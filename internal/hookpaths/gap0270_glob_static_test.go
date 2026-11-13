@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // gap0270ReadShapes are the call shapes of the rel-1-0-10:GAP-0270 false
@@ -46,10 +49,19 @@ type gap0270Verdict struct {
 	keyRead                  bool
 }
 
+// gap0270Dialect reads the rows as a POSIX shell runs them; on Windows that
+// shell is Git Bash under the native home (posixShellDecision).
+func gap0270Dialect() actionfacts.Dialect {
+	if runtime.GOOS == "windows" {
+		return actionfacts.DialectPOSIX
+	}
+	return ""
+}
+
 func gap0270Read(command, cwd, home string) gap0270Verdict {
 	memo := NewTargetMemo()
 	return gap0270Verdict{
-		decision: memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, "", nil),
+		decision: memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, gap0270Dialect(), nil),
 		unproven: UnprovenProtectedWrite(command, cwd, home),
 		glob:     memo.GlobUnproven(),
 		keyRead:  posixShellPrivateKeyRead(command, cwd, home),
@@ -163,6 +175,12 @@ func TestGAP0270GlobLiteralDir(t *testing.T) {
 		{"/*/x", "/"},
 		{"/home/u/proj/[ab]/c", "/home/u/proj"},
 		{"/home/u/proj/a?", "/home/u/proj"},
+		// A shell may still rewrite these components (bash brace lists,
+		// extglob groups, escapes): the literal folder stops before them.
+		{"/{tmp,home}/u/.ssh/x*", "/"},
+		{"/@(home)/u/.ssh/a*", "/"},
+		{"/tmp/+(x)/y*", "/tmp"},
+		{"/tmp/!(x)/y*", "/tmp"},
 	} {
 		pattern, dir := filepath.FromSlash(row.pattern), filepath.FromSlash(row.dir)
 		if got := actionGlobLiteralDir(pattern); got != filepath.Join(filepath.VolumeName(pattern), dir) && got != dir {
@@ -192,7 +210,7 @@ const globHeld = "held-unknown"
 // unfinished pattern expansion.
 func globHeldDecision(command, cwd, home string, facts map[string]string) string {
 	memo := NewTargetMemo()
-	decision := memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, "", facts)
+	decision := memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, gap0270Dialect(), facts)
 	if decision == "" && memo.GlobUnproven() != "" {
 		return globHeld
 	}

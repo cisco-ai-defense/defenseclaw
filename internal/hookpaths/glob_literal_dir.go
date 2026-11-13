@@ -23,7 +23,9 @@ import (
 // and link readings; a literal operand through a link is still resolved.
 
 // actionGlobLiteralDir is the literal leading directory of an absolute
-// pattern.
+// pattern. A component that a shell may still rewrite (a brace list, an
+// extglob group, an escape) ends it as a metacharacter does, so the
+// directory is never deeper than the one bash expands under.
 func actionGlobLiteralDir(pattern string) string {
 	separator := string(filepath.Separator)
 	volume := filepath.VolumeName(pattern)
@@ -32,12 +34,21 @@ func actionGlobLiteralDir(pattern string) string {
 		if component == "" {
 			continue
 		}
-		if strings.ContainsAny(component, "*?[") {
+		if actionGlobComponentMayExpand(component) {
 			break
 		}
 		dir = filepath.Join(dir, component)
 	}
 	return dir
+}
+
+// actionGlobComponentMayExpand reports a path component a shell may expand
+// or rewrite: a glob metacharacter, a brace list, an extglob group (+(, @(,
+// !( with extglob on; ?( and *( hold a metacharacter already) or a
+// backslash escape.
+func actionGlobComponentMayExpand(component string) bool {
+	return strings.ContainsAny(component, "*?[{\\") ||
+		strings.Contains(component, "+(") || strings.Contains(component, "@(") || strings.Contains(component, "!(")
 }
 
 // actionGlobDirAway reports that dir, as named and as resolved, is away
