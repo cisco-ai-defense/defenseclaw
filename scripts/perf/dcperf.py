@@ -98,6 +98,19 @@ def percentile(values: list[float], pct: float) -> float:
     return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
 
 
+# When the run began (dcperf run), for the time of each slow call: a tail
+# that sits in the first seconds after the gateway start points at start-up
+# work, a tail spread over the run at the gateway or the runner.
+RUN_STARTED = time.monotonic()
+
+
+def slowest_calls(values: list[float], started_at: list[float], count: int = 8) -> list[dict]:
+    """The count slowest calls: their index, the seconds into the run they
+    started and their milliseconds (not gated; read with the p95)."""
+    order = sorted(range(len(values)), key=lambda i: -values[i])[:count]
+    return [{"i": i, "at_s": round(started_at[i], 2), "ms": round(values[i], 1)} for i in sorted(order)]
+
+
 def summarize(values: list[float]) -> dict:
     return {
         "n": len(values),
@@ -575,8 +588,9 @@ def measure_hook(inst: Install, connector: str, prof: dict) -> dict:
     session = f"dcperf-{connector}-{uuid.uuid4().hex[:8]}"
     for _ in range(3):  # warm the gateway session state
         call_hook(inst, env, command, connector, session)
-    idle, idle_bad = [], 0
+    idle, idle_bad, idle_at = [], 0, []
     for _ in range(prof["idle"]):
+        idle_at.append(time.monotonic() - RUN_STARTED)
         ms, rc, denied = call_hook(inst, env, command, connector, session)
         idle.append(ms)
         idle_bad += int(rc != 0 or denied)
@@ -591,7 +605,7 @@ def measure_hook(inst: Install, connector: str, prof: dict) -> dict:
             burst.append(ms)
             burst_bad += int(rc != 0 or denied)
     return {
-        "idle": dict(summarize(idle), not_allowed=idle_bad),
+        "idle": dict(summarize(idle), not_allowed=idle_bad, slowest=slowest_calls(idle, idle_at)),
         "burst": dict(summarize(burst), width=prof["width"], not_allowed=burst_bad),
     }
 
@@ -1207,6 +1221,11 @@ def one_line(result: dict) -> str:
         parts.append(
             f"{connector} idle p50/p95/max {i['p50_ms']:.0f}/{i['p95_ms']:.0f}/{i['max_ms']:.0f} ms"
             f" burst{b['width']} p95 {b['p95_ms']:.0f} ms"
+            + (
+                " (slowest idle i@s:ms " + " ".join(f"{c['i']}@{c['at_s']:g}:{c['ms']:.0f}" for c in i["slowest"]) + ")"
+                if i.get("slowest")
+                else ""
+            )
         )
     for connector, ex in m.get("hook_execs", {}).items():
         if "per_call_p50" in ex:

@@ -929,77 +929,107 @@ func TestCopilotSetupRemovesOwnHandlerFromUnexpectedEvent(t *testing.T) {
 }
 
 func TestCopilotSetupRemovesEditedHandlerFromUnexpectedEvent(t *testing.T) {
-	for _, goos := range []string{"linux", "darwin"} {
-		for _, field := range []string{"command", "bash", "powershell", "command_windows", "commandWindows"} {
-			for _, shape := range []string{"prefix", "nested-list", "nested-mapping"} {
-				t.Run(goos+"/"+field+"/"+shape, func(t *testing.T) {
-					path := filepath.Join(t.TempDir(), "defenseclaw.json")
-					dataDir := t.TempDir()
-					script := filepath.Join(dataDir, "hooks", "copilot-hook.sh")
-					if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
-						t.Fatal(err)
+	// Setup writes the same registration for the same hook script, so it is
+	// written once per fixture GOOS and each subtest starts from a copy: a
+	// subtest pays one product write (the repair) instead of two. The fixture
+	// GOOS rotates over the field x shape table instead of doubling it: every
+	// field and every shape runs on both GOOS (checked below). A Windows
+	// runner takes seconds for each product write.
+	gooses := []string{"linux", "darwin"}
+	fields := []string{"command", "bash", "powershell", "command_windows", "commandWindows"}
+	shapes := []string{"prefix", "nested-list", "nested-mapping"}
+	dataDir := t.TempDir()
+	script := filepath.Join(dataDir, "hooks", "copilot-hook.sh")
+	registered := map[string][]byte{}
+	for _, goos := range gooses {
+		path := filepath.Join(t.TempDir(), "defenseclaw.json")
+		if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		registered[goos] = data
+	}
+	ran := map[string]bool{}
+	for fi, field := range fields {
+		for si, shape := range shapes {
+			goos := gooses[(fi*len(shapes)+si)%len(gooses)]
+			ran[goos+"/"+field] = true
+			ran[goos+"/"+shape] = true
+			t.Run(goos+"/"+field+"/"+shape, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "defenseclaw.json")
+				if err := os.WriteFile(path, registered[goos], 0o600); err != nil {
+					t.Fatal(err)
+				}
+				command := copilotHookInvocationCommandForEvent(goos, "preToolUse", script)
+				var edited interface{} = map[string]interface{}{field: "echo pre; " + command}
+				if shape != "prefix" {
+					edited = map[string]interface{}{
+						"handlers": []interface{}{map[string]interface{}{field: command + "; echo after"}},
 					}
-					command := copilotHookInvocationCommandForEvent(goos, "preToolUse", script)
-					var edited interface{} = map[string]interface{}{field: "echo pre; " + command}
-					if shape != "prefix" {
-						edited = map[string]interface{}{
-							"handlers": []interface{}{map[string]interface{}{field: command + "; echo after"}},
+				}
+				operator := map[string]interface{}{"bash": "echo operator", "note": script}
+				document := decodeHookFileForTest(t, path)
+				hooks := document["hooks"].(map[string]interface{})
+				if shape == "nested-mapping" {
+					hooks["unexpectedEvent"] = edited
+					hooks["operatorEvent"] = []interface{}{operator}
+				} else {
+					hooks["unexpectedEvent"] = []interface{}{edited, operator}
+				}
+				if err := os.WriteFile(path, encodeHookFileForTest(t, path, document), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				present := func() bool {
+					hooks := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
+					want := make(map[string]interface{}, len(copilotCurrentHookEvents))
+					for _, event := range copilotCurrentHookEvents {
+						want[event] = copilotHookRegistration(goos, event, script)
+					}
+					return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
+						if _, registered := want[event]; registered {
+							return true
 						}
+						return copilotUnexpectedEventOwnsHook(entry, script)
+					})
+				}
+				if present() {
+					t.Fatal("edited DefenseClaw handler counted as current before repair")
+				}
+				if goos == runtime.GOOS && NewCopilotConnector().renderedHookEntriesPresent(
+					SetupOpts{DataDir: dataDir}, decodeHookFileForTest(t, path)) {
+					t.Fatal("native presence accepted edited DefenseClaw handler")
+				}
+				if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
+					t.Fatal(err)
+				}
+				got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
+				if shape == "nested-mapping" {
+					if _, exists := got["unexpectedEvent"]; exists {
+						t.Fatalf("Setup kept the edited handler: %v", got["unexpectedEvent"])
 					}
-					operator := map[string]interface{}{"bash": "echo operator", "note": script}
-					document := decodeHookFileForTest(t, path)
-					hooks := document["hooks"].(map[string]interface{})
-					if shape == "nested-mapping" {
-						hooks["unexpectedEvent"] = edited
-						hooks["operatorEvent"] = []interface{}{operator}
-					} else {
-						hooks["unexpectedEvent"] = []interface{}{edited, operator}
+					if !sameHookJSON(got["operatorEvent"], []interface{}{operator}) {
+						t.Fatalf("Setup changed the operator handler: %v", got["operatorEvent"])
 					}
-					if err := os.WriteFile(path, encodeHookFileForTest(t, path, document), 0o600); err != nil {
-						t.Fatal(err)
-					}
-					present := func() bool {
-						hooks := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
-						want := make(map[string]interface{}, len(copilotCurrentHookEvents))
-						for _, event := range copilotCurrentHookEvents {
-							want[event] = copilotHookRegistration(goos, event, script)
-						}
-						return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
-							if _, registered := want[event]; registered {
-								return true
-							}
-							return copilotUnexpectedEventOwnsHook(entry, script)
-						})
-					}
-					if present() {
-						t.Fatal("edited DefenseClaw handler counted as current before repair")
-					}
-					if goos == runtime.GOOS && NewCopilotConnector().renderedHookEntriesPresent(
-						SetupOpts{DataDir: dataDir}, decodeHookFileForTest(t, path)) {
-						t.Fatal("native presence accepted edited DefenseClaw handler")
-					}
-					if err := patchCopilotHooksForOS(path, script, copilotCurrentHookEvents, goos); err != nil {
-						t.Fatal(err)
-					}
-					got := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
-					if shape == "nested-mapping" {
-						if _, exists := got["unexpectedEvent"]; exists {
-							t.Fatalf("Setup kept the edited handler: %v", got["unexpectedEvent"])
-						}
-						if !sameHookJSON(got["operatorEvent"], []interface{}{operator}) {
-							t.Fatalf("Setup changed the operator handler: %v", got["operatorEvent"])
-						}
-					} else if !sameHookJSON(got["unexpectedEvent"], []interface{}{operator}) {
-						t.Fatalf("Setup left the edited handler or changed the operator handler: %v", got["unexpectedEvent"])
-					}
-					if !present() {
-						t.Fatal("repaired Copilot registration is still absent")
-					}
-					if goos == runtime.GOOS && !NewCopilotConnector().renderedHookEntriesPresent(
-						SetupOpts{DataDir: dataDir}, decodeHookFileForTest(t, path)) {
-						t.Fatal("native presence still rejects repaired Copilot registration")
-					}
-				})
+				} else if !sameHookJSON(got["unexpectedEvent"], []interface{}{operator}) {
+					t.Fatalf("Setup left the edited handler or changed the operator handler: %v", got["unexpectedEvent"])
+				}
+				if !present() {
+					t.Fatal("repaired Copilot registration is still absent")
+				}
+				if goos == runtime.GOOS && !NewCopilotConnector().renderedHookEntriesPresent(
+					SetupOpts{DataDir: dataDir}, decodeHookFileForTest(t, path)) {
+					t.Fatal("native presence still rejects repaired Copilot registration")
+				}
+			})
+		}
+	}
+	for _, goos := range gooses {
+		for _, name := range append(append([]string(nil), fields...), shapes...) {
+			if !ran[goos+"/"+name] {
+				t.Errorf("rotation never ran %s on %s", name, goos)
 			}
 		}
 	}
