@@ -748,6 +748,20 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				}
 				continue
 			case '(', ')', '{', '}':
+				if r == '{' && wordActive && value.Len() > 0 {
+					// A braced GUID inside a word (auditpol /subcategory:{GUID})
+					// is argument text: PowerShell starts a script block only
+					// at the start of a word.
+					if end, ok := windowsBracedGUIDEnd(runes, i); ok {
+						for ; i < end; i++ {
+							if !writeRune(runes[i]) {
+								return lexemes, false
+							}
+						}
+						i--
+						continue
+					}
+				}
 				out.markPartial(IssueUnsupportedConstruct)
 			case ',':
 				out.markPartial(IssueUnsupportedConstruct)
@@ -822,6 +836,29 @@ func windowsCMDNativeQuoteUncertain(
 	}
 	return activeQuote != '"' || !previousQuote || valueLength != 0 ||
 		!windowsCMDWordBoundary(runes, index+1)
+}
+
+// windowsBracedGUIDEnd returns the index after a {xxxxxxxx-xxxx-xxxx-xxxx-
+// xxxxxxxxxxxx} GUID that starts at runes[start].
+func windowsBracedGUIDEnd(runes []rune, start int) (int, bool) {
+	const length = 38
+	if start+length > len(runes) || runes[start] != '{' || runes[start+length-1] != '}' {
+		return 0, false
+	}
+	for offset := 1; offset < length-1; offset++ {
+		r := runes[start+offset]
+		switch offset {
+		case 9, 14, 19, 24:
+			if r != '-' {
+				return 0, false
+			}
+		default:
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+				return 0, false
+			}
+		}
+	}
+	return start + length, true
 }
 
 func windowsPowerShellQuoteDelimiter(r rune) rune {
@@ -1653,14 +1690,13 @@ func windowsClassifyPowerShell(
 		command.Effect = EffectPreview
 		return
 	}
+	if windowsClassifyNativeProgram(command, args, builder) {
+		return
+	}
 	switch name {
 	case "echo", "write-output", "write-host", "get-date", "whoami", "whoami.exe",
 		"hostname", "hostname.exe", "pwd":
 		return
-	case "icacls", "icacls.exe":
-		// icacls is a native executable; PowerShell resolves quoting before the
-		// program receives the same slash-option grammar used from cmd.exe.
-		windowsClassifyICACLS(command, args, builder)
 	case "get-content", "gc", "cat", "type":
 		filesystem, environment := windowsAddPowerShellPaths(
 			"get-content",
@@ -1790,46 +1826,10 @@ func windowsClassifyPowerShell(
 	case "invoke-webrequest", "iwr", "invoke-restmethod", "irm",
 		"curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, true, builder)
-	case "reg", "reg.exe":
-		windowsClassifyRegistry(command, args, builder)
-	case "procdump", "procdump.exe":
-		windowsClassifyLSASSDump(command, args, builder)
-	case "ntdsutil", "ntdsutil.exe":
-		windowsClassifyNTDSIFMDump(command, args, builder)
-	case "fsutil", "fsutil.exe":
-		windowsClassifyFSUtil(command, args, builder)
-	case "vssadmin", "vssadmin.exe":
-		windowsClassifyVSSAdmin(command, args, builder)
-	case "bcdedit", "bcdedit.exe":
-		windowsClassifyBCDEdit(command, args, builder)
-	case "auditpol", "auditpol.exe":
-		windowsClassifyAuditPol(command, args, builder)
 	case "set-mppreference":
 		windowsClassifySetMPPreference(command, args, builder)
 	case "add-mppreference":
 		windowsClassifyAddMPPreference(command, builder)
-	case "wbadmin", "wbadmin.exe", "wmic", "wmic.exe":
-		windowsClassifyRecoveryStore(command, args, builder)
-	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
-		windowsClassifyNetworkScanner(command, args, builder)
-	case "naabu", "naabu.exe":
-		windowsClassifyNaabu(command, args, builder)
-	case "nc", "nc.exe", "ncat", "ncat.exe", "netcat", "netcat.exe":
-		windowsClassifyNetcat(command, args, builder)
-	case "ssh", "ssh.exe", "autossh", "autossh.exe", "sftp", "sftp.exe":
-		windowsClassifySSH(command, args, builder)
-	case "git", "git.exe":
-		windowsClassifyGit(command, args, builder)
-	case "aws", "gcloud":
-		classifyCredentialCLI(builder.out, command, command.Program)
-		classifyCloudAuditControlDestruction(command)
-	case "openssl", "openssl.exe":
-		classifyOpenSSLDecode(builder.out, command)
-	case "format":
-		classifyWindowsFormat(builder.out, command)
-	case "codex", "codex.exe", "claude", "claude.exe",
-		"gemini", "gemini.exe", "opencode", "opencode.exe":
-		classifyAgentRuntime(builder.out, command, command.Program)
 	case "start-process":
 		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessExecute, args, true, builder)
 		if windowsStartProcessHasActionArguments(args) {
@@ -1979,6 +1979,9 @@ func windowsClassifyCMD(
 		command.Effect = EffectPreview
 		return
 	}
+	if windowsClassifyNativeProgram(command, args, builder) {
+		return
+	}
 	switch command.Program {
 	case "echo", "ver", "whoami", "whoami.exe", "hostname", "hostname.exe", "rem":
 		return
@@ -2006,6 +2009,25 @@ func windowsClassifyCMD(
 		windowsAddCMDRename(command.ID, args, builder)
 	case "curl", "curl.exe", "wget", "wget.exe":
 		windowsClassifyWeb(command, args, false, builder)
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
+		"call", "for", "if", "start", "set", "setlocal":
+		builder.out.markPartial(IssueUnsupportedConstruct)
+	default:
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+	}
+}
+
+// windowsClassifyNativeProgram classifies an external Windows executable by its
+// own operand grammar. The grammar belongs to the program, not to the shell that
+// launched it, so cmd.exe and PowerShell calls of the same program share one
+// classifier (PowerShell only adds its own quoting, which windowsWord already
+// carries). It reports whether program is one of them.
+func windowsClassifyNativeProgram(
+	command *CommandFact,
+	args []windowsWord,
+	builder *windowsFactBuilder,
+) bool {
+	switch command.Program {
 	case "certutil", "certutil.exe":
 		windowsClassifyCertutil(command, args, builder)
 	case "reg", "reg.exe":
@@ -2030,15 +2052,15 @@ func windowsClassifyCMD(
 		windowsClassifyTakeown(command, args, builder)
 	case "taskkill", "taskkill.exe":
 		windowsClassifyTaskkill(command, args, builder)
-	case "schtasks":
+	case "schtasks", "schtasks.exe":
 		windowsClassifySchtasks(command, args, builder)
-	case "net", "net1":
+	case "net", "net1", "net.exe", "net1.exe":
 		windowsClassifyNetLocalGroup(command, args, builder)
 	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
 		windowsClassifyNetworkScanner(command, args, builder)
 	case "naabu", "naabu.exe":
 		windowsClassifyNaabu(command, args, builder)
-	case "nc", "ncat", "netcat":
+	case "nc", "nc.exe", "ncat", "ncat.exe", "netcat", "netcat.exe":
 		windowsClassifyNetcat(command, args, builder)
 	case "ssh", "ssh.exe", "autossh", "autossh.exe", "sftp", "sftp.exe":
 		windowsClassifySSH(command, args, builder)
@@ -2054,12 +2076,10 @@ func windowsClassifyCMD(
 	case "codex", "codex.exe", "claude", "claude.exe",
 		"gemini", "gemini.exe", "opencode", "opencode.exe":
 		classifyAgentRuntime(builder.out, command, command.Program)
-	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
-		"call", "for", "if", "start", "set", "setlocal":
-		builder.out.markPartial(IssueUnsupportedConstruct)
 	default:
-		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return false
 	}
+	return true
 }
 
 func windowsHasWildcard(args []windowsWord) bool {

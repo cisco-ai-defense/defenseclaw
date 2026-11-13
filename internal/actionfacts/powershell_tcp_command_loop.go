@@ -29,11 +29,12 @@ func ExactPowerShellTCPCommandLoop(facts Facts) bool {
 }
 
 func projectPowerShellTCPCommandLoops(input Input, facts Facts) []PowerShellTCPCommandLoopFact {
-	if facts.Parse.Dialect != DialectPowerShell || len(input.Command) == 0 ||
-		len(input.Command) > maxPowerShellTCPCommandLoopBytes {
+	text := shellCommandText(input)
+	if facts.Parse.Dialect != DialectPowerShell || len(text) == 0 ||
+		len(text) > maxPowerShellTCPCommandLoopBytes {
 		return nil
 	}
-	command := strings.TrimSpace(input.Command)
+	command := strings.TrimSpace(text)
 	constructor := powerShellTCPConstructor.FindStringSubmatchIndex(command)
 	if constructor == nil {
 		return nil

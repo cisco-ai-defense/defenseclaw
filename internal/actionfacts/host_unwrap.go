@@ -77,7 +77,7 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 		var keepOpen, ok bool
 		switch result.dialect {
 		case DialectPowerShell:
-			next, nextDialect, wrapper, ok = unwrapPowerShellOnce(result.source)
+			next, nextDialect, wrapper, keepOpen, ok = unwrapPowerShellOnce(result.source)
 		case DialectCMD:
 			next, nextDialect, wrapper, keepOpen, ok = unwrapCMDOnce(result.source)
 		}
@@ -100,10 +100,10 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 // statements of a PowerShell source. A source that is one wrapper statement is
 // replaced whole (and may change grammar to cmd.exe's); wrappers among other
 // statements are replaced in place when their script is one simple line.
-func unwrapPowerShellOnce(source string) (string, Dialect, WrapperFact, bool) {
+func unwrapPowerShellOnce(source string) (string, Dialect, WrapperFact, bool, bool) {
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) == 0 {
-		return "", DialectNone, WrapperFact{}, false
+		return "", DialectNone, WrapperFact{}, false, false
 	}
 	type edit struct {
 		start, end int
@@ -111,10 +111,11 @@ func unwrapPowerShellOnce(source string) (string, Dialect, WrapperFact, bool) {
 	}
 	var edits []edit
 	var first WrapperFact
+	keepOpen := false
 	whole := len(script.Statements) == 1
 	var wholeDialect Dialect
 	for _, statement := range script.Statements {
-		body, dialect, wrapper, start, end, ok := powerShellStatementWrapper(source, script, statement)
+		body, dialect, wrapper, start, end, open, ok := powerShellStatementWrapper(source, script, statement)
 		if !ok {
 			continue
 		}
@@ -126,18 +127,19 @@ func unwrapPowerShellOnce(source string) (string, Dialect, WrapperFact, bool) {
 		}
 		edits = append(edits, edit{start: start, end: end, body: body})
 		wholeDialect = dialect
+		keepOpen = keepOpen || open
 	}
 	if len(edits) == 0 {
-		return "", DialectNone, WrapperFact{}, false
+		return "", DialectNone, WrapperFact{}, false, false
 	}
 	if whole {
-		return edits[0].body, wholeDialect, first, true
+		return edits[0].body, wholeDialect, first, keepOpen, true
 	}
 	next := source
 	for i := len(edits) - 1; i >= 0; i-- {
 		next = next[:edits[i].start] + edits[i].body + next[edits[i].end:]
 	}
-	return next, DialectPowerShell, first, true
+	return next, DialectPowerShell, first, keepOpen, true
 }
 
 // simpleHostBody reports a script that can stand between other statements of
@@ -158,7 +160,7 @@ func powerShellStatementWrapper(
 	source string,
 	script *psparse.Script,
 	statement psparse.Statement,
-) (body string, dialect Dialect, wrapper WrapperFact, start, end int, ok bool) {
+) (body string, dialect Dialect, wrapper WrapperFact, start, end int, keepOpen, ok bool) {
 	pipeline, isPipeline := statement.(*psparse.Pipeline)
 	if !isPipeline || pipeline.ChainRHS != nil || pipeline.ChainOp != "" ||
 		pipeline.Background || len(pipeline.Redirs) != 0 || len(pipeline.Elements) != 1 {
@@ -180,7 +182,7 @@ func powerShellStatementWrapper(
 			return
 		}
 		body = source[blockStart+1 : blockEnd-1]
-		return body, DialectPowerShell, WrapperFact{Executable: command.InvokeOp}, start, end, true
+		return body, DialectPowerShell, WrapperFact{Executable: command.InvokeOp}, start, end, false, true
 	}
 	name, named := psparse.LiteralString(command.Name)
 	if !named {
@@ -206,9 +208,11 @@ func powerShellStatementWrapper(
 	switch found.Kind {
 	case psparse.KindPowerShellCommand, psparse.KindEncodedCommand:
 		if !hostLauncherIdentity(name, "powershell") && !hostLauncherIdentity(name, "pwsh") ||
-			commandHasWorkingDirectoryOption(command) {
+			commandHasWorkingDirectoryOption(command) || commandHasEmptyWord(command) ||
+			!launcherWordsArePlain(command) {
 			return
 		}
+		keepOpen = commandKeepsHostOpen(command)
 		dialect = DialectPowerShell
 	case psparse.KindIEXLiteral:
 		dialect = DialectPowerShell
@@ -216,17 +220,19 @@ func powerShellStatementWrapper(
 		if !hostLauncherIdentity(name, "cmd") {
 			return
 		}
-		// psparse joins every word after /c; only the single-word form is the
-		// line cmd.exe runs as written (several words are re-quoted by the
-		// launcher in ways the join does not show).
-		if !soleCMDPayloadWord(command) {
+		// psparse joins every word after /c with a blank; the line cmd.exe
+		// receives re-quotes the words that hold blanks, so the payload is
+		// rebuilt from the words.
+		payload, isPayload := cmdCommandPayload(command)
+		if !isPayload {
 			return
 		}
+		found.Text = payload
 		dialect = DialectCMD
 	default:
 		return
 	}
-	return found.Text, dialect, WrapperFact{Executable: name}, start, end, true
+	return found.Text, dialect, WrapperFact{Executable: name}, start, end, keepOpen, true
 }
 
 // commandHasWorkingDirectoryOption reports a -WorkingDirectory switch (or an
@@ -247,26 +253,131 @@ func commandHasWorkingDirectoryOption(command *psparse.Command) bool {
 	return false
 }
 
-// soleCMDPayloadWord reports a cmd invocation with exactly one word after its
-// /c run switch.
-func soleCMDPayloadWord(command *psparse.Command) bool {
-	for i, element := range command.Elements {
+// cmdCommandPayload is the line a `cmd /c <words>` call hands to cmd.exe: the
+// static words after /c, with the words that hold blanks quoted. /k and a
+// payload with a quote of its own are not modeled.
+func cmdCommandPayload(command *psparse.Command) (string, bool) {
+	var words []string
+	seen := false
+	for _, element := range command.Elements {
 		argument, isArg := element.(*psparse.Arg)
 		if !isArg {
+			if seen {
+				return "", false
+			}
 			continue
 		}
 		text, static := psparse.LiteralString(argument.Value)
 		if !static {
+			if seen {
+				return "", false
+			}
 			continue
 		}
-		switch strings.ToLower(text) {
-		case "/c":
-			return i+2 == len(command.Elements)
-		case "/k", "/r":
+		if !seen {
+			switch strings.ToLower(text) {
+			case "/c":
+				seen = true
+			case "/k", "/r":
+				return "", false
+			}
+			continue
+		}
+		if text == "--%" {
+			continue
+		}
+		words = append(words, text)
+	}
+	if !seen {
+		return "", false
+	}
+	return cmdJoinPayload(words)
+}
+
+// cmdJoinPayload joins launcher words into the line cmd.exe runs. A single
+// word is the line as written.
+func cmdJoinPayload(words []string) (string, bool) {
+	switch len(words) {
+	case 0:
+		return "", false
+	case 1:
+		return words[0], strings.TrimSpace(words[0]) != ""
+	}
+	parts := make([]string, len(words))
+	for index, word := range words {
+		if word == "" || strings.ContainsAny(word, "\"\r\n") {
+			return "", false
+		}
+		parts[index] = word
+		if strings.ContainsAny(word, " \t") {
+			parts[index] = `"` + word + `"`
+		}
+	}
+	return strings.Join(parts, " "), true
+}
+
+// launcherWordsArePlain reports a launcher call whose words are switches and
+// string words only. A colon-glued switch value, a number literal or any other
+// expression is not reproduced as the native argv the launcher receives, so such
+// a call is not unwrapped.
+func launcherWordsArePlain(command *psparse.Command) bool {
+	for _, element := range command.Elements {
+		switch typed := element.(type) {
+		case *psparse.Parameter:
+			if typed.HasColon || typed.Colon != nil {
+				return false
+			}
+		case *psparse.Arg:
+			if _, isString := typed.Value.(*psparse.StringLit); !isString {
+				return false
+			}
+		case *psparse.StringLit:
+		default:
 			return false
 		}
 	}
+	return true
+}
+
+// commandHasEmptyWord reports an empty static word among the words of a
+// launcher call: PowerShell versions pass it differently, so the script stays
+// opaque.
+func commandHasEmptyWord(command *psparse.Command) bool {
+	for _, element := range command.Elements {
+		if argument, isArg := element.(*psparse.Arg); isArg {
+			if text, static := psparse.LiteralString(argument.Value); static && text == "" {
+				return true
+			}
+		}
+	}
 	return false
+}
+
+// commandKeepsHostOpen reports -NoExit (or an abbreviation of it) among the
+// words of a launcher call.
+func commandKeepsHostOpen(command *psparse.Command) bool {
+	for _, element := range command.Elements {
+		switch typed := element.(type) {
+		case *psparse.Parameter:
+			if noExitWord("-" + typed.Name) {
+				return true
+			}
+		case *psparse.Arg:
+			if text, static := psparse.LiteralString(typed.Value); static && noExitWord(text) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func noExitWord(word string) bool {
+	name := strings.ToLower(strings.TrimSpace(word))
+	if !strings.HasPrefix(name, "-") && !strings.HasPrefix(name, "/") {
+		return false
+	}
+	name = strings.TrimLeft(name, "-/")
+	return len(name) >= 3 && strings.HasPrefix("noexit", name)
 }
 
 // unwrapCMDOnce unwraps a cmd.exe source that is one host launcher call.
@@ -355,12 +466,7 @@ type hostScript struct {
 // powerShellKeepsHostOpen reports -NoExit (or an abbreviation of it).
 func powerShellKeepsHostOpen(argv []string) bool {
 	for _, word := range argv[1:] {
-		name := strings.ToLower(strings.TrimSpace(word))
-		if !strings.HasPrefix(name, "-") && !strings.HasPrefix(name, "/") {
-			continue
-		}
-		name = strings.TrimLeft(name, "-/")
-		if len(name) >= 3 && strings.HasPrefix("noexit", name) {
+		if noExitWord(word) {
 			return true
 		}
 	}
@@ -436,7 +542,7 @@ func workingDirectoryWord(word string) bool {
 	if colon := strings.IndexByte(name, ':'); colon >= 0 {
 		name = name[:colon]
 	}
-	return len(name) >= 2 && strings.HasPrefix("workingdirectory", name)
+	return name == "wd" || len(name) >= 2 && strings.HasPrefix("workingdirectory", name)
 }
 
 func powerShellSingleQuote(word string) string {
@@ -452,25 +558,8 @@ func cmdHostBody(argv []string) (string, Dialect, bool, bool) {
 		lower := strings.ToLower(argv[i])
 		switch lower {
 		case "/c", "/k":
-			keepOpen := lower == "/k"
-			payload := argv[i+1:]
-			if len(payload) == 0 {
-				return "", DialectNone, false, false
-			}
-			if len(payload) == 1 {
-				return payload[0], DialectCMD, keepOpen, strings.TrimSpace(payload[0]) != ""
-			}
-			parts := make([]string, len(payload))
-			for j, word := range payload {
-				if word == "" || strings.ContainsAny(word, "\"\r\n") {
-					return "", DialectNone, false, false
-				}
-				parts[j] = word
-				if strings.ContainsAny(word, " \t") {
-					parts[j] = `"` + word + `"`
-				}
-			}
-			return strings.Join(parts, " "), DialectCMD, keepOpen, true
+			body, ok := cmdJoinPayload(argv[i+1:])
+			return body, DialectCMD, lower == "/k", ok
 		case "/d", "/q", "/s", "/a", "/u":
 		default:
 			return "", DialectNone, false, false
@@ -479,34 +568,54 @@ func cmdHostBody(argv []string) (string, Dialect, bool, bool) {
 	return "", DialectNone, false, false
 }
 
-// soleHostCallReduction replaces a POSIX parse that is one launcher call (Git
-// Bash or a generic shell running powershell/pwsh/cmd with a static script) by
-// the parse of the script, in the script's own grammar.
-func soleHostCallReduction(out *parseOutput, wrapperDepth int) (parseOutput, bool) {
+// soleHostCall recognizes a POSIX parse that is exactly one unconditional
+// launcher call (powershell, pwsh or cmd with a static script) and returns the
+// script it runs.
+func soleHostCall(out *parseOutput, wrapperDepth int) (hostScript, WrapperFact, bool) {
 	if out.status != StatusComplete || len(out.commands) != 1 || wrapperDepth >= maxWrapperDepth {
-		return parseOutput{}, false
+		return hostScript{}, WrapperFact{}, false
 	}
 	command := out.commands[0]
 	if command.ParentCommandID != 0 || command.PipelineID != 0 || command.ControlFlowUncertain ||
 		command.Background || len(command.Redirects) != 0 || len(command.Wrappers) != 0 ||
 		!command.ArgvComplete || len(command.Argv) < 2 || len(command.Arguments) != len(command.Argv) {
-		return parseOutput{}, false
+		return hostScript{}, WrapperFact{}, false
 	}
 	for _, argument := range command.Arguments {
 		if argument.Expands || argument.StaticGlob != "" {
-			return parseOutput{}, false
+			return hostScript{}, WrapperFact{}, false
 		}
 	}
-	program := commandProgram(command.Executable)
-	script, ok := hostFromArgv(program, command.Argv)
+	script, ok := hostFromArgv(commandProgram(command.Executable), command.Argv)
+	if !ok {
+		return hostScript{}, WrapperFact{}, false
+	}
+	return script, WrapperFact{Executable: command.Executable}, true
+}
+
+// soleHostCallReduction replaces a POSIX parse that is one launcher call (Git
+// Bash or a generic shell running powershell/pwsh/cmd with a static script) by
+// the parse of the script, in the script's own grammar.
+func soleHostCallReduction(out *parseOutput, wrapperDepth int) (parseOutput, bool) {
+	script, wrapper, ok := soleHostCall(out, wrapperDepth)
 	if !ok {
 		return parseOutput{}, false
 	}
-	wrapper := WrapperFact{Executable: command.Executable}
-	child := parseCommandAs(script.body, script.dialect, command.ID, wrapperDepth+1)
+	child := parseCommandAs(script.body, script.dialect, out.commands[0].ID, wrapperDepth+1)
 	child.hostWrappers = append([]WrapperFact{wrapper}, child.hostWrappers...)
 	if script.keepOpen {
 		child.markPartial(IssueUnsupportedConstruct)
 	}
 	return child, true
+}
+
+// posixSoleHostCallSource is the script text of a POSIX source that is one
+// static launcher call.
+func posixSoleHostCallSource(source string) (string, Dialect, bool) {
+	out := parsePOSIXUnwrapping(source, 1, 0, false)
+	script, _, ok := soleHostCall(&out, 0)
+	if !ok || script.keepOpen {
+		return "", DialectNone, false
+	}
+	return script.body, script.dialect, true
 }
