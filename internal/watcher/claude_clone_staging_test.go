@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,10 +17,35 @@ import (
 )
 
 // Issue #1428: "claude plugin update" clones the marketplace into
-// <cache>/temp_subdir_<n>_<random>.clone. The watcher read each folder of its
+// <cache>/temp_subdir_<ts>_<random>.clone. The watcher read each folder of its
 // .git (hooks, objects, refs, info, logs) as a <marketplace>/<plugin>/<version>
-// plugin named ".git@temp_subdir_<n>.clone", found no manifest and quarantined
-// the git object store, so the update failed.
+// plugin named ".git@temp_subdir_<ts>.clone", found no manifest and
+// quarantined the git object store, so the update failed. The other staging
+// folders (temp_github_<ts>_<r>/skills/foo read as "skills@temp_github_...")
+// and <version>.linking-<pid> had the same problem. A marketplace named like
+// a near miss (".git", "temp_subdir_a.clone") is still scanned.
+
+// stagingName is a Claude Code staging folder name stamped at.
+func stagingName(kind, suffix string, at time.Time) string {
+	return fmt.Sprintf("temp_%s_%d_t2ymk0%s", kind, at.UnixMilli(), suffix)
+}
+
+func mkdirs(t *testing.T, dirs ...string) {
+	t.Helper()
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeManifest(t *testing.T, dir, name string) {
+	t.Helper()
+	mkdirs(t, filepath.Join(dir, ".claude-plugin"))
+	if err := os.WriteFile(filepath.Join(dir, ".claude-plugin", "plugin.json"), []byte(`{"name":"`+name+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // cloneStagingTree builds a staging clone like Claude Code's, with a plugin
 // folder of the marketplace inside it, and returns its path.
@@ -27,83 +53,211 @@ func cloneStagingTree(t *testing.T, cache, name string) string {
 	t.Helper()
 	clone := filepath.Join(cache, name)
 	for _, dir := range []string{"hooks", "objects", "refs", "info", "logs"} {
-		if err := os.MkdirAll(filepath.Join(clone, ".git", dir), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		mkdirs(t, filepath.Join(clone, ".git", dir))
 	}
-	if err := os.MkdirAll(filepath.Join(clone, "plugins", "sample", ".claude-plugin"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(clone, "plugins", "sample", ".claude-plugin", "plugin.json"), []byte(`{"name":"sample"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeManifest(t, filepath.Join(clone, "plugins", "sample"), "sample")
 	return clone
 }
 
-func transientTargets(w *InstallWatcher) []string {
+// githubStagingTree builds the folder a github-source plugin is cloned into:
+// the repository with its skills and its .git, so skills/foo sits where a
+// <marketplace>/<plugin>/<version> folder would.
+func githubStagingTree(t *testing.T, cache, name string) string {
+	t.Helper()
+	staging := filepath.Join(cache, name)
+	mkdirs(t, filepath.Join(staging, ".git", "objects"), filepath.Join(staging, "skills", "foo"))
+	if err := os.WriteFile(filepath.Join(staging, "skills", "foo", "SKILL.md"), []byte("# foo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return staging
+}
+
+func age(t *testing.T, ago time.Duration, paths ...string) {
+	t.Helper()
+	old := time.Now().Add(-ago)
+	for _, path := range paths {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func pluginTargets(w *InstallWatcher) []string {
 	var out []string
 	for _, evt := range w.enumerateTargets() {
 		if evt.Type == InstallPlugin {
 			out = append(out, evt.Path)
 		}
 	}
+	slices.Sort(out)
 	return out
 }
 
-func TestClaudePluginUpdateCloneIsNotAPlugin(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		connector string
-		home      string
-	}{
-		{"claude code cache", "claudecode", ".claude"},
-		{"codex cache", "codex", ".codex"},
+func pendingPaths(w *InstallWatcher) []string {
+	var out []string
+	for path := range w.pending {
+		out = append(out, path)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func sorted(paths ...string) []string {
+	out := slices.Clone(paths)
+	slices.Sort(out)
+	return out
+}
+
+// claudeCacheFixture is a Claude Code cache with fresh installs in flight
+// and plugins (some with near-miss names) the agent loads.
+type claudeCacheFixture struct {
+	cache, clone, github, linking string
+	plugins                       []string
+}
+
+func newClaudeCacheFixture(t *testing.T, at time.Time) claudeCacheFixture {
+	t.Helper()
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	f := claudeCacheFixture{
+		cache:   cache,
+		clone:   cloneStagingTree(t, cache, stagingName("subdir", ".clone", at)),
+		github:  githubStagingTree(t, cache, stagingName("github", "", at)),
+		linking: filepath.Join(cache, "mkt", "sample", "1.0.1.linking-4242"),
+	}
+	writeManifest(t, f.linking, "sample")
+	real := filepath.Join(cache, "mkt", "real", "1.0.0")
+	mkdirs(t, filepath.Join(real, ".git", "objects"))
+	gitMarket := filepath.Join(cache, ".git", "evil", "1.0.0")
+	writeManifest(t, gitMarket, "evil")
+	cloneMarket := filepath.Join(cache, "temp_subdir_a.clone", "evil", "1.0.0")
+	writeManifest(t, cloneMarket, "evil")
+	gitPlugin := filepath.Join(cache, "mkt", ".git", "hooks")
+	mkdirs(t, gitPlugin)
+	upper := filepath.Join(cache, strings.ToUpper(stagingName("local", "", at)), "evil", "1.0.0")
+	writeManifest(t, upper, "evil")
+	f.plugins = sorted(real, gitMarket, cloneMarket, gitPlugin, upper)
+	return f
+}
+
+func claudeWatcher(t *testing.T, cache string) *InstallWatcher {
+	t.Helper()
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	return New(cfg, nil, []string{cache}, store, logger, nil, nil)
+}
+
+func TestClaudePluginInstallsInFlightAreNotPlugins(t *testing.T) {
+	f := newClaudeCacheFixture(t, time.Now())
+	w := claudeWatcher(t, f.cache)
+
+	if got := pluginTargets(w); !slices.Equal(got, f.plugins) {
+		t.Fatalf("rescan targets\n%v\nwant\n%v", got, f.plugins)
+	}
+	// The live watcher reads the same folders as it is told of them.
+	for _, path := range []string{
+		f.clone,
+		filepath.Join(f.clone, ".git"),
+		filepath.Join(f.clone, ".git", "hooks"),
+		filepath.Join(f.clone, ".git", "objects"),
+		filepath.Join(f.clone, "plugins", "sample"),
+		f.github,
+		filepath.Join(f.github, "skills"),
+		filepath.Join(f.github, "skills", "foo"),
+		filepath.Join(f.github, ".git", "objects"),
+		f.linking,
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, store, logger, _ := setupTestEnv(t)
-			cfg.Guardrail.Connector = tc.connector
-			cache := filepath.Join(t.TempDir(), tc.home, "plugins", "cache")
-			clone := cloneStagingTree(t, cache, "temp_subdir_1793946491108_t2ymk0.clone")
-			// A plugin the agent really loads, one with its own .git folder
-			// inside the version folder, stays a plugin.
-			real := filepath.Join(cache, "mkt", "real", "1.0.0")
-			if err := os.MkdirAll(filepath.Join(real, ".git", "objects"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+		if !w.inClaudePluginStaging(path, 0) || !w.inClaudePluginStaging(path, claudeStagingGrace) {
+			t.Errorf("%s is not left alone", path)
+		}
+	}
+	for _, path := range append(slices.Clone(f.plugins), filepath.Join(f.cache, "mkt"), filepath.Join(f.cache, ".git")) {
+		if w.inClaudePluginStaging(path, 0) {
+			t.Errorf("plugin or marketplace %s is left alone", path)
+		}
+	}
+	// A cache that already holds them when the watcher (re)starts queues the
+	// plugins and nothing in flight.
+	w.queueExistingClaudePlugins(context.Background(), f.cache, 0)
+	if got := pendingPaths(w); !slices.Equal(got, f.plugins) {
+		t.Fatalf("queued\n%v\nwant\n%v", got, f.plugins)
+	}
+}
 
-			if got := transientTargets(w); len(got) != 1 || !sameWatcherPath(got[0], real) {
-				t.Fatalf("rescan targets %v, want only %s", got, real)
-			}
+// A staging or linking folder still there after the grace window is
+// scanned, so a folder named like one is no scan hole. git's own files in
+// a staging clone never are.
+func TestClaudePluginStaleStagingIsScanned(t *testing.T) {
+	f := newClaudeCacheFixture(t, time.Now().Add(-time.Hour))
+	age(t, time.Hour, f.clone, f.github, f.linking)
+	w := claudeWatcher(t, f.cache)
 
-			// The live watcher reads the same folders as it is told of them.
-			for _, path := range []string{
-				clone,
-				filepath.Join(clone, ".git"),
-				filepath.Join(clone, ".git", "hooks"),
-				filepath.Join(clone, ".git", "objects"),
-				filepath.Join(clone, "plugins", "sample"),
-			} {
-				if !w.inClaudePluginStaging(path, 0) || !w.inClaudePluginStaging(path, claudeStagingGrace) {
-					t.Errorf("%s is not left alone", path)
-				}
-			}
-			if w.inClaudePluginStaging(real, 0) || w.inClaudePluginStaging(filepath.Join(cache, "mkt"), 0) {
-				t.Error("a real plugin or its marketplace folder is left alone")
-			}
+	want := sorted(append(slices.Clone(f.plugins),
+		filepath.Join(f.clone, "plugins", "sample"),
+		filepath.Join(f.github, "skills", "foo"),
+		f.linking)...)
+	if got := pluginTargets(w); !slices.Equal(got, want) {
+		t.Fatalf("rescan targets\n%v\nwant\n%v", got, want)
+	}
+	if w.inClaudePluginStaging(filepath.Join(f.github, "skills"), 0) {
+		t.Error("a stale staging folder is left alone by the live watcher")
+	}
+	if !w.inClaudePluginStaging(filepath.Join(f.clone, ".git", "hooks"), claudeStagingGrace) {
+		t.Error("git's files in a stale staging clone are read as a plugin")
+	}
 
-			// A cache that already holds a clone when the watcher (re)starts
-			// queues the real plugin and nothing of the clone.
-			w.queueExistingClaudePlugins(context.Background(), cache, 0)
-			for path := range w.pending {
-				if strings.Contains(path, "temp_subdir_") || strings.Contains(filepath.ToSlash(path), "/.git") {
-					t.Errorf("queued %s", path)
-				}
-			}
-			if _, ok := w.pending[real]; !ok {
-				t.Errorf("real plugin %s not queued: %v", real, w.pending)
-			}
-		})
+	// A fresh name on a folder the rescan sees unchanged for longer than the
+	// grace is scanned too.
+	fresh := githubStagingTree(t, f.cache, stagingName("npm", "", time.Now()))
+	age(t, time.Hour, fresh)
+	if w.inClaudePluginStaging(filepath.Join(fresh, "skills", "foo"), claudeStagingGrace) {
+		t.Error("an old staging folder with a fresh name is left alone by the rescan")
+	}
+}
+
+// A marketplace Claude Code registered under a staging-like name is a
+// marketplace, and a registered install path is a plugin.
+func TestClaudePluginRegisteredStagingNameIsAPlugin(t *testing.T) {
+	f := newClaudeCacheFixture(t, time.Now())
+	plugins := filepath.Dir(f.cache)
+	github := filepath.Base(f.github)
+	if err := os.WriteFile(filepath.Join(plugins, "known_marketplaces.json"),
+		[]byte(`{"`+github+`":{"source":{"source":"github","repo":"o/r"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installed := fmt.Sprintf(`{"version":2,"plugins":{"sample@mkt":[{"scope":"user","installPath":%q}]}}`, f.linking)
+	if err := os.WriteFile(filepath.Join(plugins, "installed_plugins.json"), []byte(installed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := claudeWatcher(t, f.cache)
+	want := sorted(append(slices.Clone(f.plugins),
+		filepath.Join(f.github, "skills", "foo"),
+		filepath.Join(f.github, ".git", "objects"),
+		f.linking)...)
+	if got := pluginTargets(w); !slices.Equal(got, want) {
+		t.Fatalf("rescan targets\n%v\nwant\n%v", got, want)
+	}
+	if w.inClaudePluginStaging(filepath.Join(f.github, "skills", "foo"), 0) ||
+		w.inClaudePluginStaging(f.linking, 0) {
+		t.Error("a registered marketplace or install path is left alone")
+	}
+}
+
+// Codex keeps its cache as it was: Claude Code's staging names are folders
+// like any other there; DefenseClaw's own .dclaw-stage- copy is still left
+// alone.
+func TestCodexPluginCacheIgnoresClaudeStagingNames(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	cache := filepath.Join(t.TempDir(), ".codex", "plugins", "cache")
+	staging := filepath.Join(cache, stagingName("local", "", time.Now()), "skills", "x")
+	own := filepath.Join(cache, ".dclaw-stage-x-ab12", "p", "1.0.0")
+	mkdirs(t, staging, own)
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	if w.inClaudePluginStaging(staging, 0) || !w.inClaudePluginStaging(own, 0) {
+		t.Fatal("codex cache staging rules changed")
+	}
+	if got := pluginTargets(w); !slices.Equal(got, []string{staging}) {
+		t.Fatalf("rescan targets %v, want %s", got, staging)
 	}
 }
 
@@ -114,23 +268,27 @@ func TestClaudePluginUpdateCloneSecureClientUnchanged(t *testing.T) {
 	cfg.DeploymentMode = "managed_enterprise"
 	cfg.Enterprise.Profile = "secure_client"
 	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
-	clone := cloneStagingTree(t, cache, "temp_subdir_1_ab.clone")
+	clone := cloneStagingTree(t, cache, stagingName("subdir", ".clone", time.Now()))
+	linking := filepath.Join(cache, "mkt", "sample", "1.0.1.linking-4242")
+	mkdirs(t, linking)
 	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
-	if w.inClaudePluginStaging(filepath.Join(clone, ".git", "hooks"), 0) {
+	if w.inClaudePluginStaging(filepath.Join(clone, ".git", "hooks"), 0) ||
+		w.inClaudePluginStaging(filepath.Join(clone, "plugins", "sample"), 0) ||
+		w.inClaudePluginStaging(linking, 0) {
 		t.Fatal("secure client profile changed")
 	}
 }
 
-// Live: the staging clone appears and fills while the watcher runs, as it does
-// during "claude plugin update". No folder of it reaches admission or is
-// quarantined; a plugin the agent really loads still does.
+// Live: a staging clone, a github staging tree and a linking folder appear
+// and fill while the watcher runs, as they do during "claude plugin
+// install/update". None of them reaches admission or is quarantined; the
+// plugin the linking folder becomes, and plugins of marketplaces named
+// ".git" and "temp_subdir_a.clone", are admitted.
 func TestLiveWatcherLeavesClaudePluginUpdateCloneAlone(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Guardrail.Connector = "claudecode"
 	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
-	if err := os.MkdirAll(cache, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	mkdirs(t, filepath.Join(cache, "mkt", "sample"))
 	var mu sync.Mutex
 	seen := map[string]string{}
 	w := New(cfg, nil, []string{cache}, store, logger, nil, func(r AdmissionResult) {
@@ -144,27 +302,35 @@ func TestLiveWatcherLeavesClaudePluginUpdateCloneAlone(t *testing.T) {
 	go func() { errCh <- w.Run(ctx) }()
 	time.Sleep(500 * time.Millisecond)
 
-	clone := filepath.Join(cache, "temp_subdir_1793946491108_t2ymk0.clone")
+	clone := filepath.Join(cache, stagingName("subdir", ".clone", time.Now()))
 	for _, dir := range []string{"info", "hooks", "objects", "refs", "logs"} {
-		if err := os.MkdirAll(filepath.Join(clone, ".git", dir), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		mkdirs(t, filepath.Join(clone, ".git", dir))
 		time.Sleep(50 * time.Millisecond)
 	}
-	// The plugin the update installs, after the clone.
-	version := filepath.Join(cache, "mkt", "sample", "1.0.1")
-	if err := os.MkdirAll(filepath.Join(version, ".claude-plugin"), 0o700); err != nil {
+	writeManifest(t, filepath.Join(clone, "plugins", "sample"), "sample")
+	github := githubStagingTree(t, cache, stagingName("github", "", time.Now()))
+	linking := filepath.Join(cache, "mkt", "sample", "1.0.1.linking-4242")
+	writeManifest(t, linking, "sample")
+	time.Sleep(300 * time.Millisecond)
+	// Claude Code renames the linked folder to the version it installs.
+	if err := os.Rename(linking, filepath.Join(cache, "mkt", "sample", "1.0.1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(version, ".claude-plugin", "plugin.json"), []byte(`{"name":"sample"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.After(8 * time.Second)
+	writeManifest(t, filepath.Join(cache, ".git", "evil", "1.0.0"), "evil")
+	writeManifest(t, filepath.Join(cache, "temp_subdir_a.clone", "evil", "1.0.0"), "evil")
+
+	want := []string{"sample@mkt", "evil@.git", "evil@temp_subdir_a.clone"}
+	deadline := time.After(10 * time.Second)
 	for done := false; !done; {
 		mu.Lock()
-		_, ok := seen["sample@mkt"]
+		all := true
+		for _, name := range want {
+			if _, ok := seen[name]; !ok {
+				all = false
+			}
+		}
 		mu.Unlock()
-		if ok {
+		if all {
 			break
 		}
 		select {
@@ -173,28 +339,33 @@ func TestLiveWatcherLeavesClaudePluginUpdateCloneAlone(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	// Let anything queued for the clone settle before judging.
+	// Let anything queued for the staging folders settle before judging.
 	time.Sleep(2 * time.Second)
 	cancel()
 	<-errCh
 
 	mu.Lock()
 	defer mu.Unlock()
-	if _, ok := seen["sample@mkt"]; !ok {
-		t.Fatalf("the real plugin was not admitted: %v", seen)
-	}
 	var names []string
 	for name := range seen {
 		names = append(names, name)
 	}
 	slices.Sort(names)
-	for _, name := range names {
-		if strings.Contains(name, "temp_subdir_") || strings.HasPrefix(name, ".git@") {
-			t.Fatalf("clone folder admitted as a plugin: %v", names)
+	for _, name := range want {
+		if _, ok := seen[name]; !ok {
+			t.Errorf("plugin %s was not admitted: %v", name, names)
 		}
 	}
-	// Nothing was moved out of the clone.
-	if _, err := os.Stat(filepath.Join(clone, ".git", "objects")); err != nil {
-		t.Fatalf("clone .git/objects was taken away: %v", err)
+	for _, name := range names {
+		if strings.Contains(name, filepath.Base(clone)) || strings.Contains(name, filepath.Base(github)) ||
+			strings.Contains(name, ".linking-") || strings.HasPrefix(name, ".git@") {
+			t.Errorf("install in flight admitted as a plugin: %v", names)
+		}
+	}
+	// Nothing was moved out of the staging folders.
+	for _, path := range []string{filepath.Join(clone, ".git", "objects"), filepath.Join(github, "skills", "foo")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was taken away: %v", path, err)
+		}
 	}
 }

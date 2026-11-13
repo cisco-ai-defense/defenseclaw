@@ -4737,12 +4737,16 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 	if err != nil {
 		return
 	}
+	claude := w.connectorForPath(dir) == "claudecode"
 	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		// A marketplace or plugin may have a hidden name (Claude Code allows
+		// ".git"), so in Claude Code's cache only an install in flight is
+		// left out; Codex keeps its cache as it was.
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") && !claude {
 			continue
 		}
 		child := filepath.Join(dir, entry.Name())
-		if w.inClaudeCacheTransient(child) {
+		if w.inClaudePluginStaging(child, 0) {
 			continue
 		}
 		if root, copied := w.cachePluginCopyRoot(child); copied {
@@ -4761,128 +4765,6 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		}
 		w.mu.Unlock()
 	}
-}
-
-// claudeStagingGrace is how long the rescan leaves a Claude Code plugin
-// staging folder alone; one that stays longer is scanned as a plugin.
-const claudeStagingGrace = 15 * time.Minute
-
-// inClaudePluginStaging reports a path below a Claude Code plugin staging
-// folder (cache/temp_local_<id>), younger than grace when grace is set.
-// Claude Code builds a plugin there and then moves it to
-// <marketplace>/<plugin>/<version>: the watcher scanned the staging copy as
-// a plugin, blocked it for its missing manifest and held its files while the
-// move ran, so even a clean plugin failed to install with EPERM (GAP-0629).
-// The final folder is admitted as before. The Secure Client profile keeps
-// the earlier behaviour.
-func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration) bool {
-	if w.secureClientActive() {
-		return false
-	}
-	rootAbs, parts, ok := w.claudeCacheParts(path)
-	if !ok {
-		return false
-	}
-	if claudeCacheTransientParts(parts) {
-		return true
-	}
-	first := parts[0]
-	if !isPluginStagingFolder(first) {
-		return false
-	}
-	if grace <= 0 {
-		return true
-	}
-	info, statErr := os.Lstat(filepath.Join(rootAbs, first))
-	return statErr == nil && time.Since(info.ModTime()) < grace
-}
-
-// inClaudeCacheTransient reports a path that is never a plugin in a Claude
-// Code plugin cache: the temp_subdir_<n>_<random>.clone folder "claude plugin
-// update" clones a marketplace into, and anything below a .git folder. The
-// watcher read each .git/<hooks|objects|refs|...> folder of a staging clone
-// as a <marketplace>/<plugin>/<version> plugin named
-// ".git@temp_subdir_<n>.clone", scanned it, found no manifest and
-// quarantined the git object store while git still used it, so the update
-// failed (issue #1428). The clone is a git checkout of the marketplace, not
-// something Claude Code loads, so unlike the temp_local_ staging folder it is
-// left alone however long it lives. The Secure Client profile keeps the
-// earlier behaviour.
-func (w *InstallWatcher) inClaudeCacheTransient(path string) bool {
-	if w.secureClientActive() {
-		return false
-	}
-	_, parts, ok := w.claudeCacheParts(path)
-	return ok && claudeCacheTransientParts(parts)
-}
-
-// claudeCacheParts splits path, when it lies below a plugin root named
-// cache, into the root and its folder names relative to it. Both separators
-// split, so a Windows path reads the same on every host.
-func (w *InstallWatcher) claudeCacheParts(path string) (root string, parts []string, ok bool) {
-	pathAbs, err := filepath.Abs(path)
-	if err != nil {
-		return "", nil, false
-	}
-	for _, dir := range w.pluginDirs {
-		rootAbs, absErr := filepath.Abs(dir)
-		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
-			continue
-		}
-		relative, relErr := filepath.Rel(rootAbs, pathAbs)
-		if relErr != nil || relative == "." || relative == ".." ||
-			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			continue
-		}
-		return rootAbs, splitCacheRelative(relative), true
-	}
-	return "", nil, false
-}
-
-// splitCacheRelative splits a path relative to a plugin cache on both
-// separators.
-func splitCacheRelative(relative string) []string {
-	return strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })
-}
-
-// claudeCacheTransientParts is the name test behind inClaudeCacheTransient
-// on the folder names of a path relative to the cache root.
-func claudeCacheTransientParts(parts []string) bool {
-	if len(parts) == 0 {
-		return false
-	}
-	if isClaudeCloneStaging(parts[0]) {
-		return true
-	}
-	for _, part := range parts {
-		if strings.EqualFold(part, ".git") {
-			return true
-		}
-	}
-	return false
-}
-
-// isClaudeCloneStaging names the temp_subdir_<n>_<random>.clone folder
-// "claude plugin update" clones into.
-func isClaudeCloneStaging(name string) bool {
-	const prefix, suffix = "temp_subdir_", ".clone"
-	lower := strings.ToLower(name)
-	return len(lower) > len(prefix)+len(suffix) &&
-		strings.HasPrefix(lower, prefix) && strings.HasSuffix(lower, suffix)
-}
-
-// isPluginStagingFolder names a staging folder in a plugin cache: Claude
-// Code's temp_local_<id>, and the .dclaw-stage-<name>-<random> folder that
-// "defenseclaw plugin install" copies a plugin into, scans and decides
-// itself before it moves the copy to cache/<name> (GAP-0017).
-func isPluginStagingFolder(name string) bool {
-	lower := strings.ToLower(name)
-	for _, prefix := range []string{"temp_local_", ".dclaw-stage-"} {
-		if strings.HasPrefix(lower, prefix) && len(lower) > len(prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // inSkillInstallStaging reports a path at or below a ".dclaw-stage-<name>-*"
@@ -5216,10 +5098,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.skillDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
-			if isBundledSkillWatchPath(path) {
-				return false
-			}
-			return true
+			return !isBundledSkillWatchPath(path)
 		}
 	}
 	for _, dir := range w.pluginDirs {
