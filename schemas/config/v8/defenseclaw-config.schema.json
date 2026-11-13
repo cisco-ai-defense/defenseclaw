@@ -456,6 +456,9 @@
           "type": "string",
           "maxLength": 8192
         },
+        "call_effects": {
+          "type": "boolean"
+        },
         "protocol": {
           "type": "string",
           "enum": ["", "system-one", "gemini-decisions"]

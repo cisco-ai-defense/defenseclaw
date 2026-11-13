@@ -2029,6 +2029,10 @@ def build_setup_sections(
                 _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge, or alone for the connectors below."),
                 _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
                 _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
+                _field(
+                    cfg, "Protocol", "decision_model.protocol", "choice", ("system-one", "gemini-decisions"),
+                    "system-one (default), or gemini-decisions for Gemini Decision 1.",
+                ),
                 _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
                 _field(cfg, "Timeout (s)", "decision_model.timeout", hint="Blank = 1. The judge runs when it is late."),
                 _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),

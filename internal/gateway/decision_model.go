@@ -123,6 +123,8 @@ type decisionModel struct {
 	allowAt      float64
 	blockAt      float64
 	decideBlocks bool
+	// callEffects adds state.call_effects (decision_model.call_effects).
+	callEffects bool
 	// alone: no judge follows (cascade 2), so the model may use all of the
 	// time left rather than a quarter of it.
 	alone  bool
@@ -175,6 +177,7 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 		allowAt:      dm.EffectiveAllowThreshold(),
 		blockAt:      dm.EffectiveBlockThreshold(),
 		decideBlocks: dm.EffectiveOnConfidentBlock() == config.DecisionModelDecide,
+		callEffects:  dm.CallEffects,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -191,6 +194,9 @@ type decisionModelState struct {
 	SessionUserIntent string                  `json:"session_user_intent,omitempty"`
 	RecentToolCalls   []decisionModelToolCall `json:"recent_tool_calls,omitempty"`
 	CurrentToolCall   decisionModelToolCall   `json:"current_tool_call"`
+	// CallEffects is the typed effect list of the current call
+	// (decision_model.call_effects; decision_model_effects.go).
+	CallEffects *decisionCallEffects `json:"call_effects,omitempty"`
 }
 
 type decisionModelToolCall struct {
@@ -306,7 +312,10 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	res.choice = choice
 	res.risk = 1 - probs["allow"]
 	switch {
-	case choice == "allow" && res.risk <= d.allowAt:
+	case choice == "allow" && res.risk <= d.allowAt && !(state.CallEffects != nil && state.CallEffects.Truncated):
+		// A confident allow on a call whose effects were cut at a cap is
+		// not trusted (ONE BOUND RULE): the judge runs, or alone, the call
+		// gets the confirmation every unclear answer gets.
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= d.blockAt:
 		res.route = decisionBlock
@@ -531,7 +540,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	if dm == nil {
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := dm.decide(ctx, dm.withCallEffects(ctx, j.takeDecisionState(sample, toolName, args), toolName, args))
 	if res.failure == "" && res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
@@ -604,7 +613,7 @@ func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
 // is never an allow of its own.
 func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := dm.decide(ctx, dm.withCallEffects(ctx, j.takeDecisionState(sample, toolName, args), toolName, args))
 	if res.failure != "" {
 		if res.logLine != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)

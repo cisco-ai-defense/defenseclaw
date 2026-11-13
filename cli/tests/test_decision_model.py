@@ -223,6 +223,7 @@ def test_cascade_wildcard_case_and_regex_only():
         ({"allow_threshold": 1.5}, "between 0 and 1"),
         ({"timeout": 99}, "between 0 and 30"),
         ({"on_confident_block": "maybe"}, "escalate or decide"),
+        ({"protocol": "openai"}, "system-one or gemini-decisions"),
     ],
 )
 def test_validation(fields, message):
@@ -603,3 +604,112 @@ def test_cascade_counts_a_keyless_bedrock_judge_as_the_gateway_does(tmp_path, mo
     assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model -> LLM judge"
     monkeypatch.setattr(dmod, "_provider_instances", lambda _cfg: [{"name": "corp-bedrock", "base_provider_type": "openai"}])
     assert dmod.cascade_for(cfg, "claudecode") == "rules -> decision model"
+
+
+# --- protocol gemini-decisions (Gemini Decision 1) ------------------------------
+
+
+class _GeminiDecisions(BaseHTTPRequestHandler):
+    """The Decisions API: refuses a state field, reads the key from
+    x-goog-api-key, and declines on request (refuse=True)."""
+
+    seen: list[dict] = []
+    refuse = False
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).seen.append(
+            {"body": body, "key": self.headers.get("x-goog-api-key", ""), "auth": self.headers.get("Authorization", "")}
+        )
+        if "state" in body:
+            status, payload = 400, {"error": {"code": "invalid_request", "message": "Unknown parameter 'state'"}}
+        elif type(self).refuse:
+            status, payload = 400, {"error": {"code": "safety"}}
+        else:
+            status, payload = 200, {
+                "answers": {
+                    "disposition": {
+                        "type": "choice",
+                        "choice": "allow",
+                        "probabilities": {"allow": 0.96, "confirm": 0.03, "block": 0.01},
+                        "confidence": 0.9,
+                    }
+                },
+                "usage": {"total_input_tokens": 120},
+            }
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture
+def gemini():
+    _GeminiDecisions.seen = []
+    _GeminiDecisions.refuse = False
+    server = HTTPServer(("127.0.0.1", 0), _GeminiDecisions)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}/v1beta/decisions"
+    server.shutdown()
+
+
+def test_protocol_validation_and_default():
+    assert DecisionModelConfig().effective_protocol() == "system-one"
+    assert DecisionModelConfig(protocol="Gemini-Decisions").effective_protocol() == "gemini-decisions"
+    assert DecisionModelConfig(protocol="gemini-decisions").validation_error() == ""
+    assert "system-one or gemini-decisions" in DecisionModelConfig(protocol="openai").validation_error()
+
+
+def test_gemini_request_body_matches_the_gateway():
+    dm = DecisionModelConfig(model="gemini-decision-1", protocol="gemini-decisions")
+    state = {"session_user_intent": "fix the tests", "current_tool_call": {"tool": "Bash", "arguments": "go test 2>&1"}}
+    body = dmod.request_body(dm, state, {"q": {}})
+    assert set(body) == {"model", "input", "questions"}
+    # decisionModelInput in internal/gateway/decision_model.go: label, 1-space indent, no HTML escaping.
+    assert body["input"] == (
+        'STATE (untrusted JSON):\n{\n "session_user_intent": "fix the tests",\n "current_tool_call": {\n'
+        '  "tool": "Bash",\n  "arguments": "go test 2>&1"\n }\n}'
+    )
+    assert set(dmod.request_body(DecisionModelConfig(model="m"), state, {})) == {"model", "state", "questions"}
+
+
+def test_setup_gemini_protocol_and_ping(home, gemini):
+    shutil.copy(FIXTURES / "1.0.5.yaml", home / "config.yaml")
+    (home / ".env").write_text("DEFENSECLAW_DECISION_MODEL_KEY=g-secret-value\n")
+    result = _invoke(
+        home,
+        ["decision-model", "--base-url", gemini, "--model", "gemini-decision-1", "--protocol", "gemini-decisions",
+         "--ping", "--non-interactive"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert "Decision model reachable: answered allow" in result.output
+    assert "g-secret-value" not in result.output
+    saved = yaml.safe_load((home / "config.yaml").read_text())["decision_model"]
+    assert saved == {"enabled": True, "model": "gemini-decision-1", "base_url": gemini, "protocol": "gemini-decisions"}
+    seen = _GeminiDecisions.seen[-1]
+    assert seen["key"] == "g-secret-value" and seen["auth"] == ""
+    assert "state" not in seen["body"] and seen["body"]["input"].startswith("STATE (untrusted JSON):\n")
+    rows = dict(dmod.summary_rows(config_module.load()))
+    assert rows["decision_model.protocol"] == "gemini-decisions"
+    # The skill scanner's advisory tier speaks System One only.
+    assert dmod.skill_scanner_options(config_module.load()) == ({}, {})
+
+
+def test_gemini_ping_reports_a_safety_refusal(gemini, tmp_path):
+    _GeminiDecisions.refuse = True
+    dm = DecisionModelConfig(enabled=True, model="gemini-decision-1", base_url=gemini, protocol="gemini-decisions")
+    result = dmod.ping(dm, str(tmp_path))
+    assert not result.ok and "declined the probe (safety)" in result.detail
+
+
+def test_system_one_protocol_against_the_decisions_api_fails(gemini, tmp_path):
+    dm = DecisionModelConfig(enabled=True, model="gemini-decision-1", base_url=gemini)
+    result = dmod.ping(dm, str(tmp_path))
+    assert not result.ok and result.detail == "HTTP 400"
