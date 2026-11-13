@@ -181,8 +181,13 @@ func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureGatewayToken: %v", err)
 	}
-	if tok != "test-token-from-dotenv" {
-		t.Fatalf("EnsureGatewayToken should return existing OPENCLAW_GATEWAY_TOKEN unchanged; got %q", tok)
+	// R-TOK: OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential, never the
+	// gateway token; a separate one is minted next to it.
+	if tok == "test-token-from-dotenv" || len(tok) != 64 {
+		t.Fatalf("EnsureGatewayToken must mint a separate token, not return OPENCLAW_GATEWAY_TOKEN; got %q", tok)
+	}
+	if env, err := loadDotEnv(dotenv); err != nil || env["OPENCLAW_GATEWAY_TOKEN"] != "test-token-from-dotenv" || env["DEFENSECLAW_GATEWAY_TOKEN"] != tok {
+		t.Fatalf(".env after mint = %v, %v; want OPENCLAW_GATEWAY_TOKEN kept and the minted DEFENSECLAW_GATEWAY_TOKEN", env, err)
 	}
 
 	conn := connector.NewOpenClawConnector()

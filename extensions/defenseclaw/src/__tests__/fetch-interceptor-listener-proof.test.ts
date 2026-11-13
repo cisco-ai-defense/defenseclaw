@@ -74,7 +74,8 @@ describe("proxy hop listener proof", () => {
   it("sends no provider key without a token to prove the listener with", async () => {
     const savedLegacy = process.env.OPENCLAW_GATEWAY_TOKEN;
     process.env.DEFENSECLAW_GATEWAY_TOKEN = "";
-    process.env.OPENCLAW_GATEWAY_TOKEN = "";
+    // The OpenClaw gateway token is not a DefenseClaw credential (R-TOK).
+    process.env.OPENCLAW_GATEWAY_TOKEN = "openclaw-only-token";
     _resetSidecarConfigCache();
     try {
       // The real proof: with no token it refuses before any connection.

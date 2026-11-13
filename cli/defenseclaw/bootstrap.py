@@ -2969,18 +2969,15 @@ def _apply_gateway_defaults(
     production logic in ``cmd_init._setup_gateway_defaults`` without
     the UI chatter.
 
-    Token-env naming policy:
+    Token policy (R-TOK):
 
-    * If we copy a token OUT of ``openclaw.json``, we persist it as
-      ``OPENCLAW_GATEWAY_TOKEN`` because that's its origin — keeps
-      ``defenseclaw setup`` UX honest about where the secret came
-      from and avoids confusing operators who have both stacks.
-    * Otherwise (the common case: standalone defenseclaw install with
-      no OpenClaw node nearby), default ``token_env`` to the canonical
-      ``DEFENSECLAW_GATEWAY_TOKEN``. This is what the Go gateway
-      auto-generates on first boot, so the Python and Go halves now
-      agree out of the box instead of needing Phase 4's migration to
-      reconcile them.
+    * A token copied out of ``openclaw.json`` is saved as
+      ``OPENCLAW_GATEWAY_TOKEN``: the credential the gateway presents to
+      the OpenClaw WebSocket, never the DefenseClaw master. A separate
+      ``DEFENSECLAW_GATEWAY_TOKEN`` is generated then when ``.env`` has none
+      or it still equals the OpenClaw token.
+    * ``token_env`` is the canonical ``DEFENSECLAW_GATEWAY_TOKEN`` (what the
+      Go gateway mints on first boot).
 
     A running gateway keeps the token it loaded until it restarts, so
     *logger* sends this run's audit events with that one (GAP-0490).
@@ -2992,7 +2989,7 @@ def _apply_gateway_defaults(
         _ensure_device_key,
         _resolve_gateway_for_connector,
     )
-    from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+    from defenseclaw.commands.cmd_setup import _ensure_master_gateway_token, _save_secret_to_dotenv
     from defenseclaw.logger import keep_running_gateway_token
 
     # SU-03/ND-2: this used to read openclaw.json unconditionally and pin
@@ -3007,25 +3004,18 @@ def _apply_gateway_defaults(
         cfg.gateway.host = gw["host"]
         cfg.gateway.port = gw["port"]
 
-    token_configured = False
     token = gw.get("token", "")
     if report is not None:
         report.openclaw_token_notice = str(gw.get("token_notice", "") or "")
         report.gateway_token_cleanup = str(gw.get("token_cleanup", "") or "")
     if token:
-        keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), token)
+        # The token a running gateway loaded (see cmd_init._setup_gateway_defaults).
+        previous = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip() or cfg.gateway.resolved_token()
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
-        cfg.gateway.token = ""
-        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
-        token_configured = True
-    else:
-        # Standalone defenseclaw install — point at the env var the
-        # Go gateway writes on first boot. resolved_token() will still
-        # auto-detect either DEFENSECLAW_ or legacy OPENCLAW_, so an
-        # upgrader whose dotenv only has OPENCLAW_ keeps working
-        # without any operator action.
-        cfg.gateway.token_env = "DEFENSECLAW_GATEWAY_TOKEN"
-        token_configured = bool(cfg.gateway.resolved_token())
+        if _ensure_master_gateway_token(cfg.data_dir, openclaw_token=token):
+            keep_running_gateway_token(logger, cfg.data_dir, previous, cfg.gateway.resolved_token())
+    cfg.gateway.token_env = "DEFENSECLAW_GATEWAY_TOKEN"
+    token_configured = bool(cfg.gateway.resolved_token())
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")

@@ -420,8 +420,9 @@ export const TARGET_URL_HEADER = "X-DC-Target-URL";
 export const AI_AUTH_HEADER = "X-AI-Auth";
 
 /**
- * Header carrying the defenseclaw proxy authentication token (the openclaw
- * gateway token from OPENCLAW_GATEWAY_TOKEN / gateway.token in config.yaml).
+ * Header carrying the defenseclaw proxy authentication token (the DefenseClaw
+ * gateway token, DEFENSECLAW_GATEWAY_TOKEN / gateway.token in config.yaml; never
+ * the OpenClaw gateway token).
  * The proxy validates this for non-loopback connections; loopback connections
  * are trusted by network topology alone.
  */

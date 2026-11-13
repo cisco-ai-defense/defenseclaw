@@ -375,22 +375,46 @@ describe("loadSidecarConfig", () => {
       expect(cfg.token).toBe("canonical-from-firstboot");
     });
 
-    it("falls back to legacy OPENCLAW_GATEWAY_TOKEN in dotenv for old installs", () => {
-      mockEnvOnlyDotenv("OPENCLAW_GATEWAY_TOKEN=legacy-only-token\n");
-      const cfg = loadSidecarConfig();
-      expect(cfg.token).toBe("legacy-only-token");
+    it("never uses OPENCLAW_GATEWAY_TOKEN, the OpenClaw credential (R-TOK)", () => {
+      mockEnvOnlyDotenv("OPENCLAW_GATEWAY_TOKEN=openclaw-only-token\n");
+      expect(loadSidecarConfig().token).toBe("");
+      _resetSidecarConfigCache();
+      process.env.OPENCLAW_GATEWAY_TOKEN = "openclaw-env-token";
+      mockEnvOnlyDotenv("");
+      expect(loadSidecarConfig().token).toBe("");
     });
 
-    it("prefers DEFENSECLAW_GATEWAY_TOKEN over the legacy name when both are present", () => {
+    it("uses DEFENSECLAW_GATEWAY_TOKEN when both names are present", () => {
       mockEnvOnlyDotenv(
         [
           "DEFENSECLAW_GATEWAY_TOKEN=new-canonical",
-          "OPENCLAW_GATEWAY_TOKEN=legacy-shadow",
+          "OPENCLAW_GATEWAY_TOKEN=openclaw-credential",
           "",
         ].join("\n")
       );
       const cfg = loadSidecarConfig();
       expect(cfg.token).toBe("new-canonical");
+    });
+
+    it("skips a DEFENSECLAW_GATEWAY_TOKEN equal to the OpenClaw token (1.0.9 adopted copy)", () => {
+      mockEnvOnlyDotenv(
+        ["DEFENSECLAW_GATEWAY_TOKEN=same-value", "OPENCLAW_GATEWAY_TOKEN=same-value", ""].join("\n")
+      );
+      expect(loadSidecarConfig().token).toBe("");
+    });
+
+    it("skips gateway.token_env OPENCLAW_GATEWAY_TOKEN and reads DEFENSECLAW_GATEWAY_TOKEN", () => {
+      mockReadFileSync.mockImplementation((path) => {
+        const p = String(path);
+        if (p.endsWith("config.yaml")) {
+          return "gateway:\n  token_env: OPENCLAW_GATEWAY_TOKEN\n";
+        }
+        if (p.endsWith(".env")) {
+          return "OPENCLAW_GATEWAY_TOKEN=openclaw-credential\nDEFENSECLAW_GATEWAY_TOKEN=minted-master\n";
+        }
+        throw new Error("ENOENT: " + p);
+      });
+      expect(loadSidecarConfig().token).toBe("minted-master");
     });
 
     it("returns empty token when neither env nor dotenv has the value", () => {

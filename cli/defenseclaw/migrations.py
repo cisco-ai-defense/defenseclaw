@@ -813,9 +813,8 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
 #      ``defenseclaw setup rotate-token`` would lock itself out of
 #      /api/v1/inspect/* and the connector hook endpoints. We
 #      synthesise a 32-byte CSPRNG hex token and atomically write it
-#      to ``<data_dir>/.env`` with mode 0o600. The legacy
-#      ``OPENCLAW_GATEWAY_TOKEN`` name is renamed if encountered so an
-#      operator who hand-edited the .env keeps their value.
+#      to ``<data_dir>/.env`` with mode 0o600. ``OPENCLAW_GATEWAY_TOKEN``
+#      is the OpenClaw gateway token and is left as it is.
 #
 #   2. **File perms tighten** — ``.env``, ``device.key`` and any
 #      ``*_backup.json`` left behind by intermediate dev builds are
@@ -931,20 +930,11 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
     if existing.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip():
         return
 
-    # Promote the legacy var name to the new canonical one without
-    # rotating the secret value — operators may have wired it into
-    # CI / agent process env, and silently rotating breaks them.
-    legacy = existing.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
-    if legacy:
-        if _dotenv_update_keys(
-            env_path,
-            updates={"DEFENSECLAW_GATEWAY_TOKEN": legacy},
-            removes=("OPENCLAW_GATEWAY_TOKEN",),
-        ):
-            ctx.changes.append("renamed legacy OPENCLAW_GATEWAY_TOKEN → DEFENSECLAW_GATEWAY_TOKEN in .env")
-        return
-
-    # No token at all — synthesise a 32-byte CSPRNG hex string. Use
+    # OPENCLAW_GATEWAY_TOKEN is the OpenClaw gateway token, never the
+    # DefenseClaw one (R-TOK): it stays as it is, and a separate token is
+    # generated. (This step used to rename it to DEFENSECLAW_GATEWAY_TOKEN,
+    # which made the OpenClaw token the master.)
+    # Synthesise a 32-byte CSPRNG hex string. Use
     # secrets.token_hex which wraps os.urandom; matches the Go
     # rand.Read + hex.EncodeToString contract in firstboot.go.
     token = secrets.token_hex(32)
@@ -958,8 +948,8 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
 def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
     """migrate stale ``gateway.token_env`` references.
 
-    The 0.4.0 migration above renames ``OPENCLAW_GATEWAY_TOKEN`` to
-    ``DEFENSECLAW_GATEWAY_TOKEN`` in ``~/.defenseclaw/.env`` but the
+    The 0.4.0 migration above generates ``DEFENSECLAW_GATEWAY_TOKEN`` in
+    ``~/.defenseclaw/.env`` but the
     legacy installer also wrote ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN``
     into ``config.yaml``. Python and TypeScript clients honour an
     explicit ``token_env`` first, so on upgraded installs they kept
@@ -1430,8 +1420,7 @@ def _dotenv_update_keys_locked(
     ``False`` on a write failure (after logging via ``click.echo``).
 
     Used by ``_migrate_0_4_0_token_bootstrap`` to set
-    ``DEFENSECLAW_GATEWAY_TOKEN`` and to retire
-    ``OPENCLAW_GATEWAY_TOKEN`` without trampling operator-curated
+    ``DEFENSECLAW_GATEWAY_TOKEN`` without trampling operator-curated
     comments. The same helper is suitable for any future migration
     that needs to flip a single key in an existing .env.
     """
@@ -2232,48 +2221,8 @@ def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     if text is None:
         return
 
-    # Scope the rewrite to the ``gateway:`` block (via the shared
-    # CRLF/EOF-aware block matcher) so a stray ``token_env:`` under
-    # another section is never touched.
-    block_match = _find_top_level_block(text, "gateway")
-    if not block_match:
-        return
-
-    body_start = block_match.start("body")
-    body_end = block_match.end("body")
-    body = block_match.group("body")
-
-    # Match the ``token_env: OPENCLAW_GATEWAY_TOKEN`` line. The value
-    # may be unquoted (most common), single-quoted, or double-quoted;
-    # we accept all three so we never miss a legitimately-formatted
-    # legacy entry. An inline comment after the value is preserved
-    # because the substitution only touches the captured value group.
-    # ``(?:\r?\n|$)`` in the suffix keeps a CRLF terminator intact in
-    # the rewritten line (rather than dropping the ``\r`` and leaving
-    # mixed terminators) and still matches a final line with no
-    # trailing newline.
-    pattern = re.compile(
-        r"""
-        (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
-        (?P<quote>["']?)                       # optional opening quote
-        OPENCLAW_GATEWAY_TOKEN                 # the literal legacy value
-        (?P=quote)                             # matching closing quote
-        (?P<suffix>[ \t]*(?:\#[^\n]*)?(?:\r?\n|$))  # trailing space + optional comment + EOL/EOF
-        """,
-        flags=re.MULTILINE | re.VERBOSE,
-    )
-
-    new_body, count = pattern.subn(
-        lambda m: (
-            f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}"
-        ),
-        body,
-    )
-    if count == 0:
-        return
-
-    new_text = text[:body_start] + new_body + text[body_end:]
-    if new_text == text:
+    new_text = _gateway_token_env_rewritten(text)
+    if new_text is None:
         return
 
     if not _atomic_write_config(cfg_path, new_text):
@@ -4521,6 +4470,169 @@ def _secure_client_stays_on_v8(config_path: str) -> bool:
     return text is not None and secure_client_managed(text.encode("utf-8"))
 
 
+# ---------------------------------------------------------------------------
+# Upgrade step: the DefenseClaw master token is not the OpenClaw token (R-TOK)
+# ---------------------------------------------------------------------------
+#
+# DefenseClaw 1.0.9 and earlier used the OpenClaw gateway.auth.token as its own
+# API token: init and setup saved it as OPENCLAW_GATEWAY_TOKEN and set
+# gateway.token_env to that name, and setup openclaw copied it under both
+# gateway-token names. The OpenClaw account, its plugins and any tool that
+# reads openclaw.json then held the token that can allow, unblock and stop the
+# gateway. From 1.0.10 OPENCLAW_GATEWAY_TOKEN is only the credential the
+# gateway presents to the OpenClaw WebSocket. Like the connector roster step
+# this one has no config_version: it runs whenever an install still has that
+# shape.
+
+def _gateway_token_env_rewritten(text: str) -> str | None:
+    """``text`` with ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` repointed at
+    ``DEFENSECLAW_GATEWAY_TOKEN``, or None when it has no such line.
+
+    Only the ``token_env:`` line of the top-level ``gateway:`` block changes
+    (found with the shared CRLF/EOF-aware block matcher): its indentation,
+    quotes, inline comment and line ending stay as they are, and so does every
+    other byte. The name compares case-insensitively on Windows.
+    """
+    block_match = _find_top_level_block(text, "gateway")
+    if not block_match:
+        return None
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    body = block_match.group("body")
+
+    pattern = re.compile(
+        r"""
+        (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
+        (?P<quote>["']?)                       # optional opening quote
+        OPENCLAW_GATEWAY_TOKEN                 # the OpenClaw credential name
+        (?P=quote)                             # matching closing quote
+        (?P<suffix>[ \t]*(?:\#[^\n]*)?(?:\r?\n|$))  # trailing space + optional comment + EOL/EOF
+        """,
+        flags=re.MULTILINE | re.VERBOSE | (re.IGNORECASE if os.name == "nt" else 0),
+    )
+
+    new_body, count = pattern.subn(
+        lambda m: (
+            f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}"
+        ),
+        body,
+    )
+    if count == 0:
+        return None
+    new_text = text[:body_start] + new_body + text[body_end:]
+    return None if new_text == text else new_text
+
+
+_GATEWAY_TOKEN_SPLIT_STEP_NAME = "give the DefenseClaw gateway its own token, separate from the OpenClaw token"
+
+
+def _gateway_token_env_names_openclaw(raw: object) -> bool:
+    gateway = raw.get("gateway") if isinstance(raw, dict) else None
+    token_env = gateway.get("token_env") if isinstance(gateway, dict) else None
+    if not isinstance(token_env, str):
+        return False
+    from defenseclaw.config import is_openclaw_gateway_token_env
+
+    return is_openclaw_gateway_token_env(token_env)
+
+
+def _openclaw_json_gateway_token(raw: object) -> str:
+    """The gateway.auth.token of the openclaw.json config.yaml names, or ""."""
+    claw = raw.get("claw") if isinstance(raw, dict) else None
+    path = claw.get("config_file") if isinstance(claw, dict) else None
+    if not isinstance(path, str) or not path.strip():
+        home = claw.get("home_dir") if isinstance(claw, dict) else None
+        home = home if isinstance(home, str) and home.strip() else "~/.openclaw"
+        path = os.path.join(home, "openclaw.json")
+    try:
+        from defenseclaw.connector_paths import _read_openclaw_json, openclaw_gateway_token
+
+        return openclaw_gateway_token(_read_openclaw_json(os.path.expanduser(path))).value.strip()
+    except Exception:  # noqa: BLE001 - an unreadable openclaw.json proves nothing
+        return ""
+
+
+def _gateway_token_split_config(config_path: str) -> object | None:
+    """The parsed config when the step may apply to it, else None.
+
+    A Secure Client config and a managed enterprise one are left alone: the
+    service owns their .env, and the gateway mints its own token at start.
+    """
+    text = _read_config_text(config_path) if os.path.isfile(config_path) else None
+    if text is None or _guardrail_runtime_migration_is_managed(text):
+        return None
+    from defenseclaw.config_writer import secure_client_managed
+
+    if secure_client_managed(text.encode("utf-8")):
+        return None
+    try:
+        return yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return None
+
+
+def _gateway_token_split_pending(config_path: str, data_dir: str) -> bool:
+    """Report an install whose master token is, or may become, the OpenClaw token."""
+    raw = _gateway_token_split_config(config_path)
+    if raw is None:
+        return False
+    if _gateway_token_env_names_openclaw(raw):
+        return True
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    env = _parse_dotenv(os.path.join(data_dir, ".env"))
+    master = env.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip()
+    openclaw = env.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
+    master = "" if is_secret_ref_text(master) else master
+    openclaw = "" if is_secret_ref_text(openclaw) else openclaw
+    if openclaw and (not master or master == openclaw):
+        return True
+    return bool(master) and master == _openclaw_json_gateway_token(raw)
+
+
+def _migrate_gateway_token_split(ctx: MigrationContext) -> None:
+    """Mint a DefenseClaw master token and repoint gateway.token_env.
+
+    OPENCLAW_GATEWAY_TOKEN stays as it is: the gateway still connects to
+    OpenClaw with it. The new DEFENSECLAW_GATEWAY_TOKEN replaces a missing one
+    or one equal to the OpenClaw token. Connector hooks keep working: they
+    authenticate with their own scoped tokens, and the gateway rewrites the
+    shared hooks/.token copy when it starts.
+    """
+    config_path = ctx.active_config_path()
+    raw = _gateway_token_split_config(config_path)
+    if raw is None:
+        return
+    from defenseclaw.commands.cmd_setup import _ensure_master_gateway_token
+
+    try:
+        minted = _ensure_master_gateway_token(ctx.data_dir, openclaw_token=_openclaw_json_gateway_token(raw))
+    except (click.ClickException, OSError) as exc:
+        # The gateway mints the token at its next start; the upgrade goes on.
+        ux.warn(f"could not write a DefenseClaw gateway token to .env ({type(exc).__name__}); "
+                "the gateway generates one when it starts", indent="    ")
+        minted = False
+    if minted:
+        ctx.changes.append(
+            "generated DEFENSECLAW_GATEWAY_TOKEN, a DefenseClaw gateway token separate from the OpenClaw "
+            "gateway token (OPENCLAW_GATEWAY_TOKEN now only connects the gateway to OpenClaw)"
+        )
+    if not _gateway_token_env_names_openclaw(raw):
+        return
+    text = _read_config_text(config_path)
+    updated = _gateway_token_env_rewritten(text) if text is not None else None
+    if updated is None:
+        return
+    from defenseclaw.config_writer import ACTOR_MIGRATION, ConfigWriteError, replace_document
+
+    try:
+        replace_document(updated.encode("utf-8"), ACTOR_MIGRATION, "gateway.token_env", path=config_path)
+    except (ConfigWriteError, OSError, ValueError) as exc:
+        raise MigrationError(f"could not repoint gateway.token_env in {config_path}: {exc}") from exc
+    ctx.changes.append("repointed gateway.token_env from OPENCLAW_GATEWAY_TOKEN to DEFENSECLAW_GATEWAY_TOKEN")
+
+
 def _pending_migration_steps(
     version: int,
     from_version: str | None,
@@ -4558,6 +4670,8 @@ def _pending_migration_steps(
         steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
+    if _gateway_token_split_pending(config_path, data_dir):
+        steps.append((_GATEWAY_TOKEN_SPLIT_STEP_NAME, _migrate_gateway_token_split))
     return steps
 
 

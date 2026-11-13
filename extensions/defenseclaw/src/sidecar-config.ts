@@ -24,12 +24,21 @@ import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_API_PORT = 18970;
-// DEFENSECLAW_GATEWAY_TOKEN is the canonical env-var name written by
-// the Go sidecar's first-boot bootstrap path. OPENCLAW_GATEWAY_TOKEN
-// is preserved as a legacy fallback for installs that pre-date the
-// rename. Lookup order is consistent across process.env AND ~/.defenseclaw/.env.
+// DEFENSECLAW_GATEWAY_TOKEN is the DefenseClaw API token the Go sidecar
+// mints on first boot. OPENCLAW_GATEWAY_TOKEN is only the credential the
+// sidecar presents on the OpenClaw WebSocket; it is never a DefenseClaw API
+// token (R-TOK), so a gateway.token_env naming it, and any value equal to it,
+// are skipped. Lookup order is consistent across process.env AND
+// ~/.defenseclaw/.env.
 const DEFAULT_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN";
-const LEGACY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
+const OPENCLAW_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
+
+/** gateway.token_env names the OpenClaw credential (case-insensitive on Windows, like the Go resolver). */
+function isOpenClawTokenEnv(name: string): boolean {
+  return process.platform === "win32"
+    ? name.toUpperCase() === OPENCLAW_TOKEN_ENV
+    : name === OPENCLAW_TOKEN_ENV;
+}
 
 interface SidecarConfig {
   host: string;
@@ -72,9 +81,10 @@ function resolveDefenseClawHome(): string {
 
 /**
  * Read gateway.host, gateway.api_port, and gateway token from
- * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar:
- * env var (gateway.token_env, default OPENCLAW_GATEWAY_TOKEN) wins over
- * the direct gateway.token value. Falls back to defaults if the file is
+ * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar
+ * (GatewayConfig.ResolvedToken): env var (gateway.token_env, default
+ * DEFENSECLAW_GATEWAY_TOKEN) wins over the direct gateway.token value, and
+ * the OpenClaw gateway credential is never used. Falls back to defaults if the file is
  * missing or malformed. The result is cached until config.yaml or .env
  * changes: `defenseclaw setup openclaw` rewrites the token in .env while
  * OpenClaw keeps running, and a stale token fails every sidecar call with
@@ -94,6 +104,12 @@ export function loadSidecarConfig(): SidecarConfig {
   let approvalTimeoutS = 30;
   let hiltEnabled = false;
   let token = "";
+  // The OpenClaw WebSocket credential: a value equal to it is not a
+  // DefenseClaw token (a 1.0.9 install saved it under both names).
+  const openClawToken =
+    process.env[OPENCLAW_TOKEN_ENV] || readDotEnvToken(defenseClawHome, OPENCLAW_TOKEN_ENV);
+  const usable = (value: string | undefined): string =>
+    value && value !== openClawToken ? value : "";
   // Default to observe to keep current dev behaviour. Production
   // installs flip this via `guardrail.mode = action` (or `enforce`).
   let enforcementMode: "observe" | "action" = "observe";
@@ -109,9 +125,9 @@ export function loadSidecarConfig(): SidecarConfig {
         if (typeof gw["approval_timeout_s"] === "number" && gw["approval_timeout_s"] > 0) {
           approvalTimeoutS = gw["approval_timeout_s"];
         }
-        if (typeof gw["token"] === "string" && gw["token"]) token = gw["token"];
+        if (typeof gw["token"] === "string") token = usable(gw["token"]);
         const tokenEnv =
-          typeof gw["token_env"] === "string" && gw["token_env"]
+          typeof gw["token_env"] === "string" && gw["token_env"] && !isOpenClawTokenEnv(gw["token_env"])
             ? gw["token_env"]
             : DEFAULT_TOKEN_ENV;
         // Mirror the Go resolver: try process.env first, then the
@@ -119,7 +135,7 @@ export function loadSidecarConfig(): SidecarConfig {
         // common case in production because the Go bootstrap writes
         // DEFENSECLAW_GATEWAY_TOKEN there but does not export it
         // into the Node process that loads this extension.
-        const envVal = process.env[tokenEnv] || readDotEnvToken(defenseClawHome, tokenEnv);
+        const envVal = usable(process.env[tokenEnv] || readDotEnvToken(defenseClawHome, tokenEnv));
         if (envVal) token = envVal;
       }
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
@@ -144,23 +160,12 @@ export function loadSidecarConfig(): SidecarConfig {
     // Config missing or unreadable — use defaults
   }
 
-  // Last-resort fallbacks: try the canonical name, then the legacy
-  // OPENCLAW_GATEWAY_TOKEN. Both process.env and ~/.defenseclaw/.env
-  // are consulted for each name so the resolver works regardless of
-  // whether the operator exported the value into the shell or kept
-  // it solely in the sidecar-managed dotenv.
-  for (const name of [DEFAULT_TOKEN_ENV, LEGACY_TOKEN_ENV]) {
-    if (token) break;
-    const envVal = process.env[name];
-    if (envVal) {
-      token = envVal;
-      break;
-    }
-    const dotenvVal = readDotEnvToken(defenseClawHome, name);
-    if (dotenvVal) {
-      token = dotenvVal;
-      break;
-    }
+  // Last-resort fallback: the canonical name, from process.env and then
+  // ~/.defenseclaw/.env, so the resolver works whether the operator exported
+  // the value into the shell or kept it only in the sidecar-managed dotenv.
+  // OPENCLAW_GATEWAY_TOKEN is not a fallback: it is the OpenClaw credential.
+  if (!token) {
+    token = usable(process.env[DEFAULT_TOKEN_ENV]) || usable(readDotEnvToken(defenseClawHome, DEFAULT_TOKEN_ENV));
   }
 
   // The plugin keys its listener proof by host and connects to it: name the

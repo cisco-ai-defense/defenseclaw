@@ -172,12 +172,6 @@ type GuardrailProxy struct {
 	// X-DC-Auth header. Production callers MUST never set this —
 	// it bypasses the security floor entirely.
 	skipAuthForTest bool
-
-	// refreshedGatewayToken returns the gateway token the OpenClaw client
-	// adopted from openclaw.json after boot ("" when none). The proxy
-	// accepts it in X-DC-Auth next to the boot token until restart, so
-	// the OpenClaw plugin keeps working after a token rotation (GAP-2346).
-	refreshedGatewayToken func() string
 }
 
 // SetDefaultAgentName sets the agent name fallback for OTel spans when
@@ -210,40 +204,14 @@ func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 // guardrail port (writeGatewayTokenListenerProof). Secure Client serves no
 // proof.
 func (p *GuardrailProxy) handleListenerProof(w http.ResponseWriter, r *http.Request) {
-	refreshed := ""
-	if p.refreshedGatewayToken != nil {
-		refreshed = p.refreshedGatewayToken()
-	}
 	secureClient := false
 	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
 		secureClient = true
 	}
-	if secureClient || ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
+	if secureClient || ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken) {
 		p.emitProxyAuthFailure(r, "listener_proof_refused")
 		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}
-}
-
-// SetRefreshedGatewayTokenSource wires the OpenClaw client's runtime-adopted
-// gateway token into proxy authentication (GAP-2346). Call it before the
-// proxy starts serving.
-func (p *GuardrailProxy) SetRefreshedGatewayTokenSource(fn func() string) {
-	p.refreshedGatewayToken = fn
-}
-
-// matchesRefreshedGatewayToken reports whether X-DC-Auth carries the gateway
-// token adopted by auth repair after boot. Like APIServer.tokenAuth since
-// GAP-2259, the boot token stays valid until the next restart.
-func (p *GuardrailProxy) matchesRefreshedGatewayToken(r *http.Request) bool {
-	if p.refreshedGatewayToken == nil {
-		return false
-	}
-	dcAuth := r.Header.Get("X-DC-Auth")
-	if dcAuth == "" {
-		return false
-	}
-	refreshed := p.refreshedGatewayToken()
-	return refreshed != "" && constantTimeStringMatch(strings.TrimPrefix(dcAuth, "Bearer "), refreshed)
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -4531,9 +4499,6 @@ func dropProxyUserClaims(next http.Handler) http.Handler {
 // (legacy hook installs) or with a provider key, which prove nothing about
 // who sent the request.
 func (p *GuardrailProxy) presentsOwnerCredential(r *http.Request) bool {
-	if p.matchesRefreshedGatewayToken(r) {
-		return true
-	}
 	for _, presented := range []string{
 		strings.TrimPrefix(r.Header.Get("X-DC-Auth"), "Bearer "),
 		connector.ExtractBearerKey(r.Header.Get("Authorization")),
@@ -4557,7 +4522,7 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	// Delegate to the connector when available — each connector knows its
 	// own auth scheme (tokens, loopback trust, etc.).
 	if p.connector != nil {
-		if p.connector.Authenticate(r) || p.matchesRefreshedGatewayToken(r) {
+		if p.connector.Authenticate(r) {
 			return true
 		}
 		reason := "invalid_token"
@@ -4572,9 +4537,6 @@ func (p *GuardrailProxy) credentialsAccepted(r *http.Request) bool {
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if p.gatewayToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(p.gatewayToken)) == 1 {
-			return true
-		}
-		if p.matchesRefreshedGatewayToken(r) {
 			return true
 		}
 	}

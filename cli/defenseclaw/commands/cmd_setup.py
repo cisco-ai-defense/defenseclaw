@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -60,7 +60,6 @@ from defenseclaw import (
     codex_toml,
     connector_paths,
     envvars,
-    gateway_token_adoption,
     openclaw_presence,
     platform_support,
     removed_connectors,
@@ -319,7 +318,7 @@ _TOKEN_ROTATION_MAX_HOOK_SCOPE_LENGTH = 128
 # rotation and managed-enterprise publication share one cross-process boundary.
 _TOKEN_ROTATION_HOOK_PUBLISH_LOCK_BASE_NAME = ".hook-api-token-publish"
 _GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
-_LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+_OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
 _DEFENSECLAW_HOME_ENV = "DEFENSECLAW_HOME"
 _DEFENSECLAW_DATA_DIR_ENV = "DEFENSECLAW_DATA_DIR"
 _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
@@ -4570,22 +4569,17 @@ def _render_secrets_to_dotenv(
 
 
 def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
-    """Canonicalize gateway-token lines and retain every unrelated byte.
+    """Replace the master token lines and retain every unrelated byte.
 
-    Once the canonical credential is rotated, retaining a legacy
-    ``OPENCLAW_GATEWAY_TOKEN`` line leaves an exposed fallback credential on
-    disk and can silently regain precedence after a later configuration edit.
-    Remove both exact token keys (including duplicates), then append exactly
-    one canonical value. Similar-looking unrelated keys remain byte-for-byte
-    intact.
+    Every ``DEFENSECLAW_GATEWAY_TOKEN`` line (including duplicates) is removed
+    and exactly one new value appended. ``OPENCLAW_GATEWAY_TOKEN`` is the
+    OpenClaw WebSocket credential, not the master (R-TOK), so rotation keeps
+    it byte-for-byte, like every other unrelated key.
     """
 
     safe_token = sanitize_dotenv_value(new_token, key=_GATEWAY_TOKEN_ENV).encode("utf-8")
     token_prefix = (_GATEWAY_TOKEN_ENV + "=").encode("ascii")
-    token_keys = {
-        _GATEWAY_TOKEN_ENV.encode("ascii"),
-        _LEGACY_GATEWAY_TOKEN_ENV.encode("ascii"),
-    }
+    token_key = _GATEWAY_TOKEN_ENV.encode("ascii")
 
     def is_token_line(line: bytes) -> bool:
         candidate = line.rstrip(b"\r\n").strip()
@@ -4593,10 +4587,7 @@ def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -
         if not separator:
             return False
         key = key.strip()
-        if os.name == "nt":
-            key = key.upper()
-            return key in {candidate_key.upper() for candidate_key in token_keys}
-        return key in token_keys
+        return key.upper() == token_key if os.name == "nt" else key == token_key
 
     lines = [line for line in snapshot.body.splitlines(keepends=True) if not is_token_line(line)]
     return serialize_dotenv([*lines, token_prefix + safe_token], snapshot.body)
@@ -4668,16 +4659,17 @@ def _rotate_token_snapshot_value(snapshot: _RotateTokenDotenvSnapshot, name: str
 
 
 def _rotate_token_previous_value(app: AppContext, snapshot: _RotateTokenDotenvSnapshot) -> str:
-    """Resolve A using the daemon's dotenv-before-process precedence."""
+    """Resolve A using the daemon's dotenv-before-process precedence.
 
-    for name in (_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        value = _rotate_token_snapshot_value(snapshot, name).strip()
-        if value:
-            return value
-    for name in (_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        value = str(os.environ.get(name, "") or "").strip()
-        if value:
-            return value
+    Only the master counts: OPENCLAW_GATEWAY_TOKEN is never it (R-TOK).
+    """
+
+    value = _rotate_token_snapshot_value(snapshot, _GATEWAY_TOKEN_ENV).strip()
+    if value:
+        return value
+    value = str(os.environ.get(_GATEWAY_TOKEN_ENV, "") or "").strip()
+    if value:
+        return value
     return str(getattr(app.cfg.gateway, "token", "") or "").strip()
 
 
@@ -5228,7 +5220,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     canonical_token_env = (
         token_env.casefold() == _GATEWAY_TOKEN_ENV.casefold() if os.name == "nt" else token_env == _GATEWAY_TOKEN_ENV
     )
-    if token_env and not canonical_token_env:
+    # A token_env naming OPENCLAW_GATEWAY_TOKEN is ignored by every resolver
+    # (R-TOK), so DEFENSECLAW_GATEWAY_TOKEN is the master that rotates.
+    from defenseclaw.config import is_openclaw_gateway_token_env
+
+    if token_env and not canonical_token_env and not is_openclaw_gateway_token_env(token_env):
         raise click.ClickException(
             "Token rotation requires gateway.token_env to be unset or DEFENSECLAW_GATEWAY_TOKEN; "
             "an externally managed token environment cannot be durably rotated here."
@@ -5414,32 +5410,30 @@ def setup_gateway(
                 gw.api_port, int(app.cfg.guardrail.port or 0), gw.port if uses_openclaw else 0
             ):
                 raise click.UsageError(conflict)
+        # --token and --ssm-param give the OpenClaw gateway token: it is saved
+        # as OPENCLAW_GATEWAY_TOKEN, the OpenClaw credential only (R-TOK).
         if token is not None:
-            _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, data_dir)
-            gw.token = ""
-            gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
+            _save_secret_to_dotenv(_OPENCLAW_GATEWAY_TOKEN_ENV, token, data_dir)
         elif ssm_param:
             fetched = _fetch_ssm_token(ssm_param, ssm_region or "us-east-1", ssm_profile)
             if fetched:
-                _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", fetched, data_dir)
-                gw.token = ""
-                gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
+                _save_secret_to_dotenv(_OPENCLAW_GATEWAY_TOKEN_ENV, fetched, data_dir)
             else:
                 click.echo("error: failed to fetch token from SSM", err=True)
                 raise SystemExit(1)
-        elif remote and not gw.resolved_token():
-            ux.echo("  ⚠ --remote specified but no auth token configured", err=True)
+        elif remote and not _openclaw_credential_saved():
+            ux.echo("  ⚠ --remote specified but no OpenClaw gateway token configured", err=True)
             click.echo("    Provide --token or --ssm-param, or set OPENCLAW_GATEWAY_TOKEN", err=True)
-        elif not gw.resolved_token():
+        elif uses_openclaw and not _openclaw_credential_saved():
             detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file, cfg=app.cfg)
             if detected:
-                _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected, data_dir)
-                gw.token = ""
-                gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
+                _save_secret_to_dotenv(_OPENCLAW_GATEWAY_TOKEN_ENV, detected, data_dir)
     elif remote:
         _interactive_gateway_remote(gw, data_dir)
     else:
         _interactive_gateway_local(gw, app.cfg.claw.config_file, data_dir, uses_openclaw=uses_openclaw)
+    _repoint_openclaw_token_env(gw)
+    _ensure_master_gateway_token(data_dir)
 
     if gw.api_port != previous_api_port:
         _refuse_held_api_port(app.cfg, gw.api_port)
@@ -5562,19 +5556,17 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str, *, 
     gw.host = click.prompt("  Gateway host", default=gw.host)
     gw.port = click.prompt("  Gateway port", default=gw.port, type=_PORT_NUMBER)
     gw.api_port = click.prompt("  Sidecar API port", default=gw.api_port, type=_PORT_NUMBER)
-    gw.token = ""
+    # A hook-only roster has no OpenClaw gateway to authenticate to.
+    if not uses_openclaw:
+        return
     detected = _detect_openclaw_gateway_token(openclaw_config_file)
     if detected:
-        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected, data_dir)
+        _save_secret_to_dotenv(_OPENCLAW_GATEWAY_TOKEN_ENV, detected, data_dir)
         click.echo(f"  OpenClaw token saved to ~/.defenseclaw/.env ({_mask(detected)})")
-    # A hook-only roster has no OpenClaw gateway to authenticate to; keep its
-    # gateway token setting as it is.
-    if not (detected or uses_openclaw):
-        return
-    gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
     click.echo()
-    click.echo("  Auth: token is read from OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env when set.")
-    click.echo("  OpenClaw may require this even for 127.0.0.1.")
+    click.echo("  Auth: DefenseClaw connects to OpenClaw with OPENCLAW_GATEWAY_TOKEN from ~/.defenseclaw/.env")
+    click.echo("  when set, else with gateway.auth.token from openclaw.json. OpenClaw may require it even")
+    click.echo("  for 127.0.0.1. The DefenseClaw API uses its own DEFENSECLAW_GATEWAY_TOKEN.")
 
 
 def _interactive_gateway_remote(gw, data_dir: str) -> None:
@@ -5606,21 +5598,15 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
         else:
             click.echo(" failed")
             click.echo("  Falling back to manual entry.")
-            _prompt_and_save_secret("OPENCLAW_GATEWAY_TOKEN", gw.token, data_dir)
-            gw.token = ""
-            gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
-            return
+            _prompt_and_save_secret(_OPENCLAW_GATEWAY_TOKEN_ENV, "", data_dir)
     else:
-        _prompt_and_save_secret("OPENCLAW_GATEWAY_TOKEN", gw.token, data_dir)
+        _prompt_and_save_secret(_OPENCLAW_GATEWAY_TOKEN_ENV, "", data_dir)
 
     if token_value:
-        _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token_value, data_dir)
+        _save_secret_to_dotenv(_OPENCLAW_GATEWAY_TOKEN_ENV, token_value, data_dir)
 
-    gw.token = ""
-    gw.token_env = "OPENCLAW_GATEWAY_TOKEN"
-
-    if not gw.resolved_token():
-        ux.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
+    if not _openclaw_credential_saved():
+        ux.echo("  warning: no OpenClaw token set — sidecar will fail to connect to a remote gateway", err=True)
 
 
 _OPENCLAW_TOKEN_NOTICES_SHOWN: set[str] = set()
@@ -15222,7 +15208,7 @@ def _setup_guardrail_connector_alias(
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
-        _adopt_openclaw_gateway_token(app, restart=restart)
+        _adopt_openclaw_gateway_token(app)
         _adopt_openclaw_gateway_port(app)
     app.cfg.claw.mode = connector
     app.cfg.guardrail.connector = connector
@@ -15453,74 +15439,30 @@ def _hook_peers_of_proxy_connector(gc, connector: str) -> list[str]:
     return sorted(name for name in names if name in _HOOK_ENFORCED_CONNECTORS)
 
 
-def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> None:
-    """Use OpenClaw's gateway token before the restart (GAP-1179).
+def _adopt_openclaw_gateway_token(app: AppContext) -> None:
+    """Save OpenClaw's gateway token as the OpenClaw credential (GAP-1179, R-TOK).
 
-    DefenseClaw authenticates to the OpenClaw gateway and serves its own API
-    with the same token. When OpenClaw was onboarded after DefenseClaw, the
-    two differ: the sidecar then adopted OpenClaw's token mid-setup and the
-    readiness check, still holding the old one, failed with 401. Reconcile the
-    token up front so the first run converges.
-
-    With *restart*, a running gateway is stopped while ``.env`` still holds the
-    token it loaded, then started on the new one. Setup's own restart sent the
-    new token to the old gateway's shutdown API, which logged an
-    api-auth-failure security event (GAP-2259).
+    The gateway presents OPENCLAW_GATEWAY_TOKEN only to the OpenClaw
+    WebSocket. When OpenClaw was onboarded after DefenseClaw the saved copy is
+    outdated, so it is refreshed from openclaw.json before the restart and the
+    first connect uses it. The DefenseClaw master (DEFENSECLAW_GATEWAY_TOKEN)
+    is a separate value that the OpenClaw account never holds; it does not
+    change here, except that a master still equal to the OpenClaw token (a
+    1.0.9 adoption copied it under both names) is replaced by a new one.
     """
     detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file, cfg=app.cfg) or "").strip()
-    gw = app.cfg.gateway
-    previous = gw.resolved_token()
-    if not detected or detected == previous:
+    if not detected:
         return
     data_dir = app.cfg.data_dir
-    stopped = False
-
-    def before_publish() -> None:
-        nonlocal stopped
-        stopped = restart and _stop_gateway_before_token_swap(data_dir)
-        if not stopped:
-            # --no-restart: the running gateway keeps the old token (GAP-0464).
-            keep_running_gateway_token(app.logger, data_dir, previous, detected)
-
-    keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
-    if gw.token_env and gw.token_env not in keys:
-        keys.append(gw.token_env)
-    _save_adopted_gateway_token(keys, detected, data_dir, before_publish=before_publish)
-    click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
-    if stopped:
-        ctx = click.get_current_context(silent=True)
-        handled = ctx.meta.get(_SETUP_RESTART_HANDLED_KEY) if ctx is not None else None
-        _restart_defense_gateway(data_dir)
-        if ctx is not None:
-            # Only the token step restarted; setup's own restart still runs.
-            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = handled
-
-
-def _stop_gateway_before_token_swap(data_dir: str) -> bool:
-    """Stop a running gateway with the token it loaded; True when it is now down."""
-    pid_file = gateway_pid_path(data_dir)
-    if not _is_pid_alive(pid_file) or not _gateway_pid_file_identifies_gateway(pid_file):
-        return False
-    if os.name == "nt":
-        from defenseclaw.gateway import packaged_windows_install_root
-
-        if packaged_windows_install_root():
-            return _stop_defense_gateway_native(data_dir)
-    executable = _gateway_lifecycle_executable()
-    if not executable:
-        return False
-    try:
-        run_pinned_executable(
-            [executable, "stop"],
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
-        )
-    except (UnsafePathError, subprocess.TimeoutExpired, OSError):
-        pass
-    return not _is_pid_alive(pid_file)
+    # The token a running gateway loaded: an older one may still run on a
+    # master equal to the OpenClaw token, which resolved_token() skips.
+    previous = os.environ.get(_GATEWAY_TOKEN_ENV, "").strip() or app.cfg.gateway.resolved_token()
+    if os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, "").strip() != detected:
+        _save_secret_to_dotenv(_OPENCLAW_GATEWAY_TOKEN_ENV, detected, data_dir)
+        click.echo("  Saved the OpenClaw gateway token from openclaw.json as OPENCLAW_GATEWAY_TOKEN.")
+    if _ensure_master_gateway_token(data_dir, openclaw_token=detected):
+        keep_running_gateway_token(app.logger, data_dir, previous, app.cfg.gateway.resolved_token())
+        click.echo("  Generated a separate DefenseClaw gateway token (DEFENSECLAW_GATEWAY_TOKEN).")
 
 
 def _openclaw_json_gateway_port(openclaw_config_file: str) -> int | None:
@@ -19263,8 +19205,20 @@ def _print_gateway_summary(gw, *, openclaw: bool = True, data_dir: str | None = 
     rows = [("host", gw.host), ("port", str(gw.port))] if openclaw else []
     rows += [
         ("api_port", str(gw.api_port)),
-        ("token", f"via {gw.token_env} (in .env)" if resolved else "(none — local mode)"),
+        (
+            "token",
+            f"via {gw.token_env or _GATEWAY_TOKEN_ENV} (in .env)" if resolved else "generated at gateway start",
+        ),
     ]
+    if openclaw:
+        rows.append(
+            (
+                "openclaw token",
+                f"via {_OPENCLAW_GATEWAY_TOKEN_ENV} (in .env)"
+                if _openclaw_credential_saved()
+                else "gateway.auth.token in openclaw.json",
+            )
+        )
 
     for key, val in rows:
         label = (f"gateway.{key}:").ljust(20)
@@ -20922,7 +20876,7 @@ def _splunk_bridge_child_env(
     )
     blocked_names = {
         _GATEWAY_TOKEN_ENV,
-        _LEGACY_GATEWAY_TOKEN_ENV,
+        _OPENCLAW_GATEWAY_TOKEN_ENV,
     }
     if configured_name:
         blocked_names.add(configured_name)
@@ -21792,34 +21746,66 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
     os.environ[key] = value
 
 
-def _save_adopted_gateway_token(
-    keys: list[str], token: str, data_dir: str, *, before_publish: Callable[[], None] | None = None
-) -> None:
-    """Copy *token*, adopted from openclaw.json, under every name in *keys*.
+def _openclaw_credential_saved() -> bool:
+    """True when OPENCLAW_GATEWAY_TOKEN (environment or loaded .env) holds a token."""
+    from defenseclaw.connector_paths import is_secret_ref_text
 
-    The new .env is built whole in memory with the adopted-token marker and
-    published once, so a failure leaves neither name changed. A later edit of one
-    gateway-token spelling then wins over the copy under the other (GAP-0847); see
-    ``defenseclaw.gateway_token_adoption``.
+    value = os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, "").strip()
+    return bool(value) and not is_secret_ref_text(value)
+
+
+def _repoint_openclaw_token_env(gw: Any) -> bool:
+    """Point a ``gateway.token_env`` naming OPENCLAW_GATEWAY_TOKEN at the canonical name.
+
+    No resolver uses OPENCLAW_GATEWAY_TOKEN as the DefenseClaw master (R-TOK);
+    DefenseClaw 1.0.9 and earlier saved it there. Returns True when it changed.
     """
+    from defenseclaw.config import is_openclaw_gateway_token_env
+
+    if not is_openclaw_gateway_token_env(str(getattr(gw, "token_env", "") or "")):
+        return False
+    gw.token_env = _GATEWAY_TOKEN_ENV
+    return True
+
+
+def _ensure_master_gateway_token(data_dir: str, *, openclaw_token: str = "") -> bool:
+    """Make sure ``.env`` holds a DefenseClaw master token of its own (R-TOK).
+
+    Mirror of EnsureGatewayToken (internal/gateway/firstboot.go). A usable
+    DEFENSECLAW_GATEWAY_TOKEN in the environment or ``.env`` is kept; one that
+    is missing, SecretRef text, or equal to the OpenClaw credential
+    (OPENCLAW_GATEWAY_TOKEN, or *openclaw_token*, the openclaw.json
+    gateway.auth.token) is replaced by a fresh 32-byte CSPRNG hex value, the
+    same shape the gateway mints. OPENCLAW_GATEWAY_TOKEN is never changed.
+    Returns True when it wrote a new token; the value is never printed.
+    """
+    import secrets
+
+    from defenseclaw.connector_paths import is_secret_ref_text
+
     dotenv_path = os.path.join(data_dir, ".env")
     with locked_file_update(dotenv_path):
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
-        rendered = snapshot
-        for key in keys:
-            rendered = _RotateTokenDotenvSnapshot(
-                existed=True,
-                body=_dotenv_upsert_render(rendered, key, token),
-                mode=rendered.mode,
-            )
-        body = gateway_token_adoption.with_adopted_marker(rendered.body, token)
-        _check_dotenv_size(dotenv_path, body)
-        if before_publish is not None:
-            before_publish()
-        if not snapshot.existed or body != snapshot.body:
-            _publish_dotenv_locked(dotenv_path, body)
-    for key in keys:
-        os.environ[key] = token
+        openclaw = {
+            _rotate_token_snapshot_value(snapshot, _OPENCLAW_GATEWAY_TOKEN_ENV).strip(),
+            os.environ.get(_OPENCLAW_GATEWAY_TOKEN_ENV, "").strip(),
+            (openclaw_token or "").strip(),
+        } - {""}
+
+        def usable(value: str) -> bool:
+            return bool(value) and not is_secret_ref_text(value) and value not in openclaw
+
+        saved = _rotate_token_snapshot_value(snapshot, _GATEWAY_TOKEN_ENV).strip()
+        if usable(saved):
+            return False
+        exported = os.environ.get(_GATEWAY_TOKEN_ENV, "").strip()
+        if not saved and usable(exported):
+            # An operator-exported master (for example from a service unit).
+            return False
+        token = secrets.token_hex(32)
+        _save_secrets_to_dotenv_locked(dotenv_path, snapshot, ((_GATEWAY_TOKEN_ENV, token),))
+    os.environ[_GATEWAY_TOKEN_ENV] = token
+    return True
 
 
 # ---------------------------------------------------------------------------

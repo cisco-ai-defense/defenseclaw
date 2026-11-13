@@ -2179,7 +2179,7 @@ def _stored_key_picker(field: WizardFormField, cfg: object | Mapping[str, Any] |
     try:
         reserved = _gateway_token_names(cfg)
     except Exception:  # noqa: BLE001 - a partial config still lists the stored names.
-        reserved = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+        reserved = {"DEFENSECLAW_GATEWAY_TOKEN"}
     names = tuple(sorted(name for name in _dotenv_names(os.path.join(data_dir, ".env")) if name not in reserved))
     if not names:
         return replace(field, hint=f"Name of the entry to delete; nothing is stored in {data_dir}/.env yet.")
