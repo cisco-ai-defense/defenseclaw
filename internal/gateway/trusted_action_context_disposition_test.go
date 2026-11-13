@@ -45,7 +45,10 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 		facts               actionfacts.Facts
 		requireDirectEgress bool
 		wantAudit           bool
-		wantSeverity        string
+		// wantAlertOnly: the literal reaches a file the call writes, so it
+		// alerts without proof of where it goes, and still cannot block.
+		wantAlertOnly bool
+		wantSeverity  string
 	}{
 		{
 			name: "literal only",
@@ -829,8 +832,11 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 					" > /workspace/.env > /tmp/public",
 				CWD: "/workspace",
 			}),
-			wantAudit:    true,
-			wantSeverity: "LOW",
+			// The sensitive file gets nothing, so there is no risk pair; the
+			// token still lands in /tmp/public, which alerts.
+			wantAudit:     true,
+			wantAlertOnly: true,
+			wantSeverity:  "CRITICAL",
 		},
 		{
 			name: "static append to active sensitive path",
@@ -898,6 +904,9 @@ func TestTrustedActionContentLiteralRequiresProvenRiskPair(t *testing.T) {
 			}
 			if gotAudit := !got[0].contributesToEnforcement(); gotAudit != test.wantAudit {
 				t.Fatalf("audit-only = %t, want %t: %#v", gotAudit, test.wantAudit, got[0])
+			}
+			if gotAlert := got[0].contributesToAlertOnly(); gotAlert != test.wantAlertOnly {
+				t.Fatalf("alert-only = %t, want %t: %#v", gotAlert, test.wantAlertOnly, got[0])
 			}
 		})
 	}
