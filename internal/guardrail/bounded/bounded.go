@@ -17,7 +17,7 @@ package bounded
 
 import (
 	"math"
-	"testing"
+	"sync/atomic"
 	"time"
 )
 
@@ -168,34 +168,51 @@ func (t *Truncated) Before(now, deadline time.Time) bool {
 func (t *Truncated) Merge(s CapSet) { t.set = t.set.Union(s) }
 
 // Any reports that some cap was hit.
-func (t *Truncated) Any() bool { return t.set.Any() }
+//
+// Any sees this Truncated's hits and those of any unbound Counter (see
+// Counter); a Counter bound to another Truncated is seen only by
+// Set(counters...).
+func (t *Truncated) Any() bool { return t.set.Any() || unboundHits.Load() != 0 }
 
-// Set is the caps hit so far, the value a reader returns. Pass the reader's
-// Counters: their hits are included even when a Counter was bound to another
-// Truncated by mistake, or never bound (a zero Counter). Under go test such a
-// Counter panics here instead, so the mistake is found where it is made.
+// Set is the caps hit so far, the value a reader returns, including the hits
+// of any unbound Counter (see Counter). Pass the reader's Counters: the hits
+// of one bound to another Truncated by mistake are included too. With
+// PanicOnMisuse on (go test binaries), such a Counter panics here instead.
 func (t *Truncated) Set(counters ...*Counter) CapSet {
-	set := t.set
+	set := t.set.Union(CapSet{uint16(unboundHits.Load())})
 	for _, k := range counters {
-		if k == nil {
+		if k == nil || k.t == t {
 			continue
 		}
-		if k.t != t {
-			if misboundPanics {
-				panic("bounded: a Counter passed to Truncated.Set is bound to another Truncated (or none); make it with NewCounter(&thisTruncated, ...)")
-			}
-			if k.t != nil {
-				set = set.Union(k.t.set)
-			}
+		if misusePanics.Load() {
+			panic("bounded: a Counter passed to Truncated.Set is bound to another Truncated; make it with NewCounter(&thisTruncated, ...)")
 		}
-		set = set.Union(k.own)
+		if k.t != nil {
+			set = set.Union(k.t.set)
+		}
 	}
 	return set
 }
 
-// misboundPanics makes Set panic on a misbound Counter in test binaries; a
-// production gateway merges its hits instead.
-var misboundPanics = testing.Testing()
+// unboundHits holds the caps hit by Counters that were never bound to a
+// Truncated (a zero Counter, a struct field one constructor path forgot to
+// set with NewCounter). Every Truncated reports them (Any, Set), process-wide
+// and for good: such a reader cannot say which call it cut short, so every
+// call is judged as truncated (the unknown tier) rather than one input going
+// unread in silence. Go test binaries panic at the first take instead
+// (PanicOnMisuse).
+var unboundHits atomic.Uint32
+
+// misusePanics: see PanicOnMisuse.
+var misusePanics atomic.Bool
+
+// PanicOnMisuse makes a misused Counter panic where the mistake is made (the
+// first take of an unbound Counter, Set with a Counter bound elsewhere)
+// instead of the production fallback (every call floored, hits merged). It is
+// a test hook: a package that adopts the helper calls it from a _test.go file
+// (func init() { bounded.PanicOnMisuse(true) }); production code never does.
+// This package does not import testing, so its binaries do not grow.
+func PanicOnMisuse(on bool) { misusePanics.Store(on) }
 
 // Counter counts one cap kind across a walk and records its hit in the
 // Truncated it was made for. Like Truncated it is used by pointer and never
@@ -207,10 +224,13 @@ var misboundPanics = testing.Testing()
 // A Time cap counted in work units (one per node, statement or effect the
 // reader visits) trips on the same input on every host; prefer it to a
 // wall-clock deadline.
+//
+// NewCounter is the only way to make a Counter that counts. A zero Counter
+// (never set with NewCounter) refuses its first take and records the hit in
+// every Truncated (see unboundHits); under go test it panics.
 type Counter struct {
 	_      noCopy
 	t      *Truncated
-	own    CapSet // the hits of a Counter with no Truncated (a zero Counter)
 	n, max int
 	cap    Cap
 }
@@ -227,10 +247,15 @@ func (k *Counter) Take() bool { return k.TakeN(1) }
 
 // TakeN counts n items (the bytes of a string, for example). A negative n is
 // a reader error, never a refund: it records the cap and is false. The count
-// saturates instead of wrapping. A zero Counter (not made by NewCounter) has
-// a max of 0, so its first take records the cap (as items) and is false; the
-// hit reaches the result through Truncated.Set(counters...).
+// saturates instead of wrapping.
 func (k *Counter) TakeN(n int) bool {
+	if k.t == nil {
+		if misusePanics.Load() {
+			panic("bounded: Take on a Counter that was never bound; make it with NewCounter(&trunc, cap, max)")
+		}
+		unboundHits.Or(uint32(CapSet{}.with(k.cap).bits))
+		return false
+	}
 	switch {
 	case n < 0:
 		k.n = math.MaxInt
@@ -242,11 +267,7 @@ func (k *Counter) TakeN(n int) bool {
 	if k.n <= k.max {
 		return true
 	}
-	if k.t != nil {
-		k.t.Hit(k.cap)
-	} else {
-		k.own = k.own.with(k.cap)
-	}
+	k.t.Hit(k.cap)
 	return false
 }
 
