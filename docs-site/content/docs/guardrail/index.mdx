@@ -375,9 +375,16 @@ guardrail:
 ```
 
 Keep `hook_connectors`: without it the judge reviews no hook connector's tool
-calls, even with `enabled: true`. `defenseclaw setup guardrail` writes `["*"]`
-when it turns the judge on. Run `defenseclaw config validate`, then restart the gateway. To turn the judge
-off again, set `guardrail.detection_strategy: regex_only` (or
+calls, even with `enabled: true`. An empty or missing list means the judge
+reviews proxy traffic only; that is also how the CLI saves
+`defenseclaw guardrail judge remove all`, so it stays off rather than
+meaning every connector. `defenseclaw setup guardrail` and
+`defenseclaw guardrail judge add all --enable` write `["*"]` when they turn the
+judge on, and `defenseclaw init` writes the connectors you pick. For a config you write by hand or push to machines, set the list
+yourself: when it is empty, the gateway log names the hook connectors the rules
+decide alone (`LLM judge hook lane off`) and `defenseclaw doctor` warns on the
+Detection row. Run `defenseclaw config validate`, then restart the gateway. To
+turn the judge off again, set `guardrail.detection_strategy: regex_only` (or
 `guardrail.judge.enabled: false`).
 
 ## A judge on a local model
@@ -392,6 +399,7 @@ classification. Point `base_url` at your Lemonade server:
 guardrail:
   judge:
     enabled: true
+    hook_connectors: ["*"]              # judge every hook connector, not only proxy traffic
     llm:
       provider: openai-compatible
       model: gemma-4
