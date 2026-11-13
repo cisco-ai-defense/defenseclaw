@@ -102,6 +102,22 @@ func TestCredentialLiteralDispositionFollowsWhatTheCallDoesWithIt(t *testing.T) 
 	}
 }
 
+func TestAWSDocumentedExampleSecretIsNotAFinding(t *testing.T) {
+	example := runtimeDetectorSignature("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY")
+	for _, text := range []string{
+		"aws_secret_access_key = " + example,
+		// What shell normalization leaves of the key and the lines after it.
+		"aws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYnnnn",
+	} {
+		if acceptedCredentialMatch("SEC-AWS-SECRET", text) {
+			t.Errorf("documented AWS example accepted: %q", text)
+		}
+	}
+	if !acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+runtimeDetectorSignature("q9Zr4Vx2", "Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4Eu9Rv3Xi8")) {
+		t.Error("a random 40-character secret was rejected")
+	}
+}
+
 func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
 	for _, test := range []struct {
 		name  string
