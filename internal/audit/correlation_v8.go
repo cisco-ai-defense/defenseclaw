@@ -1665,7 +1665,7 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 	}
 	id := deterministicCorrelationID("ev_", evidence.RelationshipID, evidenceValue, string(evidence.Role))
 	if evidence.RecordID == "" && evidence.Role == CorrelationEvidenceSource &&
-		evidence.Integrity == CorrelationIntegrityVerified {
+		evidence.Integrity == CorrelationIntegrityVerified && !tx.repo.store.secureClientSchema {
 		var fromKind, fromID string
 		err := tx.tx.QueryRowContext(ctx, `SELECT from_kind, from_id FROM correlation_relationships
 			WHERE relationship_id=?`, evidence.RelationshipID).Scan(&fromKind, &fromID)
@@ -1737,7 +1737,8 @@ func (tx *CorrelationTx) RelationshipEvidenceCount(
 // stores it no more; QueryGraph (loadEvidence) and RelationshipEvidenceCount
 // add it, with the evidence ID and creation time a stored row had, so the
 // graph a reader gets and the exported evidence count are the same with or
-// without the stored row (a store a 1.0.9 binary wrote keeps its rows).
+// without the stored row (a store a 1.0.9 binary wrote keeps its rows). A
+// Secure Client store keeps storing the row, so its rows stay main's.
 // Retention was already blind to it: a relationship's from node protects it
 // exactly when this row's semantic event did (S8 R5).
 func impliedCorrelationEvidence(relationship CorrelationRelationship) (CorrelationRelationshipEvidence, bool) {
