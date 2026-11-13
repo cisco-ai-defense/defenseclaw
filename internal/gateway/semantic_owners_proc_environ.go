@@ -157,7 +157,7 @@ var (
 	plainEnvName = lazyregexp.New(`^\^?[A-Za-z_][A-Za-z0-9_]{3,}=?$`)
 	// credentialEnvWord marks a name that reads as a credential, a connection
 	// string or an identity. Such a variable stays a finding.
-	credentialEnvWord = lazyregexp.New(`(?i)key|secret|token|pass|pwd|cred|auth|dsn|private|session|cookie|cert|salt|sign|conn|url|uri|bearer|jwt|api|login|access|aws|azure|gcp|github|ssh|user|account|ident`)
+	credentialEnvWord = lazyregexp.New(`(?i)key|secret|token|pass|pwd|cred|auth|dsn|private|session|cookie|cert|salt|sign|conn|url|uri|bearer|jwt|api|login|access|aws|azure|gcp|github|ssh|user|account|ident|openai|anthropic|stripe|twilio|slack|sendgrid|mailgun|okta|vault|bedrock|huggingface|hf_|npm|docker|kube|postgres|mysql|redis|mongo|database|db_|smtp|ldap|oauth|gcloud|google|firebase|supabase|datadog|sentry`)
 )
 
 // grepSelectsPlainNames reports grep arguments (after the program) that read

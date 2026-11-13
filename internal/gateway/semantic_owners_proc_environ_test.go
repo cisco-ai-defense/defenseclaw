@@ -27,6 +27,8 @@ func TestProcEnvironOwnerNarrowedReads(t *testing.T) {
 		{"unfiltered pipe", `cat /proc/212/environ | tr '\0' '\n' | head -20`, true},
 		{"credential name", `cat /proc/408/environ | tr '\0' '\n' | grep API_TOKEN`, true},
 		{"credential word in an alternative", `cat /proc/408/environ | tr '\0' '\n' | grep -E "INGEST_ENV|DB_PASSWORD"`, true},
+		{"provider prefix", `cat /proc/408/environ | tr '\0' '\n' | grep -i OPENAI`, true},
+		{"cloud prefix", `cat /proc/408/environ | tr '\0' '\n' | grep ANTHROPIC`, true},
 		{"connection string name", `cat /proc/408/environ | tr '\0' '\n' | grep POSTGRES_DSN`, true},
 		{"short fragment", `cat /proc/408/environ | tr '\0' '\n' | grep PG`, true},
 		{"inverted match", `cat /proc/408/environ | tr '\0' '\n' | grep -v INGEST_ENV`, true},
