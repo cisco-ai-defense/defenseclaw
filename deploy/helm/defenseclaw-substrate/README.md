@@ -125,6 +125,10 @@ shows the profile and egress an actor would get before you apply.
   (for example WireGuard) where that matters.
 - **Use the full Service names.** An actor resolves only the names in its egress policy, so policies and agent
   settings use `defenseclaw-actor.<namespace>.svc.cluster.local`, never the short `.svc` name.
+- **In-cluster clients of the admin Service use `defenseclaw-admin.<namespace>.svc`.** Its certificate is the
+  Substrate pod certificate, which names Services as `<svc>.<namespace>.svc` only, so the callout's verdict and ask
+  calls (and the launcher endpoint's in-cluster default) use that name. With `admin.tlsSecretName`, the admin listener
+  serves your certificate for external names and keeps the pod certificate for in-cluster Service names.
 - **MCP body inspection needs an egress filter with mode override, and buffers the answer too.** Body mode needs
   Agent Substrate's egress filter rendered with `--experimental-additional-egress-extproc-allow-mode-override`
   (upstream #3817). Stock v1.0.0 ignores it: set `config.substrate.extproc.body_inspection: off` there (MCP calls are

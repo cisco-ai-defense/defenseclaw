@@ -53,6 +53,16 @@ relay, which answers only the names in its policy, so the short
 */}}
 {{- define "dc.actorHost" -}}defenseclaw-actor.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
 {{- define "dc.adminHost" -}}defenseclaw-admin.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
+{{/*
+The admin listener's TLS name for clients inside the cluster. Its serving
+certificate is the Substrate servicedns pod certificate, which names each
+Service as "<svc>.<ns>.svc" only, never ".svc.cluster.local" (GAP-0186).
+Every client that verifies that certificate uses this name: the callout's
+judge and ask client, and the launcher endpoint's in-cluster default. Pods
+resolve it through the search path; actors never reach the admin Service,
+so the fully qualified rule above does not apply to it.
+*/}}
+{{- define "dc.adminTLSHost" -}}defenseclaw-admin.{{ .Release.Namespace }}.svc{{- end -}}
 {{- define "dc.calloutService" -}}{{ .Release.Namespace }}/defenseclaw-callout:{{ .Values.callout.port }}{{- end -}}
 
 {{/*
