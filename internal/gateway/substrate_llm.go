@@ -385,10 +385,12 @@ func (s *substrateLLM) bedrockOpenAIModel(w http.ResponseWriter, r *http.Request
 // case-insensitively), so the checked value and the one the provider runs
 // could differ (GAP-0187 residual, TST-0478).
 var substrateCheckedBodyKeys = map[string]bool{"model": true, "input": true, "messages": true,
-	"instructions": true, "system": true, "prompt": true, "contents": true}
+	"instructions": true, "system": true, "prompt": true, "contents": true, "tools": true}
 
 // substrateDuplicateBodyKey reports the first checked top-level key of a
-// JSON object body that appears twice, case-folded. A body that is not a
+// JSON object body that appears twice, or in another spelling, folded as
+// encoding/json matches keys
+// (Unicode simple folding: "meſſages" is "messages"). A body that is not a
 // JSON object has none.
 func substrateDuplicateBodyKey(body []byte) (string, bool) {
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -402,9 +404,14 @@ func substrateDuplicateBodyKey(body []byte) (string, bool) {
 			return "", false
 		}
 		key, _ := t.(string)
-		k := strings.ToLower(key)
-		if substrateCheckedBodyKeys[k] {
-			if seen[k] {
+		for k := range substrateCheckedBodyKeys {
+			if !strings.EqualFold(key, k) {
+				continue
+			}
+			// Another spelling of a checked name (Model, meſſages, the
+			// Kelvin sign) is refused even alone: some decoders take it
+			// for the field and others do not.
+			if seen[k] || key != k {
 				return k, true
 			}
 			seen[k] = true

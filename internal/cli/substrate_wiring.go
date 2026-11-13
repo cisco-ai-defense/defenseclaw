@@ -85,7 +85,13 @@ func substrateTemplateKit(a controller.Attestor) func(context.Context, *ateapi.A
 			return gateway.SubstrateTemplateKit{}, fmt.Errorf("%w: %v", gateway.ErrSubstrateTemplateAttestation, err)
 		}
 		if !att.Attested {
-			return gateway.SubstrateTemplateKit{}, nil
+			// controller.TemplateAttestor reports every refusal here, a
+			// verifier outage too (Retryable), never as an error: it is not
+			// "no label" (GAP-0181, R4).
+			return gateway.SubstrateTemplateKit{}, &gateway.SubstrateTemplateAttestation{Reason: att.Reason, Retryable: att.Retryable}
+		}
+		if strings.TrimSpace(att.Connector) == "" {
+			return gateway.SubstrateTemplateKit{}, &gateway.SubstrateTemplateAttestation{Reason: "the attestation carries no connector label", Unlabeled: true}
 		}
 		return gateway.SubstrateTemplateKit{Connector: att.Connector, AgentVersion: att.AgentVersion,
 			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest}, nil

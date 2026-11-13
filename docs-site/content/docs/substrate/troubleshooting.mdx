@@ -36,13 +36,19 @@ Substrate answers `503` with the reason `no_free_worker` when no worker has room
 
 After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
 
-### "could not read the template's attestation" when I start an agent
+### "could not read the template's attestation", "not attested" or "names no agent connector" when I start an agent
 
 ```text
 the cluster could not read the template's attestation, so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify
 ```
 
-The gateway answered `403` with the reason `template_attestation_unreadable`. On a managed cluster, DefenseClaw reads the template's attestation to know which agent it runs, and it checks the sign-in rules on that. If the attestation can't be read, nothing starts; the connector you named is not taken on trust. On an open-source cluster the agent starts instead, with the warning `template attestation could not be read; the connector you named decides the sign-in check`.
+On a managed cluster, DefenseClaw starts an agent only from a template whose attestation it has verified and that names the agent it runs. It checks the sign-in rules on that agent; the connector you named is not taken on trust. Nothing starts when:
+
+- the attestation could not be checked right now, for example because the registry is unreachable. The message says "retryable". Try again in a minute;
+- the template is not attested, for example a bad signature or an image that is not the attested one. An administrator rebuilds and publishes it with `defenseclaw substrate template build`;
+- the attestation names no agent connector. An administrator rebuilds the template.
+
+`defenseclaw substrate template verify` shows the reason. On an open-source cluster the agent starts with a warning instead.
 
 ### The cluster refused to start the agent
 
@@ -89,7 +95,17 @@ DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may
 
 ### `verify` says two clusters share an issuer
 
-The default actor-token issuer is the same on every cluster. Give each cluster its own with `substrate.identity.issuer`, and redeploy Substrate's API server with the matching `--actor-jwt-issuer`.
+The default actor-token issuer is the same on every cluster. Give each cluster its own: run `defenseclaw substrate setup --install-file install.yaml --issuer https://UNIQUE-HOST --yes`, then `ate-setup deploy ate-system --config install.yaml`, and set the same value in `substrate.identity.issuer`. The issuer need not resolve.
+
+### Every hook and model call is refused, and `run --task` says "The task did not run"
+
+The launcher prints `The task did not run: the cluster gateway refused its tool and model calls (keyset_unavailable: ...)` and exits with code 1. The gateway can't check agent tokens, and that holds for every agent on the cluster. The reason in brackets says why:
+
+- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate admin doctor` shows the `substrate.actor_keys` row from the gateway.
+- `issuer`: Substrate signs with another issuer than `substrate.identity.issuer`. Use the same value in `setup --issuer` (then `ate-setup deploy`) and in the configuration.
+- `verifier_unavailable`: the gateway can't reach the Substrate control API.
+
+Ask your administrator to run `defenseclaw substrate verify` and look at `actor_keys`.
 
 ### `verify` skips the snapshot bucket
 

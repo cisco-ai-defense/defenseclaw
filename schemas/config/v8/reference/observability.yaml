@@ -216,6 +216,55 @@ observability:
         timeout_seconds: 10
         cooldown_seconds: 60
         enabled: false
+  tokenomics:
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    record_routing_provenance: true
+    roles:
+    - agent
+    - judge
+    - decision_model
+    - ai_defense
+    - router_classifier
+    native_otel_import:
+      claudecode: true
+      codex: true
+    cost:
+      compute: true
+      currency: USD
+      keep_reported: true
+    local_store:
+      enabled: false
+      retention_days: 30
+      granularity: hour
+    metrics:
+      labels:
+      - connector
+      - provider
+      - model
+      - route_decision
+      - call_role
+      - profile
+  pricing:
+    version: example-1
+    unknown_model: fallback
+    fallback:
+      input_per_mtok: 3.0
+      output_per_mtok: 15.0
+      cache_read_per_mtok: 0.3
+      cache_write_per_mtok: 3.75
+      reasoning_per_mtok: 15.0
+    ai_defense:
+      per_call_usd: 0.002
+    models:
+    - provider: example-provider
+      model: example-model*
+      input_per_mtok: 1.0
+      output_per_mtok: 5.0
+      cache_read_per_mtok: 0.1
+      cache_write_per_mtok: 1.25
+      reasoning_per_mtok: 5.0
   # SQLite is mandatory, generated when omitted, and cannot be disabled or
   # filtered. retention_days: 0 retains forever and raises a capacity warning.
   local:

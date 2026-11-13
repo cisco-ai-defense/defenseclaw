@@ -246,8 +246,16 @@ func substrateAPIMessage(e *api.Error) string {
 	case e.Status == 403 && signin.IsRefusalCode(e.Reason):
 		// E9 in a managed deployment: the gateway says why and what to ask for.
 		return orWord(e.Message, "a managed cluster does not run an agent that signs in to a vendor account") + " Nothing was started (" + e.Reason + ")"
+	case e.Status == 403 && e.Reason == "template_attestation_unreadable" && e.Retryable:
+		return "the cluster could not check the template's attestation right now (retryable: " + orWord(safetext.Line(e.Detail), "the check did not finish") +
+			"), so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify"
 	case e.Status == 403 && e.Reason == "template_attestation_unreadable":
 		return "the cluster could not read the template's attestation, so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify"
+	case e.Status == 403 && e.Reason == "template_not_attested":
+		return "the template is not attested (" + orWord(safetext.Line(e.Detail), "no valid attestation") +
+			"), so a managed cluster starts nothing from it; ask your administrator to rebuild and publish it with defenseclaw substrate template build"
+	case e.Status == 403 && e.Reason == "template_connector_unlabeled":
+		return "the template's attestation names no agent connector, so a managed cluster starts nothing from it; ask your administrator to rebuild it with defenseclaw substrate template build"
 	case e.Status == 403:
 		return "the cluster refused this (" + orWord(e.Reason, "not allowed") + ")"
 	case e.Status == 404:
