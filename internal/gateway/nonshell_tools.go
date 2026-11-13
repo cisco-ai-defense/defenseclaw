@@ -6,7 +6,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"path"
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -31,7 +33,7 @@ const (
 	sqlMutationOwnerRuleID = "impact.sql_destructive_mutation"
 
 	// maxNonShellPathTwins bounds the file reads one call may have judged.
-	maxNonShellPathTwins = 16
+	maxNonShellPathTwins = 64
 )
 
 // nonShellToolFindings reads a non-shell tool call (an MCP or app tool) as
@@ -44,12 +46,12 @@ const (
 // and managed installs a finding is an alert and never a block. A call the
 // table cannot place adds nothing: unknown is not clean, but it alerts only
 // where a sensitive target is plausible, and that is the path rules above.
-func nonShellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !request.EnforcementCapable || ManagedEnterpriseActive() || !nonShellToolApplies(request) {
+func nonShellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding, mcpServer string) []RuleFinding {
+	if !request.EnforcementCapable || ManagedEnterpriseActive() || !nonShellToolApplies(request, mcpServer) {
 		return findings
 	}
-	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args)
-	if err != nil || len(mapping.Effects) == 0 {
+	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args, mcpServer)
+	if err != nil || (len(mapping.Effects) == 0 && !mapping.Truncated) {
 		return findings
 	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
@@ -69,40 +71,53 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 		out = append(out, nonShellFinding(rule, note, mapping.Name, hard))
 	}
 
-	primaries := map[string]bool{}
-	for _, e := range mapping.Effects {
-		if e.Kind == toolshape.KindNetSend && e.Role == toolshape.RolePrimary && e.Host != "" {
-			primaries[e.Host] = true
-		}
-	}
-	paths := 0
+	// One reading of the call's text, shared by every path effect: the path
+	// rules that read what is written, and the first write twin.
+	content := nonShellContentArg(request.Input.Args)
+	twinContent := content
+	// A bound that cut the walk short leaves part of the call unread: the call
+	// is judged unknown at least (an evaluation limit: alert, strict and
+	// managed block), never clean.
+	overflow := mapping.Truncated
+	twins := 0
 	seenPath := map[string]bool{}
 	for _, e := range mapping.Effects {
 		switch e.Kind {
 		case toolshape.KindRead, toolshape.KindWrite, toolshape.KindDelete, toolshape.KindList:
 			key := string(e.Kind) + "\x00" + e.Path
-			if seenPath[key] || paths >= maxNonShellPathTwins {
+			if seenPath[key] {
 				continue
 			}
 			seenPath[key] = true
-			paths++
-			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), e.Path, nonShellContentArg(request.Input.Args)) {
+			// The table's rules are cheap: every path effect is read, with a
+			// relative path resolved against the session's directory.
+			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), nonShellResolvePath(request.Input.CWD, e.Path), content) {
 				add(id, "path in MCP tool arguments")
 			}
-			for _, f := range nonShellPathTwin(ctx, request, e) {
+			if twins >= maxNonShellPathTwins {
+				overflow = true
+				continue
+			}
+			twins++
+			for _, f := range nonShellPathTwin(ctx, request, e, twinContent) {
 				if slices.ContainsFunc(out, func(x RuleFinding) bool { return x.RuleID == f.RuleID }) {
 					continue
 				}
-				// The role of an MCP effect is a guess, so outside the strict tier
-				// the finding is an alert at most. A finding the native tool
-				// leaves detection-only (a rule the pack does not let alert on a
-				// path) stays so: an MCP call is never judged harder than the
-				// native file tool on the same path.
-				if !hard && f.enforcement != findingEnforcementDetectionOnly {
+				// For a server and verb the table knows (a file server's
+				// read_file) the twin's verdict is the native tool's. For a
+				// guessed role the finding is an alert at most outside the
+				// strict tier; a finding the native tool leaves detection-only
+				// stays so.
+				if !hard && !mapping.RoleKnown && f.enforcement != findingEnforcementDetectionOnly {
 					f.enforcement, f.proof = findingEnforcementAlertOnly, findingProof{}
 				}
 				f.Title += " (path in MCP tool arguments)"
 				out = append(out, f)
+			}
+			if e.Kind == toolshape.KindWrite {
+				// The body was scanned once, with the first write; the other
+				// twins judge the path only.
+				twinContent = ""
 			}
 		case toolshape.KindSQL:
 			for _, class := range e.SQL {
@@ -126,26 +141,48 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			}
 		case toolshape.KindSetting:
 			add(mcpSettingDowngradeID, e.Setting)
-		case toolshape.KindNetSend:
+		case toolshape.KindNetSend, toolshape.KindNetFetch:
+			// Every recipient and every copy field is read, whatever other
+			// recipient the call names: a recipient the call itself supplies
+			// proves nothing about the others. A copy or output field to a host
+			// that is not this machine is a redirect; a paste, file-drop or
+			// webhook-catcher host is a collector for a fetch as for a send.
 			if e.Role == toolshape.RoleRedirect && e.Host != "" &&
-				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) && !primaries[e.Host] {
+				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) {
 				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg)
 			}
 			if e.Host != "" && nonShellCollectorHost(e.Host) {
-				add(mcpSendCollectorRuleID, "sends to a paste or collector host")
+				add(mcpSendCollectorRuleID, "reaches a paste, file-drop or webhook-catcher host")
 			}
 		}
+	}
+	if overflow {
+		out = withTrustedActionLimitFinding(out, request.EnforcementCapable)
 	}
 	return out
 }
 
+// nonShellResolvePath makes a relative path absolute against the session's
+// working directory (lexically); an absolute, home or empty value is returned
+// as it is.
+func nonShellResolvePath(cwd, p string) string {
+	p = strings.ReplaceAll(p, `\`, "/")
+	if p == "" || cwd == "" || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "~") || len(p) > 1 && p[1] == ':' {
+		return p
+	}
+	return path.Clean(strings.ReplaceAll(cwd, `\`, "/") + "/" + p)
+}
+
 // nonShellToolApplies reports a call the typed shell and file-tool paths do
-// not already read: not a shell call, not a native tool, not a tool actionfacts
-// has argument semantics for.
-func nonShellToolApplies(request trustedActionRequest) bool {
+// not already read: not a shell call and not a tool actionfacts has argument
+// semantics for. A tool the connector reports under an MCP server is never one
+// of the agent's own tools, whatever its bare name.
+func nonShellToolApplies(request trustedActionRequest, mcpServer string) bool {
 	tool := request.Input.Tool
-	if tool == "" || request.Input.Command != "" || len(request.Input.Argv) != 0 ||
-		toolshape.Native(tool) || actionfacts.KnownTool(tool) || trustedShimArgvTool(tool) {
+	if tool == "" || request.Input.Command != "" || len(request.Input.Argv) != 0 || trustedShimArgvTool(tool) {
+		return false
+	}
+	if mcpServer == "" && actionfacts.KnownTool(tool) {
 		return false
 	}
 	if _, ok := connector.ShellCommandArgs(request.Connector, tool, request.Input.Args); ok {
@@ -197,11 +234,11 @@ func nonShellFinding(rule *PatternRule, note, tool string, hard bool) RuleFindin
 // nonShellPathTwin judges the file effect of an MCP call as the native file
 // tool of the same effect would be judged, so every protected-target rule of
 // the pack applies to the path the MCP argument names.
-func nonShellPathTwin(ctx context.Context, request trustedActionRequest, e toolshape.Effect) []RuleFinding {
+func nonShellPathTwin(ctx context.Context, request trustedActionRequest, e toolshape.Effect, content string) []RuleFinding {
 	tool, args := "Read", map[string]any{"file_path": e.Path}
 	switch e.Kind {
 	case toolshape.KindWrite:
-		tool, args = "Write", map[string]any{"file_path": e.Path, "content": nonShellContentArg(request.Input.Args)}
+		tool, args = "Write", map[string]any{"file_path": e.Path, "content": content}
 	case toolshape.KindDelete:
 		tool, args = "delete_file", map[string]any{"path": e.Path}
 	case toolshape.KindList:
@@ -246,8 +283,20 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	if !request.EnforcementCapable || ManagedEnterpriseActive() {
 		return findings
 	}
-	command, ok := trustedBashCommandInput(request.Input)
-	if !ok || !toolshape.ShellCandidate(command) {
+	// A shell call is read by its command; a native file tool (Read, Write,
+	// Edit, ...) by its arguments, so the same path rules judge the native
+	// tool and the MCP twin of it alike (an MCP call is never judged harder).
+	command, isShell := trustedBashCommandInput(request.Input)
+	text := command
+	if !isShell {
+		if !actionfacts.PathTool(request.Input.Tool) {
+			return findings
+		}
+		text = nonShellContentArg(request.Input.Args)
+		if !toolshape.ShellCandidate(string(request.Input.Args)) {
+			return findings
+		}
+	} else if !toolshape.ShellCandidate(command) {
 		return findings
 	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
@@ -268,17 +317,19 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		}
 		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
 	}
-	for _, id := range toolshape.TextRules(command) {
-		add(id, "")
-	}
-	for _, c := range facts.Commands {
-		for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+	if isShell {
+		for _, id := range toolshape.TextRules(command) {
 			add(id, "")
+		}
+		for _, c := range facts.Commands {
+			for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+				add(id, "")
+			}
 		}
 	}
 	for _, p := range facts.Paths {
 		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
-		for _, id := range toolshape.PathRules(string(p.Access), path, command) {
+		for _, id := range toolshape.PathRules(string(p.Access), path, text) {
 			add(id, "")
 		}
 	}

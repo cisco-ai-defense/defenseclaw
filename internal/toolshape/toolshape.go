@@ -35,8 +35,10 @@ var shapesYAML []byte
 
 // Bounds on what one call may contribute.
 const (
-	maxDepth   = 5
-	maxEffects = 48
+	maxDepth   = 16
+	maxEffects = 256
+	maxItems   = 512
+	maxNested  = 4 // nested JSON documents inside string arguments
 	maxString  = 64 << 10
 )
 
@@ -95,7 +97,6 @@ type Effect struct {
 	SQL     []SQLClass // sql
 	Setting string     // setting: what the change does
 	Code    string     // exec: the code text (bounded)
-	DB      string     // sql: the database the call names, lower-case
 	Reason  string
 }
 
@@ -106,11 +107,12 @@ type Mapping struct {
 	Family  Family
 	Verb    Kind // the verb of the tool name; "" when the name has none
 	Effects []Effect
-	// Known reports that the name or the arguments placed the call in a
-	// family, a verb or at least one effect. A call with Known false stays
-	// unknown.
-	Known bool
-	// Truncated reports that a bound cut the walk short.
+	// RoleKnown reports that the server is one the table names with this verb
+	// (a file server's read_file): the role of its path effects is known, not
+	// guessed, so they are judged exactly as the native file tool is.
+	RoleKnown bool
+	// Truncated reports that a bound cut the walk short. The caller must treat
+	// the call as unknown at least (never clean).
 	Truncated bool
 }
 
@@ -134,10 +136,12 @@ type table struct {
 	DecodeExec []string `yaml:"decode_exec"`
 	LocalHosts []string `yaml:"local_hosts"`
 
-	PathRules     []PathRule    `yaml:"path_rules"`
-	CommandRules  []CommandRule `yaml:"command_rules"`
-	ShellTriggers []string      `yaml:"shell_triggers"`
-	TextRules     []TextRule    `yaml:"text_rules"`
+	PathRules     []PathRule          `yaml:"path_rules"`
+	CommandRules  []CommandRule       `yaml:"command_rules"`
+	ShellTriggers []string            `yaml:"shell_triggers"`
+	KnownRoles    map[string][]string `yaml:"known_roles"`
+	PathKeySuffix []string            `yaml:"path_key_suffixes"`
+	TextRules     []TextRule          `yaml:"text_rules"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
@@ -153,6 +157,7 @@ type table struct {
 	settingOps    *regexp.Regexp
 	decodeExec    []*regexp.Regexp
 	localHost     map[string]bool
+	pathSuffix    []string
 }
 
 type compiledSetting struct {
@@ -198,6 +203,9 @@ func load() (*table, error) {
 		t.urlKey, t.redirectKey, t.recipientKey = set(t.URLKeys), set(t.RedirectKeys), set(t.RecipientKeys)
 		t.sqlKey, t.sqlGenericKey = set(t.SQLKeys), set(t.SQLGenericKeys)
 		t.codeKey, t.codeToken, t.localHost = set(t.CodeKeys), set(t.CodeToolTokens), set(t.LocalHosts)
+		for _, suf := range t.PathKeySuffix {
+			t.pathSuffix = append(t.pathSuffix, "_"+suf)
+		}
 		for _, s := range t.Settings {
 			key, err := regexp.Compile(s.Key)
 			if err != nil {
@@ -285,13 +293,19 @@ func Tokens(name string) []string {
 func normKey(k string) string { return strings.Join(Tokens(k), "_") }
 
 // Map reads one call. args is the JSON argument object; anything else (an
-// array, a string) yields a mapping with no effects.
-func Map(tool string, args json.RawMessage) (Mapping, error) {
+// array, a string) yields a mapping with no effects. server is the MCP server
+// the connector reports for the call (a bare tool name carries none); empty
+// means the server the name spells.
+func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 	t, err := load()
 	if err != nil {
 		return Mapping{}, err
 	}
-	server, name := SplitName(tool)
+	nameServer, name := SplitName(tool)
+	if server == "" {
+		server = nameServer
+	}
+	server = strings.ToLower(server)
 	m := Mapping{Server: server, Name: name}
 	toks := Tokens(name)
 	if fam, ok := t.Servers[server]; ok {
@@ -330,9 +344,15 @@ func Map(tool string, args json.RawMessage) (Mapping, error) {
 			obj = nil
 		}
 	}
+	if verbs, ok := t.KnownRoles[server]; ok && m.Verb != "" {
+		for _, v := range verbs {
+			if Kind(v) == m.Verb {
+				m.RoleKnown = true
+			}
+		}
+	}
 	w := walker{t: t, m: &m, codeTool: codeTool, dbTool: m.Family == FamilyDB}
 	w.object(obj, 0, "")
-	m.Known = m.Family != FamilyUnknown || m.Verb != "" || len(m.Effects) > 0
 	return m, nil
 }
 
@@ -341,7 +361,18 @@ type walker struct {
 	m        *Mapping
 	codeTool bool
 	dbTool   bool
-	db       string
+	nested   int
+}
+
+// genericSQL reports that a value under a generic key (query, q, command) is
+// SQL. The key alone says nothing (a search tool has a query too); the tool
+// does: a database server (the table's db family) or a tool whose name has
+// the execute verb, and a value of statement shape.
+func (w *walker) genericSQL(val string) bool {
+	if w.dbTool {
+		return true
+	}
+	return w.m.Verb == KindExec && startsLikeSQL(val)
 }
 
 func (w *walker) add(e Effect) {
@@ -363,14 +394,6 @@ func (w *walker) object(obj map[string]any, depth int, parent string) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	for _, k := range keys {
-		switch normKey(k) {
-		case "database", "db", "dbname", "database_name", "db_name":
-			if s, ok := obj[k].(string); ok && w.db == "" {
-				w.db = strings.ToLower(strings.TrimSpace(s))
-			}
-		}
-	}
 	for _, rawKey := range keys {
 		w.value(normKey(rawKey), obj[rawKey], depth, parent)
 	}
@@ -381,8 +404,12 @@ func (w *walker) value(key string, v any, depth int, parent string) {
 	case map[string]any:
 		w.object(x, depth+1, key)
 	case []any:
+		if depth > maxDepth {
+			w.m.Truncated = true
+			return
+		}
 		for i, item := range x {
-			if i >= 64 {
+			if i >= maxItems {
 				w.m.Truncated = true
 				return
 			}
@@ -429,6 +456,20 @@ func (w *walker) str(key, val, parent string) {
 		return
 	}
 	t := w.t
+	// A string that holds a JSON document ("arguments": "{...}") is read as
+	// that document, to a bounded nesting.
+	if (val[0] == '{' || val[0] == '[') && w.nested < maxNested {
+		var inner any
+		if json.Unmarshal([]byte(val), &inner) == nil {
+			w.nested++
+			w.value(key, inner, 0, parent)
+			w.nested--
+			return
+		}
+	}
+	if p, ok := fileURIPath(val); ok {
+		val = p
+	}
 	// A string value can also be a setting (acl: "public-read").
 	w.setting(key, strings.ReplaceAll(val, "-", "_"))
 
@@ -442,9 +483,9 @@ func (w *walker) str(key, val, parent string) {
 	}
 
 	switch {
-	case t.sqlKey[key] || (t.sqlGenericKey[key] && (w.dbTool || startsLikeSQL(val))):
+	case t.sqlKey[key] || (t.sqlGenericKey[key] && w.genericSQL(val)):
 		if classes := ClassifySQL(val); len(classes) > 0 {
-			w.add(Effect{Kind: KindSQL, Arg: key, SQL: classes, DB: w.db})
+			w.add(Effect{Kind: KindSQL, Arg: key, SQL: classes})
 		}
 		return
 	case t.codeKey[key] && w.codeTool:
@@ -457,7 +498,7 @@ func (w *walker) str(key, val, parent string) {
 		w.add(Effect{Kind: KindWrite, Arg: key, Path: val})
 	case inputKeys[key] && looksPath(val):
 		w.add(Effect{Kind: KindRead, Arg: key, Path: val})
-	case t.pathRead[key] && looksPath(val):
+	case (t.pathRead[key] || t.pathKeySuffix(key)) && looksPath(val):
 		w.add(Effect{Kind: w.pathKind(), Arg: key, Path: val})
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
 		w.add(Effect{Kind: w.pathKind(), Arg: key, Path: val})
@@ -466,6 +507,37 @@ func (w *walker) str(key, val, parent string) {
 
 // inputKeys always name a file that is read, whatever the verb of the tool name.
 var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "input_path": true, "input_file": true, "from": true}
+
+// fileURIPath returns the path of a file:// URI (file:///etc/x, file://localhost/etc/x).
+func fileURIPath(s string) (string, bool) {
+	rest, ok := strings.CutPrefix(strings.ToLower(s[:min(len(s), 7)]), "file://")
+	if !ok || rest != "" {
+		return "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil || (u.Host != "" && !strings.EqualFold(u.Host, "localhost")) {
+		return "", false
+	}
+	p := u.Path
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' { // file:///C:/x
+		p = p[1:]
+	}
+	if p == "" {
+		return "", false
+	}
+	return p, true
+}
+
+// pathKeySuffix reports a key that ends in one of the table's path words
+// (relative_path, config_file_name).
+func (t *table) pathKeySuffix(key string) bool {
+	for _, suf := range t.pathSuffix {
+		if strings.HasSuffix(key, suf) {
+			return true
+		}
+	}
+	return false
+}
 
 // pathKind is the kind of a path under a read-style key: the verb of the name
 // decides, a name with no file verb reads.
@@ -575,19 +647,6 @@ func DecodeExec(code string) bool {
 		if re.MatchString(code) {
 			return true
 		}
-	}
-	return false
-}
-
-// Native reports a tool name that has its own typed path (shell, the file and
-// web tools of the agents). The mapper does not read those: the shell and
-// file-tool rules already do.
-func Native(tool string) bool {
-	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "bash", "read", "write", "edit", "multiedit", "glob", "grep", "webfetch", "websearch",
-		"todowrite", "task", "notebookedit", "toolsearch", "exitplanmode", "askuserquestion",
-		"skill", "killshell", "bashoutput", "slashcommand", "apply_patch", "applypatch":
-		return true
 	}
 	return false
 }

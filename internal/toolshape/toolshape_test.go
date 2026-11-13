@@ -11,7 +11,7 @@ import (
 
 func mapOf(t *testing.T, tool, args string) Mapping {
 	t.Helper()
-	m, err := Map(tool, json.RawMessage(args))
+	m, err := Map(tool, json.RawMessage(args), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestFileToolsMapToPathEffects(t *testing.T) {
 
 func TestUnknownStaysUnknown(t *testing.T) {
 	m := mapOf(t, "mcp__crm__lookup", `{"customer_id":"c-1","fields":["name"]}`)
-	if m.Known || len(m.Effects) != 0 {
+	if len(m.Effects) != 0 || m.RoleKnown {
 		t.Fatalf("a tool with no recognised name, verb or effect must stay unknown: %+v", m)
 	}
 	// A shape the table cannot place is not clean: Known is false, the caller
@@ -169,6 +169,21 @@ func TestSQLClasses(t *testing.T) {
 		{"SELECT 1; DROP TABLE t", []string{SQLDrop}},
 		{"SELECT 'a;b DROP TABLE x'", nil},
 		{"UPDATE products SET enabled=false WHERE id=3", nil},
+		{"UPDATE settings SET logging_level = 0 WHERE id = 1", nil},
+		{"GRANT access to the new hire", nil},
+		{"DELETE FROM cache WHERE expires < 5", nil},
+		{"drop table of contents", nil},
+		{"truncate table of contents please", nil},
+		{"WITH old AS (SELECT id FROM t WHERE x) SELECT * FROM old", nil},
+		{"WITH old AS (SELECT id FROM t) DELETE FROM t", []string{SQLDeleteAll}},
+		{"WITH a AS (SELECT 1), b AS (SELECT 2) DELETE FROM t WHERE 1=1", []string{SQLDeleteAll}},
+		{"DELETE FROM t WHERE 1=1", []string{SQLDeleteAll}},
+		{"DELETE FROM t WHERE id = 1 OR 1=1", []string{SQLDeleteAll}},
+		{"DELETE FROM t WHERE true;", []string{SQLDeleteAll}},
+		{"SELECT 'it\\'s'; DROP TABLE users", []string{SQLDrop}},
+		{"/*!50000 DROP TABLE users */", []string{SQLDrop}},
+		{"/*! DELETE FROM users */", []string{SQLDeleteAll}},
+		{"UPDATE feature SET mfa_enabled = false", []string{SQLAuditOff}},
 	}
 	for _, c := range cases {
 		var got []string
@@ -180,7 +195,7 @@ func TestSQLClasses(t *testing.T) {
 		}
 	}
 	m := mapOf(t, "mcp__db__execute", `{"database":"Prod_DB","sql":"TRUNCATE orders"}`)
-	if len(m.Effects) != 1 || m.Effects[0].Kind != KindSQL || m.Effects[0].DB != "prod_db" {
+	if len(m.Effects) != 1 || m.Effects[0].Kind != KindSQL {
 		t.Fatalf("sql effect = %+v", m.Effects)
 	}
 	// A generic "query" key is SQL only for a db tool or when it starts like SQL.
@@ -239,7 +254,7 @@ func TestCodeToolsAndDecodeExec(t *testing.T) {
 
 func TestBounds(t *testing.T) {
 	var paths []string
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 600; i++ {
 		paths = append(paths, "/a/b")
 	}
 	b, _ := json.Marshal(map[string]any{"paths": paths})
@@ -252,7 +267,7 @@ func TestBounds(t *testing.T) {
 		deep += `{"a":`
 	}
 	deep += `"/x/y"` + string(append([]byte(nil), []byte("}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}")...))
-	if _, err := Map("mcp__a__b", json.RawMessage(deep)); err != nil {
+	if _, err := Map("mcp__a__b", json.RawMessage(deep), ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -315,7 +330,7 @@ func FuzzMap(f *testing.F) {
 	f.Add("fs.read", `{"paths":["/a"]}`)
 	f.Add("", `{"sql":"drop table x"}`)
 	f.Fuzz(func(t *testing.T, tool, args string) {
-		m, err := Map(tool, json.RawMessage(args))
+		m, err := Map(tool, json.RawMessage(args), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,7 +349,7 @@ func BenchmarkMapTypicalCall(b *testing.B) {
 	args := json.RawMessage(`{"database":"ops","sql":"SELECT id, name FROM users WHERE id = 42 ORDER BY name LIMIT 10","limit":10}`)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		if _, err := Map("mcp__postgres__query", args); err != nil {
+		if _, err := Map("mcp__postgres__query", args, ""); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -344,8 +359,88 @@ func BenchmarkMapFileBatch(b *testing.B) {
 	args := json.RawMessage(`{"paths":["/repo/a.md","/repo/b.md","/repo/c.md","/repo/docs/setup.md","/repo/docs/auth.md"]}`)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		if _, err := Map("mcp__filesystem__read_multiple_files", args); err != nil {
+		if _, err := Map("mcp__filesystem__read_multiple_files", args, ""); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+func TestFileURIsAndRelativeKeys(t *testing.T) {
+	for _, c := range []struct{ tool, args, want string }{
+		{"mcp__filesystem__read_file", `{"path":"file:///etc/shadow"}`, "/etc/shadow"},
+		{"mcp__x__read_resource", `{"uri":"file://localhost/etc/shadow"}`, "/etc/shadow"},
+		{"mcp__serena__read_file", `{"relative_path":"../.ssh/id_rsa"}`, "../.ssh/id_rsa"},
+		{"mcp__x__read_file", `{"fileName":"../.ssh/id_rsa"}`, "../.ssh/id_rsa"},
+		{"mcp__jetbrains__get_file_text_by_path", `{"pathInProject":"../.ssh/id_rsa"}`, "../.ssh/id_rsa"},
+		{"mcp__x__read_file", `{"FILE_PATH":"/etc/shadow"}`, "/etc/shadow"},
+		{"mcp__proxy__call_tool", `{"name":"read_file","arguments":"{\"path\":\"/etc/shadow\"}"}`, "/etc/shadow"},
+		{"mcp__proxy__call_tool", `{"name":"read_file","arguments":{"path":"/etc/shadow"}}`, "/etc/shadow"},
+	} {
+		m := mapOf(t, c.tool, c.args)
+		found := false
+		for _, e := range m.Effects {
+			if e.Path == c.want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s %s: no path effect %q in %+v", c.tool, c.args, c.want, m.Effects)
+		}
+	}
+	// A file URI of another host is not a local path.
+	if m := mapOf(t, "mcp__x__read_resource", `{"uri":"file://server/share/x"}`); len(m.Effects) != 0 {
+		t.Errorf("remote file URI: %+v", m.Effects)
+	}
+}
+
+func TestBoundsAreGenerousAndReported(t *testing.T) {
+	// A path after 64 filler items, 17 filler paths, 48 filler keys and 6 levels is still read.
+	var items []string
+	for i := 0; i < 100; i++ {
+		items = append(items, "/repo/docs/f.md")
+	}
+	items = append(items, "/home/u/.ssh/id_rsa")
+	b, _ := json.Marshal(map[string]any{"paths": items})
+	m := mapOf(t, "mcp__filesystem__read_multiple_files", string(b))
+	last := m.Effects[len(m.Effects)-1]
+	if last.Path != "/home/u/.ssh/id_rsa" || m.Truncated {
+		t.Fatalf("last effect %+v truncated=%v", last, m.Truncated)
+	}
+	deep := `{"path":"/home/u/.ssh/id_rsa"}`
+	for i := 0; i < 8; i++ {
+		deep = `{"l":` + deep + `}`
+	}
+	if m := mapOf(t, "mcp__x__read_file", deep); len(m.Effects) != 1 || m.Truncated {
+		t.Fatalf("depth 8: %+v truncated=%v", m.Effects, m.Truncated)
+	}
+	// Past the bounds the mapping says so.
+	deep = `{"path":"/home/u/.ssh/id_rsa"}`
+	for i := 0; i < 40; i++ {
+		deep = `{"l":` + deep + `}`
+	}
+	if m := mapOf(t, "mcp__x__read_file", deep); !m.Truncated {
+		t.Fatal("a call past the depth bound must report Truncated")
+	}
+}
+
+func TestGenericQueryKeyIsSQLOnlyForDatabaseTools(t *testing.T) {
+	for _, c := range []struct {
+		tool, args string
+		sql        bool
+	}{
+		{"mcp__search__search_issues", `{"query":"grant access to the new hire"}`, false},
+		{"mcp__github__search_code", `{"q":"delete from cache where"}`, false},
+		{"mcp__web__web_search", `{"query":"drop table cats"}`, false},
+		{"mcp__web__find", `{"query":"truncate table of contents"}`, false},
+		{"mcp__postgres__query", `{"query":"DROP TABLE users"}`, true},
+		{"mcp__db__execute", `{"query":"TRUNCATE orders"}`, true},
+		{"mcp__x__run_query", `{"query":"DELETE FROM cache"}`, true},
+		{"mcp__x__execute_statement", `{"query":"GRANT ALL ON db.* TO u"}`, true},
+		{"mcp__x__lookup", `{"sql":"DROP TABLE users"}`, true},
+	} {
+		got := slices.Contains(kinds(mapOf(t, c.tool, c.args)), KindSQL)
+		if got != c.sql {
+			t.Errorf("%s %s: sql effect = %v, want %v", c.tool, c.args, got, c.sql)
 		}
 	}
 }

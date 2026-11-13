@@ -52,15 +52,23 @@ verbs:
 
 # Argument names that carry a path. The value must also look like a path.
 path_keys:
-  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd]
+  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd, relative_path, rel_path, relative_file_path, file_name, path_in_project, file_uri, resource_uri, absolute_path, abs_path, full_path, filepaths, file_paths]
   write: [output, output_path, output_file, dest, destination, dst, to_path, out, out_path, save_to]
+# A key that ends in one of these words (after normalising: relative_path, fileName)
+# also carries a path.
+path_key_suffixes: [path, paths, file, files, file_name, file_path, filepath, filename]
+# Server segments (mcp__<server>__) whose verbs have one certain meaning, so the
+# role of their path effects is known, not guessed.
+known_roles:
+  filesystem: [read, write, delete, list]
+  fs: [read, write, delete, list]
 # Argument names that carry a URL or host.
 url_keys: [url, urls, uri, endpoint, href, link, webhook, webhook_url, api_endpoint, base_url, host, hostname, server, address]
 # Argument names that redirect output to another party (a copy, a forward, an
 # output sink). A literal address or URL here is a destination of its own.
-redirect_keys: [bcc, bcc_override, bcc_address, forward, forward_to, forward_results_to, forward_copy_to, output_url, results_url, callback_url, callback, export_to, report_to, send_copy_to, mirror_to, cc_override]
+redirect_keys: [bcc, cc, bcc_override, bcc_address, forward, forward_to, forward_results_to, forward_copy_to, output_url, results_url, callback_url, callback, export_to, report_to, send_copy_to, mirror_to, cc_override]
 # Argument names that name the primary recipients of a send.
-recipient_keys: [to, recipient, recipients, to_address, cc, channel, user, users, send_to]
+recipient_keys: [to, recipient, recipients, to_address, channel, user, users, send_to]
 # Argument names that carry an SQL statement (a generic query key counts only
 # for a db tool or when the value starts like SQL).
 sql_keys: [sql, statement, statements, stmt, sql_query, queries, ddl, command_sql]
