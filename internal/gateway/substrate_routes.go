@@ -308,6 +308,20 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
 			return
 		}
+		var createWarnings []string
+		if errors.Is(err, ErrSubstrateTemplateAttestation) {
+			fmt.Fprintf(os.Stderr, "[substrate] template %s/%s: %v\n", atespace, req.Template, err)
+			if st.cfg.Managed {
+				// Fail closed (GAP-0181): the connector, and so the sign-in
+				// check, comes from the attestation, never from the
+				// launcher's word alone.
+				writeSubstrateJSON(w, http.StatusForbidden, map[string]any{"error": "Forbidden",
+					"reason": "template_attestation_unreadable", "message": "template attestation could not be read"})
+				return
+			}
+			createWarnings = append(createWarnings, "template attestation could not be read; the connector you named decides the sign-in check")
+			err = nil
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] template lookup failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
@@ -419,7 +433,10 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		}
 		out := substrateActorView(reg)
 		if signinDecision.Warn {
-			out["warnings"] = []string{signinDecision.Message}
+			createWarnings = append(createWarnings, signinDecision.Message)
+		}
+		if len(createWarnings) > 0 {
+			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
 			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
