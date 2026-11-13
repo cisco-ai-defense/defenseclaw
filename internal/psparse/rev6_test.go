@@ -181,7 +181,8 @@ func TestRev6CmdHiddenPayload(t *testing.T) {
 
 // TestRev6FileStdinAndStopParse covers the Sonnet-probe residuals: `-File -`
 // reads the script from stdin (PS-FILE-STDIN), and a --% stop-parse token
-// before a stdin dash is the same stdin form (PS-STOPPARSE-DASH).
+// before a stdin dash is the same stdin form (PS-STOPPARSE-DASH). The forms
+// pwsh rejects (-File:-, -File - extra) moved to rev7_test.go (R7-3).
 func TestRev6FileStdinAndStopParse(t *testing.T) {
 	rows := []struct {
 		src   string
@@ -191,8 +192,6 @@ func TestRev6FileStdinAndStopParse(t *testing.T) {
 		{`pwsh -f -`, true},
 		{`pwsh -nop -File -`, true},
 		{`powershell -File -`, true},
-		{`pwsh -File - extra`, true},
-		{`pwsh -File:-`, true},
 		{`pwsh -File '-'`, true},
 		{`pwsh --% -`, true},
 		{`pwsh --% -c -`, true},

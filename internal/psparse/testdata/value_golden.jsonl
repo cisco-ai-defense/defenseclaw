@@ -761,3 +761,26 @@
 {"i":760,"err":false,"cmds":[{"name":{"s":true,"v":"powershell.exe"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
 {"i":761,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAfgBcAHgA"}]}]}
 {"i":762,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAVwAqAA=="}]}]}
+{"i":763,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":""},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":764,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" "},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":765,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -c"},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":766,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"-c "},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":767,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":""},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":768,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":""},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":769,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -nop"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":770,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -File"},{"s":true,"v":"-"}]}]}
+{"i":771,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -ec"},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABFAFYASQBMAA=="}]}]}
+{"i":772,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -enc"},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABFAFYASQBMAA=="}]}]}
+{"i":773,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":{"s":true,"v":"-"}}]}]}
+{"i":774,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"file","c":null},{"s":true,"v":"-"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows"}]}]}
+{"i":775,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":776,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":777,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":" /c"},{"s":true,"v":"rd /s /q C:\\Windows"}]}]}
+{"i":778,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c "},{"s":true,"v":"rd /s /q C:\\Windows"}]}]}
+{"i":779,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":" /k "},{"s":true,"v":"rd"},{"s":true,"v":"/s"},{"s":true,"v":"/q"},{"s":true,"v":"C:\\Windows"}]}]}
+{"i":780,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":true,"v":"/c rd /s /q C:\\Windows"}}]}]}
+{"i":781,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":false,"v":""}}]}]}
+{"i":782,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":true,"v":"/c"}}]}]}
+{"i":783,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"rd"},{"s":true,"v":"/s"},{"s":true,"v":"/q"},{"s":true,"v":"C:\\x"}]}]}
+{"i":784,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/K"},{"s":true,"v":"rd"},{"s":true,"v":"/s"},{"s":true,"v":"/q"},{"s":true,"v":"C:\\Windows"}]}]}
+{"i":785,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"C:\\a\\b.ps1"}]}]}

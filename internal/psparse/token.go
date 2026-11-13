@@ -14,6 +14,20 @@
 // The parser never panics and never drops input: any construct it cannot
 // resolve statically is represented by an ErrorExpr or an UnknownStatement
 // carrying a Reason code, so callers can escalate rather than silently miss.
+//
+// Cost of failing closed on child-process argv. psparse does not model how a
+// native host (powershell, pwsh, cmd) receives its command line, so a nested
+// script is reported Static only when its resolved text is certain to be what
+// the child runs. The price is deliberate over-reporting of opaque scripts:
+// under DialectUnknown or Windows PowerShell 5.1 a -Command / cmd /c payload
+// with a double quote, or any host word that contains whitespace and ends in a
+// backslash (for example the ordinary quoted directory 'C:\Program Files\'),
+// is ps_legacy_quoting; a host command of "-" or a "-File -" is ps_stdin; a
+// padded, empty or unrecognised host switch is ps_host_option; a cmd line
+// hidden in a splat or a fused switch is ps_cmd_argv. Callers see these as
+// non-static and treat the script as opaque code (the effects lane maps every
+// non-static nested script to opaque_code). Pass DialectPwsh7 when the host is
+// known to be pwsh 7 to keep the text of the quoting shapes.
 package psparse
 
 // TokenKind enumerates the lexical token categories the PowerShell lexer

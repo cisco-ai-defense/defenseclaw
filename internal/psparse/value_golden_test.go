@@ -45,6 +45,9 @@ func goldenCorpus() []string {
 	for _, s := range rev6Lines() {
 		add(rev2Expand(s))
 	}
+	for _, s := range rev7Lines() {
+		add(rev2Expand(s))
+	}
 	return out
 }
 

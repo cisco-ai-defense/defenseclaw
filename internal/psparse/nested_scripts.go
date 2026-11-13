@@ -264,6 +264,7 @@ func isStartProcess(name string) bool {
 type hostWord struct {
 	text   string
 	static bool
+	colon  bool // the value of a -Name:value parameter (glued to its switch)
 }
 
 func hostWords(c *Command) []hostWord {
@@ -274,17 +275,17 @@ func hostWords(c *Command) []hostWord {
 			// gate the parameter name on the strict class too (review 5 R5-11):
 			// a name with a backtick / non-ASCII / control rune is not a trusted
 			// static word, so a positional join or host parse fails closed.
-			out = append(out, hostWord{"-" + e.Name, safeStaticLiteral(e.Name)})
+			out = append(out, hostWord{text: "-" + e.Name, static: safeStaticLiteral(e.Name)})
 			if e.Colon != nil {
 				v, ok := LiteralString(e.Colon)
-				out = append(out, hostWord{v, ok})
+				out = append(out, hostWord{text: v, static: ok, colon: true})
 			}
 		case *Arg:
 			v, ok := LiteralString(e.Value)
-			out = append(out, hostWord{v, ok})
+			out = append(out, hostWord{text: v, static: ok})
 		case Expr:
 			v, ok := LiteralString(e)
-			out = append(out, hostWord{v, ok})
+			out = append(out, hostWord{text: v, static: ok})
 		}
 	}
 	return out
@@ -298,13 +299,29 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 	}
 	for i := 0; i < len(words); i++ {
 		w := words[i]
-		name, cand := stripParamLead(w.text)
+		// pwsh trims every host argument before it looks for a switch
+		// (GetSwitchKey: args[i].Trim()), so " -c", "-c " and "\t-ec" are the
+		// switches. Classify on the trimmed word (review 7 R7-1). An empty or
+		// whitespace-only word before the command is an error in pwsh 7 and is
+		// dropped from argv by Windows PowerShell 5.1: neither is a script we
+		// can resolve, so fail closed.
+		tw := strings.TrimSpace(w.text)
+		if w.static && tw == "" {
+			return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonHostOption}}
+		}
+		name, cand := stripParamLead(tw)
 		if cand {
 			canon, takesVal, known := resolvePSParam(name)
 			if known {
 				switch canon {
 				case "command":
-					return []NestedScript{joinRest(words[i+1:], KindPowerShellCommand, "powershell", src)}
+					ns := joinRest(words[i+1:], KindPowerShellCommand, "powershell", src)
+					if ns.Reason == ReasonStdin && i+1 < len(words) && words[i+1].colon {
+						// -c:- is rejected by pwsh 7 (not a stdin read); still opaque
+						// (review 7 R7-3).
+						ns.Reason = ReasonHostOption
+					}
+					return []NestedScript{ns}
 				case "encodedcommand":
 					if i+1 < len(words) {
 						return []NestedScript{decodeWord(words[i+1], src)}
@@ -319,8 +336,18 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 				case "file":
 					if i+1 < len(words) && words[i+1].static && words[i+1].text == "-" {
 						// -File - reads the script from stdin: no script in the argv
-						// (review 6 follow-up PS-FILE-STDIN).
-						return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonStdin}}
+						// (review 6 follow-up PS-FILE-STDIN). pwsh 7 rejects the colon
+						// form (-File:-) and a non-switch word after it (-File - x);
+						// those are opaque with a host-option reason (review 7 R7-3).
+						reason := ReasonStdin
+						if words[i+1].colon {
+							reason = ReasonHostOption
+						} else if i+2 < len(words) {
+							if _, isSwitch := stripParamLead(strings.TrimSpace(words[i+2].text)); !isSwitch || !words[i+2].static {
+								reason = ReasonHostOption
+							}
+						}
+						return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: reason}}
 					}
 					return nil // a script file; its content is not inline
 				default:
@@ -330,7 +357,7 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 					continue
 				}
 			}
-			if dashLed(w.text) {
+			if dashLed(tw) {
 				// an unknown -parameter: the host CLI has an option outside the
 				// modeled set, so we cannot know whether it takes a value or
 				// where the payload begins. Fail closed (review 3 R3).
@@ -351,7 +378,23 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 // (fail-closed) host-option path (PS-STOPPARSE-DASH).
 func hostStopParseStdin(words []hostWord) bool {
 	for i, w := range words {
-		if !w.static || w.text != "--%" {
+		if !w.static {
+			return false
+		}
+		if w.text != "--%" {
+			// A -Command / -File switch ahead of the --% owns the rest of the
+			// line (`pwsh -c Remove-Item x --% -` runs `Remove-Item x -`), so
+			// the main switch loop decides; stop here (review 7 R7-3). The one
+			// exception is a --% directly after the switch, which the loop
+			// also handles (`-c --% -`), so keep scanning for it.
+			if name, cand := stripParamLead(strings.TrimSpace(w.text)); cand {
+				if canon, _, known := resolvePSParam(name); known && (canon == "command" || canon == "file") {
+					if i+1 < len(words) && words[i+1].static && words[i+1].text == "--%" {
+						continue
+					}
+					return false
+				}
+			}
 			continue
 		}
 		// the verbatim tail arrives as one word ("-c -"); split it into argv words
@@ -575,6 +618,14 @@ func cmdHasHiddenPayload(c *Command) bool {
 			if !safeStaticLiteral(e.Name) {
 				return true
 			}
+			// a colon-glued value (-x:'/c rd ..', -x:$a, -x:/c) can carry the
+			// command line too (review 7 R7-2): any non-static value, or one that
+			// holds a run switch (bare or fused), is a hidden payload.
+			if e.Colon != nil {
+				if v, ok := LiteralString(e.Colon); !ok || cmdHasRunSwitch(v) {
+					return true
+				}
+			}
 		case *Arg:
 			s, ok := LiteralString(e.Value)
 			if !ok || cmdSwitchLike(s) {
@@ -594,16 +645,19 @@ func cmdHasHiddenPayload(c *Command) bool {
 // (/c /k /r) fused or combined with other text, so the bare-switch scan did
 // not recognise it but cmd.exe would still run a command line from it.
 func cmdSwitchLike(s string) bool {
-	l := strings.ToLower(strings.TrimSpace(s))
-	for _, sw := range []string{"/c", "/k", "/r"} {
-		if l == sw {
-			return false // the bare switch is handled by the main scan
-		}
-		if strings.Contains(l, sw) {
-			return true
-		}
+	// The main scan matches the exact word (case-insensitively). A padded word
+	// (" /c", "/c ") is not that match, so it falls through to the contains
+	// test and is reported as a hidden payload (review 7 R7-2).
+	if l := strings.ToLower(s); l == "/c" || l == "/k" || l == "/r" {
+		return false // the bare switch is handled by the main scan
 	}
-	return false
+	return cmdHasRunSwitch(s)
+}
+
+// cmdHasRunSwitch reports whether s contains a /c, /k or /r run switch anywhere.
+func cmdHasRunSwitch(s string) bool {
+	l := strings.ToLower(s)
+	return strings.Contains(l, "/c") || strings.Contains(l, "/k") || strings.Contains(l, "/r")
 }
 
 // iexArgScript handles Invoke-Expression / iex with an explicit value
