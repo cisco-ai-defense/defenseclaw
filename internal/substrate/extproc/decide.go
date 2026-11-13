@@ -464,11 +464,11 @@ func (e *Engine) urlRuleVerdict(v Verdict, req *Request, pol *Policy, methods []
 				continue
 			}
 		}
-		switch {
-		case r.action == "deny":
+		switch r.action {
+		case "deny":
 			return deny(v, CategoryURLRule, sourceProfile, r.name,
 				"This actor's profile does not allow "+strings.Join(methods, " or ")+" requests to this path on "+req.Host+"."), nil, true
-		case r.action == "ask":
+		case "ask":
 			asks = append(asks, r)
 		}
 	}
