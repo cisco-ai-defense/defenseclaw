@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -106,7 +107,12 @@ func runBudgetStoreServe(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("budget-store serve: %w", err)
 	}
-	if _, err := readOwnerOnlyFile(srv.TLSKeyFile); err != nil {
+	// The TLS key may be a link (certbot live/); its target must be private.
+	tlsKey, err := filepath.EvalSymlinks(srv.TLSKeyFile)
+	if err != nil {
+		return fmt.Errorf("budget-store serve: tls_key_file cannot be read")
+	}
+	if _, err := readOwnerOnlyFile(tlsKey); err != nil {
 		return fmt.Errorf("budget-store serve: tls_key_file: %w", err)
 	}
 	tlsConfig, err := budgetstore.ServerTLSConfig(srv.TLSCertFile, srv.TLSKeyFile)

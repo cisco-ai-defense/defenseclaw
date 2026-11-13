@@ -340,7 +340,7 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 				continue
 			}
 			if b.action == config.RoutingBudgetOnExceedDeny {
-				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "The cost of a model call for budget " + b.ID + " could not be computed, so the budget cannot tell how much is left; ask your administrator to price the model (observability.pricing)."}
+				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "A recent model call of yours could not be priced, so budget " + b.ID + " cannot tell how much is left. Try again within the hour, or ask your administrator to add the model to observability.pricing."}
 				return
 			}
 			if b.action == config.RoutingBudgetOnExceedWarn {

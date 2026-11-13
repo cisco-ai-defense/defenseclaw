@@ -39,6 +39,7 @@ type fleetState struct {
 	// before the store was on, a hash under an old secret).
 	allowed      map[string]bool
 	connectorAll map[string]bool
+	userAll      map[string]bool   // budget ids of * user budgets
 	users        map[string]string // local caller key -> fleet user id
 	byFleet      map[string]string // fleet user id -> local caller key
 	err          string
@@ -102,12 +103,14 @@ func (f *fleetState) apply(cfg *config.Config) {
 
 // allowKeysLocked lists the shared-form keys of the configured budgets.
 func (f *fleetState) allowKeysLocked() {
-	f.allowed, f.connectorAll = map[string]bool{}, map[string]bool{}
+	f.allowed, f.connectorAll, f.userAll = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if f.keys == nil {
 		return
 	}
 	for _, b := range f.budgets {
 		switch {
+		case b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll:
+			f.userAll[b.ID] = true
 		case b.Scope == config.RoutingBudgetScopeUser && b.Subject != config.RoutingBudgetSubjectAll:
 			f.allowed["user:"+b.ID+":="+f.keys.SubjectHash(b.Subject)] = true
 		case b.Scope == config.RoutingBudgetScopeGroup:
@@ -210,6 +213,9 @@ func (f *fleetState) ToFleet(local string) (string, bool) {
 	defer f.mu.Unlock()
 	if !ok {
 		return local, f.sharedKeyLocked(local)
+	}
+	if !f.userAll[strings.TrimSuffix(strings.TrimPrefix(prefix, "user:"), ":*:")] {
+		return "", false // a budget a reload removed
 	}
 	id, known := f.users[caller]
 	if !known {

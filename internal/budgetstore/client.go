@@ -17,7 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
@@ -29,9 +29,14 @@ type Client struct {
 	base *url.URL
 	keys Keys
 	http *http.Client
-	mu   sync.Mutex
-	seq  uint64
 }
+
+// pushSeq is the push sequence of this process: one counter for every client
+// built, so a rebuilt client (a reload) never goes below the store's last
+// sequence of this process's epoch.
+var pushSeq atomic.Uint64
+
+func init() { pushSeq.Store(randomSeqStart()) }
 
 var _ routingadmin.SpendCounter = (*Client)(nil)
 
@@ -62,17 +67,12 @@ func NewClient(rawURL string, keys Keys, caPEM []byte, timeout time.Duration) (*
 		keys: keys,
 		http: &http.Client{Transport: transport, Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		seq: randomSeqStart(),
 	}, nil
 }
 
 // Push sends this epoch's absolute totals.
 func (c *Client) Push(ctx context.Context, epoch string, rows []routingadmin.SeedRow) error {
-	c.mu.Lock()
-	c.seq++
-	seq := c.seq
-	c.mu.Unlock()
-	req := PushRequest{Epoch: epoch, Seq: seq, Rows: make([]Row, 0, len(rows))}
+	req := PushRequest{Epoch: epoch, Seq: pushSeq.Add(1), Rows: make([]Row, 0, len(rows))}
 	for _, r := range rows {
 		if ValidKey(r.Key) {
 			req.Rows = append(req.Rows, Row{Day: r.Day, Key: r.Key, USD: r.USD})
@@ -129,11 +129,14 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 		return errors.New("budget store unreachable")
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes))
-	if resp.StatusCode != http.StatusUnauthorized && !c.keys.VerifyResponse(sig, resp.StatusCode, data, resp.Header.Get(HeaderResponse)) {
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
+	if resp.StatusCode == http.StatusOK && !c.keys.VerifyResponse(sig, resp.StatusCode, data, resp.Header.Get(HeaderResponse)) {
 		// Not the store's answer (a TLS-inspecting middlebox or a forged
 		// response): use none of it.
-		return errors.New("budget store answer is not signed by the store")
+		return errors.New("budget store answer is not signed by the store (a proxy between the device and the store?)")
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return errors.New("budget store refused the request: unauthorized (wrong tenant secret, or the clocks differ by more than 5 minutes)")
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e ErrorResponse

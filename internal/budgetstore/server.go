@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -156,13 +157,19 @@ func (s *Store) Totals(ctx context.Context, req TotalsRequest) ([]Row, error) {
 	return out, nil
 }
 
-// Prune drops days and writers older than RetentionDays.
+// WriterIdle is how long a writer's sequence is kept after its last push.
+// A request older than MaxClockSkew is refused anyway, so a pruned writer's
+// pushes cannot be replayed; live writers push every sync interval.
+const WriterIdle = 15 * time.Minute
+
+// Prune drops days older than RetentionDays and idle writers (their spend
+// rows stay).
 func (s *Store) Prune(ctx context.Context) error {
 	cutoff := s.now().UTC().AddDate(0, 0, -RetentionDays)
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM spend WHERE day < ?`, cutoff.Format(time.DateOnly)); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM writers WHERE last_seen < ?`, cutoff.Unix())
+	_, err := s.db.ExecContext(ctx, `DELETE FROM writers WHERE last_seen < ?`, s.now().Add(-WriterIdle).Unix())
 	return err
 }
 
@@ -189,8 +196,7 @@ func (h *Handler) now() time.Time {
 // code only; nothing from the request is logged or echoed.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.PreAuth != nil {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if !h.PreAuth(host) {
+		if !h.PreAuth(clientKey(r.RemoteAddr)) {
 			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{Error: "rate_limited"})
 			return
 		}
@@ -281,17 +287,19 @@ func RateLimiter(perMinute int) func(string) bool {
 		minute := time.Now().Unix() / 60
 		mu.Lock()
 		defer mu.Unlock()
-		if len(window) > 50000 {
-			for k, w := range window {
-				if w[0] != minute {
+		w, known := window[host]
+		if !known && len(window) >= 50000 {
+			for k, old := range window {
+				if old[0] != minute {
 					delete(window, k)
 				}
 			}
-			if len(window) > 50000 {
-				return false
+			if len(window) >= 50000 {
+				// Full of keys of this minute: admit uncounted rather than
+				// refuse everyone (the limiter is a guard, auth is the gate).
+				return true
 			}
 		}
-		w := window[host]
 		if w[0] != minute {
 			w = [2]int64{minute, 0}
 		}
@@ -320,4 +328,22 @@ func NewServer(addr string, h http.Handler, tlsConfig *tls.Config) *http.Server 
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10,
 		ErrorLog: log.New(io.Discard, "", 0),
 	}
+}
+
+// clientKey is the rate-limit key of a remote address: the IPv4 address, or
+// the /64 of an IPv6 one (a host holds a whole /64).
+func clientKey(remote string) string {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || addr.Is4() || addr.Is4In6() {
+		return host
+	}
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return host
+	}
+	return prefix.String()
 }

@@ -50,15 +50,17 @@ const (
 
 // Bounds.
 const (
-	MaxBodyBytes  = 1 << 20
-	MaxRows       = 20000
-	MaxKeys       = 20000
-	MaxClockSkew  = 5 * time.Minute
-	SecretBytes   = 32
-	RetentionDays = 62
-	maxUSD        = 1e7
-	authInfo      = "defenseclaw.budget-store.auth.v1"
-	subjectInfo   = "defenseclaw.budget-store.subject.v1"
+	MaxBodyBytes = 1 << 20
+	// MaxResponseBytes bounds a Totals answer the device reads (MaxRows rows).
+	MaxResponseBytes = 4 << 20
+	MaxRows          = 20000
+	MaxKeys          = 20000
+	MaxClockSkew     = 5 * time.Minute
+	SecretBytes      = 32
+	RetentionDays    = 62
+	maxUSD           = 1e7
+	authInfo         = "defenseclaw.budget-store.auth.v1"
+	subjectInfo      = "defenseclaw.budget-store.subject.v1"
 )
 
 var (

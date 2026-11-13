@@ -258,3 +258,35 @@ func TestPushRefusesDaysOutsideTheWindow(t *testing.T) {
 		t.Fatal("a sequence above 2^63-1 must be refused")
 	}
 }
+
+func TestClientKeyGroupsIPv6ByPrefix(t *testing.T) {
+	if clientKey("[2001:db8:1:2:aaaa::1]:443") != clientKey("[2001:db8:1:2:bbbb::9]:443") {
+		t.Fatal("one /64 is one client")
+	}
+	if clientKey("192.0.2.1:443") != "192.0.2.1" {
+		t.Fatal("IPv4 by address")
+	}
+}
+
+func TestIdleWritersArePrunedButTheirSpendStays(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	today := time.Now().UTC().Format(time.DateOnly)
+	if err := store.Push(ctx, PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: today, Key: "connector:c:codex", USD: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	store.now = func() time.Time { return time.Now().Add(WriterIdle + time.Minute) }
+	if err := store.Prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var writers int
+	_ = store.db.QueryRow(`SELECT COUNT(*) FROM writers`).Scan(&writers)
+	rows, _ := store.Totals(ctx, TotalsRequest{Epoch: "e2", Since: today, Keys: []string{"connector:c:codex"}})
+	if writers != 0 || len(rows) != 1 || rows[0].USD != 2 {
+		t.Fatalf("writers %d rows %+v", writers, rows)
+	}
+}
