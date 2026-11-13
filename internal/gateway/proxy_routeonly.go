@@ -168,7 +168,11 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// restarts there); the gateway uses its own credential for the target.
 	custody := s.custody(cfg)
 	subject := caller.Subject
-	r = r.WithContext(attachVerifiedSubject(r.Context(), nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer))
+	if cfg.StandaloneEnterprise() {
+		// Managed: the proved account is the subject downstream (profile
+		// matching, audit). OSS: the gateway owner, as before.
+		r = r.WithContext(attachVerifiedSubject(r.Context(), nil, subject, sanitizeLLMEventUser(userScopedIdentityName(subject)), subjectSourceKernelPeer))
+	}
 	if !s.acquire(subject) {
 		routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", "too many concurrent model calls through DefenseClaw")
 		return
