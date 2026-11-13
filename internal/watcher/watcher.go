@@ -900,7 +900,7 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 	snap, err := w.snapshotForEvent(evt)
 	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
 		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline) &&
-		!w.mcpPolicyRefusalLapsed(evt, baseline)) {
+		!w.mcpPolicyRefusalLapsed(evt, baseline) && !mcpAdmissionOwed(baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -1065,7 +1065,7 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		} else if evt := (InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}); w.mcpFailureAllowed(evt, baseline) {
 			// An allow written after the failure admits it now.
 			added = append(added, server.Name)
-		} else if w.mcpBaselineLapsed(evt, baseline) || w.mcpPolicyRefusalLapsed(evt, baseline) {
+		} else if w.mcpBaselineLapsed(evt, baseline) || w.mcpPolicyRefusalLapsed(evt, baseline) || mcpAdmissionOwed(baseline) {
 			// The allow that admitted it without a scan, or the deny that
 			// refused it, is gone: admitted again now, not at the next call
 			// or the hourly rescan, so its block is back (or its scan runs)
@@ -1342,6 +1342,9 @@ func (w *InstallWatcher) SetWebhookDispatcher(d WebhookDispatcher) {
 
 // Run starts watching configured directories. It blocks until ctx is cancelled.
 func (w *InstallWatcher) Run(ctx context.Context) error {
+	// Before any call is judged: the MCP servers a 1.0.9 store recorded as
+	// plain admissions without a scan owe an admission (gas-ux-r2:GAP-0088).
+	w.markMCPNoScanAdmissionsOwed()
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("watcher: create fsnotify watcher: %w", err)
