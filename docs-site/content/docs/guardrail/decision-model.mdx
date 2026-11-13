@@ -6,6 +6,9 @@ keywords:
   - decision_model
   - decision_model.hook_connectors
   - System One
+  - Gemini Decision 1
+  - gemini-decision-1
+  - decision_model.protocol
   - DEFENSECLAW_DECISION_MODEL_KEY
   - defenseclaw setup decision-model
   - LLM judge cost
@@ -34,7 +37,7 @@ A connector the judge covers always gets cascade 3, listed or not. A connector i
 
 ## Before you start
 
-- A decision model endpoint that speaks the System One protocol: `POST` a JSON body `{model, state, questions}` and get back `answers` with probabilities. It can be a server on the same machine (`http://127.0.0.1:...`) or a hosted service over `https`.
+- A decision model endpoint that speaks the System One protocol: `POST` a JSON body `{model, state, questions}` and get back `answers` with probabilities. It can be a server on the same machine (`http://127.0.0.1:...`) or a hosted service over `https`. Google's Gemini Decision 1 takes the same questions in a slightly different request; set `protocol: gemini-decisions` for it (see [Gemini Decision 1](#gemini-decision-1)).
 - For cascade 3, the [LLM judge](/docs/guardrail) turned on for the connector. Cascade 2 needs no judge.
 
 Each tool call the model answers is one network call to the URL you configure. Plain `http` is accepted only for a loopback host; any other host needs `https`.
@@ -65,6 +68,26 @@ Each tool call the model answers is one network call to the URL you configure. P
    ```
 
    `--show` and the `doctor` **Decision model** row name the cascade of each active connector, for example `claudecode: rules -> decision model; codex: rules -> decision model -> LLM judge`. `doctor` shows the row only while the model is on.
+
+### Gemini Decision 1
+
+Gemini Decision 1 (`gemini-decision-1`) is Google's hosted decision model, served by the Decisions API with a Google AI Studio key. It answers the same three questions; the request carries the call as text in `input` instead of a `state` object, and the key goes in an `x-goog-api-key` header. `decision_model.protocol: gemini-decisions` makes DefenseClaw send that request.
+
+```bash
+defenseclaw setup decision-model --protocol gemini-decisions \
+  --base-url https://generativelanguage.googleapis.com/v1beta/decisions \
+  --model gemini-decision-1 --connectors claudecode,codex --ping
+defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY   # paste the AI Studio key
+defenseclaw-gateway restart
+```
+
+What to know before you turn it on:
+
+- **Privacy.** Every tool call the model answers sends Google the call (tool name and arguments, up to 3,072 bytes), up to seven earlier calls of the session and the user's request (12,288 bytes in all). Read Google's Gemini API terms for your tier before you send real sessions: they say content sent on the free tier may be used to improve Google's products, and content sent on a paid tier is not. Use a paid-tier key for real work.
+- **Cost.** A call is about 490 input tokens (the three questions and the policy are most of it) and produces no output tokens. At USD 0.10 per million input tokens that is about USD 0.05 per 1,000 tool calls. The free tier costs nothing but allows only 50,000 input tokens a minute (about 100 calls) and a fixed number of requests a day, shared by every user of the key. Paid tier 1 allows 1,500 requests and 1,000,000 input tokens a minute.
+- **Latency.** 200 calls from a cloud host in November 2026: median 0.25 s, p95 0.45 s, none over the 1 s default `timeout`. The endpoint had one slow spell of a few seconds during that probe; those calls hit the timeout, and after three in a row DefenseClaw paused the model for 30 s as designed (see [When it is down](#when-it-is-down)).
+- **Refusals.** When Google's own safety filters decline a request, the API answers HTTP 400 with a code such as `safety` or `prohibited_content`. DefenseClaw treats that as no answer, never as a block or an allow: cascade 2 keeps the rule verdict and cascade 3 runs the judge. The judge event records failure class `empty_response`.
+- **Skill scans.** The skill scanner's System One tier does not speak this protocol, so `skill scan` does not use a Gemini Decision 1 endpoint.
 
 ### During `defenseclaw init`
 
@@ -127,8 +150,9 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.enabled` | `false` | Turn it on. Needs `base_url` and `model`. |
 | `decision_model.model` | empty | Model name sent in each request. |
 | `decision_model.base_url` | empty | Full endpoint URL. `https`, or `http` to `127.0.0.1`, `::1` or `localhost`. No credentials in the URL. |
+| `decision_model.protocol` | `system-one` | `system-one` (`{model, state, questions}`, Bearer token) or `gemini-decisions` (Gemini Decision 1: `{model, input, questions}`, `x-goog-api-key`). |
 | `decision_model.hook_connectors` | empty | Connectors (or `*`) whose tool calls it answers on its own where the LLM judge does not run (cascade 2). Empty: only in front of the judge. |
-| `decision_model.api_key_env` | `DEFENSECLAW_DECISION_MODEL_KEY` | Variable that holds the bearer token. An unset variable sends no token. |
+| `decision_model.api_key_env` | `DEFENSECLAW_DECISION_MODEL_KEY` | Variable that holds the token (the Bearer token, or the AI Studio key for `gemini-decisions`). An unset variable sends no token. |
 | `decision_model.credential` | empty | Managed devices only: protected credential that holds the token. |
 | `decision_model.timeout` | `1` | Seconds per call (up to 30). In cascade 3 the gateway also caps each call at a quarter of the time left for the judge. |
 | `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. `0` uses the default. |
