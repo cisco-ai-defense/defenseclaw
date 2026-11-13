@@ -3481,7 +3481,16 @@ PY
 # when its own gateway restarts.
 restart_openclaw() {
     openclaw_connector_active && has openclaw || return 0
-    local out
+    local out found want
+    # An upgrade keeps the installed OpenClaw. Before 2026.8.35 it runs the
+    # guardrail proxy only (the 1.0.9 behaviour); say how to get the native
+    # plugin hooks (rel-1-0-10 GAP-0079). No automatic update: a new OpenClaw
+    # can need its own `openclaw doctor --fix` and provider consents.
+    found="$(openclaw --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    want="$(declare -F openclaw_version_for_node >/dev/null && openclaw_version_for_node || true)"
+    if [[ -n "${found}" && -n "${want}" ]] && version_lt "${found}" "${OPENCLAW_NODE22_VERSION}"; then
+        info "OpenClaw ${found} keeps the guardrail proxy only. For the native plugin hooks, update OpenClaw (npm install -g openclaw@${want}, then openclaw doctor --fix if it asks) and run: defenseclaw setup openclaw"
+    fi
     if ! out="$(openclaw gateway restart 2>&1)"; then
         warn "Restart the OpenClaw gateway to load the updated plugin: openclaw gateway restart"
         return 0
@@ -3585,7 +3594,7 @@ first_install_extras() {
 
 ensure_openclaw() {
     local found want
-    want="$(openclaw_version_for_node)"
+    want="$(declare -F openclaw_version_for_node >/dev/null && openclaw_version_for_node || true)"
     if [[ -z "${want}" ]]; then
         warn "OpenClaw needs Node.js 22.22.3 or later (24.16 or later for OpenClaw ${OPENCLAW_VERSION}); found $(node -v 2>/dev/null || echo none). Update Node.js, then run this installer again"
         has openclaw || OPENCLAW_MISSING=true

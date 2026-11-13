@@ -5773,7 +5773,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Set-difference teardown: any connector active on a previous boot but
 	// absent from the current set is torn down once, before setup. Uses a
 	// base opts carrying just the fields Teardown needs.
-	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
+	baseOpts := withOpenClawSetupOpts(connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}, s.currentConfig())
 	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
 	var failedRemoved []string
 	setupSeed := multiConnectorSetupTransaction{}

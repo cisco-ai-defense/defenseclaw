@@ -225,8 +225,10 @@ func (c *Config) ValidateOpenClawConnector() error {
 		if filepath.Base(dir) != "defenseclaw" {
 			return fmt.Errorf("config: connectors.openclaw.plugin_dir must end in a folder named defenseclaw (the plugin id), for example /opt/defenseclaw/openclaw/defenseclaw")
 		}
-	} else if dir != "" {
-		return fmt.Errorf("config: connectors.openclaw.plugin_dir is used only with plugin_install: external")
+	} else if dir != "" && (!filepath.IsAbs(dir) || filepath.Clean(dir) != dir || filepath.Base(dir) != "defenseclaw") {
+		// plugin_dir may be set before plugin_install (two config set
+		// calls, rel-1-0-10 GAP-0073); it is used only with external.
+		return fmt.Errorf("config: connectors.openclaw.plugin_dir must be a clean absolute path ending in a folder named defenseclaw")
 	}
 	if a := strings.TrimSpace(oc.PluginAccount); a != "" {
 		if !openClawAccountPattern.MatchString(a) {

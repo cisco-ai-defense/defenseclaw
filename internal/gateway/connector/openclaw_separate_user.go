@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -80,6 +81,11 @@ func splitOpenClawAddr(addr string, defaultPort int) (string, int) {
 // merges in, as indented JSON.
 func openClawSeparateUserBlock(opts SetupOpts, paths openClawPaths) string {
 	entry := map[string]interface{}{"enabled": true, "config": openClawSeparateUserEntry(opts)}
+	// OpenClaw runs the conversation hooks (before_agent_run, prompt
+	// gate) of a non-bundled plugin only with this grant (GAP-0082).
+	if openClawSeparateUserNeedsConversationGrant(opts) {
+		entry["hooks"] = map[string]interface{}{"allowConversationAccess": true}
+	}
 	block := map[string]interface{}{"plugins": map[string]interface{}{
 		"load":    map[string]interface{}{"paths": []string{paths.external}},
 		"entries": map[string]interface{}{"defenseclaw": entry},
@@ -90,8 +96,13 @@ func openClawSeparateUserBlock(opts SetupOpts, paths openClawPaths) string {
 	if policy := openClawSeparateUserInstallPolicy(opts); policy != nil {
 		block["security"] = map[string]interface{}{"installPolicy": policy}
 	}
-	out, _ := json.MarshalIndent(block, "", "  ")
+	out, _ := json.Marshal(block)
 	return string(out)
+}
+
+// openClawSeparateUserNeedsConversationGrant: the native hooks run.
+func openClawSeparateUserNeedsConversationGrant(opts SetupOpts) bool {
+	return ResolveOpenClawHookMode(opts.OpenClawHooksMode, openClawObservedVersion(opts)) != OpenClawHookModeProxy
 }
 
 // openClawSeparateUserMissing names what openclaw.json lacks of the block.
@@ -111,6 +122,12 @@ func openClawSeparateUserMissing(cfg map[string]interface{}, opts SetupOpts, pat
 	entry, _ := entries["defenseclaw"].(map[string]interface{})
 	if entry["enabled"] != true {
 		missing = append(missing, "plugins.entries.defenseclaw.enabled true")
+	}
+	if openClawSeparateUserNeedsConversationGrant(opts) {
+		hooks, _ := entry["hooks"].(map[string]interface{})
+		if hooks["allowConversationAccess"] != true {
+			missing = append(missing, "plugins.entries.defenseclaw.hooks.allowConversationAccess true")
+		}
 	}
 	have, _ := entry["config"].(map[string]interface{})
 	for key, want := range openClawSeparateUserEntry(opts) {
@@ -164,9 +181,19 @@ func (c *OpenClawConnector) registerSeparateUser(opts SetupOpts, paths openClawP
 		return err
 	}
 	if missing := openClawSeparateUserMissing(cfg, opts, paths); len(missing) > 0 {
-		return fmt.Errorf("openclaw: %s (owned by %s) does not register DefenseClaw yet (missing: %s). DefenseClaw does not write it in the separate-user layout; "+
-			"as %s or an administrator merge this into it, then restart the OpenClaw gateway:\n%s",
-			paths.config, opts.OpenClawPluginAccount, strings.Join(missing, ", "), opts.OpenClawPluginAccount, openClawSeparateUserBlock(opts, paths))
+		// One line: the setup output shows only the first line of a
+		// multi-line refusal (GAP-0081). The block is also saved to a file.
+		block := openClawSeparateUserBlock(opts, paths)
+		saved := ""
+		if opts.DataDir != "" {
+			file := filepath.Join(opts.DataDir, "openclaw-merge.json")
+			if err := os.WriteFile(file, []byte(block+"\n"), 0o644); err == nil {
+				saved = " (also saved in " + file + ")"
+			}
+		}
+		return fmt.Errorf("openclaw: %s (owned by %s) does not register DefenseClaw yet (missing: %s); DefenseClaw does not write it in the separate-user layout: "+
+			"as %s or an administrator merge this JSON into it%s, then restart the OpenClaw gateway: %s",
+			paths.config, opts.OpenClawPluginAccount, strings.Join(missing, ", "), opts.OpenClawPluginAccount, saved, block)
 	}
 	return nil
 }

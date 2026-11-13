@@ -60,7 +60,7 @@ func TestOpenClawSeparateUserLayout(t *testing.T) {
 	}
 	c := NewOpenClawConnector()
 	err = c.Setup(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "merge this into it") || !strings.Contains(err.Error(), dir) {
+	if err == nil || !strings.Contains(err.Error(), "merge this JSON into it") || !strings.Contains(err.Error(), dir) {
 		t.Fatalf("Setup err = %v, want the block to merge", err)
 	}
 	if got := mustReadFileString(t, configPath); got != "{}\n" {

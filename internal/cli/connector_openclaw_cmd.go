@@ -63,12 +63,14 @@ folder owned by root (Administrators on Windows) and not writable by others,
 then set connectors.openclaw.plugin_install external and
 connectors.openclaw.plugin_dir to it. Run it again after every DefenseClaw
 upgrade: setup refuses a plugin that does not match the gateway.`,
-	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
+	// Run by an administrator who usually has no DefenseClaw config of their
+	// own: it needs none, so it loads none (rel-1-0-10 GAP-0074).
+	PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		if err := connector.ExportOpenClawPlugin(connectorOpenClawExportDir); err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "wrote the OpenClaw plugin to %s\nnext: defenseclaw config set connectors.openclaw.plugin_install external\n      defenseclaw config set connectors.openclaw.plugin_dir %s\n",
+		fmt.Fprintf(cmd.OutOrStdout(), "wrote the OpenClaw plugin to %s\nnext: defenseclaw config set connectors.openclaw.plugin_dir %s\n      defenseclaw config set connectors.openclaw.plugin_install external\n",
 			connectorOpenClawExportDir, connectorOpenClawExportDir)
 		return nil
 	},

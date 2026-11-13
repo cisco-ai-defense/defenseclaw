@@ -208,3 +208,21 @@ func (a *APIServer) openClawPluginAccount() string {
 	}
 	return strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
 }
+
+// withOpenClawSetupOpts fills the OpenClaw layout of config.yaml into opts,
+// so a teardown of a removed openclaw connector acts on the same files as
+// its setup (rel-1-0-10 GAP-0083: the separate-user credential stayed).
+func withOpenClawSetupOpts(opts connector.SetupOpts, cfg *config.Config) connector.SetupOpts {
+	if cfg == nil {
+		return opts
+	}
+	opts.OpenClawHome = cfg.OpenClawHome()
+	opts.OpenClawConfigPath = cfg.OpenClawConfigPath()
+	opts.OpenClawPluginDir = cfg.OpenClawExternalPluginDir()
+	opts.OpenClawPluginAccount = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+	opts.OpenClawPluginTokenFile = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile)
+	opts.OpenClawPluginTokenGroup = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenGroup)
+	opts.OpenClawHooksMode = cfg.OpenClawHooksMode()
+	opts.OpenClawPromptGate = cfg.Connectors.OpenClaw.Hooks.PromptGate
+	return opts
+}
