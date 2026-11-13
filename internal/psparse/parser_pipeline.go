@@ -292,7 +292,7 @@ func (p *parser) parseCommandName() Expr {
 		return p.parseNameRun(p.advance())
 	case TokString:
 		return p.stringLit(p.advance())
-	case TokVariable, TokLParen, TokDollarParen:
+	case TokVariable, TokLParen, TokDollarParen, TokLBrace:
 		e := p.parsePrimary()
 		if _, ok := e.(*Variable); ok {
 			p.diag0(e, ReasonDynamicName, "call target is a variable")
@@ -452,8 +452,8 @@ func (p *parser) parseArgAtom() Expr {
 // variable or a $( ) sub-expression (as PowerShell does).
 func fusableLead(e Expr) bool {
 	switch v := e.(type) {
-	case *Variable, *SubExpr, *Number:
-		return true
+	case *Variable, *Number:
+		return true // note: a $( ) sub-expression does NOT fuse with trailing text
 	case *StringLit:
 		return v.Bare
 	}

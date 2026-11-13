@@ -6,18 +6,7 @@ Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	pending step-3: glued operator/bracket/comment 
 Y21kIC9jIC0tJSBlY2hvIGhpIHwgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: --% verbatim tail as elements
 aWNhY2xzIC0tJSBDOlx4IC9ncmFudCBFdmVyeW9uZTpG	pending step-3: --% verbatim tail as elements
 R2V0LUl0ZW0gLS0gLXg=	pending step-3: parameter vs argument boundary
-JiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
-LiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICQoMSl4	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICdhJyM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
-V3JpdGUtT3V0cHV0ICgxKSM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
 UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/comment splits an argument
-UmVtb3ZlLUl0ZW0gJChHZXQtTG9jYXRpb24pXHg=	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICQoMSkkKDIp	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICdhJyNi	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICJhIiNi	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICgxKSN4	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0ICdhJzwjYyM+J2In	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC1hJ2In	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hImIi	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hJHg=	pending step-3: parameter vs argument boundary
@@ -26,9 +15,7 @@ V3JpdGUtT3V0cHV0IGFgdXs0MX1i	pending step-3: `u{hex} escape in a bareword/name
 YCQoUmVtb3ZlLUl0ZW0gQzpceCk=	pending step-3: backtick-escaped $( ) name
 YHV7NzJ9bSBDOlx4	pending step-3: delta review (cmd0 name mine=("u{72}m",true) oracle=("rm",true))
 V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
-V3JpdGUtT3V0cHV0IEDigJwKeCAkeQrigJ1A	pending step-3: smart-quote / CRLF here-string
-V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote / CRLF here-string
-V3JpdGUtT3V0cHV0IGHigJhiIGPigJk=	pending step-3: smart-quote value
+V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC0tJSBhIGI=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSAiYSBiIg==	pending step-3: --% verbatim tail as elements
@@ -45,7 +32,6 @@ V3JpdGUtT3V0cHV0IC0tJSBhICYmIFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbati
 V3JpdGUtT3V0cHV0IC0tJSBhClJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSBhIDI+JjE=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSBhIHx8IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail as elements
-JiB7IHBhcmFtKCRwKSBSZW1vdmUtSXRlbSAkcCB9IEM6XHg=	pending step-3: glued operator/bracket/comment splits an argument
 dXNpbmcgbmFtZXNwYWNlIFN5c3RlbS5JTzsgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
 ZW51bSBFIHsgQTsgQiB9OyBSZW1vdmUtSXRlbSBDOlx4	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
 ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	pending step-3: param/attribute block command recursion

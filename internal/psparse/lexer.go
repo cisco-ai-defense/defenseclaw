@@ -99,7 +99,8 @@ func (l *lexer) push(t Token) {
 func (l *lexer) setAtStart(k TokenKind) {
 	switch k {
 	case TokNewline, TokComment, TokSemi, TokPipe, TokPipePipe, TokAmpAmp, TokAmp,
-		TokLParen, TokLBrace, TokLBracket, TokComma, TokAtParen, TokAtBrace:
+		TokLParen, TokLBrace, TokLBracket, TokComma, TokAtParen, TokAtBrace,
+		TokString, TokRParen, TokRBrace, TokRBracket:
 		l.atStart = true
 	default:
 		l.atStart = false
@@ -682,7 +683,7 @@ func (l *lexer) lexBareword() {
 		if isSpace(r) || r == '\n' || r == -1 {
 			break
 		}
-		if strings.ContainsRune(";,|&(){}[]'\"", r) {
+		if strings.ContainsRune(";,|&(){}[]", r) || isSingleQuote(r) || isDoubleQuote(r) {
 			break
 		}
 		if r == '$' && dollarStartsVar(l.peek(1)) {
