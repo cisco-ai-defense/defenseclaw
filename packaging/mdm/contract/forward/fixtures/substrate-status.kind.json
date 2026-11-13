@@ -26,8 +26,7 @@
     },
     "controller": {
       "desired": 2,
-      "ready": 2,
-      "lag_seconds": 1
+      "ready": 2
     },
     "callout": {
       "desired": 2,
@@ -41,36 +40,21 @@
       "atespace": "eng-web",
       "launcher": true,
       "actors": 3,
-      "policies": 3,
-      "drift": 0,
-      "conflicts": 0,
-      "unattested": 0
+      "states": {
+        "running": 1,
+        "suspended": 2
+      }
     }
   ],
   "inventory": {
-    "actors": 3,
-    "running": 1,
-    "suspended": 2,
-    "templates": 2,
-    "unattested_templates": 0,
-    "foreign_actors": 0
+    "actors": 4,
+    "states": {
+      "running": 1,
+      "suspended": 2,
+      "crashed": 1
+    },
+    "templates": 2
   },
-  "activity": {
-    "window_seconds": 3600,
-    "hook_decisions": 120,
-    "blocked": 2,
-    "model_requests": 40,
-    "cost_micro_usd": 1250000
-  },
-  "batches": [
-    {
-      "batch_id": "b-20261113-1",
-      "tasks": 50,
-      "running": 10,
-      "succeeded": 38,
-      "failed": 2
-    }
-  ],
   "checks": [
     {
       "id": "substrate_version",
