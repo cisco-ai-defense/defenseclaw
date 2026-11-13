@@ -301,17 +301,22 @@ func (a *cradleAnalysis) commandDownloadDestination(command *psparse.Command) (s
 			return parameter == "o" || parameter == "output" ||
 				len(parameter) >= 4 && strings.HasPrefix("outfile", parameter)
 		})
-	case name == "start-bitstransfer":
-		destination, ok = cradleParameterValue(words, func(parameter string) bool {
-			return len(parameter) >= 4 && strings.HasPrefix("destination", parameter)
-		})
-	case name == "bitsadmin" || name == "bitsadmin.exe":
-		if ok = cradleHasWord(words, "transfer"); ok {
-			destination, ok = cradleLastPositional(words)
-		}
-	case name == "certutil" || name == "certutil.exe":
-		if ok = cradleHasWord(words, "urlcache", "verifyctl"); ok {
-			destination, ok = cradleLastPositional(words)
+	case cradleFileTransferPrograms[name]:
+		switch strings.TrimSuffix(name, ".exe") {
+		case "start-bitstransfer":
+			destination, ok = cradleParameterValue(words, func(parameter string) bool {
+				return len(parameter) >= 4 && strings.HasPrefix("destination", parameter)
+			})
+		case "bitsadmin":
+			if ok = cradleHasWord(words, "transfer"); ok {
+				destination, ok = cradleLastPositional(words)
+			}
+		case "certutil":
+			if ok = cradleHasWord(words, "urlcache", "verifyctl"); ok {
+				destination, ok = cradleLastPositional(words)
+			}
+		default:
+			ok = false
 		}
 	default:
 		ok = false
