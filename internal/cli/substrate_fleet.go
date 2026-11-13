@@ -224,7 +224,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 		case strings.HasSuffix(n, "gateway-leader"):
 			r.Health.Leader.Ready = rep.Ready > 0
 		case strings.HasSuffix(n, "controller"):
-			r.Health.Controller = fleet.Controller{Desired: rep.Desired, Ready: rep.Ready}
+			r.Health.Controller = fleet.Controller(rep)
 		case strings.HasSuffix(n, "callout"):
 			r.Health.Callout.Desired, r.Health.Callout.Ready = rep.Desired, rep.Ready
 		case strings.HasSuffix(n, "gateway"):
