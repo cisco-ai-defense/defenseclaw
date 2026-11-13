@@ -319,6 +319,9 @@ type Store struct {
 	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
 	// connection into one transaction and one flush (durableGrouped).
 	durableGroup writeGroup
+	// correlationGroup is the store's correlation turn and the transaction
+	// its queued hook occurrences share (JoinCorrelationGroup).
+	correlationGroup correlationGroup
 	// writeBaton orders the write transactions of the store (writeBaton).
 	writeBaton writeBaton
 	// dirSyncedWAL is the write-ahead log file whose directory entry the last

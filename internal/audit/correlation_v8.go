@@ -473,6 +473,9 @@ type CorrelationPendingLocator struct {
 
 type CorrelationRepository struct {
 	store *Store
+	// batch is the correlation turn this repository holds
+	// (JoinCorrelationGroup), or nil.
+	batch *correlationBatchMember
 }
 
 func (s *Store) CorrelationRepository() (*CorrelationRepository, error) {
@@ -550,6 +553,9 @@ func (repo *CorrelationRepository) resolveConnectorInstance(
 			profileVersion == instance.ProfileVersion {
 			return instance, nil
 		}
+	}
+	if err := repo.ownTransactionAllowed(); err != nil {
+		return ConnectorInstance{}, err
 	}
 	release, err := repo.store.acquireReady()
 	if err != nil {
@@ -688,6 +694,9 @@ func (repo *CorrelationRepository) UpsertConnectorInstance(
 	if instance.UpdatedAt.Before(instance.CreatedAt) {
 		return ConnectorInstance{}, errors.New("audit: connector instance update precedes creation")
 	}
+	if err := repo.ownTransactionAllowed(); err != nil {
+		return ConnectorInstance{}, err
+	}
 	release, err := repo.store.acquireReady()
 	if err != nil {
 		return ConnectorInstance{}, err
@@ -795,6 +804,9 @@ type CorrelationTx struct {
 	closed                    bool
 	existingSemanticEventID   SemanticEventID
 	existingConnectorInstance ConnectorInstanceID
+	// savepoint names this occurrence in a shared correlation transaction
+	// (JoinCorrelationGroup); empty when it has its own transaction.
+	savepoint string
 }
 
 // BeginExistingOccurrence opens a write transaction scoped to one immutable
@@ -944,31 +956,12 @@ func (repo *CorrelationRepository) BeginOccurrence(
 			return nil, empty, err
 		}
 	}
-	release, err := repo.store.acquireReady()
+	// Its own transaction, or a savepoint of the correlation group's shared
+	// one (beginOccurrenceTx).
+	correlationTx, err := repo.beginOccurrenceTx(ctx)
 	if err != nil {
 		return nil, empty, err
 	}
-	// The occurrence reads before it writes. Another writer of this process
-	// that commits in between makes the upgrade fail at once with
-	// SQLITE_BUSY_SNAPSHOT and the hook starts its correlation over, so this
-	// transaction takes the write baton first (writeBaton), ahead of the
-	// records of calls already answered: the answer waits on it.
-	acquireTurn := repo.store.writeBaton.acquireUrgent
-	if repo.store.secureClientSchema {
-		acquireTurn = repo.store.writeBaton.acquire
-	}
-	turn, err := acquireTurn(ctx)
-	if err != nil {
-		release()
-		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
-	}
-	tx, err := repo.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		turn()
-		release()
-		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
-	}
-	correlationTx := &CorrelationTx{repo: repo, tx: tx, release: func() { turn(); release() }}
 	fail := func(cause error) (*CorrelationTx, CorrelationOccurrenceResult, error) {
 		_ = correlationTx.Rollback()
 		return nil, empty, cause
@@ -2001,6 +1994,9 @@ func (tx *CorrelationTx) Commit() error {
 	if tx == nil || tx.tx == nil || tx.closed {
 		return errors.New("audit: correlation transaction is closed")
 	}
+	if tx.savepoint != "" {
+		return tx.commitSavepoint()
+	}
 	err := tx.tx.Commit()
 	tx.finish()
 	if err != nil {
@@ -2012,6 +2008,9 @@ func (tx *CorrelationTx) Commit() error {
 func (tx *CorrelationTx) Rollback() error {
 	if tx == nil || tx.closed {
 		return nil
+	}
+	if tx.savepoint != "" {
+		return tx.rollbackSavepoint()
 	}
 	err := tx.tx.Rollback()
 	tx.finish()

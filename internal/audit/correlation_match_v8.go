@@ -156,7 +156,7 @@ func (repo *CorrelationRepository) MatchOccurrence(
 	if err := validateCorrelationMatchInput(input); err != nil {
 		return CorrelationMatchResult{}, err
 	}
-	release, err := repo.store.acquireReady()
+	release, err := repo.acquireReady()
 	if err != nil {
 		return CorrelationMatchResult{}, err
 	}
@@ -465,7 +465,7 @@ func (repo *CorrelationRepository) matchReceipt(ctx context.Context, connector C
 			"exact-source-receipt", "v1", CorrelationSameAs, true), true, nil
 	}
 	var conflict string
-	err = repo.store.queryPool().QueryRowContext(ctx, `SELECT semantic_event_id FROM correlation_receipts
+	err = repo.queryPool().QueryRowContext(ctx, `SELECT semantic_event_id FROM correlation_receipts
 		WHERE connector_instance_id=? AND source_key_digest=? AND fingerprint_sha256<>?
 		ORDER BY first_received_time_unix_nano, semantic_event_id LIMIT 1`, string(connector),
 		receipt.SourceKeyDigest, receipt.FingerprintSHA256).Scan(&conflict)
@@ -606,7 +606,7 @@ func correlationSimilarityMatchStatement(connector ConnectorInstanceID, hint Cor
 }
 
 func (repo *CorrelationRepository) queryCorrelationMatchRows(ctx context.Context, statement string, args ...any) ([]correlationMatchRow, error) {
-	rows, err := repo.store.queryPool().QueryContext(ctx, statement, args...)
+	rows, err := repo.queryPool().QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: query correlation match evidence: %w", err)
 	}
