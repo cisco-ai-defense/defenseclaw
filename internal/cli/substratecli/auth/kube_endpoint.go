@@ -17,6 +17,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -24,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"io"
 	"net"
 	"net/http"
@@ -34,9 +36,6 @@ import (
 )
 
 const (
-	// DefaultKubeNamespace is where the cluster publishes its launcher
-	// endpoint record when the context names no kube_namespace.
-	DefaultKubeNamespace = "defenseclaw-system"
 	// KubeEndpointConfigMap is the ConfigMap that holds the record; its
 	// data key admin_url is the admin listener of this cluster.
 	KubeEndpointConfigMap = "defenseclaw-launcher-endpoint"
@@ -54,20 +53,19 @@ type KubePin struct {
 	Server    string
 	AdminURL  string
 	Principal string
+	// Namespace is where the record was read (the one named, or the one
+	// found).
+	Namespace string
 }
 
-// WithKubePin returns c with the pin recorded.
+// WithKubePin returns c with the pin recorded, and the record's namespace
+// when the context named none.
 func (c Context) WithKubePin(p KubePin) Context {
 	c.KubePinServer, c.KubePinAdminURL = p.Server, p.AdminURL
-	return c
-}
-
-// KubeNamespaceOrDefault is the namespace of the endpoint record.
-func (c Context) KubeNamespaceOrDefault() string {
-	if ns := strings.TrimSpace(c.KubeNamespace); ns != "" {
-		return ns
+	if c.KubeNamespace == "" {
+		c.KubeNamespace = p.Namespace
 	}
-	return DefaultKubeNamespace
+	return c
 }
 
 var kubeNamespaceRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -118,16 +116,17 @@ func normEndpoint(raw string) (string, error) {
 // KubeVerifyEndpoint checks that adminURL is the launcher endpoint the
 // kubeconfig's cluster publishes, before any Kubernetes credential is
 // sent to it. It reads the ConfigMap KubeEndpointConfigMap in namespace
-// (DefaultKubeNamespace when empty) from the cluster's API server, the
-// only place the kube bearer goes, trusting the kubeconfig's
-// certificate authority. It returns the pin to record in the context.
+// from the cluster's API server, the only place the user's own credential
+// goes, trusting the kubeconfig's certificate authority. With no namespace
+// it looks in every namespace for the one record that names adminURL
+// (GAP-0192; the chart installs into any namespace). It returns the pin to
+// record in the context.
 func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace string) (KubePin, error) {
 	o = o.withDefaults()
-	if namespace = strings.TrimSpace(namespace); namespace == "" {
-		namespace = DefaultKubeNamespace
-	}
-	if err := checkKubeNamespace(namespace); err != nil {
-		return KubePin{}, err
+	if namespace = strings.TrimSpace(namespace); namespace != "" {
+		if err := checkKubeNamespace(namespace); err != nil {
+			return KubePin{}, err
+		}
 	}
 	if err := checkURL("admin_url", adminURL, false); err != nil {
 		return KubePin{}, err
@@ -147,9 +146,22 @@ func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace 
 	if err != nil {
 		return KubePin{}, err
 	}
-	tok, _, err := kubeCredential(ctx, o, sel)
-	if err != nil {
-		return KubePin{}, err
+	// The user's own credential reads the record: a bearer, or the client
+	// certificate kubeAPIClient presents.
+	bearer, principal := "", sel.ctx.User
+	if !sel.certOnly() {
+		own := o
+		own.ServiceAccount = ""
+		tok, _, err := kubeUserCredential(ctx, own, sel)
+		if err != nil {
+			return KubePin{}, err
+		}
+		bearer, principal = tok.AccessToken, tok.Principal
+	}
+	if namespace == "" {
+		if namespace, err = kubeFindRecord(ctx, o, hc, sel.cluster.Server, server, bearer, principal, admin); err != nil {
+			return KubePin{}, err
+		}
 	}
 	record := fmt.Sprintf("the endpoint record (ConfigMap %s in namespace %s)", KubeEndpointConfigMap, namespace)
 	rctx, cancel := context.WithTimeout(ctx, o.apiTimeout())
@@ -158,9 +170,7 @@ func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace 
 	if err != nil {
 		return KubePin{}, fmt.Errorf("the server URL of the kube cluster %q is not valid", clean(sel.ctx.Cluster, 100))
 	}
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "defenseclaw-launcher")
+	kubeAuthorize(req, bearer)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return KubePin{}, kubeAPIError(ctx, rctx, err, server, o.apiTimeout())
@@ -175,9 +185,9 @@ func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace 
 	case resp.StatusCode == http.StatusNotFound:
 		return KubePin{}, fmt.Errorf("the cluster at %s has no launcher endpoint record (ConfigMap %s in namespace %s), so no Kubernetes credential is sent to %s; ask your administrator to publish the endpoint record, or give --kube-namespace NAME if DefenseClaw runs in another namespace; %s", server, KubeEndpointConfigMap, namespace, admin, kubeNoOverride)
 	case resp.StatusCode == http.StatusForbidden:
-		return KubePin{}, fmt.Errorf("the kubeconfig user %q may not read %s on %s (HTTP 403); check you may read ConfigMaps in that namespace, or ask your administrator to allow it; %s", clean(tok.Principal, 100), record, server, kubeNoOverride)
+		return KubePin{}, fmt.Errorf("the kubeconfig user %q may not read %s on %s (HTTP 403); check you may read ConfigMaps in that namespace, or ask your administrator to allow it; %s", clean(principal, 100), record, server, kubeNoOverride)
 	case resp.StatusCode == http.StatusUnauthorized:
-		return KubePin{}, fmt.Errorf("the Kubernetes API server %s did not accept the credential of the kubeconfig user %q (HTTP 401); sign in to the cluster again (for example run: kubectl get namespaces)", server, clean(tok.Principal, 100))
+		return KubePin{}, fmt.Errorf("the Kubernetes API server %s did not accept the credential of the kubeconfig user %q (HTTP 401); sign in to the cluster again (for example run: kubectl get namespaces)", server, clean(principal, 100))
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		return KubePin{}, fmt.Errorf("the Kubernetes API server %s answered with a redirect (HTTP %d), which the launcher does not follow; point the kubeconfig at the API server itself", server, resp.StatusCode)
 	default:
@@ -203,7 +213,172 @@ func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace 
 	if published != admin {
 		return KubePin{}, fmt.Errorf("the cluster at %s publishes the launcher endpoint %s, not %s, so no Kubernetes credential is sent to %s; use --admin-url %s, or ask your administrator to fix the endpoint record (ConfigMap %s in namespace %s); %s", server, published, admin, admin, published, KubeEndpointConfigMap, namespace, kubeNoOverride)
 	}
-	return KubePin{Server: server, AdminURL: admin, Principal: tok.Principal}, nil
+	return KubePin{Server: server, AdminURL: admin, Principal: principal, Namespace: namespace}, nil
+}
+
+// kubeAuthorize sets the headers of a request to the API server: the
+// user's bearer when it has one (a certificate user is known by its TLS
+// certificate alone).
+func kubeAuthorize(req *http.Request, bearer string) {
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "defenseclaw-launcher")
+}
+
+// kubeFindRecord lists the endpoint records of every namespace and returns
+// the namespace of the one that names admin. None, or more than one, is an
+// error that asks for --kube-namespace.
+func kubeFindRecord(ctx context.Context, o KubeOptions, hc *http.Client, rawServer, server, bearer, principal, admin string) (string, error) {
+	rctx, cancel := context.WithTimeout(ctx, o.apiTimeout())
+	defer cancel()
+	q := url.Values{"fieldSelector": {"metadata.name=" + KubeEndpointConfigMap}}
+	req, err := http.NewRequestWithContext(rctx, http.MethodGet, strings.TrimRight(rawServer, "/")+"/api/v1/configmaps?"+q.Encode(), nil)
+	if err != nil {
+		return "", fmt.Errorf("the server URL of the kube cluster is not valid")
+	}
+	kubeAuthorize(req, bearer)
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", kubeAPIError(ctx, rctx, err, server, o.apiTimeout())
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil || len(body) > maxBody {
+		return "", fmt.Errorf("reading the endpoint records from the Kubernetes API server %s failed", server)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusForbidden:
+		return "", fmt.Errorf("the kubeconfig user %q may not list ConfigMaps in every namespace on %s, so the launcher cannot find the endpoint record; give --kube-namespace NAME (the namespace DefenseClaw runs in)", clean(principal, 100), server)
+	default:
+		return "", fmt.Errorf("listing the endpoint records on the Kubernetes API server %s failed (HTTP %d); give --kube-namespace NAME (the namespace DefenseClaw runs in)", server, resp.StatusCode)
+	}
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+			Data map[string]string `json:"data"`
+		} `json:"items"`
+	}
+	if json.Unmarshal(body, &list) != nil {
+		return "", fmt.Errorf("the Kubernetes API server %s answered with something that is not a ConfigMap list", server)
+	}
+	var found []string
+	for _, it := range list.Items {
+		if it.Metadata.Name != KubeEndpointConfigMap || checkKubeNamespace(it.Metadata.Namespace) != nil {
+			continue
+		}
+		if got, err := normEndpoint(strings.TrimSpace(it.Data[kubeEndpointKey])); err == nil && got == admin {
+			found = append(found, it.Metadata.Namespace)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		return "", fmt.Errorf("no launcher endpoint record (ConfigMap %s) on %s names %s, so no Kubernetes credential is sent to it; check --admin-url, or give --kube-namespace NAME; %s", KubeEndpointConfigMap, server, admin, kubeNoOverride)
+	}
+	return "", fmt.Errorf("the launcher endpoint records of the namespaces %s on %s all name %s; give --kube-namespace NAME to pick the one DefenseClaw runs in", strings.Join(found, ", "), server, admin)
+}
+
+// mintKubeToken asks the API server, with the user's own credential (bearer,
+// or the client certificate kubeAPIClient presents), for a short-lived token
+// of the ServiceAccount o names (or DefaultKubeServiceAccount) for the
+// DefenseClaw audience. The gateway checks it with a TokenReview.
+func mintKubeToken(ctx context.Context, o KubeOptions, sel *kubeSel, bearer string) (*Token, error) {
+	ns, name, err := kubeServiceAccount(o)
+	if err != nil {
+		return nil, err
+	}
+	if sel.cluster == nil {
+		return nil, sel.noCluster()
+	}
+	server, hc, err := kubeAPIClient(o, sel)
+	if err != nil {
+		return nil, err
+	}
+	who := fmt.Sprintf("the kubeconfig user %q", clean(sel.ctx.User, 100))
+	why := ""
+	if sel.certOnly() {
+		why = who + " signs in with a client certificate, which DefenseClaw cannot check, so the launcher signs in as a ServiceAccount; "
+	}
+	sa := ns + "/" + name
+	body, _ := json.Marshal(map[string]any{"apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",
+		"spec": map[string]any{"audiences": []string{identity.KubeTokenAudience}, "expirationSeconds": kubeMintSeconds}})
+	rctx, cancel := context.WithTimeout(ctx, o.apiTimeout())
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, http.MethodPost, strings.TrimRight(sel.cluster.Server, "/")+"/api/v1/namespaces/"+ns+"/serviceaccounts/"+name+"/token", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("the server URL of the kube cluster %q is not valid", clean(sel.ctx.Cluster, 100))
+	}
+	kubeAuthorize(req, bearer)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, kubeAPIError(ctx, rctx, err, server, o.apiTimeout())
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	switch resp.StatusCode {
+	case http.StatusCreated, http.StatusOK:
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("%sthe ServiceAccount %s does not exist on %s: create it with kubectl -n %s create serviceaccount %s, or name another with --kube-service-account NAMESPACE/NAME", why, sa, server, ns, name)
+	case http.StatusForbidden:
+		return nil, fmt.Errorf("%s%s may not create a token for the ServiceAccount %s on %s (HTTP 403): it needs create on serviceaccounts/token for it, or name another with --kube-service-account NAMESPACE/NAME", why, who, sa, server)
+	case http.StatusUnauthorized:
+		return nil, fmt.Errorf("the Kubernetes API server %s did not accept the credential of %s (HTTP 401); sign in to the cluster again (for example run: kubectl get namespaces)", server, who)
+	default:
+		return nil, fmt.Errorf("the Kubernetes API server %s did not mint a token for the ServiceAccount %s (HTTP %d)", server, sa, resp.StatusCode)
+	}
+	var tr struct {
+		Status struct {
+			Token               string    `json:"token"`
+			ExpirationTimestamp time.Time `json:"expirationTimestamp"`
+		} `json:"status"`
+	}
+	if json.Unmarshal(raw, &tr) != nil {
+		return nil, fmt.Errorf("the Kubernetes API server %s answered the token request with something that is not a TokenRequest", server)
+	}
+	tok, ok := oneToken([]byte(tr.Status.Token))
+	if !ok {
+		return nil, fmt.Errorf("the Kubernetes API server %s returned no token for the ServiceAccount %s", server, sa)
+	}
+	return &Token{Kind: KindKube, AccessToken: tok, Expiry: tr.Status.ExpirationTimestamp, Principal: "system:serviceaccount:" + ns + ":" + name}, nil
+}
+
+// kubeServiceAccountRE is a ServiceAccount name (a DNS subdomain).
+var kubeServiceAccountRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
+
+// kubeServiceAccount splits o.ServiceAccount ("NAMESPACE/NAME" or "NAME",
+// default DefaultKubeServiceAccount); a bare name lives in o.Namespace.
+func kubeServiceAccount(o KubeOptions) (string, string, error) {
+	ns, name := strings.TrimSpace(o.Namespace), strings.TrimSpace(o.ServiceAccount)
+	if a, b, ok := strings.Cut(name, "/"); ok {
+		ns, name = a, b
+	}
+	if name == "" {
+		name = DefaultKubeServiceAccount
+	}
+	if ns == "" {
+		return "", "", fmt.Errorf("the ServiceAccount %s needs its namespace: give --kube-service-account NAMESPACE/NAME or --kube-namespace NAME", clean(name, 100))
+	}
+	return ns, name, CheckKubeServiceAccount(ns + "/" + name)
+}
+
+// CheckKubeServiceAccount checks a "NAMESPACE/NAME" or "NAME" value.
+func CheckKubeServiceAccount(v string) error {
+	ns, name, ok := strings.Cut(v, "/")
+	if !ok {
+		ns, name = "", v
+	}
+	if (ok && checkKubeNamespace(ns) != nil) || !kubeServiceAccountRE.MatchString(name) || strings.Contains(name, "/") {
+		return fmt.Errorf("kube_service_account %q is not NAMESPACE/NAME or NAME of a Kubernetes ServiceAccount", clean(v, 100))
+	}
+	return nil
 }
 
 func (o KubeOptions) apiTimeout() time.Duration {
@@ -227,6 +402,11 @@ func kubeAPIClient(o KubeOptions, sel *kubeSel) (string, *http.Client, error) {
 		return "", nil, fmt.Errorf("the kube cluster %q sets insecure-skip-tls-verify; the launcher does not send a Kubernetes credential to an API server it cannot verify; set certificate-authority-data for the cluster", name)
 	}
 	tc := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: cl.TLSServerName}
+	if cert, err := kubeClientCert(o, sel); err != nil {
+		return "", nil, err
+	} else if cert != nil {
+		tc.Certificates = []tls.Certificate{*cert}
+	}
 	var pem []byte
 	switch {
 	case strings.TrimSpace(cl.CertificateAuthorityData) != "":
@@ -329,4 +509,45 @@ func checkKubePin(c Context, o KubeOptions) (*kubeSel, error) {
 		return nil, &kubePinError{fmt.Sprintf("%s, not for %s on %s, so no Kubernetes credential is sent; %s", verified, admin, now, kubeLoginAgain)}
 	}
 	return sel, nil
+}
+
+// kubeClientCert is the selected user's client certificate (data or files,
+// as in client-go), nil when it has none. It goes only to the API server.
+func kubeClientCert(o KubeOptions, sel *kubeSel) (*tls.Certificate, error) {
+	u, ok := sel.kc.users[sel.ctx.User]
+	if !ok || !u.hasCert() {
+		return nil, nil
+	}
+	who := fmt.Sprintf("the kubeconfig user %q", clean(sel.ctx.User, 100))
+	from := sel.kc.userFrom[sel.ctx.User]
+	read := func(data, file, what string) ([]byte, error) {
+		if d := strings.TrimSpace(data); d != "" {
+			b, err := base64.StdEncoding.DecodeString(d)
+			if err != nil {
+				return nil, fmt.Errorf("the %s-data of %s is not base64", what, who)
+			}
+			return b, nil
+		}
+		if strings.TrimSpace(file) == "" {
+			return nil, fmt.Errorf("%s has no %s", who, what)
+		}
+		b, err := o.ReadFile(relTo(file, from))
+		if err != nil {
+			return nil, fmt.Errorf("the %s file of %s cannot be read: %s", what, who, readReason(err))
+		}
+		return b, nil
+	}
+	cert, err := read(u.ClientCertificateData, u.ClientCertificate, "client-certificate")
+	if err != nil {
+		return nil, err
+	}
+	key, err := read(u.ClientKeyData, u.ClientKey, "client-key")
+	if err != nil {
+		return nil, err
+	}
+	pair, err := tls.X509KeyPair(cert, key)
+	if err != nil {
+		return nil, fmt.Errorf("the client certificate and key of %s do not form a pair", who)
+	}
+	return &pair, nil
 }

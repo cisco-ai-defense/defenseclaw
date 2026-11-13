@@ -93,3 +93,35 @@ func TestSubstrateWorkloadWildcardBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0192: a ServiceAccount the launcher signed in with is a Kubernetes
+// person; the admin maps it to a profile by its subject (users) or by its
+// namespace group (groups), as for any other person.
+func TestSubstrateLauncherProfilesMapAServiceAccount(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.DefaultProfile = "default"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "ops", Match: config.ProfileMatch{Users: []string{"system:serviceaccount:dc:defenseclaw-launcher"}}},
+		{Profile: "eng", Match: config.ProfileMatch{Groups: []string{"system:serviceaccounts:team-a"}}},
+	}
+	cfg.Substrate.LauncherAtespaces = map[string][]string{"ops": {"dc-ops"}, "eng": {"dc-eng"}, "default": {"dc-default"}}
+	resolve := SubstrateLauncherProfiles(cfg)
+	sa := func(ns, name string) identity.Person {
+		sub := "system:serviceaccount:" + ns + ":" + name
+		return identity.Person{Kind: identity.PersonKube, Issuer: identity.KubeIssuer, Subject: sub, Principal: sub,
+			Groups: []string{"system:serviceaccounts", "system:serviceaccounts:" + ns, "system:authenticated"}}
+	}
+	for _, tc := range []struct {
+		p    identity.Person
+		want string
+	}{
+		{sa("dc", "defenseclaw-launcher"), "ops"},
+		{sa("team-a", "dev1"), "eng"},
+		{sa("team-b", "dev2"), "default"},
+	} {
+		profile, space, err := resolve(tc.p, "", "claudecode", false)
+		if err != nil || profile != tc.want || space != cfg.Substrate.LauncherAtespaces[tc.want][0] {
+			t.Errorf("%s: %s %s %v, want %s", tc.p.Subject, profile, space, err, tc.want)
+		}
+	}
+}

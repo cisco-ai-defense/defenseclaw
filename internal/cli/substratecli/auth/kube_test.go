@@ -147,8 +147,10 @@ func TestKubeLogin(t *testing.T) {
 		{name: "named context tokenFile", file: cfg, ctx: "ops", wantTok: "file-tok-marker", wantP: "filer"},
 		{name: "token when tokenFile is gone", file: cfg, ctx: "both", wantTok: "static-tok-marker", wantP: "both"},
 		{name: "tokenFile missing", file: cfg, ctx: "lost", wantErr: `the tokenFile of the kubeconfig user "lostfile" (` + filepath.Join(dir, "missing.txt") + `) does not exist`},
-		{name: "cert data refused", file: cfg, ctx: "cert", wantErr: `the kubeconfig user "certy" signs in with a client certificate; ` + kubeCertRefusal},
-		{name: "cert file refused", file: cfg, ctx: "certfile", wantErr: kubeCertRefusal},
+		// GAP-0192: a certificate user signs in as a ServiceAccount, which
+		// needs the namespace DefenseClaw runs in (login --kube records it).
+		{name: "cert data needs the namespace", file: cfg, ctx: "cert", wantErr: "the ServiceAccount defenseclaw-launcher needs its namespace"},
+		{name: "cert file needs the namespace", file: cfg, ctx: "certfile", wantErr: "the ServiceAccount defenseclaw-launcher needs its namespace"},
 		{name: "legacy auth-provider refused", file: cfg, ctx: "legacy", wantErr: `legacy auth-provider "oidc", which the launcher does not support`},
 		{name: "basic refused", file: cfg, ctx: "basic", wantErr: "does not support basic sign-in"},
 		{name: "no credential", file: cfg, ctx: "none", wantErr: `the kubeconfig user "empty" has no token, tokenFile or exec plugin`},

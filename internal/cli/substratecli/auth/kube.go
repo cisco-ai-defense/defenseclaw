@@ -42,7 +42,14 @@ const (
 	kubeExecInfoEnv  = "KUBERNETES_EXEC_INFO"
 	kubeExecV1       = "client.authentication.k8s.io/v1"
 	kubeExecV1beta1  = "client.authentication.k8s.io/v1beta1"
-	kubeCertRefusal  = "certificate sign-in is not supported by the launcher; use a token-based user or an OIDC cluster"
+	kubeCertRefusal  = "certificate sign-in through an exec plugin is not supported by the launcher; use a token-based user, a kubeconfig client certificate or an OIDC cluster"
+	// kubeMintSeconds is the life of a ServiceAccount token the launcher
+	// mints for the gateway (the TokenRequest minimum is 10 minutes).
+	kubeMintSeconds = 900
+	// DefaultKubeServiceAccount is the ServiceAccount a client-certificate
+	// user signs in as when none is named (the docs create it in the
+	// namespace DefenseClaw runs in).
+	DefaultKubeServiceAccount = "defenseclaw-launcher"
 )
 
 // KubeOptions selects the kubeconfig user whose credential is the bearer
@@ -54,7 +61,17 @@ type KubeOptions struct {
 	Kubeconfig string
 	// Context is the kubeconfig context; empty is its current-context.
 	Context string
-	Env     func(string) string
+	// Namespace is where DefenseClaw runs (the endpoint record's); a bare
+	// ServiceAccount name, and the default one, live there.
+	Namespace string
+	// ServiceAccount, "NAMESPACE/NAME" or "NAME", makes the launcher hand
+	// the gateway a short-lived token it mints for that ServiceAccount
+	// (TokenRequest, audience identity.KubeTokenAudience) with the user's
+	// own credential. A client-certificate user always does this, with
+	// DefaultKubeServiceAccount when none is named: the gateway cannot check
+	// a certificate it never sees (GAP-0192).
+	ServiceAccount string
+	Env            func(string) string
 	// RunExec runs an exec credential plugin and returns its stdout. An
 	// error's text should be the plugin's stderr (it is cut to one line
 	// and token-looking text is blanked before it is shown).
@@ -68,7 +85,7 @@ type KubeOptions struct {
 
 // KubeOptions builds the kube options of the context.
 func (c Context) KubeOptions() KubeOptions {
-	return KubeOptions{Kubeconfig: c.Kubeconfig, Context: c.KubeContext}
+	return KubeOptions{Kubeconfig: c.Kubeconfig, Context: c.KubeContext, Namespace: c.KubeNamespace, ServiceAccount: c.KubeServiceAccount}
 }
 
 func (o KubeOptions) withDefaults() KubeOptions {
@@ -92,9 +109,10 @@ func (o KubeOptions) withDefaults() KubeOptions {
 
 // KubeLogin reads the kubeconfig (without kubectl) and returns the bearer
 // of the selected user: its token, its tokenFile or the answer of its
-// exec credential plugin. The Token has Kind KindKube and Principal = the
-// kubeconfig user name. Nothing is stored. Certificate, basic and legacy
-// auth-provider users are refused.
+// exec credential plugin, or a ServiceAccount token it mints (see
+// KubeOptions.ServiceAccount). The Token has Kind KindKube and Principal =
+// the kubeconfig user name, or system:serviceaccount:NS:NAME for a minted
+// one. Nothing is stored. Basic and legacy auth-provider users are refused.
 func KubeLogin(ctx context.Context, o KubeOptions) (*Token, error) {
 	t, _, err := kubeResolve(ctx, o)
 	return t, err
@@ -355,8 +373,42 @@ func kubeResolve(ctx context.Context, o KubeOptions) (*Token, bool, error) {
 	return kubeCredential(ctx, o, sel)
 }
 
-// kubeCredential reads the bearer of the user of sel.
+// kubeCredential is the bearer the gateway gets for the user of sel: a
+// ServiceAccount token minted with the user's own credential when a
+// ServiceAccount is named or the user has only a client certificate, else
+// the user's own bearer.
 func kubeCredential(ctx context.Context, o KubeOptions, sel *kubeSel) (*Token, bool, error) {
+	if o.ServiceAccount == "" && !sel.certOnly() {
+		return kubeUserCredential(ctx, o, sel)
+	}
+	bearer := ""
+	if !sel.certOnly() {
+		own := o
+		own.ServiceAccount = ""
+		t, _, err := kubeUserCredential(ctx, own, sel)
+		if err != nil {
+			return nil, false, err
+		}
+		bearer = t.AccessToken
+	}
+	t, err := mintKubeToken(ctx, o, sel, bearer)
+	return t, false, err
+}
+
+// certOnly reports whether the user of sel signs in with a client
+// certificate and nothing else.
+func (s *kubeSel) certOnly() bool {
+	u, ok := s.kc.users[s.ctx.User]
+	return ok && u.hasCert() && u.Token == "" && u.TokenFile == "" && u.Exec == nil && u.AuthProvider == nil && u.Username == "" && u.Password == ""
+}
+
+func (u kubeUser) hasCert() bool {
+	return u.ClientCertificate != "" || u.ClientCertificateData != "" || u.ClientKey != "" || u.ClientKeyData != ""
+}
+
+// kubeUserCredential reads the bearer of the user of sel (never a
+// certificate).
+func kubeUserCredential(ctx context.Context, o KubeOptions, sel *kubeSel) (*Token, bool, error) {
 	kc, name, kctx := sel.kc, sel.name, sel.ctx
 	if kctx.User == "" {
 		return nil, false, fmt.Errorf("the kube context %q names no user", clean(name, 100))
@@ -416,9 +468,6 @@ func kubeCredential(ctx context.Context, o KubeOptions, sel *kubeSel) (*Token, b
 	}
 	if u.Username != "" || u.Password != "" {
 		return nil, false, fmt.Errorf("%s signs in with a user name and password; the launcher does not support basic sign-in; use a token-based user or an OIDC cluster", who)
-	}
-	if u.ClientCertificate != "" || u.ClientCertificateData != "" || u.ClientKey != "" || u.ClientKeyData != "" {
-		return nil, false, fmt.Errorf("%s signs in with a client certificate; %s", who, kubeCertRefusal)
 	}
 	return nil, false, fmt.Errorf("%s has no token, tokenFile or exec plugin; use a token-based user or an OIDC cluster", who)
 }

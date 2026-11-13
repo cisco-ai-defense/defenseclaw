@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -34,6 +35,14 @@ func TestSubstrateLoginKubeIsPinnedToTheClustersEndpointRecord(t *testing.T) {
 	var sawBearer atomic.Value
 	kapi := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawBearer.Store(r.Header.Get("Authorization"))
+		// No --kube-namespace: the launcher finds the record (GAP-0192).
+		if r.URL.Path == "/api/v1/configmaps" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{
+				"metadata": map[string]any{"name": "defenseclaw-launcher-endpoint", "namespace": "defenseclaw-system"},
+				"data":     map[string]string{"admin_url": record}}}})
+			return
+		}
 		if !strings.HasSuffix(r.URL.Path, "/namespaces/defenseclaw-system/configmaps/defenseclaw-launcher-endpoint") {
 			http.NotFound(w, r)
 			return
@@ -104,5 +113,17 @@ contexts:
 	t.Setenv("DEFENSECLAW_SUBSTRATE_ADMIN_URL", "https://127.0.0.1:1")
 	if _, _, err := runSubstrate(t, newSubstrateListCmd(), "--context", "k"); err == nil || !strings.Contains(err.Error(), "run: defenseclaw substrate login --kube again") {
 		t.Errorf("the override must be refused, got %v", err)
+	}
+}
+
+// Live on bm (GAP-0192): doctor said a Kubernetes sign-in signs in "with a
+// workload token only".
+func TestSubstrateDoctorSignInServerNamesAKubeSignIn(t *testing.T) {
+	got := doctorSignInServer(context.Background(), auth.Context{Kube: true})
+	if got.Status != doctorSkip || !strings.Contains(got.Summary, "Kubernetes credentials") {
+		t.Fatalf("kube context: %+v", got)
+	}
+	if got := doctorSignInServer(context.Background(), auth.Context{}); !strings.Contains(got.Summary, "workload token") {
+		t.Fatalf("workload context: %+v", got)
 	}
 }

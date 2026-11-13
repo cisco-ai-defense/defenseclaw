@@ -381,7 +381,18 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "kube-namespace",
                 "string",
-                "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)",
+                (
+                    "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record "
+                    "names --admin-url)"
+                ),
+            ),
+            _Flag(
+                "kube-service-account",
+                "string",
+                (
+                    "with --kube, sign in as this ServiceAccount (NAMESPACE/NAME or NAME) with a short-lived token; a "
+                    "client-certificate kubeconfig uses defenseclaw-launcher"
+                ),
             ),
             _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(

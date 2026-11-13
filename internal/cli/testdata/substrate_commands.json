@@ -479,7 +479,12 @@
       {
         "name": "kube-namespace",
         "type": "string",
-        "usage": "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)"
+        "usage": "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record names --admin-url)"
+      },
+      {
+        "name": "kube-service-account",
+        "type": "string",
+        "usage": "with --kube, sign in as this ServiceAccount (NAMESPACE/NAME or NAME) with a short-lived token; a client-certificate kubeconfig uses defenseclaw-launcher"
       },
       {
         "name": "kubeconfig",
