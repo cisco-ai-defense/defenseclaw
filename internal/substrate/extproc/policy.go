@@ -53,23 +53,14 @@ type urlRule struct {
 }
 
 // appliesTo reports whether the rule covers the host and the request's
-// methods (its method and any override header, GAP-0046); its path prefix
-// is matched separately, on the canonical path. A deny or ask rule applies
-// when any of the methods is listed; an allow rule only when all are, so an
-// override header can neither dodge a refusal nor borrow an allowance.
+// methods (its method and every method an override names, GAP-0046); its
+// path prefix is matched separately, on the canonical path. A rule applies
+// when any of the methods is listed, so an override can't dodge it.
 func (r urlRule) appliesTo(host string, methods []string) bool {
 	if _, ok := r.hosts.match(host); !ok {
 		return false
 	}
 	if len(r.methods) == 0 {
-		return true
-	}
-	if r.action == "allow" {
-		for _, m := range methods {
-			if !r.methods[m] {
-				return false
-			}
-		}
 		return true
 	}
 	for _, m := range methods {
@@ -80,14 +71,9 @@ func (r urlRule) appliesTo(host string, methods []string) bool {
 	return false
 }
 
-// matchesPath matches the canonical path. Deny and ask rules ignore case,
-// since some origins do (/ADMIN is /admin there); an allow rule matches
-// the exact case, so a case variant can't borrow its allowance on an
-// origin that tells them apart (GAP-0046).
+// matchesPath matches the canonical path, ignoring case, since some
+// origins do (/ADMIN is /admin there) (GAP-0046).
 func (r urlRule) matchesPath(canonical string) bool {
-	if r.action == "allow" {
-		return pathHasPrefix(canonical, r.pathPrefix)
-	}
 	// A refusal or an ask of "/admin/" covers "/admin" too: most origins
 	// serve the directory there (or redirect to it).
 	p := strings.ToLower(canonical)

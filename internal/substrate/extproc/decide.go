@@ -347,8 +347,8 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	// request that a method-scoped rule would refuse or ask for under some
 	// method: its body decides.
 	formPending := false
-	if formOverridable(req) && (rule == nil || rule.action != "deny") {
-		if _, any, _ := e.urlRuleVerdict(v, req, pol, pol.ruleMethods()); any != nil && any != rule && any.action != "allow" {
+	if formOverridable(req) {
+		if _, any, _ := e.urlRuleVerdict(v, req, pol, pol.ruleMethods()); any != nil && any != rule {
 			formPending = true
 		}
 	}
@@ -416,10 +416,11 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 
 // urlRuleVerdict applies pol's URL rules to the request under methods:
 // a refusal (deny, or an ambiguous path where a path rule applies) with
-// refused true, else the rule that decided (nil for none; an ask rule is
-// asked by the caller). Rules go in order and the first that applies decides, except
-// that a later deny beats an earlier ask, so substrate.admin's ask never
-// shadows a profile's refusal (GAP-0171).
+// refused true, else the ask rule to raise (nil for none). URL rules only
+// tighten, by strength and not by order (GAP-0171): every rule that
+// applies counts, substrate.admin's and the profile's, and the strictest
+// wins (deny, then ask). An approval of the ask never lifts a deny, since
+// the deny is decided first.
 func (e *Engine) urlRuleVerdict(v Verdict, req *Request, pol *Policy, methods []string) (Verdict, *urlRule, bool) {
 	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
 	var ask *urlRule
@@ -443,8 +444,6 @@ func (e *Engine) urlRuleVerdict(v Verdict, req *Request, pol *Policy, methods []
 				"This actor's profile does not allow "+strings.Join(methods, " or ")+" requests to this path on "+req.Host+"."), r, true
 		case r.action == "ask" && ask == nil:
 			ask = r
-		case r.action == "allow" && ask == nil:
-			return v, r, false
 		}
 	}
 	return v, ask, false
