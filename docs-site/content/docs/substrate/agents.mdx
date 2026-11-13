@@ -8,35 +8,67 @@ keywords:
   - headless coding agents
 ---
 
-{/* TODO(substrate): the waves and headless flags come from PLAN 4.3 and 4.4. A5, A10 and A11 confirm per connector that the flag works and that hooks fire; update the Status column from their HANDOFFs and from docs-site/data/capability-matrix.json. */}
-
 ## Short answer
 
-- **Every agent that DefenseClaw runs in OpenShell can run in Agent Substrate**, in three waves. An actor is a Linux container, and DefenseClaw reuses the same harness images it builds for OpenShell. Only the address the hooks call changes. Amp and OpenCode need a plugin transport change first, so they are refused in the first build.
+- **Ten command-line agents are built to run in an actor.** An actor is a Linux container, and DefenseClaw reuses the harness images it builds for OpenShell. The kit in the image sends hooks to the cluster gateway instead of a local one. How far each agent has been proven differs; the table below says.
 - **Desktop and IDE apps can't.** An actor has no screen, so the Claude desktop app, Cowork, and the Cursor, Kiro and Antigravity editors keep their host connectors. Their command-line versions can run in an actor.
 - **The checks are the same.** The same hooks, rules, guardrails, scans and asks apply.
 - **The surroundings are not.** There's no live folder and nothing on your machine is reachable. In return you get suspend and resume, any laptop OS, model traffic that always passes the guardrail proxy, and unattended runs.
 
 ## Agents
 
-| Wave | Agent | Interactive | Headless (`run --task`) | Condition |
-|---|---|---|---|---|
-| 1 | Claude Code | Yes | `claude -p` | First release; managed tamper tier |
-| 1 | Codex | Yes | `codex exec` | First release; managed tamper tier |
-| 2 | OpenCode | Yes | `opencode run` | Verified OpenShell image |
-| 2 | GitHub Copilot CLI | Yes | `copilot -p` | Verified OpenShell image |
-| 2 | Hermes | Yes | Found per connector | Verified OpenShell image |
-| 2 | Kiro CLI | Yes | `kiro-cli chat --no-interactive` | Verified OpenShell image |
-| 2 | Antigravity CLI | Yes | Found per connector | Verified OpenShell image |
-| 3 | Cursor Agent CLI | Yes | `cursor-agent -p` | Refused until a vendor sign-in run passes |
-| 3 | Amp | Yes | `amp -x` | Refused until a vendor sign-in run passes |
-| 3 | Devin CLI | Yes | Found per connector | Refused until a vendor sign-in run passes |
-| — | OpenClaw, ZeptoClaw | No | No | Not in this release |
-| — | Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
+| Agent | Headless (`run --task`) | Model route | In an actor today |
+|---|---|---|---|
+| Claude Code | `claude -p` | DefenseClaw gateway | **Proven.** Interactive and headless, on a real model, from macOS and Linux laptops. Windows laptops are being re-checked |
+| Codex | `codex exec` | DefenseClaw gateway (`/llm/openai`) | Hooks, headless and interactive proven in an actor, on a real model, in the lab. **Model route:** the shipped gateway serves Codex through the OpenAI provider and needs an OpenAI key in `defenseclaw-llm`. The Bedrock (Mantle) route used in the lab is not in the shipped gateway yet |
+| GitHub Copilot CLI | `copilot -p` | DefenseClaw gateway | Hooks and a real model proven in an actor, in the lab. **Model route:** the Bedrock route the lab used is not in the shipped gateway yet, so it has no working model route there today |
+| Hermes | `hermes chat -q` | DefenseClaw gateway | Same as Copilot CLI |
+| OpenCode | `opencode run` | DefenseClaw gateway | Same as Copilot CLI. `defenseclaw substrate run opencode` starts it: its plugin sends its hook events through the actor kit |
+| Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `KIRO_API_KEY` |
+| Antigravity CLI | `agy -p` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `GEMINI_API_KEY` |
+| Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | Hook path proven. **No model run.** `run` refuses it ("not verified yet") |
+| Amp | `amp -x` | Vendor key (`AMP_API_KEY`) | Works against its API on a key, but **can't run**: it speaks WebSocket only, which Substrate's egress refuses (see below). `run` refuses it |
+| Devin CLI | `devin -p` | Vendor sign-in only | Hook path proven. **No model run.** `run` refuses it |
+| OpenClaw, ZeptoClaw | No | No | Not in this release |
+| Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
 
-A connector without a usable headless mode is interactive only, and `run --task` says so. `template build` builds images for `claudecode` and `codex` in this release; the other connectors need their kit image before they can run.
+"Proven" means a person drove it in a real terminal, or a headless task ran, with DefenseClaw's hooks firing and a real model answering through the gateway. Only Claude Code has been driven through the launcher; the others were driven through the kit and a lab gateway. "No model run" means the vendor offers no key or sign-in the test cluster could use, so only the parts that need no model were checked.
 
-**Vendor sign-in.** Substrate's egress gateway can add an API key or token to an agent's requests, so the agent never holds it. That covers API keys (Anthropic, OpenAI, Bedrock, `AMP_API_KEY`, `CURSOR_API_KEY`). Subscription sign-ins that open a browser and refresh their own tokens, such as a Claude or ChatGPT plan login or `devin auth login`, put tokens in the actor's snapshots. In a managed profile they are refused. In open source you get a warning. Wave 3 stays refused until a run with a real key passes.
+`defenseclaw substrate run` starts `claude`, `codex`, `copilot`, `hermes`, `kiro` and `antigravity`. For the rest it stops with "NAME is not verified yet, so it does not run" and says why.
+
+Each connector has a headless command; a connector that cannot run one is interactive only, and `run --task` says so. The full command lines the relay runs are:
+
+| Agent | Command |
+|---|---|
+| Claude Code | `claude -p {prompt} --output-format stream-json --verbose --dangerously-skip-permissions` |
+| Codex | `codex exec --skip-git-repo-check -c sandbox_mode="danger-full-access" -c approval_policy="never" {prompt}` |
+| OpenCode | `opencode run {prompt}` |
+| Copilot CLI | `copilot -p {prompt} --allow-all-tools` |
+| Hermes | `hermes chat -q {prompt} -Q --yolo --accept-hooks` |
+| Kiro CLI | `kiro-cli-chat chat --v2 --agent defenseclaw --no-interactive --trust-all-tools {prompt}` |
+| Antigravity CLI | `agy -p {prompt} --dangerously-skip-permissions` |
+| Cursor Agent CLI | `cursor-agent -p {prompt} --force --trust` |
+| Amp | `amp -x {prompt}` |
+| Devin CLI | `devin --permission-mode dangerous --respect-workspace-trust false -p {prompt}` |
+
+The "skip permissions" flags only silence the agent's own prompts, because a headless run has nobody to answer them. DefenseClaw's hooks still decide every tool call, and a hook deny holds even under `--yolo`.
+
+**Images.** `template build` builds `claudecode` and `codex` images. The other agents' kit images come from the same kit generator in the repository (`deploy/images/actor-kit`) and are built by the platform team. An agent needs its kit image before it can run.
+
+## Vendor sign-in
+
+Substrate's egress gateway can add an API key or token to an agent's requests, so the agent never holds it. That covers API keys (Anthropic, OpenAI, Bedrock, `AMP_API_KEY`, `CURSOR_API_KEY`, `KIRO_API_KEY`, `GEMINI_API_KEY`). Subscription sign-ins that open a browser and refresh their own tokens, such as a Claude or ChatGPT plan login or `devin auth login`, put tokens in the actor's snapshots.
+
+| | Open source | Managed enterprise |
+|---|---|---|
+| Claude Code, Codex, OpenCode, Copilot CLI, Hermes | Model through the DefenseClaw gateway; no sign-in in the actor | Same |
+| Cursor, Kiro, Antigravity | Starts with a warning that the sign-in token will sit in the actor and its snapshots | Starts only when its key is bound as a Substrate secret; otherwise refused at create |
+| Devin | Starts with the warning. Devin has no API key route | Refused at create |
+| Amp | Starts with warnings | Refused even with a key: Amp rewrites its config folder at every start, so DefenseClaw's hook registration cannot be made root-owned |
+
+A managed refusal comes back before any actor exists, as `403` with the reason `subscription_signin_refused` (or `agent_hook_tamper_refused` for Amp), and the launcher shows the message. Binding a key is an admin task: add the secret to `substrate.secrets` with the key's environment variable as its `placeholder` (see [Secrets](/docs/substrate/secrets)).
+
+**Amp and WebSockets.** Amp's thread and user connections are HTTP/1.1 WebSockets. Substrate 1.0.0's egress answers that upgrade with `403` on an inspected rule. Listing `ampcode.com` in `substrate.allow_passthrough_for` lets the upgrade through, but that host is then not inspected and no key is injected there, so Amp's key would sit in the actor. A managed install refuses that. See [Troubleshooting](/docs/substrate/troubleshooting#an-agent-that-uses-websockets-cant-connect-amp).
 
 ## Features
 
@@ -44,14 +76,14 @@ A connector without a usable headless mode is interactive only, and `run --task`
 |---|---|---|---|
 | Tool-call checks (hooks) | Yes | Yes | Yes, same rules and messages |
 | Tool chains and intent | Per session | Per session | Per session and per actor, kept across suspend and resume |
-| Model request and reply guardrails | Through the guardrail proxy, where the connector routes to it | The model call goes to the provider directly | **Always**, because the provider is only reachable through the proxy |
-| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | For every agent, keyed to the verified person and actor |
+| Model request and reply guardrails | Through the guardrail proxy, where the connector routes to it | The model call goes to the provider directly | **Always**, for the agents that route through the gateway, because the provider is only reachable through the proxy |
+| Routing, budgets and cost | Where the proxy is used | Where the proxy is used | Not merged yet. See [Feature coverage](/docs/substrate/features#routing-budgets-and-cost) |
 | Network control | Not isolated | Egress proxy, block and allow lists, asks | Denied by default; DefenseClaw writes each agent's allow list and checks each request; asks |
 | Secrets | In the user's environment | Placeholder key in the sandbox | No secret value in the actor; the egress gateway swaps placeholders on bound hosts only |
 | Asks and approvals | In the agent | In the activity feed and `approvals` | In your terminal session and `approvals`, so you can answer after detaching |
 | Unattended runs | n/a | n/a | `--task`, `--batch`, from CI |
 | Your project | In place | Live (Linux, Docker) or copy | Copy or git clone only |
-| Undo | No | Undo point, or pull from a copy | Checkpoints of the whole agent (files and memory), and pull |
+| Undo | No | Undo point, or pull from a copy | Restore points of the agent's folder (`checkpoint`, `undo`), and `pull` |
 | Your local MCP servers | Yes | Imported (Claude Code, Codex) | No. Only MCP servers in the image or reachable over the network |
 | Ports on your machine | Yes | `--host-port`, after approval | No |
 | Process tree, kernel feed | Host feeds | Linux | No. Substrate reports CPU and memory per agent |

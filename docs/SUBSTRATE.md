@@ -126,6 +126,12 @@ An actor holds none. Model keys are added by the proxy. Service credentials are 
 gateway injects on bound hosts only. Per-person secrets are keyed by the OIDC subject. A profile's `actor_secrets` can expose a
 short-lived value with exact-value matching. See the user page for the configuration.
 
+The secrets admin API (`secrets set`, `secrets set --mine`) writes Kubernetes sources (`ate-secret://k8s.io/...`) with the
+gateway's ServiceAccount. The chart gives it the Role `defenseclaw-gateway-secrets` in each source namespace: create, plus get and
+patch by name, or on every Secret of the namespace when the Secret name holds `{person}`. Keep per-person sources in a namespace of
+their own. The gateway changes only the Secrets it created (label `app.kubernetes.io/managed-by: defenseclaw`); any other Secret of
+that name gets 409 `secret_not_managed_by_defenseclaw`. A source in the release or Substrate namespace fails the chart render.
+
 ## Telemetry
 
 Registry version 4 of the v8 telemetry registry (no v9). All additions are listed in

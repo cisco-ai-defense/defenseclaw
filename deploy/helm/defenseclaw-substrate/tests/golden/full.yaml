@@ -819,6 +819,29 @@ rules:
   resourceNames: [defenseclaw-policy-resets]
   verbs: [get, update]
 ---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-actor-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: ["github-app"]
+  verbs: [get, patch]
+---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -905,6 +928,29 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-actor-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway-secrets
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
   namespace: defenseclaw-system
 ---
 # Source: defenseclaw-substrate/templates/callout.yaml
@@ -1652,13 +1698,16 @@ spec:
         secret:
           secretName: defenseclaw-relay-session
           optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
           optional: true
+          defaultMode: 0440
       - name: callout-judge
         secret:
           secretName: defenseclaw-callout-judge
+          defaultMode: 0440
           items:
           - {key: token, path: token}
       - name: actor-secrets
@@ -1887,13 +1936,16 @@ spec:
         secret:
           secretName: defenseclaw-relay-session
           optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
           optional: true
+          defaultMode: 0440
       - name: callout-judge
         secret:
           secretName: defenseclaw-callout-judge
+          defaultMode: 0440
           items:
           - {key: token, path: token}
       - name: kube-api-token

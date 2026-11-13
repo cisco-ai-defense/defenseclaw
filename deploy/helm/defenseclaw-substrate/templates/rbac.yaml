@@ -88,3 +88,75 @@ subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
   namespace: {{ .Release.Namespace }}
+
+{{- /*
+The secrets admin API (`secrets set`, `secrets set --mine`) writes the
+Kubernetes sources of config.substrate.secrets with the gateway's token
+(substrate-1 GAP-0183). One Role per source namespace: create (RBAC cannot
+name an object that does not exist yet), and get and patch by name where the
+Secret name has no {person}; with {person} in the name every Secret of the
+namespace, so keep per_person sources in a namespace of their own. RBAC
+cannot select by label: the gateway changes only Secrets it created
+(app.kubernetes.io/managed-by: defenseclaw, checked with a resourceVersion
+precondition). validate.yaml refuses a source in the release or Substrate
+namespace.
+*/ -}}
+{{- $secretNs := dict -}}
+{{- range (dig "substrate" "secrets" list (.Values.config | default dict)) -}}
+{{- $src := toString (.source | default "") -}}
+{{- if hasPrefix "ate-secret://k8s.io/" $src -}}
+{{- $parts := splitList "/" (trimPrefix "ate-secret://k8s.io/" $src) -}}
+{{- if eq (len $parts) 4 -}}
+{{- $ns := index $parts 1 -}}
+{{- $name := index $parts 2 -}}
+{{- if and $ns $name (not (contains "{person}" $ns)) -}}
+{{- if not (hasKey $secretNs $ns) -}}
+{{- $_ := set $secretNs $ns (dict "names" list "any" false) -}}
+{{- end -}}
+{{- $e := get $secretNs $ns -}}
+{{- if contains "{person}" $name -}}
+{{- $_ := set $e "any" true -}}
+{{- else -}}
+{{- $_ := set $e "names" (append $e.names $name | uniq | sortAlpha) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $ns := keys $secretNs | sortAlpha }}
+{{- $e := get $secretNs $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [secrets]
+  {{- if not $e.any }}
+  resourceNames: {{ toJson $e.names }}
+  {{- end }}
+  verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway-secrets
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: {{ $.Release.Namespace }}
+{{- end }}

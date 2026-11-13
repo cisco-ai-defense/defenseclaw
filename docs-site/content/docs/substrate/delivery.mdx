@@ -66,8 +66,8 @@ Policy lives in the chart values (`config:`) and in the profiles. Change them th
 ## Upgrades
 
 - **DefenseClaw.** `helm upgrade` checks the new config, refuses to skip a minor version, and rolls the gateway under its disruption budget, so hooks keep being answered. The leader migrates its store at start, after a backup. `helm rollback` to a release with an older store schema is refused, and the message names the backup.
-- **The agent kit.** Each gateway accepts the kit from its own release and the one before. An older kit gets a refusal with a `migrate` hint (`defenseclaw substrate migrate <name>` moves an actor to a rebuilt template). `doctor` and the fleet view list templates with an older kit. Rebuild them with `template build`, ideally in the CI pipeline that builds your agent images.
-- **Agent Substrate.** Each DefenseClaw release names the Substrate versions it was tested with (`>=1.0.0 <1.1.0` for 1.0.10). `doctor` warns on any other. Upgrade Substrate with the upstream runbook, then run `setup` and `doctor`.
+- **The agent kit.** Each gateway accepts the kit from its own release and the one before. An older kit gets a refusal with a `migrate` hint (`defenseclaw substrate migrate <name>` moves an actor to a rebuilt template). `status --cluster` and the fleet view list templates with an older kit. Rebuild them with `template build`, ideally in the CI pipeline that builds your agent images.
+- **Agent Substrate.** Each DefenseClaw release names the Substrate versions it was tested with (`>=1.0.0 <1.1.0` for 1.0.10). `verify` warns on any other. Upgrade Substrate with the upstream runbook, then run `setup` and `verify`.
 
 ## Keeping it in place
 
@@ -75,7 +75,7 @@ On laptops, tamper protection keeps users from removing DefenseClaw. In a cluste
 
 | What could happen | What stops it |
 |---|---|
-| Someone edits DefenseClaw's config or Deployments | Kubernetes access control. Only platform admins can write `defenseclaw-system`. Changes made outside the chart show as drift in `doctor` |
+| Someone edits DefenseClaw's config or Deployments | Kubernetes access control. Only platform admins can write `defenseclaw-system`. Changes made outside the chart show as drift in `status --cluster` |
 | Someone loosens an agent's allow list with `kubectl ate update egress-policy` | The controller sees the change, puts DefenseClaw's list back, and records who made it and what they changed. After three reverts in ten minutes the controller stops, marks the actor `policy_conflict` and raises an alert, so two writers don't fight forever. It never adds access while reverting |
 | Someone starts an agent in a team atespace without DefenseClaw | Substrate access policy lets only DefenseClaw create agents there |
 | Someone builds a template without the kit | Its agents get no network, and the template is reported |

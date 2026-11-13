@@ -159,7 +159,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	resp, _, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
 	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
 		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, skillsAttached, time.Now()); len(moved) > 0 {
-			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders moved out of the skill root: %s\n", strings.Join(moved, ", "))
+			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders taken out of the agent's reach: %s\n", strings.Join(moved, ", "))
 		}
 	}
 	call.FailMode = outageMode(call.FailMode, resp, mode)
@@ -211,7 +211,7 @@ func (o HookOptions) attachSkills(env *HookEnvelope, payload []byte) (map[string
 	for _, a := range f.Files {
 		used += int64(len(a.Content))
 	}
-	sent, attached := collectSkills(f, skillRoots(o.home(), filepath.Clean(v.CWD)), loadSkillCache(o.home()), o.Config.attachCap()-used)
+	sent, attached := collectSkills(f, skillRoots(o.home(), filepath.Clean(v.CWD)), loadSkillCache(o.home()), o.Config.attachCap()-used, o.Config.attachCap())
 	if len(f.Paths) > 0 || len(f.Files) > 0 || len(f.Skills) > 0 || f.Truncated {
 		env.Facts = f
 	}
