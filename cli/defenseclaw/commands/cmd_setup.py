@@ -17209,9 +17209,13 @@ def _restart_services(
             "  OpenClaw could not restart its gateway through a service manager here, but the "
             f"gateway answers at {oc_host}:{oc_port}, so {outcome}."
         )
-        click.echo(
-            "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
-            "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
+        # A config hot reload lists the plugin but does not make the running
+        # gateway enforce it (rel-1-0-10 GAP-0060): say that it is not
+        # protected yet, in the warning colour.
+        ux.warn(
+            "OpenClaw is not protected yet: restart the OpenClaw gateway where it runs "
+            "(stop `openclaw gateway run` in its terminal and start it again) so it loads the DefenseClaw plugin. "
+            "A config hot reload is not enough."
         )
     _fail_if_restart_failed(failed)
 
