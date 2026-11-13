@@ -7,9 +7,12 @@ package gateway
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -63,4 +66,36 @@ func TestSubstrateHookRecordsCarryTheActor(t *testing.T) {
 func get(o observability.Optional[string]) string {
 	v, _ := o.Get()
 	return v
+}
+
+// The verified person rides on every actor route, not only /llm (A12's
+// pattern, lead steer): hook, notify and inspect requests carry the
+// subject the registration names; OTLP carries none.
+func TestSubstrateActorRoutesCarryTheVerifiedSubject(t *testing.T) {
+	prev := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(prev) })
+	f := newSubstrateFixture(t)
+	st := f.api.substrateState()
+	key, _ := sandboxreg.SubstrateKey("eng-web", subUID1)
+	reg, _, _ := f.regs.Get(context.Background(), "eng-web", subUID1)
+	for _, route := range []substrateActorRoute{
+		{class: sandboxauth.RouteHook, connector: "claudecode"}, {class: sandboxauth.RouteNotify, connector: "codex"},
+		{class: sandboxauth.RouteInspect}, {llm: true}, {class: sandboxauth.RouteOTLP},
+	} {
+		var subject VerifiedSubject
+		var verified bool
+		probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			subject, verified = verifiedSubjectFromContext(r.Context())
+		})
+		ctx := withSubstrateActor(context.Background(), verifiedSubstrateActor("eng-web", "alice-1", subUID1, "actor/eng-web/alice-1", key))
+		ctx = context.WithValue(ctx, substrateRegistrationKey{}, reg)
+		ctx = withSubstrateRoute(ctx, route)
+		req := httptest.NewRequest(http.MethodPost, "/x", nil).WithContext(ctx)
+		f.api.substrateActorScope(st, probe).ServeHTTP(httptest.NewRecorder(), req)
+		want := route.class != sandboxauth.RouteOTLP
+		if verified != want || (want && subject.UserID != "alice") {
+			t.Errorf("route %+v: verified=%v subject %q", route, verified, subject.UserID)
+		}
+	}
 }
