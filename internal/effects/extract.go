@@ -70,7 +70,8 @@ func executableContent(call Call) bool {
 func extractShell(call Call, o Options) Result {
 	res := Result{Surface: SurfaceShell, Flavor: o.flavor()}
 	dialect := o.Dialect
-	if dialect == DialectNone || dialect == "" {
+	inferred := dialect == DialectNone || dialect == ""
+	if inferred {
 		dialect = inferDialect(call, o)
 	}
 	res.Dialect = dialect
@@ -84,6 +85,13 @@ func extractShell(call Call, o Options) Result {
 		script = parsePOSIX(call.Command, o)
 	}
 	w := newWalker(&res, o)
+	// A guessed dialect must not place a leading / as a drive path (review 6 #1):
+	// path trust uses DialectNone unless the dialect was given explicitly.
+	if inferred {
+		w.pathDialect = DialectNone
+	} else {
+		w.pathDialect = dialect
+	}
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(script, 0)
 	return res
@@ -103,6 +111,7 @@ func extractArgv(call Call, o Options) Result {
 	}
 	s := &Script{Dialect: DialectPOSIX, Stmts: []*Stmt{{Cmds: []*Cmd{c}}}}
 	w := newWalker(&res, o)
+	w.pathDialect = DialectPOSIX // argv is an explicit POSIX-style command vector
 	w.applyWorkdir(call.Workdir)
 	w.walkScript(s, 0)
 	return res
@@ -128,6 +137,11 @@ type walker struct {
 	lastPrim   int // 1-based index of the previous stage's primary effect (pipe join)
 	work       int // remaining work budget; 0 -> stop and emit a limit unknown (R3-1)
 	overBudget bool
+	// pathDialect is the dialect of the frontend currently walking the text,
+	// used only to decide how a leading / is placed on Windows (review 6 #1). It
+	// is DialectNone when the top-level dialect was only guessed, so a guessed
+	// Windows dialect never fabricates a drive path from a POSIX-absolute path.
+	pathDialect Dialect
 }
 
 const walkWorkBudget = 20000
@@ -139,7 +153,7 @@ func newWalker(res *Result, o Options) *walker {
 	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
-		env: env, curCWD: o.CWD, curHome: o.Home, work: walkWorkBudget}
+		env: env, curCWD: o.CWD, curHome: o.Home, work: walkWorkBudget, pathDialect: o.Dialect}
 }
 
 // spend consumes one unit of the per-call work budget. It returns false once
@@ -164,6 +178,7 @@ func (w *walker) opts() Options {
 	o.CWD = w.curCWD
 	o.Home = w.curHome
 	o.Env = w.env
+	o.Dialect = w.pathDialect // place leading / by the walking frontend (review 6 #1)
 	return o
 }
 
@@ -561,7 +576,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			}
 		}
 		e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
-			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 		if dir != "" {
 			e.Target.Spelling = cap4k(dir)
 		} else if w.curCWD != "" {
@@ -608,7 +623,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			// read, so a policy label follows the copy (s7-flow).
 			if op.copyFrom != "" {
 				if abs, ok, _ := placePath(op.copyFrom, w.opts()); ok {
-					srcKey := Target{Path: abs, Flavor: w.o.flavor()}.Key()
+					srcKey := Target{Path: abs, Flavor: w.o.flavor(), CaseFold: w.o.CaseInsensitive}.Key()
 					if ri, ok := readByKeyLocal[srcKey]; ok && ri != idx {
 						w.res.Effects[idx-1].Data = &Data{Kind: DataFile, Sources: []Source{{Kind: SourceEffect, Effect: ri}}}
 					}
@@ -635,7 +650,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// piped input: emit its pipe-role effect with an unknown target (review N5).
 	if c.PipeIn && !emittedTargetEffect && entry.PipeRole != "" {
 		e := Effect{Kind: entry.PipeRole.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
-			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		w.emit(e)
 	}
@@ -645,7 +660,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if fromInput && !emittedTargetEffect {
 		if role := posModeRole(entry.Pos); role != RoleNone {
 			e := Effect{Kind: role.kind(), Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
-				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 			e.addReason(ReasonOperandsFromInput, ScopeTarget)
 			w.emit(e)
 		}
@@ -843,6 +858,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	destDir := ""
 	var srcFlags []Word
 	var destFlag Word
+	destFlagSet := false
 	endOpts := false
 	for i < len(words) {
 		wd := words[i]
@@ -929,6 +945,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		if hasInline {
 			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
+				if fl.Role == RoleWrite {
+					destFlagSet = true
+				}
 				i++
 				continue
 			}
@@ -939,6 +958,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		if fl.Value {
 			if i+1 < len(words) {
 				if routeSourcesDestFlag(p, fl, words[i+1], &srcFlags, &destFlag) {
+					if fl.Role == RoleWrite {
+						destFlagSet = true
+					}
 					i += 2
 					continue
 				}
@@ -952,9 +974,11 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	// Copy-Item/Move-Item etc. take their source and destination as -Path /
 	// -Destination flags, not positionals: fold them into the sources/dest list
 	// so the directory-destination join applies (review R5F-3).
-	if p.Pos == PosSourcesDest && (len(srcFlags) > 0 || destFlag.Static) {
+	if p.Pos == PosSourcesDest && (len(srcFlags) > 0 || destFlagSet) {
 		combined := append(srcFlags, positionals...)
-		if destFlag.Static {
+		if destFlagSet {
+			// a non-static -Destination still names a write; keep it (as a dynamic
+			// dest) rather than dropping the write entirely (review 6 #4).
 			combined = append(combined, destFlag)
 		}
 		positionals = combined
@@ -1283,7 +1307,7 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		return nil
 	}
 	e := &Effect{Origin: origin, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
-		Target: Target{Flavor: w.o.flavor(), Link: LinkNotChecked}}
+		Target: Target{Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}}
 	e.Kind = op.role.kind()
 	if op.roleUncertain {
 		e.addReason(ReasonUnknownFlag, ScopeRole)
@@ -1426,14 +1450,22 @@ func (w *walker) fillSendBody(e *Effect, op operand, isFile bool) {
 // (@- / -) to the piped producer (s7-flow). It runs only for HTTP uploader
 // programs so a git push (its own unknown-host send) is untouched.
 func (w *walker) finishNetworkSends(start int, pipeIn bool, prevPrim int) {
+	// Collect the distinct destination hosts this command fetched from. Only when
+	// there is exactly one can we attribute it to a send; with several we cannot
+	// tell which send goes where, so the send host stays unknown (review 6 #6).
 	var host, scheme, url string
 	var port int
+	distinct := 0
 	for i := start; i < len(w.res.Effects); i++ {
 		e := &w.res.Effects[i]
-		if e.Kind == KindNetworkFetch && e.Target.Host != "" && host == "" {
+		if e.Kind == KindNetworkFetch && e.Target.Host != "" {
+			if e.Target.Host != host {
+				distinct++
+			}
 			host, scheme, url, port = e.Target.Host, e.Target.Scheme, e.Target.URL, e.Target.Port
 		}
 	}
+	single := distinct == 1
 	for i := start; i < len(w.res.Effects); i++ {
 		e := &w.res.Effects[i]
 		if e.Kind != KindNetworkSend {
@@ -1443,7 +1475,7 @@ func (w *walker) finishNetworkSends(start int, pipeIn bool, prevPrim int) {
 			e.Data.Sources = []Source{{Kind: SourceEffect, Effect: prevPrim}}
 		}
 		if e.Target.Type == TargetURL && e.Target.Host == "" {
-			if host != "" {
+			if single {
 				e.Target.Host, e.Target.Scheme, e.Target.URL, e.Target.Port = host, scheme, url, port
 			} else {
 				e.addReason(ReasonDynamicExpansion, ScopeTarget)
@@ -1470,7 +1502,7 @@ func (w *walker) joinSourceWrite(e *Effect) {
 		if s.Kind != SourcePath || s.Path == "" {
 			continue
 		}
-		t := Target{Path: mustAbs(s.Path, w.opts()), Flavor: w.o.flavor()}
+		t := Target{Path: mustAbs(s.Path, w.opts()), Flavor: w.o.flavor(), CaseFold: w.o.CaseInsensitive}
 		if idx, ok := w.writeByKey[t.Key()]; ok {
 			e.Data.Sources[i] = Source{Kind: SourceEffect, Effect: idx, Path: s.Path}
 		}
@@ -1492,7 +1524,7 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 		switch r.Op {
 		case RedirWrite, RedirAppend, RedirClobber:
 			e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
-				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked},
+				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive},
 				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Depth: depth, Span: c.Span}}
 			if r.Op == RedirAppend {
 				e.Kind = KindAppend
@@ -1511,7 +1543,7 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 			}
 		case RedirRead:
 			e := Effect{Kind: KindRead, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
-				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked},
+				Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive},
 				Origin: Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Depth: depth, Span: c.Span}}
 			w.fillRedirTarget(&e, w.resolveWord(r.Target))
 			w.emit(e)
@@ -1598,6 +1630,12 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	default:
 		sub = parsePOSIX(code, w.o)
 	}
+	// Nested code has a concrete dialect, so place its leading-/ paths by it: a
+	// POSIX body under cmd/PowerShell (bash -c '... /etc/x') is virtual-rooted
+	// (review 6 #1).
+	savedPD := w.pathDialect
+	w.pathDialect = dialect
+	defer func() { w.pathDialect = savedPD }()
 	if !childScope {
 		w.walkScript(sub, depth+1)
 		return
@@ -1632,7 +1670,7 @@ func (w *walker) recordLink(op operand, ops []operand) {
 	if abs, ok, _ := placePath(targetSpelling, lo); ok {
 		targetAbs = abs
 	}
-	t := Target{Path: linkPath, Flavor: w.o.flavor()}
+	t := Target{Path: linkPath, Flavor: w.o.flavor(), CaseFold: w.o.CaseInsensitive}
 	w.links[t.Key()] = targetAbs
 }
 
@@ -1903,7 +1941,7 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 	}
 	mk := func(kind Kind, spelling string, state TargetState, reason ReasonCode) {
 		e := Effect{Kind: kind, Cond: cond, RoleState: RoleStateKnown, TargetState: state,
-			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 		if spelling != "" {
 			e.Target.Spelling = cap4k(spelling)
 			if abs, ok, r := placePath(spelling, w.opts()); ok {
@@ -2222,7 +2260,7 @@ func (w *walker) gitWorktreeEffects(args []Word, origin Origin, cond bool) {
 		return // read-only or non-worktree subcommand
 	}
 	e := Effect{Kind: kind, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
-		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 	if worktree != "" {
 		e.Target.Spelling = cap4k(worktree)
 	}
@@ -2267,7 +2305,7 @@ func (w *walker) downloadRemoteWrite(program string, args []Word, origin Origin,
 		return
 	}
 	e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
-		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
 	if dir != "" {
 		e.Target.Spelling = cap4k(dir)
 	} else if w.curCWD != "" {

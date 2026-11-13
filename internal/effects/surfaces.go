@@ -236,9 +236,11 @@ func extractMCP(call Call, o Options) Result {
 			e := Effect{Kind: KindNetworkSend, RoleState: RoleStateGuessed, TargetState: TargetStateUnknown,
 				Target: Target{Type: TargetHost, Flavor: o.flavor(), Link: LinkNotChecked},
 				Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
+			// The host from the server table is only a guess, so the target stays
+			// unknown (review 6 #5): fill it as a hint but never mark it known.
 			if host := mcpSendHost(call.Tool); host != "" {
 				e.Target.Host = host
-				e.TargetState = TargetStateKnown
+				e.addReason(ReasonMCPSemantics, ScopeTarget)
 			} else {
 				e.addReason(ReasonDynamicExpansion, ScopeTarget)
 			}
