@@ -36,6 +36,8 @@ func fakeDecisionModel(t *testing.T, choice string, pAllow float64, seen *atomic
 			"model": "fake",
 			"answers": map[string]any{
 				"disposition": map[string]any{"type": "choice", "choice": choice, "probabilities": probs, "confidence": 0.9},
+				// The risk score follows the disposition risk (0..2).
+				"risk": map[string]any{"type": "score", "score": 2 * (1 - pAllow)},
 			},
 		})
 	}))
@@ -97,10 +99,14 @@ func TestDecisionModelRequestContract(t *testing.T) {
 		CurrentToolCall:   decisionModelToolCall{Tool: "Bash", Arguments: `{"command":"go test ./..."}`},
 	})
 	got, _ := seen.Load().(string)
-	for _, want := range []string{`"model":"fake"`, `"current_tool_call"`, `"session_user_intent":"fix the tests"`, `"disposition"`, `"risk"`, `"context_sufficient"`, "auth=Bearer dm-secret"} {
+	for _, want := range []string{`"model":"fake"`, `"current_tool_call"`, `"session_user_intent":"fix the tests"`, `"disposition"`, `"risk"`, "auth=Bearer dm-secret"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("request lacks %s: %s", want, got)
 		}
+	}
+	// The context-sufficiency question was never read and is not asked.
+	if strings.Contains(got, "context_sufficient") {
+		t.Errorf("request still asks context_sufficient: %s", got)
 	}
 }
 
@@ -180,13 +186,66 @@ func TestRunToolDecisionAllowSkipsJudge(t *testing.T) {
 	}
 }
 
-func TestRunToolDecisionDecideBlockSkipsJudge(t *testing.T) {
+// TestRunToolDecisionRetiredDecideStillRunsTheJudge: on_confident_block
+// decide is retired (owner 2026-11-13): it still loads, and a confident
+// block still goes to the judge, with the HIGH floor kept when the judge
+// gives no verdict.
+func TestRunToolDecisionRetiredDecideStillRunsTheJudge(t *testing.T) {
 	srv := fakeDecisionModel(t, "block", 0.02, nil)
 	defer srv.Close()
-	j := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}, decision: testDecisionModel(t, srv.URL, config.DecisionModelDecide)}
+	judge := &countingJudgeProvider{}
+	j := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}, decision: testDecisionModel(t, srv.URL, config.DecisionModelDecide), provider: judge}
 	v := j.runToolJudgeSample(context.Background(), "Bash", `{"command":"x"}`, "sample")
-	if v == nil || v.Severity != "HIGH" || v.Scanner != decisionModelScanner {
-		t.Fatalf("verdict = %+v", v)
+	if judge.calls.Load() == 0 {
+		t.Fatal("a confident block skipped the LLM judge")
+	}
+	if v == nil || v.Severity != "HIGH" || v.Action != "block" {
+		t.Fatalf("verdict = %+v, want the HIGH decision-model floor", v)
+	}
+}
+
+// TestDecisionModelSaferRouting: a confident block needs the disposition
+// AND the risk score (R4), and never lands on a call the rules flagged
+// (RF); both are configurable and on by default.
+func TestDecisionModelSaferRouting(t *testing.T) {
+	answer := func(score any) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			ans := map[string]any{"disposition": map[string]any{"type": "choice", "choice": "block", "probabilities": map[string]float64{"allow": 0.02, "confirm": 0.03, "block": 0.95}}}
+			if score != nil {
+				ans["risk"] = map[string]any{"type": "score", "score": score}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"answers": ans})
+		}))
+	}
+	flagged := withDecisionRuleFloor(context.Background(), true)
+	cases := []struct {
+		name  string
+		score any
+		ctx   context.Context
+		cfg   func(*config.DecisionModelConfig)
+		want  decisionRoute
+	}{
+		{"block and score 1.6", 1.6, context.Background(), nil, decisionBlock},
+		{"score at the gate", 1.5, context.Background(), nil, decisionBlock},
+		{"score below the gate", 1.4, context.Background(), nil, decisionEscalate},
+		{"no score answer", nil, context.Background(), nil, decisionEscalate},
+		{"score out of range", 3.0, context.Background(), nil, decisionEscalate},
+		{"rules flagged the call", 1.9, flagged, nil, decisionEscalate},
+		{"rule-flag escalation off", 1.9, flagged, func(c *config.DecisionModelConfig) { off := false; c.EscalateRuleFlagged = &off }, decisionBlock},
+		{"lower gate configured", 1.2, context.Background(), func(c *config.DecisionModelConfig) { c.BlockRiskScore = 1.0 }, decisionBlock},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := answer(tc.score)
+			defer srv.Close()
+			cfg := &config.Config{DecisionModel: config.DecisionModelConfig{Enabled: true, Model: "fake", BaseURL: srv.URL, Timeout: 1}}
+			if tc.cfg != nil {
+				tc.cfg(&cfg.DecisionModel)
+			}
+			if got := newDecisionModel(cfg, "").decide(tc.ctx, decisionModelState{}); got.route != tc.want {
+				t.Fatalf("route = %v, want %v (risk score %v)", got.route, tc.want, got.riskScore)
+			}
+		})
 	}
 }
 
