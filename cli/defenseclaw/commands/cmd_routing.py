@@ -186,10 +186,18 @@ def _client(app: AppContext, timeout: float = 5):
 
 
 def _ask_gateway(app: AppContext, method: str, path: str, *, timeout: float = 5, **kwargs: Any) -> tuple[Any, str]:
-    """(answer, error): the gateway's JSON answer, or a plain error."""
+    """(answer, error): the gateway's JSON answer, or a plain error.
+
+    A standard account of a managed device cannot read config.yaml or the
+    API token; its own routing reads go to the managed gateway on the hook
+    socket (Linux, macOS) or the own-status pipe (Windows) instead.
+    """
+    own = method == "GET" and path.startswith("/api/v1/routing/") and _managed()
     try:
         client = _client(app, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - config unreadable or gateway settings missing
+        if own:
+            return _own_read(path, kwargs.get("params"))
         return None, f"cannot reach the gateway: {exc}"
     try:
         return client.routing_request(method, path, **kwargs), ""
@@ -197,10 +205,40 @@ def _ask_gateway(app: AppContext, method: str, path: str, *, timeout: float = 5,
         from defenseclaw.gateway import RoutingAPIError
 
         if isinstance(exc, RoutingAPIError):
+            if own and exc.status in (401, 403):
+                return _own_read(path, kwargs.get("params"))
             return None, exc.plain()
         return None, "the gateway is not running or did not answer (start it with: defenseclaw-gateway start)"
     finally:
         client.close()
+
+
+def _own_read(path: str, params: Any = None) -> tuple[Any, str]:
+    """The caller's own routing read through ``defenseclaw-gateway routing-read``."""
+    import subprocess
+    from urllib.parse import urlencode
+
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    binary = resolve_gateway_binary()
+    if not binary:
+        return None, "defenseclaw-gateway is not installed on this managed device; contact your IT help desk"
+    target = path + ("?" + urlencode(params) if params else "")
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
+            [binary, "routing-read", target], capture_output=True, text=True, timeout=30, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"the managed gateway did not answer ({exc.__class__.__name__}); contact your IT help desk"
+    out = proc.stdout.strip()
+    try:
+        body = json.loads(out) if out else None
+    except ValueError:
+        body = None
+    if proc.returncode == 0 and isinstance(body, dict):
+        return body, ""
+    message = body.get("error") if isinstance(body, dict) else ""
+    return None, str(message or proc.stderr.strip()[-300:] or "the managed gateway did not answer")
 
 
 def _health_routing(app: AppContext) -> dict[str, Any]:
