@@ -55,6 +55,8 @@ from defenseclaw.hook_metrics import (
     hook_decision_body_sql,
     hook_decision_may_block_sql,
     hook_semantic_event_id_sql,
+    HOOK_ROWS_TABLE,
+    lone_hook_decision_rows_sql,
     lone_hook_decision_sql,
 )
 from defenseclaw.models import (
@@ -918,6 +920,13 @@ class Store:
             if event.action != CONNECTOR_HOOK_SYNTHETIC_ACTION
         ][:limit]
 
+    def _hook_rows_tracked(self) -> bool:
+        """Whether the store has audit_hook_rows (a 1.0.10 gateway opened it)."""
+
+        return self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (HOOK_ROWS_TABLE,)
+        ).fetchone() is not None
+
     def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
         """Return exact all-time hook counters grouped by connector.
 
@@ -927,7 +936,16 @@ class Store:
         """
         columns, _ = self._audit_projection_schema()
         lone_hook_decisions = ""
-        if {"payload_json", "projected_record_json"}.issubset(columns):
+        if {"payload_json", "projected_record_json"}.issubset(columns) and self._hook_rows_tracked():
+            # The lone rows come from audit_hook_rows, so only their own
+            # records are read (rel-1-0-10:GAP-0316).
+            body = hook_decision_body_sql("lone.payload_json", "lone.projected_record_json")
+            lone_hook_decisions = f"""UNION ALL
+                   SELECT COALESCE(NULLIF(LOWER(TRIM(COALESCE(lone.connector, ''))), ''), '__unattributed__'),
+                          dc_hook_row_decision(lone.action, '', {body}, lone.enforced),
+                          lone.timestamp
+                     {lone_hook_decision_rows_sql("lone")}"""
+        elif {"payload_json", "projected_record_json"}.issubset(columns):
             # A decision whose only local row is its hook_decision row (a
             # benign per-user allow since 1.0.10) counts once, from that row;
             # a decision with a connector-hook row counts from it alone, as

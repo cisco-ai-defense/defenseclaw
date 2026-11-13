@@ -22,16 +22,31 @@ func hookRowSemanticEventSQL(projected string) string {
 }
 
 // LoneHookDecisionSQL is a predicate true for a hook_decision row (alias
-// alias, empty for none) that is the only local hook row of its decision: it
+// alias, empty for none) that is the only local hook row of its decision.
+// tracked reads audit_hook_rows (HookRowsTracked); without it, on a store no
+// 1.0.10 gateway has opened, the rule reads the projected records: it
 // names a semantic event and no connector-hook or connector-hook-synthetic
 // row names the same one. The subquery is not correlated, so SQLite builds
 // its set once per statement. A hook_decision row with no semantic event is
 // never alone: the gateway keeps the connector-hook row of an uncorrelated
 // call.
-func LoneHookDecisionSQL(alias string) string {
+func LoneHookDecisionSQL(alias string, tracked bool) string {
 	prefix := ""
 	if alias != "" {
 		prefix = alias + "."
+	}
+	if tracked {
+		// audit_hook_rows (hook_row_tracking.go): the row's own entry, and no
+		// connector-hook entry of its semantic event; both are index lookups
+		// and no record is read (rel-1-0-10:GAP-0316).
+		row := "audit_events.id"
+		if alias != "" {
+			row = prefix + "id"
+		}
+		return `(` + prefix + `action = '` + hookDecisionEventName + `' AND EXISTS (SELECT 1 FROM ` + hookRowsTable +
+			` AS hook_own WHERE hook_own.audit_event_id = ` + row + ` AND hook_own.connector_hook = 0 AND NOT EXISTS (SELECT 1 FROM ` +
+			hookRowsTable + ` AS hook_sibling WHERE hook_sibling.semantic_event_id = hook_own.semantic_event_id` +
+			` AND hook_sibling.connector_hook = 1)))`
 	}
 	own := hookRowSemanticEventSQL(prefix + "projected_record_json")
 	sibling := hookRowSemanticEventSQL("hook_sibling.projected_record_json")

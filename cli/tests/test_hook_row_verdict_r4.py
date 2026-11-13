@@ -48,14 +48,40 @@ def _projected(sid: str, body: dict | None = None) -> str:
     return json.dumps(record)
 
 
-@pytest.fixture()
-def store(tmp_path):
+# The table and trigger a 1.0.10 gateway adds when it opens the store
+# (internal/audit/hook_row_tracking.go, rel-1-0-10:GAP-0316); a store no
+# 1.0.10 gateway has opened has neither, and the readers fall back to the
+# projected records. Every reader test below runs on both kinds of store.
+_HOOK_ROW_TRACKING_DDL = """
+CREATE TABLE IF NOT EXISTS audit_hook_rows (
+    audit_event_id TEXT PRIMARY KEY REFERENCES audit_events(id) ON DELETE CASCADE,
+    semantic_event_id TEXT NOT NULL,
+    connector_hook INTEGER NOT NULL CHECK (connector_hook IN (0, 1))
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_audit_hook_rows_semantic ON audit_hook_rows(semantic_event_id, connector_hook);
+CREATE TRIGGER IF NOT EXISTS trg_audit_hook_rows_insert AFTER INSERT ON audit_events
+    WHEN NEW.action IN ('hook_decision','connector-hook','connector-hook-synthetic')
+     AND (CASE WHEN json_valid(COALESCE(NEW.projected_record_json,''))
+          THEN json_extract(NEW.projected_record_json,'$.correlation.semantic_event_id') END) IS NOT NULL
+    BEGIN
+        INSERT OR REPLACE INTO audit_hook_rows (audit_event_id, semantic_event_id, connector_hook)
+        VALUES (NEW.id, (CASE WHEN json_valid(COALESCE(NEW.projected_record_json,''))
+                THEN json_extract(NEW.projected_record_json,'$.correlation.semantic_event_id') END),
+                NEW.action <> 'hook_decision');
+    END;
+"""
+
+
+@pytest.fixture(params=["records", "hook-row-table"])
+def store(tmp_path, request):
     db = Store(str(tmp_path / "audit.db"))
     db.init()
     columns = {row[1] for row in db.db.execute("PRAGMA table_info(audit_events)")}
     for column in ("event_name", "payload_json", "projected_record_json", "bucket"):
         if column not in columns:
             db.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+    if request.param == "hook-row-table":
+        db.db.executescript(_HOOK_ROW_TRACKING_DDL)
     yield db
     db.close()
 
@@ -209,3 +235,58 @@ def test_synthetic_stop_is_not_an_extra_decision(store: Store) -> None:
     assert sorted(event.id for event in store.list_connector_hook_event_summaries(10)) == before_ids
     shown = [event.id for event in _without_duplicate_hook_decisions(store.list_event_summaries(50))]
     assert "stop-syn" in shown and "stop-hd" not in shown
+
+
+def test_a_report_row_written_after_the_decision_pairs_it(store: Store) -> None:
+    """The failure report writes a call's connector-hook row after its
+    fail-mode hook_decision row: from then on the call counts once, from the
+    report row (rel-1-0-10:GAP-0316, any write order)."""
+
+    _insert_hook_decision(store, "late-hd", "sid-late", _BASE, _body("allow", "alert"))
+    store.db.commit()
+    assert store.connector_hook_event_stats()["claudecode"]["calls"] == 1
+    _insert_connector_hook(store, "late-report", "sid-late", _BASE + timedelta(seconds=9), "alert")
+    store.db.commit()
+    assert store.connector_hook_event_stats()["claudecode"]["calls"] == 1
+
+
+class _CapturingConnection:
+    def __init__(self, connection):
+        self._connection = connection
+        self.statements: list[tuple[str, tuple]] = []
+
+    def execute(self, sql, *args):
+        self.statements.append((sql, args))
+        return self._connection.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def test_overview_counter_reads_the_hook_row_table_not_the_records(tmp_path) -> None:
+    """With audit_hook_rows the Overview counter finds lone hook_decision
+    rows through that table: no pass over every hook row's projected record
+    (on a grown 6.4 GB store that pass read about 1.1 GB, rel-1-0-10:GAP-0316)."""
+
+    db = Store(str(tmp_path / "audit.db"))
+    db.init()
+    columns = {row[1] for row in db.db.execute("PRAGMA table_info(audit_events)")}
+    for column in ("event_name", "payload_json", "projected_record_json", "bucket"):
+        if column not in columns:
+            db.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
+    db.db.executescript(_HOOK_ROW_TRACKING_DDL)
+    _seed(db)
+    connection = db.db
+    capture = _CapturingConnection(connection)
+    db.db = capture
+    try:
+        assert db.connector_hook_event_stats()["claudecode"]["calls"] == 4
+    finally:
+        db.db = connection
+    counter = [(sql, args) for sql, args in capture.statements if "connector_name" in sql and "hook_decision" in sql]
+    assert counter, "the hook counter statement was not captured"
+    sql, args = counter[0]
+    plan = " | ".join(row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, *args))
+    assert "audit_hook_rows" in plan, plan
+    assert "LIST SUBQUERY" not in plan, plan
+    db.close()

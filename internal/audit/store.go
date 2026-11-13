@@ -2279,6 +2279,9 @@ func (s *Store) Init() error {
 	if err := s.trimUnreadAuditIndexes(); err != nil {
 		return err
 	}
+	if err := s.ensureHookRowTracking(); err != nil {
+		return err
+	}
 	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {
 		return err
 	}
