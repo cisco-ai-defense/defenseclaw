@@ -6,7 +6,7 @@ package gateway
 import (
 	"context"
 	"errors"
-	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -40,6 +41,7 @@ const (
 	routeCallerAuthorizerUnavailable = "authorizer_unavailable"
 	routeCallerPeerUnverified        = "peer_unverified"
 	routeCallerPeerBrokerUnavailable = "peer_broker_unavailable"
+	routeCallerPeerLookupLimited     = "peer_lookup_limited"
 	routeCallerPeerMismatch          = "peer_mismatch"
 	routeCallerRoot                  = "root"
 	routeCallerServiceAccount        = "service_account"
@@ -192,7 +194,10 @@ func decideWindowsRouteCaller(in routeCallerInputs) routeCaller {
 		return unverifiedRoute(routeCallerCredentialInvalid)
 	}
 	if in.PeerSIDErr != nil {
-		if errors.Is(in.PeerSIDErr, peerbroker.ErrUnavailable) {
+		switch {
+		case errors.Is(in.PeerSIDErr, errRoutePeerLookupLimited):
+			return unverifiedRoute(routeCallerPeerLookupLimited)
+		case errors.Is(in.PeerSIDErr, peerbroker.ErrUnavailable):
 			return unverifiedRoute(routeCallerPeerBrokerUnavailable)
 		}
 		return unverifiedRoute(routeCallerPeerUnverified)
@@ -248,30 +253,39 @@ func windowsServiceSID(sid string) bool {
 	return !strings.HasPrefix(sid, "S-1-5-21-") && !strings.HasPrefix(sid, "S-1-12-1-")
 }
 
+// routePeerAsk is what a broker lookup needs beyond the connection: the
+// machine data dir (the guardian publishes its pipe name there) and the
+// identity the presented route credential is bound to (the lookup limiter
+// key; "" for the guardrail proxy and the status probe).
+type routePeerAsk struct {
+	DataDir  string
+	Identity string
+}
+
 // acpLoopbackPeerSID names the user SID of the process on the client end of
 // a loopback TCP request (managed Windows); replaceable in tests. A
-// connection is looked up once.
-var acpLoopbackPeerSID = func(r *http.Request) (string, error) {
+// connection is looked up once. The lookup ends with the request.
+var acpLoopbackPeerSID = func(r *http.Request, ask routePeerAsk) (string, error) {
 	if peer, ok := r.Context().Value(acpConnPeerKey{}).(*acpConnPeer); ok {
-		return peer.lookupSID()
+		return peer.lookupSID(r.Context(), ask)
 	}
 	local, _ := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
 	remote, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
 	if local == nil || err != nil {
 		return "", errors.New("the request carries no TCP addresses")
 	}
-	return routePeerSID(local, remote)
+	return routePeerSID(r.Context(), ask, local, remote)
 }
 
 // lookupSID reads the SID of the connection client once; a failed lookup
 // is not kept, so the next request asks again.
-func (p *acpConnPeer) lookupSID() (string, error) {
+func (p *acpConnPeer) lookupSID(ctx context.Context, ask routePeerAsk) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.sid != "" {
 		return p.sid, nil
 	}
-	sid, err := routePeerSID(p.local, p.remote)
+	sid, err := routePeerSID(ctx, ask, p.local, p.remote)
 	if err != nil {
 		return "", err
 	}
@@ -283,13 +297,20 @@ func (p *acpConnPeer) lookupSID() (string, error) {
 // of a loopback connection this gateway accepted (managed Windows, S1 Q7
 // lead ruling: the gateway gets no SeDebugPrivilege and has no in-process
 // fallback; an error that wraps peerbroker.ErrUnavailable means no trusted
-// broker answered, and the caller is unverified). Replaceable in tests.
-var routePeerSID = func(local, remote *net.TCPAddr) (string, error) {
-	client, err := routePeerBrokerClient()
+// broker answered, and the caller is unverified). Each identity has its own
+// bound on lookups (routePeerLookups, REVIEW-code-winroute P3-2), so one
+// account cannot hold every broker slot. Replaceable in tests.
+var routePeerSID = func(ctx context.Context, ask routePeerAsk, local, remote *net.TCPAddr) (string, error) {
+	client, err := routePeerBrokerClient(ask.DataDir)
 	if err != nil {
 		return "", err
 	}
-	identity, err := client.Lookup(context.Background(), local, remote)
+	release, err := routePeerLookups.acquire(ctx, ask.Identity)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	identity, err := client.Lookup(ctx, local, remote)
 	if err != nil {
 		return "", err
 	}
@@ -297,36 +318,52 @@ var routePeerSID = func(local, remote *net.TCPAddr) (string, error) {
 }
 
 var routePeerBroker struct {
-	once   sync.Once
-	client *peerbroker.Client
-	err    error
+	mu      sync.Mutex
+	built   bool
+	dataDir string
+	client  *peerbroker.Client
+	err     error
 }
 
 // routePeerBrokerClient is the broker client of this gateway service
 // (DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME in the protected service
-// environment); without it there is no broker.
-func routePeerBrokerClient() (*peerbroker.Client, error) {
-	routePeerBroker.once.Do(func() {
-		name := strings.TrimSpace(os.Getenv(peerbroker.GatewayServiceEnv))
-		if name == "" {
-			routePeerBroker.err = fmt.Errorf("%w: the gateway service environment names no gateway service", peerbroker.ErrUnavailable)
-			return
-		}
-		client, err := peerbroker.NewClient(name)
-		if err != nil {
-			routePeerBroker.err = fmt.Errorf("%w: %v", peerbroker.ErrUnavailable, err)
-			return
-		}
-		routePeerBroker.client = client
-	})
-	return routePeerBroker.client, routePeerBroker.err
+// environment) reading the published pipe name under dataDir; without the
+// service name there is no broker.
+func routePeerBrokerClient(dataDir string) (*peerbroker.Client, error) {
+	routePeerBroker.mu.Lock()
+	defer routePeerBroker.mu.Unlock()
+	if routePeerBroker.built && routePeerBroker.dataDir == dataDir {
+		return routePeerBroker.client, routePeerBroker.err
+	}
+	routePeerBroker.built, routePeerBroker.dataDir, routePeerBroker.client, routePeerBroker.err = true, dataDir, nil, nil
+	name := strings.TrimSpace(os.Getenv(peerbroker.GatewayServiceEnv))
+	client, err := peerbroker.NewClient(name, dataDir)
+	if name == "" || err != nil {
+		routePeerBroker.err = &peerbroker.UnavailableError{Reason: peerbroker.UnavailableNoService}
+		return nil, routePeerBroker.err
+	}
+	routePeerBroker.client = client
+	return client, nil
+}
+
+// routePeerBrokerProbeTTL is how long a /status probe answer is reused:
+// the TUI and status commands poll /status, and each probe is a broker
+// exchange (REVIEW-code-winroute P4-6).
+const routePeerBrokerProbeTTL = 10 * time.Second
+
+var routePeerBrokerStatus struct {
+	mu     sync.Mutex
+	at     time.Time
+	answer map[string]interface{}
 }
 
 // routePeerBrokerProbe is the route_peer_broker entry of /status on a
 // managed Windows gateway with route-only connectors (doctor row
 // "Route-only peer broker"): the broker is asked about the connection of
-// this status request itself, so the answer shows whether it serves real
-// lookups now. nil elsewhere.
+// a status request itself, so the answer shows whether it serves real
+// lookups; the answer is kept for routePeerBrokerProbeTTL. The detail is
+// the fixed category text (peerbroker.Describe), never raw error text. nil
+// elsewhere.
 func routePeerBrokerProbe(r *http.Request, cfg *config.Config) map[string]interface{} {
 	if !routeCallerWindows || cfg == nil || !cfg.StandaloneEnterprise() || !cfg.Routing.Enabled || len(cfg.Routing.RouteOnly.Connectors) == 0 {
 		return nil
@@ -336,14 +373,21 @@ func routePeerBrokerProbe(r *http.Request, cfg *config.Config) map[string]interf
 	if local == nil || err != nil || !local.IP.IsLoopback() || !remote.IP.IsLoopback() {
 		return map[string]interface{}{"state": "unknown", "detail": "the status request is not a loopback TCP connection"}
 	}
-	if _, err := routePeerSID(local, remote); err != nil {
+	routePeerBrokerStatus.mu.Lock()
+	defer routePeerBrokerStatus.mu.Unlock()
+	if routePeerBrokerStatus.answer != nil && time.Since(routePeerBrokerStatus.at) < routePeerBrokerProbeTTL {
+		return maps.Clone(routePeerBrokerStatus.answer)
+	}
+	answer := map[string]interface{}{"state": "ok"}
+	if _, err := routePeerSID(r.Context(), routePeerAsk{DataDir: cfg.DataDir}, local, remote); err != nil {
 		state := "refused"
 		if errors.Is(err, peerbroker.ErrUnavailable) {
 			state = "unavailable"
 		}
-		return map[string]interface{}{"state": state, "detail": err.Error()}
+		answer = map[string]interface{}{"state": state, "detail": peerbroker.Describe(err)}
 	}
-	return map[string]interface{}{"state": "ok"}
+	routePeerBrokerStatus.at, routePeerBrokerStatus.answer = time.Now(), answer
+	return maps.Clone(answer)
 }
 
 // verifiedRouteCaller answers for a request on a managed gateway: the
@@ -371,7 +415,7 @@ func (a *APIServer) verifiedRouteCaller(r *http.Request, connectorName string, r
 		// credential is valid (route-only) or for the proxy: a caller
 		// without one is refused first and costs the broker nothing.
 		if !requireCredential || in.CredentialIdentity != "" {
-			in.PeerSID, in.PeerSIDErr = acpLoopbackPeerSID(r)
+			in.PeerSID, in.PeerSIDErr = acpLoopbackPeerSID(r, routePeerAsk{DataDir: a.scannerCfg.DataDir, Identity: in.CredentialIdentity})
 		}
 		store := a.userScopedCredentialStore()
 		in.Enrolled = func(identity string) bool { return store.enrolledFor(identity, name) }
@@ -459,11 +503,26 @@ func (s *routeOnlyServer) holdCredential(cfg *config.Config, a *routeOnlyAttempt
 // hosts only); replaceable in tests.
 var routingCredentialValue = func(cfg *config.Config, name string) string { return cfg.RoutingCredential(name) }
 
+// routeOnlyHeldCredential is the value of the first routing.models[]
+// credential that covers provider at the origin of base, or "".
 func routeOnlyHeldCredential(cfg *config.Config, base, provider string) string {
+	for _, name := range routeOnlyCoveringCredentials(cfg, base, provider) {
+		if key := routingCredentialValue(cfg, name); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+// routeOnlyCoveringCredentials lists, in config order, the
+// routing.models[].credential names of provider at the origin of base
+// (stored on this host or not).
+func routeOnlyCoveringCredentials(cfg *config.Config, base, provider string) []string {
 	if cfg == nil {
-		return ""
+		return nil
 	}
 	origin := originOf(base)
+	var names []string
 	for _, m := range cfg.Routing.Models {
 		if !strings.EqualFold(m.Provider, provider) || strings.TrimSpace(m.Credential) == "" {
 			continue
@@ -472,14 +531,11 @@ func routeOnlyHeldCredential(cfg *config.Config, base, provider string) string {
 		if mOrigin == "" {
 			mOrigin = providerDefaultOrigins[strings.ToLower(m.Provider)]
 		}
-		if !strings.EqualFold(mOrigin, origin) {
-			continue
-		}
-		if key := routingCredentialValue(cfg, m.Credential); key != "" {
-			return key
+		if strings.EqualFold(mOrigin, origin) {
+			names = append(names, strings.TrimSpace(m.Credential))
 		}
 	}
-	return ""
+	return names
 }
 
 // routeCallerRefusalText is the 401 message for an unverified caller.
@@ -491,6 +547,8 @@ func routeCallerRefusalText(reason string) string {
 		return "the caller is not the account this gateway runs as"
 	case routeCallerCredentialMismatch, routeCallerPeerMismatch:
 		return "the route credential belongs to another account"
+	case routeCallerPeerLookupLimited:
+		return "too many new connections from this account at once; retry shortly"
 	default:
 		return "this account is not verified for routing through DefenseClaw (" + reason + "); run defenseclaw doctor"
 	}

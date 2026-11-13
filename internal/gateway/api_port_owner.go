@@ -71,7 +71,7 @@ func procNetIP(h string) net.IP {
 func apiPortHolder(listeners []procNetListener, ip net.IP, port, self int) (int, bool) {
 	uid, found := 0, false
 	for _, l := range listeners {
-		if l.port != port || !(l.ip.Equal(ip) || l.ip.IsUnspecified() || ip.IsUnspecified()) {
+		if l.port != port || (!l.ip.Equal(ip) && !l.ip.IsUnspecified() && !ip.IsUnspecified()) {
 			continue
 		}
 		if l.uid != self {

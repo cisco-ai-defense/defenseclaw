@@ -129,12 +129,7 @@ func (p windowsPeerProcess) Identity() (PeerIdentity, error) {
 	if user == nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
 		return PeerIdentity{}, errors.New("peercred: the client token has no valid user SID")
 	}
-	var session uint32
-	var n uint32
-	if err := windows.GetTokenInformation(token, windows.TokenSessionId, (*byte)(unsafe.Pointer(&session)), uint32(unsafe.Sizeof(session)), &n); err != nil {
-		return PeerIdentity{}, fmt.Errorf("peercred: read the client token session: %w", err)
-	}
-	return PeerIdentity{SID: user.User.Sid.String(), SessionID: session}, nil
+	return PeerIdentity{SID: user.User.Sid.String()}, nil
 }
 
 func (p windowsPeerProcess) Close() {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,9 +74,61 @@ func routeBackupPath(dataDir, connector string) string {
 	return filepath.Join(dataDir, connector+"_route_backup.json")
 }
 
+// RouteOnlyFileReader reads one agent file or route record for the
+// route-only render and drift check: os.ErrNotExist for a missing file, and
+// errors that carry no path and no file content (they reach the guardian
+// verify and repair report).
+type RouteOnlyFileReader func(path string) ([]byte, error)
+
+// readRouteOnlyFile is the default RouteOnlyFileReader: a regular file of at
+// most UserNativeOTLPReadLimit bytes (a user can replace these files with a
+// huge one; S1 REVIEW-code-winroute P3-3).
+func readRouteOnlyFile(path string) ([]byte, error) {
+	name := filepath.Base(path)
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, os.ErrNotExist
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", name, pathErrorCause(err))
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", name, pathErrorCause(err))
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	if info.Size() > UserNativeOTLPReadLimit {
+		return nil, UserNativeOTLPFileTooLarge(name)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, UserNativeOTLPReadLimit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, pathErrorCause(err))
+	}
+	if int64(len(raw)) > UserNativeOTLPReadLimit {
+		return nil, UserNativeOTLPFileTooLarge(name)
+	}
+	return raw, nil
+}
+
+// pathErrorCause drops the path of an *os.PathError.
+func pathErrorCause(err error) error {
+	var pathErr *os.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Err
+	}
+	return err
+}
+
 func loadRouteBackup(dataDir, connector string) (routeEnvBackup, error) {
+	return loadRouteBackupWith(readRouteOnlyFile, dataDir, connector)
+}
+
+func loadRouteBackupWith(read RouteOnlyFileReader, dataDir, connector string) (routeEnvBackup, error) {
 	var b routeEnvBackup
-	raw, err := os.ReadFile(routeBackupPath(dataDir, connector))
+	raw, err := read(routeBackupPath(dataDir, connector))
 	if errors.Is(err, os.ErrNotExist) {
 		return routeEnvBackup{Original: map[string]*string{}, Applied: map[string]string{}}, nil
 	}
@@ -83,7 +136,8 @@ func loadRouteBackup(dataDir, connector string) (routeEnvBackup, error) {
 		return b, err
 	}
 	if err := json.Unmarshal(raw, &b); err != nil {
-		return b, fmt.Errorf("route backup %s: %w", routeBackupPath(dataDir, connector), err)
+		// Never the parser text: it quotes the offending content.
+		return routeEnvBackup{}, fmt.Errorf("the %s route record is not valid JSON", connector)
 	}
 	if b.Original == nil {
 		b.Original = map[string]*string{}

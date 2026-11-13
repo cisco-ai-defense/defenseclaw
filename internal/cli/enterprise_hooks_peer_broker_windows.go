@@ -24,9 +24,10 @@ const windowsServiceNameEnvForBroker = "DEFENSECLAW_WINDOWS_SERVICE_NAME"
 // startEnterpriseHookPeerBroker serves the managed Windows route-only peer
 // SID broker (S1 Q7 lead ruling) from the standalone guardian: LocalSystem,
 // one pipe only the gateway service SID may open, one question (who owns
-// the client end of a loopback connection the gateway accepted). When it
-// stops it is restarted with a backoff; the gateway refuses every
-// route-only caller while it is down.
+// the client end of a loopback connection the gateway accepted). Every
+// start serves a new random pipe name, published in <data dir>\hooks for
+// the gateway. When it stops it is restarted with a backoff (and a new
+// name); the gateway refuses every route-only caller while it is down.
 func startEnterpriseHookPeerBroker(ctx context.Context, errOut io.Writer) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return
@@ -39,11 +40,18 @@ func startEnterpriseHookPeerBroker(ctx context.Context, errOut io.Writer) {
 	if err != nil || !strings.EqualFold(strings.TrimSpace(os.Getenv(windowsServiceNameEnvForBroker)), names.Guardian) {
 		return
 	}
-	server, err := peerbroker.NewServer(gatewayService, func(event peerbroker.Event) {
-		if event.Outcome == "verified" {
+	server, err := peerbroker.NewServer(gatewayService, cfg.DataDir, func(event peerbroker.Event) {
+		switch {
+		case event.Outcome == "verified":
 			return
+		case event.Stage == "create":
+			// The pipe name of this start is held by another process (or
+			// the next instance could not be created): the holder PID only,
+			// never its account. The guardian restarts under a new name.
+			fmt.Fprintf(errOut, "[hook-guardian] peer broker pipe %s (holder pid %d)\n", event.Outcome, event.ClientPID)
+		default:
+			fmt.Fprintf(errOut, "[hook-guardian] peer broker %s: %s (gateway pid %d)\n", event.Stage, event.Outcome, event.ClientPID)
 		}
-		fmt.Fprintf(errOut, "[hook-guardian] peer broker %s: %s (gateway pid %d)\n", event.Stage, event.Outcome, event.ClientPID)
 	})
 	if err != nil {
 		fmt.Fprintf(errOut, "[hook-guardian] peer broker not started (managed Windows route-only callers are refused): %v\n", err)
@@ -52,7 +60,7 @@ func startEnterpriseHookPeerBroker(ctx context.Context, errOut io.Writer) {
 	go func() {
 		backoff := 2 * time.Second
 		for {
-			err := server.Serve(ctx, nil)
+			err := server.Serve(ctx)
 			if ctx.Err() != nil {
 				return
 			}

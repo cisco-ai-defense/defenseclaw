@@ -13,13 +13,12 @@ import (
 type fakePeerProcess struct {
 	created uint64
 	sid     string
-	session uint32
 	closed  *int
 }
 
 func (p fakePeerProcess) CreationTime() (uint64, error) { return p.created, nil }
 func (p fakePeerProcess) Identity() (PeerIdentity, error) {
-	return PeerIdentity{SID: p.sid, SessionID: p.session}, nil
+	return PeerIdentity{SID: p.sid}, nil
 }
 func (p fakePeerProcess) Close() { *p.closed++ }
 
@@ -85,7 +84,7 @@ func TestOwnerLookupVerifyRefusesAReusedPID(t *testing.T) {
 				},
 				open: func(pid uint32) (peerProcess, error) {
 					opened = pid
-					return fakePeerProcess{created: tc.created, sid: "S-1-5-21-1-2-3-1001", session: 2, closed: &closed}, nil
+					return fakePeerProcess{created: tc.created, sid: "S-1-5-21-1-2-3-1001", closed: &closed}, nil
 				},
 			}
 			serverPID := tc.serverPID
@@ -107,8 +106,8 @@ func TestOwnerLookupVerifyRefusesAReusedPID(t *testing.T) {
 					t.Fatalf("verify = %+v, %v; want an error naming %q", got, err, tc.wantErrText)
 				}
 			default:
-				if err != nil || got.SID != tc.wantSID || got.SessionID != 2 {
-					t.Fatalf("verify = %+v, %v; want %q in session 2", got, err, tc.wantSID)
+				if err != nil || got.SID != tc.wantSID {
+					t.Fatalf("verify = %+v, %v; want %q", got, err, tc.wantSID)
 				}
 			}
 			if opened != 0 && closed != 1 {

@@ -99,7 +99,7 @@ func (u *usageResponseWriter) WriteHeader(status int) {
 	u.mu.Lock()
 	if !u.header {
 		u.header = true
-		u.call.UpstreamHeader(status, u.ResponseWriter.Header())
+		u.call.UpstreamHeader(status, u.Header())
 	}
 	u.mu.Unlock()
 	u.ResponseWriter.WriteHeader(status)
@@ -109,7 +109,7 @@ func (u *usageResponseWriter) Write(p []byte) (int, error) {
 	u.mu.Lock()
 	if !u.header {
 		u.header = true
-		u.call.UpstreamHeader(http.StatusOK, u.ResponseWriter.Header())
+		u.call.UpstreamHeader(http.StatusOK, u.Header())
 	}
 	if u.streaming {
 		u.call.Chunk(p)

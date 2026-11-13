@@ -33,7 +33,7 @@ func Answer(message []byte, callerPID uint32, verify Verifier) ([]byte, string) 
 		identity, verifyErr := verify(local, remote, callerPID, peercred.TCPConnOwner{PID: request.PID, CreateTime: request.CreateTime})
 		switch {
 		case verifyErr == nil && sidPattern.MatchString(identity.SID):
-			response.OK, response.SID, response.Session = true, identity.SID, identity.SessionID
+			response.OK, response.SID = true, identity.SID
 		case errors.Is(verifyErr, peercred.ErrPeerNotFound):
 			response.Error = RefusedNotFound
 		case errors.Is(verifyErr, peercred.ErrNotAccepted):
@@ -56,7 +56,8 @@ func Answer(message []byte, callerPID uint32, verify Verifier) ([]byte, string) 
 }
 
 // Event is one broker log line: the stage, the outcome category and the
-// gateway PID. It never carries a SID or an account name.
+// gateway PID (stage create: the PID of the process holding the pipe name,
+// 0 when unknown). It never carries a SID or an account name.
 type Event struct {
 	Stage     string
 	Outcome   string

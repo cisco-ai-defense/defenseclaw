@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -27,7 +28,6 @@ const (
 // without a new endpoint.
 type routeOnlyReadiness struct {
 	Connector  string                     `json:"connector"`
-	Mounted    bool                       `json:"mounted"`
 	API        string                     `json:"api,omitempty"`
 	Provider   string                     `json:"provider,omitempty"`
 	Upstream   string                     `json:"upstream,omitempty"` // scheme://host only
@@ -53,12 +53,20 @@ type routeOnlySigningReadiness struct {
 	CredentialError string `json:"credential_error,omitempty"`
 }
 
-func readinessError(err error) string { return truncateUTF8(err.Error(), 300) }
+// awsRequestID matches the request id an AWS error carries; it changes on
+// every call, so it is cut from readiness text (the periodic recheck would
+// otherwise publish a new state, and wake every subscriber, each minute).
+var awsRequestID = regexp.MustCompile(`(?i)(request ?id:? *)[0-9a-z-]{8,}`)
+
+func readinessError(err error) string {
+	return truncateUTF8(awsRequestID.ReplaceAllString(err.Error(), "${1}-"), 300)
+}
 
 // routeOnlyReadinessFor computes the readiness of every route-only connector
 // of cfg (none when routing is off). Signing is checked with one bounded
 // credential fetch through signers (the cache the listener signs with).
-func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSigners, mounted bool) []routeOnlyReadiness {
+// It is published only while the route-only listener is mounted.
+func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSigners) []routeOnlyReadiness {
 	names := routeOnlyConnectorsOf(cfg)
 	if len(names) == 0 {
 		return nil
@@ -67,14 +75,11 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 	custody := managedHost && routeOnlyCustodyOS(goos)
 	out := make([]routeOnlyReadiness, 0, len(names))
 	for _, name := range names {
-		r := routeOnlyReadiness{Connector: name, Mounted: mounted, Custody: custody}
+		r := routeOnlyReadiness{Connector: name, Custody: custody}
 		up, ok := cfg.Routing.RouteOnly.Upstreams[name]
 		if !ok || strings.TrimSpace(up.BaseURL) == "" {
 			r.Problem = "routing.route_only.upstreams." + name + " is not set"
-			r.Fix = "run defenseclaw routing enable --connector " + name
-			if managedHost {
-				r.Fix = "set routing.route_only.upstreams." + name + " in the policy bundle"
-			}
+			r.Fix = "set routing.route_only.upstreams." + name + " (base_url and api) in " + routeOnlyConfigSource(managedHost)
 			out = append(out, r)
 			continue
 		}
@@ -86,7 +91,7 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 			r.Ready = r.Signing.RegionOK && r.Signing.Signer && r.Signing.Credential
 			if !r.Ready {
 				r.Problem = "gateway Bedrock signing is not ready"
-				r.Fix = "check routing.route_only.upstreams." + name + ".bedrock (run defenseclaw doctor for the failing check)"
+				r.Fix = bedrockSigningFix(r.Signing, "routing.route_only.upstreams."+name+".bedrock", managedHost)
 			}
 		case custody:
 			if routeOnlyHeldCredential(cfg, up.BaseURL, r.Provider) != "" {
@@ -94,18 +99,42 @@ func routeOnlyReadinessFor(cfg *config.Config, goos string, signers *bedrockSign
 				break
 			}
 			r.Credential = routeCredentialMissing
+			if named := routeOnlyCoveringCredentials(cfg, up.BaseURL, r.Provider); len(named) > 0 {
+				// The bundle names the key, but this host does not store it.
+				r.Problem = "credential " + named[0] + " is named in the policy bundle but not stored on this host: every model call answers 503"
+				r.Fix = "store it: defenseclaw-gateway enterprise secret set --name " + named[0] + " --from-stdin"
+				break
+			}
 			r.Problem = "this managed host forwards no agent credential and no gateway credential covers " + r.Provider + " at " + r.Upstream + ": every model call answers 503"
 			r.Fix = "set routing.models[].credential for " + r.Provider + " (base_url " + r.Upstream + ") in the policy bundle"
 		default:
 			r.Credential, r.Ready = routeCredentialAgent, true
 		}
-		if r.Ready && !mounted {
-			r.Ready, r.Problem = false, "the route-only listener is not mounted on the gateway API"
-			r.Fix = "restart the gateway"
-		}
 		out = append(out, r)
 	}
 	return out
+}
+
+func routeOnlyConfigSource(managedHost bool) string {
+	if managedHost {
+		return "the policy bundle"
+	}
+	return "config.yaml"
+}
+
+// bedrockSigningFix names the fix of the first failing signing check.
+func bedrockSigningFix(s *routeOnlySigningReadiness, block string, managedHost bool) string {
+	where := routeOnlyConfigSource(managedHost)
+	switch {
+	case !s.RegionOK:
+		return "set " + block + ".region to the region of the upstream host in " + where
+	case s.ProfileFound != nil && !*s.ProfileFound:
+		return "create AWS profile " + s.Profile + " for the gateway account, or change " + block + ".profile in " + where
+	case !s.Signer:
+		return "fix " + block + " in " + where + ": the gateway could not build its Bedrock signer"
+	default:
+		return "refresh the AWS credentials of the gateway account (for SSO: aws sso login)"
+	}
 }
 
 // checkBedrockSigning runs the doctor checks of gateway Bedrock signing:
@@ -167,7 +196,7 @@ func (s *Sidecar) runRouteOnlyReadiness(ctx context.Context, ro *routeOnlyServer
 	defer tick.Stop()
 	for {
 		if cfg := s.currentConfig(); cfg != last || time.Since(lastAt) >= routeOnlyReadinessEvery {
-			s.health.SetRouteOnlyReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers, true))
+			s.health.SetRouteOnlyReadiness(routeOnlyReadinessFor(cfg, ro.goos, &ro.signers))
 			last, lastAt = cfg, time.Now()
 		}
 		select {
