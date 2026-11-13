@@ -62,7 +62,7 @@ type dmCache struct {
 	budgetFile string
 	budget     int64
 	paceMu     sync.Mutex
-	paceNext time.Time
+	paceNext   time.Time
 
 	hits, misses, upstreamCalls, rateLimited, failed, offlineMisses, stored atomic.Int64
 }
@@ -203,7 +203,6 @@ const (
 	dmBackground = 90 * time.Second
 )
 
-
 // takeBudget records one upstream request in the shared budget file and
 // reports whether it is still within the budget.
 func (c *dmCache) takeBudget() bool {
@@ -247,7 +246,6 @@ func (c *dmCache) waitPace(bodyBytes int) {
 		time.Sleep(wait)
 	}
 }
-
 
 func (c *dmCache) fetch(sha string, body []byte, window time.Duration) *dmCacheEntry {
 	if window <= dmInWindow {
