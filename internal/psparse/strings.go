@@ -278,9 +278,10 @@ func scanParenBody(runes []rune) (string, int) {
 	i := 0
 	for ; i < len(runes); i++ {
 		r := runes[i]
-		if r == '(' {
+		switch r {
+		case '(':
 			depth++
-		} else if r == ')' {
+		case ')':
 			depth--
 			if depth == 0 {
 				return b.String(), i + 1
@@ -335,8 +336,6 @@ func scanEmbeddedVar(runes []rune) (Expr, int) {
 	return &Variable{Name: name, Scope: scope}, i
 }
 
-var numberMultipliers = map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50}
-
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
 	raw := t.Raw
@@ -358,7 +357,6 @@ func numberLit(t Token) *Number {
 				mult = 1 << 50
 			}
 			raw = raw[:i] + raw[i+2:]
-			lower = strings.ToLower(raw)
 			break
 		}
 	}

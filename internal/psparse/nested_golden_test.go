@@ -45,6 +45,9 @@ func nestedCorpus() []string {
 		// (the -Version positional-script and Start-Process -ArgumentList shapes
 		// are fixed and dump-verified too, but this nested oracle does not model
 		// positional/Start-Process extraction -- see R12 -- so they are not gated.)
+		// review 4 R4-4: -EncodedArguments is a value flag, never the payload
+		`powershell -EncodedArguments UABMAEEAQwBFAEgATwBMAEQA -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`,
+		`powershell -encodeda UABMAEEAQwBFAEgATwBMAEQA -c Remove-Item C:\x`,
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -163,9 +166,12 @@ func TestGenNestedGolden(t *testing.T) {
 }
 
 // nestedOracleScript extracts, for each input line, the nested payload the way
-// pwsh resolves it: the element values after -Command / a decoded
-// -EncodedCommand / the cmd /c tail / an Invoke-Expression value or pipeline
-// input / [scriptblock]::Create's argument, using pwsh's own AST element values.
+// pwsh resolves it. It models only the powershell/pwsh host (-Command, a
+// decoded -EncodedCommand, a positional/-Version script) and the cmd /c tail,
+// which is what the gated nestedCorpus covers. Invoke-Expression,
+// [scriptblock]::Create and Start-Process -ArgumentList are NOT modelled here
+// (review 4 R12); their extraction is covered by direct unit tests
+// (TestNestedIEXList, nested_scripts_test.go) instead of this golden.
 const nestedOracleScript = `
 param([string]$InFile)
 $ErrorActionPreference = 'Stop'

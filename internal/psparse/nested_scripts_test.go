@@ -22,7 +22,8 @@ func TestExtractNestedScripts(t *testing.T) {
 		{`Invoke-Expression "hostname"`, KindIEXLiteral, "powershell", "hostname", true},
 		{`[scriptblock]::Create('calc.exe')`, KindScriptBlockCreate, "powershell", "calc.exe", true},
 		{`cmd /c "dir C:\"`, KindCmdC, "cmd", `dir C:\`, true},
-		{`Start-Process powershell -ArgumentList '-Command','calc.exe'`, KindStartProcessArgs, "powershell", "calc.exe", true},
+		// review 5: Start-Process argv is not modelled -> always opaque (ps_child_argv)
+		{`Start-Process powershell -ArgumentList '-Command','calc.exe'`, KindStartProcessArgs, "powershell", "", false},
 	}
 	for _, c := range cases {
 		sc, _ := Parse(c.src, Options{})

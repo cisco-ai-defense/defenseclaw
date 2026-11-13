@@ -381,9 +381,17 @@ func (p *parser) parseHashValue() Expr {
 	if p.at(TokLBrace) {
 		return p.parseScriptBlock()
 	}
-	// A hashtable value is a pipeline, which may be a command
-	// (@{ a = Remove-Item x }); parse it as a statement and keep it walkable.
 	start := p.cur().Start
+	// A hashtable value can be a control-flow statement
+	// (@{ a = foreach ($i in Remove-Item x) { 1 } }); parse it like an
+	// assignment RHS so its commands are walked, not read as a bareword command
+	// named "foreach" (review 5 R5-7).
+	if w, ok := p.bareword(); ok && controlKeywords[strings.ToLower(w)] {
+		st := p.parseStatement(stopBrace)
+		return &SubExpr{span: span{start, p.prevEnd()}, Statements: []Statement{st}}
+	}
+	// otherwise a hashtable value is a pipeline, which may be a command
+	// (@{ a = Remove-Item x }); parse it as a statement and keep it walkable.
 	st := p.parsePipelineChainOrAssignment(stopBrace)
 	switch v := st.(type) {
 	case *ExprStatement:
