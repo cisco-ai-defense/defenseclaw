@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -63,8 +62,10 @@ func runBudgetSchedule(t *testing.T, s budgetSchedule) budgetOutcome {
 	bindings := sandboxauth.NewLimiter(cfg)
 	account := &hookCallerLimiter{now: clock}
 
-	first, retry := connector.SandboxHookAttemptBudgets()
-	answer, receiptOpen := max(first, retry), sandboxHookReceiptWindow
+	// Every request stays open as long as its answer is still of use to the
+	// sandbox hook: to the end of the answer window, which sizes the
+	// in-flight bounds (sandboxInFlightWindow, S8 lead review P2-1).
+	answer, receiptOpen := sandboxInFlightWindow-100*time.Millisecond, sandboxInFlightWindow-100*time.Millisecond
 
 	const identity = "1000"
 	admissionKey := func(receipt bool) string {

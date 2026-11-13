@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,6 +131,10 @@ func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) 
 	}
 	return batch[0].err
 }
+
+// durableBatchSetupFailures counts durable hook-call batches whose writer
+// connection could not be set to synchronous=FULL.
+var durableBatchSetupFailures atomic.Int64
 
 // writeGroupAging is how long a write may wait before it goes ahead of
 // newer writes in takeBatchLocked, so durable writes never starve the rest.
@@ -307,6 +312,11 @@ func (s *Store) attemptGroupedTx(
 	if groupedBatchDurable(batch) {
 		conn, connErr := s.durableBatchConn(batchCtx)
 		if connErr != nil {
+			// Every write of the batch fails with it, the records of calls
+			// already answered too (fail closed); say so once.
+			if durableBatchSetupFailures.Add(1) == 1 {
+				fmt.Fprintf(os.Stderr, "[audit] a durable hook-call batch of %d writes could not set synchronous=FULL: %v\n", len(batch), connErr)
+			}
 			return hooks.begin(connErr), false
 		}
 		defer conn.restore()

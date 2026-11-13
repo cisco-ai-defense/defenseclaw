@@ -29,8 +29,9 @@ import (
 const (
 	outageModeFreshness = 250 * time.Millisecond
 	// outageModeClockSkew bounds how far in the future a result may say it
-	// started: a later one is no result (a clock step, a forged file).
-	outageModeClockSkew = time.Second
+	// started: a later one is no result (a clock step, a forged file). It is
+	// no wider than the freshness window.
+	outageModeClockSkew = outageModeFreshness
 	outageModeWaitStep  = 5 * time.Millisecond
 	outageModeWaitMax   = 3 * time.Second
 )
@@ -39,21 +40,24 @@ const (
 func sharedOutageMode(gateway, hookDir string, lateAt time.Time, look func() string) string {
 	result := filepath.Join(hookDir, ".outage-mode.result")
 	lock := filepath.Join(hookDir, ".outage-mode.lock")
+	// A look answers for the config it read: a result taken under another
+	// config.yaml (a fail mode or profile change since) is no result.
+	stamp := outageConfigStamp(filepath.Dir(hookDir))
 	deadline := time.Now().Add(outageModeWaitMax)
 	for {
-		if started, mode, ok := readOutageModeResult(result); ok && !started.Before(lateAt.Add(-outageModeFreshness)) {
+		if started, mode, ok := readOutageModeResult(result, stamp); ok && !started.Before(lateAt.Add(-outageModeFreshness)) {
 			return mode
 		}
 		if unlock := takeOutageModeLock(lock); unlock != nil {
 			// Look again under the lock: a look that finished while this call
 			// waited for it may be fresh enough.
-			if started, mode, ok := readOutageModeResult(result); ok && !started.Before(lateAt.Add(-outageModeFreshness)) {
+			if started, mode, ok := readOutageModeResult(result, stamp); ok && !started.Before(lateAt.Add(-outageModeFreshness)) {
 				unlock()
 				return mode
 			}
 			started := time.Now()
 			mode := look()
-			writeOutageModeResult(result, started, mode)
+			writeOutageModeResult(result, started, mode, stamp)
 			unlock()
 			return mode
 		}
@@ -88,9 +92,10 @@ func takeOutageModeLock(lock string) func() {
 	}
 }
 
-// readOutageModeResult reads "v1 <unix nanos> <open|closed>" from a regular
-// file of this account; anything else is no result.
-func readOutageModeResult(path string) (time.Time, string, bool) {
+// readOutageModeResult reads "v2 <unix nanos> <open|closed> <config stamp>"
+// from a regular file of this account, taken under the config.yaml of stamp;
+// anything else is no result.
+func readOutageModeResult(path, stamp string) (time.Time, string, bool) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 64 || info.Mode().Perm()&0o022 != 0 || !ownedByMe(info) {
 		return time.Time{}, "", false
@@ -100,7 +105,7 @@ func readOutageModeResult(path string) (time.Time, string, bool) {
 		return time.Time{}, "", false
 	}
 	fields := strings.Fields(string(data))
-	if len(fields) != 3 || fields[0] != "v1" || (fields[2] != "open" && fields[2] != "closed") {
+	if len(fields) != 4 || fields[0] != "v2" || (fields[2] != "open" && fields[2] != "closed") || fields[3] != stamp {
 		return time.Time{}, "", false
 	}
 	nanos, err := strconv.ParseInt(fields[1], 10, 64)
@@ -114,7 +119,7 @@ func readOutageModeResult(path string) (time.Time, string, bool) {
 	return started, fields[2], true
 }
 
-func writeOutageModeResult(path string, started time.Time, mode string) {
+func writeOutageModeResult(path string, started time.Time, mode, stamp string) {
 	// The file is written under the look lock, so one temporary name is
 	// enough and none is left behind by a later look.
 	tmp := path + ".tmp"
@@ -123,7 +128,7 @@ func writeOutageModeResult(path string, started time.Time, mode string) {
 	if err != nil {
 		return
 	}
-	_, werr := fmt.Fprintf(file, "v1 %d %s\n", started.UnixNano(), mode)
+	_, werr := fmt.Fprintf(file, "v2 %d %s %s\n", started.UnixNano(), mode, stamp)
 	if cerr := file.Close(); werr != nil || cerr != nil {
 		_ = os.Remove(tmp)
 		return
@@ -136,4 +141,14 @@ func writeOutageModeResult(path string, started time.Time, mode string) {
 func ownedByMe(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Uid == uint32(os.Geteuid())
+}
+
+// outageConfigStamp names the config.yaml of the data folder as it is now
+// (size and modification time, or "none"): the input of an outage-mode look.
+func outageConfigStamp(dataDir string) string {
+	info, err := os.Stat(filepath.Join(dataDir, "config.yaml"))
+	if err != nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d.%d", info.Size(), info.ModTime().UnixNano())
 }

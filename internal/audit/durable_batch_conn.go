@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -47,6 +48,10 @@ var (
 	auditNormalBatchPragmas  = []string{"PRAGMA fullfsync = 0", "PRAGMA synchronous = NORMAL"}
 )
 
+// durableRestoreFault is a test seam: an error it returns for a pragma fails
+// putting that pragma back after a durable batch.
+var durableRestoreFault func(pragma string) error
+
 // durableRestoreFailures counts the writer connections dropped because the
 // NORMAL pragmas could not be put back after a durable batch.
 var durableRestoreFailures atomic.Int64
@@ -81,7 +86,18 @@ func (c *durableBatchConn) restore() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	for _, pragma := range auditNormalBatchPragmas {
-		if _, err := c.ExecContext(ctx, pragma); err != nil {
+		var err error
+		if durableRestoreFault != nil {
+			err = durableRestoreFault(pragma)
+		}
+		if err == nil {
+			_, err = c.ExecContext(ctx, pragma)
+		}
+		if err != nil {
+			if errors.Is(err, sql.ErrConnDone) {
+				// The store closed under the batch: nothing to keep or drop.
+				break
+			}
 			if durableRestoreFailures.Add(1) == 1 {
 				fmt.Fprintf(os.Stderr, "[audit] dropping the writer connection after a durable batch: %s: %v\n", pragma, err)
 			}

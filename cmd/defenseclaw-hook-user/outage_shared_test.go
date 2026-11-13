@@ -49,7 +49,7 @@ func TestSharedOutageModeRunsOneLookForConcurrentLateCalls(t *testing.T) {
 // not reused: the call looks again.
 func TestSharedOutageModeIgnoresAnOldResult(t *testing.T) {
 	dir := t.TempDir()
-	writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now().Add(-time.Second), "open")
+	writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now().Add(-time.Second), "open", outageConfigStamp(filepath.Dir(dir)))
 	var looks atomic.Int32
 	got := sharedOutageMode("gw", dir, time.Now(), func() string { looks.Add(1); return "closed" })
 	if got != "closed" || looks.Load() != 1 {
@@ -69,14 +69,14 @@ func TestSharedOutageModeRefusesAForeignResult(t *testing.T) {
 	if err := os.Symlink(target, result); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := readOutageModeResult(result); ok {
+	if _, _, ok := readOutageModeResult(result, "none"); ok {
 		t.Fatal("a symlinked result was read")
 	}
 	_ = os.Remove(result)
-	if err := os.WriteFile(result, []byte("v1 12 maybe\n"), 0o600); err != nil {
+	if err := os.WriteFile(result, []byte("v2 12 maybe none\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok := readOutageModeResult(result); ok {
+	if _, _, ok := readOutageModeResult(result, "none"); ok {
 		t.Fatal("a malformed result was read")
 	}
 }
@@ -104,7 +104,7 @@ func TestSharedOutageModeWaitsForTheHolder(t *testing.T) {
 	lateAt := time.Now()
 	go func() {
 		time.Sleep(30 * time.Millisecond)
-		writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now(), "closed")
+		writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now(), "closed", outageConfigStamp(filepath.Dir(dir)))
 		unlock()
 	}()
 	var looks atomic.Int32
@@ -116,8 +116,32 @@ func TestSharedOutageModeWaitsForTheHolder(t *testing.T) {
 // A result that says it started in the future is no result.
 func TestSharedOutageModeRefusesAFutureResult(t *testing.T) {
 	dir := t.TempDir()
-	writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now().Add(time.Hour), "open")
-	if _, _, ok := readOutageModeResult(filepath.Join(dir, ".outage-mode.result")); ok {
+	writeOutageModeResult(filepath.Join(dir, ".outage-mode.result"), time.Now().Add(time.Hour), "open", "none")
+	if _, _, ok := readOutageModeResult(filepath.Join(dir, ".outage-mode.result"), "none"); ok {
 		t.Fatal("a future result was read")
+	}
+}
+
+// A look taken under another config.yaml (the fail mode changed since) is no
+// result: the next late call looks again (S8 lead review P3-1).
+func TestSharedOutageModeIgnoresAResultOfAnotherConfig(t *testing.T) {
+	data := t.TempDir()
+	dir := filepath.Join(data, "hooks")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(data, "config.yaml")
+	if err := os.WriteFile(config, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := sharedOutageMode("gw", dir, time.Now(), func() string { return "open" }); got != "open" {
+		t.Fatalf("first look %q", got)
+	}
+	if err := os.WriteFile(config, []byte("guardrail: {hook_fail_mode: closed}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var looks atomic.Int32
+	if got := sharedOutageMode("gw", dir, time.Now(), func() string { looks.Add(1); return "closed" }); got != "closed" || looks.Load() != 1 {
+		t.Fatalf("result of the earlier config reused: %q, %d looks", got, looks.Load())
 	}
 }
