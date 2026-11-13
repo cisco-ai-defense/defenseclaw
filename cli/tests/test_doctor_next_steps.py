@@ -50,16 +50,16 @@ def test_warn_and_fail_rows_print_their_remediation() -> None:
     r = _DoctorResult()
     text = _render(
         lambda: (
-            cmd_doctor._emit("warn", "Audit database size", "big", r=r, remediation="stop; VACUUM; start"),
+            cmd_doctor._emit("warn", "Audit database size", "big", r=r, remediation="stop; compact; start"),
             cmd_doctor._emit("pass", "Fine", "ok", r=r, remediation="never shown"),
             cmd_doctor._emit("fail", "Inline", "run: fix-it", r=r, remediation="fix-it"),
         )
     )
-    assert "Next step: stop; VACUUM; start" in text
+    assert "Next step: stop; compact; start" in text
     assert "never shown" not in text
     # Already spelled out in the detail: no second line.
     assert "Next step: fix-it" not in text
-    assert r.checks[0]["remediation"] == "stop; VACUUM; start"
+    assert r.checks[0]["remediation"] == "stop; compact; start"
 
 
 def test_human_size_never_reads_zero_for_a_non_empty_file() -> None:
@@ -612,6 +612,37 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     row = next(c for c in r.checks if c["label"] == "Audit storage capacity")
     assert row["status"] == "fail" and "is full" in row["detail"]
     assert "free space" in row["remediation"]
+
+
+@pytest.mark.parametrize("deployment_mode", ["", "managed_enterprise"])
+def test_audit_database_size_names_audit_compact_not_sqlite3(tmp_path, deployment_mode: str) -> None:
+    # Issue #1440: the space retention deleted is given back by
+    # 'defenseclaw audit compact', not by a manual sqlite3 VACUUM.
+    from types import SimpleNamespace
+
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(
+        status=AuditDBHealthStatus.VALID,
+        file_bytes=9800 * 1024 * 1024,
+        freelist_bytes=1059 * 1024 * 1024,
+        oldest_retention_unix_nano=None,
+    )
+    cfg = SimpleNamespace(
+        audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path), observability=None, deployment_mode=deployment_mode
+    )
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health),
+        mock.patch.object(cmd_doctor.shutil, "disk_usage", return_value=SimpleNamespace(free=1 << 40)),
+    ):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    row = next(c for c in r.checks if c["label"] == "Audit database size")
+    assert row["status"] == "warn" and "1059 MiB already deleted but not reclaimed" in row["detail"]
+    assert "defenseclaw audit compact" in row["remediation"]
+    assert "sqlite3" not in row["remediation"] and "VACUUM" not in row["remediation"]
+    stop = "'defenseclaw-gateway stop'"
+    assert (stop in row["remediation"]) is (deployment_mode == "")
 
 
 

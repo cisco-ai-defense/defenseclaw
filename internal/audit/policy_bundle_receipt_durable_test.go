@@ -18,6 +18,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -52,15 +53,9 @@ func spooledTestReceipt() (PolicyBundle, PolicyBundleReceipt) {
 func TestSpooledBundleReceiptIsNotConfirmedWithoutThePowerLossBarrier(t *testing.T) {
 	l := newTestLogger(t)
 	l.SetRuntimeV8Emitter(newTestRuntimeV8Emitter(t, l.store, router.AdmissionOrdinary))
-	// The synchronous=FULL connection cannot flush: the barrier fails.
-	db, err := openSQLiteWithPragmas(l.store.dbPath, auditDurablePragmas)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-	l.store.checkpointMu.Lock()
-	l.store.durableDB = db
-	l.store.checkpointMu.Unlock()
+	// The synchronous=FULL commit cannot flush: the barrier fails.
+	durableBatchFault = func() error { return errors.New("flush refused") }
+	t.Cleanup(func() { durableBatchFault = nil })
 	if err := l.store.SyncCommittedWrites(t.Context()); err == nil {
 		t.Fatal("fault not in place: the barrier still succeeds")
 	}
