@@ -57,7 +57,7 @@ _EC2DNS = re.compile(r"\b(?:ip-\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}|ec2-\d{1,3}-\d{1,
 _UNC = re.compile(r"(?<![\w$\\:])(\\\\)(?!\.[\\/]|\?[\\/]|wsl\$|wsl\.localhost|localhost\b|[*$]|(?i:users|windows|program|programdata|temp|tmp|system32|device|globalroot|pipe)\b|\d+\.\d+\.\d+\.\d+\\)([A-Za-z0-9][A-Za-z0-9_-]{1,62})(?=\\)")
 _COMPFLAG = re.compile(r"(?i)((?:-(?:ComputerName|Computer|CN|Server|DomainController|PSComputerName)(?:\s+|:|=)|\b(?:schtasks|tasklist|taskkill|systeminfo|shutdown|wmic)\b[^\n|;&]{0,80}?\s/(?:s\s+|node:))['\"]?)([A-Za-z][A-Za-z0-9_-]{1,14})(?![\w.$\\(-])")
 # domains
-_PRIVFQDN = re.compile(r"(?<![\w.@/-])((?:[a-z0-9][a-z0-9-]*\.)+(?:local|corp|internal|lan|intranet|localdomain|home\.arpa))(?![\w-])(?!\()(?!\.(?:json|ya?ml|toml|env|js|ts|py|md|txt|cfg|conf|ini|log|bak|example)\b)", re.I)
+_PRIVFQDN = re.compile(r"(?<![\w.@-])(?:(?<!/)|(?<=//))((?:[a-z0-9][a-z0-9-]*\.)+(?:local|corp|internal|lan|intranet|localdomain|home\.arpa))(?![\w-])(?!\()(?!\.(?:json|ya?ml|toml|env|js|ts|py|md|txt|cfg|conf|ini|log|bak|example)\b)", re.I)
 _PRIVSKIP = re.compile(r"(?i)^(?:settings|appsettings|env|config|secrets|application|docker-compose|compose|launchSettings|\.env)\.local$")
 _UPN = re.compile(r"\b([\w.-]+)@((?:[\w-]+\.)*[\w-]+\.(?:onmicrosoft\.com|local|corp|internal|lan|intranet|localdomain))\b", re.I)
 # users
@@ -72,12 +72,21 @@ _USERDIR = re.compile(r"(?i)((?:[A-Za-z]:|/[a-z]|/mnt/[a-z])?[\\/]+Users[\\/]+)(
 _USERDIR_BARE = re.compile(r"(?i)(?<![\w\\/.:-])(Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)")
 _HOMEDIR = re.compile(r"(?<![\w.-])(/(?:home|usr/home)/)(?!alice\b|user\b|username\b|runner\b|[%$*{(\[<~.])([A-Za-z0-9._-]+)")
 # hosts / ids
-_HOST = re.compile(r"\b(?:dc-(?:[a-z0-9]+-)*?(?:win|ewin|rhel|mac|ubuntu|ent|float)[a-z0-9-]*|defenseclaw-(?:dev|balanced-dev))\b", re.I)
+_HOST = re.compile(r"\bdc-(?:[a-z0-9]+-)*?(?:win|ewin|rhel|mac|ubuntu|ent|float)[a-z0-9-]*\b", re.I)
 _INSTID = re.compile(r"\bi-[0-9a-f]{8}(?:[0-9a-f]{9})?\b")
 _AWSRES = re.compile(r"\b(sg|vpc|subnet|eni|vol|ami|snap|eipalloc)-(?=[0-9a-f]*\d)([0-9a-f]{8}(?:[0-9a-f]{9})?)\b")
 _SID = re.compile(r"\bS-1-5-21-(\d+)-(\d+)-(\d+)((?:-\d+)?)")
 
 _KEEP_V4 = ("0.", "127.", "192.0.2.", "198.51.100.", "203.0.113.", "255.")
+# Keep-list: cloud metadata endpoints and cluster-internal names are the TARGET of real attacks (credential theft from IMDS, SSRF to the Kubernetes API) and are public,
+# fixed values. Rewriting them would erase the attack text, so redact() and the leak scan leave them alone.
+_KEEP_NETS = tuple(ipaddress.ip_network(n) for n in ("169.254.0.0/16", "100.100.100.200/32", "168.63.129.16/32", "fd00:ec2::/32", "fd00:ec2::254/128"))
+_KEEP_NAME = re.compile(r"(?i)^(?:metadata(?:\.google\.internal)?|instance-data(?:\.ec2\.internal)?|metadata\.goog|kubernetes\.default(?:\.svc)?(?:\.cluster\.local)?|"
+                        r"(?:[a-z0-9-]+\.)*(?:cluster\.local|docker\.internal))$")
+
+
+def _keep_ip(a) -> bool:
+    return any(a in n for n in _KEEP_NETS if n.version == a.version)
 _maps: dict[str, dict] = {}
 _deny: list = []   # [(compiled regex, {lowercased value -> category})]
 
@@ -143,7 +152,7 @@ def _ip(m: re.Match) -> str:
         a = ipaddress.ip_address(s)
     except ValueError:
         return s
-    if a.is_loopback or s.startswith(_KEEP_V4):
+    if a.is_loopback or s.startswith(_KEEP_V4) or _keep_ip(a):
         return s
     return f"198.51.100.{_n('ip4', s) % 250 + 1}"
 
@@ -154,7 +163,7 @@ def _ip6(m: re.Match) -> str:
         a = ipaddress.ip_address(s.split("%")[0])
     except ValueError:
         return s
-    if a.version != 6 or a.is_loopback or a.is_unspecified or a in ipaddress.ip_network("2001:db8::/32"):
+    if a.version != 6 or a.is_loopback or a.is_unspecified or a in ipaddress.ip_network("2001:db8::/32") or _keep_ip(a):
         return s
     return f"2001:db8::{_n('ip6', s):x}"
 
@@ -183,7 +192,7 @@ def _ec2win(m: re.Match) -> str:
 
 def _privfqdn(m: re.Match) -> str:
     v = m.group(1)
-    if _PRIVSKIP.match(v) or v.lower().endswith(".example.com"):
+    if _PRIVSKIP.match(v) or _KEEP_NAME.match(v) or v.lower().endswith(".example.com"):
         return m.group(0)
     # a short host label in front of the domain is a host: name.domain.tld
     parts = v.split(".")
@@ -329,13 +338,13 @@ def _hit_ok(name: str, m: re.Match) -> bool:
             a = ipaddress.ip_address(s)
         except ValueError:
             return True
-        return a.is_loopback or s.startswith(_KEEP_V4)
+        return a.is_loopback or s.startswith(_KEEP_V4) or _keep_ip(a)
     if name == "ipv6":
         try:
             a = ipaddress.ip_address(s.split("%")[0])
         except ValueError:
             return True
-        return a.version != 6 or a.is_loopback or a.is_unspecified or a in ipaddress.ip_network("2001:db8::/32")
+        return a.version != 6 or a.is_loopback or a.is_unspecified or a in ipaddress.ip_network("2001:db8::/32") or _keep_ip(a)
     if name == "mac":
         low = s.lower().replace("-", ":")
         return low in ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00") or low.startswith("00:00:5e:00:53:")
@@ -353,7 +362,7 @@ def _hit_ok(name: str, m: re.Match) -> bool:
         return m.group(1) in _SYSDOM or _is_ph(m.group(1), r"labdom\d+|labpc\d+")
     if name == "privfqdn":
         v = m.group(1)
-        return bool(_PRIVSKIP.match(v)) or v.lower().endswith(".example.com")
+        return bool(_PRIVSKIP.match(v) or _KEEP_NAME.match(v)) or v.lower().endswith(".example.com")
     if name == "upn":
         return _is_ph(m.group(1), r"labuser\d+") and _is_ph(m.group(2), r"labdomain\d+\.example\.com")
     if name == "labhost":
@@ -375,6 +384,53 @@ def deny_hits(text: str) -> list[str]:
     """Denylist categories whose real value occurs in `text` (one entry per occurrence; the value itself is never returned)."""
     flat = re.sub(r"\\+", r"\\", text)
     return [ents.get(m.group(0).lower(), "host") for rx, ents in _deny for m in rx.finditer(flat)]
+
+
+_ALT = re.compile(r"\(\?:([^()]*\|[^()]*)\)|\(([^()?][^()]*\|[^()]*)\)")
+_SPLIT = re.compile(r"[\"'`]\s*\+?\s*[\"'`]")
+
+
+def _expand_alternations(s: str, cap: int = 64) -> list[str]:
+    """Spell out simple regex alternations: `ab-(?:c|d)` -> `ab-c`, `ab-d` (nested groups one level at a time, at most `cap` results)."""
+    out, todo = [], [s]
+    while todo and len(out) < cap:
+        cur = todo.pop()
+        m = _ALT.search(cur)
+        if not m:
+            out.append(cur)
+            continue
+        for alt in (m.group(1) or m.group(2)).split("|"):
+            todo.append(cur[: m.start()] + alt + cur[m.end():])
+    return out
+
+
+def _scan_forms(line: str, nxt: str = "") -> list[str]:
+    """The spellings of a source line a literal match would miss: as is, split-string halves joined ("ab" + "cd", "ab" "cd", across a line break),
+    regex alternations spelled out, regex escapes dropped, doubled backslashes folded. All lower case."""
+    forms = {line}
+    for base in (line, line.rstrip() + nxt.lstrip()):
+        j = _SPLIT.sub("", base)
+        forms.add(j)
+        for alt in _expand_alternations(j):
+            forms.add(alt)
+            forms.add(re.sub(r"\\([.\-_/])", r"\1", re.sub(r"\\b", "", alt)))
+    return [re.sub(r"\\+", r"\\", f).lower() for f in forms]
+
+
+def deny_substring_hits(line: str, nxt: str = "") -> list[str]:
+    """Denylist categories whose real value occurs in a source line as a SUBSTRING (inside an identifier, a regex alternation, a split string), case-insensitively.
+    Values shorter than 6 characters must stand alone (a 3-letter NetBIOS name would otherwise match every word)."""
+    forms = _scan_forms(line, nxt)
+    hits = []
+    for rx, ents in _deny:
+        for v, cat in ents.items():
+            vv = re.sub(r"\\+", r"\\", v)
+            if len(vv) >= 6:
+                if any(vv in f for f in forms):
+                    hits.append(cat)
+            elif any(re.search(r"(?<![a-z0-9])" + re.escape(vv) + r"(?![a-z0-9])", f) for f in forms):
+                hits.append(cat)
+    return hits
 
 
 def leak_scan(text: str) -> list[str]:

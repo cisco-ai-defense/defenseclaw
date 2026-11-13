@@ -491,7 +491,7 @@ def cmd_leakscan(a):
 
 
 def cmd_leakscan_repo(a):
-    """The pre-READY gate: no real lab value in any tracked file under benchmarks/, none in the given corpus files. Exit 1 on any hit; prints file:line and the
+    """The pre-READY gate: no real lab value in any tracked file under benchmarks/ (as a whole word OR as a substring: inside an identifier, a regex alternation or a split string, case-insensitive), none in the given corpus files. Exit 1 on any hit; prints file:line and the
     category only. Corpus files get the pattern categories as well; --allow-cat names documented public-dataset categories (default: none)."""
     import subprocess
     print(f"denylist: {L.load_denylist(a.denylist)} real lab values loaded (not printed)")
@@ -507,10 +507,13 @@ def cmd_leakscan_repo(a):
             continue
         if b"\0" in raw:
             continue
-        for i, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
+        lines = raw.decode("utf-8", "replace").splitlines()
+        for i, line in enumerate(lines, 1):
+            nxt = lines[i] if i < len(lines) else ""
             for h in L.PUBLIC_DATASET_HANDLES:
                 line = line.replace(h, "")
-            for cat in sorted(set(L.deny_hits(line)) - allow):
+                nxt = nxt.replace(h, "")
+            for cat in sorted(set(L.deny_hits(line)) | set(L.deny_substring_hits(line, nxt)) - allow):
                 print(f"  {f}:{i}: denylist:{cat}")
                 bad += 1
     for c in a.corpus or []:

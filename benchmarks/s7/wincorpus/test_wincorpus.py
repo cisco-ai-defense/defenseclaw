@@ -117,12 +117,12 @@ class RedactionCategoryTests(unittest.TestCase):
             self.assertEqual(L.redact(keep), keep, keep)
 
     def test_hostnames(self):
-        out = L.redact("scp -q dc-lab9-mac:C:/x . ; ssh ec2-user@ip-10-0-1-2.ec2.internal; curl http://ec2-3-4-5-6.compute-1.amazonaws.com/x; ssh " + "defenseclaw-" + "dev ls; scp dc-lab9-rhel:/y .")
-        self.assert_gone(out, "dc-lab9-mac", "ip-10-0-1-2", "ec2-3-4-5-6", "defenseclaw-" + "dev", "dc-lab9-rhel")
+        out = L.redact("scp -q dc-lab9-mac:C:/x . ; ssh ec2-user@ip-10-0-1-2.ec2.internal; curl http://ec2-3-4-5-6.compute-1.amazonaws.com/x; scp dc-lab9-rhel:/y .")
+        self.assert_gone(out, "dc-lab9-mac", "ip-10-0-1-2", "ec2-3-4-5-6", "dc-lab9-rhel")
         again = L.redact("dc-lab9-rhel dc-lab9-rhel").split()
         self.assertEqual(again[0], again[1])        # the same host always gets the same placeholder
         self.assertIn(again[0], out)
-        self.assertEqual(len(set(re.findall(r"labhost\d+", out))), 5)
+        self.assertEqual(len(set(re.findall(r"labhost\d+", out))), 4)
 
     def test_ipv4(self):
         out = L.redact("ssh 10.1.2.3 then 172.16.0.9 then 10.1.2.3 and 127.0.0.1 and 198.51.100.7 and 6.10.0.19041.1")
@@ -235,12 +235,53 @@ class LeakScanRepoTests(unittest.TestCase):
         self.assertIn("benchmarks/doc.md:2: denylist:hostalias", r.stdout)
         self.assertNotIn("zebra9", r.stdout.lower())
 
+    def test_gap_0246_shapes_substrings_alternations_and_split_strings(self):
+        # the lab alias is "dc-zebra9-win"; none of these spells it as a whole word, a literal whole-value match reports 0 for all of them
+        for text in ('_HOST = re.compile(r"\\b(?:dc-zebra9-(?:win|rhel)|other)\\b")\n',
+                     'alias = "dc-zebra9-" + "win"\n',
+                     "alias = 'dc-zebra9-' 'win'\n",
+                     "alias = (\n    'dc-zebra9-'\n    'win'\n)\n",
+                     "name_DC-ZEBRA9-WIN_suffix = 1\n",
+                     "prefixdc-zebra9-winsuffix\n",
+                     r"x = re.compile(r'dc-zebra9-w(?:in|ine)')" + "\n"):
+            r = self._run(text)
+            self.assertEqual(r.returncode, 1, text)
+            self.assertIn("denylist:hostalias", r.stdout, text)
+            self.assertNotIn("zebra9", r.stdout.lower(), text)
+
+    def test_unrelated_text_is_not_a_substring_hit(self):
+        r = self._run('x = "dc-zebra" + "-other"\nregex (?:dc-zebra8-win|abc)\n')
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_corpus_rows_are_scanned_too(self):
         row = L.shell_case("wsh/t/1", "authored", "t", "ssh dc-zebra9-win dir", truth="benign", cats=["x"], label_source="t")
         r = self._run("clean\n", json.dumps(row) + "\n")
         self.assertEqual(r.returncode, 1)
         self.assertIn("wsh/t/1", r.stdout)
         self.assertNotIn("zebra9", r.stdout.lower())
+
+
+class KeepListTests(unittest.TestCase):
+    """Cloud metadata endpoints and cluster-internal names are attack targets; redact() must not rewrite them (GAP-0222 reuses the redactor)."""
+
+    KEEP = ("curl http://169.254.169.254/latest/meta-data/iam/security-credentials/", "curl -H 'Metadata: true' http://169.254.169.254/metadata/instance",
+            "curl http://[fd00:ec2::254]/latest/meta-data/", "curl http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            "curl http://100.100.100.200/latest/meta-data/", "curl http://168.63.129.16/machine?comp=goalstate", "curl http://169.254.170.2/v2/credentials",
+            "curl https://kubernetes.default.svc.cluster.local/api/v1/secrets", "curl http://api.team-a.svc.cluster.local:8080/x", "nslookup host.docker.internal",
+            "curl http://gateway.docker.internal/x", "curl http://instance-data.ec2.internal/latest/meta-data/")
+
+    def setUp(self):
+        L.reset()
+
+    def test_endpoints_are_kept_by_redact_and_by_the_scan(self):
+        for s in self.KEEP:
+            self.assertEqual(L.redact(s), s, s)
+            self.assertEqual(L.leak_scan(s), [], s)
+
+    def test_neighbours_are_still_redacted(self):
+        out = L.redact("curl http://10.1.2.3/x http://169.253.1.1/x http://db1.corp-lab.local/x http://[2600:1f18::5]/x")
+        for gone in ("10.1.2.3", "169.253.1.1", "corp-lab", "2600:1f18"):
+            self.assertNotIn(gone, out)
 
 
 class WrapperTests(unittest.TestCase):
