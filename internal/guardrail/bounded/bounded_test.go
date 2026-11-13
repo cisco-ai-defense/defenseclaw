@@ -4,6 +4,7 @@
 package bounded
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -45,6 +46,62 @@ func TestCounterRefusesANegativeTake(t *testing.T) {
 	}
 	if size.TakeN(500) {
 		t.Fatal("a negative take refunded 1000 bytes: 500 fit under a 10-byte cap")
+	}
+}
+
+// A Counter bound to another Truncated than the reader returns is a panic
+// under go test (review V7), and its hits are merged in production.
+func TestSetCatchesAMisboundCounter(t *testing.T) {
+	var reader, other Truncated
+	items := NewCounter(&other, Items, 1)
+	items.Take()
+	items.Take()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Set with a Counter bound to another Truncated did not panic under go test")
+			}
+		}()
+		_ = reader.Set(&items)
+	}()
+	misboundPanics = false
+	defer func() { misboundPanics = true }()
+	if got := reader.Set(&items); !got.Has(Items) {
+		t.Fatalf("production Set lost the misbound Counter's hit: %+v", got)
+	}
+	bound := NewCounter(&reader, Paths, 0)
+	bound.Take()
+	if got := reader.Set(&bound, nil); got != Of(Paths) {
+		t.Fatalf("Set(bound counter): %+v", got)
+	}
+}
+
+// A zero Counter (a struct literal, no NewCounter) is rejected cleanly: its
+// first take is a hit, which reaches the result (review V8).
+func TestZeroCounterIsRejectedCleanly(t *testing.T) {
+	var reader Truncated
+	var zero Counter
+	if zero.Take() {
+		t.Fatal("a zero Counter allowed a take")
+	}
+	misboundPanics = false
+	defer func() { misboundPanics = true }()
+	if got := reader.Set(&zero); !got.Has(Items) {
+		t.Fatalf("a zero Counter's hit is lost: %+v", got)
+	}
+}
+
+// The count saturates instead of wrapping.
+func TestTakeNSaturates(t *testing.T) {
+	var trunc Truncated
+	size := NewCounter(&trunc, Bytes, 10)
+	for i, n := range []int{math.MaxInt, math.MaxInt, 1} {
+		if size.TakeN(n) {
+			t.Fatalf("take %d of %d: a huge take wrapped the count back under the cap", i+1, n)
+		}
+	}
+	if !trunc.Set().Has(Bytes) {
+		t.Fatal("the saturated count lost its hit")
 	}
 }
 
@@ -144,6 +201,7 @@ func TestParseActionReadsEverySpelling(t *testing.T) {
 	for in, want := range map[string]Action{
 		"allow": Allow, "alert": Alert, "confirm": Confirm, "ask": Confirm, "block": Block,
 		"BLOCK": Block, "Block": Block, " block": Block, "block\t": Block, "ALERT": Alert, "": Allow,
+		"allow\n": Allow, "\r\nblock\v": Block, "\fconfirm": Confirm,
 	} {
 		if got, known := ParseAction(in); got != want || !known {
 			t.Errorf("ParseAction(%q) = %s known=%t, want %s", in, got, known, want)

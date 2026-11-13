@@ -15,7 +15,11 @@
 // with Floor. Nothing here allocates on the hot path.
 package bounded
 
-import "time"
+import (
+	"math"
+	"testing"
+	"time"
+)
 
 // Cap is the kind of bound a reader hit.
 type Cap uint8
@@ -166,8 +170,32 @@ func (t *Truncated) Merge(s CapSet) { t.set = t.set.Union(s) }
 // Any reports that some cap was hit.
 func (t *Truncated) Any() bool { return t.set.Any() }
 
-// Set is the caps hit so far, the value a reader returns.
-func (t *Truncated) Set() CapSet { return t.set }
+// Set is the caps hit so far, the value a reader returns. Pass the reader's
+// Counters: their hits are included even when a Counter was bound to another
+// Truncated by mistake, or never bound (a zero Counter). Under go test such a
+// Counter panics here instead, so the mistake is found where it is made.
+func (t *Truncated) Set(counters ...*Counter) CapSet {
+	set := t.set
+	for _, k := range counters {
+		if k == nil {
+			continue
+		}
+		if k.t != t {
+			if misboundPanics {
+				panic("bounded: a Counter passed to Truncated.Set is bound to another Truncated (or none); make it with NewCounter(&thisTruncated, ...)")
+			}
+			if k.t != nil {
+				set = set.Union(k.t.set)
+			}
+		}
+		set = set.Union(k.own)
+	}
+	return set
+}
+
+// misboundPanics makes Set panic on a misbound Counter in test binaries; a
+// production gateway merges its hits instead.
+var misboundPanics = testing.Testing()
 
 // Counter counts one cap kind across a walk and records its hit in the
 // Truncated it was made for. Like Truncated it is used by pointer and never
@@ -182,6 +210,7 @@ func (t *Truncated) Set() CapSet { return t.set }
 type Counter struct {
 	_      noCopy
 	t      *Truncated
+	own    CapSet // the hits of a Counter with no Truncated (a zero Counter)
 	n, max int
 	cap    Cap
 }
@@ -197,14 +226,28 @@ func NewCounter(t *Truncated, c Cap, max int) Counter {
 func (k *Counter) Take() bool { return k.TakeN(1) }
 
 // TakeN counts n items (the bytes of a string, for example). A negative n is
-// a reader error, never a refund: it records the cap and is false.
+// a reader error, never a refund: it records the cap and is false. The count
+// saturates instead of wrapping. A zero Counter (not made by NewCounter) has
+// a max of 0, so its first take records the cap (as items) and is false; the
+// hit reaches the result through Truncated.Set(counters...).
 func (k *Counter) TakeN(n int) bool {
-	if n < 0 {
-		k.t.Hit(k.cap)
-		return false
+	switch {
+	case n < 0:
+		k.n = math.MaxInt
+	case n > math.MaxInt-k.n:
+		k.n = math.MaxInt
+	default:
+		k.n += n
 	}
-	k.n += n
-	return k.t.Within(k.cap, k.n, k.max)
+	if k.n <= k.max {
+		return true
+	}
+	if k.t != nil {
+		k.t.Hit(k.cap)
+	} else {
+		k.own = k.own.with(k.cap)
+	}
+	return false
 }
 
 // Action is a guardrail verdict, ordered from the weakest to the strictest.
@@ -228,14 +271,14 @@ func (a Action) String() string {
 }
 
 // ParseAction reads a gateway action name, in any case and with surrounding
-// space. "ask" is Confirm. An empty name is Allow. Any other name is Block
+// ASCII white space. "ask" is Confirm. An empty name is Allow. Any other name is Block
 // and known false: a verdict the floor cannot read is never lowered.
 func ParseAction(s string) (a Action, known bool) {
 	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
+	for start < end && asciiSpace(s[start]) {
 		start++
 	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+	for end > start && asciiSpace(s[end-1]) {
 		end--
 	}
 	s = s[start:end]
@@ -251,6 +294,10 @@ func ParseAction(s string) (a Action, known bool) {
 		}
 	}
 	return Block, false
+}
+
+func asciiSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 func equalFoldASCII(s, lower string) bool {
