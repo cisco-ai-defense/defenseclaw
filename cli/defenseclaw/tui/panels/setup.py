@@ -8213,7 +8213,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         *_llm_override_fields(cfg, "Guardrail", "guardrail.llm"),
         _field(cfg, "Block Message", "guardrail.block_message", hint="Response text returned when blocked."),
         _field(
-            cfg, "Stream Buffer", "guardrail.stream_buffer_bytes", "int", hint="Chunk size for streaming inspection."
+            cfg, "Stream Buffer", "guardrail.stream_buffer_bytes", "int", hint="New streamed text checked at a time (bytes)."
         ),
         _field(
             cfg,

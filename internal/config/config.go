@@ -4114,7 +4114,7 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.connectors", map[string]any{})
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
-	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
+	viper.SetDefault("guardrail.stream_buffer_bytes", 256)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)

@@ -487,7 +487,7 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 		} else {
 			sr := e.InspectStream(ctx, text)
 			r.Action, r.RawAction, r.Severity, r.Findings = sr.Action, sr.Action, sr.Severity, sr.Findings
-			r.Extra = map[string]string{"blocked_at": fmt.Sprint(sr.BlockedAt), "scans": fmt.Sprint(sr.Scans), "unchecked_tail": fmt.Sprint(sr.UncheckedTail), "bytes": fmt.Sprint(len(text)),
+			r.Extra = map[string]string{"blocked_at": fmt.Sprint(sr.BlockedAt), "scans": fmt.Sprint(sr.Scans), "released": fmt.Sprint(sr.Released), "held_max": fmt.Sprint(sr.HeldMax), "bytes": fmt.Sprint(len(text)),
 				"final_action": sr.FinalAction, "final_sev": sr.FinalSeverity, "final_findings": strings.Join(sr.FinalFindings, ",")}
 		}
 		r.LatencyUs = time.Since(t0).Microseconds()
