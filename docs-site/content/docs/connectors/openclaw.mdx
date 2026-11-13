@@ -213,7 +213,9 @@ Wants=defenseclaw-gateway.service
 User=openclaw
 Group=openclaw
 ExecStart=/usr/local/bin/openclaw gateway run
-Restart=on-failure
+# OpenClaw exits 0 when a config change needs a full restart.
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target

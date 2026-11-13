@@ -56,3 +56,16 @@ def test_native_openclaw_shows_no_shims_and_no_port():
     with patch("defenseclaw.platform_support.host_os", return_value="linux"):
         assert not cmd_setup._openclaw_native_here("openclaw")
         assert cmd_setup._subprocess_policy_display("openclaw", meta) == "PATH shims"
+
+
+
+def test_rollback_restart_keeps_the_merge_block_of_the_failed_attempt(tmp_path):
+    # rel-1-0-10 GAP-0182: the rollback start of the previous config must not
+    # replace the block the failed attempt printed and saved.
+    merge = tmp_path / "openclaw-merge.json"
+    merge.write_text('{"hybrid": true}\n', encoding="utf-8")
+    with cmd_setup._keep_openclaw_merge_block(str(tmp_path)):
+        merge.write_text('{"proxy": true}\n', encoding="utf-8")
+    assert merge.read_text(encoding="utf-8") == '{"hybrid": true}\n'
+    with cmd_setup._keep_openclaw_merge_block(str(tmp_path / "none")):
+        pass

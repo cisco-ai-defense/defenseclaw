@@ -88,6 +88,16 @@ def configured_openclaw_plugin_config_issue(cfg: object) -> str | None:
     claw = getattr(cfg, "claw", None)
     home = str(getattr(claw, "home_dir", "") or "~/.openclaw")
     config_file = str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json"))
+    if str(_openclaw_connector_block().get("plugin_account") or "").strip():
+        try:
+            with open(os.path.expanduser(config_file), "rb"):
+                pass
+        except PermissionError:
+            # Separate-user layout: openclaw.json belongs to the OpenClaw
+            # account and is usually 0600; not an issue (rel-1-0-10 GAP-0180).
+            return None
+        except OSError:
+            pass
     return openclaw_plugin_config_issue(config_file, home)
 
 

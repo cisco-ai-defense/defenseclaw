@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import copy
 import hashlib
 import json as _json
@@ -11114,10 +11115,36 @@ def _restart_restored_connector_runtime(
         "start_if_stopped": True,
         "title": _ROLLBACK_RESTART_TITLE,
     }
+    with _keep_openclaw_merge_block(cfg.data_dir):
+        _restart_restored_services(cfg, restart_kwargs, same_failure)
+
+
+@contextlib.contextmanager
+def _keep_openclaw_merge_block(data_dir: str):
+    # The separate-user merge block the failed attempt saved is the one the
+    # operator merges next; the rollback start of the previous config would
+    # overwrite it with that config's block (rel-1-0-10 GAP-0182).
+    path = os.path.join(str(data_dir or ""), "openclaw-merge.json")
+    try:
+        with open(path, "rb") as stream:
+            kept = stream.read()
+    except OSError:
+        kept = None
+    try:
+        yield
+    finally:
+        if kept is not None:
+            try:
+                with open(path, "wb") as stream:
+                    stream.write(kept)
+            except OSError:
+                pass
+
+
+def _restart_restored_services(cfg, restart_kwargs: dict[str, Any], same_failure: BaseException | None) -> None:
     if same_failure is None:
         _restart_services(cfg.data_dir, cfg.gateway.host, cfg.gateway.port, **restart_kwargs)
         return
-    import contextlib
     import io
 
     captured = io.StringIO()
