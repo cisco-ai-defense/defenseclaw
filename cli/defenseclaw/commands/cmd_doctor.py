@@ -4530,17 +4530,26 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
     retention_days = _configured_local_retention_days(cfg)
     if health.file_bytes >= 1024 * 1024 * 1024:
         reclaim_mib = max(health.freelist_bytes, 0) // (1024 * 1024)
-        quoted_db = shlex.quote(db_path)
         if reclaim_mib >= 64:
-            size_remediation = (
-                f"to give back the {reclaim_mib} MiB: run 'defenseclaw-gateway stop', then "
-                f"sqlite3 {quoted_db} 'VACUUM;', then 'defenseclaw-gateway start'"
-            )
+            # audit compact replaces the manual sqlite3 VACUUM (issue #1440):
+            # sqlite3 is often not installed, and a plain VACUUM keeps
+            # auto_vacuum off, so the next retention pass left free pages again.
+            if _doctor_managed(cfg):
+                size_remediation = (
+                    f"to give back the {reclaim_mib} MiB, an administrator stops the gateway service, runs "
+                    "'defenseclaw audit compact' and starts the service again (the command names the service commands)"
+                )
+            else:
+                size_remediation = (
+                    f"to give back the {reclaim_mib} MiB: run 'defenseclaw-gateway stop', then "
+                    "'defenseclaw audit compact', then 'defenseclaw-gateway start' "
+                    "('defenseclaw audit compact --dry-run' shows what it reclaims)"
+                )
         elif retention_days == 0:
             size_remediation = (
                 "local retention is off (observability.local.retention_days: 0 keeps every event); set it "
                 "to the days of history you need in config.yaml, run 'defenseclaw-gateway restart', and "
-                "once older events are deleted, run this check again for the VACUUM step"
+                "once older events are deleted, run this check again for the compact step"
             )
         else:
             size_remediation = (
