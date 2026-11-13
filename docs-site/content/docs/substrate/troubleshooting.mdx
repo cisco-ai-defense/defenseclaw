@@ -58,6 +58,7 @@ The gateway answered `403` with the reason `template_attestation_unreadable`. On
 An actor with no allow list has no network. The usual causes:
 
 - **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match, or its signing key was revoked. `doctor --cluster` lists it with the reason (the events say `untrusted_signer` or `no_attestation`, and `sandbox.template_unverified`). Rebuild it with `defenseclaw substrate template build`, or `template verify`.
+- **The template is attested but its registry is private.** The controller and the gateway read the attestation from the registry and get HTTP 401, so the template is refused as `sandbox.template_unverified`. Give them a registry login: see [Attested templates in a private registry](/docs/substrate/eks#attested-templates-in-a-private-registry).
 - **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
 - **The profile has no matching assignment.** You get `default_profile`. `policy explain NAME` shows which one.
 - **Someone else made the actor.** An actor in a launcher atespace that DefenseClaw didn't create is removed from policy (`sandbox.foreign_actor`, `sandbox.policy.removed`).
