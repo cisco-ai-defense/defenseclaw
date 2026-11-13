@@ -79,8 +79,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
-            # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
-            "142667a6bbc21568e2a15eda35555d88c62870b7db04005f2dbff71acb3dc6b8",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "3c30a91dfbda99fe4f72e5d78d300979fa0fb1561f8495018b9b1184ba10ff29",
         }
     ),
     "permissive": frozenset(
@@ -116,8 +118,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
-            # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
-            "669543a89607b9b4df8add58250a5a6ecb88093cba081deeeaf86c28ef1d186c",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "7ff6d705d7fa27e88f79060c0172119e17d4b19206ea44f0e84e79616e1cb8e5",
         }
     ),
     "strict": frozenset(
@@ -152,8 +156,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
-            # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
-            "3c6307f82175c29c77bd7a65dde22ad185caafa61844908351db47221aab258a",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "5db217d923f7cc8d20e1af9077f11478e568cba974add100cb5ed6fb5d5174b5",
         }
     ),
 }

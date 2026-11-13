@@ -2542,6 +2542,28 @@
                   ]
                 },
                 {
+                  "id": "PII-EMAIL-LIST",
+                  "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "title": "Five or more email addresses together",
+                  "severity": "MEDIUM",
+                  "confidence": 0.75,
+                  "tags": [
+                    "pii",
+                    "bulk"
+                  ]
+                },
+                {
+                  "id": "PII-EMAIL-FIELD",
+                  "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "title": "Email address in a labeled field",
+                  "severity": "MEDIUM",
+                  "confidence": 0.7,
+                  "tags": [
+                    "pii",
+                    "structured"
+                  ]
+                },
+                {
                   "id": "ENT-PASSPORT-US",
                   "pattern": "\\b[A-Z]\\d{8}\\b",
                   "title": "US passport number pattern",
@@ -3443,16 +3465,6 @@
                   ]
                 },
                 {
-                  "id": "TRUST-CHAT-TEMPLATE-TOKEN",
-                  "pattern": "(?i)(?:<\\|im_start\\|>\\s*(?:system|assistant)\\b|<\\|start_header_id\\|>\\s*(?:system|assistant)\\b|<\\|(?:system|assistant)\\|>|<start_of_turn>\\s*(?:model|system)\\b|<<\\s*SYS\\s*>>|\\[INST\\])",
-                  "title": "Role-bearing chat-template token in user content",
-                  "severity": "HIGH",
-                  "confidence": 0.85,
-                  "tags": [
-                    "prompt-injection"
-                  ]
-                },
-                {
                   "id": "TRUST-FAKE-ROLE-HEADER",
                   "pattern": "(?im)^[ \\t]*(?:#{2,6}[ \\t]*[(\\[]|[(\\[<]{1,2})[ \\t]*(?:system|assistant)[ _-]?(?:message|prompt|instructions?|note|override|update)[ \\t]*[)\\]>]{1,2}",
                   "title": "Fake system or assistant header in user content",
@@ -3493,6 +3505,36 @@
                   "tags": [
                     "prompt-injection",
                     "obfuscation"
+                  ]
+                },
+                {
+                  "id": "TRUST-IGNORE-INSTEAD",
+                  "pattern": "(?is)\\bignore\\s+(?:all\\s+|any\\s+|your\\s+|the\\s+|my\\s+|these\\s+)?(?:previous|prior|earlier|above|preceding|original)\\s+[^\\s.,;:!?]{3,24}\\W.{0,400}?\\binstead\\b",
+                  "title": "Override of the earlier instructions with a replacement task",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "prompt-injection"
+                  ]
+                },
+                {
+                  "id": "TRUST-TODO-DATA-MOVE",
+                  "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:send|email|e-mail|mail|forward|transfer|share|upload|post|publish|wire|pay)\\b",
+                  "title": "Task-list marker that directs the assistant to send or move data",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "prompt-injection"
+                  ]
+                },
+                {
+                  "id": "TRUST-TODO-DIRECTIVE",
+                  "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:delete|remove|erase|modify|change|concatenate|say|visit|navigate|invite|book|reserve|give|create|make)\\b",
+                  "title": "Task-list marker that directs the assistant to act",
+                  "severity": "MEDIUM",
+                  "confidence": 0.65,
+                  "tags": [
+                    "prompt-injection"
                   ]
                 },
                 {
@@ -6574,10 +6616,32 @@
                   "id": "ENT-EMAIL-BULK",
                   "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
                   "title": "Email address",
-                  "severity": "MEDIUM",
+                  "severity": "LOW",
                   "confidence": 0.4,
                   "tags": [
                     "pii"
+                  ]
+                },
+                {
+                  "id": "PII-EMAIL-LIST",
+                  "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "title": "Five or more email addresses together",
+                  "severity": "MEDIUM",
+                  "confidence": 0.75,
+                  "tags": [
+                    "pii",
+                    "bulk"
+                  ]
+                },
+                {
+                  "id": "PII-EMAIL-FIELD",
+                  "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "title": "Email address in a labeled field",
+                  "severity": "MEDIUM",
+                  "confidence": 0.7,
+                  "tags": [
+                    "pii",
+                    "structured"
                   ]
                 },
                 {
@@ -7499,16 +7563,6 @@
                   ]
                 },
                 {
-                  "id": "TRUST-CHAT-TEMPLATE-TOKEN",
-                  "pattern": "(?i)(?:<\\|im_start\\|>\\s*(?:system|assistant)\\b|<\\|start_header_id\\|>\\s*(?:system|assistant)\\b|<\\|(?:system|assistant)\\|>|<start_of_turn>\\s*(?:model|system)\\b|<<\\s*SYS\\s*>>|\\[INST\\])",
-                  "title": "Role-bearing chat-template token in user content",
-                  "severity": "HIGH",
-                  "confidence": 0.85,
-                  "tags": [
-                    "prompt-injection"
-                  ]
-                },
-                {
                   "id": "TRUST-FAKE-ROLE-HEADER",
                   "pattern": "(?im)^[ \\t]*(?:#{2,6}[ \\t]*[(\\[]|[(\\[<]{1,2})[ \\t]*(?:system|assistant)[ _-]?(?:message|prompt|instructions?|note|override|update)[ \\t]*[)\\]>]{1,2}",
                   "title": "Fake system or assistant header in user content",
@@ -7549,6 +7603,36 @@
                   "tags": [
                     "prompt-injection",
                     "obfuscation"
+                  ]
+                },
+                {
+                  "id": "TRUST-IGNORE-INSTEAD",
+                  "pattern": "(?is)\\bignore\\s+(?:all\\s+|any\\s+|your\\s+|the\\s+|my\\s+|these\\s+)?(?:previous|prior|earlier|above|preceding|original)\\s+[^\\s.,;:!?]{3,24}\\W.{0,400}?\\binstead\\b",
+                  "title": "Override of the earlier instructions with a replacement task",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "prompt-injection"
+                  ]
+                },
+                {
+                  "id": "TRUST-TODO-DATA-MOVE",
+                  "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:send|email|e-mail|mail|forward|transfer|share|upload|post|publish|wire|pay)\\b",
+                  "title": "Task-list marker that directs the assistant to send or move data",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "prompt-injection"
+                  ]
+                },
+                {
+                  "id": "TRUST-TODO-DIRECTIVE",
+                  "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:delete|remove|erase|modify|change|concatenate|say|visit|navigate|invite|book|reserve|give|create|make)\\b",
+                  "title": "Task-list marker that directs the assistant to act",
+                  "severity": "MEDIUM",
+                  "confidence": 0.65,
+                  "tags": [
+                    "prompt-injection"
                   ]
                 },
                 {
@@ -7606,7 +7690,7 @@
                 "Email Address": {
                   "finding_id": "JUDGE-PII-EMAIL",
                   "severity_default": "HIGH",
-                  "severity_prompt": "HIGH",
+                  "severity_prompt": "LOW",
                   "severity_completion": "CRITICAL",
                   "enabled": true
                 },
@@ -10363,6 +10447,28 @@
                   ]
                 },
                 {
+                  "id": "PII-EMAIL-LIST",
+                  "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "title": "Five or more email addresses together",
+                  "severity": "MEDIUM",
+                  "confidence": 0.75,
+                  "tags": [
+                    "pii",
+                    "bulk"
+                  ]
+                },
+                {
+                  "id": "PII-EMAIL-FIELD",
+                  "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "title": "Email address in a labeled field",
+                  "severity": "MEDIUM",
+                  "confidence": 0.7,
+                  "tags": [
+                    "pii",
+                    "structured"
+                  ]
+                },
+                {
                   "id": "ENT-PASSPORT-US",
                   "pattern": "\\b[A-Z]\\d{8}\\b",
                   "title": "US passport number pattern",
@@ -11267,16 +11373,6 @@
                   ]
                 },
                 {
-                  "id": "TRUST-CHAT-TEMPLATE-TOKEN",
-                  "pattern": "(?i)(?:<\\|im_start\\|>\\s*(?:system|assistant)\\b|<\\|start_header_id\\|>\\s*(?:system|assistant)\\b|<\\|(?:system|assistant)\\|>|<start_of_turn>\\s*(?:model|system)\\b|<<\\s*SYS\\s*>>|\\[INST\\])",
-                  "title": "Role-bearing chat-template token in user content",
-                  "severity": "HIGH",
-                  "confidence": 0.85,
-                  "tags": [
-                    "prompt-injection"
-                  ]
-                },
-                {
                   "id": "TRUST-FAKE-ROLE-HEADER",
                   "pattern": "(?im)^[ \\t]*(?:#{2,6}[ \\t]*[(\\[]|[(\\[<]{1,2})[ \\t]*(?:system|assistant)[ _-]?(?:message|prompt|instructions?|note|override|update)[ \\t]*[)\\]>]{1,2}",
                   "title": "Fake system or assistant header in user content",
@@ -11317,6 +11413,36 @@
                   "tags": [
                     "prompt-injection",
                     "obfuscation"
+                  ]
+                },
+                {
+                  "id": "TRUST-IGNORE-INSTEAD",
+                  "pattern": "(?is)\\bignore\\s+(?:all\\s+|any\\s+|your\\s+|the\\s+|my\\s+|these\\s+)?(?:previous|prior|earlier|above|preceding|original)\\s+[^\\s.,;:!?]{3,24}\\W.{0,400}?\\binstead\\b",
+                  "title": "Override of the earlier instructions with a replacement task",
+                  "severity": "HIGH",
+                  "confidence": 0.8,
+                  "tags": [
+                    "prompt-injection"
+                  ]
+                },
+                {
+                  "id": "TRUST-TODO-DATA-MOVE",
+                  "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:send|email|e-mail|mail|forward|transfer|share|upload|post|publish|wire|pay)\\b",
+                  "title": "Task-list marker that directs the assistant to send or move data",
+                  "severity": "HIGH",
+                  "confidence": 0.75,
+                  "tags": [
+                    "prompt-injection"
+                  ]
+                },
+                {
+                  "id": "TRUST-TODO-DIRECTIVE",
+                  "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:delete|remove|erase|modify|change|concatenate|say|visit|navigate|invite|book|reserve|give|create|make)\\b",
+                  "title": "Task-list marker that directs the assistant to act",
+                  "severity": "MEDIUM",
+                  "confidence": 0.65,
+                  "tags": [
+                    "prompt-injection"
                   ]
                 },
                 {

@@ -5267,10 +5267,36 @@
         "id": "ENT-EMAIL-BULK",
         "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
         "title": "Email address",
-        "severity": "MEDIUM",
+        "severity": "LOW",
         "confidence": 0.4,
         "tags": [
           "pii"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PII-EMAIL-LIST",
+      "title": "Five or more email addresses together",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "PII-EMAIL-LIST",
+        "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+        "title": "Five or more email addresses together",
+        "severity": "MEDIUM",
+        "confidence": 0.75,
+        "tags": [
+          "pii",
+          "bulk"
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
@@ -5278,7 +5304,35 @@
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
       "tags": [
-        "pii"
+        "pii",
+        "bulk"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PII-EMAIL-FIELD",
+      "title": "Email address in a labeled field",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "PII-EMAIL-FIELD",
+        "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+        "title": "Email address in a labeled field",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "pii",
+          "structured"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "structured"
       ],
       "data_axis": [
         "sensitive_access"
@@ -7419,31 +7473,6 @@
       ]
     },
     {
-      "id": "RECIPE-TRUST-CHAT-TEMPLATE-TOKEN",
-      "title": "Role-bearing chat-template token in user content",
-      "kind": "rule:trust-exploit",
-      "body": {
-        "id": "TRUST-CHAT-TEMPLATE-TOKEN",
-        "pattern": "(?i)(?:<\\|im_start\\|>\\s*(?:system|assistant)\\b|<\\|start_header_id\\|>\\s*(?:system|assistant)\\b|<\\|(?:system|assistant)\\|>|<start_of_turn>\\s*(?:model|system)\\b|<<\\s*SYS\\s*>>|\\[INST\\])",
-        "title": "Role-bearing chat-template token in user content",
-        "severity": "HIGH",
-        "confidence": 0.85,
-        "tags": [
-          "prompt-injection"
-        ]
-      },
-      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
-      "examples": [],
-      "counterexamples": [],
-      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
-      "tags": [
-        "prompt-injection"
-      ],
-      "data_axis": [
-        "ingress_untrusted"
-      ]
-    },
-    {
       "id": "RECIPE-TRUST-FAKE-ROLE-HEADER",
       "title": "Fake system or assistant header in user content",
       "kind": "rule:trust-exploit",
@@ -7544,6 +7573,81 @@
       "tags": [
         "prompt-injection",
         "obfuscation"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-IGNORE-INSTEAD",
+      "title": "Override of the earlier instructions with a replacement task",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-IGNORE-INSTEAD",
+        "pattern": "(?is)\\bignore\\s+(?:all\\s+|any\\s+|your\\s+|the\\s+|my\\s+|these\\s+)?(?:previous|prior|earlier|above|preceding|original)\\s+[^\\s.,;:!?]{3,24}\\W.{0,400}?\\binstead\\b",
+        "title": "Override of the earlier instructions with a replacement task",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-TODO-DATA-MOVE",
+      "title": "Task-list marker that directs the assistant to send or move data",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-TODO-DATA-MOVE",
+        "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:send|email|e-mail|mail|forward|transfer|share|upload|post|publish|wire|pay)\\b",
+        "title": "Task-list marker that directs the assistant to send or move data",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-TODO-DIRECTIVE",
+      "title": "Task-list marker that directs the assistant to act",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-TODO-DIRECTIVE",
+        "pattern": "(?is)^\\s*(?:todo|fixme)\\s*:\\s*(?:please\\s+)?(?:delete|remove|erase|modify|change|concatenate|say|visit|navigate|invite|book|reserve|give|create|make)\\b",
+        "title": "Task-list marker that directs the assistant to act",
+        "severity": "MEDIUM",
+        "confidence": 0.65,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
       ],
       "data_axis": [
         "ingress_untrusted"

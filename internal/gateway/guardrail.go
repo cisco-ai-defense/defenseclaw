@@ -2006,6 +2006,9 @@ func scanLocalPatternsWithActivation(
 	// Content scanning retains trust, credential, and PII rules. Literal
 	// commands, paths, cognitive files, and C2 indicators are action categories
 	// and require parsed tool-call facts before they can affect enforcement.
+	// The fixed-phrase and local-PII flags above are the legacy detectors: a
+	// hit is at least MEDIUM, HIGH for the high-signal ones. A rule-pack
+	// finding carries its own severity and nothing else (rel-1-0-10:GAP-0172).
 	maxRuleSev := "NONE"
 	ruleFindings := scanUntrustedContentRules(rules, content)
 	catalogPIIEvidence := make(map[string]struct{})
@@ -2026,13 +2029,22 @@ func scanLocalPatternsWithActivation(
 		flags = append(flags, candidate.flag)
 		isHigh = true
 	}
+	legacySeverity := "NONE"
+	if len(flags) > 0 {
+		legacySeverity = "MEDIUM"
+		if isHigh {
+			legacySeverity = "HIGH"
+		}
+	}
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
-		if severityRank[rf.Severity] >= severityRank["HIGH"] {
-			isHigh = true
+		ruleSeverity := rf.Severity
+		if severityRank[ruleSeverity] == 0 {
+			// A rule without a known severity keeps the old fail-closed floor.
+			ruleSeverity = "MEDIUM"
 		}
-		if severityRank[rf.Severity] > severityRank[maxRuleSev] {
-			maxRuleSev = rf.Severity
+		if severityRank[ruleSeverity] > severityRank[maxRuleSev] {
+			maxRuleSev = ruleSeverity
 		}
 	}
 
@@ -2040,10 +2052,7 @@ func scanLocalPatternsWithActivation(
 		return allowVerdict("local-pattern")
 	}
 
-	severity := "MEDIUM"
-	if isHigh {
-		severity = "HIGH"
-	}
+	severity := legacySeverity
 	if severityRank[maxRuleSev] > severityRank[severity] {
 		severity = maxRuleSev
 	}
