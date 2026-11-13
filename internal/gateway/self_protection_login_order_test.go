@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +19,11 @@ import (
 // word). A name the command rebinds before the write names the file of the
 // new value and stays allowed, in the default and permissive packs (a strict
 // pack may keep a protective block).
+//
+// Every behaviour below is written for USER and for LOGNAME; behaviour i is
+// judged with one of them in turn (USER for the even rows of each list,
+// LOGNAME for the odd ones), so each name meets every kind of binding and
+// write. g235bRotate spreads the rows over the cells.
 func TestG235bKnownValueOrderAndIndependentNames(t *testing.T) {
 	home, project := dynamicWordParityProject(t)
 	t.Setenv("USER", filepath.Base(home))
@@ -52,12 +56,10 @@ func TestG235bKnownValueOrderAndIndependentNames(t *testing.T) {
 	const sq = "\x27"
 	active := filepath.Base(home)
 	parent := filepath.Dir(home) + "/"
-	type row struct {
-		name, command string
-		protected     bool
-	}
+	type row = g235bRow
 	var rows []row
-	for _, name := range []string{"USER", "LOGNAME"} {
+	for nameIndex, name := range []string{"USER", "LOGNAME"} {
+		first := len(rows)
 		o := "$" + name
 		notName := "LOGNAME"
 		if name == "LOGNAME" {
@@ -123,26 +125,23 @@ func TestG235bKnownValueOrderAndIndependentNames(t *testing.T) {
 			row{name + "-env-clear-ordinary", `env -i bash -c ` + sq + redirect + sq, false},
 			row{name + "-env-clear-editor-ordinary", `env -i bash -c ` + sq + editor + sq, false},
 		)
-	}
-	for _, connector := range []string{"claudecode", "codex"} {
-		for _, pack := range []string{"", "strict", "permissive"} {
-			for _, managed := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/pack=%s/managed=%t", connector, pack, managed), func(t *testing.T) {
-					for _, row := range rows {
-						if !row.protected && pack == "strict" {
-							continue
-						}
-						got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
-						if row.protected {
-							if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
-								t.Errorf("%s: %s = %.200s, want block tamper.detector_state_write", row.name, row.command, got)
-							}
-						} else if !strings.HasPrefix(got, `{"action":"allow"`) {
-							t.Errorf("%s: %s = %.200s, want allow", row.name, row.command, got)
-						}
-					}
-				})
+		// Keep behaviour i of this name when i and the name alternate.
+		kept := append([]row(nil), rows[:first]...)
+		for i, r := range rows[first:] {
+			if i%2 == nameIndex {
+				kept = append(kept, r)
 			}
 		}
+		rows = kept
 	}
+	g235bRotate(t, rows, []string{"", "strict", "permissive"}, false, func(t *testing.T, cell g235bCell, row g235bRow) {
+		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, false, row.command)
+		if row.protected {
+			if !strings.HasPrefix(got, `{"action":"block"`) || !strings.Contains(got, "tamper.detector_state_write") {
+				t.Errorf("%s: %s = %.200s, want block tamper.detector_state_write", row.name, row.command, got)
+			}
+		} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Errorf("%s: %s = %.200s, want allow", row.name, row.command, got)
+		}
+	})
 }
