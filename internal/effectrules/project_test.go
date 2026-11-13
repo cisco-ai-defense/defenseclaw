@@ -128,10 +128,22 @@ func TestProjectProtectedGrades(t *testing.T) {
 			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedKnown,
 		},
 		{
-			name:    "protected-set case 6: dynamic destination could touch any set",
+			name:    "protected-set case 6: dynamic write is outside_home unknown, not a named set",
 			command: `echo x > "$DEST"`,
 			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
-			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedUnknown,
+			set:     SetOutsideHome, want: semantic.ProtectedUnknown,
+		},
+		{
+			name:    "protected-set case 6b: dynamic write does not claim the ssh set",
+			command: `echo x > "$DEST"`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedNo,
+		},
+		{
+			name:    "protected-set case 6c: dynamic read has no protected signal",
+			command: `cat "$SRC"`,
+			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
+			set:     "", want: semantic.ProtectedNo,
 		},
 		{
 			name:    "protected-set case 7: delete under .ssh (glob child) is unknown",

@@ -40,10 +40,12 @@ func gradeTarget(t effects.Target, state effects.TargetState, set protectedSet, 
 		}
 		return gradeNo
 	}
-	// No lexical path: the spelling is fully dynamic. It could be anything,
-	// so every set it is asked about is unknown, never no.
+	// No lexical path: the spelling is fully dynamic, with no information at
+	// all. It is not claimed as a member of any NAMED set (that would make a
+	// benign dynamic read look like a credential read); a dynamic MUTATION is
+	// still caught away-from-home by the outside_home signal in the projector.
 	if t.Path == "" {
-		return gradeUnknown
+		return gradeNo
 	}
 	// A concrete lexical name that is a member is authoritative even before
 	// its physical path is read (writing the name ~/.ssh/authorized_keys is a
