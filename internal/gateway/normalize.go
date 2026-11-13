@@ -350,14 +350,12 @@ func normalizeSensitiveLocalPatternFinding(raw, source, severity string) (Normal
 			), true
 		}
 	}
-	for _, detector := range secretPatternDetectors {
-		if detector.pattern == nil || firstAcceptedRegexMatch(detector.pattern, match, func(candidate string) bool {
-			return acceptedLocalSecretMatch(detector.kind, candidate)
-		}) == nil {
-			continue
-		}
+	// A raw credential-shaped value is recognised by the rule pack's secret
+	// rules, the detectors every surface uses, so it never becomes a finding
+	// identity of its own.
+	if len(scanContentRuleCategoryWithGeneration(snapshotRulePackGeneration(""), match, "", ruleContentScopeUntrusted, "secret")) > 0 {
 		return normalizedSensitiveLocalFinding(
-			detector.canonicalID, CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
+			"LP-SECRET-MATCH", CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
 		), true
 	}
 

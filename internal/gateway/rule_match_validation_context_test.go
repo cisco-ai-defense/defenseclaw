@@ -53,11 +53,6 @@ func TestFirstAcceptedRegexMatchRejectsTypedNil(t *testing.T) {
 	if match := firstAcceptedRegexMatch(pattern, "candidate", func(string) bool { return true }); match != nil {
 		t.Fatalf("typed-nil pattern returned match %v", match)
 	}
-	if match, normalized, ok := findAcceptedLocalSecretMatch(
-		"candidate", "candidate", localSecretDetector{pattern: pattern},
-	); ok || normalized || match != "" {
-		t.Fatalf("typed-nil local detector returned %q normalized=%v ok=%v", match, normalized, ok)
-	}
 }
 
 func TestCredibleSSNContextAlignsWideDelimitedHeader(t *testing.T) {

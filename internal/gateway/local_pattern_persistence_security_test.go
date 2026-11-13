@@ -93,6 +93,21 @@ func TestLocalPatternSensitiveFindingsAreNeutralizedAcrossPersistence(t *testing
 		t.Fatal(err)
 	}
 
+	// A credential in a completion is found by the rule pack (SEC-BEARER,
+	// SEC-SECRET-ASSIGN); a rule finding is its rule id and title, so the
+	// value never enters the verdict at all.
+	for _, content := range []string{header, assignment} {
+		verdict := scanLocalPatterns("completion", content)
+		if verdict == nil || len(verdict.Findings) == 0 {
+			t.Fatalf("credential in a completion produced no finding: %#v", verdict)
+		}
+		for _, finding := range verdict.Findings {
+			if strings.Contains(finding, secretValue) {
+				t.Fatalf("completion verdict carries the credential value: %q", finding)
+			}
+		}
+	}
+
 	tests := []struct {
 		name      string
 		direction string
@@ -101,8 +116,6 @@ func TestLocalPatternSensitiveFindingsAreNeutralizedAcrossPersistence(t *testing
 		idPrefix  string
 		sensitive string
 	}{
-		{name: "header", direction: "completion", content: header, category: CatCredentialLeak, idPrefix: "LP-SECRET-", sensitive: secretValue},
-		{name: "assignment", direction: "completion", content: assignment, category: CatCredentialLeak, idPrefix: "LP-SECRET-", sensitive: secretValue},
 		{name: "injection", direction: "prompt", content: directive, category: CatPromptInjection, idPrefix: "LP-INJ-", sensitive: directive},
 		{name: "PII", direction: "completion", content: personalRecord, category: CatPIIExposure, idPrefix: "LP-PII-", sensitive: personalValue},
 	}

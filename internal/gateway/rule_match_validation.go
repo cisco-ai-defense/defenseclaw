@@ -184,27 +184,6 @@ func findAcceptedLocalPIILoc(original, normalized string, pattern *regexp.Regexp
 	return nil, "", false, false
 }
 
-func findAcceptedLocalSecretMatch(
-	original, normalized string,
-	detector localSecretDetector,
-) (match string, wasNormalized, ok bool) {
-	if detector.pattern == nil {
-		return "", false, false
-	}
-	accept := func(match string) bool {
-		return acceptedLocalSecretMatch(detector.kind, match)
-	}
-	if loc := firstAcceptedRegexMatch(detector.pattern, original, accept); loc != nil {
-		return original[loc[0]:loc[1]], false, true
-	}
-	if normalized != original {
-		if loc := firstAcceptedRegexMatch(detector.pattern, normalized, accept); loc != nil {
-			return normalized[loc[0]:loc[1]], true, true
-		}
-	}
-	return "", false, false
-}
-
 func findAcceptedRuleLoc(original, normalized, ruleID string, pattern *regexp.Regexp) (loc []int, source string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedRuleMatchAt(ruleID, original, match, start, end)
@@ -1095,30 +1074,6 @@ func nextDelimitedDataLine(remainder string) (string, bool) {
 	return remainder, remainder != ""
 }
 
-func acceptedLocalSecretMatch(kind localSecretDetectorKind, match string) bool {
-	candidate := assignmentValue(match)
-	if kind == localSecretDetectorBearer {
-		lower := strings.ToLower(match)
-		if bearer := strings.Index(lower, "bearer"); bearer >= 0 {
-			candidate = strings.TrimSpace(match[bearer+len("bearer"):])
-		}
-	}
-	if candidate == "" {
-		return true
-	}
-	// An explicit password assignment is itself the signal. Weak defaults such
-	// as changeme123 and examplepass are often the credentials operators most
-	// need surfaced, not documentation placeholders to suppress.
-	if kind == localSecretDetectorPassword {
-		return true
-	}
-	if obviousCredentialPlaceholder(candidate) {
-		return false
-	}
-	return kind != localSecretDetectorBearer ||
-		credentialEntropy(compactCredential(candidate)) >= 2.5
-}
-
 func normalizedPIIEvidenceKey(evidence string) string {
 	evidence = strings.TrimSpace(strings.TrimPrefix(evidence, "[normalized] "))
 	digits := decimalDigits(evidence)
@@ -1192,6 +1147,8 @@ func credentialCandidate(ruleID, match string) string {
 		return strings.TrimPrefix(trimmed, "github_pat_")
 	case "SEC-GITLAB":
 		return strings.TrimPrefix(trimmed, "glpat-")
+	case "SEC-HF-TOKEN":
+		return strings.TrimPrefix(trimmed, "hf_")
 	case "SEC-GOOGLE":
 		return strings.TrimPrefix(trimmed, "AIza")
 	case "SEC-SLACK-TOKEN":
@@ -1238,6 +1195,9 @@ func assignmentValue(match string) string {
 func obviousCredentialPlaceholder(candidate string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(candidate))
 	if normalized == "" {
+		return true
+	}
+	if templatedCredentialPlaceholder(normalized) {
 		return true
 	}
 	normalized = strings.TrimPrefix(normalized, "api03-")
@@ -1376,4 +1336,28 @@ func decimalNumber(value string) int {
 		n = n*10 + int(char-'0')
 	}
 	return n
+}
+
+// templatedCredentialPlaceholder reports a value that documentation writes
+// in place of a credential: a template slot (<your-token>, ${API_KEY},
+// {{ secret }}, %API_KEY%) or a your-...-here name (rel-1-0-10:GAP-0213).
+// The check is shared by every surface through acceptedCredentialMatch.
+func templatedCredentialPlaceholder(normalized string) bool {
+	for _, pair := range [][2]string{{"<", ">"}, {"${", "}"}, {"{{", "}}"}, {"%", "%"}, {"[", "]"}} {
+		if len(normalized) > len(pair[0])+len(pair[1]) &&
+			strings.HasPrefix(normalized, pair[0]) && strings.HasSuffix(normalized, pair[1]) &&
+			!strings.ContainsAny(normalized[len(pair[0]):len(normalized)-len(pair[1])], pair[0]+pair[1]) {
+			return true
+		}
+	}
+	words := strings.FieldsFunc(normalized, func(char rune) bool {
+		return char == '_' || char == '-' || char == '.' || char == ' '
+	})
+	if len(words) >= 2 && words[0] == "your" {
+		switch words[len(words)-1] {
+		case "here", "key", "token", "secret", "password", "value":
+			return true
+		}
+	}
+	return false
 }

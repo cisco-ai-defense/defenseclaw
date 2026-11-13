@@ -1713,35 +1713,6 @@ func compileLocalPatternSources(field string, sources []string) ([]*regexp.Regex
 	return compiled, nil
 }
 
-type localSecretDetectorKind uint8
-
-const (
-	localSecretDetectorToken localSecretDetectorKind = iota + 1
-	localSecretDetectorPassword
-	localSecretDetectorAPIKey
-	localSecretDetectorBearer
-	localSecretDetectorAWS
-)
-
-type localSecretDetector struct {
-	kind        localSecretDetectorKind
-	canonicalID string
-	pattern     *regexp.Regexp
-}
-
-// secretPatternDetectors tighten patterns that cause false positives as bare
-// substrings. Every detector carries stable behavioral and canonical identities
-// so slice reordering cannot silently change acceptance or finding IDs.
-var secretPatternDetectors = []localSecretDetector{
-	{localSecretDetectorToken, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`)},
-	// Require an actual secret-shaped VALUE after the key name, so prose
-	// that merely mentions "password" / "api_key" / "bearer" is not flagged.
-	{localSecretDetectorPassword, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`)},
-	{localSecretDetectorAPIKey, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`)},
-	{localSecretDetectorBearer, "LP-SECRET-BEARER", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`)},
-	{localSecretDetectorAWS, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`)},
-}
-
 // Target names and transfer verbs are common in source review and operational
 // documentation. Strong built-in exfil detection therefore requires the
 // conjunction of a read/dump verb, a sensitive target, and an egress verb.
@@ -1949,21 +1920,24 @@ func scanLocalPatternsWithActivation(
 			flags = append(flags, p)
 		}
 	}
-	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			flag := match
-			if norm {
-				flag = "[normalized] " + match
-			}
-			flags = append(flags, flag)
+	// The operator's local patterns above are their own floor; every built-in
+	// secret, PII and trust detection comes from the rule pack, read exactly
+	// as the hook path reads prompts and tool results (messageRuleFindings:
+	// the content categories, their match validators and placeholder checks,
+	// and the folded view for trust rules). The proxy used to add its own
+	// secret regexes here, so a completion and a tool result holding the same
+	// text were decided by different detectors (rel-1-0-10:GAP-0210, GAP-0213).
+	// Literal commands, paths, cognitive files and C2 indicators are action
+	// categories and need parsed tool-call facts before they can enforce.
+	localFlags := len(flags) > 0 || len(localPIICandidates) > 0
+	maxRuleSev := "NONE"
+	folded := ""
+	if !secureClientGeneration() {
+		if view := trustPatternText(content); view != content {
+			folded = view
 		}
 	}
-
-	// Content scanning retains trust, credential, and PII rules. Literal
-	// commands, paths, cognitive files, and C2 indicators are action categories
-	// and require parsed tool-call facts before they can affect enforcement.
-	maxRuleSev := "NONE"
-	ruleFindings := scanContentRuleCategoryWithGeneration(rules, content, "", ruleContentScopeUntrusted, "")
+	ruleFindings := messageRuleFindings(rules, content, folded, ruleContentScopeUntrusted, true)
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
@@ -1996,12 +1970,15 @@ func scanLocalPatternsWithActivation(
 		return allowVerdict("local-pattern")
 	}
 
-	severity := "MEDIUM"
-	if isHigh {
-		severity = "HIGH"
+	// A rule finding carries its own severity, as on the hook path (a LOW
+	// documentation-domain address stays LOW); an operator local pattern is
+	// MEDIUM, or HIGH for the injection, PII and exfiltration floors.
+	severity := maxRuleSev
+	if localFlags && severityRank[severity] < severityRank["MEDIUM"] {
+		severity = "MEDIUM"
 	}
-	if severityRank[maxRuleSev] > severityRank[severity] {
-		severity = maxRuleSev
+	if isHigh && severityRank[severity] < severityRank["HIGH"] {
+		severity = "HIGH"
 	}
 
 	action := guardrailFallbackActionForSeverity(severity)
@@ -2158,34 +2135,6 @@ func triagePatterns(direction, content string) []TriageSignal {
 			})
 		}
 	}
-	// Secret regex: tries `content` first (case/whitespace preserved
-	// for audit context) and falls back to `lower` so evasions like
-	// "token\u200B=\u200B<60-char key>" still fire. Without the
-	// fallback the docstring on scanLocalPatterns above — which
-	// promises normalization defeats whitespace/slash-run evasions —
-	// would not hold for secrets.
-	for _, detector := range secretPatternDetectors {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
-			src := content
-			if norm {
-				src = lower
-			}
-			loc := strings.Index(src, match)
-			if loc < 0 {
-				continue
-			}
-			ev := extractEvidenceAt(src, loc, loc+len(match))
-			if norm {
-				ev = "[normalized] " + ev
-			}
-			signals = append(signals, TriageSignal{
-				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
-				Category: "secret", Pattern: detector.pattern.String(),
-				Evidence: ev, Confidence: 0.75,
-			})
-		}
-	}
-
 	return signals
 }
 

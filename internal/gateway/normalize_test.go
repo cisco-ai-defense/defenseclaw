@@ -138,22 +138,6 @@ func TestNormalizeUntrustedLocalPatternFindingNeverBuildsIdentityFromSource(t *t
 	}
 }
 
-func TestNormalizeSensitiveLocalPatternFindingUsesStableSecretDetectorID(t *testing.T) {
-	tests := []struct {
-		raw  string
-		want string
-	}{
-		{raw: "api_key=q7V2m9X4k8P6r3T1w5Y0n8C4", want: "LP-SECRET-ASSIGNMENT"},
-		{raw: "Bearer eyJhbGciOiJIUzI1NiJ9.q7V2m9X4k8P6r3T1w5Y0.n8C4x6Z2", want: "LP-SECRET-BEARER"},
-	}
-	for _, test := range tests {
-		got, ok := normalizeSensitiveLocalPatternFinding(test.raw, "local-pattern", "HIGH")
-		if !ok || got.CanonicalID != test.want || got.OriginalID != test.want {
-			t.Errorf("normalizeSensitiveLocalPatternFinding(%q) = %#v, %v; want %s", test.raw, got, ok, test.want)
-		}
-	}
-}
-
 func TestNormalizeRuleFindings(t *testing.T) {
 	findings := []RuleFinding{
 		{RuleID: "SEC-AWS-KEY", Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},

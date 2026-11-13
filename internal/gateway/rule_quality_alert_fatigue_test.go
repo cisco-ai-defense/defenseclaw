@@ -125,16 +125,6 @@ func TestAlertFatigueRejectedPrivateKeyHeaderDoesNotHideCompleteBlock(t *testing
 }
 
 func TestAlertFatigueWeakButRealPasswordsRemainVisible(t *testing.T) {
-	for _, assignment := range []string{
-		"password=password123",
-		"password=changeme123",
-		"password=dummysecret",
-		"password=examplepass",
-	} {
-		if !acceptedLocalSecretMatch(1, assignment) {
-			t.Fatalf("weak password value was mistaken for a documentation placeholder: %q", assignment)
-		}
-	}
 	connectionRule := alertFatigueRule(t, "default", "SEC-CONNSTR")
 	for _, connectionString := range []string{
 		"postgres://user:password123@host.example/db",
