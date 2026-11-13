@@ -94,7 +94,7 @@ func TestGAP0613PluginCacheRootVersionsAndSubdirectories(t *testing.T) {
 			if _, err := ensureAndWatch(fsw, root); err != nil {
 				t.Fatalf("watch cache root: %v", err)
 			}
-			plugins := enumerateClaudeWatcherPlugins(root)
+			plugins := enumerateClaudeWatcherPlugins(root, true)
 			if len(plugins) != 1 || plugins[0] != version {
 				t.Fatalf("cache versions: %v", plugins)
 			}

@@ -1,0 +1,18 @@
+# managed_enterprise in bundle mode (GAP-0135, second source): the gateway
+# activates from a verified signed bundle when the mounted config does not
+# activate, so it reads the bundle state ConfigMaps and the anchors like the
+# controller.
+deploymentMode: managed_enterprise
+config:
+  substrate:
+    identity:
+      issuer: https://idp.cluster-m.example
+      oidc:
+        issuer: https://login.example.com
+        client_id: defenseclaw-launcher
+    launcher_atespaces:
+      engineering: [eng-web]
+    templates:
+      allowed_images: ["registry.example.com/defenseclaw/*"]
+bundles:
+  enabled: true

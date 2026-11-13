@@ -171,9 +171,18 @@ func (e *Effective) computeDigest() (string, error) {
 func cloneFloor(f config.OpenShellAdminConfig) config.OpenShellAdminConfig {
 	for _, list := range []*[]string{
 		&f.AllowedHarnesses, &f.EgressBlock, &f.EgressAllowOnly, &f.RequireCopyFor, &f.Locked,
-		&f.RequiredFor, &f.AllowedCredentials, &f.Runtimes, &f.ActorSecrets,
+		&f.RequiredFor, &f.AllowedCredentials, &f.Runtimes, &f.ActorSecrets, &f.AskHosts,
 	} {
 		*list = slices.Clone(*list)
+	}
+	// The URL rules hold lists of their own: copying the rules alone would share Hosts and Methods.
+	if f.URLRules != nil {
+		rules := make([]config.SandboxURLRule, len(f.URLRules))
+		for i, r := range f.URLRules {
+			r.Hosts, r.Methods = slices.Clone(r.Hosts), slices.Clone(r.Methods)
+			rules[i] = r
+		}
+		f.URLRules = rules
 	}
 	for _, flag := range []**bool{
 		&f.AllowYolo, &f.AllowMount, &f.AllowHostPorts, &f.AllowUnblock, &f.AllowLearnMode,

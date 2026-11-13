@@ -1,6 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// The host copy runs on Linux and macOS (OpenShell sandboxes are not supported on Windows hosts); its tests use POSIX paths.
+//go:build unix
+
 package workspace
 
 import (
@@ -173,6 +176,17 @@ func TestHostCopyApplyRefusesAConflict(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(o.project, "a.txt")); string(b) != "mine\n" {
 		t.Errorf("my change was overwritten: %q", b)
+	}
+}
+
+// LC-J9e: the copy keeps the folder's own name, non-ASCII included.
+func TestHostFolderNameKeepsUnicode(t *testing.T) {
+	for in, want := range map[string]string{
+		filepath.Join("x", "proj-ñ-日本"): "proj-ñ-日本", filepath.Join("x", "my app"): "my app", filepath.Join("x", "a\x01b"): "project",
+	} {
+		if got := hostFolderName(in); got != want {
+			t.Errorf("hostFolderName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

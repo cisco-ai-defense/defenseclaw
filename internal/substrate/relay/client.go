@@ -37,6 +37,12 @@ type AttachOptions struct {
 	// every route is BaseURL + "/" + route. Without it BaseURL is the relay
 	// origin and the routes are under Prefix.
 	FlatRoutes bool
+	// KeepaliveEvery and KeepaliveDead bound how long a WebSocket attach
+	// stays up with nothing from the relay (LC-J9a): a ping is sent every
+	// KeepaliveEvery, and the connection is closed (the caller reconnects
+	// and says so) when no frame or pong arrives for KeepaliveDead.
+	// Defaults 10 s and 30 s.
+	KeepaliveEvery, KeepaliveDead time.Duration
 	// OnUnsent sees the size of every chunk of input that was read but
 	// could not be sent because the connection ended (GAP-0003), so the
 	// caller can say so instead of losing keys silently.
@@ -129,9 +135,37 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		defer wmu.Unlock()
 		return conn.WriteMessage(websocket.BinaryMessage, frame)
 	}
+	every, dead := o.KeepaliveEvery, o.KeepaliveDead
+	if every <= 0 {
+		every = 10 * time.Second
+	}
+	if dead <= 0 {
+		dead = 30 * time.Second
+	}
+	// A network that drops without a reset leaves the socket open: only a
+	// read deadline notices. Any frame or pong from the relay extends it.
+	_ = conn.SetReadDeadline(time.Now().Add(dead))
+	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(dead)) })
 	var res AttachResult
 	var resMu sync.Mutex // the reader goroutine writes res while the paths below read it
 	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				wmu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(every))
+				wmu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 	go func() {
 		defer close(done)
 		for {
@@ -139,6 +173,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 			if err != nil {
 				return
 			}
+			_ = conn.SetReadDeadline(time.Now().Add(dead))
 			t, p, err := Decode(msg)
 			if err != nil {
 				continue

@@ -501,7 +501,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl.Attestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
 			SandboxClass: gateway.SubstrateSandboxClassFor(c),
 			Limiter: ratelimit.New(ratelimit.Config{
@@ -635,7 +635,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	// An approved host joins the actor's registration; the controller adds
 	// it to the policy on its next pass.
 	askStore.OnApprove = func(ctx context.Context, a asks.Ask) error {
-		if a.Host == "" {
+		// Only a host-wide approval joins the registration (and so the
+		// policy); a url_rules approval covers its rule only (GAP-0177).
+		if a.Host == "" || !asks.HostWide(a.Rule) {
 			return nil
 		}
 		reg, ok, err := store.Get(ctx, a.Atespace, a.UID)

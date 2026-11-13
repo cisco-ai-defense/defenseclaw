@@ -185,10 +185,8 @@ type metricsSet struct {
 	streamDurationMs  metric.Float64Histogram
 	redactionsApplied metric.Int64Counter
 
-	// Guardrail LLM judge + verdict cache
+	// Guardrail LLM judge
 	guardrailJudgeLatency metric.Float64Histogram
-	guardrailCacheHits    metric.Int64Counter
-	guardrailCacheMisses  metric.Int64Counter
 
 	// Connector OTLP ingest receivers (native connector telemetry
 	// posted to /v1/logs, /v1/metrics, /v1/traces). Kept
@@ -925,20 +923,6 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.guardrailJudgeLatency, err = m.Float64Histogram("defenseclaw.guardrail.judge.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("LLM judge invocation latency (cache miss path includes model round-trip)"),
-	)
-	if err != nil {
-		return nil, err
-	}
-	ms.guardrailCacheHits, err = m.Int64Counter("defenseclaw.guardrail.cache.hits",
-		metric.WithUnit("{hit}"),
-		metric.WithDescription("Verdict cache hits by scanner/verdict/TTL bucket"),
-	)
-	if err != nil {
-		return nil, err
-	}
-	ms.guardrailCacheMisses, err = m.Int64Counter("defenseclaw.guardrail.cache.misses",
-		metric.WithUnit("{miss}"),
-		metric.WithDescription("Verdict cache misses by scanner/verdict/TTL bucket"),
 	)
 	if err != nil {
 		return nil, err

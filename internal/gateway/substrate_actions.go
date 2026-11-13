@@ -53,6 +53,12 @@ var ErrSubstrateActorExists = errors.New("an actor with this name exists")
 // ErrSubstrateActorRefused is an actor the controller gives no policy.
 var ErrSubstrateActorRefused = errors.New("the controller refused the actor")
 
+// ErrSubstrateTemplateAttestation is a template whose attestation could not
+// be read (the attestor failed), so its connector label is unknown. A
+// managed create refuses it; an open-source one warns and goes on with the
+// launcher's connector (GAP-0181).
+var ErrSubstrateTemplateAttestation = errors.New("template attestation could not be read")
+
 // SubstratePolicyEnsurer writes an actor's egress policy before its first
 // resume (controller.Controller.EnsurePolicy). An error wrapping
 // ErrSubstrateActorRefused means the actor gets no policy.
@@ -64,7 +70,8 @@ type SubstrateATEActions struct {
 	Ensure SubstratePolicyEnsurer
 	// ConnectorOf reads the connector a template was built for (its attested
 	// label, GAP-0160). Nil, or "" for an unattested template, means the
-	// template names none.
+	// template names none; an attestation that could not be read is an
+	// error wrapping ErrSubstrateTemplateAttestation, never "".
 	ConnectorOf func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error)
 }
 

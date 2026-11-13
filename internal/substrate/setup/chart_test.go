@@ -32,7 +32,7 @@ const chartKubeVersion = "1.34.0"
 
 // chartCases are the golden renders: values files under
 // deploy/helm/defenseclaw-substrate/tests/values (empty for the defaults).
-var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys"}
+var chartCases = []string{"default", "launcher", "minimal", "full", "expose-lb", "expose-ingress", "bundles", "managed", "actor-secrets", "kube-signin", "ask-keys", "managed-bundles"}
 
 // helmPinnedVersion is the helm release the goldens are rendered with and
 // that the CI job substrate-chart installs (keep it equal to HELM_VERSION in
@@ -304,7 +304,7 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	// read-only file (no ConfigMap directory symlinks), and its data dir is
 	// its own volume that an init container gives to the gateway account
 	// with 0700.
-	if name == "managed" {
+	if name == "managed" || name == "managed-bundles" {
 		if !strings.Contains(fmt.Sprint(byName["ConfigMap/defenseclaw-config"].Data["config.yaml"]), "deployment_mode: managed_enterprise") {
 			t.Errorf("managed: deployment_mode not in config.yaml")
 		}

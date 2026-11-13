@@ -74,6 +74,9 @@ type AskRequest struct {
 	Method  string
 	// Rule is the ask_hosts pattern or URL rule that required it.
 	Rule string
+	// PathPrefix is the url rule's path prefix, for the person who answers
+	// ("" for a host ask).
+	PathPrefix string
 	// UnattendedAsks is the profile's unattended_asks (deny or queue, D12).
 	UnattendedAsks string
 }

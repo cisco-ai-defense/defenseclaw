@@ -22,6 +22,10 @@ Substrate parks a request when no worker has room for the actor. The launcher wa
 
 After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain` and check that your profile lets you approve (`allow_unblock`).
 
+### "could not read the template's attestation" when I start an agent
+
+On a managed cluster, DefenseClaw reads the template's attestation to know which agent it runs, and it checks the sign-in rules on that. If the attestation can't be read, nothing starts; the connector you named is not taken on trust. Try again in a minute. If it keeps happening, an administrator checks the template with `defenseclaw substrate template verify`. On an open-source cluster the agent starts with a warning instead.
+
 ### My agent can't reach anything
 
 An actor with no allow list has no network. The usual causes:
