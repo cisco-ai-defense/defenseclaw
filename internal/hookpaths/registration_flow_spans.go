@@ -363,13 +363,16 @@ func (s *registrationFlowSpans) shellBody(src string, call *syntax.CallExpr, pro
 	return capable, consumer, true
 }
 
-// interpreter judges python, node, perl and ruby with inline code (-c, -e)
-// or a program read from a here-document (python3 - <<EOF): code that
-// writes nothing makes the call a reader. A script file runs code the
-// reader does not see (handled false).
+// interpreter judges python with inline code (-c) or a program read from a
+// here-document (python3 - <<EOF): code that writes nothing makes the call a
+// reader. The judge is an allowlist (actionfacts.PythonCodeOnlyReads): code
+// it does not recognise may write. node, perl and ruby, and a script file,
+// run code the reader does not see (handled false), as before
+// rel-1-0-10:GAP-0104; the deny-list reading of their code was dropped
+// (rel-1-0-10:GAP-0244).
 func (s *registrationFlowSpans) interpreter(src string, stmt *syntax.Stmt, call *syntax.CallExpr, program string, static []string, fixed []bool) (capable, consumer, handled bool) {
 	kind := actionInterpreterKind(program)
-	if kind == "" {
+	if kind != "python" {
 		return false, false, false
 	}
 	for index := range static {
@@ -387,11 +390,7 @@ func (s *registrationFlowSpans) interpreter(src string, stmt *syntax.Stmt, call 
 			return false, false, false
 		}
 	}
-	writes := actionInterpreterCodeWrites(code, kind)
-	if kind == "python" {
-		writes = !actionfacts.PythonCodeOnlyReads(code)
-	}
-	if writes {
+	if !actionfacts.PythonCodeOnlyReads(code) {
 		s.add(src, call)
 		return true, true, true
 	}
