@@ -121,6 +121,12 @@ func acceptedSecretAssignment(match string) bool {
 }
 
 func secretAssignmentValueLooksSecret(raw string) bool {
+	return secretAssignmentRejection(raw) == ""
+}
+
+// secretAssignmentRejection names the first check a candidate value fails, or
+// returns "" for a value that looks like a generated secret.
+func secretAssignmentRejection(raw string) string {
 	value := strings.TrimSpace(raw)
 	// The value runs to the first character a secret does not use.
 	if end := strings.IndexFunc(value, func(r rune) bool {
@@ -129,27 +135,27 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 	}); end >= 0 {
 		// A name followed by "(" is a call, not a value.
 		if value[end] == '(' {
-			return false
+			return "call"
 		}
 		value = value[:end]
 	}
 	value = strings.TrimRight(value, ".,;!=")
 	if len(value) < 12 || len(value) > 128 {
-		return false
+		return "length"
 	}
 	if secretAssignmentVarRef.MatchString(value) || secretAssignmentCodeRef.MatchString(value) {
-		return false
+		return "reference"
 	}
 	if secretAssignmentPlaceholderValue(value) {
-		return false
+		return "placeholder"
 	}
 	if obviousCredentialPlaceholder(value) {
-		return false
+		return "placeholder"
 	}
 	// A path, a host name or a file name is not a secret.
 	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "~") ||
 		strings.Contains(value, "//") || secretAssignmentDotted.MatchString(value) || secretAssignmentIdentifier(value) {
-		return false
+		return "path-or-name"
 	}
 	// A value built from short underscore- or dash-separated pieces
 	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
@@ -160,25 +166,16 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 			longest = max(longest, len(segment))
 		}
 		if longest < 10 {
-			return false
+			return "pieces"
 		}
 	}
 	// A value made mostly of words (SalesDemo2026, Password.123) is a phrase
-	// a person chose, not a generated secret: a generated one has no long
-	// run of letters. Words of five letters or more count against it.
-	wordLetters, run := 0, 0
-	for _, r := range value + " " {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
-			run++
-			continue
-		}
-		if run >= 5 {
-			wordLetters += run
-		}
-		run = 0
-	}
+	// a person chose, not a generated secret. A word is a stretch of letters of
+	// one case shape with the vowel and consonant pattern of a word; a random
+	// mix of upper and lower case, or of consonants alone, is not one.
+	wordLetters := secretAssignmentWordLetters(value)
 	if wordLetters*10 >= len(value)*6 {
-		return false
+		return "words"
 	}
 	var letters, upper, lowerCount, digits, symbols int
 	for _, r := range value {
@@ -198,7 +195,7 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 	// Names, words and identifiers carry no digit; a secret a person or a
 	// tool generated mixes letters and digits.
 	if letters == 0 || digits == 0 {
-		return false
+		return "no-digit"
 	}
 	classes := 0
 	for _, n := range []int{lowerCount, upper, digits, symbols} {
@@ -207,9 +204,92 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 		}
 	}
 	if classes < 2 || (classes == 2 && len(value) < 16) {
+		return "classes"
+	}
+	if credentialEntropy(value) < 3.0 {
+		return "entropy"
+	}
+	return ""
+}
+
+// secretAssignmentWordLetters counts the letters of value that sit in
+// word-shaped segments of four letters or more. A run of letters is cut where
+// the case turns from lower to upper (BlueRiver) and before the last capital
+// of a capital run followed by lower case (HTTPServer). A segment is
+// word-shaped when it is all lower case, all upper case or one capital then
+// lower case, a fifth to seven tenths of it are vowels (a, e, i, o, u, y), and
+// no run of consonants is longer than four. This is a model of the shape of
+// a word, not a list of words: a random password whose letters happen to run
+// long (xKqrTbnPzw) has mixed case or no vowels in one segment and does not
+// count.
+func secretAssignmentWordLetters(value string) int {
+	total := 0
+	runStart := -1
+	flush := func(end int) {
+		if runStart < 0 {
+			return
+		}
+		run := value[runStart:end]
+		runStart = -1
+		segStart := 0
+		for i := 1; i <= len(run); i++ {
+			boundary := i == len(run)
+			if !boundary {
+				prevLower := run[i-1] >= 'a' && run[i-1] <= 'z'
+				upper := run[i] >= 'A' && run[i] <= 'Z'
+				prevUpper := run[i-1] >= 'A' && run[i-1] <= 'Z'
+				nextLower := i+1 < len(run) && run[i+1] >= 'a' && run[i+1] <= 'z'
+				boundary = upper && (prevLower || (prevUpper && nextLower))
+			}
+			if boundary {
+				if secretAssignmentWordShaped(run[segStart:i]) {
+					total += i - segStart
+				}
+				segStart = i
+			}
+		}
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			if runStart < 0 {
+				runStart = i
+			}
+			continue
+		}
+		flush(i)
+	}
+	flush(len(value))
+	return total
+}
+
+func secretAssignmentWordShaped(segment string) bool {
+	if len(segment) < 4 {
 		return false
 	}
-	return credentialEntropy(value) >= 3.0
+	upper, lower := 0, 0
+	for i := 0; i < len(segment); i++ {
+		if segment[i] >= 'A' && segment[i] <= 'Z' {
+			upper++
+		} else {
+			lower++
+		}
+	}
+	titleCase := upper == 1 && segment[0] >= 'A' && segment[0] <= 'Z'
+	if upper != 0 && lower != 0 && !titleCase {
+		return false
+	}
+	vowels, consonants, longest := 0, 0, 0
+	for i := 0; i < len(segment); i++ {
+		if strings.IndexByte("aeiouyAEIOUY", segment[i]) >= 0 {
+			vowels++
+			consonants = 0
+			continue
+		}
+		consonants++
+		longest = max(longest, consonants)
+	}
+	return vowels*5 >= len(segment) && vowels*10 <= len(segment)*7 && longest <= 4
 }
 
 // secretAssignmentIdentifier reports a snake_case or kebab-case name made of
