@@ -250,8 +250,13 @@ func (e *Engine) closedAuto() bool {
 	return e.cfg.Managed && e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto
 }
 
-// InvalidateActor is the lifecycle hook: a deleted, recreated or forked
-// actor's cached UID is dropped.
+// InvalidateActor drops an actor's cached UID. Nothing in the callout
+// process calls it: lifecycle events reach the gateway, not this process, so
+// the cache's own age limit (UIDCache) bounds how long a same-name actor
+// that was deleted and created again keeps its predecessor's UID. In that
+// window its verdict calls carry the old UID and the gateway, which finds
+// the old registration deleted or none, refuses them (closed, never wrongly
+// allowed). Tests use it to stand for the age limit passing.
 func (e *Engine) InvalidateActor(atespace, name string) { e.uids.Invalidate(atespace, name) }
 
 // ChainDropped is how many observed_egress steps the full queue dropped.
