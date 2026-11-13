@@ -181,6 +181,22 @@ func (s *flowSessionStore) view(id string) FlowSessionView {
 	}
 }
 
+// recentHits returns up to n of the most recent redacted hits across all live
+// sessions, newest first, for the status/TUI view.
+func (s *flowSessionStore) recentHits(n int) []FlowHitRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var all []FlowHitRecord
+	for _, e := range s.m {
+		all = append(all, e.hits...)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Time > all[j].Time })
+	if len(all) > n {
+		all = all[:n]
+	}
+	return all
+}
+
 // reset drops every session state (a test seam and a config-reload hook).
 func (s *flowSessionStore) reset() {
 	s.mu.Lock()
@@ -410,5 +426,6 @@ func (a *APIServer) handleSecretFlow(w http.ResponseWriter, r *http.Request) {
 	secretFlowSessions.mu.Lock()
 	resp["tracked_sessions"] = len(secretFlowSessions.m)
 	secretFlowSessions.mu.Unlock()
+	resp["recent_hits"] = secretFlowSessions.recentHits(maxFlowHitRing)
 	a.writeJSON(w, http.StatusOK, resp)
 }

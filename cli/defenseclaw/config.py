@@ -3004,10 +3004,10 @@ class SecretFlowConfig:
     internal/config.SecretFlowConfig."""
 
     mode: str = "shadow"  # off | shadow | on (ships shadow)
-    label_sets: "SecretFlowLabelSets" = field(default_factory=lambda: SecretFlowLabelSets())
-    sink_action: "SecretFlowSinkAction" = field(default_factory=lambda: SecretFlowSinkAction())
+    label_sets: SecretFlowLabelSets = field(default_factory=SecretFlowLabelSets)
+    sink_action: SecretFlowSinkAction = field(default_factory=SecretFlowSinkAction)
     reencodings: bool = True
-    memory: "SecretFlowMemory" = field(default_factory=lambda: SecretFlowMemory())
+    memory: SecretFlowMemory = field(default_factory=SecretFlowMemory)
     destination_allowlist: list[str] = field(default_factory=list)
 
 
@@ -3040,7 +3040,7 @@ class GuardrailConfig:
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
     effects_rules: str = "shadow"  # off | shadow | on (effect-model rule lane)
-    secret_flow: "SecretFlowConfig" = field(default_factory=lambda: SecretFlowConfig())  # Secret flow tracking
+    secret_flow: SecretFlowConfig = field(default_factory=SecretFlowConfig)  # Secret flow tracking
     # Run full judge classification on content with no regex signal
     # (regex_judge mode). Flipped from False to True in the
     # multi-provider-adapters PR: pure-regex triage misses enough

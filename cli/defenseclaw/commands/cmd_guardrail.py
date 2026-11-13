@@ -6729,9 +6729,16 @@ def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
                 "extra_path_globs": list(sf.label_sets.extra_path_globs),
                 "extra_secret_patterns": list(sf.label_sets.extra_secret_patterns),
             },
-            "sink_action": {"default": sf.sink_action.default, "strict": sf.sink_action.strict, "managed": sf.sink_action.managed},
+            "sink_action": {
+                "default": sf.sink_action.default,
+                "strict": sf.sink_action.strict,
+                "managed": sf.sink_action.managed,
+            },
             "reencodings": sf.reencodings,
-            "memory": {"max_labeled_paths": sf.memory.max_labeled_paths, "max_value_digests": sf.memory.max_value_digests},
+            "memory": {
+                "max_labeled_paths": sf.memory.max_labeled_paths,
+                "max_value_digests": sf.memory.max_value_digests,
+            },
             "destination_allowlist": list(sf.destination_allowlist),
             "tracked_sessions": tracked,
         }, indent=2))
@@ -6739,22 +6746,33 @@ def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
 
     click.echo()
     click.echo(f"  {ux.bold('Secret flow tracking')}")
-    click.echo(f"  {ux.bold('mode:')} {ux.accent(sf.mode)}  {ux.dim('(effective: ' + lane + '; rollout guardrail.effects_rules=' + (getattr(gc, 'effects_rules', '') or '') + ')')}")
+    rollout = getattr(gc, "effects_rules", "") or ""
+    click.echo(
+        f"  {ux.bold('mode:')} {ux.accent(sf.mode)}  "
+        f"{ux.dim('(effective: ' + lane + '; rollout guardrail.effects_rules=' + rollout + ')')}"
+    )
     sets = ["credentials" if sf.label_sets.credentials else ux.dim('credentials off')]
     if sf.label_sets.extra_path_globs:
         sets.append("path globs: " + ", ".join(sf.label_sets.extra_path_globs))
     if sf.label_sets.extra_secret_patterns:
         sets.append("secret patterns: " + ", ".join(sf.label_sets.extra_secret_patterns))
     click.echo(f"  {ux.bold('label sets:')} {', '.join(sets)}")
-    click.echo(f"  {ux.bold('sink action:')} default {sf.sink_action.default}, strict {sf.sink_action.strict}, managed {sf.sink_action.managed}")
+    click.echo(
+        f"  {ux.bold('sink action:')} default {sf.sink_action.default}, "
+        f"strict {sf.sink_action.strict}, managed {sf.sink_action.managed}"
+    )
     click.echo(f"  {ux.bold('re-encodings:')} {'on' if sf.reencodings else 'off'}")
-    click.echo(f"  {ux.bold('memory caps:')} {sf.memory.max_labeled_paths} paths, {sf.memory.max_value_digests} value digests")
+    click.echo(
+        f"  {ux.bold('memory caps:')} {sf.memory.max_labeled_paths} paths, "
+        f"{sf.memory.max_value_digests} value digests"
+    )
     allow = ", ".join(sf.destination_allowlist) if sf.destination_allowlist else ux.dim("(none)")
     click.echo(f"  {ux.bold('allowlist:')} {allow}")
     if tracked is not None:
         click.echo(f"  {ux.bold('tracked sessions:')} {tracked}")
     if lane == "shadow":
-        click.echo(f"  {ux.dim('Shadow: hits are recorded but never change the answer. See `secret-flow explain SESSION`.')}")
+        note = "Shadow: hits are recorded but never change the answer. See `secret-flow explain SESSION`."
+        click.echo(f"  {ux.dim(note)}")
     click.echo()
 
 
@@ -6839,7 +6857,11 @@ def secret_flow_set_cmd(app: AppContext, key: str, value: str) -> None:
         change = config_writer.Change(dotted, hosts) if hosts else config_writer.Change(dotted, unset=True)
     else:  # mode, sink-strict, sink-managed: closed enums
         v = value.strip()
-        choices = {"mode": ("off", "shadow", "on"), "sink-strict": ("alert", "block"), "sink-managed": ("alert", "block")}[key]
+        choices = {
+            "mode": ("off", "shadow", "on"),
+            "sink-strict": ("alert", "block"),
+            "sink-managed": ("alert", "block"),
+        }[key]
         if v not in choices:
             ux.err(f"{key} takes one of {', '.join(choices)} (got {value!r}).", indent="  ")
             raise click.exceptions.Exit(2)
@@ -6886,8 +6908,8 @@ def secret_flow_explain_cmd(app: AppContext, session: str, as_json: bool = False
         click.echo()
         return
     click.echo(f"  {ux.bold('session:')} {ux.accent(session)}")
-    click.echo(f"  {ux.bold('label:')} {view.get('label', 'public')}  "
-               f"{ux.dim('(' + str(view.get('labeled_paths', 0)) + ' labeled files, ' + str(view.get('value_digests', 0)) + ' secret-value digests)')}")
+    counts = f"({view.get('labeled_paths', 0)} labeled files, {view.get('value_digests', 0)} secret-value digests)"
+    click.echo(f"  {ux.bold('label:')} {view.get('label', 'public')}  {ux.dim(counts)}")
     hits = view.get("hits") or []
     if not hits:
         click.echo(f"  {ux.bold('hits:')} {ux.dim('none recorded')}")
