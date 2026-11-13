@@ -451,10 +451,16 @@ func (p *parser) parseControl(kw string) Statement {
 		case p.at(TokEOF):
 			blk.start, blk.end = start, p.prevEnd()
 			return blk
+		case kw == "switch" && (p.at(TokString) || p.at(TokGeneric) || p.at(TokVariable) || p.at(TokNumber)):
+			// the switch condition or an option value (-File <path>, a
+			// -File "...$( )..." string, or $x[$( )]): parse it as an expression
+			// so a nested $( ) / index subexpression runs its commands. A bare
+			// literal path parses to a StringLit and emits no command of its own
+			// (review 3 R2). -File is still never taken as an opaque literal.
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePostfix(p.parsePrimary())))
 		case kw == "switch":
-			// the switch condition value or an option value (e.g. -File <path>):
-			// a literal to match on, never a command to run. Consume it silently
-			// so the body { } is reached instead of leaking as a top-level command.
+			// any other condition token (an operator, etc.): consume silently so
+			// the body { } is reached without leaking a top-level command.
 			p.advance()
 		default:
 			blk.start, blk.end = start, p.prevEnd()

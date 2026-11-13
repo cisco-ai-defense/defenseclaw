@@ -692,6 +692,7 @@ func (l *lexer) scanRedirectFromHere(a int, numPrefix string) {
 // treats a backtick as an escape of the next rune.
 func (l *lexer) lexBareword() {
 	a := l.i
+	escBracket := false // an escaped `[ / `] turns off bracket-breaking for the rest of the word
 	for l.i < len(l.runes) {
 		r := l.cur()
 		if r == '`' {
@@ -705,13 +706,23 @@ func (l *lexer) lexBareword() {
 				}
 				continue
 			}
+			if l.peek(1) == '[' || l.peek(1) == ']' {
+				// an escaped bracket is a literal part of the bareword; keep the
+				// whole token together so C:\tmp\`[a]\..\x stays one argument
+				// (non-static via the Static allowlist) and the tail does not
+				// become a spurious command (review 3 R1).
+				escBracket = true
+			}
 			l.i += 2
 			continue
 		}
 		if isSpace(r) || r == '\n' || r == -1 {
 			break
 		}
-		if strings.ContainsRune(";,|&(){}[]", r) || isSingleQuote(r) || isDoubleQuote(r) {
+		if (r == '[' || r == ']') && !escBracket {
+			break
+		}
+		if strings.ContainsRune(";,|&(){}", r) || isSingleQuote(r) || isDoubleQuote(r) {
 			break
 		}
 		if r == '$' && dollarStartsVar(l.peek(1)) {
