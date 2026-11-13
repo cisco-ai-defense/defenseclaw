@@ -80,6 +80,8 @@ defenseclaw substrate run claude --task "triage the open dependabot PRs" --detac
 
 A queued ask shows `unattended` and the time left in the `RUN` column of `approvals`.
 
+A rejected or expired ask is not remembered. If the agent asks for the same site again, a new ask opens at once; there is no cooldown. To stop the asking, refuse the site with a `url_rules` rule (`action: deny`) or leave it off the allow list.
+
 ![defenseclaw substrate approvals listing one ask waiting: ID ask-4c49616b8f92eb8c85c8fc2b, agent nightly-528031bf, what GET example.com, age 7s, run unattended with 4m left, and the line with the approve and reject commands; then defenseclaw substrate approve for that ID prints Approved](/images/substrate/oss/approvals.png)
 
 ## Telemetry volume
