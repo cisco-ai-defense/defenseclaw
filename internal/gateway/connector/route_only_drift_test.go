@@ -69,3 +69,41 @@ func TestRouteOnlyDriftCodex(t *testing.T) {
 		t.Fatalf("a connector without route-only never drifts: %v", err)
 	}
 }
+
+// TestRouteOnlyDriftReadsBoundedAndQuotesNothing: an oversize agent file is
+// refused without being read whole, a corrupt route record is drift whose
+// text names no path and quotes no content, and the reader seam is used for
+// every file (S1 REVIEW-code-winroute P3-3).
+func TestRouteOnlyDriftReadsBoundedAndQuotesNothing(t *testing.T) {
+	path, opts := routeSettingsFixture(t, "{}")
+	c := NewClaudeCodeConnector()
+	route := &RouteOnlySetup{BaseURL: "http://127.0.0.1:18970/r/claudecode", Token: "tok-1"}
+	if err := os.Truncate(path, UserNativeOTLPReadLimit+1); err != nil {
+		t.Fatal(err)
+	}
+	err := RouteOnlyDrift(c, opts, route)
+	if !errors.Is(err, ErrRouteConfigDrift) || !strings.Contains(err.Error(), "larger than") || strings.Contains(err.Error(), path) {
+		t.Fatalf("oversize settings = %v; want bounded drift without the path", err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(routeBackupPath(opts.DataDir, c.Name()), []byte(`{"applied": ZZsecret`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = RouteOnlyDrift(c, opts, route)
+	if !errors.Is(err, ErrRouteConfigDrift) || strings.Contains(err.Error(), "ZZ") || strings.Contains(err.Error(), opts.DataDir) {
+		t.Fatalf("corrupt record = %v; want drift without content or path", err)
+	}
+	var read []string
+	reader := func(p string) ([]byte, error) {
+		read = append(read, p)
+		return nil, os.ErrNotExist
+	}
+	if err := RouteOnlyDriftWithReader(c, opts, route, reader); !errors.Is(err, ErrRouteConfigDrift) {
+		t.Fatalf("missing files through the reader = %v; want drift", err)
+	}
+	if len(read) != 2 || read[0] != routeBackupPath(opts.DataDir, c.Name()) || read[1] != path {
+		t.Fatalf("reader got %v; want the record then the settings file", read)
+	}
+}

@@ -25,13 +25,24 @@ var ErrRouteConfigDrift = errors.New("route_config_drift")
 // files differ from route (nil: nothing may be rendered). Connectors
 // without route-only support never drift.
 func RouteOnlyDrift(conn Connector, opts SetupOpts, route *RouteOnlySetup) error {
+	return RouteOnlyDriftWithReader(conn, opts, route, nil)
+}
+
+// RouteOnlyDriftWithReader is RouteOnlyDrift reading the agent files and
+// the route record through read (nil: a bounded regular-file read). The
+// managed Windows guardian verifies as LocalSystem and passes its account
+// file reader (bounded, links only to files the account owns).
+func RouteOnlyDriftWithReader(conn Connector, opts SetupOpts, route *RouteOnlySetup, read RouteOnlyFileReader) error {
+	if read == nil {
+		read = readRouteOnlyFile
+	}
 	var current bool
 	var err error
 	switch c := conn.(type) {
 	case *ClaudeCodeConnector:
-		current, err = c.routeOnlyCurrent(opts, route)
+		current, err = c.routeOnlyCurrent(opts, route, read)
 	case *CodexConnector:
-		current, err = c.routeOnlyCurrent(opts, route)
+		current, err = c.routeOnlyCurrent(opts, route, read)
 	default:
 		return nil
 	}
@@ -44,15 +55,15 @@ func RouteOnlyDrift(conn Connector, opts SetupOpts, route *RouteOnlySetup) error
 	return nil
 }
 
-func (c *ClaudeCodeConnector) routeOnlyCurrent(opts SetupOpts, route *RouteOnlySetup) (bool, error) {
-	backup, err := loadRouteBackup(opts.DataDir, c.Name())
+func (c *ClaudeCodeConnector) routeOnlyCurrent(opts SetupOpts, route *RouteOnlySetup, read RouteOnlyFileReader) (bool, error) {
+	backup, err := loadRouteBackupWith(read, opts.DataDir, c.Name())
 	if err != nil {
 		return false, err
 	}
 	if route == nil {
 		return len(backup.Applied) == 0, nil
 	}
-	raw, err := os.ReadFile(claudeCodeSettingsPath())
+	raw, err := read(claudeCodeSettingsPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -87,15 +98,15 @@ func (c *ClaudeCodeConnector) routeOnlyCurrent(opts SetupOpts, route *RouteOnlyS
 	return true, nil
 }
 
-func (c *CodexConnector) routeOnlyCurrent(opts SetupOpts, route *RouteOnlySetup) (bool, error) {
-	backup, err := loadRouteBackup(opts.DataDir, c.Name())
+func (c *CodexConnector) routeOnlyCurrent(opts SetupOpts, route *RouteOnlySetup, read RouteOnlyFileReader) (bool, error) {
+	backup, err := loadRouteBackupWith(read, opts.DataDir, c.Name())
 	if err != nil {
 		return false, err
 	}
 	if route == nil {
 		return len(backup.Applied) == 0, nil
 	}
-	raw, err := os.ReadFile(codexConfigPath())
+	raw, err := read(codexConfigPath())
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
