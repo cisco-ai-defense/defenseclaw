@@ -841,18 +841,21 @@ export default function (api: DefenseClawPluginHost) {
 
   api.registerCommand({
     name: "scan",
+    acceptsArgs: true,
+    requireAuth: true,
     description: "Scan a skill, plugin, MCP config, or source code with DefenseClaw",
     args: [
       { name: "target", description: "Path to skill/plugin directory, MCP config, or source code", required: true },
       { name: "type", description: "Scan type: skill (default), plugin, mcp, code", required: false },
     ],
-    handler: async ({ args }) => {
-      const target = args.target as string | undefined;
+    handler: async (cmd) => {
+      const args = commandArgs(cmd.args, ["target", "type"]);
+      const target = args.target;
       if (!target) {
         return { text: "Usage: /scan <path> [skill|plugin|mcp|code]" };
       }
 
-      const scanType = (args.type ?? "skill") as string;
+      const scanType = args.type ?? "skill";
 
       if (scanType === "plugin") {
         return handlePluginScan(target);
@@ -889,11 +892,13 @@ export default function (api: DefenseClawPluginHost) {
         { name: "type", description: "Target type: skill, mcp, plugin", required: true },
         { name: "name", description: "Name of the target", required: true },
       ],
-      handler: async ({ args }) => {
+      acceptsArgs: true,
+      handler: async (cmd) => {
+        const args = commandArgs(cmd.args, ["type", "name"]);
         // Anyone who can message the agent can type these arguments: only a
         // known type and a plain name are echoed into the command to copy.
-        const rawType = args.type as string | undefined;
-        const rawName = args.name as string | undefined;
+        const rawType = args.type;
+        const rawName = args.name;
         const targetType = rawType && ["skill", "mcp", "plugin"].includes(rawType) ? rawType : "<skill|mcp|plugin>";
         const target = rawName && /^[A-Za-z0-9@._/:-]{1,128}$/.test(rawName) ? rawName : "<name>";
         return {
@@ -983,4 +988,26 @@ function formatScanOutput(
   lines.push(...formatFindings(result.findings));
 
   return lines.join("\n");
+}
+
+/**
+ * Named command arguments. OpenClaw passes the raw text after the command
+ * (2026.8.35 and later, with acceptsArgs); older releases passed an object.
+ * Before rel-1-0-10 GAP-0065 the plugin read only the object form and set no
+ * acceptsArgs, so a command with arguments went to the model as chat text.
+ */
+export function commandArgs(raw: unknown, names: string[]): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  if (typeof raw === "string") {
+    const words = raw.trim().split(/\s+/).filter(Boolean);
+    names.forEach((name, i) => {
+      out[name] = words[i];
+    });
+  } else if (raw && typeof raw === "object") {
+    for (const name of names) {
+      const v = (raw as Record<string, unknown>)[name];
+      out[name] = typeof v === "string" ? v : undefined;
+    }
+  }
+  return out;
 }

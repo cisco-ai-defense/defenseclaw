@@ -183,3 +183,19 @@ describe("native hooks", () => {
     expect(mockDaemonClient.postRaw.mock.calls[1][1]).toMatchObject({ content: "a\nb", model: "m" });
   });
 });
+
+describe("slash command arguments (rel-1-0-10 GAP-0065)", () => {
+  it("accepts the raw argument text OpenClaw passes", async () => {
+    const commands: Record<string, { acceptsArgs?: boolean; handler: (c: { args?: unknown }) => Promise<{ text: string }> }> = {};
+    (pluginSetup as (api: unknown) => void)({
+      config: {}, pluginConfig: {}, on: vi.fn(), registerService: vi.fn(),
+      registerCommand: vi.fn((d: { name: string; acceptsArgs?: boolean; handler: (c: { args?: unknown }) => Promise<{ text: string }> }) => { commands[d.name] = d; }),
+    });
+    expect(commands["allow"].acceptsArgs).toBe(true);
+    expect(commands["scan"].acceptsArgs).toBe(true);
+    const out = await commands["allow"].handler({ args: "skill some-skill" });
+    expect(out.text).toContain("defenseclaw skill allow some-skill");
+    const none = await commands["block"].handler({});
+    expect(none.text).toContain("defenseclaw <skill|mcp|plugin> block <name>");
+  });
+});

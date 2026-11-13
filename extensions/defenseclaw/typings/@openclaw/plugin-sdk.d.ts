@@ -112,7 +112,12 @@ declare module "@openclaw/plugin-sdk" {
     name: string;
     description: string;
     args?: CommandArg[];
-    handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> | { text: string };
+    /** OpenClaw matches a command typed with arguments only when this is true. */
+    acceptsArgs?: boolean;
+    /** Only an authorized sender may run the command. */
+    requireAuth?: boolean;
+    /** OpenClaw passes args as the raw text after the command (older releases: an object). */
+    handler: (ctx: { args?: string | Record<string, unknown> }) => Promise<{ text: string }> | { text: string };
   }
 
   interface ServiceRegistration {
