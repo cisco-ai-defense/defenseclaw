@@ -19,9 +19,11 @@ const lifecycleProjectionProducer = "gateway.hook.lifecycle"
 
 // hookDecisionProjectionProducer is the producer of a hook_decision record. A
 // hook call inside an open write batch keeps its tool_start record export
-// only (#1384); its hook_decision row carries the same lifecycle facts, so it
-// is lifecycle history too. tool_start rows stay readable: 1.0.9 data has
-// them, and so do calls outside a batch and Secure Client stores.
+// only (#1384); its hook_decision row carries the same lifecycle facts, so a
+// hook_decision row of a tool_start is lifecycle history too. Every other
+// lifecycle event keeps its own lifecycle row, the only history read for it.
+// tool_start rows stay readable: 1.0.9 data has them, and so do calls outside
+// a batch, plans that keep no hook_decision records and Secure Client stores.
 const hookDecisionProjectionProducer = "defenseclaw"
 
 func lifecycleProjectionProducerFor(eventName string) string {
@@ -164,9 +166,7 @@ func (writer *EventHistoryWriter) LatestLifecycleProjection(
 		  AND (event_name IN ('session_start','session_end','subagent_start','subagent_stop',
 		                      'turn_start','turn_end','tool_start','tool_end','compact_start','compact_end','event')
 		       OR (event_name = 'hook_decision' AND json_valid(COALESCE(projected_record_json,''))
-		           AND json_extract(projected_record_json,'$.body."defenseclaw.agent.lifecycle.event"') IN
-		               ('session_start','session_end','subagent_start','subagent_stop','turn_start','turn_end',
-		                'tool_start','tool_end','compact_start','compact_end','event')))
+		           AND json_extract(projected_record_json,'$.body."defenseclaw.agent.lifecycle.event"') = 'tool_start'))
 		ORDER BY retention_timestamp_unix_nano DESC, rowid DESC
 		LIMIT 2`, query.Connector, query.SessionID, query.AgentID)
 	if err != nil {
@@ -193,12 +193,32 @@ func (writer *EventHistoryWriter) LatestLifecycleProjection(
 	if len(candidates) == 0 {
 		return LifecycleProjection{}, false, nil
 	}
-	if candidates[0].timestampUnixNano <= 0 ||
-		(len(candidates) > 1 && candidates[0].timestampUnixNano == candidates[1].timestampUnixNano) {
+	if candidates[0].timestampUnixNano <= 0 {
 		return LifecycleProjection{}, false, nil
 	}
+	projection, valid, err := writer.verifiedLifecycleProjection(ctx, candidates[0], query)
+	if err != nil || !valid {
+		return LifecycleProjection{}, false, err
+	}
+	if len(candidates) > 1 && candidates[0].timestampUnixNano == candidates[1].timestampUnixNano {
+		// Two rows at one instant are ambiguous, unless they hold one cursor:
+		// the tool_start row and the hook_decision row of the same call (a
+		// call outside a write batch keeps both).
+		other, otherValid, err := writer.verifiedLifecycleProjection(ctx, candidates[1], query)
+		if err != nil || !otherValid || !sameLifecycleCursor(projection, other) {
+			return LifecycleProjection{}, false, err
+		}
+	}
+	return projection, true, nil
+}
 
-	row := candidates[0]
+// verifiedLifecycleProjection decodes row when its projection hash and HMAC
+// verify under this generation's writer.
+func (writer *EventHistoryWriter) verifiedLifecycleProjection(
+	ctx context.Context,
+	row storedLifecycleProjection,
+	query LifecycleProjectionQuery,
+) (LifecycleProjection, bool, error) {
 	verification, err := writer.verifyStoredProjection(
 		ctx, row.recordID, []byte(row.projected), row.projectionHash,
 		row.payloadHMAC, row.integrityAlgorithm, row.integrityKeyID,
@@ -212,6 +232,12 @@ func (writer *EventHistoryWriter) LatestLifecycleProjection(
 	}
 	projection, valid := decodeLifecycleProjection(row, query)
 	return projection, valid, nil
+}
+
+// sameLifecycleCursor reports two projections that restore the same cursor.
+func sameLifecycleCursor(a, b LifecycleProjection) bool {
+	a.RecordID, b.RecordID = "", ""
+	return a == b
 }
 
 func validLifecycleProjectionQuery(query LifecycleProjectionQuery) bool {
@@ -280,7 +306,7 @@ func decodeLifecycleProjection(
 	var body lifecycleProjectionBody
 	if err := json.Unmarshal(envelope.Body, &body); err != nil ||
 		body.SessionID != query.SessionID || body.AgentID != query.AgentID ||
-		(body.Event != row.eventName && (row.eventName != hookDecisionEventName || !validLifecycleEventName(body.Event))) ||
+		(body.Event != row.eventName && (row.eventName != hookDecisionEventName || body.Event != "tool_start")) ||
 		!validLifecycleProjectionBody(body) {
 		return LifecycleProjection{}, false
 	}
@@ -301,18 +327,6 @@ func validLifecycleBucketEvent(bucket, event string) bool {
 		return bucket == string(observability.BucketToolActivity)
 	}
 	return bucket == string(observability.BucketAgentLifecycle)
-}
-
-// validLifecycleEventName reports a lifecycle event a hook_decision row may
-// carry as its defenseclaw.agent.lifecycle.event.
-func validLifecycleEventName(event string) bool {
-	switch event {
-	case "session_start", "session_end", "subagent_start", "subagent_stop", "turn_start", "turn_end",
-		"tool_start", "tool_end", "compact_start", "compact_end", "event":
-		return true
-	default:
-		return false
-	}
 }
 
 func validLifecycleProjectionBody(body lifecycleProjectionBody) bool {

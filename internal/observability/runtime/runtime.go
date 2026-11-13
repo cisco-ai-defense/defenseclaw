@@ -316,6 +316,17 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	}, nil
 }
 
+// LogsCollected reports whether the active plan collects the logs of
+// bucket; false without an active plan or for a bucket it does not name.
+func (runtime *Runtime) LogsCollected(bucket observability.Bucket) bool {
+	graph := runtime.Active()
+	if graph == nil {
+		return false
+	}
+	effective, ok := graph.Plan().Bucket(bucket)
+	return ok && effective.Collect.Logs
+}
+
 // Active returns the exact currently published graph pointer.
 func (runtime *Runtime) Active() *runtimegraph.Graph {
 	if runtime == nil || runtime.manager == nil {

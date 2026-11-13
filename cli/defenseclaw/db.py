@@ -45,6 +45,7 @@ from defenseclaw.alert_semantics import (
 )
 from defenseclaw.hook_metrics import (
     CONNECTOR_HOOK_ACTION,
+    CONNECTOR_HOOK_SYNTHETIC_ACTION,
     HOOK_DECISION_ACTION,
     HOOK_DECISION_VERDICT_KEYS,
     aggregate_connector_hook_decision,
@@ -714,7 +715,7 @@ class Store:
         "defenseclaw.guardrail.would_block",
         # A hook_decision row is the only local row of a benign per-user
         # allow (S8 R4, #1384): its verdict keys classify it as the
-        # connector-hook row did (hook_metrics.hook_row_verdict).
+        # connector-hook row did (hook_metrics.hook_row_decision).
         "defenseclaw.guardrail.raw_action",
         "defenseclaw.guardrail.enforced",
         "defenseclaw.security.severity",
@@ -769,7 +770,8 @@ class Store:
             return "NULL"
         prefix = f"{alias}." if alias else ""
         return (
-            f"CASE WHEN {prefix}action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}')"
+            f"CASE WHEN {prefix}action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}',"
+            f" '{CONNECTOR_HOOK_SYNTHETIC_ACTION}')"
             f" THEN {hook_semantic_event_id_sql(prefix + 'projected_record_json')} END"
         )
 
@@ -901,13 +903,20 @@ class Store:
                           CASE WHEN action = '{HOOK_DECISION_ACTION}' THEN {body} END AS body,
                           {self._hook_semantic_id_sql()} AS semantic_event_id
                    FROM audit_events
-                   WHERE action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}')
+                   WHERE action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}',
+                                    '{CONNECTOR_HOOK_SYNTHETIC_ACTION}')
                    ORDER BY {self._audit_event_order()} LIMIT ?
                )
                ORDER BY instant DESC, row_order DESC""",
             (_SUMMARY_DETAILS_BYTES, limit * 2 + 50),
         )
-        return count_once_hook_rows(self._row_to_event(r) for r in cur.fetchall())[:limit]
+        # A synthetic Stop pairs its hook_decision row (same semantic event)
+        # but is not itself a listed decision, as before.
+        return [
+            event
+            for event in count_once_hook_rows(self._row_to_event(r) for r in cur.fetchall())
+            if event.action != CONNECTOR_HOOK_SYNTHETIC_ACTION
+        ][:limit]
 
     def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
         """Return exact all-time hook counters grouped by connector.

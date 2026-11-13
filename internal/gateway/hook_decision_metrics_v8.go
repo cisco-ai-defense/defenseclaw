@@ -240,6 +240,15 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawSubjectKey:               managed.SubjectKey,
 		}
 		meta.Identity.applyTo(&identityInput)
+		if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+			// Secure Client records keep the shape of main (#1092): its
+			// connector-hook row stays local and holds these facts.
+			identityInput.DefenseClawHookRulePackDir = observability.Absent[string]()
+			identityInput.DefenseClawHookRawOrigin = observability.Absent[string]()
+			identityInput.DefenseClawHookRawEventIds = observability.Absent[[]string]()
+			identityInput.DefenseClawHookBodyBytes = observability.Absent[int64]()
+			identityInput.DefenseClawHookBoundedPrefixReview = observability.Absent[bool]()
+		}
 		return builder.BuildLogCompatHookDecision(identityInput)
 	})
 	var pipelineErr *pipeline.Error

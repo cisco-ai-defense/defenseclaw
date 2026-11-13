@@ -1701,21 +1701,42 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// verdict waits for that commit, as it waited for its row alone.
 			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
 			connectorCtx := auditCtx
+			var decisionCtx context.Context
+			var decisionOutcome *audit.CallWriteOutcome
+			flushed := false
+			defer func() {
+				if !flushed && decisionInAudit {
+					// A panic between the queued row of record and its flush:
+					// the row and every export of the attempt are dropped, so
+					// the fail-mode verdict the call now gets is its only
+					// decision record (S8 R4 review P1).
+					audit.AbandonCallWrites(decisionCtx, errHookAuditSectionPanicked)
+					decisionInAudit = false
+				}
+			}()
 			if a.hookDecisionIsRowOfRecord(ctx, req, resp, env, panicked) {
-				connectorCtx, decisionInAudit = a.writeHookDecisionRowOfRecord(auditCtx, req, resp, env)
+				connectorCtx, decisionCtx, decisionOutcome, decisionInAudit = a.writeHookDecisionRowOfRecord(auditCtx, req, resp, env)
 			}
+			hookStageForTest(ctx, "finalize_audit_row_of_record")
 			auditErr = a.logConnectorHookAuditEnvelope(connectorCtx, env)
 			if auditErr != nil && decisionInAudit {
 				// The connector-hook record failed beside the row of record:
 				// the call is unaudited as in 1.0.9, so its queued
 				// hook_decision row and export are dropped, and the decision
 				// is recorded below with the fail-mode verdict.
-				audit.AbandonCallWrites(auditCtx, auditErr)
+				audit.AbandonCallWrites(decisionCtx, auditErr)
 				decisionInAudit = false
 			}
 			audit.FlushCallWrites(ctx)
+			flushed = true
 			if auditErr == nil {
 				auditErr = auditOutcome.Err()
+			}
+			if auditErr == nil && decisionInAudit {
+				// The verdict stands only when its row of record committed;
+				// its export and the connector-hook export follow the same
+				// outcome (ExportAfterCallCommit).
+				auditErr = decisionOutcome.Err()
 			}
 			result.AuditPersisted = auditErr == nil
 			result.DecisionSettled = decisionInAudit && result.AuditPersisted

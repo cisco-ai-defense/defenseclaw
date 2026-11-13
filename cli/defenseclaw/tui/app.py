@@ -41,7 +41,14 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 from defenseclaw import __version__
 from defenseclaw import config as config_module
 from defenseclaw.file_permissions import atomic_write_private_bytes
-from defenseclaw.hook_metrics import CONNECTOR_HOOK_ACTION, count_once_hook_rows, hook_row_decision
+from defenseclaw.hook_metrics import (
+    CONNECTOR_HOOK_ACTION,
+    CONNECTOR_HOOK_PAIR_ACTIONS,
+    CONNECTOR_HOOK_SYNTHETIC_ACTION,
+    HOOK_DECISION_ACTION,
+    count_once_hook_rows,
+    hook_row_decision,
+)
 from defenseclaw.scanner_binary import resolve_scanner_binary
 from defenseclaw.tui.command_line import (
     CommandLineError,
@@ -8550,11 +8557,17 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 except Exception:  # noqa: BLE001 - metric tiles should degrade to cached panel rows.
                     events = []
         if not events:
-            events = count_once_hook_rows(
+            # A synthetic Stop pairs its hook_decision row but is not a
+            # counted decision itself.
+            events = [
                 event
-                for event in self.audit_model.items
-                if getattr(event, "action", "") in {"connector-hook", "hook_decision"}
-            )
+                for event in count_once_hook_rows(
+                    event
+                    for event in self.audit_model.items
+                    if getattr(event, "action", "") in {*CONNECTOR_HOOK_PAIR_ACTIONS, HOOK_DECISION_ACTION}
+                )
+                if getattr(event, "action", "") != CONNECTOR_HOOK_SYNTHETIC_ACTION
+            ]
 
         def sort_key(event: Any) -> datetime:
             ts = getattr(event, "timestamp", None)
