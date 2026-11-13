@@ -43,11 +43,19 @@ test_windows_remaining_package_shards_leave_room_in_their_step) was set on
 median times (GAP-1066). Download each run into its own directory, for example
   for r in <run1> <run2> <run3>; do gh run download $r --pattern 'go-test-timings-*' --dir t/$r; done
   scripts/update_test_timings.py go t/<run1> t/<run2> t/<run3>
-A refresh drops the tests this tree does not define. To weigh the tests of
-a branch about to merge (feat/substrate before its hand-off to rel), run the
-refresh in a checkout of that branch with this tree's scripts and copy the
-file back: unrecorded, a new test weighs "*" (about 0.24 s in the gateway),
-and three such tests of 186 s together ran a gateway shard into its -timeout.
+A refresh drops the tests this tree does not define. The rule is to
+refresh from this tree's runs only.
+One exception, approved by the lead on 2026-11-13, lasts until the Substrate
+hand-off (planned Mon 2026-11-16). Until then, the internal/gateway times in
+go-linux.json also include the runs of PR #1456 (feat/substrate), refreshed
+in a feat/substrate checkout with this tree's scripts and copied back. Rel
+does not define the Substrate tests yet, and a test with no recorded time
+weighs "*" (about 0.24 s in the gateway). Three such tests (186 s in all)
+ran a gateway shard into its -timeout. A refresh on rel before the hand-off
+drops their times, and test_linux_gateway_shard_timeouts_fit_the_job then
+fails.
+The exception ends when rel/1.0.10 contains feat/substrate. From then on,
+refresh from this tree's runs only again.
 A top-level test weighs its share of the package wall time
 (go_test_report.TopLevelShares): parallel tests that ran side by side split
 the time they shared, and a test of parallel subtests weighs the time they held.
