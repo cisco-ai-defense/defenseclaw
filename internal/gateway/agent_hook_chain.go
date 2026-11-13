@@ -1160,6 +1160,19 @@ func projectTrustedActionChainSteps(
 			guardrail.ToolChainSecretReadThenEgress,
 			secretReadDigest,
 		)
+	} else if facts.Parse.Status == actionfacts.StatusPartial {
+		// A pipeline or a command list the classifier cannot finish (an
+		// unknown operand grammar in another stage) still proves a
+		// credentials-file read when the reading command is complete: carry
+		// the read's identity so the chain may start here, detection only
+		// (guardrail Step1IdentityOwnsParseProof, substrate-1:GAP-0226).
+		if digest, ok := credentialFileReadProofDigest(facts); ok {
+			setToolChainEnforcementJoinDigest(
+				projection,
+				guardrail.ToolChainSecretReadThenEgress,
+				digest,
+			)
+		}
 	}
 	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); supported {
 		addToolChainStep(
@@ -1998,24 +2011,79 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 // PATH-SSH-KEY does not count either.
 func credentialFileContentRead(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
-		if candidate.Access != actionfacts.PathAccessRead {
-			continue
+		if _, ok := credentialFileContentReadCommand(facts, candidate); ok {
+			return true
 		}
-		value := semanticPathValue(candidate)
-		if _, ok := actionfacts.MatchCredentialFileShape(value); !ok ||
-			credentialFileFixturePath(value) {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if !ok || command.Effect != actionfacts.EffectExecute ||
-			sshIdentityConsumer(command) ||
-			!hasAnyOperation(command, actionfacts.OperationRead,
-				actionfacts.OperationSearch, actionfacts.OperationCopy) {
-			continue
-		}
-		return true
 	}
 	return false
+}
+
+// credentialFileContentReadCommand returns the command that reads the
+// contents of candidate when candidate is a credentials-file read that
+// credentialFileContentRead counts.
+func credentialFileContentReadCommand(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) (actionfacts.CommandFact, bool) {
+	if candidate.Access != actionfacts.PathAccessRead {
+		return actionfacts.CommandFact{}, false
+	}
+	value := semanticPathValue(candidate)
+	if _, ok := actionfacts.MatchCredentialFileShape(value); !ok ||
+		credentialFileFixturePath(value) {
+		return actionfacts.CommandFact{}, false
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || command.Effect != actionfacts.EffectExecute ||
+		sshIdentityConsumer(command) ||
+		!hasAnyOperation(command, actionfacts.OperationRead,
+			actionfacts.OperationSearch, actionfacts.OperationCopy) {
+		return actionfacts.CommandFact{}, false
+	}
+	return command, true
+}
+
+// credentialFileReadProofIdentity is the identity a partly parsed call
+// carries when its credentials-file read cannot name one exact file: a
+// relative path the hook does not resolve, or several files. Path identities
+// start with their flavor ("posix", "windows"), so it never equals one and
+// never joins an upload as the same file.
+const credentialFileReadProofIdentity = "credential-read-proof\x00unresolved"
+
+// credentialFileReadProofDigest proves a credentials-file read in a call
+// whose overall parse is partial: every command that reads a
+// credentials-shaped file (credentialFileContentReadCommand) has its argv
+// complete, whatever the other stages of the pipeline or members of the list
+// are. A member of an && or || list runs conditionally; the step is
+// detection-only, so that is enough. The digest is the read file's exact
+// identity when there is one file and its path resolves, else the
+// credentialFileReadProofIdentity marker.
+func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
+	selected, found, exact := "", false, true
+	for _, candidate := range facts.Paths {
+		command, ok := credentialFileContentReadCommand(facts, candidate)
+		if !ok {
+			continue
+		}
+		if !command.ArgvComplete {
+			return "", false
+		}
+		found = true
+		identity, ok := exactPathIdentity(candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+			continue
+		}
+		selected = identity
+	}
+	switch {
+	case !found:
+		return "", false
+	case exact && selected != "":
+		return pathIdentityDigest(selected), true
+	default:
+		return pathIdentityDigest(credentialFileReadProofIdentity), true
+	}
 }
 
 // credentialFileFixturePath reports a credentials-shaped file inside a
