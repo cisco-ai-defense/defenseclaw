@@ -151,6 +151,13 @@ func TestUserTypedTrustCeilingOnHookSurfaces(t *testing.T) {
 		t.Errorf("Claude Code UserPromptExpansion = %+v, want the CRITICAL block it had", expansion)
 	}
 
+	toolResult := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PostToolUse", ToolName: "WebFetch", ToolResponse: floorOverridePrompt,
+	})
+	if toolResult.Severity != "CRITICAL" {
+		t.Errorf("Claude Code PostToolUse with the same text = %+v, want CRITICAL (not typed by the user)", toolResult)
+	}
+
 	cfg.Guardrail.Connector = "codex"
 	codexSubmit := api.evaluateCodexHook(ctx, codexHookRequest{HookEventName: "UserPromptSubmit", Prompt: floorOverridePrompt})
 	if codexSubmit.RawAction != "alert" || codexSubmit.Severity != "HIGH" {
