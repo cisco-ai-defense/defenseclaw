@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -764,9 +765,11 @@ func (s *MCPStaticScanner) Scan(ctx context.Context, target string) (*scanner.Sc
 	if err != nil {
 		res.ExitCode = 1
 		res.ScanError = "mcp-scanner failed: " + strings.TrimSpace(firstLine(stderr.String(), err.Error()))
-		if errors.Is(err, exec.ErrNotFound) {
-			// No scanner here (the distroless gateway image): the runtime
-			// fail mode decides; the build treats it as a failed scan.
+		var exited *exec.ExitError
+		if errors.Is(err, exec.ErrNotFound) || (!errors.As(err, &exited) && errors.Is(err, fs.ErrNotExist)) {
+			// No scanner here (the distroless gateway image, or a binary
+			// path that does not exist): the runtime's config rules decide
+			// (GAP-0185); the build treats it as a failed scan.
 			return res, fmt.Errorf("%w: %s", scanner.ErrScannerNotFound, bin)
 		}
 		return res, nil

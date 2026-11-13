@@ -18,15 +18,12 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
-	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
@@ -111,11 +108,7 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 type runtimeSkillScanner struct{ rt *attest.RuntimeScanner }
 
 func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
-	return runtimeSkillScanner{rt: &attest.RuntimeScanner{
-		Skill:     scanner.NewSkillScannerFromLLM(cfg.Scanners.SkillScanner, cfg.ResolveLLM("scanners.skill"), cfg.CiscoAIDefense),
-		MCPStatic: &attest.MCPStaticScanner{},
-		Compiled:  policy.CompileAdmission(cfg),
-	}}
+	return runtimeSkillScanner{rt: attest.NewRuntimeScanner(cfg)}
 }
 
 // ScanSkillFolder implements gateway.SubstrateSkillScanner.
@@ -134,50 +127,6 @@ func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir stri
 		return false, "", fmt.Errorf("%w: %s", gateway.ErrSubstrateSkillScannerUnavailable, d.Reason)
 	}
 	return d.Action == "block", d.Reason, nil
-}
-
-// ScanMCP implements gateway.SubstrateMCPScanner (E20, GAP-0185): the MCP
-// servers a hook event adds or calls, from attest.HookAssets, scanned by
-// the runtime scanner (the MCP static scan runs in the gateway process).
-func (s runtimeSkillScanner) ScanMCP(ctx context.Context, payload json.RawMessage, files []gateway.SubstrateAttachedFile) ([]gateway.SubstrateMCPDecision, error) {
-	attached := make([]attest.AttachedFile, 0, len(files))
-	configs := map[string]bool{}
-	for _, f := range files {
-		attached = append(attached, attest.AttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
-		if f.Role == attest.RoleMCPConfig {
-			configs[f.Path] = true
-		}
-	}
-	var out []gateway.SubstrateMCPDecision
-	for _, a := range attest.HookAssets(payload, attached) {
-		if a.Kind != config.AdmissionTypeMCP {
-			continue
-		}
-		d := gateway.SubstrateMCPDecision{Source: a.Path, Attached: configs[a.Path]}
-		if a.Server != nil {
-			d.Server = a.Server.Name
-		}
-		if a.Server == nil && a.Ambiguous == "" {
-			d.Unreadable, d.Reason = true, "the config could not be read as MCP servers (cut, invalid or a partial edit)"
-			out = append(out, d)
-			continue
-		}
-		r, err := s.rt.Scan(ctx, a)
-		switch {
-		case err != nil:
-			d.Unreadable, d.Reason = true, err.Error()
-		case r.Action == "block":
-			// A block from the config rules stands even when the tool scan
-			// could not run.
-			d.Block, d.Reason = true, r.Reason
-		case r.Unavailable:
-			d.Unreadable, d.Reason = true, "the MCP tool scan cannot run in the gateway (no mcp-scanner)"
-		case r.Action == "warn":
-			d.Warn, d.Reason = true, r.Reason
-		}
-		out = append(out, d)
-	}
-	return out, nil
 }
 
 // substrateTemplateSkills reads an actor template's admitted skill folder

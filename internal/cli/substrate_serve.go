@@ -489,7 +489,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Relays: relayDialer(router),
 			Skills: runtimeScan,
 			// E20, GAP-0185: the runtime MCP scan of hook events.
-			MCP: runtimeScan,
+			MCP: gateway.AttestMCPScanner{RT: runtimeScan.rt},
 			// GAP-0039: an unscanned skill folder is refused where hooks fail
 			// closed (managed, strict tier) and alerted on elsewhere; scan
 			// receipts hold on every replica that shares the chain key.

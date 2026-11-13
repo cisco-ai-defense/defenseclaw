@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
@@ -20,7 +22,10 @@ import (
 // server files the kit attached (role mcp_config, mcp_server). A server the
 // scan blocks, or a config with keys that differ only by case (GAP-0176), is
 // refused closed in every tier: the gateway answers 403 with
-// kit.MCPRefusedCode and the kit writes the agent's own deny. A config the
+// kit.MCPRefusedCode and the kit writes the agent's own deny. The scan
+// blocks what the host admission rules block and, as the template build
+// does, every HIGH finding of an MCP server (fetch-and-exec, a private or
+// metadata address). A config the
 // scan cannot read as servers (cut by the attach cap, invalid, an Edit
 // fragment) follows the fail mode: managed installs and the strict tier
 // refuse, the OSS default tiers alert. On SessionStart, when the agent
@@ -48,6 +53,56 @@ type SubstrateMCPDecision struct {
 	// Warn is a finding the admission rules warn on: an alert, no refusal.
 	Warn   bool
 	Reason string
+}
+
+// AttestMCPScanner is the shipped SubstrateMCPScanner (E20, GAP-0185): the
+// MCP servers a hook event adds or calls, read with attest.HookAssets and
+// decided by the runtime scanner. The config rules and the GAP-0176 key
+// check run in the gateway process and decide; the mcp-scanner tool scan
+// adds its findings only where that scanner is installed. The gateway
+// image has none, so a server the rules clear is not refused for want of
+// it (the lead's GAP-0164 ruling for scanners in the cluster; a known
+// limit).
+type AttestMCPScanner struct{ RT *attest.RuntimeScanner }
+
+// ScanMCP implements SubstrateMCPScanner.
+func (s AttestMCPScanner) ScanMCP(ctx context.Context, payload json.RawMessage, files []SubstrateAttachedFile) ([]SubstrateMCPDecision, error) {
+	attached := make([]attest.AttachedFile, 0, len(files))
+	configs := map[string]bool{}
+	for _, f := range files {
+		attached = append(attached, attest.AttachedFile{Role: f.Role, Path: f.Path, Content: f.Content, Truncated: f.Truncated})
+		if f.Role == attest.RoleMCPConfig {
+			configs[f.Path] = true
+		}
+	}
+	var out []SubstrateMCPDecision
+	for _, a := range attest.HookAssets(payload, attached) {
+		if a.Kind != config.AdmissionTypeMCP {
+			continue
+		}
+		d := SubstrateMCPDecision{Source: a.Path, Attached: configs[a.Path]}
+		if a.Server != nil {
+			d.Server = a.Server.Name
+		}
+		if a.Server == nil && a.Ambiguous == "" {
+			d.Unreadable, d.Reason = true, "the config could not be read as MCP servers (cut, invalid or a partial edit)"
+			out = append(out, d)
+			continue
+		}
+		r, err := s.RT.Scan(ctx, a)
+		switch {
+		case err != nil:
+			d.Unreadable, d.Reason = true, err.Error()
+		case r.Action == "block":
+			// A block from the config rules stands even when the tool scan
+			// could not run.
+			d.Block, d.Reason = true, r.Reason
+		case r.Action == "warn":
+			d.Warn, d.Reason = true, r.Reason
+		}
+		out = append(out, d)
+	}
+	return out, nil
 }
 
 // substrateMCPEvents are the events the MCP pass runs on.
@@ -100,27 +155,27 @@ func (st *substrateState) substrateMCPRefusal(ctx context.Context, env substrate
 		}
 		switch {
 		case d.Block:
-			st.alertOnce(ctx, "HIGH", "Substrate MCP server refused by the runtime MCP scan: "+name, d.Source, env.Facts, errorString(d.Reason))
+			st.alertOnce(ctx, "HIGH", "Substrate MCP server refused by the runtime MCP scan: "+name, d.Source, env.Facts, mcpReason(d.Reason))
 			if pre && relevant {
 				return "DefenseClaw refused the MCP server " + name + ": " + d.Reason
 			}
 		case d.Unreadable && block:
-			st.alertOnce(ctx, "HIGH", "Substrate MCP config refused: DefenseClaw could not read its servers", d.Source, env.Facts, errorString(d.Reason))
+			st.alertOnce(ctx, "HIGH", "Substrate MCP config refused: DefenseClaw could not read its servers", d.Source, env.Facts, mcpReason(d.Reason))
 			if pre && relevant {
 				return "DefenseClaw could not check the MCP servers of " + d.Source + " (" + d.Reason + "); this install refuses MCP servers it could not scan"
 			}
 		case d.Unreadable:
-			st.alertOnce(ctx, "MEDIUM", "Substrate MCP config allowed unscanned: DefenseClaw could not read its servers", d.Source, env.Facts, errorString(d.Reason))
+			st.alertOnce(ctx, "MEDIUM", "Substrate MCP config allowed unscanned: DefenseClaw could not read its servers", d.Source, env.Facts, mcpReason(d.Reason))
 		case d.Warn:
-			st.alertOnce(ctx, "MEDIUM", "Substrate MCP server allowed with a warning: "+name, d.Source, env.Facts, errorString(d.Reason))
+			st.alertOnce(ctx, "MEDIUM", "Substrate MCP server allowed with a warning: "+name, d.Source, env.Facts, mcpReason(d.Reason))
 		}
 	}
 	return ""
 }
 
-type errorString string
+type mcpReason string
 
-func (e errorString) Error() string { return string(e) }
+func (e mcpReason) Error() string { return string(e) }
 
 // writeSubstrateMCPRefusal is the answer the kit turns into the agent's own
 // closed deny (kit.MCPRefusedCode).
