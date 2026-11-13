@@ -7,8 +7,8 @@
 package setup
 
 import (
-	"slices"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )

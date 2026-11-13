@@ -440,9 +440,9 @@ func readS3Bucket(ctx context.Context, b *fleet.Bucket, bucket, prefix string) {
 	case err == nil:
 		var lc struct {
 			Rules []struct {
-				Status     string `json:"Status"`
-				Prefix     string `json:"Prefix"`
-				Filter     *struct {
+				Status string `json:"Status"`
+				Prefix string `json:"Prefix"`
+				Filter *struct {
 					Prefix *string `json:"Prefix"`
 				} `json:"Filter"`
 				Expiration *struct {
