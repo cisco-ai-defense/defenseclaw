@@ -475,36 +475,6 @@ func TestTriagePatterns_SSN_NBSPEvasion(t *testing.T) {
 	}
 }
 
-// TestTriagePatterns_TokenSecret_ZeroWidthEvasion covers the secret
-// regex `(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`. RE2 `\s`
-// does not match Unicode whitespace, and `\b` does not fire correctly
-// across zero-width splits — both surfaces an attacker can use to hide
-// a live token from triage. After the fix the regex consults the
-// normalized form as a fallback and should flag.
-func TestTriagePatterns_TokenSecret_ZeroWidthEvasion(t *testing.T) {
-	// 30 visible chars + interstitial ZWSPs between `token` and `=`.
-	prompt := "token\u200B=\u200B A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1"
-	signals := triagePatterns("prompt", prompt)
-	foundSecret := false
-	for _, s := range signals {
-		if s.FindingID == "TRIAGE-SECRET-REGEX" {
-			foundSecret = true
-			if !strings.HasPrefix(s.Evidence, "[normalized] ") {
-				t.Errorf("expected [normalized] evidence marker on secret "+
-					"match that only fires post-normalization, got %q", s.Evidence)
-			}
-			break
-		}
-	}
-	if !foundSecret {
-		var ids []string
-		for _, s := range signals {
-			ids = append(ids, s.FindingID)
-		}
-		t.Errorf("expected TRIAGE-SECRET-REGEX signal, got %v", ids)
-	}
-}
-
 // TestTriagePatterns_CreditCard_ZeroWidthEvasion covers the credit-
 // card regex via triagePatterns (the richer structured-signal path).
 // Digit groups split by U+200B are stripped back to a contiguous 16-

@@ -2752,5 +2752,21 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 			seen[finding.RuleID] = true
 		}
 	}
+	// The secret rules read the same text with only the invisible characters
+	// removed (no letter folding: a credential is matched byte for byte). A
+	// key with a zero-width space spliced between its name and its value, or
+	// into the value, reads the same to a model and to a shell. The proxy's
+	// own secret regexes had this fallback and the pack did not, on any
+	// surface (rel-1-0-10:GAP-0210).
+	if invisible := stripZeroWidth(content); invisible != content {
+		for _, finding := range scanRuleGeneration(generation, invisible, "message", ruleScanOptions{
+			contentScope: scope, onlyCategory: "secret",
+		}) {
+			if !seen[finding.RuleID] {
+				findings = append(findings, finding)
+				seen[finding.RuleID] = true
+			}
+		}
+	}
 	return findings
 }
