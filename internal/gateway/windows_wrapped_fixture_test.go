@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -45,6 +46,11 @@ var windowsStatementWrappers = []struct {
 var windowsWrappedKnownLimit = map[string]string{
 	"windows-uac-eventvwr-autoelevation-hijack": "whole-script owner: an extra statement is not the registry-write-then-launch pair",
 }
+
+// windowsWrappedTools are the tool labels a PowerShell script reaches the hook
+// under on Windows: Claude Code's PowerShell tool, and the shell tools of
+// connectors whose label does not name the shell.
+var windowsWrappedTools = []string{"PowerShell", "Bash", "bash", "Shell"}
 
 func windowsToolCallFindings(t *testing.T, connector, tool, command string) []RuleFinding {
 	t.Helper()
@@ -79,21 +85,26 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 				if r := test.ProfileRuleIDs[pack]; r != "" {
 					rule = r
 				}
-				fires := func(command string) bool {
-					return slices.ContainsFunc(windowsToolCallFindings(t, "windows-wrapped", "PowerShell", command),
+				fires := func(tool, command string) bool {
+					return slices.ContainsFunc(windowsToolCallFindings(t, "windows-wrapped", tool, command),
 						func(f RuleFinding) bool {
 							// The strict pack reports the pipe form of a cradle as
 							// curl-to-shell when the statement list is partial.
 							return f.RuleID == rule || rule == "CMD-WIN-IWR-IEX" && f.RuleID == "CMD-PIPE-CURL"
 						})
 				}
-				if !fires(test.Command) {
+				if !fires("PowerShell", test.Command) {
 					continue
 				}
 				bare++
-				for _, wrapper := range windowsStatementWrappers {
-					if !fires(wrapper.wrap(test.Command)) && windowsWrappedKnownLimit[test.ID] == "" {
-						missed[wrapper.name] = append(missed[wrapper.name], test.ID)
+				if windowsWrappedKnownLimit[test.ID] != "" {
+					continue
+				}
+				for _, tool := range windowsWrappedTools {
+					for _, wrapper := range windowsStatementWrappers {
+						if !fires(tool, wrapper.wrap(test.Command)) {
+							missed[wrapper.name] = append(missed[wrapper.name], tool+"/"+test.ID)
+						}
 					}
 				}
 			}
@@ -101,6 +112,14 @@ func TestWindowsStatementWrappersKeepTheFixtureVerdict(t *testing.T) {
 				t.Fatalf("%s: only %d fixtures fire bare; the fixture set changed", pack, bare)
 			}
 			for _, wrapper := range windowsStatementWrappers {
+				unique := map[string]bool{}
+				for _, id := range missed[wrapper.name] {
+					unique[id[strings.Index(id, "/")+1:]] = true
+				}
+				t.Logf("%s: %s hides %d (tool, fixture) pairs over %d fixtures", pack, wrapper.name, len(missed[wrapper.name]), len(unique))
+				if wrapper.name != "call-block" {
+					continue
+				}
 				if len(missed[wrapper.name]) != 0 {
 					t.Errorf("%s: %s hides %d fixtures that fire bare: %v", pack, wrapper.name, len(missed[wrapper.name]), missed[wrapper.name])
 				}

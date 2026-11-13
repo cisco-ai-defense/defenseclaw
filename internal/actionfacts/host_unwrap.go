@@ -586,6 +586,24 @@ func posixSoleHostCallSource(source string) (string, Dialect, bool) {
 	return script.body, script.dialect, true
 }
 
+// powerShellVerbNoun is a cmdlet name in the approved-verb form
+// (Get-ChildItem, Set-Location, Invoke-WebRequest) at the start of a statement
+// or of a call block. No POSIX program is named so; the text is PowerShell
+// whatever tool label it arrived under, because connector tool labels do not
+// identify the host shell on Windows (chooseRawCommandDialect).
+var powerShellVerbNoun = lazyMustCompile(`(?i)(?:^|[;|&{(\n]\s*)(?:get|set|new|remove|add|invoke|start|stop|out|write|copy|move|test|select|where|foreach|clear|import|export|enable|disable|register|unregister|update|restart|resolve|read|rename|expand|compress|format|measure|sort|join|split|convert|find|install|uninstall|grant|revoke|send|wait|push|pop|reset)-[a-z][a-z0-9]*\b`)
+
+// powerShellOnlyGrammar reports a text, read by the tokenizer as a POSIX or
+// unlabeled command, that holds PowerShell-only grammar: a call block (& { ...
+// }) or a statement that starts with a verb-noun cmdlet. HostScriptTwin then
+// reads the same text a second time as PowerShell; the reading only adds.
+func powerShellOnlyGrammar(source string) bool {
+	if strings.HasPrefix(strings.TrimSpace(source), "& {") {
+		return true
+	}
+	return powerShellVerbNoun.MatchString(source)
+}
+
 // rawCMDLauncherLine is the line a `cmd /c <line>` call written in a POSIX
 // shell hands to cmd.exe when the text after /c is read as cmd.exe reads it, not
 // as the POSIX shell would split it: a POSIX word turns every backslash into an
@@ -669,6 +687,9 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 			body, bodyDialect, ok := rawCMDLauncherLine(source)
 			if !ok {
 				body, bodyDialect, ok = posixSoleHostCallSource(source)
+			}
+			if !ok && powerShellOnlyGrammar(source) {
+				body, bodyDialect, ok = source, DialectPowerShell, true
 			}
 			if !ok {
 				return Input{}, false

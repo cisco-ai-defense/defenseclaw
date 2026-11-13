@@ -44,3 +44,24 @@ func TestRawCMDLauncherLine(t *testing.T) {
 		})
 	}
 }
+
+func TestPowerShellOnlyGrammar(t *testing.T) {
+	for _, test := range []struct {
+		source string
+		want   bool
+	}{
+		{`& { git status }`, true},
+		{`Set-Location C:\work; git status`, true},
+		{`git status ; Write-Output done`, true},
+		{`Get-ChildItem | Select-Object Name`, true},
+		{`ls -la /tmp`, false},
+		{`docker-compose up -d`, false},
+		{`git config --get user.name`, false},
+		{`echo done; sleep 1`, false},
+		{`pip install set-tools`, false},
+	} {
+		if got := powerShellOnlyGrammar(test.source); got != test.want {
+			t.Errorf("powerShellOnlyGrammar(%q) = %v, want %v", test.source, got, test.want)
+		}
+	}
+}
