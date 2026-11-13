@@ -1,0 +1,111 @@
+{
+  "payload": {
+    "resourceLogs": [
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "defenseclaw.deployment.mode",
+              "value": {
+                "stringValue": "managed_enterprise"
+              }
+            },
+            {
+              "key": "defenseclaw.device.id",
+              "value": {
+                "stringValue": "<volatile>"
+              }
+            },
+            {
+              "key": "defenseclaw.device.public_key_fingerprint",
+              "value": {
+                "stringValue": "sha256:managed-device"
+              }
+            },
+            {
+              "key": "deployment.environment",
+              "value": {
+                "stringValue": "managed-env"
+              }
+            },
+            {
+              "key": "deployment.environment.name",
+              "value": {
+                "stringValue": "managed-env"
+              }
+            },
+            {
+              "key": "deployment.mode",
+              "value": {
+                "stringValue": "managed_enterprise"
+              }
+            },
+            {
+              "key": "host.name",
+              "value": {
+                "stringValue": "<volatile>"
+              }
+            },
+            {
+              "key": "service.instance.id",
+              "value": {
+                "stringValue": "<volatile>"
+              }
+            },
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "defenseclaw"
+              }
+            }
+          ]
+        },
+        "schemaUrl": "https://opentelemetry.io/schemas/1.42.0",
+        "scopeLogs": [
+          {
+            "logRecords": [
+              {
+                "attributes": [
+                  {
+                    "key": "defenseclaw.record.id",
+                    "value": {
+                      "stringValue": "<volatile>"
+                    }
+                  },
+                  {
+                    "key": "defenseclaw.bucket",
+                    "value": {
+                      "stringValue": "platform.health"
+                    }
+                  },
+                  {
+                    "key": "defenseclaw.signal",
+                    "value": {
+                      "stringValue": "logs"
+                    }
+                  },
+                  {
+                    "key": "defenseclaw.event.name",
+                    "value": {
+                      "stringValue": "endpoint.health_reported"
+                    }
+                  }
+                ],
+                "body": {
+                  "stringValue": "{\"action\":\"endpoint_health\",\"body\":{\"defenseclaw.health.cloud_delivery.circuit\":\"closed\",\"defenseclaw.health.cloud_delivery.consecutive_failures\":0,\"defenseclaw.health.cloud_delivery.dropped_since_last\":0,\"defenseclaw.health.cloud_delivery.last_failure_class\":\"transient\",\"defenseclaw.health.cloud_delivery.last_success_at\":\"2026-07-10T23:59:30Z\",\"defenseclaw.health.cloud_delivery.state\":\"healthy\",\"defenseclaw.health.gateway.configuration\":\"ready\",\"defenseclaw.health.gateway.started_at\":\"2026-07-10T00:00:00Z\",\"defenseclaw.health.gateway.uptime_s\":86400,\"defenseclaw.health.guardian.last_pass_at\":\"2026-07-10T23:59:00Z\",\"defenseclaw.health.guardian.state\":\"running\",\"defenseclaw.health.hooks.connectors\":[{\"connector\":\"claude_code\",\"failed\":0,\"last_activity_at\":\"2026-07-10T23:00:00Z\",\"ok\":4,\"pending\":0,\"targets\":4,\"tool_inspection_mode\":\"enforce\"}],\"defenseclaw.health.hooks.connectors_truncated\":false,\"defenseclaw.health.hooks.failed\":1,\"defenseclaw.health.hooks.failing_targets\":[{\"connector\":\"codex\",\"error_class\":\"CONFIG_WRITE_DENIED\",\"pending\":false,\"user.id\":\"S-1-5-21-1004336348-1177238915-682003330-1001\",\"user.id_kind\":\"windows_sid\"}],\"defenseclaw.health.hooks.failing_targets_truncated\":false,\"defenseclaw.health.hooks.ok\":10,\"defenseclaw.health.hooks.pending\":1,\"defenseclaw.health.hooks.targets\":12,\"defenseclaw.health.inspection.ai_defense\":\"ok\",\"defenseclaw.health.inspection.cmid_last_success_at\":\"2026-07-10T23:30:00Z\",\"defenseclaw.health.inspection.cmid_token\":\"ok\",\"defenseclaw.health.inspection.fail_open_since_last\":2,\"defenseclaw.health.local_store.audit_store\":\"ok\",\"defenseclaw.health.observed_at\":\"2026-07-11T00:00:00Z\",\"defenseclaw.health.os.version\":\"10.0.26100\",\"defenseclaw.health.reasons\":[{\"code\":\"HOOKS_PARTIAL\",\"component\":\"hooks\",\"connector\":\"codex\",\"severity\":\"degraded\"},{\"code\":\"FAIL_OPEN_OCCURRED\",\"component\":\"inspection\",\"severity\":\"degraded\"}],\"defenseclaw.health.reasons_truncated\":false,\"defenseclaw.health.report_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"defenseclaw.health.report_interval_s\":1800,\"defenseclaw.health.sequence\":1234,\"defenseclaw.health.status\":\"degraded\",\"defenseclaw.health.subsystems\":[{\"name\":\"guardrail\",\"since\":\"2026-07-10T00:00:01Z\",\"state\":\"running\"},{\"error_class\":\"SCAN_TIMEOUT\",\"name\":\"ai_discovery\",\"state\":\"error\"}],\"defenseclaw.health.subsystems_truncated\":false,\"defenseclaw.health.trigger\":\"scheduled\",\"defenseclaw.health.version.avc\":\"5.1.21.4204\",\"defenseclaw.health.version.policy_bundle\":\"42\",\"defenseclaw.health.version.product\":\"1.0.9\"},\"bucket\":\"platform.health\",\"bucket_catalog_version\":1,\"correlation\":{},\"event_name\":\"endpoint.health_reported\",\"field_classes\":{\"/defenseclaw.health.cloud_delivery.circuit\":\"metadata\",\"/defenseclaw.health.cloud_delivery.consecutive_failures\":\"metadata\",\"/defenseclaw.health.cloud_delivery.dropped_since_last\":\"metadata\",\"/defenseclaw.health.cloud_delivery.last_failure_class\":\"metadata\",\"/defenseclaw.health.cloud_delivery.last_success_at\":\"metadata\",\"/defenseclaw.health.cloud_delivery.state\":\"metadata\",\"/defenseclaw.health.gateway.configuration\":\"metadata\",\"/defenseclaw.health.gateway.started_at\":\"metadata\",\"/defenseclaw.health.gateway.uptime_s\":\"metadata\",\"/defenseclaw.health.guardian.last_pass_at\":\"metadata\",\"/defenseclaw.health.guardian.state\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/connector\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/failed\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/last_activity_at\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/ok\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/pending\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/targets\":\"metadata\",\"/defenseclaw.health.hooks.connectors/0/tool_inspection_mode\":\"metadata\",\"/defenseclaw.health.hooks.connectors_truncated\":\"metadata\",\"/defenseclaw.health.hooks.failed\":\"metadata\",\"/defenseclaw.health.hooks.failing_targets/0/connector\":\"identifier\",\"/defenseclaw.health.hooks.failing_targets/0/error_class\":\"identifier\",\"/defenseclaw.health.hooks.failing_targets/0/pending\":\"identifier\",\"/defenseclaw.health.hooks.failing_targets/0/user.id\":\"identifier\",\"/defenseclaw.health.hooks.failing_targets/0/user.id_kind\":\"identifier\",\"/defenseclaw.health.hooks.failing_targets_truncated\":\"metadata\",\"/defenseclaw.health.hooks.ok\":\"metadata\",\"/defenseclaw.health.hooks.pending\":\"metadata\",\"/defenseclaw.health.hooks.targets\":\"metadata\",\"/defenseclaw.health.inspection.ai_defense\":\"metadata\",\"/defenseclaw.health.inspection.cmid_last_success_at\":\"metadata\",\"/defenseclaw.health.inspection.cmid_token\":\"metadata\",\"/defenseclaw.health.inspection.fail_open_since_last\":\"metadata\",\"/defenseclaw.health.local_store.audit_store\":\"metadata\",\"/defenseclaw.health.observed_at\":\"metadata\",\"/defenseclaw.health.os.version\":\"metadata\",\"/defenseclaw.health.reasons/0/code\":\"metadata\",\"/defenseclaw.health.reasons/0/component\":\"metadata\",\"/defenseclaw.health.reasons/0/connector\":\"metadata\",\"/defenseclaw.health.reasons/0/severity\":\"metadata\",\"/defenseclaw.health.reasons/1/code\":\"metadata\",\"/defenseclaw.health.reasons/1/component\":\"metadata\",\"/defenseclaw.health.reasons/1/severity\":\"metadata\",\"/defenseclaw.health.reasons_truncated\":\"metadata\",\"/defenseclaw.health.report_id\":\"identifier\",\"/defenseclaw.health.report_interval_s\":\"metadata\",\"/defenseclaw.health.sequence\":\"metadata\",\"/defenseclaw.health.status\":\"metadata\",\"/defenseclaw.health.subsystems/0/name\":\"metadata\",\"/defenseclaw.health.subsystems/0/since\":\"metadata\",\"/defenseclaw.health.subsystems/0/state\":\"metadata\",\"/defenseclaw.health.subsystems/1/error_class\":\"metadata\",\"/defenseclaw.health.subsystems/1/name\":\"metadata\",\"/defenseclaw.health.subsystems/1/state\":\"metadata\",\"/defenseclaw.health.subsystems_truncated\":\"metadata\",\"/defenseclaw.health.trigger\":\"metadata\",\"/defenseclaw.health.version.avc\":\"metadata\",\"/defenseclaw.health.version.policy_bundle\":\"metadata\",\"/defenseclaw.health.version.product\":\"metadata\"},\"log_level\":\"WARN\",\"mandatory\":false,\"outcome\":\"completed\",\"phase\":\"report\",\"projection\":{\"detector_catalog_version\":1,\"failure_count\":0,\"failures_truncated\":false,\"oversize_fields\":0,\"redaction_profile\":\"sensitive\",\"removed_fields\":0,\"state\":\"inspected\",\"transformed_fields\":0},\"provenance\":{\"binary_version\":\"<volatile>\",\"config_digest\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"config_generation\":7,\"producer\":\"endpoint-health-test\",\"registry_schema_version\":1},\"record_id\":\"<volatile>\",\"schema_version\":1,\"severity\":\"MEDIUM\",\"signal\":\"logs\",\"source\":\"gateway\",\"timestamp\":\"<volatile>\"}"
+                },
+                "observedTimeUnixNano": "<volatile>",
+                "severityNumber": 13,
+                "severityText": "WARN",
+                "timeUnixNano": "<volatile>"
+              }
+            ],
+            "scope": {
+              "name": "defenseclaw"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
