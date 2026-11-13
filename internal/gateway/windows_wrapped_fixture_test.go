@@ -53,7 +53,7 @@ func windowsToolCallFindings(t *testing.T, connector, tool, command string) []Ru
 		t.Fatal(err)
 	}
 	return dispatchTrustedAction(t.Context(), trustedActionRequest{
-		Input: actionfacts.Input{Tool: tool, Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`},
+		Input:      actionfacts.Input{Tool: tool, Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`},
 		LegacyText: string(args), Connector: connector, EnforcementCapable: true,
 	})
 }
@@ -123,7 +123,7 @@ func TestWindowsCmdLauncherKeepsTheCmdFixtureVerdict(t *testing.T) {
 					t.Fatal(err)
 				}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-					Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`, DialectHint: hint},
+					Input:      actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:\work`, ActiveHome: `C:\Users\alice`, DialectHint: hint},
 					LegacyText: string(args), Connector: "windows-cmd-launcher", EnforcementCapable: true,
 				})
 				return slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == rule })
