@@ -1188,6 +1188,7 @@ func TestEndpointConnectorComponentsWindowsExactNativeRoster(t *testing.T) {
 		"devin",
 		"hermes",
 		"kiro",
+		"openclaw",
 		"opencode",
 	}
 	if !reflect.DeepEqual(got, want) {
