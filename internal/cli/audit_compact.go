@@ -46,9 +46,10 @@ audit.db of about twice the live data; compact checks it first and refuses
 with the numbers when the disk is short. --dry-run reports what compact would
 reclaim and changes nothing; it also works while the gateway runs.
 
-On a managed computer run it as an administrator (root, or an elevated
-PowerShell prompt on Windows) after you stop the gateway service. While the
-service is stopped, hooks block tool calls unless hook_fail_mode is open.
+On a managed computer an administrator runs it after stopping the gateway
+service; a refusal names the stop, start and compact commands for that
+computer. While the service is stopped, hooks block tool calls unless
+hook_fail_mode is open.
 
 Examples:
   defenseclaw-gateway audit compact --dry-run
@@ -142,6 +143,27 @@ func auditCompactStopStart() (string, string) {
 	return "sudo systemctl stop " + units, "sudo systemctl start " + units
 }
 
+// auditCompactCommand is how this computer runs compact again: on managed
+// Windows the installed CLI by its full path (no DefenseClaw command is on
+// PATH there), elsewhere the defenseclaw command.
+func auditCompactCommand(args ...string) string {
+	if runtime.GOOS == "windows" && auditCompactManaged() {
+		return managedWindowsCommand(append([]string{"audit", "compact"}, args...)...)
+	}
+	return strings.Join(append([]string{"defenseclaw", "audit", "compact"}, args...), " ")
+}
+
+// auditCompactRepair names where a damaged store is repaired: doctor on a
+// per-user install, the enterprise repair on managed Windows.
+func auditCompactRepair() string {
+	if runtime.GOOS == "windows" && auditCompactManaged() {
+		return "Run " + managedWindowsCommand("enterprise", "windows", "repair", "--profile", "standalone") +
+			" from an elevated PowerShell prompt"
+	}
+	return "Run defenseclaw doctor: it names the repair (defenseclaw-gateway restart rebuilds a damaged 0.x store " +
+		"or moves a corrupt one aside and starts a new one)"
+}
+
 // auditCompactInUse is the refusal while the store is open elsewhere.
 func auditCompactInUse(db string, pid int) error {
 	stop, start := auditCompactStopStart()
@@ -149,8 +171,8 @@ func auditCompactInUse(db string, pid int) error {
 	if pid > 0 {
 		who = fmt.Sprintf("the gateway (PID %d) is running and has %s open", pid, db)
 	}
-	return fmt.Errorf("%s, and compact needs it alone. Stop it with: %s; run defenseclaw audit compact again; then start the gateway with: %s. Nothing was changed",
-		who, stop, start)
+	return fmt.Errorf("%s, and compact needs it alone. Stop it with: %s; run %s again; then start the gateway with: %s. Nothing was changed",
+		who, stop, auditCompactCommand(), start)
 }
 
 func runAuditCompact(cmd *cobra.Command, _ []string) error {
@@ -183,11 +205,9 @@ func runAuditCompact(cmd *cobra.Command, _ []string) error {
 	case errors.Is(err, audit.ErrCompactStoreInUse):
 		return auditCompactInUse(db, 0)
 	case errors.Is(err, audit.ErrCompactStoreDamaged):
-		return fmt.Errorf("audit compact: %w, so it was not rewritten. Run defenseclaw doctor: it names the repair "+
-			"(defenseclaw-gateway restart rebuilds a damaged 0.x store or moves a corrupt one aside and starts a new one). "+
-			"Nothing was changed", err)
+		return fmt.Errorf("audit compact: %w, so it was not rewritten. %s. Nothing was changed", err, auditCompactRepair())
 	case errors.As(err, &space):
-		return fmt.Errorf("%w. Free some space on that disk and run defenseclaw audit compact again. Nothing was changed", err)
+		return fmt.Errorf("%w. Free some space on that disk and run %s again. Nothing was changed", err, auditCompactCommand())
 	case err != nil:
 		return fmt.Errorf("audit compact: %w", err)
 	}
@@ -243,7 +263,7 @@ func writeAuditCompactText(out io.Writer, report audit.CompactReport, running bo
 		}
 		if running {
 			stop, start := auditCompactStopStart()
-			fmt.Fprintf(out, "The gateway is running: stop it first (%s), run defenseclaw audit compact, then start it (%s).\n", stop, start)
+			fmt.Fprintf(out, "The gateway is running: stop it first (%s), run %s, then start it (%s).\n", stop, auditCompactCommand(), start)
 		}
 		fmt.Fprintln(out, "Dry run: nothing was changed.")
 		return
