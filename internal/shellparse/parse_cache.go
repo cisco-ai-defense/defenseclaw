@@ -20,8 +20,7 @@ import (
 // copy, because callers rewrite trees in place. A command under
 // largeCommandMin is parsed as before and never enters the cache.
 const (
-	// largeCommandMin is the size from which a command is cached (and its
-	// nesting bound remembered).
+	// largeCommandMin is the size from which a command is cached.
 	largeCommandMin = 64 << 10
 	// largeCommandMax bounds the commands kept; a larger one is parsed each
 	// time.
@@ -42,7 +41,6 @@ type parseCacheEntry struct {
 	key  parseCacheKey
 	file *syntax.File // the tree as parsed, never handed out
 	ok   bool
-	over bool // parsed, but past MaxParsedNodes (file is nil)
 	at   time.Time
 }
 
@@ -52,7 +50,7 @@ var parseCache struct {
 }
 
 // cachedParse returns a private copy of the kept tree of command.
-func cachedParse(key parseCacheKey) (file *syntax.File, ok, over, hit bool) {
+func cachedParse(key parseCacheKey) (file *syntax.File, ok, hit bool) {
 	parseCache.Lock()
 	defer parseCache.Unlock()
 	now := time.Now()
@@ -65,23 +63,15 @@ func cachedParse(key parseCacheKey) (file *syntax.File, ok, over, hit bool) {
 	parseCache.entries = kept
 	for _, entry := range kept {
 		if entry.key == key {
-			if copied, cloned := cloneFile(entry.file); cloned {
-				return copied, entry.ok, entry.over, true
-			}
-			return nil, false, false, false
+			return cloneFile(entry.file), entry.ok, true
 		}
 	}
-	return nil, false, false, false
+	return nil, false, false
 }
 
 // storeParse keeps a private copy of file; the caller goes on to use file.
-func storeParse(key parseCacheKey, file *syntax.File, ok, over bool) {
-	kept, cloned := cloneFile(file)
-	if !cloned {
-		// A tree too deep to copy within the clone bound is not kept.
-		return
-	}
-	entry := parseCacheEntry{key: key, file: kept, ok: ok, over: over, at: time.Now()}
+func storeParse(key parseCacheKey, file *syntax.File, ok bool) {
+	entry := parseCacheEntry{key: key, file: cloneFile(file), ok: ok, at: time.Now()}
 	parseCache.Lock()
 	defer parseCache.Unlock()
 	if len(parseCache.entries) >= parseCacheEntries {
@@ -90,112 +80,86 @@ func storeParse(key parseCacheKey, file *syntax.File, ok, over bool) {
 	parseCache.entries = append(parseCache.entries, entry)
 }
 
-// tooDeepMemo remembers the nesting answer of the last large command: the
-// proofs ask it for the same text on every parse and every reader.
-var tooDeepMemo struct {
-	sync.Mutex
-	command string
-	reason  string
-	set     bool
+// cloneTask copies src into dst; with assign set, it only stores src, a copy
+// that has been completed, into dst.
+type cloneTask struct {
+	dst, src reflect.Value
+	assign   bool
 }
 
-func tooDeepRemembered(command string) string {
-	tooDeepMemo.Lock()
-	if tooDeepMemo.set && tooDeepMemo.command == command {
-		reason := tooDeepMemo.reason
-		tooDeepMemo.Unlock()
-		return reason
-	}
-	tooDeepMemo.Unlock()
-	reason, measure := tooDeepScan(command)
-	if reason == "" && measure && chainTreeOver(command) {
-		reason = BudgetChain
-	}
-	tooDeepMemo.Lock()
-	tooDeepMemo.command, tooDeepMemo.reason, tooDeepMemo.set = command, reason, true
-	tooDeepMemo.Unlock()
-	return reason
-}
-
-// maxCloneDepth bounds the reflection depth of cloneValue (every pointer,
-// interface, slice element and struct field it descends through counts
-// one). A tree that passes the reading budget (MaxNestingDepth nesting and
-// MaxChainOperators operators in a chain) is far below it; it is the stop
-// for a tree that did not, so the copy returns an error instead of
-// overflowing the goroutine stack, which is a fatal error no recover
-// catches (GAP-0255: a 500 KB left-deep || list killed the gateway).
-const maxCloneDepth = 1 << 17
-
-// cloneFile returns a copy of file that shares no node with it, and false
-// when the tree is deeper than maxCloneDepth. The syntax nodes hold
-// pointers, slices and interfaces of nodes, strings, and positions (a
-// struct of unexported integers, copied by value); nothing else.
-func cloneFile(file *syntax.File) (*syntax.File, bool) {
+// cloneFile returns a copy of file that shares no node with it. The syntax
+// nodes hold pointers, slices and interfaces of nodes, strings, and
+// positions (a struct of unexported integers, copied by value); nothing
+// else. The copy walks the tree with an explicit stack, not recursion, so
+// the depth of the tree costs heap, not goroutine stack: a stack overflow
+// is a fatal error no recover catches (GAP-0255). The size of the tree is
+// bounded by the reading budget (BudgetExceeded) before a command is
+// parsed.
+func cloneFile(file *syntax.File) *syntax.File {
 	if file == nil {
-		return nil, true
+		return nil
 	}
-	copied, ok := cloneValue(reflect.ValueOf(file), 0)
-	if !ok {
-		return nil, false
-	}
-	return copied.Interface().(*syntax.File), true
-}
-
-func cloneValue(src reflect.Value, depth int) (reflect.Value, bool) {
-	if depth > maxCloneDepth {
-		return reflect.Value{}, false
-	}
-	depth++
-	switch src.Kind() {
-	case reflect.Pointer:
-		if src.IsNil() {
-			return src, true
+	root := reflect.New(reflect.TypeFor[*syntax.File]()).Elem()
+	stack := []cloneTask{{dst: root, src: reflect.ValueOf(file)}}
+	for len(stack) > 0 {
+		task := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		dst, src := task.dst, task.src
+		if task.assign {
+			dst.Set(src)
+			continue
 		}
-		inner, ok := cloneValue(src.Elem(), depth)
-		if !ok {
-			return reflect.Value{}, false
-		}
-		dst := reflect.New(src.Type().Elem())
-		dst.Elem().Set(inner)
-		return dst, true
-	case reflect.Interface:
-		if src.IsNil() {
-			return src, true
-		}
-		inner, ok := cloneValue(src.Elem(), depth)
-		if !ok {
-			return reflect.Value{}, false
-		}
-		dst := reflect.New(src.Type()).Elem()
-		dst.Set(inner)
-		return dst, true
-	case reflect.Slice:
-		if src.IsNil() {
-			return src, true
-		}
-		dst := reflect.MakeSlice(src.Type(), src.Len(), src.Len())
-		for i := range src.Len() {
-			inner, ok := cloneValue(src.Index(i), depth)
-			if !ok {
-				return reflect.Value{}, false
+		switch src.Kind() {
+		case reflect.Pointer:
+			if src.IsNil() {
+				continue
 			}
-			dst.Index(i).Set(inner)
-		}
-		return dst, true
-	case reflect.Struct:
-		dst := reflect.New(src.Type()).Elem()
-		dst.Set(src)
-		for i := range src.NumField() {
-			if src.Type().Field(i).IsExported() {
-				inner, ok := cloneValue(src.Field(i), depth)
-				if !ok {
-					return reflect.Value{}, false
+			copied := reflect.New(src.Type().Elem())
+			dst.Set(copied)
+			stack = append(stack, cloneTask{dst: copied.Elem(), src: src.Elem()})
+		case reflect.Interface:
+			if src.IsNil() {
+				continue
+			}
+			held := src.Elem()
+			if held.Kind() == reflect.Pointer {
+				// The interface holds a pointer: store the new object now
+				// and fill it where it is.
+				if held.IsNil() {
+					dst.Set(held)
+					continue
 				}
-				dst.Field(i).Set(inner)
+				copied := reflect.New(held.Type().Elem())
+				dst.Set(copied)
+				stack = append(stack, cloneTask{dst: copied.Elem(), src: held.Elem()})
+				continue
 			}
+			// A value in the interface is copied whole before it is stored.
+			copied := reflect.New(held.Type()).Elem()
+			stack = append(stack, cloneTask{dst: dst, src: copied, assign: true}, cloneTask{dst: copied, src: held})
+		case reflect.Slice:
+			if src.IsNil() {
+				continue
+			}
+			copied := reflect.MakeSlice(src.Type(), src.Len(), src.Len())
+			dst.Set(copied)
+			for i := range src.Len() {
+				stack = append(stack, cloneTask{dst: copied.Index(i), src: src.Index(i)})
+			}
+		case reflect.Struct:
+			dst.Set(src)
+			for i := range src.NumField() {
+				if !src.Type().Field(i).IsExported() {
+					continue
+				}
+				switch src.Field(i).Kind() {
+				case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Struct:
+					stack = append(stack, cloneTask{dst: dst.Field(i), src: src.Field(i)})
+				}
+			}
+		default:
+			dst.Set(src)
 		}
-		return dst, true
-	default:
-		return src, true
 	}
+	return root.Interface().(*syntax.File)
 }
