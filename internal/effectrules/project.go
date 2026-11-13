@@ -111,9 +111,21 @@ func projectTarget(
 			continue // absence folds to "no" in protected(); keep the list bounded
 		}
 		pt.Protected = append(pt.Protected, &semanticpb.ProtectedMatch{
-			Set:   name,
-			State: string(grade),
+			Set:    name,
+			State:  string(grade),
+			Reason: matchBasis(t, grade, sets[name], flavor),
 		})
+	}
+	if mutatingKind(kind) {
+		for _, name := range AllSets {
+			if dirExact(t.Path, sets[name], flavor) && !hasExactFileMatch(pt, name) {
+				pt.Protected = append(pt.Protected, &semanticpb.ProtectedMatch{
+					Set:    name,
+					State:  string(gradeUnknown),
+					Reason: "protected_dir",
+				})
+			}
+		}
 	}
 	if awayFromHomeUnknown(t, state, kind, home, flavor) {
 		pt.Protected = append(pt.Protected, &semanticpb.ProtectedMatch{
@@ -122,6 +134,18 @@ func projectTarget(
 		})
 	}
 	return pt
+}
+
+// hasExactFileMatch reports that an exact file member of set already matched,
+// so a write to that file is handled and the protected-directory rule does
+// not also fire.
+func hasExactFileMatch(pt *semanticpb.EffectTarget, set string) bool {
+	for _, m := range pt.GetProtected() {
+		if m.GetSet() == set && m.GetReason() == "exact" {
+			return true
+		}
+	}
+	return false
 }
 
 // awayFromHomeUnknown reports a mutation whose destination we cannot vouch

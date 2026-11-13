@@ -195,3 +195,44 @@ func atOrUnder(child, base string) bool {
 func defaultResolver(p string) (string, bool) {
 	return hookpaths.ResolveWriteTarget(p)
 }
+
+// matchBasis names why a target matched a set, so the restricted tier can
+// require an exact canonical member. For a known grade it is exact, tree or
+// link; for unknown it is glob, dir, dynamic or unresolved.
+func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effects.Flavor) string {
+	if grade == gradeKnown {
+		switch {
+		case memberExact(t.Path, set, flavor):
+			return "exact"
+		case underTree(t.Path, set, flavor):
+			return "tree"
+		default:
+			return "link"
+		}
+	}
+	switch {
+	case t.Glob != "":
+		return "glob"
+	case t.Path == "":
+		return "dynamic"
+	case underProtectedDir(t.Path, set, flavor):
+		return "dir"
+	default:
+		return "unresolved"
+	}
+}
+
+// dirExact reports that a path is exactly one of the set's protected
+// directories (the directory itself, not a child).
+func dirExact(p string, set protectedSet, flavor effects.Flavor) bool {
+	if p == "" {
+		return false
+	}
+	key := canon(p, flavor)
+	for _, d := range set.dirs {
+		if canon(d, flavor) == key {
+			return true
+		}
+	}
+	return false
+}

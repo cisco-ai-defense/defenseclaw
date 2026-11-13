@@ -48,9 +48,9 @@ var effectResolverOverride func(string) (string, bool)
 type effectTier string
 
 const (
-	effectTierClean   effectTier = "clean"
-	effectTierKnown   effectTier = "known"
-	effectTierUnknown effectTier = "unknown"
+	effectTierClean      effectTier = "clean"
+	effectTierUnknown    effectTier = "unknown"
+	effectTierRestricted effectTier = "restricted"
 )
 
 // EffectShadowResult is the effect lane's answer for one call. It is private
@@ -136,39 +136,113 @@ func computeEffectShadow(request trustedActionRequest, mode effectRulesMode) Eff
 		Flavor:  opts.Flavor,
 		Resolve: effectResolverOverride,
 	})
-	tier, sets, program, kind := classifyEffectFacts(facts)
-	res.Tier, res.Sets, res.Program, res.Kind = string(tier), sets, program, kind
-	res.Action = effectTierAction(tier, kind, sets, request.StrictPolicy || request.ManagedInstall)
+	c := classifyEffects(result, facts, opts.Flavor)
+	strictOrManaged := request.StrictPolicy || request.ManagedInstall
+	res.Sets, res.Program, res.Kind = c.sets, c.program, c.kind
+	switch {
+	case c.restricted:
+		res.Tier = string(effectTierRestricted)
+	case c.touches:
+		res.Tier = string(effectTierUnknown)
+	}
+	res.Action = effectAction(c.touches, c.restrictedRuling, strictOrManaged)
 	return res
 }
 
-// classifyEffectFacts folds the projected effects into one tier and names the
-// deciding effect. Known wins over unknown; the first deciding effect in call
-// order is reported.
-func classifyEffectFacts(facts []*semanticpb.EffectFact) (effectTier, []string, string, string) {
-	var unknownSets []string
-	var unknownProgram, unknownKind string
-	foundUnknown := false
+// effectClass is the protected-tier read of one call: whether any effect
+// touches a protected set at all, whether an effect is restricted-tier
+// eligible (a listed command, every token accounted, an exact canonical
+// known protected member), and whether that eligible effect is on a family
+// that blocks in the OSS default (the existing authorized-keys / self-
+// protection ruling). sets/program/kind describe the deciding effect for
+// reporting only.
+type effectClass struct {
+	touches          bool
+	restricted       bool
+	restrictedRuling bool
+	sets             []string
+	program          string
+	kind             string
+}
+
+// classifyEffects applies the owner's three answers (2026-11-13): a known
+// mutation by a listed command on an exact canonical protected path is the
+// restricted tier (block); anything else that touches a protected set,
+// including any UNKNOWN effect that could reach one, is the unknown tier;
+// otherwise clean.
+func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor) effectClass {
+	var c effectClass
+	fullyAccounted := len(result.Unknowns) == 0
+	var touchSets []string
 	for _, f := range facts {
 		t := f.GetTarget()
 		if t.GetType() != "path" {
 			continue
 		}
 		known, maybe := protectedSetsByState(t)
-		fullyKnown := f.GetTargetState() == "known" && f.GetRoleState() == "known" && f.GetKind() != string(effects.KindOpaque)
-		if fullyKnown && len(known) > 0 {
-			return effectTierKnown, known, f.GetOrigin().GetProgram(), f.GetKind()
+		if len(known) == 0 && len(maybe) == 0 {
+			continue
 		}
-		if !fullyKnown && (len(known) > 0 || len(maybe) > 0) && !foundUnknown {
-			foundUnknown = true
-			unknownSets = appendUnique(known, maybe)
-			unknownProgram, unknownKind = f.GetOrigin().GetProgram(), f.GetKind()
+		kind := f.GetKind()
+		mutating := mutatingEffectKind(kind)
+		unknownEffect := f.GetTargetState() != "known" || f.GetRoleState() != "known" || kind == string(effects.KindOpaque)
+		// Relevance: a mutation touching a protected set; a credential read; or
+		// any UNKNOWN effect that could reach a protected set (R5F-1). A benign
+		// read of a config file (shell rc, agent config) is not escalated.
+		relevant := false
+		switch {
+		case mutating:
+			relevant = true
+		case unknownEffect:
+			relevant = true
+		case kind == string(effects.KindRead) && (effectSetContains(known, effectrules.SetCredentials) || effectSetContains(maybe, effectrules.SetCredentials)):
+			relevant = true
+		}
+		if !relevant {
+			continue
+		}
+		c.touches = true
+		touchSets = append(touchSets, append(append([]string(nil), known...), maybe...)...)
+		if c.program == "" && c.kind == "" {
+			c.program, c.kind = f.GetOrigin().GetProgram(), kind
+		}
+		// Restricted eligibility: a mutation, every token accounted, this
+		// effect fully known, by a listed command, on an exact canonical known
+		// member of a named set.
+		if !mutating || !fullyAccounted ||
+			f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 {
+			continue
+		}
+		if !effectrules.RestrictedBlockCommand(f.GetOrigin().GetProgram(), effects.Surface(f.GetOrigin().GetSurface())) {
+			continue
+		}
+		if !effectrules.CanonicalAbsolute(t.GetPath(), flavor) {
+			continue
+		}
+		for _, m := range t.GetProtected() {
+			if m.GetState() != semantic.ProtectedKnown || m.GetReason() != "exact" || m.GetSet() == effectrules.SetOutsideHome {
+				continue
+			}
+			c.restricted = true
+			if m.GetSet() == effectrules.SetSSHAuthorizedKeys || m.GetSet() == effectrules.SetSelfProtection {
+				c.restrictedRuling = true
+			}
 		}
 	}
-	if foundUnknown {
-		return effectTierUnknown, unknownSets, unknownProgram, unknownKind
+	c.sets = dedupeStrings(touchSets)
+	return c
+}
+
+func dedupeStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
 	}
-	return effectTierClean, nil, "", ""
+	return out
 }
 
 // protectedSetsByState splits a target's protected matches into the sets it is
@@ -185,53 +259,20 @@ func protectedSetsByState(t *semanticpb.EffectTarget) (known, maybe []string) {
 	return known, maybe
 }
 
-func appendUnique(a, b []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(a)+len(b))
-	for _, v := range append(append([]string(nil), a...), b...) {
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	return out
-}
 
-// effectTierAction maps a tier to the guardrail action the lane would take.
-// strictOrManaged is true for the strict profile and every managed install,
-// which fail closed on the unknown tier.
-func effectTierAction(tier effectTier, kind string, sets []string, strictOrManaged bool) string {
-	switch tier {
-	case effectTierKnown:
-		// A known mutation takes today's protected-file family path. Only the
-		// families that block in the balanced default block here: SSH
-		// authorized-keys and control files, and DefenseClaw self-protection
-		// state. A shell-rc, agent-config or credential mutation alerts (as
-		// persistence.shell_profile_write does), so a benign ~/.bashrc PATH
-		// export or a config edit is not a false block. A known read of
-		// credentials is a sensitive read (alert); other reads are not escalated.
-		if mutatingEffectKind(kind) {
-			if effectSetContains(sets, effectrules.SetSSHAuthorizedKeys) ||
-				effectSetContains(sets, effectrules.SetSelfProtection) {
-				return guardrailActionBlock
-			}
-			return guardrailActionAlert
-		}
-		if effectSetContains(sets, effectrules.SetCredentials) {
-			return guardrailActionAlert
-		}
-		return guardrailActionAllow
-	case effectTierUnknown:
-		// Unknown effect touching a protected set: alert in OSS default and
-		// permissive, block in strict and every managed install. There is no
-		// ask yet (S8 owns the confirm path).
-		if strictOrManaged {
-			return guardrailActionBlock
-		}
-		return guardrailActionAlert
-	default:
+// effectAction maps the protected-tier read to the guardrail action. An effect
+// that touches a protected set blocks in strict and every managed install, and
+// blocks in the OSS default only when a restricted-tier effect is on a
+// ruling family (authorized-keys / self-protection); otherwise it alerts in
+// default and permissive. There is no ask yet (S8 owns the confirm path).
+func effectAction(touches, restrictedRuling, strictOrManaged bool) string {
+	if !touches {
 		return guardrailActionAllow
 	}
+	if strictOrManaged || restrictedRuling {
+		return guardrailActionBlock
+	}
+	return guardrailActionAlert
 }
 
 func effectSetContains(s []string, v string) bool {
@@ -270,12 +311,12 @@ func effectShadowFindings(res EffectShadowResult, mode effectRulesMode) []RuleFi
 	rid := "effect.protected_target_" + res.Tier
 	title := "Effect-model protected-target verdict"
 	severity := "HIGH"
-	if res.Tier == string(effectTierKnown) && mutatingEffectKind(res.Kind) {
+	if res.Tier == string(effectTierRestricted) {
 		severity = "CRITICAL"
 	}
-	disposition := findingDispositionEffectKnown
-	if res.Tier == string(effectTierUnknown) {
-		disposition = findingDispositionEffectUnknown
+	disposition := findingDispositionEffectUnknown
+	if res.Tier == string(effectTierRestricted) {
+		disposition = findingDispositionEffectKnown
 	}
 	tags := append([]string{"effects", res.Tier}, res.Sets...)
 	f := RuleFinding{

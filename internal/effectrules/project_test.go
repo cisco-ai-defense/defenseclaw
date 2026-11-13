@@ -196,3 +196,29 @@ func TestProjectAgentCreated(t *testing.T) {
 		t.Fatalf("expected the agent-created target to be flagged; facts=%+v", facts)
 	}
 }
+
+// R5F-3: a known write whose target IS a protected directory (~/.ssh itself,
+// via ln -s to a dir, Copy-Item/Move-Item -Destination <dir>, robocopy) must
+// be unknown, not clean, unless the joined file is a known member.
+func TestProjectProtectedDirectoryWrite(t *testing.T) {
+	dirWrite := effects.Result{Effects: []effects.Effect{{
+		Kind:        effects.KindLink,
+		TargetState: effects.TargetStateKnown,
+		RoleState:   effects.RoleStateKnown,
+		Target:      effects.Target{Type: effects.TargetPath, Path: testHome + "/.ssh", Flavor: effects.FlavorPOSIX},
+	}}}
+	facts := Project(dirWrite, Env{Home: testHome, Resolve: fakeResolver(nil)})
+	if got := strongestState(facts, SetSSHAuthorizedKeys); got != semantic.ProtectedUnknown {
+		t.Fatalf("write to ~/.ssh directory: ssh state = %q, want unknown (protected_dir)", got)
+	}
+	// A known file member under the directory is still known, not demoted.
+	fileWrite := effects.Result{Effects: []effects.Effect{{
+		Kind:        effects.KindWrite,
+		TargetState: effects.TargetStateKnown,
+		RoleState:   effects.RoleStateKnown,
+		Target:      effects.Target{Type: effects.TargetPath, Path: testHome + "/.ssh/authorized_keys", Flavor: effects.FlavorPOSIX},
+	}}}
+	if got := strongestState(Project(fileWrite, Env{Home: testHome, Resolve: fakeResolver(nil)}), SetSSHAuthorizedKeys); got != semantic.ProtectedKnown {
+		t.Fatalf("write to ~/.ssh/authorized_keys: ssh state = %q, want known", got)
+	}
+}
