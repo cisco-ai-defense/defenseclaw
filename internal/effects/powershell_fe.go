@@ -85,9 +85,7 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			} else {
 				inner = lowerPSScript(ns.Text, o, false)
 			}
-			for _, fn := range inner.Funcs {
-				s.Funcs = append(s.Funcs, fn)
-			}
+			s.Funcs = append(s.Funcs, inner.Funcs...)
 			s.Stmts = append(s.Stmts, inner.Stmts...)
 			s.Unknowns = append(s.Unknowns, inner.Unknowns...)
 		}
@@ -252,6 +250,15 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 	case *psparse.Assignment:
 		lw.assignment(v, cond)
 	case *psparse.Block:
+		// A function (or filter) defined here shadows a cmdlet of the same name for
+		// the rest of the script: the walker must not treat that name as the
+		// cmdlet (round 8 H, rv7-B48). Names are case-insensitive.
+		if v.Name != "" {
+			switch strings.ToLower(v.Keyword) {
+			case "function", "filter", "workflow":
+				lw.out.Funcs = append(lw.out.Funcs, strings.ToLower(v.Name))
+			}
+		}
 		lw.statements(v.Conditions, cond)
 		for _, b := range v.Bodies {
 			if b != nil {

@@ -17,7 +17,6 @@ func TestRv4AllowlistShapes2(t *testing.T) {
 		{"cmd type switch", winCmd, `type /Q a.txt`},
 	}
 	for _, c := range cases {
-		r := Extract(sh(c.cmd), c.o)
-		t.Logf("%-32s fullyKnown=%v\n%s", c.n, r.FullyKnown(), fmtRes(r))
+		checkRow(t, c.n, c.o, sh(c.cmd), "")
 	}
 }

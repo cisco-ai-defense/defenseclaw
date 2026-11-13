@@ -1,9 +1,6 @@
 package effects
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestReviewProbes4(t *testing.T) {
 	winBash := Options{Flavor: FlavorWindows, Dialect: DialectPOSIX, Home: `C:\Users\u`, CWD: `C:\work`, Drive: "C", CaseInsensitive: true, Env: map[string]string{"HOME": `C:\Users\u`}}
@@ -34,8 +31,7 @@ func TestReviewProbes4(t *testing.T) {
 		{"J9 drive-relative exe", winCmd, `C:evil.exe`},
 		{"J7 nested cmdsubst dup", envOpts, `echo "$(echo $(rm -rf /home/u/.ssh))"`},
 	} {
-		r := Extract(sh(p.c), p.o)
-		t.Logf("### %s :: %q\n%s", p.n, p.c, strings.TrimRight(fmtRes(r), "\n"))
+		checkRow(t, p.n, p.o, sh(p.c), "")
 	}
 }
 

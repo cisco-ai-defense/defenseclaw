@@ -94,6 +94,9 @@ const (
 	PosRobocopy       PosMode = "robocopy"
 	PosGit            PosMode = "git"
 	PosFirstWrite     PosMode = "first_write"
+	PosBits           PosMode = "bits"     // bitsadmin: URL then local file; /upload sends the file
+	PosZip            PosMode = "zip"      // zip ARCHIVE FILE...: the archive is written, the files are read
+	PosCompress       PosMode = "compress" // gzip/xz/bzip2: each operand is replaced by its (de)compressed file
 )
 
 // Program is one table row.
@@ -114,6 +117,7 @@ type Program struct {
 	PSLaunch       bool   // powershell/pwsh: decode -enc and unwrap its command as PowerShell
 	TarStyle       bool   // tar: mode-dependent create/extract effects (review N7)
 	DownloadRemote bool   // curl -O / wget: writes a URL-named file into the output dir/cwd (review R3-3)
+	AppendFlag     string // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool   // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
 }
 
@@ -204,7 +208,7 @@ func buildPOSIXTable() {
 			"-R", "-v", "-c", "-f", "-H", "-L", "-P", "-h", "-b", "-k", "-d", "-n", "--recursive", "--verbose", "--changes", "--silent", "--quiet", "--preserve-root", "--no-preserve-root", "--dereference", "--no-dereference")})
 	add(Program{Names: []string{"dd"}, Pos: PosNone,
 		Flags: map[string]Flag{"if": {Value: true, Role: RoleRead}, "of": {Value: true, Role: RoleWrite}}})
-	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
+	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, AppendFlag: "-a", Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
 	add(Program{Names: []string{"truncate"}, Pos: PosAllWrite, Flags: map[string]Flag{"-s": {Value: true}}})
 	add(Program{Names: []string{"sed"}, Pos: PosAllRead, FirstPosIgnore: true, InPlace: "-i",
 		Flags: fl(map[string]Flag{"-e": {Value: true}, "--expression": {Value: true}, "-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-l": {Value: true, Role: RoleIgnore}},
@@ -213,7 +217,11 @@ func buildPOSIXTable() {
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead}, "-v": {Value: true}, "-F": {Value: true}}, "-W")})
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
 	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: fl(map[string]Flag{"-d": {Value: true, Role: RoleIgnore}}, "-o", "-q", "-l", "-v", "-n", "-j", "-x", "-P")})
-	add(Program{Names: []string{"zip", "gzip", "gunzip", "bzip2", "xz"}, Pos: PosAllRead})
+	add(Program{Names: []string{"zip"}, Pos: PosZip,
+		Flags: fl(map[string]Flag{"-x": {Value: true, Role: RoleIgnore}, "-i": {Value: true, Role: RoleIgnore}}, "-r", "-q", "-j", "-0", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9", "-v", "-g", "-u", "-y", "-X", "-D", "-9")})
+	add(Program{Names: []string{"gzip", "gunzip", "zcat", "bzip2", "bunzip2", "bzcat", "xz", "unxz", "xzcat"}, Pos: PosCompress,
+		Flags: fl(nil, "-c", "-d", "-f", "-k", "-q", "-v", "-t", "-l", "-r", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9", "-z",
+			"--stdout", "--decompress", "--uncompress", "--force", "--keep", "--quiet", "--verbose", "--test", "--list", "--recursive", "--fast", "--best")})
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs, DownloadRemote: true,
 		Flags: fl(map[string]Flag{
 			"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
@@ -326,7 +334,9 @@ func buildWindowsTable() {
 	add(Program{Names: []string{"icacls", "cacls", "takeown", "attrib"}, Pos: PosAllPerm, Strict: true})
 	add(Program{Names: []string{"certutil"}, Pos: PosURLArgs,
 		Flags: map[string]Flag{"-urlcache": {Role: RoleNone}, "-decode": {Role: RoleNone}, "-f": {Role: RoleNone}, "-split": {Role: RoleNone}}})
-	add(Program{Names: []string{"bitsadmin"}, Pos: PosNone})
+	add(Program{Names: []string{"bitsadmin"}, Pos: PosBits,
+		Flags: map[string]Flag{"/transfer": {Value: true, Role: RoleIgnore}, "/addfile": {Value: true, Role: RoleIgnore},
+			"/priority": {Value: true, Role: RoleIgnore}, "/download": {}, "/upload": {}, "/dynamic": {}, "/acl": {Value: true, Role: RoleIgnore}}})
 	add(Program{Names: []string{"cmd"}, Pos: PosNone, CmdC: true})
 	add(Program{Names: []string{"set-content", "add-content", "out-file"}, Pos: PosFirstWrite, PipeRole: RoleWrite,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-literalpath": {Value: true, Role: RoleWrite},
@@ -356,4 +366,68 @@ func buildWindowsTable() {
 			"-F": {Value: true, Role: RoleSendData}, "--form": {Value: true, Role: RoleSendData},
 			"-d": {Value: true, Role: RoleSendData}, "--data": {Value: true, Role: RoleSendData},
 			"--data-binary": {Value: true, Role: RoleSendData}, "--data-raw": {Value: true, Role: RoleSendData}, "--data-urlencode": {Value: true, Role: RoleSendData}}})
+	addPSParameters()
+}
+
+// psCommonParameters are the parameters every PowerShell cmdlet accepts. None
+// names a path; the valued ones consume the next word, so they must be listed or
+// that word would be read as an operand (round 8, S13/S14).
+var psCommonParameters = map[string]Flag{
+	"-erroraction": {Value: true, Role: RoleIgnore}, "-warningaction": {Value: true, Role: RoleIgnore}, "-informationaction": {Value: true, Role: RoleIgnore},
+	"-errorvariable": {Value: true, Role: RoleIgnore}, "-warningvariable": {Value: true, Role: RoleIgnore}, "-informationvariable": {Value: true, Role: RoleIgnore},
+	"-outvariable": {Value: true, Role: RoleIgnore}, "-outbuffer": {Value: true, Role: RoleIgnore}, "-pipelinevariable": {Value: true, Role: RoleIgnore},
+	"-ea": {Value: true, Role: RoleIgnore}, "-wa": {Value: true, Role: RoleIgnore}, "-ia": {Value: true, Role: RoleIgnore},
+	"-ev": {Value: true, Role: RoleIgnore}, "-wv": {Value: true, Role: RoleIgnore}, "-iv": {Value: true, Role: RoleIgnore},
+	"-ov": {Value: true, Role: RoleIgnore}, "-ob": {Value: true, Role: RoleIgnore}, "-pv": {Value: true, Role: RoleIgnore},
+	"-verbose": {}, "-debug": {}, "-whatif": {}, "-confirm": {}, "-vb": {}, "-db": {}, "-wi": {}, "-cf": {},
+}
+
+// psCmdletParameters adds, per cmdlet, the parameters that do not change which
+// path is read or written.
+var psCmdletParameters = map[string]map[string]Flag{
+	"set-content": psWriterParameters, "add-content": psWriterParameters, "out-file": psWriterParameters,
+	"get-content": {"-encoding": {Value: true, Role: RoleIgnore}, "-totalcount": {Value: true, Role: RoleIgnore}, "-tail": {Value: true, Role: RoleIgnore},
+		"-readcount": {Value: true, Role: RoleIgnore}, "-delimiter": {Value: true, Role: RoleIgnore}, "-stream": {Value: true, Role: RoleIgnore},
+		"-filter": {Value: true, Role: RoleIgnore}, "-include": {Value: true, Role: RoleIgnore}, "-exclude": {Value: true, Role: RoleIgnore},
+		"-credential": {Value: true, Role: RoleIgnore}, "-raw": {}, "-wait": {}, "-force": {}, "-asbytestream": {}},
+	"copy-item": {"-filter": {Value: true, Role: RoleIgnore}, "-include": {Value: true, Role: RoleIgnore}, "-exclude": {Value: true, Role: RoleIgnore},
+		"-credential": {Value: true, Role: RoleIgnore}, "-force": {}, "-recurse": {}, "-container": {}, "-passthru": {}, "-noclobber": {}},
+	"move-item": {"-filter": {Value: true, Role: RoleIgnore}, "-include": {Value: true, Role: RoleIgnore}, "-exclude": {Value: true, Role: RoleIgnore},
+		"-credential": {Value: true, Role: RoleIgnore}, "-force": {}, "-passthru": {}, "-noclobber": {}},
+	"remove-item": {"-filter": {Value: true, Role: RoleIgnore}, "-include": {Value: true, Role: RoleIgnore}, "-exclude": {Value: true, Role: RoleIgnore},
+		"-credential": {Value: true, Role: RoleIgnore}, "-stream": {Value: true, Role: RoleIgnore}},
+	"new-item": {"-credential": {Value: true, Role: RoleIgnore}, "-type": {Value: true, Role: RoleIgnore}, "-force": {}},
+}
+
+var psWriterParameters = map[string]Flag{
+	"-encoding": {Value: true, Role: RoleIgnore}, "-inputobject": {Value: true, Role: RoleIgnore}, "-stream": {Value: true, Role: RoleIgnore},
+	"-width": {Value: true, Role: RoleIgnore}, "-credential": {Value: true, Role: RoleIgnore},
+	"-include": {Value: true, Role: RoleIgnore}, "-exclude": {Value: true, Role: RoleIgnore}, "-filter": {Value: true, Role: RoleIgnore},
+	"-nonewline": {}, "-force": {}, "-passthru": {}, "-append": {}, "-noclobber": {}, "-asbytestream": {}, "-usetransaction": {},
+}
+
+// addPSParameters merges the common and per-cmdlet parameters into every
+// PowerShell cmdlet row of the Windows table.
+func addPSParameters() {
+	for name, p := range windowsTable {
+		if len(p.Names) == 0 || !strings.Contains(p.Names[0], "-") {
+			continue
+		}
+		merged := map[string]Flag{}
+		for k, v := range p.Flags {
+			merged[k] = v
+		}
+		for k, v := range psCommonParameters {
+			if _, ok := merged[k]; !ok {
+				merged[k] = v
+			}
+		}
+		for k, v := range psCmdletParameters[strings.ToLower(p.Names[0])] {
+			if _, ok := merged[k]; !ok {
+				merged[k] = v
+			}
+		}
+		p.Flags = merged
+		windowsTable[name] = p
+	}
 }

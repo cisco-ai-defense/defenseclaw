@@ -1,9 +1,6 @@
 package effects
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestReviewProbesR3b(t *testing.T) {
 	H := homeOpts()
@@ -117,7 +114,6 @@ func TestReviewProbesR3b(t *testing.T) {
 		{"Z48 ln -s rel ok", envOpts, `ln -s ../.ssh/authorized_keys /home/u/proj/k`},
 	}
 	for _, p := range cs {
-		r := Extract(sh(p.c), p.o)
-		t.Logf("### %s :: %q\n%s", p.n, p.c, strings.TrimRight(fmtRes(r), "\n"))
+		checkRow(t, p.n, p.o, sh(p.c), "")
 	}
 }

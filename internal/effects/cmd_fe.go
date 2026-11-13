@@ -15,6 +15,7 @@ import "strings"
 func parseCMD(command string, o Options) *Script {
 	s := &Script{Dialect: DialectCMD}
 	prevOp := OpNone
+	var groups cmdGroups
 	for _, raw := range splitCMDStatements(command) {
 		op := raw.op
 		seg := strings.TrimSpace(raw.text)
@@ -26,7 +27,23 @@ func parseCMD(command string, o Options) *Script {
 		// operator that preceded it (review N14/N8).
 		cond := prevOp == OpAnd || prevOp == OpOr
 		pipeIn := prevOp == OpPipe
+		link := OpNone
+		if cond {
+			link = prevOp // the status of the previous segment gates this one (round 8 F)
+		}
 		prevOp = op
+		// ( ) groups and the if / else / for prefixes: the commands inside run
+		// (under a condition for if/else/for); the grouping punctuation is not
+		// part of any word (round 8, K29/Y09).
+		var segCond, segUnknown bool
+		seg, segCond, segUnknown = groups.prepare(seg)
+		if segUnknown {
+			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonUnparsedConstruct})
+		}
+		cond = cond || segCond
+		if seg == "" {
+			continue
+		}
 		c := &Cmd{PipeIn: pipeIn, Cond: cond, Span: [2]int{raw.start, raw.start + len(raw.text)}}
 		for _, it := range tokenizeCMD(seg) {
 			if it.redir != "" {
@@ -53,7 +70,7 @@ func parseCMD(command string, o Options) *Script {
 		if len(c.Words) == 0 && len(c.Redirs) == 0 {
 			continue
 		}
-		s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}, Op: op, Cond: cond, Span: c.Span})
+		s.Stmts = append(s.Stmts, &Stmt{Cmds: []*Cmd{c}, Op: op, Cond: cond, Link: link, Span: c.Span})
 	}
 	return s
 }
@@ -286,4 +303,135 @@ func cmdSegs(tok string) []WordSeg {
 		segs = []WordSeg{{Lit: ""}}
 	}
 	return segs
+}
+
+// cmdGroups tracks the open ( ) groups of a cmd line: each entry says whether
+// the group is the body of an if / else / for (its commands run on some paths).
+type cmdGroups struct{ stack []bool }
+
+func (g *cmdGroups) anyCond() bool {
+	for _, c := range g.stack {
+		if c {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCmdKeyword reports a leading keyword (case-insensitive) followed by space,
+// "(" or the end of the text.
+func hasCmdKeyword(s, kw string) bool {
+	if len(s) < len(kw) || !strings.EqualFold(s[:len(kw)], kw) {
+		return false
+	}
+	return len(s) == len(kw) || s[len(kw)] == ' ' || s[len(kw)] == '\t' || s[len(kw)] == '('
+}
+
+// prepare strips the grouping punctuation and the if / else / for prefixes from
+// one cmd segment and reports whether the rest runs conditionally. unknown is
+// set when a prefix could not be parsed (the statement is dropped, and the
+// script is not fully known) or when it is a for loop (its variables are not
+// modeled).
+func (g *cmdGroups) prepare(seg string) (rest string, cond, unknown bool) {
+	rest = strings.TrimSpace(seg)
+	pending := false
+loop:
+	for iter := 0; iter < 32; iter++ {
+		rest = strings.TrimSpace(rest)
+		switch {
+		case strings.HasPrefix(rest, "("):
+			g.stack = append(g.stack, pending)
+			pending = false
+			rest = rest[1:]
+		case strings.HasPrefix(rest, ")") && len(g.stack) > 0:
+			g.stack = g.stack[:len(g.stack)-1]
+			rest = rest[1:]
+		case hasCmdKeyword(rest, "else"):
+			rest = rest[4:]
+			pending = true
+		case hasCmdKeyword(rest, "if"):
+			r, ok := stripCmdIfCondition(rest[2:])
+			if !ok {
+				return "", true, true
+			}
+			rest = r
+			pending = true
+		case hasCmdKeyword(rest, "for"):
+			low := strings.ToLower(rest)
+			i := strings.Index(low, " do ")
+			if i < 0 {
+				return "", true, true
+			}
+			rest = rest[i+4:]
+			pending = true
+			unknown = true
+		default:
+			break loop
+		}
+	}
+	cond = pending || g.anyCond()
+	for len(g.stack) > 0 && strings.HasSuffix(rest, ")") {
+		rest = strings.TrimSpace(rest[:len(rest)-1])
+		g.stack = g.stack[:len(g.stack)-1]
+	}
+	return rest, cond, unknown
+}
+
+// stripCmdIfCondition removes the condition of a cmd `if` (after the keyword)
+// and returns the command that follows it.
+func stripCmdIfCondition(s string) (string, bool) {
+	toks := func(s string, n int) ([]string, string) {
+		var out []string
+		s = strings.TrimSpace(s)
+		for len(out) < n && s != "" {
+			inQ := false
+			end := len(s)
+			for i := 0; i < len(s); i++ {
+				if s[i] == '"' {
+					inQ = !inQ
+				}
+				if !inQ && (s[i] == ' ' || s[i] == '\t') {
+					end = i
+					break
+				}
+			}
+			out = append(out, s[:end])
+			s = strings.TrimSpace(s[end:])
+		}
+		return out, s
+	}
+	s = strings.TrimSpace(s)
+	for {
+		t, r := toks(s, 1)
+		if len(t) == 1 && (strings.EqualFold(t[0], "/i") || strings.EqualFold(t[0], "not")) {
+			s = r
+			continue
+		}
+		break
+	}
+	t, _ := toks(s, 1)
+	if len(t) == 0 {
+		return "", false
+	}
+	switch strings.ToLower(t[0]) {
+	case "exist", "defined", "errorlevel", "cmdextversion":
+		_, r := toks(s, 2)
+		return r, true
+	}
+	if strings.Contains(t[0], "==") {
+		_, r := toks(s, 1)
+		if strings.HasSuffix(t[0], "==") || strings.HasPrefix(t[0], "==") {
+			// "a ==b" / "a== b": the other operand is the next token.
+			_, r = toks(s, 2)
+		}
+		return r, true
+	}
+	t3, r3 := toks(s, 3)
+	if len(t3) == 3 {
+		switch strings.ToLower(t3[1]) {
+		case "==", "equ", "neq", "lss", "leq", "gtr", "geq":
+			return r3, true
+		}
+	}
+	return "", false
 }

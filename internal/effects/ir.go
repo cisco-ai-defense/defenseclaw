@@ -37,7 +37,11 @@ type Stmt struct {
 	// Cond is true when the statement runs only on some execution paths.
 	Cond       bool
 	Background bool
-	Span       [2]int
+	// Link is OpAnd / OpOr when this statement runs only on the success /
+	// failure of the statement before it (the right side of `a && b`, `a || b`).
+	// The walker uses it to know a cd's outcome (round 8 F); OpNone otherwise.
+	Link Op
+	Span [2]int
 }
 
 // Cmd is one simple command or pipeline stage.
