@@ -285,27 +285,49 @@ func TestSecretFlowDispatchMCPAndOneCall(t *testing.T) {
 	})
 }
 
-// A Windows host places every call in the Windows path namespace; a bare shell
-// command there is Git Bash's POSIX grammar. Other hosts are unchanged.
+// A Windows host places a call with Windows paths in the Windows namespace (a
+// bare shell command there is Git Bash's POSIX grammar); a POSIX-shaped cwd and
+// other hosts are unchanged.
 func TestSecretFlowHostOptions(t *testing.T) {
 	shell := effects.Call{Surface: effects.SurfaceShell, Command: "cat .env"}
 	file := effects.Call{Surface: effects.SurfaceFileTool, Tool: "Read"}
-	got := secretFlowHostOptionsFor("windows", shell, effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone})
+	winCWD := effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone, CWD: `C:\Users\u\p`}
+	got := secretFlowHostOptionsFor("windows", shell, winCWD)
 	if got.Flavor != effects.FlavorWindows || got.Dialect != effects.DialectPOSIX {
-		t.Errorf("windows host, bare shell: flavor=%v dialect=%v", got.Flavor, got.Dialect)
+		t.Errorf("windows host, windows cwd, bare shell: flavor=%v dialect=%v", got.Flavor, got.Dialect)
+	}
+	got = secretFlowHostOptionsFor("windows", file, winCWD)
+	if got.Flavor != effects.FlavorWindows || got.Dialect != effects.DialectNone {
+		t.Errorf("windows host, windows cwd, file tool: flavor=%v dialect=%v", got.Flavor, got.Dialect)
 	}
 	got = secretFlowHostOptionsFor("windows", file, effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone})
-	if got.Flavor != effects.FlavorWindows || got.Dialect != effects.DialectNone {
-		t.Errorf("windows host, file tool: flavor=%v dialect=%v", got.Flavor, got.Dialect)
+	if got.Flavor != effects.FlavorWindows {
+		t.Errorf("windows host, no cwd, file tool: flavor=%v", got.Flavor)
+	}
+	posixCWD := effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone, CWD: "/home/u/p"}
+	if got = secretFlowHostOptionsFor("windows", shell, posixCWD); got.Flavor != effects.FlavorPOSIX {
+		t.Errorf("windows host, POSIX cwd keeps the POSIX flavor: %v", got.Flavor)
+	}
+	if got = secretFlowHostOptionsFor("windows", shell, effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone}); got.Flavor != effects.FlavorPOSIX {
+		t.Errorf("windows host, bare shell with no cwd keeps the POSIX flavor: %v", got.Flavor)
 	}
 	ps := effects.Options{Flavor: effects.FlavorWindows, Dialect: effects.DialectPowerShell}
 	if got = secretFlowHostOptionsFor("windows", shell, ps); got.Flavor != ps.Flavor || got.Dialect != ps.Dialect {
 		t.Errorf("an explicit PowerShell dialect is kept: %+v", got)
 	}
-	posix := effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone}
 	for _, goos := range []string{"linux", "darwin"} {
-		if got = secretFlowHostOptionsFor(goos, shell, posix); got.Flavor != posix.Flavor || got.Dialect != posix.Dialect {
-			t.Errorf("%s host changed the options: %+v", goos, got)
+		if got = secretFlowHostOptionsFor(goos, shell, winCWD); got.Flavor != effects.FlavorPOSIX {
+			t.Errorf("%s host changed the flavor: %v", goos, got.Flavor)
+		}
+	}
+	for _, p := range []string{`C:\x`, `d:/x`, `\\srv\share`} {
+		if !windowsShapedPath(p) {
+			t.Errorf("%q is a Windows path", p)
+		}
+	}
+	for _, p := range []string{"", "/home/u", "relative", "C:"} {
+		if windowsShapedPath(p) {
+			t.Errorf("%q is not a Windows path", p)
 		}
 	}
 }

@@ -143,12 +143,15 @@ func secretFlowResultText(payload map[string]interface{}, content string) string
 	return sb.String()
 }
 
-// secretFlowHostOptions places a call in the path namespace of the host the
-// hook runs on. A hook runs on the same machine as its agent, so on a Windows
-// host every path (a Read tool's C:\... path, a Git Bash command's cwd) is a
-// Windows path whatever the shell: the flavor is Windows, and a shell command
-// with no PowerShell/cmd hint is read as the POSIX grammar of Git Bash. Without
-// this a Windows cwd on a POSIX flavor is unplaceable and no read is labeled.
+// secretFlowHostOptions places a call in the Windows path namespace when the
+// hook runs on a Windows host and the call's own paths are Windows paths. A
+// hook runs on the same machine as its agent, so a Claude Code Bash call under
+// Git Bash, or a Read tool call, there carries a C:\... working directory or
+// path whatever the shell. On a POSIX flavor that cwd is unplaceable
+// (dynamic_cwd) and no read is ever labeled; on the Windows flavor, with the
+// POSIX grammar of Git Bash for a bare shell command, it is placed. A call with
+// a POSIX-shaped cwd (a sandbox guest, a test) keeps the POSIX flavor, where
+// absolute POSIX paths such as /tmp stay placeable.
 func secretFlowHostOptions(call effects.Call, opts effects.Options) effects.Options {
 	return secretFlowHostOptionsFor(runtime.GOOS, call, opts)
 }
@@ -157,11 +160,30 @@ func secretFlowHostOptionsFor(goos string, call effects.Call, opts effects.Optio
 	if goos != "windows" || opts.Flavor == effects.FlavorWindows {
 		return opts
 	}
+	cwd := strings.TrimSpace(opts.CWD)
+	if cwd == "" {
+		cwd = strings.TrimSpace(call.Workdir)
+	}
+	switch {
+	case windowsShapedPath(cwd):
+	case cwd == "" && call.Surface != effects.SurfaceShell && call.Surface != effects.SurfaceArgv:
+	default:
+		return opts
+	}
 	opts.Flavor = effects.FlavorWindows
 	if (opts.Dialect == effects.DialectNone || opts.Dialect == "") && call.Surface == effects.SurfaceShell {
 		opts.Dialect = effects.DialectPOSIX
 	}
 	return opts
+}
+
+// windowsShapedPath reports a drive-letter or UNC path.
+func windowsShapedPath(p string) bool {
+	if len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/') &&
+		(p[0] >= 'a' && p[0] <= 'z' || p[0] >= 'A' && p[0] <= 'Z') {
+		return true
+	}
+	return strings.HasPrefix(p, `\\`)
 }
 
 // secretFlowCaseInsensitive reports a path namespace that folds case: Windows
