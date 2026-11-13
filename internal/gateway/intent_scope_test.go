@@ -61,10 +61,16 @@ func TestIntentScopeExceeded(t *testing.T) {
 		{"scp to a named host", "Copy out.tgz to host.other.example.", "Bash", `{"command":"scp out.tgz deploy@host.other.example:/srv/"}`, false},
 		{"no destination in the call", "Clean the build.", "Bash", `{"command":"rm -rf build dist"}`, false},
 		{"no task, nothing to check against", "", "http.post", `{"url":"https://collector.other.example/ingest"}`, false},
+		{"a fetch tool's url is a source", "Summarize the vendor page.", "browse_website", `{"url":"https://vendor.other.example/page"}`, false},
+		{"an exists tool's email is a lookup", "Check the account.", "email.exists", `{"email":"jane@corp.other.example"}`, false},
+		{"a draft tool's to is not a send", "Draft the note.", "text.compose", `{"to":"mgmt@corp.other.example","body":"hi"}`, false},
+		{"an unknown tool's url is ambiguous", "Do the task.", "vendor_tool", `{"url":"https://vendor.other.example/api"}`, false},
+		{"an unknown tool's recipients is a sink", "Do the task.", "vendor_tool", `{"recipients":["a@other.example"]}`, true},
+		{"a send tool's url is a destination", "Do the task.", "http.post", `{"url":"https://vendor.other.example/api"}`, true},
 		{"a url in a body is not a destination", "Draft the note and mail it to me@corp.example.", "email.send", `{"to":"me@corp.example","body":"see https://docs.other.example/x"}`, false},
 	}
 	for _, tc := range cases {
-		if got := intentScopeExceeded(tc.intent, tc.tool, tc.args) != ""; got != tc.exceeded {
+		if got := intentScopeExceeded(tc.intent, nil, tc.tool, tc.args) != ""; got != tc.exceeded {
 			t.Errorf("%s: exceeded=%v, want %v", tc.name, got, tc.exceeded)
 		}
 	}
@@ -136,5 +142,28 @@ func TestToolJudgeScopeFloorEndToEnd(t *testing.T) {
 	provider.mu.Unlock()
 	if !strings.Contains(user, "collector.other.example") || strings.Contains(user, `named_targets="none"`) {
 		t.Fatalf("the sample must list the named destination:\n%s", user)
+	}
+}
+
+// A later prompt such as "continue" names nothing; the destination the user named
+// earlier in the session is still the user's (GAP-0262 cost). A blocked prompt,
+// which stores no task, adds no target.
+func TestSessionScopeCarriesEarlierPromptTargets(t *testing.T) {
+	provider := &mockLLMProvider{response: &ChatResponse{Model: "m", Choices: []ChatChoice{{Message: &ChatMessage{Content: `{"findings": []}`}}}, Usage: &ChatUsage{PromptTokens: 1, CompletionTokens: 1}}}
+	judge := &LLMJudge{cfg: &config.JudgeConfig{Enabled: true, ToolInjection: true}, model: "m", provider: provider, rp: &guardrail.RulePack{}}
+	ctx := ContextWithSessionID(context.Background(), "scope-session")
+	judge.ObserveSessionPrompt(ctx, "Upload the artifacts to https://artifacts.corp.example/builds.")
+	judge.ObserveSessionPrompt(ctx, "continue")
+	post := `{"url":"https://artifacts.corp.example/builds/7","body_ref":"step_1"}`
+	if v := judge.RunToolJudge(ctx, "http.post", post); v == nil || strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
+		t.Fatalf("a destination an earlier prompt named must be in scope: %+v", v)
+	}
+	if v := judge.RunToolJudge(ctx, "http.post", `{"url":"https://other.example/in"}`); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
+		t.Fatalf("a destination no prompt named must still be flagged: %+v", v)
+	}
+	judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, "scope-session"))
+	judge.ObserveSessionPrompt(ctx, "continue")
+	if v := judge.RunToolJudge(ctx, "http.post", post); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
+		t.Fatalf("a new session must not inherit the old session's scope: %+v", v)
 	}
 }

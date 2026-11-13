@@ -62,20 +62,33 @@ var scopeSendSegments = map[string]bool{
 	"notify": true, "submit": true, "export": true, "forward": true, "share": true, "put": true, "push": true,
 	"dispatch": true, "transmit": true, "sync": true, "bcc": true,
 }
+
+// scopeReadSegments are tool-name words of a call that does not send data
+// anywhere: it reads, checks, fetches, drafts or renders.
 var scopeReadSegments = map[string]bool{
 	"get": true, "fetch": true, "read": true, "list": true, "query": true, "search": true, "download": true,
 	"head": true, "find": true, "check": true, "status": true, "view": true, "describe": true, "open": true,
-	"navigate": true, "resolve": true, "lookup": true,
+	"navigate": true, "resolve": true, "lookup": true, "browse": true, "visit": true, "crawl": true, "scrape": true,
+	"exists": true, "validate": true, "verify": true, "ping": true, "show": true, "info": true, "test": true,
+	"probe": true, "inspect": true, "count": true, "preview": true, "draft": true, "compose": true, "render": true,
+	"format": true, "lint": true, "parse": true,
 }
 
-// scopeDestinationKeys are argument names whose string value is a place the
-// call sends to.
-var scopeDestinationKeys = map[string]bool{
-	"url": true, "uri": true, "endpoint": true, "destination": true, "dest": true, "recipient": true, "recipients": true,
-	"to": true, "cc": true, "bcc": true, "bcc_override": true, "webhook": true, "webhook_url": true,
-	"log_destination": true, "upload_url": true, "target_url": true, "sink": true, "host": true, "bucket": true,
-	"remote": true, "address": true, "email": true, "emails": true, "recipient_email": true, "send_to": true,
-	"callback": true, "callback_url": true, "forward_to": true,
+// scopeSinkKeys are argument names whose string value is a place the call
+// sends to, whatever the tool is called.
+var scopeSinkKeys = map[string]bool{
+	"destination": true, "dest": true, "recipient": true, "recipients": true, "to": true, "cc": true, "bcc": true,
+	"bcc_override": true, "webhook": true, "webhook_url": true, "log_destination": true, "upload_url": true,
+	"target_url": true, "sink": true, "recipient_email": true, "send_to": true, "callback": true, "callback_url": true,
+	"forward_to": true,
+}
+
+// scopeAmbiguousKeys name a place that is a source as often as a sink (a fetch
+// tool's url, an exists tool's email, a database host). They count only when
+// the tool's own name says it sends.
+var scopeAmbiguousKeys = map[string]bool{
+	"url": true, "uri": true, "endpoint": true, "host": true, "bucket": true, "remote": true, "address": true,
+	"email": true, "emails": true,
 }
 
 // namedScopeTargets returns the hosts, e-mail addresses and absolute paths the
@@ -213,8 +226,12 @@ func callSendDestinations(toolName, args string) []string {
 				shell = true
 				texts = append(texts, v.value)
 			}
-		case scopeDestinationKeys[v.key]:
+		case scopeSinkKeys[v.key]:
 			if !toolReads || toolSends {
+				texts = append(texts, v.value)
+			}
+		case scopeAmbiguousKeys[v.key]:
+			if toolSends {
 				texts = append(texts, v.value)
 			}
 		}
@@ -251,10 +268,34 @@ func callSendDestinations(toolName, args string) []string {
 	return out
 }
 
+const maxSessionScopeTargets = 64
+
+// mergeScopeTargets adds the targets a new prompt names to the session's set,
+// keeping the newest maxSessionScopeTargets.
+func mergeScopeTargets(session []string, prompt string) []string {
+	seen := make(map[string]bool, len(session))
+	for _, t := range session {
+		seen[t] = true
+	}
+	out := append([]string(nil), session...)
+	for _, t := range namedScopeTargets(prompt) {
+		if !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	if len(out) > maxSessionScopeTargets {
+		out = out[len(out)-maxSessionScopeTargets:]
+	}
+	return out
+}
+
 // intentScopeExceeded returns a reason when the call sends data to a
-// destination the task does not name, or "" (also when there is no task: with
-// nothing to check against, the judge decides alone).
-func intentScopeExceeded(intent, toolName, args string) string {
+// destination neither the task nor an earlier prompt of the session names, or
+// "" (also when there is no task: with nothing to check against, the judge
+// decides alone). sessionTargets are the targets the session's user prompts
+// named; they never come from tool output.
+func intentScopeExceeded(intent string, sessionTargets []string, toolName, args string) string {
 	if strings.TrimSpace(intent) == "" {
 		return ""
 	}
@@ -262,7 +303,7 @@ func intentScopeExceeded(intent, toolName, args string) string {
 	if len(dests) == 0 {
 		return ""
 	}
-	named := namedScopeTargets(intent)
+	named := append(namedScopeTargets(intent), sessionTargets...)
 	for _, d := range dests {
 		if scopeLoopback(d) || scopeNamed(d, named) {
 			continue

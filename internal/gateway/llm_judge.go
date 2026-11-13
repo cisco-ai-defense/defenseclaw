@@ -146,8 +146,12 @@ type LLMJudge struct {
 
 type toolJudgeSessionContext struct {
 	userIntent string
-	events     []toolJudgeContextEvent
-	lastSeen   time.Time
+	// scopeTargets are the hosts, addresses and paths every user prompt of the
+	// session has named (intent_scope.go); the latest prompt alone does not
+	// carry them when it says "continue".
+	scopeTargets []string
+	events       []toolJudgeContextEvent
+	lastSeen     time.Time
 }
 
 type toolJudgeContextEvent struct {
@@ -2225,7 +2229,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		// addresses and paths the task names, or none. The task is a scope to
 		// check a call against, not a permission.
 		targets := "none"
-		if named := namedScopeTargets(entry.userIntent); len(named) > 0 {
+		if named := mergeScopeTargets(entry.scopeTargets, entry.userIntent); len(named) > 0 {
 			targets = strings.Join(named, ", ")
 		}
 		fmt.Fprintf(&sample, "<SESSION_USER_INTENT untrusted=\"true\" named_targets=%q>\n", targets)
@@ -2239,7 +2243,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
-	if reason := intentScopeExceeded(entry.userIntent, toolName, args); reason != "" {
+	if reason := intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args); reason != "" {
 		j.keepScopeFloor(sample.String(), reason)
 	}
 	if j.decision != nil {
@@ -2301,8 +2305,11 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 		j.pruneToolJudgeContextLocked(now)
 	}
 	entry := toolJudgeSessionContext{lastSeen: now}
+	prior := j.toolContext[sessionID]
+	entry.scopeTargets = prior.scopeTargets
 	if content != "" {
 		entry.userIntent = toolJudgeUserIntentExcerpt(content)
+		entry.scopeTargets = mergeScopeTargets(prior.scopeTargets, content)
 	}
 	j.toolContext[sessionID] = entry
 }
