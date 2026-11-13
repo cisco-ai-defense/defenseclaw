@@ -96,15 +96,15 @@ func TestBedrockSigV4ProfileAndDefaultChain(t *testing.T) {
 	}
 	var cache bedrockSigners
 	b := &config.RoutingBedrockAuthConfig{Auth: config.RoutingBedrockAuthProfile, Profile: "dc-route", Region: "eu-central-1"}
-	s, err := cache.get(&config.Config{}, b, "https://gw.corp.example")
+	s, err := cache.get(&config.Config{}, b, "https://bedrock-runtime.eu-central-1.amazonaws.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := signForTest(t, s, "https://gw.corp.example/model/m/invoke", []byte("{}"), nil)
+	w := signForTest(t, s, "https://bedrock-runtime.eu-central-1.amazonaws.com/model/m/invoke", []byte("{}"), nil)
 	if scope, err := verifySigV4(w, "profile-secret"); err != nil || scope[1] != "eu-central-1" {
 		t.Fatalf("profile signature: scope %v, %v", scope, err)
 	}
-	if _, err := cache.get(&config.Config{}, &config.RoutingBedrockAuthConfig{Auth: config.RoutingBedrockAuthProfile, Profile: "missing", Region: "us-east-1"}, "https://gw.corp.example"); err == nil {
+	if _, err := cache.get(&config.Config{}, &config.RoutingBedrockAuthConfig{Auth: config.RoutingBedrockAuthProfile, Profile: "missing", Region: "us-east-1"}, "https://bedrock-runtime.us-east-1.amazonaws.com"); err == nil {
 		t.Fatal("a missing profile built a signer")
 	}
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDCHAIN")

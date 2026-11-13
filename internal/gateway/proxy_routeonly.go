@@ -174,13 +174,19 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and every upstream attempt is signed here.
 	var signer *bedrockSigner
 	if bedrockGatewaySigning(upstream.Bedrock) {
+		// Only the four model calls the routing gate judges are signed with
+		// the gateway identity; anything else is refused before signing.
+		if !bedrockSignableRequest(r.Method, native) {
+			routeOnlyError(w, http.StatusForbidden, "permission_error", "DefenseClaw signs only Bedrock Converse and InvokeModel calls (POST /model/{id}/converse, converse-stream, invoke or invoke-with-response-stream)")
+			return
+		}
 		if strings.HasPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "AWS4-HMAC-SHA256") {
 			routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "the agent signed this Bedrock request itself (for the loopback host); set CLAUDE_CODE_SKIP_BEDROCK_AUTH=1 by running the routing enable step again")
 			return
 		}
 		sg, err := s.signers.get(cfg, upstream.Bedrock, upstream.BaseURL)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[routing] route-only %s: gateway Bedrock signing unavailable: %v\n", connector, err)
+			bedrockSignLogf("setup:"+connector, "[routing] route-only %s: gateway Bedrock signing unavailable: %v\n", connector, err)
 			routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "gateway Bedrock signing is not ready for routing.route_only.upstreams."+connector+".bedrock; run defenseclaw doctor")
 			return
 		}
@@ -200,7 +206,13 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bodies are buffered under one global budget; a request that does not
 	// fit streams to the configured upstream unrouted (never refused).
+	// A signed call cannot stream unhashed: when the budget is full it is
+	// answered overloaded (the agent retries); 413 stays for the 64 MiB cap.
 	if r.ContentLength > routeOnlyBodyCap || !s.holdBody(max(r.ContentLength, 0)) {
+		if signer != nil && r.ContentLength <= routeOnlyBodyCap {
+			routeOnlyOverloaded(w)
+			return
+		}
 		s.forward(w, r, original, nil, r.Body)
 		return
 	}
@@ -213,6 +225,10 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if extra := int64(len(body)) - charged; extra > 0 {
 		if !s.holdBody(extra) {
+			if signer != nil && over == nil {
+				routeOnlyOverloaded(w)
+				return
+			}
 			s.forward(w, r, original, body, over)
 			return
 		}
@@ -246,6 +262,12 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Semantic-Router", "routed")
 	s.forwardWithRetry(w, r, *attempt, retry, body)
+}
+
+// routeOnlyOverloaded answers a signed call the buffer budget cannot hold.
+func routeOnlyOverloaded(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	routeOnlyError(w, http.StatusServiceUnavailable, "overloaded_error", "DefenseClaw is holding too many request bodies to sign; retry shortly")
 }
 
 func (s *routeOnlyServer) acquire(subject string) bool {
@@ -830,12 +852,9 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 		route.Bedrock = true
 		if bedrockGatewaySigning(up.Bedrock) {
 			// The agent skips its own AWS auth only when the gateway can
-			// sign; a signer that cannot start leaves the agent direct.
-			region, err := bedrockSigningRegion(up.Bedrock, up.BaseURL)
-			if err == nil {
-				_, err = newBedrockSigner(cfg, up.Bedrock, region)
-			}
-			if err != nil {
+			// sign now (one credential fetched); otherwise the agent stays
+			// direct.
+			if err := bedrockRenderReady(cfg, up.Bedrock, up.BaseURL); err != nil {
 				fmt.Fprintf(os.Stderr, "[routing] route-only for %s not rendered: gateway Bedrock signing cannot start: %v\n", connectorName, err)
 				return nil
 			}

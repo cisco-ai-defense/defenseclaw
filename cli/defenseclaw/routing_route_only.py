@@ -13,8 +13,11 @@ uninstall and rollback (DESIGN 7.5, 16.11, 17.5).
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
+import re
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,39 +53,114 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _claude_env() -> dict[str, str]:
+def _claude_settings() -> tuple[dict[str, str], dict[str, str], dict[str, Any]]:
+    """The agent env (shell merged with settings.json env), the settings.json
+    env block alone, and the settings document."""
     env = {k: v for k, v in os.environ.items() if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_", "AWS_"))}
     path = os.path.join(claude_config_dir(), "settings.json")
     try:
         with open(path, encoding="utf-8") as fh:
             settings = json.load(fh)
     except (OSError, ValueError):
-        return env
-    block = settings.get("env") if isinstance(settings, dict) else None
-    if isinstance(block, dict):
-        env.update({str(k): str(v) for k, v in block.items()})
-    return env
+        return env, {}, {}
+    if not isinstance(settings, dict):
+        return env, {}, {}
+    block = settings.get("env")
+    own = {str(k): str(v) for k, v in block.items()} if isinstance(block, dict) else {}
+    env.update(own)
+    return env, own, settings
+
+
+# Gateway signing sends the AWS credential only to an AWS Bedrock runtime
+# host (the gateway refuses others, internal/gateway/routeonly_sigv4.go).
+_BEDROCK_RUNTIME_HOST = re.compile(
+    r"(?:^|\.)bedrock-runtime(?:-fips)?\.[a-z]{2}(?:-[a-z]+)+-[0-9]+\.(?:vpce\.)?amazonaws\.com(?:\.cn)?$"
+)
+
+_SIGNING_OPTIONS = (
+    "use a Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) "
+    "or name an AWS profile (AWS_PROFILE) in ~/.aws that the gateway can read"
+)
+
+
+def _aws_file(env: dict[str, str], own: dict[str, str], name: str, default: str) -> str:
+    """The AWS shared file the agent reads. A path set only in settings.json
+    env is seen by Claude Code and never by the gateway: refused."""
+    path = (env.get(name) or "").strip()
+    if path and own.get(name, "").strip() == path and os.environ.get(name, "").strip() != path:
+        raise RouteOnlyError(
+            f"Claude Code reads AWS profiles from {name}={path} (settings.json env), "
+            "which the DefenseClaw gateway does not read; "
+            f"move the profile to {default} or {_SIGNING_OPTIONS}"
+        )
+    return os.path.expanduser(path or default)
+
+
+def _aws_profile_exists(env: dict[str, str], own: dict[str, str], profile: str) -> bool:
+    config_file = _aws_file(env, own, "AWS_CONFIG_FILE", os.path.join("~", ".aws", "config"))
+    creds_file = _aws_file(env, own, "AWS_SHARED_CREDENTIALS_FILE", os.path.join("~", ".aws", "credentials"))
+    in_config = {f"profile {profile}"} | ({"default"} if profile == "default" else set())
+    wanted = {config_file: in_config, creds_file: {profile}}
+    for path, sections in wanted.items():
+        parser = configparser.RawConfigParser(strict=False, interpolation=None)
+        try:
+            parser.read(path, encoding="utf-8")
+        except (OSError, configparser.Error) as exc:
+            raise RouteOnlyError(f"cannot read the AWS file {path}: {exc}") from exc
+        if sections & {s.strip() for s in parser.sections()}:
+            return True
+    return False
+
+
+def _claude_bedrock_upstream(env: dict[str, str], own: dict[str, str], settings: dict[str, Any], base: str) -> Upstream:
+    """The route-only upstream of Claude Code on Bedrock (REVIEW-code-slice7 P2-2)."""
+    region = (env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1").strip()
+    upstream = base.rstrip("/") or f"https://bedrock-runtime.{region}.amazonaws.com"
+    if _truthy(env.get("CLAUDE_CODE_SKIP_BEDROCK_AUTH")):
+        # The user already skips AWS auth (their own gateway signs): the
+        # gateway passes the call through and adds no credential.
+        return Upstream(upstream, "invoke", "passthrough", bedrock_region=region)
+    if env.get("AWS_BEARER_TOKEN_BEDROCK"):
+        # A Bedrock API key is not bound to the path: passed through.
+        return Upstream(upstream, "invoke", "passthrough", bedrock_region=region)
+    # IAM credentials: the agent skips its own AWS auth and the gateway signs
+    # with the same profile (its SigV4 would name the loopback host).
+    for key in ("awsCredentialExport", "awsAuthRefresh"):
+        if settings.get(key):
+            raise RouteOnlyError(
+                f"Claude Code gets its AWS credentials from settings.json {key}, "
+                f"which the DefenseClaw gateway cannot run; {_SIGNING_OPTIONS}"
+            )
+    profile = (env.get("AWS_PROFILE") or "").strip()
+    if not profile and env.get("AWS_ACCESS_KEY_ID"):
+        raise RouteOnlyError(
+            "Claude Code signs Bedrock calls with AWS_ACCESS_KEY_ID from its environment, "
+            f"which the DefenseClaw gateway does not have; {_SIGNING_OPTIONS}"
+        )
+    profile = profile or "default"
+    host = (urllib.parse.urlsplit(upstream).hostname or "").lower()
+    if urllib.parse.urlsplit(upstream).scheme != "https" or not _BEDROCK_RUNTIME_HOST.search(host):
+        raise RouteOnlyError(
+            "gateway Bedrock signing sends AWS credentials only to an https "
+            f"bedrock-runtime.<region>.amazonaws.com host, not {upstream}; {_SIGNING_OPTIONS}"
+        )
+    if not _aws_profile_exists(env, own, profile):
+        raise RouteOnlyError(
+            f"the AWS profile {profile!r} is not in the AWS config or credentials file; {_SIGNING_OPTIONS}"
+        )
+    return Upstream(upstream, "invoke", "profile", bedrock_profile=profile, bedrock_region=region)
 
 
 def detect_upstream(connector: str) -> Upstream | None:
     """Where the agent sends model calls today; None when it already points
     at a DefenseClaw route-only endpoint (keep the recorded upstream)."""
     if connector == "claudecode":
-        env = _claude_env()
+        env, own, settings = _claude_settings()
         if _truthy(env.get("CLAUDE_CODE_USE_BEDROCK")):
             base = env.get("ANTHROPIC_BEDROCK_BASE_URL", "").strip()
             if _ROUTE_PREFIX + "claudecode" in base:
                 return None
-            region = (env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1").strip()
-            upstream = base.rstrip("/") or f"https://bedrock-runtime.{region}.amazonaws.com"
-            if env.get("AWS_BEARER_TOKEN_BEDROCK"):
-                # A Bedrock API key is not bound to the path: passed through.
-                return Upstream(upstream, "invoke", "passthrough", bedrock_region=region)
-            # IAM credentials: the agent skips its own AWS auth and the
-            # gateway signs with the same profile (its SigV4 would name the
-            # loopback host).
-            profile = (env.get("AWS_PROFILE") or "").strip() or "default"
-            return Upstream(upstream, "invoke", "profile", bedrock_profile=profile, bedrock_region=region)
+            return _claude_bedrock_upstream(env, own, settings, base)
         base = env.get("ANTHROPIC_BASE_URL", "").strip()
         if _ROUTE_PREFIX + "claudecode" in base:
             return None

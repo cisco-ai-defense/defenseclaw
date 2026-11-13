@@ -181,3 +181,37 @@ func TestClaudeCodeRouteOnlyBedrockGatewaySigningLostRecord(t *testing.T) {
 		t.Fatalf("restore removed a user skip: %v", env)
 	}
 }
+
+// REVIEW-code-slice7 P3-3: a re-render after the record was lost does not
+// keep our CLAUDE_CODE_SKIP_BEDROCK_AUTH=1 as the user value.
+func TestClaudeCodeRouteOnlyLostRecordReRenderOwnsTheSkip(t *testing.T) {
+	c := NewClaudeCodeConnector()
+	signing := &RouteOnlySetup{BaseURL: "http://127.0.0.1:4100/r/claudecode", Token: "t", Bedrock: true, GatewaySigning: true}
+	for name, next := range map[string]*RouteOnlySetup{
+		"signing again":   signing,
+		"now passthrough": {BaseURL: "http://127.0.0.1:4100/r/claudecode", Token: "t", Bedrock: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path, opts := routeSettingsFixture(t, "{\n  \"env\": {\n    \"CLAUDE_CODE_USE_BEDROCK\": \"1\"\n  }\n}")
+			if err := c.ApplyRouteOnly(opts, signing); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(routeBackupPath(opts.DataDir, "claudecode")); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.ApplyRouteOnly(opts, next); err != nil {
+				t.Fatal(err)
+			}
+			if env := readEnv(t, path); !next.GatewaySigning && env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] != nil {
+				t.Fatalf("a passthrough re-render kept our skip: %v", env)
+			}
+			if err := c.ApplyRouteOnly(opts, nil); err != nil {
+				t.Fatal(err)
+			}
+			env := readEnv(t, path)
+			if env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] != nil || env["ANTHROPIC_BEDROCK_BASE_URL"] != nil || env["CLAUDE_CODE_USE_BEDROCK"] != "1" {
+				t.Fatalf("disable after a lost-record re-render left %v", env)
+			}
+		})
+	}
+}

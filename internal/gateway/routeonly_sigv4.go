@@ -43,9 +43,9 @@ const (
 // the request was never written.
 var errBedrockSigning = errors.New("gateway Bedrock signing failed")
 
-// errBedrockSignTooLarge: a body over the buffer cap or budget streams and
+// errBedrockSignTooLarge: a body over the 64 MiB buffer cap streams and
 // cannot be hashed first, so it cannot be signed (Bedrock has no unsigned
-// payload mode).
+// payload mode). A full buffer budget is answered overloaded instead.
 var errBedrockSignTooLarge = fmt.Errorf("%w: the request body is too large to sign", errBedrockSigning)
 
 // routeOnlySendError answers a failed upstream send in the provider form.
@@ -54,11 +54,98 @@ func routeOnlySendError(w http.ResponseWriter, err error, msg string) {
 	case errors.Is(err, errBedrockSignTooLarge):
 		routeOnlyError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "the request is too large for gateway Bedrock signing")
 	case errors.Is(err, errBedrockSigning):
-		fmt.Fprintf(os.Stderr, "[routing] route-only: %v\n", err)
+		bedrockSignLogf("send", "[routing] route-only: %v\n", err)
 		routeOnlyError(w, http.StatusBadGateway, "api_error", "gateway Bedrock signing failed (no usable AWS credential); run defenseclaw doctor")
 	default:
 		routeOnlyError(w, http.StatusBadGateway, "api_error", msg)
 	}
+}
+
+// routeOnlyLogLimiter lets one stderr line per key through each interval, so
+// a signing outage does not write a line per request (REVIEW-code-slice7
+// P3-7).
+type routeOnlyLogLimiter struct {
+	mu    sync.Mutex
+	every time.Duration
+	now   func() time.Time
+	last  map[string]time.Time
+}
+
+func (l *routeOnlyLogLimiter) allow(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	if t, ok := l.last[key]; ok && now.Sub(t) < l.every {
+		return false
+	}
+	if l.last == nil {
+		l.last = map[string]time.Time{}
+	}
+	l.last[key] = now
+	return true
+}
+
+var bedrockSignLog = &routeOnlyLogLimiter{every: time.Minute, now: time.Now}
+
+// bedrockSignLogf writes a signing failure line at most once a minute per key.
+func bedrockSignLogf(key, format string, args ...any) {
+	if bedrockSignLog.allow(key) {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
+}
+
+// bedrockSignableOp is the escaped native path of the only Bedrock calls the
+// gateway signs with its own identity: Converse and InvokeModel (streaming
+// or not) on one model id segment (an ARN keeps its %2F). StartAsyncInvoke,
+// CountTokens, ApplyGuardrail and the model list are not model calls the
+// routing gate judges, so they are never signed (REVIEW-code-slice7 P2-1).
+var bedrockSignableOp = regexp.MustCompile(`^/model/[^/]+/(?:converse|converse-stream|invoke|invoke-with-response-stream)$`)
+
+// bedrockSignableRequest reports a request the gateway may sign.
+func bedrockSignableRequest(method, native string) bool {
+	return method == http.MethodPost && bedrockSignableOp.MatchString(native)
+}
+
+// bedrockSignableURL reports an upstream the gateway sends its AWS
+// credential to: HTTPS to an AWS Bedrock runtime host only (P3-9). Tests
+// widen it to their loopback servers.
+var bedrockSignableURL = func(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && strings.EqualFold(u.Scheme, "https") && bedrockRegionFromURL(raw) != ""
+}
+
+// Credentials are refreshed a little before they expire, so a call is never
+// signed with one that lapses on the way (P3-5).
+const bedrockCredentialExpiryWindow = time.Minute
+
+func bedrockCacheOptions(o *aws.CredentialsCacheOptions) {
+	o.ExpiryWindow = bedrockCredentialExpiryWindow
+	o.ExpiryWindowJitterFrac = 0.5
+}
+
+func bedrockCredentialsCache(p aws.CredentialsProvider) *aws.CredentialsCache {
+	return aws.NewCredentialsCache(p, bedrockCacheOptions)
+}
+
+// stripAmzQuery drops X-Amz-* query keys (a presigned URL form): next to
+// the gateway Authorization header AWS refuses the call for two auth forms
+// (P3-8). Other keys are kept as sent.
+func stripAmzQuery(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	vals, err := url.ParseQuery(raw)
+	drop := err != nil
+	for k := range vals {
+		if strings.HasPrefix(strings.ToLower(k), "x-amz-") {
+			delete(vals, k)
+			drop = true
+		}
+	}
+	if !drop {
+		return raw
+	}
+	return vals.Encode()
 }
 
 // bedrockGatewaySigning reports whether the bedrock block asks the gateway
@@ -139,7 +226,7 @@ func newBedrockSigner(cfg *config.Config, b *config.RoutingBedrockAuthConfig, re
 		if profile == "" {
 			profile = "default"
 		}
-		ac, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithSharedConfigProfile(profile), awsconfig.WithRegion(region))
+		ac, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithSharedConfigProfile(profile), awsconfig.WithRegion(region), awsconfig.WithCredentialsCacheOptions(bedrockCacheOptions))
 		if err != nil {
 			return nil, fmt.Errorf("AWS profile %s: %w", profile, err)
 		}
@@ -147,19 +234,19 @@ func newBedrockSigner(cfg *config.Config, b *config.RoutingBedrockAuthConfig, re
 	case config.RoutingBedrockAuthInstanceRole:
 		// The SDK default chain: on EC2 the instance role through IMDSv2,
 		// on ECS or EKS the task or pod role.
-		ac, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(region))
+		ac, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(region), awsconfig.WithCredentialsCacheOptions(bedrockCacheOptions))
 		if err != nil {
 			return nil, fmt.Errorf("AWS default credential chain: %w", err)
 		}
 		provider = ac.Credentials
 	case config.RoutingBedrockAuthIAMCredentials:
-		provider = aws.NewCredentialsCache(bedrockStaticCredentials(cfg, b, managedHost))
+		provider = bedrockCredentialsCache(bedrockStaticCredentials(cfg, b, managedHost))
 	}
 	if provider == nil {
 		return nil, errors.New("no AWS credential provider")
 	}
 	if _, cached := provider.(*aws.CredentialsCache); !cached {
-		provider = aws.NewCredentialsCache(provider)
+		provider = bedrockCredentialsCache(provider)
 	}
 	return &bedrockSigner{creds: provider, region: region, signer: v4.NewSigner(), now: time.Now}, nil
 }
@@ -213,6 +300,7 @@ func stripInboundAWSAuth(h http.Header) {
 // one segment; the signer escapes it again, as AWS SDKs do for Bedrock).
 func (s *bedrockSigner) sign(ctx context.Context, req *http.Request, payload []byte) error {
 	stripInboundAWSAuth(req.Header)
+	req.URL.RawQuery = stripAmzQuery(req.URL.RawQuery)
 	sum := sha256.Sum256(payload)
 	payloadHash := hex.EncodeToString(sum[:])
 	creds, err := s.creds.Retrieve(ctx)
@@ -254,6 +342,9 @@ type bedrockSigners struct {
 
 // get returns the signer for block b signing toward baseURL.
 func (c *bedrockSigners) get(cfg *config.Config, b *config.RoutingBedrockAuthConfig, baseURL string) (*bedrockSigner, error) {
+	if !bedrockSignableURL(baseURL) {
+		return nil, errors.New("gateway Bedrock signing sends the AWS credential only to an https bedrock-runtime.<region>.amazonaws.com host")
+	}
 	region, err := bedrockSigningRegion(b, baseURL)
 	if err != nil {
 		return nil, err
@@ -280,4 +371,26 @@ func (c *bedrockSigners) get(cfg *config.Config, b *config.RoutingBedrockAuthCon
 	}
 	c.m[key] = s
 	return s, nil
+}
+
+// routeOnlyRenderSigners serves the render check, so a reload reuses the
+// credential it fetched instead of asking IMDS, STS or SSO again.
+var routeOnlyRenderSigners bedrockSigners
+
+const bedrockRenderCheckTimeout = 2 * time.Second
+
+// bedrockRenderReady fetches one credential (bounded) for block b toward
+// baseURL: CLAUDE_CODE_SKIP_BEDROCK_AUTH is rendered only when the gateway
+// can sign now, not merely when its config loads (REVIEW-code-slice7 P3-1).
+func bedrockRenderReady(cfg *config.Config, b *config.RoutingBedrockAuthConfig, baseURL string) error {
+	s, err := routeOnlyRenderSigners.get(cfg, b, baseURL)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bedrockRenderCheckTimeout)
+	defer cancel()
+	if _, err := s.creds.Retrieve(ctx); err != nil {
+		return fmt.Errorf("no AWS credential: %w", err)
+	}
+	return nil
 }

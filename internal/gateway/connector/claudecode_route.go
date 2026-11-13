@@ -80,6 +80,11 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 				adoptLostSkipBedrock(env, &backup)
 				restoreAllRouteEnv(env, claudeCodeRouteHeaders, &backup)
 			} else {
+				if _, recorded := backup.Original[claudeCodeRouteBedrockBaseURL]; !recorded {
+					// A re-render without a record: our own skip next to our
+					// base URL is not the user value (REVIEW-code-slice7 P3-3).
+					adoptOwnSkipBedrock(env, &backup)
+				}
 				applyRouteEnv(env, claudeCodeRouteEnv(route), claudeCodeRouteHeaders, &backup)
 			}
 			if len(env) == 0 {
@@ -133,6 +138,12 @@ func adoptLostSkipBedrock(env map[string]interface{}, b *routeEnvBackup) {
 	if b.Applied[claudeCodeRouteBedrockBaseURL] != lostRecordMarker {
 		return
 	}
+	adoptOwnSkipBedrock(env, b)
+}
+
+// adoptOwnSkipBedrock records CLAUDE_CODE_SKIP_BEDROCK_AUTH=1 as ours (no
+// prior value) when our own Bedrock base URL render sits next to it.
+func adoptOwnSkipBedrock(env map[string]interface{}, b *routeEnvBackup) {
 	base, _ := env[claudeCodeRouteBedrockBaseURL].(string)
 	skip, _ := env[claudeCodeRouteSkipBedrock].(string)
 	if isOwnRouteValue(base) && skip == "1" {

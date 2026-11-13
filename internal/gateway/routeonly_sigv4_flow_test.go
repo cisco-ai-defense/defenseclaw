@@ -24,6 +24,7 @@ type sigv4Fixture struct {
 	mu        sync.Mutex
 	orig, alt []sigv4Wire
 	altStatus int
+	origURL   string
 }
 
 func newSigV4Fixture(t *testing.T) *sigv4Fixture {
@@ -50,6 +51,11 @@ func newSigV4Fixture(t *testing.T) *sigv4Fixture {
 	t.Cleanup(orig.Close)
 	alt := httptest.NewServer(record(&f.alt, func() int { return f.altStatus }))
 	t.Cleanup(alt.Close)
+	f.origURL = orig.URL
+	// The test upstreams are loopback HTTP servers, not AWS hosts.
+	prevSignable := bedrockSignableURL
+	bedrockSignableURL = func(string) bool { return true }
+	t.Cleanup(func() { bedrockSignableURL = prevSignable })
 	block := &config.RoutingBedrockAuthConfig{Region: "us-east-1", Auth: config.RoutingBedrockAuthIAMCredentials, AccessKeyEnv: "DC_SIGV4_FLOW_AK", SecretKeyEnv: "DC_SIGV4_FLOW_SK", SessionTokenEnv: "DC_SIGV4_FLOW_ST"}
 	cfg := &config.Config{DataDir: t.TempDir()}
 	cfg.Routing = config.RoutingConfig{
