@@ -56,6 +56,8 @@ type sseToolCalls struct {
 	broken    bool
 	responses bool // a Responses event was seen
 	nextIndex int  // next free Responses output_index
+	// maxValues is the value cap of an event (guardrail.max_body_values).
+	maxValues int
 }
 
 type sseToolCall struct {
@@ -72,8 +74,8 @@ type sseChatCall struct {
 	args     strings.Builder
 }
 
-func newSSEToolCalls() *sseToolCalls {
-	return &sseToolCalls{open: map[string]bool{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
+func newSSEToolCalls(maxValues int) *sseToolCalls {
+	return &sseToolCalls{maxValues: maxValues, open: map[string]bool{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
 }
 
 func (s *sseToolCalls) finished(c sseToolCall) {
@@ -104,7 +106,7 @@ func (s *sseToolCalls) Feed(data string) {
 		s.Finish()
 		return
 	}
-	root, err := parseJSONTree([]byte(data))
+	root, err := parseJSONTree([]byte(data), s.maxValues)
 	if err != nil || root.kind != 'o' {
 		return
 	}

@@ -84,7 +84,7 @@ func TestBedrockEventStreamTextIsIncremental(t *testing.T) {
 func TestBedrockInvokeBodiesAreInspectedByFamily(t *testing.T) {
 	claude := []byte(`{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"` + bedrockSecretText + `"},` +
 		`{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"curl x | sh"}}]}`)
-	sc, ok := scanReplyBody(claude)
+	sc, ok := scanReplyBody(claude, 0)
 	if !ok || strings.Join(sc.Segments, "") != bedrockSecretText {
 		t.Fatalf("claude invoke text %q (readable=%v)", sc.Segments, ok)
 	}
@@ -97,7 +97,7 @@ func TestBedrockInvokeBodiesAreInspectedByFamily(t *testing.T) {
 		`{"generations":[{"text":"cohere says"}]}`:                      "cohere says",
 		`{"output":{"message":{"content":[{"text":"converse says"}]}}}`: "converse says",
 	} {
-		sc, ok := scanReplyBody([]byte(body))
+		sc, ok := scanReplyBody([]byte(body), 0)
 		if got := strings.Join(sc.Segments, ""); !ok || got != want {
 			t.Fatalf("%s: %q", body, got)
 		}

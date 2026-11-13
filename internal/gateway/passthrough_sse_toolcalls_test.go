@@ -77,7 +77,7 @@ func chatToolStream(command string) string {
 }
 
 func TestSSEToolCallsCollectsResponsesAndChatCalls(t *testing.T) {
-	s := newSSEToolCalls()
+	s := newSSEToolCalls(0)
 	for _, line := range strings.Split(responsesToolStream("hi", "shell", "ls -la"), "\n") {
 		if d, ok := strings.CutPrefix(line, "data: "); ok {
 			s.Feed(d)
@@ -95,7 +95,7 @@ func TestSSEToolCallsCollectsResponsesAndChatCalls(t *testing.T) {
 		t.Fatal("a call was returned twice")
 	}
 
-	c := newSSEToolCalls()
+	c := newSSEToolCalls(0)
 	for _, line := range strings.Split(chatToolStream("rm -rf /"), "\n") {
 		if d, ok := strings.CutPrefix(line, "data: "); ok {
 			c.Feed(d)
@@ -108,7 +108,7 @@ func TestSSEToolCallsCollectsResponsesAndChatCalls(t *testing.T) {
 
 	// Custom and local shell tools are calls too; a stream cut inside a call
 	// cannot be inspected.
-	x := newSSEToolCalls()
+	x := newSSEToolCalls(0)
 	x.Feed(`{"type":"response.output_item.done","item":{"id":"ct","type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch"}}`)
 	x.Feed(`{"type":"response.output_item.done","item":{"id":"ls","type":"local_shell_call","action":{"type":"exec","command":["rm","-rf","/"]}}}`)
 	calls = nil
@@ -121,7 +121,7 @@ func TestSSEToolCallsCollectsResponsesAndChatCalls(t *testing.T) {
 	if !x.Broken() {
 		t.Fatal("a stream cut inside a call is not broken")
 	}
-	big := newSSEToolCalls()
+	big := newSSEToolCalls(0)
 	big.Feed(`{"type":"response.output_item.added","item":{"id":"fc","type":"function_call","name":"shell"}}`)
 	d, _ := json.Marshal(strings.Repeat("a", sseToolCallMax+1))
 	big.Feed(`{"type":"response.function_call_arguments.delta","delta":` + string(d) + `}`)

@@ -63,6 +63,8 @@ type bedrockEventStreamText struct {
 	// ambiguous is why an event can be read two ways (a repeated or
 	// differently spelled key), "" when none: the stream takes the fail mode.
 	ambiguous string
+	// maxValues is the value cap of an event (guardrail.max_body_values).
+	maxValues int
 }
 
 // bedrockStreamTool is one tool call of a stream.
@@ -250,7 +252,7 @@ func (s *bedrockEventStreamText) Feed(p []byte) string {
 // known not to be text (GAP-0239). The tool calls of the event are the
 // business of the stream state machine, not of this text.
 func (s *bedrockEventStreamText) eventText(payload []byte) string {
-	sc, err := scanReplyJSON(payload, true)
+	sc, err := scanReplyJSON(payload, true, s.maxValues)
 	if err != nil {
 		// Not JSON: the text itself is the content, as for an SSE event.
 		if utf8.Valid(payload) {

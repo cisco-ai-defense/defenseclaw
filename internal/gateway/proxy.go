@@ -89,6 +89,16 @@ type ContentInspector interface {
 	SetHILTConfig(enabled bool, minSeverity string)
 }
 
+// maxBodyValues is guardrail.max_body_values: the most JSON values the proxy
+// reads in one body or event to inspect it (0 in the walker means its
+// default).
+func (p *GuardrailProxy) maxBodyValues() int {
+	if p.cfg != nil {
+		return p.cfg.MaxBodyValues
+	}
+	return 0
+}
+
 // GuardrailProxy is a pure Go LLM proxy that accepts OpenAI-compatible
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
@@ -103,6 +113,13 @@ type GuardrailProxy struct {
 	// the reply paths hold and refuse a call without real command content;
 	// it is nil in every production proxy.
 	toolCallVerdictForTest func(context.Context, json.RawMessage) *ScanVerdict
+
+	// streamReadForTest, when set, is told after each read of a streamed
+	// reply has been fully handled (everything it decided to send is
+	// written) how many bytes of the stream have been read so far. Only
+	// tests set it, to wait for the proxy at a point instead of sleeping; it
+	// is nil in every production proxy.
+	streamReadForTest func(total int)
 
 	// kernelPeer names the verified caller of a request from the kernel
 	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
@@ -1486,7 +1503,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Every prompt-side text of the body, not only the user turn: system,
 	// developer and instructions text wherever it sits, and the tool
 	// results sent back since the model's last turn (GAP-0196).
-	side := passthroughPromptForRequest(body, wireCT, jsonHint)
+	side := passthroughPromptForRequest(body, wireCT, jsonHint, p.maxBodyValues())
 	if bodyUndecodable != "" {
 		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
 	}
@@ -1807,6 +1824,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// mislabelled reply must not skip inspection (item 5 review P2-2).
 		// A body that does not frame takes the uninspectable path.
 		bedrockStream = newBedrockEventStreamText()
+		bedrockStream.maxValues = p.maxBodyValues()
 	}
 
 	if !isSSE && bedrockStream == nil {
@@ -1835,7 +1853,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		var scan replyScan
 		if undecodable == "" {
 			var readable bool
-			if scan, readable = scanReplyBody(inspectBody); !readable && len(bytes.TrimSpace(inspectBody)) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if scan, readable = scanReplyBody(inspectBody, p.maxBodyValues()); !readable && len(bytes.TrimSpace(inspectBody)) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				// A 2xx body that is not JSON (for example compressed bytes with
 				// no Content-Encoding) cannot be inspected either (item 5 review
 				// P2-2).
@@ -1848,7 +1866,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		if undecodable != "" && p.uninspectableReply(r.Context(), label, mode, undecodable) {
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
-				blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				blockMessage(customBlockMsg, "completion", replyRefusalReason(undecodable)))
 			return
 		}
 
@@ -2695,7 +2713,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// developer turns after the user turn and the tool results sent since
 	// the model's last turn (GAP-0196). The original body, before
 	// DefenseClaw adds its own notice.
-	chatSide := passthroughPromptFor(body, true)
+	chatSide := passthroughPromptFor(body, true, p.maxBodyValues())
 	// The heartbeat and session-startup gates skip the heartbeat text itself,
 	// never the other text of the body.
 	chatSkip := ""

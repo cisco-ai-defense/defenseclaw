@@ -9,9 +9,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // RV9's review of the guardrail proxy's request and reply coverage
@@ -58,7 +62,7 @@ func TestPassthroughMediaIsSkippedByPositionOnly(t *testing.T) {
 	for _, c := range cases {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
-			got := passthroughPromptFor([]byte(c.body), false)
+			got := passthroughPromptFor([]byte(c.body), false, 0)
 			all := strings.Join(got.Segments, "\n")
 			for _, w := range c.in {
 				if !strings.Contains(all, w) {
@@ -401,6 +405,10 @@ func TestPassthroughCoverageNonObjectRequestProperty(t *testing.T) {
 		{"form-urlencoded", "/v1/responses", "application/x-www-form-urlencoded", "model=dc-test-model&input=" + covMarker, true, true},
 		{"json-array-root", "/v1/responses", "application/json", `[{"model":"dc-test-model","input":"` + covMarker + `"}]`, true, true},
 		{"json-string-root", "/v1/responses", "application/json", `"` + covMarker + `"`, true, true},
+		{"multipart-last-of-many-fields", "/v1/images/edits", mpct, multipart([3]string{"model", "", "dc-test-model"}, [3]string{"n", "", "1"}, [3]string{"image", "image/png|a.png", "\x89PNG\r\n\x1a\n"}, [3]string{"mask", "image/png|m.png", "\x89PNG"}, [3]string{"prompt", "", "a harmless sentence"}, [3]string{"user_notes", "", covMarker}), true, true},
+		{"multipart-json-part", "/v1/responses", mpct, multipart([3]string{"payload", "application/json|", `{"input":"` + covMarker + `"}`}), true, true},
+		{"form-repeated-key", "/v1/responses", "application/x-www-form-urlencoded", "input=a&input=" + covMarker, true, true},
+		{"json-array-of-requests", "/v1/responses", "application/json", `[{"model":"dc-test-model","input":"a harmless sentence"},{"model":"dc-test-model","input":"` + covMarker + `"}]`, true, true},
 		{"text-body", "/v1/responses", "text/plain", covMarker, true, true},
 		{"unlabelled-text-body", "/v1/responses", "", "model dc-test-model " + covMarker, true, true},
 	}
@@ -459,6 +467,170 @@ func TestPassthroughCoverageNonObjectRequestProperty(t *testing.T) {
 		covPost(proxy, up, "/v1/audio/transcriptions", []byte(multipart([3]string{"model", "", "dc-test-model"}, [3]string{"file", "audio/wav|a.wav", "RIFF"})), map[string]string{"Content-Type": mpct})
 		if up.count() != 1 {
 			t.Errorf("a media-only transcription was refused (%d hits)", up.count())
+		}
+	})
+}
+
+// A duplicate or case-folded structural key in a reply, generated over every
+// reply wire and slot (GAP-0240): a managed install refuses the reply, the OSS
+// default forwards it unchanged after the alert; buffered and streamed.
+func TestPassthroughCoverageReplyAmbiguousKeysProperty(t *testing.T) {
+	covAllowPrivate(t)
+	req := covJSON(t, map[string]any{"model": "dc-test-model", "input": "hello there", "messages": []any{map[string]any{"role": "user", "content": "hello there"}}, "contents": []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": "hello there"}}}}, "prompt": "hello there"})
+	// inject puts a second spelling of the first structural key it finds
+	// before that key.
+	inject := func(s string) (string, bool) {
+		for _, k := range []string{"role", "type", "content", "text", "delta", "name"} {
+			if i := strings.Index(s, `"`+k+`":`); i >= 0 {
+				return s[:i] + `"` + strings.ToUpper(k[:1]) + k[1:] + `":"x",` + s[i:], true
+			}
+		}
+		return s, false
+	}
+	for _, managed := range []bool{true, false} {
+		for _, w := range covReplyWires() {
+			for si, s := range w.slots {
+				w, s, si, managed := w, s, si, managed
+				check := func(t *testing.T, raw []byte, ctype string) {
+					covSetManaged(t, managed)
+					up := newCovUpstream(t)
+					proxy := covProxy(t, up, w.provider, &covInspector{})
+					up.set(ctype, "", raw, 0)
+					rec := covPost(proxy, up, w.path, req, nil)
+					if managed && (bytes.Equal(rec.Body.Bytes(), raw) || rec.Body.Len() == 0) {
+						t.Errorf("managed: an ambiguous reply was forwarded or answered empty (%d bytes)", rec.Body.Len())
+					}
+					if !managed && !bytes.Equal(rec.Body.Bytes(), raw) {
+						t.Errorf("OSS default: an ambiguous reply was not forwarded with an alert (%d of %d bytes)", rec.Body.Len(), len(raw))
+					}
+				}
+				t.Run(fmt.Sprintf("managed=%v/body/%s/%s", managed, w.name, s.name), func(t *testing.T) {
+					plain := string(covJSON(t, s.build("a harmless sentence")))
+					mutated, ok := inject(plain)
+					if !ok {
+						t.Skip("no structural key to repeat")
+					}
+					check(t, []byte(mutated), "application/json")
+				})
+				if w.events == nil {
+					continue
+				}
+				for _, fr := range []string{"lf-space", "crlf", "multiline"} {
+					fr := fr
+					t.Run(fmt.Sprintf("managed=%v/stream/%s/%s/%s", managed, w.name, s.name, fr), func(t *testing.T) {
+						events := w.events("a harmless sentence", si)
+						done := false
+						for i, e := range events {
+							if e == "[DONE]" {
+								continue
+							}
+							if m, ok := inject(e); ok {
+								events[i], done = m, true
+								break
+							}
+						}
+						if !done {
+							t.Skip("no structural key to repeat")
+						}
+						check(t, covFrame(events, fr), "text/event-stream")
+					})
+				}
+			}
+		}
+	}
+}
+
+// GAP-0239 (RV9 verdict 2): a Bedrock stream that ends inside a frame takes the
+// fail mode. A managed install refuses it and the agent reads a block, not a
+// cut frame; the OSS default forwards what was sent, after the alert.
+func TestPassthroughBedrockStreamCutInsideAFrame(t *testing.T) {
+	good := bedrockInvokeStreamFrames(t, "hello ", "world")
+	cut := good[:len(good)-5]
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(cut)
+	}))
+	defer upstream.Close()
+	for _, managed := range []bool{true, false} {
+		for _, buf := range []int{1, 0} {
+			managed, buf := managed, buf
+			t.Run(fmt.Sprintf("managed=%v/buffer=%d", managed, buf), func(t *testing.T) {
+				covSetManaged(t, managed)
+				proxy, insp := bedrockPassthroughProxy(t, upstream)
+				insp.setVerdict("completion", allowVerdict("mock"))
+				if proxy.cfg != nil && buf > 0 {
+					proxy.cfg.StreamBufferBytes = buf
+				}
+				rec := httptest.NewRecorder()
+				proxy.handlePassthrough(rec, bedrockRequest(upstream.URL, "/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream"))
+				if !managed {
+					if !bytes.Equal(rec.Body.Bytes(), cut) {
+						t.Errorf("OSS default: the stream was not forwarded with an alert (%d of %d bytes)", rec.Body.Len(), len(cut))
+					}
+					return
+				}
+				dec := newBedrockEventStreamText()
+				text := dec.Feed(rec.Body.Bytes())
+				if dec.Broken() || dec.PartialLen() != 0 || !strings.Contains(strings.ToLower(text), "defenseclaw") {
+					t.Errorf("managed: the agent did not get whole frames ending in a block: %q (broken=%v, %d pending)", text, dec.Broken(), dec.PartialLen())
+				}
+				if bytes.Contains(rec.Body.Bytes(), cut[len(good)-60:]) {
+					t.Errorf("managed: the cut frame reached the agent")
+				}
+			})
+		}
+	}
+}
+
+// GAP-0238 side: the value cap is the documented key guardrail.max_body_values
+// and the refusal names it.
+func TestPassthroughBodyValueCapIsTheConfigKey(t *testing.T) {
+	covAllowPrivate(t)
+	if config.DefaultMaxBodyValues != 400000 {
+		t.Fatalf("default %d", config.DefaultMaxBodyValues)
+	}
+	many := `{"model":"m","input":[` + strings.TrimSuffix(strings.Repeat(`"word",`, 50), ",") + `]}`
+	if got := passthroughPromptFor([]byte(many), false, 0); got.Unreadable != "" || len(got.Segments) != 50 {
+		t.Fatalf("under the default cap: %+v", got)
+	}
+	got := passthroughPromptFor([]byte(many), false, 10)
+	if !strings.Contains(got.Unreadable, "guardrail.max_body_values") || !strings.Contains(got.Unreadable, "10") {
+		t.Fatalf("the refusal does not name the key and the cap: %q", got.Unreadable)
+	}
+	req := []byte(many)
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("request/managed=%v", managed), func(t *testing.T) {
+			covSetManaged(t, managed)
+			up := newCovUpstream(t)
+			proxy := covProxy(t, up, "openai", &covInspector{})
+			proxy.cfg.MaxBodyValues = 10
+			up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+			rec := covPost(proxy, up, "/v1/responses", req, nil)
+			if managed && (up.count() != 0 || !strings.Contains(rec.Body.String(), "guardrail.max_body_values")) {
+				t.Errorf("managed: a body past the cap was forwarded or the refusal does not name the key (%d hits): %.200s", up.count(), rec.Body)
+			}
+			if !managed && up.count() != 1 {
+				t.Errorf("the OSS default did not forward the body with an alert (%d hits)", up.count())
+			}
+			// Raised, the same body is read and passes.
+			proxy.cfg.MaxBodyValues = 1000
+			up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+			covPost(proxy, up, "/v1/responses", req, nil)
+			if up.count() != 1 {
+				t.Errorf("a body under the raised cap was not forwarded (%d hits)", up.count())
+			}
+		})
+	}
+	t.Run("reply", func(t *testing.T) {
+		covSetManaged(t, true)
+		up := newCovUpstream(t)
+		proxy := covProxy(t, up, "openai", &covInspector{})
+		proxy.cfg.MaxBodyValues = 10
+		reply := `{"output":[{"type":"message","content":[` + strings.TrimSuffix(strings.Repeat(`{"type":"output_text","text":"word"},`, 20), ",") + `]}]}`
+		up.set("application/json", "", []byte(reply), 0)
+		rec := covPost(proxy, up, "/v1/responses", covJSON(t, map[string]any{"model": "m", "input": "hi"}), nil)
+		if strings.Contains(rec.Body.String(), `"text":"word"`) || !strings.Contains(rec.Body.String(), "guardrail.max_body_values") {
+			t.Errorf("managed: a reply past the cap was forwarded or the refusal does not name the key: %.300s", rec.Body)
 		}
 	})
 }

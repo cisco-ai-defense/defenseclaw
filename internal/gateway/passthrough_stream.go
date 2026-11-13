@@ -78,7 +78,7 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	if *model == "" {
 		*model = responseModelFromRawJSON([]byte(data))
 	}
-	sc, err := scanReplyJSON([]byte(data), true)
+	sc, err := scanReplyJSON([]byte(data), true, s.p.maxBodyValues())
 	if err != nil {
 		// Not JSON: the text itself is the content.
 		acc.WriteString(data)
@@ -175,7 +175,7 @@ func (s *passthroughStream) run() {
 
 	var sseCalls *sseToolCalls
 	if s.bedrock == nil {
-		sseCalls = newSSEToolCalls()
+		sseCalls = newSSEToolCalls(p.maxBodyValues())
 	}
 	framer := &sseFramer{}
 	var queue [][]byte // events read and not yet sent
@@ -278,7 +278,7 @@ func (s *passthroughStream) run() {
 			if why := s.eventContent(ev, sseCalls, &accumulated, &streamResponseModel); why != "" && !ambiguousReported {
 				ambiguousReported = true
 				if p.uninspectableReply(ctx, label, mode, why) {
-					sseBlockMsg = uninspectableMsg
+					sseBlockMsg = blockMessage(s.customBlockMsg, "completion", replyRefusalReason(why))
 					return true
 				}
 			}
@@ -362,10 +362,12 @@ func (s *passthroughStream) run() {
 	rawTail := false          // the fail mode forwards what is left without inspection
 	var bedrockPending []byte // the start of a Bedrock frame whose end has not come
 	buf := make([]byte, 4096)
+	readTotal := 0
 read:
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
+			readTotal += n
 			chunk := buf[:n]
 			var events []sseEvent
 			if s.bedrock != nil {
@@ -391,7 +393,7 @@ read:
 				if why := s.bedrock.Ambiguous(); why != "" && !ambiguousReported {
 					ambiguousReported = true
 					if p.uninspectableReply(ctx, label, mode, why) {
-						sseBlockMsg = uninspectableMsg
+						sseBlockMsg = blockMessage(s.customBlockMsg, "completion", replyRefusalReason(why))
 						stopped = true
 						break read
 					}
@@ -423,6 +425,9 @@ read:
 			if rawTail {
 				break read
 			}
+			if p.streamReadForTest != nil {
+				p.streamReadForTest(readTotal)
+			}
 		}
 		if readErr != nil {
 			if encoded && readErr != io.EOF && r.Context().Err() == nil {
@@ -435,7 +440,15 @@ read:
 			}
 			streamEnded = true
 			if s.bedrock != nil && len(bedrockPending) > 0 {
-				// The upstream ended inside a frame: what it sent is forwarded as it is.
+				// The upstream ended inside a frame: the rest of the frame cannot
+				// be read, so the stream takes the fail mode. A managed install
+				// refuses it (the agent reads a block); otherwise what was sent
+				// is forwarded as it is, after the alert.
+				if r.Context().Err() == nil && p.uninspectableReply(ctx, label, mode, "the stream ended inside a frame") {
+					sseBlockMsg = uninspectableMsg
+					stopped = true
+					break read
+				}
 				pend := bedrockPending
 				bedrockPending = nil
 				if handle(sseEvent{Raw: pend}) {

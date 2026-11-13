@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 )
@@ -169,92 +168,6 @@ func TestPassthroughBedrockToolCallHeldAtEverySplit(t *testing.T) {
 					}
 					check(every, fmt.Sprintf("buffer=%d byte-by-byte", buf))
 				}
-			})
-		}
-	}
-}
-
-// The call is held while the upstream waits inside it: the agent has no
-// frame of the call before the verdict, whether the text before it crossed
-// the initial buffer or not.
-func TestPassthroughBedrockToolCallHeldUntilVerdict(t *testing.T) {
-	covAllowPrivate(t)
-	for _, st := range covBedrockStreams(t, covBlockedTool) {
-		for _, buf := range []int{1, 0} {
-			st, buf := st, buf
-			t.Run(fmt.Sprintf("%s/buffer=%d", st.name, buf), func(t *testing.T) {
-				wire := st.wire()
-				// The upstream stops inside the call: after its first input part.
-				stop := 0
-				for i := 0; i <= st.toolFrom+1; i++ {
-					stop += len(st.frames[i])
-				}
-				gate := make(chan struct{})
-				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
-					f, _ := w.(http.Flusher)
-					_, _ = w.Write(wire[:stop])
-					f.Flush()
-					select {
-					case <-gate:
-					case <-time.After(20 * time.Second):
-					}
-					_, _ = w.Write(wire[stop:])
-				}))
-				defer up.Close()
-				proxy, insp := bedrockPassthroughProxy(t, up)
-				proxy.toolCallVerdictForTest = covToolVerdict
-				insp.setVerdict("completion", allowVerdict("mock"))
-				if proxy.cfg != nil && buf > 0 {
-					proxy.cfg.StreamBufferBytes = buf
-				}
-				front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxy.handlePassthrough(w, r) }))
-				defer front.Close()
-
-				var mu sync.Mutex
-				var got bytes.Buffer
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					hreq, _ := http.NewRequest(http.MethodPost, front.URL+st.path, strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
-					hreq.Header.Set("Content-Type", "application/json")
-					hreq.Header.Set("X-DC-Target-URL", up.URL)
-					hreq.Header.Set("X-AI-Auth", "Bearer test-key")
-					resp, err := http.DefaultClient.Do(hreq)
-					if err != nil {
-						return
-					}
-					defer resp.Body.Close()
-					b := make([]byte, 4096)
-					for {
-						n, err := resp.Body.Read(b)
-						mu.Lock()
-						got.Write(b[:n])
-						mu.Unlock()
-						if err != nil {
-							return
-						}
-					}
-				}()
-				time.Sleep(500 * time.Millisecond)
-				mu.Lock()
-				early := append([]byte(nil), got.Bytes()...)
-				mu.Unlock()
-				for i := st.toolFrom; i <= st.toolTo; i++ {
-					if bytes.Contains(early, st.frames[i]) {
-						t.Errorf("frame %d of a held call reached the agent before its verdict", i)
-					}
-				}
-				close(gate)
-				select {
-				case <-done:
-				case <-time.After(30 * time.Second):
-					t.Fatal("the reply did not end")
-				}
-				mu.Lock()
-				final := append([]byte(nil), got.Bytes()...)
-				mu.Unlock()
-				covBedrockCheckRefused(t, st, final, "after the verdict")
 			})
 		}
 	}

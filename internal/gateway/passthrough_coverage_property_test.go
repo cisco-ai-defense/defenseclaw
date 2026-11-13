@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 	"unicode/utf16"
 )
 
@@ -207,7 +206,7 @@ func covPost(proxy *GuardrailProxy, up *covUpstream, path string, body []byte, h
 
 // ---- body encodings ------------------------------------------------------
 
-var covEncodings = []string{"", "gzip", "deflate", "raw-deflate", "br", "zstd", "gzip, br"}
+var covEncodings = []string{"", "gzip", "x-gzip", "deflate", "raw-deflate", "br", "zstd", "gzip, br"}
 
 func covEncode(t *testing.T, enc string, plain []byte) ([]byte, string) {
 	if enc == "" {
@@ -217,7 +216,7 @@ func covEncode(t *testing.T, enc string, plain []byte) ([]byte, string) {
 	return encodeReply(t, enc, plain), header
 }
 
-var covCharsets = []string{"", "bom8", "u16le", "u16be", "u16le-param"}
+var covCharsets = []string{"", "bom8", "u16le", "u16be", "u16le-param", "u32le", "u32be-param", "latin1"}
 
 // covCharset re-encodes JSON text and returns the Content-Type it needs.
 func covCharset(plain []byte, cs string) ([]byte, string) {
@@ -229,7 +228,21 @@ func covCharset(plain []byte, cs string) ([]byte, string) {
 		}
 		return out
 	}
+	u32 := func(order binary.AppendByteOrder, bom []byte) []byte {
+		out := append([]byte(nil), bom...)
+		for _, r := range string(plain) {
+			out = order.AppendUint32(out, uint32(r))
+		}
+		return out
+	}
 	switch cs {
+	case "u32le":
+		return u32(binary.LittleEndian, []byte{0xFF, 0xFE, 0, 0}), "application/json; charset=utf-32"
+	case "u32be-param":
+		return u32(binary.BigEndian, nil), "application/json; charset=utf-32be"
+	case "latin1":
+		// The text is ASCII; the é makes the bytes differ from UTF-8.
+		return bytes.Replace(plain, []byte("{"), []byte("{\"k\xe9y\":\"x\","), 1), "application/json; charset=iso-8859-1"
 	case "bom8":
 		return append([]byte{0xEF, 0xBB, 0xBF}, plain...), "application/json"
 	case "u16le":
@@ -449,6 +462,54 @@ func covWires() []covWire {
 				b := conv(cu)
 				b["toolConfig"] = map[string]any{"tools": []any{map[string]any{"toolSpec": map[string]any{"name": "dc_test_read", "description": m, "inputSchema": map[string]any{"json": map[string]any{"type": "object"}}}}}}
 				return b
+			}},
+		}},
+		{name: "bedrock-invoke-anthropic", provider: "bedrock", path: "/model/us.anthropic.dc-test/invoke", passthru: true, benign: anth(nil, user), slots: []covSlot{
+			{"user", func(m string) map[string]any {
+				b := anth(nil, map[string]any{"role": "user", "content": m})
+				b["anthropic_version"] = "bedrock-2023-05-31"
+				return b
+			}},
+			{"system", func(m string) map[string]any {
+				b := anth(nil, user)
+				b["anthropic_version"], b["system"] = "bedrock-2023-05-31", m
+				return b
+			}},
+			{"system-blocks", func(m string) map[string]any {
+				b := anth(nil, user)
+				b["anthropic_version"], b["system"] = "bedrock-2023-05-31", []any{map[string]any{"type": "text", "text": m}}
+				return b
+			}},
+			{"tool-result", func(m string) map[string]any {
+				b := anth(nil, user, map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "tool_use", "id": "t1", "name": "dc_test_read", "input": map[string]any{}}}},
+					map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": m}}})
+				b["anthropic_version"] = "bedrock-2023-05-31"
+				return b
+			}},
+		}},
+		{name: "bedrock-invoke-native", provider: "bedrock", path: "/model/dc-test-model/invoke", passthru: true, benign: map[string]any{"prompt": "hello there"}, slots: []covSlot{
+			{"llama-prompt", func(m string) map[string]any { return map[string]any{"prompt": m, "max_gen_len": 16} }},
+			{"titan-inputText", func(m string) map[string]any {
+				return map[string]any{"inputText": m, "textGenerationConfig": map[string]any{"maxTokenCount": 16}}
+			}},
+			{"nova-user", func(m string) map[string]any {
+				return map[string]any{"messages": []any{map[string]any{"role": "user", "content": []any{map[string]any{"text": m}}}}}
+			}},
+			{"nova-system", func(m string) map[string]any {
+				return map[string]any{"system": []any{map[string]any{"text": m}}, "messages": []any{map[string]any{"role": "user", "content": []any{map[string]any{"text": "hello there"}}}}}
+			}},
+			{"cohere-message", func(m string) map[string]any { return map[string]any{"message": m, "max_tokens": 16} }},
+		}},
+		{name: "completions-legacy", provider: "openai", path: "/v1/completions", passthru: true, benign: map[string]any{"model": "dc-test-model", "prompt": "hello there"}, slots: []covSlot{
+			{"prompt-string", func(m string) map[string]any { return map[string]any{"model": "dc-test-model", "prompt": m} }},
+			{"prompt-array", func(m string) map[string]any {
+				return map[string]any{"model": "dc-test-model", "prompt": []any{"hello there", m}}
+			}},
+			{"suffix", func(m string) map[string]any {
+				return map[string]any{"model": "dc-test-model", "prompt": "hello there", "suffix": m}
+			}},
+			{"stop-not-text-but-prompt", func(m string) map[string]any {
+				return map[string]any{"model": "dc-test-model", "prompt": m, "stop": []any{"\n"}, "max_tokens": 16}
 			}},
 		}},
 		{name: "ollama-chat", provider: "ollama", path: "/api/chat", passthru: true, benign: chat(user), slots: []covSlot{
@@ -941,7 +1002,7 @@ func TestPassthroughCoverageReplyProperty(t *testing.T) {
 		}
 		for si, s := range w.slots {
 			for _, enc := range covEncodings {
-				for _, cs := range []string{"", "bom8", "u16le"} {
+				for _, cs := range []string{"", "bom8", "u16le", "u32be-param", "latin1"} {
 					if cs != "" && enc != "" && rnd.Intn(2) == 0 {
 						continue
 					}
@@ -1114,160 +1175,6 @@ func TestPassthroughCoverageToolCallProperty(t *testing.T) {
 							t.Errorf("an allowed streamed call changed:\n%.400s", out)
 						}
 					})
-				}
-			}
-		}
-	}
-}
-
-// P4: a streamed call is held until its verdict. The upstream stops inside
-// the call; while it waits, the agent has received no byte of the call, and
-// when the call ends blocked it never does, also when the text before the
-// call already crossed the initial buffer and when the open call is larger
-// than the initial buffer cap.
-func TestPassthroughCoverageHeldCallProperty(t *testing.T) {
-	covAllowPrivate(t)
-	type held struct {
-		name   string
-		path   string
-		wire   string
-		before func(n int) []string // events before the call: text of about n bytes
-		pad    func(s string) string
-		open   []string // events from the start of the call to just before its end
-		close  []string // the rest
-		marks  []string // strings that must not arrive
-	}
-	enc := func(v any) string { b, _ := json.Marshal(v); return string(b) }
-	cases := []held{
-		{name: "responses", path: "/v1/responses", wire: "openai",
-			before: func(n int) []string {
-				return []string{enc(map[string]any{"type": "response.output_text.delta", "item_id": "msg_1", "delta": strings.Repeat("working on it. ", n/15+1)})}
-			},
-			pad: func(s string) string {
-				return enc(map[string]any{"type": "response.output_text.delta", "item_id": "msg_1", "delta": s})
-			},
-			open: []string{`{"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"` + covBlockedTool + `","arguments":""}}`,
-				`{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_1","delta":"{\"note\":"}`},
-			close: []string{`{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_1","delta":"\"x\"}"}`,
-				`{"type":"response.output_item.done","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"` + covBlockedTool + `","arguments":"{\"note\":\"x\"}"}}`,
-				`{"type":"response.completed","response":{"id":"resp_1","status":"completed"}}`},
-			marks: []string{covBlockedTool, "call_1", "function_call"}},
-		{name: "chat", path: "/v1/completions", wire: "openai",
-			before: func(n int) []string {
-				return []string{enc(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": strings.Repeat("working on it. ", n/15+1)}}}})}
-			},
-			pad: func(s string) string {
-				return enc(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": map[string]any{"content": s}}}})
-			},
-			open: []string{`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"` + covBlockedTool + `","arguments":"{\"note\":"}}]}}]}`},
-			close: []string{`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}`,
-				`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`, `[DONE]`},
-			marks: []string{covBlockedTool, "call_1", "tool_calls"}},
-		{name: "anthropic", path: "/v1/messages", wire: "anthropic",
-			before: func(n int) []string {
-				return []string{`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
-					enc(map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": strings.Repeat("working on it. ", n/15+1)}}),
-					`{"type":"content_block_stop","index":0}`}
-			},
-			pad: func(s string) string {
-				return enc(map[string]any{"type": "ping", "pad": s})
-			},
-			open: []string{`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"` + covBlockedTool + `","input":{}}}`,
-				`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"note\":"}}`},
-			close: []string{`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"x\"}"}}`, `{"type":"content_block_stop","index":1}`,
-				`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`, `{"type":"message_stop"}`},
-			marks: []string{covBlockedTool, "tu_1", "tool_use"}},
-	}
-	req := covJSON(t, map[string]any{"model": "dc-test-model", "input": "hello there", "messages": []any{map[string]any{"role": "user", "content": "hello there"}}})
-	for _, c := range cases {
-		for _, lead := range []int{10, 2000} { // text before the call: inside, and past, the initial buffer
-			for _, size := range []int{0, 1300 << 10} { // text inside the open call: none, and past the 1 MiB cap
-				for _, fr := range []string{"lf-space", "crlf", "lf-nospace"} {
-					for _, managed := range []bool{false, true} {
-						if size > 0 && !managed {
-							continue // past the cap an OSS install may release the call with an alert
-						}
-						c, lead, size, fr, managed := c, lead, size, fr, managed
-						t.Run(fmt.Sprintf("%s/lead=%d/size=%d/%s/managed=%v", c.name, lead, size, fr, managed), func(t *testing.T) {
-							covSetManaged(t, managed)
-							gate := make(chan struct{})
-							srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-								_, _ = io.Copy(io.Discard, r.Body)
-								w.Header().Set("Content-Type", "text/event-stream")
-								fl := w.(http.Flusher)
-								send := func(events []string) {
-									_, _ = w.Write(covFrame(events, fr))
-									fl.Flush()
-								}
-								send(c.before(lead))
-								send(c.open)
-								pad := strings.Repeat("padding text. ", 40)
-								for n := 0; n < size; n += len(pad) {
-									send([]string{c.pad(pad)})
-								}
-								select {
-								case <-gate:
-								case <-time.After(20 * time.Second):
-								}
-								send(c.close)
-							}))
-							t.Cleanup(srv.Close)
-							up := &covUpstream{srv: srv}
-							proxy := covProxy(t, up, c.wire, &covInspector{})
-							front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { proxy.handlePassthrough(w, r) }))
-							t.Cleanup(front.Close)
-
-							var mu sync.Mutex
-							var got bytes.Buffer
-							done := make(chan struct{})
-							go func() {
-								defer close(done)
-								hreq, _ := http.NewRequest(http.MethodPost, front.URL+c.path, bytes.NewReader(req))
-								hreq.Header.Set("Content-Type", "application/json")
-								hreq.Header.Set("X-DC-Target-URL", srv.URL)
-								hreq.Header.Set("X-AI-Auth", "Bearer test-key")
-								resp, err := http.DefaultClient.Do(hreq)
-								if err != nil {
-									return
-								}
-								defer resp.Body.Close()
-								buf := make([]byte, 4096)
-								for {
-									n, err := resp.Body.Read(buf)
-									mu.Lock()
-									got.Write(buf[:n])
-									mu.Unlock()
-									if err != nil {
-										return
-									}
-								}
-							}()
-							// While the upstream waits inside the call, nothing of it may have arrived.
-							time.Sleep(700 * time.Millisecond)
-							mu.Lock()
-							early := got.String()
-							mu.Unlock()
-							for _, m := range c.marks {
-								if strings.Contains(early, m) {
-									t.Errorf("part of a held call reached the agent before its verdict (%q):\n%.300s", m, early)
-								}
-							}
-							close(gate)
-							select {
-							case <-done:
-							case <-time.After(30 * time.Second):
-								t.Fatal("the reply did not end")
-							}
-							mu.Lock()
-							final := got.String()
-							mu.Unlock()
-							for _, m := range c.marks {
-								if strings.Contains(final, m) {
-									t.Errorf("a blocked call reached the agent (%q):\n%.300s", m, final)
-								}
-							}
-						})
-					}
 				}
 			}
 		}

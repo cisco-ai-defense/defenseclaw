@@ -180,7 +180,7 @@ func TestPromptWalkHistoryAndAllowlist(t *testing.T) {
 		{"role spelled another way", `{"input":[{"Role":"assistant","content":"a"}]}`, []string{"a"}, "the body spells the key role another way"},
 		{"not valid json", `{"input":`, nil, "the body is not valid JSON"},
 	} {
-		got := passthroughPromptFor([]byte(c.body), false)
+		got := passthroughPromptFor([]byte(c.body), false, 0)
 		if strings.Join(got.Segments, "|") != strings.Join(c.want, "|") || len(got.Segments) != len(c.want) || (got.Unreadable != c.unreadable && (!strings.HasPrefix(c.unreadable, "the body is not valid JSON") || !strings.HasPrefix(got.Unreadable, c.unreadable))) {
 			t.Errorf("%s: %q / %q, want %q / %q", c.name, got.Segments, got.Unreadable, c.want, c.unreadable)
 		}
@@ -191,16 +191,16 @@ func TestPromptWalkHistoryAndAllowlist(t *testing.T) {
 	}
 	deep.WriteString(`"x"`)
 	deep.WriteString(strings.Repeat("}", walkMaxDepth+10))
-	if got := passthroughPromptFor([]byte(deep.String()), false); got.Unreadable == "" {
+	if got := passthroughPromptFor([]byte(deep.String()), false, 0); got.Unreadable == "" {
 		t.Error("a body nested past the cap is read")
 	}
-	if got := passthroughPromptFor([]byte("plain text"), false); got.Unreadable != "" || got.Text != "plain text" {
+	if got := passthroughPromptFor([]byte("plain text"), false, 0); got.Unreadable != "" || got.Text != "plain text" {
 		t.Errorf("a text body that is not JSON is inspected as text: %+v", got)
 	}
-	if got := passthroughPromptFor([]byte{0x89, 'P', 'N', 'G', 0, 1, 2}, false); got.Unreadable == "" {
+	if got := passthroughPromptFor([]byte{0x89, 'P', 'N', 'G', 0, 1, 2}, false, 0); got.Unreadable == "" {
 		t.Errorf("a binary body that is not JSON must take the fail mode: %+v", got)
 	}
-	if got := passthroughPromptFor([]byte("<html>"), true); got.Unreadable == "" {
+	if got := passthroughPromptFor([]byte("<html>"), true, 0); got.Unreadable == "" {
 		t.Error("a JSON content type with a body that is not JSON is read")
 	}
 }
@@ -219,7 +219,7 @@ func TestScanReplyTextAndCalls(t *testing.T) {
 		{"converse", `{"output":{"message":{"content":[{"text":"hi"},{"toolUse":{"toolUseId":"t","name":"f","input":{"a":1}}}]}},"stopReason":"tool_use"}`, []string{"hi"}, []string{`f:{"a":1}`}},
 		{"ollama", `{"model":"m","message":{"role":"assistant","content":"hi","tool_calls":[{"function":{"name":"f","arguments":{"a":1}}}]},"done":true}`, []string{"hi"}, []string{`f:{"a":1}`}},
 	} {
-		sc, err := scanReplyJSON([]byte(c.body), false)
+		sc, err := scanReplyJSON([]byte(c.body), false, 0)
 		if err != nil {
 			t.Errorf("%s: %v", c.name, err)
 			continue
@@ -232,18 +232,18 @@ func TestScanReplyTextAndCalls(t *testing.T) {
 			t.Errorf("%s: text %q calls %q, want %q %q", c.name, sc.Segments, calls, c.text, c.calls)
 		}
 	}
-	sc, ok := scanReplyBody([]byte("{\"message\":{\"content\":\"a\"}}\n{\"message\":{\"content\":\"b\"},\"done\":true}\n"))
+	sc, ok := scanReplyBody([]byte("{\"message\":{\"content\":\"a\"}}\n{\"message\":{\"content\":\"b\"},\"done\":true}\n"), 0)
 	if !ok || strings.Join(sc.Segments, "|") != "a|b" {
 		t.Errorf("ndjson: %+v %v", sc, ok)
 	}
-	if _, ok := scanReplyBody([]byte("<html>")); ok {
+	if _, ok := scanReplyBody([]byte("<html>"), 0); ok {
 		t.Error("html read as a reply")
 	}
 }
 
 // A call that spans events is assembled across them, for every stream shape.
 func TestSSEToolCallsAssemblesAnthropicAndChatLegacyCalls(t *testing.T) {
-	s := newSSEToolCalls()
+	s := newSSEToolCalls(0)
 	for _, ev := range []string{
 		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"f","input":{}}}`,
 		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}`,

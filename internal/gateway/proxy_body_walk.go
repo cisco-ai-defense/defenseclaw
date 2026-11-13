@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Inspect by default (substrate-1 GAP-0189, GAP-0196). The guardrail proxy
@@ -27,15 +30,38 @@ import (
 // The body is read into a tree that keeps repeated keys, so every value of a
 // repeated or case-folded key is read whichever one the provider keeps.
 
-const (
-	walkMaxNodes = 400000
-	walkMaxDepth = 64
-)
+const walkMaxDepth = 64
 
-var (
-	errWalkTooBig  = errors.New("the body has too many values to inspect")
-	errWalkTooDeep = errors.New("the body is nested too deeply to inspect")
-)
+var errWalkTooDeep = errors.New("the body is nested too deeply to inspect")
+
+// walkLimit is the value cap of a body: guardrail.max_body_values, or its
+// default when that is unset.
+func walkLimit(max int) int {
+	if max <= 0 {
+		return config.DefaultMaxBodyValues
+	}
+	return max
+}
+
+// errTooManyValues is a body with more values than the cap; its message
+// names the cap and the key that raises it.
+type errTooManyValues struct{ max int }
+
+func (e *errTooManyValues) Error() string {
+	return fmt.Sprintf("the body has more than %d values to inspect (the limit is guardrail.max_body_values)", e.max)
+}
+
+func errWalkTooBig(max int) error { return &errTooManyValues{max} }
+
+// replyRefusalReason is the reason a refused reply shows the agent: the
+// generic one, plus the cap and the key that raises it when the reply was
+// refused for having more values than guardrail.max_body_values.
+func replyRefusalReason(why string) string {
+	if strings.Contains(why, "guardrail.max_body_values") {
+		return "the provider reply could not be inspected: " + why
+	}
+	return "the provider reply could not be inspected"
+}
 
 // jnode is a JSON value. Object keys keep their order and repeats.
 type jnode struct {
@@ -48,13 +74,15 @@ type jnode struct {
 type treeParser struct {
 	dec   *json.Decoder
 	nodes int
+	max   int
 }
 
-// parseJSONTree parses exactly one JSON value.
-func parseJSONTree(b []byte) (*jnode, error) {
+// parseJSONTree parses exactly one JSON value of at most max values (0: the
+// default of guardrail.max_body_values).
+func parseJSONTree(b []byte, max int) (*jnode, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
-	p := &treeParser{dec: dec}
+	p := &treeParser{dec: dec, max: walkLimit(max)}
 	n, err := p.value(0)
 	if err != nil {
 		return nil, err
@@ -70,8 +98,8 @@ func (p *treeParser) value(depth int) (*jnode, error) {
 		return nil, errWalkTooDeep
 	}
 	p.nodes++
-	if p.nodes > walkMaxNodes {
-		return nil, errWalkTooBig
+	if p.nodes > p.max {
+		return nil, errWalkTooBig(p.max)
 	}
 	t, err := p.dec.Token()
 	if err != nil {
@@ -591,7 +619,7 @@ type passthroughSidePrompt struct {
 // body that carries no text, and a body whose keys can be read two ways take
 // the fail mode; the text it does carry is still returned, every value of a
 // repeated key included. A body that is not JSON is not a model request.
-func passthroughPromptFor(body []byte, jsonHint bool) passthroughSidePrompt {
+func passthroughPromptFor(body []byte, jsonHint bool, max int) passthroughSidePrompt {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
 		return passthroughSidePrompt{}
@@ -599,8 +627,12 @@ func passthroughPromptFor(body []byte, jsonHint bool) passthroughSidePrompt {
 	if trimmed[0] != '{' && trimmed[0] != '[' && !jsonHint {
 		return plainBodyPrompt(body)
 	}
-	root, err := parseJSONTree(trimmed)
+	root, err := parseJSONTree(trimmed, max)
 	if err != nil {
+		var big *errTooManyValues
+		if errors.As(err, &big) {
+			return passthroughSidePrompt{Unreadable: err.Error()}
+		}
 		return passthroughSidePrompt{Unreadable: "the body is not valid JSON: " + err.Error()}
 	}
 	if root.kind != 'o' {
@@ -659,7 +691,7 @@ func passthroughPromptFor(body []byte, jsonHint bool) passthroughSidePrompt {
 // passthroughPromptForRequest reads a request body by its content type: a
 // multipart or a form body by its text fields (GAP-0196), anything else as
 // passthroughPromptFor does.
-func passthroughPromptForRequest(body []byte, contentType string, jsonHint bool) passthroughSidePrompt {
+func passthroughPromptForRequest(body []byte, contentType string, jsonHint bool, max int) passthroughSidePrompt {
 	if mt, params, err := mime.ParseMediaType(contentType); err == nil {
 		switch {
 		case strings.HasPrefix(mt, "multipart/"):
@@ -668,7 +700,7 @@ func passthroughPromptForRequest(body []byte, contentType string, jsonHint bool)
 			return formPrompt(body)
 		}
 	}
-	return passthroughPromptFor(body, jsonHint)
+	return passthroughPromptFor(body, jsonHint, max)
 }
 
 // plainBodyPrompt reads a body that is not JSON and not a form: text is
@@ -758,9 +790,14 @@ type replyScan struct {
 // scanReplyJSON reads one JSON reply or stream event. With stream set, the
 // tool calls under delta, item and content_block are left to the stream
 // state machine (sseToolCalls), which assembles them across events.
-func scanReplyJSON(data []byte, stream bool) (replyScan, error) {
-	root, err := parseJSONTree(bytes.TrimSpace(data))
+func scanReplyJSON(data []byte, stream bool, max int) (replyScan, error) {
+	root, err := parseJSONTree(bytes.TrimSpace(data), max)
 	if err != nil {
+		var big *errTooManyValues
+		if errors.As(err, &big) {
+			// Valid JSON the proxy will not read: the fail mode, naming the key.
+			return replyScan{Ambiguous: err.Error()}, nil
+		}
 		return replyScan{}, err
 	}
 	w := &textWalker{reply: true, stream: stream}
@@ -770,8 +807,8 @@ func scanReplyJSON(data []byte, stream bool) (replyScan, error) {
 
 // scanReplyBody reads a buffered reply: one JSON value, or newline-delimited
 // JSON (Ollama streams). ok is false for a body that is neither.
-func scanReplyBody(data []byte) (replyScan, bool) {
-	if sc, err := scanReplyJSON(data, false); err == nil {
+func scanReplyBody(data []byte, max int) (replyScan, bool) {
+	if sc, err := scanReplyJSON(data, false, max); err == nil {
 		return sc, true
 	}
 	var out replyScan
@@ -782,7 +819,7 @@ func scanReplyBody(data []byte) (replyScan, bool) {
 		if len(ln) == 0 {
 			continue
 		}
-		sc, err := scanReplyJSON(ln, false)
+		sc, err := scanReplyJSON(ln, false, max)
 		if err != nil {
 			return replyScan{}, false
 		}
