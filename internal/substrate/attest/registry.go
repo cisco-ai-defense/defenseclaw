@@ -131,7 +131,22 @@ type RegistryOptions struct {
 	// template author must not collect the credentials of another registry
 	// (GAP-0052). They are sent only in answer to that host's challenge.
 	Credentials map[string]Credential
-	HTTPClient  *http.Client
+	// Source supplies logins at call time, for hosts Credentials does not
+	// name: a mounted docker config that is re-read when it changes, or a
+	// cloud registry token refreshed before it expires (GAP-0190). It is
+	// asked for exactly the host of the request, with the same rules.
+	Source     CredentialSource
+	HTTPClient *http.Client
+}
+
+// CredentialSource supplies registry logins per host when they are needed.
+type CredentialSource interface {
+	// Credential returns the login for exactly this registry host
+	// (host[:port], as in the image reference). ok false is no login: the
+	// host is reached anonymously. An error means the host has a login that
+	// could not be had now; the call fails (retryable) instead of going on
+	// anonymously. The error must not carry the secret.
+	Credential(ctx context.Context, host string) (c Credential, ok bool, err error)
 }
 
 // Credential is a registry login.
@@ -142,6 +157,15 @@ type Credential struct {
 	// registry-1.docker.io. A realm on any other host gets no credentials.
 	TokenHosts []string
 }
+
+// String never prints the password, so a login in a log line or an error
+// stays a secret.
+func (c Credential) String() string {
+	return fmt.Sprintf("registry login %q (password redacted)", c.Username)
+}
+
+// GoString is String, for %#v.
+func (c Credential) GoString() string { return c.String() }
 
 // Registry is a client. It is safe for concurrent use.
 type Registry struct {
@@ -164,10 +188,20 @@ func NewRegistry(o RegistryOptions) *Registry {
 	return &Registry{opts: o, client: c, tokens: map[string]string{}, basic: map[string]bool{}}
 }
 
-// credential returns the login for a registry host.
-func (g *Registry) credential(host string) (Credential, bool) {
-	c, ok := g.opts.Credentials[host]
-	return c, ok && c.Username != ""
+// credential returns the login for a registry host: the static map first,
+// then the Source.
+func (g *Registry) credential(ctx context.Context, host string) (Credential, bool, error) {
+	if c, ok := g.opts.Credentials[host]; ok {
+		return c, c.Username != "", nil
+	}
+	if g.opts.Source == nil {
+		return Credential{}, false, nil
+	}
+	c, ok, err := g.opts.Source.Credential(ctx, host)
+	if err != nil {
+		return Credential{}, false, err
+	}
+	return c, ok && c.Username != "", nil
 }
 
 // ErrNotFound is returned for a 404 from the registry.
@@ -262,7 +296,10 @@ func (g *Registry) do(ctx context.Context, c call) (*http.Response, error) {
 		tok := g.tokens[c.host+"|"+scope]
 		basic := g.basic[c.host]
 		g.mu.Unlock()
-		cred, haveCred := g.credential(c.host)
+		cred, haveCred, err := g.credential(ctx, c.host)
+		if err != nil {
+			return nil, fmt.Errorf("registry %s: login for %s: %w", c.op, c.host, err)
+		}
 		switch {
 		case tok != "":
 			req.Header.Set("Authorization", "Bearer "+tok)
@@ -339,7 +376,11 @@ func (g *Registry) fetchToken(ctx context.Context, host, challenge, scope string
 	if err != nil {
 		return "", err
 	}
-	if cred, ok := g.credential(host); ok && (u.Host == host || containsHost(cred.TokenHosts, u.Host)) {
+	cred, ok, err := g.credential(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if ok && (u.Host == host || containsHost(cred.TokenHosts, u.Host)) {
 		req.SetBasicAuth(cred.Username, cred.Password)
 	}
 	resp, err := g.client.Do(req)

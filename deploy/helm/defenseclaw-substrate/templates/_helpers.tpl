@@ -105,6 +105,15 @@ reads them from the same directory as the callout (F3, fa2fb4c476). */ -}}
 {{- if not (hasKey $x "actor_secrets_dir") }}{{ $_ := set $x "actor_secrets_dir" (include "dc.actorSecretsDir" .) }}{{ end -}}
 {{- $_ := set $sub "extproc" $x -}}
 {{- end -}}
+{{- /* Template registry logins (GAP-0190) point at the chart's mount
+unless config names a file. */ -}}
+{{- if .Values.controller.templateRegistrySecret -}}
+{{- $t := get $sub "templates" | default dict -}}
+{{- $ra := get $t "registry_auth" | default dict -}}
+{{- if not (hasKey $ra "docker_config") }}{{ $_ := set $ra "docker_config" (include "dc.templateRegistryFile" .) }}{{ end -}}
+{{- $_ := set $t "registry_auth" $ra -}}
+{{- $_ := set $sub "templates" $t -}}
+{{- end -}}
 {{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
 {{- end -}}
@@ -487,6 +496,30 @@ reaches the file in about a minute and both re-read it.
   mountPath: /etc/defenseclaw/substrate/template-anchors
   readOnly: true
 {{- end }}
+{{- end -}}
+
+{{/*
+The template registry logins (controller.templateRegistrySecret, a
+kubernetes.io/dockerconfigjson Secret): mounted read-only in the controller
+and the gateway, the two readers of attestations (GAP-0190). The file is
+re-read when the Secret changes.
+*/}}
+{{- define "dc.templateRegistryFile" -}}/etc/defenseclaw/substrate/registry-auth/config.json{{- end -}}
+
+{{- define "dc.templateRegistryMount" -}}
+- name: template-registry-auth
+  mountPath: /etc/defenseclaw/substrate/registry-auth
+  readOnly: true
+{{- end -}}
+
+{{- define "dc.templateRegistryVolume" -}}
+- name: template-registry-auth
+  secret:
+    secretName: {{ .Values.controller.templateRegistrySecret }}
+    optional: true
+    defaultMode: 0440
+    items:
+    - {key: .dockerconfigjson, path: config.json}
 {{- end -}}
 
 {{- define "dc.templateAnchorsVolume" -}}

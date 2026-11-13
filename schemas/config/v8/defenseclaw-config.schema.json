@@ -6844,6 +6844,15 @@
                 }
               }
             },
+            "admin_groups": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
             "workload_oidc": {
               "type": "array",
               "maxItems": 64,
@@ -6983,6 +6992,24 @@
               "items": {
                 "type": "string",
                 "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            },
+            "registry_auth": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "docker_config": {
+                  "type": "string",
+                  "maxLength": 4096
+                },
+                "ecr_hosts": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]{12}\\.dkr\\.ecr(-fips)?\\.[a-z]{2}(-[a-z]+)+-[0-9]+\\.amazonaws\\.com(\\.cn)?$"
+                  }
+                }
               }
             }
           }
