@@ -133,3 +133,114 @@ func TestEgressCheckNamesTheActor(t *testing.T) {
 		t.Fatalf("check without a name: %v, want bad_request", err)
 	}
 }
+
+// GAP-0234 (R8's TestR8EgressRacingADeleteIsNotAllowed, failed at
+// f8a9610180 with {Deny:false}): the delete (tombstone, then the purge)
+// lands right after the check read the registration. The purged UID gets
+// no fresh, empty entry that answers allow.
+func TestEgressRacingADeleteIsNotAllowed(t *testing.T) {
+	n := newNames()
+	var h *harness
+	var once sync.Once
+	current := func(ctx context.Context, atespace, name, uid string) (bool, error) {
+		live, err := n.current(ctx, atespace, name, uid)
+		once.Do(func() {
+			n.tombstone(actorA)
+			if r := h.life(LifecycleEvent{Actor: actorA, Event: LifecycleDeleted}); r.Ignored {
+				t.Error("delete ignored")
+			}
+		})
+		return live, err
+	}
+	h = newHarness(t, t.TempDir(), Options{Current: current, Deleted: n.isDeleted, Warn: &bytes.Buffer{}})
+	n.register("w1", actorA)
+	h.hook(actorA, "s1", secretRead(t))
+	v, err := h.egressAs("w1", actorA)
+	if err == nil && !v.Deny {
+		t.Fatalf("egress of an actor deleted during its check, after a secret read: %+v, want deny or stale", v)
+	}
+	if !v.Stale {
+		t.Fatalf("racing delete: %+v %v, want stale", v, err)
+	}
+	h.svc.mu.Lock()
+	_, made := h.svc.actors[actorA.key()]
+	h.svc.mu.Unlock()
+	if made {
+		t.Fatal("the racing check left an entry for the purged UID")
+	}
+}
+
+// GAP-0234 class: the registration changes between the check's two reads
+// (replaced, no delete event yet). The entry the check made is dropped, so
+// nothing is left for a UID that was never current while held.
+func TestEgressReplacedDuringItsCheckLeavesNoEntry(t *testing.T) {
+	n := newNames()
+	var calls int
+	var mu sync.Mutex
+	current := func(ctx context.Context, atespace, name, uid string) (bool, error) {
+		mu.Lock()
+		calls++
+		first := calls == 1
+		mu.Unlock()
+		if !first {
+			n.register("w1", actorB) // the successor registers after the first read
+		}
+		return n.current(ctx, atespace, name, uid)
+	}
+	h := newHarness(t, t.TempDir(), Options{Current: current, Deleted: n.isDeleted, Warn: &bytes.Buffer{}})
+	n.register("w1", actorA)
+	if v, err := h.egressAs("w1", actorA); err != nil || !v.Stale {
+		t.Fatalf("replaced during the check: %+v %v, want stale", v, err)
+	}
+	h.svc.mu.Lock()
+	_, kept := h.svc.actors[actorA.key()]
+	h.svc.mu.Unlock()
+	if kept {
+		t.Fatal("the stale check kept the entry it made")
+	}
+}
+
+// GAP-0234 class: after a delete purged an actor, no call makes its entry
+// again: not the egress check (stale, even with no registration wiring),
+// and not a late hook or the egress worker.
+func TestADeletedActorGetsNoEntryAgain(t *testing.T) {
+	n := newNames()
+	h := newHarness(t, t.TempDir(), Options{Deleted: n.isDeleted, Warn: &bytes.Buffer{}})
+	n.register("w1", actorA)
+	h.hook(actorA, "s1", secretRead(t))
+	n.tombstone(actorA)
+	if r := h.life(LifecycleEvent{Actor: actorA, Event: LifecycleDeleted}); r.Ignored {
+		t.Fatal("delete ignored")
+	}
+	if v, err := h.svc.Egress(context.Background(), EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"}); err != nil || !v.Stale || !v.Deny {
+		t.Fatalf("egress of a purged actor: %+v %v, want stale", v, err)
+	}
+	if _, _, err := h.svc.acquire(actorA); !errors.Is(err, errGone) {
+		t.Fatalf("acquire of a purged actor: %v, want errGone", err)
+	}
+	h.svc.mu.Lock()
+	_, made := h.svc.actors[actorA.key()]
+	h.svc.mu.Unlock()
+	if made || exists(t, h.svc.dbPath(actorA)) {
+		t.Fatal("a purged actor's entry or store came back")
+	}
+}
+
+// R8: a purge still running answers the egress check stale, not an error
+// (which the callout takes as unchecked: allowed with an alert on an
+// attended OSS install).
+func TestEgressDuringAPurgeIsStale(t *testing.T) {
+	n := newNames()
+	h := newHarness(t, t.TempDir(), Options{Deleted: n.isDeleted, Warn: &bytes.Buffer{}})
+	h.hook(actorA, "s1", secretRead(t))
+	_, release, err := h.svc.acquire(actorA) // a call still holds the actor
+	if err != nil {
+		t.Fatal(err)
+	}
+	n.tombstone(actorA)
+	h.life(LifecycleEvent{Actor: actorA, Event: LifecycleDeleted}) // purge waits for the hold
+	if v, err := h.svc.Egress(context.Background(), EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"}); err != nil || !v.Stale || !v.Deny {
+		t.Fatalf("egress during the purge: %+v %v, want stale", v, err)
+	}
+	release()
+}

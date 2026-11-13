@@ -5,6 +5,9 @@ package registry
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
+	"sync"
 	"testing"
 	"time"
 )
@@ -103,4 +106,110 @@ func TestCurrent(t *testing.T) {
 	if _, err := Current(ctx, s, "eng-web", "", u2); err == nil {
 		t.Fatal("Current without a name")
 	}
+}
+
+// R8 (claude:c7409eb0/r8): the name index against the scan under concurrent
+// writes and reads,
+// with the same names in two atespaces, CreatedAt ties, out-of-order
+// writes, late tombstones and a reload.
+func TestNameIndexUnderConcurrentWrites(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	spaces := []string{"eng-web", "eng-ops"}
+	names := []string{"a1", "a2", "a3"}
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for w := 0; w < 8; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			rnd := rand.New(rand.NewSource(int64(w)))
+			for i := 0; i < 60; i++ {
+				sp, nm := spaces[rnd.Intn(2)], names[rnd.Intn(3)]
+				uid := fmt.Sprintf("%08x-0000-4000-8000-%012x", w, i)
+				r := reg(nm, uid, "alice")
+				r.Atespace = sp
+				r.Key = ""
+				r.CreatedAt = time.Unix(int64(1000+rnd.Intn(20)), 0) // many ties
+				if err := s.Put(ctx, r); err != nil {
+					t.Error(err)
+					return
+				}
+				if rnd.Intn(3) == 0 {
+					r.Deleted = true
+					if err := s.Put(ctx, r); err != nil {
+						t.Error(err)
+						return
+					}
+				}
+			}
+		}(w)
+	}
+	var rw sync.WaitGroup
+	for r := 0; r < 4; r++ {
+		rw.Add(1)
+		go func() {
+			defer rw.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, sp := range spaces {
+					for _, nm := range names {
+						l, err := LookupName(ctx, s, sp, nm)
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						if _, err := Current(ctx, s, sp, nm, l.UID); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	rw.Wait()
+	check := func(what string, st Store) {
+		for _, sp := range spaces {
+			for _, nm := range names {
+				got, err := LookupName(ctx, st, sp, nm)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := LookupName(ctx, listOnly{st}, sp, nm)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got != want {
+					t.Fatalf("%s %s/%s: index %+v, scan %+v", what, sp, nm, got, want)
+				}
+				// The other atespace's same name never answers.
+				other := spaces[0]
+				if sp == other {
+					other = spaces[1]
+				}
+				if got.Found {
+					if ok, _ := Current(ctx, st, other, nm, got.UID); ok {
+						t.Fatalf("%s: %s/%s's UID is current under %s", what, sp, nm, other)
+					}
+				}
+			}
+		}
+	}
+	check("live", s)
+	again, err := OpenFileStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("reloaded", again)
 }

@@ -131,7 +131,17 @@ type Service struct {
 	purging map[string]bool
 	// purges are the purges whose files wait for runPurges.
 	purges []purgeJob
+	// gone are the actors a delete purged (their registration was marked
+	// deleted first). No call makes an entry for one again: a check that
+	// read the registration just before the delete must not get a fresh,
+	// empty entry that answers allow (GAP-0234). Oldest first, at most
+	// maxGone; past it, Egress still asks Current while it holds the entry.
+	gone     map[string]bool
+	goneList []string
 }
+
+// maxGone bounds Service.gone.
+const maxGone = 1 << 16
 
 // purgeJob is a purged actor's store and files, removed after mu.
 type purgeJob struct {
@@ -231,7 +241,7 @@ func New(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}}
+	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}, gone: map[string]bool{}}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
@@ -373,6 +383,9 @@ func (s *Service) load() error {
 // waited for it.
 var errEvicted = &leader.WireError{Code: leader.CodeUnavailable, Message: "the actor's chain state was purged"}
 
+// errGone is returned for an actor a delete purged.
+var errGone = &leader.WireError{Code: leader.CodeUnavailable, Message: "the actor was deleted"}
+
 // acquire returns the actor's entry with a reference; release returns it.
 // An actor seen for the first time gets an entry (evicting another when the
 // atespace is full).
@@ -384,20 +397,32 @@ func (s *Service) acquire(a Actor) (*actorEntry, func(), error) {
 // closes and file removals its release makes to a goroutine, so the check
 // never waits on the volume (GAP-0179).
 func (s *Service) acquireWith(a Actor, quick bool) (*actorEntry, func(), error) {
+	e, release, _, err := s.acquireEntry(a, quick)
+	return e, release, err
+}
+
+// acquireEntry is acquireWith; created reports an entry this call made.
+// An actor a delete purged gets none (errGone).
+func (s *Service) acquireEntry(a Actor, quick bool) (_ *actorEntry, _ func(), created bool, _ error) {
 	if err := a.Validate(); err != nil {
-		return nil, nil, bad(err)
+		return nil, nil, false, bad(err)
 	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return nil, nil, &leader.WireError{Code: leader.CodeUnavailable, Message: "chain store closed"}
+		return nil, nil, false, &leader.WireError{Code: leader.CodeUnavailable, Message: "chain store closed"}
 	}
 	e := s.actors[a.key()]
 	if (e != nil && e.purgeIdle) || s.purging[a.key()] {
 		s.mu.Unlock()
-		return nil, nil, errEvicted
+		return nil, nil, false, errEvicted
+	}
+	if e == nil && s.gone[a.key()] {
+		s.mu.Unlock()
+		return nil, nil, false, errGone
 	}
 	if e == nil {
+		created = true
 		s.makeRoomLocked(a.Atespace)
 		// A new actor has no store this leader has not seen: the memo
 		// covers it from the start.
@@ -428,7 +453,7 @@ func (s *Service) acquireWith(a Actor, quick bool) (*actorEntry, func(), error) 
 			}
 			s.runPurges()
 		})
-	}, nil
+	}, created, nil
 }
 
 // after runs f now, or in a goroutine for a quick call.
@@ -507,6 +532,19 @@ func (s *Service) purgeLocked(e *actorEntry) {
 	delete(s.actors, e.actor.key())
 	s.purging[e.actor.key()] = true
 	s.purges = append(s.purges, job)
+}
+
+// goneLocked records a deleted actor (Service.gone).
+func (s *Service) goneLocked(key string) {
+	if s.gone[key] {
+		return
+	}
+	if len(s.goneList) >= maxGone {
+		delete(s.gone, s.goneList[0])
+		s.goneList = s.goneList[1:]
+	}
+	s.gone[key] = true
+	s.goneList = append(s.goneList, key)
 }
 
 // runPurges closes the stores and removes the files of the purged actors
@@ -1073,6 +1111,7 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 			}
 		}
 		s.mu.Lock()
+		s.goneLocked(in.Actor.key())
 		if e := s.actors[in.Actor.key()]; e != nil {
 			if e.refs > 0 {
 				// Calls still hold the store: purge when the last returns,
@@ -1215,9 +1254,11 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 //
 // The UID comes from the callout's name cache, which may still hold a
 // deleted incarnation, or one a same-name actor replaced. Such a UID is
-// answered stale before its state is touched: its windows are not the
-// running actor's, and a purged UID gets no fresh, empty entry that would
-// answer allow (GAP-0234).
+// answered stale, never from state: its windows are not the running
+// actor's. Current is read before the entry is taken and again while it is
+// held, and a deleted actor's entry is never made again (Service.gone), so
+// a delete racing the check cannot give the purged UID a fresh, empty entry
+// that answers allow (GAP-0234).
 func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, error) {
 	if s.opts.Current != nil {
 		if in.Name == "" {
@@ -1234,11 +1275,39 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 			return staleVerdict, nil
 		}
 	}
-	e, release, err := s.acquireWith(in.Actor, true)
-	if err != nil {
+	e, release, created, err := s.acquireEntry(in.Actor, true)
+	switch {
+	case errors.Is(err, errGone), errors.Is(err, errEvicted):
+		// Deleted, or its purge (a delete's, or the atespace cap's) still
+		// running: there is no state to answer from. Stale, not an error,
+		// which the callout would take as unchecked (allowed with an alert
+		// on an attended OSS install); a UID stale twice is refused,
+		// retryable.
+		return staleVerdict, nil
+	case err != nil:
 		return EgressVerdict{}, err
 	}
 	defer release()
+	if s.opts.Current != nil {
+		// Asked again while the entry is held. A delete marks the
+		// registration first, then purges; from here on its purge waits
+		// for this call. So a UID current now is answered from its own
+		// state, and one deleted (or replaced) since the first read gets
+		// stale, and the entry this call made for it is dropped
+		// (GAP-0234).
+		live, err := s.opts.Current(ctx, in.Actor.Atespace, in.Name, in.Actor.UID)
+		if err != nil || !live {
+			if created {
+				s.mu.Lock()
+				e.purgeIdle = true
+				s.mu.Unlock()
+			}
+			if err != nil {
+				return EgressVerdict{}, err
+			}
+			return staleVerdict, nil
+		}
+	}
 	if err := s.linkMemo(ctx, e); err != nil {
 		return EgressVerdict{}, err
 	}

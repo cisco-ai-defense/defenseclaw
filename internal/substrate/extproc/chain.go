@@ -124,7 +124,7 @@ const (
 	// uncheckedLookup is a registration lookup that failed.
 	uncheckedLookup = "registration_unavailable"
 	// uncheckedStale is a UID the leader answered stale again after the
-	// name was resolved afresh (GAP-0234).
+	// name was resolved afresh: refused, retryable (GAP-0234).
 	uncheckedStale = "registration_stale"
 )
 

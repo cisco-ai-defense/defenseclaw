@@ -288,15 +288,42 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
 		}
 	}()
-	return e.decideHeaders(ctx, req, true)
+	var p pass
+	v = e.decideHeaders(ctx, req, &p)
+	switch {
+	case p.stale:
+		// The cache entry is dropped: the name is resolved again.
+		v = e.decideHeaders(ctx, req, &pass{last: true})
+	case !p.confirmed && e.uids.Refresh(ctx, req.Actor):
+		v = e.decideHeaders(ctx, req, &pass{last: true})
+	}
+	return v
 }
 
-// decideHeaders is DecideHeaders under its budget. again allows one more
-// pass after the leader answers the actor's chain check stale: the cached
-// UID was a deleted or replaced incarnation, so the name is resolved again
-// and the request decided again from the start, the policy profile
-// included, under the registration that is live now (GAP-0234).
-func (e *Engine) decideHeaders(ctx context.Context, req *Request, again bool) (v Verdict) {
+// pass is one decideHeaders pass over a request.
+//
+// The UID cache gets no lifecycle events, so a cached entry can name an
+// incarnation that was deleted, or replaced by a same-name actor created
+// again (GAP-0234). No decision stands on such an entry: a pass is
+// confirmed when the leader confirmed the incarnation during it (the
+// name was resolved now, or the chain check, which the leader answers only
+// for the name's live incarnation, came back clear or hit), or when the
+// decision did not use the registration. An unconfirmed pass (a refusal
+// by the host, URL or DLP stages, or an unchecked chain step, on a cached
+// entry) resolves the name again, and a changed registration decides the
+// request again; a stale chain answer drops the entry and decides it
+// again. So a recreated actor is decided under its own profile and UID,
+// never its predecessor's (GAP-0237). The last pass decides as it is.
+type pass struct {
+	last      bool
+	confirmed bool
+	stale     bool
+}
+
+// decideHeaders is one pass of DecideHeaders under its budget.
+func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Verdict) {
+	// Nothing before the registration lookup uses it.
+	p.confirmed = true
 	if req.IdentityErr != nil {
 		return deny(v, CategoryUnattributed, sourceIdentity, "",
 			"The request carries no actor identity from the Substrate egress gateway, so DefenseClaw can't tell whose it is.")
@@ -324,7 +351,11 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, again bool) (v
 	// attendance; with none, nobody can say a person watches the actor, so
 	// it counts as unattended, and under auto its unchecked egress is
 	// refused, retryable (D8, GAP-0188).
-	rec, err := e.uids.Resolve(ctx, req.Actor)
+	rec, src, err := e.uids.Resolve(ctx, req.Actor)
+	// A cached entry is confirmed by the chain check below, or resolved
+	// again. Nothing is learned from a second lookup during an outage, and
+	// an entry with no registration lives uidMissTTL only.
+	p.confirmed = src != fromCache || (err == nil && rec.UID == "")
 	lookupDown := false
 	switch {
 	case errors.Is(err, ErrActorNotLive):
@@ -399,15 +430,26 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, again bool) (v
 	if lookupDown && e.checker != nil {
 		outcome, chainWhy = chainUnchecked, uncheckedLookup
 	}
-	if outcome == chainStale {
-		// The UID cache has no lifecycle events: the leader, which keeps
-		// the registrations, tells it the UID is no longer the actor's.
-		e.uids.Invalidate(req.Actor.Atespace, req.Actor.Name)
-		if again {
-			return e.decideHeaders(ctx, req, false)
+	switch outcome {
+	case chainClear, chainHit:
+		if e.checker != nil && req.Actor.UID != "" {
+			p.confirmed = true
 		}
-		// Stale twice: the registrations changed again meanwhile.
-		outcome, chainWhy = chainUnchecked, uncheckedStale
+	case chainStale:
+		// The leader, which keeps the registrations, says the cached UID is
+		// no longer the actor's.
+		e.uids.Invalidate(req.Actor.Atespace, req.Actor.Name)
+		if !p.last {
+			p.stale = true
+			return v
+		}
+		// Stale again under the name's fresh registration: it changed again
+		// meanwhile. A new actor's UID comes from its registration and is
+		// never stale, so refusing loses nothing (GAP-0234).
+		v = deny(v, CategoryChainUnchecked, sourceChain, uncheckedStale,
+			"DefenseClaw's registrations for this actor changed while the request was checked.")
+		v.Retryable = true
+		return v
 	}
 	switch outcome {
 	case chainHit:

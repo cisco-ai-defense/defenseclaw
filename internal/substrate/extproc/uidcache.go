@@ -42,11 +42,12 @@ var ErrActorNotLive = errors.New("extproc: actor is not live")
 // the resolver fails, an entry younger than staleMax still serves (§5.5).
 // No lifecycle event reaches the callout, so an entry can name an
 // incarnation that was deleted, or replaced by a same-name actor created
-// again, until it ages out. It never decides a request under that UID:
-// the leader checks every egress chain step's UID against the name's live
-// registration and answers a stale one stale, and the engine then drops
-// the entry (Invalidate) and decides the request again under the name's
-// current registration (GAP-0234).
+// again, until it ages out. The engine does not let a decision stand on
+// such an entry (see pass in decide.go): the leader answers a chain check
+// under a UID that is not the name's live incarnation stale (the engine
+// drops the entry with Invalidate), and a decision made on a cached entry
+// that no chain answer confirmed is checked with Refresh (GAP-0234,
+// GAP-0237).
 type UIDCache struct {
 	r        UIDResolver
 	ttl      time.Duration
@@ -77,11 +78,25 @@ func NewUIDCache(r UIDResolver, ttl, staleMax time.Duration) *UIDCache {
 	return &UIDCache{r: r, ttl: ttl, staleMax: staleMax, now: time.Now, m: map[string]uidEntry{}}
 }
 
-// Resolve returns a's current incarnation. ErrActorNotLive: the actor was
-// deleted. Any other error is an outage with no usable cached entry.
-func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (ActorRecord, error) {
+// Where Resolve's answer came from.
+type resolveSource int
+
+const (
+	// fromCache is a cached entry within its TTL.
+	fromCache resolveSource = iota
+	// fromResolver is the resolver's answer to this call.
+	fromResolver
+	// fromOutage is a resolver failure: a cached entry within staleMax, or
+	// a LookupError.
+	fromOutage
+)
+
+// Resolve returns a's current incarnation, and where the answer came from.
+// ErrActorNotLive: the actor was deleted. Any other error is an outage with
+// no usable cached entry.
+func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (ActorRecord, resolveSource, error) {
 	if c == nil || c.r == nil {
-		return ActorRecord{}, nil
+		return ActorRecord{}, fromResolver, nil
 	}
 	key := a.Key()
 	now := c.now()
@@ -89,8 +104,29 @@ func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (ActorRecord, error)
 	e, ok := c.m[key]
 	c.mu.Unlock()
 	if ok && e.fresh(now, c.ttl) {
-		return e.result()
+		rec, err := e.result()
+		return rec, fromCache, err
 	}
+	ne, err := c.load(ctx, a)
+	if err != nil {
+		if ok && now.Sub(e.at) < c.staleMax {
+			rec, err := e.result()
+			return rec, fromOutage, err
+		}
+		le := &LookupError{Err: err}
+		if ok && e.live && e.rec.UID != "" {
+			le.Last, le.Known = e.rec, true
+		}
+		return ActorRecord{}, fromOutage, le
+	}
+	rec, err := ne.result()
+	return rec, fromResolver, err
+}
+
+// load asks the resolver for a (one call per name at a time) and caches
+// the answer.
+func (c *UIDCache) load(ctx context.Context, a ActorRef) (uidEntry, error) {
+	key := a.Key()
 	v, err, _ := c.sf.Do(key, func() (any, error) {
 		rec, live, err := c.r.ResolveActor(ctx, a.Atespace, a.Name)
 		if err != nil {
@@ -101,16 +137,28 @@ func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (ActorRecord, error)
 		return ne, nil
 	})
 	if err != nil {
-		if ok && now.Sub(e.at) < c.staleMax {
-			return e.result()
-		}
-		le := &LookupError{Err: err}
-		if ok && e.live && e.rec.UID != "" {
-			le.Last, le.Known = e.rec, true
-		}
-		return ActorRecord{}, le
+		return uidEntry{}, err
 	}
-	return v.(uidEntry).result()
+	return v.(uidEntry), nil
+}
+
+// Refresh resolves a again past its cached entry and reports whether the
+// registration changed: another UID, profile or attendance, or deleted
+// (GAP-0237). An outage changes nothing.
+func (c *UIDCache) Refresh(ctx context.Context, a ActorRef) bool {
+	if c == nil || c.r == nil {
+		return false
+	}
+	key := a.Key()
+	c.mu.Lock()
+	prev, ok := c.m[key]
+	c.mu.Unlock()
+	c.sf.Forget(key)
+	ne, err := c.load(ctx, a)
+	if err != nil {
+		return false
+	}
+	return !ok || ne.live != prev.live || ne.rec != prev.rec
 }
 
 // LookupError is a registration lookup outage with no cached entry young
