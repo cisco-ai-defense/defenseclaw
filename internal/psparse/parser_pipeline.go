@@ -419,7 +419,7 @@ func (p *parser) parseArgAtom() Expr {
 		// makes it non-static (unlike a command name, which stays literal).
 		return p.barewordExpr(p.advance())
 	case TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
-		TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
+		TokAtParen, TokAtBrace, TokLBrace:
 		return p.parsePostfix(p.parsePrimary())
 	case TokOperator:
 		// an operator character used as argument text (a lone '-', or a glob
@@ -434,6 +434,16 @@ func (p *parser) parseArgAtom() Expr {
 		// a ':name' at argument position is a bareword (Remove-Item :x -Force).
 		t := p.advance()
 		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+	case TokLBracket:
+		// [..] at argument position is a literal bareword in command mode
+		// (Write-Output [int] -> "[int]"), not a type literal or an index.
+		start := p.cur().Start
+		end := p.consumeBalancedEnd()
+		raw := ""
+		if start >= 0 && end <= len(p.src) && end >= start {
+			raw = p.src[start:end]
+		}
+		return &StringLit{span: span{start, end}, Kind: StrBare, Value: nameValue(raw), Static: true, Bare: true}
 	}
 	return nil
 }
@@ -479,7 +489,7 @@ func composeAtoms(atoms []Expr, s0, end int) Expr {
 // the current command argument (PowerShell's generic-token concatenation).
 func adjacentFusable(k TokenKind) bool {
 	switch k {
-	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot:
+	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot, TokLBracket:
 		return true
 	}
 	return false

@@ -9,20 +9,15 @@ R2V0LUl0ZW0gLS0gLXg=	pending step-3: parameter vs argument boundary
 JiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
 LiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0ICQoMSl4	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0IEM6XHhcW2Fd	pending step-3: [..] brackets are literal in an argument
 V3JpdGUtT3V0cHV0IDEtMg==	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0ICdhJyM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
 V3JpdGUtT3V0cHV0ICgxKSM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
 UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/comment splits an argument
 UmVtb3ZlLUl0ZW0gJChHZXQtTG9jYXRpb24pXHg=	pending step-3: glued operator/bracket/comment splits an argument
-UmVtb3ZlLUl0ZW0gQzpceFxbYWJdJ2Mn	pending step-3: [..] brackets are literal in an argument
-V3JpdGUtT3V0cHV0IGFbMF0=	pending step-3: [..] brackets are literal in an argument
 V3JpdGUtT3V0cHV0IDEtMi0z	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IDErMg==	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IDEqMg==	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IDB4MTAtMQ==	pending step-3: number value formatting (int width / suffix / decimal)
-V3JpdGUtT3V0cHV0IGFcW2Jd	pending step-3: [..] brackets are literal in an argument
-V3JpdGUtT3V0cHV0IEM6XHhcW2FdXGI=	pending step-3: [..] brackets are literal in an argument
 V3JpdGUtT3V0cHV0ICQoMSkkKDIp	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0ICdhJyNi	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0ICJhIiNi	pending step-3: glued operator/bracket/comment splits an argument
