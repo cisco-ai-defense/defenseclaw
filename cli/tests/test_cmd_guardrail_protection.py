@@ -116,6 +116,60 @@ def test_scoped_disable_refuses_inherited_global_protection(env) -> None:
     assert not writes
 
 
+def test_enable_validates_every_scope_layer_like_the_gateway(env, monkeypatch) -> None:
+    """Packs enabled at different scopes add up in the check, as on reload (rel-1-0-10:GAP-0050)."""
+    app, _root, writes = env
+    seen: list[list[dict] | None] = []
+
+    def _validate(_path, **kwargs):
+        seen.append(kwargs.get("layers"))
+        return rulepack_validation.RulePackValidationResult(
+            wire_version=1,
+            kind="validation",
+            valid=True,
+            summary={"rule_count": 1, "digest": "c" * 64, "files_digest": "a" * 64},
+        )
+
+    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _validate)
+    app.cfg.guardrail.rules = GuardrailRulesConfig(
+        protections=[DB], severity_overrides={"impact.sql_unbounded_delete": "HIGH"}
+    )
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(rules=GuardrailRulesConfig(disable=["impact.sql_schema_destroy"]))
+    }
+    result = _run(app, "protection", "enable", K8S, "--connector", "codex", "--json")
+    assert result.exit_code == 0, result.output
+    assert seen == [
+        [
+            {"protections": [DB], "severity_overrides": {"impact.sql_unbounded_delete": "HIGH"}},
+            {"disable": ["impact.sql_schema_destroy"], "protections": [K8S]},
+        ]
+    ]
+    assert writes[-1][0] == [config_writer.Change("guardrail.connectors.codex.rules.protections", [K8S])]
+
+
+def test_enable_refuses_when_the_composed_layers_do_not_load(env, monkeypatch) -> None:
+    app, _root, writes = env
+    monkeypatch.setattr(
+        rulepack_validation,
+        "validate_rule_pack",
+        lambda _path, **_k: rulepack_validation.RulePackValidationResult(
+            wire_version=1,
+            kind="validation_error",
+            valid=False,
+            error=rulepack_validation.RulePackValidationIssue(
+                path=".", code="semantic_catalog_cost_limit", reason="over the limit"
+            ),
+        ),
+    )
+    app.cfg.guardrail.rules = GuardrailRulesConfig(protections=[DB])
+    result = _run(app, "protection", "enable", K8S, "--connector", "codex", "--json")
+    body = json.loads(result.stdout)
+    assert result.exit_code == 1
+    assert "semantic_catalog_cost_limit" in body["message"] and "Nothing was changed" in body["message"]
+    assert not writes
+
+
 def test_protection_list_reads_config(env) -> None:
     app, _root, _writes = env
     app.cfg.guardrail.rules = GuardrailRulesConfig(protections=[DB])

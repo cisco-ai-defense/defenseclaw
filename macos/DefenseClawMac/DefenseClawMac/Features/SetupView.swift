@@ -286,6 +286,16 @@ struct WizardSheet: View {
                 || (values["action"] == "setup" && values["replace"] == "yes"))
     }
 
+    /// TUI setup.py: the connector wizard's Guardrail mode seeds from the
+    /// chosen connector's effective mode (its override, else guardrail.mode),
+    /// or the global mode for batch, so an untouched apply keeps the live
+    /// posture rather than downgrading an action-mode connector to observe.
+    private func seedConnectorGuardrailMode() {
+        let connector = values["action"] == "batch" ? "" : (values["connector"] ?? "")
+        let mode = appState.config.effectiveGuardrailMode(for: connector).lowercased()
+        values["mode"] = ["observe", "action"].contains(mode) ? mode : "observe"
+    }
+
     private var displayCommand: String {
         let commands = buildCommands(maskSecrets: true)
         guard !commands.isEmpty else { return "(no changes selected — nothing to apply)" }
@@ -329,17 +339,23 @@ struct WizardSheet: View {
                     values[key] = value
                 }
             }
-            // TUI parity: the connector wizard preselects the configured
-            // claw.mode connector, not a hardcoded default.
-            if wizard.id == "connector",
-               let configured = (appState.config.connectorMode ?? appState.config.connectorName)?
-                   .trimmingCharacters(in: .whitespaces).lowercased(),
-               TUIWizards.connectors.contains(configured) {
-                values["connector"] = configured
+            // TUI parity (1.0.7): the connector wizard preselects
+            // config.active_connector() — guardrail.connector, else the
+            // roster (claw.mode when listed, else its first name), else
+            // claw.mode — and nothing when no connector is configured.
+            if wizard.id == "connector" {
+                let configured = appState.config.activeConnector
+                if TUIWizards.connectors.contains(configured) { values["connector"] = configured }
+                seedConnectorGuardrailMode()
             }
             seededValues = values
             if wizard.interactiveOnly { phase = .review } // nothing to fill in
             if wizard.id == "sandbox" { checkSandboxMachine() }
+        }
+        .onChange(of: wizard.id == "connector" ? "\(values["action"] ?? "")/\(values["connector"] ?? "")" : "") { _, driver in
+            // TUI rebuilders: a new Connector/Action re-seeds the Guardrail
+            // mode instead of carrying a prior connector's mode along.
+            if !driver.isEmpty { seedConnectorGuardrailMode() }
         }
         .alert("Replace the connector roster?", isPresented: $confirmConnectorReplacement) {
             Button("Cancel", role: .cancel) {}

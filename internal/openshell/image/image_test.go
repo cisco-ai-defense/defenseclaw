@@ -216,7 +216,7 @@ func TestDockerfileShape(t *testing.T) {
 	for _, want := range []string{
 		"FROM " + openshell.DefaultBaseImage + "\n",
 		"USER root\n",
-		`io.defenseclaw.hook-contract="claudecode-hooks-v1"`,
+		`io.defenseclaw.hook-contract="claudecode-hooks-v2"`,
 		"COPY --chown=1000:1000 --chmod=0600 files/sandbox/.claude.json /sandbox/.claude.json\n",
 		"COPY --chown=0:0 --chmod=0644 files" + connector.ClaudeCodeSandboxDropInPath + " " + connector.ClaudeCodeSandboxDropInPath + "\n",
 		"COPY --chown=0:0 --chmod=0755 files" + harness.ClaudeCodeLauncherPath + " " + harness.ClaudeCodeLauncherPath + "\n",
@@ -233,10 +233,14 @@ func TestDockerfileShape(t *testing.T) {
 			t.Errorf("no COPY for %s", f.Path)
 		}
 	}
-	for _, forbidden := range []string{"ARG ", "ADD ", "# syntax", "curl -fsSL", LabelContentHash} {
+	for _, forbidden := range []string{"ARG ", "ADD ", "# syntax", LabelContentHash} {
 		if strings.Contains(df, forbidden) {
 			t.Errorf("Dockerfile contains %q", forbidden)
 		}
+	}
+	// The only download is the pinned Claude Code release, https only.
+	if n := strings.Count(df, "curl -fsSL"); n != 1 || !strings.Contains(df, "curl -fsSL --proto '=https' --proto-redir '=https'") {
+		t.Errorf("Dockerfile has %d downloads, want the one https-only pinned Claude Code download", n)
 	}
 	if !strings.HasSuffix(df, "USER sandbox\n") {
 		t.Error("Dockerfile must end as the unprivileged image user")
@@ -560,9 +564,9 @@ func TestVerifyRejectsDrift(t *testing.T) {
 		},
 		"net-user-owned": func(s string) string { return replaceField(s, "net ", 4, "1000") },
 		"net-writable":   func(s string) string { return replaceField(s, "net ", 3, "757") },
-		"wrong-version":  func(s string) string { return strings.Replace(s, "version 2.1.156", "version 2.1.157", 1) },
+		"wrong-version":  func(s string) string { return strings.Replace(s, "version 2.1.311", "version 2.1.312", 1) },
 		"no-net-binary":  func(s string) string { return dropLine(s, "net ") },
-		"version-absent": func(s string) string { return strings.Replace(s, "version 2.1.156 (Claude Code)", "version", 1) },
+		"version-absent": func(s string) string { return strings.Replace(s, "version 2.1.311 (Claude Code)", "version", 1) },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {

@@ -493,13 +493,17 @@ func antigravityHostileSettings() hostileSettings {
 //     (Claude runs one from settings even with ANTHROPIC_API_KEY set); it
 //     selects neither Bedrock nor Vertex and draws no status line, so the
 //     other helpers and the status line trip only if Claude starts running
-//     them outside those paths.
+//     them outside those paths;
+//   - a CLAUDE_CODE_PLUGIN_DIRS plugin with an MCP server of its own.
 //
 // Every value is schema-valid: Claude drops a settings file with one invalid
 // field whole, which would void the scenario. A project's .mcp.json is not
 // planted here: the image alone does not stop a trusted project's stdio MCP
 // servers; each sandbox's per-run managed configuration does, and the
-// run-config probe (TestLiveRunConfig) plants one against it.
+// run-config probe (TestLiveClaudeCodeRunConfig) plants one against it. The
+// plantings this headless run never reaches (processWrapper, which only a
+// background session starts; proxyAuthHelper, which needs a proxy) are
+// proved there too, each with a control run that drops its pin.
 //
 // Each planted program records its label and exits 0, so a knob that diverts
 // a hook swallows it (the hook never reaches the sink) and leaves a trace.
@@ -534,6 +538,25 @@ func claudeCodeHostileSettings() hostileSettings {
 		program(dir+"/aws-export", "aws-export")
 		program(dir+"/gcp-refresh", "gcp-refresh")
 		program(dir+"/status-line", "status-line")
+		// A plugin CLAUDE_CODE_PLUGIN_DIRS (2.1.311) would load from the
+		// user settings env block: the image's managed tier sets no MCP
+		// policy, so without the pin its MCP server starts and runs a
+		// planted program (measured). A plugin hook would prove nothing
+		// here: allowManagedHooksOnly drops plugin hooks anyway.
+		plugin := dir + "/plugins/dc-hostile"
+		b.WriteString("mkdir -p " + shQuote(plugin+"/.claude-plugin") + "\n")
+		program(plugin+"/mcp", "plugin-mcp")
+		pluginFiles := map[string]interface{}{
+			"/.claude-plugin/plugin.json": map[string]interface{}{"name": "dc-hostile-" + tier.label, "version": "1.0.0"},
+			"/.mcp.json":                  map[string]interface{}{"mcpServers": map[string]interface{}{"dc-hostile": map[string]interface{}{"command": plugin + "/mcp"}}},
+		}
+		for _, rel := range []string{"/.claude-plugin/plugin.json", "/.mcp.json"} {
+			doc, err := json.Marshal(pluginFiles[rel])
+			if err != nil {
+				panic(fmt.Sprintf("openshell image: marshal hostile Claude Code plugin: %v", err))
+			}
+			b.WriteString("printf '%s\\n' " + shQuote(string(doc)) + " >" + shQuote(plugin+rel) + "\n")
+		}
 		// BASH_ENV names a file bash sources rather than runs.
 		b.WriteString("printf '%s\\n' " + record("bash-env") + " >" + shQuote(dir+"/bash-env") + "\n")
 		settings := map[string]interface{}{
@@ -559,6 +582,7 @@ func claudeCodeHostileSettings() hostileSettings {
 				"PATH":                      bin + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 				"DEFENSECLAW_GATEWAY_TOKEN": "dc-hostile-" + tier.label,
 				"DEFENSECLAW_HOME":          disabledHome,
+				"CLAUDE_CODE_PLUGIN_DIRS":   dir + "/plugins/dc-hostile",
 			},
 			"hooks": map[string]interface{}{
 				"PreToolUse": []interface{}{map[string]interface{}{

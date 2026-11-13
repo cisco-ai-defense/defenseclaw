@@ -171,9 +171,12 @@ type Sidecar struct {
 	// enrolledWatchRoots are the enrolled user folders the previous
 	// watcher of this process watched (runWatcher only); nil before the
 	// first.
-	enrolledWatchRoots       map[string]struct{}
-	guardrailRestartCh       chan struct{}
-	aiRestartCh              chan struct{}
+	enrolledWatchRoots map[string]struct{}
+	guardrailRestartCh chan struct{}
+	aiRestartCh        chan struct{}
+	// endpointHealthReloadCh asks the endpoint health reporter for a
+	// config_reload report after a committed reload.
+	endpointHealthReloadCh   chan struct{}
 	aiRuntimeRestartCh       chan struct{}
 	runCancelMu              sync.Mutex
 	runCancel                context.CancelFunc
@@ -592,6 +595,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		watcherRestartCh:        make(chan struct{}, 1),
 		guardrailRestartCh:      make(chan struct{}, 1),
 		aiRestartCh:             make(chan struct{}, 1),
+		endpointHealthReloadCh:  make(chan struct{}, 1),
 		aiRuntimeRestartCh:      make(chan struct{}, 1),
 		alertCtx:                alertCtx,
 		alertCancel:             alertCancel,
@@ -1031,7 +1035,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// connector pending before it can answer a retained native hook.
 	s.beginPerUserConnectorHookSetup()
 	s.applyModelUsage(s.cfg)
+	defer s.stopRoutingAdmin()
 	defer s.stopModelUsage()
+	s.startRoutingAdmin(ctx)
 	s.carryObservabilityV8ShutdownDrops()
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
@@ -1166,7 +1172,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}
 	}
-	s.modelRouter = newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	s.modelRouter = router
+	activeEngineRouter.Store(router)
 
 	s.logSecureClientPolicyEngine()
 
@@ -1432,6 +1440,17 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			errCh <- err
 		}
 	}()
+
+	// Goroutine 5c: endpoint health reports to Cisco AI Defense. Only a
+	// managed Secure Client deployment has the destination; elsewhere no
+	// goroutine or timer is started.
+	if endpointHealthReporterEnabled(s.currentConfig()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.runEndpointHealthReporter(runCtx)
+		}()
+	}
 
 	// Goroutine 6: local UDS gRPC IPC server for AVC (opt-in via
 	// managed.enabled or deployment_mode=managed_enterprise). No-op
@@ -2472,6 +2491,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	)
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldHookCfg, appliedCfg)
+	// Route-only is hot (DESIGN 16.11): re-render the agent config of every
+	// connector whose route-only rendering changed.
+	s.applyRouteOnlyRenders(oldCfg, appliedCfg)
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
 		// change are readmitted now, without waiting for content drift
@@ -2543,6 +2565,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 	}
 	s.applyModelUsage(appliedCfg)
+	s.applyRoutingAdmin(appliedCfg)
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
@@ -2648,6 +2671,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if aiRestart {
 		signalRestart(s.aiRestartCh)
 		signalRestart(s.aiRuntimeRestartCh)
+	}
+	if endpointHealthReporterEnabled(s.currentConfig()) {
+		signalRestart(s.endpointHealthReloadCh)
 	}
 	preparedCommitted = true
 	return nil
@@ -3591,6 +3617,7 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 		}
 		proxy.bindObservabilityV8TraceMode(lifecycle, true)
 		proxy.generationSource = s.Generation
+		proxy.kernelPeer = s.proxyKernelPeer
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
@@ -7460,6 +7487,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:             agentVersion,
 		AgentExecutable:          agentExecutable,
 		HookContractID:           contractResolution.Contract.ContractID,
+		RouteOnly:                routeOnlySetupFor(cfg, conn.Name(), apiAddr),
 	}, nil
 }
 
@@ -9143,6 +9171,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 		api.SetGenerationSource(s.Generation)
+	}
+	if router, ok := s.modelRouter.(*engineRouter); ok && router != nil {
+		ro := newRouteOnlyServer(router, s.currentConfig, s.currentConfig().DataDir)
+		api.SetRouteOnly(ro)
+		api.onRouteKeyRotated = func() { s.rerenderRouteOnly(s.currentConfig()) }
+		go s.runRouteOnlyReadiness(ctx, ro)
 	}
 	// The API scans with the profile set of the current generation; deriving
 	// it again here doubled the profile work of every start (GAP-0276).
