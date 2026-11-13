@@ -62,7 +62,7 @@ var (
 // defenseclaw-acp.
 type KiroConnector struct {
 	gatewayToken string
-	masterKey    string
+
 	loopbackWarn sync.Once
 }
 
@@ -427,7 +427,7 @@ func (c *KiroConnector) reclaimEarlierKiroFootprint(opts SetupOpts, command stri
 }
 
 func (c *KiroConnector) Authenticate(r *http.Request) bool {
-	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.Name(),
+	return authenticateHookBridgeRequest(r, c.gatewayToken, c.Name(),
 		"Kiro hook and ACP traffic is authenticated by the scoped connector token", &c.loopbackWarn)
 }
 
@@ -435,8 +435,8 @@ func (c *KiroConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, 
 	return &ConnectorSignals{RawBody: body, RawModel: ParseModelFromBody(body), Stream: ParseStreamFromBody(body), PassthroughMode: true, ConnectorName: c.Name()}, nil
 }
 
-func (c *KiroConnector) SetCredentials(gatewayToken, masterKey string) {
-	c.gatewayToken, c.masterKey = gatewayToken, masterKey
+func (c *KiroConnector) SetCredentials(gatewayToken string) {
+	c.gatewayToken = gatewayToken
 }
 
 func (c *KiroConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {

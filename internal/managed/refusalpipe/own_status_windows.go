@@ -39,26 +39,47 @@ const (
 // neither of the two, or from a token that is not a user account
 // (AccountSID), gets no answer.
 func ServeOwnStatus(ctx context.Context, answer func(sid string) []byte, excluded func(sid string) bool) error {
-	return serveOwnStatus(ctx, OwnStatusPipeName, answer, excluded)
+	return ServeOwn(ctx, OwnAnswers{Status: answer, Excluded: excluded})
+}
+
+// OwnAnswers are the answers of the own-status pipe, each for the SID of
+// the account whose token connected. A nil answer leaves that request
+// unanswered.
+type OwnAnswers struct {
+	Status   func(sid string) []byte
+	Excluded func(sid string) bool
+	// Routing answers RoutingRequest: the caller's own routing read of path
+	// (ValidRoutingReadPath), as RoutingAnswer JSON.
+	Routing func(sid, path string) []byte
+}
+
+// ServeOwn answers every own-status pipe request kind until ctx ends.
+func ServeOwn(ctx context.Context, answers OwnAnswers) error {
+	return serveOwn(ctx, OwnStatusPipeName, answers)
 }
 
 func serveOwnStatus(ctx context.Context, pipeName string, answer func(sid string) []byte, excluded func(sid string) bool) error {
+	return serveOwn(ctx, pipeName, OwnAnswers{Status: answer, Excluded: excluded})
+}
+
+func serveOwn(ctx context.Context, pipeName string, answers OwnAnswers) error {
 	return serveInstances(ctx, pipeName, MaxOwnStatusBytes, func(ctx context.Context, pipe windows.Handle) {
-		answerPipeRequest(ctx, pipe, answer, excluded)
+		answerPipeRequest(ctx, pipe, answers)
 	})
 }
 
 // answerPipeRequest reads one request, names its sender and writes the answer.
-func answerPipeRequest(ctx context.Context, pipe windows.Handle, answer func(sid string) []byte, excluded func(sid string) bool) {
-	request := make([]byte, max(len(OwnStatusRequest), len(ExcludedRequest))+1)
+func answerPipeRequest(ctx context.Context, pipe windows.Handle, answers OwnAnswers) {
+	request := make([]byte, MaxRoutingRequestBytes+1)
 	count, err := overlapped(ctx, serverReadTimeout, pipe, func(done *uint32, o *windows.Overlapped) error {
 		return windows.ReadFile(pipe, request, done, o)
 	})
-	if err != nil {
+	if err != nil || int(count) > MaxRoutingRequestBytes {
 		return
 	}
 	kind := string(request[:count])
-	if kind != OwnStatusRequest && kind != ExcludedRequest {
+	routingPath, isRouting := ParseRoutingRequest(request[:count])
+	if kind != OwnStatusRequest && kind != ExcludedRequest && !isRouting {
 		return
 	}
 	sid, err := clientSID(pipe)
@@ -66,15 +87,25 @@ func answerPipeRequest(ctx context.Context, pipe windows.Handle, answer func(sid
 		return
 	}
 	var body []byte
-	if kind == ExcludedRequest {
-		if excluded == nil {
+	limit := MaxOwnStatusBytes
+	switch {
+	case kind == ExcludedRequest:
+		if answers.Excluded == nil {
 			return
 		}
-		body = ExcludedAnswer(excluded(sid))
-	} else {
-		body = answer(sid)
+		body = ExcludedAnswer(answers.Excluded(sid))
+	case isRouting:
+		if answers.Routing == nil {
+			return
+		}
+		body, limit = answers.Routing(sid, routingPath), MaxRoutingAnswerBytes
+	default:
+		if answers.Status == nil {
+			return
+		}
+		body = answers.Status(sid)
 	}
-	if len(body) == 0 || len(body) > MaxOwnStatusBytes {
+	if len(body) == 0 || len(body) > limit {
 		return
 	}
 	if _, err := overlapped(ctx, ownStatusWriteTimeout, pipe, func(done *uint32, o *windows.Overlapped) error {
@@ -97,7 +128,23 @@ func answerPipeRequest(ctx context.Context, pipe windows.Handle, answer func(sid
 // (SECURITY_IDENTIFICATION). The request names no account: the gateway
 // answers for the token that connected.
 func OwnStatus(ctx context.Context) ([]byte, error) {
-	return askGateway(ctx, OwnStatusRequest, ownStatusAnswerTimeout)
+	return askGateway(ctx, OwnStatusRequest, ownStatusAnswerTimeout, MaxOwnStatusBytes)
+}
+
+// OwnRouting asks the gateway service for the calling account's own routing
+// read of path (ValidRoutingReadPath: its decisions and budgets only, the way
+// the managed hook socket answers on Linux and macOS) and returns the HTTP
+// status and JSON body the routing API gave.
+func OwnRouting(ctx context.Context, path string) (int, []byte, error) {
+	request, err := RoutingRequest(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	answer, err := askGateway(ctx, string(request), ownStatusAnswerTimeout, MaxRoutingAnswerBytes)
+	if err != nil {
+		return 0, nil, err
+	}
+	return ParseRoutingAnswer(answer)
 }
 
 // AccountExcluded asks the running gateway service whether the machine
@@ -110,7 +157,7 @@ func OwnStatus(ctx context.Context) ([]byte, error) {
 func AccountExcluded(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, excludedAnswerTimeout)
 	defer cancel()
-	answer, err := askGateway(ctx, ExcludedRequest, excludedAnswerTimeout)
+	answer, err := askGateway(ctx, ExcludedRequest, excludedAnswerTimeout, MaxOwnStatusBytes)
 	if err != nil {
 		return false, err
 	}
@@ -119,7 +166,7 @@ func AccountExcluded(ctx context.Context) (bool, error) {
 
 // askGateway writes request on the own-status pipe and returns the JSON
 // answer, bounded by timeout.
-func askGateway(ctx context.Context, request string, timeout time.Duration) ([]byte, error) {
+func askGateway(ctx context.Context, request string, timeout time.Duration, limit int) ([]byte, error) {
 	handle, err := dial(ctx, ownStatusClientPipeName)
 	if err != nil {
 		return nil, err
@@ -147,8 +194,8 @@ func askGateway(ctx context.Context, request string, timeout time.Duration) ([]b
 			return windows.ReadFile(handle, chunk, done, o)
 		})
 		answer = append(answer, chunk[:count]...)
-		if len(answer) > MaxOwnStatusBytes {
-			return nil, fmt.Errorf("the gateway service's answer is larger than %d bytes", MaxOwnStatusBytes)
+		if len(answer) > limit {
+			return nil, fmt.Errorf("the gateway service's answer is larger than %d bytes", limit)
 		}
 		if len(answer) > 0 && json.Valid(answer) {
 			return answer, nil

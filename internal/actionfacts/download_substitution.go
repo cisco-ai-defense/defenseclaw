@@ -17,8 +17,7 @@
 package actionfacts
 
 import (
-	"strings"
-
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -45,7 +44,7 @@ func ExactPOSIXDownloadSubstitution(facts Facts, input Input) bool {
 		len(facts.Commands) != 2 {
 		return false
 	}
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(source), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(source), "")
 	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 ||
 		file.Stmts[0].Background || file.Stmts[0].Negated {
 		return false

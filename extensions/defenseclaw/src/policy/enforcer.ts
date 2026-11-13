@@ -429,7 +429,6 @@ export class PolicyEnforcer {
     this.localBlockList.set(key, reason);
     this.localAllowList.delete(key);
 
-    await this.client.block(targetType, name, reason).catch(() => {});
   }
 
   /**
@@ -458,14 +457,12 @@ export class PolicyEnforcer {
     });
     this.localBlockList.delete(key);
 
-    await this.client.allow(targetType, name, reason).catch(() => {});
   }
 
   async unblock(targetType: InstallType, name: string): Promise<void> {
     const key = `${targetType}:${name}`;
     this.localBlockList.delete(key);
 
-    await this.client.unblock(targetType, name).catch(() => {});
   }
 
   isBlockedLocally(targetType: InstallType, name: string): boolean {

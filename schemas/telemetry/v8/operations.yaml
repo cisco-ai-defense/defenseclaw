@@ -15583,6 +15583,8 @@ producer_identity_sets:
   - event_name: model.stream.completed
     bucket: model.io
     family: log.model.stream.completed
+- id: identity_set.model_usage
+  identities:
   - event_name: model.usage
     bucket: model.io
     family: log.model.usage
@@ -16750,6 +16752,21 @@ producer_mappings:
     introduced_in: telemetry-registry-v1
     disposition: translate_to_v8
   allowed_context_identity_set: identity_set.ai_discovery
+- producer: gateway_event
+  key: model_usage
+  source: internal/gatewaylog/events.go
+  event_name_policy: context_optional
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v4
+    disposition: translate_to_v8
+  allowed_context_identity_set: identity_set.model_usage
+  default_identity:
+    event_name: model.usage
+    bucket: model.io
+    family: log.model.usage
 - producer: gateway_event
   key: endpoint_health
   source: internal/gatewaylog/events.go

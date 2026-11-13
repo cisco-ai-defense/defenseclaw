@@ -451,11 +451,11 @@ Defaults from the loader. Omitted keys take these values.
 | `tenant_id`, `workspace_id`, `discovery_source` | empty | Identity stamped on every record. Restart required. |
 | `deployment_mode` | empty | `managed_enterprise` on a managed device. Restart required. |
 | `claw.mode` | `openclaw` | The primary connector. With several active it names the first; the OTel attribute `defenseclaw.claw.mode` is set only while a single connector is active. |
-| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up. |
+| `claw.home_dir`, `claw.config_file` | `~/.openclaw`, `~/.openclaw/openclaw.json` | Where the OpenClaw install is looked up, and the home and `openclaw.json` that the OpenClaw connector patches (honoured since 1.0.10). A `config_file` left at its default follows a moved `home_dir`. |
 | `claw.workspace_dir` | empty | Set by `setup <connector> --workspace` or `config set`; scopes hooks to one folder, and setup without `--workspace` keeps it ([Per-connector files](#per-connector-files)). |
 | `gateway.host`, `gateway.port` | `127.0.0.1`, `18789` | The upstream agent gateway (OpenClaw and ZeptoClaw fleet link). |
 | `gateway.fleet_mode` | `auto` | `auto`, `enabled` or `disabled`: when to dial `host:port` ([OpenClaw fleet link](#openclaw-fleet-link)). |
-| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). |
+| `gateway.token_env` | `DEFENSECLAW_GATEWAY_TOKEN` | The variable that holds the sidecar API token ([Keys](/docs/reference/keys)). `OPENCLAW_GATEWAY_TOKEN` is not accepted here: it holds the OpenClaw gateway credential, and the gateway skips it. `defenseclaw doctor --fix` changes it to `DEFENSECLAW_GATEWAY_TOKEN`. |
 | `gateway.api_port`, `gateway.api_bind` | `18970`, empty | The sidecar REST API. Empty `api_bind` binds `127.0.0.1` ([Gateway API](/docs/reference/gateway-api#bind-address)). |
 | `gateway.device_key_file` | `<data_dir>/device.key` | The device key. |
 | `gateway.auto_approve_safe` | `false` | Auto-approve safe requests from the upstream gateway. |
@@ -667,6 +667,24 @@ The gateway dials the OpenClaw or ZeptoClaw gateway at `gateway.host` and `gatew
 
 When `guardrail.connectors` lists agents, the active connector comes from that roster. An older `claw.mode` default does not add OpenClaw to it.
 
+### OpenClaw connector (`connectors.openclaw`)
+
+Optional keys that DefenseClaw 1.0.10 reads. With none set, the plugin is managed, OpenClaw and DefenseClaw run as one account and the hook mode is `auto`. A signed bundle that sets any of them must require `min_product_version` 1.0.10. The block is refused with the Secure Client integration. Setup, the plugin and the checks are on the [OpenClaw connector](/docs/connectors/openclaw) page.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `connectors.openclaw.plugin_install` | `managed` | `managed`: setup writes the plugin into `extensions/defenseclaw` in the OpenClaw home. `external`: an administrator installed it at `plugin_dir`; DefenseClaw checks that its files equal this build and never writes or deletes them ([Administrator-installed plugin](/docs/connectors/openclaw#administrator-installed-plugin)). |
+| `connectors.openclaw.plugin_dir` | empty | Clean absolute path of the administrator-installed plugin, ending in a folder named `defenseclaw`. Used only with `plugin_install: external` and required there. Set it before `plugin_install`. |
+| `connectors.openclaw.operator_admin` | `true` | Ask OpenClaw for the `operator.admin` scope, used only to turn off a blocked skill, plugin or MCP server through OpenClaw. `false` keeps read, write and approvals; blocks are still enforced by DefenseClaw admission and inspection. |
+| `connectors.openclaw.hooks.mode` | `auto` | `auto` or `proxy`. `auto` uses the native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows) and the guardrail proxy below that. `proxy` keeps the 1.0.9 behaviour; refused on Windows ([Hook modes](/docs/connectors/openclaw#hook-modes)). |
+| `connectors.openclaw.hooks.prompt_gate` | `false` | Check every user prompt in `before_agent_run` before the model reads it; blocks it in action mode. Always on in native mode (Windows), where it is the only request check ([Prompt gate](/docs/connectors/openclaw#prompt-gate)). |
+| `connectors.openclaw.plugin_account` | empty | OS account of the OpenClaw gateway when it is not the account of the DefenseClaw gateway (the [separate-user layout](/docs/connectors/openclaw#separate-users-linux-and-macos)). Linux and macOS only. Needs `plugin_install: external` and `plugin_token_file`. |
+| `connectors.openclaw.plugin_token_file` | empty | Clean absolute path where DefenseClaw publishes the plugin credential for `plugin_account`. Its folder must be owned by the DefenseClaw account and not writable by group or others. Needs `plugin_account`. |
+| `connectors.openclaw.plugin_token_group` | none (required with `plugin_account`) | Group of the OpenClaw account that may read `plugin_token_file` (mode 0640). It must contain `plugin_account` and must not be a group every account is in, such as `staff` or `users`. Linux and macOS. |
+| `connectors.openclaw.install_policy` | `auto` | `auto`, `on` or `off`. When on (OpenClaw 2026.8.35 and later), OpenClaw asks DefenseClaw admission before it installs or updates a skill or plugin. `auto` is on in the strict tier and on managed installs, off in the default and permissive tiers ([Install admission](/docs/connectors/openclaw#install-admission)). |
+
+`plugin_account` and `plugin_token_group` take letters, digits, `_`, `.` and `-`, at most 64 characters, and do not start with `.` or `-`.
+
 ### Routing and observability behavior
 
 The `routing` block affects OpenClaw and ZeptoClaw only on the proxy's OpenAI-compatible Chat Completions path. `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/guardrail/semantic-routing).
@@ -684,13 +702,20 @@ Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0
 | `routing.sensitive` | `aliases` plus `severity_at_least` and/or `signals` (keyword signal names): at or above that guardrail severity, or when a listed signal matches, only these aliases are used. Best effort: regex and keyword checks miss personal data written in prose; for regulated groups give their profile an `allowed_aliases` list of local models only | none |
 | `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none |
 | `routing.models[].apis` | `chat`, `messages`, `responses`, `converse`, `invoke`: API families the backend serves without translation | the provider default |
-| `routing.models[].credential` | protected credential name on a managed host (`api_key_env` is for per-user installs) | none |
+| `routing.models[].credential` | protected credential name on a managed host; the gateway reads only it when it is set. A managed model with only `api_key_env` (1.0.9 configs) still reads the gateway service environment, and doctor warns to move the key to a credential | none |
 | `routing.models[].bedrock` | `region`, `auth` (`passthrough`, `profile`, `instance_role`, `iam_credentials`) and the key names for gateway signing | none |
 | `routing.decisions[].conditions[].type` | `keyword`, plus `connector`, `api_family` and `request` (`has_tools`, `tool_turn`, `has_images`, `long_context`) with the `rules` or `systemone` classifier | `keyword` only |
-| `routing.route_only.connectors` | `claudecode`, `codex`: hook connectors whose model calls go through the gateway for routing and usage only | none |
-| `routing.route_only.upstreams.<connector>` | `base_url`, `api`, `bedrock`: where unrouted calls go; the route-only enable step writes it from the agent configuration | none |
+| `routing.route_only.connectors` | `claudecode`, `codex`: hook connectors whose model calls go through the gateway for routing and usage only. On managed macOS and Windows the agent credential is not forwarded, so the bundle must give the gateway its own credential for each routed upstream (a `routing.models[].credential` of the same provider and base URL, or gateway Bedrock signing); validation refuses a bundle without one, because every model call would answer 503. `defenseclaw doctor` and `defenseclaw status` show one route-only row per connector (gateway readiness, agent config, Bedrock signing checks). On Linux and Windows, when another account holds the gateway API port, the gateway logs and audits it (`gateway-degraded`) and replaces the route credential once it owns the port again; on a Mac with more than one account doctor warns instead | none |
+| `routing.route_only.upstreams.<connector>` | `base_url`, `api`, `bedrock`: where unrouted calls go; the route-only enable step writes it from the agent configuration. Claude Code on Bedrock with a Bedrock API key gets `bedrock.auth: passthrough`; with IAM credentials it gets `bedrock.auth: profile` (the `AWS_PROFILE` of Claude Code, else `default`): Claude Code then skips its own AWS signing (`CLAUDE_CODE_SKIP_BEDROCK_AUTH=1`) and the gateway signs each call with SigV4. `instance_role` (the AWS default chain) and `iam_credentials` (`*_env` names, or `*_credential` names on a managed host) also sign at the gateway; `region` defaults to the region in the upstream host. The gateway signs only `POST /model/{id}/converse`, `converse-stream`, `invoke` and `invoke-with-response-stream` (other Bedrock calls get 403) and sends its credential only to an https `bedrock-runtime` AWS host. Enable keeps passthrough when Claude Code already sets `CLAUDE_CODE_SKIP_BEDROCK_AUTH`, and refuses static `AWS_ACCESS_KEY_ID` without a profile, `awsCredentialExport` or `awsAuthRefresh`, an AWS profile missing from the AWS config and credentials files, and an `AWS_CONFIG_FILE` set only in Claude Code settings | none |
 | `routing.admin` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`, `locked`: the organization floor | no floor |
+| `routing.admin.rules` | ordered list of `id`, `match` (`groups`, `users`, `connectors`, `agents`, `categories`, `severity_at_least`), and either `allow` / `default` or `action: deny` with an optional `message`. Every matching rule applies: a deny wins, `allow` lists intersect (and also bind a request that is not routed), the first matching `default` that is allowed is used | none |
+| `routing.admin.budgets` | list of `id`, `scope` (`user`, `group`, `connector`), `subject` (a user or `*` for each user, one group, a connector or `*`), `period` (`day`, `week` from Monday, `month`; UTC), `limit_usd`, `on_exceed` (`warn`, `deny`, `downgrade:<alias>[,<alias>]`). Needs `observability.tokenomics` recording with the local store and computed cost | none |
+| `routing.admin.visibility.users_see` | `own` (a user reads only their own usage, decisions and budgets) or `none` (only administrators read them) | `own` |
+| `routing.admin.budget_store` | opt-in fleet budget store, standalone managed devices only: `url` (`https://host[:port]`), `credential` (name of the protected credential that holds this device's issued credential), `ca_file` (absolute path), `sync_interval` (5s to 10m), `timeout_ms` (100 to 30000). See [Routing rules and budgets](/docs/enterprise/routing-budgets) | off; `credential: routing-budget-store-device`, `sync_interval: 30s`, `timeout_ms: 2000` |
+| `routing.admin.budget_store.server` | store host only (`defenseclaw-gateway budget-store serve`): `listen`, `tls_cert_file`, `tls_key_file`, `db_path` (absolute paths), `rate_limit_per_minute` per device, `device_daily_cap_usd` | `rate_limit_per_minute: 120`, `device_daily_cap_usd: 500` |
 | `guardrail.profiles.<name>.routing` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`: only tightens `routing.admin`; a key in `routing.admin.locked` is refused | nothing added |
+
+Rule and budget denies take effect only on a standalone managed device; on other installs they are reported in `defenseclaw routing status`, `doctor` and the audit log, and routing goes on. On a managed device a rule that names users, groups or agents treats a caller whose identity cannot be confirmed as matching a constraining rule and refuses on a deny rule; while the classifier is down every category rule applies, so their `allow` lists must share an alias. Budgets count the cost of agent calls: the computed cost (tokens times `observability.pricing`), else the cost the provider reported; a call with no known cost makes the spend unknown, and a deny budget then refuses on a managed device. Each managed host counts its own spend; with `routing.admin.budget_store` the store adds up the spend of every device and a host falls back to its own count while the store cannot be reached. Calls already running when a limit is reached still finish. Rules, budgets and visibility need DefenseClaw 1.0.10 or later (sign the bundle with `--min-product-version 1.0.10`). Which routing commands a standard user runs on a managed computer: [Managed commands](/docs/enterprise/managed-commands).
 
 A profile overlay intersects `allowed_aliases`, adds to `denied_providers`, and can only turn `allow_user_override` off: it is on only when `routing.allow_user_override` is `true` and no layer sets it to `false`. A profile that names an alias the floor does not allow fails validation. `routing.admin` and `routing.route_only` are refused with the Secure Client integration.
 
@@ -704,7 +729,7 @@ Omissions compile to an explicit effective policy; inspect it with `defenseclaw 
 
 ### Tokenomics and pricing
 
-`observability.tokenomics` records what every model call used and cost. `observability.pricing` is the price table it reads. Both are off or absent by default, and an absent block behaves exactly as before 1.0.10. See [Tokenomics](/docs/observability/tokenomics) for what a usage record holds and how cost is computed.
+`observability.tokenomics` records what every model call used and cost. `observability.pricing` is the price table it reads. Both are off or absent by default, and an absent block behaves exactly as before 1.0.10. See [Tokenomics](/docs/observability/tokenomics) for what a usage record holds and how cost is computed. On a managed host both blocks come from the admin `config.yaml` in the signed policy bundle, and a bundle that sets either one needs `--min-product-version 1.0.10`, even when the value is `enabled: false`.
 
 Prices are never compiled into DefenseClaw. The gateway prices a call only from `observability.pricing` in `config.yaml`. A model with no entry has no cost, not a zero cost. On a managed host both blocks come from the admin `config.yaml` in the signed bundle.
 
@@ -1077,7 +1102,7 @@ There is no `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR` or `DEFENSECLAW_L
 
 | Connector | File DefenseClaw mutates |
 | --- | --- |
-| OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/extensions/defenseclaw/` |
+| OpenClaw | `openclaw.json` and `extensions/defenseclaw/` in the OpenClaw home (`claw.home_dir`, `~/.openclaw` by default); with `connectors.openclaw.plugin_install: external` the plugin is read from `plugin_dir` and not written; with `plugin_account` DefenseClaw writes only `plugin_token_file` |
 | ZeptoClaw | `~/.zeptoclaw/config.json` |
 | Claude Code | `~/.claude/settings.json` |
 | Codex | `~/.codex/config.toml` |
