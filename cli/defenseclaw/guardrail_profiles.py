@@ -81,6 +81,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
             "142667a6bbc21568e2a15eda35555d88c62870b7db04005f2dbff71acb3dc6b8",
+            # 1.0.10 (s7/response, GAP-0210): SEC-HF-TOKEN, with s7/secret-recall and s7/promptfloor merged.
+            "54dbe6f0d23d20a9284f0bbb9b301d0ed39b2830f37254fe8bf82c855010c762",
         }
     ),
     "permissive": frozenset(
@@ -118,6 +120,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
             "669543a89607b9b4df8add58250a5a6ecb88093cba081deeeaf86c28ef1d186c",
+            # 1.0.10 (s7/response, GAP-0210): SEC-HF-TOKEN, with s7/secret-recall and s7/promptfloor merged.
+            "99a13f72380b322fd8f7b31365d81f72d7efa072426aece56d4fea23ae210dc8",
         }
     ),
     "strict": frozenset(
@@ -154,6 +158,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             # 1.0.10 (s7/promptfloor, GAP-0175): prompt-injection floor in trust-exploit.yaml.
             "3c6307f82175c29c77bd7a65dde22ad185caafa61844908351db47221aab258a",
+            # 1.0.10 (s7/response, GAP-0210): SEC-HF-TOKEN, with s7/secret-recall and s7/promptfloor merged.
+            "0fc7a1497b70d1a51e6470281931e13783a5f0a4f344fa042a40041df293e8d2",
         }
     ),
 }
