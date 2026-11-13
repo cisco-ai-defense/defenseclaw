@@ -75,6 +75,9 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	// known regardless). Real symlink-through-link attacks are not exercised
 	// here; that is a documented harness limit.
 	effectResolverOverride = func(path string) (string, bool) { return path, true }
+	// The harness reads the effect verdict per case from Deterministic (the
+	// same effectShadowRun core); the hook's async live run is not needed.
+	effectShadowLiveOff = true
 	return &S7Engine{
 		sc: sc, api: api, connector: connectorName,
 		hook:    api.handleUnifiedConnectorHook(connectorName),
