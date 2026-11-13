@@ -188,7 +188,7 @@ func TestRetentionSizeCapNamesActiveCorrelationState(t *testing.T) {
 		if err := tx.PutCursor(t.Context(), CorrelationCursor{
 			ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "active-session", AgentID: "active-agent",
 			Phase: "active", Sequence: 1, LastSemanticEventID: event.SemanticEventID,
-			ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: old,
+			ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: now.Add(-time.Hour),
 		}); err != nil {
 			t.Fatal(err)
 		}
