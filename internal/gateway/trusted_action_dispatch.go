@@ -436,8 +436,10 @@ func dispatchTrustedAction(
 		// call takes the over-limit path, which the profile decides
 		// (GAP-0677). It is decided before the recovered-parse reading
 		// below, which would read the same bodies again for the same
-		// finding.
-		return trustedActionLimitFindings(request.EnforcementCapable)
+		// finding. It keeps the check that works on the raw text, as every
+		// call past a reading bound does: a state write past the bound
+		// blocks in every mode (GAP-0360).
+		return withBudgetStateBlock(request, trustedActionLimitFindings(request.EnforcementCapable))
 	}
 	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)

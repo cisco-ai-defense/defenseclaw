@@ -302,6 +302,33 @@ func treeChain(file *syntax.File) int {
 	return chain
 }
 
+// hiddenChainForms are prefixes after which this pass's reading of the
+// grammar (aware of comments, quotes and here-documents) can differ from the
+// parser's: an escaped blank before a #, an escaped ( before a #, a quote
+// after a backslash, a here-document followed by an escaped NUL, CR or
+// newline. A chain behind each is real code for the parser.
+var hiddenChainForms = []string{
+	"a\\ #", "a\\(#", "\\$'x\\'", "a\\ '#", "a#b ",
+	"cat <<'EOF'\\\x00\nx\nEOF\n", "cat <<'EOF'\\\r\nx\nEOF\n", "cat <<EOF\\\x00\nx\nEOF\n",
+}
+
+// TestHiddenChainFormsAreMeasured pins the shortcut of the first stage: a
+// text under the soft byte bound whose | bytes the aware count may skip is
+// still measured when its raw count passes the soft chain bound, so a chain
+// the parser reads is never counted low (review P3 of rel-1-0-10:GAP-0283).
+func TestHiddenChainFormsAreMeasured(t *testing.T) {
+	for _, form := range hiddenChainForms {
+		command := form + strings.Repeat("|a", softChainBytes+90)
+		file, ok := parseUnbudgeted(command)
+		if !ok || treeChain(file) <= MaxChainOperators {
+			continue // not a chain for the parser: nothing to count
+		}
+		if reason := BudgetExceeded(command); reason == "" {
+			t.Errorf("%q: a chain of %d nodes is within the budget", form, treeChain(file))
+		}
+	}
+}
+
 // FuzzBudget generates large commands from the family table (and takes raw
 // text as well) and asserts the invariants of the budget: it answers; a
 // command past the budget is never parsed; a command within it parses to a
@@ -311,6 +338,9 @@ func FuzzBudget(f *testing.F) {
 		f.Add(name, uint32(1000), "")
 	}
 	f.Add("pipe", uint32(166443), "tail")
+	for _, form := range hiddenChainForms {
+		f.Add("", uint32(0), form+strings.Repeat("|a", 600))
+	}
 	f.Fuzz(func(t *testing.T, name string, n uint32, extra string) {
 		command := extra
 		if s, known := budgetShapes[name]; known {
@@ -332,12 +362,14 @@ func FuzzBudget(f *testing.F) {
 			// The first stage never counts fewer chain operators than the
 			// tree holds (its reading of data may skip real code only up to
 			// the raw bound, which this check does not excuse).
-			if _, aware, _, nesting := scanCounts(command); nesting == "" && aware.chain < treeChain(file) {
-				t.Fatalf("the first stage counts %d chain bytes but the tree has %d chain nodes", aware.chain, treeChain(file))
+			if raw, _, _, nesting := scanCounts(command); nesting == "" && raw.chain < treeChain(file) {
+				t.Fatalf("the first stage counts %d chain bytes but the tree has %d chain nodes", raw.chain, treeChain(file))
 			}
-			// The soft bounds hold: a text under both is never past a
-			// tree bound, so it is not parsed to find out.
-			if chain := strings.Count(command, "|") + strings.Count(command, "&&"); got != "" && len(command) <= softBytes && chain <= softChainBytes {
+			// The soft bounds hold: a text under both (its | and & bytes
+			// counted all, as the first stage counts them: the parser reads
+			// two & with a NUL or a line continuation between them as one &&)
+			// is never past a tree bound, so it is not parsed to find out.
+			if chain := strings.Count(command, "|") + strings.Count(command, "&"); got != "" && len(command) <= softBytes && chain <= softChainBytes {
 				t.Fatalf("a %d-byte command with %d chain bytes measures as %q but the first stage passes it", len(command), chain, got)
 			}
 		}

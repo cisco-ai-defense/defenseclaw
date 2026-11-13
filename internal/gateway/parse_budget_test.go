@@ -112,6 +112,8 @@ func TestParseBudgetKeepsTheStateWriteProof(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	rows := append([]overBudget{
 		{"pipe", 100}, {"and", 100}, {"pipe", shellparse.MaxChainOperators}, {"nest", shellparse.MaxNestingDepth},
+		// Nested shell bodies past shellparse.MaxNestedBodyBytes (GAP-0360).
+		{"bodies", 10},
 	}, overBudgetRows...)
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"observe", "action"} {

@@ -50,9 +50,14 @@ func TestNestedBodiesOverBudget(t *testing.T) {
 		{"bash -c x6 of a long body", nestedSingleQuoted(6, "bash -c", strings.Repeat(long, 6)), true},
 
 		{"short nested", nestedSingleQuoted(6, "bash -c", "rm -rf ~/project/output"), false},
-		{"one bash -c script of 400 KB", "bash -c '" + strings.Repeat("printf '\\''%s\\n'\\'' \"a b c\" "+strings.Repeat("word ", 400)+"; ", 200) + "'", false},
+		// A 400 KB flat script is past the reading budget (tokens and parsed
+		// nodes); the largest ordinary one is about 60 KB.
+		{"one bash -c script of 60 KB", "bash -c '" + strings.Repeat("printf '\\''%s\\n'\\'' \"a b c\" "+strings.Repeat("word ", 400)+"; ", 30) + "'", false},
 		{"bash -c of a python -c program of 40 KB", "bash -c 'python3 -c \"" + strings.Repeat("x = 1 + 2\n", 4096) + "\"'", false},
-		{"ssh of a bash -c script of 60 KB", `ssh host "bash -c 'printf %s ` + strings.Repeat("a b ", 15000) + `'"`, false},
+		// 60 KB of operands is also past the reading budget (parsed nodes,
+		// shellparse.MaxParsedNodes): the row is the largest ordinary script
+		// inside it, 20,000 nodes.
+		{"ssh of a bash -c script of 20 KB", `ssh host "bash -c 'printf %s ` + strings.Repeat("a b ", 5000) + `'"`, false},
 		{"flat echo of 500 KB", "echo '" + strings.Repeat("ab cd; ef ", 50000) + "'", false},
 		{"here-document of 300 KB", "cat > notes.txt <<'EOF'\n" + strings.Repeat("some text (with) a b c; d | e\n", 10000) + "EOF", false},
 		{"three nested of 7 KB", `bash -c 'ssh host "sh -c '\''printf %s ` + strings.Repeat("a b ", 1800) + `'\''"'`, false},

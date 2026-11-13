@@ -231,7 +231,11 @@ func computeBudget(command string) string {
 		return BudgetChain
 	case aware.tokens > MaxTokens || raw.tokens > rawTokens:
 		return BudgetTokens
-	case aware.chain <= softChainBytes && len(command) <= softBytes:
+	case raw.chain <= softChainBytes && len(command) <= softBytes:
+		// The shortcut counts every | and & byte of the text, data and all:
+		// the aware count is this pass's reading of the grammar (a # after an
+		// escaped blank, a quote after a backslash) and the parser may read
+		// it differently, so it never decides that a text needs no measure.
 		return ""
 	}
 	file, ok := parseUnbudgeted(command)
@@ -239,7 +243,7 @@ func computeBudget(command string) string {
 		// Text that does not parse has no tree to count. Past the soft
 		// chain bound it may be a chain with a syntax error (GAP-0284); other
 		// text is bounded by MaxTokens and MaxCommandBytes.
-		if aware.chain > softChainBytes {
+		if raw.chain > softChainBytes {
 			return BudgetUnparsed
 		}
 		return ""

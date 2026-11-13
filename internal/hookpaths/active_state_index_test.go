@@ -125,15 +125,15 @@ func TestGAP1409ActiveStateIndexIsBounded(t *testing.T) {
 	}
 
 	resetActiveStateIndex(t)
-	budget := activeStateIndexBudget
-	activeStateIndexBudget = -time.Second
-	t.Cleanup(func() { activeStateIndexBudget = budget })
+	savedEntries := activeStateIndexEntries
+	activeStateIndexEntries = 0
+	t.Cleanup(func() { activeStateIndexEntries = savedEntries })
 	start := time.Now()
 	if _, same := ResolveActiveStateHardlinkTarget(configAlias, home); same {
-		t.Fatal("expired walk budget still indexed files")
+		t.Fatal("an exhausted entry bound still indexed files")
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("expired walk budget took %s", elapsed)
+		t.Fatalf("an exhausted entry bound took %s", elapsed)
 	}
 }
 

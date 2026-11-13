@@ -72,8 +72,8 @@ func NestedBodyWeight(command string) int {
 		return 0
 	}
 	work := 0
-	var visit func(text string, depth int) bool
-	visit = func(text string, depth int) bool {
+	var visit func(text string, depth int, code bool) bool
+	visit = func(text string, depth int, code bool) bool {
 		if depth >= 3 {
 			work += len(text) * (depth - 2) * (depth - 2)
 			if work > MaxNestedBodyBytes {
@@ -81,6 +81,21 @@ func NestedBodyWeight(command string) int {
 			}
 		}
 		if depth >= nestedBodyMaxDepth || nestingBound(text) != "" {
+			return false
+		}
+		// A body is a command the readers parse: it is under the reading
+		// budget like the call that carries it, and the measure does not
+		// parse a body past it (the first stage reads a single-quoted body as
+		// data, so the body is the one place the budget sees its tokens and
+		// nodes). A body a shell is given (bash -c, eval) that is past the
+		// budget is past the nested bound; any other candidate (an argument
+		// of echo, a here-document: text a program reads) is not parsed and
+		// not counted.
+		if depth > 0 && BudgetExceeded(text) != "" {
+			if code {
+				work = MaxNestedBodyBytes + 1
+				return true
+			}
 			return false
 		}
 		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
@@ -95,13 +110,13 @@ func NestedBodyWeight(command string) int {
 			switch node := node.(type) {
 			case *syntax.CallExpr:
 				for _, arg := range node.Args {
-					if body, ok := staticBodyWord(arg); ok && visit(body, depth+1) {
+					if body, ok := staticBodyWord(arg); ok && visit(body, depth+1, shellBodyProgram(node)) {
 						over = true
 						return false
 					}
 				}
 			case *syntax.Redirect:
-				if body, ok := staticBodyWord(node.Hdoc); ok && visit(body, depth+1) {
+				if body, ok := staticBodyWord(node.Hdoc); ok && visit(body, depth+1, false) {
 					over = true
 					return false
 				}
@@ -110,8 +125,28 @@ func NestedBodyWeight(command string) int {
 		})
 		return over
 	}
-	visit(command, 0)
+	visit(command, 0, false)
 	return work
+}
+
+// shellBodyProgram reports that call hands its arguments to a shell as code:
+// the program is a shell, or eval.
+func shellBodyProgram(call *syntax.CallExpr) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	name, ok := staticBodyWord(call.Args[0])
+	if !ok {
+		name = call.Args[0].Lit()
+	}
+	if i := strings.LastIndexByte(name, '/'); i >= 0 {
+		name = name[i+1:]
+	}
+	switch name {
+	case "bash", "sh", "zsh", "dash", "ksh", "ash", "eval":
+		return true
+	}
+	return false
 }
 
 // staticBodyWord is the shell value of a word made only of literal and

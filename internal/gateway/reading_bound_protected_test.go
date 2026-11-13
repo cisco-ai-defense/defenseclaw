@@ -159,7 +159,7 @@ func TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget(t *testing.T) {
 		{"ordinary ten levels", "Bash", readingBoundNest(10, "rm -rf ~/project/output"), guardrailActionAlert},
 	}, 2*time.Second, nil, []readingBoundCell{perUserDefault, managedStrict})
 	readingBoundCellsIn(t, []readingBoundRow{
-		{"known protected value", "Bash", "export protected=~/.defenseclaw; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionAlert},
+		{"known protected value", "Bash", "export protected=~/.ssh; " + readingBoundNest(10, "rm -rf \"$protected\""), guardrailActionAlert},
 	}, 2*time.Second, nil, []readingBoundCell{managedDefault})
 	// Three levels with a long comment weigh as much as nine levels of a
 	// short body (more than MaxNestedBodyProofBytes, not past the bound)
