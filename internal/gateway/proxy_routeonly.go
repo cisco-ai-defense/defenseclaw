@@ -764,6 +764,12 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 	if cfg == nil || cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() {
 		return nil
 	}
+	// Only connectors whose hooks DefenseClaw installs: teardown and
+	// uninstall restore exactly those (REVIEW-code-slice5b P1-2). Managed
+	// hosts render protected ledger targets through the guardian instead.
+	if !slices.Contains(cfg.ActiveConnectors(), connectorName) {
+		return nil
+	}
 	route := routeOnlySetupBase(cfg, connectorName, apiAddr)
 	if route == nil {
 		return nil
@@ -804,6 +810,11 @@ func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
 func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *connector.RouteOnlySetup {
 	if !RouteOnlyRouted(cfg, connectorName) || strings.TrimSpace(apiAddr) == "" {
 		return nil
+	}
+	// The agent always talks to the loopback listener, whatever the bind
+	// address (0.0.0.0 or an IPv6 form is not a usable client URL).
+	if _, port, err := net.SplitHostPort(apiAddr); err == nil {
+		apiAddr = net.JoinHostPort("127.0.0.1", port)
 	}
 	up, ok := cfg.Routing.RouteOnly.Upstreams[connectorName]
 	if !ok {

@@ -264,6 +264,7 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 
 func TestRouteOnlySetupManagedVsOSS(t *testing.T) {
 	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Guardrail.Connector = "codex"
 	cfg.Routing.Enabled = true
 	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"codex"}, Upstreams: map[string]config.RoutingUpstreamConfig{"codex": {BaseURL: "https://api.openai.com/v1", API: "responses"}}}
 	if ManagedRouteOnlySetup(cfg, "codex", "127.0.0.1:18970", "tok") != nil {

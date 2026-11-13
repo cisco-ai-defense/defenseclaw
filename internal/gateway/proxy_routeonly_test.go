@@ -326,6 +326,7 @@ func TestRouteOnlyHotReloadRendersAndRestores(t *testing.T) {
 	off := cloneConfig(f.cfg)
 	off.Routing.RouteOnly = config.RoutingRouteOnlyConfig{}
 	off.Gateway.APIPort, f.cfg.Gateway.APIPort = 18970, 18970
+	f.cfg.Guardrail.Connector, off.Guardrail.Connector = "claudecode", "claudecode"
 	s := &Sidecar{}
 	s.applyRouteOnlyRenders(off, f.cfg)
 	raw, _ := os.ReadFile(settings)

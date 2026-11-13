@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 )
 
 // Claude Code route-only keys in settings.json env (DESIGN 7.2). They have
@@ -42,7 +43,10 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 	// create the agent config directory).
 	if route == nil {
 		if b, err := loadRouteBackup(opts.DataDir, c.Name()); err == nil && len(b.Applied) == 0 {
-			return nil
+			raw, rerr := os.ReadFile(settingsPath)
+			if rerr != nil || (!bytes.Contains(raw, []byte("/r/claudecode")) && !bytes.Contains(raw, []byte(RouteOnlyHeader))) {
+				return nil
+			}
 		}
 	}
 	return withFileLock(settingsPath, func() error {
@@ -51,7 +55,13 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 			return err
 		}
 		if route == nil && len(backup.Applied) == 0 {
-			return nil
+			// No record: restore only if our own render is still there (a
+			// lost record after a crash or a data-dir reset).
+			raw, rerr := os.ReadFile(settingsPath)
+			if rerr != nil || (!bytes.Contains(raw, []byte("/r/claudecode")) && !bytes.Contains(raw, []byte(RouteOnlyHeader))) {
+				return nil
+			}
+			backup = lostClaudeRouteRecord()
 		}
 		err = atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			settings := map[string]interface{}{}
@@ -80,6 +90,11 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 			if err != nil {
 				return atomicTransformResult{}, err
 			}
+			// The record goes first: a crash after it and before the agent
+			// file is harmless (restore finds nothing of ours to change).
+			if err := saveRouteBackup(opts.DataDir, c.Name(), backup); err != nil {
+				return atomicTransformResult{}, fmt.Errorf("route backup: %w", err)
+			}
 			if exists && bytes.Equal(bytes.TrimSpace(out), bytes.TrimSpace(data)) {
 				return atomicTransformResult{Keep: true}, nil
 			}
@@ -88,8 +103,23 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 		if err != nil {
 			return fmt.Errorf("claudecode route-only settings: %w", err)
 		}
-		return saveRouteBackup(opts.DataDir, c.Name(), backup)
+		return nil
 	})
 }
 
 var _ RouteOnlyConnector = (*ClaudeCodeConnector)(nil)
+
+// lostClaudeRouteRecord is the record a restore uses when ours is gone but
+// the render is still in settings.json: every route key is treated as ours
+// with no prior value; restoreRouteEnvKey removes only values that still
+// look like our own render.
+func lostClaudeRouteRecord() routeEnvBackup {
+	b := routeEnvBackup{Original: map[string]*string{}, Applied: map[string]string{}}
+	for _, k := range []string{claudeCodeRouteBaseURL, claudeCodeRouteBedrockBaseURL, claudeCodeRouteHeaders} {
+		b.Original[k] = nil
+		b.Applied[k] = lostRecordMarker
+	}
+	return b
+}
+
+const lostRecordMarker = "\x00lost-record"

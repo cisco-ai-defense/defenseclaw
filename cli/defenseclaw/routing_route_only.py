@@ -182,7 +182,10 @@ def disable(cfg: Any, connector: str) -> dict[str, Any]:
     upstreams.pop(connector, None)
     _store(cfg, connectors, upstreams)
     cfg.save()
-    return {"connector": connector, "enabled": False, "changed": was, "restart_agent": was}
+    # The running gateway restores on reload; this also covers a gateway
+    # that is stopped or down (DESIGN 7.4).
+    restored = restore_agent_config(connector)
+    return {"connector": connector, "enabled": False, "changed": was, "restart_agent": was, "agent_config_restored": restored}
 
 
 def status(cfg: Any) -> list[dict[str, Any]]:
@@ -197,3 +200,25 @@ def status(cfg: Any) -> list[dict[str, Any]]:
         }
         for name in ROUTE_ONLY_CONNECTORS
     ]
+
+
+def restore_agent_config(connector: str | None = None) -> bool:
+    """Put back the agent model settings route-only replaced, with or without
+    a running gateway (``defenseclaw-gateway connector route-restore``).
+
+    Best effort: returns False when the gateway binary is missing or too old
+    (it predates route-only, so nothing was rendered) or the restore failed.
+    """
+    import subprocess
+
+    from defenseclaw.gateway import path_gateway
+
+    gw = path_gateway(honor_override=False)
+    if gw is None:
+        return False
+    args = [gw, "connector", "route-restore"] + (["--connector", connector] if connector else ["--all"])
+    try:
+        proc = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0
