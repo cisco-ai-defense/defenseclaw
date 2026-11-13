@@ -1553,6 +1553,20 @@ func matchesActiveSSHPrivateKey(
 	)
 }
 
+// matchesActiveStandardSSHPrivateKey is matchesActiveSSHPrivateKey for the
+// standard key file names only: the table rows that name the file itself
+// (their Relative is the bare name), not the any-id_*-in-.ssh row.
+func matchesActiveStandardSSHPrivateKey(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	if !matchesActiveSSHPrivateKey(facts, candidate) {
+		return false
+	}
+	shape, ok := actionfacts.MatchCredentialFileShape(semanticPathValue(candidate))
+	return ok && !strings.Contains(shape.Relative, "/")
+}
+
 func matchesAWSCredentials(value string) bool {
 	return credentialFileShapeIs(value, actionfacts.CredentialFileAWS)
 }
