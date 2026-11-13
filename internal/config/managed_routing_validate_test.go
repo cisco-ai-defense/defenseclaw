@@ -36,6 +36,7 @@ func TestValidateManagedRoutingRefusals(t *testing.T) {
 		{"managed Windows route-only bedrock env", "windows", func(c *Config) {
 			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "converse", Bedrock: &RoutingBedrockAuthConfig{AccessKeyEnv: "AWS_ACCESS_KEY_ID"}}
 		}, "upstreams.claudecode.bedrock.access_key_env"},
+		{"Windows custody without a gateway credential", "windows", func(c *Config) { c.Routing.Models[0].Credential = "" }, "route-only on managed windows forwards no agent credential"},
 		{"managed Windows without route-only", "windows", func(c *Config) { c.Routing.RouteOnly = RoutingRouteOnlyConfig{} }, ""},
 		{"connector without base_url capability", "linux", func(c *Config) { c.Routing.RouteOnly.Connectors = []string{"cursor"} }, "no routing base_url capability"},
 		{"bedrock auth profile on a route-only upstream", "darwin", func(c *Config) {

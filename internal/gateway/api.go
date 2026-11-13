@@ -75,6 +75,9 @@ type APIServer struct {
 	// (another process, possibly another account, had it while this
 	// gateway restarted); set by acquireAPIListener, read by Run.
 	apiBindFoundHeld bool
+	// apiPortHolderNoted: a bind conflict of this acquire named the holder
+	// (noteHeldAPIPort); reset by acquireAPIListener.
+	apiPortHolderNoted atomic.Bool
 
 	// routeOnly serves /r/<connector>/ (route-only mode); nil = not mounted.
 	routeOnly atomic.Pointer[routeOnlyServer]
@@ -1318,10 +1321,9 @@ func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (ne
 
 // listenWithRetryNotingHeld is listenWithRetry that sets *held when any
 // attempt found the address held (a bind conflict), even if a later one won,
-// and calls onHeld (when set) at the first such attempt.
-func listenWithRetryNotingHeld(ctx context.Context, addr string, budget time.Duration, held *bool, onHeld func()) (net.Listener, error) {
+// and calls onHeld (when set) with the error of every such attempt.
+func listenWithRetryNotingHeld(ctx context.Context, addr string, budget time.Duration, held *bool, onHeld func(error)) (net.Listener, error) {
 	deadline := time.Now().Add(budget)
-	noted := false
 	for attempt := 1; ; attempt++ {
 		ln, err := apiListenTCP(ctx, addr)
 		if err == nil {
@@ -1331,9 +1333,8 @@ func listenWithRetryNotingHeld(ctx context.Context, addr string, budget time.Dur
 			if held != nil {
 				*held = true
 			}
-			if onHeld != nil && !noted {
-				noted = true
-				onHeld()
+			if onHeld != nil {
+				onHeld(err)
 			}
 		}
 		if !isBindConflict(err) || time.Now().After(deadline) || ctx.Err() != nil {

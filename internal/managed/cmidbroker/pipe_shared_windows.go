@@ -28,6 +28,19 @@ func NewGatewayPipeSecurity(gatewayServiceName string) (GatewayPipeSecurity, err
 	return GatewayPipeSecurity{security: security}, err
 }
 
+// GatewayPipeSDDL is the descriptor NewGatewayPipeSecurity builds, as SDDL
+// (the peer broker tests check it and apply its access list).
+func GatewayPipeSDDL(gatewayServiceName string) (string, error) {
+	return gatewayPipeSDDL(gatewayServiceName)
+}
+
+// PipeSecurityFromSDDL builds a pipe descriptor from SDDL: the peer broker
+// tests serve as an ordinary account, which cannot make SYSTEM the owner.
+func PipeSecurityFromSDDL(sddl string) (GatewayPipeSecurity, error) {
+	security, err := pipeSecurityFromSDDL(sddl)
+	return GatewayPipeSecurity{security: security}, err
+}
+
 // CreateGatewayServerPipe creates one overlapped message-mode instance of
 // pipeName (first: FILE_FLAG_FIRST_PIPE_INSTANCE, so a pipe someone else
 // created first is refused) that rejects remote clients.

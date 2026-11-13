@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,7 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-func TestListenWithRetryCallsOnHeldOnce(t *testing.T) {
+func TestListenWithRetryCallsOnHeldAtEveryConflict(t *testing.T) {
 	prev := apiListenTCP
 	t.Cleanup(func() { apiListenTCP = prev })
 	failures := 3
@@ -30,13 +32,70 @@ func TestListenWithRetryCallsOnHeldOnce(t *testing.T) {
 		return lc.Listen(ctx, "tcp", "127.0.0.1:0")
 	}
 	held, calls := false, 0
-	ln, err := listenWithRetryNotingHeld(context.Background(), "127.0.0.1:18970", 5*time.Second, &held, func() { calls++ })
+	ln, err := listenWithRetryNotingHeld(context.Background(), "127.0.0.1:18970", 5*time.Second, &held, func(err error) {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			calls++
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = ln.Close()
-	if !held || calls != 1 {
-		t.Fatalf("held=%v calls=%d: the holder is looked up once per bind", held, calls)
+	if !held || calls != 3 {
+		t.Fatalf("held=%v calls=%d: the holder is looked up at every conflict (it can change between attempts)", held, calls)
+	}
+}
+
+// OSS Windows: WSAEACCES proves another account holds the wildcard port
+// (it names none). The mark is written without a uid, audited, and the
+// route key is replaced once the gateway owns the port (S1 DESIGN 16.2).
+func TestNoteAPIPortHolderAccessDeniedMarksAnotherAccount(t *testing.T) {
+	errForeign := errors.New("bind: forbidden by its access permissions")
+	prev := apiPortHeldByAnotherAccount
+	apiPortHeldByAnotherAccount = func(err error) bool { return errors.Is(err, errForeign) }
+	t.Cleanup(func() { apiPortHeldByAnotherAccount = prev })
+	store, logger := testStoreAndV8Logger(t)
+	dir := t.TempDir()
+	cfg := &config.Config{DataDir: dir}
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
+	tokens := newRouteTokenStore(dir, "1000")
+	old, err := tokens.Token("claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &APIServer{addr: "127.0.0.1:18970", scannerCfg: cfg, logger: logger}
+	a.routeOnly.Store(&routeOnlyServer{tokens: tokens})
+	renders := 0
+	a.onRouteKeyRotated = func() { renders++ }
+
+	a.noteHeldAPIPort(errForeign)
+	a.noteHeldAPIPort(errForeign)
+	raw, err := os.ReadFile(filepath.Join(dir, "hooks", routePortHeldName))
+	if err != nil {
+		t.Fatalf("held-port mark: %v", err)
+	}
+	var mark routePortHeld
+	if json.Unmarshal(raw, &mark) != nil || mark.UID != nil || mark.Addr != "127.0.0.1:18970" {
+		t.Fatalf("mark: %s", raw)
+	}
+	if events, err := store.ListEvents(10); err != nil || len(events) != 1 || events[0].Severity != "HIGH" ||
+		!strings.Contains(events[0].Details, "another account") {
+		t.Fatalf("one audit per acquire: %+v %v", events, err)
+	}
+	a.rotateRouteKeyAfterHeldPort()
+	if renders != 1 || tokens.Valid("claudecode", old) {
+		t.Fatalf("renders=%d: the old credential is refused once the port is back", renders)
+	}
+
+	// Managed Windows rotates its route epoch instead: no mark.
+	b := &APIServer{addr: "127.0.0.1:18970", scannerCfg: &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}}
+	b.scannerCfg.Enterprise.Profile = "standalone"
+	if !b.noteAPIPortHolder(errForeign) {
+		t.Fatal("managed: the holder is settled")
+	}
+	if _, err := os.Stat(filepath.Join(b.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
+		t.Fatalf("managed: no OSS mark: %v", err)
 	}
 }
 

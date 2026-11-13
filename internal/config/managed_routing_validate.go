@@ -76,8 +76,8 @@ func validateManagedRouting(cfg *Config, goos string) error {
 		if !r.Enabled || !routeOnlyCustodyGOOS(goos) {
 			continue
 		}
-		// Custody (S1 DESIGN 16.2, 20.7): managed macOS forwards no agent
-		// credential on route-only, so a connector the gateway holds no
+		// Custody (S1 DESIGN 16.2, 20.7, 21.4): managed macOS and Windows
+		// forward no agent credential on route-only, so a connector the gateway holds no
 		// credential for would answer 503 on every model call. route_only is
 		// new in 1.0.10 (no 1.0.8 or 1.0.9 config has it), so refusing here
 		// breaks no upgrade; a ref that does not resolve on the host is a
