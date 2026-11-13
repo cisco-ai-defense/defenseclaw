@@ -296,9 +296,10 @@ func dataSpan(command string, i int, pending *[]heredocSpec) int {
 	case '\'':
 		if i > 0 && command[i-1] == '$' {
 			for j := i + 1; j < len(command); j++ {
-				if command[j] == '\\' {
+				switch command[j] {
+				case '\\':
 					j++
-				} else if command[j] == '\'' {
+				case '\'':
 					return j + 1
 				}
 			}
