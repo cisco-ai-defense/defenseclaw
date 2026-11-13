@@ -424,6 +424,20 @@ func (s SubstrateConfig) EffectiveAdminService() string {
 	return orDefault(s.Services.Admin, DefaultSubstrateAdminService)
 }
 
+// ActorGatewayURL is the actor listener base URL a kit image posts to: plain
+// HTTP to the actor Service FQDN (egress re-originates the in-cluster hop and
+// adds the actor JWT; substrate-1 GAP-0023 and GAP-0042).
+func (s SubstrateConfig) ActorGatewayURL() string {
+	return "http://" + strings.TrimSpace(s.EffectiveActorService())
+}
+
+// RelaySessionIssuer is the iss of the relay session tokens the gateway
+// signs, https://<admin Service>. Template builds bake the same value into
+// the relay (substrate-1 GAP-0147), so both sides take it from here.
+func (s SubstrateConfig) RelaySessionIssuer() string {
+	return "https://" + strings.TrimSpace(s.EffectiveAdminService())
+}
+
 // EffectiveAudience and EffectiveTokenLifetime shape the actor JWT.
 func (s SubstrateConfig) EffectiveAudience() string {
 	return orDefault(s.Identity.Audience, DefaultSubstrateAudience)
@@ -464,15 +478,6 @@ func (s SubstrateConfig) LauncherAtespace(atespace string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
 }
 
 var (
@@ -718,6 +723,9 @@ func (s *SubstrateConfig) Validate() error {
 
 	s.Bundles.validate(bad)
 	if err := s.Admin.validateAs("admin"); err != nil {
+		errs = append(errs, err)
+	}
+	if err := s.Admin.substrateScopeError("admin"); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

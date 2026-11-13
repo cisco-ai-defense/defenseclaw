@@ -213,6 +213,40 @@ func HostRunRefusedOn(conn, surface, profile, projectDir, requestAccess string) 
 	return b.String()
 }
 
+// substrateRunCommand starts an agent in an Agent Substrate actor.
+const substrateRunCommand = "defenseclaw substrate run"
+
+// HostRunRefusedSubstrate is the hook refusal of a host run of conn that
+// must run in a sandbox where the caller's floor allows only Agent
+// Substrate (runtimes: [substrate], E26): it points to the launcher, which
+// runs the agent in a cluster actor and not on this computer. surface words
+// it for a desktop app or IDE extension, as HostRunRefusedOn.
+func HostRunRefusedSubstrate(conn, surface, profile, requestAccess string) string {
+	h := harnessFor(conn)
+	product := h.display
+	where, embedded := refusalSurfaces[strings.ToLower(strings.TrimSpace(surface))]
+	if embedded {
+		if p, ok := refusalProducts[strings.ToLower(strings.TrimSpace(conn))]; ok {
+			product = p
+		}
+		product += " " + where
+	}
+	return adminSentence() + product + " can't run on this computer" + profileNote(profile) +
+		": your organization runs " + h.display + " on Agent Substrate.\n" +
+		"Start it there from your project folder:\n  " + substrateRunCommand + " " + h.command + "\n" +
+		"Need an exception? Contact " + contact(requestAccess)
+}
+
+// SandboxRunSubstrateOnly is the refusal of a sandbox on this computer for
+// conn where the caller's floor allows only Agent Substrate (runtimes:
+// [substrate]). The contact travels beside it (the refusal's
+// request_access), as for the other managed resolve refusals.
+func SandboxRunSubstrateOnly(conn, profile string) string {
+	h := harnessFor(conn)
+	return adminSentence() + h.display + " runs on Agent Substrate under your profile" + profileNote(profile) +
+		", not in a sandbox on this computer.\nStart it there: " + substrateRunCommand + " " + h.command
+}
+
 // HostRunUnavailable is the hook refusal of a host run of conn that must
 // run in a sandbox where sandboxes can't run for the caller (Q1); why says
 // what is missing ("OpenShell is not installed"), "" when unknown, and code

@@ -53,10 +53,10 @@ func TextEmitter(out, errw io.Writer) func(relay.TaskEvent) {
 	}
 }
 
-// RunTask starts a headless task in the actor (POST /dcrelay/1/task through
+// RunTask starts a headless task in the actor (the task route through
 // the attach route) and streams its events to Emit until the agent exits. When
 // the stream drops it follows the task again from where it stopped
-// (GET /dcrelay/1/task/{id}), so no event is lost or repeated. It returns
+// (GET task/{id}), so no event is lost or repeated. It returns
 // the agent's exit code.
 func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 	if strings.TrimSpace(o.Prompt) == "" {
@@ -98,7 +98,7 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 		// The client puts the person's bearer on the request; the token
 		// argument is not used for it.
 		code, err := relay.RunTask(ctx, l.tun.HTTPClient(), l.tun.BaseURL(), "",
-			relay.TaskRequest{Prompt: o.Prompt}, track)
+			relay.TaskRequest{Prompt: o.Prompt, Dir: o.Dir}, track)
 		if err == nil {
 			return code, nil
 		}
@@ -111,6 +111,11 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 		st := relayStatus(err)
 		if st == http.StatusConflict {
 			return -1, fmt.Errorf("a task is already running in %s; follow it with: defenseclaw substrate logs %s -f", o.Target.Name, o.Target.Name)
+		}
+		// The relay itself refuses a task text that is not the one the agent
+		// was started with (GAP-0071); that is not an attach refusal.
+		if st == http.StatusForbidden && strings.Contains(err.Error(), "not the task this actor was registered for") {
+			return -1, fmt.Errorf("%s runs only the task it was started with; start a new agent for another task: defenseclaw substrate run AGENT --task \"...\"", safetext.Line(o.Target.Name))
 		}
 		k, kerr := l.judge(err)
 		switch {
@@ -169,7 +174,7 @@ func (l *link) follow(ctx context.Context, id string, cursor uint64, emit func(r
 	rec := newRetry(o.Backoff)
 	failures := 0
 	for {
-		resp, err := l.get(ctx, "/dcrelay/1/task/"+url.PathEscape(id)+"?cursor="+strconv.FormatUint(cursor, 10))
+		resp, err := l.get(ctx, relay.RouteTask+"/"+url.PathEscape(id)+"?cursor="+strconv.FormatUint(cursor, 10))
 		switch {
 		case err != nil:
 			if ctx.Err() != nil {
@@ -236,10 +241,10 @@ func isFatal(err error) bool {
 // get sends a GET through the attach route, waiting while the cluster is
 // full or the agent is starting. A refusal is fatal; any other answer is the
 // caller's.
-func (l *link) get(ctx context.Context, path string) (*http.Response, error) {
+func (l *link) get(ctx context.Context, route string) (*http.Response, error) {
 	park := l.newParker()
 	for {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, l.tun.BaseURL()+path, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, relay.RouteURL(l.tun.BaseURL(), route), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -308,7 +313,7 @@ func responseError(resp *http.Response, t Target) error {
 	return fmt.Errorf("the agent %s answered %d: %s", t.Name, resp.StatusCode, msg)
 }
 
-// Status reads the relay's status (GET /dcrelay/1/status) through the
+// Status reads the relay's status (the status route) through the
 // attach route: the session, whether the agent runs, the last pre-connect time
 // and the tasks.
 func Status(ctx context.Context, o Options) (map[string]any, error) {
@@ -320,7 +325,7 @@ func Status(ctx context.Context, o Options) (map[string]any, error) {
 		return nil, err
 	}
 	defer l.close()
-	resp, err := l.get(ctx, "/dcrelay/1/status")
+	resp, err := l.get(ctx, relay.RouteStatus)
 	if err != nil {
 		return nil, ctxErr(ctx, unwrapFatal(err))
 	}

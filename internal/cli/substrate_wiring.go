@@ -71,6 +71,19 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 	})
 }
 
+// substrateTemplateConnector reads the connector a template was built for
+// from its attestation (the signed io.defenseclaw.connector label); an
+// unattested template names none, and the controller refuses it at resume.
+func substrateTemplateConnector(ctl *controller.Controller) func(context.Context, *ateapi.ActorTemplate) (string, error) {
+	return func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error) {
+		att, err := ctl.Attestor().Attest(ctx, tmpl)
+		if err != nil || !att.Attested {
+			return "", nil
+		}
+		return att.Connector, nil
+	}
+}
+
 // substrateEnsurer is the create path's policy writer over a controller.
 func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer {
 	return func(ctx context.Context, atespace, name string) error {

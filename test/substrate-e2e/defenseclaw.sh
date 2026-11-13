@@ -59,9 +59,12 @@ config:
     # The stub agent template is not attested (that is a separate journey); an unattested template gets no network.
     require_attested_templates: false
     launcher_atespaces:
-      engineering: [$E2E_DC_LAUNCH_ATESPACE]
+      default: [$E2E_DC_LAUNCH_ATESPACE]
+  # The default profile only observes; the smoke test needs a gateway that blocks.
   # An actor in the managed atespace gets the policy of the profile whose match.substrate selects its atespace.
   guardrail:
+    mode: action
+    block_at: HIGH
     profiles:
       e2e:
         mode: action
@@ -118,27 +121,98 @@ dc_hook_deny() {
   # The first posts can fail while the new policy and the actor's registration settle.
   if retry 90 4 bash -c "$(declare -f dc_post); E2E_PROXY_PORT=$E2E_PROXY_PORT E2E_WORKDIR=$E2E_WORKDIR; dc_post '$DC_HOOK_ALLOW' | grep -q '^200 '"; then
     got=$(dc_post "$DC_HOOK_ALLOW"); echo "$got" >"$E2E_ARTIFACTS/hook-allow.txt"
-    if echo "$got" | grep -qi -E '"(action|verdict)" *: *"(deny|block)"|"decision" *: *"block"'; then
-      fail "a harmless command is allowed by the gateway: $got"
-    else
+    if echo "$got" | grep -q '"action":"allow"' && echo "$got" | grep -q '"would_block":false'; then
       pass "a harmless command (ls) is allowed by the real gateway"
+    else
+      fail "a harmless command is allowed by the gateway: $got"
     fi
   else
     fail "the real gateway answers a hook event from the stub agent through egress"
     return 1
   fi
-  got=$(dc_post "$DC_HOOK_DENY"); echo "$got" >"$E2E_ARTIFACTS/hook-deny.txt"
+  # The deny is proven for an actor the launcher created (dc_launcher_hook): only that registration carries the
+  # connector the gateway inspects the hook for.
+  stop_proxies
+}
+
+# dc_launcher_hook: the real launcher create flow. A person signs in with a Kubernetes bearer (E2E_KUBE_TOKEN, set by
+# kube_user_setup in create mode; an existing cluster passes its own), POSTs to the admin listener to create an actor,
+# and the registration carries the connector. The hook post of the stub agent is then inspected: the metadata read
+# is blocked by the real gateway.
+dc_launcher_hook() {
+  log "DefenseClaw: an actor created through the launcher flow"
+  if [ -z "${E2E_KUBE_TOKEN:-}" ]; then
+    if [ "$E2E_REQUIRE_DEFENSECLAW" = 1 ]; then
+      fail "a Kubernetes user token exists for the launcher create flow (E2E_KUBE_TOKEN; create mode adds one)"
+    else
+      skip "the launcher create flow: no Kubernetes user token (E2E_KUBE_TOKEN; create mode adds one)"
+    fi
+    return 0
+  fi
+  local ns=$E2E_DC_NAMESPACE la=$E2E_DC_LAUNCH_ATESPACE hdr="$E2E_WORKDIR/auth.hdr" tpl="$E2E_WORKDIR/launch-template.yaml" port=18443
+  # The gateway checks the bearer with a TokenReview and needs the system:auth-delegator role for it. The chart
+  # does not grant it (GAP-0153); the test adds the binding.
+  check "the gateway may review tokens (test binding)" K create clusterrolebinding dc-e2e-auth-delegator --clusterrole=system:auth-delegator --serviceaccount="$ns:defenseclaw-gateway"
+  # The launcher atespace (created by the bootstrap) needs workers and the stub template.
+  ATE get atespace "$la" >/dev/null 2>&1 || ATE create atespace "$la" >>"$E2E_ARTIFACTS/check.log" 2>&1
+  K apply -f - <<YAML >>"$E2E_ARTIFACTS/check.log" 2>&1
+apiVersion: ate.dev/v1
+kind: WorkerPool
+metadata:
+  name: lp
+  namespace: $E2E_NAMESPACE
+  labels:
+    workload: $la
+spec:
+  replicas: $E2E_POOL_REPLICAS
+  sandboxClasses:
+  - name: gvisor
+  workerImage: ghcr.io/agent-substrate/substrate/ateworker-gvisor:$E2E_SUBSTRATE_VERSION
+  template:
+    resources:
+      limits: {cpu: "2", memory: 2Gi}
+      requests: {cpu: 250m, memory: 512Mi}
+YAML
+  sed -e "s/atespace: $E2E_ATESPACE/atespace: $la/" -e "s/workload: $E2E_ATESPACE/workload: $la/" "$E2E_WORKDIR/stub-template.yaml" >"$tpl"
+  check "actor template stub created in the launcher atespace" ATE create actor-template -f "$tpl"
+  retry 300 5 bash -c "kubectl $(kctx) -n $E2E_NAMESPACE get workerpool lp -o jsonpath='{.status.readyReplicas}' | grep -qx $E2E_POOL_REPLICAS" || { fail "launcher worker pool is ready"; return 1; }
+
+  (umask 077; printf 'Authorization: Bearer %s\n' "$E2E_KUBE_TOKEN" >"$hdr")
+  setsid nohup kubectl $(kctx) -n "$ns" port-forward svc/defenseclaw-admin "$port:443" >"$E2E_ARTIFACTS/port-forward.log" 2>&1 </dev/null &
+  PROXY_PIDS+=("$!")
+  if ! retry 30 1 bash -c "curl -sk -m 3 -o /dev/null https://127.0.0.1:$port/"; then fail "the admin listener answers through a port-forward"; return 1; fi
+  local code
+  code=$(curl -sk -m 120 -o "$E2E_WORKDIR/create.out" -w '%{http_code}' -X POST -H @"$hdr" -H 'X-DefenseClaw-Client: substrate-e2e' \
+    -H 'Content-Type: application/json' -d '{"template":"stub","connector":"claudecode"}' "https://127.0.0.1:$port/api/v1/substrate/actors")
+  if [ "$code" != 201 ]; then
+    info "create answered $code: $(head -c 300 "$E2E_WORKDIR/create.out")"
+    fail "the launcher create flow creates an actor (HTTP $code)"; return 1
+  fi
+  pass "the launcher create flow creates an actor for a Kubernetes user"
+  local name
+  name=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("name",""))' "$E2E_WORKDIR/create.out")
+  [ -n "$name" ] || { fail "the create answer names the actor"; return 1; }
+  info "launcher actor $la/$name"
+  if ! proxy_actor "$name" "$E2E_PROXY_PORT" "$la"; then fail "the launcher-created stub agent answers through the actor proxy"; return 1; fi
+  local got
+  retry 90 4 bash -c "$(declare -f dc_post); E2E_PROXY_PORT=$E2E_PROXY_PORT E2E_WORKDIR=$E2E_WORKDIR; dc_post '$DC_HOOK_ALLOW' | grep -q '^200 '"
+  got=$(dc_post "$DC_HOOK_ALLOW"); echo "$got" >"$E2E_ARTIFACTS/launcher-hook-allow.txt"
+  if echo "$got" | grep -q '"action":"allow"'; then pass "a harmless command (ls) is allowed for a launcher-created actor"; else fail "a harmless command is allowed for a launcher-created actor: $got"; fi
+  got=$(dc_post "$DC_HOOK_DENY"); echo "$got" >"$E2E_ARTIFACTS/launcher-hook-deny.txt"
   info "deny answer: $(echo "$got" | cut -c1-240)"
-  if echo "$got" | grep -qi -E 'deny|block|C2-METADATA-AWS'; then
-    pass "a command that reads instance metadata is denied by the real gateway"
+  if echo "$got" | grep -q '^200 ' && echo "$got" | grep -q -E '"action":"block"|"permissionDecision":"deny"'; then
+    pass "a command that reads instance metadata is blocked by the real gateway for a launcher-created actor"
   else
-    fail "a command that reads instance metadata is denied by the real gateway"
+    fail "a command that reads instance metadata is blocked by the real gateway for a launcher-created actor: $got"
   fi
   stop_proxies
+  ATE delete actor "$name" -a "$la" >/dev/null 2>&1
 }
 
 dc_uninstall() {
   log "uninstall leaves nothing open"
+  K delete clusterrolebinding dc-e2e-auth-delegator --ignore-not-found >/dev/null 2>&1
+  K -n "$E2E_NAMESPACE" delete workerpool lp --ignore-not-found >/dev/null 2>&1
   local ns=$E2E_DC_NAMESPACE fq rc=0
   fq=$(dc_fqdn)
   # shellcheck disable=SC2046

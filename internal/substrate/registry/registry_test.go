@@ -124,4 +124,49 @@ func TestRemoteOverLeader(t *testing.T) {
 	if err != nil || len(list) != 1 {
 		t.Fatalf("list %v %v", list, err)
 	}
+	if l, err := r.Lookup(ctx, "eng-web", "a1"); err != nil || !l.Found || l.UID != "4f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4a" || l.Profile != "eng" {
+		t.Fatalf("lookup %+v %v", l, err)
+	}
+	if l, err := r.Lookup(ctx, "eng-web", "nobody"); err != nil || l.Found {
+		t.Fatalf("lookup of an unregistered name %+v %v", l, err)
+	}
+}
+
+// TestLookupName is GAP-0090: the callout's name lookup answers the newest
+// incarnation, a tombstone as deleted, and the attendance.
+func TestLookupName(t *testing.T) {
+	s, err := OpenFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	old := reg("w1", "4f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4a", "alice")
+	old.CreatedAt = time.Unix(1000, 0)
+	old.Deleted = true
+	cur := reg("w1", "5f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4b", "alice")
+	cur.CreatedAt = time.Unix(2000, 0)
+	cur.Unattended = true
+	for _, r := range []Registration{old, cur} {
+		if err := s.Put(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	l, err := LookupName(ctx, s, "eng-web", "w1")
+	if err != nil || !l.Found || l.Deleted || l.UID != cur.UID || !l.Unattended || l.Profile != "eng" {
+		t.Fatalf("newest incarnation: %+v %v", l, err)
+	}
+	gone := reg("g1", "6f9c3a1e-8d2b-4c77-9e0a-6b5f1d2c3e4c", "bob")
+	gone.Deleted = true
+	if err := s.Put(ctx, gone); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := LookupName(ctx, s, "eng-web", "g1"); err != nil || !l.Found || !l.Deleted {
+		t.Fatalf("tombstone: %+v %v", l, err)
+	}
+	if l, _ := LookupName(ctx, s, "other", "w1"); l.Found {
+		t.Fatalf("another atespace's actor: %+v", l)
+	}
+	if _, err := LookupName(ctx, s, "", "w1"); err == nil {
+		t.Fatal("lookup without an atespace")
+	}
 }

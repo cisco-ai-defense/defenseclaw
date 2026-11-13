@@ -38,6 +38,11 @@ type listOut struct {
 	Registrations []Registration `json:"registrations"`
 }
 
+type lookupIn struct {
+	Atespace string `json:"atespace"`
+	Name     string `json:"name"`
+}
+
 type putOut struct {
 	Key string `json:"key"`
 }
@@ -66,6 +71,9 @@ func Serve(srv *leader.Server, s Store) {
 	srv.HandleRead(leader.MethodRegistrationList, leader.Typed(func(ctx context.Context, f Filter) (listOut, error) {
 		rs, err := s.List(ctx, f)
 		return listOut{Registrations: rs}, err
+	}))
+	srv.HandleRead(leader.MethodRegistrationLookup, leader.Typed(func(ctx context.Context, in lookupIn) (Lookup, error) {
+		return LookupName(ctx, s, in.Atespace, in.Name)
 	}))
 }
 
@@ -146,4 +154,12 @@ func (s *Remote) List(ctx context.Context, f Filter) ([]Registration, error) {
 	var out listOut
 	err := s.Client.Call(ctx, leader.MethodRegistrationList, leader.NewRequestID(), f, &out)
 	return out.Registrations, err
+}
+
+// Lookup asks the leader for atespace/name's newest incarnation. It is not
+// cached here: the callout's UID cache holds the answer.
+func (s *Remote) Lookup(ctx context.Context, atespace, name string) (Lookup, error) {
+	var out Lookup
+	err := s.Client.Call(ctx, leader.MethodRegistrationLookup, leader.NewRequestID(), lookupIn{Atespace: atespace, Name: name}, &out)
+	return out, err
 }

@@ -97,8 +97,10 @@ func (q *chainQueue) droppedCount() uint64 {
 
 // chainPerActorInflight caps one actor's concurrent chain checks, so an
 // actor flooding its own window can't take the leader's time from others
-// (GAP-0090); a check over the cap is unchecked at once.
-const chainPerActorInflight = 4
+// (GAP-0090). A check over the cap waits for a slot within its budget, so
+// a normal burst of parallel requests (a package install) is checked, not
+// refused; only a sustained flood is unchecked.
+const chainPerActorInflight = 8
 
 // Chain check outcomes.
 const (
@@ -113,51 +115,93 @@ const (
 	uncheckedTimeout  = "timeout"
 	uncheckedBusy     = "actor_busy"
 	uncheckedInternal = "internal_error"
+	// uncheckedUnregistered is an actor with no registration (no UID), so
+	// no chain window can be named for it (GAP-0090).
+	uncheckedUnregistered = "unregistered"
+	// uncheckedLookup is a registration lookup that failed.
+	uncheckedLookup = "registration_unavailable"
 )
 
-// chainLimiter counts in-flight checks per actor.
+// chainLimiter bounds in-flight checks per actor: one semaphore per actor,
+// dropped when its last check returns.
 type chainLimiter struct {
 	mu sync.Mutex
-	n  map[string]int
+	m  map[string]*actorSlots
 }
 
-func (l *chainLimiter) acquire(key string) bool {
+type actorSlots struct {
+	ch    chan struct{}
+	users int
+}
+
+// acquire takes a slot for key, waiting until ctx ends.
+func (l *chainLimiter) acquire(ctx context.Context, key string) bool {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.n == nil {
-		l.n = map[string]int{}
+	if l.m == nil {
+		l.m = map[string]*actorSlots{}
 	}
-	if l.n[key] >= chainPerActorInflight {
+	s := l.m[key]
+	if s == nil {
+		s = &actorSlots{ch: make(chan struct{}, chainPerActorInflight)}
+		l.m[key] = s
+	}
+	s.users++
+	l.mu.Unlock()
+	select {
+	case s.ch <- struct{}{}:
+		return true
+	default:
+	}
+	select {
+	case s.ch <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		l.done(key, s)
 		return false
 	}
-	l.n[key]++
-	return true
 }
 
+// release returns key's slot.
 func (l *chainLimiter) release(key string) {
 	l.mu.Lock()
+	s := l.m[key]
+	l.mu.Unlock()
+	if s == nil {
+		return
+	}
+	<-s.ch
+	l.done(key, s)
+}
+
+func (l *chainLimiter) done(key string, s *actorSlots) {
+	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.n[key]--; l.n[key] <= 0 {
-		delete(l.n, key)
+	if s.users--; s.users <= 0 && l.m[key] == s {
+		delete(l.m, key)
 	}
 }
 
 // checkChain runs the synchronous egress-chain check under the budget. A
-// miss is clear. An error, a panic, the deadline or the actor's in-flight
-// cap is unchecked, with the reason: the caller applies the chain failure
-// mode, because on the hook path an egress chain only alerts and the
-// callout is where it blocks (GAP-0090).
+// miss is clear. An actor with no registration, an error, a panic, the
+// deadline or the actor's in-flight cap is unchecked, with the reason: the
+// caller applies the chain failure mode, because on the hook path an
+// egress chain only alerts and the callout is where it blocks (GAP-0090).
 func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, int, string) {
 	if e.checker == nil {
 		return ChainVerdict{}, chainClear, ""
 	}
-	key := step.Actor.Atespace + "/" + step.Actor.Name
-	if !e.chainLimit.acquire(key) {
-		return ChainVerdict{}, chainUnchecked, uncheckedBusy
+	if step.Actor.UID == "" {
+		return ChainVerdict{}, chainUnchecked, uncheckedUnregistered
 	}
-	// Released when the check returns, not at the deadline, so a slow
+	key := step.Actor.Atespace + "/" + step.Actor.Name
+	// The budget covers the wait for a slot and the check. The slot is
+	// released when the check returns, not at the deadline, so a slow
 	// leader keeps counting against the actor that sent it.
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.Chain.CheckBudget)
+	if !e.chainLimit.acquire(ctx, key) {
+		cancel()
+		return ChainVerdict{}, chainUnchecked, uncheckedBusy
+	}
 	type result struct {
 		v        ChainVerdict
 		err      error

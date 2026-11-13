@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
@@ -254,7 +255,7 @@ func (r *Review) render(name string) string {
 	if r.Empty {
 		fmt.Fprintf(&b, "%s: nothing to bring back\n", name)
 	} else {
-		fmt.Fprintf(&b, "%s: %s\n", name, r.Summary)
+		fmt.Fprintf(&b, "%s: %s\n", safetext.Line(name), safetext.Line(r.Summary))
 	}
 	if r.Flagged > 0 {
 		noun := "files need"
@@ -271,20 +272,22 @@ func (r *Review) render(name string) string {
 				b.WriteString("Other changes:\n")
 			}
 		}
+		// Paths come from the agent: safetext.Path quotes a name with a
+		// newline, a control or a format character, so it cannot forge lines.
 		if len(f.Flags) > 0 {
-			fmt.Fprintf(&b, "  %s (%s): %s\n", f.Path, f.Status, strings.Join(f.Flags, "; "))
+			fmt.Fprintf(&b, "  %s (%s): %s\n", safetext.Path(f.Path), safetext.Line(f.Status), safetext.Line(strings.Join(f.Flags, "; ")))
 		} else {
-			fmt.Fprintf(&b, "  %s (%s)\n", f.Path, f.Status)
+			fmt.Fprintf(&b, "  %s (%s)\n", safetext.Path(f.Path), safetext.Line(f.Status))
 		}
 	}
 	for _, d := range r.Dropped {
-		fmt.Fprintf(&b, "%s was held back from the actor; its change is not brought back\n", d)
+		fmt.Fprintf(&b, "%s was held back from the actor; its change is not brought back\n", safetext.Path(d))
 	}
 	for _, x := range r.Blocking {
-		fmt.Fprintf(&b, "refused: %s\n", x)
+		fmt.Fprintf(&b, "refused: %s\n", safetext.Line(x))
 	}
 	for _, w := range r.Warnings {
-		fmt.Fprintf(&b, "note: %s\n", w)
+		fmt.Fprintf(&b, "note: %s\n", safetext.Line(w))
 	}
 	return b.String()
 }

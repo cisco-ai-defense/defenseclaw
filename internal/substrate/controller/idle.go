@@ -19,17 +19,18 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 )
 
-// idle suspends a running actor that has been idle for IdleSuspendAfter
-// (E4): no hook, model, relay or egress activity and low CPU, never with a
-// pending ask, never for a --task run unless its profile allows it, and
-// never without a fresh CPU sample (no sample means not idle).
-func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event) error {
-	after := c.o.IdleSuspendAfter
-	if after <= 0 || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
+// idle suspends a running actor that has been idle for after (the profile's
+// idle_suspend_after, else IdleSuspendAfter; E4): no hook, model, relay or
+// egress activity and low CPU, never with a pending ask, never for a --task
+// run unless its profile allows it, and never without a fresh CPU sample (no
+// sample means not idle). Without an ActivitySource nothing is idle.
+func (c *Controller) idle(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, base Event, after time.Duration) error {
+	if after <= 0 || c.o.Activity == nil || a.GetStatus().GetState() != ateapi.ActorStateRunning || st.conflict {
 		return nil
 	}
 	if reg.Task && !reg.IdleSuspendTask {

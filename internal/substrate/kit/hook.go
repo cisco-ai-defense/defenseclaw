@@ -16,7 +16,27 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
+
+// signinRefusal reads the gateway's E9 refusal: status 403 with reason
+// signin.RefusedCode, whose message is the text the agent shows.
+func signinRefusal(status int, body []byte) (string, bool) {
+	if status != 403 {
+		return "", false
+	}
+	var v struct {
+		Reason  string `json:"reason"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &v) != nil || !signin.IsRefusalCode(v.Reason) {
+		return "", false
+	}
+	if v.Message == "" {
+		v.Message = "DefenseClaw refused this actor: its agent signs in to a vendor account, which a managed deployment does not allow."
+	}
+	return v.Message, true
+}
 
 // maxPayloadBytes is the agent event cap, the host hooks' 1 MiB
 // (hookexec.DefaultMaxBody): a larger event is refused closed.
@@ -156,6 +176,15 @@ func RunHook(ctx context.Context, o HookOptions) int {
 			return code
 		}
 		return refuse("DefenseClaw actor hook failed: " + err.Error())
+	}
+	if msg, ok := signinRefusal(resp.Status, resp.Body); ok {
+		// E9: the gateway refused this actor's vendor sign-in. Say so, not
+		// "its identity was not accepted".
+		code, rerr := hookexec.RemoteRefused(call, msg)
+		if rerr != nil {
+			fmt.Fprintln(o.Stderr, "defenseclaw:", rerr)
+		}
+		return code
 	}
 	code, rerr := hookexec.RemoteAnswer(call, resp.Status, resp.Body)
 	if rerr != nil {

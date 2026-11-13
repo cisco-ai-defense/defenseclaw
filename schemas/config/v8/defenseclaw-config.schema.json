@@ -1447,6 +1447,58 @@
             "docker",
             "none"
           ]
+        },
+        "runtimes": {
+          "description": "The sandbox runtimes the subject's agents may use: openshell (a sandbox on the computer) and substrate (an Agent Substrate actor). Unset allows both; profiles intersect it. With required_for, [substrate] points a refused host run to defenseclaw substrate run and refuses an OpenShell sandbox.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "openshell",
+              "substrate"
+            ]
+          }
+        },
+        "sandbox_class": {
+          "description": "Agent Substrate only: the weakest isolation an actor may run in (gvisor or microvm; microvm wins). Unset takes substrate.default_sandbox_class.",
+          "type": "string",
+          "enum": [
+            "",
+            "gvisor",
+            "microvm"
+          ]
+        },
+        "idle_suspend_after": {
+          "description": "Agent Substrate only: suspend an idle actor after this Go duration (at least 1m), instead of substrate.idle_suspend_after. The shortest wins.",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "unattended_asks": {
+          "description": "Agent Substrate only: what an ask of an unattended (--task, --batch) actor does: deny, or queue it for a person (a timeout denies). Deny wins; unset takes substrate.unattended.asks.",
+          "type": "string",
+          "enum": [
+            "",
+            "deny",
+            "queue"
+          ]
+        },
+        "ask_timeout": {
+          "description": "Agent Substrate only: how long a queued ask waits before it is denied (a Go duration, 1m to 24h), instead of substrate.unattended.ask_timeout. The shortest wins.",
+          "type": "string",
+          "pattern": "^(|[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h)(?:[0-9]+(?:\\.[0-9]+)?(?:ns|us|\u00b5s|ms|s|m|h))*)$"
+        },
+        "actor_secrets": {
+          "description": "Agent Substrate only: the values a program inside the actor may read, keys of the callout's actor-secrets Secret. Each is marked exposed and matched by exact value on prompts and egress. Unset exposes none; profiles intersect it.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+          }
         }
       }
     },
@@ -1753,6 +1805,197 @@
         "sandbox": {
           "description": "Tightens openshell.admin for the subjects of this profile; only request_access overrides.",
           "$ref": "#/$defs/openShellAdmin"
+        },
+        "routing": {
+          "description": "Tightens routing.admin for the subjects of this profile.",
+          "$ref": "#/$defs/routingPolicy"
+        }
+      }
+    },
+    "routingPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Tighten-only routing overlay (guardrail.profiles.<name>.routing).",
+      "properties": {
+        "allowed_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Limit routing to these routing.models aliases (intersected with every other layer)."
+        },
+        "denied_providers": {
+          "description": "Remove every alias of these providers.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "default_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when the classifier picks nothing that survives."
+        },
+        "categories": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Classifier category to alias."
+        },
+        "allow_user_override": {
+          "type": "boolean",
+          "description": "A request that names an allowed alias as its model keeps it; false from any layer wins."
+        }
+      }
+    },
+    "routingAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Organization routing floor; profiles only tighten it.",
+      "properties": {
+        "allowed_aliases": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Limit routing to these routing.models aliases (intersected with every other layer)."
+        },
+        "denied_providers": {
+          "description": "Remove every alias of these providers.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "default_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when the classifier picks nothing that survives."
+        },
+        "categories": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "Classifier category to alias."
+        },
+        "allow_user_override": {
+          "type": "boolean",
+          "description": "A request that names an allowed alias as its model keeps it; false from any layer wins."
+        },
+        "locked": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "default_alias",
+              "categories",
+              "allow_user_override",
+              "classifier",
+              "models",
+              "min_confidence",
+              "on_classifier_error",
+              "sensitive",
+              "systemone",
+              "route_only"
+            ]
+          }
+        }
+      }
+    },
+    "routingBedrockAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "How the gateway authenticates a routed Bedrock call.",
+      "properties": {
+        "region": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+        },
+        "auth": {
+          "type": "string",
+          "enum": [
+            "passthrough",
+            "profile",
+            "instance_role",
+            "iam_credentials"
+          ]
+        },
+        "profile": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "access_key_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "secret_key_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "session_token_env": {
+          "$ref": "#/$defs/envName"
+        },
+        "access_key_credential": {"$ref": "#/$defs/credentialName"},
+        "secret_key_credential": {"$ref": "#/$defs/credentialName"},
+        "session_token_credential": {"$ref": "#/$defs/credentialName"}
+      }
+    },
+    "routingUpstream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_url"
+      ],
+      "properties": {
+        "base_url": {
+          "$ref": "#/$defs/boundedString"
+        },
+        "api": {
+          "type": "string",
+          "enum": [
+            "chat",
+            "messages",
+            "responses",
+            "converse",
+            "invoke"
+          ]
+        },
+        "bedrock": {
+          "$ref": "#/$defs/routingBedrockAuth"
         }
       }
     },
@@ -4713,7 +4956,7 @@
     "routing": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Semantic model router configuration for intelligent LLM request routing via vLLM Semantic Router sidecar.",
+      "description": "Semantic model routing: the in-process rules classifier, System One or the vLLM Semantic Router, profile and admin routing policy, and route-only mode for hook connectors.",
       "allOf": [
         {
           "if": {
@@ -4739,6 +4982,146 @@
         }
       ],
       "properties": {
+        "classifier": {
+          "type": "string",
+          "enum": [
+            "rules",
+            "systemone",
+            "vllm_sr"
+          ],
+          "description": "Router classifier; absent = vllm_sr (1.0.9 meaning)."
+        },
+        "min_confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "on_classifier_error": {
+          "type": "string",
+          "enum": [
+            "original",
+            "rules"
+          ]
+        },
+        "default_alias": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "categories": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "allow_user_override": {
+          "type": "boolean"
+        },
+        "sensitive": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["aliases"],
+          "anyOf": [{"required": ["severity_at_least"]}, {"required": ["signals"]}],
+          "properties": {
+            "signals": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            },
+            "severity_at_least": {
+              "type": "string",
+              "enum": [
+                "LOW",
+                "MEDIUM",
+                "HIGH",
+                "CRITICAL",
+                "low",
+                "medium",
+                "high",
+                "critical"
+              ]
+            },
+            "aliases": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 256,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              }
+            }
+          }
+        },
+        "systemone": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "use_decision_model": {
+              "type": "boolean"
+            },
+            "base_url": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "model": {
+              "$ref": "#/$defs/boundedString"
+            },
+            "api_key_env": {
+              "$ref": "#/$defs/envName"
+            },
+            "credential": {"$ref": "#/$defs/credentialName"},
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            }
+          }
+        },
+        "route_only": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "connectors": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": [
+                  "claudecode",
+                  "codex"
+                ]
+              }
+            },
+            "upstreams": {
+              "type": "object",
+              "propertyNames": {
+                "enum": [
+                  "claudecode",
+                  "codex"
+                ]
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/routingUpstream"
+              }
+            }
+          }
+        },
+        "admin": {
+          "$ref": "#/$defs/routingAdmin"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -4807,6 +5190,25 @@
               },
               "capabilities": {
                 "$ref": "#/$defs/stringList"
+              },
+              "apis": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "chat",
+                    "messages",
+                    "responses",
+                    "converse",
+                    "invoke"
+                  ]
+                }
+              },
+              "credential": {"$ref": "#/$defs/credentialName"},
+              "bedrock": {
+                "$ref": "#/$defs/routingBedrockAuth"
               }
             }
           }
@@ -4888,7 +5290,10 @@
                       "type": "string",
                       "enum": [
                         "keyword",
-                        "KEYWORD"
+                        "KEYWORD",
+                        "connector",
+                        "api_family",
+                        "request"
                       ]
                     },
                     "name": {

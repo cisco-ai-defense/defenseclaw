@@ -211,6 +211,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		}
 		substrateStartupChecks(cfg)
+		// A managed gateway in a pod has no laptop lifecycle: the chart's
+		// read-only mounted config is the activated one (GAP-0135).
+		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+			gateway.SetSubstrateClusterActivation(gateway.SubstrateMountedConfigActivation(gateway.SubstrateFileOwner))
+		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
 	}
@@ -343,6 +348,14 @@ func substratePeople(c *config.Config) (gateway.SubstratePersonVerifier, error) 
 	return nil, nil
 }
 
+// substrateNoPeople refuses every sign-in: the admin listener of a
+// cluster with no sign-in configured serves the callout route only.
+type substrateNoPeople struct{}
+
+func (substrateNoPeople) Verify(context.Context, string) (identity.Person, error) {
+	return identity.Person{}, &identity.Error{Reason: identity.ReasonIssuer, Message: "no sign-in is configured on this cluster"}
+}
+
 // substrateKubeSignIn reports whether people sign in with Kubernetes
 // credentials: no OIDC issuer, not a managed install, not turned off.
 func substrateKubeSignIn(c *config.Config) bool {
@@ -413,6 +426,15 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, err
 		}
+		if people == nil && !managed.IsManagedEnterprise(c.DeploymentMode) {
+			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
+				// GAP-0015: with no sign-in at all, the admin listener still
+				// runs for the callout's tool verdict route (its own bearer
+				// token); every person route refuses.
+				fmt.Fprintln(os.Stderr, "[substrate] no sign-in is configured: the admin listener serves the callout verdict route only")
+				people = substrateNoPeople{}
+			}
+		}
 		servingTLS, err := substrateServingTLS()
 		if err != nil {
 			return out, err
@@ -421,6 +443,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Providers:     gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
 			Proxy:         llmProxy,
 			BedrockModels: c.Substrate.LLM.BedrockModels,
+			// actor_secrets: exact-value DLP on prompts (PLAN §7.2), from
+			// the callout's actor-secrets Secret mounted in the gateway.
+			ExposedValues: gateway.SubstrateExposedValues(c, c.Substrate.Extproc.ActorSecretsDir),
 		})
 		if err != nil {
 			return out, err
@@ -450,6 +475,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Actors: actors, Registrations: regs, Activity: recorder,
 			Chains: &chainstate.Client{Leader: toLeader},
 			Asks:   &asks.Client{Leader: toLeader}, Policies: ate,
+			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
+				return gateway.SubstrateUnattendedAskFor(c, profile)
+			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: substrateRelays(),
 			Skills: newRuntimeSkillScanner(c),
@@ -465,7 +493,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl)},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -473,6 +501,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			// D8: interactive actors fail as hosts do (managed closed, OSS
 			// open with a warning); unattended actors always closed.
 			FailOpenInteractive: !managed.IsManagedEnterprise(c.DeploymentMode),
+			// E9: a managed deployment refuses a vendor sign-in held in an actor.
+			Managed:            managed.IsManagedEnterprise(c.DeploymentMode),
+			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 			OnRateLimited: func(scope ratelimit.Scope, route string) {
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
 			},
@@ -503,11 +534,10 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "[substrate] no substrate.identity.oidc issuer: the admin listener does not run")
+			fmt.Fprintln(os.Stderr, "[substrate] no sign-in and no callout token: the admin listener does not run")
 		}
 		if _, err := os.Stat(serveFlags.sessionKeyFile); err == nil {
-			issuer := "https://" + strings.TrimSpace(c.Substrate.Services.Admin)
-			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, issuer)
+			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, c.Substrate.RelaySessionIssuer())
 			if err != nil {
 				return out, err
 			}
@@ -515,6 +545,27 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		}
 		ready.Store(true)
 		return out, nil
+	}
+}
+
+// substrateSecretPlaceholders resolves bound secret names to the environment
+// variable names the actor carries in their place. E9 looks there for a
+// vendor API key (CURSOR_API_KEY, AMP_API_KEY, KIRO_API_KEY, GEMINI_API_KEY).
+func substrateSecretPlaceholders(secrets []config.SubstrateSecret) func([]string) []string {
+	byName := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		if s.Inject.Placeholder != "" {
+			byName[s.Name] = s.Inject.Placeholder
+		}
+	}
+	return func(names []string) []string {
+		var out []string
+		for _, n := range names {
+			if p, ok := byName[n]; ok {
+				out = append(out, p)
+			}
+		}
+		return out
 	}
 }
 
@@ -659,8 +710,9 @@ func kubeHTTPClient() (*http.Client, error) {
 
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method; the callout only the egress
-// chain check; the controller the registrations, the chain lifecycle and
-// the activity feed. An identity listed in two roles gets both sets.
+// chain check and the name lookup of a registration (GAP-0090); the
+// controller the registrations, the chain lifecycle and the activity feed.
+// An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
 	add := func(ids []string, methods ...string) {
@@ -671,7 +723,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
 		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
 	return p

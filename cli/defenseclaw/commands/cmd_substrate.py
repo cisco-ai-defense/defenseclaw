@@ -31,6 +31,7 @@ Windows, macOS and Linux.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from typing import Any, NoReturn
@@ -49,6 +50,34 @@ from defenseclaw.commands.cmd_sandbox import (
     _Flag,
     _help_text,
 )
+
+_HYPHENATED_WORD = re.compile(r"\w-\w")
+
+
+def _go_wrapped_help(text: str | None) -> str | None:
+    """Keep the line breaks of a paragraph that has a hyphenated word.
+
+    The Go help is the source of the text, and Go wraps it by hand. Click wraps again, and it breaks a line at a
+    hyphen ("ate- setup"), which changes the words the docs check compares. A paragraph with a hyphenated word
+    is printed as Go wrote it (a Click no-rewrap block); the others are wrapped to the terminal as usual.
+    """
+    if not text:
+        return text
+    out = []
+    for paragraph in text.split("\n\n"):
+        if _HYPHENATED_WORD.search(paragraph) and not paragraph.lstrip().startswith("\b"):
+            paragraph = "\b\n" + paragraph
+        out.append(paragraph)
+    return "\n\n".join(out)
+
+
+class _SubstrateCommand(GatewayCommand):
+    """GatewayCommand whose help keeps the Go line breaks where a hyphen could be split."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["help"] = _go_wrapped_help(kwargs.get("help"))
+        super().__init__(*args, **kwargs)
+
 
 # Tests replace this to capture the argv instead of replacing the process.
 _execv = os.execv
@@ -203,9 +232,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Attaches your terminal to a running or suspended agent from any machine you are signed in on.\n"
             "A suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press "
             "Ctrl-]\n"
-            "to detach again. If the connection drops, it reconnects by itself."
+            'to detach again. If the connection drops, it reconnects by itself. NAME is the name "defenseclaw '
+            'substrate list"\n'
+            "shows, or the --name you gave run when only one agent has it."
         ),
-        example="defenseclaw substrate connect fix-tests-7f3a",
+        example="defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
@@ -304,9 +335,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Signs you in to the cluster your organization runs, with your own account. It prints a web\n"
             "address and a short code; open the address in any browser, enter the code and approve. Your\n"
             "sign-in is kept in the system keychain, never in a file you can read. The first time, give the "
-            "cluster's\n"
-            'addresses (your administrator has them); after that, "defenseclaw substrate login" alone renews the '
-            "sign-in.\n"
+            "cluster\n"
+            "address with --admin-url (your administrator has it); the cluster tells the launcher which sign-in "
+            "server to\n"
+            'use. After that, "defenseclaw substrate login" alone renews the sign-in.\n'
             "\n"
             "On a cluster that has no sign-in server (an open-source install), use --kube: you are then the "
             "Kubernetes user of\n"
@@ -318,6 +350,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "cluster's workload audience, and nothing is stored."
         ),
         example=(
+            "defenseclaw substrate login --admin-url https://admin.example.test:9443\n"
             "defenseclaw substrate login --admin-url https://admin.example.test:9443 --issuer "
             "https://sso.example.test/realms/corp --client-id defenseclaw-launcher\n"
             "defenseclaw substrate login\n"
@@ -344,6 +377,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("kube", "bool", "sign in with your current kubeconfig identity (clusters without a sign-in server)"),
             _Flag("kube-context", "string", "with --kube, the kubeconfig context (default: its current one)"),
+            _Flag(
+                "kube-namespace",
+                "string",
+                "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)",
+            ),
             _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(
                 "name",
@@ -514,9 +552,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "claude,\n"
             "codex, copilot, opencode, kiro, hermes or antigravity (amp, cursor-agent and devin are not verified "
             "yet, so\n"
-            "they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. "
-            "Questions the\n"
-            "guard asks appear on the last line: [o]nce [a]lways [d]eny.\n"
+            "they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. When the\n"
+            "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
+            "always or deny.\n"
             "\n"
             "Press Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine "
             "with\n"
@@ -549,7 +587,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
             _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
-            _Flag("name", "string", "name for the agent (default: chosen by the cluster)", metavar="NAME"),
+            _Flag(
+                "name",
+                "string",
+                (
+                    "a readable start for the agent's name; a random suffix is added, so a name is never used twice "
+                    "(default: the agent's command)"
+                ),
+                metavar="NAME",
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag("no-upload", "bool", "start with an empty folder; upload nothing"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
@@ -615,6 +661,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
@@ -630,6 +677,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
     ),
@@ -640,6 +688,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
         ),
     ),
@@ -793,7 +842,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or "
             "bedrock-mantle)\n"
             "  --model ID                      default model id\n"
-            "  --gateway-url URL               actor listener URL (default the in-cluster Service)\n"
+            "  --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of "
+            "--config)\n"
             "  --fail-mode MODE                interactive outage mode: open or closed\n"
             "  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n"
             "  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n"
@@ -802,7 +852,17 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --dry-run                       scan the composed image and stop before pushing\n"
             "  --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)\n"
             "  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n"
-            "  --session-key KID=FILE          relay session public key, kid=PEM file (repeatable)\n"
+            "  --session-key FILE              the gateway's relay session public key (public.pem of the relay "
+            "session Secret);\n"
+            "                                  KID=FILE is checked against the key's own id (repeatable)\n"
+            "  --session-issuer URL            iss of the session tokens the keys verify (default "
+            "https://<substrate.services.admin>\n"
+            "                                  of --config, the issuer the gateway signs with)\n"
+            "  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n"
+            "  --verify-url URL                ask the gateway to check each session token, instead of "
+            "--session-key\n"
+            "                                  An image that starts the relay needs --session-key or "
+            "--verify-url.\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"
             "  --json                          print JSON\n"
@@ -1111,7 +1171,7 @@ def _build_command(cmd: _Cmd) -> click.Command:
         )
     params: list[click.Parameter] = [_click_argument(arg) for arg in cmd.args]
     params += [_option(flag) for flag in cmd.flags]
-    return GatewayCommand(
+    return _SubstrateCommand(
         cmd.path[-1],
         params=params,
         callback=click.pass_context(_forward),

@@ -201,3 +201,78 @@ func FuzzCleanNeverLeavesAControl(f *testing.F) {
 		}
 	})
 }
+
+// GAP-0126: an escape sequence that follows a lone 0xC2 byte must not pass.
+func TestStreamLoneLeadByteDoesNotHideAnEscapeSequence(t *testing.T) {
+	for name, in := range map[string]string{
+		"c2 osc52 bel":     "a\xc2\x1b]52;c;cm0gLXJmIH4=\x07b",
+		"c2 osc52 st":      "a\xc2\x1b]52;c;AAAA\x1b\\b",
+		"c2 osc8":          "\xc2\x1b]8;;https://evil.example.test\x07x",
+		"c2 dcs":           "\xc2\x1bP1000p\x1b\\x",
+		"c2 apc":           "\xc2\x1b_Gf=100;AAAA\x1b\\x",
+		"c2 csi window op": "\xc2\x1b[21tx",
+		"e2 82 then osc":   "\xe2\x82\x1b]52;c;AAAA\x07x",
+		"f0 then osc":      "\xf0\x1b]52;c;AAAA\x07x",
+		"stray 9d osc":     "a\x9d52;c;AAAA\x07b",
+		"raw 9b csi":       "a\x9b2Jb",
+		"c2 9d osc":        "a\xc2\x9d52;c;AAAA\x07b",
+		"esc c2 then osc":  "\x1b\xc2\x1b]52;c;AAAA\x07x",
+		"csi c2 then osc":  "\x1b[1;\xc2\x1b]52;c;AAAA\x07x",
+		"overlong c0 80":   "a\xc0\x80b",
+		"surrogate":        "a\xed\xa0\x80b",
+	} {
+		var f Stream
+		out := f.Filter([]byte(in))
+		checkStreamOutput(t, []byte(in), out)
+		if !strings.Contains(string(out), "x") && !strings.HasSuffix(string(out), "b") && strings.ContainsAny(in, "xb") {
+			t.Errorf("%s: the text after the sequence was lost: %q", name, out)
+		}
+	}
+	// The visible text around the damage survives.
+	var f Stream
+	if got := string(f.Filter([]byte("ab\xc2\x1b]52;c;AAAA\x07cd"))); got != "ab\ufffdcd" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestStreamKeepsValidUTF8AcrossWrites(t *testing.T) {
+	in := "naïve 日本語 😀 ok"
+	for split := 1; split < len(in); split++ {
+		var f Stream
+		got := string(f.Filter([]byte(in[:split]))) + string(f.Filter([]byte(in[split:])))
+		if got != in {
+			t.Fatalf("split at %d: %q", split, got)
+		}
+	}
+	// A C1 control written as UTF-8 is dropped, a no-break space is not.
+	var f Stream
+	if got := string(f.Filter([]byte("a\u009bb\u00a0c"))); got != "ab\u00a0c" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func FuzzStreamNeverLetsAControlThrough(f *testing.F) {
+	for _, in := range hostile {
+		f.Add([]byte(in), uint8(3))
+	}
+	f.Add([]byte("a\xc2\x1b]52;c;AAAA\x07b"), uint8(1))
+	f.Add([]byte("\x1b\xc2\x9d52;c;AAAA\x07"), uint8(2))
+	f.Fuzz(func(t *testing.T, in []byte, cut uint8) {
+		var whole Stream
+		w := whole.Filter(in)
+		// Input cut inside a character is held; close it with a plain byte.
+		w = append(w, whole.Filter([]byte{'.'})...)
+		checkStreamOutput(t, in, w)
+		// The same input in two writes gives the same output.
+		var parts Stream
+		k := 0
+		if len(in) > 0 {
+			k = int(cut) % (len(in) + 1)
+		}
+		g := append(parts.Filter(in[:k]), parts.Filter(in[k:])...)
+		g = append(g, parts.Filter([]byte{'.'})...)
+		if !bytes.Equal(w, g) {
+			t.Fatalf("split at %d changes the output of %q: %q vs %q", k, in, w, g)
+		}
+	})
+}

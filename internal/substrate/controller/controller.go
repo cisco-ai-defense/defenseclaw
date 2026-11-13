@@ -540,6 +540,9 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			return c.unmanaged(ctx, a, st, base)
 		}
 		st.unmanagedChecked = false
+		if res.Refuse == "" && res.SandboxClass != "" {
+			res.Refuse = c.classRefusal(ctx, a, res.SandboxClass)
+		}
 		if res.Refuse != "" {
 			c.refuseOnce(st, base, EventProfileRefused, res.Refuse, "", "")
 		} else if c.admit(ctx, a, st, base, res.Profile.Name) == "" {
@@ -561,7 +564,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			if err := c.apply(ctx, a, st, reg, res.Profile, base); err != nil {
 				return err
 			}
-			return c.idle(ctx, a, st, reg, base)
+			return c.idle(ctx, a, st, reg, base, res.idleAfter(c.o.IdleSuspendAfter))
 		}
 	}
 	// Refused: no policy, so the actor falls to default deny.

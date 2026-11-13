@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
 // Attach through the admin listener (GAP-0085, GAP-0086; lead ruling
@@ -98,13 +100,18 @@ type SubstrateRelayDialer interface {
 	DialRelay(ctx context.Context, atespace, name string) (net.Conn, error)
 }
 
-// substrateAttachRoutes are the relay paths an attach may reach.
-var substrateAttachRoutes = []string{"ws", "poll", "task", "status", "exec", "files"}
-
 // substrateAttachSessionTTL is the lifetime of the per-request session
 // token (a WebSocket keeps its connection past it; the relay checks the
 // token at the upgrade).
 const substrateAttachSessionTTL = 10 * time.Minute
+
+// substrateSessionActor is the actor incarnation a relay session token
+// names, with the task digest of its leader registration: the relay starts
+// a headless task only when the text matches it (GAP-0162). Every route
+// that issues a session token (create, session-cert, attach) uses it.
+func substrateSessionActor(reg registry.Registration) identity.SessionActor {
+	return identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID, TaskDigest: reg.TaskDigest}
+}
 
 func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -114,11 +121,13 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		}
 		rest := strings.Trim(r.PathValue("rest"), "/")
 		if rest == "" {
-			rest = "ws"
+			rest = relay.RouteWS
 		}
 		head, _, _ := strings.Cut(rest, "/")
 		known := false
-		for _, p := range substrateAttachRoutes {
+		// relay.AttachRoutes is the one route table: the launcher builds
+		// <attach>/<route>, the relay serves relay.Path(route) (GAP-0158).
+		for _, p := range relay.AttachRoutes {
 			known = known || head == p
 		}
 		if !known || strings.Contains(rest, "..") || strings.Contains(rest, "//") {
@@ -131,7 +140,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, substrateAttachSessionTTL)
+		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return
@@ -146,7 +155,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 		proxy := &httputil.ReverseProxy{
 			Rewrite: func(pr *httputil.ProxyRequest) {
 				pr.Out.URL.Scheme, pr.Out.URL.Host = "http", "actor.invalid"
-				pr.Out.URL.Path, pr.Out.URL.RawPath = "/dcrelay/1/"+rest, ""
+				pr.Out.URL.Path, pr.Out.URL.RawPath = relay.Path(rest), ""
 				pr.Out.Host = "actor.invalid"
 				pr.Out.Header.Del("Authorization")
 				pr.Out.Header.Del("Cookie")

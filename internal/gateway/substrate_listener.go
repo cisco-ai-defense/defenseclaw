@@ -121,6 +121,15 @@ type SubstrateConfig struct {
 	// permissive tiers fail open with a warning; managed and strict fail
 	// closed). Unattended runs always fail closed (D8).
 	FailOpenInteractive bool
+	// Managed is a managed_enterprise deployment. It refuses an actor whose
+	// agent signs in to a vendor account, because the token would sit in the
+	// actor and its snapshots (E9); an open-source deployment allows it with
+	// a warning.
+	Managed bool
+	// SecretPlaceholders maps bound secret names to the environment variable
+	// names the actor carries in their place (substrate.secrets[].inject.
+	// placeholder). Nil means no secret is bound to a vendor key.
+	SecretPlaceholders func(names []string) []string
 	// LLM serves /llm/<provider>/... for a verified actor (nil: 404).
 	LLM http.Handler
 	// Actions creates and deletes actors for the launcher (nil: 501).
@@ -150,6 +159,9 @@ type SubstrateConfig struct {
 	SkillReceiptKey []byte
 	// Asks is the leader's ask and decision store (nil: 501).
 	Asks SubstrateAskStore
+	// UnattendedAsk is what an unattended actor's ask does for its profile
+	// (SubstrateUnattendedAskFor; nil: deny, D12).
+	UnattendedAsk func(profile string) SubstrateUnattendedAsk
 	// Policies reads an actor's egress policy for policy explain.
 	Policies SubstratePolicyReader
 	// Relays reaches an actor's relay through the router for attach
@@ -586,6 +598,14 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		key, kerr := sandboxreg.SubstrateKey(actor.Atespace, actor.UID)
 		if kerr != nil || key != reg.Key {
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
+			return
+		}
+		// E9: an actor made some other way than the launcher still gets
+		// nothing from a managed gateway when its agent signs in to a vendor
+		// account.
+		if d := st.cfg.signinDecision(reg.Connector, reg.Secrets); !d.Allowed {
+			st.logRefusal("actor %s refused: %s (%s)", actor.Ref(), substrateSigninRefusedCode, reg.Connector)
+			writeSubstrateSigninRefusal(w, d)
 			return
 		}
 		ctx := withSubstrateActor(r.Context(), verifiedSubstrateActor(actor.Atespace, actor.Name, actor.UID, actor.Subject, key))

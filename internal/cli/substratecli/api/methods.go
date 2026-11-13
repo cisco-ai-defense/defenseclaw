@@ -22,6 +22,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 // Actor is one Substrate actor as the admin listener shows it.
@@ -42,6 +44,38 @@ type Actor struct {
 	// SessionToken is present on create for an attended run.
 	SessionToken   string    `json:"session_token,omitempty"`
 	SessionExpires time.Time `json:"session_expires,omitempty"`
+}
+
+// shown returns a with every field a person reads made safe to print
+// (safetext.Line): the cluster and the agent choose them, and they end up in
+// tables, status lines, prompts and errors. The identifiers the launcher
+// sends back (UID, registration key, session token) are left as they are.
+func (a Actor) shown() Actor {
+	for _, f := range []*string{&a.Atespace, &a.Name, &a.Profile, &a.Connector, &a.Template, &a.BatchID, &a.Owner, &a.State} {
+		*f = safetext.Line(*f)
+	}
+	return a
+}
+
+func (k Ask) shown() Ask {
+	for _, f := range []*string{&k.ID, &k.Atespace, &k.Actor, &k.Tool, &k.Summary, &k.Reason, &k.Severity} {
+		*f = safetext.Line(*f)
+	}
+	return k
+}
+
+func (s Secret) shown() Secret {
+	for _, f := range []*string{&s.Name, &s.Scope, &s.Status} {
+		*f = safetext.Line(*f)
+	}
+	if s.Hosts != nil {
+		hosts := make([]string, len(s.Hosts))
+		for i, h := range s.Hosts {
+			hosts[i] = safetext.Line(h)
+		}
+		s.Hosts = hosts
+	}
+	return s
 }
 
 // Workspace is what an actor starts with.
@@ -98,7 +132,8 @@ type Ask struct {
 // Create makes an actor (suspended, then resumed by the gateway).
 func (c *Client) Create(ctx context.Context, r CreateRequest) (Actor, error) {
 	var a Actor
-	return a, c.do(ctx, http.MethodPost, "actors", nil, r, &a)
+	err := c.do(ctx, http.MethodPost, "actors", nil, r, &a)
+	return a.shown(), err
 }
 
 // List returns the person's actors.
@@ -116,13 +151,17 @@ func (c *Client) List(ctx context.Context, o ListOptions) ([]Actor, error) {
 	if err := c.do(ctx, http.MethodGet, "actors", q, nil, &out); err != nil {
 		return nil, err
 	}
+	for i := range out.Actors {
+		out.Actors[i] = out.Actors[i].shown()
+	}
 	return out.Actors, nil
 }
 
 // Get returns one actor.
 func (c *Client) Get(ctx context.Context, atespace, name string) (Actor, error) {
 	var a Actor
-	return a, c.do(ctx, http.MethodGet, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, &a)
+	err := c.do(ctx, http.MethodGet, "actors/"+url.PathEscape(atespace)+"/"+url.PathEscape(name), nil, nil, &a)
+	return a.shown(), err
 }
 
 // Delete removes an actor and its snapshots.
@@ -173,6 +212,9 @@ func (c *Client) Asks(ctx context.Context) ([]Ask, error) {
 	}
 	if err := c.do(ctx, http.MethodGet, "asks", nil, nil, &out); err != nil {
 		return nil, err
+	}
+	for i := range out.Asks {
+		out.Asks[i] = out.Asks[i].shown()
 	}
 	return out.Asks, nil
 }
@@ -238,6 +280,9 @@ func (c *Client) Secrets(ctx context.Context, mine bool) ([]Secret, error) {
 	}
 	if err := c.do(ctx, http.MethodGet, "secrets", q, nil, &out); err != nil {
 		return nil, err
+	}
+	for i := range out.Secrets {
+		out.Secrets[i] = out.Secrets[i].shown()
 	}
 	return out.Secrets, nil
 }

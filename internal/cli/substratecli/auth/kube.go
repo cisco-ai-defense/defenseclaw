@@ -63,6 +63,7 @@ type KubeOptions struct {
 	Now      func() time.Time
 
 	execTimeout time.Duration // tests; 0 is kubeExecTimeout
+	apiTimeoutT time.Duration // tests; 0 is kubeAPITimeout
 }
 
 // KubeOptions builds the kube options of the context.
@@ -303,25 +304,60 @@ func oneToken(raw []byte) (string, bool) {
 	return t, t != "" && len(t) <= maxBody && !strings.ContainsAny(t, " \t\r\n")
 }
 
-// kubeResolve returns the bearer of the selected kubeconfig user;
-// fromFile says it came from a tokenFile (read again on every call).
-func kubeResolve(ctx context.Context, o KubeOptions) (*Token, bool, error) {
-	o = o.withDefaults()
+// kubeSel is the selected kubeconfig context with its user and cluster
+// (cluster is nil when the kubeconfig does not define it).
+type kubeSel struct {
+	kc      *kubeconfig
+	name    string
+	ctx     kubeContext
+	cluster *kubeCluster
+	clFrom  string
+}
+
+// kubeSelect reads the kubeconfig and picks the context (o has its
+// defaults).
+func kubeSelect(o KubeOptions) (*kubeSel, error) {
 	kc, err := loadKubeconfig(o)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	name, from := strings.TrimSpace(o.Context), "kube_context"
 	if name == "" {
 		if kc.current == "" {
-			return nil, false, fmt.Errorf("%s has no current-context; pick one with: kubectl config use-context NAME, or give --kube-context NAME", kc.desc)
+			return nil, fmt.Errorf("%s has no current-context; pick one with: kubectl config use-context NAME, or give --kube-context NAME", kc.desc)
 		}
 		name, from = kc.current, "its current-context"
 	}
 	kctx, ok := kc.contexts[name]
 	if !ok {
-		return nil, false, fmt.Errorf("%s has no context %q (named by %s); list them with: kubectl config get-contexts", kc.desc, clean(name, 100), from)
+		return nil, fmt.Errorf("%s has no context %q (named by %s); list them with: kubectl config get-contexts", kc.desc, clean(name, 100), from)
 	}
+	sel := &kubeSel{kc: kc, name: name, ctx: kctx}
+	if c, ok := kc.clusters[kctx.Cluster]; ok {
+		sel.cluster, sel.clFrom = &c, kc.clFrom[kctx.Cluster]
+	}
+	return sel, nil
+}
+
+// noCluster says the selected context names a cluster that is not there.
+func (s *kubeSel) noCluster() error {
+	return fmt.Errorf("the kube context %q names the cluster %q, which %s does not define", clean(s.name, 100), clean(s.ctx.Cluster, 100), s.kc.desc)
+}
+
+// kubeResolve returns the bearer of the selected kubeconfig user;
+// fromFile says it came from a tokenFile (read again on every call).
+func kubeResolve(ctx context.Context, o KubeOptions) (*Token, bool, error) {
+	o = o.withDefaults()
+	sel, err := kubeSelect(o)
+	if err != nil {
+		return nil, false, err
+	}
+	return kubeCredential(ctx, o, sel)
+}
+
+// kubeCredential reads the bearer of the user of sel.
+func kubeCredential(ctx context.Context, o KubeOptions, sel *kubeSel) (*Token, bool, error) {
+	kc, name, kctx := sel.kc, sel.name, sel.ctx
 	if kctx.User == "" {
 		return nil, false, fmt.Errorf("the kube context %q names no user", clean(name, 100))
 	}
@@ -366,15 +402,10 @@ func kubeResolve(ctx context.Context, o KubeOptions) (*Token, bool, error) {
 		return mk(tok, time.Time{}), false, nil
 	}
 	if u.Exec != nil {
-		var cl *kubeCluster
-		clFrom := ""
-		if c, ok := kc.clusters[kctx.Cluster]; ok {
-			cl, clFrom = &c, kc.clFrom[kctx.Cluster]
+		if u.Exec.ProvideClusterInfo && sel.cluster == nil {
+			return nil, false, fmt.Errorf("the exec plugin of %s asks for the cluster, but %s", who, sel.noCluster())
 		}
-		if u.Exec.ProvideClusterInfo && cl == nil {
-			return nil, false, fmt.Errorf("the exec plugin of %s asks for the cluster, but the kube context %q names the cluster %q, which %s does not define", who, clean(name, 100), clean(kctx.Cluster, 100), kc.desc)
-		}
-		tok, exp, err := runKubeExec(ctx, o, who, u.Exec, kc.userFrom[uname], cl, clFrom)
+		tok, exp, err := runKubeExec(ctx, o, who, u.Exec, kc.userFrom[uname], sel.cluster, sel.clFrom)
 		if err != nil {
 			return nil, false, err
 		}
