@@ -101,6 +101,11 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 	if opts.Exec == nil {
 		return nil, errors.New("workspace: pull needs a transport to the actor")
 	}
+	if hostCopy {
+		if _, err := loadHostRecord(opts.DataDir, opts.Name); err == nil {
+			return hostPull(ctx, opts, firstNonEmpty(opts.Label, opts.Name))
+		}
+	}
 	label := opts.Label
 	if label == "" {
 		label = opts.Name
@@ -391,6 +396,9 @@ func (m ApplyMode) toOSW() (osw.ApplyMode, error) {
 // A branch or a patch file runs nothing, so they need no yes unless a secret
 // would go into the branch's history.
 func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
+	if _, err := loadHostRecord(opts.DataDir, opts.Name); err == nil && hostCopy {
+		return hostApply(ctx, opts)
+	}
 	mode, err := opts.Mode.toOSW()
 	if err != nil {
 		return nil, err

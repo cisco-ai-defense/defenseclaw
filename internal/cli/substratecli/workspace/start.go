@@ -128,6 +128,12 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	if t == nil {
 		return nil, errors.New("workspace: start needs a transport to the actor")
 	}
+	if hostCopy {
+		// GAP-0173: no OpenShell copy pipeline on this OS.
+		if c, ok := t.(*Client); ok {
+			return hostStart(ctx, opts, c)
+		}
+	}
 	root := opts.RemoteRoot
 	if root == "" {
 		root = DefaultRemoteRoot

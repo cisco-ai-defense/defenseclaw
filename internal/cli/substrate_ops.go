@@ -32,7 +32,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
-	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -147,7 +146,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
-	if _, err := osw.LoadCopy(dataDir, name); err != nil {
+	if !workspace.HasCopy(dataDir, name) {
 		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
 			"Pull from the computer you ran it on, or push from inside the agent (defenseclaw substrate connect %s, then git push)", a.Atespace, a.Name, a.Name)
 	}
@@ -246,11 +245,11 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 // --- checkpoint and undo ----------------------------------------------------
 
 func substrateRemoteDir(a api.Actor) (string, error) {
-	rec, err := osw.LoadCopy(auth.StateDir(), substrateCopyName(a))
-	if err != nil || rec == nil || rec.RemoteDir == "" {
+	dir := workspace.RemoteDirOf(auth.StateDir(), substrateCopyName(a))
+	if dir == "" {
 		return "", fmt.Errorf("this computer has no record of where %s/%s keeps your folder. Run checkpoint and undo on the computer you started it from", a.Atespace, a.Name)
 	}
-	return rec.RemoteDir, nil
+	return dir, nil
 }
 
 func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *substrateCommon, ref string, every time.Duration) error {
