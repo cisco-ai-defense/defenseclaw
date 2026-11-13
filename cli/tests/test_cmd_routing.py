@@ -108,7 +108,8 @@ def test_managed_device_refuses_writes_with_the_reason(home: Path, monkeypatch) 
     monkeypatch.setattr("defenseclaw.enforce.asset_lists.audit_managed_config_refusal", lambda *a: None)
     before = (home / "config.yaml").read_bytes()
     for args in (["rules", "add", "r", "--groups", "g", "--allow", "fast"], ["models", "set-default", "fast"],
-                 ["budgets", "remove", "x"], ["enable"], ["pricing", "set", "openai/gpt", "--input", "1", "--output", "2"]):
+                 ["budgets", "remove", "x"], ["enable"], ["pricing", "set", "openai/gpt", "--input", "1", "--output", "2"],
+                 ["enable", "--connector", "claudecode"], ["disable", "--connector", "claudecode"]):
         result = CliRunner().invoke(cmd_routing.routing_cmd, args)
         assert result.exit_code == 3, (args, result.output)
         assert "set by your administrator" in result.output

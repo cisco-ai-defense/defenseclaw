@@ -85,9 +85,7 @@ def _document() -> dict[str, Any]:
         load_validate_v8(raw, source_name=str(path))
         doc = yaml.safe_load(raw) or {}
     except Exception as exc:  # noqa: BLE001 - shown as one plain line
-        raise click.ClickException(
-            "config.yaml does not validate; run defenseclaw config validate to see why"
-        ) from exc
+        raise click.ClickException("config.yaml does not validate; run defenseclaw config validate to see why") from exc
     if not isinstance(doc, dict):
         raise click.ClickException("config.yaml is not a mapping; run defenseclaw config validate")
     _READ_SHA256 = hashlib.sha256(raw).hexdigest()
@@ -382,6 +380,12 @@ def routing_status(app: AppContext, as_json: bool) -> None:
 # ---------------- enable / disable
 
 
+def _gateway_binary() -> str | None:
+    from defenseclaw.gateway import path_gateway
+
+    return path_gateway(honor_override=False)
+
+
 def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None:
     """Route one hook connector (or stop) through routing_route_only, owned
     by the routing core. Its helpers take the loaded config and save
@@ -397,12 +401,17 @@ def _route_only_change(app: AppContext, connector: str, *, enable: bool) -> None
     if enable:
         base = str((out.get("upstream") or {}).get("base_url") or "")
         click.echo(f"Routing {connector} model calls through DefenseClaw" + (f" (upstream {base})." if base else "."))
-    elif not out.get("changed"):
-        click.echo(f"{connector} was not routed; nothing to stop.")
     else:
-        click.echo(f"Stopped routing {connector}.")
+        click.echo(f"Stopped routing {connector}." if out.get("changed") else f"{connector} was not routed.")
         if out.get("agent_config_restored"):
             click.echo(f"Restored the {connector} model settings.")
+        elif _gateway_binary() is None:
+            # Nothing was routed and no gateway rendered anything: nothing to say.
+            if out.get("changed"):
+                ux.warn(
+                    f"no defenseclaw-gateway is installed to restore the {connector} model settings; "
+                    "the gateway restores them when it is installed and starts"
+                )
         else:
             ux.warn(
                 f"could not restore the {connector} model settings now: run defenseclaw-gateway connector "
@@ -1172,8 +1181,13 @@ def routing_usage(app: AppContext, group_by: str, since: str, as_json: bool) -> 
     "--classifier", type=click.Choice(CLASSIFIERS), default=None, help="rules (built in), systemone or vllm_sr."
 )
 @click.option("--yes", "-y", is_flag=True, help="Accept the defaults and the models already configured.")
-@click.option("--model", "add_models", multiple=True, metavar="ALIAS=PROVIDER/MODEL",
-              help="Add a model alias without prompting (repeat for more).")
+@click.option(
+    "--model",
+    "add_models",
+    multiple=True,
+    metavar="ALIAS=PROVIDER/MODEL",
+    help="Add a model alias without prompting (repeat for more).",
+)
 @pass_ctx
 def routing_setup(app: AppContext, classifier: str | None, yes: bool, add_models: tuple[str, ...]) -> None:
     """Guided setup: models, classifier and default model, then a test."""

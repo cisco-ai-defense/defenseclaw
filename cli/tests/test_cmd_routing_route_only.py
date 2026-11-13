@@ -49,10 +49,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (claude / "settings.json").write_text(
         json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://llm.corp.example/"}}), encoding="utf-8"
     )
-    # The gateway is down: nothing may reach its API.
-    monkeypatch.setattr(
-        cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running")
-    )
+
+    # The gateway is down: the route-only path must never ask its API.
+    def gateway_down(app, method, path, **kw):
+        raise AssertionError(f"asked the stopped gateway {method} {path}")
+
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", gateway_down)
     return tmp_path
 
 
@@ -111,4 +113,21 @@ def test_disable_connector_says_how_to_restore_when_it_cannot(home: Path, monkey
     result = _run("disable", "--connector", "claudecode")
     assert result.exit_code == 0, result.output
     assert _route_only(home) in (None, {})
-    assert "defenseclaw-gateway connector route-restore --connector claudecode" in result.output
+    assert "no defenseclaw-gateway is installed" in result.output
+
+
+def test_disable_unrouted_connector_still_reports_the_restore(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(home)
+    real_run = subprocess.run
+
+    def fake_run(args, **kwargs):
+        if "route-restore" not in args:
+            return real_run(args, **kwargs)
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    monkeypatch.setattr("defenseclaw.gateway.path_gateway", lambda honor_override=False: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = _run("disable", "--connector", "codex")
+    assert result.exit_code == 0, result.output
+    assert "codex was not routed." in result.output
+    assert "route-restore --connector codex" in result.output
