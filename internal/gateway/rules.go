@@ -98,6 +98,11 @@ type RuleFinding struct {
 	// file. It is private and value-free; guardrailActionForProfile keeps its
 	// block in every profile.
 	omittedOperand bool
+	// boundedBlock marks the evaluation-limit finding of an input read up to
+	// a cap (withBoundedTruncation) in a tier whose unknown verdict blocks
+	// (bounded.Unknown: strict, managed). It is private and value-free;
+	// guardrailActionForProfile keeps its block.
+	boundedBlock bool
 }
 
 type findingEnforcement uint8
