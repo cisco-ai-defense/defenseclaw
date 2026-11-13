@@ -307,7 +307,11 @@ func (p *parser) parseCommandName() Expr {
 
 func (p *parser) parseParameter() CommandElement {
 	t := p.advance()
-	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, HasColon: t.HasColon}
+	raw := t.Raw
+	if t.HasColon && len(raw) > 0 && raw[len(raw)-1] == ':' {
+		raw = raw[:len(raw)-1]
+	}
+	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, Raw: raw, HasColon: t.HasColon}
 	if t.HasColon {
 		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End
 		// -Name:value (adjacent) or -Name: value (the next value across

@@ -227,9 +227,15 @@ func nestedFromCommand(c *Command) []NestedScript {
 	}
 	switch {
 	case isPSHost(name):
-		return powerShellHostScripts(c, hostWords(c))
+		return psHostNested(c)
 	case baseName(name) == "cmd":
 		if ns, ok := cmdCScript(c); ok {
+			if ns.Static {
+				// Static only for the tested cmd-run shape (host_shapes.go).
+				if reason := cmdShapeReject(c); reason != "" {
+					ns.Static, ns.Text, ns.Reason = false, "", reason
+				}
+			}
 			return []NestedScript{ns}
 		}
 	case isIEX(name):
@@ -275,7 +281,11 @@ func hostWords(c *Command) []hostWord {
 			// gate the parameter name on the strict class too (review 5 R5-11):
 			// a name with a backtick / non-ASCII / control rune is not a trusted
 			// static word, so a positional join or host parse fails closed.
-			out = append(out, hostWord{text: "-" + e.Name, static: safeStaticLiteral(e.Name)})
+			text := "-" + e.Name
+			if e.Raw != "" {
+				text = e.Raw // keep the dash character as written (-c vs en-dash c)
+			}
+			out = append(out, hostWord{text: text, static: safeStaticLiteral(e.Name)})
 			if e.Colon != nil {
 				v, ok := LiteralString(e.Colon)
 				out = append(out, hostWord{text: v, static: ok, colon: true})
@@ -309,19 +319,24 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 		if w.static && tw == "" {
 			return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonHostOption}}
 		}
+		if w.static && tw == "-" && w.text != tw {
+			// a padded lone dash (pwsh 7 rejects it; a host that trims it would
+			// read stdin): opaque, like an empty word (review 8 R8-2).
+			return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonHostOption}}
+		}
 		name, cand := stripParamLead(tw)
 		if cand {
 			canon, takesVal, known := resolvePSParam(name)
 			if known {
 				switch canon {
 				case "command":
-					ns := joinRest(words[i+1:], KindPowerShellCommand, "powershell", src)
-					if ns.Reason == ReasonStdin && i+1 < len(words) && words[i+1].colon {
-						// -c:- is rejected by pwsh 7 (not a stdin read); still opaque
-						// (review 7 R7-3).
-						ns.Reason = ReasonHostOption
+					if i+1 < len(words) && words[i+1].colon {
+						// pwsh 7 rejects the colon form (-c:<text>, -Command:<text>,
+						// -c:-) as a script-file name: not the command it looks
+						// like, so opaque (review 7 R7-3, review 8 R8-3).
+						return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonHostOption}}
 					}
-					return []NestedScript{ns}
+					return []NestedScript{joinRest(words[i+1:], KindPowerShellCommand, "powershell", src)}
 				case "encodedcommand":
 					if i+1 < len(words) {
 						return []NestedScript{decodeWord(words[i+1], src)}
@@ -369,6 +384,20 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 		return []NestedScript{joinRest(words[i:], KindPowerShellCommand, "powershell", src)}
 	}
 	return nil
+}
+
+// hostHasStopParse reports whether a host invocation carries a --% stop-parse
+// tail.
+func hostHasStopParse(c *Command, words []hostWord) bool {
+	if c.StopParsing != "" {
+		return true
+	}
+	for _, w := range words {
+		if w.static && w.text == "--%" {
+			return true
+		}
+	}
+	return false
 }
 
 // hostStopParseStdin reports whether a host invocation puts a --% stop-parse
@@ -654,9 +683,16 @@ func cmdSwitchLike(s string) bool {
 	return cmdHasRunSwitch(s)
 }
 
-// cmdHasRunSwitch reports whether s contains a /c, /k or /r run switch anywhere.
+// cmdHasRunSwitch reports whether s is a switch word (it starts with "/" once
+// padding is trimmed) that holds a /c, /k or /r run switch: the bare, fused,
+// combined and colon forms (/c, /crd, /d/c, /v:on/c, /c:rd, "/c rd .."). A "/c"
+// inside a value that is not a switch word (C:/code, -x:C:/code) does not count
+// (review 8 R8-4).
 func cmdHasRunSwitch(s string) bool {
-	l := strings.ToLower(s)
+	l := strings.ToLower(strings.TrimSpace(s))
+	if !strings.HasPrefix(l, "/") {
+		return false
+	}
 	return strings.Contains(l, "/c") || strings.Contains(l, "/k") || strings.Contains(l, "/r")
 }
 
