@@ -1,0 +1,17 @@
+{"i":0,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":1,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":2,"ns":[{"kind":"powershell-command","text":"","static":false}]}
+{"i":3,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":4,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":5,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":6,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":7,"ns":[]}
+{"i":8,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":9,"ns":[{"kind":"cmd-c","text":"del C:\\x","static":true}]}
+{"i":10,"ns":[{"kind":"cmd-c","text":"del C:\\x","static":true}]}
+{"i":11,"ns":[{"kind":"cmd-c","text":"del C:\\x","static":true}]}
+{"i":12,"ns":[{"kind":"cmd-c","text":"del %TEMP%\\x","static":true}]}
+{"i":13,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":14,"ns":[{"kind":"cmd-c","text":"dir","static":true}]}
+{"i":15,"ns":[]}
+{"i":16,"ns":[{"kind":"powershell-command","text":"","static":false}]}

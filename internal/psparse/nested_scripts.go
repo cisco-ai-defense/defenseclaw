@@ -150,6 +150,17 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 	if sc != nil {
 		walkStmts(sc.Statements)
 	}
+	// Invariant: a nested script with no resolved text is never Static=true
+	// (an empty payload from a dropped --% tail or an unresolved value must
+	// escalate, never be trusted as "an empty script"). See N2.
+	for i := range out {
+		if out[i].Static && out[i].Text == "" {
+			out[i].Static = false
+			if out[i].Reason == "" {
+				out[i].Reason = ReasonStopParsing
+			}
+		}
+	}
 	return out
 }
 
@@ -287,6 +298,9 @@ func joinRest(words []hostWord, kind, dialect string, src Node) NestedScript {
 			ns.Static = false
 			ns.Reason = ReasonNonLiteral
 			break
+		}
+		if w.text == "--%" { // the stop-parse token is consumed, not part of the payload
+			continue
 		}
 		parts = append(parts, w.text)
 	}
@@ -432,6 +446,9 @@ func cmdCScript(c *Command) (NestedScript, bool) {
 					ns.Static = false
 					ns.Reason = ReasonNonLiteral
 					break
+				}
+				if v == "--%" { // stop-parse token consumed, not part of the payload
+					continue
 				}
 				parts = append(parts, v)
 			}
