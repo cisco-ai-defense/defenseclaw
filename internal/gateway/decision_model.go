@@ -107,6 +107,11 @@ type decisionResult struct {
 	// decisionEscalate.
 	failure      gatewaylog.JudgeFailureClass
 	failureCause string
+	// refusal is the code of a Decisions API safety refusal (HTTP 400
+	// safety, prohibited_content, ...). It is not a failure: the content
+	// decided it, so the call gets the unsure answer (route escalate; a
+	// HIGH confirm in cascade 2) and the breaker is not touched.
+	refusal string
 	// skipped: the model was not called (breaker open or no budget).
 	skipped bool
 	// logLine is a gateway log line to print for this call, if any.
@@ -288,17 +293,21 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	choice, probs, err := d.call(cctx, state)
 	cancel()
 	res.latencyMs = time.Since(start).Milliseconds()
+	var rerr decisionRefusalError
+	if errors.As(err, &rerr) {
+		// A refusal is a healthy answer the content chose (GAP-0342,
+		// GAP-0343): never an outage, so it neither trips the breaker nor
+		// lets the call skip the model; the call gets the unsure answer.
+		res.logLine = d.record(false, time.Now())
+		res.refusal = rerr.code
+		return res
+	}
 	res.logLine = d.record(err != nil, time.Now())
 	if err != nil {
 		res.failure = gatewaylog.JudgeFailureProvider
 		var perr decisionParseError
-		var rerr decisionRefusalError
-		switch {
-		case errors.As(err, &perr):
+		if errors.As(err, &perr) {
 			res.failure = gatewaylog.JudgeFailureOutputParse
-		case errors.As(err, &rerr):
-			// The model answered, but with no usable answer.
-			res.failure = gatewaylog.JudgeFailureEmptyResponse
 		}
 		res.failureCause = boundedJudgeHealthValue(err.Error(), 240)
 		return res
@@ -401,7 +410,9 @@ func setDecisionWireAuth(req *http.Request, protocol, key string) {
 }
 
 // decisionRefusalCodes are the error codes the Decisions API returns, with
-// HTTP 400, when its own safety filters decline the input.
+// HTTP 400, when its own safety filters decline the input. Not yet seen
+// live (0 in the first 25k benchmark calls): they come from the API
+// documentation, as error.code, error.status or an error.details reason.
 var decisionRefusalCodes = map[string]bool{
 	"safety": true, "prohibited_content": true, "blocklist": true, "image_safety": true, "content_blocked": true,
 }
@@ -414,21 +425,46 @@ func (e decisionRefusalError) Error() string {
 	return "decision model declined the input (" + e.code + ")"
 }
 
+// decisionRefusalCode finds a refusal code in a 400 body: a string
+// error.code (the Decisions API form), else error.status or the reason of
+// an error.details entry (Google's general error form, where error.code is
+// the numeric HTTP status). "" when it is not a refusal.
+func decisionRefusalCode(raw []byte) string {
+	var body struct {
+		Error struct {
+			Code    json.RawMessage `json:"code"`
+			Status  string          `json:"status"`
+			Details []struct {
+				Reason string `json:"reason"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	candidates := []string{body.Error.Status}
+	var code string
+	if json.Unmarshal(body.Error.Code, &code) == nil {
+		candidates = append([]string{code}, candidates...)
+	}
+	for _, d := range body.Error.Details {
+		candidates = append(candidates, d.Reason)
+	}
+	for _, c := range candidates {
+		if c = strings.ToLower(strings.TrimSpace(c)); decisionRefusalCodes[c] {
+			return c
+		}
+	}
+	return ""
+}
+
 // decisionHTTPError turns a non-200 answer into an error. A Decisions API
 // safety refusal (HTTP 400 with a known error code) is a decisionRefusalError;
 // anything else keeps only the status, never the body.
 func decisionHTTPError(protocol string, status int, raw []byte) error {
 	if protocol == config.DecisionModelProtocolGeminiDecisions && status == http.StatusBadRequest {
-		var body struct {
-			Error struct {
-				Code json.RawMessage `json:"code"`
-			} `json:"error"`
-		}
-		var code string
-		if json.Unmarshal(raw, &body) == nil && json.Unmarshal(body.Error.Code, &code) == nil {
-			if code = strings.ToLower(strings.TrimSpace(code)); decisionRefusalCodes[code] {
-				return decisionRefusalError{code}
-			}
+		if code := decisionRefusalCode(raw); code != "" {
+			return decisionRefusalError{code}
 		}
 	}
 	if status == http.StatusTooManyRequests {
@@ -605,7 +641,7 @@ func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
 func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
 	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
-	if res.failure != "" {
+	if res.failure != "" && res.refusal == "" {
 		if res.logLine != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)
 		}
@@ -618,15 +654,15 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
 	var v *ScanVerdict
-	switch res.route {
-	case decisionAllow:
+	switch {
+	case res.route == decisionAllow:
 		v = allowVerdict(decisionModelScanner)
 		v.Reason = fmt.Sprintf("decision-model: confident allow (risk %.2f <= %.2f)", res.risk, dm.allowAt)
 		if decisionRuleFloorFrom(ctx) {
 			v.Reason += "; the rule finding stands"
 		}
 		v.Confidence = 1 - res.risk
-	case decisionBlock:
+	case res.route == decisionBlock:
 		v = &ScanVerdict{
 			Action:     guardrailActionBlock,
 			Severity:   "CRITICAL",
@@ -634,6 +670,17 @@ func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample 
 			Findings:   []string{decisionModelFindingID},
 			Scanner:    decisionModelScanner,
 			Confidence: res.risk,
+		}
+	case res.refusal != "":
+		// GAP-0342: a refusal is the unsure answer, never the rule verdict
+		// alone: content written to trip the filter must not skip the model.
+		v = &ScanVerdict{
+			Action:          guardrailActionConfirm,
+			Severity:        "HIGH",
+			Reason:          fmt.Sprintf("decision-model: declined (%s), needs a person's confirmation", res.refusal),
+			Findings:        []string{decisionModelFindingID},
+			Scanner:         decisionModelScanner,
+			decisionConfirm: true,
 		}
 	default:
 		v = &ScanVerdict{
@@ -747,6 +794,16 @@ func emitDecisionModel(ctx context.Context, model, toolName, args string, res de
 		payload.Severity = deriveSeverity(v.Severity)
 		payload.Findings = judgeFindingsPayload(v)
 	}
+	if res.refusal != "" {
+		// The refusal class rides on the decision-model finding: the event
+		// is a confirm or an escalation, not an error.
+		if len(payload.Findings) == 0 {
+			payload.Findings = []gatewaylog.Finding{{Category: decisionModelFindingID, Severity: payload.Severity, Rule: decisionModelFindingID, Source: "judge"}}
+		}
+		for i := range payload.Findings {
+			payload.Findings[i].RuleID = decisionRefusalRuleID(res.refusal)
+		}
+	}
 	if args != "" {
 		payload.InputHash = judgeInputHash(args)
 	}
@@ -754,6 +811,10 @@ func emitDecisionModel(ctx context.Context, model, toolName, args string, res de
 		_ = js.PersistJudgeEvent(ctx, gatewaylog.DirectionPrompt, payload, toolName, "", "", "")
 	}
 }
+
+// decisionRefusalRuleID is the bounded rule id that records a refusal class
+// on the judge event (refusal_safety, refusal_prohibited_content, ...).
+func decisionRefusalRuleID(code string) string { return "refusal_" + code }
 
 // judgeCompletionAction is the action of a judge completion record, whose
 // vocabulary is allow, alert, block or error: a decision-model confirm or

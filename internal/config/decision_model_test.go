@@ -107,12 +107,13 @@ func TestDecisionModelProtocol(t *testing.T) {
 	if got := cfg.DecisionModel.EffectiveProtocol(); got != DecisionModelProtocolGeminiDecisions {
 		t.Fatalf("protocol = %q", got)
 	}
-	for _, p := range []string{"", "system-one", " SYSTEM-ONE ", "gemini-decisions"} {
+	for _, p := range []string{"", "system-one", "gemini-decisions"} {
 		if err := (DecisionModelConfig{Protocol: p}).Validate(); err != nil {
 			t.Errorf("protocol %q refused: %v", p, err)
 		}
 	}
-	for _, p := range []string{"gemini", "openai", "systemone"} {
+	// Exact values only, as in the schema.
+	for _, p := range []string{"gemini", "openai", "systemone", "Gemini-Decisions", " system-one"} {
 		if err := (DecisionModelConfig{Protocol: p}).Validate(); err == nil {
 			t.Errorf("protocol %q accepted", p)
 		}
@@ -124,12 +125,13 @@ func TestDecisionModelProtocol(t *testing.T) {
 }
 
 func TestValidateDecisionModelURL(t *testing.T) {
-	for _, ok := range []string{"https://dm.example/v1/systemone", "http://127.0.0.1:8791/v1/systemone", "http://localhost:8791/x", "http://[::1]:8791/x"} {
+	for _, ok := range []string{"https://dm.example/v1/systemone", "http://127.0.0.1:8791/v1/systemone", "http://localhost:8791/x", "http://[::1]:8791/x", "https://dm.example/x?alt=json"} {
 		if err := ValidateDecisionModelURL(ok); err != nil {
 			t.Errorf("%s: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{"http://localhost.attacker.example/x", "http://192.168.1.5/x", "ftp://dm.example/x", "dm.example/x", "https://a:b@dm.example/x"} {
+	for _, bad := range []string{"http://localhost.attacker.example/x", "http://192.168.1.5/x", "ftp://dm.example/x", "dm.example/x", "https://a:b@dm.example/x",
+		"https://generativelanguage.googleapis.com/v1beta/decisions?key=placeholder", "https://dm.example/x?alt=json&API_KEY=placeholder", "https://dm.example/x?access_token=placeholder"} {
 		if err := ValidateDecisionModelURL(bad); err == nil {
 			t.Errorf("%s accepted", bad)
 		}

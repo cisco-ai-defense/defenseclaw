@@ -153,10 +153,11 @@ func (d DecisionModelConfig) EffectiveOnConfidentBlock() string {
 	return DecisionModelEscalate
 }
 
-// EffectiveProtocol returns Protocol or system-one.
+// EffectiveProtocol returns Protocol or system-one. Validate admits only
+// the exact values, so no folding happens here.
 func (d DecisionModelConfig) EffectiveProtocol() string {
-	if v := strings.ToLower(strings.TrimSpace(d.Protocol)); v != "" {
-		return v
+	if d.Protocol != "" {
+		return d.Protocol
 	}
 	return DecisionModelProtocolSystemOne
 }
@@ -189,8 +190,9 @@ func (d DecisionModelConfig) Validate() error {
 	default:
 		return fmt.Errorf("on_confident_block must be %q or %q, got %q", DecisionModelEscalate, DecisionModelDecide, d.OnConfidentBlock)
 	}
-	switch d.EffectiveProtocol() {
-	case DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions:
+	// Exact values only, as the config schema has them (no case folding).
+	switch d.Protocol {
+	case "", DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions:
 	default:
 		return fmt.Errorf("protocol must be %q or %q, got %q", DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions, d.Protocol)
 	}
@@ -210,6 +212,14 @@ func (d DecisionModelConfig) Validate() error {
 	return nil
 }
 
+// decisionModelKeyQueryParams are query parameters that carry a key or a
+// token (Google's examples put the AI Studio key in ?key=).
+var decisionModelKeyQueryParams = map[string]bool{
+	"key": true, "api_key": true, "apikey": true, "api-key": true, "x-goog-api-key": true,
+	"access_token": true, "token": true, "auth_token": true, "auth": true, "secret": true,
+	"client_secret": true, "password": true,
+}
+
 // ValidateDecisionModelURL allows https anywhere and plain http only to a
 // loopback host, so tool-call arguments and the bearer token never cross
 // the network in clear text. Credentials in the URL are refused.
@@ -220,6 +230,11 @@ func ValidateDecisionModelURL(raw string) error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("base_url must not carry credentials; put the token in %s", DefenseClawDecisionModelKeyEnv)
+	}
+	for name := range u.Query() {
+		if decisionModelKeyQueryParams[strings.ToLower(name)] {
+			return fmt.Errorf("base_url must not carry a key in its query string (%s=); put the key in %s (decision_model.api_key_env)", name, DefenseClawDecisionModelKeyEnv)
+		}
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
