@@ -56,6 +56,13 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			if spShell[ns.Source] {
 				continue // never use a Start-Process-into-shell nested text (review 5 (a))
 			}
+			// A literal `cmd /c ...` host command is lowered as an ordinary command
+			// and the walker unwraps its /c payload itself (and makes a payload it
+			// cannot place opaque), so psparse's copy of the same text would walk the
+			// payload twice (round 8 merge with psparse 27b3aa1f3b).
+			if cmd, ok := ns.Source.(*psparse.Command); ok && ns.Dialect == "cmd" && psBaseNameOf(cmd) == "cmd" {
+				continue
+			}
 			// A powershell/pwsh host carrying -EncodedArguments: psparse decodes
 			// the CLIXML args blob as if it were the script (and misses the real
 			// -EncodedCommand), so never re-parse it. The payload is opaque; the

@@ -603,7 +603,7 @@ S16 Set-Item env	U|
 S16 Tee-Object	U|
 S17 & { cd } leaks	U|
 S17 Rename-Item NewName	U|
-S17 cmd /c from ps	K|delete:c:\windows\x,delete:c:\windows\x
+S17 cmd /c from ps	K|delete:c:\windows\x
 S18 . { cd }	U|
 S18 Copy-Item positional	U|
 S18 ForEach Remove-Item	U|
@@ -647,7 +647,7 @@ S40 Expand-Archive	U|
 S41 iwr -OutFile	K|write:c:\users\u\.ssh\authorized_keys
 S42 iwr -o alias param	U|
 S43 Start-BitsTransfer	U|
-S44 cmd /c mklink	K|link:c:\tmp\k,link:c:\tmp\k,link:c:\tmp\k,link:c:\users\u\.ssh\authorized_keys
+S44 cmd /c mklink	K|link:c:\tmp\k,link:c:\users\u\.ssh\authorized_keys
 S45 cd ~ then .ssh	U|
 S46 Set-Location $HOME	U|
 S47 sc PS5 alias	U|
@@ -974,7 +974,7 @@ rv7-B07 cd none || { write; }	K|append:/home/u/.bashrc
 rv7-B08 cd none || tee	K|append:/home/u/.ssh/authorized_keys
 rv7-B09 gb cd none || write	K|append:c:\users\u\.bashrc
 rv7-B10 gb cd none ; write	K|append:c:\none\.bashrc,append:c:\users\u\.bashrc
-rv7-B100 ps env into Start-Process cmd	U|
+rv7-B100 ps env into Start-Process cmd	U|append:c:\users\u\.ssh\authorized_keys
 rv7-B101 gb USERPROFILE into cmd //c	U|
 rv7-B102 cmd set then cmd /c %%	U|
 rv7-B11 ps Set-Location none ; Set-Content	K|write:c:\t\none\authorized_keys,write:c:\users\u\.ssh\authorized_keys
@@ -1035,13 +1035,13 @@ rv7-B83 pwsh -wd	U|
 rv7-B84 cmd pwsh -WorkingDirectory	U|
 rv7-B85 gb pwsh -wd	U|
 rv7-B86 cmd start title /D	U|
-rv7-B87 ps cmd /c cd /d	U|
+rv7-B87 ps cmd /c cd /d	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 rv7-B88 ps-linux pwsh -wd	U|
 rv7-B89 bash pwsh -WorkingDirectory	U|
 rv7-B90 ps wsl -e sh -c	U|
 rv7-B91 ps bash -c tilde	U|
 rv7-B93 gb cmd //c cd /d	U|
-rv7-B95 ps env USERPROFILE into cmd	U|
+rv7-B95 ps env USERPROFILE into cmd	U|append:c:\users\u\.ssh\authorized_keys
 rv7-B98 cmd two-line set then %P%	U|
 rv7-B99 ps env into powershell -c	U|
 rv7-C01 cmd: curl | cmd	U|
@@ -1217,7 +1217,7 @@ rv7-S17 ps dot-source var	U|
 rv7-S18 ps if var	U|
 rv7-S19 ps unknown env	U|
 rv7-S2 ps pushd popd	U|
-rv7-S20 ps cd then cmd /c	U|
+rv7-S20 ps cd then cmd /c	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
 rv7-S21 ps cd then powershell -c	U|
 rv7-S22 ps cd piped	U|
 rv7-S23 ps try cd	U|
