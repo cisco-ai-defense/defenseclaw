@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // rel-1-0-6:GAP-0431: each declined shape has a direct proof row. Some
@@ -214,18 +216,7 @@ func TestGAP0428PrintfAttachedValueTracking(t *testing.T) {
 // function of whoever runs the test: they withhold the client's safe proofs
 // (GAP-0293: the shared dev host exports two helpers). A test that needs a
 // startup sets it after the call.
-func clearShellStartupEnv(t *testing.T) {
-	t.Helper()
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if name == "BASH_ENV" || name == "ENV" || strings.HasPrefix(name, "BASH_FUNC_") {
-			t.Setenv(name, "")
-			if err := os.Unsetenv(name); err != nil {
-				t.Fatalf("unset %s: %v", name, err)
-			}
-		}
-	}
-}
+func clearShellStartupEnv(t *testing.T) { testenv.ClearShellStartupT(t) }
 
 // gap0431ProofRow is one GAP-0431 client proof row: want is the proof the
 // row must get with no shell startup.

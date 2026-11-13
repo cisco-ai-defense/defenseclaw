@@ -12,11 +12,15 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestMain(m *testing.M) {
 	prepareGatewayTestProcess()
+	// No test reads the host's shell startup or system profiles (GAP-0293).
+	testenv.ClearShellStartup()
+	hookpaths.UseSystemShellProfilesForTests(nil, "")
 	// A call never waits for a start that is not coming; the gate's tests
 	// (TestSessionStartGateCallBeforeItsStart) set the arrival wait.
 	sessionStartArrivalWait = 0
