@@ -28,8 +28,12 @@ import (
 //     alerted on ordinary output (strict: 67% of benign tool outputs). PII in
 //     the output of named tools stays covered by the sensitive-tools result
 //     inspection (sensitive-tools.yaml) and the opt-in PII judge.
-//     Action categories (command, path, C2, cognitive-file) never run on
-//     content, for every connector (Claude Code and Codex already did this).
+//   - the C2 rules (known exfil and tunnel hosts: webhook.site, ngrok, ...):
+//     an output that names one is how an indirect injection hands the agent
+//     an exfil endpoint, and the generic /inspect/tool-response route always
+//     alerted on it (security suite tool-response/c2-webhook). HIGH at most,
+//     like every tool-result finding. The other action categories (command,
+//     path, cognitive-file) judge tool calls and never run on content.
 //   - the trust-exploit rules again on the tool-result view: string escapes
 //     decoded (tool output is often JSON or YAML in which the text the model
 //     reads is a quoted string) and confusables folded;
@@ -70,6 +74,17 @@ func toolResultRuleFindings(generation *compiledRulePackCategories, content stri
 			ruleScanOptions{excludeTrustExploit: true, excludeEnterpriseData: true})
 		injection = scanContentRulesWithOptions(generation, content, "message", scope,
 			ruleScanOptions{onlyCategory: "trust-exploit"})
+		if scope != ruleContentScopeSource {
+			// C2 is an action category, which a content scope leaves out; on a
+			// tool's output it runs on its own (see the surface comment above).
+			for _, f := range scanContentRulesWithOptions(generation, content, "message", ruleContentScopeAll,
+				ruleScanOptions{onlyCategory: "c2"}) {
+				if strings.EqualFold(f.Severity, "CRITICAL") {
+					f.Severity = "HIGH"
+				}
+				findings = append(findings, f)
+			}
+		}
 	}
 	seen := make(map[string]bool, len(injection))
 	for _, f := range injection {
