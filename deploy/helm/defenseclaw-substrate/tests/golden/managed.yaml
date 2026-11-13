@@ -1609,13 +1609,16 @@ spec:
         secret:
           secretName: defenseclaw-relay-session
           optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
           optional: true
+          defaultMode: 0440
       - name: callout-judge
         secret:
           secretName: defenseclaw-callout-judge
+          defaultMode: 0440
           items:
           - {key: token, path: token}
       - name: template-anchors
@@ -1885,13 +1888,16 @@ spec:
         secret:
           secretName: defenseclaw-relay-session
           optional: true
+          defaultMode: 0440
       - name: llm-credentials
         secret:
           secretName: defenseclaw-llm
           optional: true
+          defaultMode: 0440
       - name: callout-judge
         secret:
           secretName: defenseclaw-callout-judge
+          defaultMode: 0440
           items:
           - {key: token, path: token}
       - name: kube-api-token
