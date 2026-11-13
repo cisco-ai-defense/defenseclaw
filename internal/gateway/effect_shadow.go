@@ -259,7 +259,6 @@ func protectedSetsByState(t *semanticpb.EffectTarget) (known, maybe []string) {
 	return known, maybe
 }
 
-
 // effectAction maps the protected-tier read to the guardrail action. An effect
 // that touches a protected set blocks in strict and every managed install, and
 // blocks in the OSS default only when a restricted-tier effect is on a
