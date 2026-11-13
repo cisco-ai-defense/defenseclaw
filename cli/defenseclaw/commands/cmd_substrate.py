@@ -232,9 +232,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Attaches your terminal to a running or suspended agent from any machine you are signed in on.\n"
             "A suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press "
             "Ctrl-]\n"
-            "to detach again. If the connection drops, it reconnects by itself."
+            'to detach again. If the connection drops, it reconnects by itself. NAME is the name "defenseclaw '
+            'substrate list"\n'
+            "shows, or the --name you gave run when only one agent has it."
         ),
-        example="defenseclaw substrate connect fix-tests-7f3a",
+        example="defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
@@ -333,9 +335,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Signs you in to the cluster your organization runs, with your own account. It prints a web\n"
             "address and a short code; open the address in any browser, enter the code and approve. Your\n"
             "sign-in is kept in the system keychain, never in a file you can read. The first time, give the "
-            "cluster's\n"
-            'addresses (your administrator has them); after that, "defenseclaw substrate login" alone renews the '
-            "sign-in.\n"
+            "cluster\n"
+            "address with --admin-url (your administrator has it); the cluster tells the launcher which sign-in "
+            "server to\n"
+            'use. After that, "defenseclaw substrate login" alone renews the sign-in.\n'
             "\n"
             "On a cluster that has no sign-in server (an open-source install), use --kube: you are then the "
             "Kubernetes user of\n"
@@ -347,6 +350,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "cluster's workload audience, and nothing is stored."
         ),
         example=(
+            "defenseclaw substrate login --admin-url https://admin.example.test:9443\n"
             "defenseclaw substrate login --admin-url https://admin.example.test:9443 --issuer "
             "https://sso.example.test/realms/corp --client-id defenseclaw-launcher\n"
             "defenseclaw substrate login\n"
@@ -373,6 +377,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("kube", "bool", "sign in with your current kubeconfig identity (clusters without a sign-in server)"),
             _Flag("kube-context", "string", "with --kube, the kubeconfig context (default: its current one)"),
+            _Flag(
+                "kube-namespace",
+                "string",
+                "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)",
+            ),
             _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(
                 "name",
@@ -543,9 +552,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "claude,\n"
             "codex, copilot, opencode, kiro, hermes or antigravity (amp, cursor-agent and devin are not verified "
             "yet, so\n"
-            "they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. "
-            "Questions the\n"
-            "guard asks appear on the last line: [o]nce [a]lways [d]eny.\n"
+            "they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. When the\n"
+            "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
+            "always or deny.\n"
             "\n"
             "Press Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine "
             "with\n"
@@ -578,7 +587,15 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag("json", "bool", "same as --output json"),
             _Flag("keep", "bool", "keep the agent after a finished --task (default: it stays until you delete it)"),
             _Flag("max-upload-mb", "int", "refuse a copy larger than this many MB (default 500)", default="0"),
-            _Flag("name", "string", "name for the agent (default: chosen by the cluster)", metavar="NAME"),
+            _Flag(
+                "name",
+                "string",
+                (
+                    "a readable start for the agent's name; a random suffix is added, so a name is never used twice "
+                    "(default: the agent's command)"
+                ),
+                metavar="NAME",
+            ),
             _Flag("no-asks", "bool", "do not show guard questions on this terminal"),
             _Flag("no-upload", "bool", "start with an empty folder; upload nothing"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
@@ -644,6 +661,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         args=(_Arg("name"),),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("yes", "bool", "do not ask", short="y"),
         ),
     ),
@@ -659,6 +677,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("from-env", "string", "read the value from this environment variable"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("stdin", "bool", "read the value from standard input"),
         ),
     ),
@@ -669,6 +688,7 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag("json", "bool", "same as --output json"),
+            _Flag("mine", "bool", "your own secret (the only kind this command acts on)", default="true"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
         ),
     ),
@@ -849,6 +869,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -916,6 +939,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -958,6 +984,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -988,6 +1017,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"

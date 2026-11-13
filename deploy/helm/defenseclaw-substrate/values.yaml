@@ -137,7 +137,9 @@ leader:
 controller:
   # One replica (no Lease client in the controller yet).
   # The admin-only Secret with the template signing keys (key anchors.pem),
-  # mounted for substrate.templates.trust_anchors. Without it every template
+  # mounted read-only in the controller and the gateway (its create path
+  # admits launcher actors the same way, GAP-0154) for
+  # substrate.templates.trust_anchors. Without it every template
   # is refused (require_attested_templates).
   templateAnchorsSecret: defenseclaw-template-anchors
   args: []
@@ -176,8 +178,12 @@ callout:
   # MCP asset policy and tool rules) on the admin Service. Name a Secret with
   # the bearer token in key "token" to turn it on; without it the callout
   # applies only its own MCP rules.
+  # The callout's token for the MCP tool verdict route on the admin
+  # Service (GAP-0015): the chain-key hook creates this Secret when it is
+  # absent, so the tool rules run at egress by default. "" turns the route
+  # off (tools/call is then an alert on OSS and refused on managed).
   judge:
-    tokenSecret: ""
+    tokenSecret: defenseclaw-callout-judge
   # A Secret whose keys are the exposed actor_secrets values (one file per
   # name), for exact-value DLP on egress. Never mounted into actors.
   actorSecrets:

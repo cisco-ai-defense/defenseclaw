@@ -546,6 +546,13 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 		if res.Refuse != "" {
 			c.refuseOnce(st, base, EventProfileRefused, res.Refuse, "", "")
 		} else if c.admit(ctx, a, st, base, res.Profile.Name) == "" {
+			booted, err := c.bootedTemplate(ctx, a, st, base)
+			if err != nil {
+				return err
+			}
+			if !booted {
+				return c.removePolicy(ctx, a, st, base)
+			}
 			if res.DenyOnly != st.forcedDeny {
 				st.forcedDeny = res.DenyOnly
 				if res.DenyOnly != "" {
@@ -659,7 +666,9 @@ func (c *Controller) parentRegistration(ctx context.Context, tag *ateapi.ObjectR
 
 // admit checks the template's attestation and kit version.
 func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState, base Event, profile string) string {
-	tmpl, att, err := c.template(ctx, a.GetActorTemplate())
+	// The first admission of an actor reads its template fresh: a cached
+	// verdict by name would admit an image swapped in after it (GAP-0053).
+	tmpl, att, err := c.template(ctx, a.GetActorTemplate(), !st.written)
 	if err != nil {
 		c.refuseOnce(st, base, EventTemplateUnverified, "template could not be read: "+err.Error(), "", "")
 		return "template_unreadable"
@@ -691,18 +700,62 @@ func (c *Controller) admit(ctx context.Context, a *ateapi.Actor, st *actorState,
 	return ""
 }
 
-func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef) (*ateapi.ActorTemplate, Attestation, error) {
+// bootedTemplate reports whether the actor runs the template version that
+// admission just checked (GAP-0053). An actor records only its template's
+// name, not the version it booted, so a template edited after the actor was
+// created (an image swapped in, an actor started, the image swapped back
+// inside one poll) leaves the actor's image unknown. Such an actor keeps its
+// network only if DefenseClaw already gave it its policy (a controller
+// admitted it before the edit, also across a controller restart); one that
+// has none is refused, and the fix is to recreate it.
+func (c *Controller) bootedTemplate(ctx context.Context, a *ateapi.Actor, st *actorState, base Event) (bool, error) {
+	if st.written {
+		return true, nil
+	}
+	k := ateapi.Key(a.GetActorTemplate())
+	c.mu.Lock()
+	ct, ok := c.templates[k]
+	c.mu.Unlock()
+	if !ok {
+		return true, nil
+	}
+	edited, created := ct.tmpl.GetMetadata().GetUpdateTime(), a.GetMetadata().GetCreateTime()
+	if edited == nil || created == nil || !edited.AsTime().After(created.AsTime()) {
+		return true, nil
+	}
+	cur, err := c.o.Client.GetActorEgressPolicy(ctx, ateapi.RefOf(a.GetMetadata()))
+	switch {
+	case ateapi.IsNotFound(err):
+	case err != nil:
+		return false, fmt.Errorf("%s: get policy (holding, no policy change): %w", st.key, err)
+	case render.IsDefenseClaw(cur, c.o.Settings):
+		return true, nil
+	}
+	c.refuseOnce(st, base, EventTemplateUnverified, "template "+k+" changed after the actor was created, so the actor's image is not known to be the attested one; delete the actor and create it again",
+		SignalUnattestedTemplate, ct.att.Digest)
+	return false, nil
+}
+
+// template returns the template and its attestation. A cached verdict is
+// reused for templateCacheTTL by name, except when fresh: then the template
+// is read again and the verdict is reused only for the same template
+// version (uid and version), so an edit is never hidden by the cache.
+func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef, fresh bool) (*ateapi.ActorTemplate, Attestation, error) {
 	k := ateapi.Key(ref)
 	now := c.o.Now()
 	c.mu.Lock()
 	ct, ok := c.templates[k]
 	c.mu.Unlock()
-	if ok && now.Sub(ct.at) < templateCacheTTL && (ct.att.ValidUntil.IsZero() || now.Before(ct.att.ValidUntil)) {
+	valid := ok && now.Sub(ct.at) < templateCacheTTL && (ct.att.ValidUntil.IsZero() || now.Before(ct.att.ValidUntil))
+	if valid && !fresh {
 		return ct.tmpl, ct.att, nil
 	}
 	tmpl, err := c.o.Client.GetActorTemplate(ctx, ref)
 	if err != nil {
 		return nil, Attestation{}, err
+	}
+	if valid && sameTemplateVersion(ct.tmpl, tmpl) {
+		return ct.tmpl, ct.att, nil
 	}
 	// Always attest again after the TTL, even for an unchanged template: a
 	// revoked key, rotated anchors or a raised policy generation must reach
@@ -716,8 +769,7 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef) (*atea
 	// good verdict of the same template version for a bounded grace and
 	// alert, instead of cutting every running actor's network (GAP-0127).
 	// Revocation, new anchors and other refusals still cut at once.
-	if !att.Attested && att.Retryable && ok && ct.att.Attested &&
-		ct.tmpl.GetMetadata().GetUid() == tmpl.GetMetadata().GetUid() && ct.tmpl.GetMetadata().GetVersion() == tmpl.GetMetadata().GetVersion() {
+	if !att.Attested && att.Retryable && ok && ct.att.Attested && sameTemplateVersion(ct.tmpl, tmpl) {
 		since := ct.goodAt
 		if since.IsZero() {
 			since = ct.at
@@ -744,6 +796,13 @@ func (c *Controller) template(ctx context.Context, ref *ateapi.ObjectRef) (*atea
 	c.mu.Unlock()
 	return ct.tmpl, ct.att, nil
 }
+
+func sameTemplateVersion(a, b *ateapi.ActorTemplate) bool {
+	return a.GetMetadata().GetUid() == b.GetMetadata().GetUid() && a.GetMetadata().GetVersion() == b.GetMetadata().GetVersion()
+}
+
+// Attestor is the template admission the controller runs (wiring tests).
+func (c *Controller) Attestor() Attestor { return c.o.Attestor }
 
 // refuseOnce records why an actor gets no policy, emitting the event (and
 // a shadow AI signal when signalID is set) once per reason.

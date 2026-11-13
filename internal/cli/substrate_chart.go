@@ -147,7 +147,7 @@ func init() {
 				}
 				return setup.PreRollback(ctx, plan, kube)
 			}),
-		substrateChartStep("chain-key", "Create the shared chain key Secret when it does not exist",
+		substrateChartStep("chain-key", "Create the shared chain key and callout token Secrets when they do not exist",
 			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
 				kube, err := substrateChartKube()
 				if err != nil {

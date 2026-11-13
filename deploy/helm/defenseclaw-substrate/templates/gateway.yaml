@@ -85,6 +85,9 @@ spec:
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
         {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
+        # The create path admits a launcher actor with the controller's own
+        # attestation check (GAP-0154), so it reads the same anchors.
+        {{- include "dc.templateAnchorsMount" . | nindent 8 }}
         # The admin route writes policy_conflict resets for the controller.
         {{- include "dc.kubeTokenMount" . | nindent 8 }}
         {{- if .Values.admin.tlsSecretName }}
@@ -95,6 +98,7 @@ spec:
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
+      {{- include "dc.templateAnchorsVolume" . | nindent 6 }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- if .Values.admin.tlsSecretName }}
       - name: admin-tls

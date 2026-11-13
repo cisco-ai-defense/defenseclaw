@@ -122,7 +122,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `substrate.namespace`, `substrate.apiAddress` | Where Substrate runs |
 | `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway |
 | `leader.store.size`, `leader.store.keepOnUninstall` | The leader's volume |
-| `callout.judge.tokenSecret` | Turns on the MCP verdict route for the callout |
+| `callout.judge.tokenSecret` | The callout's token for the MCP tool-rules route. Default `defenseclaw-callout-judge`, which the chart creates. `""` turns the route off: MCP tool calls then raise an alert, and a managed install refuses them |
 | `networkPolicy.adminFrom`, `adminIngress.*` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |
 | `observability.local.enabled` | A local collector for trying the chart |

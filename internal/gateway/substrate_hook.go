@@ -86,6 +86,8 @@ type SubstrateSkillFingerprint struct {
 	Path     string `json:"path"`
 	FP       string `json:"fp"`
 	Attached bool   `json:"attached,omitempty"`
+	// Receipt is the scan receipt a gateway gave for this fingerprint.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 // SubstratePathFact is one path argument as the actor resolves it.
@@ -198,9 +200,7 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
-			q := st.substrateScanSkills(ctx, env.Facts)
-			unscanned := st.substrateUnscannedSkills(ctx, env.Facts)
-			answer := withSubstrateAnswer(w, r, next, q, unscanned)
+			answer := withSubstrateAnswer(w, r, next, st.substrateSkills(ctx, env.Connector, env.Facts))
 			if reg, ok := substrateRegistrationFrom(ctx); ok {
 				st.substrateRecordDecision(ctx, reg, env.Event, answer)
 			}

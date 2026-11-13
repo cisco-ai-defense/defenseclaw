@@ -52,6 +52,10 @@ func TestChartCalloutManaged(t *testing.T) {
 	if !cc.Managed || cc.Chain.FailureMode != extproc.ChainAuto {
 		t.Errorf("managed/auto: managed=%v chain.failure_mode=%q", cc.Managed, cc.Chain.FailureMode)
 	}
+	// GAP-0015: the tool verdict route is on by default.
+	if cc.Judge.URL == "" || cc.Judge.TokenFile == "" {
+		t.Errorf("managed: no tool verdict route by default: %+v", cc.Judge)
+	}
 	args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion,
 		"--set", "config.deployment_mode=managed_enterprise", "--set", managedImages,
 		"--set", "config.substrate.extproc.chain.failure_mode=open"}

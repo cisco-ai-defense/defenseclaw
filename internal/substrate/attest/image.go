@@ -286,8 +286,14 @@ type FileEntry struct {
 	UID, GID int
 	Size     int64
 	Linkname string
-	Layer    int
-	off      int64 // data offset in the layer's uncompressed tar
+	// Layer is the layer that added this path: whiteouts of a later layer
+	// remove it, whiteouts of the same layer do not. A hard link is added
+	// by its own layer even when its content lives in a lower one.
+	Layer int
+	// dataLayer and off locate the content: the layer whose tar holds the
+	// bytes and the offset in it (a hard link points at its target's).
+	dataLayer int
+	off       int64
 }
 
 // IsDir, IsRegular and IsSymlink classify an entry.
@@ -322,7 +328,20 @@ type ImageFS struct {
 	limits Limits
 	count  int // tar entries seen
 	sorted []string
+	// links maps a real path to the symlinks that resolve to it (built on
+	// first use by Names, dropped on every index change).
+	links map[string][]string
 }
+
+// maxLinkHops is the number of symlinks one path resolution may follow, as
+// on Linux (MAXSYMLINKS): a longer chain fails at run time with ELOOP, and
+// here it is unresolvable rather than silently cut short.
+const maxLinkHops = 40
+
+// maxNames bounds the names Names returns for one file.
+const maxNames = 256
+
+func (f *ImageFS) changed() { f.sorted, f.links = nil, nil }
 
 // OpenFS downloads the layers (digest-checked) and indexes them.
 func (g *Registry) OpenFS(ctx context.Context, img *Image, lim Limits) (*ImageFS, error) {
@@ -452,41 +471,62 @@ func (f *ImageFS) indexLayer(layer int, file string) error {
 			return fmt.Errorf("layer %d: bad path in tar", layer)
 		}
 		dir, base := path.Split(p)
+		// The folders a whiteout or an entry names are the real folders the
+		// extractor resolves; a chain the runtime could not follow refuses
+		// the image instead of indexing a path the runtime never writes.
+		realDir, ok := f.canon(dir, true)
+		if !ok {
+			return fmt.Errorf("layer %d: %s: symlink chain longer than %d hops or a loop", layer, p, maxLinkHops)
+		}
 		// A whiteout removes what lower layers hold; entries the same layer
 		// adds, in any order, stay (OCI image spec, layer changesets).
 		switch {
 		case base == ".wh..wh..opq":
-			f.removeBelow(path.Clean(f.canon(dir, true)), false, layer)
+			f.removeBelow(path.Clean(realDir), false, layer)
 			continue
 		case strings.HasPrefix(base, ".wh."):
-			f.removeBelow(path.Join(f.canon(dir, true), strings.TrimPrefix(base, ".wh.")), true, layer)
+			f.removeBelow(path.Join(realDir, strings.TrimPrefix(base, ".wh.")), true, layer)
 			continue
 		}
 		// The parents are the real folders the extractor writes into: a
 		// symlinked parent from a lower layer moves the entry.
-		p = f.canon(p, false)
+		p = path.Join(realDir, base)
 		e := &FileEntry{Path: p, Type: hdr.Typeflag, Mode: hdr.Mode, UID: hdr.Uid, GID: hdr.Gid,
-			Size: hdr.Size, Linkname: hdr.Linkname, Layer: layer, off: cr.n}
+			Size: hdr.Size, Linkname: hdr.Linkname, Layer: layer, dataLayer: layer, off: cr.n}
 		if hdr.Typeflag == tar.TypeLink {
-			// A hard link is the same file as its target as it is now; a
-			// later layer that replaces the target does not change it.
-			t, ok := f.idx[f.canon(hdr.Linkname, true)]
+			// A hard link is the same inode as its target as it is now; a
+			// later layer that replaces the target does not change it. The
+			// extractors call link(2) without following the last element, so
+			// a hard link to a symlink is that symlink (same text, resolved
+			// from the new place), never the file it pointed at.
+			tp, ok := f.canon(hdr.Linkname, false)
 			if !ok {
+				return fmt.Errorf("layer %d: hard link %s: symlink chain longer than %d hops or a loop", layer, p, maxLinkHops)
+			}
+			t, found := f.idx[tp]
+			if !found {
 				return fmt.Errorf("layer %d: hard link %s has no target %s", layer, p, hdr.Linkname)
 			}
+			if t.IsDir() {
+				return fmt.Errorf("layer %d: hard link %s points at a folder", layer, p)
+			}
 			c := *t
-			c.Path = p
+			// The link is a new name added by this layer: its own whiteouts
+			// leave it alone (GAP-0050); only the content is the target's.
+			c.Path, c.Layer = p, layer
 			e = &c
 		}
 		f.idx[p] = e
-		f.sorted = nil
+		f.changed()
 	}
 }
 
 // canon resolves symlinked folders in p against the index, as the file system
-// would: every parent always, the last element only when followLast. Loops
-// and long chains stop where they are.
-func (f *ImageFS) canon(p string, followLast bool) string {
+// would: every parent always, the last element only when followLast. ok is
+// false when the resolution needs more than maxLinkHops links (a loop or a
+// chain Linux refuses with ELOOP); the path returned is then where it stopped.
+// ".." never climbs above the image root, as inside the container.
+func (f *ImageFS) canon(p string, followLast bool) (string, bool) {
 	comps := strings.Split(strings.Trim(path.Clean("/"+p), "/"), "/")
 	cur := "/"
 	hops := 0
@@ -497,13 +537,16 @@ func (f *ImageFS) canon(p string, followLast bool) string {
 		}
 		next := path.Join(cur, c)
 		last := i == len(comps)-1
-		if e, ok := f.idx[next]; ok && e.IsSymlink() && (!last || followLast) && hops < 16 {
+		if e, ok := f.idx[next]; ok && e.IsSymlink() && (!last || followLast) {
+			if hops == maxLinkHops {
+				return next, false
+			}
 			hops++
 			base := cur
 			if path.IsAbs(e.Linkname) {
 				base = "/"
 			}
-			resolved := path.Clean(path.Join(base, e.Linkname))
+			resolved := path.Clean(path.Join("/", base, e.Linkname))
 			rest := append([]string(nil), comps[i+1:]...)
 			comps = append(strings.Split(strings.Trim(resolved, "/"), "/"), rest...)
 			cur, i = "/", -1
@@ -511,7 +554,51 @@ func (f *ImageFS) canon(p string, followLast bool) string {
 		}
 		cur = next
 	}
-	return cur
+	return cur, true
+}
+
+// Names returns every path through which the entry at real path p can be
+// opened: p itself first, then each name a symlink in the image adds (a link
+// to the file, a link to one of its folders, links to those links), at most
+// maxNames. Files are indexed by real path, so a check that decides by name
+// (which file is an MCP config) must look at all of them (GAP-0051).
+func (f *ImageFS) Names(p string) []string {
+	if f.links == nil {
+		f.links = map[string][]string{}
+		for lp, e := range f.idx {
+			if !e.IsSymlink() {
+				continue
+			}
+			if real, ok := f.canon(lp, true); ok && real != lp {
+				f.links[real] = append(f.links[real], lp)
+			}
+		}
+		for _, ls := range f.links {
+			sort.Strings(ls)
+		}
+	}
+	names := []string{p}
+	seen := map[string]bool{p: true}
+	for i := 0; i < len(names) && len(names) < maxNames; i++ {
+		n := names[i]
+		// Every ancestor of n (n included) a link resolves to gives a name.
+		for a := n; ; a = path.Dir(a) {
+			for _, l := range f.links[a] {
+				cand := l + strings.TrimPrefix(n, a)
+				if a == "/" {
+					cand = path.Join(l, n)
+				}
+				if !seen[cand] && len(names) < maxNames {
+					seen[cand] = true
+					names = append(names, cand)
+				}
+			}
+			if a == "/" {
+				break
+			}
+		}
+	}
+	return names
 }
 
 // removeBelow deletes p (when self) and everything below it that lower
@@ -524,7 +611,7 @@ func (f *ImageFS) removeBelow(p string, self bool, layer int) {
 	for k, e := range f.idx {
 		if e.Layer < layer && (strings.HasPrefix(k, prefix) || (self && k == p)) {
 			delete(f.idx, k)
-			f.sorted = nil
+			f.changed()
 		}
 	}
 }
@@ -535,14 +622,22 @@ func (f *ImageFS) Close() error { return os.RemoveAll(f.dir) }
 // Lookup returns the entry at p; symlinked parent folders are followed, a
 // symlink at the end is returned as it is.
 func (f *ImageFS) Lookup(p string) (*FileEntry, bool) {
-	e, ok := f.idx[f.canon(p, false)]
+	real, ok := f.canon(p, false)
+	if !ok {
+		return nil, false
+	}
+	e, ok := f.idx[real]
 	return e, ok
 }
 
 // Resolve is Lookup that also follows a symlink at the end, inside the image
-// root, and returns the real path.
+// root, and returns the real path. ok is false for a dangling link and for a
+// chain the runtime could not follow either.
 func (f *ImageFS) Resolve(p string) (*FileEntry, string, bool) {
-	real := f.canon(p, true)
+	real, ok := f.canon(p, true)
+	if !ok {
+		return nil, real, false
+	}
 	e, ok := f.idx[real]
 	return e, real, ok
 }
@@ -572,7 +667,7 @@ func (f *ImageFS) Read(p string) ([]byte, error) {
 	if e.Size > f.limits.MaxFileBytes {
 		return nil, fmt.Errorf("%s: %d bytes is over the %d byte read limit", p, e.Size, f.limits.MaxFileBytes)
 	}
-	fh, err := os.Open(f.layers[e.Layer])
+	fh, err := os.Open(f.layers[e.dataLayer])
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +693,8 @@ func (f *ImageFS) Glob(pattern string) []*FileEntry {
 
 // Under lists entries below dir (not dir itself), sorted by path.
 func (f *ImageFS) Under(dir string) []*FileEntry {
-	prefix := f.canon(dir, true) + "/"
+	real, _ := f.canon(dir, true)
+	prefix := real + "/"
 	if prefix == "//" {
 		prefix = "/"
 	}
@@ -617,7 +713,7 @@ func (f *ImageFS) Under(dir string) []*FileEntry {
 // symlink to a file inside the image is copied as that file; a link to a
 // folder, a device or a name that climbs out of the folder is reported.
 func (f *ImageFS) Materialize(dir, dest string) (string, []string, error) {
-	root := f.canon(dir, true)
+	root, _ := f.canon(dir, true)
 	target := filepath.Join(dest, filepath.FromSlash(strings.TrimPrefix(root, "/")))
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		return "", nil, err
@@ -637,8 +733,11 @@ func (f *ImageFS) Materialize(dir, dest string) (string, []string, error) {
 				if len(f.Under(realPath)) > 0 {
 					// A folder with no entry of its own, reached through a link.
 					skipped = append(skipped, e.Path+" (link to a folder)")
+				} else {
+					// Dangling here, maybe filled at run time: never silence.
+					skipped = append(skipped, e.Path+" (link the scan cannot follow)")
 				}
-				continue // otherwise a dangling link has no content
+				continue
 			}
 			real = r
 		}

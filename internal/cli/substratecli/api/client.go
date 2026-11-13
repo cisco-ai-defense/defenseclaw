@@ -33,6 +33,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 const (
@@ -42,6 +44,13 @@ const (
 	// clientTag is the X-DefenseClaw-Client value of the launcher.
 	clientTag = "substrate-launcher"
 )
+
+// SetClientHeaders marks a request as coming from the launcher: the client
+// tag the admin listener requires on every write (its CSRF gate, GAP-0102).
+// It goes on every request, so a GET that becomes a write needs no change.
+// The API client and the attach tunnel both call it. The JSON content type
+// is set by the API client only: the attach route takes the relay types.
+func SetClientHeaders(h http.Header) { h.Set("X-DefenseClaw-Client", clientTag) }
 
 // TokenFunc returns the bearer for one request.
 type TokenFunc func(ctx context.Context) (string, error)
@@ -131,8 +140,8 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	if e.Reason != "" {
-		return fmt.Sprintf("the cluster answered %d (%s)", e.Status, e.Reason)
+	if r := safetext.Line(e.Reason); r != "" {
+		return fmt.Sprintf("the cluster answered %d (%s)", e.Status, r)
 	}
 	return fmt.Sprintf("the cluster answered %d", e.Status)
 }
@@ -164,20 +173,25 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	u := *c.base
 	u.Path = prefix + strings.TrimLeft(path, "/")
 	u.RawQuery = q.Encode()
-	tok, err := c.token(ctx)
-	if err != nil {
-		return err
+	tok := ""
+	if ctx.Value(noTokenKey{}) == nil {
+		var err error
+		if tok, err = c.token(ctx); err != nil {
+			return err
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.ua)
 	// The admin listener refuses a write that does not carry the client tag
 	// and a JSON content type, even a DELETE with no body (its CSRF gate).
-	req.Header.Set("X-DefenseClaw-Client", clientTag)
+	SetClientHeaders(req.Header)
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -210,6 +224,29 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 		return fmt.Errorf("the cluster answer is not what this version expects: %w", err)
 	}
 	return nil
+}
+
+// noTokenKey marks a call that is made before anyone is signed in.
+type noTokenKey struct{}
+
+// Info is the answer of GET /info: how the cluster signs people in. The
+// route takes no sign-in.
+type Info struct {
+	// SignIn is oidc, kubernetes or none.
+	SignIn   string `json:"sign_in"`
+	Issuer   string `json:"issuer,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
+	// Attach reports that the cluster can attach launchers to agents.
+	Attach bool `json:"attach"`
+}
+
+// Info asks the cluster how people sign in to it. It sends no token.
+func (c *Client) Info(ctx context.Context) (Info, error) {
+	var in Info
+	err := c.do(context.WithValue(ctx, noTokenKey{}, true), http.MethodGet, "info", nil, nil, &in)
+	in.SignIn = strings.ToLower(strings.TrimSpace(in.SignIn))
+	in.Issuer, in.ClientID = strings.TrimSpace(in.Issuer), strings.TrimSpace(in.ClientID)
+	return in, err
 }
 
 // redactErr keeps a token out of a transport error text.

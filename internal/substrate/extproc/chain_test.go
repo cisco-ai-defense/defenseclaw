@@ -106,11 +106,110 @@ func TestChainUncheckedFollowsFailureMode(t *testing.T) {
 	}
 }
 
+// TestChainShippedWiring is GAP-0090 as shipped: the resolver's
+// registration names the UID, profile and attendance. An actor with no
+// registration is unchecked (an alert on OSS, refused on a managed
+// install), an unattended registration is refused on an unchecked step,
+// and the registration's profile wins over the atespace's.
+func TestChainShippedWiring(t *testing.T) {
+	ctx := context.Background()
+	var seen []ChainStep
+	var mu sync.Mutex
+	rec := checkerFunc(func(_ context.Context, s ChainStep) (ChainVerdict, error) {
+		mu.Lock()
+		seen = append(seen, s)
+		mu.Unlock()
+		return ChainVerdict{}, nil
+	})
+
+	// Unregistered (live, no UID): never "clear", the checker is not asked.
+	h := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = rec })
+	h.uids.uid = ""
+	v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+	if !v.Allow || !v.Alert || !strings.Contains(strings.Join(v.Findings, ","), "chain_unchecked:"+uncheckedUnregistered) || len(seen) != 0 {
+		t.Fatalf("oss unregistered: %+v (checker saw %d)", v, len(seen))
+	}
+	hm := newHarness(t, func(c *Config, o *Options) { c.Managed = true; o.ChainChecker = rec })
+	hm.uids.uid = ""
+	if v := hm.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); v.Allow || v.Category != CategoryChainUnchecked ||
+		v.Rule != uncheckedUnregistered || !v.Retryable {
+		t.Fatalf("managed unregistered: %+v", v)
+	}
+
+	// Registered: the checker gets the registration's UID.
+	h = newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = rec })
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); !v.Allow || v.Alert || len(seen) != 1 || seen[0].Actor.UID != "uid-1" {
+		t.Fatalf("registered: %+v steps %+v", v, seen)
+	}
+
+	// Unattended registration, OSS auto: an unchecked step is refused,
+	// with the default StaticPolicies (no test-only PolicySource).
+	h = newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = fakeChecker{err: errors.New("leader down")} })
+	h.uids.unattended = true
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); v.Allow || v.Category != CategoryChainUnchecked {
+		t.Fatalf("unattended registration: %+v", v)
+	}
+	h.uids.unattended = false
+	h.eng.InvalidateActor("eng-web", "a1")
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); !v.Allow || !v.Alert {
+		t.Fatalf("interactive registration: %+v", v)
+	}
+
+	// The registration's profile wins: an actor in an atespace the base
+	// profile covers, registered with eng, gets eng's block list.
+	h = newHarness(t, nil)
+	h.uids.profile = "eng"
+	if v := h.eng.DecideHeaders(ctx, req("ops", "GET", "blocked.example.net", "/")); v.Allow || v.Profile != "eng" {
+		t.Fatalf("registration profile: %+v", v)
+	}
+	// A profile this callout does not have falls back to the atespace.
+	h = newHarness(t, nil)
+	h.uids.profile = "gone"
+	if v := h.eng.DecideHeaders(ctx, req("ops", "GET", "blocked.example.net", "/")); !v.Allow || v.Profile != "base" {
+		t.Fatalf("unknown registration profile: %+v", v)
+	}
+}
+
+type checkerFunc func(context.Context, ChainStep) (ChainVerdict, error)
+
+func (f checkerFunc) CheckEgress(ctx context.Context, s ChainStep) (ChainVerdict, error) {
+	return f(ctx, s)
+}
+
+// A burst of parallel requests from one actor (a package install) is
+// checked, not refused: over the cap a check waits for a slot within its
+// budget.
+func TestChainBurstIsChecked(t *testing.T) {
+	slowish := checkerFunc(func(context.Context, ChainStep) (ChainVerdict, error) {
+		time.Sleep(2 * time.Millisecond)
+		return ChainVerdict{}, nil
+	})
+	h := newHarness(t, func(c *Config, o *Options) {
+		c.Managed = true
+		o.ChainChecker = slowish
+		c.Chain.CheckBudget = 200 * time.Millisecond
+	})
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	var refused sync.Map
+	for i := 0; i < 4*chainPerActorInflight; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); !v.Allow {
+				refused.Store(i, v.Rule)
+			}
+		}()
+	}
+	wg.Wait()
+	refused.Range(func(k, v any) bool { t.Errorf("request %v refused: %v", k, v); return true })
+}
+
 // One actor's flood of checks takes at most chainPerActorInflight slots;
 // another actor's check still runs.
 func TestChainPerActorCap(t *testing.T) {
 	g := &gateChecker{gate: make(chan struct{})}
-	h := newHarness(t, func(c *Config, o *Options) { o.ChainChecker = g; c.Chain.CheckBudget = 300 * time.Millisecond })
+	h := newHarness(t, func(c *Config, o *Options) { o.ChainChecker = g; c.Chain.CheckBudget = 150 * time.Millisecond })
 	ctx := context.Background()
 	var wg sync.WaitGroup
 	for i := 0; i < chainPerActorInflight; i++ {
@@ -129,7 +228,7 @@ func TestChainPerActorCap(t *testing.T) {
 	}
 	start := time.Now()
 	v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
-	if !strings.Contains(strings.Join(v.Findings, ","), "chain_unchecked:"+uncheckedBusy) || time.Since(start) > 100*time.Millisecond {
+	if !strings.Contains(strings.Join(v.Findings, ","), "chain_unchecked:"+uncheckedBusy) || time.Since(start) > time.Second {
 		t.Fatalf("over the cap: %+v after %s", v, time.Since(start))
 	}
 	other := req("eng-web", "GET", "example.com", "/")

@@ -56,7 +56,9 @@ func main() {
 	issuer := flag.String("session-issuer", "", "session token issuer (required with --session-key)")
 	verifyURL := flag.String("verify-url", "", "gateway session-token check URL (instead of keys)")
 	interactive := flag.String("interactive", "", "relay interactive argv, space-separated (test variants; default: the connector)")
+	managedFlag := flag.Bool("managed", false, "managed_enterprise image: the relay refuses an agent that signs in to a vendor account (E9)")
 	flag.Parse()
+	managedImage = *managedFlag
 	if *interactive != "" {
 		interactiveArgv = strings.Fields(*interactive)
 	}
@@ -70,6 +72,7 @@ func main() {
 var (
 	interactiveArgv []string
 	sessionIssuer   string
+	managedImage    bool
 )
 
 const (
@@ -96,6 +99,7 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	}
 	cfg := kit.DefaultConfig()
 	cfg.GatewayURL, cfg.FailMode, cfg.KitVersion = gateway, failMode, version
+	cfg.Managed = managedImage
 	cfg.Relay.Listen, cfg.Relay.SessionAudience, cfg.Relay.VerifyURL = listen, audience, verifyURL
 	cfg.Relay.Interactive = interactiveArgv
 	cfg.Relay.SessionIssuer = sessionIssuer
