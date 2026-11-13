@@ -309,3 +309,23 @@ func FuzzMap(f *testing.F) {
 		}
 	})
 }
+
+func BenchmarkMapTypicalCall(b *testing.B) {
+	args := json.RawMessage(`{"database":"ops","sql":"SELECT id, name FROM users WHERE id = 42 ORDER BY name LIMIT 10","limit":10}`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := Map("mcp__postgres__query", args); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkMapFileBatch(b *testing.B) {
+	args := json.RawMessage(`{"paths":["/repo/a.md","/repo/b.md","/repo/c.md","/repo/docs/setup.md","/repo/docs/auth.md"]}`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := Map("mcp__filesystem__read_multiple_files", args); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

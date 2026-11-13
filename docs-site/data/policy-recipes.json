@@ -5021,6 +5021,345 @@
       ]
     },
     {
+      "id": "RECIPE-CMD-SECRET-REVEAL",
+      "title": "Command prints a stored secret",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SECRET-REVEAL",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Command prints a stored secret",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "credential",
+          "secret-reveal"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "secret-reveal"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-SECRET-LOOKUP",
+      "title": "Command reads a stored secret or issues a credential",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SECRET-LOOKUP",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Command reads a stored secret or issues a credential",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "credential",
+          "secret-reveal"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "secret-reveal"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-GIT-SHOW-SECRET",
+      "title": "git show prints a committed secret file",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-GIT-SHOW-SECRET",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "git show prints a committed secret file",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "credential",
+          "secret-reveal"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "secret-reveal"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PERSIST-SYSTEM-SCHEDULE",
+      "title": "Write to a system schedule or sudoers drop-in",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PERSIST-SYSTEM-SCHEDULE",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Write to a system schedule or sudoers drop-in",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "persistence",
+          "privilege-escalation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence",
+        "privilege-escalation"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PRIV-SETUID",
+      "title": "Set-id bit set with chmod",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PRIV-SETUID",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Set-id bit set with chmod",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "privilege-escalation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege-escalation"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SQL-DESTRUCTIVE",
+      "title": "Destructive SQL in a tool call",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SQL-DESTRUCTIVE",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Destructive SQL in a tool call",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "destructive",
+          "database",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "destructive",
+        "database",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SQL-PRIVILEGE",
+      "title": "Privilege-changing SQL in a tool call",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SQL-PRIVILEGE",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Privilege-changing SQL in a tool call",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "privilege-escalation",
+          "database",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege-escalation",
+        "database",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SQL-AUDIT-OFF",
+      "title": "SQL switches an audit or logging setting off",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SQL-AUDIT-OFF",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "SQL switches an audit or logging setting off",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "defense-evasion",
+          "database",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "defense-evasion",
+        "database",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SQL-CREDENTIAL",
+      "title": "SQL sets a credential column",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SQL-CREDENTIAL",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "SQL sets a credential column",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "credential",
+          "database",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "database",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SEND-REDIRECT",
+      "title": "Tool call copies or redirects its output to another party",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SEND-REDIRECT",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Tool call copies or redirects its output to another party",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "exfiltration",
+          "network",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "exfiltration",
+        "network",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SEND-COLLECTOR",
+      "title": "Tool call sends to a paste, file-drop or webhook-catcher host",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SEND-COLLECTOR",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Tool call sends to a paste, file-drop or webhook-catcher host",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "exfiltration",
+          "network",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "exfiltration",
+        "network",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-SETTING-DOWNGRADE",
+      "title": "Tool call turns a security control off",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-SETTING-DOWNGRADE",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Tool call turns a security control off",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "defense-evasion",
+          "configuration",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "defense-evasion",
+        "configuration",
+        "mcp"
+      ]
+    },
+    {
+      "id": "RECIPE-MCP-CODE-DECODE-EXEC",
+      "title": "Code tool runs decoded text",
+      "kind": "rule:command",
+      "body": {
+        "id": "MCP-CODE-DECODE-EXEC",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Code tool runs decoded text",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "execution",
+          "obfuscation",
+          "mcp"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "obfuscation",
+        "mcp"
+      ]
+    },
+    {
       "id": "RECIPE-ENT-BULK-SSN",
       "title": "US Social Security Number",
       "kind": "rule:enterprise-data",
@@ -6420,6 +6759,90 @@
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-K8S-CLUSTER-CRED",
+      "title": "Kubernetes cluster credential file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-K8S-CLUSTER-CRED",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Kubernetes cluster credential file",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-CRED-STORE",
+      "title": "System credential store file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-CRED-STORE",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "System credential store file",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-CRED-STORE-USER",
+      "title": "Credential file in a home directory",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-CRED-STORE-USER",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Credential file in a home directory",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
       "examples": [],
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",

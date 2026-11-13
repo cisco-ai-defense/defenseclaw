@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -220,7 +219,7 @@ func nonShellContentArg(raw json.RawMessage) string {
 	}
 	for _, key := range []string{"content", "contents", "text", "data", "body", "file_text"} {
 		if s, ok := obj[key].(string); ok {
-			return strings.Clone(s)
+			return s
 		}
 	}
 	return ""

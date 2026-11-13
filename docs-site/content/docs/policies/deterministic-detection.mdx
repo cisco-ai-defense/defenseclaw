@@ -403,6 +403,22 @@ DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `
 
 With the balanced (default) rule pack, action mode blocks CRITICAL findings; instruction-file writes are HIGH, so they are reported, not blocked, unless the session loaded the file or found it at its start ([Instruction files](#instruction-files)), `guardrail.block_at` is `HIGH` or the strict pack is used.
 
+## MCP and app tool calls
+
+An MCP or app tool reaches the gateway as a tool name and a JSON object. `internal/toolshape` reads that call as effects, the same kind of facts the shell and file-tool paths produce, and the rules decide on the effects. The table it reads is `internal/toolshape/shapes.yaml`; it holds names and argument shapes only.
+
+| Effect | Read from | Judged by |
+| --- | --- | --- |
+| File read, write, delete or list on a path | path-valued arguments (`path`, `paths`, `file`, `src`, `dest`, and any absolute or home path under another key); the verb of the tool name (`read_file`, `write`, `delete`) sets the kind | the call is judged as the native file tool on that path would be, so every protected-target rule of the pack (`PATH-SSH-KEY`, `PATH-AWS-CREDS`, `PATH-KUBE`, and the rest) applies; `PATH-K8S-CLUSTER-CRED`, `PATH-CRED-STORE`, `PATH-CRED-STORE-USER` add system credential stores |
+| SQL statement | `sql`, `statement` and similar keys, and `query` for a db tool or a value that starts like SQL | `MCP-SQL-DESTRUCTIVE` (DROP, TRUNCATE, DELETE with no WHERE), `MCP-SQL-PRIVILEGE`, `MCP-SQL-AUDIT-OFF`, `MCP-SQL-CREDENTIAL` |
+| Send to a recipient or URL | `to`, `recipients`, `url`, and the redirect keys (`bcc`, `bcc_override`, `forward_to`, `output_url`) | `MCP-SEND-REDIRECT` (a copy or output goes to a host that is none of the primary recipients and not local), `MCP-SEND-COLLECTOR` (a paste, file-drop or webhook-catcher host from the sandbox egress blocklist) |
+| Security setting | argument names and values such as `skip_2fa: true`, `verify_ssl: false`, `include_sensitive_data: true`, `acl: public-read`, and `{"op": "disable_mfa"}` entries | `MCP-SETTING-DOWNGRADE` |
+| Code | the code argument of a code-execution tool | `MCP-CODE-DECODE-EXEC` (decoded text is passed to an evaluator) |
+
+The role of every effect is a guess from names (the effect reason is `mcp_semantics`), so outside the strict tier and managed installs a finding is an alert and never a block. A tool the table cannot place has no effects: it is not treated as clean, but it alerts only when a path it names is a protected target. Server names (`filesystem`, `git`, `fetch`, `postgres`, `gmail`, `slack`, `github`, `kubernetes`, `python`) and name tokens only choose the family; add a name to `servers` to teach the table a server.
+
+Shell calls use the same table for rules that need no CEL: `CMD-SECRET-REVEAL` (`--reveal`, `--show-secrets`), `CMD-SECRET-LOOKUP`, `CMD-GIT-SHOW-SECRET`, `CMD-PRIV-SETUID`, `CMD-PERSIST-SYSTEM-SCHEDULE` and writes to `/etc/passwd`. They run in Go on the parsed ActionFacts, because the rule catalog's CEL cost budget is spent, and the pack keeps the rule's title, severity and tags.
+
 ## Action-mode rule details
 
 ### Protected SSH keys
