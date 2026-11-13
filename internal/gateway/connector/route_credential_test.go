@@ -6,6 +6,7 @@ package connector
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -93,5 +94,39 @@ func TestRouteEpochFileRoundTrip(t *testing.T) {
 	}
 	if err := WriteRouteEpoch(dataDir, RouteEpoch{Version: 1, Epoch: "short"}); err == nil {
 		t.Fatal("an invalid epoch must not be written")
+	}
+}
+
+// A published epoch another account could write is refused (P3-3): it
+// decides every route credential the guardian renders.
+func TestRouteEpochFileRefusesABroadFile(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	epoch, _ := NewRouteEpoch()
+	if err := WriteRouteEpoch(dataDir, epoch); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := RouteEpochPath(dataDir)
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadRouteEpoch(dataDir); err == nil {
+			t.Fatal("a world-writable route epoch must be refused")
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := path + ".target"
+	if err := os.Rename(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(link, path); err == nil {
+		if _, err := LoadRouteEpoch(dataDir); err == nil {
+			t.Fatal("a symlinked route epoch must be refused")
+		}
 	}
 }

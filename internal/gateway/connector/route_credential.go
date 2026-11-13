@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Route credentials on a managed (standalone) gateway (S1 DESIGN 16.9, 17.2,
@@ -150,7 +152,13 @@ func LoadRouteEpoch(dataDir string) (*RouteEpoch, error) {
 	if !info.Mode().IsRegular() || info.Size() > routeEpochMaxBytes {
 		return nil, fmt.Errorf("route epoch %s is not a small regular file", path)
 	}
-	raw, err := os.ReadFile(path)
+	// Integrity: the epoch decides every route credential, so a file
+	// another account can write or own is refused (the key file trust
+	// rule; S1 REVIEW-code-slice4 P3-3).
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("route epoch %s: %w", path, err)
+	}
+	raw, err := safefile.ReadRegularFileBounded(path, routeEpochMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +200,11 @@ func WriteRouteEpoch(dataDir string, epoch RouteEpoch) error {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		return err
+	}
+	// Owner-only DACL on Windows (a temp file inherits the directory ACL),
+	// so LoadRouteEpoch accepts what the gateway wrote.
+	if err := safefile.ProtectFile(name); err != nil {
 		return err
 	}
 	return os.Rename(name, path)
