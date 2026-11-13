@@ -602,8 +602,8 @@ Respond ONLY with a JSON object in this exact format:
 // toolResultPIIScope turns the PII judge's question for a listed tool's
 // output from "is there personal data?" (true for nearly every mailbox,
 // contact list and booking record the user asked for) into "is there
-// personal data beyond what the request asked for?" (TOOLRESULT-TO-GEMMA4.md
-// 3b). Without a known request it asks the original question.
+// personal data beyond what the request asked for?" (rel-1-0-10:GAP-0171).
+// Without a known request it asks the original question.
 const toolResultPIIScope = `This sample is a tool's output, fetched for the user's request in the CONTEXT FROM DEFENSECLAW block below. Personal data the request asked for (the user's own inbox, contacts, calendar, account, or the record they looked up) is the expected content of the output: label it false. Label a category true only when the output carries that kind of data beyond the request: other people's records in bulk that the request did not ask for, credentials, secrets or government identifiers, or data about a different subject than the request. When user_request is unknown, judge the output as you would without this note.`
 
 // wrapJudgeSample wraps user-supplied content in delimiter tags so the
