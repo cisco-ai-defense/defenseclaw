@@ -338,7 +338,7 @@ func TestACPPermissionWithoutAKindIsJudgedByItsInput(t *testing.T) {
 				return env.evaluate(t, acp.AgentToClient, acpFrameJSON(t, 1, "session/request_permission",
 					map[string]any{"sessionId": "s", "options": []any{}, "toolCall": toolCall}))
 			}
-			var compared, blocked, reads int
+			var compared, blocked, reads, readsBlocked, readsHookBlocked int
 			for _, pair := range pairs {
 				var input map[string]any
 				var kind string
@@ -384,6 +384,12 @@ func TestACPPermissionWithoutAKindIsJudgedByItsInput(t *testing.T) {
 					// write the input does not show.
 					reads++
 					got := permission(withoutKind, nil)
+					if acpBlocked(got.RawAction) {
+						readsBlocked++
+					}
+					if acpBlocked(want.RawAction) {
+						readsHookBlocked++
+					}
 					switch {
 					case strict && !acpBlocked(got.RawAction):
 						t.Errorf("%s: a path with no kind and no text, %s, want a block at the strict tier", pair.id, got.RawAction)
@@ -414,6 +420,7 @@ func TestACPPermissionWithoutAKindIsJudgedByItsInput(t *testing.T) {
 					t.Errorf("%s: a cut input from the guard's state %s, below the permission %s", pair.id, got.RawAction, want.RawAction)
 				}
 			}
+			t.Logf("%s: %d permissions compared, %d blocked with their kind; %d read pairs, %d blocked as a read, %d blocked with no kind", pack, compared, blocked, reads, readsHookBlocked, readsBlocked)
 			if compared < 250 || blocked < 100 || reads < 20 {
 				t.Fatalf("%d permissions compared, %d blocked, %d reads: the rules did not load?", compared, blocked, reads)
 			}
@@ -489,6 +496,7 @@ func TestACPKindsOtherThanReadJudgeTheirLocationsAsWrites(t *testing.T) {
 		if tried < 100 {
 			t.Fatalf("kind %s: only %d permissions tried", kind, tried)
 		}
+		t.Logf("kind %s: %d of %d permissions for a file the hook blocks are blocked", kind, blocked, tried)
 		if blocked != tried {
 			t.Errorf("kind %s: %d of %d permissions for a file the hook blocks are not blocked (e.g. %s)", kind, tried-blocked, tried, example)
 		}
