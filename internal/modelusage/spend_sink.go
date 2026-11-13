@@ -6,11 +6,8 @@ package modelusage
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"sync/atomic"
 	"time"
 )
-
-var callIDFallback atomic.Uint64
 
 // SpendSink is where finished calls charge routing.admin budgets: the
 // routing admin runtime (routingadmin.Runtime.Add). The gateway wires it in;
@@ -48,10 +45,12 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 	if usd == nil {
 		usd = rec.Cost.USD
 	}
-	// A stream cancelled after the provider started answering, before the
-	// final usage, was billed by the provider for output nobody counted:
-	// its cost is unknown, never the input-only (or zero) total.
-	cutShort := rec.Outcome == "cancelled" && rec.TTFB > 0 && rec.Usage.Has&HasOutput == 0
+	// A stream cancelled or broken by the upstream after the provider
+	// started answering, before the final usage, was billed by the provider
+	// for output nobody counted: its cost is unknown, never the input-only
+	// (or zero) total.
+	brokenOff := rec.Outcome == "cancelled" || rec.ErrorType == "upstream_error"
+	cutShort := brokenOff && rec.TTFB > 0 && rec.Usage.Has&HasOutput == 0
 	switch {
 	case cutShort:
 		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)
@@ -66,13 +65,6 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 // its budget charge).
 func newCallID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// never an all-zero id, which would make every call a replay
-		n := callIDFallback.Add(1)
-		for i := 0; i < 8; i++ {
-			b[i] = byte(n >> (8 * i))
-		}
-		b[15] = 0xff
-	}
+	_, _ = rand.Read(b[:]) // never fails since Go 1.24: a failure crashes the process
 	return hex.EncodeToString(b[:])
 }
