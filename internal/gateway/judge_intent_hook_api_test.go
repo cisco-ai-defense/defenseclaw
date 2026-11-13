@@ -48,15 +48,6 @@ func postClaudeCodeHookResponse(t *testing.T, a *APIServer, body string) map[str
 	return out
 }
 
-func hookJSON(t *testing.T, v map[string]any) string {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(b)
-}
-
 func userPromptEvent(session, prompt string) string {
 	b, _ := json.Marshal(map[string]any{"session_id": session, "hook_event_name": "UserPromptSubmit", "cwd": "/tmp", "prompt": prompt})
 	return string(b)
