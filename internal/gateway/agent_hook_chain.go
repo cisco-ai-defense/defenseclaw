@@ -2028,8 +2028,7 @@ func credentialFileFixturePath(value string) bool {
 	}
 	for _, component := range strings.Split(strings.Trim(canonicalSemanticPath(value), "/"), "/") {
 		switch component {
-		case "__tests__", "__fixtures__", "__mocks__",
-			"node_modules", "site-packages", "dist-packages":
+		case "node_modules", "site-packages", "dist-packages":
 			return true
 		}
 	}

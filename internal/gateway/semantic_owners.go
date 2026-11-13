@@ -1278,9 +1278,8 @@ func isDefinitelyNonSensitivePath(
 }
 
 func matchesAnySensitivePathCandidate(value string) bool {
-	_, credentialFile := actionfacts.MatchCredentialFileShape(value)
 	return canonicalSemanticPath(value) == "/etc/shadow" ||
-		credentialFile ||
+		matchesCredentialFileShape(value) ||
 		matchesProcEnvironCandidate(value) ||
 		matchesBrowserSessionStore(value) ||
 		matchesWorkloadIdentityTokenCandidate(value)
@@ -1691,9 +1690,11 @@ func matchesProcEnvironCandidate(value string) bool {
 		strings.Contains(value, "/proc/") && strings.HasSuffix(value, "/environ")
 }
 
-func matchesCloudCredentialFile(value string) bool {
-	relative, ok := liveHomeRelative(value)
-	return ok && matchesCloudCredentialRelative(relative)
+// matchesCredentialFileShape reports a path of any credentials-file shape
+// (actionfacts.MatchCredentialFileShape), wherever it is.
+func matchesCredentialFileShape(value string) bool {
+	_, ok := actionfacts.MatchCredentialFileShape(value)
+	return ok
 }
 
 func matchesCloudCredentialFallbackCandidate(value string) bool {

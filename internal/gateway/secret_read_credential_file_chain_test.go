@@ -148,9 +148,10 @@ func TestWindowsProjectCredentialFileReadStartsSecretReadChainGAP0210(t *testing
 // chain on the hook path (Claude Code PreToolUse + PostToolUse, then the
 // egress call): a credentials file read inside the project is followed by
 // the same verdict as the home copy, in every pack and on a managed host.
-// On a managed_enterprise gateway the local chain lane is switched off for
-// every path today (substrate-1:GAP-0211, lane F5), so there the test pins
-// parity only: a project read gets what the home read gets.
+// On a managed_enterprise gateway the local chain lane is off for an
+// ordinary hook call (the host daemon owns chains there; Substrate actors are
+// the exception, substrate-1:GAP-0211), so there the test pins parity only:
+// a project read gets what the home read gets.
 func TestAuthenticatedHookProjectCredentialReadThenEgressGAP0210(t *testing.T) {
 	installCorrelationHMACForTest()
 	policiesRoot := guardrailPoliciesRoot(t)

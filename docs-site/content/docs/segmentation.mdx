@@ -108,6 +108,8 @@ DefenseClaw's own state, agent hook registrations, and files that run code
 
 With the default rule pack, the hook rules deny a read of an SSH private key (`PATH-SSH-KEY`, for example `cat ~/.ssh/id_rsa`), also in action mode. A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead: agents and their tools read these files to sign in. The agent shows `DefenseClaw observed a MEDIUM ... finding: rule PATH-AWS-CREDS`, and the alert is in `defenseclaw alerts`.
 
+A read of a credentials file also starts the `chain.secret_read_then_egress` correlation, wherever the file is: in the home or in a project or work directory (a `.env` file, `.aws/credentials`, an `id_*` SSH key, `.netrc`, `.git-credentials`, `.npmrc`, `.pypirc`, a Docker or Kubernetes config, a GitHub CLI `hosts.yml`, a `*.key` file). An upload to an external host within the next 8 tool calls (30 minutes) of the same session then raises a `CRITICAL` alert in every pack. Templates (`.env.example`, `.env.sample`, `.env.template`), files under `testdata`, `fixtures`, `__tests__`, `examples`, `docs`, `node_modules` and `site-packages` folders, and public keys (`*.pub`) do not start it.
+
 ### Persistence
 
 Shell profiles, user systemd units and autostart entries, cron, LaunchAgents,

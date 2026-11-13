@@ -4147,7 +4147,8 @@ func integrityPathHasFixtureSegment(value string) bool {
 	) {
 		switch component {
 		case "testdata", "test-data", "fixture", "fixtures",
-			"example", "examples", "docs":
+			"example", "examples", "docs",
+			"__tests__", "__fixtures__", "__mocks__":
 			return true
 		}
 	}
