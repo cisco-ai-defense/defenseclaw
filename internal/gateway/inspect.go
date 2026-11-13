@@ -1908,6 +1908,12 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	default: // regex_only / unset
 		return nil
 	}
+	if strategy == "regex_judge" && strings.EqualFold(strategyDirection, "tool_call") && hookJudgeSkipsProvenReadOnly(ctx, toolName, content, current) {
+		// Not asked, but kept in the session history so a later call that
+		// sends what this one read is judged with it.
+		judge.prepareToolJudgeSample(ctx, toolName, content)
+		return nil
+	}
 
 	// The generic /inspect handlers run under a 200ms deadline
 	// (inspectScanTimeout) — no judge round-trip fits, and blowing
