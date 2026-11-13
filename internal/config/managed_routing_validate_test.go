@@ -33,7 +33,10 @@ func TestValidateManagedRoutingRefusals(t *testing.T) {
 			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "converse", Bedrock: &RoutingBedrockAuthConfig{SessionTokenEnv: "AWS_SESSION_TOKEN"}}
 		}, "upstreams.claudecode.bedrock.session_token_env"},
 		{"systemone api_key_env", "linux", func(c *Config) { c.Routing.SystemOne = &RoutingSystemOneConfig{APIKeyEnv: "S1_KEY"} }, "systemone.api_key_env"},
-		{"managed Windows route-only (interim)", "windows", nil, "windows_no_peer_factor"},
+		{"managed Windows route-only (guardian peer broker)", "windows", nil, ""},
+		{"managed Windows route-only bedrock env", "windows", func(c *Config) {
+			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "converse", Bedrock: &RoutingBedrockAuthConfig{AccessKeyEnv: "AWS_ACCESS_KEY_ID"}}
+		}, "upstreams.claudecode.bedrock.access_key_env"},
 		{"managed Windows without route-only", "windows", func(c *Config) { c.Routing.RouteOnly = RoutingRouteOnlyConfig{} }, ""},
 		{"connector without base_url capability", "linux", func(c *Config) { c.Routing.RouteOnly.Connectors = []string{"cursor"} }, "no routing base_url capability"},
 		{"bedrock auth profile on a route-only upstream", "darwin", func(c *Config) {

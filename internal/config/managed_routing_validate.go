@@ -29,10 +29,9 @@ func RouteOnlyCapableOn(connector, goos string) bool {
 // for goos (S1 DESIGN 15.6, 17.1, 19): secrets come from protected
 // credential refs only (no *_env names, which would read the gateway
 // service environment), route-only connectors need routing base_url on the
-// target OS, and managed Windows route-only stays off until a live probe
-// confirms the Windows kernel peer factor under the LocalSystem gateway
-// (S1 DESIGN 20.6) and the Windows guardian renders route-only per user
-// (rel-1-0-10:GAP-0012).
+// target OS. Managed Windows route-only is valid: the guardian renders it
+// per enrolled user and its peer SID broker proves each caller (S1 DESIGN
+// 21, rel-1-0-10:GAP-0012).
 func validateManagedRouting(cfg *Config, goos string) error {
 	r := cfg.Routing
 	for i, m := range r.Models {
@@ -66,9 +65,10 @@ func validateManagedRouting(cfg *Config, goos string) error {
 	if len(r.RouteOnly.Connectors) == 0 {
 		return nil
 	}
-	if goos == "windows" {
-		return fmt.Errorf("config routing.route_only is not available on managed Windows in this release (windows_no_peer_factor): the gateway service cannot yet prove which account opened a loopback connection; route proxy traffic only, or use route-only on managed Linux and macOS")
-	}
+	// Managed Windows: the guardian peer SID broker proves the account of
+	// each loopback caller (S1 Q7); the gateway refuses every route-only
+	// caller while the broker does not answer (doctor: Route-only peer
+	// broker), so the config itself is valid there.
 	for i, c := range r.RouteOnly.Connectors {
 		if goos != "" && !RouteOnlyCapableOn(c, goos) {
 			return fmt.Errorf("config routing.route_only.connectors[%d] %q has no routing base_url capability on %s", i, c, goos)
