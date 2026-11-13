@@ -21,8 +21,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-
-	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 )
 
 // MaxBundleBytes is the largest policy bundle ApplyBundle sends: the
@@ -31,14 +29,6 @@ const MaxBundleBytes = 48 << 10
 
 // ErrBundleTooLarge is returned by ApplyBundle for a bundle over MaxBundleBytes.
 var ErrBundleTooLarge = errors.New("the bundle is larger than 48 KiB")
-
-// FleetVerifyDocument returns the administrator verify document: the
-// cluster checks and one verdict. A person who is not an administrator gets
-// a 403, a cluster without the route a 501.
-func (c *Client) FleetVerifyDocument(ctx context.Context) (fleet.VerifyDocument, error) {
-	var out fleet.VerifyDocument
-	return out, c.do(ctx, http.MethodGet, "fleet/verify", nil, nil, &out)
-}
 
 // bundleApplyRequest is the body of POST bundle. The admin listener takes
 // JSON only (its CSRF gate), so the bundle bytes travel as base64.
