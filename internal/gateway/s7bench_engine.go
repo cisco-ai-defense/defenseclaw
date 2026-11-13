@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -340,9 +341,7 @@ func (e *S7Engine) Stats(ctx context.Context) S7Stats {
 	return out
 }
 
-// InspectText runs one text through the /llm proxy's guardrail inspector (direction prompt or completion) with this
-// generation's rule pack, posture thresholds, detection strategy and judge, as handleChatCompletion does for a user turn.
-func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *ScanVerdict {
+func (e *S7Engine) ensureInspector() {
 	e.inspOnce.Do(func() {
 		cfg := e.sc.currentConfig()
 		g := NewGuardrailInspector("local", nil, e.sc.sharedJudge())
@@ -351,6 +350,88 @@ func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *Sca
 		g.SetDetectionStrategy(gr.DetectionStrategy, gr.DetectionStrategyPrompt, gr.DetectionStrategyCompletion, gr.DetectionStrategyToolCall, gr.JudgeSweep)
 		e.insp = g
 	})
+}
+
+// S7StreamResult is a model response replayed through the proxy's streaming inspection (InspectStream).
+type S7StreamResult struct {
+	Action, Severity string   // the enforced decision: mid-stream block, or the strongest mid-stream alert
+	Findings         []string // findings of the verdict that decided
+	BlockedAt        int      // bytes accumulated when the stream was cut; -1 when it was not
+	Scans            int      // mid-stream scans run
+	UncheckedTail    int      // bytes released after the last mid-stream scan (only the final, non-enforced check sees them); 0 for a blocked or short stream
+	FinalAction      string   // the post-stream check over the whole text; the proxy records it without enforcing it
+	FinalSeverity    string
+	FinalFindings    []string
+}
+
+// Mirrors of handleStreamingChatCompletion's constants (proxy.go): a mid-stream scan every 500 bytes, the first 1024 bytes buffered.
+const (
+	s7StreamScanInterval = 500
+	s7StreamBufSize      = 1024
+	s7StreamChunk        = 32
+)
+
+// InspectStream replays text as a streamed completion the way the proxy inspects one: regex-only InspectMidStream whenever 500 more bytes have accumulated
+// (a block cuts the stream), one more check at the end of a stream shorter than the 1024-byte buffer, and the final Inspect of the whole text, which the proxy
+// computes with enforcement off (proxyGuardrailWithoutEnforcement). The decision is the enforced one; the final verdict is returned beside it.
+func (e *S7Engine) InspectStream(ctx context.Context, text string) S7StreamResult {
+	e.ensureInspector()
+	ctx = withPinnedGeneration(ctx, e.sc.Generation())
+	res := S7StreamResult{Action: "allow", Severity: "NONE", BlockedAt: -1}
+	var acc strings.Builder
+	lastScan := 0
+	note := func(v *ScanVerdict) bool { // true: the stream is cut
+		if v == nil {
+			return false
+		}
+		if v.Severity != "NONE" && v.Action == "block" {
+			res.Action, res.Severity, res.Findings, res.BlockedAt = "block", v.Severity, v.Findings, acc.Len()
+			return true
+		}
+		if res.Action == "allow" && (v.Action == "alert" || v.Action == "confirm") {
+			res.Action, res.Severity, res.Findings = "alert", v.Severity, v.Findings
+		}
+		return false
+	}
+	scan := func() bool {
+		res.Scans++
+		return note(e.insp.InspectMidStream(ctx, "completion", acc.String(), []ChatMessage{{Role: "assistant", Content: acc.String()}}, "s7bench", "action"))
+	}
+	cut := false
+	for off := 0; off < len(text) && !cut; {
+		end := off + s7StreamChunk
+		if end > len(text) {
+			end = len(text)
+		}
+		for end < len(text) && !utf8.RuneStart(text[end]) {
+			end++
+		}
+		acc.WriteString(text[off:end])
+		off = end
+		if acc.Len()-lastScan >= s7StreamScanInterval {
+			cut = scan()
+			lastScan = acc.Len()
+		}
+	}
+	if !cut && acc.Len() > 0 && acc.Len() < s7StreamBufSize {
+		cut = scan()
+	}
+	if !cut && acc.Len() >= s7StreamBufSize {
+		res.UncheckedTail = acc.Len() - lastScan
+	}
+	if acc.Len() > 0 {
+		fv := e.insp.Inspect(proxyGuardrailWithoutEnforcement(ctx), "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, "s7bench", "action")
+		if fv != nil {
+			res.FinalAction, res.FinalSeverity, res.FinalFindings = fv.Action, fv.Severity, fv.Findings
+		}
+	}
+	return res
+}
+
+// InspectText runs one text through the /llm proxy's guardrail inspector (direction prompt or completion) with this
+// generation's rule pack, posture thresholds, detection strategy and judge, as handleChatCompletion does for a user turn.
+func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *ScanVerdict {
+	e.ensureInspector()
 	// Pin the generation as the proxy does for every request (proxy.go withPinnedGeneration), so the content rules and
 	// thresholds come from the pack under test, not the process-wide rule set.
 	ctx = withPinnedGeneration(ctx, e.sc.Generation())
