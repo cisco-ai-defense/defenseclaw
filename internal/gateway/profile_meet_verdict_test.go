@@ -376,7 +376,7 @@ func TestProfileMeetKeepsTheDecisionModelConfirm(t *testing.T) {
 		resolved.set.profileConfig(member).DecisionModel = dm
 	}
 	api.SetHookDecisionJudge(newDecisionOnlyJudge(api.scannerCfg))
-	verdict := api.runHookJudge(ctx, "tool_call", "prompt", "codex", `{"command":"ls -la ./fixtures/reports"}`, "Bash", nil)
+	verdict := api.runHookJudge(ctx, "tool_call", "prompt", "codex", `{"command":"make -C ./fixtures/reports"}`, "Bash", nil)
 	if verdict == nil || calls.Load() == 0 || verdict.Action != guardrailActionConfirm || !verdict.decisionConfirm {
 		t.Fatalf("meet verdict = %+v (decision model calls %d), want the decision model's confirm", verdict, calls.Load())
 	}
