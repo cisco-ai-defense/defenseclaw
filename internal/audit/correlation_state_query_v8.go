@@ -47,12 +47,12 @@ func (repo *CorrelationRepository) GetCursor(
 	if err := validateBoundedIdentifier("cursor agent id", agentID, true, maxCorrelationIdentifierBytes); err != nil {
 		return CorrelationCursor{}, err
 	}
-	release, err := repo.store.acquireReady()
+	release, err := repo.acquireReady()
 	if err != nil {
 		return CorrelationCursor{}, err
 	}
 	defer release()
-	return scanCorrelationCursor(repo.store.queryPool().QueryRowContext(ctx, correlationCursorSelect+
+	return scanCorrelationCursor(repo.queryPool().QueryRowContext(ctx, correlationCursorSelect+
 		` WHERE connector_instance_id=? AND session_id=? AND agent_id=?`,
 		string(connectorInstanceID), sessionID, agentID))
 }
@@ -91,12 +91,12 @@ func (repo *CorrelationRepository) findUniqueActiveCursor(
 	if err := validateBoundedIdentifier("cursor session id", sessionID, true, maxCorrelationIdentifierBytes); err != nil {
 		return CorrelationCursor{}, err
 	}
-	release, err := repo.store.acquireReady()
+	release, err := repo.acquireReady()
 	if err != nil {
 		return CorrelationCursor{}, err
 	}
 	defer release()
-	rows, err := repo.store.queryPool().QueryContext(ctx, correlationCursorSelect+`
+	rows, err := repo.queryPool().QueryContext(ctx, correlationCursorSelect+`
 		WHERE connector_instance_id=? AND session_id=? AND active=1`+extraWhere+`
 		ORDER BY updated_time_unix_nano DESC, agent_id LIMIT 2`, string(connectorInstanceID), sessionID)
 	if err != nil {
@@ -194,12 +194,12 @@ func (repo *CorrelationRepository) ListPendingOperations(
 		args = append(args, query.SessionID)
 	}
 	args = append(args, limit)
-	release, err := repo.store.acquireReady()
+	release, err := repo.acquireReady()
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	rows, err := repo.store.queryPool().QueryContext(ctx, correlationPendingSelect+` WHERE `+
+	rows, err := repo.queryPool().QueryContext(ctx, correlationPendingSelect+` WHERE `+
 		strings.Join(clauses, " AND ")+`
 		ORDER BY updated_time_unix_nano DESC, operation_id, operation_type LIMIT ?`, args...)
 	if err != nil {
