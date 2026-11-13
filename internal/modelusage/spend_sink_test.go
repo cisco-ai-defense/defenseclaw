@@ -9,34 +9,27 @@ import (
 )
 
 type recordingSink struct {
-	keys []string
-	usd  float64
-	n    int
+	ids   []string
+	usd   []float64
+	known []bool
 }
 
-func (r *recordingSink) Charge(keys []string, usd float64, _ time.Time) {
-	r.keys, r.usd, r.n = keys, usd, r.n+1
+func (r *recordingSink) Add(callID string, _ []string, usd float64, known bool, _ time.Time) {
+	r.ids, r.usd, r.known = append(r.ids, callID), append(r.usd, usd), append(r.known, known)
 }
 
-func TestChargeBudgetsComputedAgentCostOnly(t *testing.T) {
+func TestChargeBudgetsResolvesTheCost(t *testing.T) {
 	e := NewEngine()
 	sink := &recordingSink{}
 	e.SetSpendSink(sink)
 	computed, reported := 0.25, 9.0
 	keys := []string{"user:d:*:1001"}
-	e.chargeBudgets(CallFacts{CallRole: RoleAgent, ChargeKeys: keys}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
-	if sink.n != 1 || sink.usd != 0.25 || sink.keys[0] != keys[0] {
-		t.Fatalf("computed agent cost: %+v", sink)
-	}
-	e.chargeBudgets(CallFacts{CallRole: RoleAgent, ChargeKeys: keys}, Record{Cost: Cost{USD: &reported, Basis: BasisReported, ComputedUSD: &computed}})
-	if sink.n != 2 || sink.usd != 0.25 {
-		t.Fatalf("a reported cost charges the computed one: %+v", sink)
-	}
-	e.chargeBudgets(CallFacts{CallRole: RoleAgent, ChargeKeys: keys}, Record{Cost: Cost{USD: &reported, Basis: BasisReported}})
-	e.chargeBudgets(CallFacts{CallRole: RoleAgent, ChargeKeys: keys}, Record{})
-	e.chargeBudgets(CallFacts{CallRole: "judge", ChargeKeys: keys}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
-	e.chargeBudgets(CallFacts{CallRole: RoleAgent}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
-	if sink.n != 2 {
-		t.Fatalf("reported-only, unknown, judge and keyless calls charge nothing: %+v", sink)
+	e.chargeBudgets(CallFacts{RequestID: "r1", ChargeKeys: keys}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
+	e.chargeBudgets(CallFacts{RequestID: "r2", ChargeKeys: keys}, Record{Cost: Cost{USD: &reported, Basis: BasisReported, ComputedUSD: &computed}})
+	e.chargeBudgets(CallFacts{RequestID: "r3", ChargeKeys: keys}, Record{Cost: Cost{USD: &reported, Basis: BasisReported}})
+	e.chargeBudgets(CallFacts{RequestID: "r4", ChargeKeys: keys}, Record{})
+	e.chargeBudgets(CallFacts{RequestID: "r5"}, Record{Cost: Cost{USD: &computed, Basis: BasisComputed}})
+	if len(sink.ids) != 4 || sink.usd[0] != 0.25 || sink.usd[1] != 0.25 || sink.usd[2] != 9 || sink.known[3] || !sink.known[2] {
+		t.Fatalf("computed, else reported, unknown passed as unknown, keyless calls skipped: %+v", sink)
 	}
 }

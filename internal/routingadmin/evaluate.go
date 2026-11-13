@@ -18,7 +18,9 @@
 // identity_unconfirmed, category_unknown, rule_deny_not_enforced:<id>,
 // rule_allow_not_enforced:<ids>, budget_warn:<id>, budget_downgrade:<id>,
 // budget_deny_not_enforced:<id>, budget_downgrade_unavailable:<id>,
-// budget_downgrade_not_enforced:<id>, budget_spend_unknown:<id> (warnings).
+// budget_downgrade_not_enforced:<id>, budget_spend_unknown:<id>,
+// budget_cost_unknown:<id> (warnings; budget_cost_unknown:<id> is also a
+// managed deny).
 //
 // Charge keys: user:<id>:*:<caller key> (each user of a * budget),
 // user:<id>:=<sha12 of the subject> (a named user), group:<id>:<sha12 of the
@@ -329,7 +331,23 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 			v.warn("budget_spend_unknown:" + b.ID)
 			continue
 		}
-		if spend < b.LimitUSD {
+		if ledger.Unknown(key, b.Period, now) {
+			// A call of unknown cost: the spend is not known (never 0).
+			// Managed treats the budget as over its limit (deny refuses,
+			// downgrade forces); OSS warns.
+			if !p.Managed {
+				v.warn("budget_cost_unknown:" + b.ID)
+				continue
+			}
+			if b.action == config.RoutingBudgetOnExceedDeny {
+				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "The cost of a model call for budget " + b.ID + " could not be computed, so the budget cannot tell how much is left; ask your administrator to price the model (observability.pricing)."}
+				return
+			}
+			if b.action == config.RoutingBudgetOnExceedWarn {
+				v.warn("budget_cost_unknown:" + b.ID)
+				continue
+			}
+		} else if spend < b.LimitUSD {
 			continue
 		}
 		switch {

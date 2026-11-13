@@ -47,6 +47,10 @@ type Runtime struct {
 	syncing  bool
 	kick     chan struct{}
 	pushMu   sync.Mutex // one push at a time: snapshot and send stay in order
+
+	callsMu   sync.Mutex
+	calls     map[string]struct{}
+	callOrder []string
 }
 
 // Kick asks the sync loop to sync now (a new user was seen).
@@ -148,12 +152,51 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys, hash func(string
 	rt.startSync()
 }
 
-// Charge counts a priced agent call against its budget keys (the usage
-// engine calls it with the computed cost when the call ends).
+// Charge counts usd against keys (no idempotency; tests and Add use it).
 func (rt *Runtime) Charge(keys []string, usd float64, at time.Time) {
 	if l := rt.Ledger(); l != nil {
 		l.Charge(keys, usd, at)
 	}
+}
+
+// recentCallsMax bounds the call ids Add remembers for idempotency.
+const recentCallsMax = 65536
+
+// Add is the one producer call of budget spend (lead ruling 2026-11-12T23:38Z):
+// the usage engine calls it once per finished call with the call id as the
+// idempotency key, the budget keys of the routing verdict and the resolved
+// cost (computed, else reported). known false is a call whose cost is
+// unknown: never counted as 0, the budget reads as unknown for the period.
+func (rt *Runtime) Add(callID string, keys []string, usd float64, known bool, at time.Time) {
+	if rt == nil || len(keys) == 0 {
+		return
+	}
+	l := rt.Ledger()
+	if l == nil {
+		return
+	}
+	if callID != "" {
+		rt.callsMu.Lock()
+		if rt.calls == nil {
+			rt.calls = map[string]struct{}{}
+		}
+		if _, seen := rt.calls[callID]; seen {
+			rt.callsMu.Unlock()
+			return
+		}
+		if len(rt.callOrder) >= recentCallsMax {
+			delete(rt.calls, rt.callOrder[0])
+			rt.callOrder = rt.callOrder[1:]
+		}
+		rt.calls[callID] = struct{}{}
+		rt.callOrder = append(rt.callOrder, callID)
+		rt.callsMu.Unlock()
+	}
+	if !known {
+		l.MarkUnknown(keys, at)
+		return
+	}
+	l.Charge(keys, usd, at)
 }
 
 // For returns the admin evaluator of cfg, or nil when cfg has no

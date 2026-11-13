@@ -308,3 +308,40 @@ func (f *recordingFleet) Totals(_ context.Context, _ string, _ time.Time, keys [
 	f.asked = keys
 	return f.totals, nil
 }
+
+func TestAddIsIdempotentAndUnknownCostIsNotZero(t *testing.T) {
+	budgets := []config.RoutingBudget{
+		{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 10, OnExceed: "deny"},
+		{ID: "g", Scope: "user", Subject: "*", Period: "day", LimitUSD: 10, OnExceed: "downgrade:fast"},
+	}
+	rt := NewRuntime()
+	rt.SetFeed(true)
+	rt.For(adapterConfig(nil, budgets))
+	rt.Ledger().ApplyRemote([]string{"d", "g"}, nil, time.Now())
+	key := "user:d:*:1001"
+	rt.Add("call-1", []string{key}, 2, true, time.Now())
+	rt.Add("call-1", []string{key}, 2, true, time.Now())
+	if got, _ := rt.Ledger().Spend(key, "day", time.Now()); got != 2 {
+		t.Fatalf("one charge per call id: %v", got)
+	}
+	caller := engine.Caller{Verified: true, Key: "1001"}
+	managed := &evaluator{policy: Compile(nil, budgets, true), ledger: rt.Ledger()}
+	if v := managed.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false); v.Deny != nil {
+		t.Fatalf("under the limit: %+v", v.Deny)
+	}
+	rt.Add("call-2", []string{key, "user:g:*:1001"}, 0, false, time.Now())
+	v := managed.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false)
+	if v.Deny == nil || v.Deny.Code != "budget_cost_unknown:d" {
+		t.Fatalf("managed: an unknown cost makes a deny budget refuse: %+v", v)
+	}
+	rt.Add("call-3", []string{"user:d:*:" + OwnerKey}, 0, false, time.Now()) // on OSS every caller is the owner
+	oss := &evaluator{policy: Compile(nil, budgets, false), ledger: rt.Ledger()}
+	v = oss.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false)
+	if v.Deny != nil || !slices.Contains(v.Warnings, "budget_cost_unknown:d") || v.Force != nil {
+		t.Fatalf("OSS warns: %+v", v)
+	}
+	onlyDowngrade := &evaluator{policy: Compile(nil, budgets[1:], true), ledger: rt.Ledger()}
+	if v := onlyDowngrade.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false); !slices.Equal(v.Force, []string{"fast"}) {
+		t.Fatalf("managed: an unknown cost forces the downgrade: %+v", v)
+	}
+}
