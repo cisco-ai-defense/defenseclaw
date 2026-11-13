@@ -608,7 +608,8 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 	if len(input.Argv) == 0 && !mayHoldHostScript(shellCommandText(input)) {
 		return Input{}, false
 	}
-	source, dialect := shellCommandText(input), DialectNone
+	source := shellCommandText(input)
+	var dialect Dialect
 	layers := 0 // launchers already resolved from the argv or the POSIX call
 	switch {
 	case len(input.Argv) != 0:
