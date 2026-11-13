@@ -21,7 +21,14 @@ import (
 // Service, so a test can make the callout's chain check (ChainEgress).
 func newTestChainLeaderService(t *testing.T) (*chainstate.Service, *chainstate.Client) {
 	t.Helper()
-	svc, err := chainstate.New(chainstate.Options{Dir: t.TempDir()})
+	return newTestChainLeaderServiceWith(t, "")
+}
+
+// newTestChainLeaderServiceWith is newTestChainLeaderService with the
+// leader's chain egress action ("" is the shipped default, block).
+func newTestChainLeaderServiceWith(t *testing.T, egressAction string) (*chainstate.Service, *chainstate.Client) {
+	t.Helper()
+	svc, err := chainstate.New(chainstate.Options{Dir: t.TempDir(), EgressAction: egressAction})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -264,7 +264,10 @@ func (a *APIServer) applyAgentHookToolChains(
 	// Managed enterprise policy is authoritative on hook content. Keep the
 	// local semantic/chain lane disabled with the rest of the local scanners
 	// so one request cannot produce competing local and managed decisions.
-	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil {
+	// The switch is the host daemon's: a verified Substrate actor's steps
+	// always feed its actor window on the leader, which the callout's egress
+	// check reads, in every tier (GAP-0211).
+	if a == nil || (ManagedEnterpriseActive() && !isVerifiedSubstrateActor(ctx)) || req.toolChain == nil {
 		return resp, finalization
 	}
 

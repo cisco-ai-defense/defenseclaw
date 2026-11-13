@@ -8,7 +8,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -68,11 +72,25 @@ func (r chartReplica) admit(name, uid string) {
 // PostToolUse on the other, and the callout's chain check then refuses its
 // next request. Before the fix the registration named no agent version, so
 // the kit's pinned hook contract (claudecode-hooks-v2) resolved as unknown
-// and the chain stage skipped the read silently on every replica.
+// and the chain stage skipped the read silently on every replica. The same
+// holds in every tier (GAP-0211): the default and strict packs and
+// managed_enterprise, whose local chain switch is the host daemon's.
 func TestSubstrateChartInstallSecretReadRefusedGAP0201(t *testing.T) {
+	// The shipped profile (PLAN 5.3): a chain hit refuses in every tier,
+	// because actors are unattended; "alert" is the operator's opt-in.
+	for _, tier := range []string{"oss", "strict", "managed_enterprise", "alert"} {
+		t.Run(tier, func(t *testing.T) { chartInstallSecretRead(t, tier) })
+	}
+}
+
+func chartInstallSecretRead(t *testing.T, tier string) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
-	svc, chains := newTestChainLeaderService(t)
+	action := ""
+	if tier == "alert" {
+		action = chainstate.EgressAlert
+	}
+	svc, chains := newTestChainLeaderServiceWith(t, action)
 	fake := ateapifake.New()
 	fake.PutTemplate(&ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "claude"}})
 	profiles := func(identity.Person, string, string, bool) (string, string, error) { return "eng", "eng-web", nil }
@@ -84,6 +102,15 @@ func TestSubstrateChartInstallSecretReadRefusedGAP0201(t *testing.T) {
 		r.f.api.store, r.f.api.logger = testStoreAndV8Logger(t)
 	}
 	r1.f.api.substrateState().cfg.Actions = chartTemplateActions(fake, attestedClaudeKit())
+	switch tier {
+	case "strict":
+		for _, r := range []chartReplica{r1, r2} {
+			r.f.api.scannerCfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+		}
+	case "managed_enterprise":
+		SetManagedEnterpriseActive(true)
+		t.Cleanup(func() { SetManagedEnterpriseActive(false) })
+	}
 
 	rec := r1.f.do(t, r1.f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice",
 		`{"template":"claude","connector":"claudecode","name":"alice-chart","unattended":true}`)
@@ -107,7 +134,13 @@ func TestSubstrateChartInstallSecretReadRefusedGAP0201(t *testing.T) {
 	check := func(when string, wantDeny bool) {
 		t.Helper()
 		v, err := svc.Egress(context.Background(), egress)
-		if err != nil || v.Deny != wantDeny || (wantDeny && v.Rule != guardrail.ToolChainSecretReadThenEgress) {
+		hit := wantDeny
+		if tier == "alert" {
+			// The same detection, allowed with an alert.
+			wantDeny = false
+		}
+		if err != nil || v.Deny != wantDeny || (hit && (v.Rule != guardrail.ToolChainSecretReadThenEgress ||
+			!slices.Contains(v.Detected, guardrail.ToolChainSecretReadThenEgress))) {
 			t.Errorf("%s: egress %+v err=%v, want deny=%v", when, v, err, wantDeny)
 		}
 	}
@@ -166,4 +199,55 @@ func withHarness(t *testing.T, f *substrateFixture, name, version, contract stri
 	}
 	reg.HarnessVersion, reg.HookContract = version, contract
 	return reg
+}
+
+// TestHostChainLaneKeepsTheManagedSwitchGAP0211: GAP-0211 lifts the
+// managed switch for Substrate actors only. A host daemon's hook keeps it:
+// the same two-step chain that a host call shows on the strict pack is
+// absent once managed_enterprise is active.
+func TestHostChainLaneKeepsTheManagedSwitchGAP0211(t *testing.T) {
+	installCorrelationHMACForTest()
+	for _, managedOn := range []bool{false, true} {
+		installDefaultProfileConnector(t, "claudecode")
+		store, logger := testStoreAndV8Logger(t)
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.Connector = "claudecode"
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+		api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+		handler := http.HandlerFunc(api.handleAgentHook("claudecode"))
+		SetManagedEnterpriseActive(managedOn)
+		session := "host-managed-" + map[bool]string{false: "off", true: "on"}[managedOn]
+		callAgentHookForTest(t, handler, claudeToolEvent("PreToolUse", session, "discover", "sudo -l"))
+		callAgentHookForTest(t, handler, claudeToolResult("PostToolUse", session, "discover"))
+		got := callAgentHookForTest(t, handler, claudeToolEvent("PreToolUse", session, "elevate", "sudo -u root /bin/sh"))
+		SetManagedEnterpriseActive(false)
+		if present := slices.Contains(got.RuleIDs, guardrail.ToolChainPrivilegeDiscoveryThenElevation); present == managedOn {
+			t.Fatalf("managed=%v: chain present=%v, want %v (%+v)", managedOn, present, !managedOn, got)
+		}
+	}
+}
+
+// TestTrustedActionManagedSwitchGAP0211: dispatchTrustedAction
+// (trusted_action_dispatch.go) returns no findings on a managed host call,
+// and evaluates a verified Substrate actor's call (isVerifiedSubstrateActor).
+func TestTrustedActionManagedSwitchGAP0211(t *testing.T) {
+	const connector = "r104-gap-0531"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	home, cwd := r104ReviewHome(t)
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "id_ed25519"), []byte("test-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]string{"command": `cat "$HOME/.ssh/id_ed25519"`})
+	req := trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: cwd, ActiveHome: home,
+		DialectHint: actionfacts.DialectPOSIX}, LegacyText: string(args), Connector: connector, EnforcementCapable: true}
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(false) })
+	if got := dispatchTrustedAction(t.Context(), req); len(got) != 0 {
+		t.Fatalf("managed host call: %v, want no findings", findingIDs(got))
+	}
+	actorCtx := withSubstrateActor(t.Context(), chainTestActor())
+	if got := dispatchTrustedAction(actorCtx, req); len(got) == 0 {
+		t.Fatal("managed Substrate actor call: no findings")
+	}
 }
