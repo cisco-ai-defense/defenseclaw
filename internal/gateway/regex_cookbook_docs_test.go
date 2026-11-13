@@ -141,7 +141,9 @@ func TestRegexCookbookSamplesMatchTheShippedRules(t *testing.T) {
 			t.Errorf("%s: findings %v, the page says %s", call, resp.Findings, rule)
 		}
 		// The page says a regex match in a tool call alerts and does not block.
-		if resp.Action != "allow" {
+		// A tool result is HIGH at most (no result-side block in the default
+		// pack, GAP-0171), so the key in the output is an alert.
+		if resp.Action == guardrailActionBlock {
 			t.Errorf("%s: action %q, the page says the call is not blocked", call, resp.Action)
 		}
 	}
