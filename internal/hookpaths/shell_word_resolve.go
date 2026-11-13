@@ -222,6 +222,33 @@ func resolverPatternActive(pattern string) bool {
 	return false
 }
 
+// resolverWordTargets are the words a shell word may name a file with: the
+// word itself, and for an attached option value (dd of=PATH, --output=PATH)
+// the text after the first equals sign of its leading literal.
+func resolverWordTargets(word *syntax.Word) []*syntax.Word {
+	targets := []*syntax.Word{word}
+	if word == nil || len(word.Parts) == 0 {
+		return targets
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return targets
+	}
+	name, rest, found := strings.Cut(lit.Value, "=")
+	if !found || name == "" || strings.ContainsAny(name, "*?[\\/ ") {
+		return targets
+	}
+	parts := make([]syntax.WordPart, 0, len(word.Parts))
+	if rest != "" {
+		parts = append(parts, &syntax.Lit{Value: rest})
+	}
+	parts = append(parts, word.Parts[1:]...)
+	if len(parts) == 0 {
+		return targets
+	}
+	return append(targets, &syntax.Word{Parts: parts})
+}
+
 // shellWordNeedsResolver is the cheap syntactic test for a word whose
 // shell expansion can differ from its plain value: a glob character in any
 // part (quoted, escaped or active), an ANSI-C string, or a backslash. A word

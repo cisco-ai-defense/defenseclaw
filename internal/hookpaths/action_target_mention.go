@@ -258,13 +258,17 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// through the one resolver, and every candidate it names is
 			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
 			if posixWords && !stateOnly && shellWordNeedsResolver(word) {
-				resolved := resolveShellWord(word, values, effectiveCWD, globOptions)
-				for _, candidate := range resolved.candidates {
-					if checkAs(candidate, false, effectiveCWD, true) {
-						return true
+				settled := true
+				for _, target := range resolverWordTargets(word) {
+					resolved := resolveShellWord(target, values, effectiveCWD, globOptions)
+					for _, candidate := range resolved.candidates {
+						if checkAs(candidate, false, effectiveCWD, true) {
+							return true
+						}
 					}
+					settled = settled && resolved.uncertain == ""
 				}
-				if resolved.uncertain == "" {
+				if settled {
 					return false
 				}
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
