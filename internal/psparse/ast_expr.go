@@ -23,6 +23,7 @@ type StringLit struct {
 	Parts  []StringPart // for expandable strings
 	Bare   bool         // was an unquoted bareword
 	Raw    string       // the exact source span (for the Static value allowlist)
+	Fused  bool         // several adjacent atoms composed into one word (a'b"c"'); its value is not one native argv word
 }
 
 func (*StringLit) expr()    {}

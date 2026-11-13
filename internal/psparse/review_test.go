@@ -198,7 +198,7 @@ func TestRevNested(t *testing.T) {
 		{"start_process_noprofile_enc", "Start-Process powershell -ArgumentList '-NoProfile','-EncodedCommand','" + b + "'", KindStartProcessArgs, "<dyn>"},
 		{"scriptblock_full_type", `[System.Management.Automation.ScriptBlock]::Create('Remove-Item C:\x')`, KindScriptBlockCreate, payload},
 		{"cmd_c_rest", `cmd /c del C:\x`, KindCmdC, `del C:\x`},
-		{"cmd_full_path", `C:\Windows\System32\cmd.exe /c "del C:\x"`, KindCmdC, `del C:\x`},
+		{"cmd_full_path", `C:\Windows\System32\cmd.exe /c "del C:\x"`, KindCmdC, "<dyn>"}, // a quoted payload word is NotStatic (review 9 R9-2)
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

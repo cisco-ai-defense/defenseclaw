@@ -231,7 +231,7 @@ func TestRev6CmdCleanStillStatic(t *testing.T) {
 		{`cmd /c del C:\x`, `del C:\x`},
 		{`cmd /k dir`, `dir`},
 		{`cmd /C del C:\x`, `del C:\x`},
-		{`cmd.exe /c "del C:\x"`, `del C:\x`},
+		{`cmd.exe /c del C:\x`, `del C:\x`},
 	}
 	for _, c := range cases {
 		ns, ok := firstNestedOfKind(c.src, DialectPwsh7, KindCmdC)

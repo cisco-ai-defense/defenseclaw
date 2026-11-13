@@ -493,7 +493,7 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		if amb {
 			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
 		}
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end)}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end), Fused: true}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {

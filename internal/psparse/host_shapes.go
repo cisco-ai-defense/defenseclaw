@@ -4,7 +4,10 @@
 
 package psparse
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // Host-call shapes: the allowlist behind a Static host nested script.
 //
@@ -48,7 +51,6 @@ var psHostOpts = map[string]bool{
 	"-windowstyle": true, "-w": true,
 	"-inputformat": true, "-if": true,
 	"-outputformat": true, "-of": true,
-	"-workingdirectory": true, "-wd": true,
 }
 
 var psCommandSwitches = map[string]bool{"-c": true, "-command": true}
@@ -103,8 +105,11 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 			if len(rest) == 0 {
 				return "", 0, ReasonHostShape
 			}
-			if len(rest) == 1 && rest[0].text == "-" {
-				return "", 0, ReasonStdin
+			if rest[0].text == "-" {
+				if len(rest) == 1 {
+					return "", 0, ReasonStdin
+				}
+				return "", 0, ReasonHostOption // pwsh rejects -c - with more words (review 9 R9-5)
 			}
 			return shapePSCommand, i, ""
 		case psEncodedSwitches[lw]:
@@ -160,63 +165,63 @@ func psHostNested(c *Command) []NestedScript {
 	return out
 }
 
-// cmdShapeReject returns "" when a cmd invocation's argv is the cmd-run shape,
-// else the reason code that names why it is not.
-func cmdShapeReject(c *Command) string {
-	stop := c.StopParsing != ""
-	for _, el := range c.Elements {
-		if a, ok := el.(*Arg); ok {
-			if v, ok := LiteralString(a.Value); ok && v == "--%" {
-				stop = true
-			}
-		}
+// matchCmdShape reports whether a cmd invocation is the cmd-run shape and, when
+// it is, the index of its run switch; otherwise the reason names why not. The
+// payload words must each be one native argv word with no whitespace and no
+// quote character, so joining them with spaces is provably the command line cmd
+// receives: the PowerShell caller wraps a word that holds whitespace in quotes
+// and cmd /c keeps them (review 9 R9-2), which the join would lose.
+func matchCmdShape(c *Command, words []hostWord) (idx int, reason string) {
+	if hostHasStopParse(c, words) {
+		return 0, ReasonStopParsing
 	}
-	if stop {
-		return ReasonStopParsing
-	}
-	for _, el := range c.Elements {
-		a, ok := el.(*Arg)
-		if !ok {
-			return ReasonCmdArgv
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if !w.static || w.colon {
+			return 0, ReasonCmdArgv
 		}
-		s, ok := LiteralString(a.Value)
-		if !ok || s == "" || s != strings.TrimSpace(s) {
-			return ReasonCmdArgv
+		if w.text == "" || w.text != strings.TrimSpace(w.text) {
+			return 0, ReasonCmdArgv
 		}
-		l := strings.ToLower(s)
+		l := strings.ToLower(w.text)
 		if l == "/c" || l == "/k" || l == "/r" {
-			// the payload words after the switch must all be whole static words
-			return cmdPayloadReject(c, el)
+			rest := words[i+1:]
+			if len(rest) == 0 {
+				return 0, ReasonCmdArgv
+			}
+			for _, r := range rest {
+				if !r.static || r.colon {
+					return 0, ReasonNonLiteral
+				}
+				if r.text == "" || strings.ContainsAny(r.text, "\"'") || strings.IndexFunc(r.text, unicode.IsSpace) >= 0 {
+					return 0, ReasonCmdArgv
+				}
+			}
+			return i, ""
 		}
 		if !cmdHostOpts[l] {
-			return ReasonCmdArgv
+			return 0, ReasonCmdArgv
 		}
 	}
-	return ReasonCmdArgv // no run switch
+	return 0, ReasonCmdArgv // no run switch
 }
 
-func cmdPayloadReject(c *Command, sw CommandElement) string {
-	seen := false
-	n := 0
-	for _, el := range c.Elements {
-		if el == sw {
-			seen = true
-			continue
+// cmdHostNested is the only producer of nested scripts for a cmd host call: the
+// cmd-run shape is Static, anything else NotStatic with the reason from the
+// table. cmdCScript only decides whether a non-table call hides a payload.
+func cmdHostNested(c *Command) []NestedScript {
+	words := hostWords(c)
+	idx, reason := matchCmdShape(c, words)
+	if reason == "" {
+		parts := make([]string, 0, len(words)-idx-1)
+		for _, w := range words[idx+1:] {
+			parts = append(parts, w.text)
 		}
-		if !seen {
-			continue
-		}
-		a, ok := el.(*Arg)
-		if !ok {
-			return ReasonCmdArgv
-		}
-		if _, ok := LiteralString(a.Value); !ok {
-			return ReasonCmdArgv
-		}
-		n++
+		return []NestedScript{{Kind: KindCmdC, Dialect: "cmd", Source: c, Static: true, Text: strings.Join(parts, " ")}}
 	}
-	if n == 0 {
-		return ReasonCmdArgv
+	if ns, ok := cmdCScript(c); ok {
+		ns.Static, ns.Text, ns.Reason = false, "", reason
+		return []NestedScript{ns}
 	}
-	return ""
+	return nil
 }
