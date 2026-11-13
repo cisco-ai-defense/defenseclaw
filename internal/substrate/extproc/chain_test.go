@@ -62,15 +62,18 @@ func (u unattendedPolicies) PolicyFor(ctx context.Context, a ActorRef) (*Policy,
 // a panic in the chain check is not a silent allow.
 func TestChainUncheckedFollowsFailureMode(t *testing.T) {
 	ctx := context.Background()
+	// A budget a loaded race-detector run can't miss for an immediate error
+	// or panic; the timeout checker sleeps well past it.
+	const budget = 200 * time.Millisecond
 	checkers := map[string]ChainChecker{
 		uncheckedError:    fakeChecker{err: errors.New("leader down")},
-		uncheckedTimeout:  fakeChecker{delay: 80 * time.Millisecond},
+		uncheckedTimeout:  fakeChecker{delay: 2 * budget},
 		uncheckedInternal: panicChecker{},
 	}
 	for why, chk := range checkers {
 		t.Run(why, func(t *testing.T) {
 			// auto, interactive: allowed with an alert.
-			h := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = chk })
+			h := newHarness(t, func(c *Config, o *Options) { o.ChainChecker = chk; c.Chain.CheckBudget = budget })
 			v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
 			if !v.Allow || !v.Alert || !strings.Contains(strings.Join(v.Findings, ","), "chain_unchecked:"+why) {
 				t.Fatalf("interactive: %+v", v)
@@ -78,6 +81,7 @@ func TestChainUncheckedFollowsFailureMode(t *testing.T) {
 			// auto, unattended: refused, retryable.
 			h = newHarness(t, func(c *Config, o *Options) {
 				o.ChainChecker = chk
+				c.Chain.CheckBudget = budget
 				sp, err := NewStaticPolicies(c)
 				if err != nil {
 					t.Fatal(err)
