@@ -263,7 +263,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	var c common
 	c.bind(fs)
 	var (
-		connectorName = fs.String("connector", "claudecode", "claudecode or codex")
+		connectorName = fs.String("connector", "claudecode", kit.ConnectorList())
 		from          = fs.String("from", "", "base image (the OpenShell harness image for the connector)")
 		to            = fs.String("to", "", "target repository and tag")
 		kitVersion    = fs.String("kit-version", "dev", "kit version")
@@ -611,7 +611,7 @@ func runScan(ctx context.Context, args []string, stdout io.Writer) (int, error) 
 	noMCP := fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 	analyzers := fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
 	blockAt := fs.String("block-at", "high", "lowest finding severity that blocks (critical, high, medium, low, none)")
-	connectorName := fs.String("connector", "", "check the kit's hook files and switches for this connector (claudecode or codex)")
+	connectorName := fs.String("connector", "", "check the kit's hook files and switches for this connector ("+kit.ConnectorList()+")")
 	var mcpHosts multi
 	fs.Var(&mcpHosts, "mcp-host", "remote MCP host that is allowed (repeatable)")
 	image, rest := splitFirst(args)
