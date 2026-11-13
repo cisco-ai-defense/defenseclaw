@@ -67,9 +67,20 @@ type SimpleCommand struct {
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
-	// view can be produced. A parse gap is not an action refusal.
+	// view can be produced, and EvaluationFailureInternal when the reader
+	// itself failed. A parse gap is not an action refusal.
 	EvaluationFailure string
 }
+
+// EvaluationFailureInternal is the EvaluationFailure of a call whose
+// per-command reading stopped on an internal reader error (a recovered
+// panic): nothing of the call was read, so it is unknown, never ordinary
+// (gas-ux-r2:GAP-0082).
+const EvaluationFailureInternal = "internal"
+
+// simpleCommandsFault is a test-only seam: when non-nil SimpleCommands calls
+// it first, so a test can make the reader fail. Production never sets it.
+var simpleCommandsFault func()
 
 type simpleShellState struct {
 	cwd        string
@@ -133,7 +144,15 @@ func (pieces *simplePieces) has(command SimpleCommand) bool {
 // addition to the original action. A plain single command needs no second
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
-func SimpleCommands(input Input, facts Facts) []SimpleCommand {
+func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
+	defer func() {
+		if recover() != nil {
+			commands = []SimpleCommand{{EvaluationFailure: EvaluationFailureInternal}}
+		}
+	}()
+	if simpleCommandsFault != nil {
+		simpleCommandsFault()
+	}
 	argsOnly := input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax)
 	var pieces *simplePieces
 	if argsOnly && argsExecutionTool(input.Tool) {

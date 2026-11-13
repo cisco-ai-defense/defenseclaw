@@ -204,6 +204,7 @@ func DefaultConfig() *Config {
 			HookSelfHealDebounceMs:      500,
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
+			EffectsRules:                "shadow",
 			Judge: JudgeConfig{
 				Injection:     true,
 				PII:           true,

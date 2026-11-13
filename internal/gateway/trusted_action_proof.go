@@ -34,6 +34,10 @@ const (
 	findingProofParserShadow
 	findingProofEvaluationFailure
 	findingProofActiveStateMutation
+	// findingProofEffect is the effect-model rule lane. It is authoritative
+	// (may authorize a synchronous deny) only when the effect rules are ON;
+	// in shadow it rides along detection-only.
+	findingProofEffect
 )
 
 // findingProof is deliberately value-free. It records neither argv nor shell
@@ -129,11 +133,13 @@ func newParserShadowFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
 
-// Only an actual evaluation limit can authorize a refusal. Parse uncertainty
-// remains a diagnostic and cannot decide an action.
+// Only an actual evaluation limit or an internal reader failure can
+// authorize a refusal; the profile turns either into an alert outside the
+// strict tier (guardrailActionForProfile). Parse uncertainty remains a
+// diagnostic and cannot decide an action.
 func newEvaluationFailureFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofEvaluationFailure, ruleID,
-		ruleID == "ACTION-COMPOUND-LIMIT")
+		ruleID == "ACTION-COMPOUND-LIMIT" || ruleID == parseFailureRuleID)
 }
 
 func newFindingProof(
@@ -165,6 +171,7 @@ func (p findingProof) authorizes(ruleID string) bool {
 	case findingProofActionFactsSemantic,
 		findingProofActionFactsSubgraph,
 		findingProofActiveStateMutation,
+		findingProofEffect,
 		findingProofExactCodeGuard,
 		findingProofExactFallback,
 		findingProofResolvedTarget,
