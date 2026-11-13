@@ -6,8 +6,11 @@ package modelusage
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"sync/atomic"
 	"time"
 )
+
+var callIDFallback atomic.Uint64
 
 // SpendSink is where finished calls charge routing.admin budgets: the
 // routing admin runtime (routingadmin.Runtime.Add). The gateway wires it in;
@@ -57,6 +60,13 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 // its budget charge).
 func newCallID() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		// never an all-zero id, which would make every call a replay
+		n := callIDFallback.Add(1)
+		for i := 0; i < 8; i++ {
+			b[i] = byte(n >> (8 * i))
+		}
+		b[15] = 0xff
+	}
 	return hex.EncodeToString(b[:])
 }

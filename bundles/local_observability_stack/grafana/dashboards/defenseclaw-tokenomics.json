@@ -1356,13 +1356,202 @@
       }
     },
     {
+      "id": 28,
+      "type": "row",
+      "title": "Provider, connector and unknown cost",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 74,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Cost by provider",
+      "description": "Cost by the provider the call was sent to (the selected provider after routing).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 75,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (provider) (increase(defenseclaw_model_cost_USD_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 1,
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "barchart",
+      "title": "Tokens by connector (range)",
+      "description": "All token kinds by the agent connector that made the call, over the range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 75,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (connector) (((increase(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) * 0)) and defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range) or (last_over_time(defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"}[$__range]) unless defenseclaw_model_tokens_total{connector=~\"$connector\",model=~\"$model\",profile=~\"$profile\",route_decision=~\"$route_decision\"} offset $__range))",
+          "refId": "A",
+          "legendFormat": "{{connector}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range"
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "showValue": "auto"
+      }
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "Calls with unknown cost (count)",
+      "description": "Number of model.usage records with cost.basis none in the range: no price entry matched or the provider reported no usage. Unknown cost is never counted as zero.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 83,
+        "w": 6,
+        "h": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "(sum(count_over_time({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"model.usage\" | connector=~\"$connector\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | body_defenseclaw_cost_basis=\"none\" [$__range])) or vector(0))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No data in range",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 32,
+      "type": "text",
+      "title": "Own usage and all usage",
+      "description": "Who sees what.",
+      "gridPos": {
+        "x": 6,
+        "y": 83,
+        "w": 18,
+        "h": 5
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**All usage.** Metrics carry no user or group, by design, so every panel on this dashboard shows the whole gateway to whoever can open Grafana. The table Top users by cost reads `model.usage` logs and is an administrator view.\n\n**Own usage.** A person sees only their own usage from the gateway: `GET /usage` (own rows only on a managed host), the own-status answer on managed Windows, and `defenseclaw setup tokenomics --status`. Group rollups are administrator-only and never leave the endpoint."
+      }
+    },
+    {
       "id": 25,
       "type": "row",
       "title": "Pipeline health",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 74,
+        "y": 89,
         "w": 24,
         "h": 1
       },
@@ -1379,7 +1568,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 75,
+        "y": 90,
         "w": 12,
         "h": 6
       },
@@ -1431,7 +1620,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 75,
+        "y": 90,
         "w": 12,
         "h": 6
       },

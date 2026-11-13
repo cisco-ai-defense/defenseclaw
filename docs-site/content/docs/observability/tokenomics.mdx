@@ -128,7 +128,7 @@ Two counters carry the numbers to Prometheus, Grafana or any other metric destin
 | --- | --- | --- |
 | `defenseclaw.model.cost` | USD | Cost of model calls that have a cost. |
 | `defenseclaw.model.tokens` | tokens | Token counts, with a `kind` label. |
-| `defenseclaw.tokenomics.dropped` | records | Usage records dropped because the bounded queue was full. |
+| `defenseclaw.tokenomics.dropped` | records | Usage records lost before they were counted: the bounded queue was full, or the local store reached its bucket or row cap. |
 
 `defenseclaw.model.tokens` counts five disjoint kinds: `input` (uncached prompt tokens), `cache_read`, `cache_creation`, `output` (without reasoning) and `reasoning`. No kind contains another, so the sum over all kinds is the real total. The `gen_ai.client.token.usage` metric is unchanged and counts input with cache and output with reasoning, so it does not add up the same way.
 

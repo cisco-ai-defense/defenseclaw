@@ -31,7 +31,7 @@ DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder, or 2
 | **DefenseClaw — Scanners (Ops)** (`defenseclaw-scanners`) | Are scans healthy and producing the expected findings? | Prometheus |
 | **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
 | **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
-| **DefenseClaw — Tokenomics** (`defenseclaw-tokenomics`) | What do model calls cost, by model, route, connector and profile, and how many calls have no known cost? Per-user cost reads `model.usage` logs. | Prometheus, Loki |
+| **DefenseClaw — Tokenomics** (`defenseclaw-tokenomics`) | What do model calls cost, by model, provider, route, connector and profile, how many calls have no known cost, and were any usage records dropped? Per-user cost reads `model.usage` logs and is an administrator view; a person sees their own usage from `GET /usage`. | Prometheus, Loki |
 | **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
 
 ## Kernel controls and your Tetragon policies

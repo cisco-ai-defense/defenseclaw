@@ -468,3 +468,64 @@ func TestNativeClaudeProvider(t *testing.T) {
 		}
 	}
 }
+
+type countingSpendSink struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingSpendSink) Add(string, []string, float64, bool, time.Time) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+}
+
+func TestRouteOnlyConfigMakesNativeUsageACrossCheckSoOneProxiedCallIsOneCharge(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
+	setNativeUsageSuppression(cfg)
+	t.Cleanup(func() { setNativeUsageSuppression(nil) })
+	if !nativeUsageSuppressed("claudecode") || nativeUsageSuppressed("codex") || !nativeUsageSuppressed(" ClaudeCode ") {
+		t.Fatal("suppression follows routing.route_only.connectors")
+	}
+
+	fixture := newCodexNativeOTLPFixture(t)
+	sink := installNativeUsageEngine(t, config.TokenomicsConfig{Enabled: true})
+	engine := processModelUsage.Load()
+	spend := &countingSpendSink{}
+	engine.SetSpendSink(spend)
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+
+	// the call goes through the route-only listener: one record, one charge
+	call := engine.Begin(context.Background(), modelusage.CallFacts{
+		Connector: "claudecode", Listener: "route_only", APIFamily: modelusage.FamilyMessages, CallRole: modelusage.RoleAgent,
+		SelectedProvider: "anthropic", SelectedModel: "claude-sonnet-4-5-20250929", ChargeKeys: []string{"user:1001"},
+	})
+	call.Body([]byte(`{"model":"claude-sonnet-4-5-20250929","usage":{"input_tokens":12,"output_tokens":431}}`))
+	call.End(nil)
+	sink.one(t)
+
+	// the same call, reported again by Claude Code in its own OTLP stream
+	now := time.Now().UTC()
+	if _, err := api.importDecodedOTLPRequestV8(
+		context.Background(), claudeAPIRequestLog(now, claudeAPIRequestAttributes()), otelSignalLogs, "claudecode", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	sink.none(t)
+	spend.mu.Lock()
+	defer spend.mu.Unlock()
+	if spend.calls != 1 {
+		t.Fatalf("budget charges = %d, want 1 for one proxied call", spend.calls)
+	}
+
+	// without route-only the same leaf is the source
+	setNativeUsageSuppression(nil)
+	if _, err := api.importDecodedOTLPRequestV8(
+		context.Background(), claudeAPIRequestLog(now, claudeAPIRequestAttributes()), otelSignalLogs, "claudecode", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	sink.one(t)
+}

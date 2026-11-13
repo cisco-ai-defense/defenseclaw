@@ -57,28 +57,49 @@ func TestStoreRowCapDropsNewRowsAndKeepsUpdatingOld(t *testing.T) {
 	s := openStore(t)
 	s.maxRows = 3
 	now := time.Now()
-	for h := 0; h < 5; h++ {
+	hour := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
+	for h := 0; h < 3; h++ {
+		s.Emit(context.Background(), rec("1", nil, "m", f(1), hour(h)))
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if s.DropTotals()["row_cap"] != 0 {
+		t.Fatalf("three rows fit the cap: %v", s.DropTotals())
+	}
+	// at the cap: two new hours are dropped and counted, an existing hour still updates
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), hour(3)))
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), hour(4)))
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), now))
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if s.DropTotals()["row_cap"] != 2 {
+		t.Fatalf("two new rows past the cap must be dropped and counted: %v", s.DropTotals())
+	}
+	rows, _ := s.Run(context.Background(), Query{By: "hour", AllOwners: true, From: hour(48)})
+	var calls int64
+	for _, r := range rows {
+		calls += r.Calls
+	}
+	if len(rows) != 3 || calls != 4 {
+		t.Fatalf("rows=%d calls=%d, want 3 rows and 4 calls (3 + the update, not the dropped new rows)", len(rows), calls)
+	}
+}
+
+func TestOneFlushNeverOvershootsTheRowCap(t *testing.T) {
+	s := openStore(t)
+	s.maxRows = 3
+	now := time.Now()
+	for h := 0; h < 10; h++ {
 		s.Emit(context.Background(), rec("1", nil, "m", f(1), now.Add(-time.Duration(h)*time.Hour)))
 	}
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	// the flush that saw the table below the cap wrote all five; the next flush is at the cap
-	s.Emit(context.Background(), rec("1", nil, "m", f(1), now.Add(-10*time.Hour)))
-	s.Emit(context.Background(), rec("1", nil, "m", f(1), now)) // an existing row still updates
-	if err := s.Flush(); err != nil {
-		t.Fatal(err)
-	}
-	if s.DropTotals()["row_cap"] != 1 {
-		t.Fatalf("one new row past the cap must be dropped and counted: %v", s.DropTotals())
-	}
 	rows, _ := s.Run(context.Background(), Query{By: "hour", AllOwners: true, From: now.Add(-48 * time.Hour)})
-	var calls int64
-	for _, r := range rows {
-		calls += r.Calls
-	}
-	if calls != 6 {
-		t.Fatalf("calls = %d, want 6 (5 + the update, not the dropped new row)", calls)
+	if len(rows) != 3 || s.DropTotals()["row_cap"] != 7 {
+		t.Fatalf("rows=%d drops=%v", len(rows), s.DropTotals())
 	}
 }
 

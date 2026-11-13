@@ -29,7 +29,6 @@ const (
 
 var (
 	profileLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	providerKeyPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
 )
 
 // snapshot is the immutable view of the config one call is recorded under.
@@ -177,10 +176,8 @@ func (e *Engine) reportDrops() {
 	e.mu.RUnlock()
 	totals := map[string]int64{"queue": e.dropped.Load()}
 	for _, s := range sinks {
-		if src, ok := s.(DropSource); ok {
-			for kind, n := range src.DropTotals() {
-				totals[kind] += n
-			}
+		for kind, n := range dropTotalsSafe(s) {
+			totals[kind] += n
 		}
 	}
 	e.dropMu.Lock()
@@ -203,6 +200,19 @@ func (e *Engine) reportDrops() {
 			reportSafe(r, lost)
 		}
 	}
+}
+
+// dropTotalsSafe asks a sink for its loss counters; a sink that panics reports none.
+func dropTotalsSafe(s Sink) (out map[string]int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = nil
+		}
+	}()
+	if src, ok := s.(DropSource); ok {
+		return src.DropTotals()
+	}
+	return nil
 }
 
 func reportSafe(r DropReporter, n int64) {
@@ -482,10 +492,20 @@ func (s *snapshot) modelKey(f CallFacts, cost Cost, u Usage) string {
 // providerKey bounds a provider name: a plain lower-case identifier, else other.
 func providerKey(p string) string {
 	p = strings.ToLower(strings.TrimSpace(p))
-	if providerKeyPattern.MatchString(p) {
+	if knownProviders[p] {
 		return p
 	}
 	return "other"
+}
+
+// knownProviders is the closed set of provider names that become a metric
+// label or a store key; any other provider is other, so a client or a custom
+// provider name cannot add series.
+var knownProviders = map[string]bool{
+	"anthropic": true, "openai": true, "bedrock": true, "azure": true, "gemini": true, "google": true,
+	"vertex": true, "ollama": true, "vllm": true, "lm_studio": true, "openrouter": true, "mistral": true,
+	"cohere": true, "groq": true, "xai": true, "deepseek": true, "together": true, "fireworks": true,
+	"perplexity": true, "cerebras": true, "huggingface": true, "nvidia": true, "decision_model": true, "ai_defense": true,
 }
 
 func (s *snapshot) metricLabels(f CallFacts, model, provider string) []Label {

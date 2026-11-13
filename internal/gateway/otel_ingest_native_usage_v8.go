@@ -7,22 +7,55 @@ import (
 	"context"
 	"math"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
 )
 
-// nativeUsageSuppressed reports whether the guardrail proxy or the route-only
-// listener carries the model traffic of connector. While it does, that path
-// records every call, so the usage the agent reports in its own OTLP stream is
-// a cross-check only: its log.model.response import still runs, but nothing
-// is counted from it (no log.model.usage, no cost or token counter, no store
-// row, no budget spend). The routing pod (S1) sets it when it wires the
-// listeners; the default never suppresses (hook-only connectors take native
-// usage as the source).
-var nativeUsageSuppressed = func(connector string) bool { return false }
+// nativeUsageSuppressed reports whether the route-only listener or the
+// guardrail proxy carries the model traffic of connector. While it does, that
+// path records every call, so the usage the agent reports in its own OTLP
+// stream is a cross-check only: its log.model.response import still runs, but
+// nothing is counted from it (no log.model.usage, no cost or token counter,
+// no store row, no budget spend). The answer comes from the loaded config, not
+// from a per-call guess: a hook connector listed in routing.route_only.connectors
+// sends its model calls through the gateway (D6); a hook-only connector takes
+// native usage as the source. applyModelUsage refreshes it on start and on
+// every reload.
+var nativeUsageSuppressed = func(connector string) bool {
+	set := nativeCarriedConnectors.Load()
+	if set == nil {
+		return false
+	}
+	_, carried := (*set)[strings.ToLower(strings.TrimSpace(connector))]
+	return carried
+}
+
+var nativeCarriedConnectors atomic.Pointer[map[string]struct{}]
+
+// setNativeUsageSuppression records which connectors the gateway carries the
+// model traffic of, from a validated config.
+func setNativeUsageSuppression(cfg *config.Config) {
+	if cfg == nil {
+		nativeCarriedConnectors.Store(nil)
+		return
+	}
+	set := map[string]struct{}{}
+	for _, c := range cfg.Routing.RouteOnly.Connectors {
+		if c = strings.ToLower(strings.TrimSpace(c)); c != "" {
+			set[c] = struct{}{}
+		}
+	}
+	if len(set) == 0 {
+		nativeCarriedConnectors.Store(nil)
+		return
+	}
+	nativeCarriedConnectors.Store(&set)
+}
 
 // Inbound classes whose leaves carry one model call and derive a usage record.
 const (

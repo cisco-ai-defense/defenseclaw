@@ -409,10 +409,14 @@ func (s *Store) flushLocked() error {
 			s.rowCap++
 			continue
 		}
+		exists := rows >= s.maxRows && s.rowExists(tx, k)
 		if _, err = tx.Exec(upsert, k.hour, k.owner, k.connector, k.provider, k.model, k.route, k.role, k.prof, k.family, k.basis,
 			a.calls, a.errors, a.usageCalls, a.input, a.output, a.cacheRead, a.cacheCreate, a.reasoning, cost, a.costCalls, a.latencyMs); err != nil {
 			_ = tx.Rollback()
 			return err
+		}
+		if !exists {
+			rows++
 		}
 	}
 	const gupsert = `INSERT INTO model_usage_group (hour_start, group_name, connector, model, calls, usage_calls, input, output, cost_usd_sum, cost_calls)

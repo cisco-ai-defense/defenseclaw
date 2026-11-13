@@ -143,12 +143,13 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 			if finalizeErr := a.finalizeNativeOTLPCustodyV8(correlated.ctx, correlated); finalizeErr != nil {
 				return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 			}
-		}
-		if p := leafResult.primary; p != nil && !p.invalidMapped && !p.invalidRecord && !p.persistenceFailed {
-			// Agent model calls also feed tokenomics (log.model.usage) when
-			// observability.tokenomics imports this connector. After custody
-			// is final, so a retried batch never counts one call twice.
-			a.recordNativeOTLPUsageV8(correlated.ctx, leaf, classification.match, authenticatedSource, receipt)
+			if p := leafResult.primary; p != nil && !p.invalidMapped && !p.invalidRecord && !p.persistenceFailed {
+				// Agent model calls also feed tokenomics (log.model.usage) when
+				// observability.tokenomics imports this connector. Only after the
+				// native custody of the leaf is final (the replay canary held),
+				// so a retried batch never counts one call twice.
+				a.recordNativeOTLPUsageV8(correlated.ctx, leaf, classification.match, authenticatedSource, receipt)
+			}
 		}
 		for _, derivative := range leafResult.derivatives {
 			switch {
