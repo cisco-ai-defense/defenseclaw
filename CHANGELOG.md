@@ -37,6 +37,7 @@ for current behavior.
 - **`install.sh` installs OpenClaw 2026.11.3 on Node.js 24.16 and later, 2026.8.35 on Node.js 22** (was 2026.3.24). DefenseClaw 1.0.10 is certified with OpenClaw 2026.8.35 and 2026.11.3.
 
 ### Fixed
+- **Kiro 3.x runs the tool a prompt asks for again, so DefenseClaw inspects it.** In the default interface of kiro-cli 3.x (the v3 engine, also `kiro-cli --v3`) the prompt hook printed nothing, and Kiro added that as an empty command result (`Output:`, `Exit Code: 0`) to the turn; models then answered as if the command had already run and called no tool, so no tool-call check ran. The hook now prints one line, `DefenseClaw prompt hook: this is not command output. No command has run for this prompt yet.` (rel-1-0-10:GAP-0248).
 - **A Kiro, Devin or other non-Claude-Code, non-Codex shell call on a per-user Windows gateway that does not answer is blocked again**, as the fail-mode contract and `status` say; only Claude Code and Codex take the ordinary late-call path (rel-1-0-10 GAP-0030).
 
 ### Security
