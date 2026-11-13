@@ -92,6 +92,53 @@ subjects:
   name: defenseclaw-chain-key
   namespace: {{ .Release.Namespace }}
 ---
+# The relay-session hook runs before install too, with its own
+# ServiceAccount, which exists only while the hook runs: it creates the
+# relay session key Secret when it is absent and never replaces it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: defenseclaw-relay-key
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-install,pre-upgrade") | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-hooks-relay-key
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-install,pre-upgrade") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [{{ .Values.gateway.relaySessionSecret | quote }}]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-hooks-relay-key
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "hooks") | nindent 4 }}
+  annotations:
+    {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-install,pre-upgrade") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-hooks-relay-key
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-relay-key
+  namespace: {{ .Release.Namespace }}
+---
 # Only while the pre-delete hook runs: stop the controller before the
 # policies are removed (GAP-0056). A hook resource, so no standing grant.
 apiVersion: rbac.authorization.k8s.io/v1

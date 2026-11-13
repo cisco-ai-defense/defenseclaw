@@ -487,6 +487,14 @@ type SandboxAdminConfig struct {
 	// exposed, with exact-value DLP on prompts and egress. Unset exposes
 	// none; profiles intersect it.
 	ActorSecrets []string `mapstructure:"actor_secrets" yaml:"actor_secrets,omitempty" json:",omitempty"`
+	// AskHosts are allowed hosts an actor reaches only after a person
+	// approves (GAP-0171): the egress callout raises an ask. Host names
+	// or "*.<host>"; profiles add to them. They never open a host the
+	// actor's EgressPolicy does not allow.
+	AskHosts []string `mapstructure:"ask_hosts" yaml:"ask_hosts,omitempty" json:",omitempty"`
+	// URLRules refuse (deny) or ask for (ask) requests to a host by method
+	// and path prefix, at the egress callout; profiles add to them.
+	URLRules []SandboxURLRule `mapstructure:"url_rules" yaml:"url_rules,omitempty" json:",omitempty"`
 }
 
 // Values of the managed sandbox floor keys of SandboxAdminConfig.
@@ -532,7 +540,7 @@ func (a SandboxAdminConfig) IsZero() bool {
 		a.ProcessTree == nil && a.ForeignSandboxes == "" && a.AllowUpstreamTelemetry == nil &&
 		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == "" &&
 		a.Runtimes == nil && a.SandboxClass == "" && a.IdleSuspendAfter == "" && a.UnattendedAsks == "" &&
-		a.AskTimeout == "" && a.ActorSecrets == nil
+		a.AskTimeout == "" && a.ActorSecrets == nil && a.AskHosts == nil && a.URLRules == nil
 }
 
 // IsLocked reports whether key is listed in Locked.
@@ -1173,6 +1181,7 @@ func (a *SandboxAdminConfig) validateAs(prefix string) error {
 	}
 	check(a.validateManagedFloor(prefix))
 	check(a.validateRuntimeKeys(prefix))
+	check(a.validateAskKeys(prefix))
 	return errors.Join(errs...)
 }
 

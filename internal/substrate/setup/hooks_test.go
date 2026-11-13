@@ -281,6 +281,16 @@ func TestPreUpgradeAndRollback(t *testing.T) {
 	}
 }
 
+// The uninstall keeps the hook-made Secrets and says how to delete them.
+func TestPurgeStepsNameTheKeptSecrets(t *testing.T) {
+	plan := testPlan()
+	plan.RelaySessionSecret = "dc-relay"
+	steps := strings.Join(PurgeSteps(plan), "\n")
+	if !strings.Contains(steps, "delete secret "+ChainKeySecret+" "+CalloutTokenSecret+" dc-relay") {
+		t.Errorf("purge steps: %s", steps)
+	}
+}
+
 func TestPreDeleteRemovesOnlyDefenseClawPolicies(t *testing.T) {
 	api, kube := newFakeAPI(), newFakeKube()
 	plan := testPlan()
