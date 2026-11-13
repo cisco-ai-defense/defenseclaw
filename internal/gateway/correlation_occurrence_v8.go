@@ -436,7 +436,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	exactIdentityClaims := []audit.CorrelationExactIdentityClaim(nil)
 	// A claim waits for the same provider ID on the native rail. A per-user
 	// hook has no native counterpart (nativePerUserHookOnly), so its claims
-	// were never paired and only took bytes (S8 R5).
+	// were never paired and only took bytes (S8 R5). What that gives up, on
+	// a per-user host only: a native exporter wired there by hand is never
+	// merged with the hook it mirrors (no same_as, no shared logical event)
+	// when the hook comes first, the usual order; and every PostToolUse
+	// delivered again (Claude Code sends no source event ID, so it has no
+	// receipt) is its own logical event instead of joining the first by its
+	// tool ID claim.
 	if hasLifecycle && !match.Conflict && !nativePerUserHookOnly {
 		exactIdentityClaims = correlationExactIdentityClaims(
 			spec, instance.ConnectorInstanceID, audit.CorrelationRailHook, lifecycle, allValues,
