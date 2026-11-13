@@ -287,11 +287,13 @@ func TestDecideBody(t *testing.T) {
 		t.Fatalf("alert verdict: %+v", v)
 	}
 	h.judge.alert = false
-	// Case-folded keys are not the method the server reads: not a tools/call.
+	// A case-variant key is the method a Go-decoded server reads (GAP-0156):
+	// the call is judged.
 	before := len(h.judge.calls)
-	if v := h.eng.DecideBody(ctx, r, base, []byte(`{"jsonrpc":"2.0","METHOD":"tools/call","params":{"name":"x"}}`)); !v.Allow || len(h.judge.calls) != before {
-		t.Fatalf("case-folded key judged: %+v", v)
+	if v := h.eng.DecideBody(ctx, r, base, []byte(`{"jsonrpc":"2.0","METHOD":"tools/call","params":{"name":"x"}}`)); !v.Allow || len(h.judge.calls) != before+1 {
+		t.Fatalf("case-variant key not judged: %+v", v)
 	}
+	before = len(h.judge.calls)
 	batch := "[" + string(mcpCall("a")) + "," + string(mcpCall("b")) + "]"
 	h.judge.block = true
 	if v := h.eng.DecideBody(ctx, r, base, []byte(batch)); v.Allow || len(h.judge.calls) != before+1 {
