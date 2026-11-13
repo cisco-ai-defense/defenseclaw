@@ -466,15 +466,6 @@ func (s SubstrateConfig) LauncherAtespace(atespace string) (string, bool) {
 	return "", false
 }
 
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
-}
-
 var (
 	substrateOIDRe          = regexp.MustCompile(`^[0-2](\.(0|[1-9][0-9]*))+$`)
 	substratePlaceholderRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
