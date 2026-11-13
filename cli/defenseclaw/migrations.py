@@ -745,8 +745,10 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     # the operator are not modified.
     plugins = cfg.setdefault("plugins", {})
     if isinstance(plugins, dict):
-        allow = plugins.setdefault("allow", [])
-        if isinstance(allow, list) and "defenseclaw" not in allow:
+        # plugins.allow is an exclusive allowlist: join one the operator has,
+        # never create it (rel-1-0-10 GAP-0069, REVIEW-6 P3-6).
+        allow = plugins.get("allow")
+        if isinstance(allow, list) and allow and "defenseclaw" not in allow:
             allow.append("defenseclaw")
             changes.append("added plugins.allow[defenseclaw]")
             changed = True

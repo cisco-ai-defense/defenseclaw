@@ -28,7 +28,7 @@ for current behavior.
 - **CodeGuard custom rules are compiled once per rule-folder content**, not for every inspected write.
 - **`claw.home_dir` and `claw.config_file` are honoured for OpenClaw.** The connector, the OpenClaw client and the gateway always used `~/.openclaw` of the account that ran them. A `config_file` left at its default follows a moved `home_dir`.
 - **The OpenClaw plugin waits for the verdict the gateway names.** It waited 2 seconds without human approval, so a judge verdict could arrive after the plugin had applied its outage mode. It now waits for the hook judge budget plus 2 seconds, or the approval timeout plus 5 seconds with human approval. Only a gateway that does not answer follows the saved outage mode; an unproven listener, a refused request and a bad answer block.
-- **`install.sh` installs OpenClaw 2026.11.3 on Node.js 24.16 and later, 2026.8.35 on Node.js 22** (was 2026.3.24). DefenseClaw 1.0.10 is certified with OpenClaw 2026.8.35 and 2026.11.3. <!-- pending certification: the lead confirms -->
+- **`install.sh` installs OpenClaw 2026.11.3 on Node.js 24.16 and later, 2026.8.35 on Node.js 22** (was 2026.3.24). DefenseClaw 1.0.10 is certified with OpenClaw 2026.8.35 and 2026.11.3.
 
 ### Fixed
 - **A Kiro, Devin or other non-Claude-Code, non-Codex shell call on a per-user Windows gateway that does not answer is blocked again**, as the fail-mode contract and `status` say; only Claude Code and Codex take the ordinary late-call path (rel-1-0-10 GAP-0030).

@@ -284,6 +284,16 @@ class TestMigrate030Surgical(unittest.TestCase):
         _migrate_0_3_0_surgical(self.oc_json)
 
 
+class TestMigrate030NeverCreatesAllowList(unittest.TestCase):
+    # rel-1-0-10 GAP-0069 / REVIEW-6 P3-6: plugins.allow is exclusive.
+    def test_no_allow_list_is_created(self):
+        tmp = tempfile.mkdtemp()
+        oc_json = os.path.join(tmp, "openclaw.json")
+        _write_json(oc_json, {"models": {"providers": {"defenseclaw": {"url": "x"}}}, "plugins": {"entries": {}}})
+        _migrate_0_3_0_surgical(oc_json)
+        self.assertNotIn("allow", _read_json(oc_json).get("plugins", {}))
+
+
 class TestMigrate030Dispatch(unittest.TestCase):
     """Tests for the top-level _migrate_0_3_0 dispatch logic."""
 

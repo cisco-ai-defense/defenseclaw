@@ -528,7 +528,8 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		if c == nil {
 			return nil, nil
 		}
-		return readMCPServersOpenClaw(c.Claw.ConfigFile)
+		// The openclaw.json of claw.home_dir (rel-1-0-10 REVIEW-6 P2-2).
+		return readMCPServersOpenClaw(c.OpenClawConfigPath(), c.openClawCLIReadsThisHome())
 	default:
 		return nil, nil
 	}
@@ -742,12 +743,22 @@ func ReadUserMCPServersForConnector(connector string) ([]MCPServerEntry, error) 
 	}
 }
 
-func readMCPServersOpenClaw(configFile string) ([]MCPServerEntry, error) {
+// openClawCLIReadsThisHome reports whether `openclaw config get`, run as this
+// account, reads the OpenClaw home config.yaml names: the default home and
+// not the separate-user layout. Otherwise the CLI answers for another tree.
+func (c *Config) openClawCLIReadsThisHome() bool {
+	if c == nil || c.OpenClawSeparateUser() {
+		return false
+	}
+	return filepath.Clean(c.OpenClawHome()) == filepath.Clean(expandPath("~/.openclaw"))
+}
+
+func readMCPServersOpenClaw(configFile string, useCLI bool) ([]MCPServerEntry, error) {
 	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(expandPath(configFile)); err != nil {
 		return nil, err
 	}
-	if home, homeErr := os.UserHomeDir(); runtime.GOOS != "windows" ||
-		(homeErr == nil && managed.RequireWindowsGatewayPathOutsideUserProfiles(home) == nil) {
+	if home, homeErr := os.UserHomeDir(); useCLI && (runtime.GOOS != "windows" ||
+		(homeErr == nil && managed.RequireWindowsGatewayPathOutsideUserProfiles(home) == nil)) {
 		entries, err := readMCPServersViaCLI()
 		if err == nil {
 			return entries, nil
@@ -966,10 +977,11 @@ func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 // Kept private so SkillDirsForConnector's "openclaw" / default branch
 // can call it without re-entering the polymorphic SkillDirs() dispatcher.
 func (c *Config) skillDirsOpenClaw() []string {
-	homeDir := expandPath(c.Claw.HomeDir)
+	// claw.home_dir and the openclaw.json that follows it (REVIEW-6 P2-2).
+	homeDir := c.OpenClawHome()
 	var dirs []string
 
-	if oc, err := readOpenclawConfig(c.Claw.ConfigFile); err == nil {
+	if oc, err := readOpenclawConfig(c.OpenClawConfigPath()); err == nil {
 		dirs = append(dirs, workspaceSkillsDir(homeDir, oc))
 		for _, d := range oc.Skills.Load.ExtraDirs {
 			dirs = append(dirs, expandPath(d))
@@ -987,7 +999,7 @@ func (c *Config) skillDirsOpenClaw() []string {
 // Private for the same reason as skillDirsOpenClaw — avoids recursion when
 // PluginDirsForConnector falls into its default arm.
 func (c *Config) pluginDirsOpenClaw() []string {
-	homeDir := expandPath(c.Claw.HomeDir)
+	homeDir := c.OpenClawHome()
 	return []string{filepath.Join(homeDir, "extensions")}
 }
 

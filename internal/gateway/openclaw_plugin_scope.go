@@ -17,7 +17,9 @@
 package gateway
 
 import (
+	"errors"
 	"net/http"
+	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -25,7 +27,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+var errOpenClawScanCopyTooLarge = errors.New("the folder is larger than the separate-user scan limit")
 
 // openClawPluginScope is the connector scope of the OpenClaw plugin
 // credential: the connector-scoped hook token
@@ -141,6 +146,46 @@ func (a *APIServer) refuseOpenClawPluginPath(w http.ResponseWriter, r *http.Requ
 	}
 	a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "path is outside the OpenClaw account"})
 	return true
+}
+
+// openClawScanPath is the path a scan reads. For the OpenClaw plugin
+// credential in the separate-user layout it is a private no-follow copy of
+// target (copyOpenClawScanTarget): the OpenClaw account owns the folder and
+// could swap it for a link to DefenseClaw files between the path check and
+// the scan (rel-1-0-10 REVIEW-6 P2-1). release removes the copy. ok false
+// means the answer was written.
+func (a *APIServer) openClawScanPath(w http.ResponseWriter, r *http.Request, target string) (string, func(), bool) {
+	noop := func() {}
+	if authenticatedInspectConnector(r.Context()) != openClawPluginScope {
+		return target, noop, true
+	}
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil || !cfg.OpenClawSeparateUser() {
+		return target, noop, true
+	}
+	anchors := append(openClawPluginRoots(cfg), "/tmp", "/var/tmp")
+	copied, err := copyOpenClawScanTarget(target, anchors)
+	if errors.Is(err, errOpenClawScanCopyTooLarge) {
+		a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": err.Error()})
+		return "", noop, false
+	}
+	if err != nil {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "path changed or is outside the OpenClaw account"})
+		return "", noop, false
+	}
+	return copied, func() { _ = os.RemoveAll(filepath.Dir(copied)) }, true
+}
+
+// rebaseOpenClawScanResult names the original path in a result of a scan of
+// the private copy.
+func rebaseOpenClawScanResult(result *scanner.ScanResult, scanned, original string) {
+	if result == nil || scanned == original {
+		return
+	}
+	result.Target = strings.ReplaceAll(result.Target, scanned, original)
+	for i := range result.Findings {
+		result.Findings[i].Location = strings.ReplaceAll(result.Findings[i].Location, scanned, original)
+	}
 }
 
 func openClawPluginRoots(cfg *config.Config) []string {

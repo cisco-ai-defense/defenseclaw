@@ -3498,7 +3498,13 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
 
-	result, err := ss.Scan(ctx, req.Target)
+	scanTarget, release, ok := a.openClawScanPath(w, r, req.Target)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := ss.Scan(ctx, scanTarget)
+	rebaseOpenClawScanResult(result, scanTarget, req.Target)
 	if err == nil && !cfg.SecureClientIntegration() {
 		err = scanner.JudgeFailure(result)
 	}
@@ -3715,7 +3721,13 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
 
-	result, err := ps.Scan(ctx, req.Target)
+	scanTarget, release, ok := a.openClawScanPath(w, r, req.Target)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := ps.Scan(ctx, scanTarget)
+	rebaseOpenClawScanResult(result, scanTarget, req.Target)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "plugin-scanner", "plugin", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -5186,7 +5198,13 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	if a.refuseOpenClawPluginPath(w, r, req.Path) {
 		return
 	}
-	result, err := codeScanner(r.Context(), req.Path, rulesDir)
+	scanPath, release, ok := a.openClawScanPath(w, r, req.Path)
+	if !ok {
+		return
+	}
+	defer release()
+	result, err := codeScanner(r.Context(), scanPath, rulesDir)
+	rebaseOpenClawScanResult(result, scanPath, req.Path)
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "codeguard", "code", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
