@@ -190,7 +190,11 @@ func windowsShapedPath(p string) bool {
 // paths always, and a macOS host. It is derived from the call's flavor and the
 // gateway's own OS, as the effect lane's callers do.
 func secretFlowCaseInsensitive(flavor effects.Flavor) bool {
-	return flavor == effects.FlavorWindows || runtime.GOOS == "darwin"
+	return secretFlowCaseInsensitiveFor(runtime.GOOS, flavor)
+}
+
+func secretFlowCaseInsensitiveFor(goos string, flavor effects.Flavor) bool {
+	return flavor == effects.FlavorWindows || goos == "darwin"
 }
 
 // secretFlowResultDialect picks the shell dialect to read a result's call

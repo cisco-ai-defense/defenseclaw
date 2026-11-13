@@ -128,3 +128,26 @@ def test_explain_gateway_down(app, monkeypatch):
     res = _run(app, ["secret-flow", "explain", "sess-123"])
     assert res.exit_code == 1
     assert "gateway" in res.output.lower()
+
+
+def test_explain_shows_dropped_digests(app, monkeypatch):
+    # A non-zero eviction counter (a result held more secret-shaped values than
+    # the cap) is shown, so a shed secret is not silent.
+    view = {"found": True, "label": "self", "labeled_paths": 1, "value_digests": 64,
+            "value_evictions": 236, "hits": []}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def secret_flow(self, session=None):
+            return view
+
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", FakeClient)
+    res = _run(app, ["secret-flow", "explain", "sess-1"])
+    assert res.exit_code == 0, res.output
+    assert "236 secret-value digests" in res.output
+    view["value_evictions"] = 0
+    res = _run(app, ["secret-flow", "explain", "sess-1"])
+    assert res.exit_code == 0, res.output
+    assert "dropped" not in res.output

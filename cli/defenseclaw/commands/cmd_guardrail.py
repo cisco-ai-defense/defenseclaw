@@ -6912,6 +6912,12 @@ def secret_flow_explain_cmd(app: AppContext, session: str, as_json: bool = False
     click.echo(f"  {ux.bold('session:')} {ux.accent(session)}")
     counts = f"({view.get('labeled_paths', 0)} labeled files, {view.get('value_digests', 0)} secret-value digests)"
     click.echo(f"  {ux.bold('label:')} {view.get('label', 'public')}  {ux.dim(counts)}")
+    evictions = int(view.get("value_evictions", 0) or 0)
+    if evictions:
+        click.echo(
+            f"  {ux.bold('dropped:')} {evictions} secret-value digests "
+            f"{ux.dim('(a result held more secret-shaped values than the cap; raise memory.max_value_digests)')}"
+        )
     hits = view.get("hits") or []
     if not hits:
         click.echo(f"  {ux.bold('hits:')} {ux.dim('none recorded')}")
