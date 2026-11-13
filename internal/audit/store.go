@@ -2142,6 +2142,18 @@ var unreadAuditIndexes = []struct{ name, create string }{
 	// (rel-1-0-3 GAP-0320).
 	{"idx_correlation_identifiers_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_identifiers_exact ON correlation_identifiers(connector_instance_id, namespace, identifier_kind, value_digest)`},
 	{"idx_correlation_receipts_source", `CREATE INDEX IF NOT EXISTS idx_correlation_receipts_source ON correlation_receipts(connector_instance_id, source_key_digest)`},
+	// Three more correlation indexes no query needs (S8 R5). The pending
+	// operation's exact key is its primary key; status, the index's last
+	// column, only filters the one row the key finds. The from index leads
+	// with the two columns that lead the unique key of the relationship
+	// (sqlite_autoindex_correlation_relationships_2), so the graph load and
+	// the retention keep tests seek that one instead. No query filters
+	// relationships by status, with or without the last-seen time: retention
+	// orders them by idx_correlation_relationships_seen. A benign hook call
+	// wrote about 300 bytes to these three (TestCorrelationLookupsUseUniqueIndexesAfterTheTrim).
+	{"idx_correlation_pending_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_exact ON correlation_pending_operations(connector_instance_id, operation_namespace, operation_kind, operation_id, operation_type, scope_kind, scope_id, status)`},
+	{"idx_correlation_relationships_from", `CREATE INDEX IF NOT EXISTS idx_correlation_relationships_from ON correlation_relationships(from_kind, from_id, status)`},
+	{"idx_correlation_relationships_status", `CREATE INDEX IF NOT EXISTS idx_correlation_relationships_status ON correlation_relationships(status, last_seen_time_unix_nano)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client

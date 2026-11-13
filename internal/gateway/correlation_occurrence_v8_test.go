@@ -559,16 +559,16 @@ func TestHookOccurrenceToolStartAndEndRemainDistinctAcrossRestart(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The end resolved the start's operation, which deletes it (S8 R5).
 	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
 		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		Type:                audit.CorrelationOperationTool, Status: audit.CorrelationOperationCompleted, Limit: 10,
+		Type:                audit.CorrelationOperationTool, Limit: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].StartSemanticEventID != audit.SemanticEventID(start.SemanticEventID) ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
-		t.Fatalf("resolved pending operations=%+v", operations)
+	if len(operations) != 0 {
+		t.Fatalf("resolved pending operations kept: %+v", operations)
 	}
 }
 
@@ -647,16 +647,13 @@ func TestCursorHookOccurrencePreservesNativeTurnAcrossToolLifecycleAndRestart(t 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The end resolved the start's operation, which deletes it (S8 R5).
 	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
 		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		OperationID:         "cursor-tool-1", Type: audit.CorrelationOperationTool,
-		Status: audit.CorrelationOperationCompleted, Limit: 10,
+		OperationID:         "cursor-tool-1", Type: audit.CorrelationOperationTool, Limit: 10,
 	})
-	if err != nil || len(operations) != 1 ||
-		operations[0].StartSemanticEventID != audit.SemanticEventID(start.SemanticEventID) ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) ||
-		operations[0].SessionID != prompt.SessionID || operations[0].TurnID != prompt.TurnID {
-		t.Fatalf("cursor completed operation=%+v err=%v", operations, err)
+	if err != nil || len(operations) != 0 {
+		t.Fatalf("cursor resolved operation kept: %+v err=%v", operations, err)
 	}
 }
 
@@ -852,16 +849,16 @@ func TestHookOccurrenceReportedToolStartResolvesMissingEndIDAcrossRestart(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The end resolved the start's operation, which deletes it (S8 R5).
 	operations, err := repo.ListPendingOperations(t.Context(), audit.CorrelationPendingQuery{
 		ConnectorInstanceID: audit.ConnectorInstanceID(start.ConnectorInstanceID),
-		Type:                audit.CorrelationOperationTool, Status: audit.CorrelationOperationCompleted, Limit: 10,
+		Type:                audit.CorrelationOperationTool, Limit: 10,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].OperationID != "provider-tool-call-1" ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
-		t.Fatalf("reported tool pending resolution=%+v", operations)
+	if len(operations) != 0 {
+		t.Fatalf("reported tool pending resolution kept %+v", operations)
 	}
 }
 

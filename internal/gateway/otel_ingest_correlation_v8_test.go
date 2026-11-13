@@ -399,16 +399,17 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 		WHERE relationship_type='same_as'`).Scan(&sameAs); err != nil {
 		t.Fatal(err)
 	}
-	var pendingStatus, terminalSemantic string
-	if err := database.QueryRow(`SELECT status, terminal_semantic_event_id
+	// The native end resolved the hook's pending start, which deletes it
+	// (S8 R5).
+	var pendingLeft int
+	if err := database.QueryRow(`SELECT COUNT(*)
 		FROM correlation_pending_operations WHERE operation_id=?`,
-		hook.ToolInvocationID).Scan(&pendingStatus, &terminalSemantic); err != nil {
+		hook.ToolInvocationID).Scan(&pendingLeft); err != nil {
 		t.Fatal(err)
 	}
-	if causedBy != 1 || sameAs != 0 || pendingStatus != string(audit.CorrelationOperationCompleted) ||
-		terminalSemantic != nativeSemantic {
-		t.Fatalf("derived join caused_by=%d same_as=%d pending=%q terminal=%q native=%q",
-			causedBy, sameAs, pendingStatus, terminalSemantic, nativeSemantic)
+	if causedBy != 1 || sameAs != 0 || pendingLeft != 0 {
+		t.Fatalf("derived join caused_by=%d same_as=%d pending left=%d native=%q",
+			causedBy, sameAs, pendingLeft, nativeSemantic)
 	}
 }
 
@@ -612,7 +613,10 @@ func TestNativeOTLPCodexResponseLinksUniqueDurablePromptWithoutCollapse(t *testi
 		"conversation-native-1", prompt.TurnID, prompt.AgentID).Scan(&relationshipProjection); err != nil {
 		t.Fatal(err)
 	}
-	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 2 ||
+	// The cursor-derived turn and agent are in the native observations
+	// (nativeProjection), not in correlation_identifiers: turn and agent
+	// identifiers are no longer stored (S8 R5, correlationIdentifierStored).
+	if events != 3 || groups != 3 || causedBy != 1 || exactMerges != 0 || derivedMembership != 0 ||
 		nativeProjection == 0 || relationshipProjection != 0 {
 		t.Fatalf("durable prompt join events=%d groups=%d caused_by=%d exact_merges=%d derived_membership=%d native_projection=%d relationship_projection=%d",
 			events, groups, causedBy, exactMerges, derivedMembership, nativeProjection, relationshipProjection)
