@@ -219,7 +219,7 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 		}
 		return (i + k) % len(cells)
 	}
-	calls := fileToolUnknownKeyCalls()
+	fileToolCalls := fileToolUnknownKeyCalls()
 	bashForms := func(target string) []string {
 		return []string{
 			"export F=" + target + `; printf x > "$F"`,
@@ -236,12 +236,22 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 			for _, connector := range []string{"claudecode", "codex", "copilot", "opencode", "cursor", "hermes"} {
 				installToolCallCorpusProfileConnector(t, connector, cell.profile)
 			}
-			n := 0
-			verdict := func(connector, tool string, args any) (string, string) {
-				n++
-				return fileToolUnknownKeyVerdict(t, connector, tool, args, cell.profile, cell.managed, home, project, fmt.Sprintf("%s-%d", strings.ReplaceAll(name, "/", "-"), n))
+			// The calls are judged on every CPU (each builds its own gateway
+			// and only reads the fixture, as concurrent hooks do); the checks
+			// then run in order on the verdicts.
+			type call struct {
+				connector, tool, key string
+				args                 any
+				action, body         string
 			}
-			for i, call := range calls {
+			var calls []call
+			var checks []func()
+			verdict := func(connector, tool string, args any) int {
+				calls = append(calls, call{connector: connector, tool: tool, args: args,
+					key: fmt.Sprintf("%s-%d", strings.ReplaceAll(name, "/", "-"), len(calls)+1)})
+				return len(calls) - 1
+			}
+			for i, call := range fileToolCalls {
 				for k, label := range labels {
 					if cellOf(i, k, label) != ci {
 						continue
@@ -249,10 +259,12 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 					target := filepath.Join(home, targets[label])
 					used[rotation{fmt.Sprintf("tool %d", i), "target " + label}] = true
 					used[rotation{"cell " + name, "target " + label}] = true
-					reviewed, _ := verdict(call.connector, call.tool, call.args(target))
-					if label == "state" && call.tool != "Read" && reviewed != "block" {
-						t.Fatalf("%s %s-%d: the reviewed write of DefenseClaw's state is %q, not block", name, call.tool, i, reviewed)
-					}
+					reviewed := verdict(call.connector, call.tool, call.args(target))
+					checks = append(checks, func() {
+						if label == "state" && call.tool != "Read" && calls[reviewed].action != "block" {
+							t.Fatalf("%s %s-%d: the reviewed write of DefenseClaw's state is %q, not block", name, call.tool, i, calls[reviewed].action)
+						}
+					})
 					variants := fileToolUnknownKeyVariants(benign)
 					if label != "ordinary" {
 						for hidden, variant := range fileToolHiddenTargetVariants(target) {
@@ -268,30 +280,33 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 						if label != "ordinary" {
 							used[rotation{"variant " + variantName + " on " + label, "cell " + name}] = true
 						}
-						got, body := verdict(call.connector, call.tool, variants[variantName](call.args(target)))
-						if label == "ordinary" {
-							// Copilot CLI refuses a call with an unreviewed key
-							// before any rule (HOOK-TOOL-CALL-UNPARSED); every
-							// other connector judges the ordinary file.
-							if cell.profile == "default" && call.connector != "copilot" && got != "allow" {
-								t.Errorf("%s %s %s-%d %s: ordinary file got %q: %.400s", name, call.connector, call.tool, i, variantName, got, body)
+						v := verdict(call.connector, call.tool, variants[variantName](call.args(target)))
+						checks = append(checks, func() {
+							got, body := calls[v].action, calls[v].body
+							if label == "ordinary" {
+								// Copilot CLI refuses a call with an unreviewed key
+								// before any rule (HOOK-TOOL-CALL-UNPARSED); every
+								// other connector judges the ordinary file.
+								if cell.profile == "default" && call.connector != "copilot" && got != "allow" {
+									t.Errorf("%s %s %s-%d %s: ordinary file got %q: %.400s", name, call.connector, call.tool, i, variantName, got, body)
+								}
+								return
 							}
-							continue
-						}
-						if variantName == "hidden-array" && label != "state" {
-							continue
-						}
-						if fileToolUnknownKeyRank[got] < fileToolUnknownKeyRank[reviewed] {
-							t.Errorf("%s %s %s-%d %s on %s: %q, weaker than the reviewed call's %q: %.400s",
-								name, call.connector, call.tool, i, variantName, label, got, reviewed, body)
-						}
+							if variantName == "hidden-array" && label != "state" {
+								return
+							}
+							if fileToolUnknownKeyRank[got] < fileToolUnknownKeyRank[calls[reviewed].action] {
+								t.Errorf("%s %s %s-%d %s on %s: %q, weaker than the reviewed call's %q: %.400s",
+									name, call.connector, call.tool, i, variantName, label, got, calls[reviewed].action, body)
+							}
+						})
 					}
 				}
 			}
 			for k, label := range labels {
 				target := filepath.Join(home, targets[label])
 				for c, connector := range []string{"claudecode", "codex"} {
-					literal := ""
+					literal := -1
 					for f, form := range bashForms(target) {
 						formCell := (k + c + f) % len(cells)
 						if label == "ordinary" {
@@ -304,21 +319,31 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 						if label != "ordinary" {
 							used[rotation{fmt.Sprintf("form %d", f), "cell " + name}] = true
 						}
-						if literal == "" {
-							literal, _ = verdict(connector, "Bash", map[string]any{"command": "printf x > " + target})
+						if literal < 0 {
+							literal = verdict(connector, "Bash", map[string]any{"command": "printf x > " + target})
 						}
-						got, body := verdict(connector, "Bash", map[string]any{"command": form})
-						if label == "ordinary" {
-							if cell.profile == "default" && got != "allow" {
-								t.Errorf("%s %s %q: ordinary file got %q: %.400s", name, connector, form, got, body)
+						v, lit := verdict(connector, "Bash", map[string]any{"command": form}), literal
+						checks = append(checks, func() {
+							got, body := calls[v].action, calls[v].body
+							if label == "ordinary" {
+								if cell.profile == "default" && got != "allow" {
+									t.Errorf("%s %s %q: ordinary file got %q: %.400s", name, connector, form, got, body)
+								}
+								return
 							}
-							continue
-						}
-						if fileToolUnknownKeyRank[got] < fileToolUnknownKeyRank[literal] {
-							t.Errorf("%s %s %q on %s: %q, weaker than the literal write's %q: %.400s", name, connector, form, label, got, literal, body)
-						}
+							if fileToolUnknownKeyRank[got] < fileToolUnknownKeyRank[calls[lit].action] {
+								t.Errorf("%s %s %q on %s: %q, weaker than the literal write's %q: %.400s", name, connector, form, label, got, calls[lit].action, body)
+							}
+						})
 					}
 				}
+			}
+			forEachOnEveryCPU(len(calls), func(i int) {
+				c := &calls[i]
+				c.action, c.body = fileToolUnknownKeyVerdict(t, c.connector, c.tool, c.args, cell.profile, cell.managed, home, project, c.key)
+			})
+			for _, check := range checks {
+				check()
 			}
 		})
 	}
@@ -341,7 +366,7 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 		if label != "ordinary" {
 			names = append(slices.Clone(variantNames), hiddenNames...)
 		}
-		for i := range calls {
+		for i := range fileToolCalls {
 			need(fmt.Sprintf("tool %d", i), "target "+label)
 		}
 		for _, v := range names {
@@ -358,7 +383,7 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 			}
 		}
 	}
-	for i := range calls {
+	for i := range fileToolCalls {
 		for _, v := range variantNames {
 			need("variant "+v, fmt.Sprintf("tool %d", i))
 		}
