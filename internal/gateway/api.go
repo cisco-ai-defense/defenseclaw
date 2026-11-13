@@ -59,7 +59,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
@@ -71,10 +70,13 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
+	// modelUsage is the local usage store behind GET /usage (nil until the
+	// sidecar binds it; the store itself reports whether it is on).
+	modelUsage atomic.Pointer[usageQuerierBox]
+	health     *SidecarHealth
+	client     *Client
+	store      *audit.Store
+	logger     *audit.Logger
 	// protectedFiles is the sidecar's protected-file watch (nil when off or
 	// in a test server); the hook handler records tool calls for it.
 	protectedFiles *protectedFileWatch
@@ -1413,6 +1415,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/enforce/allowed", a.handleEnforceAllowed)
 	mux.HandleFunc("/alerts", a.handleAlerts)
 	mux.HandleFunc("/audit/event", a.handleAuditEvent)
+	mux.HandleFunc("/usage", a.handleUsage)
 	mux.HandleFunc("/policy/evaluate", a.handlePolicyEvaluate)
 	mux.HandleFunc("/policy/reload", a.handlePolicyReload)
 	mux.HandleFunc("/v1/skill/scan", a.handleSkillScan)
@@ -3981,10 +3984,10 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 
 	// The local stderr diagnostic remains redacted. Canonical telemetry keeps
 	// the source reason until the central per-destination redaction stage.
-	redactedReason := redaction.Reason(req.Reason)
+	redactedReason := logDisplayReason(req.Reason)
 	redactedFindings := make([]string, len(req.Findings))
 	for i, f := range req.Findings {
-		redactedFindings[i] = redaction.Reason(f)
+		redactedFindings[i] = logDisplayReason(f)
 	}
 	switch req.Action {
 	case "block":
@@ -4105,7 +4108,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 
 	fmt.Fprintf(os.Stderr, "[guardrail] evaluate <<< action=%s severity=%s sources=%v reason=%q\n",
 		out.Action, out.Severity, out.ScannerSources,
-		redaction.Reason(truncate(out.Reason, 120)))
+		logDisplayReason(truncate(out.Reason, 120)))
 
 	runtime, ok := a.observabilityV8RuntimeEmitter().(apiGuardrailEvaluateV8Runtime)
 	if !ok || runtime == nil {

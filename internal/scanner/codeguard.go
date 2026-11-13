@@ -19,6 +19,7 @@ package scanner
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -512,6 +514,25 @@ type customRuleYAML struct {
 	Extensions  []string `yaml:"extensions"`
 }
 
+// customRulesCache keeps the compiled custom rules of a rules folder for as
+// long as its rule files keep their names and their bytes. The gateway builds
+// a CodeGuard scanner for every write it inspects, and each one parsed and
+// compiled every custom rule file again (#1384); the files are still read on
+// every call (cheap), so an edited, replaced or relinked rule file is
+// compiled anew, and the rules a call is checked against are the same either
+// way.
+var customRulesCache sync.Map // dir -> customRulesEntry
+
+type customRulesEntry struct {
+	digest [sha256.Size]byte
+	rules  []rule
+}
+
+type customRuleFile struct {
+	name string
+	data []byte
+}
+
 func loadCustomRules(dir string) []rule {
 	if dir == "" {
 		return nil
@@ -520,7 +541,8 @@ func loadCustomRules(dir string) []rule {
 	if err != nil {
 		return nil
 	}
-	var custom []rule
+	sum := sha256.New()
+	var files []customRuleFile
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
@@ -529,8 +551,27 @@ func loadCustomRules(dir string) []rule {
 		if err != nil {
 			continue
 		}
+		fmt.Fprintf(sum, "%d:%s:%d:", len(e.Name()), e.Name(), len(data))
+		sum.Write(data)
+		files = append(files, customRuleFile{name: e.Name(), data: data})
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], sum.Sum(nil))
+	if cached, ok := customRulesCache.Load(dir); ok && cached.(customRulesEntry).digest == digest {
+		return cached.(customRulesEntry).rules
+	}
+	rules := compileCustomRules(files)
+	customRulesCache.Store(dir, customRulesEntry{digest: digest, rules: rules})
+	return rules
+}
+
+// compileCustomRules parses and compiles the custom rule files read from a
+// rules folder, in folder order.
+func compileCustomRules(files []customRuleFile) []rule {
+	var custom []rule
+	for _, file := range files {
 		var rf customRuleFileYAML
-		if err := yaml.Unmarshal(data, &rf); err != nil {
+		if err := yaml.Unmarshal(file.data, &rf); err != nil {
 			continue
 		}
 		for _, cr := range rf.Rules {

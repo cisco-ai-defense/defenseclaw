@@ -543,6 +543,8 @@ def observability_v8_parity_contract() -> dict[str, Any]:
             "collect": {"logs": True, "traces": True, "metrics": True},
             "redaction_profile": "none",
             "local_retention_days": 7,
+            "local_keep_rejected_records": False,
+            "local_rejected_records_max_rows": 10000,
             "trace_sampler": "parentbased_always_on",
             "metric_export_interval_seconds": 60,
             "metric_temporality": "delta",
@@ -992,6 +994,8 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
         (defs["metricPolicy"]["properties"]["export_interval_seconds"]["default"], 60),
         (defs["metricPolicy"]["properties"]["temporality"]["default"], "delta"),
         (defs["localStore"]["properties"]["retention_days"]["default"], 7),
+        (defs["localStore"]["properties"]["keep_rejected_records"]["default"], False),
+        (defs["localStore"]["properties"]["rejected_records_max_rows"]["default"], 10000),
     )
     if any(actual != expected for actual, expected in default_checks):
         raise RuntimeError("Python v8 default policy drifted from the canonical schema")
@@ -1384,6 +1388,7 @@ def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
     _validate_profile_references(observability, set(BUILT_IN_PROFILES) | set(profiles), source_name)
     _validate_resource_attributes(observability.get("resource", {}).get("attributes", {}), source_name)
     _validate_trace_policy(observability.get("trace_policy", {}), source_name)
+    _validate_pricing(observability.get("pricing") or {}, source_name)
 
     destinations = observability.get("destinations", [])
     if len(destinations) > MAX_DESTINATIONS:
@@ -1411,6 +1416,38 @@ def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
                 )
             route_names.add(route["name"])
         _validate_destination(destination, path, source_name)
+
+
+def _validate_pricing(pricing: dict[str, Any], source_name: str) -> None:
+    """Mirror of PricingConfig.Validate (internal/config/tokenomics.go) for what the schema cannot say."""
+    models = pricing.get("models") or []
+    if models and not str(pricing.get("version", "")).strip():
+        _semantic_error(
+            source_name,
+            "observability.pricing.version",
+            "set a table version; usage records carry it when models are listed",
+        )
+    seen: set[str] = set()
+    for index, entry in enumerate(models):
+        path = f"observability.pricing.models[{index}]"
+        provider = str(entry.get("provider", "")).strip()
+        model = str(entry.get("model", "")).strip()
+        if not provider or not model:
+            _semantic_error(source_name, path, "set both provider and model")
+        if "*" in model[:-1]:
+            _semantic_error(source_name, f"{path}.model", "use * only as the last character of a model prefix")
+        key = f"{provider.lower()}/{model.lower()}"
+        if key in seen:
+            _semantic_error(source_name, path, "list each provider/model once")
+        seen.add(key)
+    if pricing.get("unknown_model") == "fallback":
+        fallback = pricing.get("fallback") or {}
+        if "input_per_mtok" not in fallback or "output_per_mtok" not in fallback:
+            _semantic_error(
+                source_name,
+                "observability.pricing.fallback",
+                "set input_per_mtok and output_per_mtok when unknown_model is fallback",
+            )
 
 
 def _validate_openshell(document: dict[str, Any], source_name: str) -> None:

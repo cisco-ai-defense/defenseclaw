@@ -93,11 +93,49 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.connectors.<name>.webhooks[].timeout_seconds` | integer | `10` |  |  |
 | `observability.connectors.<name>.webhooks[].cooldown_seconds` | integer |  |  |  |
 | `observability.connectors.<name>.webhooks[].enabled` | boolean | `false` |  |  |
+| `observability.tokenomics` | object |  |  | Per-call model usage records, cost and the local usage aggregate. Off by default; an absent block is the pre-1.0.10 behaviour. |
+| `observability.tokenomics.enabled` | boolean | `false` |  | Master switch. Off: no usage record, no store, no goroutine. |
+| `observability.tokenomics.record_routing_provenance` | boolean | `true` |  | Put requested and selected model, route decision and profile on each usage record. |
+| `observability.tokenomics.roles` | array |  |  | Call roles to record. Empty or absent: all. |
+| `observability.tokenomics.native_otel_import` | object |  |  |  |
+| `observability.tokenomics.native_otel_import.claudecode` | boolean | `true` |  | Import per-call usage from the Claude Code OTLP stream (cross-check only while the proxy carries the connector). |
+| `observability.tokenomics.native_otel_import.codex` | boolean | `true` |  | Import per-call usage from the Codex OTLP stream (cross-check only while the proxy carries the connector). |
+| `observability.tokenomics.cost` | object |  |  |  |
+| `observability.tokenomics.cost.compute` | boolean | `true` |  | Compute cost from observability.pricing. |
+| `observability.tokenomics.cost.currency` | constant | `"USD"` | `"USD"` |  |
+| `observability.tokenomics.cost.keep_reported` | boolean | `true` |  | Keep a per-call provider or agent reported cost and mark its basis as reported. |
+| `observability.tokenomics.local_store` | object |  |  |  |
+| `observability.tokenomics.local_store.enabled` | boolean | `false` |  | Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status. |
+| `observability.tokenomics.local_store.retention_days` | integer | `30` |  |  |
+| `observability.tokenomics.local_store.granularity` | constant | `"hour"` | `"hour"` |  |
+| `observability.tokenomics.metrics` | object |  |  |  |
+| `observability.tokenomics.metrics.labels` | array |  |  | Labels on defenseclaw.model.cost and defenseclaw.model.tokens. A closed set: identity labels are refused. |
+| `observability.pricing` | object |  |  | Versioned price table. The gateway prices only from this table; no price is compiled into a binary. Managed hosts take it from the admin config in the signed bundle. |
+| `observability.pricing.version` | string |  |  | Table version stamped on every record. Required when models are listed. |
+| `observability.pricing.models` | array |  |  |  |
+| `observability.pricing.models[].provider` | string |  |  | Required. |
+| `observability.pricing.models[].model` | string |  |  | Required. Exact model id, or a prefix ending in * (longest prefix wins). |
+| `observability.pricing.models[].input_per_mtok` | number |  |  | Required. USD per million input tokens (uncached). |
+| `observability.pricing.models[].output_per_mtok` | number |  |  | Required. USD per million output tokens (reasoning included unless reasoning_per_mtok is set). |
+| `observability.pricing.models[].cache_read_per_mtok` | number |  |  | USD per million cache-read input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.models[].cache_write_per_mtok` | number |  |  | USD per million cache-creation input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.models[].reasoning_per_mtok` | number |  |  | USD per million reasoning output tokens. Absent: priced at output_per_mtok. |
+| `observability.pricing.ai_defense` | object |  |  |  |
+| `observability.pricing.ai_defense.per_call_usd` | number |  |  |  |
+| `observability.pricing.unknown_model` | constraint | `"omit"` | `omit, fallback` | omit: a model without a price entry has no cost. fallback: price it with fallback. |
+| `observability.pricing.fallback` | object |  |  |  |
+| `observability.pricing.fallback.input_per_mtok` | number |  |  | USD per million input tokens (uncached). |
+| `observability.pricing.fallback.output_per_mtok` | number |  |  | USD per million output tokens (reasoning included unless reasoning_per_mtok is set). |
+| `observability.pricing.fallback.cache_read_per_mtok` | number |  |  | USD per million cache-read input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.fallback.cache_write_per_mtok` | number |  |  | USD per million cache-creation input tokens. Absent: priced at input_per_mtok. |
+| `observability.pricing.fallback.reasoning_per_mtok` | number |  |  | USD per million reasoning output tokens. Absent: priced at output_per_mtok. |
 | `observability.local` | object |  |  |  |
 | `observability.local.path` | string |  |  | Defaults dynamically to <data_dir>/audit.db. |
 | `observability.local.judge_bodies_path` | string |  |  | Defaults dynamically to <data_dir>/judge_bodies.db. |
 | `observability.local.retention_days` | integer | `7` |  | Positive values reap eligible local event, evidence, judge-body, and correlation history older than the UTC cutoff a minute after startup readiness and every six hours. The same window bounds AI discovery scan history in <data_dir>/inventory.db, which the gateway prunes about hourly (always keeping the latest scan) and compacts. Zero retains history forever and requires a persistent capacity warning. SQLite can reuse freed pages, but the audit database file does not shrink automatically. The maximum is the largest whole-day period representable as a Go time.Duration. |
 | `observability.local.max_store_mb` | integer | `0` |  | Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration). |
+| `observability.local.keep_rejected_records` | boolean | `false` |  | Opt-in. When true, each record the v8 schema gate refuses (a field value outside its family contract) is also kept in the rejected_records table of the audit database: time, signal, family, event name, reason code, the failing field and a copy of its fields redacted with, per field class, the stricter of the sensitive profile and the local profile of the record's bucket (at most 16 KiB per record; larger copies keep only the field names). Until the gateway redacts it, the copy is held in its memory only. The gateway writes them off the producer path through a bounded queue that drops and counts when full; each run of the store (from turning it on, or a reload that keeps it on, to the next) keeps at most rejected_records_max_rows rows. retention_days and max_store_mb prune the table with the other history. false (the default) only counts refused records and starts no writer. Read them with defenseclaw audit rejected. Not used on Secure Client. Releases before 1.0.10 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration). Those releases also neither prune nor show the table, while their max_store_mb pass counts its pages: before going back, keep the store on with rejected_records_max_rows: 100 until the gateway has applied it (it trims the table at once), then remove both keys (or, with the gateway stopped, delete the rows with sqlite3 audit.db 'DELETE FROM rejected_records'). |
+| `observability.local.rejected_records_max_rows` | integer | `10000` |  | Row cap of the rejected-record store (keep_rejected_records): the writer deletes the oldest rows past it in small batches, at once when a reload lowers it, and one run of the store queues at most this many rows. Ignored while keep_rejected_records is false. Releases before 1.0.10 refuse this key. |
 | `observability.destinations` | array |  |  |  |
 | `observability.destinations[].name` | constraint |  |  | Required. |
 | `observability.destinations[].kind` | constant |  | `"jsonl"` | Required. |
