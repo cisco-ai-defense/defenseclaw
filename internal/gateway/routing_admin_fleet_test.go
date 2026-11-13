@@ -64,6 +64,15 @@ func TestFleetKeysComeFromTheDeviceCredential(t *testing.T) {
 			t.Fatalf("connector key %s: %q %v", k, got, ok)
 		}
 	}
+	f.bundle = map[string]bool{"daily": true, "named": true, "codex": true, "anyconn": true} // eng retired
+	if _, ok := f.ToFleet(group); ok {
+		t.Fatal("a budget no longer in the bundle is never sent")
+	}
+	for _, k := range f.Wanted() {
+		if strings.HasPrefix(k, "group:eng:") {
+			t.Fatal("a budget no longer in the bundle is never asked about")
+		}
+	}
 	wanted := f.Wanted()
 	joined := strings.ToLower(strings.Join(wanted, " "))
 	for _, name := range []string{"dclab", "s-1-5-21"} {

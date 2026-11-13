@@ -44,6 +44,7 @@ type Runtime struct {
 	feed     bool
 	interval time.Duration
 	epoch    string
+	writer   string // the last fleet writer id (device), kept while no fleet is set
 	syncing  bool
 	kick     chan struct{}
 	pushMu   sync.Mutex // one push at a time: snapshot and send stay in order
@@ -166,21 +167,34 @@ func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys) {
 	}
 	rt.pushMu.Lock()
 	rt.mu.Lock()
-	old, ledger, local, epoch, ctx := rt.fleet, rt.ledger, rt.local, rt.epoch, rt.ctx
-	rotate := old != nil && fleet != nil && writerOf(old) != writerOf(fleet)
+	old, oldKeys, ledger, local, epoch, ctx := rt.fleet, rt.keys, rt.ledger, rt.local, rt.epoch, rt.ctx
+	// A different writer than the last one this process sent as, even with
+	// no fleet in between (a bad CA file, the store off and on again).
+	rotate := fleet != nil && rt.writer != "" && writerOf(fleet) != rt.writer
 	if rotate {
 		rt.epoch = newEpoch()
+	}
+	if fleet != nil {
+		rt.writer = writerOf(fleet)
 	}
 	rt.fleet, rt.keys = fleet, keys
 	rt.last, rt.lastEv = nil, nil
 	rt.mu.Unlock()
 	if rotate && ledger != nil {
-		if rows := ledger.TakeLocal(); len(rows) > 0 && local != nil {
+		if rows := ledger.TakeLocal(); len(rows) > 0 {
 			if ctx == nil {
 				ctx = context.Background()
 			}
 			pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			ledger.PushResult(local.Push(pctx, epoch, rows))
+			var err error
+			if local != nil {
+				err = local.Push(pctx, epoch, rows)
+			}
+			if old != nil && old != fleet {
+				// The old credential's last word, so other devices see it.
+				_ = old.Push(pctx, epoch, toFleet(rows, oldKeys))
+			}
+			ledger.PushResult(err)
 			cancel()
 		}
 	}

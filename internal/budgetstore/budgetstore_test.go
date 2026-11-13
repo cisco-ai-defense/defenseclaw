@@ -554,6 +554,20 @@ func TestPerDeviceBounds(t *testing.T) {
 	if err := a.Push(ctx, "wextra", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 100}}); err == nil {
 		t.Fatal("writers per device are bounded")
 	}
+	if _, err := f.store.db.Exec(`UPDATE writers SET last_seen = 0`); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.store.Prune(ctx)
+	for i := 0; i < MaxEpochsPerDay-MaxWritersPerDevice; i++ {
+		if err := a.Push(ctx, "x"+strconv.Itoa(i), []routingadmin.SeedRow{{Day: today(), Key: key, USD: 0.01}}); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.store.db.Exec(`UPDATE writers SET last_seen = 0`)
+		_ = f.store.Prune(ctx)
+	}
+	if err := a.Push(ctx, "xmore", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 0.01}}); err == nil {
+		t.Fatal("writers per device and day are bounded, pruned or not")
+	}
 	cred2, rec2, err := Issue(f.subject, IssueInput{Budgets: append(append([]config.RoutingBudget(nil), testBudgets...),
 		config.RoutingBudget{ID: "any", Scope: "connector", Subject: "*", Period: "day", LimitUSD: 1}), Users: []string{bobUPN}})
 	if err != nil {

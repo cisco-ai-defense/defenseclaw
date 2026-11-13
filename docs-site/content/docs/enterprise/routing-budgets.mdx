@@ -125,7 +125,10 @@ What a device may do:
 - Group and connector totals and every device's spend are read on the store host only (`report`); the store has no network API for them.
 - A revoked device is refused within 10 seconds. Its spend so far stays counted; `device revoke --drop-spend-from 2026-11-01` also deletes its spend from that day on (for example forged spend that tripped a group's deny budget). `report --by-device` shows each device's spend. `device add` does not bring a revoked device back unless you pass `--reactivate`.
 - One device adds at most `device_daily_cap_usd` per UTC day over all its keys (or its own `--cap-usd`); `device list` shows the last day a device reached it.
-- One device may run at most 16 gateway processes at once and use at most 64 connector names a day beyond its credential's keys.
+- The cap counts per UTC day of the spend. Yesterday's spend can still grow for a day (a call that started before midnight), so just after midnight a device can add up to two caps within a few hours.
+- One device may run at most 16 gateway processes at once, store spend from at most 64 gateway processes a day, and use at most 64 connector names a day beyond its credential's keys.
+- Spend made while a device cannot reach the store for more than a day counts on that device only; it never reaches the fleet total.
+- A budget you remove from the bundle is no longer sent or asked about; you may remove it from the store config too.
 
 More:
 
