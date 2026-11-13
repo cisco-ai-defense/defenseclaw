@@ -60,7 +60,7 @@ func findingByRule(findings []RuleFinding, ruleID string) *RuleFinding {
 // The ceiling is decided by the category and the origin of the text: the same
 // rule keeps CRITICAL on text of any other origin, and a rule of another
 // category keeps its severity on user-typed text.
-func TestUserTypedTrustCeilingByCategoryAndOrigin(t *testing.T) {
+func TestTypedPromptTrustCeilingByCategoryAndOrigin(t *testing.T) {
 	wantAction := map[string]map[ruleTextOrigin]string{
 		"default":    {ruleTextOriginUnspecified: "block", ruleTextOriginUserTyped: "alert"},
 		"permissive": {ruleTextOriginUnspecified: "block", ruleTextOriginUserTyped: "alert"},
@@ -107,7 +107,7 @@ func TestUserTypedTrustCeilingByCategoryAndOrigin(t *testing.T) {
 
 // The /llm proxy: the prompt direction is the user turn and alerts; the
 // completion direction is the model and still blocks.
-func TestUserTypedTrustCeilingOnTheProxyPromptPath(t *testing.T) {
+func TestTypedPromptTrustCeilingOnTheProxyPromptPath(t *testing.T) {
 	for _, strategy := range []string{"regex_only", "regex_judge"} {
 		t.Run(strategy, func(t *testing.T) {
 			previous := liveGeneration.Load()
@@ -131,7 +131,7 @@ func TestUserTypedTrustCeilingOnTheProxyPromptPath(t *testing.T) {
 // The hooks: the turn-start event is what the user typed and alerts; the same
 // text on a surface the user did not type (a tool result, an expansion, a model
 // request) keeps its CRITICAL block.
-func TestUserTypedTrustCeilingOnHookSurfaces(t *testing.T) {
+func TestTypedPromptTrustCeilingOnHookSurfaces(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
