@@ -563,7 +563,7 @@ func writeSubstrateJSONCompact(w io.Writer, v any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s\n", b)
+	_, err = fmt.Fprintf(w, "%s\n", safetext.JSON(b))
 	return err
 }
 

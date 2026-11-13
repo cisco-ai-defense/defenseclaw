@@ -33,6 +33,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 const (
@@ -131,8 +133,8 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	if e.Reason != "" {
-		return fmt.Sprintf("the cluster answered %d (%s)", e.Status, e.Reason)
+	if r := safetext.Line(e.Reason); r != "" {
+		return fmt.Sprintf("the cluster answered %d (%s)", e.Status, r)
 	}
 	return fmt.Sprintf("the cluster answered %d", e.Status)
 }

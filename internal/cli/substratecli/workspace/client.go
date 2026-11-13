@@ -39,6 +39,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
@@ -103,8 +104,9 @@ func (e *HTTPError) Error() string {
 	switch {
 	case e.Status == http.StatusUnauthorized:
 		msg += ": the session token was not accepted; sign in again"
-	case e.Message != "":
-		msg += ": " + e.Message
+	case safetext.Line(e.Message) != "":
+		// The relay (inside the actor) wrote this: one clean line.
+		msg += ": " + safetext.Line(e.Message)
 	}
 	return msg
 }

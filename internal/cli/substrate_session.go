@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 type substrateLoginFlags struct {
@@ -204,7 +205,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 			if e, ok := api.AsError(err); ok && !e.NotImplemented() {
 				note = "You are signed in, but the cluster did not accept it yet: " + substrateAPIMessage(e)
 			} else if !ok {
-				note = "You are signed in, but the cluster could not be reached: " + err.Error()
+				note = "You are signed in, but the cluster could not be reached: " + safetext.Line(err.Error())
 			}
 		}
 	}
@@ -287,7 +288,7 @@ func newSubstrateWhoamiCmd() *cobra.Command {
 			}
 			fmt.Fprintf(w, "Signed in as %s (%s) on %s\n", substrateDash(tok.Principal), substrateDash(tok.Kind), s.Name)
 			if len(tok.Groups) > 0 {
-				fmt.Fprintf(w, "Groups:   %s\n", strings.Join(tok.Groups, ", "))
+				fmt.Fprintf(w, "Groups:   %s\n", safetext.Line(strings.Join(tok.Groups, ", ")))
 			}
 			if !tok.Expiry.IsZero() {
 				fmt.Fprintf(w, "Token:    renews itself; the current one lasts until %s\n", tok.Expiry.Local().Format(time.RFC1123))

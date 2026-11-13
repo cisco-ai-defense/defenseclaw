@@ -84,8 +84,9 @@ func substrateAge(t time.Time, now time.Time) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
+// substrateDash shows a value the cluster sent, as one safe line, or "-".
 func substrateDash(s string) string {
-	if s == "" {
+	if s = safetext.Line(s); s == "" {
 		return "-"
 	}
 	return s
