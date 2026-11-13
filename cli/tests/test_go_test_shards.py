@@ -11,6 +11,7 @@ import yaml
 
 import scripts.go_test_shards as go_test_shards
 from scripts.go_test_shards import (
+    MAX_RUN_PATTERN_CHARS,
     bounded_regexes,
     check_exact_cover,
     discover_test_files,
@@ -601,3 +602,22 @@ def test_linux_remaining_package_hookpaths_runs_in_parts_under_the_race_timeout(
     for regex in parts:
         estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
         assert estimated <= 0.5 * 11 * 60, (regex, estimated)
+
+
+def test_windows_gateway_and_connector_shards_fit_the_command_line() -> None:
+    # Windows Native CI 43331326436, gw6: a gateway shard of 733 names was one
+    # -run regex of 34,028 characters, and go.exe did not start ("The filename
+    # or extension is too long", 32,767 at most). The workflow asks for
+    # bounded regexes and runs one go test per line; every line fits, and
+    # the lines of a shard select exactly its tests.
+    root = Path(__file__).resolve().parents[2]
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    assert "'--bounded'" in workflow and "$shardPatterns[$patternIndex]" in workflow
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))["tests"]
+    shard_count = int(re.search(r"\$nativeTestShardCount = (\d+)", workflow).group(1))
+    for package in ("internal/gateway", "internal/gateway/connector"):
+        shards = partition_test_files(discover_test_files(root / package), shard_count, timings.get(package))
+        for names in shards:
+            patterns = bounded_regexes(names)
+            assert all(len(pattern) <= MAX_RUN_PATTERN_CHARS for pattern in patterns), package
+            assert sorted(name for pattern in patterns for name in regex_names(pattern)) == sorted(names)

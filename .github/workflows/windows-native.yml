@@ -403,25 +403,35 @@ jobs:
               @{ Dir = 'internal/gateway/connector'; Skip = $connectorSkip; Extra = @() }
             )) {
               $leaf = ($part.Dir -replace '^internal/', '') -replace '/', '-'
+              # --bounded: the shard comes as -run regexes of at most 16,000
+              # characters, one per line (a Windows command line holds 32,767;
+              # gw6 of 43331326436 could not start go.exe on a 34,028-character
+              # pattern). Each line is its own go test run of the package.
               $selection = Invoke-WindowsNativeProcess $uv @(
                 'run', '--no-project', '--python', '3.12', 'python', 'scripts/go_test_shards.py',
                 '--package-dir', $part.Dir,
                 '--timings', 'scripts/test-timings/go-windows.json',
                 '--shard-count', [string]$nativeTestShardCount,
-                '--shard-index', [string]$matrixShard
+                '--shard-index', [string]$matrixShard,
+                '--bounded'
               ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-select.log"))
-              $shardPattern = ([string]$selection.StdOut).Trim()
-              if ($shardPattern -notmatch '^\^\(\?:.+\)\$$') {
+              $shardPatterns = @(
+                [regex]::Split(([string]$selection.StdOut).Trim(), '\r?\n') |
+                  ForEach-Object { $_.Trim() } | Where-Object { $_ }
+              )
+              if (-not $shardPatterns -or @($shardPatterns | Where-Object { $_ -notmatch '^\^\(\?:.+\)\$$' })) {
                 throw "go_test_shards.py selected no $($part.Dir) tests for shard $matrixShard"
               }
-              # -timeout stays below the job's 20 minutes so a hung test
-              # fails with Go's goroutine dump, not a cancelled job.
-              Invoke-WindowsNativeProcess $go (@(
-                'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1') + $part.Extra + @(
-                '-skip', $part.Skip, '-run', $shardPattern, ('./' + $part.Dir)
-              )) -TimeoutSeconds 840 `
-                -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-$matrixShard.log")) `
-                -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+              for ($patternIndex = 0; $patternIndex -lt $shardPatterns.Count; $patternIndex++) {
+                # -timeout stays below the job's 20 minutes so a hung test
+                # fails with Go's goroutine dump, not a cancelled job.
+                Invoke-WindowsNativeProcess $go (@(
+                  'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1') + $part.Extra + @(
+                  '-skip', $part.Skip, '-run', $shardPatterns[$patternIndex], ('./' + $part.Dir)
+                )) -TimeoutSeconds 840 `
+                  -LogPath (Join-Path $env:DC_STATE_ROOT ("go-$leaf-shard-$matrixShard-$patternIndex.log")) `
+                  -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+              }
             }
             Write-Host "Native Windows Go matrix shard $matrixShard completed its gateway and connector shards."
             return
