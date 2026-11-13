@@ -2003,6 +2003,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseShippedRulePacks(result)
+			applyWindowsEnterpriseHookImage(result)
 			applyWindowsEnterpriseHookRuntimeAccess(result)
 			applyWindowsEnterpriseGuardianTargets(result)
 			applyWindowsEnterpriseUserCleanupFailures(result)
@@ -4834,6 +4835,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				coworkReason, coworkDetail = windowsEnterpriseShippedRulePacksEnsureDrift()
 			}
 			if !pending && coworkReason == "" {
+				// The launch folder agent hooks start is missing or changed
+				// (GAP-0751): PowerShell verify does not check it.
+				coworkReason, coworkDetail = windowsEnterpriseHookImageEnsureDrift()
+			}
+			if !pending && coworkReason == "" {
 				// The module can set ok:false for security_incomplete with no
 				// failed check. Keep its warning, without turning that into a
 				// synthetic not_ready error during result translation.
@@ -4918,6 +4924,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				// A shipped rule pack the config selects that is missing or
 				// changed: PowerShell verify does not check it (#1445).
 				coworkReason, coworkDetail = windowsEnterpriseShippedRulePacksEnsureDrift()
+			}
+			if coworkReason == "" {
+				// The launch folder agent hooks start is missing or changed
+				// (GAP-0751): PowerShell verify does not check it.
+				coworkReason, coworkDetail = windowsEnterpriseHookImageEnsureDrift()
 			}
 		}
 		switch {
