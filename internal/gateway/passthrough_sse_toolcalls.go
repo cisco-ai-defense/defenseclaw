@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -39,20 +40,31 @@ func passthroughWireProvider(provider, path string) string {
 	return provider
 }
 
-// sseToolCalls collects the tool calls of an OpenAI-shaped SSE reply, so
-// each finished call goes through the tool-call rules before its bytes
-// reach the agent (as GAP-0098 does for the Bedrock eventstream):
-//   - Responses: function_call, custom_tool_call, local_shell_call and
-//     mcp_call items, from response.output_item.added (open) to
-//     response.output_item.done (finished);
-//   - Chat Completions: choices[].delta.tool_calls fragments, finished by
-//     the choice's finish_reason or the end of the stream.
+// sseToolCalls collects the tool calls of an SSE reply, so each finished
+// call goes through the tool-call rules before its bytes reach the agent (as
+// GAP-0098 does for the Bedrock eventstream). A call that spans events is
+// assembled here from:
+//   - Responses: every output item whose type is a call (function_call,
+//     custom_tool_call, local_shell_call, mcp_call, computer_call and the
+//     items that come after them), from response.output_item.added (open) to
+//     response.output_item.done (finished), and its argument deltas;
+//   - Chat Completions: choices[].delta.tool_calls (and the older
+//     delta.function_call) fragments, finished by the choice's finish_reason
+//     or the end of the stream;
+//   - Anthropic Messages: tool_use, server_tool_use and mcp_tool_use content
+//     blocks, from content_block_start to content_block_stop.
+//
+// A call that arrives whole in one event (Gemini functionCall, a message
+// object with tool_calls, the snapshot in response.completed) is added with
+// AddCalls.
 type sseToolCalls struct {
 	open      map[string]bool // Responses item ids in progress
 	chat      map[int]*sseChatCall
 	chatOrder []int
+	blocks    map[int]*sseChatCall // Anthropic content blocks in progress
 	done      []sseToolCall
-	held      int // argument bytes of open calls
+	seen      map[string]bool // finished calls, by name and arguments
+	held      int             // argument bytes of open calls
 	broken    bool
 	responses bool // a Responses event was seen
 	nextIndex int  // next free Responses output_index
@@ -73,11 +85,30 @@ type sseChatCall struct {
 }
 
 func newSSEToolCalls() *sseToolCalls {
-	return &sseToolCalls{open: map[string]bool{}, chat: map[int]*sseChatCall{}}
+	return &sseToolCalls{open: map[string]bool{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
 }
 
-// sseResponsesToolItems are the Responses output item types that run a tool.
-var sseResponsesToolItems = map[string]bool{"function_call": true, "custom_tool_call": true, "local_shell_call": true, "mcp_call": true}
+func (s *sseToolCalls) finished(c sseToolCall) {
+	s.seen[c.Function.Name+"\x00"+c.Function.Arguments] = true
+	s.done = append(s.done, c)
+}
+
+// AddCalls adds calls that arrived whole in one event, once each.
+func (s *sseToolCalls) AddCalls(calls []sseToolCall) {
+	for _, c := range calls {
+		if !s.seen[c.Function.Name+"\x00"+c.Function.Arguments] {
+			s.finished(c)
+		}
+	}
+}
+
+func jnodeInt(n *jnode) (int, bool) {
+	if n == nil || n.kind != 'v' {
+		return 0, false
+	}
+	i, err := strconv.Atoi(n.s)
+	return i, err == nil
+}
 
 // Feed reads one SSE data payload ("[DONE]" ends the stream).
 func (s *sseToolCalls) Feed(data string) {
@@ -85,92 +116,123 @@ func (s *sseToolCalls) Feed(data string) {
 		s.Finish()
 		return
 	}
-	var ev struct {
-		Type        string          `json:"type"`
-		OutputIndex *int            `json:"output_index"`
-		Item        json.RawMessage `json:"item"`
-		Delta       json.RawMessage `json:"delta"`
-		Choices     []struct {
-			Delta struct {
-				ToolCalls []struct {
-					Index    int    `json:"index"`
-					ID       string `json:"id"`
-					Function struct {
-						Name      string `json:"name"`
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			} `json:"delta"`
-			FinishReason *string `json:"finish_reason"`
-		} `json:"choices"`
-	}
-	if json.Unmarshal([]byte(data), &ev) != nil {
+	root, err := parseJSONTree([]byte(data))
+	if err != nil || root.kind != 'o' {
 		return
 	}
-	if strings.HasPrefix(ev.Type, "response.") {
+	typ := root.str("type")
+	outIdx, hasOutIdx := jnodeInt(root.get("output_index"))
+	if strings.HasPrefix(typ, "response.") {
 		s.responses = true
-		if ev.OutputIndex != nil && *ev.OutputIndex >= s.nextIndex {
-			s.nextIndex = *ev.OutputIndex + 1
+		if hasOutIdx && outIdx >= s.nextIndex {
+			s.nextIndex = outIdx + 1
 		}
 	}
-	switch ev.Type {
-	case "response.output_item.added", "response.output_item.done":
-		var item struct {
-			ID        string          `json:"id"`
-			Type      string          `json:"type"`
-			CallID    string          `json:"call_id"`
-			Name      string          `json:"name"`
-			Arguments string          `json:"arguments"`
-			Input     string          `json:"input"`
-			Action    json.RawMessage `json:"action"`
+	itemKey := func(id string) string {
+		if id != "" {
+			return id
 		}
-		if json.Unmarshal(ev.Item, &item) != nil || !sseResponsesToolItems[item.Type] {
-			return
+		return "output_index:" + strconv.Itoa(outIdx)
+	}
+	switch {
+	case typ == "response.output_item.added" || typ == "response.output_item.done":
+		item := root.get("item")
+		if item == nil || item.kind != 'o' || !isCallType(item.str("type")) {
+			break
 		}
-		if ev.Type == "response.output_item.added" {
-			s.open[item.ID] = true
-			return
+		key := itemKey(item.str("id"))
+		if typ == "response.output_item.added" {
+			s.open[key] = true
+			break
 		}
-		delete(s.open, item.ID)
-		c := sseToolCall{ID: item.CallID, Type: "function"}
-		c.Function.Name, c.Function.Arguments = item.Name, item.Arguments
-		switch item.Type {
-		case "custom_tool_call":
-			c.Function.Arguments = item.Input
-		case "local_shell_call":
-			c.Function.Name, c.Function.Arguments = "local_shell", string(item.Action)
+		delete(s.open, key)
+		w := &textWalker{reply: true}
+		w.callObject(item, "")
+		for _, c := range w.calls {
+			s.finished(c)
 		}
-		s.done = append(s.done, c)
-		if len(s.open) == 0 {
+		if len(s.open) == 0 && len(s.blocks) == 0 {
 			s.held = 0
 		}
-	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
-		var d string
-		_ = json.Unmarshal(ev.Delta, &d)
-		s.grow(len(d))
-	case "response.completed", "response.failed", "response.incomplete":
+	case strings.HasPrefix(typ, "response.") && strings.HasSuffix(typ, ".delta") && strings.Contains(typ, "_call"):
+		// function_call_arguments, custom_tool_call_input, mcp_call_arguments,
+		// code_interpreter_call_code ...: the item is open even if its
+		// output_item.added was not seen.
+		s.open[itemKey(root.str("item_id"))] = true
+		if d := root.get("delta"); d != nil && d.kind == 's' {
+			s.grow(len(d.s))
+		}
+	case typ == "response.completed" || typ == "response.failed" || typ == "response.incomplete":
 		s.open = map[string]bool{}
 		s.held = 0
-	}
-	for _, ch := range ev.Choices {
-		for _, tc := range ch.Delta.ToolCalls {
-			c := s.chat[tc.Index]
+	case typ == "content_block_start":
+		idx, _ := jnodeInt(root.get("index"))
+		if cb := root.get("content_block"); cb != nil && isCallType(cb.str("type")) {
+			c := &sseChatCall{id: cb.str("id"), name: cb.str("name")}
+			if in := cb.get("input"); in != nil && in.kind == 'o' && len(in.kids) > 0 {
+				c.args.WriteString(in.json())
+			}
+			s.blocks[idx] = c
+		}
+	case typ == "content_block_delta":
+		idx, _ := jnodeInt(root.get("index"))
+		if d := root.get("delta"); d != nil && d.str("type") == "input_json_delta" {
+			c := s.blocks[idx]
 			if c == nil {
 				c = &sseChatCall{}
-				s.chat[tc.Index] = c
-				s.chatOrder = append(s.chatOrder, tc.Index)
+				s.blocks[idx] = c
 			}
-			if tc.ID != "" {
-				c.id = tc.ID
-			}
-			c.name += tc.Function.Name
-			c.args.WriteString(tc.Function.Arguments)
-			s.grow(len(tc.Function.Arguments) + len(tc.Function.Name))
+			c.args.WriteString(d.str("partial_json"))
+			s.grow(len(d.str("partial_json")))
 		}
-		if ch.FinishReason != nil && *ch.FinishReason != "" {
-			s.finishChat()
+	case typ == "content_block_stop":
+		idx, _ := jnodeInt(root.get("index"))
+		if c := s.blocks[idx]; c != nil {
+			delete(s.blocks, idx)
+			tc := sseToolCall{ID: c.id, Type: "function"}
+			tc.Function.Name, tc.Function.Arguments = c.name, c.args.String()
+			if tc.Function.Arguments == "" {
+				tc.Function.Arguments = "{}"
+			}
+			s.finished(tc)
+			if len(s.open) == 0 && len(s.blocks) == 0 {
+				s.held = 0
+			}
 		}
 	}
+	if choices := root.get("choices"); choices != nil && choices.kind == 'a' {
+		for _, ch := range choices.kids {
+			delta := ch.get("delta")
+			if tcs := delta.get("tool_calls"); tcs != nil && tcs.kind == 'a' {
+				for _, tc := range tcs.kids {
+					idx, _ := jnodeInt(tc.get("index"))
+					s.chatFragment(idx, tc.str("id"), tc.get("function"))
+				}
+			}
+			if fc := delta.get("function_call"); fc != nil && fc.kind == 'o' {
+				s.chatFragment(-1, "", fc)
+			}
+			if fr := ch.get("finish_reason"); fr != nil && fr.kind == 's' && fr.s != "" {
+				s.finishChat()
+			}
+		}
+	}
+}
+
+func (s *sseToolCalls) chatFragment(idx int, id string, fn *jnode) {
+	c := s.chat[idx]
+	if c == nil {
+		c = &sseChatCall{}
+		s.chat[idx] = c
+		s.chatOrder = append(s.chatOrder, idx)
+	}
+	if id != "" {
+		c.id = id
+	}
+	name, args := fn.str("name"), fn.str("arguments")
+	c.name += name
+	c.args.WriteString(args)
+	s.grow(len(args) + len(name))
 }
 
 func (s *sseToolCalls) grow(n int) {
@@ -185,25 +247,28 @@ func (s *sseToolCalls) finishChat() {
 		c := s.chat[i]
 		tc := sseToolCall{ID: c.id, Type: "function"}
 		tc.Function.Name, tc.Function.Arguments = c.name, c.args.String()
-		s.done = append(s.done, tc)
+		s.finished(tc)
 	}
 	s.chat, s.chatOrder = map[int]*sseChatCall{}, nil
-	if len(s.open) == 0 {
+	if len(s.open) == 0 && len(s.blocks) == 0 {
 		s.held = 0
 	}
 }
 
 // Finish ends the stream: Chat Completions calls with no finish_reason are
-// finished; an open Responses item can no longer be completed.
+// finished; an open Responses item or content block can no longer be
+// completed.
 func (s *sseToolCalls) Finish() {
 	s.finishChat()
-	if len(s.open) > 0 {
+	if len(s.open) > 0 || len(s.blocks) > 0 {
 		s.broken = true
 	}
 }
 
 // Open reports a tool call in progress, whose bytes are held.
-func (s *sseToolCalls) Open() bool { return len(s.open) > 0 || len(s.chatOrder) > 0 }
+func (s *sseToolCalls) Open() bool {
+	return len(s.open) > 0 || len(s.chatOrder) > 0 || len(s.blocks) > 0
+}
 
 // Broken reports a stream whose tool calls cannot be inspected (too large,
 // or cut inside a call).

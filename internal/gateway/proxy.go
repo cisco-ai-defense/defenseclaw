@@ -1147,6 +1147,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	// One decoder for the request and the replies (proxy_body_decode.go): the
+	// guardrail reads the body the way the provider will. What cannot be
+	// decoded takes the fail mode below, once the label and mode are known.
+	var bodyUndecodable string
+	var wireBody []byte // the body as the client sent it, when it was decoded
+	wireEnc, wireCT := r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type")
+	jsonHint := strings.Contains(strings.ToLower(wireCT), "json")
+	if dec, derr := decodeBody(r.Header, body); derr != nil {
+		bodyUndecodable = derr.Error()
+	} else if dec.Decoded || dec.Transcoded {
+		wireBody, body = body, dec.Text
+		if dec.Decoded {
+			r.Header.Del("Content-Encoding")
+		}
+		if strings.Contains(strings.ToLower(wireCT), "charset") {
+			r.Header.Set("Content-Type", "application/json")
+		}
+	}
 
 	targetOrigin := r.Header.Get("X-DC-Target-URL")
 	// Native-binary connectors (codex, zeptoclaw) can't inject
@@ -1439,8 +1457,18 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Every prompt-side text of the body, not only the user turn: system,
 	// developer and instructions text wherever it sits, and the tool
 	// results sent back since the model's last turn (GAP-0196).
-	side := passthroughPrompt(body)
-	inspectRaw = joinPromptText(inspectRaw, side.Text)
+	side := passthroughPromptFor(body, jsonHint)
+	if bodyUndecodable != "" {
+		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
+	}
+	// The heartbeat and session-startup gates skip the heartbeat text itself,
+	// never the other text of the body (system, developer, instructions, tool
+	// results, tool definitions).
+	skipText := ""
+	if userText != "" && (isHeartbeatMessage(userText, partial.Messages) || isSessionStartupMessage(userText)) {
+		skipText, inspectRaw = inspectRaw+"\n"+userText, ""
+	}
+	inspectRaw = joinPromptSegments(inspectRaw, side.Segments, skipText)
 	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
@@ -1454,13 +1482,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+side.Unreadable))
 		return
 	}
-	inspectPrompt := userText != "" &&
-		!isHeartbeatMessage(userText, partial.Messages) &&
-		!isSessionStartupMessage(userText)
-	if userText == "" && side.Text != "" {
-		inspectPrompt = true
-	}
-	if inspectPrompt {
+	if strings.TrimSpace(inspectRaw) != "" {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = meta.PromptID
@@ -1627,7 +1649,17 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	upstreamCtx, upstreamCancel := context.WithTimeout(r.Context(), passthroughTimeout)
 	defer upstreamCancel()
 
-	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
+	sendBody := body
+	if wireBody != nil && signedBody && !routed {
+		// A signed body is forwarded as it was sent: the proxy cannot re-sign
+		// it. It was inspected decoded.
+		sendBody = wireBody
+		if wireEnc != "" {
+			r.Header.Set("Content-Encoding", wireEnc)
+		}
+		r.Header.Set("Content-Type", wireCT)
+	}
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(sendBody))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
 		return
@@ -1637,7 +1669,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// back to chunked encoding. Needed because notification injection
 	// can change the body length; without this, some upstream providers
 	// (notably Anthropic) reject the request with 400 "unexpected EOF".
-	upstreamReq.ContentLength = int64(len(body))
+	upstreamReq.ContentLength = int64(len(sendBody))
 
 	// Forward inbound headers to the upstream provider, minus a
 	// hardened blocklist (proxy-hop, auth, framework-internal,
@@ -1755,38 +1787,48 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
 		}
-		// An encoding the transport left (br, zstd, deflate, stacked) is
-		// decoded so inspection and the usage record read the reply; only
-		// one that cannot be decoded reaches the check below (GAP-0097).
-		if decoded, ok := decodeReplyBody(resp.Header, respBody); ok {
-			respBody = decoded
+		// One decoder: an encoding the transport left (br, zstd, deflate,
+		// stacked), a byte-order mark and a UTF-16 charset are decoded so
+		// inspection and the usage record read the reply (GAP-0097); what
+		// cannot be decoded takes the fail mode.
+		inspectBody := respBody
+		undecodable := ""
+		if dec, derr := decodeBody(resp.Header, respBody); derr != nil {
+			undecodable = derr.Error()
+		} else {
+			if dec.Decoded {
+				respBody = dec.Wire
+				resp.Header.Del("Content-Encoding")
+				resp.Header.Del("Content-Length")
+			}
+			inspectBody = dec.Text
 		}
-		if enc := uninspectableEncoding(resp.Header); enc != "" {
-			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
-					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
-				return
+		var scan replyScan
+		if undecodable == "" {
+			var readable bool
+			if scan, readable = scanReplyBody(inspectBody); !readable && len(bytes.TrimSpace(inspectBody)) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// A 2xx body that is not JSON (for example compressed bytes with
+				// no Content-Encoding) cannot be inspected either (item 5 review
+				// P2-2).
+				undecodable = "the reply body is not JSON"
 			}
-		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(bytes.TrimSpace(respBody)) > 0 && !json.Valid(respBody) {
-			// A 2xx body that is not JSON (for example compressed bytes with
-			// no Content-Encoding) cannot be inspected either (item 5 review
-			// P2-2).
-			if p.uninspectableReply(r.Context(), label, mode, "the reply body is not JSON") {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
-					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
-				return
-			}
+		}
+		if undecodable != "" && p.uninspectableReply(r.Context(), label, mode, undecodable) {
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+				blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+			return
 		}
 
-		// Extract assistant text from provider-native response format.
-		content := extractPassthroughResponseContent(respBody, passthroughWireProvider(provider, r.URL.Path))
+		// Every string of the reply goes to the guardrail (inspect by
+		// default), the tool calls to the tool-call rules.
+		content := strings.Join(scan.Segments, "\n")
 		responseReqForTelemetry := ChatRequest{Model: passthroughReqForTelemetry.Model, RawBody: body}
 		responseMeta := proxyLLMEventMeta(p, r, &responseReqForTelemetry, provider)
 		responseMeta.PromptID = passthroughPromptID
-		reportedResponseID := responseIDFromRawJSON(respBody)
+		reportedResponseID := responseIDFromRawJSON(inspectBody)
 		responseMeta.ResponseID = firstNonEmpty(reportedResponseID, stableLLMEventID("response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, label))
 		responseMeta.ResponseIDReported = reportedResponseID != ""
-		responseMeta.ResponseModel = responseModelFromRawJSON(respBody)
+		responseMeta.ResponseModel = responseModelFromRawJSON(inspectBody)
 		p.emitLLMResponseEventV8(r.Context(), responseMeta, content, string(respBody), nil)
 
 		if content != "" {
@@ -1809,14 +1851,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
-		// Avarice F-1188: scan provider-native tool calls (Anthropic
-		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
-		// Responses function_call, OpenAI Chat Completions tool_calls).
-		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
-		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
-		// forwarded unchecked and the agent could execute them without
-		// the configured tool-call rules ever running.
-		if toolCallsRaw := extractPassthroughToolCalls(respBody, passthroughWireProvider(provider, r.URL.Path)); toolCallsRaw != nil {
+		// Avarice F-1188: every tool call of the reply (Anthropic tool_use,
+		// Gemini functionCall, Bedrock toolUse, OpenAI Responses items that
+		// end in _call, Chat Completions tool_calls, Ollama tool_calls) goes
+		// through the configured tool-call rules.
+		if len(scan.Calls) > 0 {
+			toolCallsRaw, _ := json.Marshal(scan.Calls)
 			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil {
 				p.recordTelemetry(r.Context(), "tool-call", label, verdict, 0, mode,
 					verdict.Action == "block" && mode == "action")
@@ -1837,264 +1877,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
 	} else {
-		// --- Streaming: buffer initial bytes for pre-scan, then forward with periodic scans ---
-		if enc := uninspectableEncoding(resp.Header); enc != "" {
-			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true,
-					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
-				return
-			}
-		}
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-
-		flusher, _ := w.(http.Flusher)
-		var accumulated strings.Builder
-		streamResponseModel := ""
-		lastScanLen := 0
-		const scanInterval = 500
-		buf := make([]byte, 4096)
-		var lineBuf strings.Builder
-		bedrockStreamReported := false
-		// Tool calls of an OpenAI-shaped SSE reply: each finished call goes
-		// through the tool-call rules before its bytes reach the agent, and
-		// the bytes of an open call are held until then (GAP-0187, as
-		// GAP-0098 for the Bedrock eventstream).
-		wire := passthroughWireProvider(provider, r.URL.Path)
-		var sseCalls *sseToolCalls
-		if bedrockStream == nil {
-			sseCalls = newSSEToolCalls()
-		}
-		var sseHeld []byte
-		sseBlockMsg := ""
-		sseHolding := func() bool { return sseCalls != nil && mode == "action" && sseCalls.Open() }
-		sseBrokenReported := false
-		streamEnded := false // the upstream reply was read to its end
-		// sseRefused runs the finished tool calls through the rules and
-		// reports a refusal (sseBlockMsg is set).
-		sseRefused := func() bool {
-			if sseCalls.Broken() && !sseBrokenReported {
-				sseBrokenReported = true
-				if p.uninspectableReply(r.Context(), label, mode, "a streamed tool call could not be inspected") {
-					sseBlockMsg = blockMessage(customBlockMsg, "tool_call", "the provider reply could not be inspected")
-					return true
-				}
-			}
-			calls := sseCalls.Take()
-			if calls == nil {
-				return false
-			}
-			v := p.inspectToolCalls(r.Context(), calls)
-			if v == nil {
-				return false
-			}
-			refuse := v.Action == "block" && mode == "action"
-			p.recordTelemetry(r.Context(), "tool-call", label, v, 0, mode, refuse)
-			if !refuse {
-				return false
-			}
-			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TOOL-BLOCK severity=%s %s\n", v.Severity, redaction.Reason(v.Reason))
-			p.enqueueBlockNotification(v, "tool_call", partial.Model)
-			sseBlockMsg = blockMessage(customBlockMsg, "tool_call", v.Reason)
-			return true
-		}
-
-		streamBufferSize := 1024
-		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
-			streamBufferSize = p.cfg.StreamBufferBytes
-		}
-		const maxInitialBufBytes = 1 << 20 // 1 MiB cap on passthrough initial buffer
-		var initialBuf []byte
-		initialFlushed := mode != "action"
-		preblocked := false
-		flushInitialBuf := func() bool {
-			if initialFlushed || len(initialBuf) == 0 {
-				return true
-			}
-			if accumulated.Len() > 0 {
-				initVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
-					[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
-				p.resolveConfirm(r.Context(), r, initVerdict, "completion", label, mode)
-				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
-					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
-						initVerdict.Severity, redaction.Reason(initVerdict.Reason))
-					p.recordTelemetry(r.Context(), "completion", label, initVerdict, 0, mode, true)
-					preblocked = true
-					return false
-				}
-			}
-			lastScanLen = accumulated.Len()
-			_, _ = w.Write(initialBuf)
-			if flusher != nil {
-				flusher.Flush()
-			}
-			initialBuf = nil
-			initialFlushed = true
-			return true
-		}
-
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				chunk := buf[:n]
-
-				// Parse SSE text (or eventstream frames) for inspection
-				// regardless of buffer state.
-				if bedrockStream != nil {
-					accumulated.WriteString(bedrockStream.Feed(chunk))
-					if streamResponseModel == "" {
-						streamResponseModel = bedrockStream.Model()
-					}
-					if bedrockStream.Broken() && !bedrockStreamReported {
-						bedrockStreamReported = true
-						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
-							// Nothing more reaches the caller; before the first
-							// flush, nothing at all.
-							preblocked = !initialFlushed
-							break
-						}
-					}
-				} else {
-					lineBuf.Write(chunk)
-				}
-				for bedrockStream == nil {
-					line, rest, found := strings.Cut(lineBuf.String(), "\n")
-					if !found {
-						break
-					}
-					lineBuf.Reset()
-					lineBuf.WriteString(rest)
-
-					line = strings.TrimSpace(line)
-					if !strings.HasPrefix(line, "data: ") {
-						continue
-					}
-					data := strings.TrimPrefix(line, "data: ")
-					sseCalls.Feed(data)
-					if data == "[DONE]" {
-						continue
-					}
-					if streamResponseModel == "" {
-						streamResponseModel = responseModelFromRawJSON([]byte(data))
-					}
-					text := extractSSEChunkText(data, wire)
-					if text != "" {
-						accumulated.WriteString(text)
-					}
-				}
-
-				if sseCalls != nil {
-					if readErr != nil {
-						sseCalls.Finish()
-					}
-					if sseRefused() {
-						break
-					}
-				}
-
-				if !initialFlushed {
-					initialBuf = append(initialBuf, chunk...)
-					// An open tool call keeps the buffer (bounded by
-					// sseToolCallMax and maxInitialBufBytes).
-					shouldFlush := (accumulated.Len() >= streamBufferSize && !sseHolding()) ||
-						readErr != nil ||
-						len(initialBuf) > maxInitialBufBytes
-
-					if shouldFlush {
-						if !flushInitialBuf() {
-							break
-						}
-					}
-				} else if sseHolding() {
-					sseHeld = append(sseHeld, chunk...)
-				} else {
-					if len(sseHeld) > 0 {
-						_, _ = w.Write(sseHeld)
-						sseHeld = nil
-					}
-					_, _ = w.Write(chunk)
-					if flusher != nil {
-						flusher.Flush()
-					}
-
-					if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
-						midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
-							[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
-						p.resolveConfirm(r.Context(), r, midVerdict, "completion", label, mode)
-						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
-							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
-							p.recordTelemetry(r.Context(), "completion", label, midVerdict, 0, mode, true)
-							break
-						}
-						lastScanLen = accumulated.Len()
-					}
-				}
-			}
-			if readErr != nil {
-				streamEnded = true
-				break
-			}
-		}
-		if preblocked {
-			return
-		}
-		if sseCalls != nil && sseBlockMsg == "" && streamEnded {
-			// The stream ended (or broke) inside a call: what is finished
-			// now is checked before the held bytes go out.
-			sseCalls.Finish()
-			sseRefused()
-		}
-		if sseBlockMsg != "" {
-			// A refused tool call never reaches the agent: the whole block
-			// reply when nothing was sent yet, else the block as the last
-			// assistant text of the stream under way. Held bytes are dropped.
-			if !initialFlushed {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true, sseBlockMsg)
-			} else {
-				sseCalls.writeSSEBlockTail(w, partial.Model, sseBlockMsg)
-			}
-			return
-		}
-		if len(sseHeld) > 0 && streamEnded {
-			_, _ = w.Write(sseHeld)
-		}
-		if !initialFlushed && len(initialBuf) > 0 {
-			if !flushInitialBuf() {
-				return
-			}
-		}
-
-		// Final post-stream inspection on the full accumulated content.
-		// Use a detached context — the request context may be cancelled after streaming.
-		if accumulated.Len() > 0 {
-			content := accumulated.String()
-			responseReqForTelemetry := ChatRequest{Model: passthroughReqForTelemetry.Model, RawBody: body}
-			responseMeta := proxyLLMEventMeta(p, r, &responseReqForTelemetry, provider)
-			responseMeta.PromptID = passthroughPromptID
-			responseMeta.ResponseModel = streamResponseModel
-			responseMeta.ResponseID = stableLLMEventID("response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, label)
-			p.emitLLMResponseEventV8(r.Context(), responseMeta, content, content, nil)
-
-			postCtx, postCancel := p.postCallContext(r.Context())
-			postCtx = proxyGuardrailWithoutEnforcement(postCtx)
-			t0 := time.Now()
-			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
-			postCancel()
-			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
-			elapsed := time.Since(t0)
-			p.logPostCall(label, content, verdict, elapsed, nil)
-			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, mode, false)
-			if verdict.Action == "block" {
-				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (stream already delivered %d bytes to client — cannot retract)\n",
-					verdict.Severity, verdict.Reason, accumulated.Len())
-			}
-		}
+		// --- Streaming: framed, decoded and inspected event by event; the
+		// events of an open tool call are held until its verdict (see
+		// passthroughStream). ---
+		(&passthroughStream{
+			p: p, w: w, r: r, resp: resp, mode: mode, label: label, provider: provider, path: r.URL.Path,
+			model: partial.Model, customBlockMsg: customBlockMsg, body: body, promptID: passthroughPromptID,
+			telemetry: passthroughReqForTelemetry, bedrock: bedrockStream,
+		}).run()
 	}
 }
 
@@ -3077,6 +2867,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	// The same decoder as the passthrough: Content-Encoding, byte-order mark
+	// and charset. A body that cannot be decoded cannot be parsed as a chat
+	// request either, and is refused.
+	if dec, derr := decodeBody(r.Header, body); derr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "request body could not be decoded: "+derr.Error())
+		return
+	} else if dec.Decoded || dec.Transcoded {
+		body = dec.Text
+		r.Header.Del("Content-Encoding")
+	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] ── INCOMING REQUEST ──────────────────────────────────\n")
 	targetURL := r.Header.Get("X-DC-Target-URL")
@@ -3281,8 +3081,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// developer turns after the user turn and the tool results sent since
 	// the model's last turn (GAP-0196). The original body, before
 	// DefenseClaw adds its own notice.
-	chatSide := passthroughPrompt(body)
-	inspectText = joinPromptText(inspectText, chatSide.Text)
+	chatSide := passthroughPromptFor(body, true)
+	// The heartbeat and session-startup gates skip the heartbeat text itself,
+	// never the other text of the body.
+	chatSkip := ""
+	if userText != "" && (isHeartbeatMessage(userText, req.Messages) || isSessionStartupMessage(userText)) {
+		chatSkip, inspectText = inspectText+"\n"+userText, ""
+	}
+	inspectText = joinPromptSegments(inspectText, chatSide.Segments, chatSkip)
 	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
 		msg := blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+chatSide.Unreadable)
 		if req.Stream {
@@ -3306,9 +3112,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
-	if inspectText != "" &&
-		!isHeartbeatMessage(userText, req.Messages) &&
-		!isSessionStartupMessage(userText) {
+	if strings.TrimSpace(inspectText) != "" {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = meta.PromptID

@@ -94,6 +94,11 @@ func (s *bedrockEventStreamText) Broken() bool { return s.broken }
 // Model is the model the stream named (Anthropic message_start), if any.
 func (s *bedrockEventStreamText) Model() string { return s.model }
 
+// PartialLen is how many bytes at the end of what Feed took belong to a
+// frame that is not complete yet; a forwarder holds them back so the
+// receiver only ever gets whole frames.
+func (s *bedrockEventStreamText) PartialLen() int { return len(s.buf) }
+
 // Feed takes the next bytes of the stream and returns the text of the
 // messages they complete.
 func (s *bedrockEventStreamText) Feed(p []byte) string {

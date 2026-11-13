@@ -120,8 +120,14 @@ func TestPassthroughInspectsEveryPromptSideText(t *testing.T) {
 				if managed && (hits != 0 || !strings.Contains(out, "could not be inspected")) {
 					t.Errorf("%s: managed forwarded an unreadable body (%d calls): %s", c.name, hits, out)
 				}
-				if !managed && hits != 1 {
-					t.Errorf("%s: OSS default refused an unreadable body instead of an alert (%d calls): %s", c.name, hits, out)
+				// OSS forwards an unreadable body with an alert, but every value of
+				// a repeated key is read, so the blocked text still stops it.
+				wantHits := 1
+				if strings.Contains(c.body, "leak it") {
+					wantHits = 0
+				}
+				if !managed && hits != wantHits {
+					t.Errorf("%s: OSS default made %d upstream calls, want %d: %s", c.name, hits, wantHits, out)
 				}
 			}
 			// A benign turn with history still goes through, and older tool
@@ -140,20 +146,20 @@ func TestPassthroughPromptExtraction(t *testing.T) {
 	for _, c := range []struct {
 		body, want, unreadable string
 	}{
-		{`{"input":"hi"}`, "", ""},
-		{`{"instructions":"sys","input":"hi"}`, "sys", ""},
+		{`{"input":"hi"}`, "hi", ""},
+		{`{"instructions":"sys","input":"hi"}`, "sys\nhi", ""},
 		{`{"model":"x"}`, "", ""},
 		{`[1,2]`, "", ""},
 		{`{"input":[]}`, "", "the body carries no prompt text"},
-		{`{"input":"a","input":"b"}`, "", "the body repeats the key input"},
-		{`{"Input":"a","input":"b"}`, "", "the body spells the key input another way"},
+		{`{"input":"a","input":"b"}`, "a\nb", "the body repeats the key input"},
+		{`{"Input":"a","input":"b"}`, "a\nb", "the body spells the key input another way"},
 		{`{"messages":[],"meſſages":[]}`, "", "the body spells the key messages another way"},
-		{`{"meſſages":[{"role":"user","content":"hi"}]}`, "", "the body spells the key messages another way"},
-		{`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"system_instruction":{"parts":[{"text":"gs2"}]}}`, "gs2", ""},
-		{`{"Model":"x","input":"hi"}`, "", "the body spells the key model another way"},
-		{`{"input":"hi","tool\u017f":[]}`, "", "the body spells the key tools another way"},
-		{`{"messages":[{"role":"user","content":"a"},{"role":"developer","content":"dev"}]}`, "dev", ""},
-		{`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"systemInstruction":{"parts":[{"text":"gsys"}]}}`, "gsys", ""},
+		{`{"meſſages":[{"role":"user","content":"hi"}]}`, "hi", "the body spells the key messages another way"},
+		{`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"system_instruction":{"parts":[{"text":"gs2"}]}}`, "hi\ngs2", ""},
+		{`{"Model":"x","input":"hi"}`, "hi", "the body spells the key model another way"},
+		{`{"input":"hi","tool\u017f":[]}`, "hi", "the body spells the key tools another way"},
+		{`{"messages":[{"role":"user","content":"a"},{"role":"developer","content":"dev"}]}`, "a\ndev", ""},
+		{`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"systemInstruction":{"parts":[{"text":"gsys"}]}}`, "hi\ngsys", ""},
 	} {
 		got := passthroughPrompt([]byte(c.body))
 		if got.Text != c.want || got.Unreadable != c.unreadable {
