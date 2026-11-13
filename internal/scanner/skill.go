@@ -473,12 +473,6 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
-	// A missing scanner is found here: the contained run reports only that
-	// its custody failed, which reads like a scanner that ran and failed
-	// (substrate-1 GAP-0164: a gateway image without skill-scanner).
-	if _, err := exec.LookPath(binary); err != nil {
-		return nil, scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
-	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, binary, s.commandArgs(scanPath, policy)...)
@@ -498,6 +492,13 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			exitCode = exitErr.ExitCode()
 		}
 		if !errors.As(err, &exitErr) {
+			// The contained run reports a missing scanner only as a failed
+			// custody handshake, which reads like a scanner that ran and failed
+			// (substrate-1 GAP-0164: a gateway image without skill-scanner). A run
+			// that wrote output did start, so it is never "not found".
+			if _, lerr := exec.LookPath(binary); lerr != nil && stdout.Len() == 0 {
+				return nil, scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
+			}
 			result.ExitCode = -1
 			result.ScanError = err.Error()
 			return result, fmt.Errorf("scanner: %s could not complete: %w", s.Name(), err)
