@@ -173,6 +173,8 @@ type walker struct {
 	// is set when the letter could not be read (round 8, K43/S34).
 	aliasDrive map[byte]bool
 	aliasAll   bool
+	// varsOwned: env and exported are this scope's own copies (see ownVars).
+	varsOwned bool
 	// cdUnreliable: the cd builtin was disabled or made to resolve names as
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
@@ -234,7 +236,7 @@ func newWalker(res *Result, o Options) *walker {
 	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
-		env: env, exported: exported, spec: &childSpec{},
+		env: env, exported: exported, varsOwned: true, spec: &childSpec{},
 		curCWD: o.CWD, curHome: o.Home, work: walkWorkBudget, pathDialect: o.Dialect, curDialect: o.Dialect}
 }
 
@@ -522,9 +524,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			continue
 		}
 		if a.Exported {
+			w.ownVars()
 			w.exported[a.Name] = true
 		}
 		if rv.Static {
+			w.ownVars()
 			w.env[a.Name] = rv.Value
 			// A reassigned HOME re-roots `~` and a bare cd under POSIX shell
 			// semantics, on every flavor incl. Git Bash (review 6 C). PowerShell's
@@ -534,6 +538,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 				w.curHome = w.placedHome(rv)
 			}
 		} else {
+			w.ownVars()
 			delete(w.env, a.Name)
 			if a.Name == "HOME" && dialect == DialectPOSIX {
 				w.curHome = "" // a dynamic home makes ~ dynamic (review N3 E2)
@@ -2270,6 +2275,7 @@ func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, dep
 	s := w.saveScope()
 	env, exp, home := w.childEnvironment(dialect)
 	w.env, w.exported = env, exp
+	w.varsOwned = true
 	if dialect == DialectPOSIX {
 		w.curHome = home
 	}
@@ -2458,6 +2464,8 @@ type scopeState struct {
 	exported  map[string]bool
 	chain     *cdChain
 	narrowed  *cwdState
+	// varsOwned: the saved scope owned its env / exported maps.
+	varsOwned bool
 }
 
 // saveScope returns the current state and installs private copies of the
@@ -2466,16 +2474,32 @@ type scopeState struct {
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
 		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed}
-	w.env = cloneEnv(w.env)
-	w.exported = cloneBools(w.exported)
+	// The env and exported maps are shared with the saved state until the child
+	// first writes one (ownVars): most scopes (a command substitution, a pipeline
+	// stage) never assign, so copying on every entry would cost the deep-nesting
+	// cases for nothing.
+	s.varsOwned = w.varsOwned
+	w.varsOwned = false
 	w.cwdAlt = append([]string(nil), w.cwdAlt...)
 	w.cdChain, w.narrowed = nil, nil
 	return s
 }
 
+// ownVars makes the env and exported maps private to the current scope before a
+// write.
+func (w *walker) ownVars() {
+	if w.varsOwned {
+		return
+	}
+	w.env = cloneEnv(w.env)
+	w.exported = cloneBools(w.exported)
+	w.varsOwned = true
+}
+
 func (w *walker) restoreScope(s scopeState) {
 	w.curCWD, w.curHome, w.cwdAlt, w.cwdStack, w.env = s.cwd, s.home, s.alt, s.stack, s.env
 	w.exported, w.cdChain, w.narrowed = s.exported, s.chain, s.narrowed
+	w.varsOwned = s.varsOwned
 }
 
 func cloneBools(in map[string]bool) map[string]bool {
@@ -2491,6 +2515,7 @@ func cloneBools(in map[string]bool) map[string]bool {
 // variable that steers path resolution makes that resolution dynamic (round 8
 // E: HOME re-roots `~` and a bare cd, CDPATH redirects a relative cd).
 func (w *walker) unsetVar(name string) {
+	w.ownVars()
 	delete(w.env, name)
 	switch name {
 	case "HOME":
