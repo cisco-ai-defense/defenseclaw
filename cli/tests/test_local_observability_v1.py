@@ -530,3 +530,36 @@ def test_live_inventory_has_one_global_deadline_not_per_query_timeouts() -> None
     inventory, errors = audit.live_inventory(dashboards, deadline=0)
     assert inventory == []
     assert errors == ["live dashboard audit exceeded its global deadline"]
+
+
+# Boards a merge has dropped before (GAP-0212: the rel/1.0.10 merge bb1f38cbb6 kept the
+# Tokenomics board and lost the Substrate agents board). Each must be on disk, in both
+# UID inventories, in the docs table, and its metrics in the right collector branch.
+_PINNED_BOARDS = ("defenseclaw-substrate", "defenseclaw-tokenomics")
+
+
+def test_every_core_board_is_in_both_inventories_and_the_docs_table() -> None:
+    from defenseclaw import bundle_refresh
+
+    on_disk = {payload["uid"] for _path, payload in _dashboards()}
+    core = on_disk - {"defenseclaw-fleet"}
+    docs = (ROOT / "docs-site/content/docs/observability/grafana-dashboards.mdx").read_text(encoding="utf-8")
+    documented = set(re.findall(r"^\| \*\*[^|]*\*\* \(`(defenseclaw-[a-z0-9-]+)`\) \|", docs, re.MULTILINE))
+
+    assert set(_PINNED_BOARDS) <= core
+    assert compat.EXPECTED_DASHBOARD_UIDS == on_disk
+    assert set(bundle_refresh._LOCAL_OBSERVABILITY_DASHBOARD_UIDS) == core
+    assert core <= documented, sorted(core - documented)
+
+
+def test_substrate_metrics_take_the_managed_sandbox_branch() -> None:
+    collector = yaml.safe_load(
+        (ROOT / "bundles/local_observability_stack/otel-collector/config.yaml").read_text(encoding="utf-8")
+    )
+    out = collector["processors"]["filter/managed-sandbox-out"]["metric_conditions"]
+    pattern = re.search(r'IsMatch\(metric\.name, "([^"]+)"\)', out[0])[1]
+
+    assert out == [compat.MANAGED_SANDBOX_METRIC_CONDITION]
+    assert re.match(pattern, "defenseclaw.substrate.policy_lag")
+    assert re.match(pattern, "defenseclaw.sandbox.managed.starts")
+    assert not re.match(pattern, "defenseclaw.model.tokens")
