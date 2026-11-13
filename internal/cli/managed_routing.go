@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -32,7 +33,14 @@ const managedRoutingReads = "`defenseclaw routing status`, `defenseclaw routing 
 // "not available on this computer" answer on Windows and a launcher refusal
 // on Linux and macOS (REVIEW-s13-p1-merge F1).
 func newManagedRoutingCmd() *cobra.Command {
-	refuse := func(_ *cobra.Command, _ []string) error {
+	refuse := func(cmd *cobra.Command, args []string) error {
+		// A refused routing write is a row in the managed audit log, as the
+		// per-user CLI's refusal is (REVIEW-final F2). The launcher refuses
+		// the writes before this tree runs, so this reports on Windows.
+		words := append(strings.Fields(cmd.CommandPath())[1:], args...)
+		if command, ok := launcherAuditedWriter(words); ok {
+			reportManagedCommandRefusal(command, "")
+		}
 		return withExitCode(managedDeviceAnswer("this computer's DefenseClaw is managed by your organization: model routing, its rules and "+
 			"budgets are set by your administrator. You can read your own routing with "+managedRoutingReads+". Nothing was changed."), 3)
 	}
@@ -40,6 +48,9 @@ func newManagedRoutingCmd() *cobra.Command {
 		return func(cmd *cobra.Command, _ []string) error { return runManagedRoutingRead(cmd, path) }
 	}
 	annotations := map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"}
+	// The refused writes carry the per-user CLI's flags (budgets add
+	// --limit-usd ...): they get the managed answer, not "unknown flag".
+	writes := cobra.FParseErrWhitelist{UnknownFlags: true}
 	routing := &cobra.Command{
 		Use:          "routing",
 		Short:        "Read your own model routing decisions and budgets (managed computers)",
@@ -48,6 +59,8 @@ func newManagedRoutingCmd() *cobra.Command {
 		SilenceUsage: true,
 		Annotations:  annotations,
 		RunE:         refuse,
+
+		FParseErrWhitelist: writes,
 	}
 	status := &cobra.Command{
 		Use: "status", Short: "Your routing profile and recent decisions", Args: cobra.NoArgs,
@@ -55,7 +68,7 @@ func newManagedRoutingCmd() *cobra.Command {
 	}
 	budgets := &cobra.Command{
 		Use: "budgets", Short: "Your budgets", Args: cobra.ArbitraryArgs,
-		Annotations: annotations, SilenceUsage: true, RunE: refuse,
+		Annotations: annotations, SilenceUsage: true, RunE: refuse, FParseErrWhitelist: writes,
 	}
 	list := &cobra.Command{
 		Use: "list", Short: "The budgets that count your spend", Args: cobra.NoArgs,
@@ -75,6 +88,38 @@ func newManagedRoutingCmd() *cobra.Command {
 	budgets.AddCommand(list)
 	routing.AddCommand(status, budgets, explain)
 	return routing
+}
+
+// managedRoutingWriters are the routing commands that change the
+// administrator's config (the per-user CLI's writers): enable, disable and
+// setup, and the writers of each group. Reads (status, test, explain, usage,
+// the list and show of a group) are not here.
+var managedRoutingWriters = map[string]map[string]bool{
+	"enable": nil, "disable": nil, "setup": nil,
+	"models":  {"add": true, "remove": true, "set-default": true},
+	"rules":   {"add": true, "remove": true, "move": true},
+	"budgets": {"add": true, "remove": true},
+	"pricing": {"set": true, "import": true},
+}
+
+// managedRoutingWriter returns the command words of a routing writer from
+// the words after "routing"; the words come from the table, never from the
+// arguments.
+func managedRoutingWriter(words []string) (string, bool) {
+	if len(words) == 0 {
+		return "", false
+	}
+	group, ok := managedRoutingWriters[words[0]]
+	if !ok {
+		return "", false
+	}
+	if group == nil {
+		return "routing " + words[0], true
+	}
+	if len(words) > 1 && group[words[1]] {
+		return "routing " + words[0] + " " + words[1], true
+	}
+	return "", false
 }
 
 func runManagedRoutingRead(cmd *cobra.Command, path string) error {
