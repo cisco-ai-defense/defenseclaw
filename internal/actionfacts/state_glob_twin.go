@@ -25,6 +25,7 @@ import (
 
 	"mvdan.cc/sh/v3/syntax"
 
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
@@ -287,7 +288,7 @@ func stateGlobMatches(pattern, home string, deadline time.Time, stateNames []str
 		return current, true
 	}
 	for _, candidate := range current {
-		if _, err := os.Lstat(candidate); err == nil {
+		if _, err := os.Lstat(fixturefs.Map(candidate)); err == nil {
 			matches = append(matches, candidate)
 		}
 	}
@@ -338,11 +339,11 @@ func stateGlobLiteral(component string) (string, bool) {
 // block the reading). listed is false for a directory with more than
 // maxStateGlobDirEntries names.
 func stateGlobDirNames(dir string) (names []string, listed bool) {
-	info, err := os.Stat(dir)
+	info, err := os.Stat(fixturefs.Map(dir))
 	if err != nil || !info.IsDir() {
 		return nil, true
 	}
-	file, err := os.Open(dir)
+	file, err := os.Open(fixturefs.Map(dir))
 	if err != nil {
 		return nil, true
 	}
