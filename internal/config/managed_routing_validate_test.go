@@ -25,7 +25,6 @@ func TestValidateManagedRoutingRefusals(t *testing.T) {
 	}{
 		{"credential refs on linux", "linux", nil, ""},
 		{"macOS", "darwin", nil, ""},
-		{"models api_key_env", "linux", func(c *Config) { c.Routing.Models[0].APIKeyEnv = "ANTHROPIC_API_KEY" }, "models[0].api_key_env"},
 		{"models bedrock env", "linux", func(c *Config) {
 			c.Routing.Models[0].Bedrock = &RoutingBedrockAuthConfig{AccessKeyEnv: "AWS_ACCESS_KEY_ID"}
 		}, "models[0].bedrock.access_key_env"},
@@ -91,17 +90,21 @@ func TestValidateManagedRoutingAccepts109ManagedShape(t *testing.T) {
 			{Name: "local", Provider: "ollama", Model: "llama3.1", BaseURL: "http://127.0.0.1:11434"},
 		},
 	}
-	for _, goos := range []string{"linux", "darwin", "windows"} {
-		warned.Reset()
-		if err := validateManagedRouting(c, goos); err != nil {
-			t.Fatalf("%s: a 1.0.9 managed config is refused after upgrade: %v", goos, err)
-		}
-		if !strings.Contains(warned.String(), "routing.models[0].api_key_env is ignored") {
-			t.Fatalf("%s: no warning for the ignored name: %q", goos, warned.String())
+	for _, enabled := range []bool{false, true} {
+		c.Routing.Enabled = enabled
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			warned.Reset()
+			if err := validateManagedRouting(c, goos); err != nil {
+				t.Fatalf("%s routing %v: a 1.0.9 managed config is refused after upgrade: %v", goos, enabled, err)
+			}
+			if !strings.Contains(warned.String(), "routing.models[0].api_key_env reads the gateway service environment") {
+				t.Fatalf("%s: no warning for the api_key_env model: %q", goos, warned.String())
+			}
 		}
 	}
-	c.Routing.Enabled = true
-	if err := validateManagedRouting(c, "linux"); err == nil || !strings.Contains(err.Error(), "models[0].api_key_env") {
-		t.Fatalf("routing on with api_key_env = %v, want a refusal", err)
+	c.Routing.Models[0].Credential = "openai-org"
+	warned.Reset()
+	if err := validateManagedRouting(c, "linux"); err != nil || warned.Len() != 0 {
+		t.Fatalf("a model with a credential = %v, warning %q", err, warned.String())
 	}
 }

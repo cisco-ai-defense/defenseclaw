@@ -79,9 +79,13 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	}
 	var eng *engine.Engine
 	classifier := r.classifierFor(cfg)
-	if cfg != nil && cfg.Routing.Enabled && cfg.Routing.EffectiveClassifier() == config.RoutingClassifierVLLMSR && classifier == nil {
+	if cfg != nil && cfg.Routing.Enabled && cfg.Routing.EffectiveClassifier() == config.RoutingClassifierVLLMSR && classifier == nil &&
+		!cfg.StandaloneEnterprise() {
 		// The vLLM Semantic Router did not start: routing stays off, as in
-		// 1.0.9 (health already reports the failure).
+		// 1.0.9 (health already reports the failure). A managed device keeps
+		// the engine with no classifier, so every request takes the
+		// classifier-failure path (the original request) while the admin
+		// floor and Gate still judge it (S11 REVIEW-slice3 F12).
 	} else {
 		var err error
 		eng, err = engine.New(cfg, engine.Options{
@@ -142,7 +146,13 @@ func (r *engineRouter) RouterActive(ctx context.Context) bool {
 // process env, data-dir .env). "" with no key reference means keyless.
 func (r *engineRouter) backendKey(cfg *config.Config, b engine.Backend) string {
 	if cfg != nil && cfg.StandaloneEnterprise() {
-		return cfg.RoutingCredential(b.Credential)
+		if strings.TrimSpace(b.Credential) != "" || b.APIKeyEnv == "" {
+			// A named credential is the only source, even when it is missing.
+			return cfg.RoutingCredential(b.Credential)
+		}
+		// A 1.0.9 or 1.0.8 managed config names the key by api_key_env only;
+		// keep its meaning (the service environment or the data-dir .env),
+		// with a doctor warning to move it to a protected credential.
 	}
 	if b.APIKeyEnv == "" {
 		return ""

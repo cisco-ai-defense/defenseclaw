@@ -346,3 +346,14 @@ func TestRouteOnlyHotReloadRendersAndRestores(t *testing.T) {
 		t.Fatalf("disable did not restore byte for byte: %q", raw)
 	}
 }
+
+func TestRouteOnlyErrorBodiesAreProviderNative(t *testing.T) {
+	for family, key := range map[string]string{"messages": "type", "responses": "error", "chat": "error", "invoke": "message"} {
+		rec := httptest.NewRecorder()
+		routeOnlyErrorFor(rec, family, http.StatusForbidden, "permission_error", "denied")
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body[key] == nil {
+			t.Fatalf("%s body = %s", family, rec.Body.String())
+		}
+	}
+}

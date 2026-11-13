@@ -96,9 +96,26 @@ func routeOnlyDispatch(ro func() *routeOnlyServer, next http.Handler) http.Handl
 }
 
 func routeOnlyError(w http.ResponseWriter, status int, kind, msg string) {
+	routeOnlyErrorFor(w, "", status, kind, msg)
+}
+
+// routeOnlyErrorFor writes the error in the shape the agent API uses
+// (S11 F6: provider-native refusal bodies): Anthropic Messages, OpenAI
+// chat/Responses, Bedrock.
+func routeOnlyErrorFor(w http.ResponseWriter, family string, status int, kind, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": kind, "message": "[DefenseClaw] " + msg}})
+	msg = "[DefenseClaw] " + msg
+	var body []byte
+	switch family {
+	case config.RoutingAPIChat, config.RoutingAPIResponses:
+		body, _ = json.Marshal(map[string]any{"error": map[string]any{"message": msg, "type": kind, "code": kind}})
+	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
+		w.Header().Set("X-Amzn-ErrorType", "AccessDeniedException")
+		body, _ = json.Marshal(map[string]any{"message": msg})
+	default:
+		body, _ = json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": kind, "message": msg}})
+	}
 	_, _ = w.Write(body)
 }
 
@@ -289,7 +306,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		original.usage.Route.Decision = modelusage.DecisionFallback
 	}
 	if routedOutcome.Result == SemanticRouteDenied {
-		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
+		routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
 	if attempt != nil && custody && attempt.keepInbound && !s.holdCredential(cfg, attempt, attempt.provider) {
