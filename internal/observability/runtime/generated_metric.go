@@ -209,7 +209,16 @@ func recordGeneratedMetricsWithLease(
 			observations = append(observations, metric.observation)
 		}
 	}
-	if len(observations) > 0 {
+	// Inside a hook call the metrics of the call write no correlation
+	// observation of their own: the call commits the observation of its
+	// hook_decision record, the metrics are exported after that commit
+	// (DeferAfterCallWrites below), and no reader needs a ledger row per
+	// metric. They were 9 of the 13 observation rows of a benign tool call
+	// and about a third of the writer work per call (#1384, bar H1).
+	// Metrics outside a hook call keep commit-before-export with their own
+	// observation.
+	inCall := len(observations) > 0 && audit.CallWritesOpen(ctx, store)
+	if len(observations) > 0 && !inCall {
 		if groupErr := recordRuntimeCorrelationObservations(ctx, store, observations...); groupErr != nil {
 			for _, metric := range prepared {
 				if metric.observed {
@@ -224,9 +233,9 @@ func recordGeneratedMetricsWithLease(
 			return results, buildErr
 		}
 	}
-	if len(observations) > 0 && audit.CallWritesOpen(ctx, store) {
-		// The observations wait in the hook call's batch: the provider gets
-		// the records after the call commits them (commit before export).
+	if inCall {
+		// The provider gets the records after the call commits its writes
+		// (commit before export, at the granularity of the call).
 		if fork := lease.Fork(); fork != nil {
 			exportCtx := context.WithoutCancel(ctx)
 			deferred := append([]preparedGeneratedMetric(nil), prepared...)
@@ -242,6 +251,14 @@ func recordGeneratedMetricsWithLease(
 				return results, buildErr
 			}
 			fork.Release()
+		}
+	}
+	if inCall {
+		// The export could not wait for the call commit (no lease fork, or
+		// the batch closed): commit the observations first, as outside a
+		// call, so commit-before-export still holds.
+		if err := recordRuntimeCorrelationObservations(ctx, store, observations...); err != nil {
+			return results, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
 		}
 	}
 	for _, metric := range prepared {

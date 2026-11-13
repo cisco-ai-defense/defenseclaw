@@ -9011,6 +9011,10 @@ _INBOUND_ALIAS_IDS: Final = (
     "output-tokens-v1",
     "cached-input-tokens-v1",
     "log-duration-seconds-v1",
+    "reasoning-tokens-v1",
+    "claudecode-uncached-input-tokens-v1",
+    "claudecode-cache-read-tokens-v1",
+    "claudecode-cache-creation-tokens-v1",
 )
 _INBOUND_SOURCE_PROJECTION_PLAN_IDS: Final = (
     "genai-token-metric-v1",
@@ -9048,6 +9052,7 @@ _INBOUND_CLASS_IDS: Final = (
     "otlp.codex.tool_result.v1",
     "otlp.claudecode.user_prompt.v1",
     "otlp.codex.response_completed.v1",
+    "otlp.claudecode.api_request.v1",
     "otlp.claudecode.token_usage.v1",
     "otlp.codex.token_usage.v1",
     "otlp.genai.duration.metric.v1",
