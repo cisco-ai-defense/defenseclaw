@@ -2750,6 +2750,16 @@
                   ]
                 },
                 {
+                  "id": "SEC-HF-TOKEN",
+                  "pattern": "\\bhf_[A-Za-z0-9]{34,}\\b",
+                  "title": "Hugging Face access token",
+                  "severity": "CRITICAL",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SLACK-TOKEN",
                   "pattern": "xox[bpors]-[0-9a-zA-Z\\-]{10,}",
                   "title": "Slack token",
@@ -6809,6 +6819,16 @@
                   ]
                 },
                 {
+                  "id": "SEC-HF-TOKEN",
+                  "pattern": "\\bhf_[A-Za-z0-9]{34,}\\b",
+                  "title": "Hugging Face access token",
+                  "severity": "CRITICAL",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SLACK-TOKEN",
                   "pattern": "xox[bpors]-[0-9a-zA-Z\\-]{10,}",
                   "title": "Slack token",
@@ -10587,6 +10607,16 @@
                   "id": "SEC-GOOGLE",
                   "pattern": "AIza[0-9A-Za-z\\-_]{35}",
                   "title": "Google API key",
+                  "severity": "CRITICAL",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "SEC-HF-TOKEN",
+                  "pattern": "\\bhf_[A-Za-z0-9]{34,}\\b",
+                  "title": "Hugging Face access token",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
                   "tags": [
