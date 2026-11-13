@@ -258,6 +258,30 @@ type SandboxArtifactProvider interface {
 // refuses gets the sandbox's reason. Overlay images pin reviewed builds, so
 // sandbox resolution keeps exact-range matching.
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
+	if alias, ok := substrateReviewedBuilds[normalizeConnectorName(connectorName)][strings.TrimSpace(agentVersion)]; ok {
+		resolution := resolveSandboxHookContract(connectorName, alias)
+		resolution.RawVersion = agentVersion
+		return resolution
+	}
+	return resolveSandboxHookContract(connectorName, agentVersion)
+}
+
+// substrateReviewedBuilds are builds the Agent Substrate actor kit runs that
+// the connector's host contract lists no pin for (lane K1, 1.0.10): the cert
+// hosts' releases of the connectors whose contracts pin exact builds. Each
+// maps to the pinned build whose hook surface it shares, and is added only
+// after the build's hooks were exercised in an actor (testctl rows of area
+// substrate-k1: the registered hook config reads, an allowed and a blocked
+// call reach the gateway). The host contracts, and so every host verdict
+// ("untested newer version"), are unchanged. Remove an entry when the
+// contract itself lists the build.
+var substrateReviewedBuilds = map[string]map[string]string{
+	"cursor": {"2026.11.11-b912975": "2026.07.23-e383d2b"},
+	"devin":  {"3000.12.57": "3000.11.3"},
+	"kiro":   {"2.35.1": "2.24.1"},
+}
+
+func resolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
 		resolution := strictHookContractResolutionOf(resolveHookContractAgainstIn(name, agentVersion, contracts, true))

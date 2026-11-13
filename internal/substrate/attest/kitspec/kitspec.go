@@ -79,7 +79,7 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	if !ok {
 		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: unknown connector %q", o.Connector)
 	}
-	ictx, err := image.NewContext(image.BuildSpec{Harness: h, UID: o.UID, GID: o.GID, IngressPort: 18970,
+	ictx, err := image.NewContext(image.BuildSpec{Harness: h, HarnessVersion: kit.HarnessRelease(o.Connector), UID: o.UID, GID: o.GID, IngressPort: 18970,
 		DefenseClawVersion: o.KitVersion, Owner: "0000000000000000"})
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err

@@ -40,6 +40,22 @@ var codexPin = npmPin{
 	},
 }
 
+// codexPinSubstrate is the Codex CLI release of the Agent Substrate actor kit
+// (substrate-1 lane K1): the cert hosts' release, 0.168.0. The native binary
+// is vendor/<triple>/bin/codex of the platform package (the package now also
+// ships codex-code-mode-host, rg and voice helpers beside it).
+var codexPinSubstrate = npmPin{
+	Package:   "@openai/codex",
+	Version:   "0.168.0",
+	Integrity: "sha512-PnX7jM9QFmDyq5oGrFQ2l/TCrkn+/Q6amlSxxUEpyxGeBR0eVHNULU87jcbRPmnVup1V1Leyv3DIajlKkjl9Ug==",
+	Native: map[string]npmNative{
+		"aarch64": {Path: "lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex", SHA256: "6fbce31b3288c1515af48c4ad53f1e66c1579626459413c84b57e7c7d76c63ad"},
+		"x86_64":  {Path: "lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex", SHA256: "a8cb58c528c76e7313d4a70294ec614757b0f4c7bf9683e11c88ecad8c3d421b"},
+	},
+}
+
+var codexPins = npmPins{codexPin, codexPinSubstrate}
+
 // Codex is the Codex CLI harness. The base image's Codex 0.117 is outside
 // every reviewed hook contract, so the pinned release is always installed
 // from npm (and the base copy removed).
@@ -60,7 +76,7 @@ var Codex = register(&Spec{
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/codex"
-		run, err := codexPin.installRun(root, version, "codex", "@openai/codex")
+		run, err := codexPins.installRun(root, version, "codex", "@openai/codex")
 		if err != nil {
 			return nil, err
 		}

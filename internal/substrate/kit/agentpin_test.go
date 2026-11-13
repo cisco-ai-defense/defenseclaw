@@ -30,7 +30,7 @@ func TestClaudeCodePin(t *testing.T) {
 	if res.Status != connector.HookCompatibilityKnown || res.Contract.ContractID != "claudecode-hooks-v2" {
 		t.Fatalf("hook contract for %s: %+v", r.Version, res)
 	}
-	if AgentVersion("claudecode", harness.ClaudeCode.DefaultVersion) != r.Version || AgentVersion("codex", "0.146.0") != "0.146.0" {
+	if AgentVersion("claudecode", harness.ClaudeCode.DefaultVersion) != r.Version || AgentVersion("codex", "0.146.0") != HarnessReleases["codex"] || AgentVersion("hermes", "0.19.0") != "0.19.0" {
 		t.Fatal("AgentVersion")
 	}
 	if claudeCodeDefaultModel(AgentVersion("claudecode", harness.ClaudeCode.DefaultVersion)) != ClaudeCodeBedrockModel {

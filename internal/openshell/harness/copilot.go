@@ -37,6 +37,20 @@ var copilotPin = npmPin{
 	},
 }
 
+// copilotPinSubstrate is the Copilot CLI release of the Agent Substrate actor
+// kit (lane K1): the cert hosts' release, 1.0.110.
+var copilotPinSubstrate = npmPin{
+	Package:   "@github/copilot",
+	Version:   "1.0.110",
+	Integrity: "sha512-3F7zvl+fvnImy/6m35dzA2y89nsv5zs8jC0uizTBotkQ8sdQDcOOrtLK/xtA1oFgmALSkfNNDqNPaMbKfTweyA==",
+	Native: map[string]npmNative{
+		"aarch64": {Path: "lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-arm64/copilot", SHA256: "0c27cde208a81ef139f3d4570cd1cf6de54bf35d56ec35b1104cd4ac456f2401"},
+		"x86_64":  {Path: "lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot", SHA256: "52496feac05f5ca6d53a16590adfcd2f74de2b5188542840cba447bc2bb19e18"},
+	},
+}
+
+var copilotPins = npmPins{copilotPin, copilotPinSubstrate}
+
 // CopilotPackageCache is the root-owned package cache the image pre-extracts
 // the pinned CLI into. The executable otherwise extracts its JavaScript into
 // ~/.cache/copilot on first run and prefers the newest package it finds in
@@ -85,7 +99,7 @@ find ` + CopilotPackageCache + ` -type f -path '*/prebuilds/*/copilot-runtime' -
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/copilot"
-		run, err := copilotPin.installRun(root, version, "copilot", "@github/copilot")
+		run, err := copilotPins.installRun(root, version, "copilot", "@github/copilot")
 		if err != nil {
 			return nil, err
 		}

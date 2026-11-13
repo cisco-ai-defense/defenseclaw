@@ -41,6 +41,26 @@ var kiroPin = tarballPin{
 	DigestSource: "Kiro release manifest (stable channel)",
 }
 
+// kiroPinSubstrate is the Kiro CLI release of the Agent Substrate actor kit
+// (lane K1): 2.35.1, the 2.x line the cert hosts' Windows and macOS users ran
+// before the 3.x sweep. 3.x is not a kit release: its headless archive carries
+// only bin/kiro-cli (no kiro-cli-chat, the binary the sandbox contract, the
+// launcher and the actor argv run), and its hook surface is unmeasured (GAP
+// filed by lane K1). Kiro publishes a manifest for its current release only,
+// so these are the sha256 of the 2.35.1 archives DefenseClaw downloaded on
+// 2026-11-13. kiro-cli-chat 2.35.1 prints "kiro-cli 2.35.1".
+var kiroPinSubstrate = tarballPin{
+	Version: "2.35.1",
+	Archives: map[string]tarballArchive{
+		"aarch64": {URL: "https://prod.download.cli.kiro.dev/stable/2.35.1/kirocli-aarch64-linux.tar.gz", SHA256: "933d53ed2636c5035fb775e725f73987888e7b398a0bdb09a4b5f035b7e0bf40"},
+		"x86_64":  {URL: "https://prod.download.cli.kiro.dev/stable/2.35.1/kirocli-x86_64-linux.tar.gz", SHA256: "b4ec8f61c466dbfb06b73972fa746f4f96bf19abe2d4307af3cd988bde751b56"},
+	},
+	Strip:        1,
+	DigestSource: "measured by DefenseClaw (Kiro publishes no manifest for a past release)",
+}
+
+var kiroPins = tarballPins{kiroPin, kiroPinSubstrate}
+
 // kiroModel is the sentence-embedding model (all-MiniLM-L6-v2) Kiro CLI
 // 2.24.1 downloads at its first start for its semantic search: a 79 MiB zip
 // from desktop-release.q.us-east-1.amazonaws.com, unpacked into
@@ -153,7 +173,7 @@ var Kiro = register(&Spec{
 	},
 	probe: ProbeSpec{
 		VersionArgv: []string{"/usr/local/bin/kiro-cli-chat", "--version"},
-		VersionRE:   regexp.MustCompile(`^kiro-cli-chat v?([0-9]+\.[0-9]+\.[0-9]+)`),
+		VersionRE:   regexp.MustCompile(`^kiro-cli(?:-chat)? v?([0-9]+\.[0-9]+\.[0-9]+)`),
 		// kiro-cli-chat is the agent (it makes every model request); the
 		// kiro-cli front end runs the login flow.
 		NetworkBinaries: `readlink -f /usr/local/bin/kiro-cli-chat
@@ -161,13 +181,13 @@ readlink -f /usr/local/bin/kiro-cli`,
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/kiro"
-		run, err := kiroPin.installRun(root, version)
+		run, err := kiroPins.installRun(root, version)
 		if err != nil {
 			return nil, err
 		}
 		link := `for b in kiro-cli kiro-cli-chat kiro-cli-term; do [ -x "$root/bin/$b" ] || { echo "Kiro CLI archive lacks bin/$b" >&2; exit 1; }; ln -sfn "$root/bin/$b" "/usr/local/bin/$b"; done; ` +
 			`h="$(mktemp -d)"; got="$(HOME="$h" /usr/local/bin/kiro-cli-chat --version 2>/dev/null | head -n 1)"; rm -rf "$h"; ` +
-			`got="${got#kiro-cli-chat }"; ` + pinVersionCheck("Kiro CLI", version)
+			`got="${got#kiro-cli-chat }"; ` + kiroReleaseName(version) + pinVersionCheck("Kiro CLI", version)
 		return []InstallStep{{
 			Comment: "Install Kiro CLI " + version + " from its release archive into a root-owned prefix (vendor sha256 checked)",
 			Run:     run + "; " + link,
@@ -308,3 +328,13 @@ agent="$` + connector.KiroSandboxAgentDirEnv + `/` + connector.KiroSandboxAgentN
 [ -f "$agent" ] && [ -r "$agent" ] ||
   refuse "the DefenseClaw agent $agent is missing" "Kiro runs without hooks when its agent is missing."
 ` + launcherExec(`/usr/local/bin/kiro-cli-chat chat --v2 --agent `+connector.KiroSandboxAgentName+` "$@"`)
+
+// kiroReleaseName strips the name a Substrate kit release prints: 2.35.1's
+// kiro-cli-chat reports "kiro-cli 2.35.1", where the OpenShell pin's reports
+// "kiro-cli-chat 2.24.1" (the OpenShell step is unchanged).
+func kiroReleaseName(version string) string {
+	if version == kiroPin.Version {
+		return ""
+	}
+	return `got="${got#kiro-cli }"; `
+}
