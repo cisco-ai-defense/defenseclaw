@@ -382,6 +382,8 @@ On per-user and standalone installs, if a completed retention pass still leaves 
 
 ### 1.0.7 retention and memory limits
 
+Since 1.0.10 a metric recorded during a hook call (hook invocations, latency and outcome, inspect counts, lifecycle gauges) no longer writes a correlation row of its own in `audit.db`: it is exported after the call commits its log records, and the calls log records keep their correlation rows. A local correlation graph or timeline query therefore lists the calls log records, not its metric points; the exported metrics are unchanged.
+
 GAP-0408: active correlation state or recent history can keep used pages above `max_store_mb` after retention. The warning names the used size, configured cap, and reason; it does not stop tool calls. GAP-0327: on a per-user macOS install, idle gateway memory can grow gradually with the audit store even while performance remains within its release budget. Retention bounds the stored history, but does not immediately return all memory.
 
 From 1.0.6, a standalone install stores the field classes of a record (the redaction class of each field) once per set in `audit.db`, and each row names its set by digest. The row hash and signature cover that digest, so a row whose set is missing or changed fails the integrity check. Destinations still get the full record. Releases 1.0.4 and 1.0.5 read these rows after a rollback. A Secure Client install keeps the classes in each row.
