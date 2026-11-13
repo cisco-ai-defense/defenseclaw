@@ -125,13 +125,22 @@ type RegistryOptions struct {
 	// PlainHTTP lists registry hosts (host:port) reached over HTTP, for the
 	// in-VPC registry of a dev cluster. Loopback hosts are always allowed.
 	PlainHTTP []string
-	// Username and Password are sent as basic auth, or to a token service.
+	// Credentials are per registry host (host[:port], exactly as in the
+	// image reference). A host with no entry gets no credentials, ever: an
+	// image reference names its own registry, so a base image chosen by a
+	// template author must not collect the credentials of another registry
+	// (GAP-0052). They are sent only in answer to that host's challenge.
+	Credentials map[string]Credential
+	HTTPClient  *http.Client
+}
+
+// Credential is a registry login.
+type Credential struct {
 	Username, Password string
-	// AuthHosts are the only hosts (registries and token services) the
-	// credentials are ever sent to. An image reference names its own registry,
-	// so credentials are never sent to a host it chose.
-	AuthHosts  []string
-	HTTPClient *http.Client
+	// TokenHosts are the token services (Bearer realm hosts) other than the
+	// registry itself that may receive this login, e.g. auth.docker.io for
+	// registry-1.docker.io. A realm on any other host gets no credentials.
+	TokenHosts []string
 }
 
 // Registry is a client. It is safe for concurrent use.
@@ -140,6 +149,9 @@ type Registry struct {
 	client *http.Client
 	mu     sync.Mutex
 	tokens map[string]string // host+scope → bearer token
+	// basic marks hosts that asked for Basic auth and have a credential:
+	// later requests to them (streamed uploads too) send it up front.
+	basic map[string]bool
 }
 
 // NewRegistry returns a client.
@@ -149,7 +161,13 @@ func NewRegistry(o RegistryOptions) *Registry {
 		c = &http.Client{Timeout: 5 * time.Minute}
 		c.CheckRedirect = refuseUnsafeRedirect
 	}
-	return &Registry{opts: o, client: c, tokens: map[string]string{}}
+	return &Registry{opts: o, client: c, tokens: map[string]string{}, basic: map[string]bool{}}
+}
+
+// credential returns the login for a registry host.
+func (g *Registry) credential(host string) (Credential, bool) {
+	c, ok := g.opts.Credentials[host]
+	return c, ok && c.Username != ""
 }
 
 // ErrNotFound is returned for a 404 from the registry.
@@ -242,12 +260,14 @@ func (g *Registry) do(ctx context.Context, c call) (*http.Response, error) {
 		}
 		g.mu.Lock()
 		tok := g.tokens[c.host+"|"+scope]
+		basic := g.basic[c.host]
 		g.mu.Unlock()
+		cred, haveCred := g.credential(c.host)
 		switch {
 		case tok != "":
 			req.Header.Set("Authorization", "Bearer "+tok)
-		case g.mayAuth(c.host):
-			req.SetBasicAuth(g.opts.Username, g.opts.Password)
+		case basic && haveCred:
+			req.SetBasicAuth(cred.Username, cred.Password)
 		}
 		resp, err := g.client.Do(req)
 		if err != nil {
@@ -256,7 +276,18 @@ func (g *Registry) do(ctx context.Context, c call) (*http.Response, error) {
 		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
 			challenge := resp.Header.Get("Www-Authenticate")
 			_ = resp.Body.Close()
-			if t, err := g.fetchToken(ctx, challenge, scope); err == nil && t != "" {
+			if isBasicChallenge(challenge) {
+				// Basic: only a host with its own credential gets it, and
+				// only now that it asked.
+				if !haveCred || basic {
+					return nil, &RegistryError{Op: c.op, Status: http.StatusUnauthorized, Detail: "authentication required"}
+				}
+				g.mu.Lock()
+				g.basic[c.host] = true
+				g.mu.Unlock()
+				continue
+			}
+			if t, err := g.fetchToken(ctx, c.host, challenge, scope); err == nil && t != "" {
 				g.mu.Lock()
 				g.tokens[c.host+"|"+scope] = t
 				g.mu.Unlock()
@@ -269,9 +300,17 @@ func (g *Registry) do(ctx context.Context, c call) (*http.Response, error) {
 	return nil, &RegistryError{Op: c.op, Status: http.StatusUnauthorized, Detail: "authentication failed"}
 }
 
-// fetchToken answers a Bearer challenge from the token service.
-func (g *Registry) fetchToken(ctx context.Context, challenge, scope string) (string, error) {
-	rest, ok := strings.CutPrefix(challenge, "Bearer ")
+func isBasicChallenge(challenge string) bool {
+	scheme, _, _ := strings.Cut(strings.TrimSpace(challenge), " ")
+	return strings.EqualFold(scheme, "Basic")
+}
+
+// fetchToken answers a Bearer challenge of registry host from the token
+// service. The registry's credential goes along only when the realm is the
+// registry itself or one of the credential's TokenHosts; otherwise the
+// token is asked for anonymously.
+func (g *Registry) fetchToken(ctx context.Context, host, challenge, scope string) (string, error) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(challenge), "Bearer ")
 	if !ok {
 		return "", errors.New("not a bearer challenge")
 	}
@@ -300,8 +339,8 @@ func (g *Registry) fetchToken(ctx context.Context, challenge, scope string) (str
 	if err != nil {
 		return "", err
 	}
-	if g.mayAuth(u.Host) {
-		req.SetBasicAuth(g.opts.Username, g.opts.Password)
+	if cred, ok := g.credential(host); ok && (u.Host == host || containsHost(cred.TokenHosts, u.Host)) {
+		req.SetBasicAuth(cred.Username, cred.Password)
 	}
 	resp, err := g.client.Do(req)
 	if err != nil {
@@ -520,11 +559,8 @@ var (
 	tagRE      = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`)
 )
 
-func (g *Registry) mayAuth(host string) bool {
-	if g.opts.Username == "" {
-		return false
-	}
-	for _, h := range g.opts.AuthHosts {
+func containsHost(hosts []string, host string) bool {
+	for _, h := range hosts {
 		if h == host {
 			return true
 		}

@@ -38,6 +38,8 @@ Flags build, verify, scan and publish all take:
   --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)
   --registry-user USER            registry user
   --registry-password-file FILE   file with the registry password
+  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build adds the --to host,
+                                  never the --from host)
   --config FILE                   DefenseClaw config.yaml (scanner and admission settings)
   --platform OS/ARCH              image platform (default linux/amd64)
 `
