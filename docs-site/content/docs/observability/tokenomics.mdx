@@ -154,3 +154,10 @@ The gateway answers `GET /usage?by=model|connector|route|profile|role|provider|u
 ## Agents that report their own usage
 
 Claude Code and Codex send their own usage over OTLP. `observability.tokenomics.native_otel_import` lets DefenseClaw read it for connectors that do not go through the guardrail proxy. When the proxy carries the connector, the proxy record is counted and the agent figures are only a cross-check, so a call is never counted twice.
+
+| Agent | Event read | What the usage record gets |
+|---|---|---|
+| Claude Code | `claude_code.api_request` log, one per API call | Input (`input_tokens` plus both cache counts), output, cache read and cache creation tokens, the model, the duration, and `cost_usd` as a `reported` cost for that call. The table cost stays next to it for comparison. |
+| Codex | `codex.sse_event` log with `event.kind` `response.completed` | Input, cached input, output and reasoning tokens and the model. Codex reports no cost, so the cost comes from the price table or is absent. |
+
+A count the agent did not send stays absent. Running totals are never read as the cost of a call: DefenseClaw does not import the Claude Code `claude_code.cost.usage` counter, and a session total a hook reports stays on the `defenseclaw.agent.reported_cost` gauge. The records join the hook session of the same conversation, like the other records the agent sends.

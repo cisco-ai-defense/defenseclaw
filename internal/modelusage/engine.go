@@ -237,23 +237,91 @@ func (e *Engine) Begin(ctx context.Context, f CallFacts) Call {
 	if f.CallRole == "" {
 		f.CallRole = RoleAgent
 	}
-	if !s.enabled || (!s.allRoles && !s.roles[f.CallRole]) {
+	if !s.records(f.CallRole) {
 		return noopCall{}
 	}
 	now := time.Now()
 	if f.StartedAt.IsZero() {
 		f.StartedAt = now
 	}
-	c := &call{e: e, s: s, f: f, start: now}
+	c := &call{e: e, s: s, f: s.withoutProvenance(f), start: now}
 	if f.Streaming {
 		c.parser = NewStreamParser(f.APIFamily)
 	}
-	if !s.provenance {
-		c.f.Route = RouteFacts{Decision: f.Route.Decision}
-		c.f.RequestedProvider, c.f.RequestedModel = "", ""
-		c.f.ProfileName, c.f.ProfileDigest = "", ""
-	}
 	return c
+}
+
+func (s *snapshot) records(role CallRole) bool {
+	return s.enabled && (s.allRoles || s.roles[role])
+}
+
+// withoutProvenance drops the routing facts when the operator turned
+// observability.tokenomics.record_routing_provenance off.
+func (s *snapshot) withoutProvenance(f CallFacts) CallFacts {
+	if !s.provenance {
+		f.Route = RouteFacts{Decision: f.Route.Decision}
+		f.RequestedProvider, f.RequestedModel = "", ""
+		f.ProfileName, f.ProfileDigest = "", ""
+	}
+	return f
+}
+
+// NativeImportEnabled reports whether usage imported from the OTLP telemetry
+// of connector is recorded: tokenomics on, the agent role recorded and
+// observability.tokenomics.native_otel_import.<connector> on.
+func (e *Engine) NativeImportEnabled(connector string) bool {
+	if e == nil {
+		return false
+	}
+	s := e.snap.Load()
+	return s.records(RoleAgent) && s.tok.NativeImportEnabled(connector)
+}
+
+// RecordNative records a model call the engine did not see itself: usage an
+// agent reported in its own telemetry (native OTLP). rec carries the facts,
+// the usage, the times and, in Cost.ReportedUSD only, a per-call cost the
+// agent reported; every other Cost field and the labels are recomputed here
+// with the current price table, exactly as for a proxied call. A running
+// total (a session or cumulative cost counter) must never be passed as
+// ReportedUSD. The record is dropped when tokenomics, the call role or the
+// native import of rec.Facts.Connector is off. It returns the record as
+// recorded and whether it was recorded.
+func (e *Engine) RecordNative(rec Record) (out Record, ok bool) {
+	if e == nil {
+		return Record{}, false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			out, ok = Record{}, false
+		}
+	}()
+	s := e.snap.Load()
+	if rec.Facts.CallRole == "" {
+		rec.Facts.CallRole = RoleAgent
+	}
+	if !s.records(rec.Facts.CallRole) || !s.tok.NativeImportEnabled(rec.Facts.Connector) {
+		return Record{}, false
+	}
+	rec.Facts = s.withoutProvenance(rec.Facts)
+	rec.Usage.seal()
+	if rec.Usage.Has != 0 && rec.Usage.Source == "" {
+		rec.Usage.Source = SourceNativeOTel
+	}
+	if rec.EndedAt.IsZero() {
+		rec.EndedAt = time.Now()
+	}
+	if rec.Facts.StartedAt.IsZero() {
+		rec.Facts.StartedAt = rec.EndedAt.Add(-rec.Total)
+	}
+	if rec.Outcome == "" {
+		rec.Outcome = "completed"
+	}
+	reported := rec.Cost.ReportedUSD
+	rec.Cost = s.price(rec.Facts, rec.Status, rec.Usage, reported)
+	s.bound(&rec)
+	e.chargeBudgets(rec.Facts, rec)
+	e.enqueue(rec)
+	return rec, true
 }
 
 type call struct {
@@ -347,10 +415,8 @@ func (c *call) build(err error) Record {
 	}
 	u := c.pickUsage()
 	rec.Usage = u
-	rec.Cost = c.cost(u)
-	rec.ModelKey = c.modelKey(rec.Cost, u)
-	rec.ProviderKey = providerKey(c.f.SelectedProvider)
-	rec.Labels = c.labels(rec.ModelKey, rec.ProviderKey)
+	rec.Cost = c.s.price(c.f, c.status, u, nil)
+	c.s.bound(&rec)
 	return rec
 }
 
@@ -369,36 +435,43 @@ func (c *call) pickUsage() Usage {
 	}
 }
 
-func (c *call) cost(u Usage) Cost {
-	s := c.s
+// price prices one call with the snapshot table. reported is a per-call cost
+// the agent or provider reported; it is never a running total.
+func (s *snapshot) price(f CallFacts, status int, u Usage, reported *float64) Cost {
 	if !s.cost {
-		return Resolve(s.table, nil, "", nil, s.keepRep, u.Partial)
+		return Resolve(s.table, nil, "", reported, s.keepRep, u.Partial)
 	}
-	if c.f.CallRole == RoleAIDefense {
-		if v, ok := s.table.AIDefenseCost(); ok && c.status < 400 {
-			return Resolve(s.table, &v, "ai_defense", nil, s.keepRep, "")
+	if f.CallRole == RoleAIDefense {
+		if v, ok := s.table.AIDefenseCost(); ok && status < 400 {
+			return Resolve(s.table, &v, "ai_defense", reported, s.keepRep, "")
 		}
-		return Resolve(s.table, nil, "", nil, s.keepRep, "")
+		return Resolve(s.table, nil, "", reported, s.keepRep, "")
 	}
-	provider, model := c.f.SelectedProvider, c.f.SelectedModel
+	provider, model := f.SelectedProvider, f.SelectedModel
 	if usd, key, ok := s.table.Compute(provider, model, u); ok {
-		return Resolve(s.table, &usd, key, nil, s.keepRep, u.Partial)
+		return Resolve(s.table, &usd, key, reported, s.keepRep, u.Partial)
 	}
 	if u.ResponseModel != "" && u.ResponseModel != model {
 		if usd, key, ok := s.table.Compute(provider, u.ResponseModel, u); ok {
-			return Resolve(s.table, &usd, key, nil, s.keepRep, u.Partial)
+			return Resolve(s.table, &usd, key, reported, s.keepRep, u.Partial)
 		}
 	}
-	return Resolve(s.table, nil, "", nil, s.keepRep, u.Partial)
+	return Resolve(s.table, nil, "", reported, s.keepRep, u.Partial)
 }
 
-// labels builds the bounded metric labels. The model label is the matched
-// price entry or other, so a client-chosen model string cannot add series.
-func (c *call) modelKey(cost Cost, u Usage) string {
-	f := c.f
-	model := c.s.table.ModelKey(f.SelectedProvider, f.SelectedModel)
+// bound sets the bounded model and provider of a record and its metric
+// labels. The model is the matched price entry or other, so a client-chosen
+// model string cannot add series or store rows.
+func (s *snapshot) bound(rec *Record) {
+	rec.ModelKey = s.modelKey(rec.Facts, rec.Cost, rec.Usage)
+	rec.ProviderKey = providerKey(rec.Facts.SelectedProvider)
+	rec.Labels = s.metricLabels(rec.Facts, rec.ModelKey, rec.ProviderKey)
+}
+
+func (s *snapshot) modelKey(f CallFacts, cost Cost, u Usage) string {
+	model := s.table.ModelKey(f.SelectedProvider, f.SelectedModel)
 	if model == "other" && u.ResponseModel != "" {
-		model = c.s.table.ModelKey(f.SelectedProvider, u.ResponseModel)
+		model = s.table.ModelKey(f.SelectedProvider, u.ResponseModel)
 	}
 	if cost.PriceEntry == "fallback" {
 		model = "other"
@@ -415,10 +488,9 @@ func providerKey(p string) string {
 	return "other"
 }
 
-func (c *call) labels(model, provider string) []Label {
-	f := c.f
-	out := make([]Label, 0, len(c.s.labels))
-	for _, name := range c.s.labels {
+func (s *snapshot) metricLabels(f CallFacts, model, provider string) []Label {
+	out := make([]Label, 0, len(s.labels))
+	for _, name := range s.labels {
 		var v string
 		switch name {
 		case "connector":

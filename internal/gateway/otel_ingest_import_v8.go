@@ -144,6 +144,12 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 				return addPrimary(leaf, otlpInboundLocalPersistenceFailed)
 			}
 		}
+		if p := leafResult.primary; p != nil && !p.invalidMapped && !p.invalidRecord && !p.persistenceFailed {
+			// Agent model calls also feed tokenomics (log.model.usage) when
+			// observability.tokenomics imports this connector. After custody
+			// is final, so a retried batch never counts one call twice.
+			a.recordNativeOTLPUsageV8(correlated.ctx, leaf, classification.match, authenticatedSource, receipt)
+		}
 		for _, derivative := range leafResult.derivatives {
 			switch {
 			case derivative.invalidMapped || derivative.invalidRecord:
@@ -1485,7 +1491,7 @@ func normalizeInboundAliasValueV8(
 		return nil, false
 	}
 	switch alias.ID() {
-	case "input-tokens-v1", "output-tokens-v1", "cached-input-tokens-v1":
+	case "input-tokens-v1", "output-tokens-v1", "cached-input-tokens-v1", "reasoning-tokens-v1":
 	default:
 		return nil, false
 	}

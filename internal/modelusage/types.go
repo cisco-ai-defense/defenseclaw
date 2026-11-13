@@ -71,6 +71,13 @@ type CallFacts struct {
 	Groups           []string
 	IdentityVerified bool
 
+	// Correlation of a call imported from the OTLP telemetry of the agent
+	// (Engine.RecordNative): the session, turn and agent it joined on the hook
+	// rail, the agent prompt id and the provider request id. Proxied calls
+	// leave them empty; their records correlate through the request id.
+	SessionID, TurnID, AgentID      string
+	ModelRequestID, ModelResponseID string
+
 	StartedAt time.Time
 
 	// ChargeKeys are the budget keys the admin routing verdict says this call

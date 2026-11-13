@@ -18,6 +18,7 @@ func rec(owner string, groups []string, model string, usd *float64, at time.Time
 		},
 		Usage:   Usage{Input: 100, Output: 10, Has: HasInput | HasOutput},
 		Outcome: "completed", EndedAt: at, Total: 50 * time.Millisecond,
+		ModelKey: model, ProviderKey: "anthropic",
 	}
 	r.Cost.Basis = BasisNone
 	if usd != nil {
