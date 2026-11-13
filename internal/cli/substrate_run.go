@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -158,8 +159,24 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
+// substratePresence records this launcher for AI discovery while it is
+// attached (E26: discovery labels it the Agent Substrate launcher; process
+// snapshots keep no command line). The record holds the command, the
+// connector and the context name only. It returns the cleanup.
+func substratePresence(cmd *cobra.Command, a api.Actor) func() {
+	ctxName := ""
+	if name, _, err := auth.ResolveContext(""); err == nil {
+		ctxName = name
+	}
+	remove, _ := launcherpresence.Write(auth.StateDir(), launcherpresence.Record{
+		Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName),
+	})
+	return remove
+}
+
 // substrateAttachAndReport attaches and says how the session ended.
 func substrateAttachAndReport(ctx context.Context, cmd *cobra.Command, o attach.Options, a api.Actor) error {
+	defer substratePresence(cmd, a)()
 	res, err := attach.Attach(ctx, o)
 	w := cmd.ErrOrStderr()
 	if err != nil {
@@ -260,10 +277,9 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
 	t := substrateRunTarget{spec: spec, connName: spec.Name}
+	// No profile named: the cluster gives the person the profile their
+	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
-	if t.profile == "" {
-		return t, withExitCode(errors.New("name the guard profile: --profile NAME (ask your administrator which you may use), or save one with: defenseclaw substrate login --default-profile NAME"), 2)
-	}
 	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
 	return t, nil
 }
@@ -295,7 +311,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	if err != nil {
 		return a, substrateFail(err)
 	}
-	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, t.profile)
+	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
 	defer func() {
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)

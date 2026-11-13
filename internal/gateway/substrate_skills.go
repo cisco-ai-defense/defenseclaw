@@ -23,11 +23,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 )
 
 // Skill folders that arrive without a tool call (GAP-0039, A9's design):
@@ -105,7 +108,7 @@ func substrateSkillFolders(f *SubstrateFacts) map[string][]SubstrateAttachedFile
 // quarantine and, for each folder that passed, a scan receipt. A scan error
 // blocks the folder: the kit attached it because the model would see it
 // next (fail closed, as the runtime scan does for an incomplete folder).
-func (st *substrateState) substrateScanSkills(ctx context.Context, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned) {
+func (st *substrateState) substrateScanSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned) {
 	folders := substrateSkillFolders(f)
 	if len(folders) == 0 || st.cfg.Skills == nil {
 		return nil, nil
@@ -115,16 +118,36 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, f *SubstrateF
 		dirs = append(dirs, d)
 	}
 	sort.Strings(dirs)
+	trusted := st.templateSkillDigests(ctx)
 	var out []SubstrateQuarantine
 	passed := map[string]bool{}
 	for i, dir := range dirs {
 		if i >= substrateSkillFoldersMax {
 			break
 		}
+		// GAP-0164: a folder that is exactly what the attested template build
+		// scanned and admitted is trusted from the attestation.
+		if d := substrateSkillFolderDigest(dir, folders[dir]); d != "" && trusted[d] {
+			passed[dir] = true
+			continue
+		}
 		blocked, reason, err := st.cfg.Skills.ScanSkillFolder(ctx, path.Base(dir), dir, folders[dir])
-		if err != nil {
-			st.logRefusal("skill folder scan failed, folder blocked: %v", err)
+		switch {
+		case errors.Is(err, ErrSubstrateSkillScannerUnavailable):
+			// No scanner can run here: the fail mode decides (managed and
+			// strict refuse, OSS default tiers allow), never silently.
+			if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
+				blocked, reason = true, "no skill scanner can run in the gateway, and this install refuses unscanned skills"
+				st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: no skill scanner can run in the gateway", dir, f, err)
+			} else {
+				st.alertOnce(ctx, "MEDIUM", "Substrate skill folder allowed unscanned: no skill scanner can run in the gateway", dir, f, err)
+				continue // allowed, but no receipt: it is not scanned
+			}
+		case err != nil:
 			blocked, reason = true, "the skill scan could not complete"
+			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: the skill scan could not complete", dir, f, err)
+		case blocked:
+			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused by the runtime skill scan", dir, f, errors.New(reason))
 		}
 		if blocked {
 			out = append(out, SubstrateQuarantine{Path: dir, Reason: reason})
@@ -149,6 +172,85 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, f *SubstrateF
 	}
 	return out, scanned
 }
+
+// ErrSubstrateSkillScannerUnavailable is what a SubstrateSkillScanner returns
+// when no scanner can run here (not installed in the gateway image, or the
+// pod refuses scanner containment): the fail mode decides (GAP-0164).
+var ErrSubstrateSkillScannerUnavailable = errors.New("substrate: no skill scanner can run in the gateway")
+
+// templateSkillDigests are the admitted skill folder digests of the calling
+// actor's attested template; empty when there is none or it cannot be read.
+func (st *substrateState) templateSkillDigests(ctx context.Context) map[string]bool {
+	if st.cfg.TemplateSkills == nil {
+		return nil
+	}
+	reg, ok := substrateRegistrationFrom(ctx)
+	if !ok || reg.Template == "" {
+		return nil
+	}
+	digests, err := st.cfg.TemplateSkills(ctx, reg.Template)
+	if err != nil {
+		st.logRefusal("template skill digests of %s: %v (folders are scanned)", reg.Template, err)
+		return nil
+	}
+	out := make(map[string]bool, len(digests))
+	for _, d := range digests {
+		out[d] = true
+	}
+	return out
+}
+
+// substrateSkillFolderDigest is attest.SkillFolderDigest over the folder's
+// attached files, computed from their content (the kit's sha256 is a claim).
+// A folder with a cut file is never matched.
+func substrateSkillFolderDigest(dir string, files []SubstrateAttachedFile) string {
+	m := make(map[string][]byte, len(files))
+	for _, f := range files {
+		if f.Truncated {
+			return ""
+		}
+		p := path.Clean("/" + strings.TrimPrefix(f.Path, "/"))
+		rel := strings.TrimPrefix(p, dir+"/")
+		if rel == p {
+			return ""
+		}
+		m[rel] = f.Content
+	}
+	return attest.SkillFolderDigest(m)
+}
+
+// alertOnce raises one audit alert per actor, folder, fingerprint and
+// summary (bounded memory), so a folder named on every hook post alerts once.
+func (st *substrateState) alertOnce(ctx context.Context, severity, summary, dir string, f *SubstrateFacts, cause error) {
+	actor, _ := substrateActorFrom(ctx)
+	fp := ""
+	if f != nil {
+		for _, s := range f.Skills {
+			if path.Clean("/"+strings.TrimPrefix(s.Path, "/")) == dir {
+				fp = s.FP
+			}
+		}
+	}
+	key := actor.UID + "\x00" + dir + "\x00" + fp + "\x00" + summary
+	st.alertMu.Lock()
+	if st.alerted == nil || len(st.alerted) >= substrateAlertMemory {
+		st.alerted = map[string]bool{}
+	}
+	seen := st.alerted[key]
+	st.alerted[key] = true
+	st.alertMu.Unlock()
+	if seen || st.alert == nil {
+		return
+	}
+	details := map[string]any{"actor_uid": actor.UID, "atespace": actor.Atespace, "actor": actor.Name, "folder": dir, "fingerprint": fp}
+	if cause != nil {
+		details["reason"] = cause.Error()
+	}
+	st.alert(ctx, severity, summary, details)
+}
+
+// substrateAlertMemory bounds alertOnce's memory.
+const substrateAlertMemory = 10000
 
 // SubstrateUnscanned is one entry of the substrate_unscanned field.
 type SubstrateUnscanned struct {
@@ -239,7 +341,7 @@ func (s substrateSkillAnswer) empty() bool {
 
 // substrateSkills runs the skill pass of one hook post.
 func (st *substrateState) substrateSkills(ctx context.Context, connector string, f *SubstrateFacts) substrateSkillAnswer {
-	q, scanned := st.substrateScanSkills(ctx, f)
+	q, scanned := st.substrateScanSkills(ctx, connector, f)
 	unscanned, refused := st.substrateUnscannedSkills(ctx, connector, f)
 	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: unscanned}
 }

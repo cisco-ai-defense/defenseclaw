@@ -202,7 +202,11 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		note(o.Skill.Name(), o.Skill.Version())
 		local, skipped, err := fsys.Materialize(dir, filepath.Join(work, "skills"))
 		var res *scanner.ScanResult
+		digest := ""
 		if err == nil {
+			if len(skipped) == 0 {
+				digest = localSkillDigest(local)
+			}
 			res, err = o.Skill.Scan(ctx, local)
 		}
 		if err != nil || res == nil {
@@ -215,6 +219,9 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 				Description: strings.Join(skipped, "; "), Location: dir, Scanner: ConfigScannerName, Category: "skill-config"})
 		}
 		record(config.AdmissionTypeSkill, path.Base(dir), dir, o.Skill.Name(), res)
+		if it := &sum.Items[len(sum.Items)-1]; digest != "" && it.Verdict != VerdictBlock {
+			it.Digest = digest
+		}
 	}
 
 	// Plugins: a directory with a plugin manifest. Their skills and MCP

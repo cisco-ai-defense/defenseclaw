@@ -245,6 +245,8 @@ func substrateAPIMessage(e *api.Error) string {
 		return "the cluster has no such item, or it is not yours"
 	case e.Status == 413:
 		return "that was too large for the cluster (" + orWord(e.Reason, "too large") + ")"
+	case e.Status == 503 && e.Reason == "no_free_worker":
+		return "the cluster has no free worker for a new agent right now; nothing was started. Your running agents hold workers: see them with defenseclaw substrate list, and free one with defenseclaw substrate delete NAME, or ask your administrator for more workers"
 	case e.Status == 429:
 		return "the cluster is rate limiting you; wait a moment and try again"
 	case e.Status == 502 || e.Status == 503:

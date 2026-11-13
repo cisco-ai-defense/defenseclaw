@@ -60,7 +60,7 @@ Every read command has `--output text|json` and `--json`, and every command take
 
 ### Files
 
-`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). On macOS the key that seals them is an item only the DefenseClaw program may read without asking; macOS asks once after you install a new DefenseClaw build, and over SSH the keychain must be unlocked (`security unlock-keychain`).
 
 ## Configuration
 

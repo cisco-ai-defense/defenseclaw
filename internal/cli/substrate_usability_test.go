@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 )
 
@@ -105,6 +106,29 @@ func TestSubstrateNameFindsTheAgentRunNamed(t *testing.T) {
 	for _, ref := range []string{"fix", "web", "eng-web/fix-tests"} {
 		if _, err := resolveSubstrateActor(ctx, s.Client, ref); err == nil {
 			t.Errorf("%s must not match", ref)
+		}
+	}
+}
+
+// GAP-0166: run with no profile anywhere asks the cluster, which gives the
+// person the profile their groups map to.
+func TestSubstrateRunNeedsNoProfile(t *testing.T) {
+	t.Setenv("DEFENSECLAW_SUBSTRATE_PROFILE", "")
+	tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, "claude")
+	if err != nil {
+		t.Fatalf("run without a profile: %v", err)
+	}
+	if tg.profile != "" {
+		t.Errorf("profile %q, want empty (the cluster picks)", tg.profile)
+	}
+}
+
+// GAP-0167: no free worker says what to do.
+func TestSubstrateNoFreeWorkerMessage(t *testing.T) {
+	msg := substrateAPIMessage(&api.Error{Status: 503, Reason: "no_free_worker"})
+	for _, want := range []string{"no free worker", "nothing was started", "defenseclaw substrate list", "defenseclaw substrate delete NAME"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
 		}
 	}
 }
