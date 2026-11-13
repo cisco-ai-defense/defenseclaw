@@ -45,6 +45,7 @@ func rev6Lines() []string {
 		`pwsh -wd C:\ -c 'Remove-Item C:\x'`, `pwsh -WorkingDirectory C:\ -c 'Remove-Item C:\x'`, `pwsh -o xml -c 'Remove-Item C:\x'`,
 		`pwsh -if text -c 'Remove-Item C:\x'`, `pwsh -sta -c 'Remove-Item C:\x'`, `pwsh -login -c 'Remove-Item C:\x'`, `pwsh -l -c 'Remove-Item C:\x'`,
 		`pwsh -c:'Remove-Item C:\x'`, `pwsh -Command:'Remove-Item C:\x'`, `pwsh -nop:$true -c 'Remove-Item C:\x'`, `pwsh -c 'Get-Date' -c 'Remove-Item C:\x'`,
+		`pwsh -nop -File -`, `pwsh -File - extra`, `pwsh -File:-`, `pwsh -File '-'`, `pwsh --% -`, `pwsh --% -c -`, `pwsh --% -File -`, `pwsh -nop --% -`,
 		`pwsh -c - `, `pwsh -c -`, `pwsh -File -`, `pwsh -`, `pwsh -c ''`, `pwsh -c ' '`, `pwsh -c`, `pwsh`,
 		`pwsh -c Write-Output --% ; Remove-Item C:\x`, `pwsh --% -c Remove-Item C:\x`, `powershell -c 'Write-Output' --% "a;Remove-Item C:\x"`,
 		`pwsh -c Write-Output a,b`, `pwsh -c 'Write-Output',"a;Remove-Item C:\x"`, `pwsh -c @('Remove-Item','C:\x')`, `pwsh -c ('Remove-Item C:\x')`,
@@ -174,6 +175,49 @@ func TestRev6CmdHiddenPayload(t *testing.T) {
 		if ns.Static || ns.Reason != ReasonCmdArgv {
 			t.Errorf("%q: got static=%v reason=%q text=%q; want static=false reason=%q",
 				src, ns.Static, ns.Reason, ns.Text, ReasonCmdArgv)
+		}
+	}
+}
+
+// TestRev6FileStdinAndStopParse covers the Sonnet-probe residuals: `-File -`
+// reads the script from stdin (PS-FILE-STDIN), and a --% stop-parse token
+// before a stdin dash is the same stdin form (PS-STOPPARSE-DASH).
+func TestRev6FileStdinAndStopParse(t *testing.T) {
+	rows := []struct {
+		src   string
+		stdin bool // want a non-static ps_stdin powershell-command
+	}{
+		{`pwsh -File -`, true},
+		{`pwsh -f -`, true},
+		{`pwsh -nop -File -`, true},
+		{`powershell -File -`, true},
+		{`pwsh -File - extra`, true},
+		{`pwsh -File:-`, true},
+		{`pwsh -File '-'`, true},
+		{`pwsh --% -`, true},
+		{`pwsh --% -c -`, true},
+		{`pwsh --% -File -`, true},
+		{`pwsh -nop --% -`, true},
+		{`pwsh -c --% -`, true},
+		{`powershell -Command --% -`, true},
+		{`pwsh -File x.ps1`, false},
+		{`pwsh -File`, false},
+	}
+	for _, r := range rows {
+		for _, d := range []Dialect{DialectUnknown, DialectWindowsPS51, DialectPwsh7} {
+			sc, _ := Parse(r.src, Options{Dialect: d})
+			got := false
+			for _, n := range ExtractNestedScripts(sc) {
+				if !n.Static && n.Reason == ReasonStdin {
+					got = true
+				}
+				if r.stdin && n.Static {
+					t.Errorf("%q d=%d: static nested %q; want ps_stdin", r.src, d, n.Text)
+				}
+			}
+			if got != r.stdin {
+				t.Errorf("%q d=%d: ps_stdin=%v want %v", r.src, d, got, r.stdin)
+			}
 		}
 	}
 }

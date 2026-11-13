@@ -561,195 +561,203 @@
 {"i":560,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"command","c":{"s":true,"v":"Remove-Item C:\\x"}}]}]}
 {"i":561,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":{"s":false,"v":""}},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
 {"i":562,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":563,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":564,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":565,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
-{"i":566,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"-"}]}]}
-{"i":567,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":""}]}]}
-{"i":568,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":" "}]}]}
-{"i":569,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null}]}]}
-{"i":570,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[]}]}
-{"i":571,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"; Remove-Item C:\\x"}]}]}
-{"i":572,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":573,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"\"a;Remove-Item C:\\x\""}]}]}
-{"i":574,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}]}
-{"i":575,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":"","l":[{"s":true,"v":"Write-Output"},{"s":true,"v":"a;Remove-Item C:\\x"}]}]}]}
-{"i":576,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
-{"i":577,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
-{"i":578,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":579,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item 'C:\\x'"}]}]}
-{"i":580,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":581,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":582,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Out-Null"},"els":[]}]}
-{"i":583,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":584,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Date"},"els":[]}]}
-{"i":585,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":586,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a"},{"s":true,"v":"b"},{"s":true,"v":"c;Remove-Item C:\\x"}]}]}
-{"i":587,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a#"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":588,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output <#"},{"s":true,"v":"#> ; Remove-Item C:\\x"}]}]}
-{"i":589,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"'$(Remove-Item('C:\\Windows'))'"},{"s":true,"v":"a b\\"}]}]}
-{"i":590,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"$(Remove-Item('C:\\Windows'))"},{"s":true,"v":"a b\\"}]}]}
-{"i":591,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a\\"},{"s":true,"v":"b"}]}]}
-{"i":592,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x\\"}]}]}
-{"i":593,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output C:\\a b\\\\"}]}]}
-{"i":594,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"'$(Remove-Item('C:\\Windows'))'#"},{"s":true,"v":"a b\\"}]}]}
-{"i":595,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"echo x\\"},{"s":true,"v":"a b\\"}]}]}
-{"i":596,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":597,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
-{"i":598,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":599,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
-{"i":600,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/q"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":601,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/v:on"},{"s":true,"v":"/c"},{"s":true,"v":"del !x!"}]}]}
-{"i":602,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":603,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c del C:\\x"}]}]}
-{"i":604,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":605,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"start"},{"s":true,"v":"powershell"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":606,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"powershell"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":607,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del %SystemRoot%\\x"}]}]}
-{"i":608,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"},{"s":true,"v":"^"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":609,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"},{"s":true,"v":"&"},{"s":true,"v":"del"},{"s":true,"v":"C:\\y"}]}]}
-{"i":610,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del C:\\x & del C:\\y"}]}]}
-{"i":611,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del \"C:\\x\""}]}]}
-{"i":612,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/u"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":613,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/e:on"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":614,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"}]}]}
-{"i":615,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[]}]}
-{"i":616,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":false,"v":""}]}]}
-{"i":617,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":false,"v":""}]}]}
-{"i":618,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":false,"v":""}]}]}
-{"i":619,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"c","c":null},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":620,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":621,"err":false,"cmds":[{"name":{"s":true,"v":"icm"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":622,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"computername","c":null},{"s":true,"v":"h"},{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":623,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"filepath","c":null},{"s":true,"v":"C:\\x.ps1"}]}]}
-{"i":624,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]}]}
-{"i":625,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"s":false,"v":""}]}]}
-{"i":626,"err":false,"cmds":[]}
-{"i":627,"err":false,"cmds":[]}
-{"i":628,"err":false,"cmds":[]}
-{"i":629,"err":false,"cmds":[{"name":{"s":true,"v":"New-Object"},"els":[{"s":true,"v":"Diagnostics.Process"}]}]}
-{"i":630,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":631,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":632,"err":false,"cmds":[{"name":{"s":true,"v":"Start-ThreadJob"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":633,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"p":"initializationscript","c":null},{"s":false,"v":""},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":634,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-CimMethod"},"els":[{"p":"classname","c":null},{"s":true,"v":"Win32_Process"},{"p":"methodname","c":null},{"s":true,"v":"Create"},{"p":"arguments","c":null},{"s":false,"v":""}]}]}
-{"i":635,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-WmiMethod"},"els":[{"p":"class","c":null},{"s":true,"v":"Win32_Process"},{"p":"name","c":null},{"s":true,"v":"Create"},{"p":"argumentlist","c":null},{"s":true,"v":"cmd /c del C:\\x"}]}]}
+{"i":563,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":564,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"},{"s":true,"v":"extra"}]}]}
+{"i":565,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":{"s":true,"v":"-"}}]}]}
+{"i":566,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":567,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":568,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-c -"}]}]}
+{"i":569,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-File -"}]}]}
+{"i":570,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":571,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":572,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":573,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":574,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"-"}]}]}
+{"i":575,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":""}]}]}
+{"i":576,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":" "}]}]}
+{"i":577,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null}]}]}
+{"i":578,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[]}]}
+{"i":579,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"; Remove-Item C:\\x"}]}]}
+{"i":580,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":581,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"\"a;Remove-Item C:\\x\""}]}]}
+{"i":582,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}]}
+{"i":583,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":"","l":[{"s":true,"v":"Write-Output"},{"s":true,"v":"a;Remove-Item C:\\x"}]}]}]}
+{"i":584,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":585,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":586,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":587,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item 'C:\\x'"}]}]}
+{"i":588,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":589,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":590,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Out-Null"},"els":[]}]}
+{"i":591,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":592,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Date"},"els":[]}]}
+{"i":593,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":594,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a"},{"s":true,"v":"b"},{"s":true,"v":"c;Remove-Item C:\\x"}]}]}
+{"i":595,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a#"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":596,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output <#"},{"s":true,"v":"#> ; Remove-Item C:\\x"}]}]}
+{"i":597,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"'$(Remove-Item('C:\\Windows'))'"},{"s":true,"v":"a b\\"}]}]}
+{"i":598,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"$(Remove-Item('C:\\Windows'))"},{"s":true,"v":"a b\\"}]}]}
+{"i":599,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a\\"},{"s":true,"v":"b"}]}]}
+{"i":600,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x\\"}]}]}
+{"i":601,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output C:\\a b\\\\"}]}]}
+{"i":602,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"'$(Remove-Item('C:\\Windows'))'#"},{"s":true,"v":"a b\\"}]}]}
+{"i":603,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"echo x\\"},{"s":true,"v":"a b\\"}]}]}
+{"i":604,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":605,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":606,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":607,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":608,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/q"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":609,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/v:on"},{"s":true,"v":"/c"},{"s":true,"v":"del !x!"}]}]}
+{"i":610,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":611,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c del C:\\x"}]}]}
+{"i":612,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":613,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"start"},{"s":true,"v":"powershell"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":614,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"powershell"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":615,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del %SystemRoot%\\x"}]}]}
+{"i":616,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"},{"s":true,"v":"^"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":617,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"},{"s":true,"v":"&"},{"s":true,"v":"del"},{"s":true,"v":"C:\\y"}]}]}
+{"i":618,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del C:\\x & del C:\\y"}]}]}
+{"i":619,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del \"C:\\x\""}]}]}
+{"i":620,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/u"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":621,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/e:on"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":622,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"}]}]}
+{"i":623,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[]}]}
+{"i":624,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":false,"v":""}]}]}
+{"i":625,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":false,"v":""}]}]}
+{"i":626,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":false,"v":""}]}]}
+{"i":627,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"c","c":null},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":628,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":629,"err":false,"cmds":[{"name":{"s":true,"v":"icm"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":630,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"computername","c":null},{"s":true,"v":"h"},{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":631,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"filepath","c":null},{"s":true,"v":"C:\\x.ps1"}]}]}
+{"i":632,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]}]}
+{"i":633,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"s":false,"v":""}]}]}
+{"i":634,"err":false,"cmds":[]}
+{"i":635,"err":false,"cmds":[]}
 {"i":636,"err":false,"cmds":[]}
-{"i":637,"err":false,"cmds":[{"name":{"s":true,"v":"wmic"},"els":[{"s":true,"v":"process"},{"s":true,"v":"call"},{"s":true,"v":"create"},{"s":true,"v":"cmd /c del C:\\x"}]}]}
-{"i":638,"err":false,"cmds":[]}
-{"i":639,"err":false,"cmds":[]}
-{"i":640,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[]}]}
-{"i":641,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[]}]}
-{"i":642,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":643,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"command","c":{"s":true,"v":"Remove-Item C:\\x"}}]}]}
-{"i":644,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":false,"v":""}]}]}
-{"i":645,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
-{"i":646,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":647,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"co","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":648,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"},{"p":"verbose","c":null}]}]}
-{"i":649,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"filepath","c":null},{"s":true,"v":"powershell"},{"p":"argumentlist","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":650,"err":false,"cmds":[{"name":{"s":true,"v":"start"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":651,"err":false,"cmds":[{"name":{"s":true,"v":"saps"},"els":[{"s":true,"v":"pwsh"},{"s":false,"v":"","l":[{"s":true,"v":"-c"},{"s":true,"v":"Remove-Item C:\\x"}]}]}]}
-{"i":652,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"verb","c":null},{"s":true,"v":"RunAs"},{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":653,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"wt"},{"s":true,"v":"powershell -c Remove-Item C:\\x"}]}]}
-{"i":654,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"conhost"},{"s":true,"v":"powershell -c Remove-Item C:\\x"}]}]}
-{"i":655,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"C:\\x.bat"}]}]}
-{"i":656,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":false,"v":""}]}]}
-{"i":657,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":false,"v":""},{"s":true,"v":"-c Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Command"},"els":[{"s":true,"v":"powershell"}]}]}
-{"i":658,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"}]}]}
-{"i":659,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"filepath","c":{"s":true,"v":"pwsh"}},{"p":"argumentlist","c":{"s":false,"v":"","l":[{"s":true,"v":"-c"},{"s":true,"v":"Remove-Item C:\\x"}]}}]}]}
-{"i":660,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"fi","c":null},{"s":true,"v":"pwsh"},{"p":"ar","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":661,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"pwsh.exe"},{"p":"nonewwindow","c":null},{"p":"wait","c":null},{"p":"args","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":662,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"gcm"},"els":[{"s":true,"v":"powershell"}]}]}
-{"i":663,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Command"},"els":[{"s":true,"v":"pwsh"}]}]}
-{"i":664,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Item"},"els":[{"s":true,"v":"C:\\x.bat"}]}]}
-{"i":665,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
-{"i":666,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
-{"i":667,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
-{"i":668,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":false,"v":""}]}]}
-{"i":669,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
-{"i":670,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"s":false,"v":""}]}]}
-{"i":671,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
-{"i":672,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
-{"i":673,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":false,"v":""}]}]}
-{"i":674,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":false,"v":""}]}]}
-{"i":675,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":false,"v":""},{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
-{"i":676,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""},{"s":true,"v":"x"}]}]}
-{"i":677,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":678,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":679,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":680,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output \"a;Remove-Item C:\\x\""}]}]}
-{"i":681,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":682,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":683,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":684,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"verbose","c":null}]}]}
-{"i":685,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]},{"name":{"s":true,"v":"Out-Null"},"els":[]}]}
-{"i":686,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":687,"err":false,"cmds":[{"name":{"s":true,"v":"gc"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":688,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":689,"err":false,"cmds":[{"name":{"s":true,"v":"%"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":690,"err":false,"cmds":[{"name":{"s":true,"v":"ForEach-Object"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":637,"err":false,"cmds":[{"name":{"s":true,"v":"New-Object"},"els":[{"s":true,"v":"Diagnostics.Process"}]}]}
+{"i":638,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":639,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":640,"err":false,"cmds":[{"name":{"s":true,"v":"Start-ThreadJob"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":641,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"p":"initializationscript","c":null},{"s":false,"v":""},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":642,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-CimMethod"},"els":[{"p":"classname","c":null},{"s":true,"v":"Win32_Process"},{"p":"methodname","c":null},{"s":true,"v":"Create"},{"p":"arguments","c":null},{"s":false,"v":""}]}]}
+{"i":643,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-WmiMethod"},"els":[{"p":"class","c":null},{"s":true,"v":"Win32_Process"},{"p":"name","c":null},{"s":true,"v":"Create"},{"p":"argumentlist","c":null},{"s":true,"v":"cmd /c del C:\\x"}]}]}
+{"i":644,"err":false,"cmds":[]}
+{"i":645,"err":false,"cmds":[{"name":{"s":true,"v":"wmic"},"els":[{"s":true,"v":"process"},{"s":true,"v":"call"},{"s":true,"v":"create"},{"s":true,"v":"cmd /c del C:\\x"}]}]}
+{"i":646,"err":false,"cmds":[]}
+{"i":647,"err":false,"cmds":[]}
+{"i":648,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[]}]}
+{"i":649,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[]}]}
+{"i":650,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":651,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"command","c":{"s":true,"v":"Remove-Item C:\\x"}}]}]}
+{"i":652,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":false,"v":""}]}]}
+{"i":653,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":654,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":655,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"co","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":656,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"},{"p":"verbose","c":null}]}]}
+{"i":657,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"filepath","c":null},{"s":true,"v":"powershell"},{"p":"argumentlist","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":658,"err":false,"cmds":[{"name":{"s":true,"v":"start"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":659,"err":false,"cmds":[{"name":{"s":true,"v":"saps"},"els":[{"s":true,"v":"pwsh"},{"s":false,"v":"","l":[{"s":true,"v":"-c"},{"s":true,"v":"Remove-Item C:\\x"}]}]}]}
+{"i":660,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"verb","c":null},{"s":true,"v":"RunAs"},{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":661,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"wt"},{"s":true,"v":"powershell -c Remove-Item C:\\x"}]}]}
+{"i":662,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"conhost"},{"s":true,"v":"powershell -c Remove-Item C:\\x"}]}]}
+{"i":663,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"C:\\x.bat"}]}]}
+{"i":664,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":false,"v":""}]}]}
+{"i":665,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":false,"v":""},{"s":true,"v":"-c Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Command"},"els":[{"s":true,"v":"powershell"}]}]}
+{"i":666,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"}]}]}
+{"i":667,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"filepath","c":{"s":true,"v":"pwsh"}},{"p":"argumentlist","c":{"s":false,"v":"","l":[{"s":true,"v":"-c"},{"s":true,"v":"Remove-Item C:\\x"}]}}]}]}
+{"i":668,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"fi","c":null},{"s":true,"v":"pwsh"},{"p":"ar","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":669,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"pwsh.exe"},{"p":"nonewwindow","c":null},{"p":"wait","c":null},{"p":"args","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":670,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"gcm"},"els":[{"s":true,"v":"powershell"}]}]}
+{"i":671,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Command"},"els":[{"s":true,"v":"pwsh"}]}]}
+{"i":672,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Item"},"els":[{"s":true,"v":"C:\\x.bat"}]}]}
+{"i":673,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":674,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":675,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":676,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":false,"v":""}]}]}
+{"i":677,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":678,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"s":false,"v":""}]}]}
+{"i":679,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":680,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":681,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":false,"v":""}]}]}
+{"i":682,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":false,"v":""}]}]}
+{"i":683,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":false,"v":""},{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
+{"i":684,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""},{"s":true,"v":"x"}]}]}
+{"i":685,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":686,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":687,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":688,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output \"a;Remove-Item C:\\x\""}]}]}
+{"i":689,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":690,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
 {"i":691,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":692,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":693,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":694,"err":false,"cmds":[{"name":{"s":true,"v":"IEX"},"els":[]}]}
-{"i":695,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":696,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":697,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":698,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":699,"err":false,"cmds":[{"name":{"s":true,"v":"Tee-Object"},"els":[{"p":"variable","c":null},{"s":true,"v":"t"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":692,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"verbose","c":null}]}]}
+{"i":693,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]},{"name":{"s":true,"v":"Out-Null"},"els":[]}]}
+{"i":694,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":695,"err":false,"cmds":[{"name":{"s":true,"v":"gc"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":696,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":697,"err":false,"cmds":[{"name":{"s":true,"v":"%"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":698,"err":false,"cmds":[{"name":{"s":true,"v":"ForEach-Object"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":699,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
 {"i":700,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":701,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":702,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":"-"}]}]}
-{"i":703,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[]}]}
-{"i":704,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null}]}]}
-{"i":705,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[]}]}
-{"i":706,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/q"}]}]}
-{"i":707,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
-{"i":708,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
-{"i":709,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"$input | iex"}]}]}
-{"i":710,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":711,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":712,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":713,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Get-Date"}]}]}
-{"i":714,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":715,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":716,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"enc","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":717,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":718,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"en","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":719,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encod","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":720,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedcommand","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":721,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"enc","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":722,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--encodedcommand"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":723,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"/e"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":724,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}}]}]}
-{"i":725,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedcommand","c":{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}}]}]}
-{"i":726,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":727,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":728,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABBAA=="},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":729,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABBAA=="},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":730,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":731,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"nop","c":null}]}]}
-{"i":732,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"s":true,"v":"extra"}]}]}
-{"i":733,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"w","c":null},{"s":true,"v":"hidden"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":734,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAiAGEAOwBSAGUAbQBvAHYAZQAtAEkAdABlAG0AIABDADoAXAB4ACIA"}]}]}
-{"i":735,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeA"}]}]}
-{"i":736,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA"}]}]}
-{"i":737,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0A"},{"s":true,"v":"bwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":738,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UmVtb3ZlLUl0ZW0gQzpceA=="}]}]}
-{"i":739,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAAAADsAIABSAGUAbQBvAHYAZQAtAEkAdABlAG0AIABDADoAXAB5AA=="}]}]}
-{"i":740,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"aQBlAHgAIAAnAFIAZQBtAG8AdgBlAC0ASQB0AGUAbQAgAEMAOgBcAHgAJwA="}]}]}
-{"i":741,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"cABvAHcAZQByAHMAaABlAGwAbAAgAC0AYwAgACcAUgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAAnAA=="}]}]}
-{"i":742,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAB4AFwA"},{"s":true,"v":"eQA="}]}]}
-{"i":743,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
-{"i":744,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"powershell"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":745,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ea","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABhAA=="}]}]}
-{"i":746,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedarguments","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":747,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"pwsh"},{"p":"argumentlist","c":null},{"s":false,"v":"","l":[{"s":true,"v":"-ec"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}]}
-{"i":748,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
-{"i":749,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
-{"i":750,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
-{"i":751,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":752,"err":false,"cmds":[{"name":{"s":true,"v":"powershell.exe"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
-{"i":753,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAfgBcAHgA"}]}]}
-{"i":754,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAVwAqAA=="}]}]}
+{"i":701,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":702,"err":false,"cmds":[{"name":{"s":true,"v":"IEX"},"els":[]}]}
+{"i":703,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":704,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":705,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":706,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":707,"err":false,"cmds":[{"name":{"s":true,"v":"Tee-Object"},"els":[{"p":"variable","c":null},{"s":true,"v":"t"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":708,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":709,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":710,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":"-"}]}]}
+{"i":711,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[]}]}
+{"i":712,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null}]}]}
+{"i":713,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[]}]}
+{"i":714,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/q"}]}]}
+{"i":715,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":716,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
+{"i":717,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"$input | iex"}]}]}
+{"i":718,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":719,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":720,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":721,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Get-Date"}]}]}
+{"i":722,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":723,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":724,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"enc","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":725,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":726,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"en","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":727,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encod","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":728,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedcommand","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":729,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"enc","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":730,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--encodedcommand"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":731,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"/e"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":732,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}}]}]}
+{"i":733,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedcommand","c":{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}}]}]}
+{"i":734,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":735,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":736,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABBAA=="},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":737,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABBAA=="},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":738,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":739,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"nop","c":null}]}]}
+{"i":740,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"s":true,"v":"extra"}]}]}
+{"i":741,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"w","c":null},{"s":true,"v":"hidden"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":742,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAiAGEAOwBSAGUAbQBvAHYAZQAtAEkAdABlAG0AIABDADoAXAB4ACIA"}]}]}
+{"i":743,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeA"}]}]}
+{"i":744,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA"}]}]}
+{"i":745,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0A"},{"s":true,"v":"bwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":746,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UmVtb3ZlLUl0ZW0gQzpceA=="}]}]}
+{"i":747,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAAAADsAIABSAGUAbQBvAHYAZQAtAEkAdABlAG0AIABDADoAXAB5AA=="}]}]}
+{"i":748,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"aQBlAHgAIAAnAFIAZQBtAG8AdgBlAC0ASQB0AGUAbQAgAEMAOgBcAHgAJwA="}]}]}
+{"i":749,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"cABvAHcAZQByAHMAaABlAGwAbAAgAC0AYwAgACcAUgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAAnAA=="}]}]}
+{"i":750,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAB4AFwA"},{"s":true,"v":"eQA="}]}]}
+{"i":751,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
+{"i":752,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"powershell"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":753,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ea","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABhAA=="}]}]}
+{"i":754,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedarguments","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":755,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"pwsh"},{"p":"argumentlist","c":null},{"s":false,"v":"","l":[{"s":true,"v":"-ec"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}]}
+{"i":756,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
+{"i":757,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
+{"i":758,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
+{"i":759,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":760,"err":false,"cmds":[{"name":{"s":true,"v":"powershell.exe"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":761,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAfgBcAHgA"}]}]}
+{"i":762,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAVwAqAA=="}]}]}

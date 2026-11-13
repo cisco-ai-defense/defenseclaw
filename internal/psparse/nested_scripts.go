@@ -293,6 +293,9 @@ func hostWords(c *Command) []hostWord {
 // powerShellHostScripts applies the pwsh CLI parameter rules to a
 // powershell/pwsh invocation's argument words and returns the embedded script.
 func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
+	if hostStopParseStdin(words) {
+		return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonStdin}}
+	}
 	for i := 0; i < len(words); i++ {
 		w := words[i]
 		name, cand := stripParamLead(w.text)
@@ -314,6 +317,11 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 					i++
 					continue
 				case "file":
+					if i+1 < len(words) && words[i+1].static && words[i+1].text == "-" {
+						// -File - reads the script from stdin: no script in the argv
+						// (review 6 follow-up PS-FILE-STDIN).
+						return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonStdin}}
+					}
 					return nil // a script file; its content is not inline
 				default:
 					if takesVal {
@@ -334,6 +342,39 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 		return []NestedScript{joinRest(words[i:], KindPowerShellCommand, "powershell", src)}
 	}
 	return nil
+}
+
+// hostStopParseStdin reports whether a host invocation puts a --% stop-parse
+// token before a stdin dash: `pwsh --% -`, `pwsh --% -c -`, `pwsh --% -File -`.
+// PowerShell consumes the --% and passes the verbatim tail as the host argv,
+// so the script is read from stdin. The tail is otherwise left to the normal
+// (fail-closed) host-option path (PS-STOPPARSE-DASH).
+func hostStopParseStdin(words []hostWord) bool {
+	for i, w := range words {
+		if !w.static || w.text != "--%" {
+			continue
+		}
+		// the verbatim tail arrives as one word ("-c -"); split it into argv words
+		var tail []string
+		for _, t := range words[i+1:] {
+			if !t.static {
+				return false
+			}
+			tail = append(tail, strings.Fields(t.text)...)
+		}
+		if len(tail) >= 1 && tail[0] == "-" {
+			return true
+		}
+		if len(tail) >= 2 && tail[1] == "-" {
+			if name, cand := stripParamLead(tail[0]); cand {
+				if canon, _, known := resolvePSParam(name); known && (canon == "command" || canon == "file") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // joinRest joins the remaining words into one script, static only if every word
