@@ -258,9 +258,23 @@ func compileObservabilityV8Local(source ObservabilityV8LocalSource) (Observabili
 			maxStoreMB, ObservabilityV8MinStoreMB, ObservabilityV8MaxStoreMB,
 		)
 	}
+	rejectedRows := ObservabilityV8DefaultRejectedRecordsRows
+	if source.RejectedRecordsMaxRows != nil {
+		rejectedRows = *source.RejectedRecordsMaxRows
+	}
+	if rejectedRows < ObservabilityV8MinRejectedRecordsRows || rejectedRows > ObservabilityV8MaxRejectedRecordsRows {
+		return ObservabilityV8EffectiveLocal{}, fmt.Errorf(
+			"observability.local.rejected_records_max_rows: got %d, want %d to %d",
+			rejectedRows, ObservabilityV8MinRejectedRecordsRows, ObservabilityV8MaxRejectedRecordsRows,
+		)
+	}
+	keepRejected := source.KeepRejectedRecords != nil && *source.KeepRejectedRecords
+	if !keepRejected {
+		rejectedRows = 0
+	}
 	return ObservabilityV8EffectiveLocal{
 		Path: source.Path, JudgeBodiesPath: source.JudgeBodiesPath, RetentionDays: retentionDays,
-		MaxStoreMB: maxStoreMB,
+		MaxStoreMB: maxStoreMB, KeepRejectedRecords: keepRejected, RejectedRecordsMaxRows: rejectedRows,
 	}, nil
 }
 
@@ -1822,6 +1836,16 @@ func compileObservabilityV8Provenance(
 	if source.Local.MaxStoreMB != nil {
 		result = append(result, ObservabilityV8Provenance{
 			Path: "observability.local.max_store_mb", Origin: originObservabilityV8Pointer(source.Local.MaxStoreMB),
+		})
+	}
+	if source.Local.KeepRejectedRecords != nil {
+		result = append(result, ObservabilityV8Provenance{
+			Path: "observability.local.keep_rejected_records", Origin: originObservabilityV8Pointer(source.Local.KeepRejectedRecords),
+		})
+	}
+	if source.Local.RejectedRecordsMaxRows != nil {
+		result = append(result, ObservabilityV8Provenance{
+			Path: "observability.local.rejected_records_max_rows", Origin: originObservabilityV8Pointer(source.Local.RejectedRecordsMaxRows),
 		})
 	}
 	resourceNames := make([]string, 0, len(source.Resource.Attributes))

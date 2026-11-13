@@ -20,6 +20,9 @@ import Foundation
 struct FirstRunConnectorSelectionTests {
     static func main() {
         onboardingChoicesExcludeProxyConnectors()
+        expect(ConnectorDiscoverySelection.onboardingConnectors.contains("kiro"), "Kiro is available in native onboarding")
+        expect(!ConnectorDiscoverySelection.onboardingConnectors.contains("omnigent")
+               && !ConnectorDiscoverySelection.onboardingConnectors.contains("openhands"), "retired connectors are not offered")
         firstDiscoveryPreselectsEverything()
         proxyConnectorsAreNotSelectable()
         refreshPreservesExplicitChoices()

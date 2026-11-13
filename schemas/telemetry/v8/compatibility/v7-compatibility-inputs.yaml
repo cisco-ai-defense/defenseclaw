@@ -23,6 +23,7 @@ classes:
       EventHookDecision: "hook_decision"
       EventAIDiscovery: "ai_discovery"
       EventModelUsage: "model_usage"
+      EventEndpointHealth: "endpoint_health"
 
   audit_actions:
     items:

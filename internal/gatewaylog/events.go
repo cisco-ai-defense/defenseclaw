@@ -185,6 +185,12 @@ const (
 	// (scripts/generate_telemetry_registry.py expected_audit_gateway_keys) and a
 	// migrated v7 audit sink never receives a usage record.
 	EventModelUsage EventType = "model_usage"
+
+	// EventEndpointHealth is the classification key of the periodic managed
+	// endpoint health report (observability.ProducerGatewayEvent with
+	// ProducerKey("endpoint_health")). Like EventAIDiscovery it exists only as a
+	// v8 log identity and has no envelope payload or envelope row.
+	EventEndpointHealth EventType = "endpoint_health"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
