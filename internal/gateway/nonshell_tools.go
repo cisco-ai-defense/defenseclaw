@@ -26,6 +26,10 @@ const (
 	mcpSettingDowngradeID   = "MCP-SETTING-DOWNGRADE"
 	mcpCodeDecodeExecRuleID = "MCP-CODE-DECODE-EXEC"
 
+	// sqlMutationOwnerRuleID is the exact SQL-mutation owner (actionfacts) that
+	// already judges structured SQL tool calls.
+	sqlMutationOwnerRuleID = "impact.sql_destructive_mutation"
+
 	// maxNonShellPathTwins bounds the file reads one call may have judged.
 	maxNonShellPathTwins = 16
 )
@@ -100,7 +104,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				switch class.Class {
 				case toolshape.SQLDrop, toolshape.SQLTruncate, toolshape.SQLDeleteAll:
 					// The exact SQL-mutation owner already judged this call.
-					if !slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == sqlDestructiveMutationRuleID }) {
+					if !slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == sqlMutationOwnerRuleID }) {
 						add(mcpSQLDestructiveRuleID, "SQL "+class.Class)
 					}
 				case toolshape.SQLPrivilege:
