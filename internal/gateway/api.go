@@ -1454,6 +1454,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
 	mux.Handle("/api/v1/inspect/", hookLimiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
+	mux.HandleFunc(openClawRuntimePath, a.handleOpenClawRuntime)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
 	mux.HandleFunc("/api/v1/telemetry/canary", a.handleTelemetryCanary)
 	mux.HandleFunc("/api/v1/watchdog/recovery", a.handleWatchdogRecovery)
@@ -3653,6 +3654,9 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.refuseOpenClawPluginPath(w, r, req.Target) {
+		return
+	}
 	if a.rejectWindowsGatewayPath(w, "plugin", req.Target, req.Target) {
 		return
 	}
@@ -4587,6 +4591,18 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
+		// The OpenClaw plugin credential authenticates only the closed route
+		// table in openclaw_plugin_scope.go, on loopback; everything else
+		// falls through to the master gateway token check below.
+		if token != "" && !userScoped && connector.IsLoopback(r) && openClawPluginRoute(r.Method, r.URL.Path) &&
+			a.openClawConnectorRegistered() && a.hookAPITokenMatches(openClawPluginScope, token) {
+			r = r.WithContext(withAuthenticatedInspectConnector(
+				a.attachProcessOwnerSubject(PromoteSessionIfAuthenticated(r.Context())),
+				openClawPluginScope,
+			))
+			next.ServeHTTP(w, r)
+			return
+		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
 			writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -5142,6 +5158,9 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 	codeScanner := scanner.ScanCode
 	if a.codeScanner != nil {
 		codeScanner = a.codeScanner
+	}
+	if a.refuseOpenClawPluginPath(w, r, req.Path) {
+		return
 	}
 	result, err := codeScanner(r.Context(), req.Path, rulesDir)
 	if err != nil {

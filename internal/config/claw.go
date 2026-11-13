@@ -1018,6 +1018,41 @@ func (c *Config) InstalledSkillCandidates(skillName string) []string {
 	return candidates
 }
 
+// OpenClawHome is the OpenClaw home the connector patches: claw.home_dir
+// with "~/" expanded, ~/.openclaw when unset.
+func (c *Config) OpenClawHome() string {
+	home := ""
+	if c != nil {
+		home = strings.TrimSpace(c.Claw.HomeDir)
+	}
+	if home == "" {
+		home = "~/.openclaw"
+	}
+	return filepath.Clean(expandPath(home))
+}
+
+// OpenClawConfigPath is the openclaw.json the connector patches:
+// claw.config_file, else <claw.home_dir>/openclaw.json. A config_file still at
+// its default (~/.openclaw/openclaw.json) while home_dir names another home
+// follows home_dir, because only home_dir was moved.
+func (c *Config) OpenClawConfigPath() string {
+	home := c.OpenClawHome()
+	inHome := filepath.Join(home, "openclaw.json")
+	configFile := ""
+	if c != nil {
+		configFile = strings.TrimSpace(c.Claw.ConfigFile)
+	}
+	if configFile == "" {
+		return inHome
+	}
+	configFile = filepath.Clean(expandPath(configFile))
+	defaultHome := filepath.Clean(expandPath("~/.openclaw"))
+	if configFile == filepath.Join(defaultHome, "openclaw.json") && home != defaultHome {
+		return inHome
+	}
+	return configFile
+}
+
 // OpenClawConfigCandidates returns the openclaw.json paths whose presence
 // marks OpenClaw as set up on this machine: claw.config_file and
 // <claw.home_dir>/openclaw.json, with "~/" expanded and duplicates removed.

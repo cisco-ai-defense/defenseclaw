@@ -136,7 +136,7 @@ func TestOpenClawUninstallOfASavedFileKeepsWhatTheOperatorHadUnderHooks(t *testi
 func TestOpenClawUninstallWithoutARecordKeepsTheConversationGrant(t *testing.T) {
 	configPath, opts := openClawGrantFixture(t, "{}\n")
 	discardManagedFileBackup(opts.DataDir, "openclaw", "openclaw.json")
-	if err := uninstallOpenClawExtension(filepath.Dir(configPath), false, openClawSetupGrantFor(opts.DataDir, "openclaw")); err != nil {
+	if err := uninstallOpenClawExtension(openClawPathsIn(filepath.Dir(configPath)), false, openClawSetupGrantFor(opts.DataDir, "openclaw")); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustReadFileString(t, configPath); !strings.Contains(got, "allowConversationAccess") {
