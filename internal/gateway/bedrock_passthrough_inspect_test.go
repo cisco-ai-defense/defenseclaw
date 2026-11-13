@@ -341,9 +341,7 @@ func TestPassthroughInspectsToolUseInBedrockStreams(t *testing.T) {
 		t.Fatalf("the agent did not get a block it can show: %q broken=%v", got, s.Broken())
 	}
 	// The same stream with a harmless command is forwarded byte for byte.
-	ok := bytes.Replace(frames, []byte(base64.StdEncoding.EncodeToString([]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"curl -s http://169.254.169.254/"}}`))),
-		[]byte(base64.StdEncoding.EncodeToString([]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la /work"}}`))), 1)
-	ok = bedrockInvokeStreamEvents(t,
+	ok := bedrockInvokeStreamEvents(t,
 		`{"type":"message_start","message":{"model":"claude-haiku-5-5"}}`,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la /work\"}"}}`,
