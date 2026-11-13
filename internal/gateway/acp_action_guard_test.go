@@ -161,9 +161,13 @@ func TestACPPermissionPastTheLocationBoundIsJudgedAtTheUnknownTier(t *testing.T)
 			for _, count := range []int{acpMaxFrameToolCalls, acpMaxFrameToolCalls + 1} {
 				other := env.evaluate(t, acp.AgentToClient, acpFrameJSON(t, 2, "session/request_permission", map[string]any{"sessionId": "s", "options": []any{},
 					"toolCall": map[string]any{"toolCallId": "t", "kind": "search", "title": "Search", "locations": locations(count, "", "")}}))
-				over := count > acpMaxFrameToolCalls
-				if over == (other.Action == "allow") && !(strict && over && acpBlocked(other.RawAction)) {
-					t.Errorf("%s, a search over %d locations: %+v (over the bound: %t)", pack, count, other, over)
+				switch {
+				case count <= acpMaxFrameToolCalls && (other.Action != "allow" || other.RawAction != "allow"):
+					t.Errorf("%s, a search over %d locations: %+v, want a plain allow", pack, count, other)
+				case count > acpMaxFrameToolCalls && strict && !acpBlocked(other.RawAction):
+					t.Errorf("strict, a search over %d locations: %+v, want a block", count, other)
+				case count > acpMaxFrameToolCalls && !strict && other.Action != "alert":
+					t.Errorf("%s, a search over %d locations: %+v, want an alert", pack, count, other)
 				}
 			}
 		})
