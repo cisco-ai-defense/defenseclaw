@@ -217,7 +217,9 @@ func procSocketHolders(ctx context.Context, inode string) []int {
 
 // procHoldsSocket reports whether /proc/<name> is a process of account uid
 // with link want (socket:[inode]) in its descriptor folder. A folder that
-// cannot be read is false.
+// cannot be read is false. Callers pass the effective uid; readGatewayRecord
+// checks the record file against the real uid. The hook binaries are never
+// setuid, so the two are the same account (A2 review P4).
 func procHoldsSocket(name string, uid uint32, want string) bool {
 	dir := "/proc/" + name
 	var st syscall.Stat_t
