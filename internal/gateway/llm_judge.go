@@ -28,9 +28,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
@@ -133,8 +135,9 @@ type LLMJudge struct {
 	// scopeFloors holds, per prepared sample, the scope finding of a call that
 	// sends data to a destination the user's task does not name
 	// (intent_scope.go); runToolDecision applies it to the judge's verdict.
-	scopeFloorsMu sync.Mutex
-	scopeFloors   map[string]string
+	scopeFloorsMu   sync.Mutex
+	scopeFloors     map[string]*scopeFloorEntry
+	scopeFloorOrder []string
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
@@ -808,7 +811,7 @@ func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind str
 		Messages:       messages,
 		MaxTokens:      intPtr(maxTok),
 		Temperature:    temperature,
-		ResponseFormat: judgeResponseFormatBounded(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model), judgeBoundsFreeText(j.model)),
+		ResponseFormat: judgeResponseFormatBounded(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model), judgeBoundsFreeText(j.model) && len(j.cfg.Fallbacks) == 0),
 		Fallbacks:      j.cfg.Fallbacks,
 		ExtraParams:    extraParams,
 	}
@@ -2070,20 +2073,59 @@ func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker strin
 	return head + truncationMarker + middle + toolJudgeMiddleExcerptMarker + tail
 }
 
-// toolJudgeDelimiterTag matches anything a model could read as one of the
-// structural tags that separate the sample's context blocks: any letter
-// case, spaces or a slash between the bracket and the name, and the
-// full-width and small less-than signs. Matching only the exact upper-case
-// spelling let a tool argument or a pasted prompt close CURRENT_TOOL_CALL and
-// open a forged SESSION_USER_INTENT in lower case.
-var toolJudgeDelimiterTag = lazyregexp.New(`(?i)[<\x{FF1C}\x{FE64}](\s*/?\s*)(SESSION_USER_INTENT|RECENT_TOOL_CALL|CURRENT_TOOL_CALL)`)
-
-// neutralizeToolJudgeDelimiters prevents untrusted arguments or user intent
-// from forging the structural tags that separate context blocks: the opening
-// bracket of every tag-shaped name becomes '‹'. It leaves ordinary shell
-// redirection and source-code comparison operators untouched.
+// neutralizeToolJudgeDelimiters prevents untrusted arguments, tool names or user
+// intent from forging the structural tags that separate context blocks: the
+// opening bracket of every tag-shaped name becomes '‹'. The text after a bracket
+// is folded first (NFKC, format characters dropped, case folded, spaces, hyphens
+// and underscores one separator), so full-width letters, zero-width and soft
+// hyphen splits and "session user intent" read as the tag they look like. It
+// leaves ordinary shell redirection and source-code comparison operators alone.
 func neutralizeToolJudgeDelimiters(value string) string {
-	return toolJudgeDelimiterTag.ReplaceAllString(value, "‹$1$2")
+	if !strings.ContainsAny(value, "<\uFF1C\uFE64") {
+		return value
+	}
+	runes := []rune(value)
+	var out strings.Builder
+	out.Grow(len(value))
+	for i, r := range runes {
+		if (r == '<' || r == '\uFF1C' || r == '\uFE64') && looksLikeToolJudgeTag(runes[i+1:]) {
+			out.WriteRune('‹')
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return out.String()
+}
+
+var toolJudgeTagNames = []string{"session_user_intent", "recent_tool_call", "current_tool_call"}
+
+func looksLikeToolJudgeTag(rest []rune) bool {
+	if len(rest) > 96 {
+		rest = rest[:96]
+	}
+	var folded strings.Builder
+	separated := false
+	for _, r := range norm.NFKC.String(string(rest)) {
+		switch {
+		case unicode.Is(unicode.Cf, r):
+			continue
+		case unicode.IsSpace(r) || r == '_' || r == '-' || r == '/':
+			if !separated {
+				folded.WriteByte('_')
+				separated = true
+			}
+		default:
+			folded.WriteRune(unicode.ToLower(r))
+			separated = false
+		}
+	}
+	text := strings.TrimLeft(folded.String(), "_")
+	for _, name := range toolJudgeTagNames {
+		if strings.HasPrefix(text, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func utf8SafePrefix(value string, maxBytes int) string {
@@ -2287,6 +2329,14 @@ func (j *LLMJudge) pruneToolJudgeContextLocked(now time.Time) {
 // empty prompt starts a turn with no task. The value is kept in memory only
 // and remains untrusted data in the judge sample.
 func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
+	j.ObserveSessionPromptScope(ctx, content, content)
+}
+
+// ObserveSessionPromptScope is ObserveSessionPrompt with the text that may name
+// scope targets (hosts, addresses, paths) for the session apart from the task
+// text: scopeText is "" for text that is not known to be what the owner typed
+// (a tool result read by the generic prompt fallback, a remote chat party).
+func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scopeText string) {
 	if j == nil {
 		return
 	}
@@ -2309,7 +2359,7 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	entry.scopeTargets = prior.scopeTargets
 	if content != "" {
 		entry.userIntent = toolJudgeUserIntentExcerpt(content)
-		entry.scopeTargets = mergeScopeTargets(prior.scopeTargets, content)
+		entry.scopeTargets = mergeScopeTargets(prior.scopeTargets, scopeText)
 	}
 	j.toolContext[sessionID] = entry
 }
@@ -2679,6 +2729,7 @@ func toolSignalStrengthRank(strength string) int {
 // sanitizeToolName strips control characters and truncates the tool name to
 // prevent prompt injection via crafted tool names in the judge system prompt.
 func sanitizeToolName(name string) string {
+	name = neutralizeToolJudgeDelimiters(name)
 	var sb strings.Builder
 	count := 0
 	for _, r := range name {

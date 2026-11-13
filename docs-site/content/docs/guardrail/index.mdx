@@ -440,13 +440,25 @@ data for the judge, never an instruction, and it never excuses a call the
 rules block.
 
 - **Kept:** Claude Code, Claude Cowork, Codex, GitHub Copilot CLI, Cursor (IDE),
-  Amp, Kiro (IDE), Hermes, Devin and OpenClaw's chat stream.
+  Amp, Kiro (IDE), Hermes and Devin.
 - **Not kept, so the judge sees the tool calls without your task:** OpenCode,
-  Cursor Agent CLI, Kiro CLI 2.x and Antigravity. Their hooks send no prompt
-  text.
+  Cursor Agent CLI, Kiro CLI 2.x and Antigravity, whose hooks send no prompt
+  text, and OpenClaw: its chat stream records your prompt, but the tool-call
+  check looks the task up under a different session key and finds none.
 - A new prompt starts a new turn. A prompt DefenseClaw blocks, and an empty
   prompt, leave the turn with no task. A configuration change keeps the tasks
   of the sessions that are open.
+- **A send to a place no prompt named.** When the judge is on, a tool call that
+  sends data (a post or upload tool, a mail tool, `curl` with a body, `scp`,
+  `rsync`, `mail`, a cloud copy) to a host or mailbox that none of your prompts
+  in the session named carries the finding `INTENT-SCOPE-SEND`, at least a
+  medium finding, whatever the judge made of your task; whether it shows as an
+  alert depends on the connector's `alert_at` level. Naming a host covers that
+  host and its sub-domains, not its parent domain. Naming a mailbox covers that
+  address only. A destination you describe but do not spell out ("the
+  management team") is not named, so the finding is expected there; name it in
+  the prompt to avoid it. Only text you typed counts: a prompt DefenseClaw
+  blocks, a tool result and a remote chat message name nothing.
 
 ### Let tool calls go first
 

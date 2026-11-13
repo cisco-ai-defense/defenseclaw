@@ -263,9 +263,6 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 	case "UserPromptSubmit":
 		intentEvent := !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
-		if intentEvent {
-			a.observeUserDownloadRequest(ctx, req.Prompt)
-		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
 		// text it was sent before (issue #1092).
 		prompt := req.Prompt
@@ -280,7 +277,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			contentScope: ruleContentScopeUntrusted,
 		})
 		if intentEvent {
-			a.observeToolJudgeIntent(ctx, req.Prompt, verdict)
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, verdict)
 		}
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{

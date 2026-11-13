@@ -519,16 +519,20 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 	return out
 }
 
-// observeToolJudgeIntent starts a new tool-judge turn for the session on every
-// hook-lane judge. The prompt becomes the turn's task only when the guardrail
-// did not block it: a blocked prompt is not a task DefenseClaw lets later tool
-// calls be excused by.
-func (a *APIServer) observeToolJudgeIntent(ctx context.Context, prompt string, verdict *ToolInspectVerdict) {
+// observeUserTurn starts a new turn for the session after its prompt was
+// inspected: on every hook-lane judge, and in the user-download allowance. The
+// prompt becomes the turn's task, and names run-from hosts, only when the
+// guardrail did not block it: a blocked prompt is not a task DefenseClaw lets
+// later tool calls be excused by. scopeText is the part of the prompt that may
+// name scope targets; "" when it is not known to be what the owner typed.
+func (a *APIServer) observeUserTurn(ctx context.Context, prompt, scopeText string, verdict *ToolInspectVerdict) {
 	if verdict != nil && strings.EqualFold(verdict.Action, "block") {
-		prompt = ""
+		prompt, scopeText = "", ""
+	} else {
+		a.observeUserDownloadRequest(ctx, prompt)
 	}
 	for _, judge := range a.hookSessionJudges(ctx) {
-		judge.ObserveSessionPrompt(ctx, prompt)
+		judge.ObserveSessionPromptScope(ctx, prompt, scopeText)
 	}
 }
 

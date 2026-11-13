@@ -33,8 +33,9 @@ import (
 //     a fact in the sample and not something the model has to infer.
 //   - intentScopeExceeded finds a call that sends data (a post, upload, mail,
 //     a copy to another host) to a destination the task does not name. The
-//     tool judge's verdict cannot fall below an alert for such a call, whatever
-//     the model made of the task.
+//     tool judge's verdict carries at least a MEDIUM finding for such a call,
+//     whatever the model made of the task; whether that shows as an alert is
+//     the connector's alert_at level.
 //
 // Rules never read the task, so a rule finding stands whatever it says.
 
@@ -104,11 +105,19 @@ func namedScopeTargets(intent string) []string {
 	for _, m := range scopeURLHostRe.FindAllStringSubmatch(intent, -1) {
 		add(m[1])
 	}
-	for _, m := range scopeEmailRe.FindAllString(intent, -1) {
-		add(m)
+	var mailSpans [][2]int
+	for _, loc := range scopeEmailRe.FindAllStringIndex(intent, -1) {
+		add(intent[loc[0]:loc[1]])
+		mailSpans = append(mailSpans, [2]int{loc[0], loc[1]})
 	}
-	for _, m := range scopeDomainRe.FindAllStringSubmatch(intent, -1) {
-		add(m[1])
+	for _, loc := range scopeDomainRe.FindAllStringSubmatchIndex(intent, -1) {
+		inMailbox := false
+		for _, sp := range mailSpans {
+			inMailbox = inMailbox || (loc[2] >= sp[0] && loc[3] <= sp[1])
+		}
+		if !inMailbox {
+			add(intent[loc[2]:loc[3]])
+		}
 	}
 	for _, m := range scopePathRe.FindAllStringSubmatch(intent, -1) {
 		add(m[1])
@@ -189,23 +198,44 @@ func scopeLoopback(host string) bool {
 	return host == "localhost" || host == "::1" || strings.HasPrefix(host, "127.") || strings.HasSuffix(host, ".localhost")
 }
 
-// scopeNamed reports whether host is one of the task's named targets or inside
-// one (api.example.com for a task that names example.com, and the reverse).
-func scopeNamed(host string, named []string) bool {
+// scopeDest is one place a call sends to: a host (a URL, a bare host, the host
+// of user@host in scp or rsync) or a mailbox (a recipient of a mail call).
+type scopeDest struct {
+	host    string
+	mailbox string
+}
+
+// scopeNamedHost reports whether host is a host the task names or a sub-domain
+// of one. A named host does not name its parent domain: a task that names
+// bucket.s3.amazonaws.com does not name s3.amazonaws.com.
+func scopeNamedHost(host string, named []string) bool {
 	host = strings.ToLower(strings.Trim(host, "[]"))
 	for _, n := range named {
-		if strings.HasPrefix(n, "/") || strings.HasPrefix(n, "~") || strings.HasPrefix(n, ".") {
+		if strings.ContainsAny(n, "@/~") || strings.HasPrefix(n, ".") {
 			continue
 		}
-		if at := strings.LastIndex(n, "@"); at >= 0 {
-			n = n[at+1:]
-		}
-		if host == n || strings.HasSuffix(host, "."+n) || strings.HasSuffix(n, "."+host) {
+		if host == n || strings.HasSuffix(host, "."+n) {
 			return true
 		}
 	}
 	return false
 }
+
+// scopeNamedMailbox reports whether the exact address is one the task names. A
+// named mailbox does not name the other mailboxes of its domain.
+func scopeNamedMailbox(mailbox string, named []string) bool {
+	mailbox = strings.ToLower(mailbox)
+	for _, n := range named {
+		if n == mailbox {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeMailProgramRe finds a mail program in a shell command: an address there
+// is a mailbox; user@host in scp, rsync or curl is a host.
+var scopeMailProgramRe = lazyregexp.New(`(?i)\b(?:mail|mailx|sendmail|swaks|msmtp|mutt)\b`)
 
 // scopeToolVerb reads what a tool does from its name: the verb is the last word
 // of a namespaced name (email.exists, http.post) or the first of a verb_noun
@@ -238,9 +268,9 @@ func scopeToolVerb(toolName string) (sends, reads bool) {
 	return false, false
 }
 
-// callSendDestinations returns the hosts and mail domains a sending call goes
-// to; nil for a call that does not send.
-func callSendDestinations(toolName, args string) []string {
+// callSendDestinations returns the places a sending call goes to; nil for a
+// call that does not send.
+func callSendDestinations(toolName, args string) []scopeDest {
 	toolSends, toolReads := scopeToolVerb(toolName)
 	values := scopeStrings(args)
 	var texts []string
@@ -269,25 +299,31 @@ func callSendDestinations(toolName, args string) []string {
 		return nil
 	}
 	seen := map[string]bool{}
-	var out []string
-	add := func(h string) {
-		h = strings.ToLower(strings.TrimSpace(h))
-		if h != "" && !seen[h] && len(out) < maxScopeDestinations {
-			seen[h] = true
-			out = append(out, h)
+	var out []scopeDest
+	add := func(d scopeDest) {
+		key := d.host + "|" + d.mailbox
+		if (d.host != "" || d.mailbox != "") && !seen[key] && len(out) < maxScopeDestinations {
+			seen[key] = true
+			out = append(out, d)
 		}
 	}
 	for _, t := range texts {
+		shellText := scopeShellSendRe.MatchString(t)
+		mailCommand := shellText && scopeMailProgramRe.MatchString(t)
 		for _, m := range scopeURLHostRe.FindAllStringSubmatch(t, -1) {
-			add(m[1])
+			add(scopeDest{host: strings.ToLower(m[1])})
 		}
 		for _, m := range scopeEmailRe.FindAllStringSubmatch(t, -1) {
-			add(m[1])
+			if shellText && !mailCommand {
+				add(scopeDest{host: strings.ToLower(m[1])})
+			} else {
+				add(scopeDest{mailbox: strings.ToLower(m[0])})
+			}
 		}
 		if !strings.Contains(t, "://") && !strings.Contains(t, "@") && !strings.ContainsAny(t, " \t\n/\\") {
 			// a bare host or domain in a destination key
 			if m := scopeDomainRe.FindStringSubmatch(t); m != nil && m[1] == strings.ToLower(strings.TrimSpace(t)) {
-				add(m[1])
+				add(scopeDest{host: m[1]})
 			}
 		}
 	}
@@ -331,7 +367,11 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 	}
 	named := append(namedScopeTargets(intent), sessionTargets...)
 	for _, d := range dests {
-		if scopeLoopback(d) || scopeNamed(d, named) {
+		if d.mailbox != "" {
+			if scopeNamedMailbox(d.mailbox, named) {
+				continue
+			}
+		} else if scopeLoopback(d.host) || scopeNamedHost(d.host, named) {
 			continue
 		}
 		return "the call sends data to a destination the user's task does not name"
@@ -344,18 +384,37 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 func (j *LLMJudge) keepScopeFloor(sample, reason string) {
 	j.scopeFloorsMu.Lock()
 	defer j.scopeFloorsMu.Unlock()
-	if j.scopeFloors == nil || len(j.scopeFloors) >= pendingScopeFloorsCap {
-		j.scopeFloors = make(map[string]string)
+	if j.scopeFloors == nil {
+		j.scopeFloors = make(map[string]*scopeFloorEntry)
 	}
-	j.scopeFloors[sample] = reason
+	if e := j.scopeFloors[sample]; e != nil {
+		e.n++ // two concurrent identical samples each get their floor
+		return
+	}
+	for len(j.scopeFloors) >= pendingScopeFloorsCap && len(j.scopeFloorOrder) > 0 {
+		delete(j.scopeFloors, j.scopeFloorOrder[0]) // the oldest pending floor goes, not all of them
+		j.scopeFloorOrder = j.scopeFloorOrder[1:]
+	}
+	j.scopeFloors[sample] = &scopeFloorEntry{reason: reason, n: 1}
+	j.scopeFloorOrder = append(j.scopeFloorOrder, sample)
 }
 
 func (j *LLMJudge) takeScopeFloor(sample string) string {
 	j.scopeFloorsMu.Lock()
 	defer j.scopeFloorsMu.Unlock()
-	reason := j.scopeFloors[sample]
-	delete(j.scopeFloors, sample)
-	return reason
+	e := j.scopeFloors[sample]
+	if e == nil {
+		return ""
+	}
+	if e.n--; e.n <= 0 {
+		delete(j.scopeFloors, sample)
+	}
+	return e.reason
+}
+
+type scopeFloorEntry struct {
+	reason string
+	n      int
 }
 
 // applyIntentScopeFloor keeps the judge's verdict from falling below an alert
@@ -373,7 +432,15 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 		Findings: []string{intentScopeFinding},
 		Scanner:  "intent-scope",
 	}
-	if judged == nil || judged.JudgeFailed {
+	if judged == nil {
+		return floor
+	}
+	if judged.JudgeFailed {
+		// Never replace a judge failure: the hook has to see it (fallback
+		// metric, loud log, the escalated fail-closed refusal). The alert
+		// rides next to it.
+		floor.JudgeFailed = true
+		floor.judgeFailedUnderFloor = true
 		return floor
 	}
 	if guardrailSeverityRank(judged.Severity) > guardrailSeverityRank(floor.Severity) ||

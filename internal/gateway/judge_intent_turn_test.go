@@ -97,11 +97,11 @@ func TestObserveToolJudgeIntentBlockedPromptIsNotTheTask(t *testing.T) {
 	a := &APIServer{}
 	a.SetHookJudge(j)
 	ctx := ContextWithSessionID(context.Background(), "sess-blocked")
-	a.observeToolJudgeIntent(ctx, "first task", &ToolInspectVerdict{Action: "allow"})
+	a.observeUserTurn(ctx, "first task", "first task", &ToolInspectVerdict{Action: "allow"})
 	if s := j.toolJudgeContextSample(ctx, "Bash", `{"command":"make"}`); !strings.Contains(s, "first task") {
 		t.Fatalf("allowed prompt is not the task:\n%s", s)
 	}
-	a.observeToolJudgeIntent(ctx, "blocked prompt text", &ToolInspectVerdict{Action: "block"})
+	a.observeUserTurn(ctx, "blocked prompt text", "blocked prompt text", &ToolInspectVerdict{Action: "block"})
 	s := j.toolJudgeContextSample(ctx, "Bash", `{"command":"make test"}`)
 	if strings.Contains(s, "blocked prompt text") || strings.Contains(s, "first task") || strings.Contains(s, "RECENT_TOOL_CALL") {
 		t.Fatalf("a blocked prompt became the task, or the earlier turn carried over:\n%s", s)

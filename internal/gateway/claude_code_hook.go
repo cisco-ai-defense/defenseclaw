@@ -181,14 +181,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// carries command text the user did not type, so it must not
 		// replace the task. Secure Client keeps the judge input of main.
 		intentEvent := isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
-		if intentEvent {
-			a.observeUserDownloadRequest(ctx, req.Prompt)
-		}
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodePromptContent(req), "prompt",
 		))
 		if intentEvent {
-			a.observeToolJudgeIntent(ctx, req.Prompt, verdict)
+			a.observeUserTurn(ctx, req.Prompt, req.Prompt, verdict)
 		}
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
