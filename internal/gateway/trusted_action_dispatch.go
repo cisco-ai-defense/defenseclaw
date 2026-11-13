@@ -386,6 +386,15 @@ func dispatchTrustedAction(
 				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode), mode)...)
 			}()
 		}
+		// Secret flow tracking (S7). It keeps a bounded per-session state and
+		// alerts (default) or blocks (strict/managed) when a labeled secret
+		// reaches an external sink. In shadow the findings are detection-only
+		// and never change the answer; the lane runs at most once per call.
+		fctx := parent
+		freq := request
+		defer func() {
+			findings = append(findings, runSecretFlowShadow(fctx, freq)...)
+		}()
 	}
 	if ManagedEnterpriseActive() {
 		return nil

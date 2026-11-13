@@ -116,6 +116,11 @@ const (
 	// changing the public finding schema.
 	findingDispositionEffectKnown
 	findingDispositionEffectUnknown
+	// findingDispositionFlowSecretEgress marks a Secret flow tracking hit: a
+	// labeled secret reached an external sink. S8 maps it to a native ask
+	// where a connector supports one; until then default alerts and
+	// strict/managed block.
+	findingDispositionFlowSecretEgress
 )
 
 const (

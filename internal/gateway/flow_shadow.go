@@ -1,0 +1,300 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/effects"
+	"github.com/defenseclaw/defenseclaw/internal/flow"
+)
+
+// The Secret flow tracking lane (S7, 1.0.10). It runs the pure effect
+// extractor (internal/effects) and the flow step (internal/flow) over a small
+// bounded per-session state, beside today's rules. Its rollout rides the
+// shared guardrail.effects_rules lane (off disables it entirely, no cost);
+// guardrail.secret_flow.mode is the feature's own switch (off, shadow, on).
+// The lane ships shadow: it computes and records a verdict without changing the
+// answer. In on, the verdict participates.
+//
+// It replaces the credential-read-then-egress chain entry
+// (chain.secret_read_then_egress) once it is on; that entry stays until then
+// (see the chain catalog note) so turning the flow lane off keeps today's
+// behavior.
+
+type flowLaneMode string
+
+const (
+	flowLaneOff    flowLaneMode = "off"
+	flowLaneShadow flowLaneMode = "shadow"
+	flowLaneOn     flowLaneMode = "on"
+)
+
+// maxFlowSessions bounds the number of live per-session states the gateway
+// holds. A session is a cheap struct; the real memory is inside each state,
+// itself bounded by guardrail.secret_flow.memory.
+const maxFlowSessions = 4096
+
+// flowSessionTTL evicts a session state untouched for this long.
+const flowSessionTTL = 2 * time.Hour
+
+// secretFlowSessions is the process-wide bounded session store. One gateway
+// process serves one per-user install (or one managed host), so a package
+// global is the session scope.
+var secretFlowSessions = newFlowSessionStore(maxFlowSessions)
+
+type flowSessionEntry struct {
+	st   *flow.State
+	last time.Time
+}
+
+type flowSessionStore struct {
+	mu  sync.Mutex
+	m   map[string]*flowSessionEntry
+	max int
+}
+
+func newFlowSessionStore(max int) *flowSessionStore {
+	return &flowSessionStore{m: make(map[string]*flowSessionEntry), max: max}
+}
+
+// session returns the state for id, creating it with the configured bounds on
+// first use. It evicts stale and over-cap entries so the store stays bounded.
+func (s *flowSessionStore) session(id string, cfg flow.Config) *flow.State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if e, ok := s.m[id]; ok {
+		e.last = now
+		return e.st
+	}
+	s.evictLocked(now)
+	st := flow.NewState(cfg.MaxLabeledPaths, cfg.MaxValueDigests)
+	s.m[id] = &flowSessionEntry{st: st, last: now}
+	return st
+}
+
+// lookup returns an existing session state without creating one.
+func (s *flowSessionStore) lookup(id string) (*flow.State, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.m[id]; ok {
+		e.last = time.Now()
+		return e.st, true
+	}
+	return nil, false
+}
+
+func (s *flowSessionStore) evictLocked(now time.Time) {
+	for id, e := range s.m {
+		if now.Sub(e.last) > flowSessionTTL {
+			delete(s.m, id)
+		}
+	}
+	for len(s.m) >= s.max {
+		var oldestID string
+		var oldest time.Time
+		first := true
+		for id, e := range s.m {
+			if first || e.last.Before(oldest) {
+				oldestID, oldest, first = id, e.last, false
+			}
+		}
+		if oldestID == "" {
+			break
+		}
+		delete(s.m, oldestID)
+	}
+}
+
+// reset drops every session state (a test seam and a config-reload hook).
+func (s *flowSessionStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m = make(map[string]*flowSessionEntry)
+}
+
+// secretFlowConfig builds the engine config from the live generation and the
+// call's trusted context. ok is false when the lane should not run.
+func secretFlowConfig(ctx context.Context, request trustedActionRequest) (flow.Config, flowLaneMode, bool) {
+	g := currentGeneration()
+	if g == nil || g.Config == nil {
+		return flow.Config{}, flowLaneOff, false
+	}
+	mode := secretFlowLaneMode(g.Config.Guardrail)
+	if mode == flowLaneOff {
+		return flow.Config{}, flowLaneOff, false
+	}
+	sf := g.Config.Guardrail.SecretFlow
+	flavor := effects.FlavorPOSIX
+	switch request.Input.DialectHint {
+	case actionfacts.DialectPowerShell, actionfacts.DialectCMD:
+		flavor = effects.FlavorWindows
+	}
+	strictOrManaged := request.StrictPolicy || request.ManagedInstall
+	cfg := flow.Config{
+		Mode:                 string(mode),
+		Credentials:          sf.CredentialsEnabled(),
+		ExtraPathGlobs:       sf.LabelSets.ExtraPathGlobs,
+		ExtraSecretPatterns:  sf.LabelSets.ExtraSecretPatterns,
+		Reencodings:          sf.Reencodings,
+		MaxLabeledPaths:      sf.Memory.MaxLabeledPaths,
+		MaxValueDigests:      sf.Memory.MaxValueDigests,
+		DestinationAllowlist: sf.DestinationAllowlist,
+		SinkDefault:          flow.Action(sf.SinkActionFor(false, false)),
+		SinkStrict:           flow.Action(sf.SinkActionFor(true, false)),
+		SinkManaged:          flow.Action(sf.SinkActionFor(false, true)),
+		StrictOrManaged:      strictOrManaged,
+		Managed:              request.ManagedInstall,
+		Home:                 request.Input.ActiveHome,
+		Flavor:               flavor,
+	}
+	return cfg, mode, true
+}
+
+// secretFlowLaneMode folds the rollout key (guardrail.effects_rules) and the
+// feature switch (guardrail.secret_flow.mode) into one effective mode. The
+// lane runs only when the effect lane is enabled; the verdict participates
+// only when both are on.
+func secretFlowLaneMode(g config.GuardrailConfig) flowLaneMode {
+	rollout := g.EffectsRules
+	if rollout == "off" {
+		return flowLaneOff
+	}
+	switch g.SecretFlow.Mode {
+	case "off":
+		return flowLaneOff
+	case "on":
+		if rollout == "on" {
+			return flowLaneOn
+		}
+		return flowLaneShadow
+	default: // "shadow" or unset
+		return flowLaneShadow
+	}
+}
+
+// runSecretFlowShadow runs the flow step for one call and returns findings.
+// In shadow the findings are detection-only; in on an egress finding may
+// participate. It is called once at the outermost trusted-action dispatch.
+func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) []RuleFinding {
+	cfg, mode, ok := secretFlowConfig(ctx, request)
+	if !ok {
+		return nil
+	}
+	call, opts, has := effectCall(request.Connector, request.Input)
+	if !has {
+		return nil
+	}
+	opts.Flavor = cfg.Flavor
+	res := effects.Extract(call, opts)
+	sid := SessionIDFromContext(ctx)
+	if sid == "" {
+		sid = request.Connector + ":anon"
+	}
+	st := secretFlowSessions.session(sid, cfg)
+	out := st.Step(res, cfg)
+	return flowShadowFindings(out, mode)
+}
+
+// flowShadowFindings turns a flow verdict into findings. A clean or allow
+// verdict carries nothing. An alert-tier verdict is capped at alert-only in
+// every profile; a block-tier verdict contributes to enforcement so the
+// profile threshold maps its severity. The proof is authoritative only when
+// the lane is on.
+func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
+	if out.Action == flow.ActionAllow || len(out.Hits) == 0 {
+		return nil
+	}
+	sets := map[string]bool{}
+	kinds := map[string]bool{}
+	var host string
+	for _, h := range out.Hits {
+		for _, s := range h.Sets {
+			sets[s] = true
+		}
+		kinds[string(h.Kind)] = true
+		if host == "" {
+			host = h.Host
+		}
+	}
+	tags := []string{"secret_flow", string(mode)}
+	for s := range sets {
+		tags = append(tags, s)
+	}
+	for k := range kinds {
+		tags = append(tags, k)
+	}
+	sort.Strings(tags)
+	severity := "HIGH"
+	f := RuleFinding{
+		RuleID:     flow.RuleIDEgress,
+		Title:      "Secret flow tracking: a labeled secret reached an external sink",
+		Severity:   severity,
+		Confidence: 0.9,
+		Tags:       tags,
+	}
+	f.disposition = findingDispositionFlowSecretEgress
+	f.proof = newFindingProof(findingProofFlow, flow.RuleIDEgress, mode == flowLaneOn)
+	if out.Action == flow.ActionAlert {
+		f.enforcement = findingEnforcementAlertOnly
+	} else {
+		f.enforcement = findingEnforcementInherit
+	}
+	return []RuleFinding{f}
+}
+
+// addSecretFlowResultValues feeds the secret-shaped values of a successful
+// sensitive-read tool result into the session so a later outbound call that
+// sends the value (even re-encoded) is caught by the value lane. It runs on
+// PostToolUse. It stores only keyed digests, never the raw value. It is a
+// no-op when the lane is off or no state exists for the session yet.
+func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
+	if req.SessionID == "" {
+		return
+	}
+	g := currentGeneration()
+	if g == nil || g.Config == nil || secretFlowLaneMode(g.Config.Guardrail) == flowLaneOff {
+		return
+	}
+	if canonicalEvent(req.HookEventName) != "posttooluse" {
+		return
+	}
+	result := stringifyHookValue(firstValue(req.Payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result"))
+	if strings.TrimSpace(result) == "" {
+		return
+	}
+	// Only index the result of a read of a credential source: the flow step
+	// labels credentials, and indexing every tool output would waste the
+	// digest budget. Reuse the sensitive-read classifier the value-lineage
+	// chain uses.
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:       req.ToolName,
+		Args:       req.ToolArgs,
+		CWD:        req.CWD,
+		ActiveHome: hookActiveHome(ctx),
+	})
+	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); !supported {
+		return
+	}
+	sf := g.Config.Guardrail.SecretFlow
+	cfg := flow.Config{Reencodings: sf.Reencodings, MaxValueDigests: sf.Memory.MaxValueDigests}
+	st, ok := secretFlowSessions.lookup(req.SessionID)
+	if !ok {
+		// Create the session so a read result before any PreToolUse still
+		// seeds the value set.
+		st = secretFlowSessions.session(req.SessionID, flow.Config{
+			MaxLabeledPaths: sf.Memory.MaxLabeledPaths,
+			MaxValueDigests: sf.Memory.MaxValueDigests,
+		})
+	}
+	st.AddResultValues([]byte(result), "tool_result", cfg)
+}
