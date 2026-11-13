@@ -15,8 +15,29 @@ import (
 // through directory aliases, before it is compared with the protected
 // files. project/keydir is a link to ~/.ssh; project/sub/inner is another.
 func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
-	home := t.TempDir()
-	cwd := filepath.Join(home, "project")
+	home, cwd := globAliasFixture(t)
+	for _, command := range globAliasProtectedCommands(cwd) {
+		t.Run(command, func(t *testing.T) {
+			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+	for _, command := range globAliasAllowCommands {
+		t.Run("allow/"+command, func(t *testing.T) {
+			if got := posixShellDecision(command, cwd, home); got != "" {
+				t.Fatalf("decision = %q, want allow", got)
+			}
+		})
+	}
+}
+
+// globAliasFixture is the GAP-1445 home: project/keydir and
+// project/sub/inner are links to ~/.ssh, project/build is a plain folder.
+func globAliasFixture(t *testing.T) (home, cwd string) {
+	t.Helper()
+	home = t.TempDir()
+	cwd = filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
 	for _, dir := range []string{ssh, cwd, filepath.Join(cwd, "build"), filepath.Join(cwd, "sub")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -34,7 +55,13 @@ func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, command := range []string{
+	return home, cwd
+}
+
+// globAliasProtectedCommands are the GAP-1445 writes through a directory
+// alias that a pattern selects.
+func globAliasProtectedCommands(cwd string) []string {
+	return []string{
 		`cp payload keyd*/authorized_keys`,
 		`cp payload keyd?r/authorized_keys`,
 		`cp payload k*/a*_keys`,
@@ -49,28 +76,19 @@ func TestR104GlobParentThroughDirectoryAlias(t *testing.T) {
 		`tee keyd*/authorized_keys < payload`,
 		`for f in keyd*/authorized_keys; do cp payload "$f"; done`,
 		`cp payload keyd*`,
-	} {
-		t.Run(command, func(t *testing.T) {
-			if got := posixShellDecision(command, cwd, home); got != "protected-target" {
-				t.Fatalf("decision = %q, want protected-target", got)
-			}
-		})
 	}
-	for _, command := range []string{
-		`cp payload buil*/authorized_keys`,
-		`cp payload buil*/notes.txt`,
-		`cp payload s*/notes.txt`,
-		`cp payload b*/`,
-		`cat keyd*/authorized_keys`,
-		`ls keyd*/`,
-		`cd build && cp payload ../b*/notes.txt`,
-	} {
-		t.Run("allow/"+command, func(t *testing.T) {
-			if got := posixShellDecision(command, cwd, home); got != "" {
-				t.Fatalf("decision = %q, want allow", got)
-			}
-		})
-	}
+}
+
+// globAliasAllowCommands are the GAP-1445 patterns that select no alias, or
+// only read through one.
+var globAliasAllowCommands = []string{
+	`cp payload buil*/authorized_keys`,
+	`cp payload buil*/notes.txt`,
+	`cp payload s*/notes.txt`,
+	`cp payload b*/`,
+	`cat keyd*/authorized_keys`,
+	`ls keyd*/`,
+	`cd build && cp payload ../b*/notes.txt`,
 }
 
 // The Windows form of GAP-1445 runs on the host: keydir is a junction to

@@ -1534,6 +1534,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.resolvedTarget = &resolvedTarget
 	evidence.unprovenTarget = &unprovenTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	// A pathname pattern under the home whose expansion could not finish is
+	// an unknown target, held like an unresolved one: the unknown handling
+	// below warns or blocks it, named for what it is, never as a proved key
+	// write (rel-1-0-10:GAP-0270).
+	heldGlob := false
+	if !symlinkWrite {
+		if dir := request.targetMemo.GlobUnproven(); dir != "" {
+			symlinkWrite, heldGlob = true, true
+			unprovenTarget = unprovenWrite{class: hookpaths.UnprovenGlobIncomplete, operand: dir}
+		}
+	}
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
 		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
@@ -1608,6 +1619,13 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
+			} else if heldGlob && named.ID == rule.ID &&
+				!trustedAuthorizedKeysSymlinkWrite(input) &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+				!trustedSandboxGuestAuthorizedKeysWrite(request) {
+				// Still enforced (strict, managed, or the pattern can reach
+				// the home), as the unknown target it is.
+				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
@@ -1664,7 +1682,7 @@ func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home str
 		return false
 	}
 	if held.operand == "" || !filepath.IsAbs(held.operand) || home == "" || !filepath.IsAbs(home) ||
-		unprovenOperandNearProtected(held.operand, home) {
+		hookpaths.NearProtected(held.operand, home) {
 		return false
 	}
 	command, _ := trustedBashCommandInput(request.Input)
@@ -1697,33 +1715,6 @@ func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home str
 // hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
 type unprovenWrite struct {
 	class, operand string
-}
-
-// unprovenOperandNearProtected reports an operand at or under the active
-// home or sshd's Windows ProgramData folder, or one that holds either (/,
-// /home), compared without case on Windows.
-func unprovenOperandNearProtected(operand, home string) bool {
-	clean := func(path string) string {
-		path = filepath.Clean(path)
-		if runtime.GOOS == "windows" {
-			path = strings.ToLower(path)
-		}
-		return path
-	}
-	near := func(path, root string) bool {
-		path, root = clean(path), clean(root)
-		return path == root || strings.HasPrefix(path, strings.TrimSuffix(root, string(filepath.Separator))+string(filepath.Separator)) ||
-			strings.HasPrefix(root, strings.TrimSuffix(path, string(filepath.Separator))+string(filepath.Separator))
-	}
-	if near(operand, home) {
-		return true
-	}
-	for _, path := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
-		if near(operand, filepath.Dir(path)) {
-			return true
-		}
-	}
-	return false
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target

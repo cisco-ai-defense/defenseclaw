@@ -36,6 +36,7 @@ var unprovenReasonTitles = map[string]string{
 	"nested-shell":           "A nested shell or shell script can write a protected file",
 	UnprovenLinkUnread:       "A link the command makes or changes could not be read and may lead to a protected file",
 	UnprovenTargetUnresolved: "A write target could not be resolved and may be a protected file",
+	UnprovenGlobIncomplete:   "A pathname pattern could not be expanded in full and may select a protected file",
 }
 
 // linkCallText is link-making code this package does not evaluate:
@@ -75,6 +76,10 @@ func CommandMayMakeLink(command string) bool {
 const (
 	UnprovenLinkUnread       = "link-unread"
 	UnprovenTargetUnresolved = "target-unresolved"
+	// UnprovenGlobIncomplete: a pattern under the home whose expansion
+	// passed its bound or met a directory it could not read
+	// (TargetMemo.GlobUnproven, rel-1-0-10:GAP-0270).
+	UnprovenGlobIncomplete = "glob-incomplete"
 )
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
@@ -1568,6 +1573,11 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					if protectedReachPath(destination, protected, ssh) {
 						return "copy-directory", true
 					}
+					if actionGlobDirAway(destination, home, nil) {
+						// No child of a directory away from the protected
+						// targets is one by name (rel-1-0-10:GAP-0270).
+						continue
+					}
 					directory, err := pathOpen(destination)
 					if err != nil {
 						return "copy-directory", true
@@ -1827,6 +1837,11 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 	parent, base := filepath.Dir(pattern), filepath.Base(pattern)
 	if _, err := filepath.Match(base, ""); err != nil {
 		return false // An incomplete URL bracket is not a shell glob.
+	}
+	// A pattern under a directory away from the protected targets selects
+	// none of them by name; its directory is not listed (rel-1-0-10:GAP-0270).
+	if actionGlobDirAway(actionGlobLiteralDir(OperandPath(pattern, cwd)), filepath.Dir(ssh), nil) {
+		return false
 	}
 	if strings.ContainsAny(parent, "*?[") {
 		return true

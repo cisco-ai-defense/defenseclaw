@@ -51,6 +51,34 @@ type TargetMemo struct {
 	// Windows candidate checks among them (WorkParts).
 	work       int
 	candidates int
+	// globUnproven is the literal directory of the first pathname pattern
+	// whose expansion could not finish (actionProtectedFileGlobReachAs).
+	globUnproven string
+}
+
+// noteGlobUnproven keeps dir as the first unfinished pattern expansion of
+// the evaluation. A nil memo keeps nothing.
+func (m *TargetMemo) noteGlobUnproven(dir string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	if m.globUnproven == "" {
+		m.globUnproven = dir
+	}
+	m.mu.Unlock()
+}
+
+// GlobUnproven returns the literal directory of the first pathname pattern
+// whose expansion stopped at a bound or at a directory it could not read:
+// an unknown target of the evaluation, "" when there was none.
+func (m *TargetMemo) GlobUnproven() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.globUnproven
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not

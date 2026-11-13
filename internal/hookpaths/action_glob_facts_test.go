@@ -147,15 +147,18 @@ func TestR104GlobFactsDecideBehindHiddenHome(t *testing.T) {
 		}
 	})
 	// No client answer (an old client, a dropped header, a pattern past
-	// the bound): the closed name fallback stays.
+	// the bound): the pattern is never an allow. A client that sent
+	// evidence without an answer could not prove it, so the gateway holds it
+	// as an unknown target (rel-1-0-10:GAP-0270), which the authorized-keys
+	// proof keeps closed behind ProtectHome.
 	t.Run("no answer stays closed", func(t *testing.T) {
 		homes, home, cwd := globFactsFixture(t, false)
 		if err := os.Chmod(homes, 0); err != nil {
 			t.Fatal(err)
 		}
 		for _, command := range []string{`git add */*`, `git add .*`, `rm -f a*`, `cp payload keyd*/authorized_keys`} {
-			if got := ActionCommandDecisionWithGlobFacts(command, cwd, home, map[string]string{}); got != "protected-target" {
-				t.Errorf("%s: hidden gateway without answers = %q, want protected-target", command, got)
+			if got := globHeldDecision(command, cwd, home, map[string]string{}); got != globHeld {
+				t.Errorf("%s: hidden gateway without answers = %q, want %s", command, got, globHeld)
 			}
 		}
 	})
@@ -174,10 +177,15 @@ func TestR104GlobFactsDecideBehindHiddenHome(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		for _, command := range []string{`cp payload keyd*/authorized_keys`, `cp payload */*`, `cp payload many/*/*`} {
+		for _, command := range []string{`cp payload keyd*/authorized_keys`, `cp payload */*`} {
 			if got := ActionCommandDecisionWithGlobFacts(command, cwd, home, forged); got != "protected-target" {
 				t.Errorf("%s: visible gateway with a forged answer = %q, want protected-target", command, got)
 			}
+		}
+		// Past the walk's bound the forged "0" does not allow either: the
+		// pattern is held unknown (rel-1-0-10:GAP-0270).
+		if got := globHeldDecision(`cp payload many/*/*`, cwd, home, forged); got != globHeld {
+			t.Errorf("cp payload many/*/*: visible gateway with a forged answer = %q, want %s", got, globHeld)
 		}
 	})
 }

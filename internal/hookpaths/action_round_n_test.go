@@ -77,9 +77,9 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 		t.Errorf("hidden home with client answer: %q, want protected-target", got)
 	}
 	// A client that sent evidence but no answer for this pattern could
-	// not prove it: closed.
-	if got := ActionCommandDecisionWithGlobFacts(`cp payload tree/*/n*`, cwd, home, map[string]string{CWDKey: cwd}); got != "protected-target" {
-		t.Errorf("hidden home, client without answer: %q, want protected-target", got)
+	// not prove it: held unknown, never an allow (rel-1-0-10:GAP-0270).
+	if got := globHeldDecision(`cp payload tree/*/n*`, cwd, home, map[string]string{CWDKey: cwd}); got != globHeld {
+		t.Errorf("hidden home, client without answer: %q, want %s", got, globHeld)
 	}
 	if err := os.Chmod(homes, 0o700); err != nil {
 		t.Fatal(err)

@@ -771,7 +771,8 @@ func dispatchTrustedActionWith(
 						checkedWholeWrite = true
 						wholeWriteSafe = wholeCommandKnown &&
 							request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
-								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
+								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == "" &&
+							request.targetMemo.GlobUnproven() == ""
 						if !wholeWriteSafe && wholeCommandKnown && !request.ProtectedHomeHook &&
 							(request.Connector == "claudecode" || request.Connector == "codex") &&
 							trustedPOSIXShellCall(request.Input, facts) {

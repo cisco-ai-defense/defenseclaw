@@ -1445,7 +1445,19 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			return true
 		}
 	}
-	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
+	if _, err := filepath.Match(pattern, ""); err != nil {
+		return false
+	}
+	// The literal leading directory bounds what the pattern can select:
+	// away from every protected target, the text above decided it, and no
+	// directory is listed (rel-1-0-10:GAP-0270).
+	if actionGlobDirAway(actionGlobLiteralDir(pattern), home, globs.targetMemo()) {
+		if !globs.full() {
+			globs.note(pattern, "0")
+		}
+		return false
+	}
+	if globs.full() {
 		return false
 	}
 	hidden := actionGlobViewHidden(cwd, home)
@@ -1461,12 +1473,15 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		globs.note(pattern, "0")
 		return false
 	}
-	if hidden && unseen {
+	if hidden {
 		if answer := globs.answer(pattern); answer != "" {
-			// A walk this process could not see defers to the client,
-			// which expanded the pattern as the user.
+			// A walk this process could not see, or could not finish,
+			// defers to the client, which expanded the pattern as the
+			// user or decided it from its text.
 			return answer == "1"
 		}
+	}
+	if hidden && unseen {
 		if !globs.fromClient() {
 			// No client evidence at all (an older hook client): the
 			// name fallback of round m.
@@ -1488,8 +1503,13 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	// The walk (this one, or the client's that sent no answer) stopped at
 	// a bound or at a directory it could not read, so an alias of any name
 	// may be among the names it did not see: the pattern is unproved,
-	// never an allow (GAP-1481).
-	return true
+	// never an allow (GAP-1481). Unproved is an unknown target, not a
+	// protected one: the memo keeps it, and the authorized-keys proof
+	// holds the call as an unproven write (UnprovenGlobIncomplete), which
+	// blocks wherever an unknown target can reach the home and is named
+	// for what it is (rel-1-0-10:GAP-0270).
+	globs.targetMemo().noteGlobUnproven(actionGlobLiteralDir(pattern))
+	return false
 }
 
 // actionGlobDotComponentsMatch reports, for a pattern that filepath.Match

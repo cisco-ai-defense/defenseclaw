@@ -1183,7 +1183,7 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		}
 		// On the Windows host itself the pattern is expanded and each match
 		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == "windows" && !actionGlobDirAway(actionGlobLiteralDir(filepath.FromSlash(native)), home, nil) {
 			for _, match := range actionBoundedGlob(filepath.FromSlash(native), dotglob) {
 				if actionPrivateReadPath(match, cwd, home) {
 					return true
@@ -1207,6 +1207,11 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		} else if actionKeyPatternMatch(pattern, key, dotglob) {
 			return true
 		}
+	}
+	// Away from the protected targets the pattern names no key: its
+	// directory is not listed (rel-1-0-10:GAP-0270).
+	if actionGlobDirAway(actionGlobLiteralDir(pattern), home, nil) {
+		return false
 	}
 	for _, match := range actionBoundedGlob(pattern, dotglob) {
 		if actionPrivateReadPath(match, cwd, home) {
@@ -1335,6 +1340,11 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 	ssh, ok := ResolveWriteTarget(filepath.Join(home, ".ssh"))
 	if !ok || samePathName(physical, ssh) || strings.HasPrefix(physical, ssh+string(filepath.Separator)) {
 		return false
+	}
+	if actionGlobDirAway(parent, home, nil) {
+		// A generated name in a directory away from the protected targets
+		// is none of them; the directory is not listed (rel-1-0-10:GAP-0270).
+		return true
 	}
 	pattern := strings.ReplaceAll(filepath.Base(target), actionGeneratedMarker, "*")
 	directory, err := pathOpen(parent)
