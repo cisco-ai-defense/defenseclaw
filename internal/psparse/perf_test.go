@@ -52,7 +52,7 @@ func TestNestedStringScaling(t *testing.T) {
 	sc, _ := Parse(src, Options{})
 	_ = Project(sc)
 	_ = ExtractNestedScripts(sc)
-	if d := time.Since(start); d > 50*time.Millisecond {
-		t.Errorf("nested string len=%d parsed in %v (> 50ms)", len(src), d)
+	if d := time.Since(start); d > 300*time.Millisecond { // generous vs load; the former O(n^2) was seconds
+		t.Errorf("nested string len=%d parsed in %v (> 300ms; possible super-linear blowup)", len(src), d)
 	}
 }

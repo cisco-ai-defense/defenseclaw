@@ -1,0 +1,13 @@
+# value-gate allow-list: base64(line)\treason. Every entry is a
+# representation-only disagreement with the pwsh 7.7 golden (a token or
+# element-shape difference, or an inert extra command), never a missed
+# command or a wrong static value an effects consumer would act on.
+TmV3LUl0ZW0gLVBhdGg6IC1OYW1lOmNoaWxkLnR4dA==	representation-only: colon-form parameter boundary (-Name:value binding); the command and filename are preserved
+Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	under-static (R7, safe): a post-`--` token that pwsh keeps is read as a parameter / folded to a dynamic expression and not asserted as a value; the dropped token is never a command or path, and mine never asserts a wrong value
+R2V0LUl0ZW0gLS0gLXg=	under-static (R7, safe): a post-`--` token that pwsh keeps is read as a parameter / folded to a dynamic expression and not asserted as a value; the dropped token is never a command or path, and mine never asserts a wrong value
+UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	representation-only (R8): a backtick+space+newline line-continuation yields one extra static space argument; the command and its path are unchanged
+V3JpdGUtT3V0cHV0IC1hJ2In	representation-only (R7, P3): a dash-word glued to a value with no space; pwsh fuses it into one argument, mine splits it into a parameter plus value. Contrived; no command or path content, and no wrong static path or program
+V3JpdGUtT3V0cHV0IC1hImIi	representation-only (R7, P3): a dash-word glued to a value with no space; pwsh fuses it into one argument, mine splits it into a parameter plus value. Contrived; no command or path content, and no wrong static path or program
+V3JpdGUtT3V0cHV0IC1hJHg=	representation-only (R7, P3): a dash-word glued to a value with no space; pwsh fuses it into one argument, mine splits it into a parameter plus value. Contrived; no command or path content, and no wrong static path or program
+V3JpdGUtT3V0cHV0IC0tIC0tJSBh	representation-only: the -- before a --% stop-parsing marker is read as a parameter vs pwsh's positional; the verbatim --% tail is preserved
+ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	representation-only (N7): a constant attribute argument is surfaced as an inert extra command; no real command is missed or mis-valued
