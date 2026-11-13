@@ -499,17 +499,7 @@ func useBinaryShippedRulePacks(cfg *config.Config) (string, func(), error) {
 		return "", none, nil
 	}
 	folder := config.WindowsShippedRulePacksFolder()
-	if folder == "" {
-		return "", none, nil
-	}
-	selected := false
-	for _, dir := range cfg.ReferencedRulePackDirs() {
-		if cfg.WindowsShippedRulePackName(dir) != "" {
-			selected = true
-			break
-		}
-	}
-	if !selected {
+	if folder == "" || configSelectsShippedRulePack(cfg) == "" {
 		return "", none, nil
 	}
 	files, err := policyassets.ShippedRulePackFiles()
@@ -537,6 +527,31 @@ func useBinaryShippedRulePacks(cfg *config.Config) (string, func(), error) {
 	}
 	cfg.UseOfflineVendorPolicies(folder, root)
 	return root, cleanup, nil
+}
+
+// configSelectsShippedRulePack is the shipped pack (strict or permissive) a
+// setting of cfg loads from the folder a managed Windows Setup ships it in
+// (config.WindowsShippedRulePackDir), "" when no setting does.
+func configSelectsShippedRulePack(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	for _, dir := range cfg.ReferencedRulePackDirs() {
+		if name := cfg.WindowsShippedRulePackName(dir); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// shippedRulePacksWriteRequired reports whether a failed write of the
+// shipped rule packs must fail the lifecycle run (#1445 review P1): only when
+// the config it applies selects one of them, or cannot be read (its config
+// check then refuses it anyway). A deployment on the default pack goes on
+// with a warning; the next run whose config selects strict or permissive
+// writes them, and fails if it cannot.
+func shippedRulePacksWriteRequired(cfg *config.Config, loadErr error) bool {
+	return loadErr != nil || cfg == nil || configSelectsShippedRulePack(cfg) != ""
 }
 
 // pathWithinFolder reports whether path is folder or below it.

@@ -209,20 +209,23 @@ func (c *Config) EmbeddedRulePack(ref RulePackRef) bool {
 
 var (
 	windowsShippedRulePacksRootMu       sync.Mutex
+	windowsShippedRulePacksRootRead     bool
 	windowsShippedRulePacksRootResolved string
 	windowsShippedRulePacksRootOverride *string
 )
 
 // windowsShippedRulePacksRoot is managed.StandaloneWindowsShippedRulePacksDir,
-// read once from the protected registration; "" where it cannot be read
-// (off Windows).
+// read once per process from the protected registration, a failed read
+// included: the decision and threshold paths resolve rule packs for every
+// hook call. "" where it cannot be read (off Windows).
 func windowsShippedRulePacksRoot() string {
 	windowsShippedRulePacksRootMu.Lock()
 	defer windowsShippedRulePacksRootMu.Unlock()
 	if windowsShippedRulePacksRootOverride != nil {
 		return *windowsShippedRulePacksRootOverride
 	}
-	if windowsShippedRulePacksRootResolved == "" {
+	if !windowsShippedRulePacksRootRead {
+		windowsShippedRulePacksRootRead = true
 		if dir, err := managed.StandaloneWindowsShippedRulePacksDir(); err == nil {
 			windowsShippedRulePacksRootResolved = dir
 		}

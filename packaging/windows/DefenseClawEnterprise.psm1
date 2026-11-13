@@ -34925,7 +34925,10 @@ function Install-DefenseClawStandaloneShippedRulePacks {
         folder that already holds exactly those files is left as it is, so a
         repeated ensure changes nothing. The root sits beside the state root,
         like the scanner runtime, so the install-tree and state-root checks
-        never walk it. Secure Client never calls it.
+        never walk it. A failed write stops the run only when the config it
+        applies selects strict or permissive (the helper's required flag);
+        a deployment on the default pack goes on with a warning, and the
+        next run that selects one writes them. Secure Client never calls it.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -34958,8 +34961,21 @@ function Install-DefenseClawStandaloneShippedRulePacks {
         throw "unsupported shipped rule packs report schema: $($report.schema_version)"
     }
     $ok = $report.PSObject.Properties['ok']
-    if ([int]$probe.exit_code -ne 0 -or $null -eq $ok -or $ok.Value -isnot [bool] -or -not [bool]$ok.Value) {
-        throw "the rule packs this release ships could not be written: $(ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$report.error))"
+    if ($null -eq $ok -or $ok.Value -isnot [bool]) {
+        throw 'shipped rule packs report is missing boolean ok'
+    }
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$ok.Value) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$report.error)
+        $required = $report.PSObject.Properties['required']
+        if ([bool]$ok.Value -or $null -eq $required -or $required.Value -isnot [bool] -or [bool]$required.Value) {
+            throw "the rule packs this release ships could not be written, and the config selects one of them: $detail"
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'shipped-rule-packs'
+            reason    = "the strict and permissive rule packs this release ships could not be written; the config selects neither, so the run goes on, and the next run whose config selects one writes them: $detail"
+        }
+        Microsoft.PowerShell.Utility\Write-Warning -Message ('shipped rule packs were not written: {0}' -f $detail)
+        return
     }
     $folder = [IO.Path]::GetFullPath([string]$report.folder).TrimEnd('\')
     $expectedRoot = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw-RulePacks')
@@ -50366,15 +50382,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($StandaloneFleetStateKnown -and -not $StandaloneFleetEnabled) {
             Remove-DefenseClawRetiredStandaloneCompiler -Layout $Layout
         }
-        if (Test-DefenseClawStandaloneProfile) {
-            # The strict and permissive rule packs this release ships
-            # (#1445), written by the gateway just installed before the
-            # config check and the first start read them. A rollback needs
-            # nothing restored: each release reads only its own folder.
-            Install-DefenseClawStandaloneShippedRulePacks `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName
-        }
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
             $Layout.BrokerPath,
@@ -50478,6 +50485,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -PathType Leaf)) {
                 throw "required managed artifact is missing after $Action policy staging: $requiredPath"
             }
+        }
+        if (Test-DefenseClawStandaloneProfile) {
+            # The strict and permissive rule packs this release ships
+            # (#1445), written by the gateway just installed once the config
+            # this run applies is in place, and before the target runtimes,
+            # the config check and the first start read them. A rollback
+            # needs nothing restored: each folder is named by its packs'
+            # digest and a release reads only its own.
+            Install-DefenseClawStandaloneShippedRulePacks `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
         }
         if ($Action -eq 'Install' -and -not $priorDeploymentActive) {
             # Before any target runtime is prepared or the Guardian can

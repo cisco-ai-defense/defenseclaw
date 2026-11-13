@@ -48,9 +48,11 @@ import (
 // windowsShippedRulePacksDACL: LocalSystem and Administrators hold full
 // control and every service reads, all inherited; standard users have no
 // access (a pack is policy, GAP-0386). The read grant names NT
-// AUTHORITY\SERVICE, which the gateway's virtual account carries
-// (managed.ValidateServiceCanReadTree checks it), because the gateway's own
-// service SID does not resolve before the first install creates the service.
+// AUTHORITY\SERVICE, which every gateway's virtual account carries
+// (managed.ValidateServiceCanReadTree checks it), rather than one gateway's
+// service SID: the one root is shared by the gateway of every deployment
+// scope, certification scopes with other service names included, and the
+// files are the release's public pack bytes.
 const windowsShippedRulePacksDACL = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;SU)"
 
 // windowsShippedRulePacksSDDL is that DACL with Administrators as the owner.
@@ -74,6 +76,11 @@ type windowsShippedRulePacksReport struct {
 	Changed       bool     `json:"changed"`
 	Notes         []string `json:"notes,omitempty"`
 	Error         string   `json:"error,omitempty"`
+	// Required is set with an error: the config being applied selects a
+	// shipped pack (or cannot be read), so the lifecycle must fail. A
+	// failed write with Required false is only a warning: the deployment
+	// does not use the packs, and the next run that selects one writes them.
+	Required bool `json:"required"`
 }
 
 func newWindowsShippedRulePacksCommand() *cobra.Command {
@@ -103,6 +110,8 @@ func runWindowsShippedRulePacks(out io.Writer) error {
 	}
 	if err != nil {
 		report.Error = err.Error()
+		cfg, loadErr := loadWindowsEnterpriseStandaloneConfig("")
+		report.Required = shippedRulePacksWriteRequired(cfg, loadErr)
 	} else {
 		report.OK = true
 	}
@@ -111,6 +120,9 @@ func runWindowsShippedRulePacks(out io.Writer) error {
 		return marshalErr
 	}
 	fmt.Fprintln(out, string(encoded))
+	if err != nil && !report.Required {
+		return nil
+	}
 	return err
 }
 
@@ -151,6 +163,7 @@ func installWindowsShippedRulePacks() (string, bool, []string, error) {
 		notes = append(notes, note)
 	}
 	notes = append(notes, removeWindowsShippedRulePacksScratch(root)...)
+	notes = append(notes, removeWindowsShippedRulePacksUntrusted(root)...)
 	if windowsShippedRulePacksProblem(folder, files, serviceAccount) == "" {
 		return folder, false, notes, nil
 	}
@@ -237,7 +250,34 @@ func ensureWindowsShippedRulePacksRoot(root string) (string, error) {
 	if err := createWindowsShippedRulePacksDir(root); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("moved %s, which an account other than Administrators or LocalSystem created, to %s; remove that folder", root, aside), nil
+	note := fmt.Sprintf("moved %s, which an account other than Administrators or LocalSystem created, aside and created it again", root)
+	if err := os.RemoveAll(aside); err != nil {
+		note += fmt.Sprintf("; the moved folder %s could not be removed (%v): remove it", aside, err)
+	}
+	return note, nil
+}
+
+// windowsShippedRulePacksUntrusted lists the folders
+// ensureWindowsShippedRulePacksRoot moved aside beside root.
+func windowsShippedRulePacksUntrusted(root string) []string {
+	matches, err := filepath.Glob(root + ".untrusted-*")
+	if err != nil {
+		return nil
+	}
+	return matches
+}
+
+// removeWindowsShippedRulePacksUntrusted removes the moved-aside folders an
+// earlier run could not remove. os.RemoveAll deletes a link or junction
+// inside them as a link and never follows it.
+func removeWindowsShippedRulePacksUntrusted(root string) []string {
+	var notes []string
+	for _, aside := range windowsShippedRulePacksUntrusted(root) {
+		if err := os.RemoveAll(aside); err != nil {
+			notes = append(notes, fmt.Sprintf("the moved-aside folder %s stays: %v", aside, err))
+		}
+	}
+	return notes
 }
 
 // createWindowsShippedRulePacksDir creates path with the protected access
@@ -415,13 +455,7 @@ func windowsEnterpriseShippedRulePackProblems(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
-	selected := ""
-	for _, dir := range cfg.ReferencedRulePackDirs() {
-		if name := cfg.WindowsShippedRulePackName(dir); name != "" {
-			selected = name
-			break
-		}
-	}
+	selected := configSelectsShippedRulePack(cfg)
 	folder := config.WindowsShippedRulePacksFolder()
 	if selected == "" || folder == "" {
 		return nil
@@ -451,6 +485,13 @@ func applyWindowsEnterpriseShippedRulePacks(result *enterprisestatus.Result) {
 	}
 	for _, problem := range windowsEnterpriseShippedRulePackProblems(cfg) {
 		result.AddError("rule_pack_shipped_invalid", problem)
+	}
+	if root, err := windowsShippedRulePacksRootDir(); err == nil {
+		for _, aside := range windowsShippedRulePacksUntrusted(root) {
+			result.AddWarning("shipped_rule_packs_untrusted_left", fmt.Sprintf(
+				"%s is a folder an account other than Administrators or LocalSystem created where the shipped rule packs go; "+
+					"Setup moved it aside and could not remove it: remove it as an administrator", aside))
+		}
 	}
 }
 

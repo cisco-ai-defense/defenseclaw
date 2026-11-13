@@ -96,3 +96,42 @@ func TestUseBinaryShippedRulePacksForPreflight(t *testing.T) {
 		cleanup()
 	}
 }
+
+// TestShippedRulePacksWriteRequired covers #1445 review P1: a failed write of
+// the shipped packs fails the lifecycle only when the config it applies
+// selects strict or permissive (or cannot be read); a default-pack
+// deployment, an administrator's policy_dir pack and Secure Client go on.
+func TestShippedRulePacksWriteRequired(t *testing.T) {
+	root := t.TempDir()
+	defer config.SetWindowsShippedRulePacksRootForTest(root)()
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		err  error
+		want bool
+	}{
+		{"default pack", shippedRulePackTestConfig("standalone", "default"), nil, false},
+		{"no rule_pack", shippedRulePackTestConfig("standalone", ""), nil, false},
+		{"strict", shippedRulePackTestConfig("standalone", "strict"), nil, true},
+		{"permissive", shippedRulePackTestConfig("standalone", "permissive"), nil, true},
+		{"secure client strict", shippedRulePackTestConfig("secure_client", "strict"), nil, false},
+		{"unreadable config", nil, os.ErrNotExist, true},
+	} {
+		if got := shippedRulePacksWriteRequired(tc.cfg, tc.err); got != tc.want {
+			t.Errorf("%s: required = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	profile := shippedRulePackTestConfig("standalone", "default")
+	profile.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {RulePack: "strict"}}
+	if got := configSelectsShippedRulePack(profile); got != "strict" {
+		t.Errorf("a connector that selects strict = %q, want strict", got)
+	}
+	admin := shippedRulePackTestConfig("standalone", "strict")
+	admin.PolicyDir = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(admin.PolicyDir, "guardrail", "strict"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if shippedRulePacksWriteRequired(admin, nil) {
+		t.Error("strict from the administrator's policy_dir needs no shipped folder")
+	}
+}
