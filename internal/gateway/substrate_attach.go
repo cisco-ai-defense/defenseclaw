@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -104,6 +105,14 @@ type SubstrateRelayDialer interface {
 // token at the upgrade).
 const substrateAttachSessionTTL = 10 * time.Minute
 
+// substrateSessionActor is the actor incarnation a relay session token
+// names, with the task digest of its leader registration: the relay starts
+// a headless task only when the text matches it (GAP-0162). Every route
+// that issues a session token (create, session-cert, attach) uses it.
+func substrateSessionActor(reg registry.Registration) identity.SessionActor {
+	return identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID, TaskDigest: reg.TaskDigest}
+}
+
 func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if st.cfg.Relays == nil || st.cfg.Sessions == nil {
@@ -131,7 +140,7 @@ func (a *APIServer) substrateAttach(st *substrateState) http.HandlerFunc {
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
-		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, substrateAttachSessionTTL)
+		tok, _, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), substrateAttachSessionTTL)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

@@ -112,6 +112,11 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 		if st == http.StatusConflict {
 			return -1, fmt.Errorf("a task is already running in %s; follow it with: defenseclaw substrate logs %s -f", o.Target.Name, o.Target.Name)
 		}
+		// The relay itself refuses a task text that is not the one the agent
+		// was started with (GAP-0071); that is not an attach refusal.
+		if st == http.StatusForbidden && strings.Contains(err.Error(), "not the task this actor was registered for") {
+			return -1, fmt.Errorf("%s runs only the task it was started with; start a new agent for another task: defenseclaw substrate run AGENT --task \"...\"", safetext.Line(o.Target.Name))
+		}
 		k, kerr := l.judge(err)
 		switch {
 		case k == outFatal:
