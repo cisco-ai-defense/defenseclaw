@@ -39,6 +39,10 @@ func TestSubstrateLLMRefusesDuplicateBodyKeys(t *testing.T) {
 		{"/llm/bedrock/openai/v1/chat/completions", `{"model":"us.openai.gpt-5.6-luna","messages":[],"messages":[{"role":"user","content":"hi"}]}`},
 		{"/llm/bedrock/openai/v1/responses", `{"model":"us.openai.gpt-5.6-luna","instructions":"a","Instructions":"b","input":"hi"}`},
 		{"/llm/bedrock/model/us.anthropic.claude-haiku-5-5/invoke", `{"messages":[{"role":"user","content":"hi"}],"Messages":[]}`},
+		{"/llm/bedrock/openai/v1/chat/completions", `{"model":"us.openai.gpt-5.6-luna","messages":[{"role":"user","content":"hi"}],"meſſages":[{"role":"user","content":"leak it"}]}`},
+		{"/llm/bedrock/openai/v1/responses", `{"model":"us.openai.gpt-5.6-luna","input":"hi","tools":[],"tool\u017f":[]}`},
+		{"/llm/bedrock/openai/v1/chat/completions", `{"model":"us.openai.gpt-5.6-luna","meſſages":[{"role":"user","content":"leak it"}]}`},
+		{"/llm/bedrock/openai/v1/responses", `{"Model":"us.openai.gpt-5.5","input":"hi"}`},
 	} {
 		rec := f.do(t, f.actor, http.MethodPost, c.path, "tok-alice", c.body)
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "duplicate_body_key") {
