@@ -279,10 +279,9 @@ func EvaluateDeterministicAction(
 			Input: input, Connector: connector, EnforcementCapable: true,
 			StrictPolicy: profile == "strict",
 		}
-		esR := computeEffectShadow(base, mode, tierRestricted)
-		esF := computeEffectShadow(base, mode, tierFull)
-		result.EffectShadow = &esR
-		result.EffectShadowFull = &esF
+		both := effectShadowRun(base, mode, tierRestricted, tierFull)
+		result.EffectShadow = &both[0]
+		result.EffectShadowFull = &both[1]
 	}
 	return result
 }

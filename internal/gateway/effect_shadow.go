@@ -85,6 +85,15 @@ type EffectShadowResult struct {
 	Sets    []string `json:"sets,omitempty"`
 	Program string   `json:"program,omitempty"`
 	Kind    string   `json:"kind,omitempty"`
+	// RuleIDs names the effect rule that would fire (empty when clean).
+	RuleIDs []string `json:"rule_ids,omitempty"`
+	// Reason is why the run has no (or a partial) verdict: parse_budget_exceeded,
+	// shadow_timeout or shadow_panic. Empty for a fully computed run.
+	Reason string `json:"reason,omitempty"`
+	// CostUS is the wall-clock cost of the run in microseconds; Effects is the
+	// number of effects the extractor produced.
+	CostUS  int64 `json:"cost_us,omitempty"`
+	Effects int   `json:"effects,omitempty"`
 }
 
 // effectsRulesModeFor reads the live generation's config. An absent generation
@@ -144,31 +153,11 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 }
 
 // computeEffectShadow runs the effect lane for one request and returns its
-// verdict. It never mutates the request or today's findings. The protected-set
-// grade follows links through the hook's own reader (read-only).
+// verdict. It never mutates the request or today's findings. It is the shared
+// core (effectShadowRun) for one tier: the live hook and the benchmark harness
+// run the same code, with the same budget, time cap and recovery.
 func computeEffectShadow(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) EffectShadowResult {
-	res := EffectShadowResult{Mode: string(mode), Tier: string(effectTierClean), Action: guardrailActionAllow}
-	call, opts, ok := effectCall(request.Connector, request.Input)
-	if !ok {
-		return res
-	}
-	result := effects.Extract(call, opts)
-	facts := effectrules.Project(result, effectrules.Env{
-		Home:    request.Input.ActiveHome,
-		Flavor:  opts.Flavor,
-		Resolve: effectResolverOverride,
-	})
-	c := classifyEffects(result, facts, opts.Flavor, tier)
-	strictOrManaged := request.StrictPolicy || request.ManagedInstall
-	res.Sets, res.Program, res.Kind = c.sets, c.program, c.kind
-	switch {
-	case c.restricted:
-		res.Tier = string(effectTierRestricted)
-	case c.touches:
-		res.Tier = string(effectTierUnknown)
-	}
-	res.Action = effectAction(c.touches, c.restrictedRuling, strictOrManaged)
-	return res
+	return effectShadowRun(request, mode, tier)[0]
 }
 
 // effectClass is the protected-tier read of one call: whether any effect

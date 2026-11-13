@@ -62,6 +62,12 @@ const (
 	ActionApprovalGranted Action = "approval-granted"
 	ActionApprovalDenied  Action = "approval-denied"
 
+	// ActionEffectsShadow is one row of the live shadow run of the effect-model
+	// rule lane (guardrail.effects_rules=shadow): the verdict it would have
+	// reached (tier, would-be action, rule id, reason code, cost). It is a
+	// measurement, never enforcement.
+	ActionEffectsShadow Action = "effects-shadow"
+
 	// Tool runtime
 	ActionToolCall   Action = "tool-call"
 	ActionToolResult Action = "tool-result"
@@ -431,6 +437,7 @@ func AllActions() []Action {
 		ActionApprovalRequest,
 		ActionApprovalGranted,
 		ActionApprovalDenied,
+		ActionEffectsShadow,
 		ActionToolCall,
 		ActionToolResult,
 		ActionConfigUpdate,

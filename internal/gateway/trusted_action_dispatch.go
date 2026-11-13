@@ -227,6 +227,11 @@ type trustedActionRequest struct {
 	patchHostView   bool
 	record          func(actionfacts.Facts, []RuleFinding)
 	recordTelemetry func(trustedActionTelemetry)
+	// recordEffectShadow receives the answer of the live shadow run of the
+	// effect lane (guardrail.effects_rules=shadow). Only the hook route sets it;
+	// the dispatch takes it once, at the outermost call, and clears it so a
+	// twin or child request never runs the lane again.
+	recordEffectShadow func(EffectShadowResult)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to
@@ -380,12 +385,18 @@ func dispatchTrustedAction(
 	// EvaluateDeterministicAction, not here.
 	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
 		parent = octx
-		if mode := effectsRulesModeFor(); mode == effectRulesOn {
+		switch mode := effectsRulesModeFor(); mode {
+		case effectRulesOn:
 			effectRequest := request
 			defer func() {
 				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)
 			}()
+		case effectRulesShadow:
+			// Shadow: compute and record beside today's rules, off the hook's
+			// path and verdict-neutral (effect_shadow_live.go, GAP-0256).
+			scheduleEffectShadow(request, mode, effectsRulesTierFor(), request.recordEffectShadow)
 		}
+		request.recordEffectShadow = nil
 	}
 	if ManagedEnterpriseActive() {
 		return nil
