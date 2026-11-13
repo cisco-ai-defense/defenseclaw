@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -54,6 +55,35 @@ var secretFlowSessions = newFlowSessionStore(maxFlowSessions)
 type flowSessionEntry struct {
 	st   *flow.State
 	last time.Time
+	// hits is a small bounded ring of the most recent redacted hits on this
+	// session, for `defenseclaw guardrail secret-flow explain`. It holds no
+	// path or secret value, only the redacted fields the finding already
+	// carries (kind, program, host, label sets, a basename or set tag).
+	hits []FlowHitRecord
+}
+
+// FlowHitRecord is one redacted recent hit for the explain view.
+type FlowHitRecord struct {
+	Time    string   `json:"time"`
+	Kind    string   `json:"kind"`
+	Program string   `json:"program,omitempty"`
+	Host    string   `json:"host,omitempty"`
+	Sets    []string `json:"sets,omitempty"`
+	Source  string   `json:"source,omitempty"`
+	Action  string   `json:"action"`
+}
+
+// maxFlowHitRing is how many recent hits a session keeps for explain.
+const maxFlowHitRing = 16
+
+// FlowSessionView is the read-only explain payload for one session.
+type FlowSessionView struct {
+	Session      string          `json:"session"`
+	Found        bool            `json:"found"`
+	Label        string          `json:"label"`
+	LabeledPaths int             `json:"labeled_paths"`
+	ValueDigests int             `json:"value_digests"`
+	Hits         []FlowHitRecord `json:"hits"`
 }
 
 type flowSessionStore struct {
@@ -112,6 +142,42 @@ func (s *flowSessionStore) evictLocked(now time.Time) {
 			break
 		}
 		delete(s.m, oldestID)
+	}
+}
+
+// recordHits appends redacted hit records for a session (bounded ring).
+func (s *flowSessionStore) recordHits(id string, recs []FlowHitRecord) {
+	if len(recs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.m[id]
+	if !ok {
+		return
+	}
+	e.hits = append(e.hits, recs...)
+	if len(e.hits) > maxFlowHitRing {
+		e.hits = e.hits[len(e.hits)-maxFlowHitRing:]
+	}
+}
+
+// view returns the read-only explain payload for a session.
+func (s *flowSessionStore) view(id string) FlowSessionView {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.m[id]
+	if !ok {
+		return FlowSessionView{Session: id, Found: false}
+	}
+	hits := append([]FlowHitRecord(nil), e.hits...)
+	return FlowSessionView{
+		Session:      id,
+		Found:        true,
+		Label:        e.st.Label.String(),
+		LabeledPaths: e.st.LabeledPaths(),
+		ValueDigests: e.st.ValueDigests(),
+		Hits:         hits,
 	}
 }
 
@@ -202,6 +268,17 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) []Ru
 	}
 	st := secretFlowSessions.session(sid, cfg)
 	out := st.Step(res, cfg)
+	if len(out.Hits) > 0 {
+		now := time.Now().UTC().Format(time.RFC3339)
+		recs := make([]FlowHitRecord, 0, len(out.Hits))
+		for _, h := range out.Hits {
+			recs = append(recs, FlowHitRecord{
+				Time: now, Kind: string(h.Kind), Program: h.Program,
+				Host: h.Host, Sets: h.Sets, Source: h.Source, Action: string(out.Action),
+			})
+		}
+		secretFlowSessions.recordHits(sid, recs)
+	}
 	return flowShadowFindings(out, mode)
 }
 
@@ -297,4 +374,41 @@ func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
 		})
 	}
 	st.AddResultValues([]byte(result), "tool_result", cfg)
+}
+
+// handleSecretFlow serves the Secret flow tracking read-only view at
+// /v1/guardrail/secret-flow. With no query it returns the live config summary
+// and the number of tracked sessions. With ?session=ID it returns that
+// session's redacted explain view (label, counts, recent hits). It never
+// returns a path or a secret value.
+func (a *APIServer) handleSecretFlow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if sid := strings.TrimSpace(r.URL.Query().Get("session")); sid != "" {
+		a.writeJSON(w, http.StatusOK, secretFlowSessions.view(sid))
+		return
+	}
+	resp := map[string]interface{}{"mode": "off"}
+	if live := a.runtimeConfigSnapshot(); live != nil {
+		sf := live.Guardrail.SecretFlow
+		resp["mode"] = string(secretFlowLaneMode(live.Guardrail))
+		resp["configured_mode"] = sf.Mode
+		resp["effects_rules"] = live.Guardrail.EffectsRules
+		resp["credentials"] = sf.CredentialsEnabled()
+		resp["reencodings"] = sf.Reencodings
+		resp["sink_default"] = sf.SinkActionFor(false, false)
+		resp["sink_strict"] = sf.SinkActionFor(true, false)
+		resp["sink_managed"] = sf.SinkActionFor(false, true)
+		resp["extra_path_globs"] = sf.LabelSets.ExtraPathGlobs
+		resp["extra_secret_patterns"] = sf.LabelSets.ExtraSecretPatterns
+		resp["destination_allowlist"] = sf.DestinationAllowlist
+		resp["max_labeled_paths"] = sf.Memory.MaxLabeledPaths
+		resp["max_value_digests"] = sf.Memory.MaxValueDigests
+	}
+	secretFlowSessions.mu.Lock()
+	resp["tracked_sessions"] = len(secretFlowSessions.m)
+	secretFlowSessions.mu.Unlock()
+	a.writeJSON(w, http.StatusOK, resp)
 }

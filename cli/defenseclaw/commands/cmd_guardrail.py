@@ -6643,3 +6643,262 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
 from defenseclaw.commands.cmd_judge import judge as _judge_group  # noqa: E402
 
 guardrail.add_command(_judge_group)
+
+
+# ---------------------------------------------------------------------------
+# Secret flow tracking (guardrail.secret_flow) — S7, 1.0.10
+# ---------------------------------------------------------------------------
+
+_SECRET_FLOW_SET_KEYS = {
+    "mode": ("secret_flow.mode", "off | shadow | on"),
+    "reencodings": ("secret_flow.reencodings", "true | false"),
+    "credentials": ("secret_flow.label_sets.credentials", "true | false"),
+    "sink-strict": ("secret_flow.sink_action.strict", "alert | block"),
+    "sink-managed": ("secret_flow.sink_action.managed", "alert | block"),
+    "max-paths": ("secret_flow.memory.max_labeled_paths", "a non-negative integer"),
+    "max-digests": ("secret_flow.memory.max_value_digests", "a non-negative integer"),
+    "allowlist": ("secret_flow.destination_allowlist", "comma-separated hosts (empty clears)"),
+}
+
+
+def _secret_flow_lane_mode(gc) -> str:
+    """Fold the rollout key (effects_rules) and the feature switch into the
+    effective lane mode, mirroring internal/gateway.secretFlowLaneMode."""
+    rollout = getattr(gc, "effects_rules", "shadow") or "shadow"
+    if rollout == "off":
+        return "off"
+    mode = (getattr(gc, "secret_flow", None).mode if getattr(gc, "secret_flow", None) else "shadow") or "shadow"
+    if mode == "off":
+        return "off"
+    if mode == "on":
+        return "on" if rollout == "on" else "shadow"
+    return "shadow"
+
+
+@click.group("secret-flow")
+def secret_flow_group() -> None:
+    """Secret flow tracking: alert (or block) when a labeled secret an agent
+    read reaches an external sink.
+
+    \b
+      status           mode, label sets, sink actions, memory, allowlist, hits
+      enable/disable   turn the feature on (shadow) / off
+      set KEY VALUE    change one setting
+      explain SESSION  why a hit fired in a session (paths redacted)
+
+    Rollout rides guardrail.effects_rules; this feature's own switch is
+    guardrail.secret_flow.mode. It ships in shadow (measured, never changes
+    the answer) until the real-trace alert rate is reviewed.
+    """
+
+
+guardrail.add_command(secret_flow_group)
+
+
+@secret_flow_group.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Print the status as JSON.")
+@pass_ctx
+def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
+    """Show the Secret flow tracking settings and, if the gateway is up, the
+    number of sessions being tracked."""
+    gc = app.cfg.guardrail
+    sf = gc.secret_flow
+    lane = _secret_flow_lane_mode(gc)
+    tracked = None
+    try:
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=2,
+        )
+        tracked = client.secret_flow().get("tracked_sessions")
+    except Exception:  # noqa: BLE001 - gateway not running is fine for status
+        tracked = None
+
+    if as_json:
+        click.echo(json.dumps({
+            "version": 1,
+            "configured_mode": sf.mode,
+            "effective_mode": lane,
+            "effects_rules": getattr(gc, "effects_rules", ""),
+            "label_sets": {
+                "credentials": sf.label_sets.credentials,
+                "extra_path_globs": list(sf.label_sets.extra_path_globs),
+                "extra_secret_patterns": list(sf.label_sets.extra_secret_patterns),
+            },
+            "sink_action": {"default": sf.sink_action.default, "strict": sf.sink_action.strict, "managed": sf.sink_action.managed},
+            "reencodings": sf.reencodings,
+            "memory": {"max_labeled_paths": sf.memory.max_labeled_paths, "max_value_digests": sf.memory.max_value_digests},
+            "destination_allowlist": list(sf.destination_allowlist),
+            "tracked_sessions": tracked,
+        }, indent=2))
+        return
+
+    click.echo()
+    click.echo(f"  {ux.bold('Secret flow tracking')}")
+    click.echo(f"  {ux.bold('mode:')} {ux.accent(sf.mode)}  {ux.dim('(effective: ' + lane + '; rollout guardrail.effects_rules=' + (getattr(gc, 'effects_rules', '') or '') + ')')}")
+    sets = ["credentials" if sf.label_sets.credentials else ux.dim('credentials off')]
+    if sf.label_sets.extra_path_globs:
+        sets.append("path globs: " + ", ".join(sf.label_sets.extra_path_globs))
+    if sf.label_sets.extra_secret_patterns:
+        sets.append("secret patterns: " + ", ".join(sf.label_sets.extra_secret_patterns))
+    click.echo(f"  {ux.bold('label sets:')} {', '.join(sets)}")
+    click.echo(f"  {ux.bold('sink action:')} default {sf.sink_action.default}, strict {sf.sink_action.strict}, managed {sf.sink_action.managed}")
+    click.echo(f"  {ux.bold('re-encodings:')} {'on' if sf.reencodings else 'off'}")
+    click.echo(f"  {ux.bold('memory caps:')} {sf.memory.max_labeled_paths} paths, {sf.memory.max_value_digests} value digests")
+    allow = ", ".join(sf.destination_allowlist) if sf.destination_allowlist else ux.dim("(none)")
+    click.echo(f"  {ux.bold('allowlist:')} {allow}")
+    if tracked is not None:
+        click.echo(f"  {ux.bold('tracked sessions:')} {tracked}")
+    if lane == "shadow":
+        click.echo(f"  {ux.dim('Shadow: hits are recorded but never change the answer. See `secret-flow explain SESSION`.')}")
+    click.echo()
+
+
+def _secret_flow_write(app: AppContext, change, reason: str) -> None:
+    def _fail(code: int, message: str) -> None:
+        ux.err(message, indent="  ")
+        raise click.exceptions.Exit(code)
+
+    result = _write_guardrail_config(app, [change], reason, _fail)
+    if result is not None:
+        ux.ok(reason)
+        _note_running_agent_restart()
+
+
+@secret_flow_group.command("enable")
+@pass_ctx
+def secret_flow_enable_cmd(app: AppContext) -> None:
+    """Turn Secret flow tracking on in shadow mode (the shipped, safe mode:
+    it records hits but never changes the answer). Use `set mode on` to make
+    it enforce once you have reviewed the alert rate."""
+    from defenseclaw import config_writer
+
+    _secret_flow_write(app, config_writer.Change("guardrail.secret_flow.mode", "shadow"),
+                        "guardrail secret-flow enable (mode=shadow)")
+
+
+@secret_flow_group.command("disable")
+@pass_ctx
+def secret_flow_disable_cmd(app: AppContext) -> None:
+    """Turn Secret flow tracking off (no state kept, no cost)."""
+    from defenseclaw import config_writer
+
+    _secret_flow_write(app, config_writer.Change("guardrail.secret_flow.mode", "off"),
+                        "guardrail secret-flow disable (mode=off)")
+
+
+@secret_flow_group.command("set")
+@click.argument("key")
+@click.argument("value")
+@pass_ctx
+def secret_flow_set_cmd(app: AppContext, key: str, value: str) -> None:
+    """Change one Secret flow tracking setting.
+
+    \b
+    KEY is one of:
+      mode          off | shadow | on
+      reencodings   true | false
+      credentials   true | false   (the built-in credential label set)
+      sink-strict   alert | block
+      sink-managed  alert | block
+      max-paths     per-session labeled-path cap (integer)
+      max-digests   per-session value-digest cap (integer)
+      allowlist     comma-separated hosts that are not external (empty clears)
+
+    The default-profile sink action is fixed to alert (the default profile
+    never blocks) and is not settable here.
+    """
+    from defenseclaw import config_writer
+
+    key = key.strip().lower()
+    if key not in _SECRET_FLOW_SET_KEYS:
+        ux.err(f"Unknown key {key!r}. One of: {', '.join(sorted(_SECRET_FLOW_SET_KEYS))}.", indent="  ")
+        raise click.exceptions.Exit(2)
+    path, hint = _SECRET_FLOW_SET_KEYS[key]
+    dotted = "guardrail." + path
+
+    if key in ("reencodings", "credentials"):
+        v = value.strip().lower()
+        if v not in ("true", "false"):
+            ux.err(f"{key} takes {hint} (got {value!r}).", indent="  ")
+            raise click.exceptions.Exit(2)
+        change = config_writer.Change(dotted, v == "true")
+    elif key in ("max-paths", "max-digests"):
+        try:
+            n = int(value)
+        except ValueError:
+            ux.err(f"{key} takes {hint} (got {value!r}).", indent="  ")
+            raise click.exceptions.Exit(2)
+        change = config_writer.Change(dotted, n)
+    elif key == "allowlist":
+        hosts = [h.strip() for h in value.split(",") if h.strip()]
+        change = config_writer.Change(dotted, hosts) if hosts else config_writer.Change(dotted, unset=True)
+    else:  # mode, sink-strict, sink-managed: closed enums
+        v = value.strip()
+        choices = {"mode": ("off", "shadow", "on"), "sink-strict": ("alert", "block"), "sink-managed": ("alert", "block")}[key]
+        if v not in choices:
+            ux.err(f"{key} takes one of {', '.join(choices)} (got {value!r}).", indent="  ")
+            raise click.exceptions.Exit(2)
+        change = config_writer.Change(dotted, v)
+
+    _secret_flow_write(app, change, f"guardrail secret-flow set {key} {value}")
+
+
+@secret_flow_group.command("explain")
+@click.argument("session")
+@click.option("--json", "as_json", is_flag=True, help="Print the explanation as JSON.")
+@pass_ctx
+def secret_flow_explain_cmd(app: AppContext, session: str, as_json: bool = False) -> None:
+    """Show why Secret flow tracking fired for a session (paths redacted).
+
+    Reads the live gateway's per-session state: the session label, how many
+    files and secret values it is tracking, and the most recent sink hits with
+    their kind, program, destination host and the label sets involved. No path
+    or secret value is shown.
+    """
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=3,
+        )
+        view = client.secret_flow(session=session)
+    except Exception as exc:  # noqa: BLE001
+        ux.err(f"Could not reach the gateway to read session state: {exc}", indent="  ")
+        ux.err("The gateway holds Secret flow tracking state in memory; start it and retry.", indent="  ")
+        raise click.exceptions.Exit(1) from exc
+
+    if as_json:
+        click.echo(json.dumps(view, indent=2))
+        return
+
+    click.echo()
+    if not view.get("found"):
+        click.echo(f"  No Secret flow tracking state for session {ux.accent(session)}.")
+        click.echo(f"  {ux.dim('Either the session has made no tracked calls, or the gateway restarted since.')}")
+        click.echo()
+        return
+    click.echo(f"  {ux.bold('session:')} {ux.accent(session)}")
+    click.echo(f"  {ux.bold('label:')} {view.get('label', 'public')}  "
+               f"{ux.dim('(' + str(view.get('labeled_paths', 0)) + ' labeled files, ' + str(view.get('value_digests', 0)) + ' secret-value digests)')}")
+    hits = view.get("hits") or []
+    if not hits:
+        click.echo(f"  {ux.bold('hits:')} {ux.dim('none recorded')}")
+    else:
+        click.echo(f"  {ux.bold('recent hits:')}")
+        for h in hits:
+            sets = ", ".join(h.get("sets") or []) or "-"
+            parts = [h.get("time", ""), h.get("action", ""), h.get("kind", "")]
+            line = " ".join(p for p in parts if p)
+            dest = h.get("host") or "?"
+            prog = h.get("program") or "?"
+            src = h.get("source") or ""
+            click.echo(f"    - {line}: {prog} -> {dest}  [{sets}]" + (f"  from {src}" if src else ""))
+    click.echo()

@@ -1047,6 +1047,27 @@ class OrchestratorClient:
             raise ValueError("gateway returned a malformed ACP profiles response")
         return data
 
+    def secret_flow(self, *, session: str = "") -> dict[str, Any]:
+        """GET /v1/guardrail/secret-flow: the live Secret flow tracking view.
+
+        With ``session`` it returns that session's redacted explain payload
+        (label, counts, recent hits); without it the config summary and the
+        number of tracked sessions. Paths and secret values are never
+        returned.
+        """
+        params = {"session": session} if session else {}
+        resp = self._session.get(
+            f"{self.base_url}/v1/guardrail/secret-flow",
+            params=params,
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError("gateway returned a malformed secret-flow view")
+        return data
+
     def guardrail_profile_resolve(self, *, user: str = "", connector: str = "", agent: str = "") -> dict[str, Any]:
         """GET /api/v1/guardrail/profiles/resolve: the profile a subject would get."""
         params = {key: value for key, value in (("user", user), ("connector", connector), ("agent", agent)) if value}
