@@ -99,7 +99,7 @@ try {
             Set-TestLock $script:AdministratorsSID
             $out = & icacls.exe $layout.LifecycleLockPath /grant '*S-1-5-32-545:(M)' 2>&1
             if ($LASTEXITCODE -ne 0) { throw "fixture: icacls /grant: $out" }
-            Test-Take 'an inheriting lock with a Users write entry' $false 'refusing to re-stamp|untrusted|S-1-5-32-545'
+            Test-Take 'an inheriting lock with a Users write entry' $false 'inherits from an ancestor|refusing to re-stamp|untrusted|S-1-5-32-545'
             $usersEntry = @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $layout.LifecycleLockPath).GetAccessRules(
                 $true, $true, [Security.Principal.SecurityIdentifier]) |
                 Microsoft.PowerShell.Core\Where-Object { $_.IdentityReference.Value -eq 'S-1-5-32-545' })
