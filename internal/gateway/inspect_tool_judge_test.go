@@ -219,7 +219,11 @@ func newToolOutputJudgeServer(t *testing.T, jcfg config.JudgeConfig, strategy st
 		cfg:      &cfg.Guardrail.Judge,
 		model:    "test-model",
 		provider: mock,
-		rp:       &guardrail.RulePack{},
+		// The PII judge reads a tool's output only for a tool the pack lists
+		// with judge_result (GAP-0171): fetch_url, the tool these tests post.
+		rp: &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{
+			Tools: []guardrail.SensitiveTool{{Name: "fetch_url", ResultInspection: true, JudgeResult: true}},
+		}},
 	})
 	return a
 }

@@ -1,0 +1,90 @@
+---
+title: Tool results
+description: A tool's output is untrusted data. DefenseClaw checks every tool result for instructions aimed at the agent, alerts on them in the default posture, and in strict withholds the output where the agent lets it.
+keywords:
+  - indirect prompt injection
+  - tool output
+  - PostToolUse
+  - tool_result
+---
+
+A web page, a file, an email or an API response can carry text written to
+steer the agent that reads it. That is indirect prompt injection. The tool
+call has already run when its output comes back, so DefenseClaw treats the
+output as a warning about what the agent reads next, not as an action to
+stop.
+
+## What is checked
+
+Every tool result goes through one set of checks, whichever way it reaches
+DefenseClaw:
+
+- the PostToolUse (or equivalent) hook of every hook connector;
+- the tool results a request to the `/llm` proxy carries for the first time:
+  tool-role messages, Anthropic `tool_result` blocks, Responses API
+  `function_call_output` items and Gemini `functionResponse` parts. Results
+  from earlier turns were checked on the request that first carried them.
+
+The checks:
+
+- **Prompt-injection rules** (`trust-exploit`), on the text as written and on
+  a decoded view: string escapes such as `\n` and `\u0041` decoded and
+  look-alike letters folded, because tool output is often JSON or YAML and
+  the model reads the escape as the character.
+- **Structural checks.** They look for text that addresses the agent, not for
+  words: data that calls the AI agent by role or model name and tells it to
+  do something, that refers to the agent's own instructions or task, that
+  opens a new chat role (chat-template tokens, a closing tool-output tag, a
+  "system message" header), or that tells the reader to discard its
+  instructions. Ordinary content that addresses people (an email asking a
+  colleague for a report, a README telling you to run a command) does not
+  match. Rule IDs: `TOOLRESULT-AGENT-DIRECTIVE`, `TOOLRESULT-ROLE-SWITCH`,
+  `TOOLRESULT-DISCARD-INSTRUCTIONS`.
+- **Secrets** (`secret` rules), as before.
+- **C2 and exfil hosts** (`c2` rules: webhook.site, ngrok, Pipedream, cloud
+  metadata and the like), recorded as LOW telemetry: a host named in a
+  document or a test file is not an action. The call to the host, if the agent
+  makes it, is judged on its own.
+- **The judge, when you turn it on.** The injection judge reads a tool result
+  as untrusted data with its own prompt ("does this data try to direct the
+  agent?"). It runs under `detection_strategy_completion`, the setting that
+  already governs tool output (setup sets it with the judge): `regex_judge`
+  judges every result the rules did not already block, `judge_first` every
+  result.
+
+Not checked on tool output: the contact and payment rules of enterprise-data
+(email addresses, phone numbers, card numbers, IBANs). In a tool's output
+those are the data you asked the tool for. The regulated identifiers (Social
+Security, passport, licence and NHS numbers, medical records, dates of birth)
+stay checked. The PII judge likewise reads a tool's output only when
+the pack lists the tool in `sensitive-tools.yaml` with `judge_result: true`.
+To alert on personal data in the output of particular tools, list them there
+(`result_inspection`, `min_entities_for_alert`). Command and path rules
+never run on output text; they judge tool calls.
+
+## What happens
+
+The tool has already run, so a verdict on its output cannot undo it. Every
+tool-result finding (rules, structural checks, judge) is HIGH at most, so the
+default pack never blocks a tool result:
+
+| posture | what you get |
+|---|---|
+| default, permissive | an alert. The tool output reaches the model. |
+| strict | a block answer: the output is withheld where the agent allows it, below; elsewhere an alert. |
+
+Secrets in a tool's output are an alert today; redacting them where the agent
+can replace the output is planned.
+
+What a block on a tool result does, per agent:
+
+| agent | a block answer on a tool result |
+|---|---|
+| `/llm` proxy (OpenClaw and every proxy-routed agent) | The model call that would carry the output is refused with a DefenseClaw message, so the model never reads it. |
+| Codex | The PostToolUse answer is `decision: block`. In interactive use Codex feeds the reason to the model in place of the tool result; in code mode the tool promise rejects. |
+| Claude Code | PostToolUse and PostToolBatch answers are advisory in Claude Code: the finding is an alert with `would_block`, and the output reaches the model. |
+| Amp | `tool.result` is enforced: the plugin replaces the output with a withheld notice before Amp sends it to the model. |
+| Copilot CLI, Cursor, Devin, Hermes, OpenCode, Antigravity, Kiro | Their post-tool events cannot block: the finding is an alert with `would_block`. |
+
+Managed enterprise (AI Defense only) is unchanged: AI Defense receives the
+conversation, tool messages included.

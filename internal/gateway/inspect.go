@@ -1590,13 +1590,23 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
-	folded := ""
-	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-		if view := trustPatternText(content); view != content {
-			folded = view
-		}
+	secureClient := false
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		secureClient = true
 	}
-	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
+	var ruleFindings []RuleFinding
+	if isToolResultDirection(req.Direction) && !secureClient {
+		// One tool-result path for every connector (tool_result_inspect.go).
+		ruleFindings = toolResultRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, req.contentScope, !ManagedEnterpriseActive())
+	} else {
+		folded := ""
+		if !secureClient {
+			if view := trustPatternText(content); view != content {
+				folded = view
+			}
+		}
+		ruleFindings = messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
+	}
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -1733,17 +1743,24 @@ func withHookJudgeBudget(ctx context.Context, end time.Time) context.Context {
 // verdict unchanged.
 func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectRequest, content string, current *ToolInspectVerdict) *ScanVerdict {
 	// RunJudges speaks the proxy lane's direction vocabulary: "prompt"
-	// selects the injection + exfil (+ PII-prompt) judges, "completion"
-	// the PII-completion judge. Hook tool_result content is tool/model
-	// output — completion-shaped, matching how the proxy judges tool
-	// results in inspectToolResult.
-	direction := "completion"
-	if strings.EqualFold(req.Direction, "prompt") {
-		direction = "prompt"
+	// selects the injection + exfil (+ PII-prompt) judges, "tool_result" the
+	// tool-result injection judge (+ PII-completion), "completion" the
+	// PII-completion judge. Tool output is opted in with the completion
+	// strategy (detection_strategy_completion), as before.
+	strategyDirection, judgeDirection := "completion", "completion"
+	switch {
+	case strings.EqualFold(req.Direction, "prompt"):
+		strategyDirection, judgeDirection = "prompt", "prompt"
+	case isToolResultDirection(req.Direction):
+		judgeDirection = directionToolResult
 	}
 	// Message content threads the caller ctx so the generic /inspect/tool
 	// endpoint's 200ms deadline still short-circuits the judge below.
-	return a.runHookJudge(ctx, direction, direction, req.Connector, content, req.Tool, current)
+	v := a.runHookJudge(ctx, strategyDirection, judgeDirection, req.Connector, content, req.Tool, current)
+	if judgeDirection == directionToolResult {
+		v = capToolResultJudgeVerdict(a.decisionConfig(ctx), req.Connector, v)
+	}
+	return v
 }
 
 // connectorRulePack is the composed rule pack the request scans connector
