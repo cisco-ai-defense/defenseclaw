@@ -182,20 +182,47 @@ func LookupName(ctx context.Context, s Store, atespace, name string) (Lookup, er
 	if atespace == "" || name == "" {
 		return Lookup{}, errors.New("registry: a lookup names the atespace and the actor")
 	}
-	rs, err := s.List(ctx, Filter{Atespace: atespace, IncludeDeleted: true})
-	if err != nil {
-		return Lookup{}, err
-	}
 	var best *Registration
-	for i := range rs {
-		if rs[i].Name == name && (best == nil || rs[i].CreatedAt.After(best.CreatedAt)) {
-			best = &rs[i]
+	if fs, ok := s.(*FileStore); ok {
+		if r, found := fs.newestByName(atespace, name); found {
+			best = &r
+		}
+	} else {
+		rs, err := s.List(ctx, Filter{Atespace: atespace, IncludeDeleted: true})
+		if err != nil {
+			return Lookup{}, err
+		}
+		for i := range rs {
+			if rs[i].Name == name && (best == nil || newer(rs[i], *best)) {
+				best = &rs[i]
+			}
 		}
 	}
 	if best == nil {
 		return Lookup{}, nil
 	}
 	return Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}, nil
+}
+
+// Current reports whether uid is atespace/name's live incarnation: the
+// name's newest registration, not deleted. The leader asks it on every
+// egress chain check, so a callout that still holds a deleted or replaced
+// incarnation's UID is never answered for it (GAP-0234).
+func Current(ctx context.Context, s Store, atespace, name, uid string) (bool, error) {
+	l, err := LookupName(ctx, s, atespace, name)
+	if err != nil {
+		return false, err
+	}
+	return l.Found && !l.Deleted && l.UID == uid, nil
+}
+
+// newer orders two registrations of one name: the later CreatedAt, then
+// the smaller key (List's order).
+func newer(a, b Registration) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.Key < b.Key
 }
 
 // Store is a registration store.
@@ -211,6 +238,10 @@ type FileStore struct {
 	dir string
 	mu  sync.RWMutex
 	mem map[string]Registration
+	// newest is the key of each name's newest registration (atespace and
+	// name), so LookupName reads one entry: the leader answers one for
+	// every egress chain check (GAP-0234).
+	newest map[string]string
 }
 
 // OpenFileStore loads every registration under dir.
@@ -218,7 +249,7 @@ func OpenFileStore(dir string) (*FileStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
 	}
-	s := &FileStore{dir: dir, mem: map[string]Registration{}}
+	s := &FileStore{dir: dir, mem: map[string]Registration{}, newest: map[string]string{}}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("registry: %w", err)
@@ -239,8 +270,32 @@ func OpenFileStore(dir string) (*FileStore, error) {
 			return nil, fmt.Errorf("registry: %s: %w", e.Name(), err)
 		}
 		s.mem[r.Key] = r
+		s.indexLocked(r)
 	}
 	return s, nil
+}
+
+func nameKey(atespace, name string) string { return atespace + "\x00" + name }
+
+// indexLocked makes r its name's newest registration if it is newer than
+// the one indexed. s.mu is held for writing (or s is not shared yet) and
+// r is in s.mem.
+func (s *FileStore) indexLocked(r Registration) {
+	n := nameKey(r.Atespace, r.Name)
+	if k, ok := s.newest[n]; ok && k != r.Key && !newer(r, s.mem[k]) {
+		return
+	}
+	s.newest[n] = r.Key
+}
+
+func (s *FileStore) newestByName(atespace, name string) (Registration, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k, ok := s.newest[nameKey(atespace, name)]
+	if !ok {
+		return Registration{}, false
+	}
+	return s.mem[k], true
 }
 
 func fileName(key string) string {
@@ -305,6 +360,7 @@ func (s *FileStore) Put(_ context.Context, r Registration) error {
 		return fmt.Errorf("registry: %w", err)
 	}
 	s.mem[r.Key] = r
+	s.indexLocked(r)
 	return nil
 }
 

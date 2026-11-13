@@ -120,6 +120,10 @@ type ChainSink interface {
 
 // ChainVerdict is the outcome of a chain check.
 type ChainVerdict struct {
+	// Stale: the UID is not the actor's live incarnation (deleted, or
+	// replaced by a same-name actor), so the leader answered nothing for
+	// it (GAP-0234).
+	Stale  bool
 	Deny   bool
 	Rule   string
 	Reason string

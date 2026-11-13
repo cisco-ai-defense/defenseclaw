@@ -256,15 +256,6 @@ func (e *Engine) closedAuto() bool {
 	return e.cfg.Managed && e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto
 }
 
-// InvalidateActor drops an actor's cached UID. Nothing in the callout
-// process calls it: lifecycle events reach the gateway, not this process, so
-// the cache's own age limit (UIDCache) bounds how long a same-name actor
-// that was deleted and created again keeps its predecessor's UID. In that
-// window its verdict calls carry the old UID and the gateway, which finds
-// the old registration deleted or none, refuses them (closed, never wrongly
-// allowed). Tests use it to stand for the age limit passing.
-func (e *Engine) InvalidateActor(atespace, name string) { e.uids.Invalidate(atespace, name) }
-
 // ChainDropped is how many observed_egress steps the full queue dropped.
 func (e *Engine) ChainDropped() uint64 { return e.chain.droppedCount() }
 
@@ -297,6 +288,15 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
 		}
 	}()
+	return e.decideHeaders(ctx, req, true)
+}
+
+// decideHeaders is DecideHeaders under its budget. again allows one more
+// pass after the leader answers the actor's chain check stale: the cached
+// UID was a deleted or replaced incarnation, so the name is resolved again
+// and the request decided again from the start, the policy profile
+// included, under the registration that is live now (GAP-0234).
+func (e *Engine) decideHeaders(ctx context.Context, req *Request, again bool) (v Verdict) {
 	if req.IdentityErr != nil {
 		return deny(v, CategoryUnattributed, sourceIdentity, "",
 			"The request carries no actor identity from the Substrate egress gateway, so DefenseClaw can't tell whose it is.")
@@ -398,6 +398,16 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		Method: req.Method, Allowed: true, Time: e.now()})
 	if lookupDown && e.checker != nil {
 		outcome, chainWhy = chainUnchecked, uncheckedLookup
+	}
+	if outcome == chainStale {
+		// The UID cache has no lifecycle events: the leader, which keeps
+		// the registrations, tells it the UID is no longer the actor's.
+		e.uids.Invalidate(req.Actor.Atespace, req.Actor.Name)
+		if again {
+			return e.decideHeaders(ctx, req, false)
+		}
+		// Stale twice: the registrations changed again meanwhile.
+		outcome, chainWhy = chainUnchecked, uncheckedStale
 	}
 	switch outcome {
 	case chainHit:

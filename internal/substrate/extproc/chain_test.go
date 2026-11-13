@@ -154,7 +154,7 @@ func TestChainShippedWiring(t *testing.T) {
 		t.Fatalf("unattended registration: %+v", v)
 	}
 	h.uids.unattended = false
-	h.eng.InvalidateActor("eng-web", "a1")
+	h.eng.uids.Invalidate("eng-web", "a1")
 	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); !v.Allow || !v.Alert {
 		t.Fatalf("interactive registration: %+v", v)
 	}

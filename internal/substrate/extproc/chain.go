@@ -107,6 +107,9 @@ const (
 	chainClear = iota
 	chainHit
 	chainUnchecked
+	// chainStale is a check the leader refused to answer for the UID: it
+	// is not the actor's live incarnation (GAP-0234).
+	chainStale
 )
 
 // Why a chain check could not answer.
@@ -120,6 +123,9 @@ const (
 	uncheckedUnregistered = "unregistered"
 	// uncheckedLookup is a registration lookup that failed.
 	uncheckedLookup = "registration_unavailable"
+	// uncheckedStale is a UID the leader answered stale again after the
+	// name was resolved afresh (GAP-0234).
+	uncheckedStale = "registration_stale"
 )
 
 // chainLimiter bounds in-flight checks per actor: one semaphore per actor,
@@ -182,7 +188,8 @@ func (l *chainLimiter) done(key string, s *actorSlots) {
 }
 
 // checkChain runs the synchronous egress-chain check under the budget. A
-// miss is clear. An actor with no registration, an error, a panic, the
+// miss is clear; a stale answer is chainStale, for the caller to resolve
+// the actor again. An actor with no registration, an error, a panic, the
 // deadline or the actor's in-flight cap is unchecked, with the reason: the
 // caller applies the chain failure mode, because on the hook path an
 // egress chain only alerts and the callout is where it blocks (GAP-0090).
@@ -238,6 +245,8 @@ func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, 
 		return ChainVerdict{}, chainUnchecked, uncheckedTimeout
 	case r.err != nil:
 		return ChainVerdict{}, chainUnchecked, uncheckedError
+	case r.v.Stale:
+		return ChainVerdict{}, chainStale, ""
 	case r.v.Deny:
 		return r.v, chainHit, ""
 	}

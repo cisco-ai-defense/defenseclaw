@@ -97,6 +97,11 @@ type Options struct {
 	// controller marks the registration first, and a peer that cannot write
 	// registrations cannot wipe a live actor's chains (GAP-0142).
 	Deleted func(ctx context.Context, atespace, uid string) (bool, error)
+	// Current reports whether uid is the live incarnation of the actor
+	// atespace/name: its name's newest registration, not deleted. An egress
+	// check under any other UID is answered stale, never from that UID's
+	// windows (GAP-0234). Nil answers every UID (tests without a store).
+	Current func(ctx context.Context, atespace, name, uid string) (bool, error)
 	// OnCrashed closes the actor's open asks when it crashes (the ask store).
 	OnCrashed func(ctx context.Context, actor Actor)
 	// Now replaces the clock (tests).
@@ -1207,7 +1212,28 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 // event window. A cold memo answers errWarming and the worker reads it
 // back. A new forked actor's memo is linked to its parent's first
 // (linkMemo).
+//
+// The UID comes from the callout's name cache, which may still hold a
+// deleted incarnation, or one a same-name actor replaced. Such a UID is
+// answered stale before its state is touched: its windows are not the
+// running actor's, and a purged UID gets no fresh, empty entry that would
+// answer allow (GAP-0234).
 func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, error) {
+	if s.opts.Current != nil {
+		if in.Name == "" {
+			return EgressVerdict{}, bad(errors.New("chainstate: an egress check names the actor"))
+		}
+		if err := in.Actor.Validate(); err != nil {
+			return EgressVerdict{}, bad(err)
+		}
+		live, err := s.opts.Current(ctx, in.Actor.Atespace, in.Name, in.Actor.UID)
+		if err != nil {
+			return EgressVerdict{}, err
+		}
+		if !live {
+			return staleVerdict, nil
+		}
+	}
 	e, release, err := s.acquireWith(in.Actor, true)
 	if err != nil {
 		return EgressVerdict{}, err
@@ -1226,6 +1252,11 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 	}
 	return v, nil
 }
+
+// staleVerdict answers an egress check under a UID that is not the
+// actor's live incarnation.
+var staleVerdict = EgressVerdict{Stale: true, Deny: true, Rule: "actor_not_current",
+	Reason: "DefenseClaw's registrations say this actor UID was deleted or replaced by a newer actor of the same name."}
 
 // recordEgress is the worker's exact record of an egress step: the event
 // in the actor window, then the memo read back from the store.

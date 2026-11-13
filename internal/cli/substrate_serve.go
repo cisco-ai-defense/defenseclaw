@@ -678,26 +678,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
-	chains, err := chainstate.New(chainstate.Options{Dir: serveFlags.storeDir,
-		EgressAction: serveFlags.chainEgressAction, Retention: serveFlags.chainRetention,
-		// A fork starts from its parent windows the first time the leader
-		// sees it; the parent comes from the verified registration (GAP-0091).
-		ParentOf: func(ctx context.Context, atespace, uid string) (string, error) {
-			reg, ok, err := store.Get(ctx, atespace, uid)
-			if err != nil || !ok {
-				return "", err
-			}
-			return reg.ParentUID, nil
-		},
-		// A delete purges only a registration the controller marked
-		// deleted (or an actor never registered) (GAP-0142).
-		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
-			reg, ok, err := store.Get(ctx, atespace, uid)
-			if err != nil {
-				return false, err
-			}
-			return !ok || reg.Deleted, nil
-		}})
+	chainOpts := substrateChainRegistrations(store)
+	chainOpts.Dir, chainOpts.EgressAction, chainOpts.Retention = serveFlags.storeDir, serveFlags.chainEgressAction, serveFlags.chainRetention
+	chains, err := chainstate.New(chainOpts)
 	if err != nil {
 		return err
 	}
@@ -948,5 +931,36 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
 		}
 		return res, nil
+	}
+}
+
+// substrateChainRegistrations is what the leader's chain state reads from
+// the registrations.
+func substrateChainRegistrations(store registry.Store) chainstate.Options {
+	return chainstate.Options{
+		// A fork starts from its parent windows the first time the leader
+		// sees it; the parent comes from the verified registration (GAP-0091).
+		ParentOf: func(ctx context.Context, atespace, uid string) (string, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil || !ok {
+				return "", err
+			}
+			return reg.ParentUID, nil
+		},
+		// A delete purges only a registration the controller marked
+		// deleted (or an actor never registered) (GAP-0142).
+		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil {
+				return false, err
+			}
+			return !ok || reg.Deleted, nil
+		},
+		// The callout's egress chain check is answered only for the name's
+		// live incarnation, never for a deleted or replaced UID it still
+		// caches (GAP-0234).
+		Current: func(ctx context.Context, atespace, name, uid string) (bool, error) {
+			return registry.Current(ctx, store, atespace, name, uid)
+		},
 	}
 }

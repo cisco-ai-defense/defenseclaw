@@ -40,10 +40,13 @@ var ErrActorNotLive = errors.New("extproc: actor is not live")
 // UIDCache caches a UIDResolver per atespace/name. A fresh entry (younger
 // than ttl, or uidMissTTL for an unregistered actor) is used as is; when
 // the resolver fails, an entry younger than staleMax still serves (§5.5).
-// Invalidate drops one entry, but nothing in the callout process calls it
-// (lifecycle events reach the gateway): a same-name actor created again keeps
-// its predecessor's UID until the entry ages out, and the gateway refuses its
-// calls for that time (it knows the old UID as deleted, or not at all).
+// No lifecycle event reaches the callout, so an entry can name an
+// incarnation that was deleted, or replaced by a same-name actor created
+// again, until it ages out. It never decides a request under that UID:
+// the leader checks every egress chain step's UID against the name's live
+// registration and answers a stale one stale, and the engine then drops
+// the entry (Invalidate) and decides the request again under the name's
+// current registration (GAP-0234).
 type UIDCache struct {
 	r        UIDResolver
 	ttl      time.Duration
@@ -147,8 +150,7 @@ func (c *UIDCache) store(key string, e uidEntry) {
 	c.m[key] = e
 }
 
-// Invalidate drops atespace/name, as a lifecycle event (delete, recreate,
-// fork, suspend) for the actor would.
+// Invalidate drops atespace/name: the leader answered its UID stale.
 func (c *UIDCache) Invalidate(atespace, name string) {
 	if c == nil {
 		return

@@ -183,14 +183,22 @@ type LifecycleResult struct {
 }
 
 // EgressRequest is the ChainEgress body: one request the callout saw.
+// Name is the actor's name, the identity atenet-egress gives the callout;
+// Actor.UID is the incarnation the callout resolved it to (GAP-0234).
 type EgressRequest struct {
 	Actor  Actor  `json:"actor"`
+	Name   string `json:"name"`
 	Host   string `json:"host"`
 	Method string `json:"method"`
 }
 
-// EgressVerdict is the ChainEgress answer.
+// EgressVerdict is the ChainEgress answer. Stale says the UID is not the
+// name's live incarnation (deleted, or replaced by a same-name actor): the
+// callout resolves the name again and asks under the new UID. A stale
+// answer also has Deny set, so a caller that does not know Stale refuses
+// (GAP-0234).
 type EgressVerdict struct {
+	Stale    bool     `json:"stale,omitempty"`
 	Deny     bool     `json:"deny,omitempty"`
 	Rule     string   `json:"rule,omitempty"`
 	Reason   string   `json:"reason,omitempty"`
