@@ -1507,14 +1507,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	if bodyUndecodable != "" {
 		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
 	}
-	// The heartbeat and session-startup gates skip the heartbeat text itself,
-	// never the other text of the body (system, developer, instructions, tool
-	// results, tool definitions).
-	skipText := ""
-	if userText != "" && (isHeartbeatMessage(userText, partial.Messages) || isSessionStartupMessage(userText)) {
-		skipText, inspectRaw = userText, ""
-	}
-	inspectRaw = joinPromptSegments(inspectRaw, side.Segments, skipText)
+	// The OpenClaw heartbeat and session-startup prompts are left out as the
+	// exact canonical sentences only (guardrail_probe.go); everything else in
+	// the same message, and in the rest of the body (system, developer,
+	// instructions, tool results, tool definitions), is inspected.
+	inspectRaw, _ = stripCanonicalProbes(inspectRaw)
+	inspectRaw = joinPromptSegments(inspectRaw, side.Segments)
+	inspectMessages := probeFreeMessages(partial.Messages)
 	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
@@ -1551,7 +1550,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode)
+		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, inspectMessages, label, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -2707,20 +2706,17 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
-	userText := lastUserText(req.Messages)
 	inspectText := promptInspectText(req.Messages)
 	// Every prompt-side text of the body, as on the passthrough: system and
 	// developer turns after the user turn and the tool results sent since
 	// the model's last turn (GAP-0196). The original body, before
 	// DefenseClaw adds its own notice.
 	chatSide := passthroughPromptFor(body, true, p.maxBodyValues())
-	// The heartbeat and session-startup gates skip the heartbeat text itself,
-	// never the other text of the body.
-	chatSkip := ""
-	if userText != "" && (isHeartbeatMessage(userText, req.Messages) || isSessionStartupMessage(userText)) {
-		chatSkip, inspectText = userText, ""
-	}
-	inspectText = joinPromptSegments(inspectText, chatSide.Segments, chatSkip)
+	// The heartbeat and session-startup prompts: the exact canonical sentences
+	// only, never the rest of the message or of the body.
+	inspectText, _ = stripCanonicalProbes(inspectText)
+	inspectText = joinPromptSegments(inspectText, chatSide.Segments)
+	inspectMessages := probeFreeMessages(req.Messages)
 	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
 		msg := blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+chatSide.Unreadable)
 		if req.Stream {
@@ -2771,7 +2767,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode)
+		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, inspectMessages, req.Model, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {

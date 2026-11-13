@@ -834,17 +834,18 @@ func scanReplyBody(data []byte, max int) (replyScan, bool) {
 }
 
 // joinPromptSegments adds the segments of a body to the text the proxy
-// already inspects (the user turn), once: a segment the text contains, or
-// that is exactly skip (the heartbeat text), is left out. A segment that only
-// contains the heartbeat text, or is part of it, is text like any other
-// (GAP-0196: a user message before a heartbeat in the same turn).
-func joinPromptSegments(inspect string, segs []string, skip string) string {
+// already inspects (the user turn), once: a segment the text contains is left
+// out. The canonical heartbeat and session-startup sentences are taken out of
+// every segment first (stripCanonicalProbes); what else a segment says is
+// inspected.
+func joinPromptSegments(inspect string, segs []string) string {
 	budget := 64 << 20
 	seen := map[string]bool{}
 	var b strings.Builder
 	b.WriteString(inspect)
 	for _, s := range segs {
-		if seen[s] || (skip != "" && strings.TrimSpace(s) == strings.TrimSpace(skip)) {
+		s, _ = stripCanonicalProbes(s)
+		if seen[s] || strings.TrimSpace(s) == "" {
 			continue
 		}
 		seen[s] = true
