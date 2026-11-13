@@ -494,7 +494,10 @@ func dispatchTrustedAction(
 			// observe mode allows the budget finding but hard-blocks a
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
-			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
+			// The statement budget is a cap of the bound rule too (items): the
+			// limit finding names it.
+			return withOverBudgetStateMutation(parent, request, facts,
+				withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable), bounded.Of(bounded.Items), request))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
@@ -9641,7 +9644,7 @@ const parseBudgetExceededReason = "parse_budget_exceeded"
 
 // trustedBudgetTruncation is the cap the command of input hit in the reading
 // budget, for the bound rule (shellparse.BudgetTruncated).
-func trustedBudgetTruncation(input actionfacts.Input) bounded.Truncated {
+func trustedBudgetTruncation(input actionfacts.Input) bounded.CapSet {
 	command := input.Command
 	if command == "" && len(bytes.TrimSpace(input.Args)) > 0 {
 		if field, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
@@ -9654,7 +9657,7 @@ func trustedBudgetTruncation(input actionfacts.Input) bounded.Truncated {
 // withBudgetTruncation judges a call the readers did not read: the check
 // that works on the raw text first (withBudgetStateBlock), then the bound
 // rule's floor (withBoundedTruncation), with the reason of the budget.
-func withBudgetTruncation(request trustedActionRequest, truncated bounded.Truncated) []RuleFinding {
+func withBudgetTruncation(request trustedActionRequest, truncated bounded.CapSet) []RuleFinding {
 	findings := withBudgetStateBlock(request, nil)
 	findings = withBoundedTruncation(findings, truncated, request)
 	for index := range findings {

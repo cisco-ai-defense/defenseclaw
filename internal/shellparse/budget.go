@@ -116,20 +116,18 @@ const (
 // internal/guardrail/bounded. The reasons map to the kinds: bytes to Bytes;
 // nesting and tree depth to Depth; tree nodes to Nodes; chain operators,
 // tokens, brace expansion and an unparsed chain to Items.
-func BudgetTruncated(reason string) bounded.Truncated {
-	var t bounded.Truncated
+func BudgetTruncated(reason string) bounded.CapSet {
 	switch reason {
 	case "":
+		return bounded.CapSet{}
 	case BudgetBytes:
-		t.Hit(bounded.Bytes)
+		return bounded.Of(bounded.Bytes)
 	case BudgetNesting, BudgetDepth:
-		t.Hit(bounded.Depth)
+		return bounded.Of(bounded.Depth)
 	case BudgetNodes:
-		t.Hit(bounded.Nodes)
-	default:
-		t.Hit(bounded.Items)
+		return bounded.Of(bounded.Nodes)
 	}
-	return t
+	return bounded.Of(bounded.Items)
 }
 
 // TooDeep reports whether command is past the reading budget (see

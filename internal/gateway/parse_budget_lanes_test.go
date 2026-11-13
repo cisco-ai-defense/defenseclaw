@@ -22,14 +22,20 @@ import (
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse tree nodes", cap: bounded.Nodes, limit: budgetLimit(boundedFlatWords, 40000),
-			adopted: true, gen: boundedShellCall(boundedFlatWords)},
+			gen: boundedShellLane(boundedFlatWords, boundedMultiCap(boundedFlatWords)), seen: boundedShellSeenCall},
 		boundedLaneCap{lane: "shell-parse tree depth", cap: bounded.Depth, limit: budgetLimit(boundedArithChain, 40000),
-			adopted: true, gen: boundedShellCall(boundedArithChain)},
+			gen: boundedShellLane(boundedArithChain, boundedMultiCap(boundedArithChain)), seen: boundedShellSeenCall},
 		boundedLaneCap{lane: "shell-parse tokens", cap: bounded.Items, limit: budgetLimit(boundedQuotedWords, shellparse.MaxTokens+10),
-			adopted: true, gen: boundedShellCall(boundedQuotedWords)},
+			gen: boundedShellLane(boundedQuotedWords, boundedMultiCap(boundedQuotedWords)), seen: boundedShellSeenCall},
 		boundedLaneCap{lane: "shell-parse bytes", cap: bounded.Bytes, limit: shellparse.MaxCommandBytes - len("echo "),
-			adopted: true, gen: boundedShellCall(boundedOneWord)},
+			gen: boundedShellLane(boundedOneWord, boundedMultiCap(boundedOneWord)), seen: boundedShellSeenCall},
 	)
+}
+
+// boundedMultiCap is fill(size) behind a list of statements past the
+// statement budget: two caps hit at once.
+func boundedMultiCap(fill func(int) string) func(int) string {
+	return func(size int) string { return gap0568Assignments(2*boundedShellStatements) + "; " + fill(size) }
 }
 
 // boundedFlatWords is one double-quoted word of size parameter expansions:
