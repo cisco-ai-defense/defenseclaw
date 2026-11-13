@@ -28,18 +28,6 @@ import (
 // streamed reply; past it the stream cannot be held for inspection.
 const sseToolCallMax = 1 << 20
 
-// passthroughWireProvider is the provider whose wire format a passthrough
-// reply is read in. Bedrock Runtime's OpenAI-compatible API (/openai/v1/...
-// on a bedrock-runtime host: GPT-5.6 Luna for Codex, OpenCode, Copilot CLI
-// and Hermes, GAP-0187) answers in the OpenAI shapes, not in Converse or
-// InvokeModel ones.
-func passthroughWireProvider(provider, path string) string {
-	if provider == "bedrock" && strings.HasPrefix(path, "/openai/") {
-		return "openai"
-	}
-	return provider
-}
-
 // sseToolCalls collects the tool calls of an SSE reply, so each finished
 // call goes through the tool-call rules before its bytes reach the agent (as
 // GAP-0098 does for the Bedrock eventstream). A call that spans events is

@@ -497,22 +497,25 @@ func TestPassthroughCoverageRequestProperty(t *testing.T) {
 			for _, s := range w.slots {
 				// Identity first, then every encoding and charset once
 				// per slot (the pair is drawn, so a fixed seed reruns it).
-				type combo struct{ enc, cs string }
-				combos := []combo{{"", ""}}
+				// pfx is text put before the marker: a string that starts with
+				// "data:<type>," is text in a text field, not binary media
+				// (GAP-0238).
+				type combo struct{ enc, cs, pfx string }
+				combos := []combo{{"", "", ""}, {"", "", "data:x,"}, {"", "", "data:application/octet-stream,"}}
 				for _, e := range covEncodings[1:] {
-					combos = append(combos, combo{e, covCharsets[rnd.Intn(len(covCharsets))]})
+					combos = append(combos, combo{e, covCharsets[rnd.Intn(len(covCharsets))], ""})
 				}
 				for _, cs := range covCharsets[1:] {
-					combos = append(combos, combo{covEncodings[rnd.Intn(len(covEncodings))], cs})
+					combos = append(combos, combo{covEncodings[rnd.Intn(len(covEncodings))], cs, ""})
 				}
 				for _, c := range combos {
-					name := fmt.Sprintf("%s/%s/%s/%s/enc=%s,cs=%s", mode, w.name, s.name, "marker", c.enc, c.cs)
+					name := fmt.Sprintf("%s/%s/%s/%s/enc=%s,cs=%s,pfx=%s", mode, w.name, s.name, "marker", c.enc, c.cs, c.pfx)
 					t.Run(name, func(t *testing.T) {
 						up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
 						insp.mu.Lock()
 						insp.prompts = nil
 						insp.mu.Unlock()
-						plain := covJSON(t, s.build(covMarker))
+						plain := covJSON(t, s.build(c.pfx+covMarker))
 						body, ct := covCharset(plain, c.cs)
 						body, ce := covEncode(t, c.enc, body)
 						hdr := map[string]string{"Content-Type": ct}
@@ -950,6 +953,29 @@ func TestPassthroughCoverageReplyProperty(t *testing.T) {
 						plain, ct := covCharset(covJSON(t, s.build(covMarker)), cs)
 						body, ce := covEncode(t, enc, plain)
 						up.set(ct, ce, body, 0)
+						check(t, covPost(proxy, up, w.path, req, nil))
+					})
+				}
+			}
+			for _, pfx := range []string{"data:x,", "data:,"} {
+				pfx := pfx
+				t.Run(fmt.Sprintf("body-dataprefix/%s/%s/%s", w.name, s.name, pfx), func(t *testing.T) {
+					insp.mu.Lock()
+					insp.completes = nil
+					insp.mu.Unlock()
+					up.set("application/json", "", covJSON(t, s.build(pfx+covMarker)), 0)
+					check(t, covPost(proxy, up, w.path, req, nil))
+				})
+				if w.events == nil {
+					continue
+				}
+				for _, fr := range []string{"lf-space", "crlf"} {
+					fr := fr
+					t.Run(fmt.Sprintf("stream-dataprefix/%s/%s/%s/%s", w.name, s.name, fr, pfx), func(t *testing.T) {
+						insp.mu.Lock()
+						insp.completes = nil
+						insp.mu.Unlock()
+						up.set("text/event-stream", "", covFrame(w.events(pfx+covMarker, si), fr), 11)
 						check(t, covPost(proxy, up, w.path, req, nil))
 					})
 				}

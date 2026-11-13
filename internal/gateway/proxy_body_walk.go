@@ -218,28 +218,90 @@ var walkSkipSubtree = keySet("usage", "usage_metadata", "logprobs", "metadata", 
 // replyEchoKeys are the request fields a reply may repeat.
 var replyEchoKeys = keySet("instructions", "tools", "tool_choice", "input", "parallel_tool_calls")
 
-// opaqueString reports a value that is binary media, not text: a data URL of
-// a non-text type, or a long base64 string in a field that carries bytes.
-func opaqueString(key, s string) bool {
+// Binary media is skipped by where it sits, never by what the value looks
+// like (GAP-0238). A string is skipped only when it is in a position where
+// the wire format puts encoded bytes (an image, audio or document field) and
+// it is encoded bytes: a base64 data URL of a non-text type, or a long
+// base64 string. The same shape anywhere else (system text, a tool result, a
+// reply, a tool call's input) is text and is inspected. Inside a tool call's
+// or tool result's free-form payload nothing is skipped at all.
+
+// mediaURLKeys are the fields that hold a URL or data URL of a media file.
+var mediaURLKeys = keySet("image_url", "video_url", "audio_url", "file_url")
+
+// mediaURLParents are the objects whose "url" is a media URL.
+var mediaURLParents = keySet("image_url", "video_url", "audio_url", "file_url", "image", "video", "audio")
+
+// mediaDataParents are the objects whose "data" holds encoded bytes: the
+// OpenAI input_audio and reply audio, Gemini inlineData.
+var mediaDataParents = keySet("input_audio", "inline_data", "audio")
+
+// mediaBytesParents are the objects whose "bytes" holds encoded bytes: the
+// source of a Converse image, document or video.
+var mediaBytesParents = keySet("source")
+
+// textMediaType reports a media type that is text a model reads.
+func textMediaType(mt string) bool {
+	mt = strings.ToLower(strings.TrimSpace(mt))
+	return mt == "" || !strings.Contains(mt, "/") || strings.HasPrefix(mt, "text/") ||
+		mt == "application/json" || mt == "application/xml" || mt == "application/javascript" ||
+		mt == "application/x-www-form-urlencoded" || strings.HasSuffix(mt, "+json") || strings.HasSuffix(mt, "+xml")
+}
+
+// encodedBytes reports a value that is encoded binary: a base64 data URL of
+// a non-text media type, or a base64 string of at least 64 characters.
+func encodedBytes(s string) bool {
 	if strings.HasPrefix(s, "data:") {
-		if i := strings.IndexByte(s, ','); i > 0 {
-			mt := s[5:i]
-			return !strings.HasPrefix(mt, "text/") && !strings.HasPrefix(mt, "application/json")
+		i := strings.IndexByte(s, ',')
+		if i < 0 {
+			return false
+		}
+		head := strings.ToLower(s[5:i])
+		mt, params, _ := strings.Cut(head, ";")
+		return !textMediaType(mt) && strings.Contains(";"+params+";", ";base64;")
+	}
+	if len(s) < 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '+' && c != '/' && c != '=' && c != '-' && c != '_' {
+			return false
 		}
 	}
-	switch normKey(key) {
-	case "data", "bytes", "b64json", "filedata", "blob", "audio", "image":
-		if len(s) >= 64 {
-			for i := 0; i < len(s); i++ {
-				c := s[i]
-				if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '+' && c != '/' && c != '=' && c != '-' && c != '_' {
-					return false
-				}
-			}
-			return true
-		}
+	return true
+}
+
+// mediaValue reports a string that is binary media at its position: key is
+// the field, w.cur the object that holds it and w.curKey the field that
+// object sits under.
+func (w *textWalker) mediaValue(key, s string) bool {
+	if w.payload > 0 {
+		return false
 	}
-	return false
+	nk, ck := normKey(key), normKey(w.curKey)
+	typ := ""
+	if w.cur != nil {
+		typ = w.cur.str("type")
+	}
+	var pos bool
+	switch nk {
+	case "imageurl", "videourl", "audiourl", "fileurl":
+		pos = mediaURLKeys[nk]
+	case "url":
+		pos = mediaURLParents[ck]
+	case "filedata", "b64json", "partialimageb64", "images":
+		pos = true
+	case "data":
+		pos = (ck == "source" && typ == "base64") || mediaDataParents[ck]
+	case "bytes":
+		pos = mediaBytesParents[ck]
+	case "result":
+		pos = typ == "image_generation_call"
+	case "delta":
+		pos = typ == "response.audio.delta" || typ == "response.output_audio.delta"
+	}
+	return pos && encodedBytes(s)
 }
 
 // foldCanon is the smallest rune of every rune's simple-folding orbit, so
@@ -270,7 +332,8 @@ func canonSet(keys ...string) map[string]string {
 // or differently spelled one makes the body ambiguous.
 var walkStructuralKeys = canonSet("role", "type", "content", "text", "messages", "input", "output", "parts", "instructions",
 	"system", "contents", "model", "tools", "name", "arguments", "prompt", "systemInstruction", "system_instruction", "toolUse",
-	"toolResult", "functionCall", "functionResponse", "tool_calls", "function", "delta", "choices", "candidates")
+	"toolResult", "functionCall", "functionResponse", "tool_calls", "function", "delta", "choices", "candidates",
+	"content_block", "item", "function_call", "tool_use", "partial_json", "finish_reason", "stop_reason", "index", "output_index", "id", "call_id", "item_id", "response", "message")
 
 // ---- the walker ---------------------------------------------------------------
 
@@ -293,6 +356,27 @@ type textWalker struct {
 	stream    bool // reply event of a stream: calls under delta, item and content_block belong to sseToolCalls
 	skipCalls bool
 	calls     []sseToolCall
+	// cur is the object whose value is being read and curKey the field it
+	// sits under (media positions); payload counts the free-form payloads
+	// (tool input and results) the walker is inside.
+	cur     *jnode
+	curKey  string
+	payload int
+}
+
+// callHolderKeys are the fields whose object is a tool call or a tool
+// result, and payloadKeys the fields of such an object that hold free-form
+// data: no field name inside them is a protocol field. A "json" field
+// (Converse toolResult content) is free-form wherever it is.
+var callHolderKeys = keySet("toolUse", "toolResult", "functionCall", "functionResponse", "function", "function_call", "tool_use")
+var payloadKeys = keySet("input", "arguments", "args", "response", "output", "result")
+
+func isResultType(t string) bool {
+	switch t {
+	case "tool_result", "function_call_output", "computer_call_output", "mcp_tool_result":
+		return true
+	}
+	return strings.HasSuffix(t, "_call_output")
 }
 
 func (w *textWalker) add(s string) {
@@ -337,8 +421,7 @@ func (w *textWalker) checkKeys(n *jnode) {
 func (w *textWalker) walk(n *jnode, key string, depth int) {
 	switch n.kind {
 	case 's':
-		nk := normKey(key)
-		if walkSkipScalar[nk] || opaqueString(key, n.s) {
+		if w.payload == 0 && (walkSkipScalar[normKey(key)] || w.mediaValue(key, n.s)) {
 			return
 		}
 		w.add(n.s)
@@ -346,6 +429,9 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 		if w.reply && replyCallKeys[normKey(key)] {
 			for _, c := range n.kids {
 				if c.kind == 'o' {
+					if w.payload == 0 {
+						w.checkKeys(c)
+					}
 					w.callObject(c, key)
 				} else {
 					w.walk(c, key, depth+1)
@@ -357,29 +443,44 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 			w.walk(c, key, depth+1)
 		}
 	case 'o':
+		if w.payload == 0 {
+			// Replies too: a repeated or differently spelled structural key
+			// is read one way here and another by the agent (GAP-0240).
+			w.checkKeys(n)
+		}
 		if w.reply {
 			if replyCallKeys[normKey(key)] || isCallType(n.str("type")) {
 				w.callObject(n, key)
 				return
 			}
-		} else {
-			w.checkKeys(n)
 		}
+		prevCur, prevKey := w.cur, w.curKey
+		w.cur, w.curKey = n, key
+		defer func() { w.cur, w.curKey = prevCur, prevKey }()
+		typ := n.str("type")
+		holder := isCallType(typ) || isResultType(typ) || callHolderKeys[normKey(key)]
 		for i, k := range n.keys {
 			nk := normKey(k)
-			if walkSkipSubtree[nk] {
+			if w.payload == 0 && walkSkipSubtree[nk] {
 				continue
 			}
 			if w.reply && (depth == 0 || (depth == 1 && normKey(key) == "response")) && replyEchoKeys[nk] {
 				continue
 			}
+			enter := w.payload == 0 && ((holder && payloadKeys[nk]) || nk == "json")
+			if enter {
+				w.payload++
+			}
 			if w.stream && (nk == "delta" || nk == "item" || nk == "contentblock") && !w.skipCalls {
 				w.skipCalls = true
 				w.walk(n.kids[i], k, depth+1)
 				w.skipCalls = false
-				continue
+			} else {
+				w.walk(n.kids[i], k, depth+1)
 			}
-			w.walk(n.kids[i], k, depth+1)
+			if enter {
+				w.payload--
+			}
 		}
 	}
 }
@@ -480,11 +581,6 @@ type passthroughSidePrompt struct {
 	Unreadable string
 }
 
-// passthroughPrompt reads body; see passthroughPromptFor.
-func passthroughPrompt(body []byte) passthroughSidePrompt {
-	return passthroughPromptFor(body, false)
-}
-
 // passthroughPromptFor reads every inspectable text of a request body once,
 // for every wire shape the passthrough serves. A body that is JSON on its
 // face (it starts with { or [, or jsonHint says so) but not valid JSON, a
@@ -555,6 +651,9 @@ type replyScan struct {
 	Type     string
 	Segments []string
 	Calls    []sseToolCall
+	// Ambiguous is why the reply can be read two ways ("" when it cannot):
+	// the reply takes the fail mode, as an ambiguous request does.
+	Ambiguous string
 }
 
 // scanReplyJSON reads one JSON reply or stream event. With stream set, the
@@ -567,7 +666,7 @@ func scanReplyJSON(data []byte, stream bool) (replyScan, error) {
 	}
 	w := &textWalker{reply: true, stream: stream}
 	w.walk(root, "", 0)
-	return replyScan{Type: root.str("type"), Segments: w.segs, Calls: w.calls}, nil
+	return replyScan{Type: root.str("type"), Segments: w.segs, Calls: w.calls, Ambiguous: w.ambiguous}, nil
 }
 
 // scanReplyBody reads a buffered reply: one JSON value, or newline-delimited
@@ -591,6 +690,9 @@ func scanReplyBody(data []byte) (replyScan, bool) {
 		n++
 		out.Segments = append(out.Segments, sc.Segments...)
 		out.Calls = append(out.Calls, sc.Calls...)
+		if out.Ambiguous == "" {
+			out.Ambiguous = sc.Ambiguous
+		}
 	}
 	return out, n > 0
 }

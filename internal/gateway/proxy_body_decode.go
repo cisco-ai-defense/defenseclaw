@@ -310,6 +310,7 @@ type sseEvent struct {
 type sseFramer struct {
 	buf     []byte
 	pos     int // start of the line being read, in buf
+	scan    int // where the search for the end of that line resumes
 	data    strings.Builder
 	hasData bool
 	started bool
@@ -323,6 +324,11 @@ type sseFramer struct {
 
 // Broken reports an event larger than sseEventMax.
 func (f *sseFramer) Broken() bool { return f.broken }
+
+// Held returns the bytes the framer has read and not yet dispatched in an
+// event. A fail mode that forwards the rest of the stream raw sends them
+// first, so the agent gets every byte (GAP-0241).
+func (f *sseFramer) Held() []byte { return f.buf }
 
 // Write adds bytes to the stream and returns the events they complete. With
 // final set, an unterminated last event is returned as well.
@@ -339,14 +345,17 @@ func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
 	}
 	var out []sseEvent
 	for {
-		i := bytes.IndexAny(f.buf[f.pos:], "\r\n")
+		from := max(f.pos, f.scan)
+		i := bytes.IndexAny(f.buf[from:], "\r\n")
 		if i < 0 {
+			f.scan = len(f.buf) // the next read resumes here, not at the line start
 			break
 		}
-		i += f.pos
+		i += from
 		next := i + 1
 		if f.buf[i] == '\r' {
 			if i+1 >= len(f.buf) && !final {
+				f.scan = i
 				break // a CR at the end may be the first half of CRLF
 			}
 			if i+1 < len(f.buf) && f.buf[i+1] == '\n' {
@@ -355,6 +364,7 @@ func (f *sseFramer) Write(chunk []byte, final bool) []sseEvent {
 		}
 		line := f.buf[f.pos:i]
 		f.pos = next
+		f.scan = 0
 		if len(line) == 0 {
 			out = append(out, f.dispatch())
 			continue
@@ -384,7 +394,7 @@ func (f *sseFramer) dispatch() sseEvent {
 		f.DataEvents++
 	}
 	f.buf = append(f.buf[:0], f.buf[f.pos:]...)
-	f.pos = 0
+	f.pos, f.scan = 0, 0
 	f.data.Reset()
 	f.hasData = false
 	return ev

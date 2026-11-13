@@ -209,12 +209,6 @@ func TestPassthroughBlocksStreamedToolCalls(t *testing.T) {
 // The reply text of Bedrock's OpenAI-compatible API is read in the OpenAI
 // shape (it was read as Converse and came out empty).
 func TestPassthroughInspectsBedrockOpenAIReplyText(t *testing.T) {
-	if got := passthroughWireProvider("bedrock", "/openai/v1/responses"); got != "openai" {
-		t.Fatalf("wire %q", got)
-	}
-	if got := passthroughWireProvider("bedrock", "/model/x/converse"); got != "bedrock" {
-		t.Fatalf("wire %q", got)
-	}
 	up := sseUpstream(t, "application/json", `{"output":[{"type":"message","content":[{"type":"output_text","text":"the vault code is 4242"}]}]}`)
 	proxy, insp := bedrockPassthroughProxy(t, up)
 	insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test secret"})

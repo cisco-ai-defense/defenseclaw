@@ -64,14 +64,16 @@ func snapshotEvent(typ string) bool {
 
 // eventContent feeds one event to the tool-call state machine and adds its
 // text to the accumulated reply.
-func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *strings.Builder, model *string) {
+// It returns why the event can be read two ways (a repeated or differently
+// spelled key), "" when it cannot.
+func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *strings.Builder, model *string) string {
 	if !ev.HasData {
-		return
+		return ""
 	}
 	data := ev.Data
 	calls.Feed(data)
 	if data == "[DONE]" {
-		return
+		return ""
 	}
 	if *model == "" {
 		*model = responseModelFromRawJSON([]byte(data))
@@ -80,7 +82,7 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 	if err != nil {
 		// Not JSON: the text itself is the content.
 		acc.WriteString(data)
-		return
+		return ""
 	}
 	calls.AddCalls(sc.Calls)
 	snapshot := snapshotEvent(sc.Type)
@@ -90,6 +92,7 @@ func (s *passthroughStream) eventContent(ev sseEvent, calls *sseToolCalls, acc *
 		}
 		acc.WriteString(seg)
 	}
+	return sc.Ambiguous
 }
 
 func (s *passthroughStream) copyHeaders() {
@@ -184,6 +187,7 @@ func (s *passthroughStream) run() {
 	sseBlockMsg := ""
 	brokenReported := false
 	framerReported := false
+	ambiguousReported := false
 	streamEnded := false
 	initialFlushed := mode != "action"
 	preblocked := false // an SSE completion block before the first flush: nothing was sent
@@ -271,7 +275,13 @@ func (s *passthroughStream) run() {
 	// handle takes one event; true stops the stream.
 	handle := func(ev sseEvent) bool {
 		if sseCalls != nil {
-			s.eventContent(ev, sseCalls, &accumulated, &streamResponseModel)
+			if why := s.eventContent(ev, sseCalls, &accumulated, &streamResponseModel); why != "" && !ambiguousReported {
+				ambiguousReported = true
+				if p.uninspectableReply(ctx, label, mode, why) {
+					sseBlockMsg = uninspectableMsg
+					return true
+				}
+			}
 		}
 		queue = append(queue, ev.Raw)
 		queueBytes += len(ev.Raw)
@@ -378,6 +388,14 @@ read:
 				// Whole frames only (GAP-0225): the start of a frame that is cut
 				// at the end of this read waits for the rest of it, so the agent
 				// never gets half a frame and a block can follow a whole one.
+				if why := s.bedrock.Ambiguous(); why != "" && !ambiguousReported {
+					ambiguousReported = true
+					if p.uninspectableReply(ctx, label, mode, why) {
+						sseBlockMsg = uninspectableMsg
+						stopped = true
+						break read
+					}
+				}
 				bedrockPending = append(bedrockPending, chunk...)
 				keep := min(s.bedrock.PartialLen(), len(bedrockPending))
 				if whole := bedrockPending[:len(bedrockPending)-keep]; len(whole) > 0 {
@@ -444,6 +462,14 @@ read:
 			initialFlushed = true
 		}
 		writeQueue()
+		// The bytes of the event the framer could not hold come first: the
+		// agent gets every byte of the stream (GAP-0241).
+		if held := framer.Held(); len(held) > 0 {
+			_, _ = w.Write(held)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
 		s.copyRest(src)
 		return
 	}
