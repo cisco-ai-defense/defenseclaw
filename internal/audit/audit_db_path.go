@@ -30,6 +30,9 @@ type auditDBPathHooks struct {
 	schemaTolerant bool
 	// secureClient opens with the pragmas of main (auditPragmasFor).
 	secureClient bool
+	// exclusive opens in SQLite's exclusive locking mode
+	// (exclusiveLockingQuery): only the audit compaction sets it.
+	exclusive bool
 	// reopenSidecarForHardening reopens a pinned SQLite sidecar with the
 	// ACL-changing capability.
 	reopenSidecarForHardening func(string, *os.File) (*os.File, error)
@@ -150,6 +153,10 @@ func openHardenedAuditSQLiteWithIdentity(
 	pragmas := auditPragmasFor(hooks.secureClient)
 	if hooks.schemaTolerant {
 		pragmas = schemaTolerantPragmas
+	}
+	if hooks.exclusive {
+		// First, so the mode applies before the connection reads the store.
+		pragmas = exclusiveLockingQuery + strings.TrimPrefix(pragmas, "?")
 	}
 	db, err := openSQLiteWithPragmas(prepared.path, pragmas)
 	if err != nil {

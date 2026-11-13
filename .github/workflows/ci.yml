@@ -1691,7 +1691,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.enterprise != 'false' }}
     runs-on: ubuntu-latest
-    # The snapshot build takes 10 to 14 minutes on hosted runners (rel/1.0.10 11.6, PR 1456 12 to 15): 15 was no margin.
+    # The snapshot build takes 10 to 14 minutes on hosted runners (rel/1.0.10 11.6, PR 1456 12 to 15): 15 was no margin; 20 is the pull request job ceiling (test_ci_workflow_efficiency).
     timeout-minutes: 20
     outputs:
       linux-version: ${{ steps.linux.outputs.version }}

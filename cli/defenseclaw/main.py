@@ -277,10 +277,11 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
 
 
 def _is_audit_export(ctx: click.Context) -> bool:
-    """Return whether this is the ``audit export``/``findings`` gateway alias.
+    """Return whether this is the ``audit export``/``findings``/``compact`` gateway alias.
 
     The gateway binary loads the configuration and opens the audit database
-    read-only itself, so the CLI must not open the store for writing first.
+    itself (read-only, or alone for ``compact``), so the CLI must not open the
+    store first: ``compact`` refuses a store another process has open.
     """
     if ctx.invoked_subcommand != "audit":
         return False
@@ -289,7 +290,7 @@ def _is_audit_export(ctx: click.Context) -> bool:
         index = argv.index("audit")
     except ValueError:
         return False
-    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings"}
+    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings", "compact"}
 
 
 def _audit_logs_can_read_with_ide_scope_typo(ctx: click.Context, result: object) -> bool:

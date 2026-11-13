@@ -366,6 +366,12 @@ func (s *Store) runCallGroupBatch(batch []*groupedWrite) {
 		return
 	}
 	defer release()
+	if durableBatchObserved != nil {
+		if durable := countDurable(batch); durable > 0 {
+			durableBatchObserved(s, durable)
+		}
+	}
+	defer s.syncDurableDirFor(batch)
 	_ = s.runGroupedTx(batch, groupedTxHooks{
 		op: "hook_call_transaction",
 		begin: func(err error) error {

@@ -8282,7 +8282,9 @@ def _merge_tokenomics(raw: Any) -> TokenomicsConfig:
         cost_keep_reported=_coerce_bool(cost.get("keep_reported", True), default=True),
         local_store_enabled=_coerce_bool(store.get("enabled", False)),
         local_store_retention_days=int(store.get("retention_days", 30) or 30),
-        metric_labels=[str(x) for x in labels] if isinstance(labels, list) and labels else list(TOKENOMICS_METRIC_LABELS),
+        metric_labels=(
+            [str(x) for x in labels] if isinstance(labels, list) and labels else list(TOKENOMICS_METRIC_LABELS)
+        ),
     )
 
 
