@@ -205,7 +205,7 @@ func substrateFail(err error) error {
 	if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, attach.ErrNotSignedIn) {
 		return withExitCode(err, substrateExitSignedOut)
 	}
-	for _, refused := range []error{attach.ErrNotAllowed, attach.ErrNoActor, attach.ErrNotOffered} {
+	for _, refused := range []error{attach.ErrNotAllowed, attach.ErrNoActor, attach.ErrNotOffered, attach.ErrAttachOff} {
 		if errors.Is(err, refused) {
 			return withExitCode(err, substrateExitRefused)
 		}
