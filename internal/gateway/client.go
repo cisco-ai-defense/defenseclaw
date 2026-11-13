@@ -27,9 +27,11 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -268,10 +270,54 @@ func dialOpenClawListener(ctx context.Context, network, addr string) (net.Conn, 
 		return conn, nil
 	}
 	if err := verifyOpenClawListener(conn); err != nil {
+		if acceptOpenClawPluginAccountListener(conn) {
+			return conn, nil
+		}
 		_ = conn.Close()
 		return nil, fmt.Errorf("%w (%s): %v", errOpenClawListenerUnverified, addr, err)
 	}
 	return conn, nil
+}
+
+// openClawListenerAccount is connectors.openclaw.plugin_account: in the
+// separate-user layout the OpenClaw gateway listens as that account, not as
+// this one. The sidecar sets it from config.yaml.
+var openClawListenerAccount atomic.Pointer[string]
+
+func setOpenClawListenerAccount(account string) {
+	account = strings.TrimSpace(account)
+	openClawListenerAccount.Store(&account)
+}
+
+var openClawUnverifiedAccountOnce sync.Once
+
+// acceptOpenClawPluginAccountListener accepts, in the separate-user layout,
+// a listener owned by the OpenClaw account. On Linux the kernel names the
+// owner; macOS cannot read the owner of a socket of another account without
+// privileges, so there the listener is accepted unverified with a warning
+// (a documented limit of the separate-user layout on macOS; what DefenseClaw
+// sends there is the OpenClaw credential, never the DefenseClaw one).
+func acceptOpenClawPluginAccountListener(conn net.Conn) bool {
+	p := openClawListenerAccount.Load()
+	if p == nil || *p == "" {
+		return false
+	}
+	u, err := user.Lookup(*p)
+	if err != nil {
+		return false
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil || uid <= 0 {
+		return false
+	}
+	err = hookexec.VerifyLocalPeerOwnedBy(conn, uid)
+	if errors.Is(err, hookexec.ErrPeerAccountUnverifiable) && runtime.GOOS == "darwin" {
+		openClawUnverifiedAccountOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "[gateway] WARNING: macOS cannot verify that the OpenClaw listener belongs to %s; connecting without that check (separate-user layout)\n", *p)
+		})
+		return true
+	}
+	return err == nil
 }
 
 // openClawListenerOwnerChecked reports whether conn's listener account is

@@ -7440,6 +7440,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 	if err != nil {
 		return connector.SetupOpts{}, err
 	}
+	setOpenClawListenerAccount(cfg.Connectors.OpenClaw.PluginAccount)
 	return connector.SetupOpts{
 		DataDir:                  cfg.DataDir,
 		CodexOtelEnvironment:     cfg.Environment,
