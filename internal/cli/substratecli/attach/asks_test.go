@@ -512,7 +512,7 @@ func TestAskGoneClosesPromptAndStop(t *testing.T) {
 	_, _ = r.scr.Write([]byte("held-2"))
 	r.u.stop()
 	r.scr.end()
-	if r.mode() != modeNone || !strings.Contains(r.out.String(), "held-2") || !strings.HasSuffix(r.out.String(), "\x1b[2K\x1b8") {
+	if r.mode() != modeNone || !strings.Contains(r.out.String(), "held-2") || !strings.HasSuffix(r.out.String(), "\x1b[2K\x1b8"+modesOff) {
 		t.Fatalf("stop did not release the terminal: %q", r.out.String())
 	}
 	r.u.update([]Ask{myAsk("k3")})
