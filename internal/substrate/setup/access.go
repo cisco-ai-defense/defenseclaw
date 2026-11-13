@@ -52,14 +52,37 @@ func (p *AccessPolicy) binding(role string) *Binding {
 	return &p.Bindings[len(p.Bindings)-1]
 }
 
-// Members returns the members holding role.
+// Members returns the members holding role, from every binding of it.
 func (p AccessPolicy) Members(role string) []string {
+	var out []string
 	for _, b := range p.Bindings {
 		if b.Role == role {
-			return b.Members
+			out = append(out, b.Members...)
 		}
 	}
-	return nil
+	return out
+}
+
+// mergeRoles folds bindings of the same role into one, in first-seen
+// order. The policy writers edit the first binding of a role, so a second
+// one (written outside DefenseClaw) would keep its members out of their
+// reach: a foreign editor of a launcher atespace would survive the
+// bootstrap.
+func mergeRoles(bindings []Binding) []Binding {
+	var out []Binding
+	for _, b := range bindings {
+		i := slices.IndexFunc(out, func(o Binding) bool { return o.Role == b.Role })
+		if i < 0 {
+			out = append(out, Binding{Role: b.Role, Members: append([]string{}, b.Members...)})
+			continue
+		}
+		for _, m := range b.Members {
+			if !slices.Contains(out[i].Members, m) {
+				out[i].Members = append(out[i].Members, m)
+			}
+		}
+	}
+	return out
 }
 
 func (p *AccessPolicy) normalize() {

@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,8 +55,10 @@ type substrateClusterFlags struct {
 	substrateNS string
 	installFile string
 	configFile  string
-	timeout     time.Duration
-	com         substrateCommon
+	// managedAtespaces is the chart's managedAtespaces (openfga_grants).
+	managedAtespaces []string
+	timeout          time.Duration
+	com              substrateCommon
 }
 
 func (f *substrateClusterFlags) add(cmd *cobra.Command) {
@@ -73,19 +76,13 @@ func (f *substrateClusterFlags) addKube(cmd *cobra.Command) {
 	fl.StringVar(&f.substrateNS, "substrate-namespace", "ate-system", "namespace Agent Substrate runs in")
 	fl.StringVar(&f.installFile, "install-file", "", "the SubstrateInstall file you gave ate-setup (the callout and router settings are read from it)")
 	fl.StringVar(&f.configFile, "config", "", "DefenseClaw config.yaml (default: read from the cluster)")
+	fl.StringSliceVar(&f.managedAtespaces, "managed-atespaces", nil, "the chart's managedAtespaces, where DefenseClaw must be an editor (comma-separated)")
 	fl.DurationVar(&f.timeout, "timeout", 30*time.Second, "give up on the cluster after this long")
 }
 
 // substrateKubectl runs kubectl; tests replace it.
 var substrateKubectl = func(ctx context.Context, f *substrateClusterFlags, args ...string) ([]byte, error) {
-	var pre []string
-	if f.kubeconfig != "" {
-		pre = append(pre, "--kubeconfig", f.kubeconfig)
-	}
-	if f.kubeContext != "" {
-		pre = append(pre, "--context", f.kubeContext)
-	}
-	cmd := exec.CommandContext(ctx, "kubectl", append(pre, args...)...)
+	cmd := exec.CommandContext(ctx, "kubectl", kubectlArgs(f, args...)...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
@@ -121,7 +118,10 @@ type kubeItem struct {
 	Spec struct {
 		Replicas       *int   `json:"replicas"`
 		HolderIdentity string `json:"holderIdentity"`
-		Template       struct {
+		// A ClusterTrustBundle's signer and PEM bundle.
+		SignerName  string `json:"signerName"`
+		TrustBundle string `json:"trustBundle"`
+		Template    struct {
 			Spec struct {
 				Containers []struct {
 					Name  string `json:"name"`
@@ -280,13 +280,20 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 					KeysURL string `yaml:"keys_url"`
 				} `yaml:"identity"`
 				API struct {
-					Address string `yaml:"address"`
+					Address    string `yaml:"address"`
+					ServerName string `yaml:"server_name"`
 				} `yaml:"api"`
+				Services struct {
+					Actor string `yaml:"actor"`
+				} `yaml:"services"`
+				Launcher map[string][]string `yaml:"launcher_atespaces"`
 			} `yaml:"substrate"`
 		}
 		if err := yaml.Unmarshal([]byte(cfgText), &doc); err == nil {
 			o.Issuer = doc.Substrate.Identity.Issuer
 			keysCfg.Identity.KeysURL, keysCfg.API.Address = doc.Substrate.Identity.KeysURL, doc.Substrate.API.Address
+			keysCfg.API.ServerName, keysCfg.Services.Actor = doc.Substrate.API.ServerName, doc.Substrate.Services.Actor
+			keysCfg.LauncherAtespaces = doc.Substrate.Launcher
 			if doc.Substrate.Supported != "" {
 				o.SupportedVersions = doc.Substrate.Supported
 			}
@@ -311,8 +318,12 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			}
 		}
 	}
-	// Not read here: the snapshot bucket, the access policies and the actor
-	// listener's routes. The checks say so as warnings or skips.
+	// The snapshot bucket, the access policies and the actor listener's
+	// routes (substrate_fleet_readers.go).
+	readSnapshotBucket(cctx, f, &o, settings[setup.KeySnapshotLocation])
+	api, apiErr := substrateAPITarget(keysCfg.API.Address, keysCfg.API.ServerName, f.substrateNS)
+	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), api, apiErr)
+	readActorRoutes(cctx, f, &o, keysCfg.Services.Actor)
 	r.ProductVersion = appVersion
 	r.Now = time.Now()
 	return o, r, nil
@@ -382,6 +393,21 @@ func serviceProxyPath(raw string) (serviceProxy, bool) {
 	}
 	base := "/api/v1/namespaces/" + parts[1] + "/services/https:" + parts[0] + ":" + port + "/proxy"
 	return serviceProxy{keys: base + u.EscapedPath(), discovery: base + "/.well-known/openid-configuration"}, true
+}
+
+// launcherAtespaceList is every atespace of substrate.launcher_atespaces,
+// sorted and once each.
+func launcherAtespaceList(byProfile map[string][]string) []string {
+	var out []string
+	for _, spaces := range byProfile {
+		for _, a := range spaces {
+			if !slices.Contains(out, a) {
+				out = append(out, a)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 func imageTag(image string) string {

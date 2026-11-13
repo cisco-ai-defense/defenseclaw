@@ -20,12 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
 const fleetInstallOK = `apiVersion: install.ate.dev/v1alpha1
@@ -34,6 +37,7 @@ atenet.dataplane: envoy
 atenet.egress.additionalExtprocService: defenseclaw-system/defenseclaw-callout:9443
 ingressAllowedSPIFFEIDs: spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
 actorJWT.issuer: https://idp.cluster-a.example.test
+storage.snapshotLocation: s3://dc-snapshots-e1/snapshots/
 `
 
 func writeInstall(t *testing.T, body string) string {
@@ -45,9 +49,12 @@ func writeInstall(t *testing.T, body string) string {
 	return p
 }
 
-// fakeKubectl answers the reads collectFleet makes.
+// fakeKubectl answers the reads collectFleet makes, and fakes the other
+// readers (port-forward, the access policies, the object store CLI) for a
+// healthy cluster.
 func fakeKubectl(t *testing.T, fail error) {
 	t.Helper()
+	fakeFleetReaders(t, fail)
 	old := substrateKubectl
 	substrateKubectl = func(_ context.Context, _ *substrateClusterFlags, args ...string) ([]byte, error) {
 		if fail != nil {
@@ -68,7 +75,9 @@ func fakeKubectl(t *testing.T, fail error) {
 		case strings.HasPrefix(joined, "get leases.coordination.k8s.io"):
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"holderIdentity":"pod-1"}}]}`), nil
 		case strings.HasPrefix(joined, "get configmaps -n defenseclaw-system"):
-			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n"}}]}`), nil
+			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n  launcher_atespaces:\n    eng: [eng-web]\n"}}]}`), nil
+		case strings.HasPrefix(joined, "get nodes -l topology.kubernetes.io/region"):
+			return []byte(`{"items":[{"metadata":{"name":"n1","labels":{"topology.kubernetes.io/region":"us-east-1"}}}]}`), nil
 		// The idp Service through the API server's Service proxy
 		// (GAP-0194): its key set and its discovery document.
 		case joined == "get --raw /api/v1/namespaces/ate-system/services/https:idp:443/proxy/openid/v1/jwks":
@@ -101,9 +110,17 @@ func TestSubstrateVerifyReadsTheClusterAndPasses(t *testing.T) {
 	for _, c := range doc.Checks {
 		status[c.ID] = c.Status
 	}
+	// Every check passes on a healthy cluster: none is left unread
+	// (GAP-0200, GAP-0209).
+	for _, c := range doc.Checks {
+		if c.Status != fleet.Pass {
+			t.Errorf("check %s = %s %q, want pass", c.ID, c.Status, c.Message)
+		}
+	}
 	for id, want := range map[string]string{
 		fleet.CheckSubstrateVersion: fleet.Pass, fleet.CheckCallout: fleet.Pass, fleet.CheckIngressClients: fleet.Pass,
 		fleet.CheckAPIAccess: fleet.Pass, fleet.CheckIssuer: fleet.Pass, fleet.CheckActorKeys: fleet.Pass,
+		fleet.CheckBucket: fleet.Pass, fleet.CheckGrants: fleet.Pass, fleet.CheckActorRoutes: fleet.Pass,
 	} {
 		if status[id] != want {
 			t.Errorf("check %s = %q, want %q (%+v)", id, status[id], want, status)
@@ -194,6 +211,84 @@ func TestSubstrateDoctorReadsClusterChecksWithKubectl(t *testing.T) {
 	if got := doctorKubeChecks(t.Context(), kf); len(got) != 1 || got[0].Status != doctorFail || !strings.Contains(got[0].Summary, "--install-file") {
 		t.Errorf("without the install file doctor must say so: %+v", got)
 	}
+}
+
+// fakeFleetReaders fakes the port-forward (an actor listener that answers
+// 401 on its routes and 404 elsewhere, as the real one does without a
+// token), the access policies (DefenseClaw's grants in place) and the aws
+// CLI (an encrypted, private, expiring bucket in the cluster's region).
+func fakeFleetReaders(t *testing.T, fail error) {
+	t.Helper()
+	oldPF, oldAP, oldCLI := substratePortForward, substrateAccessPolicies, substrateCloudCLI
+	t.Cleanup(func() { substratePortForward, substrateAccessPolicies, substrateCloudCLI = oldPF, oldAP, oldCLI })
+	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fleet.ActorRouteAllowed(r.RequestURI) {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(actor.Close)
+	substratePortForward = func(_ context.Context, _ *substrateClusterFlags, _, target string, _ int) (string, func(), error) {
+		if fail != nil {
+			return "", nil, fail
+		}
+		if target != "svc/defenseclaw-actor" {
+			return "", nil, errors.New("unexpected port-forward to " + target)
+		}
+		return strings.TrimPrefix(actor.URL, "http://"), func() {}, nil
+	}
+	policies := fleetHealthyPolicies("defenseclaw-system", "eng-web")
+	substrateAccessPolicies = func(context.Context, *substrateClusterFlags, apiTarget) (accessPolicyReader, error) {
+		if fail != nil {
+			return nil, fail
+		}
+		return fakePolicyReader(policies), nil
+	}
+	substrateCloudCLI = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if fail != nil {
+			return nil, fail
+		}
+		if name != "aws" || len(args) < 2 {
+			return nil, errors.New("unexpected cloud CLI call")
+		}
+		if s3, ok := fakeS3Healthy[args[1]]; ok && args[0] == "s3api" {
+			return []byte(s3), nil
+		}
+		return nil, errors.New("unexpected aws call: " + strings.Join(args, " "))
+	}
+}
+
+var fakeS3Healthy = map[string]string{
+	"get-bucket-location":                `{"LocationConstraint":null}`,
+	"get-bucket-encryption":              `{"ServerSideEncryptionConfiguration":{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms"}}]}}`,
+	"get-public-access-block":            `{"PublicAccessBlockConfiguration":{"BlockPublicAcls":true,"IgnorePublicAcls":true,"BlockPublicPolicy":true,"RestrictPublicBuckets":true}}`,
+	"get-bucket-lifecycle-configuration": `{"Rules":[{"ID":"x","Status":"Enabled","Filter":{"Prefix":"snapshots/"},"Expiration":{"Days":30}}]}`,
+}
+
+type fakePolicyReader map[string]*setup.AccessPolicy
+
+func (f fakePolicyReader) GetAccessPolicy(_ context.Context, atespace string) (*setup.AccessPolicy, error) {
+	return f[atespace], nil
+}
+func (fakePolicyReader) Close() error { return nil }
+
+// fleetHealthyPolicies are the grants the chart bootstrap writes.
+func fleetHealthyPolicies(ns string, launcher ...string) map[string]*setup.AccessPolicy {
+	members := func(ps []string) []string {
+		out := make([]string, len(ps))
+		for i, p := range ps {
+			out[i] = setup.Member(p)
+		}
+		return out
+	}
+	out := map[string]*setup.AccessPolicy{"": {Bindings: []setup.Binding{
+		{Role: setup.RoleOwner, Members: []string{"user:admin"}},
+		{Role: setup.RoleViewer, Members: members(setup.ChartGlobalViewers(ns))}}}}
+	for _, a := range launcher {
+		out[a] = &setup.AccessPolicy{Atespace: a, Bindings: []setup.Binding{{Role: setup.RoleEditor, Members: members(setup.ChartEditors(ns))}}}
+	}
+	return out
 }
 
 func TestImageTag(t *testing.T) {

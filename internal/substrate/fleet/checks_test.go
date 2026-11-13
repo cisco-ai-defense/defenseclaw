@@ -53,6 +53,18 @@ func TestCheckBucket(t *testing.T) {
 	expect(t, CheckSnapshotBucket(o), Warn, "could not be read")
 	o.Bucket = nil
 	expect(t, CheckSnapshotBucket(o), Skip, "no object-storage")
+	o = healthyCluster()
+	o.Bucket.Missing = true
+	expect(t, CheckSnapshotBucket(o), Fail, "does not exist")
+	o = healthyCluster()
+	o.Bucket.Err = "AccessDenied"
+	expect(t, CheckSnapshotBucket(o), Warn, "could not be read from here (AccessDenied)")
+	o = healthyCluster()
+	o.Bucket.PublicAccessBlocked, o.Bucket.Notes = nil, []string{"inherited"}
+	expect(t, CheckSnapshotBucket(o), Warn, ": inherited")
+	if strings.Contains(CheckSnapshotBucket(o).Message, "public access settings could not be read") {
+		t.Error("a note replaces the generic could-not-read")
+	}
 }
 
 func TestCheckGrants(t *testing.T) {
@@ -107,8 +119,15 @@ func TestCheckActorRoutes(t *testing.T) {
 	expect(t, CheckActorListenerRoutes(o), Pass, "only actor routes")
 	o.ActorRoutes = append(o.ActorRoutes, "/api/v1/substrate/actors", "/health")
 	expect(t, CheckActorListenerRoutes(o), Fail, "/api/v1/substrate/actors, /health")
-	o.ActorRoutes = nil
-	expect(t, CheckActorListenerRoutes(o), Warn, "could not read")
+	o.ActorRoutes = []string{}
+	expect(t, CheckActorListenerRoutes(o), Warn, "answered none of the actor routes")
+	o.ActorRoutes, o.ActorRoutesNote = nil, "no port-forward"
+	expect(t, CheckActorListenerRoutes(o), Warn, "could not read the actor listener's routes (no port-forward)")
+	for _, p := range ActorListenerProbes {
+		if strings.HasPrefix(p, "/api/v1/substrate/hook/") && !ActorRouteAllowed(p) {
+			t.Errorf("probe %s is an actor route", p)
+		}
+	}
 	for route, want := range map[string]bool{
 		"/api/v1/substrate/hook/claudecode": true, "/api/v1/substrate/relay/verify": true, "/llm/bedrock/model/x": true, "/v1/traces": true,
 		"/api/v1/substrate/hook/": false, "/api/v1/substrate/asks": false, "/api/v1/substrate/policy/explain": false,

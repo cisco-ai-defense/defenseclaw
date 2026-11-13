@@ -40,7 +40,7 @@ func TestCheckActorKeysVerify(t *testing.T) {
 	expect(t, CheckActorKeysVerify(o), Warn, "could not be read")
 	o = base
 	o.Keys, o.KeysNote = nil, "it is not a Service of this cluster"
-	expect(t, CheckActorKeysVerify(o), Warn, "admin doctor")
+	expect(t, CheckActorKeysVerify(o), Warn, "substrate doctor --cluster")
 	o = base
 	o.Issuer = ""
 	expect(t, CheckActorKeysVerify(o), Skip, "not set")

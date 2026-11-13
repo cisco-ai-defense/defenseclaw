@@ -837,7 +837,7 @@ func substrateActorKeySet(c *config.Config) (*identity.KeySet, error) {
 	})
 }
 
-// substrateActorKeysCheck is the admin doctor row for the actor token key
+// substrateActorKeysCheck is the gateway doctor row (GET /api/v1/substrate/doctor) for the actor token key
 // set: the keys URL answers with signing keys, and the issuer the idp
 // serves (what ate-api-server puts in iss) is substrate.identity.issuer.
 func substrateActorKeysCheck(ctx context.Context, ks *identity.KeySet) gateway.SubstrateCheck {

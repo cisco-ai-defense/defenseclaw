@@ -30,7 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
-// Gateway-side checks for `defenseclaw substrate admin doctor`, from where
+// Gateway-side checks for `defenseclaw substrate doctor --cluster`, from where
 // the gateway runs (its DNS, its network):
 //
 //	GET /api/v1/substrate/doctor   (administrators)  {"checks":[{id,status,detail,fix}]}

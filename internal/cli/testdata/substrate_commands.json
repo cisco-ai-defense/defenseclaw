@@ -342,6 +342,12 @@
         "usage": "kubectl configuration file (default: kubectl's own)"
       },
       {
+        "name": "managed-atespaces",
+        "type": "stringSlice",
+        "default": "[]",
+        "usage": "the chart's managedAtespaces, where DefenseClaw must be an editor (comma-separated)"
+      },
+      {
         "name": "namespace",
         "type": "string",
         "default": "defenseclaw-system",
@@ -1345,6 +1351,12 @@
         "usage": "kubectl configuration file (default: kubectl's own)"
       },
       {
+        "name": "managed-atespaces",
+        "type": "stringSlice",
+        "default": "[]",
+        "usage": "the chart's managedAtespaces, where DefenseClaw must be an editor (comma-separated)"
+      },
+      {
         "name": "namespace",
         "type": "string",
         "default": "defenseclaw-system",
@@ -1537,6 +1549,12 @@
         "name": "kubeconfig",
         "type": "string",
         "usage": "kubectl configuration file (default: kubectl's own)"
+      },
+      {
+        "name": "managed-atespaces",
+        "type": "stringSlice",
+        "default": "[]",
+        "usage": "the chart's managedAtespaces, where DefenseClaw must be an editor (comma-separated)"
       },
       {
         "name": "namespace",
