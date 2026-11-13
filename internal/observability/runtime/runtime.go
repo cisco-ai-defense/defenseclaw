@@ -497,7 +497,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
-			if export == observability.RemoteExportDefault {
+			if export == observability.RemoteExportDefault && !observability.ExportAfterCallCommit(ctx) {
 				runtime.dispatchOptional(ctx, lease, graph, outcome)
 			}
 		}
@@ -545,6 +545,11 @@ func (runtime *Runtime) dispatchAfterLocalCommit(
 			dispatchCtx := context.WithoutCancel(ctx)
 			if audit.DeferAfterCallWrites(ctx, store, func() {
 				defer fork.Release()
+				if observability.ExportAfterCallCommit(dispatchCtx) && !audit.CallWritesCommitted(dispatchCtx) {
+					// The row of record did not commit: the call exports the
+					// decision with its fail-mode verdict instead.
+					return
+				}
 				runtime.dispatchOptional(dispatchCtx, fork, graph, outcome)
 			}) {
 				return

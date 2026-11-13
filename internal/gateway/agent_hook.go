@@ -1677,6 +1677,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// gets the fail-mode verdict instead of its computed allow, unless that
 	// allow was already delivered.
 	recordPanic()
+	// decisionInAudit: the hook_decision record is the call's row of record
+	// and was written in the audit section with the connector-hook record
+	// export only (#1384); AuditPersisted is then its commit.
+	decisionInAudit := false
 	if !replay {
 		var auditErr error
 		safeSection("audit", func() {
@@ -1696,12 +1700,25 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// The rows the call queued commit with its audit row, and the
 			// verdict waits for that commit, as it waited for its row alone.
 			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
-			auditErr = a.logConnectorHookAuditEnvelope(auditCtx, env)
+			connectorCtx := auditCtx
+			if a.hookDecisionIsRowOfRecord(ctx, req, resp, env, panicked) {
+				connectorCtx, decisionInAudit = a.writeHookDecisionRowOfRecord(auditCtx, req, resp, env)
+			}
+			auditErr = a.logConnectorHookAuditEnvelope(connectorCtx, env)
+			if auditErr != nil && decisionInAudit {
+				// The connector-hook record failed beside the row of record:
+				// the call is unaudited as in 1.0.9, so its queued
+				// hook_decision row and export are dropped, and the decision
+				// is recorded below with the fail-mode verdict.
+				audit.AbandonCallWrites(auditCtx, auditErr)
+				decisionInAudit = false
+			}
 			audit.FlushCallWrites(ctx)
 			if auditErr == nil {
 				auditErr = auditOutcome.Err()
 			}
 			result.AuditPersisted = auditErr == nil
+			result.DecisionSettled = decisionInAudit && result.AuditPersisted
 		})
 		// A call backed by a pending occurrence (w3-g3-obs; only a
 		// receipt-capable delivery has one) is recovered from the published
@@ -1822,6 +1839,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",
 					connectorName, req.HookEventName)
 			}
+		} else if decisionInAudit {
+			// The record was written in the audit section; its metrics are
+			// counted here, as every decision's.
+			a.recordHookDecisionMetricsOfCall(ctx, req, resp, env, panicked)
 		}
 		// With no companion to persist, an enforced hook is
 		// notification-ready as soon as its audit row has landed.

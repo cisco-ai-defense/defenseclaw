@@ -22,6 +22,31 @@ func WithExportOnlyInCall(ctx context.Context) context.Context {
 	return context.WithValue(ctx, exportOnlyInCallKey{}, true)
 }
 
+// WithExportAfterCallCommit marks an occurrence whose export waits for its
+// hook call's writes to commit and is dropped when they did not: the
+// hook_decision record that is the only local row of a benign per-user
+// decision. When its row cannot be written the call answers with its
+// fail-mode verdict and exports a new decision record that carries it, so an
+// export never holds a verdict the agent did not get (#1384). Other records
+// keep GAP-1536: exported also when the local store is down.
+func WithExportAfterCallCommit(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, exportAfterCallCommitKey{}, true)
+}
+
+// ExportAfterCallCommit reports whether ctx carries WithExportAfterCallCommit.
+func ExportAfterCallCommit(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	marked, _ := ctx.Value(exportAfterCallCommitKey{}).(bool)
+	return marked
+}
+
+type exportAfterCallCommitKey struct{}
+
 // ExportOnlyInCall reports whether ctx carries WithExportOnlyInCall.
 func ExportOnlyInCall(ctx context.Context) bool {
 	if ctx == nil {

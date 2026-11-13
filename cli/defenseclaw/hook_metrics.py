@@ -25,8 +25,10 @@ representations identically, without substring matches such as finding
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from typing import Any
+import math
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
 _BLOCK_ACTIONS = frozenset({"block", "deny"})
 _ALERT_ACTIONS = frozenset({"alert", "warn"})
@@ -354,3 +356,265 @@ def connector_hook_connector(
     if normalized:
         return normalized
     return parse_detail_tokens(details).get("connector", "").strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# The verdict of a hook row, whichever kind holds it (S8 R4, #1384).
+#
+# A hook decision is stored as a ``connector-hook`` row (the defenseclaw.hook.v1
+# envelope plus its ``key=value`` details) and as a ``hook_decision`` row (the
+# canonical v8 record, body keys ``defenseclaw.*``). Since 1.0.10 a benign
+# per-user allow keeps only its ``hook_decision`` row locally (the
+# connector-hook record is exported, not written); every other decision, and
+# all 1.0.9 data, keeps both rows, linked by the semantic event id of their
+# projected records. Both row kinds stay live: every reader takes the verdict
+# from :func:`hook_row_verdict` and counts a decision once with
+# :func:`count_once_hook_rows` or :func:`lone_hook_decision_sql`.
+# ---------------------------------------------------------------------------
+
+CONNECTOR_HOOK_ACTION = "connector-hook"
+HOOK_DECISION_ACTION = "hook_decision"
+HOOK_ROW_ACTIONS = (CONNECTOR_HOOK_ACTION, HOOK_DECISION_ACTION)
+# Rows that pair a hook_decision row of the same semantic event: a
+# synthetic Stop (connector-hook-synthetic) also has a hook_decision row.
+CONNECTOR_HOOK_PAIR_ACTIONS = (CONNECTOR_HOOK_ACTION, "connector-hook-synthetic")
+
+_HOOK_DECISION_ACTION_KEY = "defenseclaw.guardrail.effective_action"
+_HOOK_DECISION_RAW_ACTION_KEY = "defenseclaw.guardrail.raw_action"
+_HOOK_DECISION_MODE_KEY = "defenseclaw.guardrail.mode"
+_HOOK_DECISION_WOULD_BLOCK_KEY = "defenseclaw.guardrail.would_block"
+_HOOK_DECISION_ENFORCED_KEY = "defenseclaw.guardrail.enforced"
+_HOOK_DECISION_SEVERITY_KEY = "defenseclaw.security.severity"
+_HOOK_DECISION_REASON_KEY = "defenseclaw.guardrail.reason"
+_HOOK_DECISION_EVENT_KEY = "defenseclaw.hook.event"
+_HOOK_DECISION_RULE_IDS_KEY = "defenseclaw.guardrail.rule_ids"
+_HOOK_DECISION_LATENCY_KEY = "defenseclaw.guardrail.latency_ms"
+
+# The body keys a reader needs to classify a hook_decision row; summary
+# queries project these instead of the whole record.
+HOOK_DECISION_VERDICT_KEYS = (
+    _HOOK_DECISION_ACTION_KEY,
+    _HOOK_DECISION_RAW_ACTION_KEY,
+    _HOOK_DECISION_MODE_KEY,
+    _HOOK_DECISION_WOULD_BLOCK_KEY,
+    _HOOK_DECISION_ENFORCED_KEY,
+    _HOOK_DECISION_SEVERITY_KEY,
+    _HOOK_DECISION_EVENT_KEY,
+)
+
+
+@dataclass(frozen=True)
+class HookRowVerdict:
+    """The decision one hook row records, read from either row kind.
+
+    ``decision`` is the Overview classification (``allow``, ``alert`` or
+    ``block``) :func:`connector_hook_decision` gives a connector-hook row.
+    ``reason`` is set only when the row stores it as text (a redaction
+    profile can replace it).
+    """
+
+    kind: str
+    decision: str
+    action: str = ""
+    raw_action: str = ""
+    severity: str = ""
+    mode: str = ""
+    would_block: bool = False
+    enforced: bool = False
+    reason: str = ""
+    event: str = ""
+    connector: str = ""
+    rule_ids: tuple[str, ...] = ()
+    elapsed_ms: int | None = None
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _rule_ids(value: Any) -> tuple[str, ...]:
+    if isinstance(value, str):
+        value = [part for part in value.split(",")]
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item).strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _milliseconds(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number) or number < 0:
+        return None
+    return int(number)
+
+
+def hook_row_verdict(
+    action: str,
+    details: str = "",
+    structured: Any = None,
+    enforced: Any = None,
+    *,
+    connector: str = "",
+    target: str = "",
+) -> HookRowVerdict | None:
+    """Return the verdict of a ``connector-hook`` or ``hook_decision`` row.
+
+    ``structured`` is the row's structured envelope (connector-hook) or its
+    record body (hook_decision: ``payload_json``, or ``$.body`` of the
+    projected record), as a mapping or JSON text. ``enforced`` is the
+    audit_events.enforced column. Any other action returns None.
+    """
+
+    kind = str(action or "").strip().lower()
+    payload = _structured_mapping(structured)
+    if kind == CONNECTOR_HOOK_ACTION:
+        tokens = parse_detail_tokens(details)
+
+        def field(name: str) -> str:
+            value = payload.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return str(tokens.get(name, "")).strip()
+
+        would_block_value = payload.get("would_block") if "would_block" in payload else tokens.get("would_block")
+        explicit = _optional_bool(enforced)
+        if explicit is None and "enforced" in payload:
+            explicit = _optional_bool(payload.get("enforced"))
+        reason = payload.get("reason") if "reason" in payload else tokens.get("reason", "")
+        return HookRowVerdict(
+            kind=CONNECTOR_HOOK_ACTION,
+            decision=connector_hook_decision(details, structured, enforced),
+            action=field("action").lower(),
+            raw_action=field("raw_action").lower(),
+            severity=field("severity").upper(),
+            mode=field("mode").lower(),
+            would_block=_optional_bool(would_block_value) is True,
+            enforced=explicit is True,
+            reason=_text(reason),
+            event=_text(payload.get("event")) or str(target or "").strip(),
+            connector=str(connector or "").strip().lower() or field("connector").lower(),
+            rule_ids=_rule_ids(payload.get("rule_ids")),
+            elapsed_ms=_milliseconds(payload.get("elapsed_ms", tokens.get("elapsed_ms"))),
+        )
+    if kind != HOOK_DECISION_ACTION:
+        return None
+    effective = _text(payload.get(_HOOK_DECISION_ACTION_KEY)).lower()
+    raw_action = _text(payload.get(_HOOK_DECISION_RAW_ACTION_KEY)).lower()
+    mode = _text(payload.get(_HOOK_DECISION_MODE_KEY)).lower()
+    would_block = _optional_bool(payload.get(_HOOK_DECISION_WOULD_BLOCK_KEY)) is True
+    is_enforced = _optional_bool(enforced) is True or _optional_bool(payload.get(_HOOK_DECISION_ENFORCED_KEY)) is True
+    # The connector-hook classifier, fed the same facts: an enforced call is a
+    # block, a block action outside observe mode a block, an alert or a latent
+    # block an alert. The record states enforced=false for every call it did
+    # not enforce; the connector-hook row leaves the column NULL there, so only
+    # a true value is passed on.
+    decision = connector_hook_decision(
+        "",
+        {"action": effective, "raw_action": raw_action, "mode": mode, "would_block": would_block},
+        True if is_enforced else None,
+    )
+    return HookRowVerdict(
+        kind=HOOK_DECISION_ACTION,
+        decision=decision,
+        action=effective,
+        raw_action=raw_action,
+        severity=_text(payload.get(_HOOK_DECISION_SEVERITY_KEY)).upper(),
+        mode=mode,
+        would_block=would_block,
+        enforced=is_enforced,
+        reason=_text(payload.get(_HOOK_DECISION_REASON_KEY)),
+        event=_text(payload.get(_HOOK_DECISION_EVENT_KEY)) or str(target or "").strip(),
+        connector=str(connector or "").strip().lower(),
+        rule_ids=_rule_ids(payload.get(_HOOK_DECISION_RULE_IDS_KEY)),
+        elapsed_ms=_milliseconds(payload.get(_HOOK_DECISION_LATENCY_KEY)),
+    )
+
+
+def hook_row_decision(action: str, details: str = "", structured: Any = None, enforced: Any = None) -> str:
+    """``allow``, ``alert`` or ``block`` for a hook row of either kind; "" for any other row."""
+
+    if str(action or "").strip().lower() == CONNECTOR_HOOK_ACTION:
+        # The hot path of every Overview tick: no verdict object.
+        return connector_hook_decision(details, structured, enforced)
+    verdict = hook_row_verdict(action, details, structured, enforced)
+    return verdict.decision if verdict is not None else ""
+
+
+def aggregate_hook_row_decision(action: str, details: str = "", structured: Any = None, enforced: Any = None) -> str:
+    """SQLite callback form of :func:`hook_row_decision` for aggregate scans."""
+
+    if str(action or "").strip().lower() == CONNECTOR_HOOK_ACTION:
+        return aggregate_connector_hook_decision(details, structured, enforced)
+    return hook_row_decision(action, details, structured, enforced)
+
+
+T = TypeVar("T")
+
+
+def count_once_hook_rows(rows: Iterable[T]) -> list[T]:
+    """Keep one row per hook decision, in order; rows of other actions pass through.
+
+    The connector-hook row is the decision when the store has one. A
+    hook_decision row is the decision only when it names its semantic event
+    and no connector-hook row of that event is among *rows*; a hook_decision
+    row with no semantic event id always has its connector-hook row locally
+    (the gateway writes a hook_decision row alone only for a correlated call).
+    Rows are read through ``action`` and ``semantic_event_id`` attributes.
+    """
+
+    items = list(rows)
+    paired = {
+        str(getattr(row, "semantic_event_id", "") or "")
+        for row in items
+        if str(getattr(row, "action", "") or "").strip().lower() in CONNECTOR_HOOK_PAIR_ACTIONS
+    }
+    paired.discard("")
+    kept: list[T] = []
+    for row in items:
+        if str(getattr(row, "action", "") or "").strip().lower() == HOOK_DECISION_ACTION:
+            semantic = str(getattr(row, "semantic_event_id", "") or "")
+            if not semantic or semantic in paired:
+                continue
+        kept.append(row)
+    return kept
+
+
+def hook_semantic_event_id_sql(projected: str = "projected_record_json") -> str:
+    """SQL expression: the semantic event id of a row's projected record, else NULL."""
+
+    return (
+        f"(CASE WHEN json_valid(COALESCE({projected}, ''))"
+        f" THEN json_extract({projected}, '$.correlation.semantic_event_id') END)"
+    )
+
+
+def hook_decision_body_sql(payload: str = "payload_json", projected: str = "projected_record_json") -> str:
+    """SQL expression: the body of a native record (payload_json, else the projected record's body)."""
+
+    return (
+        f"COALESCE(NULLIF({payload}, ''), CASE WHEN json_valid(COALESCE({projected}, ''))"
+        f" THEN json_extract({projected}, '$.body') END)"
+    )
+
+
+def lone_hook_decision_sql(alias: str = "", table: str = "audit_events") -> str:
+    """SQL predicate: the row is a hook_decision row that is its decision's only hook row.
+
+    The connector-hook ids of the subquery are computed once per statement
+    (an uncorrelated ``NOT IN``), so a scan costs one pass over each kind.
+    """
+
+    prefix = f"{alias}." if alias else ""
+    own = hook_semantic_event_id_sql(f"{prefix}projected_record_json")
+    sibling = hook_semantic_event_id_sql("sibling.projected_record_json")
+    return (
+        f"({prefix}action = '{HOOK_DECISION_ACTION}'"
+        f" AND {own} IS NOT NULL"
+        f" AND {own} NOT IN (SELECT {sibling} FROM {table} AS sibling"
+        f" WHERE sibling.action IN ('{CONNECTOR_HOOK_PAIR_ACTIONS[0]}', '{CONNECTOR_HOOK_PAIR_ACTIONS[1]}')"
+        f" AND {sibling} IS NOT NULL))"
+    )
