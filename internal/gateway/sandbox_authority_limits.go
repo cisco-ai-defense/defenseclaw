@@ -71,14 +71,6 @@ const (
 	// answers four sandboxes at 25 calls a second inside the hook window.
 	sandboxUserHookRate  = 100
 	sandboxUserHookBurst = 200
-	// sandboxInFlightSizingRate sizes the in-flight bounds
-	// (sandboxWindowCapacity): the requests a stalled gateway holds over one
-	// request lifetime at the earlier 40 calls a second, plus the burst. A
-	// call at the new rate is answered in well under a second, so it holds
-	// far fewer; keeping the bound near its earlier size keeps the
-	// gateway-wide minimum (hookGlobalInFlightMin, four of the largest) and
-	// the memory it can hold for queued bodies where they were.
-	sandboxInFlightSizingRate = 40
 )
 
 var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
@@ -87,12 +79,23 @@ var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlight
 // lifetime for hooks and the gateway's receipt window for acknowledgements.
 // These are separate HTTP requests with separate account rate buckets.
 func managedSandboxInFlightLimits() (hook, receipt int) {
+	return sandboxWindowCapacity(sandboxHookAttemptWindow()), sandboxWindowCapacity(sandboxHookReceiptWindow)
+}
+
+// sandboxHookAttemptWindow is the longest lifetime of one rendered ingress
+// attempt.
+func sandboxHookAttemptWindow() time.Duration {
 	first, retry := connector.SandboxHookAttemptBudgets()
-	return sandboxWindowCapacity(max(first, retry)), sandboxWindowCapacity(sandboxHookReceiptWindow)
+	return max(first, retry)
+}
+
+// sandboxWindowCapacityAt is the burst plus what rate admits over window.
+func sandboxWindowCapacityAt(rate int, window time.Duration) int {
+	return sandboxUserHookBurst + int((time.Duration(rate)*window+time.Second-1)/time.Second)
 }
 
 func sandboxWindowCapacity(window time.Duration) int {
-	return sandboxUserHookBurst + int((time.Duration(sandboxInFlightSizingRate)*window+time.Second-1)/time.Second)
+	return sandboxWindowCapacityAt(sandboxUserHookRate, window)
 }
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per

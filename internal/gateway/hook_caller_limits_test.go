@@ -432,7 +432,7 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 		}
 		var running []held
 		for call := range 600 {
-			now = time.Unix(4_000_000, 0).Add(time.Duration(call) * 100 * time.Millisecond)
+			now = time.Unix(4_000_000, 0).Add(time.Duration(call) * 50 * time.Millisecond)
 			kept := running[:0]
 			for _, request := range running {
 				if request.until.After(now) {
@@ -453,11 +453,11 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 	}
 	for _, service := range []time.Duration{40 * time.Millisecond, 500 * time.Millisecond, time.Second, 3 * time.Second} {
 		if refused := flood(service); refused != 0 {
-			t.Fatalf("10 calls a second taking %s each: %d of 600 refused, want 0", service, refused)
+			t.Fatalf("20 calls a second taking %s each: %d of 600 refused, want 0", service, refused)
 		}
 	}
 	if refused := flood(4 * time.Second); refused == 0 {
-		t.Fatal("10 calls a second taking 4 s each were all admitted; the in-flight bound did not apply")
+		t.Fatal("20 calls a second taking 4 s each were all admitted; the in-flight bound did not apply")
 	}
 }
 

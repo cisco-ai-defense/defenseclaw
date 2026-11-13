@@ -225,9 +225,10 @@ func TestSandboxAccountBudgetSchedule(t *testing.T) {
 // its sustained rate are admitted, the refusals name the rate (not the open
 // request bounds), and none comes before the burst is spent.
 func TestSandboxAccountBudgetRefusesOnlyTheExcess(t *testing.T) {
-	// Four sandboxes at 24 a second (96 together) for 10 s: the account
-	// bucket holds a burst of 100 and refills 40 a second.
-	out := runBudgetSchedule(t, budgetSchedule{4, 24, 10 * time.Second})
+	// Six sandboxes at 24 a second (144 together, each under its binding
+	// rate) for 10 s: the account bucket holds a burst of 200 and refills
+	// 100 a second.
+	out := runBudgetSchedule(t, budgetSchedule{6, 24, 10 * time.Second})
 	accountRate := "account " + managedHookReasonRateLimited
 	admitted := out.calls - out.refused[accountRate]
 	if other := out.refusedTotal() - out.refused[accountRate]; other != 0 {
