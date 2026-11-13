@@ -30,13 +30,6 @@ import (
 )
 
 func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
-	return parsePOSIXUnwrapping(source, startID, wrapperDepth, true)
-}
-
-// parsePOSIXUnwrapping is parsePOSIX; unwrapHost false leaves a sole
-// powershell, pwsh or cmd launcher call as the command it is, so the launcher's
-// own argv can be read (posixSoleHostCallSource).
-func parsePOSIXUnwrapping(source string, startID int64, wrapperDepth int, unwrapHost bool) parseOutput {
 	out := newParseOutput(DialectPOSIX, startID)
 	if len(source) > maxCommandBytes ||
 		len(source)*(wrapperDepth+1) > maxNestedCommandBytes {
@@ -128,12 +121,7 @@ func parsePOSIXUnwrapping(source string, startID int64, wrapperDepth int, unwrap
 	})
 
 	addPOSIXStructuralFlows(&out)
-	if unwrapHost {
-		if reduced, ok := soleHostCallReduction(&out, wrapperDepth); ok {
-			return reduced
-		}
-		expandStaticPOSIXWrappers(&out, wrapperDepth)
-	}
+	expandStaticPOSIXWrappers(&out, wrapperDepth)
 	if posixMayRebindHome(parsedSource) {
 		for i := range out.commands {
 			for j := range out.commands[i].Arguments {

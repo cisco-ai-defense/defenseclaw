@@ -19,6 +19,7 @@ package actionfacts
 import (
 	"encoding/base64"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -42,12 +43,16 @@ func hookShellArgs(t *testing.T, command string) json.RawMessage {
 	return raw
 }
 
-// A static launcher, call block or Invoke-Expression literal is the script it
-// runs: the same command, paths and status as the bare script, with the
-// launcher kept only as HostWrappers evidence.
-func TestHostWrappersAreTransparentToFacts(t *testing.T) {
+func hookShellInput(t *testing.T, tool, command string) Input {
+	t.Helper()
+	return Input{Tool: tool, Args: hookShellArgs(t, command), ActiveHome: `C:\Users\alice`}
+}
+
+// A static launcher, call block or Invoke-Expression literal has a script
+// reading: the same commands, paths and status as the bare script.
+func TestHostScriptTwinIsTheScriptTheCallRuns(t *testing.T) {
 	const bare = `Get-Content C:\tmp\a.txt`
-	bareFacts := Analyze(Input{Tool: "PowerShell", Args: hookShellArgs(t, bare)})
+	bareFacts := Analyze(hookShellInput(t, "PowerShell", bare))
 	if !bareFacts.Authoritative() || len(bareFacts.Commands) != 1 {
 		t.Fatalf("bare script facts = %#v", bareFacts)
 	}
@@ -62,39 +67,57 @@ func TestHostWrappersAreTransparentToFacts(t *testing.T) {
 		{"call block", "PowerShell", `& { Get-Content C:\tmp\a.txt }`},
 		{"invoke expression literal", "PowerShell", `Invoke-Expression 'Get-Content C:\tmp\a.txt'`},
 		{"nested launchers", "PowerShell", `powershell -c 'pwsh -c ''Get-Content C:\tmp\a.txt'''`},
-		{"cmd launcher", "PowerShell", `cmd /c type C:\tmp\a.txt`},
 		{"Git Bash running powershell.exe", "Bash", `powershell.exe -NoProfile -Command 'Get-Content C:/tmp/a.txt'`},
 		{"Git Bash running pwsh without profile switch", "Bash", `pwsh -c 'Get-Content C:/tmp/a.txt'`},
 		{"statement list", "PowerShell", `Set-Location C:\tmp; powershell -c "Get-Content C:\tmp\a.txt"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			facts := Analyze(Input{Tool: test.tool, Args: hookShellArgs(t, test.command), ActiveHome: `C:\Users\alice`})
-			want := "get-content"
-			if strings.HasPrefix(test.command, "cmd") {
-				want = "type"
+			input := hookShellInput(t, test.tool, test.command)
+			twin, ok := HostScriptTwin(input, Analyze(input))
+			if !ok {
+				t.Fatal("no script reading")
 			}
-			if len(facts.HostWrappers) == 0 || !hasExecutable(facts.Commands, want) {
-				t.Fatalf("wrapped facts = %#v", facts)
+			if len(twin.Args) != 0 || len(twin.Argv) != 0 || twin.Command == "" {
+				t.Fatalf("twin input = %#v", twin)
+			}
+			facts := Analyze(twin)
+			if !hasExecutable(facts.Commands, "get-content") {
+				t.Fatalf("script reading facts = %#v", facts)
 			}
 			for _, command := range facts.Commands {
-				if len(command.Wrappers) != 0 || command.ParentCommandID != 0 {
-					t.Fatalf("a launcher was recorded as an execution wrapper: %#v", command)
-				}
-				if command.Program == "powershell" || command.Program == "pwsh" || command.Program == "cmd" {
-					t.Fatalf("the launcher is a command of the call: %#v", facts.Commands)
+				if command.Program == "powershell" || command.Program == "pwsh" {
+					t.Fatalf("the launcher is a command of its own script reading: %#v", facts.Commands)
 				}
 			}
-			if !strings.Contains(test.name, "statement list") &&
-				(!facts.Authoritative() || facts.Parse.Dialect == DialectMixed) {
-				t.Fatalf("wrapped parse = %#v", facts.Parse)
+			if !strings.Contains(test.name, "statement list") && !facts.Authoritative() {
+				t.Fatalf("script reading parse = %#v", facts.Parse)
 			}
 		})
 	}
+	for _, command := range []string{
+		`cmd /c type C:\tmp\a.txt`,
+		`cmd.exe /d /c "type C:\tmp\a.txt"`,
+	} {
+		input := hookShellInput(t, "PowerShell", command)
+		twin, ok := HostScriptTwin(input, Analyze(input))
+		if !ok || !hasExecutable(Analyze(twin).Commands, "type") || twin.DialectHint != DialectCMD {
+			t.Fatalf("cmd launcher %q: twin=%#v ok=%v", command, twin, ok)
+		}
+	}
 }
 
-// Anything psparse cannot resolve to one static script is not unwrapped: the
-// launcher stays an ordinary command with unknown operands.
-func TestHostWrappersStayOpaqueWhenTheScriptIsNotStatic(t *testing.T) {
+// A structured argv launcher has the same reading.
+func TestHostScriptTwinReadsAStructuredLauncher(t *testing.T) {
+	input := Input{Tool: "exec", Argv: []string{"pwsh", "-c", `Get-Content C:\tmp\a.txt`}}
+	twin, ok := HostScriptTwin(input, Analyze(input))
+	if !ok || !hasExecutable(Analyze(twin).Commands, "get-content") {
+		t.Fatalf("structured launcher: twin=%#v ok=%v", twin, ok)
+	}
+}
+
+// Anything psparse cannot resolve to one static script has no reading: the
+// call stays exactly as unknown as the tokenizer left it.
+func TestHostScriptTwinIsAbsentWhenTheScriptIsNotStatic(t *testing.T) {
 	for _, test := range []struct {
 		name, command string
 	}{
@@ -105,89 +128,102 @@ func TestHostWrappersStayOpaqueWhenTheScriptIsNotStatic(t *testing.T) {
 		{"stop parsing tail", `powershell -Command --% Get-Content C:\tmp\a.txt`},
 		{"working directory", `powershell -WorkingDirectory C:\other -Command "Get-Content a.txt"`},
 		{"working directory abbreviation", `pwsh -wo C:\other -c "Get-Content a.txt"`},
+		{"working directory alias", `pwsh -wd C:\other -c "Get-Content a.txt"`},
 		{"empty argument", `pwsh -Command Get-Content ''`},
+		{"colon-glued switch", `pwsh -Command: "Get-Content C:\tmp\a.txt"`},
+		{"number word", `pwsh -Command Get-Content 0x10`},
 		{"unknown host switch", `powershell -Frobnicate -Command "Get-Content C:\tmp\a.txt"`},
 		{"start process child", `Start-Process powershell -ArgumentList '-c','Get-Content C:\tmp\a.txt'`},
 		{"arbitrary path launcher", `C:\tmp\powershell.exe -Command "Get-Content C:\tmp\a.txt"`},
 		{"encoded command that is not base64", `powershell -EncodedCommand not-base64!`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			facts := Analyze(Input{Tool: "PowerShell", Args: hookShellArgs(t, test.command)})
-			if facts.Authoritative() || len(facts.HostWrappers) != 0 {
-				t.Fatalf("an opaque launcher was unwrapped: %#v", facts)
-			}
-			if hasExecutable(facts.Commands, "get-content") {
-				t.Fatalf("the unresolved script was projected: %#v", facts.Commands)
+			input := hookShellInput(t, "PowerShell", test.command)
+			if twin, ok := HostScriptTwin(input, Analyze(input)); ok {
+				t.Fatalf("an opaque launcher has a reading: %#v", twin)
 			}
 		})
 	}
 }
 
-func TestHostWrappersKeepOpenHostPartial(t *testing.T) {
-	for _, test := range []struct {
-		name, tool, command string
-		dialect             Dialect
-	}{
-		{"cmd /k", "shell", `cmd /k "type C:\tmp\a.txt"`, DialectCMD},
-		{"powershell -NoExit", "PowerShell", `powershell -NoExit -c "Get-Content C:\tmp\a.txt"`, ""},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			facts := Analyze(Input{Tool: test.tool, Command: test.command, DialectHint: test.dialect})
-			if facts.Authoritative() || len(facts.HostWrappers) == 0 ||
-				(!hasExecutable(facts.Commands, "type") && !hasExecutable(facts.Commands, "get-content")) {
-				t.Fatalf("keep-open launcher facts = %#v", facts)
-			}
-		})
-	}
-}
-
-func TestHostWrappersStopAtTheWrapperDepth(t *testing.T) {
+func TestHostScriptTwinStopsAtTheWrapperDepth(t *testing.T) {
 	source := `Get-Content C:\tmp\a.txt`
 	for layer := 0; layer < maxWrapperDepth+1; layer++ {
 		source = `powershell -c '` + strings.ReplaceAll(source, `'`, `''`) + `'`
 	}
-	facts := Analyze(Input{Tool: "PowerShell", Args: hookShellArgs(t, source)})
-	if facts.Authoritative() || facts.Parse.Status != StatusLimitExceeded ||
-		!containsIssue(facts.Parse.Issues, IssueWrapperLimit) {
-		t.Fatalf("over-deep launchers = %#v", facts.Parse)
+	input := hookShellInput(t, "PowerShell", source)
+	if twin, ok := HostScriptTwin(input, Analyze(input)); ok {
+		t.Fatalf("over-deep launchers have a reading: %#v", twin)
 	}
 	within := `Get-Content C:\tmp\a.txt`
 	for layer := 0; layer < maxWrapperDepth-1; layer++ {
 		within = `powershell -c '` + strings.ReplaceAll(within, `'`, `''`) + `'`
 	}
-	facts = Analyze(Input{Tool: "PowerShell", Args: hookShellArgs(t, within)})
-	if !facts.Authoritative() || len(facts.HostWrappers) != maxWrapperDepth-1 || !hasExecutable(facts.Commands, "get-content") {
-		t.Fatalf("launchers within the depth = %#v", facts)
+	input = hookShellInput(t, "PowerShell", within)
+	twin, ok := HostScriptTwin(input, Analyze(input))
+	if !ok || !hasExecutable(Analyze(twin).Commands, "get-content") {
+		t.Fatalf("launchers within the depth: twin=%#v ok=%v", twin, ok)
 	}
 }
 
-// Launcher words are evidence only: the wrapped and the bare spelling of the
-// same script have the same commands, paths and operations.
-func TestHostWrappersGiveTheSameCommandsPathsAndOperations(t *testing.T) {
-	const script = `Add-Content -Path C:\Users\alice\.ssh\authorized_keys -Value x`
-	bare := Analyze(Input{Tool: "PowerShell", Args: hookShellArgs(t, script), ActiveHome: `C:\Users\alice`})
-	for _, wrapped := range []string{
-		`powershell -Command "` + script + `"`,
-		`powershell -NoProfile -EncodedCommand ` + encodedPowerShell(script),
-		`& { ` + script + ` }`,
-		`Invoke-Expression '` + script + `'`,
+// ADDITIVE ONLY (S7 lead constraint). psparse is not yet reliable in every
+// modelled shape, so it may only add readings: the facts of a call as written
+// never depend on it. For every call below, Analyze gives the same facts whether
+// or not a script reading exists; the launcher stays the command the tokenizer
+// saw with the status and issues it gave; a reading never mutates its input; and
+// a call psparse cannot resolve is neither completed nor made clean.
+func TestHostScriptTwinNeverChangesTheFactsOfTheCallAsWritten(t *testing.T) {
+	calls := []Input{
+		hookShellInput(t, "PowerShell", `powershell -Command "Get-Content C:\tmp\a.txt"`),
+		hookShellInput(t, "PowerShell", `powershell -NoProfile -Command "Remove-Item C:\victim"`),
+		hookShellInput(t, "PowerShell", `pwsh -c 'Get-Content C:\tmp\a.txt'`),
+		hookShellInput(t, "PowerShell", `& { Remove-Item C:\victim }`),
+		hookShellInput(t, "PowerShell", `Invoke-Expression 'Remove-Item C:\victim'`),
+		hookShellInput(t, "PowerShell", `cmd /c del C:\victim`),
+		hookShellInput(t, "PowerShell", `powershell -Command $payload`),
+		hookShellInput(t, "PowerShell", `powershell -File C:\tmp\run.ps1`),
+		hookShellInput(t, "PowerShell", `powershell -Command --% Remove-Item C:\victim`),
+		hookShellInput(t, "Bash", `powershell.exe -c "Remove-Item C:\victim"`),
+		hookShellInput(t, "Bash", `cmd.exe /d /c "del C:\victim"`),
+		hookShellInput(t, "Bash", `rm -rf /tmp/victim`),
+		{Tool: "exec", Argv: []string{"pwsh", "-c", `Remove-Item C:\victim`}},
+		{Tool: "exec", Argv: []string{"cmd.exe", "/c", `del C:\victim`}},
+	}
+	for _, input := range calls {
+		before := Analyze(input)
+		snapshot := Input{Tool: input.Tool, Args: append(json.RawMessage(nil), input.Args...), Argv: append([]string(nil), input.Argv...), ActiveHome: input.ActiveHome}
+		twin, ok := HostScriptTwin(input, before)
+		after := Analyze(input)
+		if !reflect.DeepEqual(before, after) {
+			t.Fatalf("a script reading changed the facts of the call as written:\nbefore=%#v\nafter=%#v", before, after)
+		}
+		if !reflect.DeepEqual(snapshot.Args, append(json.RawMessage(nil), input.Args...)) ||
+			!reflect.DeepEqual(snapshot.Argv, append([]string(nil), input.Argv...)) {
+			t.Fatalf("a script reading mutated its input: %#v", input)
+		}
+		if !ok {
+			continue
+		}
+		// The launcher or call block is still part of the call as written,
+		// and an unproven call stays unproven: a reading is a second set of
+		// facts, never the answer for the first.
+		if before.Authoritative() != Analyze(input).Authoritative() {
+			t.Fatalf("authority of the call as written changed: %#v", before.Parse)
+		}
+		if len(twin.Args) != 0 || len(twin.Argv) != 0 {
+			t.Fatalf("a reading keeps the launcher payload: %#v", twin)
+		}
+	}
+	// Calls psparse cannot resolve have no reading and stay unproven as written.
+	for _, command := range []string{
+		`powershell -Command $payload`,
+		`powershell -File C:\tmp\run.ps1`,
+		`powershell -Command --% Remove-Item C:\victim`,
 	} {
-		facts := Analyze(Input{Tool: "PowerShell", Args: hookShellArgs(t, wrapped), ActiveHome: `C:\Users\alice`})
-		if len(facts.Commands) != len(bare.Commands) || len(facts.Paths) != len(bare.Paths) ||
-			facts.Parse.Status != bare.Parse.Status || facts.Parse.Dialect != bare.Parse.Dialect {
-			t.Fatalf("wrapped %q facts differ from the bare script:\nwrapped=%#v\nbare=%#v", wrapped, facts, bare)
-		}
-		for index, command := range facts.Commands {
-			other := bare.Commands[index]
-			if command.Program != other.Program || !equalStrings(command.Argv, other.Argv) ||
-				len(command.Operations) != len(other.Operations) {
-				t.Fatalf("wrapped %q command differs: %#v vs %#v", wrapped, command, other)
-			}
-		}
-		for index, path := range facts.Paths {
-			if path.Value != bare.Paths[index].Value || path.Access != bare.Paths[index].Access {
-				t.Fatalf("wrapped %q path differs: %#v vs %#v", wrapped, path, bare.Paths[index])
-			}
+		input := hookShellInput(t, "PowerShell", command)
+		facts := Analyze(input)
+		if _, ok := HostScriptTwin(input, facts); ok || facts.Authoritative() {
+			t.Fatalf("an unresolved launcher %q was read or completed: %#v", command, facts.Parse)
 		}
 	}
 }

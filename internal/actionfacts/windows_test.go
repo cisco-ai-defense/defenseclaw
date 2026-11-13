@@ -777,8 +777,8 @@ func TestParsePowerShellUnsafeSyntaxNeverAuthoritative(t *testing.T) {
 			wantExec:   "write-output",
 		},
 		{
-			name:       "encoded command with a non-static payload",
-			source:     `powershell -EncodedCommand $payload`,
+			name:       "encoded command is not decoded",
+			source:     `powershell -EncodedCommand RwBlAHQALQBEAGEAdABlAA==`,
 			wantStatus: StatusPartial,
 			wantExec:   "powershell",
 		},
@@ -801,10 +801,10 @@ func TestParsePowerShellUnsafeSyntaxNeverAuthoritative(t *testing.T) {
 			wantExec:   "foreach-object",
 		},
 		{
-			name:       "nested launcher with a variable payload",
-			source:     `powershell -NoProfile -Command "powershell -NoProfile -Command $payload"`,
+			name:       "nested launcher",
+			source:     `powershell -NoProfile -Command "powershell -NoProfile -Command 'Get-Content C:\tmp\x'"`,
 			wantStatus: StatusPartial,
-			wantExec:   "powershell",
+			wantExec:   "get-content",
 		},
 		{
 			name:       "unknown operand grammar",
@@ -1083,6 +1083,7 @@ func TestPowerShellDynamicCallTargetsStayOpaque(t *testing.T) {
 	tests := []string{
 		`& $command status`,
 		`& (Get-Command reg.exe) add HKCU\Software\Example`,
+		`& { Remove-Item C:\victim.txt }`,
 		`& "C:\Tools\$env:NAME.exe" status`,
 		`& 'C:\Tools\safe.exe'evil status`,
 	}
@@ -1539,9 +1540,10 @@ func TestWindowsExactWrapperRecognitionPreservesExecutableSuffix(t *testing.T) {
 			classifyOutput(&out)
 			if out.status != StatusComplete || len(out.commands) != 1 ||
 				out.commands[0].Program != test.childProgram ||
-				len(out.commands[0].Wrappers) != 0 ||
-				len(out.hostWrappers) != 1 ||
-				out.hostWrappers[0].Executable != test.wrapper {
+				len(out.commands[0].Wrappers) != 1 ||
+				out.commands[0].Wrappers[0].Executable != test.wrapper ||
+				len(out.commands[0].Wrappers[0].Argv) == 0 ||
+				out.commands[0].Wrappers[0].Argv[0] != test.wrapper {
 				t.Fatalf("output = %#v", out)
 			}
 		})
@@ -1608,7 +1610,7 @@ func TestWindowsNestedWrappersReachDepthLimit(t *testing.T) {
 			name:  "PowerShell",
 			parse: parsePowerShell,
 			source: `powershell.exe -NoProfile -Command ` +
-				`'powershell.exe -NoProfile -Command Write-Output safe'`,
+				`'powershell.exe -NoProfile -Command "Write-Output safe"'`,
 			leafProgram: "write-output",
 		},
 		{
@@ -1631,7 +1633,7 @@ func TestWindowsNestedWrappersReachDepthLimit(t *testing.T) {
 				containsIssue(belowLimit.issues, IssueWrapperLimit) ||
 				len(belowLimit.commands) != 1 ||
 				belowLimit.commands[0].Program != test.leafProgram ||
-				len(belowLimit.hostWrappers) != 2 {
+				len(belowLimit.commands[0].Wrappers) != 2 {
 				t.Fatalf("below-depth-limit output = %#v", belowLimit)
 			}
 
@@ -3759,8 +3761,8 @@ func TestCMDNativeArgvQuoteBoundarySeparatesBuiltinFromChild(t *testing.T) {
 	}
 
 	const wrapperSource = `cmd.exe /d /c "echo C:\"`
-	if unwrapped, ok := unwrapHostSource(wrapperSource, DialectCMD, 0); ok {
-		t.Fatalf("native-uncertain CMD wrapper was unwrapped: %#v", unwrapped)
+	if wrapper, ok := windowsExactWrapper(wrapperSource, windowsCMD); ok {
+		t.Fatalf("native-uncertain CMD wrapper was unwrapped: %#v", wrapper)
 	}
 	wrapper := Analyze(Input{
 		Tool: "shell", Command: wrapperSource, DialectHint: DialectCMD,

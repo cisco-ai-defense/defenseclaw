@@ -35,7 +35,7 @@ func TestExactPersistenceCommandProjection(t *testing.T) {
 		{
 			name: "scheduled task command", method: "scheduled_task",
 			payload: "powershell.exe -c \"Write-Output fixture\"",
-			command: "powershell.exe -c \"Write-Output fixture\"", program: "write-output",
+			command: "powershell.exe -c \"Write-Output fixture\"", program: "powershell.exe",
 		},
 	}
 	for _, test := range tests {

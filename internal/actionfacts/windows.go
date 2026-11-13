@@ -75,6 +75,13 @@ type windowsPipelineEdge struct {
 	to   int
 }
 
+type windowsWrapper struct {
+	executable string
+	argv       []string
+	body       string
+	keepOpen   bool
+}
+
 func parsePowerShell(source string, startID int64, wrapperDepth int) parseOutput {
 	return parseWindows(source, startID, wrapperDepth, windowsPowerShell)
 }
@@ -108,22 +115,24 @@ func parseWindows(source string, startID int64, wrapperDepth int, dialect window
 		}
 	}
 
-	// A static powershell, pwsh or cmd launcher, a call block, or an
-	// Invoke-Expression of a literal runs the script it names: the facts are the
-	// facts of that script (host_unwrap.go), whatever the spelling.
-	if unwrapped, ok := unwrapHostSource(source, windowsOutputDialect(dialect), wrapperDepth); ok {
-		if unwrapped.limit {
+	if wrapper, ok := windowsExactWrapper(source, dialect); ok {
+		if wrapperDepth == maxWrapperDepth {
 			out.markLimit(IssueWrapperLimit)
 			return out
 		}
-		inner := parseCommandAs(
-			unwrapped.source,
-			unwrapped.dialect,
-			startID,
-			wrapperDepth+len(unwrapped.wrappers),
-		)
-		inner.hostWrappers = append(cloneWrapperFacts(unwrapped.wrappers), inner.hostWrappers...)
-		if unwrapped.keepOpen {
+		var inner parseOutput
+		if dialect == windowsPowerShell {
+			inner = parsePowerShell(wrapper.body, startID, wrapperDepth+1)
+		} else {
+			inner = parseCMD(wrapper.body, startID, wrapperDepth+1)
+		}
+		for i := range inner.commands {
+			inner.commands[i].Wrappers = append(
+				[]WrapperFact{{Executable: wrapper.executable, Argv: cloneSlice(wrapper.argv)}},
+				inner.commands[i].Wrappers...,
+			)
+		}
+		if wrapperDepth > 0 || wrapper.keepOpen {
 			inner.markPartial(IssueUnsupportedConstruct)
 		}
 		return inner
@@ -304,6 +313,122 @@ func windowsExactPipelineWhatIf(value string) bool {
 	default:
 		return false
 	}
+}
+
+// windowsExactWrapper unwraps only an exact, statically tokenized launcher.
+// Reconstructing a command from multiple argv elements can change quoting and
+// operator meaning, so those forms remain visible as unsupported commands.
+func windowsExactWrapper(source string, dialect windowsDialect) (windowsWrapper, bool) {
+	probe := newParseOutput(windowsOutputDialect(dialect), 1)
+	lexemes, ok := windowsLex(source, dialect, &probe)
+	if !ok || probe.status != StatusComplete {
+		return windowsWrapper{}, false
+	}
+	commands, edges, ok := windowsBuildCommands(lexemes, &probe)
+	if !ok || len(commands) != 1 || len(edges) != 0 || len(commands[0].redirects) != 0 {
+		return windowsWrapper{}, false
+	}
+	words := commands[0].words
+	if len(words) < 3 || words[0].expands ||
+		windowsNativeArgvUncertain(words[0], words[1:]) {
+		return windowsWrapper{}, false
+	}
+	executable := windowsExecutable(words[0].value)
+	name := commandProgramForDialect(
+		words[0].value,
+		windowsOutputDialect(dialect),
+	)
+	if name == "" {
+		return windowsWrapper{}, false
+	}
+	switch dialect {
+	case windowsPowerShell:
+		if name != "powershell" && name != "pwsh" {
+			return windowsWrapper{}, false
+		}
+		for _, word := range words[1:] {
+			switch strings.ToLower(word.value) {
+			case "-encodedcommand", "-enc", "-e", "-file":
+				return windowsWrapper{}, false
+			}
+		}
+		commandIndex := -1
+		// Profiles are ambient commands outside the statically supplied body.
+		noProfileSeen := false
+		for i := 1; i < len(words); i++ {
+			lower := strings.ToLower(words[i].value)
+			if lower == "-command" || lower == "-c" {
+				if !noProfileSeen {
+					return windowsWrapper{}, false
+				}
+				commandIndex = i
+				break
+			}
+			switch lower {
+			case "-noprofile":
+				if noProfileSeen {
+					return windowsWrapper{}, false
+				}
+				noProfileSeen = true
+			case "-noninteractive", "-nologo":
+			case "-executionpolicy":
+				i++
+				if i >= len(words) || words[i].expands {
+					return windowsWrapper{}, false
+				}
+			default:
+				return windowsWrapper{}, false
+			}
+		}
+		if commandIndex < 0 || commandIndex+2 != len(words) || words[commandIndex+1].expands {
+			return windowsWrapper{}, false
+		}
+		return windowsWrapper{
+			executable: executable,
+			argv:       windowsWordValues(words[:commandIndex+1]),
+			body:       words[commandIndex+1].value,
+		}, true
+
+	case windowsCMD:
+		if name != "cmd" {
+			return windowsWrapper{}, false
+		}
+		commandIndex := -1
+		keepOpen := false
+		// /d disables Command Processor AutoRun entries before /c executes.
+		disableAutoRunSeen := false
+		for i := 1; i < len(words); i++ {
+			lower := strings.ToLower(words[i].value)
+			if lower == "/c" || lower == "/k" {
+				if !disableAutoRunSeen {
+					return windowsWrapper{}, false
+				}
+				commandIndex = i
+				keepOpen = lower == "/k"
+				break
+			}
+			switch lower {
+			case "/d":
+				if disableAutoRunSeen {
+					return windowsWrapper{}, false
+				}
+				disableAutoRunSeen = true
+			case "/q", "/s":
+			default:
+				return windowsWrapper{}, false
+			}
+		}
+		if commandIndex < 0 || commandIndex+2 != len(words) || words[commandIndex+1].expands {
+			return windowsWrapper{}, false
+		}
+		return windowsWrapper{
+			executable: executable,
+			argv:       windowsWordValues(words[:commandIndex+1]),
+			body:       words[commandIndex+1].value,
+			keepOpen:   keepOpen,
+		}, true
+	}
+	return windowsWrapper{}, false
 }
 
 func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]windowsLexeme, bool) {

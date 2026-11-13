@@ -571,6 +571,15 @@ func dispatchTrustedAction(
 	}
 	// A file-tool call with an argument key outside its reviewed schema is
 	// judged as each reading the harness may run (gas-ux-r1 GAP-0076).
+	// A static powershell, pwsh or cmd launcher, call block or Invoke-Expression
+	// literal also runs the script it names. psparse reads that script (the
+	// launcher itself stays as the tokenizer saw it); the script reading only
+	// ever adds findings (host_script_twin.go).
+	if twin, ok := hostScriptTwinRequest(request, facts); ok {
+		defer func() {
+			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	twins, overflow := unknownKeyTwinRequests(request, facts)
 	request.UnknownKeyPossibleOverflow = request.UnknownKeyPossibleOverflow || overflow
 	for _, twin := range twins {
@@ -5596,8 +5605,15 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 	},
 	"CMD-WIN-IWR-IEX": {
-		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return powerShellDownloadExecPrerequisite(facts)
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return powerShellDownloadExecPrerequisite(facts) ||
+				actionfacts.PowerShellFetchedContentExecution(input)
+		},
+		// A cradle statement is proven on its own tree even when the rest of
+		// the script (a cd prefix, a trailer, a list) leaves the outer parse
+		// partial.
+		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
+			return actionfacts.PowerShellFetchedContentExecution(input)
 		},
 	},
 	"CMD-PIPE-WGET": {
@@ -6354,7 +6370,8 @@ func filterExactFallbackFindings(
 		// connector input has complete authoritative PowerShell ActionFacts.
 		if finding.RuleID == "CMD-WIN-IWR-IEX" &&
 			(!facts.Authoritative() ||
-				facts.Parse.Status != actionfacts.StatusComplete) {
+				facts.Parse.Status != actionfacts.StatusComplete) &&
+			!actionfacts.PowerShellFetchedContentExecution(input) {
 			continue
 		}
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {

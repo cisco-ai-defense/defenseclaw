@@ -23,31 +23,26 @@ import (
 )
 
 // Host unwrapping: the one place the PowerShell parser (internal/psparse)
-// feeds ActionFacts.
+// feeds ActionFacts, and it only ever ADDS.
 //
 // A call such as `powershell -Command "<script>"`, `pwsh -EncodedCommand
 // <base64>`, `cmd /c "<line>"`, `& { <script> }`, `Invoke-Expression '<script>'`
 // or Git Bash running powershell.exe runs the same statements as the bare
-// script. The rules judge the action, not its spelling, so the facts of a
-// static wrapper are the facts of the script it runs: this file replaces the
-// wrapper by that script (recursively, to the POSIX wrapper depth and size
-// budget) before the shell grammar of the script is parsed, and records the
-// launcher only as Facts.HostWrappers evidence. Wrappers is left to the
-// launchers that change the execution context (sudo, env, chroot, nsenter,
-// find -exec), which the exact rules must keep refusing.
+// script, and the rules judge the action, not its spelling. psparse
+// (ExtractNestedScripts) says what the launcher runs; HostScriptTwin hands that
+// script back as a second reading of the call, in its own grammar, recursively
+// to the wrapper depth and size budget.
 //
-// What the wrapper script is comes from psparse (ExtractNestedScripts): a
-// payload psparse cannot resolve to one static string (a variable, a
-// sub-expression, a stdin read, a child argv, a stop-parse tail, quotes the
-// legacy argument passing rewrites) is never unwrapped. The call then keeps the
-// launcher as an ordinary command whose operands are unknown, exactly as before.
-// The launcher's ambient startup (a PowerShell profile, a cmd.exe AutoRun
-// entry) is the same ambient state any other call in the session runs under;
-// it is not part of what the call text says, so it no longer keeps a static
-// wrapper out of the rules.
-
-// A recorded launcher is value-free: its executable as typed, never its
-// switches or its script.
+// The facts of the call as written (Analyze) are never touched by this file:
+// the launcher stays the command the tokenizer saw, with the status and issues
+// the tokenizer gave it. A caller judges the script reading separately and may
+// only add its findings to those of the call as written. So a psparse result
+// that is wrong (a Static text that differs from what runs) can add a false
+// alert, which the precision gate measures, and can never hide an attack or
+// turn an unknown call into a clean one. Anything psparse cannot resolve to one
+// static script (a variable, a sub-expression, a stdin read, a child argv, a
+// stop-parse tail, quotes the legacy argument passing rewrites, a working
+// directory, an empty or colon-glued word) has no reading at all.
 
 // hostUnwrap is the result of unwrapping the static host wrappers of one source.
 type hostUnwrap struct {
@@ -419,16 +414,6 @@ func soleCMDHostCall(source string) ([]string, bool) {
 	return windowsWordValues(words), true
 }
 
-// hostLauncherProgram reports a program that launches a PowerShell or cmd.exe
-// script from its argv.
-func hostLauncherProgram(program string) bool {
-	switch program {
-	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
-		return true
-	}
-	return false
-}
-
 // hostLauncherIdentity reports that name is the Windows launcher family
 // (powershell, pwsh or cmd) itself: a bare name, or a path under the system
 // directories. A launcher of the same name in any other directory is an
@@ -568,54 +553,94 @@ func cmdHostBody(argv []string) (string, Dialect, bool, bool) {
 	return "", DialectNone, false, false
 }
 
-// soleHostCall recognizes a POSIX parse that is exactly one unconditional
-// launcher call (powershell, pwsh or cmd with a static script) and returns the
-// script it runs.
-func soleHostCall(out *parseOutput, wrapperDepth int) (hostScript, WrapperFact, bool) {
-	if out.status != StatusComplete || len(out.commands) != 1 || wrapperDepth >= maxWrapperDepth {
-		return hostScript{}, WrapperFact{}, false
+// soleHostCall recognizes a POSIX parse whose one top-level command is an
+// unconditional launcher call (powershell, pwsh or cmd with a static script) and
+// returns the script it runs. Commands nested under it (the tokenizer's own
+// reading of an exact launcher) are ignored: the script is read again from the
+// launcher's argv.
+func soleHostCall(out *parseOutput) (hostScript, bool) {
+	var top []CommandFact
+	for _, command := range out.commands {
+		if command.ParentCommandID == 0 {
+			top = append(top, command)
+		}
 	}
-	command := out.commands[0]
-	if command.ParentCommandID != 0 || command.PipelineID != 0 || command.ControlFlowUncertain ||
-		command.Background || len(command.Redirects) != 0 || len(command.Wrappers) != 0 ||
+	if len(top) != 1 {
+		return hostScript{}, false
+	}
+	command := top[0]
+	if command.PipelineID != 0 || command.ControlFlowUncertain || command.Background ||
+		len(command.Redirects) != 0 || len(command.Wrappers) != 0 ||
 		!command.ArgvComplete || len(command.Argv) < 2 || len(command.Arguments) != len(command.Argv) {
-		return hostScript{}, WrapperFact{}, false
+		return hostScript{}, false
 	}
 	for _, argument := range command.Arguments {
 		if argument.Expands || argument.StaticGlob != "" {
-			return hostScript{}, WrapperFact{}, false
+			return hostScript{}, false
 		}
 	}
-	script, ok := hostFromArgv(commandProgram(command.Executable), command.Argv)
-	if !ok {
-		return hostScript{}, WrapperFact{}, false
-	}
-	return script, WrapperFact{Executable: command.Executable}, true
-}
-
-// soleHostCallReduction replaces a POSIX parse that is one launcher call (Git
-// Bash or a generic shell running powershell/pwsh/cmd with a static script) by
-// the parse of the script, in the script's own grammar.
-func soleHostCallReduction(out *parseOutput, wrapperDepth int) (parseOutput, bool) {
-	script, wrapper, ok := soleHostCall(out, wrapperDepth)
-	if !ok {
-		return parseOutput{}, false
-	}
-	child := parseCommandAs(script.body, script.dialect, out.commands[0].ID, wrapperDepth+1)
-	child.hostWrappers = append([]WrapperFact{wrapper}, child.hostWrappers...)
-	if script.keepOpen {
-		child.markPartial(IssueUnsupportedConstruct)
-	}
-	return child, true
+	return hostFromArgv(commandProgram(command.Executable), command.Argv)
 }
 
 // posixSoleHostCallSource is the script text of a POSIX source that is one
 // static launcher call.
 func posixSoleHostCallSource(source string) (string, Dialect, bool) {
-	out := parsePOSIXUnwrapping(source, 1, 0, false)
-	script, _, ok := soleHostCall(&out, 0)
+	out := parsePOSIX(source, 1, 0)
+	script, ok := soleHostCall(&out)
 	if !ok || script.keepOpen {
 		return "", DialectNone, false
 	}
 	return script.body, script.dialect, true
+}
+
+// HostScriptTwin is the second reading of a call that runs a static
+// powershell, pwsh or cmd launcher, a call block or an Invoke-Expression of a
+// literal: the same call written as the script it runs, in the script's own
+// grammar (psparse decides what the launcher runs: ExtractNestedScripts).
+//
+// The reading is ADDITIVE. The call is analyzed as written, exactly as before,
+// and its facts are never changed by the launcher; a caller judges this input
+// as a separate reading and may only add the findings it raises to those of the
+// call as written (the gateway does, through withOverLimitTwinFindings). A
+// psparse result therefore cannot hide, replace or soften anything the
+// tokenizer saw, and a launcher psparse cannot resolve to one static script has
+// no reading at all (the call stays as unknown as it was).
+func HostScriptTwin(input Input, facts Facts) (Input, bool) {
+	if facts.Parse.Status == StatusLimitExceeded {
+		return Input{}, false
+	}
+	source, dialect := shellCommandText(input), Dialect(DialectNone)
+	layers := 0 // launchers already resolved from the argv or the POSIX call
+	switch {
+	case len(input.Argv) != 0:
+		program := commandProgramForDialect(input.Argv[0], DialectPowerShell)
+		script, ok := hostFromArgv(program, input.Argv)
+		if !ok {
+			return Input{}, false
+		}
+		source, dialect, layers = script.body, script.dialect, 1
+	case source == "" || len(source) > maxCommandBytes:
+		return Input{}, false
+	default:
+		dialect, _ = chooseRawCommandDialect(input.Tool, input.DialectHint, source)
+		if dialect == DialectPOSIX || dialect == DialectNone || dialect == DialectMixed {
+			body, bodyDialect, ok := posixSoleHostCallSource(source)
+			if !ok {
+				return Input{}, false
+			}
+			source, dialect, layers = body, bodyDialect, 1
+		}
+	}
+	if dialect != DialectPowerShell && dialect != DialectCMD {
+		return Input{}, false
+	}
+	unwrapped, more := unwrapHostSource(source, dialect, layers)
+	if unwrapped.limit || !more && layers == 0 {
+		return Input{}, false
+	}
+	twin := input
+	twin.Args, twin.Argv = nil, nil
+	twin.Command = unwrapped.source
+	twin.DialectHint = unwrapped.dialect
+	return twin, true
 }

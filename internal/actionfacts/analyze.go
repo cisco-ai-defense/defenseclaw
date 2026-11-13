@@ -565,19 +565,6 @@ func analyzeStructuredArgv(
 			return out
 		}
 		nestedDialect = dialect
-		if hostLauncherProgram(program) {
-			// A powershell, pwsh or cmd launcher is transparent: the facts are
-			// those of the script it runs (host_unwrap.go).
-			reduced := parseCommandAs(nested, nestedDialect, command.ID, wrapperDepth+1)
-			reduced.hostWrappers = append(
-				[]WrapperFact{{Executable: command.Executable}},
-				reduced.hostWrappers...,
-			)
-			if script, _ := hostFromArgv(program, argv); script.keepOpen {
-				reduced.markPartial(IssueUnsupportedConstruct)
-			}
-			return reduced
-		}
 		child = parseCommandAs(nested, nestedDialect, out.nextID, wrapperDepth+1)
 	}
 
@@ -646,15 +633,77 @@ func nestedCommand(argv []string, program string) (string, Dialect, bool, bool) 
 		}
 		return argv[commandIndex], DialectPOSIX, true, false
 	case "powershell", "pwsh", "powershell.exe", "pwsh.exe":
-		// What a PowerShell launcher runs is read by psparse (host_unwrap.go);
-		// any form it does not resolve to one static script stays opaque.
-		if script, ok := hostFromArgv(program, argv); ok {
-			return script.body, script.dialect, true, false
+		// A profile can execute commands before the statically supplied body.
+		// Only unwrap when that ambient startup path is exactly disabled.
+		noProfileSeen := false
+		for i := 1; i < len(argv); i++ {
+			option := strings.ToLower(argv[i])
+			switch option {
+			case "-encodedcommand", "-enc", "-e", "-file", "-f":
+				return "", DialectPowerShell, false, true
+			case "-command", "-c":
+				if !noProfileSeen || i+1 >= len(argv) ||
+					strings.TrimSpace(argv[i+1]) == "" ||
+					argv[i+1] == "-" {
+					return "", DialectPowerShell, false, true
+				}
+				// PowerShell joins every argument after -Command with spaces
+				// into the body, so `pwsh -Command echo marker` runs
+				// "echo marker" (GAP-2079). An empty argument is passed
+				// differently across PowerShell versions, so it stays opaque.
+				for _, argument := range argv[i+2:] {
+					if argument == "" {
+						return "", DialectPowerShell, false, true
+					}
+				}
+				return strings.Join(argv[i+1:], " "), DialectPowerShell, true, false
+			case "-noprofile":
+				if noProfileSeen {
+					return "", DialectPowerShell, false, true
+				}
+				noProfileSeen = true
+			case "-noninteractive", "-nologo":
+				continue
+			case "-workingdirectory":
+				// This option changes the nested command's path-resolution
+				// context. Until wrapper-local cwd is represented in Facts,
+				// parsing the child against Input.CWD would publish incorrect
+				// authoritative paths.
+				return "", DialectPowerShell, false, true
+			case "-executionpolicy":
+				i++
+				if i >= len(argv) || strings.TrimSpace(argv[i]) == "" {
+					return "", DialectPowerShell, false, true
+				}
+			default:
+				return "", DialectPowerShell, false, true
+			}
 		}
 		return "", DialectPowerShell, false, true
 	case "cmd", "cmd.exe":
-		if script, ok := hostFromArgv(program, argv); ok {
-			return script.body, script.dialect, true, false
+		// Command Processor AutoRun entries execute before /c unless /d is
+		// present, so the nested body is not the complete action otherwise.
+		disableAutoRunSeen := false
+		for i := 1; i < len(argv); i++ {
+			switch strings.ToLower(argv[i]) {
+			case "/k":
+				return "", DialectCMD, false, true
+			case "/c":
+				if !disableAutoRunSeen || i+2 != len(argv) ||
+					strings.TrimSpace(argv[i+1]) == "" {
+					return "", DialectCMD, false, true
+				}
+				return argv[i+1], DialectCMD, true, false
+			case "/d":
+				if disableAutoRunSeen {
+					return "", DialectCMD, false, true
+				}
+				disableAutoRunSeen = true
+			case "/q", "/s":
+				continue
+			default:
+				return "", DialectCMD, false, true
+			}
 		}
 		return "", DialectCMD, false, true
 	}
@@ -1851,8 +1900,7 @@ func staticCommandStructureComparable(out parseOutput) bool {
 }
 
 func equivalentStaticCommandStructure(left, right parseOutput) bool {
-	if len(left.commands) != len(right.commands) ||
-		!equivalentHostWrappers(left, right) {
+	if len(left.commands) != len(right.commands) {
 		return false
 	}
 	for index := range left.commands {
@@ -1969,24 +2017,8 @@ func equivalentCommandArgv(left, right []string, dialect Dialect) bool {
 	return true
 }
 
-// equivalentHostWrappers compares the launchers two sources unwrapped: a
-// launcher spelled differently is a different call even though it is
-// transparent to the facts.
-func equivalentHostWrappers(left, right parseOutput) bool {
-	if len(left.hostWrappers) != len(right.hostWrappers) {
-		return false
-	}
-	for index := range left.hostWrappers {
-		if left.hostWrappers[index].Executable != right.hostWrappers[index].Executable {
-			return false
-		}
-	}
-	return true
-}
-
 func equivalentCommandStructure(left, right parseOutput) bool {
 	if len(left.commands) != len(right.commands) ||
-		!equivalentHostWrappers(left, right) ||
 		!equalComparableSlices(left.paths, right.paths) ||
 		!equalComparableSlices(left.network, right.network) ||
 		!equalComparableSlices(left.dataFlows, right.dataFlows) ||
