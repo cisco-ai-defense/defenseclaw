@@ -98,10 +98,18 @@ func TestEgressMemoFollowsTheStore(t *testing.T) {
 }
 
 // TestEgressMemoWarmsAStoreFromAnOlderLeader: a state file with no saved
-// memo (written by an older leader) answers errWarming, so the callout's
-// chain failure mode decides, until the worker has read the store; then
-// the store's own detection.
+// memo, or a memo of the older step1/hit format (ed4fc62536), is cold: the
+// new leader answers errWarming, so the callout's chain failure mode
+// decides, until its worker has read the store back (it starts doing so
+// at start, before any egress); then the store's own detection. It never
+// allows meanwhile.
 func TestEgressMemoWarmsAStoreFromAnOlderLeader(t *testing.T) {
+	for _, older := range []any{nil, map[string]any{"step1": map[string]any{}}} {
+		t.Run(fmt.Sprint(older), func(t *testing.T) { testEgressMemoWarms(t, older) })
+	}
+}
+
+func testEgressMemoWarms(t *testing.T, older any) {
 	dir := t.TempDir()
 	req := EgressRequest{Actor: actorA, Host: "example.com", Method: "POST"}
 	h := newHarness(t, dir, Options{})
@@ -116,7 +124,11 @@ func TestEgressMemoWarmsAStoreFromAnOlderLeader(t *testing.T) {
 	if err := json.Unmarshal(raw, &st); err != nil || st["egress"] == nil {
 		t.Fatalf("state file has no saved memo: %s %v", raw, err)
 	}
-	delete(st, "egress")
+	if older == nil {
+		delete(st, "egress")
+	} else {
+		st["egress"] = older
+	}
 	if raw, err = json.Marshal(st); err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +137,10 @@ func TestEgressMemoWarmsAStoreFromAnOlderLeader(t *testing.T) {
 	}
 
 	h2 := newHarness(t, dir, Options{})
-	_, err = h2.svc.Egress(context.Background(), req)
+	v, err := h2.svc.Egress(context.Background(), req)
 	var we *leader.WireError
-	if !errors.As(err, &we) || we.Code != leader.CodeUnavailable {
-		t.Fatalf("cold memo: %v", err)
+	if err == nil && !v.Deny || err != nil && (!errors.As(err, &we) || we.Code != leader.CodeUnavailable) {
+		t.Fatalf("cold memo: %+v %v", v, err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {

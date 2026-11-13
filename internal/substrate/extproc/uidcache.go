@@ -99,10 +99,28 @@ func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (ActorRecord, error)
 		if ok && now.Sub(e.at) < c.staleMax {
 			return e.result()
 		}
-		return ActorRecord{}, err
+		le := &LookupError{Err: err}
+		if ok && e.live && e.rec.UID != "" {
+			le.Last, le.Known = e.rec, true
+		}
+		return ActorRecord{}, le
 	}
 	return v.(uidEntry).result()
 }
+
+// LookupError is a registration lookup outage with no cached entry young
+// enough to serve. Last is the name's last known registered incarnation,
+// when Known: an incarnation's profile and attendance never change, so
+// they still decide its policy and chain fail mode past the stale window
+// (GAP-0188). Its UID is not used: the actor may have been recreated.
+type LookupError struct {
+	Err   error
+	Last  ActorRecord
+	Known bool
+}
+
+func (e *LookupError) Error() string { return e.Err.Error() }
+func (e *LookupError) Unwrap() error { return e.Err }
 
 func (e uidEntry) result() (ActorRecord, error) {
 	if !e.live {

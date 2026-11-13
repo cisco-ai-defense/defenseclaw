@@ -304,7 +304,11 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	// attendance (GAP-0090). A lookup outage (the leader, past the stale
 	// window) does not stop the actor's traffic: the actor is matched by
 	// atespace, and only its chain check is missing, which
-	// chain.failure_mode decides (refused on a managed install).
+	// chain.failure_mode decides (refused on a managed install). The
+	// actor's last known registration still names its profile and
+	// attendance; with none, nobody can say a person watches the actor, so
+	// it counts as unattended, and under auto its unchecked egress is
+	// refused, retryable (D8, GAP-0188).
 	rec, err := e.uids.Resolve(ctx, req.Actor)
 	lookupDown := false
 	switch {
@@ -315,6 +319,13 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		lookupDown = true
 		v.Alert = true
 		v.Findings = append(v.Findings, "registration_unavailable")
+		var le *LookupError
+		if errors.As(err, &le) && le.Known {
+			rec = ActorRecord{Profile: le.Last.Profile, Unattended: le.Last.Unattended}
+		} else {
+			rec = ActorRecord{Unattended: true}
+			v.Findings = append(v.Findings, "attendance_unknown")
+		}
 	}
 	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
