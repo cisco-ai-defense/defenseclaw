@@ -351,6 +351,9 @@ func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *Sca
 		g.SetDetectionStrategy(gr.DetectionStrategy, gr.DetectionStrategyPrompt, gr.DetectionStrategyCompletion, gr.DetectionStrategyToolCall, gr.JudgeSweep)
 		e.insp = g
 	})
+	// Pin the generation as the proxy does for every request (proxy.go withPinnedGeneration), so the content rules and
+	// thresholds come from the pack under test, not the process-wide rule set.
+	ctx = withPinnedGeneration(ctx, e.sc.Generation())
 	v := e.insp.Inspect(ctx, direction, text, []ChatMessage{{Role: "user", Content: text}}, "s7bench", "action")
 	if v == nil {
 		v = &ScanVerdict{Action: "allow", Severity: "NONE"}
