@@ -158,14 +158,33 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		sum.Verdict = worse(sum.Verdict, verdict)
 	}
 
+	// unresolvable records a skill or MCP config the agent may load but the
+	// scan cannot read: a dangling link (a target filled at run time), a
+	// chain longer than Linux follows, a link to a device. HIGH, so the build
+	// floor blocks it; an admin can accept the rule with a reason.
+	unresolvable := func(kind, name, p, why string) {
+		res := &scanner.ScanResult{Scanner: ConfigScannerName, Target: p, Timestamp: o.now()}
+		res.Findings = append(res.Findings, scanner.Finding{ID: RuleLinkUnresolvable, RuleID: RuleLinkUnresolvable,
+			Severity: scanner.SeverityHigh, Title: "A " + kind + " the agent loads is a link the scan cannot follow",
+			Description: why, Location: p, Scanner: ConfigScannerName, Category: kind + "-config"})
+		note(ConfigScannerName, "1")
+		record(kind, name, p, ConfigScannerName, res)
+	}
+
 	// Skills: a directory holding SKILL.md, outermost only.
 	var skillDirs []string
 	for _, p := range fsys.Paths() {
 		if path.Base(p) != "SKILL.md" {
 			continue
 		}
-		if r, _, ok := fsys.Resolve(p); !ok || !r.IsRegular() {
+		r, real, ok := fsys.Resolve(p)
+		if !ok || (!r.IsRegular() && !r.IsDir()) {
+			sum.Skills++
+			unresolvable(config.AdmissionTypeSkill, path.Base(path.Dir(p)), path.Dir(p), linkWhy(p, real, ok))
 			continue
+		}
+		if !r.IsRegular() {
+			continue // a folder named SKILL.md is not a skill
 		}
 		dir := path.Dir(p)
 		nested := false
@@ -215,12 +234,15 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		}
 	}
 
-	// MCP servers: every definition in every config file.
-	for _, p := range fsys.Paths() {
-		if !isMCPConfig(p) {
+	// MCP servers: every definition in every config file. A file counts as
+	// a config when any name that reaches it is a config name (a linked
+	// ~/.claude folder, a ~/.claude.json link to a file elsewhere).
+	for _, p := range mcpConfigPaths(fsys) {
+		if r, real, ok := fsys.Resolve(p); !ok || (!r.IsRegular() && !r.IsDir()) {
+			sum.MCPServers++
+			unresolvable(config.AdmissionTypeMCP, path.Base(p), p, linkWhy(p, real, ok))
 			continue
-		}
-		if r, _, ok := fsys.Resolve(p); !ok || !r.IsRegular() {
+		} else if !r.IsRegular() {
 			continue
 		}
 		data, err := fsys.Read(p)
@@ -308,6 +330,54 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		sum.Accepted = append(sum.Accepted, a)
 	}
 	return rep, nil
+}
+
+// RuleLinkUnresolvable is the finding for a SKILL.md or MCP config that is a
+// link the scan cannot follow inside the image.
+const RuleLinkUnresolvable = "link-unresolvable"
+
+func linkWhy(p, real string, resolved bool) string {
+	if !resolved {
+		return fmt.Sprintf("%s: the link chain stops at %s (dangling, a loop, or more than %d links)", p, real, maxLinkHops)
+	}
+	return fmt.Sprintf("%s: resolves to %s, which is not a regular file", p, real)
+}
+
+// mcpConfigPaths lists one name per MCP config in the image, sorted: for each
+// regular file every name that reaches it is tried and the first config name
+// is kept (one per file format, so a file is parsed once); a symlink that
+// does not resolve is listed under its config name for the caller to refuse.
+func mcpConfigPaths(fsys *ImageFS) []string {
+	var out []string
+	for _, p := range fsys.Paths() {
+		e := fsys.idx[p]
+		resolvesToFile := false
+		if e.IsSymlink() {
+			r, _, ok := fsys.Resolve(p)
+			if ok && r.IsDir() {
+				continue // the files below are reached through Names
+			}
+			resolvesToFile = ok && r.IsRegular()
+		} else if !e.IsRegular() {
+			continue
+		}
+		if resolvesToFile {
+			continue // the target file is listed, under this name too
+		}
+		formats := map[bool]bool{}
+		for _, n := range fsys.Names(p) {
+			if !isMCPConfig(n) {
+				continue
+			}
+			toml := strings.HasSuffix(n, ".toml")
+			if !formats[toml] {
+				formats[toml] = true
+				out = append(out, n)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // decide runs the admission rules on one result. accepted are the rule ids

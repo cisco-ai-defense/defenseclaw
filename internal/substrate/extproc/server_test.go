@@ -266,7 +266,8 @@ func TestDecideBody(t *testing.T) {
 		category string
 	}{
 		{"plain tools/call", string(mcpCall("list")), true, ""},
-		{"not json-rpc", "hello", true, ""},
+		{"json, not json-rpc", `{"hello":"world"}`, true, ""},
+		{"utf-8 bom", "\xef\xbb\xbf" + string(mcpCall("list")), true, ""},
 		{"duplicate method key", `{"jsonrpc":"2.0","method":"ping","method":"tools/call","params":{"name":"x"}}`, false, CategoryMCPToolBlocked},
 		{"duplicate tool name", `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"a","name":"b"}}`, false, CategoryMCPToolBlocked},
 		{"no tool name", `{"jsonrpc":"2.0","method":"tools/call","params":{}}`, false, CategoryMCPToolBlocked},

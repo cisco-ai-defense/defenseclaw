@@ -31,6 +31,7 @@ Windows, macOS and Linux.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from typing import Any, NoReturn
@@ -49,6 +50,34 @@ from defenseclaw.commands.cmd_sandbox import (
     _Flag,
     _help_text,
 )
+
+_HYPHENATED_WORD = re.compile(r"\w-\w")
+
+
+def _go_wrapped_help(text: str | None) -> str | None:
+    """Keep the line breaks of a paragraph that has a hyphenated word.
+
+    The Go help is the source of the text, and Go wraps it by hand. Click wraps again, and it breaks a line at a
+    hyphen ("ate- setup"), which changes the words the docs check compares. A paragraph with a hyphenated word
+    is printed as Go wrote it (a Click no-rewrap block); the others are wrapped to the terminal as usual.
+    """
+    if not text:
+        return text
+    out = []
+    for paragraph in text.split("\n\n"):
+        if _HYPHENATED_WORD.search(paragraph) and not paragraph.lstrip().startswith("\b"):
+            paragraph = "\b\n" + paragraph
+        out.append(paragraph)
+    return "\n\n".join(out)
+
+
+class _SubstrateCommand(GatewayCommand):
+    """GatewayCommand whose help keeps the Go line breaks where a hyphen could be split."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["help"] = _go_wrapped_help(kwargs.get("help"))
+        super().__init__(*args, **kwargs)
+
 
 # Tests replace this to capture the argv instead of replacing the process.
 _execv = os.execv
@@ -813,7 +842,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or "
             "bedrock-mantle)\n"
             "  --model ID                      default model id\n"
-            "  --gateway-url URL               actor listener URL (default the in-cluster Service)\n"
+            "  --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of "
+            "--config)\n"
             "  --fail-mode MODE                interactive outage mode: open or closed\n"
             "  --no-mcp-static                 do not run mcp-scanner over tool descriptions\n"
             "  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n"
@@ -822,13 +852,26 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --dry-run                       scan the composed image and stop before pushing\n"
             "  --trusted-base sha256:DIGEST    base image digest the admin trusts (repeatable)\n"
             "  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n"
-            "  --session-key KID=FILE          relay session public key, kid=PEM file (repeatable)\n"
+            "  --session-key FILE              the gateway's relay session public key (public.pem of the relay "
+            "session Secret);\n"
+            "                                  KID=FILE is checked against the key's own id (repeatable)\n"
+            "  --session-issuer URL            iss of the session tokens the keys verify (default "
+            "https://<substrate.services.admin>\n"
+            "                                  of --config, the issuer the gateway signs with)\n"
+            "  --session-audience AUD          aud of the session tokens (default: the one the gateway signs)\n"
+            "  --verify-url URL                ask the gateway to check each session token, instead of "
+            "--session-key\n"
+            "                                  An image that starts the relay needs --session-key or "
+            "--verify-url.\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"
             "  --json                          print JSON\n"
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -896,6 +939,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -938,6 +984,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -968,6 +1017,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --insecure-registry HOST:PORT   registry reached over plain HTTP (repeatable)\n"
             "  --registry-user USER            registry user\n"
             "  --registry-password-file FILE   file with the registry password\n"
+            "  --registry-auth-host HOST       registry or token host that gets the login (repeatable; build "
+            "adds the --to host,\n"
+            "                                  never the --from host)\n"
             "  --config FILE                   DefenseClaw config.yaml (scanner and admission settings)\n"
             "  --platform OS/ARCH              image platform (default linux/amd64)\n"
             "\n"
@@ -1119,7 +1171,7 @@ def _build_command(cmd: _Cmd) -> click.Command:
         )
     params: list[click.Parameter] = [_click_argument(arg) for arg in cmd.args]
     params += [_option(flag) for flag in cmd.flags]
-    return GatewayCommand(
+    return _SubstrateCommand(
         cmd.path[-1],
         params=params,
         callback=click.pass_context(_forward),

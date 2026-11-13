@@ -28,33 +28,45 @@ import (
 // chain split across replicas is never matched (A13).
 const ChainKeySecret = "defenseclaw-chain-key"
 
+// CalloutTokenSecret is the callout's service token for the tool verdict
+// route on the admin listener (key "token"). The chart mounts it into the
+// callout and the gateway, so the MCP tool rules run at egress by default
+// (GAP-0015).
+const CalloutTokenSecret = "defenseclaw-callout-judge"
+
 // SecretAPI is what EnsureChainKey needs of the Kubernetes API.
 type SecretAPI interface {
 	SecretExists(ctx context.Context, namespace, name string) (bool, error)
 	CreateSecret(ctx context.Context, namespace, name string, data map[string][]byte) error
 }
 
-// EnsureChainKey creates the chain key Secret with 32 random bytes when it
-// does not exist (the chart's pre-install and pre-upgrade hook). An
-// existing key is never replaced, so upgrades keep chain joins working.
-// The value is never printed.
+// EnsureChainKey creates the chain key Secret and the callout token Secret
+// with 32 random bytes each when they do not exist (the chart's
+// pre-install and pre-upgrade hook). An existing one is never replaced, so
+// upgrades keep chain joins and the callout's verdict route working.
+// Values are never printed.
 func EnsureChainKey(ctx context.Context, plan ChartPlan, api SecretAPI) (StepReport, error) {
 	r := StepReport{Step: "chain-key"}
-	ok, err := api.SecretExists(ctx, plan.Namespace, ChainKeySecret)
-	if err != nil {
-		return r, fmt.Errorf("chain key: %w", err)
+	for _, s := range []struct{ name, key, what string }{
+		{ChainKeySecret, "key", "chain key"},
+		{CalloutTokenSecret, "token", "callout token"},
+	} {
+		ok, err := api.SecretExists(ctx, plan.Namespace, s.name)
+		if err != nil {
+			return r, fmt.Errorf("%s: %w", s.what, err)
+		}
+		if ok {
+			r.note("the %s Secret %s exists; kept", s.what, s.name)
+			continue
+		}
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			return r, err
+		}
+		if err := api.CreateSecret(ctx, plan.Namespace, s.name, map[string][]byte{s.key: []byte(hex.EncodeToString(b))}); err != nil {
+			return r, fmt.Errorf("%s: %w", s.what, err)
+		}
+		r.note("created the %s Secret %s (value not shown)", s.what, s.name)
 	}
-	if ok {
-		r.note("the chain key Secret %s exists; kept", ChainKeySecret)
-		return r, nil
-	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return r, err
-	}
-	if err := api.CreateSecret(ctx, plan.Namespace, ChainKeySecret, map[string][]byte{"key": []byte(hex.EncodeToString(b))}); err != nil {
-		return r, fmt.Errorf("chain key: %w", err)
-	}
-	r.note("created the chain key Secret %s (value not shown)", ChainKeySecret)
 	return r, nil
 }

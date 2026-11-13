@@ -51,4 +51,10 @@ func TestEnsureChainKey(t *testing.T) {
 	if string(f.m[plan.Namespace+"/"+ChainKeySecret]["key"]) != key {
 		t.Fatal("an existing chain key was replaced")
 	}
+	// GAP-0015: the callout token exists by default, so the tool rules run
+	// at egress without an extra setting.
+	tok := string(f.m[plan.Namespace+"/"+CalloutTokenSecret]["token"])
+	if len(tok) != 64 || tok == key || strings.Contains(strings.Join(r.Notes, " "), tok) {
+		t.Fatalf("callout token %d chars; notes %v", len(tok), r.Notes)
+	}
 }

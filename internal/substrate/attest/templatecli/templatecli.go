@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,20 +56,29 @@ func (c *common) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.json, "json", false, "print JSON")
 	fs.Var(&c.plain, "insecure-registry", "registry host:port reached over plain HTTP (repeatable)")
 	fs.StringVar(&c.user, "registry-user", "", "registry user")
-	fs.Var(&c.authHosts, "registry-auth-host", "registry host that gets the credentials (repeatable; build adds the hosts of --from and --to)")
+	fs.Var(&c.authHosts, "registry-auth-host", "registry or token-service host that gets the credentials (repeatable; build adds the --to host, never the --from host)")
 	fs.StringVar(&c.passFile, "registry-password-file", "", "file with the registry password")
 	fs.StringVar(&c.configPath, "config", "", "DefenseClaw config.yaml (scanner and admission settings)")
 	fs.StringVar(&c.platform, "platform", "linux/amd64", "image platform")
 }
 
 func (c *common) registry() (*attest.Registry, error) {
-	o := attest.RegistryOptions{PlainHTTP: c.plain, Username: c.user, AuthHosts: c.authHosts}
+	o := attest.RegistryOptions{PlainHTTP: c.plain}
+	if c.user == "" {
+		return attest.NewRegistry(o), nil
+	}
+	cred := attest.Credential{Username: c.user, TokenHosts: c.authHosts}
 	if c.passFile != "" {
 		b, err := os.ReadFile(c.passFile)
 		if err != nil {
 			return nil, err
 		}
-		o.Password = strings.TrimSpace(string(b))
+		cred.Password = strings.TrimSpace(string(b))
+	}
+	// The one login belongs to the listed hosts only (GAP-0052).
+	o.Credentials = map[string]attest.Credential{}
+	for _, h := range c.authHosts {
+		o.Credentials[h] = cred
 	}
 	return attest.NewRegistry(o), nil
 }
@@ -183,6 +193,69 @@ type BuildOutput struct {
 	Scan    attest.ScanSummary `json:"scan"`
 	KeyID   string             `json:"key_id,omitempty"`
 	AttTag  string             `json:"attestation_tag,omitempty"`
+	Relay   RelaySessions      `json:"relay"`
+}
+
+// RelaySessions is how the image's relay checks a launcher's session token:
+// against the gateway (verify_url), or with the gateway's public keys for
+// tokens of one issuer and audience.
+type RelaySessions struct {
+	VerifyURL string   `json:"verify_url,omitempty"`
+	Issuer    string   `json:"issuer,omitempty"`
+	Audience  string   `json:"audience,omitempty"`
+	KeyIDs    []string `json:"key_ids,omitempty"`
+}
+
+// relaySessions works out the relay's session verification for a build
+// (substrate-1 GAP-0147). Keys are given as FILE (the kid is the key's own
+// id, the one the gateway writes in every token) or KID=FILE (checked
+// against it). Their issuer is --session-issuer, else the install's: the
+// gateway signs with https://<substrate.services.admin> of --config (or of
+// the defaults), so an image built for an install verifies that install's
+// tokens. A relay with neither keys nor a verify URL would refuse every
+// attachment, so an image that starts the relay must have one of them.
+func relaySessions(cfg *config.Config, keyArgs []string, issuer, audience, verifyURL string, startsRelay bool) (map[string][]byte, RelaySessions, error) {
+	rs := RelaySessions{VerifyURL: strings.TrimSpace(verifyURL)}
+	keys := map[string][]byte{}
+	for _, kv := range keyArgs {
+		kid, file, ok := strings.Cut(kv, "=")
+		if !ok {
+			kid, file = "", kv
+		}
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, rs, err
+		}
+		id, err := kit.SessionKeyID(b)
+		if err != nil {
+			return nil, rs, fmt.Errorf("--session-key %s: %w", file, err)
+		}
+		if kid != "" && kid != id {
+			return nil, rs, fmt.Errorf("--session-key %s: kid %q is not the key's id %q; give the file alone and the build uses its id", file, kid, id)
+		}
+		keys[id] = b
+		rs.KeyIDs = append(rs.KeyIDs, id)
+	}
+	sort.Strings(rs.KeyIDs)
+	switch {
+	case rs.VerifyURL != "" && len(keys) > 0:
+		return nil, rs, errors.New("--verify-url and --session-key are two ways to check session tokens; give one")
+	case len(keys) > 0:
+		rs.Issuer = strings.TrimSpace(issuer)
+		if rs.Issuer == "" {
+			rs.Issuer = cfg.Substrate.RelaySessionIssuer()
+		}
+		rs.Audience = strings.TrimSpace(audience)
+		if rs.Audience == "" {
+			rs.Audience = kit.DefaultConfig().Relay.SessionAudience
+		}
+	case rs.VerifyURL == "" && startsRelay:
+		return nil, rs, errors.New("the relay could not check any session token, so nobody could attach: give --session-key " +
+			"(the gateway's relay session public key, public.pem of the relay session Secret) or --verify-url")
+	case issuer != "":
+		return nil, rs, errors.New("--session-issuer goes with --session-key")
+	}
+	return keys, rs, nil
 }
 
 func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error) {
@@ -204,13 +277,16 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		builder       = fs.String("builder-id", "", "builder id recorded in the attestation")
 		provider      = fs.String("provider", "", "model route (claudecode: bedrock|anthropic; codex: openai|bedrock-mantle)")
 		model         = fs.String("model", "", "default model id")
-		gateway       = fs.String("gateway-url", "", "actor listener URL (default the in-cluster Service)")
+		gateway       = fs.String("gateway-url", "", "actor listener URL (default http://<substrate.services.actor> of --config, the in-cluster Service)")
 		failMode      = fs.String("fail-mode", "", "interactive outage mode: open or closed")
 		noMCP         = fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 		analyzers     = fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
 		keepEP        = fs.Bool("keep-entrypoint", false, "keep the base image ENTRYPOINT and CMD (tests; a real actor image starts the relay)")
 		agentFile     = fs.String("agent-binary", "", "the connector's pinned agent build (default: download it); checked against the kit's pinned checksum")
 		dry           = fs.Bool("dry-run", false, "scan the composed image and stop before pushing")
+		issuer        = fs.String("session-issuer", "", "iss of the relay session tokens the keys verify (default https://<substrate.services.admin> of --config, the gateway's)")
+		audience      = fs.String("session-audience", "dcrelay", "aud of the relay session tokens")
+		verifyURL     = fs.String("verify-url", "", "gateway session-token check URL, instead of --session-key")
 		trusted       multi
 		mcpHosts      multi
 		sessionKeys   multi
@@ -220,17 +296,18 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	fs.Var(&acceptIDs, "accept-finding", "finding rule id the build floor accepts (a known false positive; repeatable; needs --reason; recorded in the attestation)")
 	acceptReason := fs.String("reason", "", "why the --accept-finding rules are accepted (recorded in the attestation)")
 	fs.Var(&mcpHosts, "mcp-host", "remote MCP host that is allowed (repeatable)")
-	fs.Var(&sessionKeys, "session-key", "relay session public key, kid=PEM file (repeatable)")
+	fs.Var(&sessionKeys, "session-key", "the gateway's relay session public key, PEM FILE or KID=FILE (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsageError, nil
 	}
 	if *from == "" || *to == "" || *hookBin == "" || *relayBin == "" || (*keyFile == "" && !*dry) {
 		return ExitUsageError, errors.New("build needs --from, --to, --hook-binary, --relay-binary and --key")
 	}
-	for _, img := range []string{*from, *to} {
-		if r, perr := attest.ParseRef(img); perr == nil {
-			c.authHosts = append(c.authHosts, r.Registry)
-		}
+	// The login is for the registry the template goes to. The base image
+	// names its own registry, so it gets the login only when the admin lists
+	// its host with --registry-auth-host (GAP-0052).
+	if r, perr := attest.ParseRef(*to); perr == nil {
+		c.authHosts = append(c.authHosts, r.Registry)
 	}
 	reg, err := c.registry()
 	if err != nil {
@@ -256,17 +333,9 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if err != nil {
 		return ExitUsageError, err
 	}
-	keys := map[string][]byte{}
-	for _, kv := range sessionKeys {
-		kid, file, ok := strings.Cut(kv, "=")
-		if !ok {
-			return ExitUsageError, fmt.Errorf("--session-key wants kid=path, got %q", kv)
-		}
-		b, err := os.ReadFile(file)
-		if err != nil {
-			return ExitUsageError, err
-		}
-		keys[kid] = b
+	keys, sessions, err := relaySessions(cfg, sessionKeys, *issuer, *audience, *verifyURL, !*keepEP)
+	if err != nil {
+		return ExitUsageError, err
 	}
 	// The kit's pinned agent build, when the connector has one (GAP-0114):
 	// from --agent-binary, or downloaded, and checked against the pin.
@@ -283,8 +352,14 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 			return ExitUsageError, err
 		}
 	}
+	// The hook posts to the install's actor Service by its FQDN (GAP-0023):
+	// the same name the controller renders the egress rule for.
+	if strings.TrimSpace(*gateway) == "" {
+		*gateway = cfg.Substrate.ActorGatewayURL()
+	}
 	spec, tpl, harnessVersion, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
 		FailMode: *failMode, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
+		SessionIssuer: sessions.Issuer, Audience: sessions.Audience, VerifyURL: sessions.VerifyURL,
 		AgentBinary: agent, Arch: "amd64", Providers: providers(*connectorName, *provider)})
 	if err != nil {
 		return ExitUsageError, err
@@ -327,7 +402,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	}
 	_ = harnessVersion
 	res, err := attest.Build(ctx, opts)
-	out := BuildOutput{}
+	out := BuildOutput{Relay: sessions}
 	if res != nil {
 		out.Base, out.Kit, out.Digest, out.Pushed = res.Base, res.Kit, res.Digest, res.Pushed
 		if res.Report != nil {
@@ -373,6 +448,12 @@ func printBuild(w io.Writer, o BuildOutput, dry bool) {
 		fmt.Fprintf(w, "dry run: the image would be attested (scan verdict %s)\n", o.Scan.Verdict)
 	default:
 		fmt.Fprintf(w, "built %s\n  kit %s on base %s (%s)\n  attestation %s signed by key %s\n", o.Image, o.Kit.Version, o.Base.Digest, o.Base.Trust, o.AttTag, short(o.KeyID))
+	}
+	switch r := o.Relay; {
+	case r.VerifyURL != "":
+		fmt.Fprintf(w, "  relay checks session tokens with %s\n", r.VerifyURL)
+	case len(r.KeyIDs) > 0:
+		fmt.Fprintf(w, "  relay accepts session tokens of %s (aud %s), keys %s\n", r.Issuer, r.Audience, strings.Join(r.KeyIDs, ", "))
 	}
 	printScan(w, o.Scan, o.Hooks)
 }

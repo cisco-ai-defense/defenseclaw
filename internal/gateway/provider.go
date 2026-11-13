@@ -657,8 +657,6 @@ func doProviderRequest(req *http.Request, emit providerEgressEmitter) (*http.Res
 // ResolveAPIKey reads the API key from the named environment variable,
 // optionally loading a .env file first (for daemon contexts where the
 // user's shell env is not inherited).
-// Returns "" immediately when local key resolution has been disabled via
-// DisableLocalKeyResolution (enterprise credential-management mode).
 func ResolveAPIKey(envVar string, dotenvPath string) string {
 	// Enterprise token hydration stores secrets in-memory so they never need
 	// to enter the process environment or an on-disk dotenv file. Keep the
@@ -666,9 +664,6 @@ func ResolveAPIKey(envVar string, dotenvPath string) string {
 	// backends and ordinary gateway providers share one credential source.
 	if v, ok := config.GetKey(envVar); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
-	}
-	if localKeyResolutionDisabled {
-		return ""
 	}
 	if v := os.Getenv(envVar); v != "" {
 		return v

@@ -1,0 +1,22 @@
+# Profile runtime keys in the callout profiles (lane F3; no golden, see
+# TestChartCalloutProfileKeys).
+config:
+  substrate:
+    launcher_atespaces:
+      engineering: [eng-web]
+      ci: [ci-runs]
+      data: [data-ml]
+    unattended:
+      asks: deny
+    admin:
+      actor_secrets: [db-password, npm-token]
+  guardrail:
+    profiles:
+      engineering:
+        sandbox:
+          unattended_asks: Queue
+          actor_secrets: [db-password, other-token]
+      ci:
+        sandbox:
+          unattended_asks: queue
+          actor_secrets: [other-token]

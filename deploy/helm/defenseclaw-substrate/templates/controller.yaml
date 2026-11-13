@@ -52,22 +52,8 @@ spec:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
         # Reads admin policy_conflict resets (defenseclaw-policy-resets).
         {{- include "dc.kubeTokenMount" . | nindent 8 }}
-        {{- if .Values.controller.templateAnchorsSecret }}
-        - name: template-anchors
-          mountPath: /etc/defenseclaw/substrate/template-anchors
-          readOnly: true
-        {{- end }}
+        {{- include "dc.templateAnchorsMount" . | nindent 8 }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
-      {{- if .Values.controller.templateAnchorsSecret }}
-      # Admin-only: only the controller mounts it; a Secret update reaches
-      # the file in about a minute and the controller re-reads it.
-      - name: template-anchors
-        secret:
-          secretName: {{ .Values.controller.templateAnchorsSecret }}
-          optional: true
-          defaultMode: 0440
-          items:
-          - {key: anchors.pem, path: anchors.pem}
-      {{- end }}
+      {{- include "dc.templateAnchorsVolume" . | nindent 6 }}

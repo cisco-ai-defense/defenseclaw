@@ -149,6 +149,26 @@ phase_tools() {
   pass "tools present, Substrate $E2E_SUBSTRATE_VERSION client available"
 }
 
+# kube_user_setup adds a Kubernetes user to the kind API server for the launcher create flow. The gateway
+# checks a person's Kubernetes bearer with a TokenReview and refuses a ServiceAccount token (a pod is not a
+# person), so the test cluster gets a user with a static token (tests only; the token is random and never
+# printed). The token reaches the later phases in E2E_KUBE_TOKEN.
+kube_user_setup() {
+  local node="${E2E_KIND_CLUSTER}-control-plane" tok csv="$E2E_WORKDIR/e2e-tokens.csv"
+  tok=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')
+  (umask 077; printf '%s,e2e-user,e2e-user-uid,"e2e-users"\n' "$tok" >"$csv")
+  if ! docker cp "$csv" "$node:/etc/kubernetes/pki/e2e-tokens.csv" >>"$E2E_ARTIFACTS/kube-user.log" 2>&1 ||
+    ! docker exec "$node" sed -i 's|^    - kube-apiserver$|    - kube-apiserver\n    - --token-auth-file=/etc/kubernetes/pki/e2e-tokens.csv|' /etc/kubernetes/manifests/kube-apiserver.yaml >>"$E2E_ARTIFACTS/kube-user.log" 2>&1; then
+    fail "add a Kubernetes user with a static token to the kind API server"; return 1
+  fi
+  rm -f "$csv"
+  # kubelet restarts the API server pod from the changed manifest.
+  sleep 5
+  if ! retry 240 4 kubectl $(kctx) get --raw /readyz; then fail "the kind API server is ready after adding the test user"; return 1; fi
+  export E2E_KUBE_TOKEN="$tok"
+  pass "the kind API server knows a Kubernetes user for the launcher create flow"
+}
+
 # ---- phase: substrate ----
 phase_substrate() {
   log "substrate"
@@ -179,6 +199,7 @@ YAML
     # registry on localhost:5001); it also probes /dev/kvm and mounts it when there is one.
     if (cd "$E2E_SUBSTRATE_SRC" && KIND_CLUSTER_NAME="$E2E_KIND_CLUSTER" hack/create-kind-cluster.sh) >"$E2E_ARTIFACTS/kind-create.log" 2>&1; then
       pass "kind cluster $E2E_KIND_CLUSTER created"
+      kube_user_setup || return 1
     else
       tail -n 30 "$E2E_ARTIFACTS/kind-create.log"
       fail "kind cluster $E2E_KIND_CLUSTER created"
@@ -279,7 +300,7 @@ YAML
 
 # proxy_actor <actor> <local-port>: forward the stub agent's port 8080.
 proxy_actor() {
-  setsid nohup kubectl-ate $(kctx) proxy actor "$1" "$2:8080" -a "$E2E_ATESPACE" >"$E2E_ARTIFACTS/proxy-$1.log" 2>&1 </dev/null &
+  setsid nohup kubectl-ate $(kctx) proxy actor "$1" "$2:8080" -a "${3:-$E2E_ATESPACE}" >"$E2E_ARTIFACTS/proxy-$1.log" 2>&1 </dev/null &
   PROXY_PIDS+=("$!")
   retry 60 1 curl -sf -m 2 "http://127.0.0.1:$2/readyz"
 }
@@ -345,7 +366,7 @@ phase_defenseclaw() {
   # with the helpers above (check, retry, ATE, K, proxy_actor, fetch_code).
   # shellcheck disable=SC1091
   . "$HERE/defenseclaw.sh"
-  dc_install && dc_actor_policy && dc_hook_deny
+  dc_install && dc_actor_policy && dc_hook_deny && dc_launcher_hook
 }
 
 phase_uninstall() {

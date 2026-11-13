@@ -1330,6 +1330,12 @@ def _host_list(hosts: list[str], limit: int = 4) -> str:
     return shown + (f" (+{len(hosts) - limit} more)" if len(hosts) > limit else "")
 
 
+def _substrate_only(runtimes: Any) -> bool:
+    """A floor's runtimes that leave Agent Substrate only (Go SubstrateOnly)."""
+    names = [_text(v) for v in _list(runtimes)]
+    return bool(names) and "openshell" not in names and "substrate" in names
+
+
 def managed_policy_pairs(explain: dict[str, Any], now: datetime | None = None) -> tuple[tuple[str, str], ...]:
     """The caller's own sandbox policy as label/value pairs.
 
@@ -1366,6 +1372,14 @@ def managed_policy_pairs(explain: dict[str, Any], now: datetime | None = None) -
             "Required",
             "your account is exempt from enrollment (enterprise.enrollment.exempt_users), so required_for doesn't apply to you: "
             f"{_and_list(required)} may also run on this computer outside a sandbox, where their calls are still inspected and logged",
+        ))
+    elif required and _substrate_only(explain.get("runtimes")):
+        # runtimes: [substrate] (E26): the launcher runs them in an Agent
+        # Substrate actor, never on this computer.
+        pairs.append((
+            "Required",
+            f"{_and_list(required)} run only on Agent Substrate, not on this computer: "
+            f"start one with defenseclaw substrate run {required[0]}",
         ))
     elif required:
         required_text = f"{_and_list(required)} run only in a sandbox on this computer"

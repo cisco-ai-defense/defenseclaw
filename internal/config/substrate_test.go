@@ -342,8 +342,8 @@ func TestSubstrateTemplatesDefaults(t *testing.T) {
 		t.Fatal("max_age")
 	}
 	ok := validSubstrate()
-	ok.Templates = SubstrateTemplatesConfig{AllowedImages: []string{"10.0.1.2:5000/f1/*"}, ProfileImages: map[string][]string{"ci": {"10.0.1.2:5000/f1/ci-*"}},
-		PlainHTTPRegistries: []string{"10.0.1.2:5000"}, RevokedDigests: []string{"sha256:" + strings.Repeat("ab", 32)}}
+	ok.Templates = SubstrateTemplatesConfig{AllowedImages: []string{"registry.example.test:5000/f1/*"}, ProfileImages: map[string][]string{"ci": {"registry.example.test:5000/f1/ci-*"}},
+		PlainHTTPRegistries: []string{"registry.example.test:5000"}, RevokedDigests: []string{"sha256:" + strings.Repeat("ab", 32)}}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid templates refused: %v", err)
 	}

@@ -47,7 +47,7 @@ Because every model call passes the proxy, the 1.0.10 routing and tokenomics fea
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
 | Scan before use | Changed, stronger | `template build` scans the agent's skills, plugins, MCP servers and agent config inside the image, then signs the result. Agents from unscanned images get no network |
-| Scan at run time | Changed | When an agent adds a skill or MCP server mid-session, the hook sends the files to the gateway for scanning (size-capped, as in OpenShell copy mode), because the gateway can't read the agent's disk |
+| Scan at run time | Changed | When an agent adds a skill or MCP server mid-session, the hook sends the files to the gateway for scanning (size-capped, as in OpenShell copy mode), because the gateway can't read the agent's disk. A skill folder that fails is moved out of the skill folder. One that arrives without a scan is refused in managed installs and the strict tier, and raises an alert otherwise |
 | Remote MCP servers | Same, plus network | Allowed MCP servers are named in the allow list. The egress callout reads the body of a call to a listed MCP host (up to 1 MiB) to apply tool rules, and admission decides as usual |
 | MCP servers started inside the actor from the repo | Changed | The hook sends the server's files with the admission request so the MCP scanner can read them |
 | Local MCP servers on your laptop | Not available | An agent in the cluster can't reach your machine |
