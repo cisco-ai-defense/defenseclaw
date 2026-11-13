@@ -83,7 +83,12 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 }
 
 // Hook answers one hook payload through the connector's handler.
-func (e *S7Engine) Hook(ctx context.Context, body []byte) (int, []byte) {
+func (e *S7Engine) Hook(ctx context.Context, body []byte) (code int, out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
+		}
+	}()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.connector, bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -127,7 +132,12 @@ type S7Det struct {
 }
 
 // Deterministic evaluates the call the way evaluateAgentHook projects it.
-func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json.RawMessage, cwd string) S7Det {
+func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json.RawMessage, cwd string) (det S7Det) {
+	defer func() {
+		if r := recover(); r != nil {
+			det = S7Det{Tool: toolName, Parse: "panic"}
+		}
+	}()
 	actionTool := agentHookTrustedActionTool(e.connector, toolName, runtime.GOOS)
 	trusted, toolCWD := agentHookTrustedActionArgs(e.connector, toolName, args)
 	if toolCWD == "" {
