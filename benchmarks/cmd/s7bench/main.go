@@ -236,6 +236,9 @@ func main() {
 	dmCacheOnly := flag.Bool("dm-cache-only", false, "with -dm-cache-dir: replay only, a miss fails the call (offline, no key needed)")
 	dmCacheInflight := flag.Int("dm-cache-inflight", 8, "with -dm-cache-dir: upstream requests in flight per harness process")
 	dmCacheTPM := flag.Int("dm-cache-tpm", 0, "with -dm-cache-dir: input tokens per minute this process may send upstream (0: no pacing)")
+	dmCacheRPM := flag.Int("dm-cache-rpm", 0, "with -dm-cache-dir: upstream requests per minute this process may send (0: no pacing)")
+	dmCacheBudgetFile := flag.String("dm-cache-budget-file", "", "with -dm-cache-dir: file that counts upstream requests across processes")
+	dmCacheBudget := flag.Int64("dm-cache-budget", 0, "with -dm-cache-budget-file: upstream requests allowed in all (0: no cap)")
 	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
@@ -379,13 +382,13 @@ func main() {
 			if logPath == "" {
 				logPath = filepath.Join(filepath.Dir(filepath.Clean(*dmCacheDir)), "log", fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405"), os.Getpid()))
 			}
-			u, c, err := startDMCache(*dmURL, (config.DecisionModelConfig{Protocol: *dmProtocol}).EffectiveProtocol(), *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, logPath)
+			u, c, err := startDMCache(*dmURL, (config.DecisionModelConfig{Protocol: *dmProtocol}).EffectiveProtocol(), *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudgetFile, *dmCacheBudget, logPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "[s7bench] FATAL: dm cache:", err)
 				os.Exit(2)
 			}
 			baseURL, dmc = u, c
-			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v inflight=%d tpm=%d\n", *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM)
+			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v inflight=%d tpm=%d rpm=%d budget=%d\n", *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudget)
 		}
 		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
 			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock}

@@ -56,9 +56,13 @@ type dmCache struct {
 	flight                       sync.Map // sha -> *dmFlight
 	// tpm paces upstream calls to this many input tokens per minute (0:
 	// none); the key's quota is shared with other lanes.
-	tpm      int
-	paceMu   sync.Mutex
-	paceNext time.Time
+	tpm, rpm int
+	// budgetFile counts upstream requests across every harness process of
+	// a run (one byte appended per request); at budget no request is sent.
+	budgetFile string
+	budget     int64
+	paceMu     sync.Mutex
+	paceNext   time.Time
 
 	hits, misses, upstreamCalls, rateLimited, failed, offlineMisses, stored atomic.Int64
 }
@@ -69,7 +73,7 @@ type dmFlight struct {
 }
 
 // startDMCache starts the relay and returns its loopback URL.
-func startDMCache(upstream, protocol, dir string, only bool, inflight, tpm int, logPath string) (string, *dmCache, error) {
+func startDMCache(upstream, protocol, dir string, only bool, inflight, tpm, rpm int, budgetFile string, budget int64, logPath string) (string, *dmCache, error) {
 	if inflight < 1 {
 		inflight = 8
 	}
@@ -77,7 +81,7 @@ func startDMCache(upstream, protocol, dir string, only bool, inflight, tpm int, 
 		return "", nil, err
 	}
 	c := &dmCache{upstream: upstream, protocol: protocol, key: os.Getenv("DEFENSECLAW_DECISION_MODEL_KEY"), dir: dir, only: only,
-		sem: make(chan struct{}, inflight), tpm: tpm,
+		sem: make(chan struct{}, inflight), tpm: tpm, rpm: rpm, budgetFile: budgetFile, budget: budget,
 		client: &http.Client{Timeout: 120 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}
@@ -186,13 +190,37 @@ func (c *dmCache) waitPause() {
 	}
 }
 
+// takeBudget records one upstream request in the shared budget file and
+// reports whether it is still within the budget.
+func (c *dmCache) takeBudget() bool {
+	if c.budgetFile == "" || c.budget <= 0 {
+		return true
+	}
+	f, err := os.OpenFile(c.budgetFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte{'.'}); err != nil {
+		return false
+	}
+	st, err := f.Stat()
+	return err == nil && st.Size() <= c.budget
+}
+
 // waitPace spaces calls so the estimated input tokens (request bytes / 4,
 // questions included) stay under tpm per minute.
 func (c *dmCache) waitPace(bodyBytes int) {
-	if c.tpm <= 0 {
+	if c.tpm <= 0 && c.rpm <= 0 {
 		return
 	}
-	cost := time.Duration(float64(time.Minute) * float64(max(bodyBytes/4, 1)) / float64(c.tpm))
+	var cost time.Duration
+	if c.tpm > 0 {
+		cost = time.Duration(float64(time.Minute) * float64(max(bodyBytes/4, 1)) / float64(c.tpm))
+	}
+	if c.rpm > 0 {
+		cost = max(cost, time.Minute/time.Duration(c.rpm))
+	}
 	c.paceMu.Lock()
 	now := time.Now()
 	if c.paceNext.Before(now) {
@@ -225,6 +253,11 @@ func (c *dmCache) fetch(sha string, body []byte) *dmCacheEntry {
 		attempts++
 		c.waitPause()
 		c.waitPace(len(body))
+		if !c.takeBudget() {
+			c.failed.Add(1)
+			c.logLine(map[string]any{"sha": sha, "budget_exhausted": true})
+			return nil
+		}
 		req, _ := http.NewRequest(http.MethodPost, c.upstream, bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		if c.key != "" {
