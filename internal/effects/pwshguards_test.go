@@ -75,7 +75,8 @@ func TestPSReview4CommaListNotOnePath(t *testing.T) {
 }
 
 // R4-3 (b): a list / array piped into iex / Invoke-Expression is opaque_code,
-// never a trusted re-parse.
+// never a trusted re-parse; each element is its own script, so its effects are
+// present too.
 func TestPSReview4ArrayIntoIEXIsOpaque(t *testing.T) {
 	for _, c := range []string{
 		`'Get-Date','Remove-Item C:\Windows' | iex`,
@@ -88,9 +89,12 @@ func TestPSReview4ArrayIntoIEXIsOpaque(t *testing.T) {
 		if r.FullyKnown() {
 			t.Errorf("%q wrongly fully known: %s", c, fmtRes(r))
 		}
-		// the hidden Remove-Item must not surface as a trusted known delete.
-		if has(r, KindDelete, `c:\windows`, TargetStateKnown) {
-			t.Errorf("%q fabricated a known delete of c:\\windows: %s", c, fmtRes(r))
+		// pwsh runs each piped element as its own script, and psparse now gives one
+		// script per element, so the delete of the second element is a real effect
+		// and must be present. The call stays opaque and not fully known (the
+		// assertions above); the delete is not what makes it safe (GAP-0156, R7-M).
+		if !has(r, KindDelete, `c:\windows`, TargetStateKnown) {
+			t.Errorf("%q lost the delete of c:\\windows that the second element runs: %s", c, fmtRes(r))
 		}
 	}
 }

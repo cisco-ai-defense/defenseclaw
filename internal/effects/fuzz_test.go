@@ -51,18 +51,15 @@ func checkInvariants(t *testing.T, in string, r Result) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if indexOf(string(b), `"Text"`) >= 0 || indexOf(string(b), `"text"`) >= 0 {
+	// Look at the keys, not the bytes: a command whose own word is "text" is
+	// spelled "text" in a value, which is not a leaked field.
+	var tree any
+	if err := json.Unmarshal(b, &tree); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if jsonHasKey(tree, "Text") || jsonHasKey(tree, "text") {
 		t.Errorf("Data.Text serialized into JSON output (in %q)", in)
 	}
-}
-
-func indexOf(hay, needle string) int {
-	for i := 0; i+len(needle) <= len(hay); i++ {
-		if hay[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
 }
 
 func FuzzExtractPOSIX(f *testing.F) {
@@ -173,4 +170,23 @@ func TestOddBytesNeverPanic(t *testing.T) {
 		r := Extract(Call{Surface: SurfaceShell, Command: s}, posixOpts)
 		checkInvariants(t, s, r)
 	}
+}
+
+// jsonHasKey reports an object key of that name anywhere in the decoded tree.
+func jsonHasKey(v any, key string) bool {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, c := range x {
+			if k == key || jsonHasKey(c, key) {
+				return true
+			}
+		}
+	case []any:
+		for _, c := range x {
+			if jsonHasKey(c, key) {
+				return true
+			}
+		}
+	}
+	return false
 }

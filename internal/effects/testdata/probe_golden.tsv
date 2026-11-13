@@ -1,0 +1,1380 @@
+A01 >>ak	K|append:/home/u/.ssh/authorized_keys
+A02 tee -a ak	K|append:/home/u/.ssh/authorized_keys
+A03 cp ak	U|
+A04 cp into ~ (dir dest)	U|
+A05 cp into ~/	K|write:/home/u/.bashrc
+A06 mv into /home/u/	K|write:/home/u/.bashrc
+A07 install ak	U|
+A08 install -t dir	K|write:/home/u/.ssh/authorized_keys
+A09 rsync ak	U|
+A10 dd of=	K|write:/home/u/.ssh/authorized_keys
+A11 sed -i.bak	U|write:/home/u/.bashrc
+A12 sed -ibak	U|write:/home/u/.bashrc
+A13 sed -Ei	K|write:/home/u/.bashrc
+A14 sed --in-place=.b	K|write:/home/u/.bashrc
+A15 perl -pi -e	U|
+A16 truncate	K|write:/home/u/.ssh/authorized_keys
+A17 touch	K|write:/home/u/.ssh/authorized_keys
+A18 chmod	K|permission_change:/home/u/.ssh/authorized_keys
+A19 cp -t dir	K|write:/home/u/.ssh/authorized_keys
+A20 mv -t dir	K|write:/home/u/.bashrc
+A21 rename util	U|
+A22 ex editor	U|
+A23 curl -o	K|write:/home/u/.ssh/authorized_keys
+A24 curl --output-dir	U|
+A25 wget -O	U|write:/home/u/.ssh/authorized_keys
+A26 wget -P	U|
+A27 unzip -d ssh	U|
+A28 tar -C ssh	U|
+A29 tar --directory=	U|
+A30 tar C before x	U|
+A31 tar xf in home cwd	U|
+A32 tar -x -f sep	U|
+A33 tar --extract	U|
+A34 tar czf - src	K|write:/home/u/.ssh
+A35 tar cf old dest	K|write:/home/u/.bashrc
+A36 git rm	U|
+A37 git checkout file	U|
+A38 git apply	U|
+A39 git restore --source	U|
+A40 git show > ak	K|write:/home/u/.ssh/authorized_keys
+A41 git config --global	U|
+A42 ed	U|
+A43 cat > heredoc	K|write:/home/u/.claude/settings.json
+A44 exec redirect	K|append:/home/u/.bashrc
+A45 exec fd 3	K|append:/home/u/.ssh/authorized_keys
+A46 group redirect	K|append:/home/u/.ssh/authorized_keys
+A47 >| clobber	K|write:/home/u/.bashrc
+A48 <> rw	K|write:/home/u/.bashrc
+A49 while < >>	K|append:/home/u/.ssh/authorized_keys
+A50 xargs -I cp	U|
+A51 xargs rm	U|
+A52 xargs sh -c	U|append:/home/u/.ssh/authorized_keys
+A53 find -delete	K|delete:/home/u/.ssh
+A54 find -exec cp to ak	U|
+A55 find -exec sh -c	K|append:/home/u/.ssh/authorized_keys
+A56 find -fprint	K|write:/home/u/.bashrc
+A57 ln -sf name=ak	U|link:/tmp/k
+A58 ln -s into dir	K|link:/tmp/x/authorized_keys,link:/tmp/x/authorized_keys
+A59 ln -st dir	K|link:/home/u/.ssh,link:/tmp/x/authorized_keys
+A60 ln hard	U|link:/tmp/k
+A61 ln -s settings	U|link:/tmp/evil.json
+A62 ln -s rel target in other dir	U|
+A63 cp -s symlink	U|
+B01 ~u user tilde	U|
+B02 ~root	U|
+B03 ${HOME}	K|write:/home/u/.bashrc
+B04 ~+ tilde	U|
+B05 ~- tilde	U|
+B06 env HOME= then ~ (outer expands)	U|
+B07 prefix HOME= then ~	U|
+B08 unset HOME then ~	U|
+B09 HOME empty then ~	U|
+B10 local HOME in func	U|write:/home/u/.bashrc
+B11 declare HOME	K|write:/tmp/h/.bashrc
+B12 readonly/export -n	K|write:/home/u/.bashrc
+B13 ${HOME:-/tmp}	U|
+B14 ${X:-~}	U|
+B15 $PWD	U|
+B16 $OLDPWD	U|
+B17 double slash/dot	U|
+B18 dotdot	U|
+B19 mac case	K|append:/users/u/.ssh/authorized_keys
+B20 trailing slash	K|write:/home/u/.bashrc
+B21 ansi-c quote	U|
+B22 locale quote	K|write:/home/u/.bashrc
+B23 IFS split path	U|
+B24 brace expn	U|
+B25 printf -v	U|
+B26 arith/array	U|
+B27 indirect	U|
+B28 alias	U|
+C01 cd /d	U|append:c:\users\u\.ssh\authorized_keys
+C01 cd ~/.ssh ; >>	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C02 cd ~/.ssh || exit	U|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C02 pushd	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+C03 cd %USERPROFILE%	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+C03 cd ~/.ssh || return	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C04 copy dest dir	K|write:c:\users\u\.ssh\authorized_keys
+C04 if cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C05 case cd	U|
+C05 xcopy dest dir	U|write:c:\users\u\.ssh\authorized_keys
+C06 func cd called	U|
+C06 mklink	K|link:c:\t\a,link:c:\users\u\.ssh\authorized_keys
+C07 cd overridden by func	U|
+C07 forward slashes	U|append:c:\users\u\.ssh\authorized_keys
+C08 8.3 name	U|
+C08 eval cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C09 cd then cmd /c	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+C09 eval cd from tmp	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys,append:/tmp/authorized_keys
+C1 cd	K|delete:/etc/passwd
+C10 source	U|append:/home/u/proj/authorized_keys
+C10 trailing dot	U|
+C11 cd .. relative	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+C11 source builtin	U|write:/home/u/proj/.bashrc
+C12 CDPATH env	U|
+C12 drive-relative after drive switch	U|
+C13 CDPATH assigned	U|
+C13 pushd UNC	U|
+C14 builtin cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C14 cd \ root-relative	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+C15 command cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C15 move	U|
+C16 caret in path	U|append:c:\users\u\.ssh\authorized_keys
+C16 cd -P	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C17 cd --	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C17 quoted space redirect	K|write:c:\users\u\.ssh\authorized_keys
+C18 ProgramData DC	U|write:c:\programdata\defenseclaw\config.yaml,write:c:\work\config.yaml
+C18 pushd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C19 pushd popd	U|
+C2 subshell cd	K|delete:/home/u/proj/x
+C20 cd .. chain	U|
+C21 cd $HOME/.ssh	K|append:/home/u/.ssh/authorized_keys
+C22 cd then subshell	U|
+C23 cd in &&-chain then ;	U|
+C24 cd redirect	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C25 cd in time	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C26 cd in ! 	U|
+C27 cd in { }	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C28 cd via exec env	K|
+C29 cd in until	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C3 pushd	K|delete:/etc/passwd,delete:/home/u/proj/passwd
+C30 cd in while body	K|append:/home/u/.ssh/authorized_keys
+C31 bash -c cd write	K|append:/home/u/.ssh/authorized_keys
+C32 sh -c cd from tmp	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys,append:/tmp/authorized_keys
+C33 bash heredoc literal	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+C34 bash -s	U|
+C35 trap	U|
+C36 coproc	U|
+C37 select	K|append:/home/u/.bashrc
+C38 [[ ]] && cd	U|
+C39 cd ; cd -	U|
+C4 git -C	U|
+C40 heredoc cmdsubst	K|append:/home/u/.ssh/authorized_keys
+C41 heredoc backtick	U|
+C42 herestring cmdsubst	U|
+C43 arith cmdsubst	U|
+C44 param default cmdsubst	U|
+C45 [[ ]] cmdsubst	U|
+C46 case word cmdsubst	U|
+C47 for list cmdsubst	U|
+C48 assignment only	U|
+C49 redirect target cmdsubst	U|
+C50 local cmdsubst	U|
+CS-a Remove-Item comma list all static	K|delete:c:\t\a,delete:c:\t\b
+CS-b Remove-Item comma list dynamic middle	U|delete:c:\t\a,delete:c:\t\b
+CS-c colon comma list	K|delete:c:\t\a,delete:c:\t\b
+CS-d array-expr with dynamic	U|
+CS-e comma list hits protected + dynamic	U|delete:c:\users\u\.ssh\authorized_keys
+D1 cmd > spaced	K|write:c:\out.txt
+D10 curl -F cmd	K|
+D11 nul	K|
+D12 cmd /c	K|delete:c:\x
+D13 ren dir	U|
+D14 robocopy	U|
+D15 cmd caret in quotes	K|delete:c:\a^b
+D2 cmd >attached	U|write:c:\x\a.bat
+D3 cmd %VAR% trusted	K|delete:c:\users\u\.ssh\id_rsa
+D4 cmd quoted glob	U|
+D5 mklink order	K|link:c:\windows\system32\config\sam,link:c:\x\l
+D6 icacls	U|permission_change:c:\x
+D7 certutil	K|
+D8 cmd cond	K|delete:c:\x\a
+D9 cmd %1	U|
+DU-a powershell -Command delete (ps dialect)	K|delete:c:\t\a,delete:c:\t\a
+DU-b powershell -Command delete (cmd outer)	K|delete:c:\t\a
+DU-c powershell -Command protected	K|delete:c:\users\u\.ssh\authorized_keys,delete:c:\users\u\.ssh\authorized_keys
+DU-d pwsh -EncodedArguments opaque	U|
+E1 HOME reassigned	K|write:/etc/passwd
+E2 HOME dynamic then ~	U|
+E3 HOME prefix only	K|delete:/home/u/.bashrc
+EFF-ARCHIVE-01 unzip -d	U|
+EFF-ARCHIVE-02 tar -C	U|
+EFF-ARCHIVE-03 tar --directory	U|
+EFF-ARCHIVE-04 gunzip in place	K|delete:/home/u/.ssh/authorized_keys.gz,write:/home/u/.ssh/authorized_keys
+EFF-ARCHIVE-05 gzip -d	K|delete:/home/u/.ssh/authorized_keys.gz,write:/home/u/.ssh/authorized_keys
+EFF-ARCHIVE-06 xz -d	K|delete:/home/u/.ssh/authorized_keys.xz,write:/home/u/.ssh/authorized_keys
+EFF-ARCHIVE-07 bunzip2	K|delete:/home/u/.ssh/authorized_keys.bz2,write:/home/u/.ssh/authorized_keys
+EFF-ARCHIVE-08 gzip compresses (original removed)	K|delete:/home/u/.ssh/authorized_keys,write:/home/u/.ssh/authorized_keys.gz
+EFF-ARCHIVE-09 gzip -c is read only	K|
+EFF-ARCHIVE-10 zip writes the archive	U|
+EFF-ARCHIVE-11 7z	U|
+EFF-ARCHIVE-12 bsdtar	U|
+EFF-ARCHIVE-13 cpio	U|
+EFF-BITS-01 transfer	K|write:c:\users\u\.ssh\authorized_keys
+EFF-BITS-02 transfer download priority	K|write:c:\users\u\.ssh\authorized_keys
+EFF-BITS-03 upper-case switches	K|write:c:\users\u\.ssh\authorized_keys
+EFF-BITS-04 addfile	K|write:c:\users\u\.ssh\authorized_keys
+EFF-BITS-05 relative local	K|write:c:\work\authorized_keys
+EFF-BITS-06 upload reads	K|
+EFF-BITS-07 unknown verb	U|
+EFF-BITS-08 powershell	K|write:c:\users\u\.ssh\authorized_keys
+EFF-CDPATH-01 declare	U|
+EFF-CDPATH-02 local in function	U|
+EFF-CDPATH-03 typeset	U|
+EFF-CDPATH-04 printf -v	U|
+EFF-CDPATH-05 read	U|
+EFF-CDPATH-06 mapfile	U|
+EFF-CDPATH-07 getopts	U|
+EFF-CDPATH-08 readonly	U|
+EFF-CDPATH-09 export name only	U|
+EFF-CDPATH-10 read through variable name	U|
+EFF-DYN-FILEPATH-01 variable FilePath	U|
+EFF-DYN-FILEPATH-02 env FilePath	U|
+EFF-DYN-FILEPATH-03 expression FilePath	U|
+EFF-DYN-FILEPATH-04 positional variable	U|
+EFF-DYN-FILEPATH-05 subexpression	U|
+EFF-GITC-01 filter-branch	U|
+EFF-GITC-02 reset --hard	U|
+EFF-GITC-03 gc --prune	U|
+EFF-GITC-04 update-ref	U|
+EFF-GITC-05 checkout	U|
+EFF-GITC-06 rebase	U|
+EFF-GITC-07 sparse-checkout	U|
+EFF-GITC-08 submodule update	U|
+EFF-GITC-09 config writes	U|
+EFF-GITC-10 git-dir work-tree reset	U|
+EFF-GITC-11 status is read only	K|
+EFF-GITC-12 cd then git	U|
+EFF-GITC-13 replace	U|
+EFF-HEREDOC-01 sh quoted	K|append:/home/u/.ssh/authorized_keys
+EFF-HEREDOC-02 bash -s	K|append:/home/u/.ssh/authorized_keys
+EFF-HEREDOC-03 sh dash	U|append:/home/u/.ssh/authorized_keys
+EFF-HEREDOC-04 zsh tab-stripped	K|append:/home/u/.ssh/authorized_keys
+EFF-HEREDOC-05 cat pipe sh	U|
+EFF-HEREDOC-06 sh -e flag	U|append:/home/u/.ssh/authorized_keys
+EFF-HEREDOC-07 unquoted expanding	U|
+EFF-HEREDOC-08 here-string	K|append:/home/u/.ssh/authorized_keys
+EFF-HEREDOC-09 body is data for a script	U|
+EFF-HEREDOC-10 body is data for -c	K|
+EFF-HEREDOC-11 redirected heredoc into sh	K|append:/home/u/.ssh/authorized_keys,write:/t/out
+EFF-HOME-01 read	U|
+EFF-HOME-02 read then bare cd	U|
+EFF-HOME-03 read -r from file	U|
+EFF-HOME-04 printf -v	U|
+EFF-HOME-05 mapfile	U|
+EFF-HOME-06 getopts	U|
+EFF-HOME-07 unset	U|
+EFF-HOME-08 read then export	U|
+EFF-HOME-09 read via name	U|
+EFF-HOME-10 gitbash read	U|
+EFF-LAUNCHERS-01 schtasks	U|
+EFF-LAUNCHERS-02 runas	U|
+EFF-LAUNCHERS-03 psexec	U|
+EFF-LAUNCHERS-04 forfiles	U|
+EFF-LAUNCHERS-05 wmic	U|
+EFF-LAUNCHERS-06 mshta	U|
+EFF-LAUNCHERS-07 wscript	U|
+EFF-LAUNCHERS-08 cscript	U|
+EFF-LAUNCHERS-09 rundll32	U|
+EFF-LAUNCHERS-10 regsvr32	U|
+EFF-LAUNCHERS-11 ps schtasks	U|
+EFF-LAUNCHERS-12 posix at	U|
+EFF-LAUNCHERS-13 systemd-run	U|
+EFF-LAUNCHERS-14 nsenter	U|
+EFF-LAUNCHERS-15 script -c	U|
+EFF-LAUNCHERS-16 flock	U|
+EFF-LAUNCHERS-17 parallel	U|
+EFF-LAUNCHERS-18 setpriv	U|
+EFF-LAUNCHERS-19 tmux	U|
+EFF-LAUNCHERS-20 strace	U|
+EFF-LAUNCHERS-21 watch	U|
+EFF-LAUNCHERS-22 osascript	U|
+EFF-Z16-01 clone into dir	K|write:/home/u/.ssh/**
+EFF-Z16-02 clone default name	K|write:/home/u/r/**
+EFF-Z16-03 clone into home-relative	K|write:/home/u/.ssh/**
+EFF-Z16-04 clone dynamic dest	U|
+EFF-Z16-05 init dir	K|write:/home/u/.ssh/**
+EFF-Z16-06 clone with options	U|write:/home/u/.ssh/**
+F1 CommandLine cap	K|delete:/etc/x
+F1 read_file kind	K|
+F2 argv join	K|delete:/tmp/a b
+F2 local_shell action	K|delete:/etc/x
+F3 argv -c non-shell	K|
+F3 json string args	K|delete:/etc/x
+F4 argv surface	K|delete:/etc/passwd
+F4 numeric command	U|
+F5 argv bash -c no payload	K|
+F5 patch context line	K|write:/home/u/proj/a.md
+F6 empty object shell	U|
+F6 mcp deep	U|write:/tmp/ok
+F7 argv sh -ec	K|delete:/etc/x
+F7 empty shell	K|
+F8 commands array	K|delete:/etc/x
+F8 tool run_in_terminal	K|delete:/etc/x
+F9 argv cmd.exe	U|
+G01 cd ~ relative	K|append:c:\users\u\.ssh\authorized_keys
+G01 gb >> ~	K|append:c:\users\u\.ssh\authorized_keys
+G02 /c mount	K|append:c:\users\u\.ssh\authorized_keys
+G02 gb cd /c/ then >>	K|append:c:\users\u\.ssh\authorized_keys
+G03 C:/ form	K|append:c:\users\u\.ssh\authorized_keys
+G03 gb case	K|append:c:\users\u\.ssh\authorized_keys
+G04 cd /c then rel	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\.ssh\authorized_keys
+G04 gb //localhost	U|
+G05 $USERPROFILE	K|append:c:\users\u\.ssh\authorized_keys
+G05 gb C:/	K|append:c:\users\u\.ssh\authorized_keys
+G06 /cygdrive cd	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+G06 gb /cygdrive	K|write:c:\users\u\.ssh\authorized_keys
+G07 gb /C/ upper	K|append:c:\users\u\.ssh\authorized_keys
+G07 quoted backslash	K|append:c:\users\u\.ssh\authorized_keys
+G08 escaped backslash	K|append:c:\users\u\.ssh\authorized_keys
+G08 gb cd ~	K|write:c:\users\u\.bashrc
+G09 cmd //c	U|
+G09 gb /home/u	U|
+G1 gitbash /c/ path	K|delete:c:\users\u\.ssh
+G10 gb /etc	U|
+G10 ln -s in .ssh	U|link:c:\t\a
+G11 HOME reassigned cd	K|append:c:\users\u\.ssh\authorized_keys
+G11 gb $USERPROFILE	U|
+G12 cp dest dir	K|write:c:\users\u\.ssh\authorized_keys
+G12 gb cmd //c	U|
+G13 gb powershell -c	U|
+G13 mixed case drive	K|append:c:\users\u\.ssh\authorized_keys
+G14 gb /tmp	U|
+G15 gb /proc/cygdrive	U|
+G2 gitbash tilde	K|
+G3 gitbash backslash path	K|delete:c:\users\u\.ssh\id_rsa
+G4 gitbash quoted win path	K|delete:c:\users\u\.ssh\id_rsa
+G5 gitbash $HOME	K|delete:c:\users\u\.ssh
+GIT-a git add protected path	K|
+GIT-b git add relative	K|
+GIT-c git push default remote	U|
+GIT-d git push origin	U|
+GIT-e git push url	K|
+H-cmd authorized_keys	U|append:c:\users\u\.ssh\authorized_keys
+H-gitbash msys home ak	K|append:c:\users\u\.ssh\authorized_keys
+H-gitbash posix-dialect ak	K|append:c:\users\u\.ssh\authorized_keys
+H-posix authorized_keys append	K|append:/home/u/.ssh/authorized_keys
+H-posix bashrc	K|append:/home/u/.bashrc
+H-posix known_hosts	K|append:/home/u/.ssh/known_hosts
+H-posix sshd_config	K|append:/etc/ssh/sshd_config
+H-ps Set-Content ak	K|write:c:\users\u\.ssh\authorized_keys
+H1 ps & scriptblock	U|delete:c:\windows\x
+H2 ps Invoke-Command	U|delete:c:\windows\x
+H3 ps if block	K|delete:c:\windows\x
+H4 ps -WhatIf	K|delete:c:\windows\x
+H5 ps Out-File	K|write:c:\x\o.txt
+H6 ps -enc nested in ps	K|delete:c:\x,delete:c:\x
+J1 dq $HOME	K|delete:/home/u/.ssh
+J2 escaped prog	K|delete:/etc/x
+J3 quoted prog	K|delete:/etc/x
+J4 net send host	K|
+J5 pushd in subshell	K|delete:/home/u/.ssh
+J6 cd .. after cd -	U|
+J7 nested cmdsubst dup	K|delete:/home/u/.ssh
+J8 exec after dynamic cd	U|
+J9 drive-relative exe	U|
+K01 >> %USERPROFILE%	U|append:c:\users\u\.ssh\authorized_keys
+K02 copy /y	U|
+K03 copy into dir	K|write:c:\users\u\.ssh\authorized_keys
+K04 xcopy	U|
+K05 robocopy	K|write:c:\users\u\.ssh\authorized_keys
+K06 move	U|
+K07 cd /d & >>	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+K08 pushd	U|append:c:\users\u\.ssh\authorized_keys
+K09 cd twice	U|
+K1 cd /d	K|delete:c:\windows\x
+K10 cd \ rooted	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+K10 lowercase var	U|
+K11 @ prefix	U|
+K11 drive switch	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+K12 cmd /c cd	K|delete:c:\work\x
+K12 drive-relative C:	U|
+K13 mklink	K|link:c:\tmp\k,link:c:\users\u\.ssh\authorized_keys
+K14 mklink /J	U|link:c:\tmp\evil,link:c:\users\u\.ssh
+K15 delayed !P!	U|
+K15c cmd /v:on !P!	U|
+K16 8.3 short name	U|
+K17 8.3 ProgramData	U|
+K18 trailing dot	U|
+K19 trailing space	U|
+K2 caret in quotes hides &	K|delete:c:\tmp\a^,delete:c:\windows\system32\x
+K20 forward slashes	U|append:c:\users\u\.ssh\authorized_keys
+K21 \\.\ prefix	U|
+K22 \\127.0.0.1\C$	U|
+K23 \\?\UNC\localhost	U|
+K24 caret in path	U|append:c:\users\u\.ssh\authorized_keys
+K25 split quotes path	U|append:c:\users\u\.ssh\authorized_keys
+K26 for %f	U|
+K27 paren block redirect	U|append:c:\users\u\.ssh\authorized_keys
+K28 redirect first	U|append:c:\users\u\.ssh\authorized_keys
+K29 if exist ( )	U|append:c:\users\u\.ssh\authorized_keys
+K3 2>&1	K|write:c:\out.txt
+K30 start /b cmd ^>^>	U|
+K31 cmd /c quoted	U|append:c:\users\u\.ssh\authorized_keys
+K32 copy concat append	U|
+K33 ren in place	U|
+K34 replace	U|
+K35 esentutl	U|
+K36 certutil -decode	K|write:c:\users\u\.ssh\authorized_keys
+K37 certutil -urlcache	K|write:c:\users\u\.ssh\authorized_keys
+K38 bitsadmin	K|write:c:\users\u\.ssh\authorized_keys
+K39 curl -o	K|write:c:\users\u\.ssh\authorized_keys
+K40 tar -C	U|
+K41 icacls	U|permission_change:c:\users\u\.ssh\authorized_keys
+K42 expand	U|
+K43 subst drive	U|
+K44 %VAR:~% substring	U|
+K45 %VAR:a=b% subst	U|
+K46 set /p then use	U|
+K47 call delayed %%	U|
+K48 powershell -c from cmd	U|
+K49 cmd.exe full path	U|
+K4a cmd powershell -enc	U|
+K4b cmd powershell -e	U|
+K5 cmd powershell positional	K|delete:c:\users\u\.ssh
+K50 cmd /s /c	U|
+K51 copy cwd relative ..	U|
+K52 type >	K|write:c:\users\u\.ssh\authorized_keys
+K53 echo>>no space	U|append:c:\users\u\.ssh\authorized_keys
+K54 1>>	U|append:c:\users\u\.ssh\authorized_keys
+K55 ADS on dir	U|
+K56 cmd mixed case env	U|
+K57 wsl	U|
+K58 rundll/regsvr	U|
+K59 schtasks	U|
+K6 curl|cmd	U|
+K60 cd .. up from ssh sub	U|append:c:\authorized_keys,append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\.ssh\x\authorized_keys,append:c:\work\authorized_keys
+K7 cond	K|delete:c:\work\b
+K8a \\.\ prefix	U|
+K8b admin share	U|
+K9 set then %VAR% same line	U|delete:c:\users\u\x
+M01 mac mixed case	K|append:/users/u/.ssh/authorized_keys
+M02 mac cd mixed case	K|append:/users/u/.ssh/authorized_keys,append:/users/u/proj/authorized_keys
+M03 mac /private/var alias	U|
+M1 mac case join	K|write:/tmp/a
+M2 linux join	K|write:/tmp/a
+N1 dq cmdsubst	K|delete:/home/u/.ssh
+N1-a posix-dialect virtual root (fixed baseline)	U|
+N1-b dialect=NONE on windows, msys path	U|
+N1-c dialect=CMD on windows, msys path	U|append:c:\home\u\.ssh\authorized_keys
+N1-d bash -c nested under cmd outer	U|
+N1-e bash -c nested under posix outer (contrast)	U|
+N1-f neutral /t/a dialect none	U|
+N2 unmodeled with cmdsubst	U|delete:/home/u/.ssh
+N2-a bare /c	K|
+N2-b /c/ root	K|
+N2-c write /c	K|write:c:
+N3 assign cmdsubst	K|delete:/home/u/.ssh
+N3-a mac cp mixed-case source basename	K|write:/users/u/.ssh/ak
+N3-b mac curl -d @file then write same path diff case	U|
+N4 heredoc cmdsubst	K|delete:/home/u/.ssh,write:/tmp/o
+N4-a Copy-Item dynamic dest	U|
+N4-b Move-Item dynamic dest	U|
+N4-c Copy-Item dynamic dest protected src	U|
+N4-d Copy-Item dynamic SOURCE static dest	U|
+N4-e positional dynamic dest contrast	U|
+N5 redirect target cmdsubst	U|delete:/home/u/.ssh
+N5-a slack send	U|
+N5-b github create_issue	U|
+N5-c generic upload with url arg	U|
+N5-d post_message host-table	U|
+N6 nested func shadow	U|
+N6-a curl -d two urls	U|
+N6-b curl -T two urls	U|
+N6-c curl literal body two urls	U|
+N6-d wget --post-file two urls	U|
+N7 for-list cmdsubst	U|delete:/home/u/.ssh
+N8 param default cmdsubst	K|delete:/home/u/.ssh
+P01 cd..cd chain	U|
+P02 env -C	K|append:/home/u/.ssh/authorized_keys
+P03 sudo -D	K|append:/home/u/.ssh/authorized_keys
+P04 nice timeout install	U|
+P05 ln -sf rc	U|link:/tmp/x
+P06 cp -t dir	K|write:/home/u/.ssh/authorized_keys
+P07 mv src -t dir	K|write:/home/u/.ssh/config
+P08 double slash	U|
+P09 exec fd redirect	K|append:/home/u/.ssh/authorized_keys
+P1 positional Remove-Item	K|delete:c:\users\u\.ssh
+P10 group redirect	K|append:/home/u/.ssh/authorized_keys
+P10 pipe in quotes	K|write:c:\x
+P11 Get-Content	K|
+P11 pushd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+P12 colon param	K|delete:c:\windows\x
+P12 dd of=$HOME	K|write:/home/u/.ssh/authorized_keys
+P13 New-Item link	K|link:c:\windows\system32,write:c:\x\l
+P13 bare cd	K|append:/home/u/.ssh/authorized_keys
+P14 -Path slash	K|delete:c:\windows\x
+P14 CDPATH prefix	U|
+P15 CDPATH set	U|
+P15 ps posix-path positional	K|delete:c:\windows\x
+P16 OLDPWD cd -	U|
+P16 PS Remove-Item pos -LiteralPath glob	U|
+P17 PS backtick	U|
+P17 cd then sh -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+P18 heredoc	K|write:/home/u/.ssh/authorized_keys
+P19 in-call symlink dir	U|append:/tmp/s/authorized_keys,link:/home/u/.ssh
+P2 quoted wildcard -Path	U|
+P20 in-call symlink file	U|append:/home/u/.bashrc,link:/home/u/.bashrc
+P21 relative symlink in cwd	U|append:/tmp/w/s/authorized_keys,link:/home/u/.ssh
+P22 HOME reassigned, cd	K|append:/home/u/.ssh/authorized_keys
+P23 HOME reassigned, tilde	K|append:/home/u/.ssh/authorized_keys
+P24 HOME export tilde	K|append:/home/u/.ssh/authorized_keys
+P25 var alias	K|append:/home/u/.ssh/authorized_keys
+P26 param op	U|
+P27 set -- positional	U|
+P28 command cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+P29 builtin cd	K|append:/home/u/.ssh/authorized_keys
+P3 paren grouping	U|
+P30 exec bash -c after cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+P31 rsync	U|
+P32 tee -a absolute via ..	U|
+P33 ln hard into cwd	U|link:/tmp/k
+P34 cp dest dir trailing	K|write:/home/u/.zshrc
+P35 aws creds tee	K|write:/home/u/.aws/credentials,write:/home/u/proj/credentials
+P36 claude settings via cd -P	K|write:/home/u/.claude/settings.json
+P37 xargs -I cp	U|
+P38 find -exec cp	U|
+P39 git -C	U|
+P4 redirect	U|write:c:\users\u\documents\profile.ps1
+P40 tar -C extract	U|
+P5 -enc	U|
+P6 param prefix	U|
+P7 env reassigned	K|delete:c:\windows
+P8 iwr positional|iex	U|
+P9 Start-Process positional	K|
+Q1 quoted-prefix+glob	U|
+Q1b cat quoted-prefix glob	U|
+Q2 brace	U|
+Q3 dq backslash	K|delete:/tmp/a\b
+Q4 quoted tilde	K|delete:/home/u/x
+Q5 escaped star	K|delete:/tmp/*
+R1 block redirect	K|write:/home/u/.bashrc
+R2 subshell redirect	K|append:/home/u/.bashrc
+R3 loop redirect	K|write:/tmp/o
+R4 >& file	K|write:/home/u/.bashrc
+R5 stderr join	K|write:/tmp/err
+R5-1a SP embedded quote	U|
+R5-1b host embedded quote	U|
+R5-2 string ArgumentList	U|
+R5-3 quoted wildcard	U|
+R5-4 SP -a prefix	U|
+R5-5 dyn before /c	U|
+R6 exec fd	K|write:/home/u/.bashrc
+R6-1a stdin -c -	U|
+R6-1b bare -	U|
+R6-1c powershell -Command -	U|
+R6-2a fused /crd	U|
+R6-2b /d/c	U|
+R6-2c quoted /c	U|
+R6-2d splat into cmd	U|
+R6-4a Start-Process wt	U|
+R6-4b direct wt	U|
+R6-4c cmd /c start	U|
+R6-4d conhost	U|
+R7 redirect only	K|write:/home/u/.bashrc
+S01 Set-Location ~\	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+S01 ac ~\	K|write:c:\users\u\.ssh\authorized_keys
+S02 ac $env:USERPROFILE	U|
+S02 cd $HOME	U|
+S03 >> $HOME	U|
+S03 Push-Location env	U|
+S04 .NET AppendAllText	U|
+S04 sc -LiteralPath dq	U|
+S05 Copy-Item dest dir	K|write:c:\users\u\.ssh\authorized_keys
+S05 [IO.File]::AppendAllText	U|
+S06 New-Item symlink	K|link:c:\t\a,write:c:\users\u\.ssh\authorized_keys
+S06 [System.IO.File]::WriteAllText	U|
+S07 -LiteralPath quoted	K|write:c:\users\u\.ssh\authorized_keys
+S07 copy-item -Destination	U|
+S08 copy-item into dir	K|write:c:\users\u\.ssh\authorized_keys
+S08 redirect fwd slash	K|write:c:\users\u\.ssh\authorized_keys
+S09 cp alias	U|
+S09 var path	U|
+S1 curl|bash	U|
+S10 New-Item -Path -Name	K|write:c:\users\u\.ssh\authorized_keys
+S10 cd chain relative	K|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys,write:c:\work\.ssh\authorized_keys,write:c:\work\authorized_keys
+S11 Move-Item -Force	U|
+S11 ni symlink	K|link:c:\tmp\k,write:c:\users\u\.ssh\authorized_keys
+S11 ps var	U|
+S12 colon param	K|write:c:\users\u\.ssh\authorized_keys
+S12 join-path	U|
+S12 ni hardlink -Value	K|write:c:\users\u\.ssh\authorized_keys
+S13 -Stream	K|write:c:\users\u\.ssh\authorized_keys
+S13 Set-Location then ac	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+S13 ri -r alias	K|delete:c:\users\u\.ssh
+S14 Out-File -FilePath	U|
+S14 sl alias	U|
+S15 Start-Process -WorkingDirectory	U|
+S15 chdir	U|
+S15 iex (iwr).Content	U|
+S16 Push-Location	U|
+S16 Set-Item env	U|
+S16 Tee-Object	U|
+S17 & { cd } leaks	U|
+S17 Rename-Item NewName	U|
+S17 cmd /c from ps	K|delete:c:\windows\x
+S18 . { cd }	U|
+S18 Copy-Item positional	U|
+S18 ForEach Remove-Item	U|
+S19 Program Files ..	U|
+S19 function cd called	U|
+S1a ~\ no Home	U|
+S1b ~\ with Home	K|delete:c:\users\u\.ssh
+S1c ~/ with Home	K|
+S2 gci | Remove-Item	U|
+S2 python heredoc	U|
+S20 if cd	U|
+S20 pwsh -c from cmd	U|
+S21 ForEach cd	U|
+S21 Set-Location -Path	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+S22 Invoke-Command cd	U|
+S22 Join-Path	U|
+S23 $env:USERPROFILE reassigned then ~	K|write:c:\users\u\.ssh\authorized_keys
+S23 provider path	U|
+S24 -Pa prefix	U|write:c:\users\u\.ssh\authorized_keys
+S24 New-Item -Name	K|write:c:\users\u\.ssh\authorized_keys
+S25 -Value first then positional	K|write:c:\users\u\.ssh\authorized_keys
+S26 Out-File -Append -FilePath	K|write:c:\users\u\.ssh\authorized_keys
+S27 Tee-Object -FilePath	U|
+S28 Start-Process cmd args	U|
+S29 iex literal	U|write:c:\users\u\.ssh\authorized_keys
+S3 bash heredoc	K|delete:/home/u/.ssh
+S3 literal | Remove-Item	U|
+S30 Rename-Item NewName	U|
+S31 Rename-Item -NewName	U|
+S32 provider-qualified path	U|
+S33 FileSystem:: short	U|
+S34 New-PSDrive	U|
+S35 backtick in path	U|
+S36 -Path array	K|write:c:\tmp\a,write:c:\users\u\.ssh\authorized_keys
+S37 splat	U|
+S38 string concat	U|
+S39 Copy-Item dest dir -Force	U|
+S4 bash script	U|
+S4 iwr | powershell -	U|
+S40 Expand-Archive	U|
+S41 iwr -OutFile	K|write:c:\users\u\.ssh\authorized_keys
+S42 iwr -o alias param	U|
+S43 Start-BitsTransfer	U|
+S44 cmd /c mklink	K|link:c:\tmp\k,link:c:\users\u\.ssh\authorized_keys
+S45 cd ~ then .ssh	U|
+S46 Set-Location $HOME	U|
+S47 sc PS5 alias	U|
+S48 Move-Item -Destination	U|
+S49 Copy-Item -ToSession	U|write:c:\users\u\.ssh\authorized_keys\k
+S5 ps powershell positional	K|delete:c:\users\u\.ssh,delete:c:\users\u\.ssh
+S50 Set-Location -LiteralPath	U|
+S51 [Environment]::SetEnvironmentVariable	U|
+S52 Out-File positional	K|write:c:\users\u\.ssh\authorized_keys
+S53 redirection 3>	U|write:c:\users\u\.ssh\authorized_keys
+S54 *>> 	U|append:c:\users\u\.ssh\authorized_keys
+S55 ac -Path with ..	K|write:c:\users\u\.ssh\authorized_keys
+S56 Set-Location .. after	U|
+S57 cd - (PS7 history)	U|
+S58 Pop-Location	U|
+S59 & script path	U|
+S6 cd then relative	K|delete:c:\windows\x,delete:c:\work\x
+S60 dot-source	U|
+S7 \\?\ literal	U|
+S8 2> join	K|write:c:\x\err
+SEC-a gh auth token	U|
+SEC-b gh auth token | curl -d @-	U|
+SEC-c op get benign overmatch	U|
+SEC-d kubectl get pods (not secret)	U|
+SEC-e aws configure get benign	U|
+T01 Write abs	K|write:/home/u/.ssh/authorized_keys
+T02 Write rel	U|
+T03 Write tilde	K|write:/home/u/.bashrc
+T04 Edit	K|write:/home/u/.claude/settings.json
+T05 patch move to	K|write:/home/u/.ssh/authorized_keys,write:/home/u/proj/x.txt
+T06 patch add rel	U|
+T07 codex shell workdir	K|append:/home/u/.ssh/authorized_keys
+T08 codex exec_command workdir	K|append:/home/u/.ssh/authorized_keys
+T09 cursor cwd	K|append:/home/u/.ssh/authorized_keys
+T1 dd	K|write:/dev/sda
+T10 argv cp	U|
+T10 curl -d @file	K|
+T11 argv env -C	K|append:/home/u/.ssh/authorized_keys
+T11 curl combined -sSLo	K|write:/home/u/.bashrc
+T12 Write win rel	K|write:c:\users\u\.ssh\authorized_keys
+T12 curl schemeless	K|write:/tmp/x.sh
+T13 curl -F json	K|
+T13 str_replace_editor create	U|write:/home/u/.bashrc
+T14 MultiEdit	K|write:/home/u/.zshrc
+T14 curl -d json	K|
+T15 Bash with cd arg	K|append:/home/u/.ssh/authorized_keys
+T15 scp remote	U|
+T16 rsync remote	U|
+T17 cp into dir	K|write:/home/u/.ssh/authorized_keys
+T18 ln relative	U|
+T19 ln one arg	K|link:/etc/passwd
+T2 git clone	K|write:/home/u/.ssh/**
+T20 rm --	K|delete:/home/u/proj/-rf
+T21 chmod reference	K|permission_change:/home/u/proj/target
+T22 wget default	U|
+T23 curl -O	U|
+T24 git -c	U|
+T25 cp -t	K|write:/etc/a,write:/etc/b
+T26 python -m pip	U|
+T27 tee -a	K|append:/home/u/.bashrc
+T28 find exec then delete	U|delete:/home/u
+T29 xargs rm	U|
+T3 git push	K|
+T30 git hooks clone+cd	U|write:/home/u/proj/r/**
+T4 tar x	U|
+T5 tar c	K|write:/home/u/.ssh
+T6 sed -i	K|write:/home/u/.bashrc
+T7 find -delete	K|delete:/home/u/.ssh
+T8 find -exec rm	U|
+T9 grep pattern	K|
+V1 CDPATH prefix ;	U|
+V1 bare cd	K|delete:/home/u/.ssh
+V10 git -C rm	U|
+V11 prefix HOME then $HOME	K|delete:/home/u/.ssh
+V12 for rebinds var	U|
+V13 read rebinds var	U|
+V14 field split	U|
+V15 glob after expansion	U|
+V16 brace+escaped tilde	U|
+V17 brace+escaped	U|
+V19 export HOME	K|delete:/tmp/.bashrc
+V19b dynamic HOME export	U|
+V2 CDPATH prefix tilde	U|
+V2 cond cd	U|
+V20a &>	K|write:/home/u/.bashrc
+V20b &>>	K|append:/home/u/.bashrc
+V20c >&file	K|write:/home/u/.bashrc
+V21a procsubst in	U|delete:/home/u/.ssh
+V21b procsubst out	U|
+V22 heredoc cmdsubst	K|delete:/home/u/.ssh,write:/tmp/o
+V22 heredoc rm	K|delete:/home/u/.ssh,write:/tmp/o
+V23 bash heredoc expands	U|
+V24 find -exec cat|curl	U|
+V25 find -exec sh -c	K|delete:/etc/x
+V26a ls|xargs rm	U|
+V26b find|xargs rm -rf	U|
+V27a sed -i -e	K|write:/home/u/.bashrc
+V27b grep -e	K|
+V27c awk -f	U|
+V27d sed --in-place	K|write:/home/u/.bashrc
+V28a tar old-style x -C	U|
+V28b tar -czf create	K|write:/tmp/o.tgz
+V29a unzip -d	U|
+V29b zip -r	U|
+V3 CDPATH prefix pushd	U|
+V3 pipeline cd	K|delete:/home/u/.ssh
+V30a git clean	U|
+V30b git checkout	U|
+V30c git config hooksPath	U|
+V30d git -c sshCommand	U|
+V31 git -c x=y clone	K|write:/home/u/proj/r/**
+V32 pipe into curl -d @-	K|
+V32b curl -d json inline	K|
+V33 su -c	U|delete:/etc/x
+V34 sudo -D	K|delete:/etc/passwd
+V35 ssh string cmd	U|
+V36a go run	U|
+V36b pip via -m	U|
+V38 curl|sudo bash	U|
+V39 bash -c positional	U|
+V4 CDPATH env wrapper n/a (cd not exec)	U|
+V4 cmdsubst cd	K|delete:/home/u/.ssh
+V40 eval literal cd	K|delete:/home/u/.ssh,delete:/tmp/.ssh
+V5 CDPATH exported earlier	U|
+V5 bash -c cd	K|delete:/home/u/.ssh
+V6 CDPATH prefix bashrc	U|
+V6 func body cd	K|delete:/home/u/.ssh
+V7 background cd	K|delete:/home/u/.ssh
+V7 cmd-flavor gitbash CDPATH	U|
+V8 if-false cd	U|
+V9 env -C	K|delete:/etc/passwd
+W builtin	U|
+W busybox	U|
+W bwrap --bind / /	U|
+W caffeinate	U|
+W chroot /	U|
+W chrt -i 0	U|
+W command	U|
+W doas	U|
+W eatmydata	U|
+W env --	U|
+W env -i	U|
+W exec	U|
+W exec -a x	U|
+W fakeroot	U|
+W firejail	U|
+W flock /tmp/l	U|
+W ionice -c3	U|
+W ltrace	U|
+W nice -n 5	U|
+W nohup	U|
+W nsenter -t 1 -m --	U|
+W parallel	U|
+W pkexec	U|
+W proxychains	U|
+W runuser -u u --	U|
+W script -qc	U|
+W setsid	U|
+W sg wheel	U|
+W stdbuf -o0	U|
+W strace -o /tmp/s	U|
+W su u -c	U|
+W sudo --	U|
+W sudo -E	U|
+W sudo -i	U|
+W sudo -s	U|
+W sudo -u u	U|
+W systemd-run --user	U|
+W taskset -c 0	U|
+W time	U|
+W timeout 5	U|
+W torsocks	U|
+W unshare -U	U|
+W watch -n1	U|
+W xargs -0 -a /dev/null	U|
+W1 gb HOME tilde	K|append:c:\users\u\.ssh\authorized_keys
+W1 sudo -u	K|delete:/etc/x
+W2 gb HOME C:/ cd	K|append:c:\users\u\.ssh\authorized_keys
+W2 timeout	K|delete:/etc/x
+W3 gb export HOME cd	K|append:c:\users\u\.ssh\authorized_keys
+W3 nice -n	K|delete:/etc/x
+W4 env -u	K|delete:/etc/x
+W4 gb HOME cd ~	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+W5 gb HOME prefix cd	K|append:c:\users\u\.ssh\authorized_keys
+W5 xargs -n	U|
+W6 lin HOME prefix cd	K|append:/home/u/.ssh/authorized_keys
+W6 ssh -i	U|delete:/x
+W7 cmd-dialect unrelated HOME	U|append:c:\work\authorized_keys
+W7 command -v	K|
+W8 ps HOME var cd	U|
+W8 sudo plain	K|delete:/etc/x
+W9 ps env USERPROFILE cd	U|
+WP1 extended prefix	U|
+WP2 ADS	U|
+WP3 dots	U|
+X01 sl + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+X02 chdir + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+X03 Push-Location + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+X04 pushd + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+X05 function cd + Add-Content	U|
+X06 if cd + Add-Content	U|
+X07 ForEach cd + Add-Content	U|
+X08 Invoke-Command cd + Add-Content	U|
+X09 cd ~ ; cd .ssh + Add-Content	K|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys,write:c:\work\.ssh\authorized_keys,write:c:\work\authorized_keys
+X10 Set-Location $HOME + Add-Content	U|
+X11 Set-Location -LiteralPath	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+X12 cd .. + Add-Content	K|write:c:\authorized_keys,write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\.ssh\x\authorized_keys,write:c:\work\authorized_keys
+X13 cd - + Add-Content	U|
+X14 Pop-Location + Add-Content	U|
+X15 dot-source + Add-Content	U|write:c:\work\authorized_keys
+X16 & script + Add-Content	U|write:c:\work\authorized_keys
+X17 while cd	K|write:c:\users\u\.ssh\authorized_keys
+X18 try cd	U|
+X19 Set-Location -Path ; then -Path rel	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\.ssh\authorized_keys
+X20 Start-Process powershell	U|
+X21 saps	U|
+X22 Start-Process -FilePath	U|
+X23 New-Item -Name rel	K|write:c:\users\u\.bashrc
+X24 -Path array del	K|delete:c:\tmp\a,delete:c:\users\u\.ssh\authorized_keys
+X25 -Path array quoted	K|write:c:\tmp\a,write:c:\users\u\.ssh\authorized_keys
+X26 env:HOMEPATH	U|
+X27 Home only no env	K|write:c:\users\u\.ssh\authorized_keys
+X28 Copy-Item -Container dest dir	U|
+X29 Registry provider	U|
+X30 Remove-Item Env:	U|
+Y01 cmd /v:on	K|delete:c:\users\u\.ssh\authorized_keys
+Y02 cmd /q /c	K|delete:c:\users\u\.ssh\authorized_keys
+Y03 cmd /d /c	K|delete:c:\users\u\.ssh\authorized_keys
+Y04 cmd /e:on /c	K|delete:c:\users\u\.ssh\authorized_keys
+Y05 cmd /k	K|delete:c:\users\u\.ssh\authorized_keys
+Y06 cmd /C upper	K|delete:c:\users\u\.ssh\authorized_keys
+Y07 cmd/c no space	U|
+Y08 if not exist ( )	K|delete:c:\users\u\.ssh\authorized_keys
+Y09 ( ) multi	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+Y10 for /f	U|
+Y11 %~dp0	U|
+Y12 call :label	U|append:c:\work\authorized_keys
+Y13 start cmd /c	U|
+Y14 runas	U|
+Y15 ren dir	U|
+Y16 rename long	U|
+Y17 copy con	U|
+Y18 forfiles	U|
+Z01 runuser --	U|
+Z02 runuser -c	U|delete:/home/u/.ssh
+Z03 curl -O in ssh cwd	U|
+Z04 curl -OJ	U|
+Z05 wget plain in ssh cwd	U|
+Z06 unzip into home cwd	U|
+Z07 unzip -d ~	U|
+Z08 bsdtar -xf	U|
+Z09 cpio -i	U|
+Z10 7z x -o	U|
+Z11 gunzip -c >	K|write:/home/u/.ssh/authorized_keys
+Z12 git am	U|
+Z13 git stash pop	U|
+Z14 git reset --hard	U|
+Z15 git pull in home	U|
+Z16 git clone into ssh	K|write:/home/u/.ssh/**
+Z17 git worktree add	U|
+Z18 git --work-tree checkout	U|
+Z19 git archive | tar	U|
+Z20 sed -i --	K|write:/home/u/.bashrc
+Z21 sed --in-place -e	K|write:/home/u/.bashrc
+Z22 sed -s -i	K|write:/home/u/.bashrc
+Z23 find -fprintf	K|write:/home/u/.bashrc
+Z24 find -fls	K|write:/home/u/.bashrc
+Z25 ansi-c path rm	U|
+Z26 ansi-c octal	U|
+Z27 ansi-c plain ok	U|
+Z28 cd $'..'	U|
+Z29 func shadows rm	U|delete:/tmp/x
+Z30 func shadows echo then >>	U|
+Z31 hash -p	U|
+Z32 enable -n cd	U|
+Z33 shopt autocd	U|append:/home/u/proj/authorized_keys
+Z34 cd from var then ssh	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+Z35 cd quoted ~	K|write:/home/u/.bashrc,write:/home/u/proj/.bashrc
+Z36 install -d no	K|write:/home/u/.ssh/k
+Z37 cp -r src/. ~	U|
+Z38 rsync into ~/	U|
+Z39 mv no -T into ~/.ssh/	K|write:/home/u/.ssh/authorized_keys
+Z40 cp --target-directory=	K|write:/home/u/.ssh/authorized_keys
+Z41 ln -s . target	K|link:/tmp/k,link:/tmp/k
+Z42 python -c open	U|
+Z43 node -e	U|
+Z44 crontab	U|
+Z45 ssh-copy-id	U|
+Z46 tee into ssh via sudo	K|append:/home/u/.ssh/authorized_keys
+Z47 dd of= with conv	U|write:/home/u/.ssh/authorized_keys
+Z48 ln -s rel ok	U|
+cmd cd no-arg prints only	K|write:c:\a\f,write:c:\work\f
+cmd cd other drive keeps C	K|write:c:\a\f,write:c:\work\f
+cmd copy switch	U|
+cmd del switch	U|delete:c:\work\a.txt
+cmd pushd no-arg prints only	U|
+cmd type switch	U|
+cp listed, dir dest	K|write:/tmp/d/a.txt
+cp single unlisted, dir dest	U|write:/tmp/d/a.txt
+mv single unlisted, dir dest	U|write:/tmp/d/a.txt
+posix cat single unlisted	U|
+posix combined unlisted short	U|
+posix dot-dot lexical	U|
+posix nil-flags prog (scp)	U|
+posix nil-flags prog (zip)	U|
+posix popd +1 keeps cwd	U|
+posix popd -n keeps cwd	U|
+posix pushd +1 rotates	U|
+posix pushd no-arg swaps	U|
+posix rm single unlisted	U|delete:/tmp/x
+posix single unlisted short	U|
+posix unlisted long	U|
+ps Push-Location no-arg	U|
+ps Remove-Item unlisted	U|delete:c:\work\a.txt
+ps Set-Content unlisted	U|write:c:\work\a.txt
+ps listed param	U|
+ps unlisted param	U|
+rv7-B01 cd none ; write	K|append:/home/u/.bashrc,append:/t/none/.bashrc
+rv7-B02 cd none ; ../ write	U|
+rv7-B03 pushd none ; write	K|append:/home/u/.ssh/authorized_keys,append:/t/none/authorized_keys
+rv7-B04 cd none && true ; write	K|append:/home/u/.bashrc,append:/t/none/.bashrc
+rv7-B05 cd a || cd b ; write	U|
+rv7-B07 cd none || { write; }	K|append:/home/u/.bashrc
+rv7-B08 cd none || tee	K|append:/home/u/.ssh/authorized_keys
+rv7-B09 gb cd none || write	K|append:c:\users\u\.bashrc
+rv7-B10 gb cd none ; write	K|append:c:\none\.bashrc,append:c:\users\u\.bashrc
+rv7-B100 ps env into Start-Process cmd	U|append:c:\users\u\.ssh\authorized_keys
+rv7-B101 gb USERPROFILE into cmd //c	U|
+rv7-B102 cmd set then cmd /c %%	U|
+rv7-B11 ps Set-Location none ; Set-Content	K|write:c:\t\none\authorized_keys,write:c:\users\u\.ssh\authorized_keys
+rv7-B12 ps cd none ; Add-Content -Path .\	K|write:c:\t\none\authorized_keys,write:c:\users\u\.ssh\authorized_keys
+rv7-B13 cmd cd none & copy	U|
+rv7-B14 cmd cd none || copy	U|
+rv7-B15 mac cd none || ../ write	U|
+rv7-B16 cd none 2>/dev/null ; cp	U|
+rv7-B17 ps Set-Location none ; Set-Content S21-shape	K|write:c:\t\none\authorized_keys,write:c:\users\u\.ssh\authorized_keys
+rv7-B18 cd none ; cd .ssh	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys,append:/t/none/.ssh/authorized_keys,append:/t/none/authorized_keys
+rv7-B19 cmd cd /d none & echo	U|append:c:\t\none\authorized_keys,append:c:\users\u\.ssh\authorized_keys
+rv7-B20 HOME prefix exec sh -c	K|append:/home/u/.ssh/authorized_keys
+rv7-B21 HOME prefix nohup sh -c	K|append:/home/u/.ssh/authorized_keys
+rv7-B22 sudo VAR=val sh -c	U|
+rv7-B23 env HOME bash -c cd	K|append:/home/u/.ssh/authorized_keys
+rv7-B24 gb env HOME bash -c	K|append:c:\users\u\.ssh\authorized_keys
+rv7-B25 mac env HOME sh -c	K|append:/users/u/.ssh/authorized_keys
+rv7-B26 HOME prefix timeout sh -c	K|append:/home/u/.ssh/authorized_keys
+rv7-B27 read HOME here-string	U|
+rv7-B30 export HOME bash -c cd	K|append:/home/u/.ssh/authorized_keys
+rv7-B31 printf -v D	U|
+rv7-B32 read D here-string	U|
+rv7-B34 D set then read D	U|
+rv7-B35 D set then printf -v D	U|
+rv7-B36 D set then getopts	U|
+rv7-B37 D set then eval	K|append:/home/u/.ssh/authorized_keys
+rv7-B38 D set then mapfile	U|
+rv7-B39 D set then select/IFS read -r	U|
+rv7-B40 cd shadowed by function	U|
+rv7-B43 pushd shadowed	U|
+rv7-B44 function cd redirects	U|
+rv7-B45 tee shadowed by function	U|append:/home/u/.bashrc,write:/t/a/x
+rv7-B46 cp shadowed by function	U|
+rv7-B47 ps Set-Content shadowed	U|write:c:\t\a,write:c:\users\u\.ssh\authorized_keys
+rv7-B48 ps Set-Location shadowed	U|
+rv7-B52 enable -n cd	U|
+rv7-B53 cdable_vars	U|
+rv7-B54 mv shadowed alias-free	U|
+rv7-B56 find -execdir home	U|
+rv7-B57 find -execdir tee	U|
+rv7-B58 env --chdir space	K|append:/home/u/.ssh/authorized_keys
+rv7-B59 env -C fused	K|append:/home/u/.ssh/authorized_keys
+rv7-B60 sudo --chdir=	K|append:/home/u/.ssh/authorized_keys
+rv7-B61 sudo -i rel write	U|
+rv7-B62 su - -c rel	U|
+rv7-B63 runuser -l rel	U|
+rv7-B64 sudo -u u -i sh -c rel	U|
+rv7-B65 systemd-run WorkingDirectory	U|
+rv7-B66 nice env --chdir=	U|append:/home/u/.ssh/authorized_keys
+rv7-B68 parallel :::	U|
+rv7-B69 watch	U|
+rv7-B71 git -C apply	U|
+rv7-B73 unzip -d	U|
+rv7-B75 exec env -C sh -c	K|append:/home/u/.ssh/authorized_keys
+rv7-B76 sudo -E env HOME tilde	K|append:/home/u/.ssh/authorized_keys
+rv7-B82 pwsh -WorkingDirectory	U|
+rv7-B83 pwsh -wd	U|
+rv7-B84 cmd pwsh -WorkingDirectory	U|
+rv7-B85 gb pwsh -wd	U|
+rv7-B86 cmd start title /D	U|
+rv7-B87 ps cmd /c cd /d	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-B88 ps-linux pwsh -wd	U|
+rv7-B89 bash pwsh -WorkingDirectory	U|
+rv7-B90 ps wsl -e sh -c	U|
+rv7-B91 ps bash -c tilde	U|
+rv7-B93 gb cmd //c cd /d	U|
+rv7-B95 ps env USERPROFILE into cmd	U|append:c:\users\u\.ssh\authorized_keys
+rv7-B98 cmd two-line set then %P%	U|
+rv7-B99 ps env into powershell -c	U|
+rv7-C01 cmd: curl | cmd	U|
+rv7-C02 cmd: type | cmd	U|
+rv7-C03 cmd: cmd < file	U|
+rv7-C04 cmd: | cmd.exe	U|
+rv7-C05 cmd: | cmd /q	U|
+rv7-C06 cmd: | cmd /d	U|
+rv7-C07 cmd: | powershell	U|
+rv7-C08 cmd: | powershell -nop	U|
+rv7-C09 ps: gc | cmd	U|
+rv7-C10 ps: iwr | cmd	U|
+rv7-C11 ps: gc | powershell	U|
+rv7-C12 ps: gc | pwsh -NoProfile	U|
+rv7-C13 ps: cmd < (n/a) via cmd /c	U|
+rv7-C14 posix: curl | sh	U|
+rv7-C15 posix: sh < file	U|
+rv7-C16 posix: | bash -s	U|
+rv7-C17 posix: bash <<<	U|
+rv7-C18 posix: | python3	U|
+rv7-C19 posix: | pwsh	U|
+rv7-C20 gb: curl | cmd	U|
+rv7-C21 gb: | powershell	U|
+rv7-C22 cmd: echo payload | cmd	U|
+rv7-C23 none-dialect win: | cmd	U|
+rv7-C24 cmd: cmd 0< file	U|
+rv7-C25 mac: curl | zsh	U|
+rv7-E01 mirror HOME prefix child	K|append:/t/h/.bashrc
+rv7-E02 mirror env HOME child	K|append:/t/h/.npmrc
+rv7-E03 mirror cd || write	K|append:/home/u/proj/authorized_keys
+rv7-E04 mirror cd fail ; write	K|append:/home/u/.ssh_none/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-E05 mirror find -execdir	U|
+rv7-E06 mirror env -C fused	K|write:/t/a/.bashrc
+rv7-E07 mirror sudo -i rel	U|
+rv7-E08 mirror ps Set-Location shadow	U|
+rv7-E09 mirror gb HOME prefix child	K|append:c:\t\h\.bashrc
+rv7-E10 mirror printf -v HOME	U|
+rv7-G1 gb cd then cmd //c	U|
+rv7-G10 gb env -C	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G12 gb cd $HOME	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G13 gb PWD var	U|
+rv7-G14 gb workdir windows	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G15 gb function cd	U|
+rv7-G16 gb subshell cd no leak	K|append:c:\users\u\.bashrc
+rv7-G17 gb workdir msys	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G18 gb unknown env	U|
+rv7-G2 gb cd then powershell -c	U|
+rv7-G3 gb HOME prefix bash -c	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G4 gb HOME reassigned then child	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G5 gb pipeline cd subshell	K|append:c:\users\u\.bashrc
+rv7-G6 gb USERPROFILE reassigned	K|append:c:\users\u\.ssh\authorized_keys
+rv7-G7 gb cd quoted backslash	K|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-G8 gb pushd popd	U|
+rv7-G9 gb cd - twice	U|
+rv7-K1 cmd child cd no leak	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-K10 cmd C: drive cwd after /d D:	U|
+rv7-K11 cmd cd other drive keeps current	U|append:c:\work\authorized_keys,append:d:\x\authorized_keys
+rv7-K12 cmd unknown env path	U|
+rv7-K13 cmd unknown env cd	U|
+rv7-K16 cmd pushd env then cd	U|append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys,append:c:\work\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-K17 cmd /c cd /d	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-K18 cmd /s /c &&	U|append:c:\users\u\.ssh\authorized_keys
+rv7-K19 cmd workdir	U|append:c:\users\u\.ssh\authorized_keys
+rv7-K2 cmd pushd popd	U|
+rv7-K20 cmd workdir relative	U|append:c:\users\u\.ssh\authorized_keys
+rv7-K21 cmd cd then powershell -c	U|
+rv7-K22 cmd type nul	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+rv7-K23 cmd set /p dynamic	U|
+rv7-K24 cmd for /d cd	U|
+rv7-K25 cmd bare cd in cwd home	U|append:c:\t\authorized_keys,append:c:\users\u\authorized_keys
+rv7-K26 cmd set X then cmd /c %X%	U|
+rv7-K3 cmd bare cd prints only	U|append:c:\users\u\.ssh\authorized_keys
+rv7-K4 cmd set then %VAR% same line	U|append:c:\users\u\.bashrc
+rv7-K5 cmd start /b inherits cwd	U|
+rv7-K6 cmd start /D	U|
+rv7-K7 cmd call echo	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-K8 cmd chdir	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-K9 cmd if then write	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-L01 pipeline cd is a subshell	K|append:/home/u/.bashrc
+rv7-L02 background cd is a subshell	K|append:/home/u/.bashrc
+rv7-L03 cd || write	K|append:/home/u/.bashrc
+rv7-L04 function def not called	K|append:/home/u/.bashrc
+rv7-L05 function called cd	U|
+rv7-L06 pushd popd	U|
+rv7-L07 cd - back	U|
+rv7-L08 PWD assign no cd	K|append:/home/u/.bashrc
+rv7-L09 env HOME wrapper sh -c tilde	K|append:/home/u/.ssh/authorized_keys
+rv7-L10 prefix HOME sh -c tilde	K|append:/home/u/.ssh/authorized_keys
+rv7-L11 prefix HOME bash -c cd	K|append:/home/u/.ssh/authorized_keys
+rv7-L12 env --chdir	K|append:/home/u/.ssh/authorized_keys
+rv7-L13 env -C sh -c	K|append:/home/u/.ssh/authorized_keys
+rv7-L14 nohup sh -c cd	K|append:/home/u/.ssh/authorized_keys
+rv7-L15 timeout sh -c cd	K|write:/home/u/.ssh/authorized_keys,write:/home/u/proj/authorized_keys
+rv7-L16 exec redirect after cd	K|append:/home/u/.ssh/authorized_keys
+rv7-L17 unset HOME tilde	U|
+rv7-L18 empty HOME tilde	U|
+rv7-L19 tilde-user	U|
+rv7-L20 tilde-plus after cd	U|
+rv7-L21 tilde-minus oldpwd	U|
+rv7-L22 cd --	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L23 cd -L	K|append:/home/u/.ssh/authorized_keys
+rv7-L24 CDPATH prefix command cd	U|
+rv7-L25 PWD var after cd	U|
+rv7-L26 OLDPWD var	U|
+rv7-L27 sudo keeps cwd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L28 sudo -i moves cwd	U|
+rv7-L29 sudo -H sh -c tilde	U|
+rv7-L30 su -c tilde	U|
+rv7-L31 sh -c positional cd	U|
+rv7-L32 bash -c $0 cd	U|
+rv7-L33 unknown env var path	U|
+rv7-L34 unknown env var cd	U|
+rv7-L35 flock -c	U|
+rv7-L36 script -c	U|
+rv7-L37 su - login moves cwd	U|
+rv7-L38 bash -l keeps cwd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L39 ssh remote not local	U|
+rv7-L40 subshell cd does not leak	K|append:/home/u/.ssh/authorized_keys
+rv7-L41 cmdsubst cd does not leak	K|append:/home/u/.ssh/authorized_keys
+rv7-L42 cd inside if	U|
+rv7-L43 cd inside while	U|
+rv7-L44 env -u HOME child tilde	U|
+rv7-L45 find -execdir parent	U|
+rv7-L46 procsubst write	U|append:/home/u/.ssh/authorized_keys
+rv7-L47 cd in brace group	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L48 cd then && chain mixed	U|
+rv7-L49 cd in case arm	U|
+rv7-L50 HOME reassigned then child	K|append:/home/u/.ssh/authorized_keys
+rv7-L51 export var into child	K|append:/home/u/.ssh/authorized_keys
+rv7-L52 unexported var into child	U|
+rv7-L53 env -i HOME child	K|append:/home/u/.ssh/authorized_keys
+rv7-L54 HOME prefix on tee (no tilde)	K|append:/home/u/.bashrc
+rv7-L55 HOME via read builtin	U|
+rv7-L56 HOME via for loop	U|
+rv7-L57 HOME via declare	K|append:/home/u/.ssh/authorized_keys
+rv7-L58 HOME via local in fn	U|
+rv7-L59 HOME via getopts/printf -v	U|
+rv7-L60 sudo -D then sh -c	K|append:/home/u/.ssh/authorized_keys
+rv7-L61 stdbuf tee	U|append:/home/u/.ssh/authorized_keys
+rv7-L62 setsid sh -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L63 xargs sh -c cd	U|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L64 time builtin + cd	K|append:/home/u/.ssh/authorized_keys,append:/home/u/proj/authorized_keys
+rv7-L65 chroot path	U|append:/root/.bashrc
+rv7-L66 doas tee	K|append:/home/u/.ssh/authorized_keys
+rv7-L67 env -S split	U|
+rv7-L68 busybox sh -c	U|
+rv7-L69 zsh -c tilde	K|append:/home/u/.zshrc
+rv7-L70 dash -c cd -	U|
+rv7-L80 workdir abs	K|append:/home/u/.ssh/authorized_keys
+rv7-L81 workdir relative	K|append:/home/u/.ssh/authorized_keys
+rv7-L82 workdir tilde literal	U|
+rv7-L83 workdir then cd ..	U|
+rv7-L84 workdir dotdot	U|
+rv7-L85 workdir + cd -	U|
+rv7-M1 mac cd mixed rel	K|append:/users/u/.ssh/authorized_keys
+rv7-M2 mac HOME prefix zsh -c	K|append:/users/u/.ssh/authorized_keys
+rv7-M3 mac caffeinate tee	U|
+rv7-M4 mac arch sh -c	U|
+rv7-M5 mac Library/.. claude	U|
+rv7-M6 mac proj/.. DefenseClaw	U|
+rv7-M7 mac workdir mixed case	K|append:/users/u/.ssh/authorized_keys
+rv7-M8 mac pushd popd	U|
+rv7-M9 mac open -a not a write	U|
+rv7-S1 ps scriptblock & cd persists	U|
+rv7-S10 ps foreach cd	U|
+rv7-S11 ps Invoke-Command cd	U|
+rv7-S12 ps iex cd	U|
+rv7-S13 ps SessionState SetLocation	U|
+rv7-S14 ps Set-Item env:	U|
+rv7-S15 ps New-Item env:	U|
+rv7-S16 ps Set-Variable	U|
+rv7-S17 ps dot-source var	U|
+rv7-S18 ps if var	U|
+rv7-S19 ps unknown env	U|
+rv7-S2 ps pushd popd	U|
+rv7-S20 ps cd then cmd /c	U|append:c:\users\u\.ssh\authorized_keys,append:c:\work\authorized_keys
+rv7-S21 ps cd then powershell -c	U|
+rv7-S22 ps cd piped	U|
+rv7-S23 ps try cd	U|
+rv7-S24 ps Push-Location -StackName	U|
+rv7-S25 ps Set-Location -PassThru	U|
+rv7-S26 ps cd home then -Path rel	U|
+rv7-S27 ps env USERPROFILE vs tilde	U|
+rv7-S29 ps Start-Process inherits loc	U|
+rv7-S3 ps cd - back	U|
+rv7-S30 ps .NET CurrentDirectory set	U|
+rv7-S31 ps Out-File positional	K|write:c:\users\u\.ssh\authorized_keys,write:c:\work\authorized_keys
+rv7-S32 ps cd tilde then rel	K|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys,write:c:\work\.ssh\authorized_keys,write:c:\work\authorized_keys
+rv7-S33 ps workdir	U|
+rv7-S34 ps PWD var	U|
+rv7-S35 ps Join-Path PWD	U|
+rv7-S37 ps & block write	U|
+rv7-S38 ps switch cd	U|
+rv7-S39 ps ForEach-Object cd	U|
+rv7-S4 ps sl alias	U|
+rv7-S40 ps-linux cd tilde	K|write:/home/u/.ssh/authorized_keys,write:/home/u/authorized_keys
+rv7-S41 ps-linux env HOME vs tilde	K|write:/home/u/.bashrc
+rv7-S42 ps-linux loc then bash -c	U|
+rv7-S43 ps $using/env var in -Path	U|
+rv7-S44 ps Set-Location -Path:colon	U|
+rv7-S45 ps cd provider-qualified	U|
+rv7-S46 ps cd HKCU then C:	U|
+rv7-S47 ps scriptblock var invoke	U|
+rv7-S5 ps Set-Location -LiteralPath	U|
+rv7-S6 ps .NET relative uses process cwd	U|
+rv7-S7 ps function cd	U|
+rv7-S8 ps dot-source block cd	U|
+rv7-S9 ps if block cd	U|
+rv8-C01 overflow	U|
+rv8-C02 cd || subshell	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C03 cd || cmdsubst	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C04 cd && subshell	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C05 cd || true	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C06 cd && w || w	K|append:/home/u/.bashrc,append:/t/none/.bashrc,append:/t/none/x
+rv8-C07 cd || func	U|
+rv8-C08 cd || eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C09 cd || bash -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C10 cd || source	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C11 cmd paren group cd	U|append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys
+rv8-C12 cmd failed cd /d then cd	U|append:c:\t\none\.ssh\authorized_keys,append:c:\t\none\authorized_keys,append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys
+rv8-C13 cmd cd || write	U|append:c:\users\u\.ssh\authorized_keys
+rv8-C14 if cd then	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C15 while cd	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C16 cd || cmdsubst in arg	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C17 cd || heredoc	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C18 cd || procsubst	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C19 cd || background	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C20 cd || pipeline	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C21 ps sl ||	U|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys
+rv8-C22 ps sl && sub	U|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys
+rv8-C23 cd && eval	U|append:/home/u/.bashrc,append:/t/none/.bashrc
+rv8-C24 cd || command eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C25 cd || builtin eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-E01 ps env HOME into bash	U|
+rv8-E02 cmd set HOME into bash	U|
+rv8-E03 ps env HOME into sh bare cd	U|
+rv8-E04 export -n HOME	U|
+rv8-E05 declare +x HOME	U|
+rv8-E06 exec -c	U|
+rv8-E07 relative HOME child cd	U|
+rv8-E08 relative HOME parent	U|
+rv8-E09 relative HOME bare cd	U|
+rv8-E10 command export HOME	K|append:/home/u/.ssh/authorized_keys
+rv8-E11 builtin export HOME	K|append:/home/u/.ssh/authorized_keys
+rv8-E12 command declare HOME	U|append:/home/u/.ssh/authorized_keys
+rv8-E13 command export D (control)	K|append:/home/u/.ssh/authorized_keys
+rv8-E14 set -a (control)	U|
+rv8-E15 env -u HOME (control)	U|
+rv8-E16 typeset +x HOME bare cd	U|
+rv8-E17 unset then assign HOME	U|
+rv8-E18 command eval HOME	K|append:/home/u/.ssh/authorized_keys
+rv8-E19 builtin readonly HOME	U|append:/home/u/.ssh/authorized_keys
+rv8-E20 command export CDPATH	U|
+rv8-P01 iex Set-Location then write	U|write:c:\work\authorized_keys
+rv8-P02 Invoke-Expression -Command	U|write:c:\work\authorized_keys
+rv8-P03 iex then cmd /c	U|append:c:\work\authorized_keys
+rv8-S01 sh -s with pipe	U|
+rv8-S02 bash /dev/stdin	U|
+rv8-S03 sh -	U|
+rv8-S04 cmd fd 0 dup	U|
+rv8-S05 bash -i pipe	U|
+rv8-T01 uniq IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T02 sed w	U|
+rv8-T03 sed s///w	U|
+rv8-T04 sed -e w	U|
+rv8-T05 awk print >>	U|
+rv8-T06 awk -f	U|
+rv8-T07 sed -f	U|
+rv8-T08 xxd -r IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T09 xxd IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T10 curl -w output	U|
+rv8-T11 curl -K	U|
+rv8-T12 git -C pull	U|
+rv8-T13 git --work-tree pull	U|
+rv8-T14 git --work-tree checkout	U|
+rv8-T15 git -C clone	K|write:/home/u/.ssh/k/**
+rv8-T16 git -C init	K|write:/home/u/.ssh/**
+rv8-T17 sort -o fused	K|write:/home/u/.ssh/authorized_keys
+rv8-T18 sort --output=	K|write:/home/u/.ssh/authorized_keys
+rv8-T19 cp -t fused	K|write:/home/u/.ssh/authorized_keys
+rv8-T20 install -m fused	U|
+rv8-T21 uniq -c IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T22 tee -p (control)	K|write:/home/u/.ssh/authorized_keys
+rv8-T24 xxd -r stdin OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-W01 sudo -e	U|
+rv8-W02 sudo -e -u	U|
+rv8-W03 env -S	U|
+rv8-W04 nice nohup env -C	K|append:/home/u/.ssh/authorized_keys
+rv8-W05 failed cd then env -C rel	K|append:/home/u/.ssh/authorized_keys,append:/t/none/.ssh/authorized_keys
+rv8-W06 failed cd then sudo -D rel	K|append:/home/u/.ssh/authorized_keys,append:/t/none/.ssh/authorized_keys
+rv8-W07 timeout env --chdir	K|append:/home/u/.ssh/authorized_keys
+rv8-W08 exec -a env -C	K|append:/home/u/.ssh/authorized_keys
+rv8-W09 setsid env -C fused	K|append:/home/u/.ssh/authorized_keys
+rv8-W10 env -C --	K|append:/home/u/.ssh/authorized_keys
+rv8-W11 env -C twice	U|
+rv8-W12 sudo -D then env -C	U|
+rv8-W13 env -C sh -c cd ..	U|
+rv8-W14 env -C bash -c	K|append:/home/u/.ssh/authorized_keys
+rv8-W15 env -C then nested env -C abs	K|append:/home/u/.ssh/authorized_keys
+rv8-W16 command -p tee (control)	K|append:/home/u/.ssh/authorized_keys
+rv8-W17 cd .ssh then env -C ..	U|
+rv8-W18 failed cd, cd, env -C ..	U|
+rv8-X01 ps LHS index cmd	U|
+rv8-X02 ps hash key cmd	U|
+rv8-X03 ps hash value & cmd	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-X04 ps hash value bare cmd	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-X05 ps member LHS cmd	U|
+rv8-X06 ps legacy quote split	U|
+rv8-X07 ps legacy quote cmd.exe	U|
+rv8-X08 ps legacy quote & cmd	U|
+rv8-X09 ps legacy quote full path	U|
+rv8-X10 ps legacy backtick quote	U|
+rv8-X11 ps plain cmd del (control)	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-X12 ps legacy quote assign	U|
+rv8-X13 ps cmd quoted payload (control)	U|append:c:\users\u\.ssh\authorized_keys
+rv8-X14 ps legacy quote piped	U|
+rv8-X15 ps legacy quote in foreach	U|
+rv8-X16 ps legacy quote CMD upper	U|
+rv8-X17 ps legacy quote /k	U|
+rv8-X18 ps legacy quote cd	U|
+rv8-X19 ps cmd /r	U|
+rv8-X20 ps cmd padded /c	U|
+rv8-X21 ps cmd /c colon param	U|delete:c:\t,delete:c:\users\u\.ssh\authorized_keys
+rv8-X22 ps cmd /c env var arg	U|
+rv8-X23 ps cmd stop-parse tail	U|
+rv8-X24 ps cmd /c then stop-parse	U|
+rv8-Y01 ps LHS index Remove-Item	U|
+rv8-Y02 ps hash key Remove-Item	U|
+rv8-Y03 ps hash value & Remove-Item	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-Y04 ps hash value bare Remove-Item	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-Y05 ps member LHS Remove-Item	U|
+rv8-Y06 ps void & Remove-Item (control)	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-Y07 ps hash value & powershell	K|delete:c:\users\u\.ssh\authorized_keys,delete:c:\users\u\.ssh\authorized_keys
+rv8-Y08 ps LHS index Set-Content	U|
+rv8-Y09 ps hash value & Add-Content	K|write:c:\users\u\.ssh\authorized_keys
+tee single unlisted	U|write:/tmp/x

@@ -22,7 +22,6 @@ func TestRv4AllowlistShapes(t *testing.T) {
 		{"ps listed param", winPS, `Copy-Item -Path a.txt -Destination b.txt`},
 	}
 	for _, c := range cases {
-		r := Extract(sh(c.cmd), c.o)
-		t.Logf("%-32s fullyKnown=%v unknowns=%v", c.n, r.FullyKnown(), r.Unknowns)
+		checkRow(t, c.n, c.o, sh(c.cmd), "")
 	}
 }

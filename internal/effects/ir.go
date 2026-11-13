@@ -37,7 +37,11 @@ type Stmt struct {
 	// Cond is true when the statement runs only on some execution paths.
 	Cond       bool
 	Background bool
-	Span       [2]int
+	// Link is OpAnd / OpOr when this statement runs only on the success /
+	// failure of the statement before it (the right side of `a && b`, `a || b`).
+	// The walker uses it to know a cd's outcome (round 8 F); OpNone otherwise.
+	Link Op
+	Span [2]int
 }
 
 // Cmd is one simple command or pipeline stage.
@@ -106,6 +110,11 @@ type Assign struct {
 	// Unbind marks a name a for-loop rebinds: the walker drops it so later
 	// commands do not read a stale static value (review N3).
 	Unbind bool
+	// NoValue marks a declaration that names the variable without giving it a
+	// value (`export X`, `declare +x X`): only its attributes change.
+	NoValue bool
+	// Unexport removes the export attribute (`export -n`, `declare +x`).
+	Unexport bool
 }
 
 // RedirOp is the kind of a redirection.

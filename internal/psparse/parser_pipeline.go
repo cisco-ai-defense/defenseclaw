@@ -346,6 +346,17 @@ func (p *parser) parseCommandArg() CommandElement {
 		for p.at(TokComma) {
 			p.advance()
 			p.skipNewlines()
+			if p.at(TokParameter) {
+				// after a comma a -word is the next list element (an argument),
+				// not a parameter: Remove-Item a,-b -> ["a","-b"] (review 5 R5-10)
+				tk := p.advance()
+				name := "-" + tk.Value
+				if tk.HasColon {
+					name += ":"
+				}
+				arr.Elements = append(arr.Elements, &StringLit{span: span{tk.Start, tk.End}, Kind: StrBare, Value: name, Static: true, Bare: true, Raw: tk.Raw})
+				continue
+			}
 			if nxt := p.parseFusedArg(); nxt != nil {
 				arr.Elements = append(arr.Elements, nxt)
 			}
@@ -503,10 +514,8 @@ func (p *parser) parseRedirection() *Redirection {
 	if t.ColonArg != "" { // stream merge like 2>&1
 		return r
 	}
-	if t.Value == "<" {
-		// input redirection target
-	}
-	// target is the next argument expression
+	// "<" input redirection and > / >> / 2> ... all take the next argument
+	// expression (parsed below) as the target.
 	p.skipComments()
 	if !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) && !p.at(TokPipe) {
 		if a := p.parseCommandArg(); a != nil {

@@ -56,6 +56,19 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			if spShell[ns.Source] {
 				continue // never use a Start-Process-into-shell nested text (review 5 (a))
 			}
+			// A literal `cmd /c ...` host command is lowered as an ordinary command
+			// and the walker unwraps its /c payload itself (and makes a payload it
+			// cannot place opaque), so psparse's copy of the same text would walk the
+			// payload twice (round 8 merge with psparse 27b3aa1f3b).
+			if cmd, ok := ns.Source.(*psparse.Command); ok && ns.Dialect == "cmd" && psBaseNameOf(cmd) == "cmd" {
+				// psparse's verdict is kept when it is not static (a payload it could
+				// not read, legacy quoting): the walker's own unwrap must not be the
+				// only thing standing between that and a fully known result.
+				if !ns.Static {
+					s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+				}
+				continue
+			}
 			// A powershell/pwsh host carrying -EncodedArguments: psparse decodes
 			// the CLIXML args blob as if it were the script (and misses the real
 			// -EncodedCommand), so never re-parse it. The payload is opaque; the
@@ -85,9 +98,7 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			} else {
 				inner = lowerPSScript(ns.Text, o, false)
 			}
-			for _, fn := range inner.Funcs {
-				s.Funcs = append(s.Funcs, fn)
-			}
+			s.Funcs = append(s.Funcs, inner.Funcs...)
 			s.Stmts = append(s.Stmts, inner.Stmts...)
 			s.Unknowns = append(s.Unknowns, inner.Unknowns...)
 		}
@@ -252,6 +263,15 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 	case *psparse.Assignment:
 		lw.assignment(v, cond)
 	case *psparse.Block:
+		// A function (or filter) defined here shadows a cmdlet of the same name for
+		// the rest of the script: the walker must not treat that name as the
+		// cmdlet (round 8 H, rv7-B48). Names are case-insensitive.
+		if v.Name != "" {
+			switch strings.ToLower(v.Keyword) {
+			case "function", "filter", "workflow":
+				lw.out.Funcs = append(lw.out.Funcs, strings.ToLower(v.Name))
+			}
+		}
 		lw.statements(v.Conditions, cond)
 		for _, b := range v.Bodies {
 			if b != nil {

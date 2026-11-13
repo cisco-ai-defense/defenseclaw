@@ -15,25 +15,32 @@ type wrapperSpec struct {
 	valFlags  map[string]bool
 	posSkip   int
 	envAssign bool
+	// shorts lists the single-letter switches the wrapper accepts. Any other
+	// short flag may take a value we cannot see, so it is unaccounted (the
+	// wrapper allowlist is closed, round 8 G).
+	shorts string
 }
 
+// The wrapper table is an allowlist: a launcher not listed here is the inner
+// program itself and, being unmodeled, is not fully known. A listed wrapper is
+// transparent only for the options named here.
 var wrapperSpecs = map[string]wrapperSpec{
-	"sudo":    {kind: wrapIdentity, valFlags: set("-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "--user", "--group")},
-	"doas":    {kind: wrapIdentity, valFlags: set("-u", "-C")},
-	"env":     {kind: wrapPlain, valFlags: set("-u", "-C", "--unset", "--chdir"), envAssign: true},
+	"sudo":    {kind: wrapIdentity, valFlags: set("-u", "-g", "-C", "-h", "-p", "-r", "-t", "-U", "-D", "--user", "--group", "--chdir"), shorts: "AbEeHiKklnPSsVvB"},
+	"doas":    {kind: wrapIdentity, valFlags: set("-u", "-C"), shorts: "nsL"},
+	"env":     {kind: wrapPlain, valFlags: set("-u", "-C", "--unset", "--chdir"), envAssign: true, shorts: "i0v"},
 	"nohup":   {kind: wrapPlain},
-	"setsid":  {kind: wrapPlain},
+	"setsid":  {kind: wrapPlain, shorts: "cfw"},
 	"nice":    {kind: wrapPlain, valFlags: set("-n", "--adjustment")},
-	"ionice":  {kind: wrapPlain, valFlags: set("-c", "-n", "-p")},
-	"timeout": {kind: wrapPlain, valFlags: set("-s", "-k", "--signal", "--kill-after"), posSkip: 1},
+	"ionice":  {kind: wrapPlain, valFlags: set("-c", "-n", "-p"), shorts: "t"},
+	"timeout": {kind: wrapPlain, valFlags: set("-s", "-k", "--signal", "--kill-after"), posSkip: 1, shorts: "fpv"},
 	"stdbuf":  {kind: wrapPlain, valFlags: set("-i", "-o", "-e")},
-	"command": {kind: wrapPlain},
+	"command": {kind: wrapPlain, shorts: "pvV"},
 	"builtin": {kind: wrapPlain},
-	"exec":    {kind: wrapPlain, valFlags: set("-a")},
-	"time":    {kind: wrapPlain},
-	"xargs":   {kind: wrapInput, valFlags: set("-n", "-I", "-i", "-P", "-a", "-s", "-L", "-d", "-E", "--max-args", "--replace", "--max-procs")},
+	"exec":    {kind: wrapPlain, valFlags: set("-a"), shorts: "cl"},
+	"time":    {kind: wrapPlain, shorts: "pv"},
+	"xargs":   {kind: wrapInput, valFlags: set("-n", "-I", "-i", "-P", "-a", "-s", "-L", "-d", "-E", "--max-args", "--replace", "--max-procs"), shorts: "0rtpxo"},
 	"chroot":  {kind: wrapForeign, posSkip: 1},
-	"ssh":     {kind: wrapForeign, valFlags: set("-i", "-p", "-o", "-l", "-F", "-L", "-R", "-D", "-b", "-c", "-m", "-O", "-Q", "-w", "-e", "-J", "-W"), posSkip: 1},
+	"ssh":     {kind: wrapForeign, valFlags: set("-i", "-p", "-o", "-l", "-F", "-L", "-R", "-D", "-b", "-c", "-m", "-O", "-Q", "-w", "-e", "-J", "-W"), posSkip: 1, shorts: "46AaCfGgKkMNnqsTtVvXxYy"},
 	"wsl":     {kind: wrapForeign, valFlags: set("-u", "-d", "--user", "--distribution"), envAssign: false},
 }
 
@@ -47,7 +54,11 @@ func set(xs ...string) map[string]bool {
 
 // stripWrappers peels known launchers off the front, returning the inner argv,
 // the stripped wrapper names, and whether the inner command runs in a foreign
-// context or takes its operands from input.
+// context or takes its operands from input. It also records on w.spec the
+// environment and working-directory changes the wrappers apply to the child
+// they start (env -i / -u / NAME=val, sudo's environment reset, sudo -i), so
+// nested code is walked with the child's environment, not the shell's
+// (round 8 E, G).
 func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, foreign, fromInput, unaccounted bool) {
 	i := 0
 	for i < len(words) {
@@ -66,6 +77,11 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 			foreign = true
 		case wrapInput:
 			fromInput = true
+		case wrapIdentity:
+			// sudo / doas reset the environment (HOME becomes the target user's):
+			// nothing the shell knows reaches the child, unless -E keeps it (and
+			// even then HOME is not trusted). The flags below refine this.
+			w.spec.clear = true
 		}
 		i++
 		// consume this wrapper's own flags and env assignments.
@@ -80,33 +96,56 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 				break
 			}
 			if spec.envAssign && strings.Contains(v, "=") && !strings.HasPrefix(v, "-") {
-				// env CDPATH=... sets CDPATH for the wrapped command, so a relative
-				// cd inside it can resolve elsewhere -> dynamic (review 6 B, V4).
-				if strings.HasPrefix(v, "CDPATH=") {
+				// env NAME=val sets the child's environment; CDPATH also changes how
+				// a relative cd inside it resolves -> dynamic (review 6 B, V4).
+				eq := strings.IndexByte(v, '=')
+				if v[:eq] == "CDPATH" {
 					w.cdpathMaybeSet = true
 				}
+				w.spec.set(v[:eq], v[eq+1:], true)
 				i++
 				continue
 			}
 			if strings.HasPrefix(v, "-") && v != "-" {
 				fn := v
+				inline := ""
+				hasInline := false
 				if eq := strings.IndexByte(v, '='); eq > 0 {
 					fn = v[:eq]
+					inline = v[eq+1:]
+					hasInline = true
 				}
-				// An unmodeled long wrapper option may change the command's
-				// behaviour (cwd, identity, environment) in a way we do not
-				// account for: mark the command not fully known (review R5-1).
-				if strings.HasPrefix(fn, "--") && !spec.valFlags[fn] {
-					unaccounted = true
-				}
-				if eq := strings.IndexByte(v, '='); eq > 0 {
+				w.wrapperFlag(name, fn, v, spec, &unaccounted)
+				chdirFlag := (name == "env" && (fn == "-C" || fn == "--chdir")) || (name == "sudo" && (fn == "-D" || fn == "--chdir"))
+				if hasInline {
+					if name == "env" && fn == "--unset" {
+						w.spec.set(inline, "", false)
+					}
+					if chdirFlag {
+						w.spec.chdir, w.spec.chdirSet = inline, true
+					}
 					i++
 					continue
 				}
 				i++
 				if spec.valFlags[fn] && i < len(words) {
+					if name == "env" && (fn == "-u" || fn == "--unset") && words[i].Static {
+						w.spec.set(words[i].Value, "", false)
+					}
+					if chdirFlag {
+						if words[i].Static {
+							w.spec.chdir, w.spec.chdirSet = words[i].Value, true
+						} else {
+							w.spec.cwdDyn = true
+						}
+					}
 					i++ // consume the flag's value
 				}
+				continue
+			}
+			if v == "-" && name == "env" {
+				w.spec.clear = true // env - is env -i
+				i++
 				continue
 			}
 			break
@@ -117,6 +156,73 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 		}
 	}
 	return words[i:], wrappers, foreign, fromInput, unaccounted
+}
+
+// wrapperFlag accounts for one wrapper option token (v) with name fn: it marks
+// the command unaccounted when the option is outside the wrapper's allowlist
+// and applies the options that change the child's environment or directory.
+func (w *walker) wrapperFlag(wrapper, fn, v string, spec wrapperSpec, unaccounted *bool) {
+	if strings.HasPrefix(fn, "--") {
+		if !spec.valFlags[fn] {
+			// An unmodeled long wrapper option may change the command's behaviour
+			// (cwd, identity, environment): not fully known (review R5-1), except
+			// the few switches whose meaning is modeled below.
+			switch {
+			case wrapper == "env" && fn == "--ignore-environment":
+				w.spec.clear = true
+			case wrapper == "sudo" && (fn == "--preserve-env" || fn == "--login" || fn == "--set-home" || fn == "--shell" || fn == "--background" || fn == "--non-interactive" || fn == "--reset-timestamp" || fn == "--remove-timestamp" || fn == "--stdin" || fn == "--askpass"):
+				w.sudoFlag(fn)
+			case wrapper == "xargs" && (fn == "--null" || fn == "--no-run-if-empty" || fn == "--verbose" || fn == "--interactive" || fn == "--exit"):
+			case wrapper == "timeout" && (fn == "--foreground" || fn == "--preserve-status" || fn == "--verbose"):
+			default:
+				*unaccounted = true
+			}
+		}
+		return
+	}
+	// short option(s)
+	body := v[1:]
+	if len(body) == 0 {
+		return
+	}
+	if spec.valFlags[v[:2]] && len(v) == 2 {
+		return // a valued option; the caller consumes its value
+	}
+	if wrapper == "env" && v[:2] == "-C" {
+		w.spec.chdir, w.spec.chdirSet = v[2:], true // fused -Cdir
+		return
+	}
+	for _, ch := range body {
+		if wrapper == "nice" && ch >= '0' && ch <= '9' {
+			continue // the legacy `nice -5` adjustment
+		}
+		if !strings.ContainsRune(spec.shorts, ch) {
+			if spec.valFlags["-"+string(ch)] && len(body) == 1 {
+				continue
+			}
+			*unaccounted = true
+			continue
+		}
+		switch {
+		case wrapper == "env" && ch == 'i':
+			w.spec.clear = true
+		case wrapper == "exec" && ch == 'c':
+			w.spec.clear = true // exec -c runs the program with an empty environment
+		case wrapper == "sudo":
+			w.sudoFlag("-" + string(ch))
+		}
+	}
+}
+
+// sudoFlag records the effect of a sudo option on the child it starts.
+func (w *walker) sudoFlag(fn string) {
+	switch fn {
+	case "-E", "--preserve-env":
+		w.spec.clear = false
+		w.spec.dropHome = true
+	case "-i", "--login":
+		w.spec.cwdDyn = true
+	}
 }
 
 // programBasename takes the basename of a program path and folds case for
@@ -143,6 +249,9 @@ func flagLookup(p Program, name string, dialect Dialect) (Flag, bool) {
 	key := name
 	if eq := strings.IndexByte(name, '='); eq >= 0 {
 		key = name[:eq]
+	}
+	if dialect == DialectCMD && strings.HasPrefix(key, "/") {
+		key = strings.ToLower(key) // cmd's own /switches are case-insensitive (curl's -F is not)
 	}
 	if dialect == DialectPowerShell {
 		key = strings.ToLower(key)
@@ -176,27 +285,6 @@ func collectExecArgv(words []Word) []Word {
 		out = append(out, wd)
 	}
 	return out
-}
-
-// uploadPath extracts the local file from a curl upload operand: -F name=@file,
-// -T file, --data-binary @file. ok is false when the value carries no file
-// (inline data). A trailing ;type=... on a -F @file is stripped (review PT-5).
-func uploadPath(v string) (string, bool) {
-	if at := strings.LastIndex(v, "@"); at >= 0 {
-		p := v[at+1:]
-		if semi := strings.IndexByte(p, ';'); semi >= 0 {
-			p = p[:semi]
-		}
-		if p == "" {
-			return "", false
-		}
-		return p, true
-	}
-	if strings.IndexByte(v, '=') >= 0 {
-		return "", false // a form field with inline data, not a file
-	}
-	// -T/--upload-file give a bare path (no @).
-	return v, true
 }
 
 // parseURL splits a URL with an explicit scheme into scheme, host and port.

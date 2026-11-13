@@ -154,14 +154,32 @@ func LiteralString(e Expr) (string, bool) {
 		// obfuscated name/path (i`u{65}x, C:\tmp\`[a]) can never resolve to a
 		// trusted literal. (The AST Static flag itself stays set for node-kind
 		// matching against the reference parser.)
-		if v.Static && safeStaticLiteral(v.Raw) && safeStaticLiteral(v.Value) {
+		if !v.Static {
+			return "", false
+		}
+		if v.Bare || v.Kind == StrBare {
+			// a bareword / command name: the strict class (an operator-class
+			// rune here would be a real separator, not literal text).
+			if safeStaticLiteral(v.Raw) && safeStaticLiteral(v.Value) {
+				return v.Value, true
+			}
+			return "", false
+		}
+		// a quoted string literal: its contents are literal (never operators),
+		// and when it is a nested script effects re-parses it and re-gates the
+		// leaves, so the wider class (printable ASCII, but still no backtick,
+		// control rune or non-ASCII) is safe and avoids making ordinary quoted
+		// payloads opaque (review 4 R4-7).
+		if safeQuotedLiteral(v.Raw) && safeQuotedLiteral(v.Value) {
 			return v.Value, true
 		}
 		return "", false
 	case *Number:
 		// the pwsh-formatted value computed in numberLit (0x10 -> "16",
-		// 1.0d -> "1.0", a too-big integer keeps its exact digits).
-		if v.OK {
+		// 1.0d -> "1.0", a too-big integer keeps its exact digits). Gate the
+		// display on the strict class too, so a non-ASCII "digit" that slipped
+		// through can never resolve static (review 4 invariant fuzzer).
+		if v.OK && safeStaticLiteral(v.Display) {
 			return v.Display, true
 		}
 		return "", false
@@ -174,18 +192,37 @@ func LiteralString(e Expr) (string, bool) {
 		// reference side, so it is never a static literal value.
 		return "", false
 	case *ArrayLit:
-		// a comma list of literals joins with spaces (ArgumentList style)
-		parts := make([]string, 0, len(v.Elements))
-		for _, el := range v.Elements {
-			s, ok := LiteralString(el)
-			if !ok {
-				return "", false
-			}
-			parts = append(parts, s)
-		}
-		return strings.Join(parts, " "), true
+		// A comma/array argument is never one static value: effects must read
+		// the elements (LiteralList) and treat each as its own word, so a
+		// protected element (Remove-Item C:\tmp\a,C:\Windows) is not hidden
+		// inside a fabricated joined string (review 4 R4-2).
+		return "", false
 	}
 	return "", false
+}
+
+// ListItem is one element of a comma/array argument: its resolved value and
+// whether that value is a trusted static literal.
+type ListItem struct {
+	Text   string
+	Static bool
+}
+
+// LiteralList returns the elements of a comma/array argument, each with its own
+// Static flag, and true if e is such a list. Callers must treat each element as
+// a separate word; LiteralString on the same expression is non-static by
+// design, so a comma list can never resolve to one joined value.
+func LiteralList(e Expr) ([]ListItem, bool) {
+	a, ok := e.(*ArrayLit)
+	if !ok {
+		return nil, false
+	}
+	items := make([]ListItem, 0, len(a.Elements))
+	for _, el := range a.Elements {
+		v, st := LiteralString(el)
+		items = append(items, ListItem{Text: v, Static: st})
+	}
+	return items, true
 }
 
 // DecodeEncodedCommand decodes a PowerShell -EncodedCommand value: base64 of
@@ -217,6 +254,25 @@ func safeStaticLiteral(s string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// safeQuotedLiteral is the wider class for a quoted string literal (and for a
+// nested script's text): every rune must be printable ASCII (0x20..0x7e) and
+// not a backtick. It rejects backtick escapes, control runes and non-ASCII
+// (the value-changing / homoglyph vectors) but allows the structural
+// punctuation that is literal inside quotes (; & | ( ) { } [ ] $ * ? etc.).
+func safeQuotedLiteral(s string) bool {
+	for _, r := range s {
+		if r == '`' || r < 0x20 || r > 0x7e {
+			return false
+		}
+		// PowerShell -Path expands * ? [ ] even inside quotes, so a quoted path
+		// value with a wildcard metachar is not an exact literal (review 5 R5-3).
+		if r == '*' || r == '?' || r == '[' || r == ']' {
+			return false
+		}
 	}
 	return true
 }

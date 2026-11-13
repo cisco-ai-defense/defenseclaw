@@ -49,15 +49,31 @@ var revExtraLines = []string{
 	`Write-Output "a§$(1)"`, `Write-Output "a§§$(1)"`, `Write-Output 'a$(1)'`, `Write-Output "a§u{0}b"`, `Write-Output "§0"`,
 	`Write-Output a§ b`, `Write-Output "a§`, `Write-Output §"a§"`, `Write-Output §'a§'`, `Write-Output a§'b`,
 	`Write-Output -Name:"x y"`, `Write-Output -Name:'x'`, `Write-Output -Name:$x`, `Write-Output -Name:(1)`, `Write-Output -Name:a,b`,
+	// review 4 R4-2: comma/array arguments split element by element
+	`Remove-Item C:\tmp\a,C:\Windows`, `Remove-Item -Path C:\tmp\a, C:\Windows -Recurse`,
+	`Remove-Item -Path:C:\a,C:\b`, `Write-Output 'C:\tmp\a','C:\Windows'`,
+	`Write-Output C:\a, 'C:\b', "C:\c"`, `Copy-Item C:\a,C:\Windows\System32\x.dll C:\dst`,
+	// review 4 R4-1: a hashtable bareword key fused to = must not hide the value's commands
+	`@{b=Remove-Item C:\x}`, `@{a=1;b=Remove-Item C:\x}`, `@{a= Remove-Item C:\x}`,
+	`$h=@{a=1;b=Remove-Item C:\x}`, `@{a=1;b=(Remove-Item C:\x)}`, `@{a=1;b={Remove-Item C:\x}}`,
+	`@{a=1;b=& rm C:\x}`, `@{a=1;b=iex 'Remove-Item C:\x'}`, `@{a=1;b=powershell -c Remove-Item C:\x}`,
+	`Write-Output @{a=1;b=Remove-Item C:\x}`, `Remove-Item @{a=1;b=Remove-Item C:\x}`,
+	`@{a =1}`, `@{a = 1}`, `@{'a'=Remove-Item C:\x}`, `@{"a"=Remove-Item C:\x}`, `@{1=Remove-Item C:\x}`,
+	// review 5 R5-7: a control-flow hashtable value walks its commands, not "foreach"/"in"
+	`@{a=foreach($i in Remove-Item C:\Windows){1}}`, `@{a=if($x){Remove-Item C:\y}}`,
+	`@{a=while($x){Remove-Item C:\z}}`,
+	// review 5 R5-10: after a comma a -word is a list element, not a parameter
+	`Remove-Item a,-b`, `Remove-Item C:\a,-Recurse`,
 }
 
 func bq2(s string) string { return strings.ReplaceAll(s, "§", "`") }
 
 type ovVal struct {
-	S bool   `json:"s"`
-	V string `json:"v"`
-	P string `json:"p"`
-	C *ovVal `json:"c"`
+	S bool    `json:"s"`
+	V string  `json:"v"`
+	P string  `json:"p"`
+	C *ovVal  `json:"c"`
+	L []ovVal `json:"l"` // elements of a comma/array argument (review 4 R4-2)
 }
 type ovCmd struct {
 	Name ovVal   `json:"name"`
@@ -259,8 +275,8 @@ function V($el) {
   if ($tn -eq 'StringConstantExpressionAst' -or $tn -eq 'ConstantExpressionAst') { return [ordered]@{ s = $true; v = [string]$el.Value } }
   if ($tn -eq 'ArrayLiteralAst') {
     $parts = New-Object System.Collections.ArrayList
-    foreach ($x in $el.Elements) { $r = V $x; if (-not $r.s) { return [ordered]@{ s = $false; v = '' } }; [void]$parts.Add($r.v) }
-    return [ordered]@{ s = $true; v = ($parts -join ' ') }
+    foreach ($x in $el.Elements) { [void]$parts.Add((V $x)) }
+    return [ordered]@{ s = $false; v = ''; l = $parts }
   }
   return [ordered]@{ s = $false; v = '' }
 }
