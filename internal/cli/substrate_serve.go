@@ -209,6 +209,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		}
 		substrateStartupChecks(cfg)
+		// A managed gateway in a pod has no laptop lifecycle: the chart's
+		// read-only mounted config is the activated one (GAP-0135).
+		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+			gateway.SetSubstrateClusterActivation(gateway.SubstrateMountedConfigActivation(gateway.SubstrateFileOwner))
+		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
 	}
