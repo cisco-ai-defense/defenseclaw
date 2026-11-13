@@ -224,6 +224,10 @@ var hostShapeNotStatic = []struct {
 	// value-taking option without a value
 	{"ep-missing", `pwsh -ep`, ReasonHostShape},
 	// review 9 (GAP-0191..0194): working directory, cmd payload quoting, native argv
+	{"Q16", `pwsh -if bogus -c 'Write-Output a'`, ReasonHostOption},
+	{"Q19", `pwsh -ep /c -c 'Write-Output a'`, ReasonHostOption},
+	{"of-bogus", `pwsh -of bogus -c 'Write-Output a'`, ReasonHostOption},
+	{"w-bogus", `pwsh -w bogus -c 'Write-Output a'`, ReasonHostOption},
 	{"W03", `pwsh -wd /tmp -c 'Remove-Item x'`, ReasonHostOption},
 	{"W04", `pwsh -WorkingDirectory /tmp -command 'Remove-Item x'`, ReasonHostOption},
 	{"P01", `cmd /c rd /s /q 'C:\Program Files\dcx'`, ReasonCmdArgv},
@@ -286,6 +290,16 @@ type refWord struct {
 var (
 	refNoVal   = []string{"-noprofile", "-nop", "-noninteractive", "-noni", "-nologo", "-nol", "-sta", "-mta"}
 	refWithVal = []string{"-executionpolicy", "-ep", "-exec", "-windowstyle", "-w", "-inputformat", "-if", "-outputformat", "-of"}
+	refValues  = map[string][]string{
+		"policy": {"bypass", "unrestricted", "remotesigned", "allsigned", "restricted", "default", "undefined"},
+		"format": {"text", "xml"},
+		"style":  {"normal", "minimized", "maximized", "hidden"},
+	}
+	refValueSet = map[string]string{
+		"-executionpolicy": "policy", "-ep": "policy", "-exec": "policy",
+		"-inputformat": "format", "-if": "format", "-outputformat": "format", "-of": "format",
+		"-windowstyle": "style", "-w": "style",
+	}
 	refCmdSw   = []string{"-c", "-command"}
 	refEncSw   = []string{"-e", "-ec", "-enc", "-encodedcommand"}
 	refCmdOpts = []string{"/q", "/d", "/s", "/a", "/u", "/x", "/y", "/e:on", "/e:off", "/v:on", "/v:off", "/f:on", "/f:off"}
@@ -365,7 +379,7 @@ func refPS(words []refWord, stop bool) (text string, ok bool) {
 				return "", false
 			}
 			v := words[i+1].text
-			if v == "" || strings.TrimSpace(v) != v || strings.HasPrefix(v, "-") {
+			if v == "" || strings.TrimSpace(v) != v || strings.HasPrefix(v, "-") || !refIn(refValues[refValueSet[l]], strings.ToLower(v)) {
 				return "", false
 			}
 			i += 2
@@ -480,7 +494,7 @@ type genWord struct {
 var (
 	genHosts   = []string{"pwsh", "powershell", "PowerShell.EXE", "pwsh.exe", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "& pwsh", "& 'powershell.exe'"}
 	genNoVal   = []string{"-NoProfile", "-nop", "-NOP", "-noni", "-NonInteractive", "-NoLogo", "-nol", "-sta", "-mta", "-noexit", "-login", "-l", "-nop:", "-foo", "/nop", "--nop", "\u2013nop", "\u2014nop", "\u2015nop", "\t-nop", "\u00a0-nop"}
-	genWithVal = [][]string{{"-ep", "Bypass"}, {"-ExecutionPolicy", "Bypass"}, {"-w", "hidden"}, {"-WindowStyle", "Hidden"}, {"-Version", "2"}, {"-wd", "/tmp"}, {"-WorkingDirectory", "/tmp"}, {"-if", "text"}, {"-of", "xml"}, {"-File", "x.ps1"}, {"-foo", "bar"}, {"-ep", ""}, {"-ep", " Bypass"}, {"-ep"}}
+	genWithVal = [][]string{{"-ep", "Bypass"}, {"-ExecutionPolicy", "Bypass"}, {"-w", "hidden"}, {"-WindowStyle", "Hidden"}, {"-Version", "2"}, {"-wd", "/tmp"}, {"-WorkingDirectory", "/tmp"}, {"-if", "text"}, {"-of", "xml"}, {"-File", "x.ps1"}, {"-foo", "bar"}, {"-ep", ""}, {"-ep", " Bypass"}, {"-ep"}, {"-ep", "/c"}, {"-ep", "bypass"}, {"-ep", "Unrestricted"}, {"-if", "bogus"}, {"-of", "bogus"}, {"-of", "Text"}, {"-w", "bogus"}, {"-exec", "RemoteSigned"}}
 	genCmdSw   = []string{"-c", "-Command", "-command", "-C", "-comm", "-co", "/c", "--command", "\u2013c", "\u2014c", "-cwa", "-c:"}
 	genEncSw   = []string{"-e", "-ec", "-enc", "-EncodedCommand", "-en", "-encodedc", "/e", "-e:", "-ea"}
 	genPayload = []string{"Get-Date", `Remove-Item C:\x`, "Write-Output 'a b'", `Write-Output "x"`, "-", "--%", "", " ", `a\ b\`, "$x", "x;y", "Write-Output a", "-nop", "1e3", "0x10", "1kb", "C:\\Program Files\\x", "say \"hi\"", "ver", "dir"}
@@ -753,4 +767,41 @@ foreach ($l in [IO.File]::ReadAllLines($f)) {
 		t.Errorf("only %d cases had certain words; the argv oracle is too thin", checked)
 	}
 	t.Logf("argv oracle: %d of %d cases compared", checked, len(cases))
+}
+
+// TestHostOptionValuesOracle checks the value sets in psOptValues against
+// pwsh 7.7: every listed value is accepted (exit 0) and an unlisted value is
+// rejected. The window styles are Windows-only and are not run here.
+func TestHostOptionValuesOracle(t *testing.T) {
+	pwsh := os.Getenv("PSPARSE_ORACLE")
+	if pwsh == "" {
+		t.Skip("PSPARSE_ORACLE unset")
+	}
+	run := func(args ...string) int {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		err := exec.CommandContext(ctx, pwsh, args...).Run()
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode()
+		}
+		if err != nil {
+			return -1
+		}
+		return 0
+	}
+	for opt, vals := range psOptValues {
+		if opt == "-w" || opt == "-windowstyle" {
+			continue
+		}
+		for v := range vals {
+			if code := run(opt, v, "-c", "Write-Output ok"); code != 0 {
+				t.Errorf("%s %s: pwsh 7.7 exit %d, but the table accepts it", opt, v, code)
+			}
+		}
+		for _, bad := range []string{"bogus", "/c", "xmlx"} {
+			if code := run(opt, bad, "-c", "Write-Output ok"); code == 0 {
+				t.Errorf("%s %s: pwsh 7.7 accepted a value the table rejects", opt, bad)
+			}
+		}
+	}
 }
