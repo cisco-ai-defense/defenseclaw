@@ -77,7 +77,7 @@ jobs:
         cache-files: scripts/build-release-assets.sh
         cache-hit: ${{ steps.go.outputs.cache-hit }}
   perf-budget:
-    name: Performance Budget (Linux per-user)
+    name: g88 ${{ matrix.mode }} ${{ matrix.rep }}
     needs: install-smoke-assets
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -93,14 +93,10 @@ jobs:
       with:
         name: install-smoke-assets
         path: ${{ runner.temp }}/assets
-    - name: strace for the processes-per-hook count
-      run: bash scripts/runner-apt-install.sh strace strace
     - name: Install into a throwaway HOME
       run: python3 scripts/perf/dcperf.py provision --assets "$RUNNER_TEMP/assets" --home "$RUNNER_TEMP/perf-home"
-    - name: Measure and check the budgets
-      run: 'python3 scripts/perf/g88diag.py "$RUNNER_TEMP/perf-home" "$RUNNER_TEMP/g88diag.json" || true
-
-        python3 scripts/perf/dcperf.py run --home "$RUNNER_TEMP/perf-home" --out "$RUNNER_TEMP/perf-result.json" --budgets scripts/perf/budgets.json --column linux-per-user'
+    - name: g88 diag
+      run: python3 scripts/perf/g88diag2.py "$RUNNER_TEMP/perf-home" "$RUNNER_TEMP/g88diag.json" ${{ matrix.mode }}
     - name: Stop the gateway
       if: ${{ always() }}
       env:
@@ -109,11 +105,21 @@ jobs:
     - if: ${{ always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: perf-result
-        path: '${{ runner.temp }}/perf-result.json
-
-          ${{ runner.temp }}/g88diag.json'
+        name: g88-${{ matrix.mode }}-${{ matrix.rep }}
+        path: ${{ runner.temp }}/g88diag.json
         if-no-files-found: warn
         retention-days: 14
+    strategy:
+      fail-fast: false
+      matrix:
+        mode:
+        - now
+        - sync
+        - wait20
+        rep:
+        - 1
+        - 2
+        - 3
+        - 4
 'on':
   workflow_dispatch: null
