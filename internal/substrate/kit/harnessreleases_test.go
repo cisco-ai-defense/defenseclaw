@@ -49,3 +49,20 @@ func TestHarnessReleasesAreInstallableAndCovered(t *testing.T) {
 		t.Error("Claude Code is installed by the kit's file pin, not the harness")
 	}
 }
+
+// Lane K1 (found live on Codex 0.168.0): the release refuses to start with
+// approval_policy "untrusted" ("no longer supported"), so the interactive argv
+// of a kit that installs 0.168.x must carry a value the release lists
+// (codex --help: on-request, never).
+func TestCodexInteractiveApprovalPolicyIsOneTheReleaseAccepts(t *testing.T) {
+	var got string
+	argv := InteractiveArgv["codex"]
+	for i, a := range argv {
+		if a == "-c" && i+1 < len(argv) && strings.HasPrefix(argv[i+1], "approval_policy=") {
+			got = strings.Trim(strings.TrimPrefix(argv[i+1], "approval_policy="), `"`)
+		}
+	}
+	if got != "on-request" && got != "never" {
+		t.Fatalf("Codex %s interactive approval_policy = %q; the release accepts on-request and never", HarnessReleases["codex"], got)
+	}
+}

@@ -355,9 +355,11 @@ var claudeCodeModelSlots = []string{"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MOD
 var InteractiveArgv = map[string][]string{
 	"claudecode": {"/usr/local/bin/claude"},
 	// Codex's own bubblewrap/Landlock sandbox cannot nest in a gVisor or
-	// microVM actor (as in OpenShell); "untrusted" asks before commands
-	// outside its read-only set, and the DefenseClaw hooks check each one.
-	"codex": {"/usr/local/bin/codex", "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="untrusted"`},
+	// microVM actor (as in OpenShell). Codex 0.168.0 no longer accepts
+	// approval_policy "untrusted" (it refuses to start: "no longer
+	// supported"); "on-request" is the interactive value left, and the
+	// DefenseClaw hooks check each command either way (lane K1).
+	"codex": {"/usr/local/bin/codex", "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="on-request"`},
 }
 
 // HeadlessArgv is each wave-1 connector's headless mode for --task (PLAN
