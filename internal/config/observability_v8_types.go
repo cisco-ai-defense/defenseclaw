@@ -97,8 +97,12 @@ type ObservabilityV8Source struct {
 	Connectors           map[string]ObservabilityV8ConnectorSource                  `json:"connectors,omitempty" mapstructure:"connectors" yaml:"connectors,omitempty"`
 	Local                ObservabilityV8LocalSource                                 `json:"local,omitempty" mapstructure:"local" yaml:"local,omitempty"`
 	Destinations         []ObservabilityV8DestinationSource                         `json:"destinations,omitempty" mapstructure:"destinations" yaml:"destinations,omitempty"`
-	localPathDefaulted   bool
-	judgePathDefaulted   bool
+	// Tokenomics and Pricing (tokenomics.go) are read by the model-usage engine
+	// only; the exporter compile ignores them, so the plan digest is unchanged.
+	Tokenomics         TokenomicsConfig `json:"tokenomics,omitempty" mapstructure:"tokenomics" yaml:"tokenomics,omitempty"`
+	Pricing            PricingConfig    `json:"pricing,omitempty" mapstructure:"pricing" yaml:"pricing,omitempty"`
+	localPathDefaulted bool
+	judgePathDefaulted bool
 }
 
 type ObservabilityV8ResourceSource struct {
