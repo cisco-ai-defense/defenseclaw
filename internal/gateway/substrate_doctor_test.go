@@ -52,7 +52,7 @@ func TestSubstrateDoctorAndInfoRoutes(t *testing.T) {
 		t.Fatalf("person doctor %d", rec.Code)
 	}
 	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/doctor", "p-admin", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"x"`) {
-		t.Fatalf("admin doctor %d %s", rec.Code, rec.Body)
+		t.Fatalf("gateway doctor %d %s", rec.Code, rec.Body)
 	}
 	rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/info", "", "")
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "defenseclaw-launcher") || !strings.Contains(rec.Body.String(), `"attach":false`) {

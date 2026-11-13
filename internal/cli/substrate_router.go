@@ -85,7 +85,7 @@ func newRouterDialer(addr, serverName, caFile string, relayPort int, identity fu
 // in ingressAllowedSPIFFEIDs (with TLS 1.3 the alert arrives on the first
 // read, not in the handshake).
 var errRouterRefusedIdentity = errors.New("the router refused the gateway's identity: its SPIFFE ID is not in Substrate's " +
-	"ingressAllowedSPIFFEIDs (run `defenseclaw substrate setup`, then ate-setup; `defenseclaw substrate admin doctor` checks it)")
+	"ingressAllowedSPIFFEIDs (run `defenseclaw substrate setup`, then ate-setup; `defenseclaw substrate doctor --cluster` checks it)")
 
 func routerTLSRefusal(err error) error {
 	if err != nil && strings.Contains(err.Error(), "remote error: tls:") {

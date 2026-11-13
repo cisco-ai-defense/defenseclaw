@@ -13,8 +13,8 @@ import (
 // its egress NetworkPolicy reaches the router's CONNECT-TLS port; no other
 // pod gets either. substrate.router.enabled=false, or no pod certificates,
 // turns both off. The router admitting the gateway is the overlay's
-// ingressAllowedSPIFFEIDs entry (TestOverlay*) and the admin doctor's
-// ingress_clients row.
+// ingressAllowedSPIFFEIDs entry (TestOverlay*) and the
+// ingress_clients row of doctor --cluster.
 func TestGatewayAttachRouterFlags(t *testing.T) {
 	helm := helmBinary(t)
 	want := []string{"--router-address=atenet-router.ate-system.svc:8444",

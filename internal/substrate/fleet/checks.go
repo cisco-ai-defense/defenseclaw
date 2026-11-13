@@ -231,7 +231,7 @@ func CheckActorKeysVerify(o Observed) Check {
 			"set the same value in both", refused)
 	case o.Keys == nil:
 		return result(CheckActorKeys, Warn, "", "the keys URL (substrate.identity.keys_url) was not read from here (%s); "+
-			"defenseclaw substrate admin doctor checks it from the gateway", o.KeysNote)
+			"defenseclaw substrate doctor --cluster checks it from the gateway", o.KeysNote)
 	case *o.Keys == 0:
 		return result(CheckActorKeys, Fail, "", "the keys URL (substrate.identity.keys_url) does not answer (%s)%s; set it "+
 			"(chart value substrate.actorKeys.url) to the idp Service key set", o.KeysErr, refused)
