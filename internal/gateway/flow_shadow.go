@@ -6,6 +6,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"sort"
@@ -40,6 +42,74 @@ const (
 	flowLaneShadow flowLaneMode = "shadow"
 	flowLaneOn     flowLaneMode = "on"
 )
+
+// FlowAuditRecord is one shadow hit as it is written to the audit log: the rule,
+// the hit kind (the chain kind), the sink program and redacted host, the label
+// sets, a digest of the label source and the action the lane would take. It
+// carries no path, no secret value and no raw host label.
+type FlowAuditRecord struct {
+	Rule         string
+	Mode         string
+	Connector    string
+	Kind         string
+	Program      string
+	Host         string
+	Sets         []string
+	SourceDigest string
+	WouldAction  string
+}
+
+// Details renders the record as the key=value details of the audit row.
+func (r FlowAuditRecord) Details() string {
+	sets := strings.Join(r.Sets, ",")
+	if sets == "" {
+		sets = "-"
+	}
+	host := r.Host
+	if host == "" {
+		host = "-"
+	}
+	return "rule=" + r.Rule + " mode=" + r.Mode + " kind=" + r.Kind + " program=" + r.Program +
+		" host=" + host + " sets=" + sets + " source_digest=" + r.SourceDigest +
+		" would=" + r.WouldAction + " connector=" + r.Connector
+}
+
+// secretFlowAuditSink writes one record to the audit log. The API server
+// installs it; with no server (a benchmark, a test) shadow hits stay in the ring.
+var secretFlowAuditSink atomic.Pointer[func(context.Context, FlowAuditRecord)]
+
+// SetSecretFlowAuditSink installs (or, with nil, removes) the shadow-hit sink.
+func SetSecretFlowAuditSink(f func(context.Context, FlowAuditRecord)) {
+	if f == nil {
+		secretFlowAuditSink.Store(nil)
+		return
+	}
+	secretFlowAuditSink.Store(&f)
+}
+
+// maxFlowAuditPerCall bounds the rows one call can write.
+const maxFlowAuditPerCall = 8
+
+// emitSecretFlowShadowAudit writes each shadow hit of one call as an audit row so
+// the evidence for flipping the lane on survives a restart and reaches the
+// configured sinks. The explain ring keeps the same hits for the live view.
+func emitSecretFlowShadowAudit(ctx context.Context, mode flowLaneMode, connector string, recs []FlowHitRecord) {
+	sink := secretFlowAuditSink.Load()
+	if sink == nil {
+		return
+	}
+	for i, r := range recs {
+		if i >= maxFlowAuditPerCall {
+			break
+		}
+		sum := sha256.Sum256([]byte(r.Source))
+		(*sink)(ctx, FlowAuditRecord{
+			Rule: flow.RuleIDEgress, Mode: string(mode), Connector: connector, Kind: r.Kind,
+			Program: r.Program, Host: r.Host, Sets: r.Sets,
+			SourceDigest: hex.EncodeToString(sum[:6]), WouldAction: r.Action,
+		})
+	}
+}
 
 // secretFlowPanics counts panics the lane recovered from (it never changes an
 // answer by failing).
@@ -350,6 +420,9 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 			})
 		}
 		secretFlowSessions.recordHits(sid, recs)
+		if mode == flowLaneShadow {
+			emitSecretFlowShadowAudit(ctx, mode, request.Connector, recs)
+		}
 	}
 	// P1-1: shadow is record-only (the hit is kept in the explain ring above,
 	// never in the live findings). Only the ON lane contributes a finding, and

@@ -1193,6 +1193,14 @@ func newAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
 	}
+	if logger != nil {
+		// Secret flow tracking: write each shadow hit to the audit log (the
+		// in-memory explain ring does not survive a restart).
+		SetSecretFlowAuditSink(func(ctx context.Context, r FlowAuditRecord) {
+			defer func() { _ = recover() }()
+			_ = logger.LogActionCtxSeverity(ctx, string(audit.ActionGuardrailInspection), "secret-flow:shadow", r.Details(), "INFO")
+		})
+	}
 	return s
 }
 
