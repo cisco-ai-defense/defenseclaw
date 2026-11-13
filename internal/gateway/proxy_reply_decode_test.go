@@ -27,7 +27,7 @@ func encodeReply(t *testing.T, encodings string, plain []byte) []byte {
 	for _, enc := range strings.Split(encodings, ",") {
 		var buf bytes.Buffer
 		switch strings.TrimSpace(enc) {
-		case "gzip":
+		case "gzip", "x-gzip":
 			zw := gzip.NewWriter(&buf)
 			_, _ = zw.Write(out)
 			_ = zw.Close()

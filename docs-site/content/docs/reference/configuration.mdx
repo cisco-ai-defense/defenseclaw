@@ -477,6 +477,7 @@ Defaults from the loader. Omitted keys take these values.
 | `notifications.sources.hook`, `.guardrail`, `.asset_policy` | `true` | Per-source switches. |
 | `notifications.dedup_window`, `.max_per_minute` | 30 seconds, `12` | Duplicate suppression and rate cap. |
 | `guardrail.stream_buffer_bytes` | `1024` | Buffer for streamed proxy responses. |
+| `guardrail.max_body_values` | `400000` | Most JSON values the guardrail proxy reads in one request body or reply event to inspect it. A body with more is not inspected: a managed install and the strict tier refuse it, the default forwards it with an alert that names this key. Raise it for a legitimate large body (for example a batch of token-id embedding inputs). |
 | `guardrail.judge.timeout`, `.adjudication_timeout` | `30`, `5` | Seconds for a judge call, and for adjudication. |
 | `guardrail.judge.max_parallel` | Automatic | Most judge calls sent to the judge model at once. Unset uses `1` for loopback/private endpoints and no limit for public endpoints; explicit `0` means no limit. With a limit, tool-call judging goes first. See [A judge on a local model](/docs/guardrail#let-tool-calls-go-first). |
 | `guardrail.judge.extra_body` | empty | Additional JSON fields for a judge using an OpenAI-compatible endpoint. Judge-owned request fields and authentication keys are refused when the config loads. See [Lemonade and Gemma 4](/docs/guardrail#lemonade-and-gemma-4). |

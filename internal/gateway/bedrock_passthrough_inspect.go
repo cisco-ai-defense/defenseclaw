@@ -23,7 +23,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 )
@@ -38,38 +40,6 @@ import (
 // bedrockStreamingPath reports a Bedrock path that answers with a stream.
 func bedrockStreamingPath(p string) bool {
 	return strings.HasSuffix(p, "/invoke-with-response-stream") || strings.HasSuffix(p, "/converse-stream")
-}
-
-// bedrockInvokeText is the assistant text of an InvokeModel body: the
-// Anthropic Messages shape (Claude) or the Nova, Llama, Mistral and Cohere
-// shapes. "" when the body has none.
-func bedrockInvokeText(body []byte) string {
-	if t := extractPassthroughResponseContent(body, "anthropic"); t != "" {
-		return t
-	}
-	var other struct {
-		Generation string `json:"generation"` // Meta Llama
-		Outputs    []struct {
-			Text string `json:"text"`
-		} `json:"outputs"` // Mistral
-		Generations []struct {
-			Text string `json:"text"`
-		} `json:"generations"` // Cohere
-		Completion string `json:"completion"` // Anthropic text completions
-	}
-	if json.Unmarshal(body, &other) != nil {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString(other.Generation)
-	sb.WriteString(other.Completion)
-	for _, o := range other.Outputs {
-		sb.WriteString(o.Text)
-	}
-	for _, g := range other.Generations {
-		sb.WriteString(g.Text)
-	}
-	return sb.String()
 }
 
 // bedrockStreamMaxFrame bounds one eventstream message the inspector holds.
@@ -90,6 +60,11 @@ type bedrockEventStreamText struct {
 	done     []bedrockStreamTool
 	converse bool // a ConverseStream (else InvokeModelWithResponseStream)
 	maxIndex int
+	// ambiguous is why an event can be read two ways (a repeated or
+	// differently spelled key), "" when none: the stream takes the fail mode.
+	ambiguous string
+	// maxValues is the value cap of an event (guardrail.max_body_values).
+	maxValues int
 }
 
 // bedrockStreamTool is one tool call of a stream.
@@ -212,8 +187,33 @@ func newBedrockEventStreamText() *bedrockEventStreamText {
 // Broken reports a stream the decoder could not frame.
 func (s *bedrockEventStreamText) Broken() bool { return s.broken }
 
+// Ambiguous is why a frame of the stream can be read two ways, if one can.
+func (s *bedrockEventStreamText) Ambiguous() string { return s.ambiguous }
+
 // Model is the model the stream named (Anthropic message_start), if any.
 func (s *bedrockEventStreamText) Model() string { return s.model }
+
+// PartialLen is how many bytes at the end of what Feed took belong to a
+// frame that is not complete yet; a forwarder holds them back so the
+// receiver only ever gets whole frames.
+func (s *bedrockEventStreamText) PartialLen() int { return len(s.buf) }
+
+// Finish ends the tool calls still open when the stream ended (a stream cut
+// inside a call): they are handed to the tool-call rules like finished ones.
+// A stream the decoder could not frame has no reliable open calls.
+func (s *bedrockEventStreamText) Finish() {
+	if s.broken {
+		return
+	}
+	idx := make([]int, 0, len(s.tools))
+	for i := range s.tools {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	for _, i := range idx {
+		s.toolStop(i)
+	}
+}
 
 // Feed takes the next bytes of the stream and returns the text of the
 // messages they complete.
@@ -246,6 +246,26 @@ func (s *bedrockEventStreamText) Feed(p []byte) string {
 	return sb.String()
 }
 
+// eventText reads one event payload (a Converse event, or the decoded
+// Anthropic or model-native chunk) with the walker every other reply format
+// goes through: every string of the event is inspected, except the fields
+// known not to be text (GAP-0239). The tool calls of the event are the
+// business of the stream state machine, not of this text.
+func (s *bedrockEventStreamText) eventText(payload []byte) string {
+	sc, err := scanReplyJSON(payload, true, s.maxValues)
+	if err != nil {
+		// Not JSON: the text itself is the content, as for an SSE event.
+		if utf8.Valid(payload) {
+			return string(payload)
+		}
+		return ""
+	}
+	if sc.Ambiguous != "" && s.ambiguous == "" {
+		s.ambiguous = sc.Ambiguous
+	}
+	return strings.Join(sc.Segments, "")
+}
+
 func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 	var mtype, etype string
 	for _, h := range msg.Headers {
@@ -266,7 +286,10 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		var c struct {
 			Bytes string `json:"bytes"`
 		}
-		if json.Unmarshal(msg.Payload, &c) != nil || c.Bytes == "" {
+		if json.Unmarshal(msg.Payload, &c) != nil {
+			return s.eventText(msg.Payload)
+		}
+		if c.Bytes == "" {
 			return ""
 		}
 		inner, err := base64.StdEncoding.DecodeString(c.Bytes)
@@ -284,17 +307,7 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 			}
 		}
 		s.anthropicStreamToolEvent(inner)
-		if t := extractSSEChunkText(string(inner), "anthropic"); t != "" {
-			return t
-		}
-		var other struct {
-			Generation string `json:"generation"`
-			OutputText string `json:"outputText"`
-			Completion string `json:"completion"`
-		}
-		if json.Unmarshal(inner, &other) == nil {
-			return other.Generation + other.OutputText + other.Completion
-		}
+		return s.eventText(inner)
 	case "contentBlockStart":
 		// ConverseStream tool call: {"contentBlockIndex":n,"start":
 		// {"toolUse":{"toolUseId","name"}}}.
@@ -318,7 +331,6 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		var d struct {
 			Index int `json:"contentBlockIndex"`
 			Delta struct {
-				Text    string `json:"text"`
 				ToolUse struct {
 					Input string `json:"input"`
 				} `json:"toolUse"`
@@ -331,7 +343,6 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 			if d.Delta.ToolUse.Input != "" {
 				s.toolDelta(d.Index, d.Delta.ToolUse.Input)
 			}
-			return d.Delta.Text
 		}
 	case "contentBlockStop":
 		s.converse = true
@@ -341,6 +352,10 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		if json.Unmarshal(msg.Payload, &st) == nil {
 			s.toolStop(st.Index)
 		}
+	}
+	// Every event goes through the walker, whatever its type.
+	if etype != "chunk" {
+		return s.eventText(msg.Payload)
 	}
 	return ""
 }

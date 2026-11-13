@@ -89,6 +89,16 @@ type ContentInspector interface {
 	SetHILTConfig(enabled bool, minSeverity string)
 }
 
+// maxBodyValues is guardrail.max_body_values: the most JSON values the proxy
+// reads in one body or event to inspect it (0 in the walker means its
+// default).
+func (p *GuardrailProxy) maxBodyValues() int {
+	if p.cfg != nil {
+		return p.cfg.MaxBodyValues
+	}
+	return 0
+}
+
 // GuardrailProxy is a pure Go LLM proxy that accepts OpenAI-compatible
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
@@ -97,6 +107,20 @@ type GuardrailProxy struct {
 	// the proxy mux (SubstrateHandler).
 	substrateOnce    sync.Once
 	substrateHandler http.Handler
+	// toolCallVerdictForTest, when set, decides every tool-call check in
+	// place of the rules (inspectToolCalls). Only tests set it (the field is
+	// unexported and nothing outside a _test.go file assigns it), to prove
+	// the reply paths hold and refuse a call without real command content;
+	// it is nil in every production proxy.
+	toolCallVerdictForTest func(context.Context, json.RawMessage) *ScanVerdict
+
+	// streamReadForTest, when set, is told after each read of a streamed
+	// reply has been fully handled (everything it decided to send is
+	// written) how many bytes of the stream have been read so far. Only
+	// tests set it, to wait for the proxy at a point instead of sleeping; it
+	// is nil in every production proxy.
+	streamReadForTest func(total int)
+
 	// kernelPeer names the verified caller of a request from the kernel
 	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
 	// leaves authentication as it was.
@@ -1169,6 +1193,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	// One decoder for the request and the replies (proxy_body_decode.go): the
+	// guardrail reads the body the way the provider will. What cannot be
+	// decoded takes the fail mode below, once the label and mode are known.
+	var bodyUndecodable string
+	var wireBody []byte // the body as the client sent it, when it was decoded
+	wireEnc, wireCT := r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type")
+	jsonHint := strings.Contains(strings.ToLower(wireCT), "json")
+	if dec, derr := decodeBody(r.Header, body); derr != nil {
+		bodyUndecodable = derr.Error()
+	} else if dec.Decoded || dec.Transcoded {
+		wireBody, body = body, dec.Text
+		if dec.Decoded {
+			r.Header.Del("Content-Encoding")
+		}
+		if strings.Contains(strings.ToLower(wireCT), "charset") {
+			r.Header.Set("Content-Type", "application/json")
+		}
+	}
 
 	targetOrigin := r.Header.Get("X-DC-Target-URL")
 	// Native-binary connectors (codex, zeptoclaw) can't inject
@@ -1458,6 +1500,21 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	if ollamaSystemText != "" {
 		inspectRaw = ollamaSystemText + "\n" + userText
 	}
+	// Every prompt-side text of the body, not only the user turn: system,
+	// developer and instructions text wherever it sits, and the tool
+	// results sent back since the model's last turn (GAP-0196).
+	side := passthroughPromptForRequest(body, wireCT, jsonHint, p.maxBodyValues())
+	if bodyUndecodable != "" {
+		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
+	}
+	// The heartbeat and session-startup gates skip the heartbeat text itself,
+	// never the other text of the body (system, developer, instructions, tool
+	// results, tool definitions).
+	skipText := ""
+	if userText != "" && (isHeartbeatMessage(userText, partial.Messages) || isSessionStartupMessage(userText)) {
+		skipText, inspectRaw = userText, ""
+	}
+	inspectRaw = joinPromptSegments(inspectRaw, side.Segments, skipText)
 	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
@@ -1466,9 +1523,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
 	passthroughSeverity := ""
-	if userText != "" &&
-		!isHeartbeatMessage(userText, partial.Messages) &&
-		!isSessionStartupMessage(userText) {
+	if side.Unreadable != "" && p.uninspectablePrompt(r.Context(), label, mode, side.Unreadable) {
+		p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream,
+			blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+side.Unreadable))
+		return
+	}
+	if strings.TrimSpace(inspectRaw) != "" {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = meta.PromptID
@@ -1635,7 +1695,17 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	upstreamCtx, upstreamCancel := context.WithTimeout(r.Context(), passthroughTimeout)
 	defer upstreamCancel()
 
-	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
+	sendBody := body
+	if wireBody != nil && signedBody && !routed {
+		// A signed body is forwarded as it was sent: the proxy cannot re-sign
+		// it. It was inspected decoded.
+		sendBody = wireBody
+		if wireEnc != "" {
+			r.Header.Set("Content-Encoding", wireEnc)
+		}
+		r.Header.Set("Content-Type", wireCT)
+	}
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, upstreamURL, bytes.NewReader(sendBody))
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request: "+err.Error())
 		return
@@ -1645,7 +1715,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// back to chunked encoding. Needed because notification injection
 	// can change the body length; without this, some upstream providers
 	// (notably Anthropic) reject the request with 400 "unexpected EOF".
-	upstreamReq.ContentLength = int64(len(body))
+	upstreamReq.ContentLength = int64(len(sendBody))
 
 	// Forward inbound headers to the upstream provider, minus a
 	// hardened blocklist (proxy-hop, auth, framework-internal,
@@ -1754,6 +1824,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// mislabelled reply must not skip inspection (item 5 review P2-2).
 		// A body that does not frame takes the uninspectable path.
 		bedrockStream = newBedrockEventStreamText()
+		bedrockStream.maxValues = p.maxBodyValues()
 	}
 
 	if !isSSE && bedrockStream == nil {
@@ -1763,38 +1834,52 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
 		}
-		// An encoding the transport left (br, zstd, deflate, stacked) is
-		// decoded so inspection and the usage record read the reply; only
-		// one that cannot be decoded reaches the check below (GAP-0097).
-		if decoded, ok := decodeReplyBody(resp.Header, respBody); ok {
-			respBody = decoded
+		// One decoder: an encoding the transport left (br, zstd, deflate,
+		// stacked), a byte-order mark and a UTF-16 charset are decoded so
+		// inspection and the usage record read the reply (GAP-0097); what
+		// cannot be decoded takes the fail mode.
+		inspectBody := respBody
+		undecodable := ""
+		if dec, derr := decodeBody(resp.Header, respBody); derr != nil {
+			undecodable = derr.Error()
+		} else {
+			if dec.Decoded {
+				respBody = dec.Wire
+				resp.Header.Del("Content-Encoding")
+				resp.Header.Del("Content-Length")
+			}
+			inspectBody = dec.Text
 		}
-		if enc := uninspectableEncoding(resp.Header); enc != "" {
-			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
-					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
-				return
+		var scan replyScan
+		if undecodable == "" {
+			var readable bool
+			if scan, readable = scanReplyBody(inspectBody, p.maxBodyValues()); !readable && len(bytes.TrimSpace(inspectBody)) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// A 2xx body that is not JSON (for example compressed bytes with
+				// no Content-Encoding) cannot be inspected either (item 5 review
+				// P2-2).
+				undecodable = "the reply body is not JSON"
+			} else if scan.Ambiguous != "" {
+				// A repeated or differently spelled key: the agent may read
+				// another value than the one the rules read (GAP-0240).
+				undecodable = scan.Ambiguous
 			}
-		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(bytes.TrimSpace(respBody)) > 0 && !json.Valid(respBody) {
-			// A 2xx body that is not JSON (for example compressed bytes with
-			// no Content-Encoding) cannot be inspected either (item 5 review
-			// P2-2).
-			if p.uninspectableReply(r.Context(), label, mode, "the reply body is not JSON") {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
-					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
-				return
-			}
+		}
+		if undecodable != "" && p.uninspectableReply(r.Context(), label, mode, undecodable) {
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+				blockMessage(customBlockMsg, "completion", replyRefusalReason(undecodable)))
+			return
 		}
 
-		// Extract assistant text from provider-native response format.
-		content := extractPassthroughResponseContent(respBody, provider)
+		// Every string of the reply goes to the guardrail (inspect by
+		// default), the tool calls to the tool-call rules.
+		content := strings.Join(scan.Segments, "\n")
 		responseReqForTelemetry := ChatRequest{Model: passthroughReqForTelemetry.Model, RawBody: body}
 		responseMeta := proxyLLMEventMeta(p, r, &responseReqForTelemetry, provider)
 		responseMeta.PromptID = passthroughPromptID
-		reportedResponseID := responseIDFromRawJSON(respBody)
+		reportedResponseID := responseIDFromRawJSON(inspectBody)
 		responseMeta.ResponseID = firstNonEmpty(reportedResponseID, stableLLMEventID("response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, label))
 		responseMeta.ResponseIDReported = reportedResponseID != ""
-		responseMeta.ResponseModel = responseModelFromRawJSON(respBody)
+		responseMeta.ResponseModel = responseModelFromRawJSON(inspectBody)
 		p.emitLLMResponseEventV8(r.Context(), responseMeta, content, string(respBody), nil)
 
 		if content != "" {
@@ -1817,14 +1902,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
-		// Avarice F-1188: scan provider-native tool calls (Anthropic
-		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
-		// Responses function_call, OpenAI Chat Completions tool_calls).
-		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
-		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
-		// forwarded unchecked and the agent could execute them without
-		// the configured tool-call rules ever running.
-		if toolCallsRaw := extractPassthroughToolCalls(respBody, provider); toolCallsRaw != nil {
+		// Avarice F-1188: every tool call of the reply (Anthropic tool_use,
+		// Gemini functionCall, Bedrock toolUse, OpenAI Responses items that
+		// end in _call, Chat Completions tool_calls, Ollama tool_calls) goes
+		// through the configured tool-call rules.
+		if len(scan.Calls) > 0 {
+			toolCallsRaw, _ := json.Marshal(scan.Calls)
 			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil {
 				p.recordTelemetry(r.Context(), "tool-call", label, verdict, 0, mode,
 					verdict.Action == "block" && mode == "action")
@@ -1845,665 +1928,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(respBody)
 	} else {
-		// --- Streaming: buffer initial bytes for pre-scan, then forward with periodic scans ---
-		if enc := uninspectableEncoding(resp.Header); enc != "" {
-			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
-				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true,
-					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
-				return
-			}
-		}
-		for k, vs := range resp.Header {
-			if bedrockStream != nil && http.CanonicalHeaderKey(k) == "Content-Length" {
-				// A refused Bedrock stream ends with block frames of its
-				// own, so the upstream length no longer holds.
-				continue
-			}
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-
-		flusher, _ := w.(http.Flusher)
-		var accumulated strings.Builder
-		streamResponseModel := ""
-		lastScanLen := 0
-		const scanInterval = 500
-		buf := make([]byte, 4096)
-		var lineBuf strings.Builder
-		bedrockStreamReported := false
-		// bedrockBlockMsg is set when a Bedrock stream is refused; the agent
-		// then reads it as a block. bedrockHeld holds the bytes of an open
-		// tool call until the tool-call rules decide (GAP-0098).
-		bedrockBlockMsg := ""
-		var bedrockHeld []byte
-		bedrockHolding := func() bool {
-			return bedrockStream != nil && mode == "action" && bedrockStream.Holding()
-		}
-
-		streamBufferSize := 1024
-		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
-			streamBufferSize = p.cfg.StreamBufferBytes
-		}
-		const maxInitialBufBytes = 1 << 20 // 1 MiB cap on passthrough initial buffer
-		var initialBuf []byte
-		initialFlushed := mode != "action"
-		preblocked := false
-		flushInitialBuf := func() bool {
-			if initialFlushed || len(initialBuf) == 0 {
-				return true
-			}
-			if accumulated.Len() > 0 {
-				initVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
-					[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
-				p.resolveConfirm(r.Context(), r, initVerdict, "completion", label, mode)
-				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
-					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
-						initVerdict.Severity, logDisplayReason(initVerdict.Reason))
-					p.recordTelemetry(r.Context(), "completion", label, initVerdict, 0, mode, true)
-					preblocked = true
-					return false
-				}
-			}
-			lastScanLen = accumulated.Len()
-			_, _ = w.Write(initialBuf)
-			if flusher != nil {
-				flusher.Flush()
-			}
-			initialBuf = nil
-			initialFlushed = true
-			return true
-		}
-
-		for {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				chunk := buf[:n]
-
-				// Parse SSE text (or eventstream frames) for inspection
-				// regardless of buffer state.
-				if bedrockStream != nil {
-					accumulated.WriteString(bedrockStream.Feed(chunk))
-					if streamResponseModel == "" {
-						streamResponseModel = bedrockStream.Model()
-					}
-					if bedrockStream.Broken() && !bedrockStreamReported {
-						bedrockStreamReported = true
-						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
-							// Nothing more of the upstream reaches the caller;
-							// a block it can show takes its place.
-							bedrockBlockMsg = blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected")
-							break
-						}
-					}
-					// Tool calls in the stream (GAP-0098): each finished call
-					// goes through the tool-call rules before its bytes reach
-					// the agent, as on the non-streaming path (F-1188).
-					if calls := bedrockStream.TakeToolCalls(); calls != nil {
-						if v := p.inspectToolCalls(r.Context(), calls); v != nil {
-							refuse := v.Action == "block" && mode == "action"
-							p.recordTelemetry(r.Context(), "tool-call", label, v, 0, mode, refuse)
-							if refuse {
-								fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TOOL-BLOCK severity=%s %s\n",
-									v.Severity, redaction.Reason(v.Reason))
-								p.enqueueBlockNotification(v, "tool_call", partial.Model)
-								bedrockBlockMsg = blockMessage(customBlockMsg, "tool_call", v.Reason)
-								break
-							}
-						}
-					}
-				} else {
-					lineBuf.Write(chunk)
-				}
-				for bedrockStream == nil {
-					line, rest, found := strings.Cut(lineBuf.String(), "\n")
-					if !found {
-						break
-					}
-					lineBuf.Reset()
-					lineBuf.WriteString(rest)
-
-					line = strings.TrimSpace(line)
-					if !strings.HasPrefix(line, "data: ") {
-						continue
-					}
-					data := strings.TrimPrefix(line, "data: ")
-					if data == "[DONE]" {
-						continue
-					}
-					if streamResponseModel == "" {
-						streamResponseModel = responseModelFromRawJSON([]byte(data))
-					}
-					text := extractSSEChunkText(data, provider)
-					if text != "" {
-						accumulated.WriteString(text)
-					}
-				}
-
-				if !initialFlushed {
-					initialBuf = append(initialBuf, chunk...)
-					// An open tool call keeps the buffer (its size is
-					// bounded by bedrockStreamToolMax).
-					shouldFlush := (accumulated.Len() >= streamBufferSize ||
-						len(initialBuf) > maxInitialBufBytes) && !bedrockHolding() ||
-						readErr != nil
-
-					if shouldFlush {
-						if !flushInitialBuf() {
-							break
-						}
-					}
-				} else if bedrockHolding() {
-					bedrockHeld = append(bedrockHeld, chunk...)
-				} else {
-					if len(bedrockHeld) > 0 {
-						_, _ = w.Write(bedrockHeld)
-						bedrockHeld = nil
-					}
-					_, _ = w.Write(chunk)
-					if flusher != nil {
-						flusher.Flush()
-					}
-
-					if accumulated.Len()-lastScanLen >= scanInterval && mode == "action" {
-						midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", accumulated.String(),
-							[]ChatMessage{{Role: "assistant", Content: accumulated.String()}}, label, mode)
-						p.resolveConfirm(r.Context(), r, midVerdict, "completion", label, mode)
-						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
-							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-								midVerdict.Severity, logDisplayReason(midVerdict.Reason), lastScanLen+len(chunk))
-							p.recordTelemetry(r.Context(), "completion", label, midVerdict, 0, mode, true)
-							if bedrockStream != nil {
-								bedrockBlockMsg = blockMessage(customBlockMsg, "completion", midVerdict.Reason)
-							}
-							break
-						}
-						lastScanLen = accumulated.Len()
-					}
-				}
-			}
-			if readErr != nil {
-				break
-			}
-		}
-		if bedrockBlockMsg == "" && !preblocked && !initialFlushed && len(initialBuf) > 0 {
-			flushInitialBuf()
-		}
-		if preblocked && bedrockStream != nil && bedrockBlockMsg == "" {
-			bedrockBlockMsg = blockMessage(customBlockMsg, "completion", "the reply was blocked")
-		}
-		if bedrockBlockMsg != "" {
-			// A refused Bedrock stream ends with a block the agent can show:
-			// the whole block reply when nothing was sent yet, else the
-			// block as the last text block of the message under way. An
-			// empty or cut eventstream left Claude Code with no answer
-			// (GAP-0098, GAP-0149). Held tool-call bytes are dropped.
-			hw := &headersSentWriter{ResponseWriter: w}
-			if !initialFlushed {
-				p.writeBlockedPassthrough(hw, r.URL.Path, provider, partial.Model, true, bedrockBlockMsg)
-				return
-			}
-			bedrockStream.writeBlockTail(hw, bedrockBlockMsg)
-			hw.Flush()
-			bedrockHeld = nil
-		}
-		if preblocked {
-			return
-		}
-		if len(bedrockHeld) > 0 {
-			_, _ = w.Write(bedrockHeld)
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-
-		// Final post-stream inspection on the full accumulated content.
-		// Use a detached context — the request context may be cancelled after streaming.
-		if accumulated.Len() > 0 {
-			content := accumulated.String()
-			responseReqForTelemetry := ChatRequest{Model: passthroughReqForTelemetry.Model, RawBody: body}
-			responseMeta := proxyLLMEventMeta(p, r, &responseReqForTelemetry, provider)
-			responseMeta.PromptID = passthroughPromptID
-			responseMeta.ResponseModel = streamResponseModel
-			responseMeta.ResponseID = stableLLMEventID("response", responseMeta.Source, responseMeta.SessionID, responseMeta.RequestID, label)
-			p.emitLLMResponseEventV8(r.Context(), responseMeta, content, content, nil)
-
-			postCtx, postCancel := p.postCallContext(r.Context())
-			postCtx = proxyGuardrailWithoutEnforcement(postCtx)
-			t0 := time.Now()
-			respMessages := []ChatMessage{{Role: "assistant", Content: content}}
-			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
-			postCancel()
-			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
-			elapsed := time.Since(t0)
-			p.logPostCall(label, content, verdict, elapsed, nil)
-			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, mode, false)
-			if verdict.Action == "block" {
-				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-VIOLATION severity=%s %s (stream already delivered %d bytes to client — cannot retract)\n",
-					verdict.Severity, verdict.Reason, accumulated.Len())
-			}
-		}
+		// --- Streaming: framed, decoded and inspected event by event; the
+		// events of an open tool call are held until its verdict (see
+		// passthroughStream). ---
+		(&passthroughStream{
+			p: p, w: w, r: r, resp: resp, mode: mode, label: label, provider: provider, path: r.URL.Path,
+			model: partial.Model, customBlockMsg: customBlockMsg, body: body, promptID: passthroughPromptID,
+			telemetry: passthroughReqForTelemetry, bedrock: bedrockStream,
+		}).run()
 	}
-}
-
-// extractPassthroughResponseContent extracts assistant text from a non-streaming
-// provider-native response body. Supports Anthropic Messages API, Gemini,
-// OpenAI Responses API, OpenAI Chat Completions, Ollama native chat/generate,
-// and Bedrock Converse.
-//
-// Avarice F-1186: pre-fix Ollama and Bedrock envelopes were ignored, so
-// completion inspection silently skipped any prompt-injection that triggered
-// `block` because `content` came back empty and the proxy short-circuited
-// the inspector call. The new branches keep parity with the providers that
-// `inferProviderFromURL` recognises so action-mode passthrough enforcement
-// is uniform across the supported provider surface.
-func extractPassthroughResponseContent(body []byte, provider string) string {
-	switch provider {
-	case "anthropic":
-		// Anthropic: {"content": [{"type": "text", "text": "..."}]}
-		var resp struct {
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		}
-		if json.Unmarshal(body, &resp) == nil {
-			var sb strings.Builder
-			for _, c := range resp.Content {
-				if c.Type == "text" {
-					sb.WriteString(c.Text)
-				}
-			}
-			return sb.String()
-		}
-
-	case "gemini":
-		// Gemini: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
-		var resp struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct {
-						Text string `json:"text"`
-					} `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
-		}
-		if json.Unmarshal(body, &resp) == nil {
-			var sb strings.Builder
-			for _, c := range resp.Candidates {
-				for _, p := range c.Content.Parts {
-					sb.WriteString(p.Text)
-				}
-			}
-			return sb.String()
-		}
-
-	case "ollama":
-		// F-1186: Ollama native chat: {"message": {"content": "..."}}
-		// Ollama native generate: {"response": "..."}
-		var chatResp struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Response string `json:"response"`
-		}
-		if json.Unmarshal(body, &chatResp) == nil {
-			if chatResp.Message.Content != "" {
-				return chatResp.Message.Content
-			}
-			if chatResp.Response != "" {
-				return chatResp.Response
-			}
-		}
-
-	case "bedrock":
-		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
-		// InvokeModel answers in the model family's shape (bedrockInvokeText).
-		var bedrockResp struct {
-			Output struct {
-				Message struct {
-					Content []struct {
-						Text string `json:"text"`
-					} `json:"content"`
-				} `json:"message"`
-			} `json:"output"`
-		}
-		if json.Unmarshal(body, &bedrockResp) == nil {
-			var sb strings.Builder
-			for _, c := range bedrockResp.Output.Message.Content {
-				sb.WriteString(c.Text)
-			}
-			if sb.Len() > 0 {
-				return sb.String()
-			}
-		}
-		// InvokeModel answers in the model family's own shape (GAP-0098).
-		if t := bedrockInvokeText(body); t != "" {
-			return t
-		}
-
-	default:
-		// OpenAI Responses API: {"output": [{"content": [{"text": "..."}]}]}
-		var respAPI struct {
-			Output []struct {
-				Content []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"output"`
-		}
-		if json.Unmarshal(body, &respAPI) == nil && len(respAPI.Output) > 0 {
-			var sb strings.Builder
-			for _, o := range respAPI.Output {
-				for _, c := range o.Content {
-					sb.WriteString(c.Text)
-				}
-			}
-			if sb.Len() > 0 {
-				return sb.String()
-			}
-		}
-
-		// OpenAI Chat Completions: {"choices": [{"message": {"content": "..."}}]}
-		var respCC struct {
-			Choices []struct {
-				Message struct {
-					Content string `json:"content"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal(body, &respCC) == nil && len(respCC.Choices) > 0 {
-			return respCC.Choices[0].Message.Content
-		}
-	}
-	return ""
-}
-
-// extractPassthroughToolCalls returns provider-native tool-call payloads
-// found in a non-streaming response body, normalised into the OpenAI Chat
-// Completions tool_calls shape — a JSON array of
-// {"type":"function","function":{"name","arguments"}} objects. That nested
-// shape is the exact contract inspectToolCalls parses: emitting the flat
-// {"name","arguments"} shape here would make the inspector decode every
-// Function.Name / Function.Arguments as the empty string, so Anthropic
-// `tool_use`, Gemini `functionCall`, Bedrock `toolUse`, and OpenAI Responses
-// `function_call` outputs would forward uninspected. Returns nil when the
-// body contains no recognised tool-call shape so the caller can short-circuit
-// inspection.
-func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
-	type out struct {
-		Name      string
-		Arguments string
-	}
-	var calls []out
-	addCall := func(name string, args interface{}) {
-		if name == "" {
-			return
-		}
-		argStr := ""
-		switch a := args.(type) {
-		case string:
-			argStr = a
-		case json.RawMessage:
-			if len(a) > 0 {
-				// OpenAI Responses encodes `arguments` as a JSON string
-				// (a quoted string whose contents are themselves JSON).
-				// Unwrap that single layer so the inspector sees the same
-				// Go-string shape Chat Completions produces natively
-				// (`{"cmd":"..."}` rather than `"{\"cmd\":\"...\"}"`).
-				// Object-shaped arguments (Anthropic / Gemini / Bedrock
-				// tool inputs) pass through verbatim.
-				if a[0] == '"' {
-					var s string
-					if json.Unmarshal(a, &s) == nil {
-						argStr = s
-						break
-					}
-				}
-				argStr = string(a)
-			}
-		case nil:
-			argStr = ""
-		default:
-			b, err := json.Marshal(a)
-			if err == nil {
-				argStr = string(b)
-			}
-		}
-		calls = append(calls, out{Name: name, Arguments: argStr})
-	}
-
-	switch provider {
-	case "anthropic":
-		var resp struct {
-			Content []struct {
-				Type  string          `json:"type"`
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
-			} `json:"content"`
-		}
-		if json.Unmarshal(body, &resp) == nil {
-			for _, c := range resp.Content {
-				if c.Type == "tool_use" {
-					addCall(c.Name, c.Input)
-				}
-			}
-		}
-	case "gemini":
-		var resp struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct {
-						FunctionCall struct {
-							Name string          `json:"name"`
-							Args json.RawMessage `json:"args"`
-						} `json:"functionCall"`
-					} `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
-		}
-		if json.Unmarshal(body, &resp) == nil {
-			for _, c := range resp.Candidates {
-				for _, p := range c.Content.Parts {
-					addCall(p.FunctionCall.Name, p.FunctionCall.Args)
-				}
-			}
-		}
-	case "bedrock":
-		var resp struct {
-			Output struct {
-				Message struct {
-					Content []struct {
-						ToolUse struct {
-							Name  string          `json:"name"`
-							Input json.RawMessage `json:"input"`
-						} `json:"toolUse"`
-					} `json:"content"`
-				} `json:"message"`
-			} `json:"output"`
-		}
-		if json.Unmarshal(body, &resp) == nil {
-			for _, c := range resp.Output.Message.Content {
-				addCall(c.ToolUse.Name, c.ToolUse.Input)
-			}
-		}
-		if len(calls) == 0 {
-			// InvokeModel for Claude answers with Anthropic tool_use blocks
-			// (GAP-0098).
-			if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
-				return raw
-			}
-		}
-	default:
-		// OpenAI Responses API: {"output": [{"type":"function_call","name":"...","arguments":"..."}]}
-		var respAPI struct {
-			Output []struct {
-				Type      string          `json:"type"`
-				Name      string          `json:"name"`
-				Arguments json.RawMessage `json:"arguments"`
-			} `json:"output"`
-		}
-		if json.Unmarshal(body, &respAPI) == nil {
-			for _, o := range respAPI.Output {
-				if o.Type == "function_call" {
-					addCall(o.Name, o.Arguments)
-				}
-			}
-		}
-		// OpenAI Chat Completions tool calls: {"choices":[{"message":{"tool_calls":[{"function":{"name":"...","arguments":"..."}}]}}]}
-		var respCC struct {
-			Choices []struct {
-				Message struct {
-					ToolCalls []struct {
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"message"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal(body, &respCC) == nil {
-			for _, c := range respCC.Choices {
-				for _, tc := range c.Message.ToolCalls {
-					addCall(tc.Function.Name, tc.Function.Arguments)
-				}
-			}
-		}
-	}
-	if len(calls) == 0 {
-		return nil
-	}
-	// Emit the nested OpenAI Chat Completions tool_calls shape so the payload
-	// round-trips through inspectToolCalls' parse contract (function.name /
-	// function.arguments). See the function doc for why the flat shape breaks
-	// inspection.
-	type fnPart struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	}
-	type nestedCall struct {
-		Type     string `json:"type"`
-		Function fnPart `json:"function"`
-	}
-	out2 := make([]nestedCall, len(calls))
-	for i, c := range calls {
-		out2[i] = nestedCall{
-			Type:     "function",
-			Function: fnPart(c),
-		}
-	}
-	encoded, err := json.Marshal(out2)
-	if err != nil {
-		return nil
-	}
-	return encoded
-}
-
-// extractSSEChunkText extracts the assistant text delta from a single SSE
-// data JSON object in a streaming provider-native response.
-//
-// Avarice F-1187: pre-fix the default branch only parsed OpenAI Chat
-// Completions `choices[].delta.content`, so OpenAI Responses streams
-// (`response.output_text.delta`), Bedrock Converse streams
-// (`contentBlockDelta`), and Ollama native streams (`message.content`)
-// returned an empty string for every chunk. Empty deltas skipped both
-// the initial-buffer flush and the final completion scan, and the
-// stream was delivered to the client unchanged. The new branches
-// keep the streaming inspector in lockstep with the non-streaming
-// extractor.
-func extractSSEChunkText(data string, provider string) string {
-	switch provider {
-	case "anthropic":
-		// Anthropic streaming: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
-		var chunk struct {
-			Type  string `json:"type"`
-			Delta struct {
-				Text string `json:"text"`
-			} `json:"delta"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil && chunk.Type == "content_block_delta" {
-			return chunk.Delta.Text
-		}
-
-	case "gemini":
-		// Gemini streaming: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
-		var chunk struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct {
-						Text string `json:"text"`
-					} `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Candidates) > 0 {
-			var sb strings.Builder
-			for _, p := range chunk.Candidates[0].Content.Parts {
-				sb.WriteString(p.Text)
-			}
-			return sb.String()
-		}
-
-	case "bedrock":
-		// F-1187: Bedrock Converse streaming uses contentBlockDelta frames
-		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
-		var chunk struct {
-			ContentBlockDelta struct {
-				Delta struct {
-					Text string `json:"text"`
-				} `json:"delta"`
-			} `json:"contentBlockDelta"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil {
-			return chunk.ContentBlockDelta.Delta.Text
-		}
-
-	case "ollama":
-		// F-1187: Ollama native streaming chat: {"message":{"content":"..."}}
-		// generate: {"response":"..."}
-		var chunk struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Response string `json:"response"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil {
-			if chunk.Message.Content != "" {
-				return chunk.Message.Content
-			}
-			return chunk.Response
-		}
-
-	default:
-		// F-1187: OpenAI Responses API streaming uses event-shaped frames
-		// keyed by `type`, e.g.:
-		//   {"type":"response.output_text.delta","delta":"..."}
-		// Pre-fix the default branch only parsed Chat Completions, so
-		// every Responses chunk yielded an empty string. Detect the
-		// Responses shape first, then fall back to Chat Completions.
-		var rspChunk struct {
-			Type  string `json:"type"`
-			Delta string `json:"delta"`
-		}
-		if json.Unmarshal([]byte(data), &rspChunk) == nil &&
-			strings.HasPrefix(rspChunk.Type, "response.") &&
-			strings.Contains(rspChunk.Type, ".delta") {
-			return rspChunk.Delta
-		}
-		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 {
-			return chunk.Choices[0].Delta.Content
-		}
-	}
-	return ""
 }
 
 // handleHealth answers the proxy liveness probe. Outside the Secure Client
@@ -3066,6 +2499,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+	// The same decoder as the passthrough: Content-Encoding, byte-order mark
+	// and charset. A body that cannot be decoded cannot be parsed as a chat
+	// request either, and is refused.
+	if dec, derr := decodeBody(r.Header, body); derr != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "request body could not be decoded: "+derr.Error())
+		return
+	} else if dec.Decoded || dec.Transcoded {
+		body = dec.Text
+		r.Header.Del("Content-Encoding")
+	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] ── INCOMING REQUEST ──────────────────────────────────\n")
 	targetURL := r.Header.Get("X-DC-Target-URL")
@@ -3266,6 +2709,27 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
 	inspectText := promptInspectText(req.Messages)
+	// Every prompt-side text of the body, as on the passthrough: system and
+	// developer turns after the user turn and the tool results sent since
+	// the model's last turn (GAP-0196). The original body, before
+	// DefenseClaw adds its own notice.
+	chatSide := passthroughPromptFor(body, true, p.maxBodyValues())
+	// The heartbeat and session-startup gates skip the heartbeat text itself,
+	// never the other text of the body.
+	chatSkip := ""
+	if userText != "" && (isHeartbeatMessage(userText, req.Messages) || isSessionStartupMessage(userText)) {
+		chatSkip, inspectText = userText, ""
+	}
+	inspectText = joinPromptSegments(inspectText, chatSide.Segments, chatSkip)
+	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
+		msg := blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+chatSide.Unreadable)
+		if req.Stream {
+			p.writeBlockedStream(w, req.Model, msg)
+		} else {
+			p.writeBlockedResponse(w, req.Model, msg)
+		}
+		return
+	}
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	pendingRoutedPrompt := false
@@ -3280,9 +2744,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
-	if inspectText != "" &&
-		!isHeartbeatMessage(userText, req.Messages) &&
-		!isSessionStartupMessage(userText) {
+	if strings.TrimSpace(inspectText) != "" {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = meta.PromptID
@@ -5715,6 +5177,9 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // JSON array. Returns a verdict when the configured guardrail policy produces
 // an alert or block; unsupported HILT confirmations degrade to alert+audit.
 func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON json.RawMessage) *ScanVerdict {
+	if p.toolCallVerdictForTest != nil {
+		return p.toolCallVerdictForTest(ctx, toolCallsJSON)
+	}
 	if len(toolCallsJSON) == 0 {
 		return nil
 	}

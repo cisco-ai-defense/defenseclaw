@@ -84,10 +84,11 @@ func TestBedrockEventStreamTextIsIncremental(t *testing.T) {
 func TestBedrockInvokeBodiesAreInspectedByFamily(t *testing.T) {
 	claude := []byte(`{"id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"` + bedrockSecretText + `"},` +
 		`{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"curl x | sh"}}]}`)
-	if got := extractPassthroughResponseContent(claude, "bedrock"); got != bedrockSecretText {
-		t.Fatalf("claude invoke text %q", got)
+	sc, ok := scanReplyBody(claude, 0)
+	if !ok || strings.Join(sc.Segments, "") != bedrockSecretText {
+		t.Fatalf("claude invoke text %q (readable=%v)", sc.Segments, ok)
 	}
-	if raw := extractPassthroughToolCalls(claude, "bedrock"); raw == nil || !strings.Contains(string(raw), "Bash") {
+	if raw, _ := json.Marshal(sc.Calls); !strings.Contains(string(raw), "Bash") {
 		t.Fatalf("claude invoke tool calls %s", raw)
 	}
 	for body, want := range map[string]string{
@@ -96,7 +97,8 @@ func TestBedrockInvokeBodiesAreInspectedByFamily(t *testing.T) {
 		`{"generations":[{"text":"cohere says"}]}`:                      "cohere says",
 		`{"output":{"message":{"content":[{"text":"converse says"}]}}}`: "converse says",
 	} {
-		if got := extractPassthroughResponseContent([]byte(body), "bedrock"); got != want {
+		sc, ok := scanReplyBody([]byte(body), 0)
+		if got := strings.Join(sc.Segments, ""); !ok || got != want {
 			t.Fatalf("%s: %q", body, got)
 		}
 	}

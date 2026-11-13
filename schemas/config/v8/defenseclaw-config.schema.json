@@ -2283,6 +2283,12 @@
           "minimum": 0,
           "maximum": 1073741824
         },
+        "max_body_values": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000000,
+          "description": "Most JSON values the guardrail proxy reads in one request body or reply event. A larger body is refused on managed and strict installs and forwarded with an alert otherwise. 0 means 400000."
+        },
         "rule_pack_dir": {
           "$ref": "#/$defs/boundedString",
           "deprecated": true,

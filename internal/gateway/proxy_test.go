@@ -807,7 +807,7 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 	})
 
-	t.Run("ordinary_user_keeps_last_user_only", func(t *testing.T) {
+	t.Run("ordinary_user_request_inspects_system_and_last_user", func(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		proxy := newTestProxy(t, prov, insp, "action")
@@ -824,8 +824,10 @@ func TestProxyPreCallInspection(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
 		}
-		if insp.lastContent != "What is 2+2?" {
-			t.Errorf("ordinary user request inspected %q, want last user text only", insp.lastContent)
+		// The system text is prompt-side text too (substrate-1 GAP-0196): the
+		// guardrail sees it with the last user turn.
+		if !strings.Contains(insp.lastContent, "What is 2+2?") || !strings.Contains(insp.lastContent, "You are a helpful assistant.") {
+			t.Errorf("ordinary user request inspected %q, want the system text and the last user text", insp.lastContent)
 		}
 		if prov.getLastReq() == nil {
 			t.Error("allowed ordinary user request should be forwarded")
