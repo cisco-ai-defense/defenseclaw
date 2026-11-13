@@ -13267,6 +13267,15 @@ def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _check_routing_policy(r: _DoctorResult) -> None:
+    """routing.admin rules and budgets that do less than they look (defenseclaw routing rules list)."""
+    from defenseclaw.commands.cmd_routing import doctor_rows
+
+    for status, detail in doctor_rows():
+        remediation = "see defenseclaw routing rules list" if status == "warn" else ""
+        _emit(status, "Routing policy", detail, remediation=remediation, r=r)
+
+
 def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     """Warn about routed models a managed host keys by api_key_env.
 
@@ -16470,6 +16479,7 @@ def doctor(
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
+    _check_routing_policy(r)
     _check_route_only(cfg, r, live_health=sidecar_health)
     _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)

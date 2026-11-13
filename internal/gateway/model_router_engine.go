@@ -29,9 +29,11 @@ const routerClassifierTextLimit = 8 * 1024
 type engineRouter struct {
 	boot       *config.Config
 	classifier engine.Classifier // vllm_sr client, nil unless started
-	admin      engine.AdminEvaluator
 	dotenv     string
 	sticky     *engine.StickyCache
+	// admin, when set (tests), is used for every generation instead of
+	// the routing.admin evaluator compiled per generation (adminFor).
+	admin engine.AdminEvaluator
 
 	mu sync.Mutex
 	// cache keeps the engines of the last two generations, so requests
@@ -90,7 +92,7 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 		var err error
 		eng, err = engine.New(cfg, engine.Options{
 			Classifier:   classifier,
-			Admin:        r.admin,
+			Admin:        r.adminFor(cfg),
 			Managed:      cfg != nil && cfg.StandaloneEnterprise(),
 			Sticky:       r.sticky,
 			CredentialOK: func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
@@ -185,6 +187,7 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		return normalizeSemanticRouteOutcome(out)
 	}
 	d := eng.Decide(ctx, engineRequest(in))
+	recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)
 	switch d.Outcome {
@@ -336,6 +339,7 @@ func routeCallerFromContext(ctx context.Context) (engine.Caller, []string) {
 	var caller engine.Caller
 	if s, ok := verifiedSubjectFromContext(ctx); ok {
 		caller = engine.Caller{Verified: true, Key: s.UserID, Source: s.Source}
+		caller.Matches = routingCallerMatcher(ctx)
 	}
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || !caller.Verified {

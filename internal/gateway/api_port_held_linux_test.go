@@ -81,7 +81,7 @@ func TestNoteAPIPortHolderAuditsAnotherAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(key)
-	a.noteAPIPortHolder(syscall.EADDRINUSE)
+	a.noteAPIPortHolder()
 	raw, err := os.ReadFile(filepath.Join(a.configDataDir(), "hooks", routePortHeldName))
 	if err != nil {
 		t.Fatalf("held-port mark: %v", err)
@@ -103,7 +103,7 @@ func TestNoteAPIPortHolderAuditsAnotherAccount(t *testing.T) {
 func TestNoteAPIPortHolderIgnoresTheOwnAccount(t *testing.T) {
 	useProcNetFixture(t, strings.ReplaceAll(procNetTCPFixture, "  4242  ", "  1000  "), "")
 	a, store := heldPortServer(t, true)
-	a.noteAPIPortHolder(syscall.EADDRINUSE)
+	a.noteAPIPortHolder()
 	if _, err := os.Stat(filepath.Join(a.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
 		t.Fatalf("own listener (a gateway still stopping) is no hijack: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestNoteAPIPortHolderIgnoresTheOwnAccount(t *testing.T) {
 func TestNoteAPIPortHolderWithoutRouteOnly(t *testing.T) {
 	useProcNetFixture(t, procNetTCPFixture, "")
 	b, store := heldPortServer(t, false)
-	b.noteAPIPortHolder(syscall.EADDRINUSE)
+	b.noteAPIPortHolder()
 	if _, err := os.Stat(filepath.Join(b.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
 		t.Fatalf("no route-only, no mark: %v", err)
 	}

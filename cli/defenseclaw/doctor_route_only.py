@@ -309,7 +309,8 @@ def _port_holder_command(port: int, platform: str) -> str:
 
 def port_held_row(cfg: Any, platform: str = sys.platform) -> Row | None:
     """The mark the OSS gateway leaves when another account held its API
-    port (Linux names the uid, Windows does not; internal/gateway/api_port_held.go).
+    port (Linux names the uid, Windows the SID when the gateway could read the
+    holder token; internal/gateway/api_port_held.go).
     Gone once the gateway owns the port again and replaced the route key."""
     path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks", PORT_HELD_MARK)
     try:
@@ -320,7 +321,13 @@ def port_held_row(cfg: Any, platform: str = sys.platform) -> Row | None:
     except (OSError, ValueError):
         mark = {}
     uid = mark.get("uid") if isinstance(mark, dict) else None
-    who = f"another account (uid {uid})" if isinstance(uid, int) else "another account"
+    sid = mark.get("sid") if isinstance(mark, dict) else None
+    if isinstance(uid, int):
+        who = f"another account (uid {uid})"
+    elif isinstance(sid, str) and sid.startswith("S-1-"):
+        who = f"another account ({sid})"
+    else:
+        who = "another account"
     port = int(getattr(getattr(cfg, "gateway", None), "api_port", 0) or 0)
     return Row(
         "fail",

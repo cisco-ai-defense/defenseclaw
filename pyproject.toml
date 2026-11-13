@@ -145,9 +145,9 @@ dev = [
     "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
-    # CVE-2026-114603 (unbounded tracestate parsing) is fixed in 1.45.1.
-    "opentelemetry-api>=1.45.1",
-    "opentelemetry-sdk>=1.45.1",
+    # CVE-2026-114603 (unbounded tracestate parsing) is fixed in 1.45.1; CVE-2026-126360 in 1.45.2.
+    "opentelemetry-api>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
 ]
 
 [project.scripts]

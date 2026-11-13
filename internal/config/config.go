@@ -3368,6 +3368,12 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: routing: %w", err)
 	}
+	if err := cfg.validateRoutingAdminRules(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "routing_invalid")
+		}
+		return nil, fmt.Errorf("config: %w", err)
+	}
 	if err := cfg.AIDiscovery.ValidateTrustedADChildDomains(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "ai_discovery_invalid")

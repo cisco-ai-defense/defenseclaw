@@ -116,6 +116,7 @@ from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
+from defenseclaw.tui.routing_panel import RoutingPanelMixin
 from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
 from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel, ConfigDiffScreen
@@ -179,6 +180,7 @@ from defenseclaw.tui.services.read_repository import (
     TUIReadResult,
     TUIReadSnapshot,
 )
+from defenseclaw.tui.services.routing_state import RoutingPanelModel, routing_help_rows
 from defenseclaw.tui.services.setup_state import credential_reload_summary, validate_config_field
 from defenseclaw.tui.services.substrate_state import substrate_needs_terminal
 from defenseclaw.tui.services.tui_state import TUIState, TUIStateStore
@@ -571,13 +573,19 @@ PANELS = (
     ("setup", "0", "Setup"),
 )
 
+# Panels whose tab shows only where they apply (_panel_hidden): Routing
+# while routing is on or routing.admin is set. Kept out of PANELS so the
+# tab strip of every other install is unchanged.
+OPTIONAL_PANELS = (("routing", "M", "Routing"),)
+ALL_PANELS = PANELS + OPTIONAL_PANELS
+
 # Letter panel keys work only in the case the tab strip and ? help show
 # (T A V N R P). Lowercase letters used to switch panels too, so the word
 # "krea" typed on Activity went r -> Registries, e -> registry require
 # (GAP-2438); lowercase ``t`` was already free for panel-local use.
-CASE_SENSITIVE_PANEL_KEYS = frozenset(key for _name, key, _label in PANELS if key.isalpha())
-PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS if key not in CASE_SENSITIVE_PANEL_KEYS}
-CASE_SENSITIVE_PANEL_SHORTCUTS = {key: name for name, key, _label in PANELS if key in CASE_SENSITIVE_PANEL_KEYS}
+CASE_SENSITIVE_PANEL_KEYS = frozenset(key for _name, key, _label in ALL_PANELS if key.isalpha())
+PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in ALL_PANELS if key not in CASE_SENSITIVE_PANEL_KEYS}
+CASE_SENSITIVE_PANEL_SHORTCUTS = {key: name for name, key, _label in ALL_PANELS if key in CASE_SENSITIVE_PANEL_KEYS}
 # Panels whose own action takes the capital letter keep the lowercase letter
 # as the way to that panel: Sandboxes pulls a copy on P and p opens Policies.
 LOWERCASE_PANEL_FALLBACK: dict[str, frozenset[str]] = {"sandboxes": frozenset({"p", "r"})}
@@ -592,7 +600,7 @@ STRIP_SUCCESS_SECONDS = 8.0
 def _panel_label(panel: str) -> str:
     """The tab label for ``panel`` ("MCPs", not ``"mcps".title()`` = "Mcps")."""
 
-    return next((label for name, _key, label in PANELS if name == panel), panel.title())
+    return next((label for name, _key, label in ALL_PANELS if name == panel), panel.title())
 
 
 def _catalog_loaded_text(panel: str, model: Any) -> str:
@@ -605,7 +613,7 @@ def _catalog_loaded_text(panel: str, model: Any) -> str:
     return f"{label}: {len(model.items)} loaded."
 
 
-PANEL_NAMES = {name for name, _key, _label in PANELS}
+PANEL_NAMES = {name for name, _key, _label in ALL_PANELS}
 
 
 @dataclass(frozen=True)
@@ -709,7 +717,7 @@ class _PanelMain(Vertical):
             self.app.call_after_refresh(recheck)
 
 
-class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
+class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, RoutingPanelMixin, App[None]):
     """Textual TUI foundation.
 
     This first slice intentionally implements shell, routing, command
@@ -1334,6 +1342,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         runtime_model: RuntimePanelModel | None = None,
         sandbox_model: SandboxesPanelModel | None = None,
         policy_model: PoliciesPanelModel | None = None,
+        routing_model: RoutingPanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -1436,6 +1445,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.overview_model.set_runtime_overview(self.runtime_model.overview())
         self._sandbox_init(sandbox_model)
         self._policy_init(policy_model)
+        self._routing_init(routing_model)
         self.setup_model = setup_model or SetupPanelModel(config)
         self._catalog_load_seq: dict[str, int] = {}
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
@@ -1629,7 +1639,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 yield Tabs(
                     *(
                         Tab(f"{key} {label}", id=f"tab-{name}")
-                        for name, key, label in PANELS
+                        for name, key, label in ALL_PANELS
                         if not self._panel_hidden(name)
                     ),
                     active=f"tab-{self.active_panel}",
@@ -2318,7 +2328,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         panel = self.active_panel
         if title is None:
-            label = next((label for name, _key, label in PANELS if name == panel), panel.title())
+            label = next((label for name, _key, label in ALL_PANELS if name == panel), panel.title())
             title = f"DefenseClaw — {label}"
         generation = self._panel_render_queued.get(panel)
         if panel not in {
@@ -2385,6 +2395,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Policies: read the catalog once so Overview's posture and the
         # status strip name the active policy.
         self._policy_mount()
+        self._routing_mount()
         # Native delivery evidence changes while the TUI is open; refresh the
         # same bounded snapshot periodically without coupling it to 3s health.
         self.set_interval(30.0, self._schedule_observability_status_load)
@@ -2657,9 +2668,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         Amp, Hermes and other connectors have plugins too (``plugin list``
         shows them), so the tab is always reachable and shows each
         connector's plugins or an empty state (GAP-1153). The hook stays so
-        a future connector-gated panel has one place to opt out.
+        a future connector-gated panel has one place to opt out. Routing
+        shows while routing is on or routing.admin is set.
         """
 
+        if panel == "routing":
+            return not self._routing_tab_wanted()
         return False
 
     def _visible_panels(self) -> list[str]:
@@ -2669,7 +2683,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         always agree on what's reachable for the active connector set.
         """
 
-        return [name for name, _key, _label in PANELS if not self._panel_hidden(name)]
+        return [name for name, _key, _label in ALL_PANELS if not self._panel_hidden(name)]
 
     def _panel_total_count(self, panel: str) -> int:
         """Return the current "interesting items" count for ``panel``.
@@ -2758,7 +2772,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         except NoMatches:
             return
         self._sync_header_title()
-        visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
+        visible = [(name, key, label) for name, key, label in ALL_PANELS if not self._panel_hidden(name)]
         # Under ~170 columns fifteen full names don't fit: shorten the
         # inactive tabs (key letters always stay) instead of scrolling.
         labels = fit_tab_labels(
@@ -2808,7 +2822,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         """True when every visible tab keeps its full name beside ``title``."""
 
         strip = max(0, width - 2 - (len(title) + 1 if title else 0) - 12)
-        visible = [(name, key, label) for name, key, label in PANELS if not self._panel_hidden(name)]
+        visible = [(name, key, label) for name, key, label in ALL_PANELS if not self._panel_hidden(name)]
         labels = [f"{key} {label}" for _name, key, label in visible]
         if not visible or strip_width(labels) + BADGE_RESERVE > strip:
             return False
@@ -2977,6 +2991,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self._schedule_policy_load()
             if model.view == "sandbox_packs" and not model.sandbox_loaded:
                 self._schedule_policy_load(sandbox=True)
+        if panel == "routing":
+            self._schedule_routing_load()
         if (
             panel == "runtime"
             and not self._runtime_model_injected
@@ -3121,7 +3137,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             body_widget.update("")
             self._last_body_signature = (panel, False, "")
         else:
-            label = next(label for name, _key, label in PANELS if name == panel)
+            label = next(label for name, _key, label in ALL_PANELS if name == panel)
             loading = f"[bold #22D3EE]{label}[/]\n\nLoading current data…"
             self.body_text = loading
             body_widget.update(self._safe_body_renderable(loading))
@@ -3807,7 +3823,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         visible = [
             PanelChoice(name=name, label=label, hotkey=key)
-            for name, key, label in PANELS
+            for name, key, label in ALL_PANELS
             if not self._panel_hidden(name)
         ]
         if not visible:
@@ -4430,6 +4446,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         elif self.active_panel == "sandboxes":
             self.sandbox_model.cursor = event.cursor_row
             self._sync_sandbox_controls()
+        elif self.active_panel == "routing":
+            self.routing_model.cursor = event.cursor_row
         elif self.active_panel == "policies":
             self.policy_model.cursor = event.cursor_row
             if self.policy_model.cursor != event.cursor_row:
@@ -5168,6 +5186,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("C/W/B/E", "Sources column: clean / warning / blocked / error entries (rejected ones are not counted)"),
                 ("A/R", "Entries column: A approved, R rejected, - neither"),
             ],
+            "routing": [
+                *routing_help_rows(self.routing_model.managed),
+            ],
             "policies": [
                 *((keys, what) for keys, what, _views in policy_keymap_rows(self.policy_model.sandbox_supported)),
                 ("A", "Activity panel (a is the alert level on Posture and Policies)"),
@@ -5180,7 +5201,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             [("(no panel-specific shortcuts)", "")],
         )
         panel_label = next(
-            (label for name, _key, label in PANELS if name == self.active_panel),
+            (label for name, _key, label in ALL_PANELS if name == self.active_panel),
             self.active_panel.title(),
         )
         if self.active_panel == "setup":
@@ -5250,7 +5271,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if self.help_open:
             self.body_text = self._render_help_body()
             return self.body_text
-        label = next(label for name, _key, label in PANELS if name == self.active_panel)
+        label = next(label for name, _key, label in ALL_PANELS if name == self.active_panel)
         if self.active_panel == "overview":
             service_cards = self.overview_model.service_cards()
             self.body_text = self._overview_body_text(service_cards)
@@ -5327,6 +5348,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # The table spans the body (6 columns of borders and padding).
                 self._table_rows = self.sandbox_model.data_table_rows(compact, max(0, self.size.width - 6))
             self.body_text = self._sandbox_body_text()
+            return self.body_text
+        if self.active_panel == "routing":
+            compact = self.size.width < 100
+            self._table_columns = self.routing_model.data_table_columns(compact)
+            self._table_rows = self.routing_model.data_table_rows(compact)
+            self.body_text = self._routing_body_text()
             return self.body_text
         if self.active_panel == "policies":
             self._table_columns, self._table_rows = self.policy_model.table(self._policy_table_width())
@@ -11074,6 +11101,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
     def _hint_panel_view(self, active_panel: str) -> str:
         if active_panel == "sandboxes":
             return self.sandbox_model.view
+        if active_panel == "routing":
+            return self.routing_model.view + ("-managed" if self.routing_model.managed else "")
         if active_panel == "policies":
             return self.policy_model.view
         if self.active_panel == "setup":
@@ -11960,6 +11989,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return self.ai_discovery_model.cursor
         if self.active_panel == "sandboxes":
             return self.sandbox_model.cursor
+        if self.active_panel == "routing":
+            return self.routing_model.cursor
         if self.active_panel == "policies":
             return self.policy_model.cursor
         if self.active_panel == "runtime":
@@ -12021,6 +12052,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if event.character == "U":
                 key = "U"
             return self._apply_sandbox_action(self.sandbox_model.handle_key(key))
+        if self.active_panel == "routing":
+            return self._apply_routing_action(self.routing_model.handle_key(_vim_key(key)))
         if self.active_panel == "policies":
             if key in {"pagedown", "page_down", "pageup", "page_up"} and self._panel_aside_below is not None:
                 # The detail under the table shows four lines at 80x24;
@@ -13752,6 +13785,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._refresh_cached_config()
         elif command == "doctor":
             self._load_doctor_cache()
+        elif command == "routing":
+            self._routing_command_done()
         elif command == "policy" or (
             command == "guardrail"
             and len(args) > 1

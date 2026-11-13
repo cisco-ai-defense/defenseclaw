@@ -73,7 +73,7 @@ type passthroughRouteInput struct {
 // refusal.
 func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteInput) (route passthroughRoute, ok bool, outcome SemanticRouteOutcome) {
 	if in.APIFamily == "" || in.Signed || !p.routerActive(r.Context()) {
-		return passthroughRoute{}, false, SemanticRouteOutcome{}
+		return passthroughRoute{}, false, p.gateUnrouted(r, in)
 	}
 	caller, profiles := routeCallerFromContext(r.Context())
 	var probe struct {
@@ -103,7 +103,7 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 	}
 	if probe.PreviousResponseID != "" && !strings.EqualFold(d.Provider, in.Provider) {
 		// A stored response id belongs to the original provider (DESIGN 5).
-		return passthroughRoute{}, false, outcome
+		return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
 	}
 	origin := originOf(d.TargetURL)
 	sameProvider := strings.EqualFold(d.Provider, in.Provider)
@@ -115,17 +115,17 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 		}
 	}
 	if origin == "" {
-		return passthroughRoute{}, false, outcome
+		return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
 	}
 	route = passthroughRoute{Origin: origin, Path: r.URL.RequestURI(), Body: in.Body, Provider: d.Provider}
 	switch in.APIFamily {
 	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
 		if !strings.EqualFold(d.Provider, "bedrock") {
-			return passthroughRoute{}, false, outcome
+			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
 		}
 		route.Path = swapBedrockPathModel(r.URL, d.Model)
 		if route.Path == "" {
-			return passthroughRoute{}, false, outcome
+			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
 		}
 	default:
 		route.Body = patchModelInBody(in.Body, d.Model)

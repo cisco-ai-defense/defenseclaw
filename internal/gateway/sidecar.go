@@ -1038,7 +1038,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// connector pending before it can answer a retained native hook.
 	s.beginPerUserConnectorHookSetup()
 	s.applyModelUsage(s.cfg)
+	defer s.stopRoutingAdmin()
 	defer s.stopModelUsage()
+	s.startRoutingAdmin(ctx)
 	s.carryObservabilityV8ShutdownDrops()
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
@@ -1173,7 +1175,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			}
 		}
 	}
-	s.modelRouter = newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	router := newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
+	s.modelRouter = router
+	activeEngineRouter.Store(router)
 
 	s.logSecureClientPolicyEngine()
 
@@ -2571,6 +2575,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 	}
 	s.applyModelUsage(appliedCfg)
+	s.applyRoutingAdmin(appliedCfg)
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
