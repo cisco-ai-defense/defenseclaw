@@ -124,13 +124,27 @@ func (w *InstallWatcher) stagingNow() time.Time {
 }
 
 // stagingKey is the map key of a staging path: case folded where the file
-// system usually is (Windows, macOS), so one folder has one entry.
-func stagingKey(path string) string {
+// system usually is (Windows, macOS), so one folder has one entry however
+// an event spells it. Every staging map is keyed through it, in the product
+// and in its tests; the value keeps the original path for anything that
+// reads the disk, since a folded key names nothing on a case-sensitive
+// volume (GAP-0091). stagingFold, when set, replaces the fold: tests run the
+// Windows and macOS rule on Linux.
+func (w *InstallWatcher) stagingKey(path string) string {
 	path = filepath.Clean(path)
+	if w.stagingFold != nil {
+		return w.stagingFold(path)
+	}
 	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 		return strings.ToLower(path)
 	}
 	return path
+}
+
+// stagingSeenEntry is when a staging folder was first seen, and its path.
+type stagingSeenEntry struct {
+	path  string
+	first time.Time
 }
 
 // inClaudePluginStaging reports a path in a plugin cache that is a plugin
@@ -194,17 +208,18 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 // claudeStagingCap ago, and notes when it was first seen.
 func (w *InstallWatcher) withinStagingCap(folder string, stamp time.Time) bool {
 	now := w.stagingNow()
-	key := stagingKey(folder)
+	key := w.stagingKey(folder)
 	w.stagingMu.Lock()
 	if w.stagingSeen == nil {
-		w.stagingSeen = map[string]time.Time{}
+		w.stagingSeen = map[string]stagingSeenEntry{}
 	}
-	first, seen := w.stagingSeen[key]
+	entry, seen := w.stagingSeen[key]
 	if !seen {
-		first = now
-		w.stagingSeen[key] = now
+		entry = stagingSeenEntry{path: folder, first: now}
+		w.stagingSeen[key] = entry
 	}
 	w.stagingMu.Unlock()
+	first := entry.first
 	if !stamp.IsZero() && stamp.Before(first) {
 		first = stamp
 	}
@@ -224,7 +239,7 @@ func (w *InstallWatcher) claudeInFlight(folder string, stamp time.Time) bool {
 	if !stamp.IsZero() && stamp.After(now.Add(claudeStagingSkew)) {
 		return false
 	}
-	key := stagingKey(folder)
+	key := w.stagingKey(folder)
 	w.stagingMu.Lock()
 	memo, cached := w.stagingMemo[key]
 	w.stagingMu.Unlock()
@@ -297,7 +312,10 @@ func (w *InstallWatcher) deferClaudeStaging(path string, depth int) {
 	if w.stagingDeferred == nil {
 		w.stagingDeferred = map[string]stagingDeferral{}
 	}
-	w.stagingDeferred[stagingKey(path)] = stagingDeferral{path: path, depth: depth}
+	// The first spelling stays: it is one read from the disk.
+	if key := w.stagingKey(path); w.stagingDeferred[key].path == "" {
+		w.stagingDeferred[key] = stagingDeferral{path: path, depth: depth}
+	}
 }
 
 // stagingDeferral is a path the live watcher left alone and its cache depth.
@@ -343,7 +361,7 @@ func (w *InstallWatcher) recheckClaudeStaging(admit func(path string, depth int)
 			continue
 		}
 		w.stagingMu.Lock()
-		delete(w.stagingDeferred, stagingKey(deferral.path))
+		delete(w.stagingDeferred, w.stagingKey(deferral.path))
 		w.stagingMu.Unlock()
 		if err == nil {
 			admit(deferral.path, deferral.depth)
@@ -364,18 +382,19 @@ func (w *InstallWatcher) recheckClaudeStaging(admit func(path string, depth int)
 	w.pruneStagingSeen()
 }
 
-// pruneStagingSeen forgets the first-seen times of folders that are gone.
+// pruneStagingSeen forgets the first-seen times of folders that are gone,
+// read through their own path: the folded key named nothing on a
+// case-sensitive volume, so a live folder was forgotten on every re-check
+// and its cap started again.
 func (w *InstallWatcher) pruneStagingSeen() {
 	w.stagingMu.Lock()
-	keys := make([]string, 0, len(w.stagingSeen))
-	for key := range w.stagingSeen {
-		keys = append(keys, key)
+	entries := make(map[string]string, len(w.stagingSeen))
+	for key, entry := range w.stagingSeen {
+		entries[key] = entry.path
 	}
 	w.stagingMu.Unlock()
-	for _, key := range keys {
-		if _, err := os.Lstat(key); errors.Is(err, os.ErrNotExist) {
-			// A case-folded key of an existing folder reads as gone on a
-			// case-sensitive volume; it is noted again on its next look.
+	for key, path := range entries {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			w.stagingMu.Lock()
 			delete(w.stagingSeen, key)
 			w.stagingMu.Unlock()
@@ -459,7 +478,7 @@ type registryAnswer struct {
 // claudeStagingMemo.
 func (w *InstallWatcher) claudeRegistry(pluginsRoot string) claudePluginRegistry {
 	now := w.stagingNow()
-	key := stagingKey(pluginsRoot)
+	key := w.stagingKey(pluginsRoot)
 	w.stagingMu.Lock()
 	memo, cached := w.registryMemo[key]
 	w.stagingMu.Unlock()
