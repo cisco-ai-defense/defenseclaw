@@ -211,12 +211,10 @@ const (
 func bodyMethods(raw []byte, req *Request, max int64) (methods []string, why string) {
 	readings := [][]byte{raw}
 	decoded, dwhy := decodeBody(raw, req.headerList("content-encoding"), "", max)
-	switch {
-	case dwhy == "":
+	if dwhy == "" {
 		readings = append(readings, decoded)
-	default:
-		why = dwhy
-		decoded = raw
+	} else {
+		why, decoded = dwhy, raw
 	}
 	for _, line := range contentTypes(req) {
 		_, params, err := mime.ParseMediaType(line)
