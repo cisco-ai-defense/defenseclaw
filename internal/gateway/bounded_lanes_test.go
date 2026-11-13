@@ -52,9 +52,10 @@ type boundedLaneCap struct {
 	// decide runs one call through the lane's hook decision and returns the
 	// action and finding strings; nil runs it through the Claude Code hook.
 	decide func(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string)
-	// open names the gap of a known violation not yet fixed in this tree:
-	// its failures are logged, not failed. A lane clears it in its fix.
-	open string
+	// open names, by tier name ("*" for every tier), the gap of a known
+	// violation not yet fixed in this tree: its failures are logged, not
+	// failed. A lane deletes the entry in its fix.
+	open map[string]string
 }
 
 // boundedShape is the shape of a generated input.
@@ -83,13 +84,20 @@ func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(bounded
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
-			gen: boundedShellCall(boundedNestedSubshells), open: "rel-1-0-10:GAP-0284 (parselimits follow-up)"},
+			gen:  boundedShellCall(boundedNestedSubshells),
+			open: map[string]string{"*": "rel-1-0-10:GAP-0312", "managed": boundedManagedLimitOpen}},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
-			gen: boundedShellCall(gap0568Assignments)},
+			gen: boundedShellCall(gap0568Assignments), open: map[string]string{"managed": boundedManagedLimitOpen}},
 		boundedLaneCap{lane: "shell operands", cap: bounded.Items, limit: actionfacts.MaxOperandsPerCall,
-			gen: boundedShellCall(boundedListOperands)},
+			gen: boundedShellCall(boundedListOperands), open: map[string]string{"*": "rel-1-0-10:GAP-0313"}},
 	)
 }
+
+// boundedManagedLimitOpen: the evaluation-limit finding of the shell readers
+// alerts on a managed install with the default pack (rel-1-0-6:GAP-0675),
+// below the bound rule's managed floor, until the parse lane adopts
+// withBoundedTruncation.
+const boundedManagedLimitOpen = "managed floor of the shell evaluation limit (GAP-0675 vs bound rule, parselimits adoption)"
 
 // boundedShellStatements is the statement budget of one POSIX call
 // (actionfacts.maxStatementsAlone).
@@ -129,10 +137,12 @@ func boundedListOperands(size int) string {
 }
 
 // boundedDecideClaudeCode sends one PreToolUse call through the Claude Code
-// hook with the hook client's resolved writes, as a per-user gateway does.
+// hook with the hook client's resolved writes and the tier mark of the hook
+// route (safeEvaluateHook), as a per-user gateway does.
 func boundedDecideClaudeCode(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string) {
 	t.Helper()
-	ctx := context.Background()
+	base := context.Background()
+	ctx := withShareBodyStrict(base, func() bool { return api.shareBodyStrictTier(base, "claudecode") })
 	body := mustJSON(t, map[string]any{"hook_event_name": "PreToolUse", "session_id": "bounded", "cwd": env.cwd,
 		"tool_name": call.tool, "tool_input": call.input})
 	if targets, ok := hookpaths.Decode(hookpaths.Resolve(body)); ok {
@@ -154,6 +164,7 @@ var boundedTestTiers = []struct {
 	{"permissive", "permissive", false, bounded.TierPermissive},
 	{"strict", "strict", false, bounded.TierStrict},
 	{"managed", "default", true, bounded.TierManaged},
+	{"managed strict", "strict", true, bounded.TierStrict},
 }
 
 func boundedHasLimit(findings []string, c bounded.Cap, adopted bool) bool {
@@ -194,7 +205,10 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 	for _, tier := range boundedTestTiers {
 		api := instructionProtectionTestAPIWithPack(t, "claudecode", "action", "", tier.posture)
 		if tier.managed {
+			// A managed enterprise install whose local rules decide (the
+			// Secure Client profile hands every decision to AI Defense).
 			api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			api.scannerCfg.Enterprise.Profile = managed.ProfileStandalone
 		}
 		for _, lane := range boundedLanes {
 			name := tier.name + "/" + lane.lane + "/" + lane.cap.String()
@@ -203,8 +217,12 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 				decide = boundedDecideClaudeCode
 			}
 			report := t.Errorf
-			if lane.open != "" {
-				report = func(format string, args ...any) { t.Logf("OPEN %s: "+format, append([]any{lane.open}, args...)...) }
+			open := lane.open[tier.name]
+			if open == "" {
+				open = lane.open["*"]
+			}
+			if open != "" {
+				report = func(format string, args ...any) { t.Logf("OPEN %s: "+format, append([]any{open}, args...)...) }
 			}
 			floor := bounded.Unknown(tier.tier)
 			for _, shape := range []boundedShape{{}, {seen: true}} {
