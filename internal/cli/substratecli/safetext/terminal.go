@@ -17,6 +17,7 @@
 package safetext
 
 import (
+	"runtime"
 	"strings"
 	"sync/atomic"
 )
@@ -32,12 +33,18 @@ var asciiOnly atomic.Bool
 func UseASCII(on bool) { asciiOnly.Store(on) }
 
 // TerminalUTF8 reports whether the locale (LC_ALL, then LC_CTYPE, then
-// LANG) lets the terminal decode UTF-8. Only a locale that names another
-// character set, such as en_US.ISO-8859-1 or ja_JP.eucJP, says no. An
-// unset, C or POSIX locale, or one with no character set, is taken as
-// UTF-8: that is what terminals use today, and the Windows console takes
-// UTF-8 from the launcher.
+// LANG) lets the terminal decode UTF-8. Only a locale that names UTF-8 says
+// yes. One that names another character set (en_US.ISO-8859-1,
+// ja_JP.eucJP) says no, and so does one that names none: C, POSIX or en_US
+// is a single-byte locale by the POSIX rules, and a terminal in it may read
+// the bytes 0x80 to 0x9f as C1 controls (GAP-0126). With no locale variable
+// set at all the locale is C, so the answer is no, except on Windows, whose
+// console takes UTF-8 from the launcher.
 func TerminalUTF8(getenv func(string) string) bool {
+	return terminalUTF8(getenv, runtime.GOOS)
+}
+
+func terminalUTF8(getenv func(string) string, goos string) bool {
 	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
 		v := getenv(k)
 		if v == "" {
@@ -45,11 +52,11 @@ func TerminalUTF8(getenv func(string) string) bool {
 		}
 		_, cs, ok := strings.Cut(v, ".")
 		if !ok {
-			return true
+			return false
 		}
 		cs, _, _ = strings.Cut(cs, "@")
 		cs = strings.ToLower(strings.ReplaceAll(cs, "-", ""))
 		return cs == "utf8"
 	}
-	return true
+	return goos == "windows"
 }
