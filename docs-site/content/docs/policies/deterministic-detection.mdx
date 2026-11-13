@@ -70,7 +70,7 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 250 enabled balanced/default rules are generated from
+The 254 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
@@ -78,9 +78,9 @@ The 250 enabled balanced/default rules are generated from
 | `command` | 131 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
-| `trust-exploit` | 28 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
+| `trust-exploit` | 30 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
-| `enterprise-data` | 13 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
+| `enterprise-data` | 15 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
 | `cognitive-file` | 11 | Agent instruction, memory, configuration, gateway, and detector-state modification |
 
 ### Prompt-injection floor
@@ -400,7 +400,7 @@ fact and use closed CEL/ActionFacts proofs instead of resource-name guesses.
 
 | Pack | Status | Deterministic coverage |
 | --- | --- | --- |
-| `privacy-high-assurance` | Selectable | 13 structured PII rules for SSNs, payment cards, IBANs, labeled email/phone, medical IDs, dates of birth, and structured CSV/JSON records |
+| `privacy-high-assurance` | Selectable | 14 structured PII rules for SSNs, payment cards, IBANs, labeled email/phone, email lists, medical IDs, dates of birth, and structured CSV/JSON records |
 | `cloud-production-protection` | Selectable | Bulk cloud-data deletion, cloud resource/service deletion, and audit-control destruction for production-scoped connectors |
 | `database-destruction-protection` | Selectable | Literal SQL `DELETE` without `WHERE`, schema/table-wide destructive statements, and same-table sensitive SQLite read/delete proof |
 | `infrastructure-destruction-protection` | Selectable | Device format/wipe, protected access-control weakening, kernel-control bind override, and unscoped Terraform/OpenTofu/Pulumi destruction |
@@ -454,6 +454,8 @@ A comment does not hide destructive SQL from `database-destruction-protection`. 
 ### Personal data rules
 
 The card-number rules skip digits that follow a decimal point, so a float in a JSON file is not a card. `ENT-PHONE-E164` skips the plus that starts an added line of a diff and a date after a plus. `ENT-EMAIL-BULK` alerts on an address in a URL path or query value on another host, a scheme-less URL, `host:path` and a UNC path. It skips an address in a local path (`/`, `~/`, `./`, `../`, a drive path, `file:///`), also after a redirect, a parenthesis, a glued option or a shell variable.
+
+Email addresses are scored by how many there are. One address, such as a vendor's no-reply address in an agent's own instructions, is `ENT-EMAIL-BULK` at LOW in every pack: strict alerts on it and never blocks. Five or more different addresses within about 4 KB (a CSV export, a recipient list, `mailto:` links) is `PII-EMAIL-LIST`, and an address in a labeled field (`email: ...`, `"email": "..."`, `E-mail address: ...`) is `PII-EMAIL-FIELD`. Both are MEDIUM, so strict blocks them and default alerts. Addresses in commit headers and trailers (`Author:`, `Co-authored-by:`, `Signed-off-by:`) are project history and do not count toward a list. The card-number rules count a digit run only when it passes the Luhn check, has a real card scheme's prefix and length, is printed as a card (digits alone or in card-style groups), and is not part of a longer token such as a UUID, hash or trace id.
 
 ### CodeGuard
 
