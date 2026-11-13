@@ -245,11 +245,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if resolverWord {
 				// The resolver reads this word: its escaped pattern is the
 				// one recorded and judged, not the flattened value.
-				// A pattern the resolver does not model exactly is never
+				// A pattern form the resolver does not model exactly is never
 				// recorded: the client's glob answer would claim a walk that
-				// bash does not make.
+				// bash does not make. A glob option it does not model only
+				// widens what the walk finds (dotglob, GLOBIGNORE), so the
+				// check still runs and may block.
 				if pattern, active := resolverWordPattern(word, values, effectiveCWD); active &&
-					!globOptions.unmodeled() && resolverPatternModeled(pattern) && check(pattern, false, effectiveCWD) {
+					resolverPatternModeled(pattern) && check(pattern, false, effectiveCWD) {
 					return true
 				}
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
