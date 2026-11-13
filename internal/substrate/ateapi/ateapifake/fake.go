@@ -193,7 +193,31 @@ func (f *Fake) SetState(ref *ateapi.ObjectRef, state ateapi.ActorState) error {
 	if !ok {
 		return status.Errorf(codes.NotFound, "actor %s not found", key(ref))
 	}
+	if state == ateapi.ActorStateSuspended && a.Status.State == ateapi.ActorStateRunning {
+		// A suspend takes a new snapshot generation, as SuspendActor does.
+		a.Status.LastAssignedGeneration++
+	}
 	a.Status.State = state
+	f.bump(a.Metadata)
+	return nil
+}
+
+// Revert moves an actor back to SUSPENDED at its durable snapshot, as
+// RevertActor does: no new snapshot generation (the controller tells a
+// revert from a suspend by that).
+func (f *Fake) Revert(ref *ateapi.ObjectRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.actors[key(ref)]
+	if !ok {
+		return status.Errorf(codes.NotFound, "actor %s not found", key(ref))
+	}
+	switch a.Status.State {
+	case ateapi.ActorStateRunning, ateapi.ActorStateCrashed, ateapi.ActorStateSuspended:
+	default:
+		return status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)
+	}
+	a.Status.State = ateapi.ActorStateSuspended
 	f.bump(a.Metadata)
 	return nil
 }
@@ -347,6 +371,7 @@ func (f *Fake) SuspendActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.A
 	case ateapi.ActorStateSuspended:
 	case ateapi.ActorStateRunning:
 		a.Status.State = ateapi.ActorStateSuspended
+		a.Status.LastAssignedGeneration++
 		f.bump(a.Metadata)
 	default:
 		return nil, status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)

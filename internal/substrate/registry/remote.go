@@ -135,6 +135,19 @@ func (s *Remote) Get(ctx context.Context, atespace, uid string) (Registration, b
 	return Registration{}, false, nil
 }
 
+// GetFresh reads the leader past the miss cache (a found record still comes
+// from the cache). The controller calls it before it calls a launcher actor
+// foreign, because the launcher writes the registration one leader call
+// after CreateActor and a cached miss from that gap is stale (GAP-0145).
+func (s *Remote) GetFresh(ctx context.Context, atespace, uid string) (Registration, bool, error) {
+	s.mu.Lock()
+	if c, ok := s.cache[atespace+"/"+uid]; ok && !c.found {
+		delete(s.cache, atespace+"/"+uid)
+	}
+	s.mu.Unlock()
+	return s.Get(ctx, atespace, uid)
+}
+
 // Put implements Store.
 func (s *Remote) Put(ctx context.Context, r Registration) error {
 	if err := r.Validate(); err != nil {

@@ -257,6 +257,11 @@ func TestForeignActorInLauncherAtespace(t *testing.T) {
 	r := newRig(t, nil)
 	a := r.actor("eng-web", "intruder", ateapi.ActorStateSuspended, "")
 	r.pass()
+	if len(r.sink.Events(controller.EventForeignActor)) != 0 {
+		t.Fatal("called foreign inside the launcher grace (GAP-0145)")
+	}
+	r.clk.Add(16 * time.Second)
+	r.pass()
 	if r.api.Policy(ateapi.RefOf(a.GetMetadata())) != nil {
 		t.Fatal("an unregistered actor in a launcher atespace got a policy")
 	}

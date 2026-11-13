@@ -617,7 +617,8 @@ func TestLifecycleEventsToTheLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass()
-	want := []string{"suspended", "resumed", "reverted", "crashed", "forked<" + a.GetMetadata().GetUid()}
+	// CRASHED -> SUSPENDED is a revert of the crashed actor (GAP-0141).
+	want := []string{"suspended", "resumed", "reverted", "crashed", "reverted", "forked<" + a.GetMetadata().GetUid()}
 	if got := life.names(); !slices.Equal(got, want) {
 		t.Fatalf("lifecycle = %v, want %v", got, want)
 	}
@@ -626,7 +627,7 @@ func TestLifecycleEventsToTheLeader(t *testing.T) {
 			t.Fatalf("event without controller time or actor: %+v", e)
 		}
 	}
-	if life.evs[4].Actor.UID != child.GetMetadata().GetUid() {
+	if life.evs[5].Actor.UID != child.GetMetadata().GetUid() {
 		t.Fatal("the fork event names the wrong actor")
 	}
 	// Leader down: events wait and go out in order when it is back.
@@ -644,7 +645,7 @@ func TestLifecycleEventsToTheLeader(t *testing.T) {
 	r.pass()
 	life.down = false
 	r.pass()
-	got := life.names()[5:]
+	got := life.names()[6:]
 	if !slices.Equal(got, []string{"resumed", "suspended", "deleted"}) {
 		t.Fatalf("after the outage: %v", got)
 	}
