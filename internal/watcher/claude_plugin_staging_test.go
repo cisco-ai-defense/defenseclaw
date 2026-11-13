@@ -5,7 +5,10 @@
 package watcher
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,11 +36,11 @@ func TestClassifyClaudeCacheParts(t *testing.T) {
 		{`temp_archive_` + ts + `_1/a/b`, claudeCacheStaging},
 		{`temp_command_` + ts + `_q1w2e3/a/b`, claudeCacheStaging},
 		{`temp_unknown_` + ts + `_x9/a/b`, claudeCacheStaging},
-		// git's files in a staging clone.
-		{`temp_subdir_` + ts + `_t2ymk0.clone/.git`, claudeCacheStagingGit},
-		{`temp_subdir_` + ts + `_t2ymk0.clone/.git/hooks`, claudeCacheStagingGit},
-		{`temp_subdir_` + ts + `_t2ymk0.clone\.git\objects`, claudeCacheStagingGit},
-		{`temp_github_` + ts + `_ab12/.git/refs`, claudeCacheStagingGit},
+		// git's files in a staging clone are in it too.
+		{`temp_subdir_` + ts + `_t2ymk0.clone/.git`, claudeCacheStaging},
+		{`temp_subdir_` + ts + `_t2ymk0.clone/.git/hooks`, claudeCacheStaging},
+		{`temp_subdir_` + ts + `_t2ymk0.clone\.git\objects`, claudeCacheStaging},
+		{`temp_github_` + ts + `_ab12/.git/refs`, claudeCacheStaging},
 		// A version folder being linked.
 		{`mkt/plugin/1.0.0.linking-4242`, claudeCacheLinking},
 		{`mkt\plugin\1.0.0.linking-4242\skills`, claudeCacheLinking},
@@ -74,28 +77,67 @@ func TestClassifyClaudeCacheParts(t *testing.T) {
 	}
 }
 
-// A staging folder is in flight only while the time stamp in its name is
-// recent: an old or far-future name is read as a plugin again.
-func TestClaudeStagingFresh(t *testing.T) {
-	now := time.Now()
-	name := func(at time.Time) string {
-		return "temp_github_" + strconv.FormatInt(at.UnixMilli(), 10) + "_ab12"
+// stagingTestClock is a test clock for the staging code, safe across goroutines.
+type stagingTestClock struct{ offset atomic.Int64 }
+
+func (c *stagingTestClock) now() time.Time          { return time.Now().Add(time.Duration(c.offset.Load())) }
+func (c *stagingTestClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
+
+// A staging folder is in flight while it was written (name stamp, newest
+// modification time in it) in the last claudeStagingGrace, for
+// claudeStagingCap at most: a slow clone is not quarantined mid-clone, and
+// nothing stays unscanned past the cap. git's files in it count the same.
+func TestClaudeInFlightWindow(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	w := claudeWatcher(t, cache)
+	clock := &stagingTestClock{}
+	w.stagingClock = clock.now
+	stamped := func(at time.Time) string {
+		return filepath.Join(cache, "temp_github_"+strconv.FormatInt(at.UnixMilli(), 10)+"_ab12")
 	}
-	for _, tc := range []struct {
-		name string
-		want bool
-	}{
-		{name(now), true},
-		{name(now.Add(-14 * time.Minute)), true},
-		{name(now.Add(30 * time.Second)), true},
-		{name(now.Add(-16 * time.Minute)), false},
-		{name(now.Add(-24 * time.Hour)), false},
-		{name(now.Add(10 * time.Minute)), false},
-		{"temp_github_99999999999999999999_ab12", false},
-		{"mkt", false},
+
+	idle := stamped(clock.now())
+	mkdirs(t, filepath.Join(idle, "skills", "foo"))
+	if !w.inClaudePluginStaging(filepath.Join(idle, "skills", "foo"), 0) {
+		t.Fatal("a fresh staging folder is not in flight")
+	}
+	clock.advance(16 * time.Minute)
+	if w.inClaudePluginStaging(filepath.Join(idle, "skills", "foo"), 0) {
+		t.Fatal("a staging folder idle past the grace is still in flight")
+	}
+
+	slow := stamped(clock.now())
+	pack := filepath.Join(slow, ".git", "objects", "pack", "tmp_pack_1")
+	mkdirs(t, filepath.Dir(pack))
+	if err := os.WriteFile(pack, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	began := clock.now()
+	for clock.now().Sub(began) < claudeStagingCap-time.Minute {
+		now := clock.now()
+		if err := os.Chtimes(pack, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if !w.inClaudePluginStaging(filepath.Join(slow, ".git", "objects"), 0) {
+			t.Fatalf("a clone still being written left flight after %s", clock.now().Sub(began))
+		}
+		clock.advance(14 * time.Minute)
+	}
+	now := clock.now()
+	if err := os.Chtimes(pack, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if w.inClaudePluginStaging(filepath.Join(slow, ".git", "objects"), 0) {
+		t.Fatal("a clone still being written stays in flight past the cap")
+	}
+
+	for name, folder := range map[string]string{
+		"a stamp ahead of the clock":              stamped(clock.now().Add(10 * time.Minute)),
+		"a stamp older than the cap, fresh write": stamped(clock.now().Add(-2 * time.Hour)),
 	} {
-		if got := claudeStagingFresh(tc.name, now); got != tc.want {
-			t.Errorf("claudeStagingFresh(%q) = %v, want %v", tc.name, got, tc.want)
+		mkdirs(t, filepath.Join(folder, "a", "b"))
+		if w.inClaudePluginStaging(filepath.Join(folder, "a", "b"), 0) {
+			t.Errorf("%s is in flight", name)
 		}
 	}
 }

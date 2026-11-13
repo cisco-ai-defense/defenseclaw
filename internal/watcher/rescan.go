@@ -688,7 +688,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			}
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir,
 				connector == "claudecode" && !w.secureClientActive()) {
-				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
+				if w.isOwnPlugin(plugin) {
+					continue
+				}
+				if w.inClaudePluginStaging(plugin, claudeStagingGrace) {
+					w.deferClaudeStaging(plugin, 3)
 					continue
 				}
 				targets = append(targets, InstallEvent{
@@ -1113,11 +1117,13 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				}
 				return rescanScanned
 			}
-			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
+			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) || w.admitsAfterStaging(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
 				// The same under a root watched closely: its first scan
 				// enforces the verdict, whichever rescan found it (GAP-0905).
+				// The same for a Claude Code staging or linking folder left
+				// alone as an install in flight (issue #1428 review).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)

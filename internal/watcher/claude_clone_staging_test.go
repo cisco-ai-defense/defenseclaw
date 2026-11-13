@@ -7,6 +7,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -70,16 +71,6 @@ func githubStagingTree(t *testing.T, cache, name string) string {
 		t.Fatal(err)
 	}
 	return staging
-}
-
-func age(t *testing.T, ago time.Duration, paths ...string) {
-	t.Helper()
-	old := time.Now().Add(-ago)
-	for _, path := range paths {
-		if err := os.Chtimes(path, old, old); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 func pluginTargets(w *InstallWatcher) []string {
@@ -183,39 +174,36 @@ func TestClaudePluginInstallsInFlightAreNotPlugins(t *testing.T) {
 	}
 }
 
-// A staging or linking folder still there after the grace window is
-// scanned, so a folder named like one is no scan hole. git's own files in
-// a staging clone never are.
+// A staging or linking folder still there after the window is scanned, git's
+// files in a staging clone included, so a folder named like one is no scan
+// hole.
 func TestClaudePluginStaleStagingIsScanned(t *testing.T) {
-	f := newClaudeCacheFixture(t, time.Now().Add(-time.Hour))
-	age(t, time.Hour, f.clone, f.github, f.linking)
+	f := newClaudeCacheFixture(t, time.Now())
 	w := claudeWatcher(t, f.cache)
+	w.stagingClock = func() time.Time { return time.Now().Add(2 * time.Hour) }
 
-	want := sorted(append(slices.Clone(f.plugins),
+	want := slices.Clone(f.plugins)
+	for _, dir := range []string{"hooks", "objects", "refs", "info", "logs"} {
+		want = append(want, filepath.Join(f.clone, ".git", dir))
+	}
+	want = sorted(append(want,
 		filepath.Join(f.clone, "plugins", "sample"),
+		filepath.Join(f.github, ".git", "objects"),
 		filepath.Join(f.github, "skills", "foo"),
 		f.linking)...)
 	if got := pluginTargets(w); !slices.Equal(got, want) {
 		t.Fatalf("rescan targets\n%v\nwant\n%v", got, want)
 	}
-	if w.inClaudePluginStaging(filepath.Join(f.github, "skills"), 0) {
-		t.Error("a stale staging folder is left alone by the live watcher")
-	}
-	if !w.inClaudePluginStaging(filepath.Join(f.clone, ".git", "hooks"), claudeStagingGrace) {
-		t.Error("git's files in a stale staging clone are read as a plugin")
-	}
-
-	// A fresh name on a folder the rescan sees unchanged for longer than the
-	// grace is scanned too.
-	fresh := githubStagingTree(t, f.cache, stagingName("npm", "", time.Now()))
-	age(t, time.Hour, fresh)
-	if w.inClaudePluginStaging(filepath.Join(fresh, "skills", "foo"), claudeStagingGrace) {
-		t.Error("an old staging folder with a fresh name is left alone by the rescan")
+	for _, path := range []string{filepath.Join(f.github, "skills"), filepath.Join(f.clone, ".git", "hooks"), f.linking} {
+		if w.inClaudePluginStaging(path, 0) {
+			t.Errorf("stale %s is left alone", path)
+		}
 	}
 }
 
 // A marketplace Claude Code registered under a staging-like name is a
-// marketplace, and a registered install path is a plugin.
+// marketplace, and a folder holding a registered install path (a linking
+// folder, a clone with its .git) is plugins.
 func TestClaudePluginRegisteredStagingNameIsAPlugin(t *testing.T) {
 	f := newClaudeCacheFixture(t, time.Now())
 	plugins := filepath.Dir(f.cache)
@@ -224,12 +212,18 @@ func TestClaudePluginRegisteredStagingNameIsAPlugin(t *testing.T) {
 		[]byte(`{"`+github+`":{"source":{"source":"github","repo":"o/r"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	installed := fmt.Sprintf(`{"version":2,"plugins":{"sample@mkt":[{"scope":"user","installPath":%q}]}}`, f.linking)
+	installed := fmt.Sprintf(`{"version":2,"plugins":{"sample@mkt":[{"scope":"user","installPath":%q}],`+
+		`"sample@other":[{"scope":"user","installPath":%q}]}}`, f.linking, filepath.Join(f.clone, "plugins", "sample"))
 	if err := os.WriteFile(filepath.Join(plugins, "installed_plugins.json"), []byte(installed), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	w := claudeWatcher(t, f.cache)
-	want := sorted(append(slices.Clone(f.plugins),
+	want := slices.Clone(f.plugins)
+	for _, dir := range []string{"hooks", "objects", "refs", "info", "logs"} {
+		want = append(want, filepath.Join(f.clone, ".git", dir))
+	}
+	want = sorted(append(want,
+		filepath.Join(f.clone, "plugins", "sample"),
 		filepath.Join(f.github, "skills", "foo"),
 		filepath.Join(f.github, ".git", "objects"),
 		f.linking)...)
@@ -237,7 +231,8 @@ func TestClaudePluginRegisteredStagingNameIsAPlugin(t *testing.T) {
 		t.Fatalf("rescan targets\n%v\nwant\n%v", got, want)
 	}
 	if w.inClaudePluginStaging(filepath.Join(f.github, "skills", "foo"), 0) ||
-		w.inClaudePluginStaging(f.linking, 0) {
+		w.inClaudePluginStaging(f.linking, 0) ||
+		w.inClaudePluginStaging(filepath.Join(f.clone, ".git", "hooks"), 0) {
 		t.Error("a registered marketplace or install path is left alone")
 	}
 }
@@ -368,4 +363,160 @@ func TestLiveWatcherLeavesClaudePluginUpdateCloneAlone(t *testing.T) {
 			t.Errorf("%s was taken away: %v", path, err)
 		}
 	}
+}
+
+// A real plugin whose version ends in .linking-<n> (1.0.0-x.linking-1;
+// Claude Code keeps a .linking-<pid> folder while its pid lives, pid 1
+// always) is left alone only while it is written. Then the rescan admits it
+// (scan, verdict, block/quarantine) like a new plugin; it used to record
+// only a baseline, so nothing it held was enforced.
+func TestClaudeLinkingVersionPluginIsAdmittedAfterGrace(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	linked := filepath.Join(cache, "mkt", "pid1", "1.0.0-x.linking-1")
+	plain := filepath.Join(cache, "mkt", "plain", "1.0.0")
+	writeManifest(t, linked, "pid1")
+	writeManifest(t, plain, "plain")
+	var mu sync.Mutex
+	admitted := map[string]int{}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, func(r AdmissionResult) {
+		mu.Lock()
+		admitted[r.Event.Path]++
+		mu.Unlock()
+	})
+	clock := &stagingTestClock{}
+	w.stagingClock = clock.now
+
+	if got := pluginTargets(w); !slices.Equal(got, []string{plain}) {
+		t.Fatalf("rescan targets while written %v, want %s", got, plain)
+	}
+	if _, ok := w.stagingDeferred[linked]; !ok {
+		t.Fatalf("the rescan did not note %s for a re-check: %v", linked, w.stagingDeferred)
+	}
+	clock.advance(claudeStagingGrace + time.Minute)
+	ctx := context.Background()
+	for _, evt := range w.enumerateTargets() {
+		if evt.Type == InstallPlugin {
+			w.rescanTarget(ctx, evt, nil)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if admitted[linked] != 1 {
+		t.Fatalf("the .linking- version plugin was admitted %d times, want 1: %v", admitted[linked], admitted)
+	}
+	if admitted[plain] != 0 {
+		t.Fatalf("a plain plugin was admitted by a rescan without startup roots: %v", admitted)
+	}
+}
+
+// The live watcher looks again at what it left alone: a path still there
+// and settled is handed to admission, one gone is forgotten.
+func TestRecheckClaudeStagingQueuesSettledPaths(t *testing.T) {
+	f := newClaudeCacheFixture(t, time.Now())
+	w := claudeWatcher(t, f.cache)
+	clock := &stagingTestClock{}
+	w.stagingClock = clock.now
+	gone := filepath.Join(f.cache, "mkt", "gone", "1.0.0.linking-7")
+	w.deferClaudeStaging(f.linking, 3)
+	w.deferClaudeStaging(f.github, 1)
+	w.deferClaudeStaging(gone, 3)
+	got := map[string]int{}
+	admit := func(path string, depth int) { got[path] = depth }
+
+	w.recheckClaudeStaging(admit)
+	if len(got) != 0 {
+		t.Fatalf("installs in flight handed to admission: %v", got)
+	}
+	if _, ok := w.stagingDeferred[gone]; ok {
+		t.Error("a path gone is still deferred")
+	}
+	clock.advance(claudeStagingGrace + time.Minute)
+	w.recheckClaudeStaging(admit)
+	if want := map[string]int{f.linking: 3, f.github: 1}; !maps.Equal(got, want) {
+		t.Fatalf("handed to admission %v, want %v", got, want)
+	}
+	if len(w.stagingDeferred) != 0 {
+		t.Fatalf("still deferred: %v", w.stagingDeferred)
+	}
+
+	// Admission takes them as new plugins.
+	ctx := context.Background()
+	w.admitClaudeStaging(ctx, f.linking, 3)
+	w.admitClaudeStaging(ctx, f.github, 1)
+	want := sorted(f.linking, filepath.Join(f.github, ".git", "objects"), filepath.Join(f.github, "skills", "foo"))
+	if got := pendingPaths(w); !slices.Equal(got, want) {
+		t.Fatalf("queued\n%v\nwant\n%v", got, want)
+	}
+}
+
+// Live, with a test clock: a .linking- version plugin is left alone while
+// written and admitted once settled; what is deferred when the watcher
+// stops is dropped and never re-checked.
+func TestLiveWatcherAdmitsLinkingVersionAfterGraceAndStopForgets(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	mkdirs(t, filepath.Join(cache, "mkt", "pid1"))
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, func(r AdmissionResult) {
+		mu.Lock()
+		seen[r.Event.Name] = true
+		mu.Unlock()
+	})
+	clock := &stagingTestClock{}
+	w.stagingClock = clock.now
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Run(ctx) }()
+	time.Sleep(500 * time.Millisecond)
+
+	deferred := func(path string) bool {
+		w.stagingMu.Lock()
+		defer w.stagingMu.Unlock()
+		_, ok := w.stagingDeferred[path]
+		return ok
+	}
+	waitFor := func(what string, cond func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); !cond(); time.Sleep(50 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting: %s", what)
+			}
+		}
+	}
+	admitted := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen["pid1@mkt"]
+	}
+
+	linked := filepath.Join(cache, "mkt", "pid1", "1.0.0-x.linking-1")
+	writeManifest(t, linked, "pid1")
+	waitFor("the linking folder deferred", func() bool { return deferred(linked) })
+	time.Sleep(1500 * time.Millisecond)
+	if admitted() {
+		t.Fatal("a version folder being written was admitted")
+	}
+	clock.advance(claudeStagingGrace + time.Minute)
+	waitFor("the settled .linking- version admitted", admitted)
+
+	// Back to the real time, so the next folder is one being written.
+	clock.offset.Store(0)
+	other := filepath.Join(cache, "mkt", "pid1", "2.0.0.linking-9")
+	writeManifest(t, other, "pid1")
+	waitFor("the second linking folder deferred", func() bool { return deferred(other) })
+	cancel()
+	<-errCh
+	w.stagingMu.Lock()
+	left := len(w.stagingDeferred) + len(w.stagingSeen)
+	w.stagingMu.Unlock()
+	if left != 0 {
+		t.Fatalf("deferred installs kept after stop: %d", left)
+	}
+	clock.advance(time.Hour)
+	w.recheckClaudeStaging(func(path string, _ int) { t.Errorf("re-checked %s after stop", path) })
 }

@@ -219,6 +219,17 @@ type InstallWatcher struct {
 	pending          map[string]time.Time // path → first-seen, for debounce
 	quarantineMoveMu sync.Mutex
 
+	// stagingMu guards the Claude Code installs in flight the watcher
+	// left alone and looks at again (claude_plugin_staging.go):
+	// stagingSeen is when each folder was first seen, stagingDeferred the
+	// paths to re-check with their cache depth. stagingClock is a test
+	// clock (nil: time.Now).
+	stagingMu        sync.Mutex
+	stagingSeen      map[string]time.Time
+	stagingDeferred  map[string]int
+	stagingNextCheck time.Time
+	stagingClock     func() time.Time
+
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
 	// (empty or category folders, GAP-2449) and skill folders without a
 	// markdown file yet (GAP-0900); they are watched for what lands in them,
@@ -1652,6 +1663,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			stopLoops()
 			w.loops.Wait()
 			w.admissions.Wait()
+			w.forgetClaudeStaging()
 			w.state.reset()
 			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")
 			return ctx.Err()
@@ -1709,6 +1721,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if w.cacheLayoutPlugins(event.Name) {
 				if depth, inside := w.claudeCacheDepth(event.Name); inside {
 					if w.inClaudePluginStaging(event.Name, 0) {
+						w.deferClaudeStaging(event.Name, depth)
 						continue
 					}
 					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
@@ -1814,6 +1827,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			for key, root := range roots {
 				rewatchRoot(key, root)
 			}
+			w.recheckClaudeStaging(func(path string, depth int) {
+				if depth < 3 {
+					addClaudeCacheWatches(fsw, path, watchedDirs)
+				}
+				w.admitClaudeStaging(ctx, path, depth)
+			})
 			if len(deferredDirs) > 0 {
 				waiting := deferredDirs
 				deferredDirs = nil
@@ -4747,6 +4766,7 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		}
 		child := filepath.Join(dir, entry.Name())
 		if w.inClaudePluginStaging(child, 0) {
+			w.deferClaudeStaging(child, depth+1)
 			continue
 		}
 		if root, copied := w.cachePluginCopyRoot(child); copied {
