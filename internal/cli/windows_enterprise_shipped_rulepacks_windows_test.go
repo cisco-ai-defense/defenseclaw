@@ -10,11 +10,13 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/productlayout"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -52,29 +54,75 @@ func windowsShippedRulePacksTestRoot(t *testing.T) string {
 	return root
 }
 
-// windowsShippedRulePacksTestUser is this token's user when it is not
-// Administrators or LocalSystem, so a folder it owns is untrusted.
-func windowsShippedRulePacksTestUser(t *testing.T) *windows.SID {
+// windowsShippedRulePacksStandardOwner is BUILTIN\Users: a principal that is
+// neither a canonical owner (SYSTEM, Administrators, TrustedInstaller) nor
+// administrator-equivalent, so the trust check refuses what it owns. The
+// test account cannot be used for that: on a hosted runner it is the built-in
+// Administrator (RID 500), whose ownership the trust check accepts as drift
+// (rel-1-0-10:GAP-0093).
+func windowsShippedRulePacksStandardOwner(t *testing.T) *windows.SID {
+	t.Helper()
+	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if managed.WindowsAdminEquivalentPrincipal(sid) {
+		t.Fatalf("%s is administrator-equivalent on this computer", sid)
+	}
+	return sid
+}
+
+// windowsShippedRulePacksAdminOwner is this token's user when it is an
+// administrator principal outside the canonical set (the built-in
+// Administrator, a direct member of local Administrators).
+func windowsShippedRulePacksAdminOwner(t *testing.T) *windows.SID {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
 	}
 	sid := user.User.Sid
-	if sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
-		t.Skip("the test account is LocalSystem; no untrusted owner to set")
+	if !managed.WindowsAdminEquivalentPrincipal(sid) {
+		t.Skipf("the test account %s is not an administrator principal outside the canonical set", sid)
 	}
 	return sid
 }
 
+// setWindowsShippedRulePacksTestOwner makes owner the owner of path. Only
+// SeRestorePrivilege lets an administrator give an object an owner that is
+// not in its own token, so it is enabled on an impersonation token of this
+// locked thread for the one call.
 func setWindowsShippedRulePacksTestOwner(t *testing.T, path string, owner *windows.SID) {
 	t.Helper()
 	extended, err := winpath.Extended(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = windows.RevertToSelf() }()
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, false, &token); err != nil {
+		t.Fatal(err)
+	}
+	defer token.Close()
+	name, err := windows.UTF16PtrFromString("SeRestorePrivilege")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privileges := windows.Tokenprivileges{PrivilegeCount: 1}
+	if err := windows.LookupPrivilegeValue(nil, name, &privileges.Privileges[0].Luid); err != nil {
+		t.Fatal(err)
+	}
+	privileges.Privileges[0].Attributes = windows.SE_PRIVILEGE_ENABLED
+	if err := windows.AdjustTokenPrivileges(token, false, &privileges, 0, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
-		t.Fatalf("set the owner of %s: %v", path, err)
+		t.Fatalf("set the owner of %s to %s: %v", path, owner, err)
 	}
 }
 
@@ -141,7 +189,7 @@ func TestWindowsShippedRulePacksConverges(t *testing.T) {
 // adopted, and the packs land in a root Administrators own.
 func TestWindowsShippedRulePacksRealTrustMovesAnUntrustedRootAside(t *testing.T) {
 	root := windowsShippedRulePacksTestRoot(t)
-	user := windowsShippedRulePacksTestUser(t)
+	user := windowsShippedRulePacksStandardOwner(t)
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -197,11 +245,11 @@ func TestWindowsShippedRulePacksRealTrustRewritesALinkInside(t *testing.T) {
 }
 
 // TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild covers a folder
-// inside the release folder that a standard account owns (it keeps WRITE_DAC
-// over it): the real trust check refuses it and the folder is replaced.
+// inside the release folder that a standard principal owns (BUILTIN\\Users;
+// it keeps WRITE_DAC over it): the real trust check refuses it and the folder is replaced.
 func TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild(t *testing.T) {
 	windowsShippedRulePacksTestRoot(t)
-	user := windowsShippedRulePacksTestUser(t)
+	user := windowsShippedRulePacksStandardOwner(t)
 	files := windowsShippedRulePacksTestFiles(t)
 	folder, _, _, err := installWindowsShippedRulePacks()
 	if err != nil {
@@ -216,5 +264,29 @@ func TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild(t *testing.T) {
 	}
 	if problem := windowsShippedRulePacksProblem(folder, files, ""); problem != "" {
 		t.Fatalf("rewritten folder: %s", problem)
+	}
+}
+
+// TestWindowsShippedRulePacksRealTrustAcceptsAnAdministratorOwnedChild records
+// the design (rel-1-0-10:GAP-0093): a folder inside the release folder owned
+// by an administrator principal outside the canonical set (the built-in
+// Administrator, a local Administrators member) is accepted as drift and
+// logged (managed_trust_drift_advisory), as every managed trust check does:
+// an administrator can take ownership of any file, so refusing one adds no
+// protection. The pack is still this release's bytes, so nothing is rewritten.
+func TestWindowsShippedRulePacksRealTrustAcceptsAnAdministratorOwnedChild(t *testing.T) {
+	windowsShippedRulePacksTestRoot(t)
+	admin := windowsShippedRulePacksAdminOwner(t)
+	files := windowsShippedRulePacksTestFiles(t)
+	folder, _, _, err := installWindowsShippedRulePacks()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsShippedRulePacksTestOwner(t, filepath.Join(folder, "strict", "rules"), admin)
+	if problem := windowsShippedRulePacksProblem(folder, files, ""); problem != "" {
+		t.Fatalf("an administrator-owned folder inside = %q, want it accepted as drift", problem)
+	}
+	if _, changed, _, err := installWindowsShippedRulePacks(); err != nil || changed {
+		t.Fatalf("run over an administrator-owned folder changed %v, %v; want no change", changed, err)
 	}
 }

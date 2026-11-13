@@ -73,6 +73,15 @@ locals {
       { property = "gen_ai.agent.name", alias = "agent" },
       { property = "gen_ai.request.model", alias = "model" },
     ]
+    tokenomics_cost = [
+      { property = "deployment.environment.name", alias = "environment" },
+      { property = "service.name", alias = "service" },
+      { property = "connector", alias = "connector" },
+      { property = "provider", alias = "provider" },
+      { property = "model", alias = "price entry" },
+      { property = "route_decision", alias = "route decision" },
+      { property = "profile", alias = "guardrail profile" },
+    ]
     runtime_reliability = concat(local.common_dashboard_variables, [
       { property = "http.route", alias = "route" },
       { property = "sink", alias = "batch sink" },
@@ -455,6 +464,69 @@ locals {
         O54 = data('gen_ai.client.token.usage', filter=filter('gen_ai.operation.name', 'chat') and filter('gen_ai.token.type', 'output') and filter('gen_ai.request.model', 'gpt-5.4'), rollup='sum').sum().sum(over=Args.get('ui.dashboard_window', '31d')).scale(0.00001500).fill(0)
         O55 = data('gen_ai.client.token.usage', filter=filter('gen_ai.operation.name', 'chat') and filter('gen_ai.token.type', 'output') and filter('gen_ai.request.model', 'gpt-5.5'), rollup='sum').sum().sum(over=Args.get('ui.dashboard_window', '31d')).scale(0.00003000).fill(0)
         C = (O4O + O41 + O54M + O54 + O55).publish(label='Output USD')
+      EOT
+    }
+    tokcost_total_cost = {
+      name        = "Model cost (USD)"
+      description = "USD cost of model calls in the selected time range. Calls with no known price add nothing, so this is a floor."
+      program     = <<-EOT
+        TA = data('defenseclaw.model.cost', extrapolation='zero', rollup='delta')
+        TB = data('defenseclaw.model.cost', extrapolation='zero', rollup='latest')
+        TC = TA.delta()
+        T = (TA if TC is not None else TB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        T.publish(label='Cost USD')
+      EOT
+    }
+    tokcost_total_tokens = {
+      name        = "Model tokens"
+      description = "Disjoint model tokens (uncached input, cache read, cache creation, output, reasoning) in the selected time range."
+      program     = <<-EOT
+        TA = data('defenseclaw.model.tokens', extrapolation='zero', rollup='delta')
+        TB = data('defenseclaw.model.tokens', extrapolation='zero', rollup='latest')
+        TC = TA.delta()
+        T = (TA if TC is not None else TB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        T.publish(label='Tokens')
+      EOT
+    }
+    tokcost_cache_read_share = {
+      name        = "Cache-read share of prompt tokens"
+      description = "cache_read / (input + cache_read + cache_creation) over the selected time range."
+      program     = <<-EOT
+        NA = data('defenseclaw.model.tokens', filter=filter('kind', 'cache_read'), extrapolation='zero', rollup='delta')
+        NB = data('defenseclaw.model.tokens', filter=filter('kind', 'cache_read'), extrapolation='zero', rollup='latest')
+        NC = NA.delta()
+        N = (NA if NC is not None else NB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        TA = data('defenseclaw.model.tokens', filter=filter('kind', 'input', 'cache_read', 'cache_creation'), extrapolation='zero', rollup='delta')
+        TB = data('defenseclaw.model.tokens', filter=filter('kind', 'input', 'cache_read', 'cache_creation'), extrapolation='zero', rollup='latest')
+        TC = TA.delta()
+        T = (TA if TC is not None else TB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        (N / T).publish(label='Cache-read share')
+      EOT
+    }
+    tokcost_reasoning_share = {
+      name        = "Reasoning share of output tokens"
+      description = "reasoning / (output + reasoning) over the selected time range."
+      program     = <<-EOT
+        NA = data('defenseclaw.model.tokens', filter=filter('kind', 'reasoning'), extrapolation='zero', rollup='delta')
+        NB = data('defenseclaw.model.tokens', filter=filter('kind', 'reasoning'), extrapolation='zero', rollup='latest')
+        NC = NA.delta()
+        N = (NA if NC is not None else NB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        TA = data('defenseclaw.model.tokens', filter=filter('kind', 'output', 'reasoning'), extrapolation='zero', rollup='delta')
+        TB = data('defenseclaw.model.tokens', filter=filter('kind', 'output', 'reasoning'), extrapolation='zero', rollup='latest')
+        TC = TA.delta()
+        T = (TA if TC is not None else TB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        (N / T).publish(label='Reasoning share')
+      EOT
+    }
+    tokcost_dropped = {
+      name        = "Usage records dropped"
+      description = "Usage records dropped because the bounded queue was full. Above zero means the cost and token counters undercount."
+      program     = <<-EOT
+        TA = data('defenseclaw.tokenomics.dropped', extrapolation='zero', rollup='delta')
+        TB = data('defenseclaw.tokenomics.dropped', extrapolation='zero', rollup='latest')
+        TC = TA.delta()
+        T = (TA if TC is not None else TB).sum().sum(over=Args.get('ui.dashboard_window', '31d'))
+        T.publish(label='Dropped')
       EOT
     }
     runtime_total_gateway_errors = {
@@ -1015,6 +1087,66 @@ locals {
       axis_label  = "tokens"
       program     = <<-EOT
         A = data('gen_ai.client.token.usage', filter=filter('gen_ai.operation.name', 'chat'), rollup='sum').sum(by=['gen_ai.token.type']).publish(label='Tokens')
+      EOT
+    }
+    tokcost_by_model = {
+      name        = "Cost by model"
+      description = "Model cost per minute by matched price-table entry."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "USD / min"
+      program     = <<-EOT
+        A = data('defenseclaw.model.cost', rollup='rate').sum(by=['model']).scale(60).publish(label='USD / min')
+      EOT
+    }
+    tokcost_by_route = {
+      name        = "Cost by route decision"
+      description = "Model cost per minute by router decision."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "USD / min"
+      program     = <<-EOT
+        A = data('defenseclaw.model.cost', rollup='rate').sum(by=['route_decision']).scale(60).publish(label='USD / min')
+      EOT
+    }
+    tokcost_by_connector = {
+      name        = "Cost by connector"
+      description = "Model cost per minute by agent connector."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "USD / min"
+      program     = <<-EOT
+        A = data('defenseclaw.model.cost', rollup='rate').sum(by=['connector']).scale(60).publish(label='USD / min')
+      EOT
+    }
+    tokcost_by_profile = {
+      name        = "Cost by guardrail profile"
+      description = "Model cost per minute by guardrail profile."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "USD / min"
+      program     = <<-EOT
+        A = data('defenseclaw.model.cost', rollup='rate').sum(by=['profile']).scale(60).publish(label='USD / min')
+      EOT
+    }
+    tokcost_tokens_by_kind = {
+      name        = "Tokens by kind"
+      description = "Disjoint token kinds per minute: input (uncached), cache_read, cache_creation, output, reasoning."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "tokens / min"
+      program     = <<-EOT
+        A = data('defenseclaw.model.tokens', rollup='rate').sum(by=['kind']).scale(60).publish(label='Tokens / min')
+      EOT
+    }
+    tokcost_dropped_rate = {
+      name        = "Dropped usage records"
+      description = "Usage records dropped per minute."
+      plot_type   = "LineChart"
+      stacked     = false
+      axis_label  = "records / min"
+      program     = <<-EOT
+        A = data('defenseclaw.tokenomics.dropped', rollup='rate').sum().scale(60).publish(label='Dropped / min')
       EOT
     }
     token_estimated_cost_by_agent = {
@@ -1605,6 +1737,11 @@ locals {
     token_tokens_by_model           = "gen_ai.request.model"
     token_input_vs_output           = "gen_ai.token.type"
     token_estimated_cost_by_agent   = "gen_ai.agent.name"
+    tokcost_by_model                = "model"
+    tokcost_by_route                = "route_decision"
+    tokcost_by_connector            = "connector"
+    tokcost_by_profile              = "profile"
+    tokcost_tokens_by_kind          = "kind"
     policy_evaluations_by_domain    = "policy.verdict"
     findings_by_severity            = "severity"
     findings_by_scanner             = "scanner"
@@ -1709,6 +1846,23 @@ locals {
         B = data('defenseclaw.codex.notify', extrapolation='zero', rollup='latest')
         C = A.delta()
         D = (A if C is not None else B).sum(by=['type', 'status', 'result']).sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Codex notify')
+      EOT
+    }
+    tokcost_table = {
+      name        = "Model cost and tokens"
+      description = "Cost and tokens in the selected time range by connector, provider, model, route decision and profile."
+      group_by    = ["connector", "provider", "model", "route_decision", "profile"]
+      program     = <<-EOT
+        CA = data('defenseclaw.model.cost', extrapolation='zero', rollup='delta')
+        CB = data('defenseclaw.model.cost', extrapolation='zero', rollup='latest')
+        CC = CA.delta()
+        C = (CA if CC is not None else CB).sum(by=['connector', 'provider', 'model', 'route_decision', 'profile']).sum(over=Args.get('ui.dashboard_window', '31d'))
+        C.publish(label='Cost USD')
+        KA = data('defenseclaw.model.tokens', extrapolation='zero', rollup='delta')
+        KB = data('defenseclaw.model.tokens', extrapolation='zero', rollup='latest')
+        KC = KA.delta()
+        K = (KA if KC is not None else KB).sum(by=['connector', 'provider', 'model', 'route_decision', 'profile']).sum(over=Args.get('ui.dashboard_window', '31d'))
+        K.publish(label='Tokens')
       EOT
     }
     token_agent_table = {
@@ -1854,6 +2008,20 @@ locals {
       { type = "time", key = "token_input_vs_output", row = 2, column = 8, width = 4, height = 2 },
       { type = "time", key = "token_estimated_cost_by_agent", row = 4, column = 0, width = 6, height = 2 },
       { type = "table", key = "token_agent_table", row = 4, column = 6, width = 6, height = 2 },
+    ]
+    tokenomics_cost = [
+      { type = "single", key = "tokcost_total_cost", row = 0, column = 0, width = 2, height = 1 },
+      { type = "single", key = "tokcost_total_tokens", row = 0, column = 2, width = 2, height = 1 },
+      { type = "single", key = "tokcost_cache_read_share", row = 0, column = 4, width = 3, height = 1 },
+      { type = "single", key = "tokcost_reasoning_share", row = 0, column = 7, width = 3, height = 1 },
+      { type = "single", key = "tokcost_dropped", row = 0, column = 10, width = 2, height = 1 },
+      { type = "time", key = "tokcost_by_model", row = 1, column = 0, width = 6, height = 2 },
+      { type = "time", key = "tokcost_by_route", row = 1, column = 6, width = 6, height = 2 },
+      { type = "time", key = "tokcost_by_connector", row = 3, column = 0, width = 6, height = 2 },
+      { type = "time", key = "tokcost_by_profile", row = 3, column = 6, width = 6, height = 2 },
+      { type = "time", key = "tokcost_tokens_by_kind", row = 5, column = 0, width = 6, height = 2 },
+      { type = "time", key = "tokcost_dropped_rate", row = 5, column = 6, width = 6, height = 2 },
+      { type = "table", key = "tokcost_table", row = 7, column = 0, width = 12, height = 2 },
     ]
     runtime_reliability = [
       { type = "single", key = "runtime_total_gateway_errors", row = 0, column = 0, width = 2, height = 1 },
@@ -2110,6 +2278,42 @@ resource "signalfx_dashboard" "token_economics" {
 
   dynamic "chart" {
     for_each = local.dashboard_layouts.token_economics
+    iterator = dashboard_chart
+
+    content {
+      chart_id = (
+        dashboard_chart.value.type == "single" ? signalfx_single_value_chart.single[dashboard_chart.value.key].id :
+        dashboard_chart.value.type == "time" ? signalfx_time_chart.time[dashboard_chart.value.key].id :
+        signalfx_table_chart.table[dashboard_chart.value.key].id
+      )
+      width  = dashboard_chart.value.width
+      height = dashboard_chart.value.height
+      row    = dashboard_chart.value.row
+      column = dashboard_chart.value.column
+    }
+  }
+}
+
+resource "signalfx_dashboard" "tokenomics_cost" {
+  name            = "DefenseClaw Model Cost and Tokens${local.display_name_suffix}"
+  description     = "Cost and tokens of model calls from the defenseclaw.model.cost and defenseclaw.model.tokens counters: by model, route decision, connector and profile, token kinds, cache-read and reasoning shares and dropped usage records. Calls with absent cost, routed against requested model and top users come from model.usage logs and are on the Splunk Model Tokenomics view and the Grafana Tokenomics dashboard; metrics carry no user label."
+  dashboard_group = signalfx_dashboard_group.defenseclaw_o11y.id
+  time_range      = "-31d"
+  tags            = ["defenseclaw", "genai", "tokenomics", "cost", "otel"]
+
+  dynamic "variable" {
+    for_each = local.dashboard_variables.tokenomics_cost
+    iterator = dashboard_var
+
+    content {
+      property       = dashboard_var.value.property
+      alias          = dashboard_var.value.alias
+      apply_if_exist = true
+    }
+  }
+
+  dynamic "chart" {
+    for_each = local.dashboard_layouts.tokenomics_cost
     iterator = dashboard_chart
 
     content {
