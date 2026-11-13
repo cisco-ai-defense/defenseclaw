@@ -95,8 +95,12 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		body = io.NopCloser(bytes.NewReader(plaintext))
 	}
 	r.Body = http.MaxBytesReader(w, body, acp.MaxTurnEvaluationBytes+(64<<10))
+	// A field this gateway does not know is ignored, never a refusal: a guard
+	// that is newer than the gateway it talks to (session_cwd and
+	// tool_call_state were added to the evaluation after 1.0.9, and a gateway
+	// that has not restarted since an upgrade does not know them) must not have
+	// every frame refused; it only loses what the field tells.
 	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
 	var req acp.Evaluation
 	if err := decoder.Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ACP evaluation body"})

@@ -41,19 +41,29 @@ func (m *lruMap[V]) has(key string) bool {
 }
 
 // put stores value under key and marks it used. A full map drops its least
-// recently used entry first.
-func (m *lruMap[V]) put(key string, value V) {
+// recently used entry first, and put reports that entry's key.
+func (m *lruMap[V]) put(key string, value V) (evicted string, dropped bool) {
 	if element, ok := m.entries[key]; ok {
 		element.Value.(*lruEntry[V]).value = value
 		m.order.MoveToFront(element)
-		return
+		return "", false
 	}
 	for len(m.entries) >= m.max && m.order.Len() > 0 {
 		oldest := m.order.Back()
-		delete(m.entries, oldest.Value.(*lruEntry[V]).key)
+		evicted, dropped = oldest.Value.(*lruEntry[V]).key, true
+		delete(m.entries, evicted)
 		m.order.Remove(oldest)
 	}
 	m.entries[key] = m.order.PushFront(&lruEntry[V]{key: key, value: value})
+	return evicted, dropped
+}
+
+// remove drops key.
+func (m *lruMap[V]) remove(key string) {
+	if element, ok := m.entries[key]; ok {
+		delete(m.entries, key)
+		m.order.Remove(element)
+	}
 }
 
 func (m *lruMap[V]) len() int { return len(m.entries) }

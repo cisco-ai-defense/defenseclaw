@@ -91,7 +91,7 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 			return acpFrameAction{calls: []acpToolCall{{unread: true}}, enforceable: true}, true
 		}
 		toolCall, merged := acpMergeToolCall(req.ToolCallState, params.ToolCall)
-		calls, prose, read := acpToolCallUpdateCalls(toolCall, goos, true)
+		calls, prose, read := acpToolCallUpdateCalls(toolCall, goos, true, merged)
 		return acpFrameAction{calls: calls, enforceable: true, prose: prose, trunc: merged.Union(read)}, true
 	case "session/update":
 		var params struct {
@@ -115,7 +115,7 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 			// a status or output update alone names no action.
 			update2, merged = acpMergeToolCall(req.ToolCallState, update2)
 		}
-		calls, prose, read := acpToolCallUpdateCalls(update2, goos, false)
+		calls, prose, read := acpToolCallUpdateCalls(update2, goos, false, merged)
 		if len(calls) == 0 {
 			// A status or output report names no action: its text is agent
 			// output, judged as before.
@@ -205,19 +205,24 @@ func acpFileCall(method string, raw json.RawMessage) acpToolCall {
 // permission's toolCall, a tool_call report) as the tool calls it performs:
 // by its kind, from its rawInput and locations. prose is its other text
 // (title, content blocks). A report that names no input gives no calls; a
-// permission for an action it does not show is refused as unread. trunc holds
+// permission for an action it does not show is refused as unread, unless
+// carried says the guard's state of the call was cut or dropped: then the
+// action is not known and the frame is judged at the unknown tier. trunc holds
 // the caps hit: more locations than acpMaxFrameToolCalls (the first ones are
 // judged), or an action whose shape could not be fixed.
 //
-// A call without a kind (the field is optional in an update, and the kind may
-// have come only in the first report) is read by the shape of its input, as
-// the effects model reads it: a command is a shell call, text to write or a
-// replacement is a Write or Edit of its location, a location alone is a Write
-// of it (a permission is asked before the action, so the strictest file
-// reading applies). It is never judged as a generic tool, which reads its
-// locations as reads (rel-1-0-10:GAP-0330).
-func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (calls []acpToolCall, prose string, caps bounded.CapSet) {
-	var trunc bounded.Truncated // one per reading, never copied
+// Only a read reads. Every other kind is an action on its locations and they
+// are judged as writes: an edit, a delete, a move (a write of the destination
+// and a delete of the source), and the kinds that name no file action of their
+// own (search, other, think...), whose locations are not known to be only read
+// (rel-1-0-10:GAP-0373). A call without a kind (the field is optional in an
+// update, and the kind may have come only in the first report, which the guard
+// merges in) is read by the shape of its input: a command is a shell call, text
+// to write or a replacement is a Write or Edit of its location. A location or
+// input that shows no action at all is unknown: judged as a read and raised to
+// the unknown tier of the pack, never a write the input does not show
+// (rel-1-0-10:GAP-0330, GAP-0375).
+func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool, carried bounded.CapSet) (calls []acpToolCall, prose string, caps bounded.CapSet) {
 	var call struct {
 		Kind      string          `json:"kind"`
 		Title     string          `json:"title"`
@@ -226,6 +231,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 			Path string `json:"path"`
 		} `json:"locations"`
 	}
+	var trunc bounded.Truncated // one per reading, never copied
 	if json.Unmarshal(raw, &call) != nil {
 		if permission {
 			return []acpToolCall{{unread: true}}, "", trunc.Set()
@@ -239,19 +245,43 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	if path := acpInputString(input, "file_path", "filePath", "path", "absolute_path", "abs_path", "target_file", "notebook_path"); path != "" {
 		paths = append(paths, path)
 	}
-	for _, location := range call.Locations {
-		path := strings.TrimSpace(location.Path)
+	addPath := func(path string) bool {
+		path = strings.TrimSpace(path)
 		if path == "" || slices.Contains(paths, path) {
-			continue
+			return true
 		}
 		if len(paths) == acpMaxFrameToolCalls {
 			trunc.Hit(bounded.Locations)
-			break
+			return false
 		}
 		paths = append(paths, path)
+		return true
+	}
+	for _, location := range call.Locations {
+		if !addPath(location.Path) {
+			break
+		}
+	}
+	// A move names its two ends in its input as often as in its locations.
+	sources := acpInputPaths(input, "source", "src", "from", "old_path", "oldPath", "source_path", "sourcePath", "old_file_path")
+	destinations := acpInputPaths(input, "destination", "dest", "dst", "to", "new_path", "newPath", "destination_path", "destinationPath", "target", "new_file_path")
+	if call.Kind == "move" {
+		for _, path := range append(slices.Clone(sources), destinations...) {
+			if !addPath(path) {
+				break
+			}
+		}
 	}
 	if !hasInput && len(paths) == 0 {
 		if permission {
+			if carried.Any() {
+				// The guard cut or dropped what it kept of this call, so the
+				// permission that names only its id shows no action: not known,
+				// judged by the unknown tier, not a refusal as unreadable.
+				// The judge, where one is configured, is shown what the agent did
+				// show of the call: its id and title.
+				return []acpToolCall{{tool: "acp_tool", args: raw}}, prose, trunc.Set()
+			}
 			// The editor is asked to allow an action the frame does not
 			// show: it cannot be shown to be safe.
 			return []acpToolCall{{unread: true}}, prose, trunc.Set()
@@ -271,8 +301,13 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 		switch {
 		case hasCommand:
 			kind = "execute"
-		case len(paths) > 0:
+		case len(paths) > 0 && (hasContent || hasOld && hasNew):
 			kind = "edit"
+		case len(paths) > 0:
+			// A path and no text to write: the action it asks for is not
+			// shown. Read as a read, at the unknown tier.
+			kind = "read"
+			trunc.Hit(bounded.Items)
 		default:
 			// An input that names no command and no location: the action it
 			// performs is not known.
@@ -290,6 +325,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 			calls = append(calls, acpToolCall{tool: tool, args: acpMarshal(args(path))})
 		}
 	}
+	write := func(path string) map[string]string { return map[string]string{"file_path": path} }
 	switch kind {
 	case "execute":
 		command, ok := acpInputCommand(input, goos)
@@ -305,7 +341,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 		return []acpToolCall{{tool: "shell", args: acpCommandArgs(command),
 			cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}}, prose, trunc.Set()
 	case "read":
-		addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
+		addPaths("Read", write)
 	case "edit":
 		addPaths("Write", func(path string) map[string]string {
 			switch {
@@ -314,13 +350,30 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 			case hasContent && path == paths[0]:
 				return map[string]string{"file_path": path, "content": content}
 			}
-			return map[string]string{"file_path": path}
+			return write(path)
 		})
 		if hasOld && hasNew && len(calls) > 0 {
 			calls[0].tool = "Edit"
 		}
 	case "delete":
 		addPaths("delete_file", func(path string) map[string]string { return map[string]string{"path": path} })
+	case "move":
+		// The source goes (a delete), the destination is written. An end the
+		// input does not name as one is both.
+		for _, path := range paths {
+			if added >= acpMaxFrameToolCalls {
+				trunc.Hit(bounded.Locations)
+				break
+			}
+			added++
+			isSource, isDestination := slices.Contains(sources, path), slices.Contains(destinations, path)
+			if isSource || !isDestination {
+				calls = append(calls, acpToolCall{tool: "delete_file", args: acpMarshal(map[string]string{"path": path})})
+			}
+			if isDestination || !isSource {
+				calls = append(calls, acpToolCall{tool: "Write", args: acpMarshal(write(path))})
+			}
+		}
 	case "fetch":
 		if url := acpInputString(input, "url", "uri"); url != "" {
 			calls = append(calls, acpToolCall{tool: "WebFetch", args: acpMarshal(map[string]string{"url": url})})
@@ -329,16 +382,43 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	if len(calls) > 0 {
 		return calls, prose, trunc.Set()
 	}
-	// Any other kind (search, move, think, other) or a kind the input does
-	// not fit: a tool call under the tool's name, read by the non-shell tool
-	// lane, with each location judged as a read of that path.
+	// Any other kind (search, other, think, ...) or a kind the input does not
+	// fit: a tool call under the tool's name, read by the non-shell tool lane,
+	// with each location judged as a write of that path: a tool of that kind
+	// is not shown to only read it.
 	args := call.RawInput
 	if !hasInput {
 		args = json.RawMessage(`{}`)
 	}
 	calls = append(calls, acpToolCall{tool: acpToolName(call.Title, kind), args: args})
-	addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
+	addPaths("Write", write)
 	return calls, prose, trunc.Set()
+}
+
+// acpInputPaths are the paths the input names under keys (a string or a list
+// of strings).
+func acpInputPaths(input map[string]json.RawMessage, keys ...string) []string {
+	var out []string
+	for _, key := range keys {
+		raw, ok := input[key]
+		if !ok {
+			continue
+		}
+		var one string
+		var many []string
+		switch {
+		case json.Unmarshal(raw, &one) == nil:
+			many = []string{one}
+		case json.Unmarshal(raw, &many) != nil:
+			continue
+		}
+		for _, path := range many {
+			if path = strings.TrimSpace(path); path != "" && !slices.Contains(out, path) {
+				out = append(out, path)
+			}
+		}
+	}
+	return out
 }
 
 // acpUpdateNamesAnAction reports that a tool_call report carries the kind,
@@ -358,8 +438,8 @@ func acpUpdateNamesAnAction(raw json.RawMessage) bool {
 
 // acpMergeToolCall applies a ToolCallUpdate (own) onto the fields the guard
 // kept of the call it names (state, Evaluation.ToolCallState), as the editor
-// does: a field own holds replaces the kept one. A field the guard left out
-// of the state for size is a cap hit.
+// does: a field own holds replaces the kept one. A field the guard cut or left
+// out of the state for size, or a state it dropped to make room, is a cap hit.
 func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapSet) {
 	var trunc bounded.Truncated
 	if len(state) == 0 {
@@ -371,6 +451,7 @@ func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapS
 		RawInput  json.RawMessage `json:"rawInput"`
 		Locations json.RawMessage `json:"locations"`
 		Truncated bool            `json:"truncated"`
+		Dropped   bool            `json:"dropped"`
 	}
 	var fields map[string]json.RawMessage
 	if len(state) > acp.MaxFrameBytes || json.Unmarshal(state, &kept) != nil || json.Unmarshal(own, &fields) != nil || fields == nil {
@@ -378,6 +459,9 @@ func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapS
 	}
 	if kept.Truncated {
 		trunc.Hit(bounded.Bytes)
+	}
+	if kept.Dropped {
+		trunc.Hit(bounded.Items)
 	}
 	for name, value := range map[string]json.RawMessage{"kind": kept.Kind, "title": kept.Title, "rawInput": kept.RawInput, "locations": kept.Locations} {
 		if len(value) == 0 {

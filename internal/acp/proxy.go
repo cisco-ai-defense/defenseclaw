@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os/exec"
 	"slices"
 	"strings"
@@ -191,10 +192,12 @@ type proxyState struct {
 	sessionCWDs    *lruMap[string]
 	newSessionCWDs map[string]string
 	// toolCalls holds, per session and toolCallId, the fields of the tool
-	// call the agent has reported so far (kind, title, rawInput, locations),
-	// as the editor merges them: a permission or an update that omits the
-	// kind is judged with the kind of the call it belongs to (GAP-0330).
-	toolCalls *lruMap[json.RawMessage]
+	// call the agent has reported so far, as the editor merges them
+	// (ToolCallTracker, GAP-0330).
+	toolCalls ToolCallTracker
+	// legacyGateway: the gateway refused an evaluation that held session_cwd
+	// or tool_call_state (it predates them).
+	legacyGateway bool
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
@@ -278,15 +281,10 @@ func (s *proxyState) recordFailMode(session string, verdict Verdict) {
 	}
 }
 
-// maxTrackedSessions and maxTrackedToolCalls bound what one guard remembers;
-// the least recently used entry goes first. The gateway judges a frame of an
-// unknown session or tool call at the unknown tier, never as clean.
-const (
-	maxTrackedSessions  = 1024
-	maxTrackedToolCalls = 256
-	// maxToolCallStateBytes bounds the state kept and sent for one tool call.
-	maxToolCallStateBytes = 64 << 10
-)
+// maxTrackedSessions bounds the session directories one guard remembers; the
+// least recently used goes first. The gateway judges a frame of an unknown
+// session at the unknown tier, never as clean.
+const maxTrackedSessions = 1024
 
 // noteSessionCWD remembers the working directory of a session the editor
 // starts: session/load and session/resume name the session and its directory;
@@ -362,92 +360,33 @@ func (s *proxyState) sessionCWD(session string) string {
 	return cwd
 }
 
-// toolCallFields are the fields of a tool call the guard keeps and sends.
-type toolCallFields struct {
-	Kind      json.RawMessage `json:"kind,omitempty"`
-	Title     json.RawMessage `json:"title,omitempty"`
-	RawInput  json.RawMessage `json:"rawInput,omitempty"`
-	Locations json.RawMessage `json:"locations,omitempty"`
-	// Truncated says a field was left out for size.
-	Truncated bool `json:"truncated,omitempty"`
-}
-
-// toolCallOf reads the tool call a session/update (tool_call and
-// tool_call_update) or a session/request_permission frame names: its
-// session, its toolCallId and the object that holds its fields.
-func toolCallOf(msg Message) (session, id string, fields map[string]json.RawMessage, ok bool) {
-	if msg.Method != "session/update" && msg.Method != "session/request_permission" {
-		return "", "", nil, false
-	}
-	var params map[string]json.RawMessage
-	if json.Unmarshal(msg.Params, &params) != nil {
-		return "", "", nil, false
-	}
-	_ = json.Unmarshal(params["sessionId"], &session)
-	key := "toolCall"
-	if msg.Method == "session/update" {
-		key = "update"
-	}
-	if json.Unmarshal(params[key], &fields) != nil || fields == nil {
-		return "", "", nil, false
-	}
-	if msg.Method == "session/update" {
-		var kind string
-		_ = json.Unmarshal(fields["sessionUpdate"], &kind)
-		if kind != "tool_call" && kind != "tool_call_update" {
-			return "", "", nil, false
-		}
-	}
-	if json.Unmarshal(fields["toolCallId"], &id) != nil || id == "" || session == "" {
-		return "", "", nil, false
-	}
-	return session, id, fields, true
-}
-
-// foldToolCall merges the tool call a frame names into the state kept for it
-// (a field the frame holds replaces the kept one, as the editor applies an
-// update) and returns the state as it was before the frame, which the gateway
-// merges the frame onto. It returns nil for a frame that names no tool call
-// or one the guard has not seen.
-func (s *proxyState) foldToolCall(msg Message) json.RawMessage {
-	session, id, fields, ok := toolCallOf(msg)
-	if !ok {
-		return nil
-	}
-	key := session + "\x00" + id
+// gatewayIgnoresContext reports that the gateway refused an evaluation that
+// held session_cwd or tool_call_state, so they are no longer sent.
+func (s *proxyState) gatewayIgnoresContext() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.toolCalls == nil {
-		s.toolCalls = newLRUMap[json.RawMessage](maxTrackedToolCalls)
-	}
-	before, _ := s.toolCalls.get(key)
-	var state toolCallFields
-	if len(before) > 0 {
-		_ = json.Unmarshal(before, &state)
-	}
-	set := func(dst *json.RawMessage, name string) {
-		if raw, present := fields[name]; present && string(bytes.TrimSpace(raw)) != "null" {
-			*dst = raw
-		}
-	}
-	set(&state.Kind, "kind")
-	set(&state.Title, "title")
-	set(&state.RawInput, "rawInput")
-	set(&state.Locations, "locations")
-	merged, err := json.Marshal(state)
-	if err == nil && len(merged) > maxToolCallStateBytes {
-		state.RawInput, state.Truncated = nil, true
-		merged, err = json.Marshal(state)
-	}
-	if err == nil && len(merged) > maxToolCallStateBytes {
-		state.Locations = nil
-		merged, err = json.Marshal(state)
-	}
-	if err != nil || len(merged) > maxToolCallStateBytes {
-		return before
-	}
-	s.toolCalls.put(key, merged)
-	return before
+	return s.legacyGateway
+}
+
+func (s *proxyState) setGatewayIgnoresContext() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.legacyGateway = true
+}
+
+// peekToolCall is the state of the tool call a frame names, before the frame.
+func (s *proxyState) peekToolCall(msg Message) json.RawMessage {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.toolCalls.Peek(msg)
+}
+
+// commitToolCall applies a frame that is being forwarded to the state of its
+// tool call.
+func (s *proxyState) commitToolCall(msg Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.toolCalls.Commit(msg)
 }
 
 // forgetFailOpen drops every open fail mode: an answer that failed
@@ -1285,11 +1224,22 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
 			Direction: direction, Surface: Classify(msg, direction), Method: msg.Method, Payload: msg.Raw,
 		}
-		if direction == AgentToClient && msg.Method != "" {
+		if direction == AgentToClient && msg.Method != "" && !state.gatewayIgnoresContext() {
 			evaluation.SessionCWD = state.sessionCWD(promptSessionID(msg))
-			evaluation.ToolCallState = state.foldToolCall(msg)
+			evaluation.ToolCallState = state.peekToolCall(msg)
 		}
 		verdict, evalErr := evaluate(ctx, opts, evaluation)
+		var refused *GatewayRefusedError
+		if errors.As(evalErr, &refused) && refused.Status == http.StatusBadRequest &&
+			(evaluation.SessionCWD != "" || evaluation.ToolCallState != nil) {
+			// A gateway that predates session_cwd and tool_call_state (it has
+			// not restarted since an upgrade) refuses an evaluation that holds
+			// them as invalid. The frame is evaluated again without them, as
+			// that gateway judges frames, and so are the rest of the session's.
+			state.setGatewayIgnoresContext()
+			evaluation.SessionCWD, evaluation.ToolCallState = "", nil
+			verdict, evalErr = evaluate(ctx, opts, evaluation)
+		}
 		if evalErr != nil && state.peerProtocolFixes && ctx.Err() != nil {
 			// The session is ending: an evaluation the shutdown cancelled
 			// is not a gateway problem to report (GAP-0351).
@@ -1345,6 +1295,10 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				continue
 			}
 			logf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
+		}
+		if direction == AgentToClient {
+			// The frame is going on to the editor: it is part of the call now.
+			state.commitToolCall(msg)
 		}
 		if opts.Mode == ModeAction {
 			out, aggregate, session, delivered, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
