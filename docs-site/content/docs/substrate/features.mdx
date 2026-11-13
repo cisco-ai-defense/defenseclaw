@@ -53,9 +53,9 @@ What is **not** in this release yet: semantic and admin routing rules, budgets (
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
 | Scan before use | Changed, stronger | `template build` scans the agent's skills, plugins, MCP servers and agent config inside the image, then signs the result. Agents from unscanned images get no network |
-| Scan at run time | Changed | When an agent adds a skill or MCP server mid-session, the hook sends the files to the gateway for scanning (size-capped, as in OpenShell copy mode), because the gateway can't read the agent's disk. A skill folder that fails is moved out of the skill folder. One that arrives without a scan is refused in managed installs and the strict tier, and raises an alert otherwise |
+| Scan at run time | Changed, weaker | skill-scanner does not run in the cluster. A skill that ships in an attested template is trusted by its digest, because the signed attestation lists it. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert |
 | Remote MCP servers | Same, plus network | Allowed MCP servers are named in the allow list. The egress callout reads the body of a call to a listed MCP host (up to 1 MiB) to apply tool rules, and admission decides as usual |
-| MCP servers started inside the actor from the repo | Changed | The hook sends the server's files with the admission request so the MCP scanner can read them |
+| MCP servers started inside the actor from the repo | Not scanned at run time yet | The gateway does not yet scan an MCP server the agent adds mid-session (a repository `.mcp.json`, a written MCP config, `mcp add`). Servers in the image are scanned at build. Tool-call hooks and the egress policy still apply to what the server does |
 | Local MCP servers on your laptop | Not available | An agent in the cluster can't reach your machine |
 | Registries (skill and MCP catalogs) | Same | Clean catalog entries are promoted into admission and, for MCP, into the allow list |
 

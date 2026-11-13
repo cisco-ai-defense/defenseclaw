@@ -83,7 +83,7 @@
         "harnessPin": "0.146.0",
         "verified": "verified"
       },
-      "substrate": { "wave": 1, "headless": "codex exec", "status": "live" },
+      "substrate": { "wave": 1, "headless": "codex exec", "status": "lab-live" },
       "hilt": "Codex has no native ask surface here; confirm becomes an alert/systemMessage with raw_action preserved. The TUI can review the event but cannot resume it.",
       "notes": "Host installs use hooks without native OTel. Secure Client and isolated OpenShell use a turn-completion bridge; only OpenShell renders native OTel. Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims."
     },
@@ -191,7 +191,7 @@
         ]
       },
       "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks-new-process-linux-macos", "managedOpenNoGuard": "runs", "secureClientClosed": "runs", "strictAvailability": "yes" },
-      "substrate": { "wave": 2, "headless": "hermes chat -q", "status": "live" },
+      "substrate": { "wave": 2, "headless": "hermes chat -q", "status": "lab-live" },
       "hilt": "Hermes has no native human-approval surface; confirm verdicts are recorded and alerted but cannot pause or resume the hook.",
       "notes": "Native Windows setup is supported; validation metadata remains empty and live=false. The connector covers one resolved default HERMES_HOME only and rejects named or multiplex profiles. It stages all 23 Hermes v0.19 hooks in config.yaml while preserving hooks_auto_accept, and transactionally owns only exact DefenseClaw event/command approvals in shell-hooks-allowlist.json. Running hosts cache callbacks, so registration and revocation remain pending reload; Windows teardown writes a direct-native disabled tombstone for stale callbacks. Only valid synchronous pre_tool_call block JSON vetoes a tool; pre_llm_call may inject context and pre_verify may continue a bounded verification loop. Other events are audit-only where the official shell parser proves no effect, and all failures remain open. The command is a directly quoted absolute native defenseclaw-hook.exe argv parsed by shlex.split and run with shell=False; there is no shell fallback and Hermes's PortableGit terminal is outside the integration. Bounded default-profile inventory covers MCP, local/external skills, SOUL.md, built-in/provider memory, and bundled/Nix/user/pip plugins; project-conditional, named-profile, and managed/ProgramData/cloud/MDM sources remain unverified."
     },
@@ -223,7 +223,7 @@
         "verified": "unverified",
         "unverifiedReason": "V2-only image and bridge; previous V1 sandbox certification does not apply. A fresh V2 OpenShell ingress, block, and egress verification is required."
       },
-      "substrate": { "wave": 2, "headless": "opencode run", "status": "live" },
+      "substrate": { "wave": 2, "headless": "opencode run", "status": "lab-live" },
       "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
       "notes": "V2-only dependency-free plugin with a default id/setup definition. Awaited execute.before rejects blocked tool calls; execute.after and session subscriptions report outcomes. Native Windows uses the reviewed @opencode/cli image or a V2 WinGet executable. OpenCode 2.2.5 was checked live in per-user and managed installs on Linux, macOS and native Windows."
     },
@@ -300,7 +300,7 @@
           "defenseclaw-copilot-github"
         ]
       },
-      "substrate": { "wave": 2, "headless": "copilot -p", "status": "live" },
+      "substrate": { "wave": 2, "headless": "copilot -p", "status": "lab-live" },
       "hilt": "Copilot CLI confirmations block because its hook does not prove an approval prompt is available; VS Code Local uses its separate native ask.",
       "notes": "Native Windows setup is supported. Provider authentication remains required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and live=false. Global hooks live under ~/.copilot/hooks by default with optional workspace hooks under <workspace>/.github/hooks."
     },

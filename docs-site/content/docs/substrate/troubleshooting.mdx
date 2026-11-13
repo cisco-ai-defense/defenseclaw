@@ -130,6 +130,14 @@ The placeholder was sent to a host the secret isn't bound to, so nothing was swa
 
 The Kubernetes credential provider hadn't picked up its namespace policy. The chart's bootstrap grants the launcher atespaces; restart the provider (`kubectl -n ate-system rollout restart deploy/k8s-credential-provider`) after any manual change.
 
+### `secrets set` or `rm` fails with `secret_not_managed_by_defenseclaw`
+
+The Kubernetes Secret named by the secret's source already exists, and DefenseClaw didn't create it: it has no `app.kubernetes.io/managed-by: defenseclaw` label. The gateway answers `409` and changes nothing, because it only touches Secrets it created. Point the source at a new Secret name, or remove the existing Secret if it is yours. The chart gives the gateway a Role only in the namespaces your Kubernetes sources name (`create`, and `get` and `patch` on the named Secret), so a failure with a `502` (`secret_not_stored`) usually means the source's namespace has no Role yet: upgrade the chart after adding a source. Keep per-person sources (`{person}` in the Secret name) in a namespace of their own. See [Secrets](/docs/substrate/secrets#manage-them).
+
+### A skill I added in the session was refused
+
+skill-scanner does not run in the cluster. A skill in the attested template is trusted by its digest. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert. To use the skill everywhere, put it in the image and rebuild the template with `template build`.
+
 ### Pull says there is no record of the folder
 
 `pull` compares the agent's work with the folder you sent. It can only do that from the computer you ran `run` on. From another computer, `connect` to the agent and `git push` from inside it.

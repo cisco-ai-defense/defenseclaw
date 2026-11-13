@@ -72,7 +72,9 @@ type AskRequest struct {
 	Profile string
 	Host    string
 	Method  string
-	// Rule is the ask_hosts pattern or URL rule that required it.
+	// Rule is the ask_hosts pattern or URL rule that required it. An
+	// approval of an url rule ask covers that rule only (GAP-0177); an
+	// ask_hosts approval covers the host.
 	Rule string
 	// PathPrefix is the url rule's path prefix, for the person who answers
 	// ("" for a host ask).
