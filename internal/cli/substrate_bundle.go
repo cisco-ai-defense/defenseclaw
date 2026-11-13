@@ -377,6 +377,25 @@ func runSubstrateBundleTest(cmd *cobra.Command, f *substrateBundleFlags) error {
 	return nil
 }
 
+// substrateBundleActivation is the managed start's second activation source
+// (GAP-0135): the bundle state in the pod's namespace, verified against the
+// mounted anchors and the boot config (bundle.Store.Activated). It needs
+// read access to the bundle ConfigMaps and the anchors mount, as the
+// controller has.
+func substrateBundleActivation(cfg *config.Config) func(string, []byte) error {
+	return func(string, []byte) error {
+		cms, err := bundle.NewInClusterKube(os.Getenv("POD_NAMESPACE"))
+		if err != nil {
+			return fmt.Errorf("substrate activation: bundle state: %w", err)
+		}
+		path := cfg.Substrate.Bundles.EffectiveAnchorsFile()
+		store := &bundle.Store{CM: cms, Base: cfg, Anchors: func() (*eb.Anchors, error) { return bundle.LoadAnchorsFile(path) }}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return store.Activated(ctx)
+	}
+}
+
 // substrateProfileResolver is the controller's profile resolver: config.yaml
 // alone, or in bundle mode the bundle resolver kept current by a manager
 // (started here; it ends with ctx). The first refresh must succeed, so the

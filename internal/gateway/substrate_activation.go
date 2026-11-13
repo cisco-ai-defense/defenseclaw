@@ -51,6 +51,27 @@ func SetSubstrateClusterActivation(fn func(path string, raw []byte) error) {
 	substrateClusterActivation.Store(&fn)
 }
 
+// SubstrateActivationSources is the one registered check over its sources
+// in order (the chart-mounted file, then a verified Substrate bundle): the
+// first that accepts the start activates it; when none does, the refusal
+// names every source's reason.
+func SubstrateActivationSources(sources ...func(path string, raw []byte) error) func(path string, raw []byte) error {
+	return func(path string, raw []byte) error {
+		errs := make([]error, 0, len(sources))
+		for _, src := range sources {
+			err := src(path, raw)
+			if err == nil {
+				return nil
+			}
+			errs = append(errs, err)
+		}
+		if len(errs) == 0 {
+			return errors.New("substrate activation: no source")
+		}
+		return errors.Join(errs...)
+	}
+}
+
 // SubstrateMountedConfigActivation is the chart-mounted layout check.
 // owner returns a file's owner uid (the stat owner; tests replace it).
 func SubstrateMountedConfigActivation(owner func(os.FileInfo) (uint32, bool)) func(path string, raw []byte) error {
