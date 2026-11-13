@@ -167,9 +167,6 @@ func rulePackValidateCommand(cfg *config.Config, goos string) string {
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
 	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
 		if config.IsBuiltinRulePack(s.ref.Name) {
-			if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" {
-				return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set; %s", scope, s.ref.Name, advice)
-			}
 			return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set", scope, s.ref.Name)
 		}
 		return nil, fmt.Errorf("%s rule pack %q is neither built in (%s) nor a guardrail.custom_packs entry",
@@ -182,16 +179,25 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		// Secure Client ignored malformed optional manifests before v9.
 		base, err = guardrail.LoadRulePackForSecureClient(s.dir)
 	}
-	if err != nil && s.ref.Name != "" && errors.As(err, &packErr) && packErr.Code == "directory_not_found" {
-		// A built-in pack folder that is not there: name the property to fix.
-		if advice := cfg.WindowsBuiltinRulePackAdvice(s.ref.Name); advice != "" && strings.TrimSpace(cfg.PolicyDir) != "" {
-			if _, isCustom := cfg.UsableCustomRulePack(s.ref.Name); !isCustom {
-				err = fmt.Errorf("%w; policy_dir is %s and it has no guardrail\\%s folder: %s", err, cfg.PolicyDir, s.ref.Name, advice)
-			}
+	if err != nil && errors.As(err, &packErr) && packErr.Code == "directory_not_found" {
+		// The folder a managed Windows Setup ships a pack in is not there:
+		// name the repair that writes it (#1445).
+		if advice := cfg.WindowsShippedRulePackAdvice(s.dir); advice != "" {
+			err = fmt.Errorf("%w; %s", err, advice)
 		}
 	}
 	if err != nil {
 		return nil, err
+	}
+	if name := cfg.WindowsShippedRulePackName(s.dir); name != "" {
+		// A shipped pack is this binary's own copy, byte for byte: a folder
+		// an administrator or a program changed is refused, not loaded, so
+		// a weakened strict pack never decides (#1445).
+		want, digestErr := guardrail.ShippedRulePackFilesDigest(name)
+		if digestErr != nil || !strings.EqualFold(base.FilesDigest(), want) {
+			return nil, fmt.Errorf("%s rule pack %q: the files in %s are not the %s pack this release ships; %s",
+				scope, s.ref.Name, s.dir, name, cfg.WindowsShippedRulePackAdvice(s.dir))
+		}
 	}
 	custom, isCustom := cfg.UsableCustomRulePack(s.ref.Name)
 	if isCustom {

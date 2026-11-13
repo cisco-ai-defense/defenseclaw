@@ -133,6 +133,11 @@ type AdmissionResult struct {
 	// type, so nothing was blocked or quarantined. Its rescan baseline keeps
 	// a mark, and admission runs again once take_action is on (GAP-0774).
 	Unenforced bool
+	// PolicyRefused is a block or rejection the admission policy decided
+	// before any scan (an asset_policy deny, a blocked or rejected verdict
+	// of the pre-scan evaluation). An MCP baseline records it as one
+	// (mcpPolicyRefusedMark), never as a decided admission (GAP-0088).
+	PolicyRefused bool
 }
 
 // OnAdmission is called after each install event is processed.
@@ -218,6 +223,22 @@ type InstallWatcher struct {
 	mu               sync.Mutex
 	pending          map[string]time.Time // path → first-seen, for debounce
 	quarantineMoveMu sync.Mutex
+
+	// stagingMu guards the Claude Code installs in flight the watcher
+	// left alone and looks at again (claude_plugin_staging.go):
+	// stagingSeen is when each folder was first seen, stagingDeferred the
+	// paths to re-check, stagingMemo and registryMemo one answer per
+	// folder and registry for a pass. stagingClock, stagingWalkLimit and
+	// stagingWalks are for tests (nil/0: time.Now, the default limit).
+	stagingMu        sync.Mutex
+	stagingSeen      map[string]time.Time
+	stagingDeferred  map[string]stagingDeferral
+	stagingMemo      map[string]stagingAnswer
+	registryMemo     map[string]registryAnswer
+	stagingNextCheck time.Time
+	stagingClock     func() time.Time
+	stagingWalkLimit int
+	stagingWalks     atomic.Int64
 
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
 	// (empty or category folders, GAP-2449) and skill folders without a
@@ -878,7 +899,8 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 	}
 	snap, err := w.snapshotForEvent(evt)
 	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
-		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline)) {
+		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline) &&
+		!w.mcpPolicyRefusalLapsed(evt, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -1040,8 +1062,14 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 			// Its scan failed: tried again with backoff, not every poll
 			// (rel-1-0-6:GAP-0258).
 			added = append(added, server.Name)
-		} else if w.mcpFailureAllowed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}, baseline) {
+		} else if evt := (InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector}); w.mcpFailureAllowed(evt, baseline) {
 			// An allow written after the failure admits it now.
+			added = append(added, server.Name)
+		} else if w.mcpBaselineLapsed(evt, baseline) || w.mcpPolicyRefusalLapsed(evt, baseline) {
+			// The allow that admitted it without a scan, or the deny that
+			// refused it, is gone: admitted again now, not at the next call
+			// or the hourly rescan, so its block is back (or its scan runs)
+			// within the poll (gas-ux-r2:GAP-0088).
 			added = append(added, server.Name)
 		}
 	}
@@ -1642,6 +1670,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	ticker := time.NewTicker(w.debounce)
 	defer ticker.Stop()
+	// Every return drops the installs in flight left to re-check.
+	defer w.forgetClaudeStaging()
 
 	for {
 		select {
@@ -1709,6 +1739,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if w.cacheLayoutPlugins(event.Name) {
 				if depth, inside := w.claudeCacheDepth(event.Name); inside {
 					if w.inClaudePluginStaging(event.Name, 0) {
+						w.deferClaudeStaging(event.Name, depth)
 						continue
 					}
 					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
@@ -1814,6 +1845,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			for key, root := range roots {
 				rewatchRoot(key, root)
 			}
+			w.recheckClaudeStaging(func(path string, depth int) {
+				if depth < 3 {
+					addClaudeCacheWatches(fsw, path, watchedDirs)
+				}
+				w.admitClaudeStaging(ctx, path, depth)
+			})
 			if len(deferredDirs) > 0 {
 				waiting := deferredDirs
 				deferredDirs = nil
@@ -2660,7 +2697,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			// kept, is held for the connector whose rule denied it too.
 			w.journalPolicyDenied(cfg, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetDenying)
 			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
+			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason, PolicyRefused: true}
 			return res
 		}
 		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
@@ -2683,14 +2720,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			fmt.Sprintf("type=%s reason=blocked", targetType))
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "blocked", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
+		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason, PolicyRefused: true}
 		return res
 	case "rejected":
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=policy-rejected", targetType))
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "rejected", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
+		res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason, PolicyRefused: true}
 		return res
 	case "allowed":
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
@@ -4737,11 +4774,19 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 	if err != nil {
 		return
 	}
+	claude := w.connectorForPath(dir) == "claudecode"
 	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+		// A marketplace or plugin may have a hidden name (Claude Code allows
+		// ".git"), so in Claude Code's cache only an install in flight is
+		// left out; Codex keeps its cache as it was.
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") && !claude {
 			continue
 		}
 		child := filepath.Join(dir, entry.Name())
+		if w.inClaudePluginStaging(child, 0) {
+			w.deferClaudeStaging(child, depth+1)
+			continue
+		}
 		if root, copied := w.cachePluginCopyRoot(child); copied {
 			if !sameWatcherPath(root, child) {
 				continue
@@ -4758,63 +4803,6 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		}
 		w.mu.Unlock()
 	}
-}
-
-// claudeStagingGrace is how long the rescan leaves a Claude Code plugin
-// staging folder alone; one that stays longer is scanned as a plugin.
-const claudeStagingGrace = 15 * time.Minute
-
-// inClaudePluginStaging reports a path below a Claude Code plugin staging
-// folder (cache/temp_local_<id>), younger than grace when grace is set.
-// Claude Code builds a plugin there and then moves it to
-// <marketplace>/<plugin>/<version>: the watcher scanned the staging copy as
-// a plugin, blocked it for its missing manifest and held its files while the
-// move ran, so even a clean plugin failed to install with EPERM (GAP-0629).
-// The final folder is admitted as before. The Secure Client profile keeps
-// the earlier behaviour.
-func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration) bool {
-	if w.secureClientActive() {
-		return false
-	}
-	pathAbs, err := filepath.Abs(path)
-	if err != nil {
-		return false
-	}
-	for _, root := range w.pluginDirs {
-		rootAbs, absErr := filepath.Abs(root)
-		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
-			continue
-		}
-		relative, relErr := filepath.Rel(rootAbs, pathAbs)
-		if relErr != nil || relative == "." || relative == ".." ||
-			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			continue
-		}
-		first := strings.FieldsFunc(relative, func(r rune) bool { return r == '/' || r == '\\' })[0]
-		if !isPluginStagingFolder(first) {
-			return false
-		}
-		if grace <= 0 {
-			return true
-		}
-		info, statErr := os.Lstat(filepath.Join(rootAbs, first))
-		return statErr == nil && time.Since(info.ModTime()) < grace
-	}
-	return false
-}
-
-// isPluginStagingFolder names a staging folder in a plugin cache: Claude
-// Code's temp_local_<id>, and the .dclaw-stage-<name>-<random> folder that
-// "defenseclaw plugin install" copies a plugin into, scans and decides
-// itself before it moves the copy to cache/<name> (GAP-0017).
-func isPluginStagingFolder(name string) bool {
-	lower := strings.ToLower(name)
-	for _, prefix := range []string{"temp_local_", ".dclaw-stage-"} {
-		if strings.HasPrefix(lower, prefix) && len(lower) > len(prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 // inSkillInstallStaging reports a path at or below a ".dclaw-stage-<name>-*"
@@ -5148,10 +5136,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.skillDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
-			if isBundledSkillWatchPath(path) {
-				return false
-			}
-			return true
+			return !isBundledSkillWatchPath(path)
 		}
 	}
 	for _, dir := range w.pluginDirs {

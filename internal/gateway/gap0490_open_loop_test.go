@@ -15,10 +15,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -133,6 +135,9 @@ type openLoopPlan struct {
 	duration    time.Duration
 	stall       time.Duration
 	dispatchLag time.Duration
+	// cores is the CPUs the gateway and the launcher share (GOMAXPROCS of
+	// the test process); 0 leaves the CPU stage out of the budget.
+	cores int
 }
 
 // required is the account-wide rate the plan names.
@@ -148,6 +153,9 @@ type openLoopResult struct {
 	problems  map[string]int
 	refused   int // calls whose proposal or receipt got HTTP 429
 	failed    int // calls the gateway answered with an explicit failure: a status other than 200 or 429, or a proposal that did not allow
+	// cpuPerCall is the process CPU time (user and system) one call of the
+	// single-stream baseline took, launcher included; 0 when not measured.
+	cpuPerCall time.Duration
 }
 
 // achievedRate is the calls a second the launcher really issued on its
@@ -373,9 +381,27 @@ const openLoopBaselineCalls = 30
 //     (630 ms for the 44 calls/s stream on the reference box, against the 0.26
 //     to 0.42 s it takes there).
 //
-// A box on which rho would exceed openLoopMaxUtilisation, or on which a
-// single-stream call goes unanswered, is overloaded and cannot carry the
-// stream: the run is INCONCLUSIVE and names the baseline it measured.
+// The serialised share was measured on an idle 16-core box, where the rest of
+// a call never waits for a core. On a box with few cores it does: the stream
+// keeps the CPUs busy for its rate x the CPU time of a call, and the writer
+// of the serialised stage then waits for a core as well, so every visit to
+// it stretches by 1 / (1 - the CPU utilisation). The test measures that CPU
+// time in the baseline (process user and system time over its calls) and
+// multiplies the budget by that stretch:
+//   - CPU utilisation rhoCPU = required rate x CPU per call / cores.
+//
+// CI showed why (Go Throughput Test (no race), 28 runs 11-08..11-12): on the
+// 4-vCPU hosted runners the two-sandbox stream (44 calls/s) took a p95 of
+// 217 to 550 ms where the baseline mean was 25 to 31 ms, and failed 2 runs
+// at 1.03 and 1.19 of a budget without this term (runs 43222066812,
+// 43235986187). A block profile of that stream shows the wait in the audit
+// write group (writeGroup.do, the proposal and its receipt), not in the
+// per-session correlation turn, and its process used 1.3 cores. On a box
+// with many cores the stretch is near 1 and the budget is the design's.
+//
+// A box on which rho or rhoCPU would exceed openLoopMaxUtilisation, or on
+// which a single-stream call goes unanswered, is overloaded and cannot carry
+// the stream: the run is INCONCLUSIVE and names the baseline it measured.
 const (
 	openLoopSerialShare    = 0.3
 	openLoopQueueVisits    = 2
@@ -388,6 +414,16 @@ const (
 // busy at the required rate of the plan, given the single-stream baseline.
 func openLoopUtilisation(plan openLoopPlan, base openLoopResult) float64 {
 	return plan.required() * openLoopSerialShare * base.mean().Seconds()
+}
+
+// openLoopCPUUtilisation is the share of the cores the stream keeps busy at
+// the required rate of the plan, given the CPU time of a baseline call; 0
+// when either is unknown.
+func openLoopCPUUtilisation(plan openLoopPlan, base openLoopResult) float64 {
+	if plan.cores <= 0 || base.cpuPerCall <= 0 {
+		return 0
+	}
+	return plan.required() * base.cpuPerCall.Seconds() / float64(plan.cores)
 }
 
 // openLoopQueueingFactor is the stretch of a call at p95 over its single-stream
@@ -410,12 +446,13 @@ func judgeOpenLoopBaseline(plan openLoopPlan, base openLoopResult) *openLoopVerd
 		return &openLoopVerdict{"failed", fmt.Sprintf("the single-stream baseline of the real path had %d of %d calls answered with an explicit failure: %v", base.failed, base.offered, base.problems)}
 	}
 	rho := openLoopUtilisation(plan, base)
-	if len(base.latencies) == base.offered && rho <= openLoopMaxUtilisation {
+	rhoCPU := openLoopCPUUtilisation(plan, base)
+	if len(base.latencies) == base.offered && rho <= openLoopMaxUtilisation && rhoCPU <= openLoopMaxUtilisation {
 		return nil
 	}
-	return &openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the single-stream baseline of the real path (%d of %d calls answered, mean %v, p95 %v, max %v: %v) puts a stream of %.0f calls/s at utilisation %.2f of the serialised write stage (limit %.2f; reference box: mean 36 to 39 ms); the box is overloaded, so this run says nothing about the gateway",
-		len(base.latencies), base.offered, base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.percentile(100).Round(time.Microsecond), base.problems,
-		plan.required(), rho, openLoopMaxUtilisation)}
+	return &openLoopVerdict{"inconclusive", fmt.Sprintf("INCONCLUSIVE: the single-stream baseline of the real path (%d of %d calls answered, mean %v, p95 %v, max %v, CPU per call %v: %v) puts a stream of %.0f calls/s at utilisation %.2f of the serialised write stage and %.2f of %d cores (limit %.2f; reference box: mean 36 to 39 ms); the box is overloaded, so this run says nothing about the gateway",
+		len(base.latencies), base.offered, base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.percentile(100).Round(time.Microsecond), base.cpuPerCall.Round(time.Microsecond), base.problems,
+		plan.required(), rho, rhoCPU, plan.cores, openLoopMaxUtilisation)}
 }
 
 // judgeOpenLoopStream decides what the offered stream shows about the limit:
@@ -455,10 +492,11 @@ func judgeOpenLoop(plan openLoopPlan, got, base openLoopResult) openLoopVerdict 
 	}
 	sandboxes := len(plan.tokens)
 	rho := openLoopUtilisation(plan, base)
-	budget := time.Duration(openLoopP95Slack * openLoopQueueingFactor(rho) * float64(base.percentile(95)))
-	numbers := fmt.Sprintf("%d sandboxes at %d calls/s, issued %.1f calls/s on schedule: answered share %.3f, p50 %v, p95 %v, max %v; single-stream real path mean %v, p95 %v, utilisation %.2f, queueing factor %.2f, p95 budget %v",
+	rhoCPU := openLoopCPUUtilisation(plan, base)
+	budget := time.Duration(openLoopP95Slack * openLoopQueueingFactor(rho) / (1 - rhoCPU) * float64(base.percentile(95)))
+	numbers := fmt.Sprintf("%d sandboxes at %d calls/s, issued %.1f calls/s on schedule: answered share %.3f, p50 %v, p95 %v, max %v; single-stream real path mean %v, p95 %v, CPU per call %v, utilisation %.2f, queueing factor %.2f, CPU utilisation %.2f of %d cores, p95 budget %v",
 		sandboxes, plan.perSecond, got.achievedRate(), got.answeredShare(), got.percentile(50).Round(time.Microsecond), got.percentile(95).Round(time.Microsecond), got.percentile(100).Round(time.Microsecond),
-		base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), rho, openLoopQueueingFactor(rho), budget.Round(time.Microsecond))
+		base.mean().Round(time.Microsecond), base.percentile(95).Round(time.Microsecond), base.cpuPerCall.Round(time.Microsecond), rho, openLoopQueueingFactor(rho), rhoCPU, plan.cores, budget.Round(time.Microsecond))
 	if got.answeredShare() < openLoopMinAnswered {
 		return openLoopVerdict{"unanswered", fmt.Sprintf("%d of %d calls unanswered inside %v (%s): %v", got.offered-len(got.latencies), got.offered, openLoopWait, numbers, got.problems)}
 	}
@@ -521,14 +559,26 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	}
 	// The baseline: the real path, one call after the other, right before the
 	// stream, on the same box in the same state.
+	cpuBefore := openLoopProcessCPU(t)
 	base := driveSingleStream(t.Context(), post, tokens[0], "g490-open-0", openLoopBaselineCalls)
-	plan := openLoopPlan{tokens: tokens, perSecond: perSecond, duration: duration}
+	base.cpuPerCall = (openLoopProcessCPU(t) - cpuBefore) / openLoopBaselineCalls
+	plan := openLoopPlan{tokens: tokens, perSecond: perSecond, duration: duration, cores: runtime.GOMAXPROCS(0)}
 	got := driveOpenLoop(t.Context(), post, plan)
 	verdict := judgeOpenLoop(plan, got, base)
 	if verdict.kind != "ok" {
 		t.Fatal(verdict.detail)
 	}
 	t.Log(verdict.detail)
+}
+
+// openLoopProcessCPU is the user and system CPU time this process has used.
+func openLoopProcessCPU(t *testing.T) time.Duration {
+	t.Helper()
+	var usage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
+		t.Fatal(err)
+	}
+	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }
 
 // openLoopCapStub stands in for a relay with an account rate cap: it answers a
@@ -751,6 +801,50 @@ func TestGAP0490OpenLoopJudgementFollowsTheBaseline(t *testing.T) {
 			}
 			if tc.kind == "inconclusive" && !strings.Contains(verdict.detail, "INCONCLUSIVE") {
 				t.Fatalf("an inconclusive verdict must say so: %s", verdict.detail)
+			}
+		})
+	}
+}
+
+// The CPU stage of the budget follows the cores. The slow-pool stream of run
+// 43235986187 (2 x 22 calls/s, p95 550 ms over a baseline mean of 31 ms and
+// p95 38 ms), with the 38 ms of CPU a call took in a profile of the same
+// stream, passes on the 4 cores of a hosted runner (CPU utilisation 0.42)
+// and is slow where 16 cores leave it no CPU wait (0.10) or where the CPU
+// time is not known. A stream past the stretched budget is still slow, a box
+// whose cores the stream would keep past openLoopMaxUtilisation is
+// INCONCLUSIVE, and a refusal still fails on any box.
+func TestGAP0490OpenLoopJudgementCPUStageFollowsTheCores(t *testing.T) {
+	slowPool := openLoopRecorded(30, 30, 31*time.Millisecond, 38*time.Millisecond, 1)
+	slowPool.cpuPerCall = 38 * time.Millisecond
+	unmeasured := openLoopRecorded(30, 30, 31*time.Millisecond, 38*time.Millisecond, 1)
+	cpuBound := openLoopRecorded(30, 30, 31*time.Millisecond, 38*time.Millisecond, 1)
+	cpuBound.cpuPerCall = 80 * time.Millisecond
+	stream := openLoopRecorded(440, 440, 266*time.Millisecond, 550*time.Millisecond, 44)
+	refused := openLoopRecorded(440, 440, 266*time.Millisecond, 550*time.Millisecond, 44)
+	refused.refused = 1
+	plan := func(cores int) openLoopPlan {
+		p := openLoopStubPlan(2, 22, 10*time.Second, 0)
+		p.cores = cores
+		return p
+	}
+	for _, tc := range []struct {
+		name string
+		plan openLoopPlan
+		got  openLoopResult
+		base openLoopResult
+		kind string
+	}{
+		{"the slow-pool stream passes on 4 cores", plan(4), stream, slowPool, "ok"},
+		{"the same stream is slow on 16 cores", plan(16), stream, slowPool, "slow"},
+		{"the same stream is slow when the CPU time is not measured", plan(4), stream, unmeasured, "slow"},
+		{"a stream past the stretched budget is slow", plan(4), openLoopRecorded(440, 440, 266*time.Millisecond, 900*time.Millisecond, 44), slowPool, "slow"},
+		{"a stream that would keep 4 cores 88% busy is inconclusive", plan(4), stream, cpuBound, "inconclusive"},
+		{"a refusal fails on 4 cores", plan(4), refused, slowPool, "refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if verdict := judgeOpenLoop(tc.plan, tc.got, tc.base); verdict.kind != tc.kind {
+				t.Fatalf("judged %s, want %s: %s", verdict.kind, tc.kind, verdict.detail)
 			}
 		})
 	}

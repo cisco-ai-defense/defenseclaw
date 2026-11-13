@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 // Prediction is one classifier answer for one item.
@@ -172,26 +174,36 @@ func NewVLLMSR(endpoint string, timeoutMs int, r config.RoutingConfig) *VLLMSR {
 
 func (v *VLLMSR) Name() string { return "vllm_sr" }
 
-var reasonRE = regexp.MustCompile(`decision=(\S*) model=(\S*) confidence=([0-9.]+)`)
-
-// Classify implements Classifier.
+// Classify implements Classifier. The production client (an
+// engine.Classifier since 1.0.10) sends the newest user turn, as the vLLM
+// Semantic Router classifies only that turn (rel-1-0-10:GAP-0002); the
+// decision name is the category, as before.
 func (v *VLLMSR) Classify(ctx context.Context, it Item) Prediction {
-	msgs := make([]gateway.ChatMessage, 0, len(it.Messages))
-	for _, m := range it.Messages {
-		msgs = append(msgs, gateway.ChatMessage{Role: m.Role, Content: m.Content})
+	text := ""
+	for i := len(it.Messages) - 1; i >= 0; i-- {
+		if it.Messages[i].Role == "user" {
+			text = it.Messages[i].Content
+			break
+		}
 	}
-	out := v.client.RouteDetailed(ctx, &gateway.ModelRouterInput{Messages: msgs, Model: "request", RequestModel: "request"})
-	p := Prediction{LatencyUS: out.Latency.Microseconds()}
-	if out.Decision == nil {
-		p.Err = out.FailureCode
+	started := time.Now()
+	res, err := v.client.Classify(ctx, engine.ClassifyInput{Text: text})
+	p := Prediction{LatencyUS: time.Since(started).Microseconds()}
+	if err != nil {
+		var ce *engine.ClassifierError
+		if errors.As(err, &ce) {
+			p.Err = ce.Code
+		} else {
+			p.Err = engine.FailureConfig
+		}
 		return p
 	}
-	p.Alias = out.Decision.Model
-	if m := reasonRE.FindStringSubmatch(out.Decision.Reason); m != nil {
-		p.Category = m[1]
-		if c, err := strconv.ParseFloat(m[3], 64); err == nil {
-			p.Confidence, p.HasConfidence = c, true
-		}
+	if len(res.Aliases) > 0 {
+		p.Alias = res.Aliases[0]
+	}
+	p.Category = res.RuleID
+	if res.Confidence >= 0 {
+		p.Confidence, p.HasConfidence = res.Confidence, true
 	}
 	if p.Category == "" {
 		if p.Alias != "" && p.Alias == v.defaultAlias {
