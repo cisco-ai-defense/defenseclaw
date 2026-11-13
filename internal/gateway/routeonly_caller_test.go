@@ -190,6 +190,13 @@ func TestManagedRouteOnlyVerifiedCaller(t *testing.T) {
 	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hello"), nil); rec.Code != 503 {
 		t.Fatalf("managed macOS without a gateway-held credential = %d", rec.Code)
 	}
+	placeholder := func(r *http.Request) {
+		r.Header.Del("X-Api-Key")
+		r.Header.Set("Authorization", "Bearer "+connector.RouteOnlyPlaceholderCredential)
+	}
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("quick question"), placeholder); rec.Code != 503 {
+		t.Fatalf("managed macOS custody render without a gateway-held credential = %d", rec.Code)
+	}
 	if atomic.LoadInt32(&f.origHits) != hits {
 		t.Fatal("a refused request or the agent key on managed macOS reached the upstream")
 	}
@@ -277,10 +284,22 @@ func TestRouteOnlySetupManagedVsOSS(t *testing.T) {
 	if routeOnlySetupFor(cfg, "codex", "127.0.0.1:18970") != nil {
 		t.Fatal("a managed gateway never renders route-only itself (no machine-wide file)")
 	}
+	prevGOOS := managedRouteOnlyGOOS
+	t.Cleanup(func() { managedRouteOnlyGOOS = prevGOOS })
+	managedRouteOnlyGOOS = "linux"
 	route := ManagedRouteOnlySetup(cfg, "codex", "127.0.0.1:18970", "tok")
-	if route == nil || route.Token != "tok" || route.BaseURL != "http://127.0.0.1:18970/r/codex" {
-		t.Fatalf("managed rendering = %+v", route)
+	if route == nil || route.Token != "tok" || route.BaseURL != "http://127.0.0.1:18970/r/codex" || route.Custody {
+		t.Fatalf("managed Linux rendering = %+v (socket activation: passthrough)", route)
 	}
+	// Managed macOS and Windows: the agent gets a placeholder credential,
+	// never its own key or login (REVIEW-code-slice4 P1-2).
+	for _, goos := range []string{"darwin", "windows"} {
+		managedRouteOnlyGOOS = goos
+		if route := ManagedRouteOnlySetup(cfg, "codex", "0.0.0.0:18970", "tok"); route == nil || !route.Custody || route.BaseURL != "http://127.0.0.1:18970/r/codex" {
+			t.Fatalf("managed %s rendering = %+v", goos, route)
+		}
+	}
+	managedRouteOnlyGOOS = "linux"
 	if ManagedRouteOnlySetup(cfg, "codex", "127.0.0.1:18970", "") != nil || ManagedRouteOnlySetup(cfg, "claudecode", "127.0.0.1:18970", "tok") != nil {
 		t.Fatal("no credential or an unrouted connector renders nothing")
 	}

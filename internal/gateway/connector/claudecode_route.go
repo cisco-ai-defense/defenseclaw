@@ -18,6 +18,11 @@ const (
 	claudeCodeRouteBedrockBaseURL = "ANTHROPIC_BEDROCK_BASE_URL"
 	claudeCodeRouteSkipBedrock    = "CLAUDE_CODE_SKIP_BEDROCK_AUTH"
 	claudeCodeRouteHeaders        = "ANTHROPIC_CUSTOM_HEADERS"
+	// Custody renders (managed macOS and Windows): the placeholder replaces
+	// the agent API key and login token (ANTHROPIC_AUTH_TOKEN wins over
+	// ANTHROPIC_API_KEY, an apiKeyHelper and a claude.ai login).
+	claudeCodeRouteAuthToken = "ANTHROPIC_AUTH_TOKEN"
+	claudeCodeRouteAPIKey    = "ANTHROPIC_API_KEY"
 )
 
 func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
@@ -27,11 +32,17 @@ func claudeCodeRouteEnv(route *RouteOnlySetup) map[string]string {
 	env := map[string]string{claudeCodeRouteHeaders: route.Token}
 	if route.Bedrock {
 		env[claudeCodeRouteBedrockBaseURL] = route.BaseURL
-		if route.GatewaySigning {
+		// Custody: the agent sends no AWS signature or Bedrock bearer; the
+		// gateway uses its own Bedrock credential.
+		if route.GatewaySigning || route.Custody {
 			env[claudeCodeRouteSkipBedrock] = "1"
 		}
 	} else {
 		env[claudeCodeRouteBaseURL] = route.BaseURL
+		if route.Custody {
+			env[claudeCodeRouteAuthToken] = RouteOnlyPlaceholderCredential
+			env[claudeCodeRouteAPIKey] = RouteOnlyPlaceholderCredential
+		}
 	}
 	return env
 }
@@ -115,7 +126,7 @@ var _ RouteOnlyConnector = (*ClaudeCodeConnector)(nil)
 // look like our own render.
 func lostClaudeRouteRecord() routeEnvBackup {
 	b := routeEnvBackup{Original: map[string]*string{}, Applied: map[string]string{}}
-	for _, k := range []string{claudeCodeRouteBaseURL, claudeCodeRouteBedrockBaseURL, claudeCodeRouteHeaders} {
+	for _, k := range []string{claudeCodeRouteBaseURL, claudeCodeRouteBedrockBaseURL, claudeCodeRouteHeaders, claudeCodeRouteAuthToken, claudeCodeRouteAPIKey} {
 		b.Original[k] = nil
 		b.Applied[k] = lostRecordMarker
 	}

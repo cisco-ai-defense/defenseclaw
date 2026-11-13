@@ -220,6 +220,11 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "a SigV4-signed Bedrock request cannot pass through the gateway; configure the agent with a Bedrock API key")
 		return
 	}
+	if custody {
+		// The agent sent the placeholder (or a credential that is dropped):
+		// every attempt uses a gateway-held credential.
+		inClass = engine.CredentialGateway
+	}
 	attempt, routedOutcome, originalAllowed := s.decide(r, connector, native, family, upstream, inClass, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
 	if routedOutcome.Result == SemanticRouteDenied {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
@@ -798,6 +803,10 @@ func ManagedRouteOnlySetup(cfg *config.Config, connectorName, apiAddr, token str
 		return nil
 	}
 	route.Token = token
+	// Custody hosts give the agent a placeholder credential: its own key
+	// or login token never reaches the loopback port (DESIGN 16.2, S1
+	// REVIEW-code-slice4 P1-2).
+	route.Custody = routeOnlyCustodyOS(managedRouteOnlyGOOS)
 	return route
 }
 

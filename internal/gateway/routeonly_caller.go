@@ -338,8 +338,18 @@ func (s *routeOnlyServer) caller(r *http.Request, cfg *config.Config, connectorN
 // Linux holds its port through socket activation, OSS forwards the user own
 // key.
 func (s *routeOnlyServer) custody(cfg *config.Config) bool {
-	return cfg != nil && cfg.StandaloneEnterprise() && (s.goos == "windows" || s.goos == "darwin")
+	return cfg != nil && cfg.StandaloneEnterprise() && routeOnlyCustodyOS(s.goos)
 }
+
+// routeOnlyCustodyOS is the custody rule by OS for managed hosts: the API
+// port has no socket activation on Windows and macOS.
+func routeOnlyCustodyOS(goos string) bool {
+	return goos == "windows" || goos == "darwin"
+}
+
+// managedRouteOnlyGOOS selects the custody render of
+// ManagedRouteOnlySetup; replaceable in tests.
+var managedRouteOnlyGOOS = runtime.GOOS
 
 // holdCredential turns a pass-through attempt into one with the gateway
 // credential of a routing.models entry for the same provider and origin
