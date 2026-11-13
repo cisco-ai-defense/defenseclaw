@@ -82,7 +82,7 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 			t.Fatalf("accepted socket owner = %d %v, want the fresh gateway", owner, unique)
 		}
 		peer := NewPerUserPeerRecord()
-		peer.capture(conn.LocalAddr(), conn.RemoteAddr())
+		peer.capture(nil, conn.LocalAddr(), conn.RemoteAddr())
 		got, known := peer.wait(settleCap)
 		if !known || got.pid != pid {
 			t.Fatalf("recorded peer = %+v %v", got, known)

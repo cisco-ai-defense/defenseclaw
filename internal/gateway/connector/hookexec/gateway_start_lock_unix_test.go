@@ -198,7 +198,7 @@ func TestPerUserConnectedPeerIsTheProcessBehindTheSocket(t *testing.T) {
 		t.Fatalf("listener owners = %+v %v, want this process", owners, ok)
 	}
 	record := NewPerUserPeerRecord()
-	record.capture(c.LocalAddr(), c.RemoteAddr())
+	record.capture(nil, c.LocalAddr(), c.RemoteAddr())
 	if got, ok := record.wait(5 * time.Second); !ok || got.pid != os.Getpid() {
 		t.Fatalf("recorded peer = %+v %v, want this process", got, ok)
 	}

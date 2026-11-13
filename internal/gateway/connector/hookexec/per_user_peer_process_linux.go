@@ -26,13 +26,82 @@ func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
 }
 
 func perUserConnectedPeerPIDWithin(ctx context.Context, client, server *net.TCPAddr) (int, bool) {
+	return soleSocketHolder(ctx, connectedSocketInode(client, server))
+}
+
+// perUserGatewayPeerPID is perUserConnectedPeerPIDWithin that first asks the
+// one process the call expects: the gateway the gateway.pid record in one of
+// homes names. When that process is still the recorded one (kernel start
+// identity, before and after its files are read), belongs to this account and
+// holds the accepted socket, it is the peer, and no other process is read.
+// Every other outcome (no record, a stale or foreign record, a reused pid, a
+// socket that process does not hold, a read error) walks every process of the
+// account as before, and the walk's rules decide (one holder or none).
+//
+// The walk also refuses a socket with a second holder of this account. The
+// first look does not see one beside the recorded gateway: such a copy needs
+// the gateway to hand it over (it does not: accepted sockets are close-on-exec
+// and never sent) or ptrace rights over the gateway, which already allow more
+// than any outcome the proof can give (S8 DESIGN section 15).
+func perUserGatewayPeerPID(ctx context.Context, homes []string, client, server *net.TCPAddr) (int, bool) {
+	inode := connectedSocketInode(client, server)
+	if inode == "" {
+		return 0, false
+	}
+	for _, home := range homes {
+		if pid, ok := recordedGatewayHolds(home, inode); ok {
+			if ctx.Err() != nil {
+				return 0, false
+			}
+			return pid, true
+		}
+	}
+	return soleSocketHolder(ctx, inode)
+}
+
+// recordedGatewayHolds is the pid of the gateway the record in home names
+// when that process, still the recorded one before and after its descriptor
+// folder is read, is of this account and holds socket inode.
+func recordedGatewayHolds(home, inode string) (int, bool) {
+	record, ok := readGatewayRecord(home)
+	if !ok || !procidentity.IsRecorded(record.PID, record.StartIdentity) {
+		return 0, false
+	}
+	if !procHoldsSocket(strconv.Itoa(record.PID), uint32(os.Geteuid()), "socket:["+inode+"]") {
+		return 0, false
+	}
+	// The pid was not reused while its files were read.
+	if !procidentity.IsRecorded(record.PID, record.StartIdentity) {
+		return 0, false
+	}
+	return record.PID, true
+}
+
+// soleSocketHolder is the one process of this account that holds inode,
+// false when there is none, more than one, or ctx ended first.
+func soleSocketHolder(ctx context.Context, inode string) (int, bool) {
+	// More than one holder of the accepted socket (a dup in another
+	// process) is no known peer (review r3 finding 2).
+	holders := socketHolderWalk(ctx, inode)
+	if ctx.Err() != nil || len(holders) != 1 {
+		return 0, false
+	}
+	return holders[0], true
+}
+
+// socketHolderWalk is procSocketHolders; a test counts the walks.
+var socketHolderWalk = procSocketHolders
+
+// connectedSocketInode is the inode of the accepted server socket of
+// client->server when this account owns it, "" otherwise.
+func connectedSocketInode(client, server *net.TCPAddr) string {
 	serverKey, table, err := procTCPEndpoint(server)
 	if err != nil {
-		return 0, false
+		return ""
 	}
 	clientKey, clientTable, err := procTCPEndpoint(client)
 	if err != nil || clientTable != table {
-		return 0, false
+		return ""
 	}
 	inode := ""
 	if sock, ok := exactAcceptedSocket(client, server); ok {
@@ -47,13 +116,7 @@ func perUserConnectedPeerPIDWithin(ctx context.Context, client, server *net.TCPA
 			inode = procSocketInode("tcp6", "01", mappedTCP6Endpoint(server), mappedTCP6Endpoint(client))
 		}
 	}
-	// More than one holder of the accepted socket (a dup in another
-	// process) is no known peer (review r3 finding 2).
-	holders := procSocketHolders(ctx, inode)
-	if ctx.Err() != nil || len(holders) != 1 {
-		return 0, false
-	}
-	return holders[0], true
+	return inode
 }
 
 // perUserListenerOwners is every process of this account that holds a
@@ -145,24 +208,33 @@ func procSocketHolders(ctx context.Context, inode string) []int {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		dir := "/proc/" + name
-		var st syscall.Stat_t
-		if err := syscall.Stat(dir, &st); err != nil || st.Uid != uid {
-			continue
-		}
-		fdDir := dir + "/fd/"
-		fds, err := readDirNames(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			if link, err := os.Readlink(fdDir + fd); err == nil && link == want {
-				holders = append(holders, pid)
-				break
-			}
+		if procHoldsSocket(name, uid, want) {
+			holders = append(holders, pid)
 		}
 	}
 	return holders
+}
+
+// procHoldsSocket reports whether /proc/<name> is a process of account uid
+// with link want (socket:[inode]) in its descriptor folder. A folder that
+// cannot be read is false.
+func procHoldsSocket(name string, uid uint32, want string) bool {
+	dir := "/proc/" + name
+	var st syscall.Stat_t
+	if err := syscall.Stat(dir, &st); err != nil || st.Uid != uid {
+		return false
+	}
+	fdDir := dir + "/fd/"
+	fds, err := readDirNames(fdDir)
+	if err != nil {
+		return false
+	}
+	for _, fd := range fds {
+		if link, err := os.Readlink(fdDir + fd); err == nil && link == want {
+			return true
+		}
+	}
+	return false
 }
 
 // readDirNames is the names in dir, unsorted; an error for a folder that

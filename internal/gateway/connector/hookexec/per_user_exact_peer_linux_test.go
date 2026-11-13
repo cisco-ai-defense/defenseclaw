@@ -309,6 +309,7 @@ func TestExactPeerLookupRefusesAnotherAccountAndExitedHolder(t *testing.T) {
 	if !lines.Scan() || !strings.HasPrefix(lines.Text(), "ACCEPTED") {
 		t.Fatalf("second account did not accept: %q", lines.Text())
 	}
+	foreignPID, _ := strconv.Atoi(strings.TrimPrefix(lines.Text(), "ACCEPTED pid="))
 	client, server := conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr)
 	exact, scan := bothLookups(t, client, server)
 	if exact.err != nil || exact.uid != foreignUID || !sameLookup(exact, scan) {
@@ -331,6 +332,22 @@ func TestExactPeerLookupRefusesAnotherAccountAndExitedHolder(t *testing.T) {
 	withoutNetlink(t, func() { scanPID, scanUnique = perUserConnectedPeerPID(client, server) })
 	if unique || pid != 0 || scanUnique || scanPID != 0 {
 		t.Fatalf("foreign peer named: netlink (%d,%v), scan (%d,%v)", pid, unique, scanPID, scanUnique)
+	}
+	// The first look at the recorded gateway (S8 DESIGN 15) refuses it too: a
+	// record naming this process (no copy of the socket) or the foreign
+	// holder itself names no peer, with or without netlink.
+	if foreignPID <= 0 {
+		t.Fatalf("foreign holder pid unknown: %d", foreignPID)
+	}
+	for _, home := range []string{selfGatewayRecord(t), recordGateway(t, foreignPID, nil)} {
+		if pid, ok := perUserGatewayPeerPID(context.Background(), []string{home}, client, server); ok {
+			t.Fatalf("foreign accepted socket: recorded-gateway peer %d", pid)
+		}
+		withoutNetlink(t, func() {
+			if pid, ok := perUserGatewayPeerPID(context.Background(), []string{home}, client, server); ok {
+				t.Fatalf("foreign accepted socket without netlink: recorded-gateway peer %d", pid)
+			}
+		})
 	}
 	// The holder exits (its pid can now be reused by anyone): the server end
 	// is gone and nothing is proven, both ways.

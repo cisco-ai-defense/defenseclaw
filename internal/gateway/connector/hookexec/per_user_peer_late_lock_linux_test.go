@@ -81,7 +81,7 @@ func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
 		t.Fatalf("helper did not accept: %q %v", line, err)
 	}
 	record := NewPerUserPeerRecord()
-	record.capture(client.LocalAddr(), client.RemoteAddr())
+	record.capture(nil, client.LocalAddr(), client.RemoteAddr())
 	// The read runs in the background from capture; the call goes on.
 	select {
 	case <-record.done:

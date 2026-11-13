@@ -66,8 +66,18 @@ func WithPerUserPeerRecord(ctx context.Context, record *PerUserPeerRecord) conte
 	return context.WithValue(ctx, perUserPeerRecordKey{}, record)
 }
 
-// capture starts the read of the connected peer once.
-func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
+// perUserCallHomes is the folders the call under ctx named for its gateway
+// record (WithPerUserGatewayDataDir), nil when it named none.
+func perUserCallHomes(ctx context.Context) []string {
+	if homes, _ := ctx.Value(perUserGatewayHomesKey{}).(func() []string); homes != nil {
+		return homes()
+	}
+	return nil
+}
+
+// capture starts the read of the connected peer once. homes is where the
+// record of the gateway the call expects may be (perUserGatewayPeerPID).
+func (r *PerUserPeerRecord) capture(homes []string, local, remote net.Addr) {
 	if r == nil {
 		return
 	}
@@ -86,7 +96,7 @@ func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
 			if !okc || !oks {
 				return
 			}
-			pid, ok := perUserConnectedPeerPID(client, server)
+			pid, ok := perUserGatewayPeerPID(context.Background(), homes, client, server)
 			if !ok || pid <= 0 {
 				return
 			}

@@ -835,7 +835,7 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 		return
 	}
 	if fresh {
-		perUserCaptureFreshGatewayOwner(check)
+		perUserCaptureFreshGatewayOwner(home, check)
 	}
 	if prepared {
 		return
