@@ -59,8 +59,8 @@ const (
 	// MaxChainOperators bounds the | && and || nodes of the parse tree.
 	// The parser builds one nested node for each, left-deep, and every
 	// recursive reader recurses once per node. The costliest family (a
-	// pipeline of command substitutions) costs 77 ms and 24 MiB at 512 and
-	// 250 ms and 80 MiB at 1024; the largest real call has 38.
+	// pipeline of command substitutions) costs 64 to 270 ms and 24 MiB at 512
+	// (quiet box to loaded box) and 250 ms and 80 MiB at 1024; the largest real call has 38.
 	MaxChainOperators = 512
 
 	// MaxParsedNodes bounds the nodes of the tree (every node, of every
@@ -74,7 +74,7 @@ const (
 	// arithmetic chain of 2,048 additions costs 66 ms and 23 MiB.
 	MaxTreeDepth = 2048
 
-	// MaxChainBytes bounds the | and && bytes of the text (|| counts
+	// MaxChainBytes bounds the | and & bytes of the text (|| and && count
 	// twice). Over it the text is refused unparsed: parsing a chain costs
 	// about 2 KB for each such byte, so it also bounds the measure itself
 	// to about 32 MiB. The largest real call has 1,600.
@@ -195,31 +195,26 @@ type budgetCounts struct {
 	inWord        bool
 }
 
-// feed counts the byte at command[i] and returns how many bytes it consumed
-// beyond itself.
-func (n *budgetCounts) feed(command string, i int) (extra int) {
+// feed counts the byte at command[i]. Every | and & counts as a chain byte
+// (|| and && count twice): the parser reads && out of two & that are not
+// next to each other (a NUL byte or a line continuation between them), so
+// counting the pair would under-count what the tree holds. A background list
+// of & costs a few more chain bytes and nothing else; only a text past the
+// soft bound is parsed to be measured.
+func (n *budgetCounts) feed(command string, i int) {
 	c := command[i]
-	switch c {
-	case '|':
+	switch {
+	case c == '|' || c == '&':
 		n.chain++
 		n.tokens++
-	case '&':
-		if i+1 < len(command) && command[i+1] == '&' {
-			n.chain++
-			extra = 1
-		}
+	case tokenBytes[c]:
 		n.tokens++
-	default:
-		if tokenBytes[c] {
-			n.tokens++
-		}
 	}
 	blank := c == ' ' || c == '\t' || c == '\n' || c == '\r' || tokenBytes[c] || c == '|' || c == '&' || c == '(' || c == ')'
 	if !blank && !n.inWord {
 		n.tokens++
 	}
 	n.inWord = !blank
-	return extra
 }
 
 func computeBudget(command string) string {
@@ -286,12 +281,7 @@ func scanCounts(command string) (raw, aware budgetCounts, braces bool, reason st
 			aware.inWord = true
 			continue
 		}
-		if skip := aware.feed(command, i); skip > 0 {
-			raw.feed(command, i)
-			raw.feed(command, i+skip)
-			i += skip
-			continue
-		}
+		aware.feed(command, i)
 		raw.feed(command, i)
 	}
 	return raw, aware, braces, ""

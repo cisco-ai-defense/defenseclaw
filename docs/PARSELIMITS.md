@@ -43,7 +43,7 @@ text the first stage has bounded in another way.
 |---|---|---|---|---|
 | `MaxNestingDepth` | 512 | | | unchanged (GAP-2537) |
 | `MaxCommandBytes` | 1 MiB | 97,371 | 25,175 | the hook body cap |
-| `MaxChainOperators` (tree) | 512 | 38 | 10 | 77 ms and 24 MiB at the cap on the costliest family; 4096 cost 1.6 to 4.2 s |
+| `MaxChainOperators` (tree) | 512 | 38 | 10 | 64 to 270 ms and 24 MiB at the cap on the costliest family (a pipeline of command substitutions: 64 ms on a quiet box, 149 to 268 ms measured by the review on a loaded one); 4096 cost 1.6 to 4.2 s |
 | `MaxChainBytes` (text, aware) | 16,384 | 1,600 | 176 | parsing a chain costs about 2 KB per byte |
 | `MaxTokens` (text, aware) | 131,072 | about 15,000 | | a flat command at the bound costs 60 MiB and 40 ms |
 | `MaxParsedNodes` (tree) | 32,768 | 13,559 | 375 | 100 to 165 ms and 67 MiB for a flat command at the bound |
@@ -79,7 +79,7 @@ gateway does not depend on it.
 ## Cost curve
 
 Hook decision, default tier, median of three, on the gate box. The caps are
-set from this table: a call at a cap stays near 100 ms and 64 MiB. A row past
+set from this table: a call at a cap stays under 64 MiB, and under about 100 ms on a quiet box (up to 270 ms on the costliest family on a loaded one, 2 to 4 times slower). A row past
 a cap is refused before any reader runs. Regenerate it with
 `PARSE_BUDGET_CURVE=1 go test -run TestParseBudgetCostCurve -v ./internal/gateway`
 (`PARSE_BUDGET_SHAPE=<shape>` for one family).

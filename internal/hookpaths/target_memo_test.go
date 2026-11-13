@@ -307,20 +307,17 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	}
 	// Review r3 mutation MC: the header is built from the reduced call, so
 	// the padding's own write targets (past the 64 KiB analysis bound, so
-	// no path fact lists them) are not described. A call of 30000 writes is
-	// also past the reading budget of shellparse (parsed nodes, GAP-0254),
-	// which no reader parses, the client's included: its map says only
-	// that it is incomplete. The state write in it is not lost: the gateway
-	// judges every call past the budget that may name the state as a
-	// mutation of it, in every mode (TestParseBudgetKeepsTheStateWriteProof
-	// in internal/gateway, GAP-0281).
+	// no path fact lists them) are not described. The call is also past the
+	// reading budget of shellparse (parsed nodes), which no reader parses:
+	// its map is the reduced reading of BudgetStateReading, the state listed
+	// and the truncated marker (TestClientHeaderOfAnOverBudgetCall...).
 	var writes []string
 	for i := range 30000 {
 		writes = append(writes, fmt.Sprintf("echo x > ordinary/f%d.txt", i))
 	}
 	reducedHeader := header(strings.Join(writes, "; ") + "; printf changed >> " + stateWord)
-	if !incomplete(reducedHeader) {
-		t.Errorf("over-budget state write after 30000 writes: header %v, want only the incomplete marker and cwd", reducedHeader)
+	if _, listed := reducedHeader[state]; !listed || reducedHeader[TruncatedKey] != "1" {
+		t.Errorf("over-budget state write after 30000 writes: header %v, want the state listed and the truncated marker", reducedHeader)
 	}
 	for key := range reducedHeader {
 		if strings.Contains(key, "ordinary/f") {
