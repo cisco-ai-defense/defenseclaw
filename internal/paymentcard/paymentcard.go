@@ -101,6 +101,19 @@ var schemes = []scheme{
 	{name: "diners", low: 36, high: 36, prefixLen: 2, minLength: 14, maxLength: 19},
 	{name: "diners", low: 38, high: 39, prefixLen: 2, minLength: 16, maxLength: 19},
 	{name: "mir", low: 2200, high: 2204, prefixLen: 4, minLength: 16, maxLength: 19},
+	{name: "diners", low: 3095, high: 3095, prefixLen: 4, minLength: 14, maxLength: 19},
+	{name: "rupay", low: 60, high: 60, prefixLen: 2, minLength: 16, maxLength: 16},
+	{name: "rupay", low: 81, high: 82, prefixLen: 2, minLength: 16, maxLength: 16},
+	{name: "rupay", low: 508, high: 508, prefixLen: 3, minLength: 16, maxLength: 16},
+	{name: "elo", low: 509, high: 509, prefixLen: 3, minLength: 16, maxLength: 16},
+	{name: "elo", low: 5041, high: 5041, prefixLen: 4, minLength: 16, maxLength: 16},
+	{name: "elo", low: 5066, high: 5067, prefixLen: 4, minLength: 16, maxLength: 16},
+	{name: "elo", low: 6277, high: 6277, prefixLen: 4, minLength: 16, maxLength: 16},
+	{name: "elo", low: 6362, high: 6363, prefixLen: 4, minLength: 16, maxLength: 16},
+	{name: "verve", low: 5060, high: 5061, prefixLen: 4, minLength: 16, maxLength: 19},
+	{name: "dankort", low: 5019, high: 5019, prefixLen: 4, minLength: 16, maxLength: 16},
+	{name: "troy", low: 9792, high: 9792, prefixLen: 4, minLength: 16, maxLength: 16},
+	{name: "instapayment", low: 637, high: 639, prefixLen: 3, minLength: 16, maxLength: 16},
 	{name: "maestro", low: 5018, high: 5018, prefixLen: 4, minLength: 12, maxLength: 19},
 	{name: "maestro", low: 5020, high: 5020, prefixLen: 4, minLength: 12, maxLength: 19},
 	{name: "maestro", low: 5038, high: 5038, prefixLen: 4, minLength: 12, maxLength: 19},
@@ -154,7 +167,7 @@ var cardGroupings = [][]int{
 
 // Grouped reports whether value has a card layout: digits only, or digit
 // groups in one of the printed card layouts joined by a single consistent
-// separator (one space, hyphen or dot; the built-in rules search only for
+// separator (one space, tab, hyphen or dot; the built-in rules search only for
 // spaces and hyphens, operator local patterns may search for dots).
 // "4444-555555555555" (the tail of a UUID) and "4532 0151-1283 0366" are not
 // card layouts.
@@ -167,7 +180,7 @@ func Grouped(value string) bool {
 		switch {
 		case c >= '0' && c <= '9':
 			run++
-		case c == ' ' || c == '-' || c == '.':
+		case c == ' ' || c == '\t' || c == '-' || c == '.':
 			if run == 0 {
 				return false // leading or doubled separator
 			}
@@ -213,30 +226,106 @@ func isAlnum(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
-// isJoiner reports a byte that glues two alphanumeric parts into one token:
-// the hyphen of a UUID or slug, the underscore of an identifier and the dot
-// of a version, decimal or file name.
-func isJoiner(c byte) bool { return c == '-' || c == '_' || c == '.' }
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+// segmentBefore and segmentAfter return the run of ASCII letters and digits
+// that ends at index i (exclusive) or starts at index i.
+func segmentBefore(text string, i int) string {
+	j := i
+	for j > 0 && isAlnum(text[j-1]) {
+		j--
+	}
+	return text[j:i]
+}
+
+func segmentAfter(text string, i int) string {
+	j := i
+	for j < len(text) && isAlnum(text[j]) {
+		j++
+	}
+	return text[i:j]
+}
+
+func hasDigit(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func allHex(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isHex(s[i]) {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// joinedSegment reports whether joiner glues the number to segment, the
+// alphanumeric run on the joiner's far side, into one machine token:
+//   - '_' joins identifiers (ord_4532..., span_4532...): any segment;
+//   - '.' joins decimals, versions and hex ids (0.4532..., v1.4532...,
+//     4532....9fa1c3d2): a segment with a digit, or 4+ hex characters.
+//     Prose ("Card no.4532...", "4532....Thanks") is not joined;
+//   - '-' joins UUID groups, trace ids and numbered ids (3333-4444...,
+//     ORD-2026-4532..., deadbeef-4532...): a segment of 3+ characters with a
+//     digit, or 4+ hex characters. Labels ("VISA-4532...", "cc-4532...", a
+//     prefix such as "x-") and a trailing expiry ("4532...-12/27") are not.
+func joinedSegment(joiner byte, segment string) bool {
+	switch joiner {
+	case '_':
+		return segment != ""
+	case '.':
+		return hasDigit(segment) || len(segment) >= 4 && allHex(segment)
+	case '-':
+		return len(segment) >= 3 && hasDigit(segment) || len(segment) >= 4 && allHex(segment)
+	}
+	return false
+}
+
+// escapeEndsAt reports a JSON or C escape that ends right before index i: a
+// one-letter escape (\n, \t, \r) or \uXXXX. Its last character is a
+// boundary, not part of the number's token.
+func escapeEndsAt(text string, i int) bool {
+	if i >= 2 && text[i-2] == '\\' {
+		return true
+	}
+	if i >= 6 && text[i-6] == '\\' && (text[i-5] == 'u' || text[i-5] == 'U') {
+		for k := i - 4; k < i; k++ {
+			if !isHex(text[k]) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
 
 // Embedded reports whether text[start:end] is part of a longer token rather
-// than a standalone number: it touches a letter or digit, or a joiner
-// ('-', '_', '.') that is itself attached to a letter or digit. That covers
-// UUIDs and Kubernetes uids (11111111-2222-3333-4444-555555555555), trace,
-// request and order ids (ord-4532015112830366), decimals (0.4532015112830366)
-// and versions. A sentence-ending period ("... 4532015112830366.") is not a
-// joiner because nothing alphanumeric follows it. An escape such as the \n of
-// a JSON-escaped line break is a boundary, not a letter.
+// than a standalone number: it touches a letter or digit (other than the end
+// of an escape such as \n or \u00a0), or a joiner that glues it to a
+// machine-token segment (see joinedSegment). That covers UUIDs and
+// Kubernetes uids (11111111-2222-3333-4444-555555555555), trace, request and
+// order ids, hashes, decimals (0.4532015112830366) and versions, while
+// "Card no.4532...", "VISA-4532..." and "4532....Thanks" stay cards.
 func Embedded(text string, start, end int) bool {
 	if start < 0 || end > len(text) || start >= end {
 		return false
 	}
 	if start > 0 {
 		before := text[start-1]
-		if isAlnum(before) && !(start > 1 && text[start-2] == '\\') {
+		if isAlnum(before) && !escapeEndsAt(text, start) {
 			return true
 		}
-		if isJoiner(before) && start > 1 && isAlnum(text[start-2]) {
-			return true
+		if before == '-' || before == '_' || before == '.' {
+			if joinedSegment(before, segmentBefore(text, start-1)) {
+				return true
+			}
 		}
 	}
 	if end < len(text) {
@@ -244,8 +333,10 @@ func Embedded(text string, start, end int) bool {
 		if isAlnum(after) {
 			return true
 		}
-		if isJoiner(after) && end+1 < len(text) && isAlnum(text[end+1]) {
-			return true
+		if after == '-' || after == '_' || after == '.' {
+			if joinedSegment(after, segmentAfter(text, end+1)) {
+				return true
+			}
 		}
 	}
 	return false
@@ -291,4 +382,38 @@ func ContextNear(text string, start, end int) bool {
 		hi = len(text)
 	}
 	return contextWordRE.MatchString(text[lo:start]) || contextWordRE.MatchString(text[end:hi])
+}
+
+// LabeledRunAt reports whether the digit run that ends a label-bound match
+// (text[start:end], e.g. "Credit Card Number: 3529 0442 5964 7174") is a
+// standalone number: one consistent separator and not glued to a longer
+// token. Label-bound rules keep their own Luhn/scheme policy (private-label
+// cards carry neither); this only rejects digits lifted from a UUID or id.
+func LabeledRunAt(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	runStart := -1
+	for i := start; i < end; i++ {
+		if text[i] >= '0' && text[i] <= '9' {
+			runStart = i
+			break
+		}
+	}
+	if runStart < 0 {
+		return false
+	}
+	sep := byte(0)
+	for i := runStart; i < end; i++ {
+		c := text[i]
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if sep == 0 {
+			sep = c
+		} else if c != sep {
+			return false
+		}
+	}
+	return !Embedded(text, runStart, end)
 }

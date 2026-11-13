@@ -241,6 +241,12 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 		return func(text, match string, start, end int) bool {
 			return validPaymentCardCandidateAt(text, match, start, end)
 		}
+	case "PII-CARD-LABELED":
+		// Label-bound (privacy-high-assurance): no Luhn or scheme check by
+		// design, but the digits must not come from a UUID or other token.
+		return func(text, _ string, start, end int) bool {
+			return paymentcard.LabeledRunAt(text, start, end)
+		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
 	case "ENT-EMAIL-BULK":
@@ -691,15 +697,21 @@ func emailDomainLooksLikeNumericHost(email string) bool {
 }
 
 // acceptedLocalPIIMatch applies the same structural checks to the legacy local
-// PII regex lane. Custom patterns that do not produce an SSN- or PAN-shaped
-// candidate retain their historical behavior.
+// PII regex lane. A match made only of digits and separators whose digits
+// carry a card-scheme prefix and length is judged by the shared payment card
+// rules (the built-in local card regexes always produce that shape). Any
+// other operator pattern (a labeled match, an IMEI, an account number)
+// keeps its historical behavior: a 13-19 digit candidate must pass Luhn.
 func acceptedLocalPIIMatch(match string) bool {
 	digits := decimalDigits(match)
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return validUSSSN(match)
 	}
 	if len(digits) >= 13 && len(digits) <= 19 {
-		return validPaymentCardCandidate(match)
+		if localPANShaped(match, digits) {
+			return validPaymentCardCandidate(match)
+		}
+		return paymentcard.Luhn(digits) && !knownPublicTestPAN(digits)
 	}
 	return true
 }
@@ -712,10 +724,28 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return credibleSSNContext(text, start, end)
 	}
-	if len(digits) >= 13 && len(digits) <= 19 && paymentcard.Embedded(text, start, end) {
-		return false
+	if len(digits) >= 13 && len(digits) <= 19 {
+		if localPANShaped(match, digits) {
+			return !paymentcard.Embedded(text, start, end)
+		}
+		// Historical rule for operator patterns: not the fraction of a
+		// float (GAP-2062).
+		return !(start >= 2 && text[start-1] == '.' && text[start-2] >= '0' && text[start-2] <= '9')
 	}
 	return true
+}
+
+// localPANShaped reports a local-lane match that is a bare number (digits
+// and separators only) whose digits have a payment-card scheme prefix and
+// length.
+func localPANShaped(match, digits string) bool {
+	for i := 0; i < len(match); i++ {
+		c := match[i]
+		if !(c >= '0' && c <= '9' || c == ' ' || c == '\t' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return paymentcard.Scheme(digits) != ""
 }
 
 func credibleSSNContext(text string, start, end int) bool {

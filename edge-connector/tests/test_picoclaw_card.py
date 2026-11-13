@@ -90,3 +90,29 @@ def test_luhn_alone_is_not_enough():
     # Luhn-valid, 4-4-4-4 shaped, but no card scheme has prefix 1234.
     assert picoclaw_hook._luhn_check("1234567890123452")
     assert "CREDIT_CARD" not in picoclaw_hook._scan_pii("build 1234 5678 9012 3452")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Card no.4000056655665556",
+        "4000056655665556.Thanks",
+        "VISA-4000 0566 5566 5556",
+        "cc-4000056655665556",
+        "card 4000056655665556-12/27",
+        "4000\t0566\t5566\t5556",
+        "rupay 6070 1234 1234 1234",
+    ],
+)
+def test_prose_label_and_scheme_forms_are_cards(text):
+    assert "CREDIT_CARD" in picoclaw_hook._scan_pii(text)
+
+
+@pytest.mark.parametrize("text", ["ord_4000056655665556", "span 4000056655665556.9fa1c3d2", "deadbeef-4000056655665556"])
+def test_machine_tokens_are_not_cards(text):
+    assert "CREDIT_CARD" not in picoclaw_hook._scan_pii(text)
+
+
+def test_non_ascii_neighbour_matches_go():
+    # Go's \b is ASCII-only; the Python regex uses re.ASCII to match it.
+    assert "CREDIT_CARD" in picoclaw_hook._scan_pii("é4000056655665556")

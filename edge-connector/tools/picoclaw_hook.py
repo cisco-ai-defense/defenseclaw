@@ -558,6 +558,14 @@ _CARD_SCHEMES = (
     (4, 5038, 5038, tuple(range(12, 20))), (4, 5893, 5893, tuple(range(12, 20))),
     (4, 6304, 6304, tuple(range(12, 20))), (4, 6759, 6759, tuple(range(12, 20))),
     (4, 6761, 6763, tuple(range(12, 20))),      # Maestro
+    (4, 3095, 3095, tuple(range(14, 20))),      # Diners Club
+    (2, 60, 60, (16,)), (2, 81, 82, (16,)), (3, 508, 508, (16,)),   # RuPay
+    (3, 509, 509, (16,)), (4, 5041, 5041, (16,)), (4, 5066, 5067, (16,)),
+    (4, 6277, 6277, (16,)), (4, 6362, 6363, (16,)),                 # Elo
+    (4, 5060, 5061, tuple(range(16, 20))),      # Verve
+    (4, 5019, 5019, (16,)),                     # Dankort
+    (4, 9792, 9792, (16,)),                     # Troy
+    (3, 637, 639, (16,)),                       # InstaPayment
 )
 
 # Printed layouts of a grouped PAN, by group length.
@@ -575,8 +583,8 @@ def _card_scheme_ok(digits: str) -> bool:
 def _card_grouped(value: str) -> bool:
     """Digits alone, or card-layout groups joined by ONE consistent separator.
     The tail of a UUID ("4444-555555555555") is not a card layout."""
-    seps = {c for c in value if c in " -."}
-    if any(not (c.isdigit() and c.isascii()) and c not in " -." for c in value):
+    seps = {c for c in value if c in " \t-."}
+    if any(not (c.isdigit() and c.isascii()) and c not in " \t-." for c in value):
         return False
     if not seps:
         return True
@@ -592,21 +600,52 @@ def _ascii_alnum(c: str) -> bool:
     return c.isascii() and c.isalnum()
 
 
+def _joined_segment(joiner: str, segment: str) -> bool:
+    """Whether joiner glues the number to segment (the alphanumeric run on
+    its far side) into one machine token. Mirrors internal/paymentcard."""
+    has_digit = any(c.isdigit() for c in segment)
+    hexy = len(segment) >= 4 and all(c in "0123456789abcdefABCDEF" for c in segment)
+    if joiner == "_":
+        return segment != ""
+    if joiner == ".":
+        return has_digit or hexy
+    if joiner == "-":
+        return (len(segment) >= 3 and has_digit) or hexy
+    return False
+
+
+def _escape_ends_at(text: str, i: int) -> bool:
+    if i >= 2 and text[i - 2] == "\\":
+        return True
+    if i >= 6 and text[i - 6] == "\\" and text[i - 5] in "uU":
+        return all(c in "0123456789abcdefABCDEF" for c in text[i - 4:i])
+    return False
+
+
 def _card_embedded(text: str, start: int, end: int) -> bool:
     """True when text[start:end] is glued to a longer token: a UUID or
-    Kubernetes uid, a hash or trace id, a versioned or decimal number."""
+    Kubernetes uid, a hash or trace id, a numbered id, a version or decimal.
+    "Card no.4532...", "VISA-4532..." and "4532....Thanks" stay cards."""
     if start > 0:
         before = text[start - 1]
-        if _ascii_alnum(before) and not (start > 1 and text[start - 2] == "\\"):
+        if _ascii_alnum(before) and not _escape_ends_at(text, start):
             return True
-        if before in "-_." and start > 1 and _ascii_alnum(text[start - 2]):
-            return True
+        if before in "-_.":
+            j = start - 1
+            while j > 0 and _ascii_alnum(text[j - 1]):
+                j -= 1
+            if _joined_segment(before, text[j:start - 1]):
+                return True
     if end < len(text):
         after = text[end]
         if _ascii_alnum(after):
             return True
-        if after in "-_." and end + 1 < len(text) and _ascii_alnum(text[end + 1]):
-            return True
+        if after in "-_.":
+            j = end + 1
+            while j < len(text) and _ascii_alnum(text[j]):
+                j += 1
+            if _joined_segment(after, text[end + 1:j]):
+                return True
     return False
 
 
@@ -646,7 +685,7 @@ def _is_valid_ssn(match_str: str) -> bool:
 
 # Raw regex patterns for initial matching
 _SSN_RE = re.compile(r'\b\d{3}[\s-]?\d{2}[\s-]?\d{4}\b')
-_CC_RE = re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b')
+_CC_RE = re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b', re.ASCII)
 
 # Sensitive data patterns for output scanning
 # Patterns that need post-match validation are handled in _scan_pii()

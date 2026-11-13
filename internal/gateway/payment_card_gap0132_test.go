@@ -18,8 +18,12 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 
 	"github.com/defenseclaw/defenseclaw/internal/paymentcard/testcorpus"
 )
@@ -162,5 +166,89 @@ func TestPaymentCardTriageConfidenceUsesContextWords(t *testing.T) {
 	}
 	if with <= without {
 		t.Fatalf("context word did not raise confidence: with=%.2f without=%.2f", with, without)
+	}
+}
+
+// Review of GAP-0132: real cards written next to prose, labels or an expiry
+// are still cards for the pack rules and triage.
+func TestPaymentCardProseAndLabelFormsStillDetected(t *testing.T) {
+	visa := alertFatigueRule(t, "default", "ENT-CC-VISA")
+	for _, text := range []string{
+		"Card no.4000056655665556",
+		"4000056655665556.Thanks for checking",
+		"VISA-4000 0566 5566 5556",
+		"cc-4000056655665556",
+		"x-4000056655665556",
+		"card 4000056655665556-12/27",
+	} {
+		if firstAcceptedRuleMatch(visa, text) == nil {
+			t.Errorf("ENT-CC-VISA missed %q", text)
+		}
+		if !triageHasCard(text) {
+			t.Errorf("TRIAGE-PII-CC missed %q", text)
+		}
+	}
+	// The ENT-CC rules allow tab separators ([\s-]); the triage regex never did.
+	if firstAcceptedRuleMatch(visa, "4000\t0566\t5566\t5556") == nil {
+		t.Error("ENT-CC-VISA missed a tab-separated card")
+	}
+}
+
+// Review of GAP-0132: operator local PII patterns that are not bare
+// card-shaped numbers keep their historical Luhn-only behavior, while the
+// card-shaped lane uses the shared rules.
+func TestPaymentCardOperatorLocalPatternsKeepHistoricalBehavior(t *testing.T) {
+	withLocalPatternsRestored(t)
+	if err := ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
+		Version: 1,
+		PIIDataRegexes: []string{
+			`(?i)card[:\s]*\d{16}`,
+			`\bimei\s+\d{15}\b`,
+			`\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"card: 4000056655665556", "device imei 490154203237518"} {
+		if !cardFinding(scanLocalPatterns("prompt", text).Findings) {
+			t.Errorf("operator pattern no longer fires on %q", text)
+		}
+	}
+	if cardFinding(scanLocalPatterns("prompt", "curl https://webhook.site/11111111-2222-3333-4444-555555555555").Findings) {
+		t.Error("UUID tail accepted through the local card pattern")
+	}
+}
+
+// Review of GAP-0132: the label-bound privacy-high-assurance rule keeps its
+// no-Luhn policy (private-label cards) but no longer lifts digits out of a
+// UUID or accepts mixed separators.
+func TestPaymentCardLabeledRuleRejectsUUIDDigits(t *testing.T) {
+	pack, err := guardrail.LoadRulePack(filepath.Join("..", "..", "policies", "guardrail-use-cases", "privacy-high-assurance"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rule PatternRule
+	for _, file := range pack.RuleFiles {
+		for _, r := range file.Rules {
+			if r.ID == "PII-CARD-LABELED" {
+				rule = PatternRule{ID: r.ID, Pattern: regexp.MustCompile(r.Pattern), Tags: r.Tags}
+			}
+		}
+	}
+	if rule.Pattern == nil {
+		t.Fatal("PII-CARD-LABELED not found")
+	}
+	for _, text := range []string{"Credit Card Number: 3529044259647174", "debit card no. 1234 5678 9012 3456"} {
+		if firstAcceptedRuleMatch(rule, text) == nil {
+			t.Errorf("labeled card missed: %q", text)
+		}
+	}
+	for _, text := range []string{
+		"GET /v1/credit-card-11111111-2222-3333-4444-555555555555",
+		"credit card 1234 5678-9012 3456",
+	} {
+		if firstAcceptedRuleMatch(rule, text) != nil {
+			t.Errorf("labeled rule matched non-card digits: %q", text)
+		}
 	}
 }

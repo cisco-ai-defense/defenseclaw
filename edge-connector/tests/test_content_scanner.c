@@ -141,6 +141,9 @@ static void test_credit_card_shape_and_boundaries(void) {
         "value 0.4532015112830366",
         "order 4532 0151-1283 0366",
         "count 1234567890123456",
+        "id ord_4000056655665556 ok",
+        "span 4000056655665556.9fa1c3d2",
+        "ref deadbeef-4000056655665556",
     };
     for (size_t i = 0; i < sizeof(benign) / sizeof(benign[0]); i++) {
         if (count_pii_high(benign[i]) != 0) {
@@ -154,6 +157,11 @@ static void test_credit_card_shape_and_boundaries(void) {
         "mc 5200-8282-8282-8210 ok",
         "amex 3714 496353 98431.",
         "card 2223003122003222",
+        "Card no.4000056655665556",
+        "VISA-4000 0566 5566 5556",
+        "card 4000056655665556-12/27",
+        "tsv 4000\t0566\t5566\t5556",
+        "rupay 6070 1234 1234 1234",
     };
     for (size_t i = 0; i < sizeof(cards) / sizeof(cards[0]); i++) {
         if (count_pii_high(cards[i]) < 1) {

@@ -195,19 +195,55 @@ static bool cc_ascii_alnum(char c) {
     return u < 0x80 && isalnum(u);
 }
 
-static bool cc_joiner(char c) { return c == '-' || c == '_' || c == '.'; }
+static bool cc_hex(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+/* Whether joiner glues the number to the segment s[from, to) into one
+ * machine token (see joinedSegment in internal/paymentcard). */
+static bool cc_joined_segment(char joiner, const char *s, uint32_t from, uint32_t to) {
+    uint32_t n = to - from;
+    bool digit = false, hex = n >= 4;
+    for (uint32_t k = from; k < to; k++) {
+        if (isdigit((unsigned char)s[k])) digit = true;
+        if (!cc_hex(s[k])) hex = false;
+    }
+    if (joiner == '_') return n > 0;
+    if (joiner == '.') return digit || hex;
+    if (joiner == '-') return (n >= 3 && digit) || hex;
+    return false;
+}
+
+static bool cc_escape_ends_at(const char *s, uint16_t i) {
+    if (i >= 2 && s[i - 2] == '\\') return true;
+    if (i >= 6 && s[i - 6] == '\\' && (s[i - 5] == 'u' || s[i - 5] == 'U')) {
+        for (uint16_t k = (uint16_t)(i - 4); k < i; k++) {
+            if (!cc_hex(s[k])) return false;
+        }
+        return true;
+    }
+    return false;
+}
 
 /* True when content[start:end) is glued to a longer token. */
 static bool cc_embedded(const char *s, uint16_t len, uint16_t start, uint16_t end) {
     if (start > 0) {
         char before = s[start - 1];
-        if (cc_ascii_alnum(before) && !(start > 1 && s[start - 2] == '\\')) return true;
-        if (cc_joiner(before) && start > 1 && cc_ascii_alnum(s[start - 2])) return true;
+        if (cc_ascii_alnum(before) && !cc_escape_ends_at(s, start)) return true;
+        if (before == '-' || before == '_' || before == '.') {
+            uint32_t j = (uint32_t)start - 1;
+            while (j > 0 && cc_ascii_alnum(s[j - 1])) j--;
+            if (cc_joined_segment(before, s, j, (uint32_t)start - 1)) return true;
+        }
     }
     if (end < len) {
         char after = s[end];
         if (cc_ascii_alnum(after)) return true;
-        if (cc_joiner(after) && end + 1 < len && cc_ascii_alnum(s[end + 1])) return true;
+        if (after == '-' || after == '_' || after == '.') {
+            uint32_t j = (uint32_t)end + 1;
+            while (j < len && cc_ascii_alnum(s[j])) j++;
+            if (cc_joined_segment(after, s, (uint32_t)end + 1, j)) return true;
+        }
     }
     return false;
 }
@@ -240,7 +276,12 @@ static bool cc_scheme(const char *d, int n) {
     if (p4 == 6011 || (p3 >= 644 && p3 <= 649) || p2 == 65 || p2 == 62 ||
         (p4 >= 3528 && p4 <= 3589) || (p4 >= 2200 && p4 <= 2204) ||
         p2 == 38 || p2 == 39) return n >= 16 && n <= 19;                     /* Discover, UnionPay, JCB, Mir, Diners */
-    if ((p3 >= 300 && p3 <= 305) || p2 == 36) return n >= 14 && n <= 19;    /* Diners */
+    if ((p3 >= 300 && p3 <= 305) || p2 == 36 || p4 == 3095) return n >= 14 && n <= 19; /* Diners */
+    if (p4 == 5060 || p4 == 5061) return n >= 16 && n <= 19;                 /* Verve */
+    if (p2 == 60 || p2 == 81 || p2 == 82 || p3 == 508 ||                     /* RuPay */
+        p3 == 509 || p4 == 5041 || p4 == 5066 || p4 == 5067 || p4 == 6277 ||
+        p4 == 6362 || p4 == 6363 ||                                          /* Elo */
+        p4 == 5019 || p4 == 9792 || (p3 >= 637 && p3 <= 639)) return n == 16; /* Dankort, Troy, InstaPayment */
     return false;
 }
 
@@ -272,7 +313,7 @@ static uint16_t cc_match_at(const char *s, uint16_t len, uint16_t i) {
         bool ok = true;
         for (uint8_t g = 0; g < groups && ok; g++) {
             if (g > 0) {
-                if (pos >= len || (s[pos] != ' ' && s[pos] != '-')) { ok = false; break; }
+                if (pos >= len || (s[pos] != ' ' && s[pos] != '\t' && s[pos] != '-' && s[pos] != '.')) { ok = false; break; }
                 if (sep == 0) sep = s[pos];
                 else if (s[pos] != sep) { ok = false; break; }
                 pos++;

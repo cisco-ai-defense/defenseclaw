@@ -53,6 +53,13 @@ func TestScheme(t *testing.T) {
 		"6200000000000005":    "unionpay",
 		"6759649826438453":    "maestro",
 		"2200123456789010":    "mir",
+		"6070123412341234":    "rupay",
+		"5066991111111118":    "elo",
+		"5061000000000000000": "verve",
+		"5019717010103742":    "dankort",
+		"9792000000000001":    "troy",
+		"6370000000000000":    "instapayment",
+		"30950000000000":      "diners",
 		// Wrong length for the prefix, or no scheme at all.
 		"400005665566555":  "",
 		"3782822463100059": "",
@@ -72,7 +79,7 @@ func TestGrouped(t *testing.T) {
 	for _, ok := range []string{
 		"4000056655665556", "4000 0566 5566 5556", "4000-0566-5566-5556",
 		"3714 496353 98431", "3622-720627-1667", "4222 2222 22222", "4000 0566 5566 5556 123",
-		"4000.0566.5566.5556",
+		"4000.0566.5566.5556", "4000\t0566\t5566\t5556",
 	} {
 		if !Grouped(ok) {
 			t.Errorf("Grouped(%q) = false", ok)
@@ -87,7 +94,7 @@ func TestGrouped(t *testing.T) {
 		"4000.0566-5566.5556",  // mixed separators
 		"4000.056655665556",
 		"400005665566 5556",
-		"4000\t0566\t5566\t5556",
+		"4000\t0566 5566\t5556",
 	} {
 		if Grouped(bad) {
 			t.Errorf("Grouped(%q) = true", bad)
@@ -106,8 +113,9 @@ func TestEmbedded(t *testing.T) {
 		{"value 0.4000056655665556", "4000056655665556", true},
 		{"bump to v1.4000056655665556", "4000056655665556", true},
 		{"ORD-2026-4000056655665556", "4000056655665556", true},
-		{"4000056655665556-abc", "4000056655665556", true},
-		{"4000056655665556.json", "4000056655665556", true},
+		{"4000056655665556-abc", "4000056655665556", false}, // short non-hex word: prose
+		{"4000056655665556-abcd1234", "4000056655665556", true},
+		{"4000056655665556.json", "4000056655665556", false}, // a file named after a card number is a card
 		{"x4000056655665556", "4000056655665556", true},
 		{"card 4000056655665556.", "4000056655665556", false},
 		{"card: 4000056655665556, exp 12/30", "4000056655665556", false},
@@ -116,6 +124,22 @@ func TestEmbedded(t *testing.T) {
 		{"line one\\n4000056655665556", "4000056655665556", false},
 		{"/cards/4000056655665556/charge", "4000056655665556", false},
 		{"4000056655665556", "4000056655665556", false},
+		// Review: prose and labels next to a joiner stay cards.
+		{"Card no.4000056655665556", "4000056655665556", false},
+		{"Kartennr.4000056655665556 bitte", "4000056655665556", false},
+		{"4000056655665556.Thanks", "4000056655665556", false},
+		{"VISA-4000 0566 5566 5556", "4000 0566 5566 5556", false},
+		{"cc-4000056655665556", "4000056655665556", false},
+		{"x-4000056655665556", "4000056655665556", false},
+		{"4000056655665556-12/27", "4000056655665556", false},
+		{"\\u00a04000056655665556", "4000056655665556", false},
+		{"\\t4000056655665556", "4000056655665556", false},
+		// Machine tokens stay embedded.
+		{"ord_4000056655665556", "4000056655665556", true},
+		{"span 4000056655665556.9fa1c3d2", "4000056655665556", true},
+		{"deadbeef-4000056655665556", "4000056655665556", true},
+		{"ORD-2026-4000056655665556", "4000056655665556", true},
+		{"00-4000056655665556-01ab", "4000056655665556", true},
 	}
 	for _, c := range cases {
 		start := strings.Index(c.text, c.match)
@@ -205,4 +229,26 @@ func TestValidAtGap0132(t *testing.T) {
 	if !Valid("4444555555555555") {
 		t.Fatal("the same digits alone must still be a card (Luhn-valid Visa)")
 	}
+}
+
+func TestLabeledRunAt(t *testing.T) {
+	for text, want := range map[string]bool{
+		"Credit Card Number: 3529044259647174":                 true,
+		"credit card: 3529 0442 5964 7174":                     true,
+		"/v1/credit-card-11111111-2222-3333-4444-555555555555": false,
+		"credit card 3529 0442-5964 7174":                      false,
+		"credit card number 3529044259647174abc":               false,
+	} {
+		if got := LabeledRunAt(text, 0, len(text)-trailingNonDigits(text)); got != want {
+			t.Errorf("LabeledRunAt(%q) = %v, want %v", text, got, want)
+		}
+	}
+}
+
+func trailingNonDigits(s string) int {
+	n := 0
+	for i := len(s) - 1; i >= 0 && (s[i] < '0' || s[i] > '9'); i-- {
+		n++
+	}
+	return n
 }
