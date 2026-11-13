@@ -112,7 +112,7 @@ type messageExtract struct {
 	// value past the node limit (nodes), a value below the depth limit (depth),
 	// a text past the size limit (bytes), or an attachment too long to decode
 	// (bytes). A limit that drops nothing but empty containers is not a hit.
-	Truncated bounded.Truncated
+	Truncated bounded.CapSet
 	// Routing holds the strings under routing keys, by dotted key path.
 	Routing map[string]interface{}
 }
@@ -152,7 +152,7 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 		text = text[:head] + "\n" + text[tail:]
 		w.trunc.Hit(bounded.Bytes)
 	}
-	out.Text, out.Truncated = text, w.trunc
+	out.Text, out.Truncated = text, w.trunc.Set()
 	if len(w.routing) > 0 {
 		out.Routing = w.routing
 	}

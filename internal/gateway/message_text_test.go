@@ -339,44 +339,56 @@ const messageTestSecret = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2"
 // the cap.
 func init() {
 	registerBoundedLane(
-		boundedLaneCap{lane: "openclaw message depth", cap: bounded.Depth, limit: messageTextMaxDepth, adopted: true,
-			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+		boundedLaneCap{lane: "openclaw message depth", cap: bounded.Depth, limit: messageTextMaxDepth,
+			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
 				var v any = "text"
 				for range size + 1 {
 					v = map[string]any{"x": v}
 				}
 				return v.(map[string]any)
 			})},
-		boundedLaneCap{lane: "openclaw message nodes", cap: bounded.Nodes, limit: messageTextMaxNodes, adopted: true,
-			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+		boundedLaneCap{lane: "openclaw message nodes", cap: bounded.Nodes, limit: messageTextMaxNodes,
+			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
 				items := make([]any, size-3, size-2)
 				for i := range items {
 					items[i] = map[string]any{}
 				}
 				return map[string]any{"items": append(items, "late")}
 			})},
-		boundedLaneCap{lane: "openclaw message routing values", cap: bounded.Nodes, limit: messageTextMaxNodes, adopted: true,
-			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+		boundedLaneCap{lane: "openclaw message routing values", cap: bounded.Nodes, limit: messageTextMaxNodes,
+			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
 				return map[string]any{"text": "x", "to": slices.Repeat([]any{"r"}, size-2)}
 			})},
-		boundedLaneCap{lane: "openclaw message bytes", cap: bounded.Bytes, limit: messageTextMaxBytes, adopted: true,
-			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+		boundedLaneCap{lane: "openclaw message bytes", cap: bounded.Bytes, limit: messageTextMaxBytes,
+			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
 				return map[string]any{"text": strings.Repeat("a", size)}
 			})},
 	)
 }
 
-// boundedMessageCall is a message call of the params fill(size) builds, after
+// boundedMessageCall is a message call of the params fill(size) builds, with
 // the lane's seen element (a key in the message field, which blocks in every
-// tier) when the shape asks for it.
-func boundedMessageCall(fill func(size int) map[string]any) func(int, boundedShape) boundedLaneCall {
-	return func(size int, shape boundedShape) boundedLaneCall {
-		params := fill(size)
-		if shape.seen {
-			params["message"] = "key: " + messageTestSecret
+// tier) before the capped part for the seen shape and after it (last in the
+// walk) for seen-after. The nested and multi-cap shapes have no form here.
+func boundedMessageCall(fill func(size int) map[string]any) func(int, boundedShape) (boundedLaneCall, bool) {
+	return func(size int, shape boundedShape) (boundedLaneCall, bool) {
+		if shape.nested || shape.multi {
+			return boundedLaneCall{}, false
 		}
-		return boundedLaneCall{tool: "message", input: params}
+		params := fill(size)
+		switch {
+		case shape.seen:
+			params["message"] = "key: " + messageTestSecret
+		case shape.seenAfter:
+			params["zzz"] = "key: " + messageTestSecret
+		}
+		return boundedLaneCall{tool: "message", input: params}, true
 	}
+}
+
+// boundedMessageSeen is the seen element alone: the message of a call.
+func boundedMessageSeen() boundedLaneCall {
+	return boundedLaneCall{tool: "message", input: map[string]any{"message": "key: " + messageTestSecret}}
 }
 
 // boundedDecideOpenClawMessage sends one message call to /inspect/tool as the
