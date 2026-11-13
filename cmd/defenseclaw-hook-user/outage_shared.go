@@ -57,6 +57,11 @@ func sharedOutageMode(gateway, hookDir string, lateAt time.Time, look func() str
 			}
 			started := time.Now()
 			mode := look()
+			if mode == "" {
+				// The look was stopped (hook-user is exiting): no result.
+				unlock()
+				return "closed"
+			}
 			writeOutageModeResult(result, started, mode, stamp)
 			unlock()
 			return mode

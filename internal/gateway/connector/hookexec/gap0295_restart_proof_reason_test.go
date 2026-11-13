@@ -123,7 +123,7 @@ func TestGAP0295NoAnswerReasonTaxonomy(t *testing.T) {
 			opts, sp, w := restartWindowCall(t, "open", false, nil)
 			if tc.modeNotReady {
 				w.mu.Lock()
-				w.restart = nil
+				w.restart, w.restartRender = nil, nil
 				w.mu.Unlock()
 			}
 			if _, ok := failPerUserRestartWindow(answerDeadlineEnded(), opts, sp, "open"); ok {

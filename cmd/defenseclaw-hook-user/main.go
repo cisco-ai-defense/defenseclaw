@@ -63,7 +63,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "defenseclaw-hook-user: invalid hook command")
 		os.Exit(2)
 	}
-	os.Exit(run(home, addr, os.Stdin, os.Stdout, os.Stderr, hookexec.ProcessStartTime()))
+	exitStoppingLooks(run(home, addr, os.Stdin, os.Stdout, os.Stderr, hookexec.ProcessStartTime()))
 }
 
 // runFallbackGuardAt uses the native hook only when its companion guard is
@@ -199,7 +199,7 @@ func run(home, addr string, stdin io.Reader, stdout, stderr io.Writer, startedAt
 	input := io.MultiReader(bytes.NewReader(payload), stdin)
 	watchdog := hookexec.ArmAnswerWatchdog(hookexec.Options{
 		Connector: "claudecode", Home: home, StartedAt: startedAt,
-		FailMode: "closed", Exit: os.Exit, Stdout: stdout, Stderr: stderr,
+		FailMode: "closed", Exit: exitStoppingLooks, Stdout: stdout, Stderr: stderr,
 	}, payload)
 	hookDir := filepath.Join(home, "hooks")
 	if addr == "" {
@@ -212,7 +212,7 @@ func run(home, addr string, stdin io.Reader, stdout, stderr io.Writer, startedAt
 	opts := hookexec.Options{
 		Connector: "claudecode", APIAddr: addr, Home: home, HookDir: hookDir,
 		FailMode: "closed", StartedAt: startedAt, Stdin: input,
-		Stdout: stdout, Stderr: stderr, Exit: os.Exit, AnswerWatchdog: watchdog,
+		Stdout: stdout, Stderr: stderr, Exit: exitStoppingLooks, AnswerWatchdog: watchdog,
 		StrictAvailability: envTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY")),
 		TraceParent:        firstNonEmpty(os.Getenv("DEFENSECLAW_TRACEPARENT"), os.Getenv("TRACEPARENT"), os.Getenv("OTEL_TRACEPARENT")),
 		TraceState:         firstNonEmpty(os.Getenv("DEFENSECLAW_TRACESTATE"), os.Getenv("TRACESTATE"), os.Getenv("OTEL_TRACESTATE")),
@@ -397,7 +397,11 @@ func outageMode(gateway, hookDir string) string {
 exec "$1" hook-outage-mode --connector claudecode --hook-dir "$2"`
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", check, "defenseclaw-hook-user-outage", gateway, hookDir)
 	cmd.Env = gatewayEnv(gateway, filepath.Dir(hookDir))
-	output, err := cmd.Output()
+	output, stopped, err := runOutageLook(cmd)
+	if stopped {
+		// hook-user is exiting: no mode, and no result for other calls.
+		return ""
+	}
 	if err == nil && strings.TrimSpace(string(output)) == "open" {
 		return "open"
 	}
