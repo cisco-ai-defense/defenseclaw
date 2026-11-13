@@ -84,6 +84,16 @@ var decisionModelQuestions = map[string]any{
 	},
 }
 
+// decisionBenchRouting holds routing variants measured by the S7 benchmark
+// (s7/sysone-bench only; set by S7SetDecisionRouting under -tags s7bench,
+// never in the product): blockRiskScore > 0 makes a confident block also
+// need the risk score answer at or above it; ruleFlagEscalates makes a
+// confident block on a call the rules flagged escalate instead.
+var decisionBenchRouting struct {
+	blockRiskScore    float64
+	ruleFlagEscalates bool
+}
+
 // decisionRoute is what the guardrail does with one decision-model answer.
 type decisionRoute int
 
@@ -99,9 +109,11 @@ const (
 
 // decisionResult is one decision-model call.
 type decisionResult struct {
-	route     decisionRoute
-	choice    string
-	risk      float64
+	route  decisionRoute
+	choice string
+	risk   float64
+	// riskScore is the risk score answer (0..2), -1 when absent.
+	riskScore float64
 	latencyMs int64
 	// failure is set when the model gave no usable answer; route is then
 	// decisionEscalate.
@@ -285,7 +297,7 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		return res
 	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
-	choice, probs, err := d.call(cctx, state)
+	choice, probs, score, err := d.call(cctx, state)
 	cancel()
 	res.latencyMs = time.Since(start).Milliseconds()
 	res.logLine = d.record(err != nil, time.Now())
@@ -304,12 +316,21 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		return res
 	}
 	res.choice = choice
+	res.riskScore = score
 	res.risk = 1 - probs["allow"]
 	switch {
 	case choice == "allow" && res.risk <= d.allowAt:
 		res.route = decisionAllow
 	case choice == "block" && res.risk >= d.blockAt:
 		res.route = decisionBlock
+	}
+	if res.route == decisionBlock {
+		if g := decisionBenchRouting.blockRiskScore; g > 0 && res.riskScore < g {
+			res.route = decisionEscalate
+		}
+		if decisionBenchRouting.ruleFlagEscalates && decisionRuleFloorFrom(ctx) {
+			res.route = decisionEscalate
+		}
 	}
 	return res
 }
@@ -318,16 +339,17 @@ type decisionParseError struct{ msg string }
 
 func (e decisionParseError) Error() string { return e.msg }
 
-func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, err error) {
+func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, score float64, err error) {
+	score = -1
 	usage := beginGatewayCallUsage(ctx, modelusage.RoleDecisionModel, "decision_model", d.model)
 	defer func() { usage.End(err) }()
 	body, err := decisionWireBody(d.protocol, d.model, state, decisionModelQuestions)
 	if err != nil {
-		return "", nil, decisionParseError{"encode request: " + err.Error()}
+		return "", nil, score, decisionParseError{"encode request: " + err.Error()}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", nil, errors.New("decision model request could not be built")
+		return "", nil, score, errors.New("decision model request could not be built")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setDecisionWireAuth(req, d.protocol, d.apiKey)
@@ -336,20 +358,41 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (cho
 		usage.UpstreamHeader(resp.StatusCode, nil)
 	}
 	if err != nil {
-		return "", nil, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
+		return "", nil, score, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
 	if err != nil {
-		return "", nil, fmt.Errorf("decision model read failed: %w", err)
+		return "", nil, score, fmt.Errorf("decision model read failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, decisionHTTPError(d.protocol, resp.StatusCode, raw)
+		return "", nil, score, decisionHTTPError(d.protocol, resp.StatusCode, raw)
 	}
 	if len(raw) > maxDecisionModelResponseBytes {
-		return "", nil, decisionParseError{"decision model answer exceeds 64 KiB"}
+		return "", nil, score, decisionParseError{"decision model answer exceeds 64 KiB"}
 	}
-	return parseDecisionModelAnswer(raw)
+	choice, probs, err = parseDecisionModelAnswer(raw)
+	return choice, probs, decisionRiskScore(raw), err
+}
+
+// decisionRiskScore reads the risk score answer (0..2), or -1 when it is
+// missing or out of range.
+func decisionRiskScore(raw []byte) float64 {
+	var out struct {
+		Answers struct {
+			Risk struct {
+				Type  string   `json:"type"`
+				Score *float64 `json:"score"`
+			} `json:"risk"`
+		} `json:"answers"`
+	}
+	if json.Unmarshal(raw, &out) != nil || out.Answers.Risk.Type != "score" || out.Answers.Risk.Score == nil {
+		return -1
+	}
+	if s := *out.Answers.Risk.Score; !math.IsNaN(s) && s >= 0 && s <= 2 {
+		return s
+	}
+	return -1
 }
 
 // decisionModelInputLabel opens the input of a gemini-decisions request:

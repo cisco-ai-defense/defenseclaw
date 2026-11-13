@@ -204,6 +204,13 @@ func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName
 	return out
 }
 
+// S7SetDecisionRouting sets the benchmark routing variants (see
+// decisionBenchRouting). Bench only.
+func S7SetDecisionRouting(blockRiskScore float64, ruleFlagEscalates bool) {
+	decisionBenchRouting.blockRiskScore = blockRiskScore
+	decisionBenchRouting.ruleFlagEscalates = ruleFlagEscalates
+}
+
 // S7DM is one decision-model answer.
 type S7DM struct {
 	Called    bool    `json:"called"`

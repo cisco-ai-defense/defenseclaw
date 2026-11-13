@@ -239,6 +239,8 @@ func main() {
 	dmCacheRPM := flag.Int("dm-cache-rpm", 0, "with -dm-cache-dir: upstream requests per minute this process may send (0: no pacing)")
 	dmCacheBudgetFile := flag.String("dm-cache-budget-file", "", "with -dm-cache-dir: file that counts upstream requests across processes")
 	dmCacheBudget := flag.Int64("dm-cache-budget", 0, "with -dm-cache-budget-file: upstream requests allowed in all (0: no cap)")
+	dmBlockRiskScore := flag.Float64("dm-block-risk-score", 0, "bench routing variant: a confident block also needs the risk score answer >= this (0: off, production)")
+	dmRuleFlagEscalates := flag.Bool("dm-rule-flag-escalates", false, "bench routing variant: a confident block on a call the rules flagged escalates instead")
 	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
@@ -400,6 +402,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
+	gateway.S7SetDecisionRouting(*dmBlockRiskScore, *dmRuleFlagEscalates)
 	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
 	var err2 error
 	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)
