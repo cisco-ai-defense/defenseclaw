@@ -32,7 +32,7 @@ substrate:
   # pull, logs; GAP-0157). The gateway presents its pod identity; the router
   # admits it only when its SPIFFE ID is in Substrate's cluster-global
   # ingressAllowedSPIFFEIDs (`defenseclaw substrate setup` adds it; `substrate
-  # admin doctor` checks it). address empty: atenet-router.<namespace>.svc:8444.
+  # doctor --cluster` checks it). address empty: atenet-router.<namespace>.svc:8444.
   # serverName empty: the address host. caFile: the servicedns trust bundle
   # the gateway pod mounts. podPort is the router's container port, for the
   # gateway's egress NetworkPolicy. enabled false turns attach off.

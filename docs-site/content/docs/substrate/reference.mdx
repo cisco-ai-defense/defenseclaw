@@ -159,7 +159,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `gateway.authDelegatorBinding` | Name of the ClusterRoleBinding of the gateway to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer). Default `defenseclaw-auth-delegator-<namespace>-<release>` |
 | `gateway.adminGroups` | Groups whose members are DefenseClaw administrators (`--admin-groups`). Adds to `config.substrate.identity.admin_groups` |
 | `gateway.oidcCA.configMap` or `.secret`, `gateway.oidcCA.key` | The trust bundle of a private OIDC issuer, from a ConfigMap or a Secret (the Secret wins; key default `ca.crt`). Mounted read-only at `/etc/defenseclaw/oidc-ca/`, and `--oidc-ca-file` is set |
-| `gateway.extraArgs` | Flags added to the gateway's serve flags |
+| `gateway.extraArgs` | Flags added to the gateway's serve flags, for example `--chain-egress-action=alert`. That flag (`block` by default, or `alert`) sets what the egress callout does with a request after a secret read: refuse it, in every mode, because actors are unattended, or only alert. Host-side hooks keep the balanced default |
 | `gateway.extraEnv`, `gateway.extraVolumes`, `gateway.extraVolumeMounts` | Added to the gateway container and pod |
 | `gateway.args` | Replaces the whole argument list (`serve --substrate ...` included). Experts only; use `gateway.extraArgs` to add a flag |
 | `controller.templateRegistrySecret` | A `kubernetes.io/dockerconfigjson` Secret with logins for private template registries, mounted in the controller and the gateway. Empty reads registries anonymously |
