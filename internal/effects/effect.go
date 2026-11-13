@@ -55,6 +55,7 @@ type Target struct {
 	Physical string    `json:"physical,omitempty"`
 	Link     LinkState `json:"link"`
 	Flavor   Flavor    `json:"flavor,omitempty"`
+	CaseFold bool      `json:"-"`
 }
 
 // Data is what an effect carries: the bytes a write lays down, the file an

@@ -70,10 +70,19 @@ func shellCall(tool string, args json.RawMessage) Call {
 	if json.Unmarshal(args, &m) != nil {
 		return base
 	}
+	workdir := ""
+	for _, k := range []string{"workdir", "cwd", "working_directory", "workingDirectory"} {
+		if s, ok := m[k].(string); ok && s != "" {
+			workdir = s
+			break
+		}
+	}
+	base.Workdir = workdir
 	// Codex local_shell: {"action":{"command":[...]}}.
 	if act, ok := m["action"].(map[string]any); ok {
 		if c := shellFromValue(tool, act["command"]); c.Command != "" || len(c.Argv) > 0 {
 			c.Args = args
+			c.Workdir = workdir
 			return c
 		}
 	}
@@ -85,6 +94,7 @@ func shellCall(tool string, args json.RawMessage) Call {
 		c := shellFromValue(tool, v)
 		if c.Command != "" || len(c.Argv) > 0 {
 			c.Args = args
+			c.Workdir = workdir
 			return c
 		}
 	}

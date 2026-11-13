@@ -99,7 +99,8 @@ func (l *lexer) push(t Token) {
 func (l *lexer) setAtStart(k TokenKind) {
 	switch k {
 	case TokNewline, TokComment, TokSemi, TokPipe, TokPipePipe, TokAmpAmp, TokAmp,
-		TokLParen, TokLBrace, TokLBracket, TokComma, TokAtParen, TokAtBrace:
+		TokLParen, TokLBrace, TokLBracket, TokComma, TokAtParen, TokAtBrace,
+		TokString, TokRParen, TokRBrace, TokRBracket:
 		l.atStart = true
 	default:
 		l.atStart = false
@@ -136,7 +137,7 @@ func (l *lexer) lex() []Token {
 			l.lexSingleString()
 		case isDoubleQuote(r):
 			l.lexDoubleString()
-		case r == '@' && (l.peek(1) == '"' || l.peek(1) == '\''):
+		case r == '@' && (isDoubleQuote(l.peek(1)) || isSingleQuote(l.peek(1))):
 			l.lexHereString()
 		case r == '@' && l.peek(1) == '(':
 			a := l.i
@@ -162,7 +163,7 @@ func (l *lexer) lex() []Token {
 			l.scanRedirectFromHere(a, string(r))
 		case unicode.IsDigit(r):
 			l.lexNumber()
-		case r == '.' && unicode.IsDigit(l.peek(1)) && !l.prevWasValue:
+		case r == '.' && unicode.IsDigit(l.peek(1)) && l.atStart:
 			l.lexNumber()
 		default:
 			l.lexOperatorOrWord()
@@ -252,9 +253,9 @@ func (l *lexer) lexDoubleString() {
 
 func (l *lexer) lexHereString() {
 	a := l.i
-	quote := l.peek(1) // ' or "
+	quote := l.peek(1) // ' or " (straight or smart)
 	kind := StrHereDouble
-	if quote == '\'' {
+	if isSingleQuote(quote) {
 		kind = StrHereSingle
 	}
 	l.i += 2 // @ and quote
@@ -270,7 +271,8 @@ func (l *lexer) lexHereString() {
 	// at the start of a line.
 	for l.i < len(l.runes) {
 		atLineStart := l.i == 0 || l.runes[l.i-1] == '\n'
-		if atLineStart && l.cur() == quote && l.peek(1) == '@' {
+		sameClass := (kind == StrHereSingle && isSingleQuote(l.cur())) || (kind == StrHereDouble && isDoubleQuote(l.cur()))
+		if atLineStart && sameClass && l.peek(1) == '@' {
 			l.i += 2
 			t := Token{Kind: TokString, Str: kind, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
 			t.Value = t.Raw
@@ -370,9 +372,16 @@ func (l *lexer) scanVarName() (name, scope string) {
 }
 
 func (l *lexer) lexDash() {
-	// --% stop-parsing: the remainder of the logical line is verbatim and must
-	// not be tokenized (an apostrophe or quote after it is literal text).
-	if l.peek(1) == '-' && l.peek(2) == '%' {
+	// --% stop-parsing: a standalone --% (at a token boundary) makes the rest
+	// of the logical line verbatim; the tail ends at a newline or an unquoted
+	// pipe or &&/|| (a ; and redirects are verbatim). --%glued is a bareword.
+	if isDash(l.peek(1)) && l.peek(2) == '%' {
+		n := l.peek(3)
+		boundary := n == -1 || n == '\n' || isSpace(n) || n == '|' || n == '&' || n == ';'
+		if !boundary {
+			l.lexBareword() // --%foo is a single bareword, not stop-parsing
+			return
+		}
 		a := l.i
 		l.i += 3
 		l.emit(TokStopParse, a, l.i)
@@ -386,7 +395,10 @@ func (l *lexer) lexDash() {
 			if c == '\n' {
 				break
 			}
-			if q == 0 && c == '|' { // an unquoted pipe ends the verbatim tail
+			if q == 0 && c == '|' { // unquoted | or || ends the tail
+				break
+			}
+			if q == 0 && c == '&' && l.peek(1) == '&' { // && ends the tail; a lone & (2>&1) is verbatim
 				break
 			}
 			if q == 0 && (c == '\'' || c == '"') {
@@ -396,15 +408,17 @@ func (l *lexer) lexDash() {
 			}
 			l.i++
 		}
-		if l.i > vs {
-			raw := l.slice(vs, l.i)
-			l.push(Token{Kind: TokGeneric, Str: StrBare, Raw: raw, Value: raw, Start: l.byteAt(vs), End: l.byteAt(l.i)})
-		}
+		raw := l.slice(vs, l.i)
+		// always emit the verbatim tail token (possibly empty) so the parser
+		// can surface --% and its tail as two command elements.
+		l.push(Token{Kind: TokGeneric, Str: StrBare, Raw: raw, Value: raw, Start: l.byteAt(vs), End: l.byteAt(l.i)})
 		return
 	}
 	// '--name' is a double-dash bareword argument in PowerShell, not an
 	// operator; only a bare '--' (decrement / no following name) is the operator.
-	if l.peek(1) == '-' {
+	// Unicode dashes (en/em/horizontal-bar) count as dashes too, so '––x' is a
+	// single bareword argument '––x', matching pwsh.
+	if isDash(l.peek(1)) {
 		if isNameStart(l.peek(2)) || l.peek(2) == '/' {
 			l.lexBareword()
 			return
@@ -456,6 +470,11 @@ func (l *lexer) lexNumber() {
 	if l.cur() == '0' && (l.peek(1) == 'x' || l.peek(1) == 'X') {
 		l.i += 2
 		for l.i < len(l.runes) && isHex(l.cur()) {
+			l.i++
+		}
+	} else if l.cur() == '0' && (l.peek(1) == 'b' || l.peek(1) == 'B') {
+		l.i += 2
+		for l.i < len(l.runes) && (l.cur() == '0' || l.cur() == '1') {
 			l.i++
 		}
 	} else {
@@ -673,16 +692,37 @@ func (l *lexer) scanRedirectFromHere(a int, numPrefix string) {
 // treats a backtick as an escape of the next rune.
 func (l *lexer) lexBareword() {
 	a := l.i
+	escBracket := false // an escaped `[ / `] turns off bracket-breaking for the rest of the word
 	for l.i < len(l.runes) {
 		r := l.cur()
 		if r == '`' {
+			if l.peek(1) == 'u' && l.peek(2) == '{' { // `u{hex} escape stays in the word
+				l.i += 3
+				for l.i < len(l.runes) && l.cur() != '}' {
+					l.i++
+				}
+				if l.cur() == '}' {
+					l.i++
+				}
+				continue
+			}
+			if l.peek(1) == '[' || l.peek(1) == ']' {
+				// an escaped bracket is a literal part of the bareword; keep the
+				// whole token together so C:\tmp\`[a]\..\x stays one argument
+				// (non-static via the Static allowlist) and the tail does not
+				// become a spurious command (review 3 R1).
+				escBracket = true
+			}
 			l.i += 2
 			continue
 		}
 		if isSpace(r) || r == '\n' || r == -1 {
 			break
 		}
-		if strings.ContainsRune(";,|&(){}[]'\"", r) {
+		if (r == '[' || r == ']') && !escBracket {
+			break
+		}
+		if strings.ContainsRune(";,|&(){}", r) || isSingleQuote(r) || isDoubleQuote(r) {
 			break
 		}
 		if r == '$' && dollarStartsVar(l.peek(1)) {

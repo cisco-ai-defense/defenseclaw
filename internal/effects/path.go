@@ -17,10 +17,75 @@ func placePath(spelling string, o Options) (abs string, ok bool, reason ReasonCo
 	if spelling == "" {
 		return "", false, ReasonDynamicExpansion
 	}
+	// A path is KNOWN only in canonical form for its dialect; any other spelling
+	// is unknown so it never produces a different KNOWN key (review R3-7).
+	if r := canonicalIssue(spelling, o.flavor()); r != "" {
+		return "", false, r
+	}
 	if o.flavor() == FlavorWindows {
 		return placeWindows(spelling, o)
 	}
 	return placePOSIX(spelling, o)
+}
+
+// canonicalIssue reports a non-canonical path spelling that must not be placed
+// to a KNOWN key (review R3-7): 8.3 short names, \\.\ device and admin-share
+// UNC, PowerShell provider prefixes and non-FileSystem drives, cmd %~/%N/%%
+// tokens, and MSYS roots other than a drive mount.
+func canonicalIssue(s string, flavor Flavor) ReasonCode {
+	if flavor == FlavorWindows {
+		w := strings.ReplaceAll(s, "/", `\`)
+		lw := strings.ToLower(w)
+		switch {
+		case strings.HasPrefix(w, `\\.\`), strings.HasPrefix(w, `\\?\`):
+			return ReasonNonCanonicalPath
+		case strings.HasPrefix(w, `\\`): // UNC / admin share (incl. localhost, 127.0.0.1)
+			return ReasonNonCanonicalPath
+		case strings.Contains(s, "::"): // provider-qualified path (FileSystem::, Env:\)
+			return ReasonNonCanonicalPath
+		case strings.Contains(w, "%"): // %VAR% left unexpanded, %~dp0, %1, %%P%%
+			return ReasonNonCanonicalPath
+		case hasShortNameSegment(w):
+			return ReasonNonCanonicalPath
+		case hasTrailingDotOrSpaceSegment(w):
+			return ReasonNonCanonicalPath // "x.exe ." / "x." name the base file (review R5-5)
+		case hasADSStream(w):
+			return ReasonNonCanonicalPath // an alternate data stream name
+		}
+		// a non-FileSystem PowerShell drive (Env:, HKLM:, Variable:, Cert:)
+		if i := strings.IndexByte(s, ':'); i > 1 {
+			drive := strings.ToLower(s[:i])
+			switch drive {
+			case "env", "hklm", "hkcu", "variable", "cert", "function", "alias", "wsman":
+				return ReasonNonCanonicalPath
+			}
+		}
+		_ = lw
+		return ""
+	}
+	// POSIX: a path with a .. (after a component that might be a symlink), a
+	// //, a /./ or a trailing /. is not canonical and must not be lexically
+	// collapsed to a KNOWN key until the resolver can follow links (review
+	// N4-4). ANSI-C quoting is caught at the word level.
+	if strings.Contains(s, "//") || strings.Contains(s, "/./") {
+		return ReasonNonCanonicalPath
+	}
+	if s == ".." || strings.HasPrefix(s, "../") || strings.HasSuffix(s, "/..") || strings.Contains(s, "/../") {
+		return ReasonNonCanonicalPath
+	}
+	if strings.HasSuffix(s, "/.") {
+		return ReasonNonCanonicalPath
+	}
+	return ""
+}
+
+func hasShortNameSegment(w string) bool {
+	for _, seg := range strings.Split(w, `\`) {
+		if i := strings.IndexByte(seg, '~'); i > 0 && i+1 < len(seg) && seg[i+1] >= '0' && seg[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func placePOSIX(spelling string, o Options) (string, bool, ReasonCode) {
@@ -75,10 +140,32 @@ func cleanPOSIX(p string) string {
 }
 
 func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
-	// MSYS / Git Bash drive mount: /c/Users -> C:\Users (review N17).
-	if len(spelling) >= 2 && spelling[0] == '/' && isDriveLetter(spelling[1]) &&
-		(len(spelling) == 2 || spelling[2] == '/') {
-		spelling = string(spelling[1]) + ":" + spelling[2:]
+	// A leading / on Windows depends on the dialect of the frontend walking the
+	// text (review 6 #1): Git Bash / Cygwin (POSIX) use POSIX-absolute spellings
+	// where only a /<drive>/ MSYS mount and /cygdrive/<drive>/ are known and
+	// every other absolute path is a virtual root; cmd and PowerShell treat a
+	// leading / as drive-root-relative (handled below); and when the dialect is
+	// unknown or only guessed, a POSIX-absolute path has no known Windows target.
+	if strings.HasPrefix(spelling, "/") {
+		switch o.Dialect {
+		case DialectCMD, DialectPowerShell:
+			// drive-root-relative; handled by the \x branch below.
+		case DialectPOSIX:
+			if len(spelling) >= 2 && isDriveLetter(spelling[1]) && (len(spelling) == 2 || spelling[2] == '/') {
+				rest := spelling[2:]
+				if rest == "" {
+					rest = "/" // bare /c is the drive root C:\, not drive-relative C: (review 6 #2)
+				}
+				spelling = string(spelling[1]) + ":" + rest
+			} else if m, ok := cygdriveMount(spelling); ok {
+				spelling = m
+			} else {
+				return "", false, ReasonVirtualRoot
+			}
+		default:
+			// Windows flavor, dialect unknown or guessed: no known POSIX root.
+			return "", false, ReasonVirtualRoot
+		}
 	}
 	s := strings.ReplaceAll(spelling, "/", `\`)
 	// UNC and device/extended-length prefixes are kept verbatim after cleaning
@@ -197,6 +284,11 @@ func (t Target) Key() string {
 	if t.Flavor == FlavorWindows {
 		return strings.ToLower(strings.ReplaceAll(v, "/", `\`))
 	}
+	// A case-insensitive POSIX filesystem (macOS default) folds the key so two
+	// spellings of one protected file match (review R5-5).
+	if t.CaseFold {
+		return strings.ToLower(v)
+	}
 	return v
 }
 
@@ -213,4 +305,65 @@ func looksGlob(s string) bool {
 		}
 	}
 	return false
+}
+
+// KnownPathCanonical reports whether a path spelling is canonical for its
+// flavor (the harness self-audit uses it to confirm no KNOWN path is
+// non-canonical over the corpus -- review N4-6).
+func KnownPathCanonical(spelling string, flavor Flavor) bool {
+	return canonicalIssue(spelling, flavor) == ""
+}
+
+// hasTrailingDotOrSpaceSegment reports a Windows path segment ending in '.' or
+// ' ', which Windows silently maps to the base name -- not canonical (R5-5).
+func hasTrailingDotOrSpaceSegment(w string) bool {
+	for _, seg := range strings.Split(w, `\`) {
+		if len(seg) >= 2 && seg[1] == ':' && len(seg) == 2 {
+			continue // drive letter
+		}
+		if seg != "" && (strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " ")) &&
+			seg != "." && seg != ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// hasADSStream reports a Windows alternate-data-stream suffix (file:stream) in a
+// non-drive segment -- not canonical (R5-5).
+func hasADSStream(w string) bool {
+	for _, seg := range strings.Split(w, `\`) {
+		c := strings.IndexByte(seg, ':')
+		if c < 0 {
+			continue
+		}
+		if c == 1 && len(seg) >= 2 && isDriveLetter(seg[0]) {
+			// drive-letter colon is fine only when it's the leading segment's
+			// drive; a second colon in the same segment is a stream.
+			if strings.IndexByte(seg[2:], ':') >= 0 {
+				return true
+			}
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// cygdriveMount maps a Cygwin /cygdrive/<drive>/rest to <drive>:\rest. ok is
+// false for anything else (incl. /proc/cygdrive/... which is not this form).
+func cygdriveMount(s string) (string, bool) {
+	const p = "/cygdrive/"
+	if !strings.HasPrefix(s, p) || len(s) < len(p)+1 {
+		return "", false
+	}
+	d := s[len(p)]
+	rest := s[len(p)+1:]
+	if !isDriveLetter(d) || (rest != "" && rest[0] != '/') {
+		return "", false
+	}
+	if rest == "" {
+		rest = "/" // /cygdrive/c is the drive root C:\, not drive-relative C: (review 6 #2)
+	}
+	return string(d) + ":" + rest, true
 }

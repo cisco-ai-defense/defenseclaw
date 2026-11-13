@@ -6,7 +6,6 @@ package psparse
 
 import (
 	"encoding/base64"
-	"strconv"
 	"strings"
 	"unicode/utf16"
 )
@@ -146,31 +145,26 @@ func walkCommandsExpr(e Expr, fn func(*Command)) {
 func LiteralString(e Expr) (string, bool) {
 	switch v := e.(type) {
 	case *StringLit:
-		if v.Static {
+		// A value is a trusted static literal only when it is marked Static AND
+		// every rune of its source span (and resolved value) is in the safe
+		// allowlist: ASCII letters, digits and \ / : . - _ , = + @ ~ % plus
+		// ASCII quotes and spaces. Anything else -- a backtick escape of any
+		// kind, smart quotes/dashes, brackets, $, u{, braces, control runes or
+		// non-ASCII -- is reported non-static (ps_unsafe_literal), so an
+		// obfuscated name/path (i`u{65}x, C:\tmp\`[a]) can never resolve to a
+		// trusted literal. (The AST Static flag itself stays set for node-kind
+		// matching against the reference parser.)
+		if v.Static && safeStaticLiteral(v.Raw) && safeStaticLiteral(v.Value) {
 			return v.Value, true
-		}
-		// an expandable string whose parts are all literal is still static
-		if len(v.Parts) > 0 {
-			var b strings.Builder
-			for _, pt := range v.Parts {
-				if pt.Expr != nil {
-					return "", false
-				}
-				b.WriteString(pt.Lit)
-			}
-			return b.String(), true
 		}
 		return "", false
 	case *Number:
-		// format the parsed value, matching the reference parser's constant
-		// value (0x10 -> "16", 1kb -> "1024", 1e3 -> "1000").
-		if v.Int {
-			return strconv.FormatInt(int64(v.Value), 10), true
+		// the pwsh-formatted value computed in numberLit (0x10 -> "16",
+		// 1.0d -> "1.0", a too-big integer keeps its exact digits).
+		if v.OK {
+			return v.Display, true
 		}
-		if f, err := strconv.ParseFloat(v.Text, 64); err == nil {
-			return strconv.FormatFloat(f, 'g', -1, 64), true
-		}
-		return strconv.FormatFloat(v.Value, 'g', -1, 64), true
+		return "", false
 	case *Binary:
 		// a binary expression argument is a non-constant node on the reference
 		// side (never a static value).
@@ -207,4 +201,22 @@ func DecodeEncodedCommand(s string) (string, bool) {
 		u16[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
 	}
 	return string(utf16.Decode(u16)), true
+}
+
+// safeStaticLiteral reports whether every rune of s is in the Static-value
+// allowlist (ASCII letters/digits and \ / : . - _ , = + @ ~ % plus ASCII
+// quotes and spaces). It is the one gate that decides whether a parsed literal
+// is trusted as an exact value; anything outside the class is treated as
+// ps_unsafe_literal and resolves non-static.
+func safeStaticLiteral(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		if strings.ContainsRune(`\/:.-_,=+@~% '"`, r) {
+			continue
+		}
+		return false
+	}
+	return true
 }

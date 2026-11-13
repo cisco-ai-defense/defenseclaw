@@ -17,6 +17,9 @@ type Call struct {
 	Args json.RawMessage
 	// Argv is a structured argv, used for an argv surface.
 	Argv []string
+	// Workdir is the per-call working directory the connector supplied (Codex
+	// workdir, Cursor cwd); relative targets resolve under it (review R3-10).
+	Workdir string
 }
 
 // Options carries everything that is otherwise OS- or context-dependent, as

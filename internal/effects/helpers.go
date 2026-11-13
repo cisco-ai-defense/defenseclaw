@@ -48,7 +48,7 @@ func set(xs ...string) map[string]bool {
 // stripWrappers peels known launchers off the front, returning the inner argv,
 // the stripped wrapper names, and whether the inner command runs in a foreign
 // context or takes its operands from input.
-func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, foreign, fromInput bool) {
+func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, foreign, fromInput, unaccounted bool) {
 	i := 0
 	for i < len(words) {
 		wd := words[i]
@@ -87,6 +87,14 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 				fn := v
 				if eq := strings.IndexByte(v, '='); eq > 0 {
 					fn = v[:eq]
+				}
+				// An unmodeled long wrapper option may change the command's
+				// behaviour (cwd, identity, environment) in a way we do not
+				// account for: mark the command not fully known (review R5-1).
+				if strings.HasPrefix(fn, "--") && !spec.valFlags[fn] {
+					unaccounted = true
+				}
+				if eq := strings.IndexByte(v, '='); eq > 0 {
 					i++
 					continue
 				}
@@ -103,7 +111,7 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 			i++
 		}
 	}
-	return words[i:], wrappers, foreign, fromInput
+	return words[i:], wrappers, foreign, fromInput, unaccounted
 }
 
 // programBasename takes the basename of a program path and folds case for

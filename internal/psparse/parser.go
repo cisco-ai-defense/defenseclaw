@@ -13,6 +13,14 @@ type Options struct {
 
 const maxDepth = 200
 
+// rawSpan returns the exact source text of [s0,end) (or "" if out of range).
+func (p *parser) rawSpan(s0, end int) string {
+	if s0 >= 0 && end <= len(p.src) && end >= s0 {
+		return p.src[s0:end]
+	}
+	return ""
+}
+
 // parser is a recursive-descent parser over the token slice. It is
 // unknown-tolerant: on any construct it cannot structure it records a
 // Diagnostic and resynchronises to the next statement boundary rather than
@@ -215,6 +223,8 @@ func (p *parser) parseStatement(s stopSet) Statement {
 			return p.parseFlow(lw)
 		case lw == "class" || lw == "enum":
 			return p.parseClassLike(lw)
+		case lw == "using":
+			return p.parseUsing()
 		}
 	}
 	return p.parsePipelineChainOrAssignment(s)
@@ -349,9 +359,45 @@ func (p *parser) parseClassLike(kw string) Statement {
 	}
 	var bodies []*ScriptBlockExpr
 	if p.at(TokLBrace) {
-		bodies = append(bodies, p.parseScriptBlock())
+		if kw == "enum" {
+			p.skipBalancedBraces() // enum members are not commands
+		} else {
+			bodies = append(bodies, p.parseScriptBlock())
+		}
 	}
 	return &Block{span: span{start, p.prevEnd()}, Keyword: kw, Name: name, Bodies: bodies}
+}
+
+// parseUsing consumes a `using namespace|module|assembly ...` statement, which
+// is a declaration, not a command.
+func (p *parser) parseUsing() Statement {
+	start := p.cur().Start
+	p.advance() // using
+	for !p.at(TokEOF) && !p.at(TokNewline) && !p.at(TokSemi) {
+		p.advance()
+	}
+	return &Block{span: span{start, p.prevEnd()}, Keyword: "using"}
+}
+
+// skipBalancedBraces consumes a { ... } group without parsing its contents.
+func (p *parser) skipBalancedBraces() {
+	if !p.at(TokLBrace) {
+		return
+	}
+	depth := 0
+	for !p.at(TokEOF) {
+		switch p.kind() {
+		case TokLBrace:
+			depth++
+		case TokRBrace:
+			depth--
+			if depth == 0 {
+				p.advance()
+				return
+			}
+		}
+		p.advance()
+	}
 }
 
 func (p *parser) parseNamedBlock(kw string) Statement {
@@ -384,7 +430,15 @@ func (p *parser) parseControl(kw string) Statement {
 		switch {
 		case p.at(TokLParen):
 			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
+		case kw == "switch" && (p.at(TokDollarParen) || p.at(TokAtParen)):
+			// switch $(...) / @(...): an evaluated condition, walk its commands
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
 		case p.at(TokLBrace):
+			if kw == "switch" {
+				p.parseSwitchBody(blk)
+				blk.start, blk.end = start, p.prevEnd()
+				return blk
+			}
 			blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
 		case p.at(TokParameter):
 			// a control option such as switch -regex / -wildcard / -file
@@ -394,6 +448,20 @@ func (p *parser) parseControl(kw string) Statement {
 		case p.at(TokLBracket):
 			// a trap/catch type filter like  catch [IOException] { }
 			p.skipBracketType()
+		case p.at(TokEOF):
+			blk.start, blk.end = start, p.prevEnd()
+			return blk
+		case kw == "switch" && (p.at(TokString) || p.at(TokGeneric) || p.at(TokVariable) || p.at(TokNumber)):
+			// the switch condition or an option value (-File <path>, a
+			// -File "...$( )..." string, or $x[$( )]): parse it as an expression
+			// so a nested $( ) / index subexpression runs its commands. A bare
+			// literal path parses to a StringLit and emits no command of its own
+			// (review 3 R2). -File is still never taken as an opaque literal.
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePostfix(p.parsePrimary())))
+		case kw == "switch":
+			// any other condition token (an operator, etc.): consume silently so
+			// the body { } is reached without leaking a top-level command.
+			p.advance()
 		default:
 			blk.start, blk.end = start, p.prevEnd()
 			return blk
@@ -401,6 +469,44 @@ func (p *parser) parseControl(kw string) Statement {
 	}
 	blk.start, blk.end = start, p.prevEnd()
 	return blk
+}
+
+// parseSwitchBody parses a switch body { <pattern> { block } ... }. Clause
+// patterns that are bare labels ('a', default, a number) are not commands and
+// are skipped; a ( ) or { } pattern (an evaluated condition) and every clause
+// block are parsed and walked.
+func (p *parser) parseSwitchBody(blk *Block) {
+	if !p.at(TokLBrace) {
+		return
+	}
+	p.advance() // {
+	save := p.enter()
+	guard := 0
+	for !p.at(TokRBrace) && !p.at(TokEOF) && guard < 1<<16 {
+		guard++
+		p.skipSeparators()
+		switch {
+		case p.at(TokRBrace):
+			goto done
+		case p.at(TokLBrace):
+			blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
+		case p.at(TokLParen):
+			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
+		case p.at(TokDollarParen), p.at(TokAtParen):
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
+		case p.at(TokString):
+			// a clause pattern that is an (expandable) string may embed $( ) or
+			// subexpressions that run commands; parse it so they are walked.
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
+		default:
+			p.advance() // a bare clause label / separator
+		}
+	}
+done:
+	p.leave(save)
+	if p.at(TokRBrace) {
+		p.advance()
+	}
 }
 
 func (p *parser) isSubKeyword() bool {

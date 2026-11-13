@@ -15,17 +15,20 @@ func (s span) Span() (int, int) { return s.start, s.end }
 // statically. They are stable strings so rules and the effects lane can key
 // on them.
 const (
-	ReasonNone           = ""
-	ReasonUnterminated   = "ps_unterminated"    // unterminated string/here-string/block/comment
-	ReasonUnknownToken   = "ps_unknown_token"   // a lexeme the lexer could not classify
-	ReasonUnbalanced     = "ps_unbalanced"      // mismatched (), {}, [], @()
-	ReasonDynamicName    = "ps_dynamic_command" // command name is a non-literal expression (& $var)
-	ReasonDynamicMember  = "ps_dynamic_member"  // member/method name is computed
-	ReasonStopParsing    = "ps_stop_parsing"    // --% verbatim remainder (not structured)
-	ReasonNonLiteral     = "ps_non_literal"     // a value that is not a static literal
-	ReasonDepthLimit     = "ps_depth_limit"     // recursion/size guard tripped
-	ReasonTruncated      = "ps_truncated"       // input exceeded the byte budget
-	ReasonIncompleteExpr = "ps_incomplete_expr" // expression ended unexpectedly
+	ReasonNone             = ""
+	ReasonUnterminated     = "ps_unterminated"      // unterminated string/here-string/block/comment
+	ReasonUnknownToken     = "ps_unknown_token"     // a lexeme the lexer could not classify
+	ReasonUnbalanced       = "ps_unbalanced"        // mismatched (), {}, [], @()
+	ReasonDynamicName      = "ps_dynamic_command"   // command name is a non-literal expression (& $var)
+	ReasonDynamicMember    = "ps_dynamic_member"    // member/method name is computed
+	ReasonStopParsing      = "ps_stop_parsing"      // --% verbatim remainder (not structured)
+	ReasonNonLiteral       = "ps_non_literal"       // a value that is not a static literal
+	ReasonDepthLimit       = "ps_depth_limit"       // recursion/size guard tripped
+	ReasonTruncated        = "ps_truncated"         // input exceeded the byte budget
+	ReasonIncompleteExpr   = "ps_incomplete_expr"   // expression ended unexpectedly
+	ReasonDialectAmbiguous = "ps_dialect_ambiguous" // escape decodes differently under PS 5.1 vs 7
+	ReasonUnsafeLiteral    = "ps_unsafe_literal"    // static source has a rune outside the safe allowlist
+	ReasonHostOption       = "ps_host_option"       // a host CLI (powershell/pwsh) option outside the modeled set
 )
 
 // Script is the root: an ordered list of statements plus the parameter block
@@ -46,6 +49,7 @@ type Dialect int
 const (
 	DialectPwsh7       Dialect = iota // pwsh 6/7+: && || null-coalescing, etc.
 	DialectWindowsPS51                // Windows PowerShell 5.1
+	DialectUnknown                    // edition unknown: a dialect-divergent escape is not static
 )
 
 // Diagnostic is one place the parser gave up on precise structure.

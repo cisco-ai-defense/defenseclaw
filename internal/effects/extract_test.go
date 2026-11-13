@@ -43,9 +43,9 @@ func TestPOSIXFileOperations(t *testing.T) {
 		known   bool
 	}{
 		{"cat home", "cat ~/.bashrc", KindRead, "/home/u/.bashrc", true},
-		{"cp dest", "cp a.txt b.txt", KindWrite, "/home/u/proj/b.txt", true},
+		{"cp dest", "cp a.txt b.txt", KindWrite, "/home/u/proj/b.txt", false},
 		{"cp src", "cp a.txt b.txt", KindRead, "/home/u/proj/a.txt", true},
-		{"mv dest", "mv old.go new.go", KindWrite, "/home/u/proj/new.go", true},
+		{"mv dest", "mv old.go new.go", KindWrite, "/home/u/proj/new.go", false},
 		{"rm abs", "rm /tmp/scratch", KindDelete, "/tmp/scratch", true},
 		{"redirect write", "echo hi > out.log", KindWrite, "/home/u/proj/out.log", true},
 		{"append", "echo hi >> out.log", KindAppend, "/home/u/proj/out.log", true},
@@ -237,10 +237,10 @@ func TestWindowsPathNormalization(t *testing.T) {
 	if !ok || got != `c:\other\x.txt` {
 		t.Errorf("dotdot normalize: got %q ok=%v", got, ok)
 	}
-	// trailing dot/space on the final element is trimmed.
-	got, _, _ = placePath(`C:\a\b.txt. `, o)
-	if got != `c:\a\b.txt` {
-		t.Errorf("trailing dot/space trim: got %q", got)
+	// a trailing dot/space on the final element is non-canonical (review R5-5):
+	// it maps to the base file on Windows, so it is unknown here.
+	if _, ok, reason := placePath(`C:\a\b.txt. `, o); ok || reason != ReasonNonCanonicalPath {
+		t.Errorf("trailing dot/space should be non_canonical_path; ok=%v reason=%s", ok, reason)
 	}
 	// C:foo (drive-relative) cannot be placed.
 	if _, ok, reason := placePath(`C:foo`, o); ok || reason != ReasonDynamicCWD {

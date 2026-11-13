@@ -4,8 +4,6 @@
 
 package psparse
 
-import "strings"
-
 // parsePipelineChainOrAssignment parses a statement that is a pipeline, a
 // pipeline chain (&& / ||), a background job (trailing &), or an assignment.
 func (p *parser) parsePipelineChainOrAssignment(s stopSet) Statement {
@@ -167,10 +165,13 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 		case TokAmp:
 			goto done
 		case TokStopParse:
-			p.advance()
-			cmd.StopParsing = p.consumeStopParsingTail()
-			p.diag(start, p.prevEnd(), ReasonStopParsing, "verbatim --% tail not structured")
-			goto done
+			sp := p.advance()
+			cmd.Elements = append(cmd.Elements, &Arg{span: span{sp.Start, sp.End}, Value: &StringLit{span: span{sp.Start, sp.End}, Kind: StrBare, Value: "--%", Static: true, Bare: true, Raw: sp.Raw}})
+			// the lexer always emits the verbatim tail token next
+			tl := p.advance()
+			cmd.StopParsing = tl.Raw
+			cmd.Elements = append(cmd.Elements, &Arg{span: span{tl.Start, tl.End}, Value: &StringLit{span: span{tl.Start, tl.End}, Kind: StrBare, Value: tl.Raw, Static: true, Bare: true, Raw: tl.Raw}})
+			p.diag(start, p.prevEnd(), ReasonStopParsing, "verbatim --% tail")
 		case TokRedir:
 			cmd.Redirs = append(cmd.Redirs, p.parseRedirection())
 		case TokParameter:
@@ -213,7 +214,9 @@ func (p *parser) parseNameRun(first Token) Expr {
 		case TokGeneric, TokVariable, TokNumber, TokDot, TokString, TokOperator:
 			end = t.End
 			p.advance()
-		case TokDollarParen, TokLParen, TokAtParen, TokLBracket, TokAtBrace, TokLBrace:
+		case TokDollarParen, TokLBracket:
+			// a $( ) or [ ] glued into a name is literal (k=$(..), a[1<<2]=x);
+			// a plain ( / @( / { / @{ starts a separate argument (`$( ) -> name "$").
 			end = p.consumeBalancedEnd()
 		default:
 			goto doneName
@@ -224,7 +227,12 @@ doneName:
 	if s0 >= 0 && end <= len(p.src) && end >= s0 {
 		raw = p.src[s0:end]
 	}
-	return &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: true, Value: nameValue(raw)}
+	v, amb := p.decodeBacktick(raw, true)
+	sl := &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: !amb, Value: v, Raw: raw}
+	if amb {
+		p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape in a name differs between PS 5.1 and 7")
+	}
+	return sl
 }
 
 // consumeBalancedEnd consumes a balanced ( ), [ ] or { } group (the current
@@ -267,32 +275,13 @@ func (p *parser) consumeBalancedEnd() int {
 	return end
 }
 
-// nameValue resolves a command-name generic token: backtick escapes are
-// decoded, unescaped quote delimiters are dropped, and $(...) is kept literal.
-func nameValue(raw string) string {
-	rs := []rune(raw)
-	var b strings.Builder
-	for i := 0; i < len(rs); i++ {
-		if rs[i] == '`' && i+1 < len(rs) {
-			b.WriteRune(backtickEscape(rs[i+1]))
-			i++
-			continue
-		}
-		if isSingleQuote(rs[i]) || isDoubleQuote(rs[i]) {
-			continue
-		}
-		b.WriteRune(rs[i])
-	}
-	return b.String()
-}
-
 func (p *parser) parseCommandName() Expr {
 	switch p.kind() {
 	case TokGeneric:
 		return p.parseNameRun(p.advance())
 	case TokString:
 		return p.stringLit(p.advance())
-	case TokVariable, TokLParen, TokDollarParen:
+	case TokVariable, TokLParen, TokDollarParen, TokLBrace:
 		e := p.parsePrimary()
 		if _, ok := e.(*Variable); ok {
 			p.diag0(e, ReasonDynamicName, "call target is a variable")
@@ -301,7 +290,7 @@ func (p *parser) parseCommandName() Expr {
 	case TokOperator:
 		if v := p.cur().Value; v == "%" || v == "?" {
 			t := p.advance()
-			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true, Raw: t.Raw}
 		}
 	case TokParameter:
 		t := p.advance()
@@ -309,7 +298,7 @@ func (p *parser) parseCommandName() Expr {
 		if t.HasColon {
 			name += ":"
 		}
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: name, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: name, Static: true, Bare: true, Raw: t.Raw}
 	}
 	// no recognisable name
 	t := p.cur()
@@ -400,7 +389,7 @@ func (p *parser) parseFusedArg() Expr {
 		return lead
 	}
 	s0, _ := lead.Span()
-	return composeAtoms(atoms, s0, end)
+	return p.composeAtoms(atoms, s0, end)
 }
 
 // barewordExpr builds an argument bareword as an expandable string: it decodes
@@ -408,7 +397,7 @@ func (p *parser) parseFusedArg() Expr {
 // $( ) (PowerShell parses such an argument as an ExpandableString).
 func (p *parser) barewordExpr(t Token) Expr {
 	parts, static, lit := p.expandable(t.Raw, t.Start)
-	return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Bare: true, Static: static, Value: lit, Parts: parts}
+	return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Bare: true, Static: static, Value: lit, Parts: parts, Raw: t.Raw}
 }
 
 // parseArgAtom parses a single argument atom (no comma, no fusion).
@@ -419,21 +408,36 @@ func (p *parser) parseArgAtom() Expr {
 		// makes it non-static (unlike a command name, which stays literal).
 		return p.barewordExpr(p.advance())
 	case TokString, TokNumber, TokVariable, TokLParen, TokDollarParen,
-		TokAtParen, TokAtBrace, TokLBrace, TokLBracket:
+		TokAtParen, TokAtBrace, TokLBrace:
 		return p.parsePostfix(p.parsePrimary())
 	case TokOperator:
 		// an operator character used as argument text (a lone '-', or a glob
 		// lead such as * in */*).
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Value, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Value, Static: true, Bare: true, Raw: t.Raw}
 	case TokDot:
 		// a '.' at argument position is a bareword (Remove-Item . -Recurse).
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: ".", Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: ".", Static: true, Bare: true, Raw: t.Raw}
 	case TokLabel:
 		// a ':name' at argument position is a bareword (Remove-Item :x -Force).
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true, Raw: t.Raw}
+	case TokLBracket:
+		// [..] at argument position is a literal bareword in command mode
+		// (Write-Output [int] -> "[int]"), not a type literal or an index.
+		start := p.cur().Start
+		end := p.consumeBalancedEnd()
+		raw := ""
+		if start >= 0 && end <= len(p.src) && end >= start {
+			raw = p.src[start:end]
+		}
+		v, amb := p.decodeBacktick(raw, true)
+		sl := &StringLit{span: span{start, end}, Kind: StrBare, Value: v, Static: !amb, Bare: true, Raw: raw}
+		if amb {
+			p.diag(start, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
+		}
+		return sl
 	}
 	return nil
 }
@@ -442,8 +446,8 @@ func (p *parser) parseArgAtom() Expr {
 // variable or a $( ) sub-expression (as PowerShell does).
 func fusableLead(e Expr) bool {
 	switch v := e.(type) {
-	case *Variable, *SubExpr:
-		return true
+	case *Variable, *Number:
+		return true // note: a $( ) sub-expression does NOT fuse with trailing text
 	case *StringLit:
 		return v.Bare
 	}
@@ -454,19 +458,27 @@ func fusableLead(e Expr) bool {
 // every atom resolves to a literal, otherwise an expandable string whose Parts
 // are the atoms (Static=false). It never returns a static value the pieces
 // disagree with.
-func composeAtoms(atoms []Expr, s0, end int) Expr {
-	var b strings.Builder
+func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 	static := true
 	for _, a := range atoms {
-		if v, ok := LiteralString(a); ok {
-			b.WriteString(v)
-		} else {
+		if _, ok := LiteralString(a); !ok {
 			static = false
 			break
 		}
 	}
 	if static {
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: b.String(), Static: true, Bare: true}
+		// A fused all-literal argument is a single generic token: its value is
+		// the processed source span (quote delimiters dropped, backtick escapes
+		// decoded, $(...) kept literal) -- not the per-atom values, so a glued
+		// number keeps its source text (0x10-1 stays "0x10-1", not "16-1").
+		val, amb := "", false
+		if s0 >= 0 && end <= len(p.src) && end >= s0 {
+			val, amb = p.decodeBacktick(p.src[s0:end], true)
+		}
+		if amb {
+			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
+		}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end)}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {
@@ -479,7 +491,7 @@ func composeAtoms(atoms []Expr, s0, end int) Expr {
 // the current command argument (PowerShell's generic-token concatenation).
 func adjacentFusable(k TokenKind) bool {
 	switch k {
-	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot:
+	case TokGeneric, TokNumber, TokVariable, TokString, TokDollarParen, TokOperator, TokDot, TokLBracket:
 		return true
 	}
 	return false
@@ -506,20 +518,6 @@ func (p *parser) parseRedirection() *Redirection {
 		}
 	}
 	return r
-}
-
-// consumeStopParsingTail collects the verbatim remainder after --% up to the
-// next newline (PowerShell treats the rest of the line as literal args).
-func (p *parser) consumeStopParsingTail() string {
-	var b strings.Builder
-	for !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) &&
-		!p.at(TokPipe) && !p.at(TokPipePipe) && !p.at(TokAmpAmp) {
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(p.advance().Raw)
-	}
-	return b.String()
 }
 
 func (p *parser) diag0(e Expr, reason, detail string) {
