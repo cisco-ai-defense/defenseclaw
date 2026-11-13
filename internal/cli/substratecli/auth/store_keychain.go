@@ -41,7 +41,43 @@ const (
 	macKeyLabel   = "defenseclaw-substrate-token-key"
 	macNotFound   = 44 // errSecItemNotFound as the security tool exits
 	sealMagic     = "DCS1"
+
+	// macNativeAccount is the key item the launcher writes with the
+	// Security framework itself (GAP-0165). It trusts the DefenseClaw
+	// binary, so reads ask nothing; macKeyAccount is the earlier item,
+	// written through the security tool, read once to move the key.
+	macNativeAccount = "launcher-key"
+
+	// OSStatus values of the Security framework.
+	secItemNotFound           = -25300
+	secDuplicateItem          = -25299
+	secAuthFailed             = -25293
+	secInteractionNotAllowed  = -25308
+	secUserCanceled           = -128
+	secNoSuchKeychain         = -25294
+	secDefaultKeychainMissing = -25307
 )
+
+// nativeKeychain is the Security framework calls the launcher needs: find
+// and add one generic password of the default keychain. An item added this
+// way trusts the calling program (the launcher binary).
+type nativeKeychain interface {
+	find(service, account string) ([]byte, int32)
+	add(service, account string, secret []byte) int32
+}
+
+// nativeStatusError says what an OSStatus means for the person.
+func nativeStatusError(what string, st int32) error {
+	switch st {
+	case secInteractionNotAllowed, secAuthFailed:
+		return noKeychain("the macOS keychain is locked and this session cannot ask you to unlock it (for example over SSH); unlock it with: security unlock-keychain")
+	case secUserCanceled:
+		return noKeychain("you declined the macOS keychain request; run the command again and allow DefenseClaw")
+	case secNoSuchKeychain, secDefaultKeychainMissing:
+		return noKeychain("this account has no default macOS keychain")
+	}
+	return noKeychain(fmt.Sprintf("the macOS keychain could not %s (status %d)", what, st))
+}
 
 // macKeySealer seals sign-ins with AES-256-GCM under a random key kept as
 // a generic password in the default (normally the login) macOS keychain.
@@ -52,6 +88,9 @@ const (
 // tool fail; the error says so and names the file store.
 type macKeySealer struct {
 	run cmdRunner
+	// native, when set (darwin), keeps the key with the Security framework;
+	// nil uses the security tool only.
+	native nativeKeychain
 
 	mu  sync.Mutex
 	key []byte
@@ -122,6 +161,13 @@ func (m *macKeySealer) getKey(create bool) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
 	defer cancel()
+	if m.native != nil {
+		key, err := m.nativeKey(ctx, create)
+		if err == nil {
+			m.key = key
+		}
+		return key, err
+	}
 	key, err := m.findKey(ctx)
 	if err != nil || key != nil || !create {
 		m.key = key
@@ -147,6 +193,58 @@ func (m *macKeySealer) getKey(create bool) ([]byte, error) {
 		return nil, macError("store the DefenseClaw key", exit, "the key read back does not match")
 	}
 	m.key = key
+	return key, nil
+}
+
+// nativeKey reads the key from the launcher's own item. When that item is
+// missing it moves a key written by an earlier version through the
+// security tool (one macOS prompt, once), or makes a new key when create
+// is set. Called with m.mu held.
+func (m *macKeySealer) nativeKey(ctx context.Context, create bool) ([]byte, error) {
+	raw, st := m.native.find(keychainService, macNativeAccount)
+	switch st {
+	case 0:
+		key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+		if err != nil || len(key) != 32 {
+			return nil, fmt.Errorf("the keychain item %s/%s is not a DefenseClaw key; delete it with: security delete-generic-password -s %s -a %s", keychainService, macNativeAccount, keychainService, macNativeAccount)
+		}
+		return key, nil
+	case secItemNotFound:
+	default:
+		return nil, nativeStatusError("read the DefenseClaw key", st)
+	}
+	legacy, err := m.findKey(ctx)
+	if err != nil && !create {
+		return nil, err
+	}
+	key := legacy
+	if key == nil {
+		if !create {
+			return nil, nil
+		}
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+	}
+	if st := m.native.add(keychainService, macNativeAccount, []byte(hex.EncodeToString(key))); st != 0 && st != secDuplicateItem {
+		if legacy != nil {
+			return legacy, nil // the old item still works; the move is tried again next time
+		}
+		return nil, nativeStatusError("store the DefenseClaw key", st)
+	}
+	got, st := m.native.find(keychainService, macNativeAccount)
+	if st != 0 || strings.TrimSpace(string(got)) != hex.EncodeToString(key) {
+		if legacy != nil {
+			return legacy, nil
+		}
+		return nil, nativeStatusError("store the DefenseClaw key", st)
+	}
+	if legacy != nil {
+		// The key now lives in the launcher's item; the old one, which
+		// asked on every read, goes (best effort).
+		_, _, _, _ = m.run(ctx, nil, securityTool, "delete-generic-password", "-s", keychainService, "-a", macKeyAccount)
+	}
 	return key, nil
 }
 
