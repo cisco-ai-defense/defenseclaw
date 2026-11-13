@@ -2111,7 +2111,10 @@ Startup variables that must apply before the managed `env` does
 `sandbox create --env`. `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` makes
 Claude treat the workload-writable `~/.claude` as untrusted: a
 `processWrapper` there no longer launches background sessions (an empty
-managed value does not outrank it), user-scope plugins do not load, the
+managed value does not outrank it), a plugin folder placed directly in
+`~/.claude/skills/NAME` no longer loads as a plugin (its skills still load;
+marketplace plugins at user, project and local scope still load, measured on
+2.1.311), the
 user's own skills and commands cannot pre-approve tools, and Claude refuses
 every prompt while `~/.claude/settings.json` has errors, naming the file.
 Managed settings, the hooks and the OTLP export are unchanged. A pre-seeded `/sandbox/.claude.json` skips onboarding

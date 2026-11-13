@@ -35,6 +35,14 @@ func TestChargeBudgetsResolvesTheCost(t *testing.T) {
 	if len(sink.ids) != 4 || sink.usd[0] != 0.25 || sink.usd[1] != 0.25 || sink.usd[2] != 9 || sink.known[3] || !sink.known[2] {
 		t.Fatalf("computed, else reported; unpriced usage is unknown; no usage, judge and keyless calls skipped: %+v", sink)
 	}
+	n := len(sink.ids)
+	e.chargeBudgets(agent("r8"), Record{Outcome: "cancelled", TTFB: time.Millisecond, Usage: Usage{Input: 10, Has: HasInput}, Cost: Cost{USD: &computed}})
+	e.chargeBudgets(agent("r9"), Record{Outcome: "cancelled"}) // cancelled before any answer: nothing billed
+	e.chargeBudgets(agent("r10"), Record{Outcome: "failed", ErrorType: "upstream_error", TTFB: time.Millisecond,
+		Usage: Usage{Input: 10, Has: HasInput}, Cost: Cost{USD: &computed}})
+	if len(sink.ids) != n+2 || sink.known[n] || sink.known[n+1] {
+		t.Fatalf("a stream cut short after the answer started is unknown, never its partial cost: %+v", sink)
+	}
 	if sink.ids[0] == sink.ids[1] || sink.ids[0] == "same" {
 		t.Fatal("call ids are minted per call, never the client request id")
 	}

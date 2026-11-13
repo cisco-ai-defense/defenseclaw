@@ -247,13 +247,25 @@ type pipeSecurity struct {
 }
 
 func pipeSecurityAttributes(gatewayServiceName string) (*pipeSecurity, error) {
+	sddl, err := gatewayPipeSDDL(gatewayServiceName)
+	if err != nil {
+		return nil, err
+	}
+	return pipeSecurityFromSDDL(sddl)
+}
+
+// gatewayPipeSDDL is the protected pipe descriptor: owner SYSTEM, SYSTEM
+// full access, the gateway service SID read and write, nobody else.
+func gatewayPipeSDDL(gatewayServiceName string) (string, error) {
 	sid, err := managed.WindowsServiceAccountSID(`NT SERVICE\` + gatewayServiceName)
 	if err != nil || sid == nil {
-		return nil, errors.New("resolve CMID broker gateway service SID")
+		return "", errors.New("resolve CMID broker gateway service SID")
 	}
-	descriptor, err := windows.SecurityDescriptorFromString(
-		"O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;" + sid.String() + ")",
-	)
+	return "O:SYD:P(A;;GA;;;SY)(A;;GRGW;;;" + sid.String() + ")", nil
+}
+
+func pipeSecurityFromSDDL(sddl string) (*pipeSecurity, error) {
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
 		return nil, errors.New("build CMID broker pipe security descriptor")
 	}

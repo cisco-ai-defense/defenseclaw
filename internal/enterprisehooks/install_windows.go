@@ -414,6 +414,10 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if err != nil {
 		return InstallResult{}, err
 	}
+	// Route-only drift (S1 DESIGN 18.3, 21): the guardian repair re-renders.
+	if err := verifyWindowsRouteOnly(conn, targetSID, home, dataDir, opts.RouteOnly); err != nil {
+		return InstallResult{}, err
+	}
 	otlpReport, err := windowsManagedUserNativeOTLPCheck(conn.Name(), home, dataDir, targetSID, setupOpts.APIAddr, setupOpts.ProxyAddr)
 	if err != nil {
 		return InstallResult{}, err
@@ -1916,8 +1920,15 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 		}
 		defer unlock()
 	}
+	// A removed Claude Code or Codex target gets its own agent values back
+	// (route-only render; best effort, as the target) only after its
+	// removal succeeded (restoreWindowsRouteOnlyAfterRemoval).
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
-		return removeWindowsClaudeManagedPolicyTarget(claudeTargetSID)
+		if err := removeWindowsClaudeManagedPolicyTarget(claudeTargetSID); err != nil {
+			return err
+		}
+		restoreWindowsRouteOnlyAfterRemoval(opts)
+		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "codex") {
 		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
@@ -1939,10 +1950,14 @@ func platformRemoveManagedPolicy(ctx context.Context, opts InstallOptions) error
 			return err
 		}
 		_ = ctx
-		return connector.RemoveWindowsCodexManagedRuntimeTarget(
+		if err := connector.RemoveWindowsCodexManagedRuntimeTarget(
 			machineOpts,
 			targetSID.String(),
-		)
+		); err != nil {
+			return err
+		}
+		restoreWindowsRouteOnlyAfterRemoval(opts)
+		return nil
 	}
 	if strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
 		if err := windowsEnterpriseMutationIdentityCheck(); err != nil {

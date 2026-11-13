@@ -28,15 +28,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-func stringSliceContains(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
-}
-
 func TestGatewayConfigResolvedToken(t *testing.T) {
 	t.Run("explicit token env", func(t *testing.T) {
 		t.Setenv("MY_GATEWAY_TOKEN", "from-custom-env")
