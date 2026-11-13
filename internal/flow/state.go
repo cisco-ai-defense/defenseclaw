@@ -455,6 +455,14 @@ func (s *State) ValueEvictions() int {
 	return s.valueEvictions
 }
 
+// Labeled reports whether the session label has tightened (a credential read,
+// a copy of a labeled file), under the lock.
+func (s *State) Labeled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Label.labeled()
+}
+
 // LabelString returns the session label under the lock, for a concurrent
 // reader (the session view).
 func (s *State) LabelString() string {

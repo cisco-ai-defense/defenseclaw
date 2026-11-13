@@ -66,6 +66,11 @@ const (
 	// HitSessionContext: the session is labeled and the call reaches an
 	// external sink, with no data-lane proof. Never fires in default.
 	HitSessionContext HitKind = "session_context"
+	// HitScopeSend: a session that read sensitive material (a result the content
+	// rules name, or a bare read) sends to a destination no prompt of the
+	// session named (chain.sensitive_read_then_unscoped_send). The gateway adds
+	// it; it is a scope proof, not a flow proof, and fires in default.
+	HitScopeSend HitKind = "scope_send"
 )
 
 // Hit is one sink finding.

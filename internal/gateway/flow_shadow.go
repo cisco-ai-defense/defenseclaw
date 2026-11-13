@@ -139,6 +139,10 @@ type flowSessionEntry struct {
 	// dialect is the shell dialect the session's last shell call reported, so a
 	// tool result is read with the grammar and path flavor that call ran under.
 	dialect actionfacts.Dialect
+	// chain is the state of chain.sensitive_read_then_unscoped_send
+	// (chain_effects.go): what armed the session and the scope the typed
+	// prompts name.
+	chain chainEffectsEntry
 }
 
 // FlowHitRecord is one redacted recent hit for the explain view.
@@ -410,6 +414,15 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 	st := secretFlowSessions.session(sid, cfg)
 	secretFlowSessions.noteDialect(sid, request.Input.DialectHint)
 	out := st.Step(res, scanText, cfg)
+	// The scope chain: a session armed by a sensitive result sends to a
+	// destination no prompt named. Only when the flow step found nothing of its
+	// own on this call (its value and file proofs are stronger evidence).
+	if len(out.Hits) == 0 {
+		if hit, act, ok := chainEffectsHit(sid, request.Input, cfg); ok {
+			out.Hits = append(out.Hits, hit)
+			out.Action = act
+		}
+	}
 	if len(out.Hits) > 0 {
 		now := time.Now().UTC().Format(time.RFC3339)
 		recs := make([]FlowHitRecord, 0, len(out.Hits))
@@ -467,8 +480,13 @@ func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
 		Confidence: 0.9,
 		Tags:       tags,
 	}
+	if len(kinds) == 1 && kinds[string(flow.HitScopeSend)] {
+		f.RuleID = chainEffectsRuleID
+		f.Title = "Sensitive data was read in this session, then sent to a destination the user never named"
+		f.Confidence = 0.8
+	}
 	f.disposition = findingDispositionFlowSecretEgress
-	f.proof = newFindingProof(findingProofFlow, flow.RuleIDEgress, mode == flowLaneOn)
+	f.proof = newFindingProof(findingProofFlow, f.RuleID, mode == flowLaneOn)
 	if out.Action == flow.ActionAlert {
 		f.enforcement = findingEnforcementAlertOnly
 	} else {

@@ -833,6 +833,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				judge.ResetToolJudgeSession(sessionKey)
 			}
 			a.resetUserDownloadRequests(sessionKey)
+			if sid := SessionIDFromContext(ctx); sid != "" {
+				secretFlowSessions.resetChain(sid)
+			} else {
+				secretFlowSessions.resetChain(req.SessionID)
+			}
 		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -1113,6 +1118,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// self-gates on guardrail.secret_flow.mode and records only keyed
 			// digests, never the raw value.
 			addSecretFlowResultValues(ctx, req)
+			armChainEffectsFromResult(ctx, req)
 			// Last, once the verdict is final: a sandbox verdict carries
 			// a plain reason (rule, title, what to do instead) to the
 			// agent, the activity feed and last_blocked.

@@ -237,6 +237,10 @@ func (cfg Config) isAllowlistedHost(rawHost string) bool {
 	return false
 }
 
+// HostAllowed reports a host the owner allowlisted as a flow destination (or a
+// loopback or link-local host): the same test the sink check applies.
+func (cfg Config) HostAllowed(host string) bool { return cfg.isAllowlistedHost(host) }
+
 // action maps the hits to the action the active mode would take. Default never
 // blocks: SinkDefault is validated to alert. The caller passes StrictOrManaged.
 func (cfg Config) action(hits []Hit) Action {
