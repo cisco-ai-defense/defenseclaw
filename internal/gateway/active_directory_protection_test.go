@@ -92,3 +92,47 @@ func TestActiveDirectoryProtectionProfileBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// TestCredentialedNetExecBuiltInAndPackAcrossShells checks credentialed NetExec
+// under a POSIX shell, PowerShell and cmd (rel-1-0-10:GAP-0014, GAP-0051). The
+// built-in HIGH credential.directory_ticket_request rule alerts in default and
+// permissive and blocks in strict; with the active-directory-protection pack,
+// credential.directory_service_credential_use blocks at CRITICAL on every base.
+func TestCredentialedNetExecBuiltInAndPackAcrossShells(t *testing.T) {
+	shells := []struct {
+		name    string
+		command string
+		dialect actionfacts.Dialect
+	}{
+		{"posix", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", ""},
+		{"posix global option", "nxc --verbose smb 198.51.100.10 -u svc -p S3cretP4ss", ""},
+		{"powershell", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", actionfacts.DialectPowerShell},
+		{"cmd nxc.exe", "nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss --shares", actionfacts.DialectCMD},
+		{"cmd path-qualified", `C:\Tools\nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss`, actionfacts.DialectCMD},
+	}
+	for _, base := range []string{"default", "strict", "permissive"} {
+		pack := adPackConnector(t, base)
+		for _, shell := range shells {
+			input := actionfacts.Input{Tool: "shell", Command: shell.command, DialectHint: shell.dialect}
+			if shell.dialect != "" {
+				input.CWD = `C:\repo`
+			}
+			t.Run(base+"/builtin/"+shell.name, func(t *testing.T) {
+				got := EvaluateDeterministicAction(context.Background(), input, shell.command, "benchmark-"+base, base)
+				if !slices.Contains(got.RuleIDs, "credential.directory_ticket_request") {
+					t.Fatalf("rules=%v parse=%q, want credential.directory_ticket_request", got.RuleIDs, got.ParseStatus)
+				}
+				if wantBlock := base == "strict"; (got.Action == "block") != wantBlock {
+					t.Fatalf("action=%q rules=%v, want block=%v", got.Action, got.RuleIDs, wantBlock)
+				}
+			})
+			t.Run(base+"/pack/"+shell.name, func(t *testing.T) {
+				got := EvaluateDeterministicAction(context.Background(), input, shell.command, pack, base)
+				if got.Action != "block" || !slices.Contains(got.RuleIDs, "credential.directory_service_credential_use") {
+					t.Fatalf("action=%q rules=%v parse=%q, want block by credential.directory_service_credential_use",
+						got.Action, got.RuleIDs, got.ParseStatus)
+				}
+			})
+		}
+	}
+}

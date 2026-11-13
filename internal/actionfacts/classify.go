@@ -752,8 +752,10 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		} else if ExactNetExecDomainServiceAuth(*command) {
 			// A complete, statically credentialed NetExec/CrackMapExec
 			// domain-service invocation (rel-1-0-10:GAP-0014). Keeping the
-			// parse authoritative lets the opt-in active-directory-protection
-			// pack block it; no built-in default rule claims this operation.
+			// parse authoritative lets the built-in HIGH
+			// credential.directory_ticket_request rule alert (default) or
+			// block (strict), and the opt-in active-directory-protection pack
+			// block it at CRITICAL.
 			addOperation(command, OperationCredentialRead)
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
@@ -982,10 +984,10 @@ func commandProgramForDialect(executable string, dialect Dialect) string {
 	family := strings.TrimSuffix(program, suffix)
 	switch family {
 	case "aws", "az", "autossh", "base64", "certutil", "chisel",
-		"claude", "cloudflared", "cmd", "cmdkey", "codex", "curl", "dd",
+		"claude", "cloudflared", "cmd", "cmdkey", "codex", "crackmapexec", "curl", "dd",
 		"docker", "fping", "gcloud", "gemini", "git", "icacls", "kubectl",
-		"masscan", "naabu", "nc", "ncat", "net", "net1", "netcat", "nerdctl",
-		"ngrok", "nmap", "oc", "opencode", "openssl", "op", "pass", "podman",
+		"masscan", "naabu", "nc", "ncat", "net", "net1", "netcat", "netexec", "nerdctl",
+		"ngrok", "nmap", "nxc", "oc", "opencode", "openssl", "op", "pass", "podman",
 		"powershell", "pwsh", "scp", "schtasks", "sftp", "socat", "ssh",
 		"takeown", "taskkill", "vault", "wget", "where":
 		return family

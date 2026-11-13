@@ -45,6 +45,11 @@ func TestExactNetExecDomainServiceAuth(t *testing.T) {
 		{"unknown protocol", "nxc ftpx 198.51.100.10 -u svc -p S3cretP4ss", false, false},
 		{"dynamic password keeps parse partial", "nxc smb 198.51.100.10 -u svc -p $PASS", false, false},
 		{"not netexec", "klist", false, false},
+		// Global options before the protocol (rel-1-0-10:GAP-0051 N5).
+		{"global flag before protocol", "nxc --verbose smb 198.51.100.10 -u svc -p S3cretP4ss", true, true},
+		{"global value options before protocol", "nxc -t 4 --timeout=5 --log run.log smb 198.51.100.10 -u svc -p S3cretP4ss", true, true},
+		{"unknown option before protocol stays partial", "nxc --frobnicate smb 198.51.100.10 -u svc -p S3cretP4ss", false, false},
+		{"global option missing its value", "nxc --timeout", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -63,5 +68,66 @@ func TestExactNetExecDomainServiceAuth(t *testing.T) {
 				t.Fatalf("parse status=%s want complete (a recognized credentialed call must be enforcement-eligible)", facts.Parse.Status)
 			}
 		})
+	}
+}
+
+// TestExactNetExecDomainServiceAuthWindows runs the same recognizer on the argv
+// from the PowerShell and cmd parsers (rel-1-0-10:GAP-0051 N2): bare nxc,
+// nxc.exe and a path-qualified binary are recognized and keep the parse
+// complete; a dynamic credential, a help call and a non-credentialed call stay
+// partial.
+func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		dialect Dialect
+		want    bool
+	}{
+		{"powershell nxc", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", DialectPowerShell, true},
+		{"cmd nxc", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", DialectCMD, true},
+		{"cmd nxc.exe", "nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss", DialectCMD, true},
+		{"powershell netexec.exe hash", "netexec.exe ldap 198.51.100.10 -u svc -H 00112233445566778899aabbccddeeff --users", DialectPowerShell, true},
+		{"cmd path-qualified nxc.exe", `C:\Tools\nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss`, DialectCMD, true},
+		{"powershell call operator path", `& 'C:\Users\alice\.local\bin\nxc.exe' smb 198.51.100.10 -u svc -p S3cretP4ss`, DialectPowerShell, true},
+		{"powershell global option", "nxc --verbose smb 198.51.100.10 -u svc -p S3cretP4ss", DialectPowerShell, true},
+		{"powershell dynamic password", "nxc smb 198.51.100.10 -u svc -p $env:P", DialectPowerShell, false},
+		{"cmd dynamic password", "nxc smb 198.51.100.10 -u svc -p %P%", DialectCMD, false},
+		{"cmd help", "nxc.exe smb 198.51.100.10 -h", DialectCMD, false},
+		{"powershell no credential", "nxc smb 198.51.100.10 --shares", DialectPowerShell, false},
+		{"cmd path-qualified no credential", `C:\Tools\nxc.exe smb 198.51.100.10 --shares`, DialectCMD, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "shell", Command: tc.command, DialectHint: tc.dialect, CWD: `C:\repo`})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands=%d, want 1", len(facts.Commands))
+			}
+			command := facts.Commands[0]
+			got := ExactNetExecDomainServiceAuth(command) && hasFactOperation(command, OperationCredentialRead)
+			if got != tc.want {
+				t.Fatalf("recognized=%v want %v (program=%q status=%s ops=%v)",
+					got, tc.want, command.Program, facts.Parse.Status, command.Operations)
+			}
+			if tc.want && facts.Parse.Status != StatusComplete {
+				t.Fatalf("parse status=%s want complete", facts.Parse.Status)
+			}
+			if !tc.want && facts.Parse.Status == StatusComplete {
+				t.Fatalf("parse became complete for an unrecognized NetExec call: ops=%v", command.Operations)
+			}
+		})
+	}
+}
+
+// TestNetExecNTDSDumpAfterGlobalOptions keeps the NTDS dump owned by the dump
+// grammar when a global option precedes the protocol, in POSIX and cmd.
+func TestNetExecNTDSDumpAfterGlobalOptions(t *testing.T) {
+	for _, in := range []Input{
+		adpBashInput("nxc --verbose smb 198.51.100.10 -u administrator -H aa:bb --ntds"),
+		{Tool: "shell", Command: "nxc.exe smb 198.51.100.10 -u administrator -H aa:bb --ntds", DialectHint: DialectCMD, CWD: `C:\repo`},
+	} {
+		facts := Analyze(in)
+		if !ExactDirectoryCredentialCompromise(facts) {
+			t.Fatalf("input=%+v is not a proven NTDS dump (status=%s)", in, facts.Parse.Status)
+		}
 	}
 }

@@ -1,29 +1,29 @@
 {
   "adapter_statistics": {
     "defenseclaw-active-directory-conformance-v1": {
-      "rows_emitted": 15,
-      "rows_read": 15
+      "rows_emitted": 17,
+      "rows_read": 17
     }
   },
-  "cases": 15,
+  "cases": 17,
   "counts": {
-    "defenseclaw-active-directory-conformance-v1": 15
+    "defenseclaw-active-directory-conformance-v1": 17
   },
   "datasets": [
     "defenseclaw-active-directory-conformance-v1"
   ],
   "exact_payload_duplicates_removed": 0,
   "label_conflicts_excluded": 0,
-  "output_sha256": "eb0a19a17b298fb02efed2ad1219253cfbcfd63a55ac8ad8b17900d38cea02f6",
+  "output_sha256": "ecfaf7a3b5ea0f83c2eb39cde400a4680226dca27ef24786eb7b2c1a177e20e8",
   "schema_version": "1",
   "source": {
-    "bytes": 8561,
+    "bytes": 9848,
     "dataset": "defenseclaw-active-directory-conformance-v1",
     "license": "Apache-2.0",
     "path": "benchmarks/fixtures/active-directory-conformance-v1.jsonl",
     "redistribution": "vendored",
     "revision": "1",
-    "rows": 15,
-    "sha256": "eb0a19a17b298fb02efed2ad1219253cfbcfd63a55ac8ad8b17900d38cea02f6"
+    "rows": 17,
+    "sha256": "ecfaf7a3b5ea0f83c2eb39cde400a4680226dca27ef24786eb7b2c1a177e20e8"
   }
 }

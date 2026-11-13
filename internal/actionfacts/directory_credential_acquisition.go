@@ -295,7 +295,8 @@ func exactDirectoryCredentialCommand(
 	}
 	switch program {
 	case "crackmapexec", "netexec", "nxc":
-		if exactNetExecNTDSDump(command.Argv[1:]) {
+		if protocol, ok := NetExecProtocolIndex(command.Argv); ok &&
+			exactNetExecNTDSDump(command.Argv[protocol:]) {
 			return DirectoryCredentialSecretsDump, true
 		}
 	case "impacket-secretsdump", "secretsdump.py":
@@ -656,9 +657,11 @@ func unresolvedHashcatArgument(value string) bool {
 // This recognizer does not mint a credential-acquisition fact (that vocabulary
 // stays reserved for dumps and offline cracks). It only proves that the call
 // is a complete, statically resolved credentialed domain-service invocation so
-// classifyCommand can keep the parse authoritative and add a credential-read
-// operation. The opt-in pack's CEL rules then decide the action; no built-in
-// default rule claims this operation, so default behaviour is unchanged.
+// the POSIX classifier (classifyCommand) and the PowerShell and cmd classifiers
+// (windowsClassifyNetExec) keep the parse authoritative and add a
+// credential-read operation. The built-in HIGH credential.directory_ticket_request
+// rule then alerts in default and blocks in strict, and the opt-in pack's
+// CRITICAL rules block in every profile.
 var netExecDirectoryPrograms = map[string]struct{}{
 	"nxc": {}, "netexec": {}, "crackmapexec": {},
 }
@@ -698,16 +701,61 @@ func netExecAuthToken(arg string) bool {
 	return false
 }
 
+// netExecGlobalValueOptions and netExecGlobalFlags are the NetExec main-parser
+// options (its generic, output and DNS argument groups) that argparse accepts
+// before the protocol subcommand, as in `nxc --verbose smb ...`
+// (rel-1-0-10:GAP-0051 N5).
+var netExecGlobalValueOptions = map[string]struct{}{
+	"-t": {}, "--threads": {}, "--timeout": {}, "--jitter": {}, "--log": {},
+	"--dns-server": {}, "--dns-timeout": {},
+}
+
+var netExecGlobalFlags = map[string]struct{}{
+	"--verbose": {}, "--debug": {}, "--no-progress": {}, "-6": {}, "--dns-tcp": {},
+}
+
+// NetExecProtocolIndex returns the argv index of the NetExec protocol
+// subcommand, skipping the known global options that may precede it. It fails
+// closed: an unknown option, or a global option without its value, before the
+// protocol is not a recognized NetExec call. It does not check the protocol
+// name itself.
+func NetExecProtocolIndex(argv []string) (int, bool) {
+	for index := 1; index < len(argv); index++ {
+		arg := argv[index]
+		if !strings.HasPrefix(arg, "-") {
+			return index, true
+		}
+		if _, ok := netExecGlobalFlags[arg]; ok {
+			continue
+		}
+		if _, ok := netExecGlobalValueOptions[arg]; ok {
+			if index+1 >= len(argv) {
+				return 0, false
+			}
+			index++
+			continue
+		}
+		if name, _, joined := strings.Cut(arg, "="); joined && strings.HasPrefix(name, "--") {
+			if _, ok := netExecGlobalValueOptions[name]; ok {
+				continue
+			}
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
 // ExactNetExecDomainServiceAuth reports whether command is a statically
 // resolved NetExec/CrackMapExec invocation that authenticates (or attempts to)
-// against a domain service (rel-1-0-10:GAP-0014, GAP-0051). NetExec always
-// takes the protocol as its first positional, so the protocol is argv[1];
+// against a domain service (rel-1-0-10:GAP-0014, GAP-0051). The protocol is
+// the first positional, after any global options (NetExecProtocolIndex);
 // options and the target host may appear in any order after it. A help or
 // version invocation is never a match. It does not inspect credential values,
 // so option order, flags before or after the target, joined and long option
 // spellings, multiple passwords, and empty (anonymous) credentials are all
-// covered. The recognizer keeps the parse authoritative so the opt-in pack can
-// enforce; it mints no credential-acquisition fact.
+// covered. The same argv comes from the POSIX, PowerShell and cmd parsers
+// (on Windows, nxc.exe is the nxc family). It mints no credential-acquisition
+// fact.
 func ExactNetExecDomainServiceAuth(command CommandFact) bool {
 	argv, ok := directoryCredentialStaticArgv(command)
 	if !ok || len(argv) < 3 ||
@@ -717,18 +765,23 @@ func ExactNetExecDomainServiceAuth(command CommandFact) bool {
 	if _, ok := netExecDirectoryPrograms[strings.ToLower(command.Program)]; !ok {
 		return false
 	}
-	if _, ok := netExecDirectoryProtocols[strings.ToLower(argv[1])]; !ok {
-		return false
-	}
-	hasAuth := false
-	for _, arg := range argv[2:] {
+	for _, arg := range argv[1:] {
 		lower := strings.ToLower(arg)
 		if arg == "-h" || lower == "--help" || lower == "--version" {
 			return false
 		}
+	}
+	protocol, ok := NetExecProtocolIndex(argv)
+	if !ok {
+		return false
+	}
+	if _, ok := netExecDirectoryProtocols[strings.ToLower(argv[protocol])]; !ok {
+		return false
+	}
+	for _, arg := range argv[protocol+1:] {
 		if netExecAuthToken(arg) {
-			hasAuth = true
+			return true
 		}
 	}
-	return hasAuth
+	return false
 }

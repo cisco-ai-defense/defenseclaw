@@ -79,9 +79,9 @@ var semanticProtectiveProfileOwners = map[string]semanticOwner{
 		prerequisite:     infrastructureAsCodeFullDestroyPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
-	// Shipped built-in (default alerts / strict blocks, HIGH) and escalated to
-	// CRITICAL by the opt-in active-directory-protection pack. The owner is
-	// registered globally, so it backs the rule under either severity.
+	// Opt-in active-directory-protection pack rule (CRITICAL). The built-in
+	// HIGH coverage of the same calls is credential.directory_ticket_request,
+	// whose prerequisite reuses this one.
 	"credential.directory_service_credential_use": {
 		prerequisite:     directoryServiceCredentialUsePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -415,7 +415,8 @@ func directoryBulkCollectionPrerequisite(facts actionfacts.Facts) bool {
 			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
 			continue
 		}
-		if len(command.Argv) < 2 || !strings.EqualFold(command.Argv[1], "ldap") {
+		protocol, ok := actionfacts.NetExecProtocolIndex(command.Argv)
+		if !ok || !strings.EqualFold(command.Argv[protocol], "ldap") {
 			continue
 		}
 		if hasAnyArgFold(command.Argv, "--bloodhound", "--users", "--groups",
