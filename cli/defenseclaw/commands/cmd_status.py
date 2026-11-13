@@ -1098,6 +1098,7 @@ def _print_agents(
         fail_mode = _effective_status_fail_mode(cfg, conn)
         fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
         fail_mode_suffix = f" fail-mode={fail_mode['effective']}{fail_mode_note} provenance={fail_mode['provenance']}"
+        fail_mode_suffix += _status_failure_outcomes_suffix(fail_mode)
         friendly = _friendly_connector_name(conn)
         disclosure = _cursor_priority_conflict_disclosure(conn)
         disclosure_suffix = f" {disclosure}" if disclosure else ""
@@ -1444,6 +1445,15 @@ def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
         except Exception:
             return ""
     return ""
+
+
+def _status_failure_outcomes_suffix(fail_mode: dict) -> str:
+    """What each kind of hook failure does, after fail-mode= (#1441), or ""."""
+
+    from defenseclaw.fail_mode import failure_outcomes_summary
+
+    summary = failure_outcomes_summary(fail_mode.get("on_failure"))
+    return f" on-failure=({summary})" if summary else ""
 
 
 def _effective_status_fail_mode(cfg, connector: str) -> dict:
