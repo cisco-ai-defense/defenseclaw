@@ -33,7 +33,7 @@ type fleetState struct {
 	cred      *budgetstore.Credential
 	toFleet   map[string]string // local key -> fleet key (credential keys)
 	fromFleet map[string]string
-	userAll   map[string]bool   // budget ids of * user budgets in the bundle
+	userAll   map[string]bool   // budget ids of * user budgets in the credential
 	connAll   map[string]bool   // budget ids of * connector budgets in the credential
 	users     map[string]string // local caller key -> fleet user id
 	byFleet   map[string]string // fleet user id -> local caller key
@@ -54,12 +54,6 @@ func (f *fleetState) apply(cfg *config.Config) {
 	if store == nil || strings.TrimSpace(store.URL) == "" {
 		*f = fleetState{}
 		return
-	}
-	f.userAll = map[string]bool{}
-	for _, b := range cfg.Routing.Admin.Budgets {
-		if b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll {
-			f.userAll[b.ID] = true
-		}
 	}
 	value := cfg.RoutingCredential(store.EffectiveCredential())
 	var ca []byte
@@ -99,7 +93,10 @@ func (f *fleetState) apply(cfg *config.Config) {
 func (f *fleetState) installLocked(cred budgetstore.Credential, client *budgetstore.Client) {
 	f.client, f.cred = client, &cred
 	f.users, f.byFleet = map[string]string{}, map[string]string{}
-	f.toFleet, f.fromFleet, f.connAll = map[string]string{}, map[string]string{}, map[string]bool{}
+	f.toFleet, f.fromFleet, f.connAll, f.userAll = map[string]string{}, map[string]string{}, map[string]bool{}, map[string]bool{}
+	for _, id := range cred.UserBudgets {
+		f.userAll[id] = true
+	}
 	for local, fleet := range cred.Keys {
 		f.toFleet[local], f.fromFleet[fleet] = fleet, local
 	}

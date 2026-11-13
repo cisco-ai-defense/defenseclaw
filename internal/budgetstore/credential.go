@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"sort"
 	"strings"
 
@@ -34,6 +35,10 @@ type Credential struct {
 	// Keys map the device's local charge keys of named-user, group and named
 	// connector budgets to their fleet form.
 	Keys map[string]string `json:"keys,omitempty"`
+	// UserBudgets are the * user budgets the credential was issued for
+	// (user:<id>:*:<user id>); a * budget added to the bundle later counts
+	// on the device until the device is issued again.
+	UserBudgets []string `json:"user_budgets,omitempty"`
 	// ConnectorBudgets are the * connector budgets (connector:<id>:<name>).
 	ConnectorBudgets []string `json:"connector_budgets,omitempty"`
 }
@@ -64,6 +69,11 @@ func DecodeCredential(value string) (Credential, error) {
 	for _, u := range c.Users {
 		if !strings.HasPrefix(u.ID, "u") || (u.SID == "" && u.UPN == "") {
 			return Credential{}, errors.New("budget store device credential has a malformed user")
+		}
+	}
+	for _, id := range append(append([]string(nil), c.UserBudgets...), c.ConnectorBudgets...) {
+		if !ValidKey("user:" + id + ":x") {
+			return Credential{}, errors.New("budget store device credential has a malformed budget id")
 		}
 	}
 	for local, fleet := range c.Keys {
@@ -97,6 +107,14 @@ func Issue(subject SubjectKey, in IssueInput) (Credential, DeviceRecord, error) 
 	cred := Credential{Version: CredentialVersion, Device: "d" + hex.EncodeToString(raw[:]), Secret: make([]byte, SecretBytes), Keys: map[string]string{}}
 	if _, err := rand.Read(cred.Secret); err != nil {
 		return Credential{}, DeviceRecord{}, err
+	}
+	if math.IsNaN(in.CapUSD) || math.IsInf(in.CapUSD, 0) || in.CapUSD < 0 || in.CapUSD > maxUSD {
+		return Credential{}, DeviceRecord{}, errors.New("--cap-usd must be 0 (the store default) to 10000000")
+	}
+	for _, b := range in.Budgets {
+		if b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll {
+			cred.UserBudgets = append(cred.UserBudgets, b.ID)
+		}
 	}
 	allowed := map[string]bool{}
 	for _, entry := range in.Users {

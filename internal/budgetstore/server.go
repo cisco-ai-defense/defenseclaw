@@ -151,10 +151,21 @@ func (s *Store) SetDefaultCap(usd float64) {
 	s.devMu.Unlock()
 }
 
-// AddDevice registers (or replaces) a device record as active.
-func (s *Store) AddDevice(ctx context.Context, rec DeviceRecord) error {
+// ErrRevoked refuses to register a revoked device again without reactivate.
+var ErrRevoked = errors.New("the device is revoked; issue a new credential, or pass --reactivate to trust this one again")
+
+// AddDevice registers (or replaces) a device record as active. A revoked
+// device stays revoked unless reactivate is set.
+func (s *Store) AddDevice(ctx context.Context, rec DeviceRecord, reactivate bool) error {
 	if _, err := NewDeviceKey(rec.ID, rec.Secret); err != nil {
 		return err
+	}
+	if math.IsNaN(rec.CapUSD) || math.IsInf(rec.CapUSD, 0) || rec.CapUSD > maxUSD {
+		return errors.New("device record has a bad cap_usd")
+	}
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM devices WHERE id = ?`, rec.ID).Scan(&status); err == nil && status == DeviceRevoked && !reactivate {
+		return ErrRevoked
 	}
 	for _, k := range rec.Keys {
 		if !ValidKey(k) {
@@ -173,17 +184,40 @@ func (s *Store) AddDevice(ctx context.Context, rec DeviceRecord) error {
 }
 
 // RevokeDevice refuses every later request of the device (within
-// DeviceCacheTTL); its spend stays.
-func (s *Store) RevokeDevice(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE devices SET status = ? WHERE id = ?`, DeviceRevoked, id)
+// DeviceCacheTTL). Its spend stays unless dropFrom names a first UTC day
+// (YYYY-MM-DD): the device's spend from that day on is deleted (forged spend
+// of a compromised device). It returns the number of spend rows deleted.
+func (s *Store) RevokeDevice(ctx context.Context, id, dropFrom string) (int64, error) {
+	if dropFrom != "" && !validDay(dropFrom) {
+		return 0, errors.New("the first day to drop must be YYYY-MM-DD")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE devices SET status = ? WHERE id = ?`, DeviceRevoked, id)
+	if err != nil {
+		return 0, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return errors.New("no such device")
+		return 0, errors.New("no such device")
+	}
+	var dropped int64
+	if dropFrom != "" {
+		res, err := tx.ExecContext(ctx, `DELETE FROM spend WHERE device = ? AND day >= ?`, id, dropFrom)
+		if err != nil {
+			return 0, err
+		}
+		dropped, _ = res.RowsAffected()
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	s.forgetDevices()
-	return nil
+	return dropped, nil
 }
 
 // DeviceInfo is one row of the device list.
@@ -278,10 +312,24 @@ func (s *Store) device(ctx context.Context, id string) *device {
 var (
 	errReplay     = errors.New("replayed")
 	errNotAllowed = errors.New("key_not_allowed")
+	errTooMany    = errors.New("too_many")
 )
 
-// Push stores one writer's absolute totals for keys the device may use,
-// clamped to the device's daily cap.
+// Per-device bounds, so one device cannot fill the store.
+const (
+	// MaxWritersPerDevice bounds the gateway processes of one device active
+	// within WriterIdle.
+	MaxWritersPerDevice = 16
+	// MaxOpenKeysPerDay bounds the keys of one device and day beyond its
+	// credential's own (connector names of * connector budgets).
+	MaxOpenKeysPerDay = 64
+)
+
+// Push stores one writer's absolute totals for keys the device may use. A
+// row never goes down (so a device cannot probe a pooled limit by lowering
+// and raising its spend), only today's and yesterday's rows (UTC, store
+// clock) may grow, and the growth is clamped so the device's spend of a day
+// over all its writers stays within its daily cap.
 func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
 	for _, row := range req.Rows {
 		if !dev.allows(row.Key) {
@@ -299,6 +347,13 @@ func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
 	var last uint64
 	switch err := tx.QueryRowContext(ctx, `SELECT last_seq FROM writers WHERE device = ? AND epoch = ?`, id, req.Epoch).Scan(&last); {
 	case errors.Is(err, sql.ErrNoRows):
+		var writers int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM writers WHERE device = ?`, id).Scan(&writers); err != nil {
+			return err
+		}
+		if writers >= MaxWritersPerDevice {
+			return errTooMany
+		}
 	case err != nil:
 		return err
 	case req.Seq <= last:
@@ -308,27 +363,84 @@ func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
 		ON CONFLICT (device, epoch) DO UPDATE SET last_seq = excluded.last_seq, last_seen = excluded.last_seen`, id, req.Epoch, req.Seq, s.now().Unix()); err != nil {
 		return err
 	}
-	// The cap: one device's spend of a UTC day, over all its writers.
-	byDay := map[string]float64{}
+	now := s.now().UTC()
+	today, yesterday := now.Format(time.DateOnly), now.AddDate(0, 0, -1).Format(time.DateOnly)
+	// The device's open days: spend over all writers and the keys in use.
+	type dayState struct {
+		total float64
+		keys  map[string]bool
+		open  int // keys in use that the credential does not list
+	}
+	days := map[string]*dayState{today: {keys: map[string]bool{}}, yesterday: {keys: map[string]bool{}}}
+	mine := map[[2]string]float64{} // (day, key) -> this writer's stored value
+	rows, err := tx.QueryContext(ctx, `SELECT day, charge_key, epoch, usd FROM spend WHERE device = ? AND day >= ?`, id, yesterday)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var day, key, epoch string
+		var usd float64
+		if err := rows.Scan(&day, &key, &epoch, &usd); err != nil {
+			rows.Close()
+			return err
+		}
+		if d := days[day]; d != nil {
+			d.total += usd
+			if !d.keys[key] && !dev.keys[key] {
+				d.open++
+			}
+			d.keys[key] = true
+		}
+		if epoch == req.Epoch {
+			mine[[2]string{day, key}] = usd
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	type growth struct {
+		day, key    string
+		stored, add float64
+	}
+	var grow []growth
+	added := map[string]float64{}
 	for _, row := range req.Rows {
-		byDay[row.Day] += row.USD
+		d := days[row.Day]
+		if d == nil {
+			continue // a closed day never grows
+		}
+		stored := mine[[2]string{row.Day, row.Key}]
+		if row.USD <= stored {
+			continue // rows never go down; an equal row changes nothing
+		}
+		if !d.keys[row.Key] && !dev.keys[row.Key] {
+			if d.open >= MaxOpenKeysPerDay {
+				return errTooMany
+			}
+			d.open++
+		}
+		d.keys[row.Key] = true
+		grow = append(grow, growth{day: row.Day, key: row.Key, stored: stored, add: row.USD - stored})
+		added[row.Day] += row.USD - stored
 	}
 	scale := map[string]float64{}
 	overDay := ""
-	for day, add := range byDay {
-		var others float64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(usd), 0) FROM spend WHERE device = ? AND day = ? AND epoch != ?`, id, day, req.Epoch).Scan(&others); err != nil {
-			return err
-		}
+	for day, add := range added {
 		scale[day] = 1
-		if others+add > dev.capUSD && add > 0 {
-			scale[day] = math.Max(0, dev.capUSD-others) / add
-			overDay = day
+		if total := days[day].total; total+add > dev.capUSD {
+			scale[day] = math.Max(0, dev.capUSD-total) / add
+			overDay = max(overDay, day)
 		}
 	}
-	for _, row := range req.Rows {
+	for _, g := range grow {
+		value := g.stored + g.add*scale[g.day]
+		if !(value > g.stored) {
+			continue
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO spend (day, charge_key, device, epoch, usd) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT (day, charge_key, device, epoch) DO UPDATE SET usd = excluded.usd`, row.Day, row.Key, id, req.Epoch, row.USD*scale[row.Day]); err != nil {
+			ON CONFLICT (day, charge_key, device, epoch) DO UPDATE SET usd = excluded.usd`, g.day, g.key, id, req.Epoch, value); err != nil {
 			return err
 		}
 	}
@@ -340,27 +452,38 @@ func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
 	return tx.Commit()
 }
 
+// unknownBudgetsError names pooled budgets the store's config lacks: the
+// device then counts on its own spend and says why.
+type unknownBudgetsError struct{ ids []string }
+
+func (e *unknownBudgetsError) Error() string { return "unknown_budget" }
+
 // Totals answers a device: other writers' spend of its own user keys, and
 // which of its pooled keys are over their limit now.
 func (s *Store) Totals(ctx context.Context, dev *device, req TotalsRequest) (TotalsResponse, error) {
 	var resp TotalsResponse
-	var users []string
+	var users, pooledKeys []string
+	open := 0
 	for _, key := range req.Keys {
 		if !dev.allows(key) {
 			return resp, errNotAllowed
 		}
-		if pooled(key) {
-			over, err := s.exceeded(ctx, key)
-			if err != nil {
-				return resp, err
+		if !dev.keys[key] {
+			if open++; open > MaxOpenKeysPerDay {
+				return resp, errTooMany
 			}
-			if over {
-				resp.Exceeded = append(resp.Exceeded, key)
-			}
-			continue
 		}
-		users = append(users, key)
+		if pooled(key) {
+			pooledKeys = append(pooledKeys, key)
+		} else {
+			users = append(users, key)
+		}
 	}
+	exceeded, err := s.exceeded(ctx, pooledKeys)
+	if err != nil {
+		return resp, err
+	}
+	resp.Exceeded = exceeded
 	for start := 0; start < len(users); start += 500 {
 		end := min(start+500, len(users))
 		args := []any{dev.key.ID(), req.Epoch, req.Since}
@@ -394,20 +517,74 @@ func (s *Store) Totals(ctx context.Context, dev *device, req TotalsRequest) (Tot
 	return resp, nil
 }
 
-// exceeded reports whether a pooled key's fleet spend in the current period
-// reached the limit of its budget (false for a budget the store does not
-// know).
-func (s *Store) exceeded(ctx context.Context, key string) (bool, error) {
-	s.mu.Lock()
-	b, ok := s.budgets[budgetIDOf(key)]
-	s.mu.Unlock()
-	if !ok || b.LimitUSD <= 0 {
-		return false, nil
+// exceeded returns the pooled keys whose fleet spend in the current period
+// reached the limit of their budget. A key of a budget the store's config
+// does not know is an error naming the budget, never "not exceeded".
+func (s *Store) exceeded(ctx context.Context, keys []string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, nil
 	}
-	var total float64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(usd), 0) FROM spend WHERE charge_key = ? AND day >= ?`,
-		key, periodStart(b.Period, s.now())).Scan(&total)
-	return total >= b.LimitUSD, err
+	s.mu.Lock()
+	budgets := s.budgets
+	s.mu.Unlock()
+	now := s.now()
+	today := now.UTC().Format(time.DateOnly)
+	byStart := map[string][]string{}
+	limit := map[string]float64{}
+	var unknown []string
+	seen := map[string]bool{}
+	for _, key := range keys {
+		id := budgetIDOf(key)
+		b, ok := budgets[id]
+		if !ok {
+			if !seen[id] {
+				seen[id] = true
+				unknown = append(unknown, id)
+			}
+			continue
+		}
+		if b.LimitUSD <= 0 {
+			continue
+		}
+		start := periodStart(b.Period, now)
+		byStart[start] = append(byStart[start], key)
+		limit[key] = b.LimitUSD
+	}
+	if len(unknown) > 0 {
+		return nil, &unknownBudgetsError{ids: unknown}
+	}
+	var out []string
+	for start, list := range byStart {
+		for i := 0; i < len(list); i += 500 {
+			chunk := list[i:min(i+500, len(list))]
+			args := []any{start, today}
+			for _, k := range chunk {
+				args = append(args, k)
+			}
+			rows, err := s.db.QueryContext(ctx, `SELECT charge_key, SUM(usd) FROM spend WHERE day >= ? AND day <= ? AND charge_key IN (?`+
+				strings.Repeat(",?", len(chunk)-1)+`) GROUP BY charge_key`, args...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var key string
+				var total float64
+				if err := rows.Scan(&key, &total); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if total >= limit[key] {
+					out = append(out, key)
+				}
+			}
+			err = rows.Err()
+			rows.Close()
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return out, nil
 }
 
 // periodStart is the first UTC day of the period that contains now.
@@ -422,17 +599,23 @@ func periodStart(period string, now time.Time) string {
 	return t.Format(time.DateOnly)
 }
 
-// ReportRow is one key's fleet total (store host only).
+// ReportRow is one key's fleet total (store host only). Device is set in a
+// per-device report.
 type ReportRow struct {
 	Key     string
+	Device  string
 	USD     float64
 	Devices int
 }
 
 // Report sums every key since a day: the admin rollup, read on the store
-// host only (no network API).
-func (s *Store) Report(ctx context.Context, since string) ([]ReportRow, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT charge_key, SUM(usd), COUNT(DISTINCT device) FROM spend WHERE day >= ? GROUP BY charge_key ORDER BY charge_key`, since)
+// host only (no network API). byDevice splits each key per device.
+func (s *Store) Report(ctx context.Context, since string, byDevice bool) ([]ReportRow, error) {
+	query := `SELECT charge_key, '', SUM(usd), COUNT(DISTINCT device) FROM spend WHERE day >= ? GROUP BY charge_key ORDER BY charge_key`
+	if byDevice {
+		query = `SELECT charge_key, device, SUM(usd), 1 FROM spend WHERE day >= ? GROUP BY charge_key, device ORDER BY device, charge_key`
+	}
+	rows, err := s.db.QueryContext(ctx, query, since)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +623,7 @@ func (s *Store) Report(ctx context.Context, since string) ([]ReportRow, error) {
 	var out []ReportRow
 	for rows.Next() {
 		var r ReportRow
-		if err := rows.Scan(&r.Key, &r.USD, &r.Devices); err != nil {
+		if err := rows.Scan(&r.Key, &r.Device, &r.USD, &r.Devices); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -496,18 +679,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found"})
 		return
 	}
+	// The device and the request time are checked before the body is read.
+	id := r.Header.Get(HeaderDevice)
+	var dev *device
+	if ValidDevice(id) && timely(r.Header.Get(HeaderTime), h.now()) {
+		dev = h.Store.device(r.Context(), id)
+	}
+	if dev == nil {
+		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: errUnauthorized.Error()})
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
 	if err != nil || len(body) > MaxBodyBytes {
 		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "too_large"})
 		return
 	}
-	id := r.Header.Get(HeaderDevice)
-	var dev *device
-	if ValidDevice(id) {
-		dev = h.Store.device(r.Context(), id)
-	}
 	sig := r.Header.Get(HeaderSignature)
-	if dev == nil || dev.key.Verify(r.Method, r.URL.Path, r.Header.Get(HeaderTime), sig, body, h.now()) != nil {
+	if dev.key.Verify(r.Method, r.URL.Path, r.Header.Get(HeaderTime), sig, body, h.now()) != nil {
 		// Unknown, revoked and badly signed requests look the same.
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: errUnauthorized.Error()})
 		return
@@ -527,6 +715,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch err := h.Store.Push(r.Context(), dev, req); {
 		case errors.Is(err, errNotAllowed):
 			signed(http.StatusForbidden, ErrorResponse{Error: "key_not_allowed"})
+		case errors.Is(err, errTooMany):
+			signed(http.StatusTooManyRequests, ErrorResponse{Error: "too_many_keys_or_writers"})
 		case errors.Is(err, errReplay):
 			signed(http.StatusConflict, ErrorResponse{Error: "replayed"})
 		case err != nil:
@@ -541,9 +731,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		resp, err := h.Store.Totals(r.Context(), dev, req)
+		var unknown *unknownBudgetsError
 		switch {
 		case errors.Is(err, errNotAllowed):
 			signed(http.StatusForbidden, ErrorResponse{Error: "key_not_allowed"})
+		case errors.Is(err, errTooMany):
+			signed(http.StatusTooManyRequests, ErrorResponse{Error: "too_many_keys_or_writers"})
+		case errors.As(err, &unknown):
+			signed(http.StatusConflict, ErrorResponse{Error: "unknown_budget", Budgets: unknown.ids})
 		case err != nil:
 			signed(http.StatusServiceUnavailable, ErrorResponse{Error: "store_unavailable"})
 		default:

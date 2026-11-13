@@ -73,6 +73,10 @@ func NewClient(rawURL string, key DeviceKey, caPEM []byte, timeout time.Duration
 	}, nil
 }
 
+// WriterID is the device id: a new credential is a new writer at the store
+// (routingadmin starts a new epoch when it changes).
+func (c *Client) WriterID() string { return c.key.ID() }
+
 // Push sends this writer's absolute totals.
 func (c *Client) Push(ctx context.Context, epoch string, rows []routingadmin.SeedRow) error {
 	req := PushRequest{Epoch: epoch, Seq: pushSeq.Add(1), Rows: make([]Row, 0, len(rows))}
@@ -158,6 +162,12 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 	if resp.StatusCode != http.StatusOK {
 		var e ErrorResponse
 		_ = json.Unmarshal(data, &e)
+		if e.Error == "unknown_budget" && len(e.Budgets) > 0 {
+			return fmt.Errorf("budget store does not know budget %s: copy the bundle's routing.admin.budgets into the store's config.yaml and restart it", strings.Join(e.Budgets, ", "))
+		}
+		if e.Error == "key_not_allowed" {
+			return errors.New("budget store refused a key this device's credential does not name (a budget or user added since the credential was issued: issue the device again)")
+		}
 		code := e.Error
 		if code == "" {
 			code = http.StatusText(resp.StatusCode)

@@ -87,7 +87,7 @@ func TestRoutingTestRefusals(t *testing.T) {
 			t.Fatalf("%.40s: %d %s", tc.body, rec.Code, rec.Body.String())
 		}
 	}
-	if routingTestAllowed("k", time.Now()); routingTestAllowed("k", time.Now()) {
+	if routingTestAllowed("k", true, time.Now()); routingTestAllowed("k", true, time.Now()) {
 		t.Fatal("a second dry run within 200 ms is refused")
 	}
 }

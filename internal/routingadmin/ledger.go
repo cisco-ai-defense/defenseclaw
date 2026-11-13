@@ -196,6 +196,33 @@ func (l *Ledger) LocalRows() []SeedRow {
 	return rows
 }
 
+// TakeLocal returns this process's spend and moves it to the remote side
+// (it keeps counting until the next sync reads it back from the store as
+// an earlier writer's), leaving no local spend.
+func (l *Ledger) TakeLocal() []SeedRow {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var rows []SeedRow
+	for key, days := range l.local {
+		for day, usd := range days {
+			rows = append(rows, SeedRow{Day: dayDate(day), Key: key, USD: usd})
+		}
+		r := l.remote[key]
+		if r == nil {
+			r = map[int32]float64{}
+			l.remote[key] = r
+		}
+		for day, usd := range days {
+			r[day] += usd
+		}
+	}
+	l.local = map[string]map[int32]float64{}
+	return rows
+}
+
 // ApplyRemote replaces the remote spend with rows and marks ids synced.
 func (l *Ledger) ApplyRemote(ids []string, rows []SeedRow, at time.Time) {
 	if l == nil {

@@ -37,7 +37,10 @@ var (
 	issueCredentialOut    string
 	issueRecordOut        string
 	deviceRecordFile      string
+	deviceReactivate      bool
+	revokeDropFrom        string
 	reportSince           string
+	reportByDevice        bool
 )
 
 var budgetStoreCmd = &cobra.Command{
@@ -101,7 +104,7 @@ var budgetStoreAddCmd = &cobra.Command{
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			return errors.New("device add: --record is not a device record")
 		}
-		if err := store.AddDevice(cmd.Context(), rec); err != nil {
+		if err := store.AddDevice(cmd.Context(), rec, deviceReactivate); err != nil {
 			return fmt.Errorf("device add: %w", err)
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "registered %s (%d keys)\n", rec.ID, len(rec.Keys))
@@ -111,7 +114,7 @@ var budgetStoreAddCmd = &cobra.Command{
 
 var budgetStoreRevokeCmd = &cobra.Command{
 	Use:   "revoke DEVICE",
-	Short: "Refuse a device from now on (its spend stays)",
+	Short: "Refuse a device from now on (its spend stays unless --drop-spend-from)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		store, _, err := openStoreFromConfig()
@@ -119,10 +122,14 @@ var budgetStoreRevokeCmd = &cobra.Command{
 			return err
 		}
 		defer store.Close()
-		if err := store.RevokeDevice(cmd.Context(), args[0]); err != nil {
+		dropped, err := store.RevokeDevice(cmd.Context(), args[0], revokeDropFrom)
+		if err != nil {
 			return fmt.Errorf("device revoke: %w", err)
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "revoked %s; a running store refuses it within %s\n", args[0], budgetstore.DeviceCacheTTL)
+		if revokeDropFrom != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "dropped %d spend rows of it from %s on\n", dropped, revokeDropFrom)
+		}
 		return nil
 	},
 }
@@ -162,11 +169,18 @@ var budgetStoreReportCmd = &cobra.Command{
 		if since == "" {
 			since = time.Now().UTC().AddDate(0, 0, -30).Format(time.DateOnly)
 		}
-		rows, err := store.Report(cmd.Context(), since)
+		rows, err := store.Report(cmd.Context(), since, reportByDevice)
 		if err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(cmd.OutOrStdout(), 2, 4, 2, ' ', 0)
+		if reportByDevice {
+			fmt.Fprintln(tw, "DEVICE\tKEY\tUSD")
+			for _, r := range rows {
+				fmt.Fprintf(tw, "%s\t%s\t%.4f\n", r.Device, r.Key, r.USD)
+			}
+			return tw.Flush()
+		}
 		fmt.Fprintln(tw, "KEY\tUSD\tDEVICES")
 		for _, r := range rows {
 			fmt.Fprintf(tw, "%s\t%.4f\t%d\n", r.Key, r.USD, r.Devices)
@@ -188,6 +202,9 @@ func init() {
 	}
 	budgetStoreAddCmd.Flags().StringVar(&deviceRecordFile, "record", "", "store record from device issue")
 	_ = budgetStoreAddCmd.MarkFlagRequired("record")
+	budgetStoreAddCmd.Flags().BoolVar(&deviceReactivate, "reactivate", false, "trust a revoked device again with this record")
+	budgetStoreRevokeCmd.Flags().StringVar(&revokeDropFrom, "drop-spend-from", "", "also delete the device's spend from this UTC day on (YYYY-MM-DD; forged spend)")
+	budgetStoreReportCmd.Flags().BoolVar(&reportByDevice, "by-device", false, "one row per device and key")
 	budgetStoreReportCmd.Flags().StringVar(&reportSince, "since", "", "first UTC day (YYYY-MM-DD; default 30 days ago)")
 	budgetStoreDeviceCmd.AddCommand(budgetStoreIssueCmd, budgetStoreAddCmd, budgetStoreRevokeCmd, budgetStoreListCmd)
 	budgetStoreCmd.AddCommand(budgetStoreServeCmd, budgetStoreDeviceCmd, budgetStoreReportCmd)
@@ -330,12 +347,29 @@ func runBudgetStoreIssue(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("device issue: %w", err)
 	}
-	recJSON, _ := json.Marshal(rec)
+	recJSON, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("device issue: %w", err)
+	}
+	var written []string
 	for _, out := range []struct {
 		path string
 		data []byte
 	}{{issueCredentialOut, []byte(cred.Encode() + "\n")}, {issueRecordOut, recJSON}} {
-		if err := writeNewPrivateFile(out.path, out.data); err != nil {
+		err := writeNewPrivateFile(out.path, out.data)
+		if err == nil {
+			written = append(written, out.path)
+			if runtime.GOOS == "windows" {
+				// Mode 0600 sets no ACL on Windows: the file inherits its folder's.
+				if managed.RejectUntrustedSecretReaders(out.path) != nil {
+					err = errors.New("the output folder is readable by other accounts: run device issue in a folder only Administrators and SYSTEM can read")
+				}
+			}
+		}
+		if err != nil {
+			for _, p := range written {
+				_ = os.Remove(p)
+			}
 			return fmt.Errorf("device issue: %w", err)
 		}
 	}

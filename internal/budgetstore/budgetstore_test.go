@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -73,7 +74,7 @@ func (f *fixture) device(users, groups []string, capUSD float64) (Credential, *C
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	if err := f.store.AddDevice(context.Background(), rec); err != nil {
+	if err := f.store.AddDevice(context.Background(), rec, false); err != nil {
 		f.t.Fatal(err)
 	}
 	key, err := cred.Key()
@@ -150,7 +151,7 @@ func TestForgedAddIsRefused(t *testing.T) {
 	credB, _ := f.device([]string{bobUPN}, []string{engGroup}, 0)
 	for _, key := range []string{userKey(credB, "daily", 0), groupKey(credB)} {
 		err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 100}})
-		if err == nil || !strings.Contains(err.Error(), "key_not_allowed") {
+		if err == nil || !strings.Contains(err.Error(), "does not name") {
 			t.Fatalf("forged add of %s: %v", key, err)
 		}
 	}
@@ -172,7 +173,7 @@ func TestCrossUserReadIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := a.Totals(ctx, "ea", time.Now().AddDate(0, 0, -1), []string{bob})
-	if err == nil || !strings.Contains(err.Error(), "key_not_allowed") {
+	if err == nil || !strings.Contains(err.Error(), "does not name") {
 		t.Fatalf("cross-user read: %v", err)
 	}
 }
@@ -208,7 +209,7 @@ func TestRevokedDeviceIsRefused(t *testing.T) {
 	if err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 1}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.RevokeDevice(ctx, cred.Device); err != nil {
+	if _, err := f.store.RevokeDevice(ctx, cred.Device, ""); err != nil {
 		t.Fatal(err)
 	}
 	err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 2}})
@@ -222,11 +223,11 @@ func TestRevokedDeviceIsRefused(t *testing.T) {
 	if len(devices) != 1 || devices[0].Status != DeviceRevoked {
 		t.Fatalf("devices %+v", devices)
 	}
-	report, _ := f.store.Report(ctx, today())
+	report, _ := f.store.Report(ctx, today(), false)
 	if len(report) != 1 || report[0].USD != 1 {
 		t.Fatalf("its spend stays: %+v", report)
 	}
-	if err := f.store.RevokeDevice(ctx, "d000000000000000000000000"); err == nil {
+	if _, err := f.store.RevokeDevice(ctx, "d000000000000000000000000", ""); err == nil {
 		t.Fatal("revoking an unknown device must fail")
 	}
 }
@@ -242,7 +243,7 @@ func TestDeviceDailyCapClamps(t *testing.T) {
 	if err := a.Push(ctx, "e2", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 5}}); err != nil {
 		t.Fatal(err)
 	}
-	report, _ := f.store.Report(ctx, today())
+	report, _ := f.store.Report(ctx, today(), false)
 	if len(report) != 1 || report[0].USD != 10 {
 		t.Fatalf("one device adds at most its cap per day: %+v", report)
 	}
@@ -413,7 +414,10 @@ func TestPruneDropsOldDaysAndIdleWriters(t *testing.T) {
 	dev := f.store.device(ctx, cred.Device)
 	key := userKey(cred, "daily", 0)
 	old := time.Now().UTC().AddDate(0, 0, -RetentionDays-1).Format(time.DateOnly)
-	if err := f.store.Push(ctx, dev, PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: old, Key: key, USD: 1}, {Day: today(), Key: key, USD: 2}}}); err != nil {
+	if err := f.store.Push(ctx, dev, PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: today(), Key: key, USD: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.db.Exec(`INSERT INTO spend (day, charge_key, device, epoch, usd) VALUES (?, ?, ?, ?, ?)`, old, key, cred.Device, "e0", 1); err != nil {
 		t.Fatal(err)
 	}
 	f.store.now = func() time.Time { return time.Now().Add(WriterIdle + time.Minute) }
@@ -422,7 +426,7 @@ func TestPruneDropsOldDaysAndIdleWriters(t *testing.T) {
 	}
 	var writers int
 	_ = f.store.db.QueryRow(`SELECT COUNT(*) FROM writers`).Scan(&writers)
-	report, _ := f.store.Report(ctx, "2000-01-01")
+	report, _ := f.store.Report(ctx, "2000-01-01", false)
 	if writers != 0 || len(report) != 1 || report[0].USD != 2 {
 		t.Fatalf("writers %d report %+v", writers, report)
 	}
@@ -449,5 +453,127 @@ func TestRequestBounds(t *testing.T) {
 	if periodStart("week", time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) != "2026-11-09" ||
 		periodStart("month", time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) != "2026-11-01" {
 		t.Fatal("weeks start on Monday, months on the 1st")
+	}
+}
+
+// The cap holds per device and day over every key and writer, and closed
+// days never grow (review 2 P1-1).
+func TestCapCannotBeSplitOrBackdated(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID}, []string{engGroup}, 10)
+	user, group := userKey(cred, "daily", 0), groupKey(cred)
+	for _, row := range []routingadmin.SeedRow{{Day: today(), Key: user, USD: 10}, {Day: today(), Key: group, USD: 10}, {Day: today(), Key: "connector:codex:codex", USD: 10}} {
+		if err := a.Push(ctx, "e1", []routingadmin.SeedRow{row}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var old []routingadmin.SeedRow
+	for d := 2; d < 31; d++ {
+		old = append(old, routingadmin.SeedRow{Day: time.Now().UTC().AddDate(0, 0, -d).Format(time.DateOnly), Key: group, USD: 10})
+	}
+	if err := a.Push(ctx, "e1", old); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := f.store.Report(ctx, "2000-01-01", false)
+	var total float64
+	for _, r := range report {
+		total += r.USD
+	}
+	if total != 10 {
+		t.Fatalf("one cap per device and day, no backdating: %v %+v", total, report)
+	}
+}
+
+// A row never goes down, so a device cannot bisect a pooled total (P2-1).
+func TestRowsNeverGoDown(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID}, []string{engGroup}, 0)
+	group := groupKey(cred)
+	for _, usd := range []float64{4, 1} {
+		if err := a.Push(ctx, "e1", []routingadmin.SeedRow{{Day: today(), Key: group, USD: usd}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	report, _ := f.store.Report(ctx, today(), false)
+	if len(report) != 1 || report[0].USD != 4 {
+		t.Fatalf("a lower value is ignored: %+v", report)
+	}
+}
+
+func TestRevokeCanDropForgedSpendAndStaysRevoked(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, rec, err := Issue(f.subject, IssueInput{Budgets: testBudgets, Users: []string{aliceSID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AddDevice(ctx, rec, false); err != nil {
+		t.Fatal(err)
+	}
+	k, _ := cred.Key()
+	a, _ := NewClient(f.srv.URL, k, f.caPEM, 5*time.Second)
+	if err := a.Push(ctx, "e1", []routingadmin.SeedRow{{Day: today(), Key: userKey(cred, "daily", 0), USD: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := f.store.RevokeDevice(ctx, cred.Device, today()); err != nil || n != 1 {
+		t.Fatalf("drop: %d %v", n, err)
+	}
+	if report, _ := f.store.Report(ctx, "2000-01-01", true); len(report) != 0 {
+		t.Fatalf("dropped: %+v", report)
+	}
+	if err := f.store.AddDevice(ctx, rec, false); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("a revoked device is not trusted again by a second add: %v", err)
+	}
+	if err := f.store.AddDevice(ctx, rec, true); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUnknownPooledBudgetIsReported(t *testing.T) {
+	f := newFixture(t)
+	f.store.SetBudgets(map[string]Budget{"codex": {LimitUSD: 50, Period: "day"}}) // the eng budget is missing
+	cred, a := f.device([]string{aliceSID}, []string{engGroup}, 0)
+	_, err := a.Totals(context.Background(), "e1", time.Now(), []string{groupKey(cred)})
+	if err == nil || !strings.Contains(err.Error(), "does not know budget eng") {
+		t.Fatalf("an unknown budget is named, never read as not exceeded: %v", err)
+	}
+}
+
+func TestPerDeviceBounds(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID}, nil, 0)
+	key := userKey(cred, "daily", 0)
+	for i := 0; i < MaxWritersPerDevice; i++ {
+		if err := a.Push(ctx, "w"+strconv.Itoa(i), []routingadmin.SeedRow{{Day: today(), Key: key, USD: float64(i + 1)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.Push(ctx, "wextra", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 100}}); err == nil {
+		t.Fatal("writers per device are bounded")
+	}
+	cred2, rec2, err := Issue(f.subject, IssueInput{Budgets: append(append([]config.RoutingBudget(nil), testBudgets...),
+		config.RoutingBudget{ID: "any", Scope: "connector", Subject: "*", Period: "day", LimitUSD: 1}), Users: []string{bobUPN}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.AddDevice(ctx, rec2, false); err != nil {
+		t.Fatal(err)
+	}
+	k2, _ := cred2.Key()
+	c, _ := NewClient(f.srv.URL, k2, f.caPEM, 5*time.Second)
+	var open []routingadmin.SeedRow
+	var keys []string
+	for i := 0; i <= MaxOpenKeysPerDay; i++ {
+		k := "connector:any:c" + strconv.Itoa(i)
+		open, keys = append(open, routingadmin.SeedRow{Day: today(), Key: k, USD: 0.01}), append(keys, k)
+	}
+	if err := c.Push(ctx, "e1", open); err == nil {
+		t.Fatal("connector names of a * budget are bounded per device and day")
+	}
+	if _, err := c.Totals(ctx, "e1", time.Now(), keys); err == nil {
+		t.Fatal("open keys a device may ask about are bounded")
 	}
 }

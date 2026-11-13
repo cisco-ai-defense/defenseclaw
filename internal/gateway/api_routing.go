@@ -197,16 +197,21 @@ func (a *APIServer) handleRoutingExplain(w http.ResponseWriter, r *http.Request)
 	writeRoutingJSON(w, http.StatusOK, entry)
 }
 
-// routingTestLimiter allows one dry run per caller every 200 ms.
+// routingTestLimiter allows one dry run per caller every 200 ms for an
+// administrator and every 2 s for a user (each runs the classifier).
 var routingTestLimiter = struct {
 	sync.Mutex
 	last map[string]time.Time
 }{last: map[string]time.Time{}}
 
-func routingTestAllowed(key string, now time.Time) bool {
+func routingTestAllowed(key string, admin bool, now time.Time) bool {
+	gap := 2 * time.Second
+	if admin {
+		gap = 200 * time.Millisecond
+	}
 	routingTestLimiter.Lock()
 	defer routingTestLimiter.Unlock()
-	if t, ok := routingTestLimiter.last[key]; ok && now.Sub(t) < 200*time.Millisecond {
+	if t, ok := routingTestLimiter.last[key]; ok && now.Sub(t) < gap {
 		return false
 	}
 	if len(routingTestLimiter.last) > 1024 {
@@ -247,7 +252,7 @@ func (a *APIServer) handleRoutingTest(w http.ResponseWriter, r *http.Request) {
 		routingAPIError(w, http.StatusForbidden, "only an administrator may test as another profile or user")
 		return
 	}
-	if !routingTestAllowed(key, time.Now()) {
+	if !routingTestAllowed(key, admin, time.Now()) {
 		routingAPIError(w, http.StatusTooManyRequests, "one routing test at a time; try again in a moment")
 		return
 	}

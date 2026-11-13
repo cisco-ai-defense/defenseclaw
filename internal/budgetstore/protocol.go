@@ -51,7 +51,7 @@ const (
 // Bounds.
 const (
 	MaxBodyBytes     = 1 << 20
-	MaxResponseBytes = 4 << 20
+	MaxResponseBytes = 16 << 20
 	MaxRows          = 20000
 	MaxKeys          = 20000
 	MaxClockSkew     = 5 * time.Minute
@@ -106,6 +106,8 @@ type TotalsResponse struct {
 // ErrorResponse is every refusal (a reason code, never an input).
 type ErrorResponse struct {
 	Error string `json:"error"`
+	// Budgets names the budget ids of an unknown_budget refusal.
+	Budgets []string `json:"budgets,omitempty"`
 }
 
 // DeviceKey signs and verifies one device's requests and answers.
@@ -148,15 +150,22 @@ func (k DeviceKey) mac(method, path, at string, body []byte) []byte {
 // without the key learns nothing, not even the store clock).
 var errUnauthorized = errors.New("unauthorized")
 
-// Verify checks a request signature and its time against now.
-func (k DeviceKey) Verify(method, path, atHeader, signature string, body []byte, now time.Time) error {
+// timely reports whether a request time header is within MaxClockSkew of now.
+func timely(atHeader string, now time.Time) bool {
 	at, err := strconv.ParseInt(strings.TrimSpace(atHeader), 10, 64)
 	if err != nil {
+		return false
+	}
+	d := now.Sub(time.Unix(at, 0))
+	return d <= MaxClockSkew && d >= -MaxClockSkew
+}
+
+// Verify checks a request signature and its time against now.
+func (k DeviceKey) Verify(method, path, atHeader, signature string, body []byte, now time.Time) error {
+	if !timely(atHeader, now) {
 		return errUnauthorized
 	}
-	if d := now.Sub(time.Unix(at, 0)); d > MaxClockSkew || d < -MaxClockSkew {
-		return errUnauthorized
-	}
+	at, _ := strconv.ParseInt(strings.TrimSpace(atHeader), 10, 64)
 	got, err := hex.DecodeString(strings.TrimSpace(signature))
 	if err != nil || !hmac.Equal(got, k.mac(method, path, strconv.FormatInt(at, 10), body)) {
 		return errUnauthorized

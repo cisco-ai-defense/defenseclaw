@@ -30,7 +30,7 @@ func TestFleetKeysComeFromTheDeviceCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fleetState{userAll: map[string]bool{"daily": true}}
+	f := &fleetState{}
 	f.installLocked(cred, &budgetstore.Client{})
 
 	local := "user:daily:*:S-1-5-21-1-2-3-1001"
