@@ -5,10 +5,12 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi/ateapifake"
@@ -127,5 +129,27 @@ func TestLifecycleClosesAsksOfACrashedActor(t *testing.T) {
 	}
 	if _, err := h(ctx, ev(chainstate.LifecycleCrashed)); err != nil || len(store.Pending()) != 0 || chainCalls != 2 {
 		t.Fatalf("crash: %v pending %v chain calls %d", err, store.Pending(), chainCalls)
+	}
+}
+
+type failingAttestor struct{ err error }
+
+func (a failingAttestor) Attest(context.Context, *ateapi.ActorTemplate) (controller.Attestation, error) {
+	return controller.Attestation{Attested: a.err == nil, Connector: "claudecode"}, a.err
+}
+
+// GAP-0181: an attestor error is an error the create route sees (it was
+// read as "no label", which let the launcher's connector decide).
+func TestTemplateConnectorReportsAnAttestationError(t *testing.T) {
+	tmpl := &ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc"}}
+	_, err := substrateTemplateConnector(failingAttestor{err: errors.New("rekor unreachable")})(context.Background(), tmpl)
+	if !errors.Is(err, gateway.ErrSubstrateTemplateAttestation) {
+		t.Fatalf("attestor error: %v", err)
+	}
+	if got, err := substrateTemplateConnector(failingAttestor{})(context.Background(), tmpl); err != nil || got != "claudecode" {
+		t.Fatalf("attested: %q %v", got, err)
+	}
+	if got, err := substrateTemplateConnector(nil)(context.Background(), tmpl); err != nil || got != "" {
+		t.Fatalf("no attestor: %q %v", got, err)
 	}
 }

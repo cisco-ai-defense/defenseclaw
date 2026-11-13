@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -35,6 +36,7 @@ import (
 type signinActions struct {
 	f         *substrateFixture
 	connector string
+	attestErr error
 	created   int
 	deleted   int
 }
@@ -47,6 +49,9 @@ func (a *signinActions) Create(_ context.Context, req SubstrateCreate) (Substrat
 
 // TemplateConnector is the connector label of the template ("" = none).
 func (a *signinActions) TemplateConnector(context.Context, string, string) (string, error) {
+	if a.attestErr != nil {
+		return "", a.attestErr
+	}
 	return a.connector, nil
 }
 
@@ -193,5 +198,37 @@ func TestSubstrateManagedRefusesASigninActorOnItsRoutes(t *testing.T) {
 		if got == "subscription_signin_refused" {
 			t.Fatalf("open source refused a sign-in actor: %s", rec.Body)
 		}
+	}
+}
+
+// GAP-0181 (R3a, STEER 03:40Z): an attestation that cannot be read at
+// create never lets the launcher's named connector decide the sign-in
+// check in managed: refused before any actor exists, even when the named
+// connector would pass. Open source warns and goes on.
+func TestSubstrateCreateAttestationErrorFailsClosedInManaged(t *testing.T) {
+	attErr := fmt.Errorf("%w: rekor unreachable", ErrSubstrateTemplateAttestation)
+	f, acts := signinFixture(t, true, "cursor")
+	acts.attestErr = attErr
+	for _, body := range []string{
+		`{"profile":"eng","template":"cursor-tpl","connector":"claudecode"}`,
+		`{"profile":"eng","template":"cursor-tpl"}`,
+	} {
+		code, out := create(t, f, body)
+		if code != http.StatusForbidden || out["reason"] != "template_attestation_unreadable" || out["message"] != "template attestation could not be read" {
+			t.Fatalf("managed, %s: %d %v", body, code, out)
+		}
+	}
+	if acts.created != 0 {
+		t.Fatalf("managed: %d actors made with an unread attestation", acts.created)
+	}
+	f, acts = signinFixture(t, false, "claudecode")
+	acts.attestErr = attErr
+	code, out := create(t, f, `{"profile":"eng","template":"claude-wave1","connector":"claudecode"}`)
+	warnings, _ := out["warnings"].([]any)
+	if code != http.StatusCreated || len(warnings) == 0 || !strings.Contains(warnings[0].(string), "attestation could not be read") {
+		t.Fatalf("open source: %d %v", code, out)
+	}
+	if code, out := create(t, f, `{"profile":"eng","template":"claude-wave1"}`); code != http.StatusBadRequest || out["reason"] != "connector_required" {
+		t.Fatalf("open source, no connector named: %d %v", code, out)
 	}
 }

@@ -72,11 +72,15 @@ const (
 // StageOptions configures Stage. Mask and size settings normally come from
 // openshell.workdir (masks, unmask, max_upload_mb, git_depth).
 type StageOptions struct {
-	Project   string
-	Name      string
-	DataDir   string
-	Home      string
-	Protected []string
+	// FolderName, when set, names the copy's folder in the sandbox in place
+	// of RepoName (which keeps ASCII only). The Agent Substrate launcher
+	// sets it to keep a folder's own name (LC-J9e); OpenShell does not.
+	FolderName string
+	Project    string
+	Name       string
+	DataDir    string
+	Home       string
+	Protected  []string
 	// RemoteRoot is the sandbox parent directory (DefaultRemoteRoot).
 	RemoteRoot string
 	// StateDir is the directory in the sandbox that holds this copy's
@@ -384,7 +388,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	if maxBytes <= 0 {
 		maxBytes = DefaultCopyMaxBytes
 	}
-	stateDir, err := checkStateDir(opts.StateDir, path.Join(path.Clean(root), RepoName(real)))
+	stateDir, err := checkStateDir(opts.StateDir, path.Join(path.Clean(root), opts.folderName(real)))
 	if err != nil {
 		return nil, "", err
 	}
@@ -392,7 +396,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	if opts.Now != nil {
 		now = opts.Now
 	}
-	repo := RepoName(real)
+	repo := opts.folderName(real)
 	rec := &CopyRecord{
 		Version: 1, Name: opts.Name, Project: real, RepoName: repo,
 		RemoteDir: path.Join(path.Clean(root), repo), StateDir: stateDir, StagedAt: now().UTC(),

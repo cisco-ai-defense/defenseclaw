@@ -179,6 +179,17 @@ func TestHostCopyApplyRefusesAConflict(t *testing.T) {
 	}
 }
 
+// LC-J9e: the copy keeps the folder's own name, non-ASCII included.
+func TestHostFolderNameKeepsUnicode(t *testing.T) {
+	for in, want := range map[string]string{
+		filepath.Join("x", "proj-ñ-日本"): "proj-ñ-日本", filepath.Join("x", "my app"): "my app", filepath.Join("x", "a\x01b"): "project",
+	} {
+		if got := hostFolderName(in); got != want {
+			t.Errorf("hostFolderName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestWindowsNames(t *testing.T) {
 	for name, ok := range map[string]bool{
 		"a/b.txt": true, "naïve café.txt": true, "dir/con.txt": false, "nul": false, "a:b": false,
