@@ -635,7 +635,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	// An approved host joins the actor's registration; the controller adds
 	// it to the policy on its next pass.
 	askStore.OnApprove = func(ctx context.Context, a asks.Ask) error {
-		if a.Host == "" {
+		// An url rule ask's host is already in the policy; its approval
+		// covers that rule only, so the host is not added (GAP-0177).
+		if a.Host == "" || a.URLRuleAsk() {
 			return nil
 		}
 		reg, ok, err := store.Get(ctx, a.Atespace, a.UID)

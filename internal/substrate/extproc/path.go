@@ -19,6 +19,7 @@ package extproc
 import (
 	"errors"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -153,16 +154,16 @@ var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", 
 // method (Laravel, Rails, Express method-override's query getter).
 const methodOverrideParam = "_method"
 
-// requestMethods is the request's method plus any method an override
-// header or a _method query parameter names, upper-cased.
+// requestMethods is the request's method plus every method an override
+// names, upper-cased: each value of an override header (a comma list
+// counts value by value: Express takes the first, others the last) and
+// of a _method query parameter (GAP-0046).
 func requestMethods(req *Request) []string {
 	out := []string{strings.ToUpper(req.Method)}
 	for _, h := range req.Headers {
 		for _, name := range methodOverrideHeaders {
 			if h.Name == name {
-				if m := strings.ToUpper(strings.TrimSpace(h.Value)); m != "" {
-					out = append(out, m)
-				}
+				out = appendMethods(out, h.Value)
 			}
 		}
 	}
@@ -171,17 +172,38 @@ func requestMethods(req *Request) []string {
 		if j := strings.IndexByte(q, '#'); j >= 0 {
 			q = q[:j]
 		}
-		// Parsed leniently, as frameworks do: a malformed pair elsewhere in
-		// the query does not hide this one.
-		for _, pair := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
-			k, v, _ := strings.Cut(pair, "=")
-			if dk, err := url.QueryUnescape(k); err == nil && strings.EqualFold(dk, methodOverrideParam) {
-				if dv, err := url.QueryUnescape(v); err == nil {
-					if m := strings.ToUpper(strings.TrimSpace(dv)); m != "" {
-						out = append(out, m)
-					}
-				}
+		out = append(out, overrideParams(q)...)
+	}
+	return out
+}
+
+// formMethods is every method a form body's _method names
+// (application/x-www-form-urlencoded).
+func formMethods(body []byte) []string {
+	return overrideParams(string(body))
+}
+
+// overrideParams reads _method from a query or form string leniently, as
+// frameworks do: a malformed pair elsewhere does not hide it, and the key
+// is matched in any case and any escaping.
+func overrideParams(q string) []string {
+	var out []string
+	for _, pair := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
+		k, v, _ := strings.Cut(pair, "=")
+		if dk, err := url.QueryUnescape(k); err == nil && strings.EqualFold(strings.TrimSpace(dk), methodOverrideParam) {
+			if dv, err := url.QueryUnescape(v); err == nil {
+				out = appendMethods(out, dv)
 			}
+		}
+	}
+	return out
+}
+
+// appendMethods adds each comma-separated value of v, upper-cased.
+func appendMethods(out []string, v string) []string {
+	for _, m := range strings.Split(v, ",") {
+		if m = strings.ToUpper(strings.TrimSpace(m)); m != "" && !slices.Contains(out, m) {
+			out = append(out, m)
 		}
 	}
 	return out

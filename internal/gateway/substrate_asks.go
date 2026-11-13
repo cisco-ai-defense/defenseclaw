@@ -66,7 +66,7 @@ const substrateCalloutAskPath = "/api/v1/substrate/callout/ask"
 
 func askView(a asks.Ask) map[string]any {
 	return map[string]any{
-		"id": a.ID, "atespace": a.Atespace, "actor": a.Actor, "kind": a.Kind, "host": a.Host, "tool": a.Tool,
+		"id": a.ID, "atespace": a.Atespace, "actor": a.Actor, "kind": a.Kind, "host": a.Host, "tool": a.Tool, "rule": a.Rule,
 		"summary": a.Summary, "reason": a.Reason, "severity": a.Severity, "created": a.Created, "expires": a.Expires,
 		"state": a.State, "unattended": a.Unattended, "note": a.Note,
 	}
@@ -313,6 +313,7 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			} `json:"actor"`
 			Host     string `json:"host,omitempty"`
 			Tool     string `json:"tool,omitempty"`
+			Rule     string `json:"rule,omitempty"`
 			Summary  string `json:"summary,omitempty"`
 			Reason   string `json:"reason,omitempty"`
 			Severity string `json:"severity,omitempty"`
@@ -336,7 +337,8 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		}
 		ask := asks.Ask{
 			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(),
-			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
+			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Rule: strings.TrimSpace(in.Rule),
+			Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
 		}
 		// The leader's store is the record of this actor's asks; the
 		// registration copy here is cached (registry.Remote) and can miss an
@@ -358,11 +360,16 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
 			return
 		}
-		if ask.Host != "" && (slices.Contains(reg.Approved, ask.Host) || slices.ContainsFunc(list, func(a asks.Ask) bool {
-			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved
+		// Approved earlier for this actor (the controller adds a host to
+		// the policy on its next pass): not asked twice. An url rule ask is
+		// approved by an approval of the same rule only; a host approval
+		// (ask_hosts, or the registration's approved hosts) covers host
+		// asks only, so one approval never opens another rule's method or
+		// path on the host (GAP-0177).
+		if ask.Host != "" && ((!ask.URLRuleAsk() && slices.Contains(reg.Approved, ask.Host)) || slices.ContainsFunc(list, func(a asks.Ask) bool {
+			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
+				a.URLRuleAsk() == ask.URLRuleAsk() && (!ask.URLRuleAsk() || a.Rule == ask.Rule)
 		})) {
-			// Approved earlier for this actor (the controller adds it to the
-			// policy on its next pass): not asked twice.
 			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
 			return
 		}

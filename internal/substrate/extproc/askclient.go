@@ -78,6 +78,7 @@ type askWire struct {
 		UID      string `json:"uid,omitempty"`
 	} `json:"actor"`
 	Host    string `json:"host"`
+	Rule    string `json:"rule,omitempty"`
 	Summary string `json:"summary,omitempty"`
 	Reason  string `json:"reason,omitempty"`
 	AskID   string `json:"ask_id,omitempty"`
@@ -94,8 +95,10 @@ type askAnswer struct {
 func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) {
 	var in askWire
 	in.Actor.Atespace, in.Actor.Name, in.Actor.UID = req.Actor.Atespace, req.Actor.Name, req.Actor.UID
-	in.Host = req.Host
-	in.Summary = strings.TrimSpace(req.Method + " " + req.Host)
+	in.Host, in.Rule = req.Host, req.Rule
+	// The person sees what the approval covers: the host, and for an url
+	// rule its method and path (GAP-0177).
+	in.Summary = strings.TrimSpace(req.Method + " " + req.Host + req.Path)
 	if req.Rule != "" {
 		in.Reason = "the egress policy asks first (" + req.Rule + ")"
 	}
@@ -174,6 +177,27 @@ func (c *AskClient) post(ctx context.Context, in askWire) (askAnswer, error) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return askAnswer{}, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// The gateway answered: it knows no such actor incarnation, or the
+		// held ask is gone (its actor was deleted or recreated). That is a
+		// refusal, never an outage the failure mode could let through.
+		// The gateway writes {"error": status text, "reason": code}.
+		var e struct {
+			Error  string `json:"error"`
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		code := e.Reason
+		if code == "" {
+			code = e.Error
+		}
+		switch code {
+		case "actor_not_found":
+			return askAnswer{State: "denied", Reason: "DefenseClaw has no running registration for this actor, so it can't ask for it."}, nil
+		case "ask_not_found":
+			return askAnswer{State: "denied", ID: in.AskID, Note: "The approval this request waited for no longer exists."}, nil
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return askAnswer{}, fmt.Errorf("callout ask: HTTP %d", resp.StatusCode)

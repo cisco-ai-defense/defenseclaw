@@ -77,9 +77,13 @@ type Ask struct {
 	UID      string `json:"uid"`
 	OwnerID  string `json:"owner_id"`
 	// Kind is egress (a host) or tool.
-	Kind     string    `json:"kind"`
-	Host     string    `json:"host,omitempty"`
-	Tool     string    `json:"tool,omitempty"`
+	Kind string `json:"kind"`
+	Host string `json:"host,omitempty"`
+	Tool string `json:"tool,omitempty"`
+	// Rule is the egress callout rule that raised an egress ask:
+	// "ask_hosts:<pattern>" (an approval covers the host) or
+	// "url_rules:<name>" (it covers that rule only, GAP-0177).
+	Rule     string    `json:"rule,omitempty"`
 	Summary  string    `json:"summary,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
 	Severity string    `json:"severity,omitempty"`
@@ -100,6 +104,10 @@ type Ask struct {
 	// (the profile's ask_timeout, at most 24 h).
 	TimeoutSeconds int64 `json:"timeout_seconds,omitempty"`
 }
+
+// URLRuleAsk reports an ask an url rule raised: its approval covers that
+// rule, not the whole host (GAP-0177).
+func (a Ask) URLRuleAsk() bool { return strings.HasPrefix(a.Rule, "url_rules:") }
 
 // MaxAskTimeout bounds Ask.TimeoutSeconds (config ask_timeout).
 const MaxAskTimeout = 24 * time.Hour
@@ -311,7 +319,7 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 	pending := 0
 	for _, o := range s.asks {
 		if o.State == StatePending && o.UID == a.UID {
-			if o.Host == a.Host && o.Tool == a.Tool {
+			if o.Host == a.Host && o.Tool == a.Tool && o.Rule == a.Rule {
 				return *o, nil // the same question is asked once
 			}
 			pending++

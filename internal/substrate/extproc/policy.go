@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -87,7 +88,25 @@ func (r urlRule) matchesPath(canonical string) bool {
 	if r.action == "allow" {
 		return pathHasPrefix(canonical, r.pathPrefix)
 	}
-	return pathHasPrefix(strings.ToLower(canonical), r.foldedPrefix)
+	// A refusal or an ask of "/admin/" covers "/admin" too: most origins
+	// serve the directory there (or redirect to it).
+	p := strings.ToLower(canonical)
+	return pathHasPrefix(p, r.foldedPrefix) || (strings.HasSuffix(r.foldedPrefix, "/") && p+"/" == r.foldedPrefix)
+}
+
+// ruleMethods is every method a method-scoped URL rule names: under all of
+// them, a rule that would refuse or ask for some override applies.
+func (p *Policy) ruleMethods() []string {
+	var out []string
+	for _, r := range p.urlRules {
+		for m := range r.methods {
+			if !slices.Contains(out, m) {
+				out = append(out, m)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // compilePolicy builds a Policy. The Decider runs in open mode: the
@@ -136,7 +155,9 @@ func compilePolicy(cfg *Config, p ProfileConfig, blocklists []*egress.Feed) (*Po
 			}
 		}
 		if ur.name == "" {
-			ur.name = r.Action + ":" + strings.Join(r.Hosts, ",")
+			// Unique per rule: an approval of an ask rule is keyed by its
+			// name (GAP-0177), so two unnamed rules on a host never share one.
+			ur.name = r.Action + ":" + strings.Join(r.Hosts, ",") + ":" + strings.Join(r.Methods, ",") + ":" + prefix
 		}
 		pol.urlRules = append(pol.urlRules, ur)
 	}

@@ -100,7 +100,8 @@ func TestAskClientAgainstTheCalloutAskRoute(t *testing.T) {
 	}
 	for _, b := range bodies {
 		for k := range b {
-			if k != "actor" && k != "host" && k != "summary" && k != "reason" && k != "ask_id" {
+			// rule is GAP-0177: the gateway keys an url rule's approval by it.
+			if k != "actor" && k != "host" && k != "rule" && k != "summary" && k != "reason" && k != "ask_id" {
 				t.Fatalf("unexpected field %q sent to the gateway", k)
 			}
 		}

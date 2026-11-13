@@ -72,8 +72,13 @@ type AskRequest struct {
 	Profile string
 	Host    string
 	Method  string
-	// Rule is the ask_hosts pattern or URL rule that required it.
+	// Rule is the ask_hosts pattern or URL rule that required it. An
+	// approval of an url rule ask covers that rule only (GAP-0177); an
+	// ask_hosts approval covers the host.
 	Rule string
+	// Path is the url rule's path prefix ("" for an ask host), shown to
+	// the person who decides.
+	Path string
 	// UnattendedAsks is the profile's unattended_asks (deny or queue, D12).
 	UnattendedAsks string
 }
