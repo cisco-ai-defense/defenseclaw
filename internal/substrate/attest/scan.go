@@ -244,7 +244,22 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	// MCP servers: every definition in every config file. A file counts as
 	// a config when any name that reaches it is a config name (a linked
 	// ~/.claude folder, a ~/.claude.json link to a file elsewhere).
-	for _, p := range mcpConfigPaths(fsys) {
+	configs, overflow := mcpConfigPaths(fsys)
+	for _, p := range overflow {
+		data, err := fsys.Read(p)
+		if err != nil || !definesMCPServers(data) {
+			continue // holds no MCP server, whatever names reach it
+		}
+		sum.MCPServers++
+		res := &scanner.ScanResult{Scanner: ConfigScannerName, Target: p, Timestamp: o.now()}
+		res.Findings = append(res.Findings, scanner.Finding{ID: RuleLinkNamesOverCap, RuleID: RuleLinkNamesOverCap,
+			Severity: scanner.SeverityHigh, Title: "An MCP server definition is reached by more links than the scan follows",
+			Description: fmt.Sprintf("%s defines MCP servers and has more than %d names through symlinks, so the scan cannot tell whether the agent loads it as an MCP config", p, maxNames),
+			Location:    p, Scanner: ConfigScannerName, Category: "mcp-config"})
+		note(ConfigScannerName, "1")
+		record(config.AdmissionTypeMCP, path.Base(p), p, ConfigScannerName, res)
+	}
+	for _, p := range configs {
 		if r, real, ok := fsys.Resolve(p); !ok || (!r.IsRegular() && !r.IsDir()) {
 			sum.MCPServers++
 			unresolvable(config.AdmissionTypeMCP, path.Base(p), p, linkWhy(p, real, ok))
@@ -354,8 +369,11 @@ func linkWhy(p, real string, resolved bool) string {
 // regular file every name that reaches it is tried and the first config name
 // is kept (one per file format, so a file is parsed once); a symlink that
 // does not resolve is listed under its config name for the caller to refuse.
-func mcpConfigPaths(fsys *ImageFS) []string {
-	var out []string
+// overflow lists the real paths of files with more names than Names returns
+// and no config name among those: their classification is unknown, so the
+// caller fails closed on any of them that holds MCP server definitions
+// (GAP-0051, lane R2).
+func mcpConfigPaths(fsys *ImageFS) (out, overflow []string) {
 	for _, p := range fsys.Paths() {
 		e := fsys.idx[p]
 		resolvesToFile := false
@@ -371,8 +389,9 @@ func mcpConfigPaths(fsys *ImageFS) []string {
 		if resolvesToFile {
 			continue // the target file is listed, under this name too
 		}
+		names, complete := fsys.Names(p)
 		formats := map[bool]bool{}
-		for _, n := range fsys.Names(p) {
+		for _, n := range names {
 			if !isMCPConfig(n) {
 				continue
 			}
@@ -382,9 +401,30 @@ func mcpConfigPaths(fsys *ImageFS) []string {
 				out = append(out, n)
 			}
 		}
+		if !complete && len(formats) == 0 {
+			// No config name among the names it got, and more exist.
+			overflow = append(overflow, p)
+		}
 	}
 	sort.Strings(out)
-	return out
+	sort.Strings(overflow)
+	return out, overflow
+}
+
+// RuleLinkNamesOverCap is the finding for a file that defines MCP servers and
+// is reached by more names than the scan follows: whether the agent loads it
+// as an MCP config cannot be decided, so the build fails closed.
+const RuleLinkNamesOverCap = "link-names-over-cap"
+
+// definesMCPServers reports whether data parses, as JSON or TOML, into at
+// least one MCP server definition. A binary or ordinary file never does.
+func definesMCPServers(data []byte) bool {
+	for _, as := range []string{"config.json", "config.toml"} {
+		if servers, err := ParseMCPConfig(as, data); err == nil && len(servers) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // decide runs the admission rules on one result. accepted are the rule ids

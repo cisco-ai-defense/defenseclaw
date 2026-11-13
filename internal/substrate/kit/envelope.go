@@ -89,6 +89,10 @@ type SkillFingerprint struct {
 	// Receipt is the gateway's scan receipt for FP; the files are then not
 	// attached.
 	Receipt string `json:"receipt,omitempty"`
+	// Over marks a folder past a kit cap (no FP): the gateway's fail mode
+	// decides for it (GAP-0039). With FP empty and Path a skill root, it
+	// stands for that root's folders past the listing cap.
+	Over bool `json:"over,omitempty"`
 }
 
 // PathFact is one path argument as the actor's file system resolves it.

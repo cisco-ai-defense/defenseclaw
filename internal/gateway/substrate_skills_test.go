@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
 type fakeSkillScanner struct {
@@ -36,8 +38,33 @@ func skillEnvelope(files []map[string]any) string {
 	p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "Bash",
 		"tool_input": map[string]any{"command": "git clone https://example.com/skills.git ~/.claude/skills"}, "cwd": "/work"})
 	b, _ := json.Marshal(map[string]any{"v": substrateEnvelopeVersion, "connector": "claudecode", "event": "PostToolUse",
-		"mode": "interactive", "kit_version": "0.1.0", "payload": json.RawMessage(p), "facts": map[string]any{"files": files}})
+		"mode": "interactive", "kit_version": "0.1.0", "payload": json.RawMessage(p),
+		"facts": map[string]any{"files": files, "skills": listedSkills(files)}})
 	return string(b)
+}
+
+// listedSkills lists the folders of the attached skill files (.../skills/<name>)
+// as the kit does: attached, with the content digest of their files.
+func listedSkills(files []map[string]any) []map[string]any {
+	byDir := map[string]map[string][]byte{}
+	for _, f := range files {
+		if f["role"] != "skill_file" {
+			continue
+		}
+		p := f["path"].(string)
+		i := strings.LastIndex(p, "/skills/")
+		name, rest, _ := strings.Cut(p[i+len("/skills/"):], "/")
+		dir := p[:i] + "/skills/" + name
+		if byDir[dir] == nil {
+			byDir[dir] = map[string][]byte{}
+		}
+		byDir[dir][rest] = f["content"].([]byte)
+	}
+	var out []map[string]any
+	for dir, m := range byDir {
+		out = append(out, map[string]any{"path": dir, "fp": skilldigest.Digest(m), "attached": true})
+	}
+	return out
 }
 
 // GAP-0039: the hook answer names the attached skill folders the runtime
@@ -112,36 +139,38 @@ func TestSubstrateUnscannedSkillFingerprints(t *testing.T) {
 	}
 	dir := "/home/agent/.claude/skills/fmt"
 	file := []map[string]any{{"role": "skill_file", "path": dir + "/SKILL.md", "size": 10, "sha256": "x", "content": []byte("format code")}}
+	fp1 := skilldigest.Digest(map[string][]byte{"SKILL.md": []byte("format code")})
+	fp2 := skilldigest.Digest(map[string][]byte{"SKILL.md": []byte("format code, now different")})
 	// Not attached, never scanned: named.
-	out := post([]map[string]any{{"path": dir, "fp": "fp1"}}, nil)
+	out := post([]map[string]any{{"path": dir, "fp": fp1}}, nil)
 	var un []SubstrateUnscanned
 	_ = json.Unmarshal(out[substrateUnscannedField], &un)
-	if len(un) != 1 || un[0].Path != dir || un[0].FP != "fp1" {
+	if len(un) != 1 || un[0].Path != dir || un[0].FP != fp1 {
 		t.Fatalf("unscanned %s", out[substrateUnscannedField])
 	}
 	// Attached and scanned: a receipt comes back, and the same fingerprint
 	// with that receipt is quiet later.
-	out = post([]map[string]any{{"path": dir, "fp": "fp1", "attached": true}}, file)
+	out = post([]map[string]any{{"path": dir, "fp": fp1, "attached": true}}, file)
 	if _, ok := out[substrateUnscannedField]; ok {
 		t.Fatalf("attached folder named unscanned: %s", out[substrateUnscannedField])
 	}
 	var sc []SubstrateScanned
 	_ = json.Unmarshal(out[substrateScannedField], &sc)
-	if len(sc) != 1 || sc[0].Path != dir || sc[0].FP != "fp1" || sc[0].Receipt == "" {
+	if len(sc) != 1 || sc[0].Path != dir || sc[0].FP != fp1 || sc[0].Receipt == "" {
 		t.Fatalf("scanned %s", out[substrateScannedField])
 	}
-	if out = post([]map[string]any{{"path": dir, "fp": "fp1", "receipt": sc[0].Receipt}}, nil); out[substrateUnscannedField] != nil {
+	if out = post([]map[string]any{{"path": dir, "fp": fp1, "receipt": sc[0].Receipt}}, nil); out[substrateUnscannedField] != nil {
 		t.Fatalf("scanned fingerprint named again: %s", out[substrateUnscannedField])
 	}
 	// The receipt is bound to the fingerprint and the folder.
-	if out = post([]map[string]any{{"path": dir + "x", "fp": "fp1", "receipt": sc[0].Receipt}}, nil); out[substrateUnscannedField] == nil {
+	if out = post([]map[string]any{{"path": dir + "x", "fp": fp1, "receipt": sc[0].Receipt}}, nil); out[substrateUnscannedField] == nil {
 		t.Fatal("a receipt for another folder was accepted")
 	}
 	// The folder changed (new fingerprint), not attached: named again.
-	out = post([]map[string]any{{"path": dir, "fp": "fp2"}}, nil)
+	out = post([]map[string]any{{"path": dir, "fp": fp2}}, nil)
 	un = nil
 	_ = json.Unmarshal(out[substrateUnscannedField], &un)
-	if len(un) != 1 || un[0].FP != "fp2" {
+	if len(un) != 1 || un[0].FP != fp2 {
 		t.Fatalf("changed folder %s", out[substrateUnscannedField])
 	}
 }
@@ -164,7 +193,7 @@ func TestSubstrateUnscannedSkillRefusedOrAlerted(t *testing.T) {
 		st.alert = func(_ context.Context, sev, summary string, _ map[string]any) { got = append(got, alert{sev, summary}) }
 		p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "Bash",
 			"tool_input": map[string]any{"command": "ls"}, "cwd": "/work"})
-		fp := map[string]any{"path": "/home/agent/.claude/skills/evil", "fp": "fp1"}
+		fp := map[string]any{"path": "/home/agent/.claude/skills/evil", "fp": "sha256:fp-evil"}
 		if receipt != "" {
 			fp["receipt"] = receipt
 		}

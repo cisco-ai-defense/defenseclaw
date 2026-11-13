@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
 // GAP-0164. A skill folder that is exactly what the attested template build
@@ -83,13 +83,15 @@ func newGAP0164Rig(t *testing.T, block bool, trusted ...string) *gap0164Rig {
 func (r *gap0164Rig) post(t *testing.T, dir string, files map[string]string) map[string]json.RawMessage {
 	t.Helper()
 	var att []map[string]any
+	m := map[string][]byte{}
 	for rel, body := range files {
 		att = append(att, map[string]any{"role": "skill_file", "path": dir + "/" + rel, "size": len(body), "sha256": "x", "content": []byte(body)})
+		m[rel] = []byte(body)
 	}
 	p, _ := json.Marshal(map[string]any{"hook_event_name": "SessionStart", "session_id": "s1", "cwd": "/work"})
 	b, _ := json.Marshal(map[string]any{"v": substrateEnvelopeVersion, "connector": "claudecode", "event": "SessionStart",
 		"mode": "interactive", "kit_version": "0.1.0", "payload": json.RawMessage(p),
-		"facts": map[string]any{"files": att, "skills": []map[string]any{{"path": dir, "fp": "fp-" + dir, "attached": true}}}})
+		"facts": map[string]any{"files": att, "skills": []map[string]any{{"path": dir, "fp": skilldigest.Digest(m), "attached": true}}}})
 	rec := r.f.do(t, r.f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice", string(b))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("hook %d %s", rec.Code, rec.Body)
@@ -125,7 +127,7 @@ func ghDigest() string {
 	for k, v := range ghFiles {
 		m[k] = []byte(v)
 	}
-	return attest.SkillFolderDigest(m)
+	return skilldigest.Digest(m)
 }
 
 func TestGAP0164AttestedSkillIsTrustedWithoutAScan(t *testing.T) {
@@ -199,7 +201,7 @@ func TestGAP0164NoScannerFollowsTheFailMode(t *testing.T) {
 }
 
 // The digest the gateway computes from what the real kit attaches equals the
-// digest of the same folder content (attest.SkillFolderDigest, which the
+// digest of the same folder content (skilldigest.Digest, which the
 // template build records), so an unchanged folder from the image matches.
 func TestGAP0164KitAttachmentMatchesTheBuildDigest(t *testing.T) {
 	home := t.TempDir()
