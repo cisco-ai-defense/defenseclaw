@@ -233,6 +233,7 @@ func main() {
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	secretFlow := flag.String("secret-flow", "", "secret flow tracking (builds that carry it): off | shadow (records hits in flow_hits, never changes an answer); empty keeps the config default")
+	resultPlaceholder := flag.Bool("result-placeholder", false, "session surface: a non-shell call whose source recorded no result is replayed with a fixed neutral placeholder as its tool result, so a rule that needs a completed read to have returned content can be measured on corpora that drop results (an upper bound; the owner sessions keep their real results)")
 	flag.Parse()
 	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" && *surface != "session" {
 		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt, tool-result or session")
@@ -412,7 +413,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				runCase(engine, c, *connectorFlag, *surface, *promptFromContent, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
+				runCase(engine, c, *connectorFlag, *surface, *promptFromContent, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions, *resultPlaceholder)
 				if n := done.Add(1); n%1000 == 0 {
 					fmt.Fprintf(os.Stderr, "[s7bench] %d cases %d decisions %.0fs\n", n, decisions.Load(), time.Since(start).Seconds())
 				}
@@ -461,7 +462,7 @@ type hookResp struct {
 	RuleIDs    []string `json:"rule_ids"`
 }
 
-func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, promptFromContent, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
+func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, promptFromContent, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64, resultPlaceholder bool) {
 	conn := connectorOf(connectorFlag, c.Strata.Provider)
 	legacy := connectorFlag == "claudecode"
 	h := sha256.Sum256([]byte(c.ID))
@@ -574,6 +575,9 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 			var resp any = map[string]any{"stdout": "", "stderr": "", "interrupted": false}
 			if surface == "tool-result" {
 				resp = ev.Result
+			}
+			if surface == "session" && ev.Result == "" && resultPlaceholder && mapped != "shell" {
+				ev.Result = "[result not recorded by the source corpus]"
 			}
 			if surface == "session" && ev.Result != "" {
 				// The result the tool returned in the source session: a shell call's stdout, any other tool's text.
