@@ -20,6 +20,8 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -99,5 +101,32 @@ func TestSubstrateCalloutAskSinkThroughTheAdminHandler(t *testing.T) {
 			t.Fatalf("an approved host was asked again: %v", p)
 		}
 		srv.Close()
+	}
+}
+
+// TST-0306 live finding: the gateway's registration copy is cached
+// (registry.Remote), so right after an approval it may not list the host
+// yet; the store's approved ask answers the next request, not a second ask.
+func TestSubstrateCalloutAskApprovedHostBeforeTheRegistrationCatchesUp(t *testing.T) {
+	store := asks.NewMemory()
+	fake := ateapifake.New()
+	fake.PutActor(&ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "bob-1"}})
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
+		c.Asks, c.Policies = asksDirect{store}, fake
+		c.UnattendedAsk = func(string) SubstrateUnattendedAsk { return SubstrateUnattendedAsk{Queue: true, Timeout: time.Minute} }
+	})
+	body := `{"actor":{"atespace":"eng-web","name":"bob-1"},"host":"registry.npmjs.org"}`
+	rec := f.do(t, f.admin, http.MethodPost, substrateCalloutAskPath, subCallout, body, "X-DefenseClaw-Client", "substrate-extproc")
+	var got map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	id, _ := got["id"].(string)
+	if _, err := store.Resolve(context.Background(), asks.ResolveRequest{ID: id, Decision: "approve", CallerID: ownerOf(bob).ID()}); err != nil {
+		t.Fatal(err)
+	}
+	rec = f.do(t, f.admin, http.MethodPost, substrateCalloutAskPath, subCallout, body, "X-DefenseClaw-Client", "substrate-extproc")
+	got = nil
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["state"] != asks.StateApproved || len(store.Pending()) != 0 {
+		t.Fatalf("after the approval: %s, pending %v", rec.Body, store.Pending())
 	}
 }
