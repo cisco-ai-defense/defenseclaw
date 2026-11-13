@@ -1758,7 +1758,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 
 		// Extract assistant text from provider-native response format.
-		content := extractPassthroughResponseContent(respBody, provider)
+		content := extractPassthroughResponseContent(respBody, passthroughWireProvider(provider, r.URL.Path))
 		responseReqForTelemetry := ChatRequest{Model: passthroughReqForTelemetry.Model, RawBody: body}
 		responseMeta := proxyLLMEventMeta(p, r, &responseReqForTelemetry, provider)
 		responseMeta.PromptID = passthroughPromptID
@@ -1795,7 +1795,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
 		// forwarded unchecked and the agent could execute them without
 		// the configured tool-call rules ever running.
-		if toolCallsRaw := extractPassthroughToolCalls(respBody, provider); toolCallsRaw != nil {
+		if toolCallsRaw := extractPassthroughToolCalls(respBody, passthroughWireProvider(provider, r.URL.Path)); toolCallsRaw != nil {
 			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil {
 				p.recordTelemetry(r.Context(), "tool-call", label, verdict, 0, mode,
 					verdict.Action == "block" && mode == "action")
@@ -1839,6 +1839,48 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		buf := make([]byte, 4096)
 		var lineBuf strings.Builder
 		bedrockStreamReported := false
+		// Tool calls of an OpenAI-shaped SSE reply: each finished call goes
+		// through the tool-call rules before its bytes reach the agent, and
+		// the bytes of an open call are held until then (GAP-0187, as
+		// GAP-0098 for the Bedrock eventstream).
+		wire := passthroughWireProvider(provider, r.URL.Path)
+		var sseCalls *sseToolCalls
+		if bedrockStream == nil {
+			sseCalls = newSSEToolCalls()
+		}
+		var sseHeld []byte
+		sseBlockMsg := ""
+		sseHolding := func() bool { return sseCalls != nil && mode == "action" && sseCalls.Open() }
+		sseBrokenReported := false
+		streamEnded := false // the upstream reply was read to its end
+		// sseRefused runs the finished tool calls through the rules and
+		// reports a refusal (sseBlockMsg is set).
+		sseRefused := func() bool {
+			if sseCalls.Broken() && !sseBrokenReported {
+				sseBrokenReported = true
+				if p.uninspectableReply(r.Context(), label, mode, "a streamed tool call could not be inspected") {
+					sseBlockMsg = blockMessage(customBlockMsg, "tool_call", "the provider reply could not be inspected")
+					return true
+				}
+			}
+			calls := sseCalls.Take()
+			if calls == nil {
+				return false
+			}
+			v := p.inspectToolCalls(r.Context(), calls)
+			if v == nil {
+				return false
+			}
+			refuse := v.Action == "block" && mode == "action"
+			p.recordTelemetry(r.Context(), "tool-call", label, v, 0, mode, refuse)
+			if !refuse {
+				return false
+			}
+			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TOOL-BLOCK severity=%s %s\n", v.Severity, redaction.Reason(v.Reason))
+			p.enqueueBlockNotification(v, "tool_call", partial.Model)
+			sseBlockMsg = blockMessage(customBlockMsg, "tool_call", v.Reason)
+			return true
+		}
 
 		streamBufferSize := 1024
 		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
@@ -1911,21 +1953,33 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 						continue
 					}
 					data := strings.TrimPrefix(line, "data: ")
+					sseCalls.Feed(data)
 					if data == "[DONE]" {
 						continue
 					}
 					if streamResponseModel == "" {
 						streamResponseModel = responseModelFromRawJSON([]byte(data))
 					}
-					text := extractSSEChunkText(data, provider)
+					text := extractSSEChunkText(data, wire)
 					if text != "" {
 						accumulated.WriteString(text)
 					}
 				}
 
+				if sseCalls != nil {
+					if readErr != nil {
+						sseCalls.Finish()
+					}
+					if sseRefused() {
+						break
+					}
+				}
+
 				if !initialFlushed {
 					initialBuf = append(initialBuf, chunk...)
-					shouldFlush := accumulated.Len() >= streamBufferSize ||
+					// An open tool call keeps the buffer (bounded by
+					// sseToolCallMax and maxInitialBufBytes).
+					shouldFlush := (accumulated.Len() >= streamBufferSize && !sseHolding()) ||
 						readErr != nil ||
 						len(initialBuf) > maxInitialBufBytes
 
@@ -1934,7 +1988,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 							break
 						}
 					}
+				} else if sseHolding() {
+					sseHeld = append(sseHeld, chunk...)
 				} else {
+					if len(sseHeld) > 0 {
+						_, _ = w.Write(sseHeld)
+						sseHeld = nil
+					}
 					_, _ = w.Write(chunk)
 					if flusher != nil {
 						flusher.Flush()
@@ -1955,11 +2015,32 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			if readErr != nil {
+				streamEnded = true
 				break
 			}
 		}
 		if preblocked {
 			return
+		}
+		if sseCalls != nil && sseBlockMsg == "" && streamEnded {
+			// The stream ended (or broke) inside a call: what is finished
+			// now is checked before the held bytes go out.
+			sseCalls.Finish()
+			sseRefused()
+		}
+		if sseBlockMsg != "" {
+			// A refused tool call never reaches the agent: the whole block
+			// reply when nothing was sent yet, else the block as the last
+			// assistant text of the stream under way. Held bytes are dropped.
+			if !initialFlushed {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true, sseBlockMsg)
+			} else {
+				sseCalls.writeSSEBlockTail(w, partial.Model, sseBlockMsg)
+			}
+			return
+		}
+		if len(sseHeld) > 0 && streamEnded {
+			_, _ = w.Write(sseHeld)
 		}
 		if !initialFlushed && len(initialBuf) > 0 {
 			if !flushInitialBuf() {
