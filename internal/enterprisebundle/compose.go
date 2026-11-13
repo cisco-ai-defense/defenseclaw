@@ -69,7 +69,7 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := CheckKeyProductFloor(cfg, in.MinProductVersion); err != nil {
+	if err := CheckKeyProductFloor(cfg, b.Files[ConfigName], in.MinProductVersion); err != nil {
 		return nil, nil, err
 	}
 	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 {

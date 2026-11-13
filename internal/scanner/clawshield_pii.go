@@ -23,6 +23,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 )
 
 // ClawShieldPIIScanner detects personally identifiable information across 10 categories.
@@ -36,22 +38,24 @@ func (s *ClawShieldPIIScanner) Version() string            { return "1.0.0" }
 func (s *ClawShieldPIIScanner) SupportedTargets() []string { return []string{"skill", "code"} }
 
 type csPIIRule struct {
-	id          string
-	category    string
-	pattern     *regexp.Regexp
-	severity    Severity
-	validator   func(string) bool
+	id       string
+	category string
+	pattern  *regexp.Regexp
+	severity Severity
+	// validator, when set, must accept text[start:end] for a match to count.
+	validator   func(text string, start, end int) bool
 	contextPat  *regexp.Regexp
 	remediation string
 }
 
 var csPIIRules = []csPIIRule{
-	// Credit cards (Luhn-validated)
-	{id: "CS-PII-CC-VISA", category: "credit_card", pattern: regexp.MustCompile(`\b4[0-9]{12}(?:[0-9]{3})?\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-MC", category: "credit_card", pattern: regexp.MustCompile(`\b5[1-5][0-9]{14}\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-AMEX", category: "credit_card", pattern: regexp.MustCompile(`\b3[47][0-9]{13}\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-DISC", category: "credit_card", pattern: regexp.MustCompile(`\b(?:6011|65[0-9]{2}|64[4-9][0-9])[0-9]{12}\b`), severity: SeverityCritical, validator: csLuhnCheck, remediation: "Remove credit card numbers; use a payment tokenization service"},
-	{id: "CS-PII-CC-FMT", category: "credit_card", pattern: regexp.MustCompile(`\b[0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	// Credit cards: the shared paymentcard rules (Luhn, scheme prefix and
+	// length, card layout, not inside a UUID/hash/id token).
+	{id: "CS-PII-CC-VISA", category: "credit_card", pattern: regexp.MustCompile(`\b4[0-9]{12}(?:[0-9]{3})?\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-MC", category: "credit_card", pattern: regexp.MustCompile(`\b5[1-5][0-9]{14}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-AMEX", category: "credit_card", pattern: regexp.MustCompile(`\b3[47][0-9]{13}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-DISC", category: "credit_card", pattern: regexp.MustCompile(`\b(?:6011|65[0-9]{2}|64[4-9][0-9])[0-9]{12}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
+	{id: "CS-PII-CC-FMT", category: "credit_card", pattern: regexp.MustCompile(`\b[0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}[\s-][0-9]{4}\b`), severity: SeverityCritical, validator: paymentcard.ValidAt, remediation: "Remove credit card numbers; use a payment tokenization service"},
 
 	// SSN
 	{id: "CS-PII-SSN-DASH", category: "ssn", pattern: regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
@@ -126,7 +130,7 @@ func csPIIScanContent(content []byte, path string) []Finding {
 		for _, loc := range matches {
 			match := text[loc[0]:loc[1]]
 
-			if rule.validator != nil && !rule.validator(match) {
+			if rule.validator != nil && !rule.validator(text, loc[0], loc[1]) {
 				continue
 			}
 
@@ -145,31 +149,6 @@ func csPIIScanContent(content []byte, path string) []Finding {
 	}
 
 	return findings
-}
-
-// csLuhnCheck implements the Luhn algorithm for credit card validation.
-func csLuhnCheck(number string) bool {
-	cleaned := strings.NewReplacer(" ", "", "-", "").Replace(number)
-	if len(cleaned) < 13 || len(cleaned) > 19 {
-		return false
-	}
-	sum := 0
-	double := false
-	for i := len(cleaned) - 1; i >= 0; i-- {
-		digit := int(cleaned[i] - '0')
-		if digit < 0 || digit > 9 {
-			return false
-		}
-		if double {
-			digit *= 2
-			if digit > 9 {
-				digit -= 9
-			}
-		}
-		sum += digit
-		double = !double
-	}
-	return sum%10 == 0
 }
 
 // csRedactPII partially masks PII values for safe logging.
