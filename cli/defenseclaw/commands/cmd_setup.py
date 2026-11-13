@@ -6644,7 +6644,7 @@ def _check_connector_version_supported_for_setup(
             return False
         if emit:
             ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
-            if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
+            if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version) and not _openclaw_native_here(connector):
                 ux.warn(
                     f"{label} {normalize_agent_version(raw_version)} is in the ≥2026.6.8 transport range. "
                     "A live guardrail proxy port is not proof that agent LLM traffic is intercepted — "
@@ -8465,7 +8465,8 @@ def setup_guardrail(
             # The values this connector runs with: a guardrail.connectors entry
             # wins over the top-level keys, as guardrail status shows (GAP-2239).
             ("guardrail.mode", gc.effective_mode(gc.connector)),
-            ("guardrail.port", str(gc.port)),
+            # No guardrail proxy carries native OpenClaw (Windows): no port.
+            *(() if _openclaw_native_here(gc.connector) else (("guardrail.port", str(gc.port)),)),
             *_legacy_guardrail_llm_rows(gc),
             ("guardrail.detection_strategy", _effective_detection_strategy(gc, gc.connector)),
             ("guardrail.rule_pack", gc.effective_rule_pack(gc.connector) or "default"),
@@ -15207,6 +15208,13 @@ def _setup_guardrail_connector_alias(
 
     if connector == "openclaw" and restart:
         _require_openclaw_gateway_before_setup(app)
+    if connector == "openclaw":
+        # The OpenClaw preflight (plugin bytes and owners, OpenClaw files,
+        # the native floor) runs before anything is saved; before, a failing
+        # preflight surfaced only when the restarted gateway set OpenClaw up,
+        # and left it down (rel-1-0-10 GAP-0075).
+        if refusal := _agent_settings_refusal(app.cfg, "openclaw", workspace_dir="", will_restart=restart):
+            raise click.ClickException(refusal)
 
     # Take the rollback point before switching the connector below: a
     # snapshot taken afterwards restores the requested connector in memory
@@ -16049,7 +16057,7 @@ def execute_guardrail_setup(
         for c in actives:
             m = _CONNECTOR_META.get(c, {})
             if m:
-                ux.ok(f"  [{c}] tool inspection: {_tool_display(m)}; subprocess policy: {m['subprocess_policy']}")
+                ux.ok(f"  [{c}] tool inspection: {_tool_display(m)}; subprocess policy: {_subprocess_policy_display(c, m)}")
             else:
                 ux.ok(f"  [{c}] plugin connector")
     else:
@@ -16057,7 +16065,7 @@ def execute_guardrail_setup(
         if meta:
             ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
             ux.ok(f"Tool inspection: {_tool_display(meta)}")
-            ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
+            ux.ok(f"Subprocess policy: {_subprocess_policy_display(connector_name, meta)}")
         else:
             ux.ok(f"Connector: {connector_name} (plugin)")
 
@@ -18211,6 +18219,18 @@ def _wait_for_connector_runtime(
         sleep_for = min(0.2, max(0.0, min(no_progress_deadline, absolute_deadline) - time.monotonic()))
         if sleep_for:
             time.sleep(sleep_for)
+
+
+def _openclaw_native_here(connector: str) -> bool:
+    """OpenClaw on this OS runs the native plugin hooks only (Windows)."""
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    return connector == "openclaw" and not uses_guardrail_proxy(connector)
+
+
+def _subprocess_policy_display(connector: str, meta: dict) -> str:
+    # Native OpenClaw writes no PATH shims (rel-1-0-10 GAP-0047).
+    return "none (native plugin hooks)" if _openclaw_native_here(connector) else str(meta.get("subprocess_policy", ""))
 
 
 def _openclaw_cli() -> str | None:
