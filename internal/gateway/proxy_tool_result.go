@@ -229,6 +229,14 @@ func (g *GuardrailInspector) InspectToolResult(ctx context.Context, tool, conten
 		return nil
 	}
 	findings := toolResultRuleFindings(proxyRuleGeneration(ctx), content, ruleContentScopeUntrusted, !ManagedEnterpriseActive())
+	// The proxy inspects tool results for the first time in this release:
+	// its findings are HIGH at most, so the default pack alerts and strict
+	// refuses the model call (tool_result_inspect.go, Disposition).
+	for i := range findings {
+		if strings.EqualFold(findings[i].Severity, "CRITICAL") {
+			findings[i].Severity = "HIGH"
+		}
+	}
 	var local *ScanVerdict
 	if len(findings) > 0 {
 		sev := HighestSeverity(findings)
