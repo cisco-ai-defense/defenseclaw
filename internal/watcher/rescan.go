@@ -1186,6 +1186,12 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	// permissive tiers. A plain baseline without a scan is the record of a
 	// server configured before the upgrade (GAP-1227) and stays one.
 	if evt.Type == InstallMCP && !w.secureClientActive() && baseline.ScanID == "" && mcpFingerprintFailed(baseline.ScannerFingerprint) {
+		if strings.HasSuffix(baseline.ScannerFingerprint, mcpPolicyRefusedMark) &&
+			baseline.ContentHash == currentSnap.ContentHash && !w.mcpPolicyRefusalLapsed(evt, baseline) {
+			// The refusal stands: admitting it again would only write the
+			// same install-rejected row every cycle.
+			return rescanSkipped
+		}
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
 	}
 
@@ -1398,7 +1404,7 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 		}
 		return fingerprint + mcpScanFailedMark
 	}
-	if res.Event.Type == InstallMCP && res.ScanID == "" && (res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected) {
+	if res.Event.Type == InstallMCP && res.PolicyRefused {
 		// Refused by the admission policy before any scan (an
 		// asset_policy.mcp deny). Recorded plain, the baseline read as a
 		// decided admission once the deny was gone, so a server never

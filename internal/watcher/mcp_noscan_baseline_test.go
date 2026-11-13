@@ -6,9 +6,11 @@ package watcher
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // GAP-0088: the rescan's drift scan read an MCP baseline that holds no
@@ -112,5 +114,48 @@ func TestGAP0088RemovedDenyDoesNotAdmitAnUnscannedMCPServer(t *testing.T) {
 	f.admitQueued()
 	if status := f.status(); !status.Failed && !status.Pending {
 		t.Fatalf("after the deny was removed: %+v, want the unscannable server refused (never allowed, never scanned)", status)
+	}
+}
+
+// The discovery poll admits a server again once the deny that refused it is
+// gone, without waiting for the hourly rescan (the GAP-0088 review F1): its
+// scan runs at the poll and the refusal mark goes.
+func TestGAP0088PollReadmitsAServerOnceItsDenyIsRemoved(t *testing.T) {
+	f := newManagedAllowRemovalFixture(t)
+	refusing := &refusingScanner{countingScanner{name: "mcp-scanner"}}
+	f.w.scannerFactory = func(InstallEvent) scanner.Scanner { return refusing }
+	scans := func() int {
+		refusing.mu.Lock()
+		defer refusing.mu.Unlock()
+		return refusing.calls
+	}
+	f.managedAdmittedThenRuleRemoved(false)
+	f.cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: f.server.Name, URL: f.server.URL}}
+	f.w.discoverAddedMCPServers()
+	f.admitQueued()
+	row, err := mcpSnapshotForServer(f.w.store, f.server)
+	if err != nil || row == nil || !strings.HasSuffix(row.ScannerFingerprint, mcpPolicyRefusedMark) {
+		t.Fatalf("while denied: baseline %+v err=%v, want the policy refusal mark", row, err)
+	}
+	before := scans()
+	for range 3 {
+		f.w.discoverAddedMCPServers()
+		f.admitQueued()
+	}
+	if scans() != before {
+		t.Fatalf("polls while the deny stands ran %d scans, want none", scans()-before)
+	}
+	f.cfg.AssetPolicy.MCP.Denied = nil
+	f.w.discoverAddedMCPServers()
+	f.admitQueued()
+	if scans() == before {
+		t.Fatal("the poll after the deny was removed ran no admission scan")
+	}
+	row, err = mcpSnapshotForServer(f.w.store, f.server)
+	if err != nil || row == nil || strings.HasSuffix(row.ScannerFingerprint, mcpPolicyRefusedMark) {
+		t.Fatalf("after the poll: baseline %+v err=%v, want the refusal mark gone", row, err)
+	}
+	if status := f.status(); !status.Failed && !status.Pending {
+		t.Fatalf("after the poll: %+v, want the unscannable server refused on managed", status)
 	}
 }

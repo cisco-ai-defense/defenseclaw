@@ -133,6 +133,11 @@ type AdmissionResult struct {
 	// type, so nothing was blocked or quarantined. Its rescan baseline keeps
 	// a mark, and admission runs again once take_action is on (GAP-0774).
 	Unenforced bool
+	// PolicyRefused is a block or rejection the admission policy decided
+	// before any scan (an asset_policy deny, a blocked or rejected verdict
+	// of the pre-scan evaluation). An MCP baseline records it as one
+	// (mcpPolicyRefusedMark), never as a decided admission (GAP-0088).
+	PolicyRefused bool
 }
 
 // OnAdmission is called after each install event is processed.
@@ -878,7 +883,8 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 	}
 	snap, err := w.snapshotForEvent(evt)
 	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
-		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline)) {
+		!w.mcpBaselineLapsed(evt, baseline) && !w.mcpFailureAllowed(evt, baseline) &&
+		!w.mcpPolicyRefusalLapsed(evt, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -2666,7 +2672,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			// kept, is held for the connector whose rule denied it too.
 			w.journalPolicyDenied(cfg, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetDenying)
 			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
+			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason, PolicyRefused: true}
 			return res
 		}
 		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
@@ -2689,14 +2695,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			fmt.Sprintf("type=%s reason=blocked", targetType))
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "blocked", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
+		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason, PolicyRefused: true}
 		return res
 	case "rejected":
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=policy-rejected", targetType))
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "rejected", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
+		res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason, PolicyRefused: true}
 		return res
 	case "allowed":
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,

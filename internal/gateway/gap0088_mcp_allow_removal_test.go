@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -66,6 +67,9 @@ func (g *gap0088Gateway) settle(t *testing.T, server assetfacts.MCPServer, want 
 }
 
 func TestGAP0088ManagedGatewayRemovedAllowRuleBlocksTheAdmittedLoopbackServerAgain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead; the watcher tests cover it")
+	}
 	t.Setenv("PATH", "")
 	store, logger := testStoreAndLogger(t)
 	dir := t.TempDir()
