@@ -15290,8 +15290,15 @@ def _refuse_proxy_next_to_hook_connectors(gc, connector: str) -> None:
     if not peers:
         return
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    why = (
+        "is proxy-backed and cannot run next to hook connectors"
+        if uses_guardrail_proxy(connector)
+        else "runs alone in this release (OpenClaw native hooks next to other connectors are not supported yet)"
+    )
     raise click.ClickException(
-        f"{label} is proxy-backed and cannot run next to hook connectors, and this install has "
+        f"{label} {why}, and this install has "
         f"{len(peers)} configured ({', '.join(peers)}). No changes made. To switch this install "
         f"to {label} and remove them, run 'defenseclaw setup {connector} --replace' (or remove "
         "them one at a time with 'defenseclaw setup remove <connector>')."
@@ -16211,7 +16218,7 @@ def _guardrail_summary_hook_fail_mode(cfg, connector: str) -> str:
     if normalize_connector(connector) in PROXY_CONNECTORS:
         from defenseclaw.fail_mode import proxy_model_outage_mode, proxy_outage_summary
 
-        return proxy_outage_summary(proxy_model_outage_mode(cfg, connector))
+        return proxy_outage_summary(proxy_model_outage_mode(cfg, connector), connector)
     mode = gc.effective_hook_outage_fail_mode(connector)
     entry = (gc.connectors or {}).get(connector)
     saved = bool(entry is not None and str(entry.hook_fail_mode or "").strip()) or bool(
@@ -18258,8 +18265,11 @@ def _restart_openclaw_gateway() -> bool:
     success while traffic kept flowing past a down (fail-open) gateway."""
     click.echo("  openclaw-gateway: restarting...", nl=False)
     try:
+        # npm installs OpenClaw on Windows as openclaw.cmd, which
+        # CreateProcess does not find by its bare name (GAP-0048 rel-1-0-10);
+        # shutil.which applies PATHEXT. The arguments are fixed literals.
         result = subprocess.run(
-            ["openclaw", "gateway", "restart"],
+            [shutil.which("openclaw") or "openclaw", "gateway", "restart"],
             capture_output=True,
             # Output is only shown to the operator: bytes that do not decode
             # must not turn into an exception that skips the health probe.

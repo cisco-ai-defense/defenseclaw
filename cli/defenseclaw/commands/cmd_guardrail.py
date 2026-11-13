@@ -1702,7 +1702,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         elif proxy:
             # No hooks: the model requests follow the outage mode the unscoped
             # view and status print, resolved by the one shared helper (GAP-0824).
-            runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key))
+            runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key), key)
         elif runtime_state.limit:
             runtime_value = runtime_state.effective
             if runtime_value == "closed":
@@ -2121,7 +2121,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         if not enforcing:
             shown = "disabled (no hooks)"
         elif _is_proxy_connector(name):
-            shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name))
+            shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name), name)
             shown += " (" + proxy_outage_source(app.cfg, name).rstrip(".") + ")"
         else:
             tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
@@ -2273,7 +2273,7 @@ def fail_mode_cmd(
                 elif _state.note:
                     _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
-                _eff = proxy_outage_summary(proxy_model_outage_mode(app.cfg, _name))
+                _eff = proxy_outage_summary(proxy_model_outage_mode(app.cfg, _name), _name)
             if _enforcing and normalize_connector(_name) not in _RUNTIME_FAIL_MODE_CONNECTORS:
                 # A hook entry the agent skips, or one that does not run
                 # DefenseClaw's current hook, leaves calls unchecked whatever
