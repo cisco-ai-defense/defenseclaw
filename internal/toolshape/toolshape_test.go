@@ -5,7 +5,9 @@ package toolshape
 
 import (
 	"encoding/json"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -187,7 +189,8 @@ func TestSQLClasses(t *testing.T) {
 	}
 	for _, c := range cases {
 		var got []string
-		for _, k := range ClassifySQL(c.sql) {
+		classes, _ := ClassifySQL(c.sql)
+		for _, k := range classes {
 			got = append(got, k.Class)
 		}
 		if !slices.Equal(got, c.want) {
@@ -259,7 +262,7 @@ func TestBounds(t *testing.T) {
 	}
 	b, _ := json.Marshal(map[string]any{"paths": paths})
 	m := mapOf(t, "mcp__fs__read_batch", string(b))
-	if len(m.Effects) > maxEffects || !m.Truncated {
+	if len(m.Effects) > maxEffects || !m.Truncated.Any() {
 		t.Fatalf("effects = %d truncated = %v", len(m.Effects), m.Truncated)
 	}
 	deep := `{"a":` + string(make([]byte, 0))
@@ -319,6 +322,9 @@ func TestRules(t *testing.T) {
 		if got := CommandRules("git", []string{"git", "show", a}); len(got) != 0 {
 			t.Errorf("git show %s = %v", a, got)
 		}
+	}
+	if !ShellCandidate(`type C:\Users\u\.config\gh\hosts.yml`) {
+		t.Error("a Windows spelling of a trigger word is a candidate")
 	}
 	if !ShellCandidate("tool --reveal x") || ShellCandidate("ls -la /tmp") {
 		t.Error("ShellCandidate")
@@ -403,14 +409,14 @@ func TestBoundsAreGenerousAndReported(t *testing.T) {
 	b, _ := json.Marshal(map[string]any{"paths": items})
 	m := mapOf(t, "mcp__filesystem__read_multiple_files", string(b))
 	last := m.Effects[len(m.Effects)-1]
-	if last.Path != "/home/u/.ssh/id_rsa" || m.Truncated {
+	if last.Path != "/home/u/.ssh/id_rsa" || m.Truncated.Any() {
 		t.Fatalf("last effect %+v truncated=%v", last, m.Truncated)
 	}
 	deep := `{"path":"/home/u/.ssh/id_rsa"}`
 	for i := 0; i < 8; i++ {
 		deep = `{"l":` + deep + `}`
 	}
-	if m := mapOf(t, "mcp__x__read_file", deep); len(m.Effects) != 1 || m.Truncated {
+	if m := mapOf(t, "mcp__x__read_file", deep); len(m.Effects) != 1 || m.Truncated.Any() {
 		t.Fatalf("depth 8: %+v truncated=%v", m.Effects, m.Truncated)
 	}
 	// Past the bounds the mapping says so.
@@ -418,7 +424,7 @@ func TestBoundsAreGenerousAndReported(t *testing.T) {
 	for i := 0; i < 40; i++ {
 		deep = `{"l":` + deep + `}`
 	}
-	if m := mapOf(t, "mcp__x__read_file", deep); !m.Truncated {
+	if m := mapOf(t, "mcp__x__read_file", deep); !m.Truncated.Any() {
 		t.Fatal("a call past the depth bound must report Truncated")
 	}
 }
@@ -442,5 +448,144 @@ func TestGenericQueryKeyIsSQLOnlyForDatabaseTools(t *testing.T) {
 		if got != c.sql {
 			t.Errorf("%s %s: sql effect = %v, want %v", c.tool, c.args, got, c.sql)
 		}
+	}
+}
+
+func TestReviewRound2Mapping(t *testing.T) {
+	has := func(m Mapping, path string) bool {
+		for _, e := range m.Effects {
+			if e.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct{ tool, args, want string }{
+		{"mcp__x__read_resource", `{"uri":"file:/home/u/.ssh/id_rsa"}`, "/home/u/.ssh/id_rsa"},
+		{"mcp__x__read_resource", `{"uri":"file://127.0.0.1/home/u/.ssh/id_rsa"}`, "/home/u/.ssh/id_rsa"},
+		{"mcp__x__read_resource", `{"uri":"file://[::1]/home/u/.ssh/id_rsa"}`, "/home/u/.ssh/id_rsa"},
+		{"mcp__x__read_resource", `{"uri":"file:///home/u/My%20Docs/.ssh/id_rsa"}`, "/home/u/My Docs/.ssh/id_rsa"},
+		{"mcp__x__read_file", `{"path":"//home/u/.ssh/id_rsa"}`, "/home/u/.ssh/id_rsa"},
+		{"mcp__x__do", `{"thing":"/home/u/My Documents/../.ssh/id_rsa"}`, "/home/u/My Documents/../.ssh/id_rsa"},
+		{"mcp__x__read_file", `{"pathname":"../.ssh/id_rsa"}`, "../.ssh/id_rsa"},
+		{"mcp__x__read_file", `{"path_name":"../.ssh/id_rsa"}`, "../.ssh/id_rsa"},
+		{"mcp__proxy__call_tool", `{"name":"read_file","arguments":"{\"path\":\"/home/u/.ssh/id_rsa\",\"n\":1e400}"}`, "/home/u/.ssh/id_rsa"},
+		{"mcp__proxy__call_tool", `{"name":"read_file","arguments":"{\"path\":\"/home/u/.ssh/id_rsa\",\"n\":NaN}"}`, "/home/u/.ssh/id_rsa"},
+		{"mcp__proxy__call_tool", `"{\"path\":\"/home/u/.ssh/id_rsa\"}"`, "/home/u/.ssh/id_rsa"},
+	} {
+		if m := mapOf(t, c.tool, c.args); !has(m, c.want) {
+			t.Errorf("%s %s: no path effect %q in %+v", c.tool, c.args, c.want, m.Effects)
+		}
+	}
+	// A path past the path bound is judged and the bound is recorded.
+	long := "/repo/" + strings.Repeat("./", maxPath/2) + "f.md"
+	if m := mapOf(t, "mcp__filesystem__read_file", `{"path":"`+long+`"}`); !has(m, long) || !m.Truncated.Has(bounded.Bytes) {
+		t.Errorf("long path: truncated=%v effects=%d", m.Truncated, len(m.Effects))
+	}
+	// A file URI of another host is unplaced: unread, never clean.
+	if m := mapOf(t, "mcp__x__read_resource", `{"uri":"file://server/share/x"}`); !m.Truncated.Any() {
+		t.Errorf("remote file URI: %+v", m)
+	}
+	// Nesting past the bound, and a document the reader cannot parse, are recorded.
+	deep := `{"path":"/home/u/.ssh/id_rsa"}`
+	for i := 0; i < maxNested+1; i++ {
+		b, _ := json.Marshal(deep)
+		deep = `{"arguments":` + string(b) + `}`
+	}
+	if m := mapOf(t, "mcp__x__read_file", deep); !m.Truncated.Has(bounded.Depth) {
+		t.Errorf("nested JSON strings past the bound: %v", m.Truncated)
+	}
+	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/x oops}"}`); !m.Truncated.Any() {
+		t.Errorf("unparseable JSON document: %v", m.Truncated)
+	}
+	// Prose that starts with a bracket is text.
+	for _, v := range []string{"[INFO] done", "{{name}} said hi", "[1] see below"} {
+		b, _ := json.Marshal(map[string]string{"note": v})
+		if m := mapOf(t, "mcp__x__post_comment", string(b)); m.Truncated.Any() {
+			t.Errorf("%q marked truncated", v)
+		}
+	}
+}
+
+func TestLargeBodiesAreNotTruncated(t *testing.T) {
+	body := strings.Repeat("benign text ", 8000) // 96 KB
+	b, _ := json.Marshal(map[string]string{"path": "/repo/notes.md", "content": body})
+	m := mapOf(t, "mcp__filesystem__write_file", string(b))
+	if m.Truncated.Any() || m.Content == "" {
+		t.Fatalf("a 96 KB write body: truncated=%v content=%d", m.Truncated, len(m.Content))
+	}
+	b, _ = json.Marshal(map[string]string{"body": body})
+	if m := mapOf(t, "mcp__github__create_issue", string(b)); m.Truncated.Any() {
+		t.Fatalf("a large issue body: %v", m.Truncated)
+	}
+	huge := strings.Repeat("a", maxString+1)
+	b, _ = json.Marshal(map[string]string{"body": huge})
+	if m := mapOf(t, "mcp__github__create_issue", string(b)); !m.Truncated.Has(bounded.Bytes) {
+		t.Fatalf("a string past the byte bound is recorded: %v", m.Truncated)
+	}
+}
+
+func TestContentIsCollectedFromNestedKeys(t *testing.T) {
+	m := mapOf(t, "mcp__proxy__call_tool", `{"name":"write","arguments":{"path":"/etc/passwd","content":"svc:x:0:0::/:/bin/sh"}}`)
+	if !strings.Contains(m.Content, "svc:x:0:0") {
+		t.Errorf("nested content: %q", m.Content)
+	}
+	m = mapOf(t, "mcp__filesystem__edit_file", `{"path":"/etc/passwd","edits":[{"oldText":"a","newText":"svc:x:0:0::/:/bin/sh"}]}`)
+	if !strings.Contains(m.Content, "svc:x:0:0") {
+		t.Errorf("edit content: %q", m.Content)
+	}
+	// A body is data: a JSON file's text is not walked as arguments.
+	m = mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/c.json","content":"{\"path\": \"/etc/shadow\"}"}`)
+	for _, e := range m.Effects {
+		if e.Path == "/etc/shadow" {
+			t.Errorf("content read as arguments: %+v", m.Effects)
+		}
+	}
+}
+
+func TestSendersAndRedirectKeys(t *testing.T) {
+	m := mapOf(t, "mcp__mail__send", `{"from":"me@corp.example","to":"a@corp.example","cc":"b@corp.example"}`)
+	if len(m.Senders) != 1 || m.Senders[0] != "corp.example" {
+		t.Errorf("senders = %v", m.Senders)
+	}
+}
+
+func TestDatabaseServersByShape(t *testing.T) {
+	for _, c := range []struct {
+		tool, args string
+		sql        bool
+	}{
+		{"mcp__bigquery__query", `{"query":"DROP TABLE t"}`, true},
+		{"mcp__postgres-prod__query", `{"query":"DROP TABLE t"}`, true},
+		{"mcp__my-sqlite__run", `{"query":"DROP TABLE t"}`, true},
+		{"mcp__snowflake__execute", `{"query":"TRUNCATE orders"}`, true},
+		{"mcp__acme__run_report", `{"query":"DROP TABLE t"}`, true},
+		{"mcp__acme__search_docs", `{"query":"DROP TABLE t"}`, false},
+		{"mcp__acme__lookup", `{"q":"GRANT ALL ON db.* TO u"}`, false},
+	} {
+		if got := slices.Contains(kinds(mapOf(t, c.tool, c.args)), KindSQL); got != c.sql {
+			t.Errorf("%s %s: sql = %v, want %v", c.tool, c.args, got, c.sql)
+		}
+	}
+}
+
+func TestSQLDialectReadings(t *testing.T) {
+	for _, c := range []struct {
+		sql  string
+		want bool
+	}{
+		{"SELECT 1 # 1; DROP TABLE t", true},      // PostgreSQL: # is an operator, the DROP runs
+		{"SELECT $$'$$; DROP TABLE t; --'", true}, // PostgreSQL dollar quotes
+		{"SELECT $q$ DROP TABLE t $q$", false},    // a string, read as one
+		{"SELECT '$$'; SELECT '$$'", false},
+		{"SELECT price FROM t WHERE cost = $1 AND id = $2", false},
+	} {
+		classes, _ := ClassifySQL(c.sql)
+		if got := len(classes) > 0; got != c.want {
+			t.Errorf("ClassifySQL(%q) = %v, want drop=%v", c.sql, classes, c.want)
+		}
+	}
+	if _, over := ClassifySQL(strings.Repeat("SELECT 1; ", maxSQL/8)); !over {
+		t.Error("a text past the SQL bound is recorded")
 	}
 }

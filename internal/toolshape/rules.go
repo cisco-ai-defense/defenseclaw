@@ -166,7 +166,7 @@ func ShellCandidate(text string) bool {
 	if err != nil {
 		return false
 	}
-	lower := strings.ToLower(text)
+	lower := strings.ReplaceAll(strings.ToLower(text), `\`, "/")
 	for _, w := range t.ShellTriggers {
 		if strings.Contains(lower, w) {
 			return true

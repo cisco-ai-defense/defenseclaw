@@ -28,18 +28,26 @@ import (
 	"unicode"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 //go:embed shapes.yaml
 var shapesYAML []byte
 
-// Bounds on what one call may contribute.
+// Bounds on what one call may contribute. A reached bound is never silent:
+// the walk records it (bounded.Truncated) and the caller judges the call as
+// unknown at least (internal/guardrail/bounded, the S7 bound rule).
 const (
-	maxDepth   = 16
-	maxEffects = 256
-	maxItems   = 512
-	maxNested  = 4 // nested JSON documents inside string arguments
-	maxString  = 64 << 10
+	maxDepth   = 16       // object and array nesting (bounded.Depth)
+	maxItems   = 512      // elements of one array (bounded.Items)
+	maxEffects = 256      // effects of one call (bounded.Effects)
+	maxNodes   = 1 << 16  // values of one walk (bounded.Nodes)
+	maxNested  = 4        // JSON documents nested in string arguments (bounded.Depth)
+	maxString  = 1 << 20  // bytes of one string argument read (bounded.Bytes)
+	maxPath    = 32 << 10 // bytes of a path value (bounded.Bytes); a longer one is still judged
+	maxContent = 1 << 20  // bytes of write content collected (bounded.Bytes)
+	maxSQL     = 256 << 10
 )
 
 // Family is the kind of server or tool a call belongs to.
@@ -111,9 +119,15 @@ type Mapping struct {
 	// (a file server's read_file): the role of its path effects is known, not
 	// guessed, so they are judged exactly as the native file tool is.
 	RoleKnown bool
-	// Truncated reports that a bound cut the walk short. The caller must treat
-	// the call as unknown at least (never clean).
-	Truncated bool
+	// Truncated is the set of bounds the walk reached. A call with a bound hit
+	// has unread parts: the caller judges it unknown at least, never clean.
+	Truncated bounded.CapSet
+	// Content is the text the call writes (values under content-style keys,
+	// nested ones included), for the rules that read what is written.
+	Content string
+	// Senders are the hosts of the call's own account fields (from, sender,
+	// account), when it names them.
+	Senders []string
 }
 
 type table struct {
@@ -142,6 +156,10 @@ type table struct {
 	KnownRoles    map[string][]string `yaml:"known_roles"`
 	PathKeySuffix []string            `yaml:"path_key_suffixes"`
 	TextRules     []TextRule          `yaml:"text_rules"`
+	ContentKeys   []string            `yaml:"content_keys"`
+	SenderKeys    []string            `yaml:"sender_keys"`
+	SearchTokens  []string            `yaml:"search_tokens"`
+	NameKeys      []string            `yaml:"name_keys"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
@@ -158,6 +176,9 @@ type table struct {
 	decodeExec    []*regexp.Regexp
 	localHost     map[string]bool
 	pathSuffix    []string
+	contentKey    map[string]bool
+	senderKey     map[string]bool
+	searchToken   map[string]bool
 }
 
 type compiledSetting struct {
@@ -203,6 +224,7 @@ func load() (*table, error) {
 		t.urlKey, t.redirectKey, t.recipientKey = set(t.URLKeys), set(t.RedirectKeys), set(t.RecipientKeys)
 		t.sqlKey, t.sqlGenericKey = set(t.SQLKeys), set(t.SQLGenericKeys)
 		t.codeKey, t.codeToken, t.localHost = set(t.CodeKeys), set(t.CodeToolTokens), set(t.LocalHosts)
+		t.contentKey, t.senderKey, t.searchToken = set(t.ContentKeys), set(t.SenderKeys), set(t.SearchTokens)
 		for _, suf := range t.PathKeySuffix {
 			t.pathSuffix = append(t.pathSuffix, "_"+suf)
 		}
@@ -292,10 +314,11 @@ func Tokens(name string) []string {
 // into single underscores.
 func normKey(k string) string { return strings.Join(Tokens(k), "_") }
 
-// Map reads one call. args is the JSON argument object; anything else (an
-// array, a string) yields a mapping with no effects. server is the MCP server
-// the connector reports for the call (a bare tool name carries none); empty
-// means the server the name spells.
+// Map reads one call. args is the JSON argument object (a JSON document inside
+// a JSON string is read too, as a proxy tool sends it); anything else yields a
+// mapping with no effects. server is the MCP server the connector reports for
+// the call (a bare tool name carries none); empty means the server the name
+// spells.
 func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 	t, err := load()
 	if err != nil {
@@ -308,11 +331,13 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 	server = strings.ToLower(server)
 	m := Mapping{Server: server, Name: name}
 	toks := Tokens(name)
+	srvToks := Tokens(server)
 	if fam, ok := t.Servers[server]; ok {
 		m.Family = Family(fam)
 	}
 	if m.Family == FamilyUnknown {
-		for _, tok := range append([]string{server}, toks...) {
+		cands := append(append([]string{server}, srvToks...), toks...)
+		for _, tok := range cands {
 			if fam, ok := t.Servers[tok]; ok {
 				m.Family = Family(fam)
 				break
@@ -330,20 +355,17 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 			break
 		}
 	}
-	codeTool := m.Family == FamilyCode
+	w := &walker{t: t, m: &m, dbTool: m.Family == FamilyDB, codeTool: m.Family == FamilyCode}
 	for _, tok := range toks {
 		if t.codeToken[tok] {
-			codeTool = true
+			w.codeTool = true
+		}
+		if t.searchToken[tok] {
+			w.searchTool = true
 		}
 	}
-	var obj map[string]any
-	if len(args) > 0 {
-		dec := json.NewDecoder(strings.NewReader(string(args)))
-		dec.UseNumber()
-		if err := dec.Decode(&obj); err != nil {
-			obj = nil
-		}
-	}
+	w.effects = bounded.NewCounter(&w.trunc, bounded.Effects, maxEffects)
+	w.nodes = bounded.NewCounter(&w.trunc, bounded.Nodes, maxNodes)
 	if verbs, ok := t.KnownRoles[server]; ok && m.Verb != "" {
 		for _, v := range verbs {
 			if Kind(v) == m.Verb {
@@ -351,77 +373,93 @@ func Map(tool string, args json.RawMessage, server string) (Mapping, error) {
 			}
 		}
 	}
-	w := walker{t: t, m: &m, codeTool: codeTool, dbTool: m.Family == FamilyDB}
-	w.object(obj, 0, "")
+	if len(args) > 0 {
+		if root, ok := decodeLenient(args); ok {
+			w.proxyVerb(root)
+			w.value("", root, 0)
+		} else if jsonDocument(string(args)) {
+			w.trunc.Hit(bounded.Nodes) // a document the reader could not parse: unread, not clean
+		}
+	}
+	m.Truncated = w.trunc.Set()
+	m.Content = w.content.String()
 	return m, nil
 }
 
-type walker struct {
-	t        *table
-	m        *Mapping
-	codeTool bool
-	dbTool   bool
-	nested   int
+// proxyVerb takes the verb of a proxy tool from the tool name its arguments
+// carry ({"name": "write_file", "arguments": {...}}), when the name of the
+// call itself has none. The first key of the table's name_keys that holds a
+// short string decides.
+func (w *walker) proxyVerb(root any) {
+	obj, ok := root.(map[string]any)
+	if !ok || w.m.Verb != "" {
+		return
+	}
+	for _, k := range w.t.NameKeys {
+		name, ok := obj[k].(string)
+		if !ok || name == "" || len(name) > 96 {
+			continue
+		}
+		for _, kind := range []Kind{KindDelete, KindWrite, KindExec, KindNetSend, KindList, KindRead} {
+			for _, tok := range Tokens(name) {
+				if w.t.verbOf[tok] == kind {
+					w.m.Verb = kind
+					return
+				}
+			}
+		}
+	}
 }
 
-// genericSQL reports that a value under a generic key (query, q, command) is
-// SQL. The key alone says nothing (a search tool has a query too); the tool
-// does: a database server (the table's db family) or a tool whose name has
-// the execute verb, and a value of statement shape.
-func (w *walker) genericSQL(val string) bool {
-	if w.dbTool {
-		return true
-	}
-	return w.m.Verb == KindExec && startsLikeSQL(val)
+// walker reads one call. It is used by pointer (the counters are bound to
+// its Truncated).
+type walker struct {
+	t          *table
+	m          *Mapping
+	trunc      bounded.Truncated
+	effects    bounded.Counter
+	nodes      bounded.Counter
+	content    strings.Builder
+	codeTool   bool
+	dbTool     bool
+	searchTool bool
+	nested     int
 }
 
 func (w *walker) add(e Effect) {
-	if len(w.m.Effects) >= maxEffects {
-		w.m.Truncated = true
+	if !w.effects.Take() {
 		return
 	}
 	e.Reason = "mcp_semantics"
 	w.m.Effects = append(w.m.Effects, e)
 }
 
-func (w *walker) object(obj map[string]any, depth int, parent string) {
-	if depth > maxDepth {
-		w.m.Truncated = true
+func (w *walker) value(key string, v any, depth int) {
+	if !w.nodes.Take() || !w.trunc.Within(bounded.Depth, depth, maxDepth) {
 		return
 	}
-	keys := make([]string, 0, len(obj))
-	for k := range obj {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, rawKey := range keys {
-		w.value(normKey(rawKey), obj[rawKey], depth, parent)
-	}
-}
-
-func (w *walker) value(key string, v any, depth int, parent string) {
 	switch x := v.(type) {
 	case map[string]any:
-		w.object(x, depth+1, key)
-	case []any:
-		if depth > maxDepth {
-			w.m.Truncated = true
-			return
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
 		}
+		sort.Strings(keys)
+		for _, rawKey := range keys {
+			w.value(normKey(rawKey), x[rawKey], depth+1)
+		}
+	case []any:
 		for i, item := range x {
-			if i >= maxItems {
-				w.m.Truncated = true
+			if !w.trunc.Within(bounded.Items, i+1, maxItems) {
 				return
 			}
 			if it, ok := item.(map[string]any); ok {
 				w.operationObject(it)
-				w.object(it, depth+1, key)
-				continue
 			}
-			w.value(key, item, depth+1, parent)
+			w.value(key, item, depth+1)
 		}
 	case string:
-		w.str(key, x, parent)
+		w.str(key, x)
 	case bool:
 		w.setting(key, fmt.Sprint(x))
 	}
@@ -446,34 +484,62 @@ func (w *walker) setting(key, value string) {
 	}
 }
 
-func (w *walker) str(key, val, parent string) {
+func (w *walker) str(key, val string) {
 	if len(val) > maxString {
 		val = val[:maxString]
-		w.m.Truncated = true
+		w.trunc.Hit(bounded.Bytes)
 	}
 	val = strings.TrimSpace(val)
 	if val == "" {
 		return
 	}
 	t := w.t
+	// Text the call writes: collected for the rules that read it, and never
+	// read as a JSON document (a file body is data).
+	if t.contentKey[key] {
+		if w.content.Len()+len(val) > maxContent {
+			w.trunc.Hit(bounded.Bytes)
+		} else {
+			w.content.WriteString(val)
+			w.content.WriteByte('\n')
+		}
+		return
+	}
 	// A string that holds a JSON document ("arguments": "{...}") is read as
-	// that document, to a bounded nesting.
-	if (val[0] == '{' || val[0] == '[') && w.nested < maxNested {
-		var inner any
-		if json.Unmarshal([]byte(val), &inner) == nil {
+	// that document, to a bounded nesting. A document the reader cannot parse
+	// is unread, not clean.
+	if jsonDocument(val) {
+		if w.nested >= maxNested {
+			w.trunc.Hit(bounded.Depth)
+			return
+		}
+		if inner, ok := decodeLenient([]byte(val)); ok {
 			w.nested++
-			w.value(key, inner, 0, parent)
+			w.value(key, inner, 0)
 			w.nested--
 			return
 		}
+		w.trunc.Hit(bounded.Nodes)
+		return
 	}
-	if p, ok := fileURIPath(val); ok {
+	switch p, kind := fileURIPath(val); kind {
+	case fileURIPlaced:
 		val = p
+	case fileURIUnplaced:
+		w.trunc.Hit(bounded.Nodes)
+		return
 	}
-	// A string value can also be a setting (acl: "public-read").
-	w.setting(key, strings.ReplaceAll(val, "-", "_"))
+	if len(val) <= 256 {
+		// A string value can also be a setting (acl: "public-read").
+		w.setting(key, strings.ReplaceAll(val, "-", "_"))
+	}
 
 	switch {
+	case t.senderKey[key] && (looksAddress(val) || looksURL(val)):
+		if h := hostFromAddrOrURL(val); h != "" {
+			w.m.Senders = append(w.m.Senders, h)
+		}
+		return
 	case t.redirectKey[key]:
 		w.destination(key, val, RoleRedirect)
 	case t.recipientKey[key] && (looksAddress(val) || looksURL(val)):
@@ -484,7 +550,11 @@ func (w *walker) str(key, val, parent string) {
 
 	switch {
 	case t.sqlKey[key] || (t.sqlGenericKey[key] && w.genericSQL(val)):
-		if classes := ClassifySQL(val); len(classes) > 0 {
+		classes, over := ClassifySQL(val)
+		if over {
+			w.trunc.Hit(bounded.Bytes)
+		}
+		if len(classes) > 0 {
 			w.add(Effect{Kind: KindSQL, Arg: key, SQL: classes})
 		}
 		return
@@ -495,48 +565,35 @@ func (w *walker) str(key, val, parent string) {
 
 	switch {
 	case t.pathWrite[key] && looksPath(val):
-		w.add(Effect{Kind: KindWrite, Arg: key, Path: val})
+		w.path(KindWrite, key, val)
 	case inputKeys[key] && looksPath(val):
-		w.add(Effect{Kind: KindRead, Arg: key, Path: val})
+		w.path(KindRead, key, val)
 	case (t.pathRead[key] || t.pathKeySuffix(key)) && looksPath(val):
-		w.add(Effect{Kind: w.pathKind(), Arg: key, Path: val})
+		w.path(w.pathKind(), key, val)
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
-		w.add(Effect{Kind: w.pathKind(), Arg: key, Path: val})
+		w.path(w.pathKind(), key, val)
 	}
 }
 
-// inputKeys always name a file that is read, whatever the verb of the tool name.
-var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "input_path": true, "input_file": true, "from": true}
-
-// fileURIPath returns the path of a file:// URI (file:///etc/x, file://localhost/etc/x).
-func fileURIPath(s string) (string, bool) {
-	rest, ok := strings.CutPrefix(strings.ToLower(s[:min(len(s), 7)]), "file://")
-	if !ok || rest != "" {
-		return "", false
+// path adds a path effect. A path past maxPath is still judged (the native
+// reader normalises and matches it); the bound is recorded.
+func (w *walker) path(kind Kind, key, val string) {
+	if len(val) > maxPath {
+		w.trunc.Hit(bounded.Bytes)
 	}
-	u, err := url.Parse(s)
-	if err != nil || (u.Host != "" && !strings.EqualFold(u.Host, "localhost")) {
-		return "", false
-	}
-	p := u.Path
-	if len(p) >= 3 && p[0] == '/' && p[2] == ':' { // file:///C:/x
-		p = p[1:]
-	}
-	if p == "" {
-		return "", false
-	}
-	return p, true
+	w.add(Effect{Kind: kind, Arg: key, Path: cleanPath(val)})
 }
 
-// pathKeySuffix reports a key that ends in one of the table's path words
-// (relative_path, config_file_name).
-func (t *table) pathKeySuffix(key string) bool {
-	for _, suf := range t.pathSuffix {
-		if strings.HasSuffix(key, suf) {
-			return true
-		}
+// genericSQL reports that a value under a generic key (query, q, command) is
+// SQL. The key alone says nothing (a search tool has a query too); the shape
+// does: a database tool (server or name in the table's db family) reads it as
+// SQL, any other tool does when the value has statement shape and the tool is
+// not a search or lookup.
+func (w *walker) genericSQL(val string) bool {
+	if w.dbTool {
+		return true
 	}
-	return false
+	return !w.searchTool && startsLikeSQL(val)
 }
 
 // pathKind is the kind of a path under a read-style key: the verb of the name
@@ -547,6 +604,20 @@ func (w *walker) pathKind() Kind {
 		return w.m.Verb
 	}
 	return KindRead
+}
+
+// inputKeys always name a file that is read, whatever the verb of the tool name.
+var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "input_path": true, "input_file": true, "from": true}
+
+// pathKeySuffix reports a key that ends in one of the table's path words
+// (relative_path, config_file_name).
+func (t *table) pathKeySuffix(key string) bool {
+	for _, suf := range t.pathSuffix {
+		if strings.HasSuffix(key, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *walker) destination(key, val string, role Role) {
@@ -565,6 +636,98 @@ func (w *walker) destination(key, val string, role Role) {
 		e.Addr = val
 	}
 	w.add(e)
+}
+
+func hostFromAddrOrURL(v string) string {
+	switch {
+	case looksURL(v):
+		return hostOf(v)
+	case looksAddress(v):
+		return strings.ToLower(v[strings.LastIndex(v, "@")+1:])
+	}
+	return ""
+}
+
+// decodeLenient decodes a JSON document the way the servers that receive it
+// do: numbers of any size (1e400), and the NaN / Infinity / -Infinity literals
+// Python's json module accepts. A document that holds a JSON string (a proxy
+// sends its arguments that way) is decoded once more.
+func decodeLenient(raw []byte) (any, bool) {
+	dec := func(b []byte) (any, bool) {
+		d := json.NewDecoder(strings.NewReader(string(b)))
+		d.UseNumber()
+		var v any
+		if err := d.Decode(&v); err != nil {
+			return nil, false
+		}
+		if d.More() {
+			return nil, false
+		}
+		return v, true
+	}
+	if v, ok := dec(raw); ok {
+		return v, true
+	}
+	if fixed := replaceNonFinite(raw); fixed != nil {
+		return dec(fixed)
+	}
+	return nil, false
+}
+
+// replaceNonFinite replaces the bare NaN, Infinity and -Infinity literals
+// outside strings with null. It returns nil when there is none.
+func replaceNonFinite(raw []byte) []byte {
+	var out []byte
+	inStr, esc, changed := false, false, false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inStr {
+			out = append(out, c)
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			out = append(out, c)
+			continue
+		}
+		for _, lit := range []string{"-Infinity", "Infinity", "NaN"} {
+			if strings.HasPrefix(string(raw[i:min(len(raw), i+len(lit))]), lit) {
+				out = append(out, "null"...)
+				i += len(lit) - 1
+				changed = true
+				c = 0
+				break
+			}
+		}
+		if c != 0 {
+			out = append(out, c)
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return out
+}
+
+var reJSONDoc = regexp.MustCompile(`(?s)^\s*(?:\{\s*(?:"|\})|\[\s*(?:["\[{\]\-0-9tfn]))`)
+
+// jsonDocument reports a string that is a JSON object or array: it starts like
+// one and ends like one. Prose that merely starts with a bracket is not.
+func jsonDocument(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 2 || !reJSONDoc.MatchString(s) {
+		return false
+	}
+	last := s[len(s)-1]
+	return last == '}' || last == ']'
 }
 
 // LocalHost reports that a host is this machine.
@@ -594,15 +757,73 @@ func looksAddress(s string) bool  { return reAddr.MatchString(s) }
 func looksURL(s string) bool      { return reURL.MatchString(s) }
 func startsLikeSQL(s string) bool { return reSQL.MatchString(s) }
 
+const (
+	fileURINone = iota
+	fileURIPlaced
+	fileURIUnplaced
+)
+
+// fileURIPath reads a file: URI as the servers that receive it do: file:///x,
+// file:/x, file://localhost/x and a loopback host, with percent escapes
+// decoded and a Windows drive (file:///C:/x) as C:/x. A file: URI of another
+// host (a network share) or one with no path is unplaced: the caller must not
+// treat it as clean.
+func fileURIPath(s string) (string, int) {
+	if len(s) < 5 || !strings.EqualFold(s[:5], "file:") {
+		return "", fileURINone
+	}
+	rest := s[5:]
+	host := ""
+	if strings.HasPrefix(rest, "//") {
+		rest = rest[2:]
+		i := strings.IndexByte(rest, '/')
+		if i < 0 {
+			return "", fileURIUnplaced
+		}
+		host, rest = rest[:i], rest[i:]
+	}
+	switch strings.ToLower(strings.Trim(host, "[]")) {
+	case "", "localhost", "127.0.0.1", "::1":
+	default:
+		return "", fileURIUnplaced
+	}
+	if q := strings.IndexAny(rest, "?#"); q >= 0 {
+		rest = rest[:q]
+	}
+	p, err := url.PathUnescape(rest)
+	if err != nil {
+		p = rest
+	}
+	if len(p) >= 3 && p[0] == '/' && p[2] == ':' {
+		p = p[1:]
+	}
+	if p == "" || (p[0] != '/' && !(len(p) >= 2 && p[1] == ':')) {
+		return "", fileURIUnplaced
+	}
+	return p, fileURIPlaced
+}
+
+// cleanPath collapses a leading run of slashes to one (POSIX reads //x as /x).
+func cleanPath(p string) string {
+	if strings.HasPrefix(p, "//") {
+		return "/" + strings.TrimLeft(p, "/")
+	}
+	return p
+}
+
 // absolutePath reports a value that is a path by shape alone: rooted, home
-// relative or a drive path.
+// relative or a drive path. Spaces are allowed in a rooted value that has at
+// least two separators ("/home/u/My Documents/x"); other shell metacharacters
+// are not.
 func absolutePath(s string) bool {
-	if len(s) > 1024 || strings.ContainsAny(s, "\n\r\x00") || strings.HasPrefix(s, "//") ||
-		looksURL(s) || looksAddress(s) {
+	if strings.ContainsAny(s, "\n\r\x00") || looksURL(s) || looksAddress(s) || strings.Contains(s, "://") {
 		return false
 	}
 	switch {
-	case strings.HasPrefix(s, "/") && len(s) > 1 && !strings.ContainsAny(s, " *{}$`;|&<>\"'"):
+	case strings.HasPrefix(s, "/") && len(s) > 1 && !strings.ContainsAny(s, "*{}$`;|&<>\"'"):
+		if strings.Contains(s, " ") {
+			return strings.Count(s, "/") >= 2
+		}
 		return true
 	case s == "~" || strings.HasPrefix(s, "~/") || strings.HasPrefix(s, `~\`):
 		return true
@@ -618,7 +839,7 @@ func looksPath(s string) bool {
 	if absolutePath(s) {
 		return true
 	}
-	if strings.ContainsAny(s, "\n\r\x00") || len(s) > 1024 || looksURL(s) || looksAddress(s) || strings.Contains(s, "://") {
+	if strings.ContainsAny(s, "\n\r\x00") || looksURL(s) || looksAddress(s) || strings.Contains(s, "://") {
 		return false
 	}
 	return strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.HasPrefix(s, `.\`) ||
@@ -639,9 +860,6 @@ func DecodeExec(code string) bool {
 	t, err := load()
 	if err != nil {
 		return false
-	}
-	if len(code) > maxString {
-		code = code[:maxString]
 	}
 	for _, re := range t.decodeExec {
 		if re.MatchString(code) {

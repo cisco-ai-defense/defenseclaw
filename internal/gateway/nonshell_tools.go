@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/toolshape"
 )
@@ -33,7 +34,7 @@ const (
 	sqlMutationOwnerRuleID = "impact.sql_destructive_mutation"
 
 	// maxNonShellPathTwins bounds the file reads one call may have judged.
-	maxNonShellPathTwins = 64
+	maxNonShellPathTwins = 64 // twin dispatches of one call (bounded.Paths); the table's path rules read every path
 )
 
 // nonShellToolFindings reads a non-shell tool call (an MCP or app tool) as
@@ -51,7 +52,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 		return findings
 	}
 	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args, mcpServer)
-	if err != nil || (len(mapping.Effects) == 0 && !mapping.Truncated) {
+	if err != nil || (len(mapping.Effects) == 0 && !mapping.Truncated.Any()) {
 		return findings
 	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
@@ -60,7 +61,9 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 	}
 	hard := request.StrictPolicy || request.ManagedInstall
 	out := append([]RuleFinding(nil), findings...)
-	add := func(ruleID, note string) {
+	// add adds a rule's finding once. An uncertain finding (the call's own
+	// account or API host is unknown) alerts in every tier and never blocks.
+	add := func(ruleID, note string, uncertain bool) {
 		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
 			return
 		}
@@ -68,17 +71,30 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 		if !ok {
 			return
 		}
-		out = append(out, nonShellFinding(rule, note, mapping.Name, hard))
+		out = append(out, nonShellFinding(rule, note, mapping.Name, hard && !uncertain))
+	}
+	// The hosts the call itself names for its own parties: its primary
+	// recipients and request URLs, and its own account when it says which.
+	own := map[string]bool{}
+	for _, e := range mapping.Effects {
+		if (e.Role == toolshape.RolePrimary || e.Role == toolshape.RoleURL) && e.Host != "" {
+			own[e.Host] = true
+		}
+	}
+	senders := map[string]bool{}
+	for _, h := range mapping.Senders {
+		senders[h] = true
 	}
 
 	// One reading of the call's text, shared by every path effect: the path
 	// rules that read what is written, and the first write twin.
-	content := nonShellContentArg(request.Input.Args)
+	content := mapping.Content
 	twinContent := content
 	// A bound that cut the walk short leaves part of the call unread: the call
-	// is judged unknown at least (an evaluation limit: alert, strict and
-	// managed block), never clean.
-	overflow := mapping.Truncated
+	// is judged unknown at least (bounded.Floor), never clean. What was read
+	// before the bound is judged as always.
+	var trunc bounded.Truncated
+	trunc.Merge(mapping.Truncated)
 	twins := 0
 	seenPath := map[string]bool{}
 	for _, e := range mapping.Effects {
@@ -92,10 +108,10 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			// The table's rules are cheap: every path effect is read, with a
 			// relative path resolved against the session's directory.
 			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), nonShellResolvePath(request.Input.CWD, e.Path), content) {
-				add(id, "path in MCP tool arguments")
+				add(id, "path in MCP tool arguments", false)
 			}
 			if twins >= maxNonShellPathTwins {
-				overflow = true
+				trunc.Hit(bounded.Paths)
 				continue
 			}
 			twins++
@@ -125,40 +141,43 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				case toolshape.SQLDrop, toolshape.SQLTruncate, toolshape.SQLDeleteAll:
 					// The exact SQL-mutation owner already judged this call.
 					if !slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == sqlMutationOwnerRuleID }) {
-						add(mcpSQLDestructiveRuleID, "SQL "+class.Class)
+						add(mcpSQLDestructiveRuleID, "SQL "+class.Class, false)
 					}
 				case toolshape.SQLPrivilege:
-					add(mcpSQLPrivilegeRuleID, "SQL privilege change")
+					add(mcpSQLPrivilegeRuleID, "SQL privilege change", false)
 				case toolshape.SQLAuditOff:
-					add(mcpSQLAuditOffRuleID, "SQL turns an audit or logging setting off")
+					add(mcpSQLAuditOffRuleID, "SQL turns an audit or logging setting off", false)
 				case toolshape.SQLCredential:
-					add(mcpSQLCredentialRuleID, "SQL sets a credential column")
+					add(mcpSQLCredentialRuleID, "SQL sets a credential column", false)
 				}
 			}
 		case toolshape.KindExec:
 			if toolshape.DecodeExec(e.Code) {
-				add(mcpCodeDecodeExecRuleID, "decoded text is run")
+				add(mcpCodeDecodeExecRuleID, "decoded text is run", false)
 			}
 		case toolshape.KindSetting:
-			add(mcpSettingDowngradeID, e.Setting)
+			add(mcpSettingDowngradeID, e.Setting, false)
 		case toolshape.KindNetSend, toolshape.KindNetFetch:
-			// Every recipient and every copy field is read, whatever other
-			// recipient the call names: a recipient the call itself supplies
-			// proves nothing about the others. A copy or output field to a host
-			// that is not this machine is a redirect; a paste, file-drop or
-			// webhook-catcher host is a collector for a fetch as for a send.
+			// A copy or output field that names a host outside the call's own
+			// parties (its recipients, its request URL, its own account) is a
+			// redirect. When the call does not say whose account it is the
+			// finding is uncertain: an alert in every tier, never a block. A
+			// paste, file-drop or webhook-catcher host is a collector for a
+			// fetch as for a send.
 			if e.Role == toolshape.RoleRedirect && e.Host != "" &&
-				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) {
-				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg)
+				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) &&
+				!own[e.Host] && !senders[e.Host] {
+				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, len(senders) == 0)
 			}
 			if e.Host != "" && nonShellCollectorHost(e.Host) {
-				add(mcpSendCollectorRuleID, "reaches a paste, file-drop or webhook-catcher host")
+				add(mcpSendCollectorRuleID, "reaches a paste, file-drop or webhook-catcher host", false)
 			}
 		}
 	}
-	if overflow {
-		out = withTrustedActionLimitFinding(out, request.EnforcementCapable)
-	}
+	// Every cap the reading reached counts: the limit finding, at least the
+	// unknown tier of the pack (alert in default, permissive and managed
+	// default; block in strict).
+	out = withBoundedTruncation(out, trunc.Set(), request)
 	return out
 }
 
@@ -182,7 +201,8 @@ func nonShellToolApplies(request trustedActionRequest, mcpServer string) bool {
 	if tool == "" || request.Input.Command != "" || len(request.Input.Argv) != 0 || trustedShimArgvTool(tool) {
 		return false
 	}
-	if mcpServer == "" && actionfacts.KnownTool(tool) {
+	if mcpServer == "" && actionfacts.KnownTool(tool) &&
+		!strings.Contains(strings.ToLower(string(request.Input.Args)), "file:") {
 		return false
 	}
 	if _, ok := connector.ShellCommandArgs(request.Connector, tool, request.Input.Args); ok {
@@ -259,19 +279,14 @@ func nonShellPathTwin(ctx context.Context, request trustedActionRequest, e tools
 	return dispatchTrustedAction(ctx, twin)
 }
 
-// nonShellContentArg is the text an MCP write call carries, for the rules
-// that read what is written.
-func nonShellContentArg(raw json.RawMessage) string {
-	var obj map[string]any
-	if json.Unmarshal(raw, &obj) != nil {
+// nonShellContentOf is the text a native file tool call writes, read the way
+// the MCP lane reads it (nested values and edit lists included).
+func nonShellContentOf(raw json.RawMessage) string {
+	m, err := toolshape.Map("write", raw, "")
+	if err != nil {
 		return ""
 	}
-	for _, key := range []string{"content", "contents", "text", "data", "body", "file_text"} {
-		if s, ok := obj[key].(string); ok {
-			return s
-		}
-	}
-	return ""
+	return m.Content
 }
 
 // shellToolFindings judges a shell call with the path and command rules of
@@ -292,7 +307,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		if !actionfacts.PathTool(request.Input.Tool) {
 			return findings
 		}
-		text = nonShellContentArg(request.Input.Args)
+		text = nonShellContentOf(request.Input.Args)
 		if !toolshape.ShellCandidate(string(request.Input.Args)) {
 			return findings
 		}

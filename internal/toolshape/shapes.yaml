@@ -23,6 +23,19 @@ servers:
   db: db
   database: db
   sql: db
+  bigquery: db
+  snowflake: db
+  clickhouse: db
+  duckdb: db
+  mssql: db
+  supabase: db
+  redshift: db
+  trino: db
+  oracle: db
+  mariadb: db
+  mongodb: db
+  cockroachdb: db
+  planetscale: db
   gmail: mail
   smtp: mail
   mail: mail
@@ -52,16 +65,24 @@ verbs:
 
 # Argument names that carry a path. The value must also look like a path.
 path_keys:
-  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd, relative_path, rel_path, relative_file_path, file_name, path_in_project, file_uri, resource_uri, absolute_path, abs_path, full_path, filepaths, file_paths]
+  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd, relative_path, rel_path, relative_file_path, file_name, path_in_project, pathname, path_name, file_uri, resource_uri, absolute_path, abs_path, full_path, filepaths, file_paths]
   write: [output, output_path, output_file, dest, destination, dst, to_path, out, out_path, save_to]
 # A key that ends in one of these words (after normalising: relative_path, fileName)
 # also carries a path.
-path_key_suffixes: [path, paths, file, files, file_name, file_path, filepath, filename]
+path_key_suffixes: [path, paths, file, files, file_name, file_path, filepath, filename, pathname]
 # Server segments (mcp__<server>__) whose verbs have one certain meaning, so the
 # role of their path effects is known, not guessed.
 known_roles:
   filesystem: [read, write, delete, list]
   fs: [read, write, delete, list]
+# Argument names whose value is text the call writes.
+content_keys: [content, contents, text, data, body, file_text, new_text, new_string, new_str, replacement, insert_text, new_content, file_content]
+# Argument names that name the caller's own account (a mail sender, an API caller).
+sender_keys: [from, sender, from_address, from_email, sender_email, account, user_email, reply_to]
+# Name tokens of a search or lookup tool: its query key is a free-text search, not a statement.
+search_tokens: [search, find, lookup, grep, browse, suggest, autocomplete, ask]
+# Argument names that hold the name of the tool a proxy tool calls.
+name_keys: [name, tool, tool_name, method]
 # Argument names that carry a URL or host.
 url_keys: [url, urls, uri, endpoint, href, link, webhook, webhook_url, api_endpoint, base_url, host, hostname, server, address]
 # Argument names that redirect output to another party (a copy, a forward, an

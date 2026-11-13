@@ -45,26 +45,54 @@ var (
 	reMainVerb  = regexp.MustCompile(`(?i)^\s*(?:delete|update|insert|select|merge|drop|truncate|grant)\b`)
 )
 
-// ClassifySQL reads the statements of sql (split on ";" outside quotes,
-// comments removed, a leading WITH skipped) and returns the classes that
-// matter for the guardrail. It reads text only; it does not prove that a
-// statement runs, and a caller decides whether a tool is a database surface.
-// A statement is read under both quoting rules (standard SQL, and MySQL where
-// a backslash escapes a quote), and the classes of either reading count.
-func ClassifySQL(sql string) []SQLClass {
-	var out []SQLClass
+// ClassifySQL reads the statements of sql (comments removed, split on ";"
+// outside quotes, a leading WITH skipped) and returns the classes that matter
+// for the guardrail. It reads text only; it does not prove that a statement
+// runs, and a caller decides whether a tool is a database surface.
+//
+// A text is read under every quoting and comment rule a dialect could apply
+// to the characters it holds (a backslash that escapes a quote in MySQL, "#"
+// that starts a comment in MySQL and is an operator in PostgreSQL, "$$" that
+// quotes in PostgreSQL), and the classes of any reading count: the stronger
+// one wins. over reports a text past the bound (it was read in part).
+func ClassifySQL(sql string) (classes []SQLClass, over bool) {
+	if len(sql) > maxSQL {
+		sql, over = sql[:maxSQL], true
+	}
+	variants := []sqlDialect{{}}
+	expand := func(has bool, set func(*sqlDialect)) {
+		if !has {
+			return
+		}
+		n := len(variants)
+		for i := 0; i < n; i++ {
+			v := variants[i]
+			set(&v)
+			variants = append(variants, v)
+		}
+	}
+	expand(strings.Contains(sql, `\`), func(d *sqlDialect) { d.backslash = true })
+	expand(strings.Contains(sql, "#"), func(d *sqlDialect) { d.hash = true })
+	expand(strings.Contains(sql, "$"), func(d *sqlDialect) { d.dollar = true })
 	seen := map[string]bool{}
-	for _, backslash := range []bool{false, true} {
-		for _, stmt := range splitSQL(stripSQLComments(sql), backslash) {
+	for _, d := range variants {
+		for _, stmt := range splitSQL(sql, d) {
 			for _, c := range classifyStatement(skipCTE(stmt)) {
 				if !seen[c.Class] {
 					seen[c.Class] = true
-					out = append(out, c)
+					classes = append(classes, c)
 				}
 			}
 		}
 	}
-	return out
+	return classes, over
+}
+
+// sqlDialect is one reading of the characters whose meaning differs by dialect.
+type sqlDialect struct {
+	backslash bool // a backslash inside a quote escapes the next character (MySQL)
+	hash      bool // "#" starts a comment to the end of the line (MySQL)
+	dollar    bool // $tag$ ... $tag$ is a quoted string (PostgreSQL)
 }
 
 // skipCTE returns the main statement of one that starts with WITH: the text
@@ -174,48 +202,72 @@ func indexWhere(s string) int {
 	return -1
 }
 
-// stripSQLComments removes -- and /* */ comments outside quotes. The body of
-// a MySQL executable comment (/*! ... */, /*!50000 ... */) is SQL, so it is
-// kept and only its markers are dropped.
-func stripSQLComments(s string) string {
-	var b strings.Builder
+// splitSQL removes comments and splits on ";" outside quotes in one pass, under
+// the reading d. The body of a MySQL executable comment (/*! ... */,
+// /*!50000 ... */) is SQL, so it is kept and only its markers are dropped.
+func splitSQL(s string, d sqlDialect) []string {
+	var out []string
+	var cur strings.Builder
 	var quote byte
+	var dollarTag string
 	exec := false
+	flush := func() {
+		if t := strings.TrimSpace(cur.String()); t != "" {
+			out = append(out, t)
+		}
+		cur.Reset()
+	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
+		case dollarTag != "":
+			if strings.HasPrefix(s[i:], dollarTag) {
+				cur.WriteString(dollarTag)
+				i += len(dollarTag) - 1
+				dollarTag = ""
+			} else {
+				cur.WriteByte(c)
+			}
 		case quote != 0:
-			b.WriteByte(c)
-			if c == '\\' && i+1 < len(s) {
+			cur.WriteByte(c)
+			if d.backslash && c == '\\' && i+1 < len(s) {
 				i++
-				b.WriteByte(s[i])
+				cur.WriteByte(s[i])
 			} else if c == quote {
 				quote = 0
 			}
 		case c == '\'' || c == '"' || c == '`':
 			quote = c
-			b.WriteByte(c)
+			cur.WriteByte(c)
+		case d.dollar && c == '$':
+			if tag := dollarTagAt(s[i:]); tag != "" {
+				cur.WriteString(tag)
+				i += len(tag) - 1
+				dollarTag = tag
+			} else {
+				cur.WriteByte(c)
+			}
 		case c == '-' && i+1 < len(s) && s[i+1] == '-':
 			for i < len(s) && s[i] != '\n' {
 				i++
 			}
-			b.WriteByte(' ')
-		case c == '#':
+			cur.WriteByte(' ')
+		case d.hash && c == '#':
 			for i < len(s) && s[i] != '\n' {
 				i++
 			}
-			b.WriteByte(' ')
+			cur.WriteByte(' ')
 		case c == '/' && i+2 < len(s) && s[i+1] == '*' && s[i+2] == '!':
 			i += 2
 			for i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
 				i++
 			}
 			exec = true
-			b.WriteByte(' ')
+			cur.WriteByte(' ')
 		case exec && c == '*' && i+1 < len(s) && s[i+1] == '/':
 			i++
 			exec = false
-			b.WriteByte(' ')
+			cur.WriteByte(' ')
 		case c == '/' && i+1 < len(s) && s[i+1] == '*':
 			end := strings.Index(s[i+2:], "*/")
 			if end < 0 {
@@ -223,40 +275,28 @@ func stripSQLComments(s string) string {
 			} else {
 				i += end + 3
 			}
-			b.WriteByte(' ')
+			cur.WriteByte(' ')
+		case c == ';':
+			flush()
 		default:
-			b.WriteByte(c)
+			cur.WriteByte(c)
 		}
 	}
-	return b.String()
+	flush()
+	return out
 }
 
-// splitSQL splits on ";" outside quotes. With backslash set, a backslash
-// inside a quote escapes the next character (MySQL).
-func splitSQL(s string, backslash bool) []string {
-	var out []string
-	var quote byte
-	start := 0
-	for i := 0; i < len(s); i++ {
+// dollarTagAt returns the dollar-quote tag ($$ or $name$) that starts s, or "".
+func dollarTagAt(s string) string {
+	for i := 1; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case quote != 0:
-			if backslash && c == '\\' {
-				i++
-			} else if c == quote {
-				quote = 0
-			}
-		case c == '\'' || c == '"' || c == '`':
-			quote = c
-		case c == ';':
-			if t := strings.TrimSpace(s[start:i]); t != "" {
-				out = append(out, t)
-			}
-			start = i + 1
+		case c == '$':
+			return s[:i+1]
+		case c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || (i > 1 && c >= '0' && c <= '9'):
+		default:
+			return ""
 		}
 	}
-	if t := strings.TrimSpace(s[start:]); t != "" {
-		out = append(out, t)
-	}
-	return out
+	return ""
 }
