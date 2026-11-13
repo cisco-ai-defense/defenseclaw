@@ -177,7 +177,10 @@ func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT action, `+audit.StructuredJSONReadSQL("", true, true)+` FROM audit_events WHERE session_id=? AND action IN ('connector-hook','tool_invocation')`, session)
+	// A benign per-user allow keeps one local row, its hook_decision row,
+	// which names the operation of its own tool call; connector-hook and
+	// tool_start are exported only (#1384).
+	rows, err := db.Query(`SELECT action, `+audit.StructuredJSONReadSQL("", true, true)+` FROM audit_events WHERE session_id=? AND action IN ('hook_decision','connector-hook','tool_invocation')`, session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,13 +197,15 @@ func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 		var doc any
 		_ = json.Unmarshal([]byte(structured.String), &doc)
 		switch action {
-		case "connector-hook":
+		case "hook_decision":
 			decisionRows++
-			decisions[findJSONString(doc, "agent_operation_id")]++
-		case "tool_invocation":
-			if id := findJSONString(doc, "defenseclaw.operation.id"); id != "" {
+			id := findJSONString(doc, "defenseclaw.operation.id")
+			decisions[id]++
+			if id != "" {
 				toolOperations[id] = true
 			}
+		default:
+			t.Errorf("a %s row of a benign per-user allow is stored; it is exported only", action)
 		}
 	}
 	if err := rows.Err(); err != nil {

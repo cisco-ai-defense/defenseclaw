@@ -284,10 +284,12 @@ func (f managedHookAuditFixture) audited(t *testing.T, sessions ...string) map[s
 		t.Fatal(err)
 	}
 	got := make(map[string]string)
-	// A benign per-user allow keeps only its hook_decision row (#1384): a
-	// session with no connector-hook row is audited by that row.
+	// A benign per-user allow keeps only its hook_decision row (#1384): on
+	// a per-user fixture a session with no connector-hook row is audited by
+	// that row. A managed call always keeps its connector-hook row.
+	perUser := f.api.scannerCfg == nil || f.api.scannerCfg.DeploymentMode == ""
 	for _, event := range events {
-		if event.Action != "hook_decision" {
+		if !perUser || event.Action != "hook_decision" {
 			continue
 		}
 		for _, session := range sessions {
