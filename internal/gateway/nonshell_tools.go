@@ -82,7 +82,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			}
 			seenPath[key] = true
 			paths++
-			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), e.Path) {
+			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), e.Path, nonShellContentArg(request.Input.Args)) {
 				add(id, "path in MCP tool arguments")
 			}
 			for _, f := range nonShellPathTwin(ctx, request, e) {
@@ -266,7 +266,7 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 	}
 	for _, p := range facts.Paths {
 		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
-		for _, id := range toolshape.PathRules(string(p.Access), path) {
+		for _, id := range toolshape.PathRules(string(p.Access), path, command) {
 			add(id, "")
 		}
 	}

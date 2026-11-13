@@ -106,6 +106,17 @@ func TestPathLikeValuesUnderOtherKeys(t *testing.T) {
 	}
 }
 
+func TestExistenceChecksAreListingsNotReads(t *testing.T) {
+	m := mapOf(t, "mcp__files__check_file_exists", `{"filepath":"/home/u/.ssh/id_rsa"}`)
+	if len(m.Effects) != 1 || m.Effects[0].Kind != KindList {
+		t.Fatalf("effects = %+v", m.Effects)
+	}
+	m = mapOf(t, "mcp__files__read_file", `{"filepath":"/home/u/.ssh/id_rsa"}`)
+	if len(m.Effects) != 1 || m.Effects[0].Kind != KindRead {
+		t.Fatalf("effects = %+v", m.Effects)
+	}
+}
+
 func TestSendDestinations(t *testing.T) {
 	m := mapOf(t, "mcp__mail__send", `{"to":"a@corp.example","bcc":"b@other.example"}`)
 	var primary, redirect int
@@ -247,22 +258,31 @@ func TestBounds(t *testing.T) {
 }
 
 func TestRules(t *testing.T) {
-	if got := PathRules("read", "/etc/k8s/admin.conf"); !slices.Equal(got, []string{"PATH-K8S-CLUSTER-CRED"}) {
+	if got := PathRules("read", "/etc/k8s/admin.conf", ""); !slices.Equal(got, []string{"PATH-K8S-CLUSTER-CRED"}) {
 		t.Errorf("k8s = %v", got)
 	}
-	if got := PathRules("read", `/home/u/.config/gh/hosts.yml`); !slices.Equal(got, []string{"PATH-CRED-STORE-USER"}) {
+	if got := PathRules("read", `/home/u/.config/gh/hosts.yml`, ""); !slices.Equal(got, []string{"PATH-CRED-STORE-USER"}) {
 		t.Errorf("gh = %v", got)
 	}
-	if got := PathRules("write", "/etc/passwd"); !slices.Equal(got, []string{"PATH-ETC-PASSWD"}) {
+	if got := PathRules("write", "/etc/passwd", "echo svc:x:0:0::/:/bin/sh >> /etc/passwd"); !slices.Equal(got, []string{"PATH-ETC-PASSWD"}) {
 		t.Errorf("passwd write = %v", got)
 	}
-	if got := PathRules("read", "/etc/passwd"); len(got) != 0 {
+	if got := PathRules("append", "/etc/passwd", "echo git:x:1000:1000::/home/git:/bin/bash >> /etc/passwd"); len(got) != 0 {
+		t.Errorf("adding an ordinary account line is not a uid-0 line: %v", got)
+	}
+	if got := PathRules("read", "/etc/passwd", ""); len(got) != 0 {
 		t.Errorf("a passwd read is not in this table: %v", got)
 	}
-	if got := PathRules("append", `/etc/cron.d/x`); !slices.Equal(got, []string{"CMD-PERSIST-SYSTEM-SCHEDULE"}) {
+	if got := PathRules("append", `/etc/cron.d/x`, "echo '0 3 * * * root /home/u/clean.sh' | tee -a /etc/cron.d/x"); !slices.Equal(got, []string{"CMD-PERSIST-SYSTEM-SCHEDULE"}) {
 		t.Errorf("cron = %v", got)
 	}
-	if got := PathRules("read", "/repo/docs/etc/k8s/admin.conf.md"); len(got) != 0 {
+	if got := PathRules("write", "/etc/cron.d/x", "echo '@reboot root /opt/app/worker.py' > /etc/cron.d/x"); len(got) != 0 {
+		t.Errorf("a root job from a system path is ordinary administration: %v", got)
+	}
+	if got := PathRules("read", "/run/secrets/db_password", ""); len(got) != 0 {
+		t.Errorf("container secrets are the workload's own input: %v", got)
+	}
+	if got := PathRules("read", "/repo/docs/etc/k8s/admin.conf.md", ""); len(got) != 0 {
 		t.Errorf("an unrooted look-alike matched: %v", got)
 	}
 	if got := CommandRules("chmod", []string{"chmod", "u+s", "/x"}); !slices.Equal(got, []string{"CMD-PRIV-SETUID"}) {
@@ -280,8 +300,8 @@ func TestRules(t *testing.T) {
 	if got := CommandRules("git", []string{"git", "show", "main:config/secrets.yaml"}); !slices.Equal(got, []string{"CMD-GIT-SHOW-SECRET"}) {
 		t.Errorf("git show of a secret file = %v", got)
 	}
-	for _, a := range []string{"main:stack/scripts/tool_gating.env.sh", "HEAD:docs/secretary.md.txt", "v1:src/environment.go"} {
-		if got := CommandRules("git", []string{"git", "show", a}); len(got) != 0 && a != "HEAD:docs/secretary.md.txt" {
+	for _, a := range []string{"main:stack/scripts/tool_gating.env.sh", "HEAD:internal/gateway/user_scoped_credentials.go", "x:docs/stop-a-secret-upload.mdx", "v1:src/environment.go", "r:secret.txt"} {
+		if got := CommandRules("git", []string{"git", "show", a}); len(got) != 0 {
 			t.Errorf("git show %s = %v", a, got)
 		}
 	}

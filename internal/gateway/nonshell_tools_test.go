@@ -121,14 +121,15 @@ func TestShellToolFindings(t *testing.T) {
 		t.Skip("the cases are POSIX shell commands on POSIX paths")
 	}
 	loud := map[string]string{
-		"pulumi stack output --show-secrets --stack a/b/c --json": "CMD-SECRET-REVEAL",
-		"op item get 'X' --reveal --format=json":                  "CMD-SECRET-REVEAL",
-		"vault token lookup":                                      "CMD-SECRET-LOOKUP",
-		"aws iam get-access-key":                                  "CMD-SECRET-LOOKUP",
-		"git show HEAD:config/secrets.yaml":                       "CMD-GIT-SHOW-SECRET",
-		"chmod u+s /tmp/x":                                        "CMD-PRIV-SETUID",
-		"echo '0 3 * * * root /x' | sudo tee /etc/cron.d/x":       "CMD-PERSIST-SYSTEM-SCHEDULE",
-		"cat /home/u/.vault-token":                                "PATH-CRED-STORE-USER",
+		"pulumi stack output --show-secrets --stack a/b/c --json":     "CMD-SECRET-REVEAL",
+		"op item get 'X' --reveal --format=json":                      "CMD-SECRET-REVEAL",
+		"vault token lookup":                                          "CMD-SECRET-LOOKUP",
+		"aws iam get-access-key":                                      "CMD-SECRET-LOOKUP",
+		"git show HEAD:config/secrets.yaml":                           "CMD-GIT-SHOW-SECRET",
+		"chmod u+s /tmp/x":                                            "CMD-PRIV-SETUID",
+		"echo '0 3 * * * root /home/u/x.sh' | sudo tee /etc/cron.d/x": "CMD-PERSIST-SYSTEM-SCHEDULE",
+		"cat /home/u/.vault-token":                                    "PATH-CRED-STORE-USER",
+		"echo 'svc:x:0:0::/:/bin/sh' | sudo tee -a /etc/passwd":       "PATH-ETC-PASSWD",
 	}
 	for command, rule := range loud {
 		args, _ := json.Marshal(map[string]string{"command": command})
@@ -145,7 +146,9 @@ func TestShellToolFindings(t *testing.T) {
 	}
 	quiet := []string{
 		"ls -la", "chmod 644 /tmp/x", "chmod +x run.sh", "vault status", "aws s3 ls",
-		"git show main:stack/scripts/tool_gating.env.sh", "git show HEAD:README.md",
+		"git show main:stack/scripts/tool_gating.env.sh", "git show HEAD:README.md", "git show HEAD:internal/gateway/user_scoped_credentials.go",
+		"cat /run/secrets/redis_auth", "echo 'git:x:1000:1000::/home/git:/bin/bash' >> /etc/passwd",
+		"echo '@reboot root /opt/app/worker.py' > /etc/cron.d/worker",
 		"cat /etc/passwd", "cp a.txt /etc/hosts", "echo hi > /tmp/x",
 	}
 	for _, command := range quiet {

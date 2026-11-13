@@ -15,7 +15,11 @@ type PathRule struct {
 	ID     string   `yaml:"id"`
 	Access []string `yaml:"access"` // read, write, append, delete
 	Regex  string   `yaml:"re"`
+	// TextRe, when set, must also match the text of the call (the shell
+	// command, or the content a write carries): the path alone is not enough.
+	TextRe string `yaml:"text_re"`
 	re     *regexp.Regexp
+	textRe *regexp.Regexp
 }
 
 // CommandRule is a rule on one parsed command (program and argv).
@@ -38,6 +42,11 @@ func (t *table) compileRules() error {
 			return fmt.Errorf("toolshape: path rule %s: %w", r.ID, err)
 		}
 		r.re = re
+		if r.TextRe != "" {
+			if r.textRe, err = regexp.Compile(r.TextRe); err != nil {
+				return fmt.Errorf("toolshape: path rule %s text: %w", r.ID, err)
+			}
+		}
 	}
 	for i := range t.CommandRules {
 		r := &t.CommandRules[i]
@@ -67,8 +76,9 @@ func accessName(k Kind) []string {
 
 // PathRules returns the ids of the path rules a call matches when it does
 // kind (read, write or delete) to path. access is one of read, write, append,
-// delete, list.
-func PathRules(access, path string) []string {
+// delete, list. text is the call's command or written content, for the rules
+// that need more than the path.
+func PathRules(access, path, text string) []string {
 	t, err := load()
 	if err != nil || path == "" {
 		return nil
@@ -83,7 +93,7 @@ func PathRules(access, path string) []string {
 				break
 			}
 		}
-		if ok && r.re.MatchString(path) {
+		if ok && r.re.MatchString(path) && (r.textRe == nil || r.textRe.MatchString(text)) {
 			out = append(out, r.ID)
 		}
 	}
