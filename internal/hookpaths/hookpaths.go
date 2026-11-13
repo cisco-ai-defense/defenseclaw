@@ -630,7 +630,7 @@ func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool)
 	for i, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
-			if strings.ContainsAny(part.Value, "*?[") {
+			if unescapedGlob(part.Value) {
 				return "", false
 			}
 			if i == 0 && strings.HasPrefix(part.Value, "~") &&
@@ -670,6 +670,27 @@ func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool)
 		return "", false
 	}
 	return fields[0], true
+}
+
+// unescapedGlob reports a *, ? or [ in the unquoted literal text of a word
+// that is not escaped by a backslash: the shell expands it as a pattern. An
+// escaped one (file\*name) is a character of the word, as quoting it is
+// (rel-1-0-10:GAP-0013). On Windows a backslash is also the path separator
+// of a cmd or PowerShell spelling read by this shell parse (C:\x\*), so
+// there every glob character keeps the word dynamic.
+func unescapedGlob(text string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.ContainsAny(text, "*?[")
+	}
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '*', '?', '[':
+			return true
+		}
+	}
+	return false
 }
 
 // StaticWord expands one shell word using only the known home directory.

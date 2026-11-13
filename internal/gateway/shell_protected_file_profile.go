@@ -20,11 +20,18 @@ import (
 // write without a trace). Whether the finding blocks stays what the rule
 // pack's thresholds and the proof of the finding say: a protected file or
 // link that a command names directly, through a value it sets or through a
-// link stays blocked in every profile. No finding of the class is lowered:
-// every reading that tried to tell an unproven target from a named one in
-// the gateway opened a protected write (a link the command makes, an
-// extraction), so the balanced warning for the unproven remainder is a
-// detection and proof task (#1189), not a profile rule.
+// link stays blocked in every profile.
+//
+// An authorized-keys finding whose only basis is a target the proof could
+// not resolve (an unreadable link operation, an operand neither the hook
+// client nor this gateway could place) is not a known key write. Per the
+// owner's rel-1-0-6:GAP-0675 ruling (2026-11-06) and the lead's 1.0.10 answer
+// (rel-1-0-10:GAP-0013, GAP-0004) it is built alert-only for a per-user
+// install in the default and permissive tiers, where the LLM judge, when it
+// is enabled, still judges the call (an alert-only CRITICAL is not decisive
+// under regex_judge); every managed install, in every tier, and the strict
+// tier keep the block (unprovenKeyWriteMayWarn). A target the proof found
+// protected, and every call that names a key file, blocks everywhere.
 var shellProtectedFileRules = map[string]bool{
 	"PERSISTENCE.SSH_AUTHORIZED_KEYS_COMMAND": true,
 	"PATH-SSH-DIR":                    true,
@@ -122,8 +129,9 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 // protected file, so it keeps its block.
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
+		id := canonicalTrustedRuleID(finding.RuleID)
 		return finding.contributesToEnforcement() && !finding.omittedOperand &&
-			canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
+			(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 	}
 	if !slices.ContainsFunc(findings, isLimit) {
 		return findings, false
