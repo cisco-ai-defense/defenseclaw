@@ -690,13 +690,12 @@ func TestWindowsHookImageNativeVendorFolders(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Administrators keep FILE_READ_ATTRIBUTES (0x80) so the owner can be read
-	// as SYSTEM's inspection would, but not FILE_LIST_DIRECTORY: the folder is
-	// a machine folder this caller cannot list. With no ACE for Administrators
-	// at all the inspection itself is refused and the folder is an account
-	// entry instead (the owner's implicit rights are READ_CONTROL and
-	// WRITE_DAC only).
-	setDACL("D:P(A;OICI;FA;;;SY)(A;;0x80;;;BA)")
+	// Administrators keep READ_CONTROL and FILE_READ_ATTRIBUTES (0x20080), what
+	// the inspection of SYSTEM's scan asks for, but not FILE_LIST_DIRECTORY:
+	// the folder is a machine folder this caller cannot list. With no such ACE
+	// the inspection itself is refused (FILE_READ_ATTRIBUTES is no implicit
+	// right of the owner) and the folder is an account entry instead.
+	setDACL("D:P(A;OICI;FA;;;SY)(A;;0x20080;;;BA)")
 	t.Cleanup(func() { setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)") })
 
 	vfs := windowsHookImageVendorFS{Inspect: winpath.InspectBelow, List: listWindowsHookImageBelow}
