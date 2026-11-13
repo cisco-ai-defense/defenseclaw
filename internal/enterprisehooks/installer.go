@@ -92,6 +92,11 @@ type InstallOptions struct {
 	// Unix shell hook runs for the session facts (see connector.SetupOpts).
 	// Empty everywhere else.
 	ManagedHookBinary string
+	// RouteOnly is the route-only rendering of this target (S1 DESIGN
+	// 17.7): set by the standalone guardian for an enrolled user of a
+	// routed connector, nil otherwise (Setup then removes an earlier
+	// render, and Verify reports one left behind as route_config_drift).
+	RouteOnly *connector.RouteOnlySetup
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -276,6 +281,7 @@ func newVerifyTarget(opts InstallOptions, operation string) (verifyTarget, error
 		// the guard existed, or edited) fails and the guardian re-renders it.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
+		RouteOnly:              opts.RouteOnly,
 	}
 	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
 		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
@@ -417,6 +423,15 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// target's own per-user credentials.
 			if connector.HookCredentialDrifted(lock, setupOpts) {
 				return fmt.Errorf("enterprise hooks: connector %s hooks were installed with credentials that are not bound to this user", conn.Name())
+			}
+			// A route-only rendering the user edited or removed, one with a
+			// rotated credential, or one left after routing was turned off
+			// fails verification, so the guardian repair re-renders it and
+			// its report carries route_config_drift (S1 DESIGN 18.3).
+			if standalonePerUserRepair(uid) {
+				if err := connector.RouteOnlyDrift(conn, setupOpts, setupOpts.RouteOnly); err != nil {
+					return fmt.Errorf("enterprise hooks: %w", err)
+				}
 			}
 			// A standalone Hermes hook installed before it ran the
 			// foreign-hook guard (or for another hook binary) is
@@ -560,6 +575,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// Only the standalone guardian sets this, for Amp and OpenCode.
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
+		RouteOnly:              opts.RouteOnly,
 	}
 	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
 		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"

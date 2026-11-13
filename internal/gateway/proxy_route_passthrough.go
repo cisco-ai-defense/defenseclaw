@@ -23,10 +23,7 @@ import (
 
 // providerDefaultOrigins is where a routed backend without base_url goes
 // when its provider differs from the inbound one.
-var providerDefaultOrigins = map[string]string{
-	"anthropic": "https://api.anthropic.com",
-	"openai":    "https://api.openai.com",
-}
+var providerDefaultOrigins = config.RoutingProviderDefaultOrigins
 
 // passthroughAPIFamily names the routable API family of a passthrough path
 // ("" when the path is not routed).

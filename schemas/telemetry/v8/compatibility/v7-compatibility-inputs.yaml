@@ -324,8 +324,6 @@ classes:
       "defenseclaw.gateway.judge.invocations": {type: "counter", unit: "{invocation}", labels: ["judge.action", "judge.kind", "judge.severity"]}
       "defenseclaw.gateway.judge.latency": {type: "histogram", unit: "ms", labels: ["judge.kind"]}
       "defenseclaw.gateway.verdicts": {type: "counter", unit: "{verdict}", labels: ["destination_app", "policy_id", "verdict.action", "verdict.severity", "verdict.stage"]}
-      "defenseclaw.guardrail.cache.hits": {type: "counter", unit: "{hit}", labels: ["cache", "scanner", "ttl_bucket", "verdict"]}
-      "defenseclaw.guardrail.cache.misses": {type: "counter", unit: "{miss}", labels: ["cache", "scanner", "ttl_bucket", "verdict"]}
       "defenseclaw.guardrail.evaluations": {type: "counter", unit: "{evaluation}", labels: ["guardrail.action_taken", "guardrail.connector", "guardrail.scanner"]}
       "defenseclaw.guardrail.judge.latency": {type: "histogram", unit: "ms", labels: ["gen_ai.request.model", "judge.kind"]}
       "defenseclaw.guardrail.latency": {type: "histogram", unit: "ms", labels: ["guardrail.connector", "guardrail.scanner"]}

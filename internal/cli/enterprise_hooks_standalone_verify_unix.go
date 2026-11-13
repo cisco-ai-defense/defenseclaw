@@ -234,6 +234,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 			HookCredentialIdentity: identity,
 			ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 			ManagedHookBinary:      standaloneManagedHookBinary(),
+			RouteOnly:              enterpriseHookRouteOnly(target.Connector, account.User, identity, apiAddr),
 		}
 		index := len(run.Rows)
 		run.Rows = append(run.Rows, row)

@@ -2476,6 +2476,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	)
 	s.publishGeneration(nextGen)
 	s.refreshHookGuardPolicies(oldHookCfg, appliedCfg)
+	// Route-only is hot (DESIGN 16.11): re-render the agent config of every
+	// connector whose route-only rendering changed.
+	s.applyRouteOnlyRenders(oldCfg, appliedCfg)
 	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
 		// Installed skills, plugins and MCP servers affected by a list
 		// change are readmitted now, without waiting for content drift
@@ -2944,7 +2947,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
-		api.SetModelUsage(s.modelUsage().store)
+		api.SetModelUsageQuerier(s.modelUsage().store)
 		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api
@@ -3596,6 +3599,7 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 		}
 		proxy.bindObservabilityV8TraceMode(lifecycle, true)
 		proxy.generationSource = s.Generation
+		proxy.kernelPeer = s.proxyKernelPeer
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
@@ -7463,6 +7467,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		AgentVersion:             agentVersion,
 		AgentExecutable:          agentExecutable,
 		HookContractID:           contractResolution.Contract.ContractID,
+		RouteOnly:                routeOnlySetupFor(cfg, conn.Name(), apiAddr),
 	}, nil
 }
 
@@ -9146,6 +9151,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 		api.SetGenerationSource(s.Generation)
+	}
+	if router, ok := s.modelRouter.(*engineRouter); ok && router != nil {
+		ro := newRouteOnlyServer(router, s.currentConfig, s.currentConfig().DataDir)
+		api.SetRouteOnly(ro)
+		api.onRouteKeyRotated = func() { s.rerenderRouteOnly(s.currentConfig()) }
+		go s.runRouteOnlyReadiness(ctx, ro)
 	}
 	// The API scans with the profile set of the current generation; deriving
 	// it again here doubled the profile work of every start (GAP-0276).
