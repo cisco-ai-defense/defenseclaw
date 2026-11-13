@@ -3,7 +3,7 @@
 
 //go:build !windows
 
-package main
+package hookuser
 
 import (
 	"bytes"
@@ -53,9 +53,9 @@ func runOutageLook(cmd *exec.Cmd) (output []byte, stopped bool, err error) {
 	return out.Bytes(), stopped, err
 }
 
-// stopOutageLooks ends every look still running, with its process group,
-// and starts no other.
-func stopOutageLooks() {
+// StopOutageLooks ends every look still running, with its process group,
+// and starts no other: call it before the process exits.
+func StopOutageLooks() {
 	outageLooks.Lock()
 	defer outageLooks.Unlock()
 	outageLooks.exiting = true
@@ -66,8 +66,8 @@ func stopOutageLooks() {
 	}
 }
 
-// exitStoppingLooks is os.Exit for hook-user: no look outlives the call.
-func exitStoppingLooks(code int) {
-	stopOutageLooks()
+// ExitStoppingLooks is os.Exit for the native hook: no look outlives the call.
+func ExitStoppingLooks(code int) {
+	StopOutageLooks()
 	os.Exit(code)
 }

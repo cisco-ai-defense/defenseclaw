@@ -3,7 +3,7 @@
 
 //go:build !windows
 
-package main
+package hookuser
 
 import (
 	"errors"
@@ -48,7 +48,7 @@ func TestGAP0268StoppedLookLeavesNoOrphanAndNoResult(t *testing.T) {
 		t.Fatal("the look never started")
 	}
 	time.Sleep(100 * time.Millisecond) // the stand-in has started its child
-	stopOutageLooks()
+	StopOutageLooks()
 	select {
 	case mode := <-modes:
 		if mode != "closed" {
