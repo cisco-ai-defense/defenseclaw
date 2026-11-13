@@ -150,6 +150,18 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 	if sc != nil {
 		walkStmts(sc.Statements)
 	}
+	// Under an unknown or Windows PowerShell 5.1 dialect, a -Command / cmd /c
+	// payload passed through native argv has its embedded double quotes dropped
+	// or reinterpreted by legacy argument passing, so the text we resolved is
+	// not what the child runs; treat it as opaque (review 5 R5-1/R5-2). An
+	// -EncodedCommand (base64) and an in-process iex literal are not affected.
+	if sc != nil && sc.Dialect != DialectPwsh7 {
+		for i := range out {
+			if out[i].Static && (out[i].Kind == KindPowerShellCommand || out[i].Kind == KindCmdC) && strings.ContainsRune(out[i].Text, '"') {
+				out[i].Static, out[i].Text, out[i].Reason = false, "", ReasonLegacyQuoting
+			}
+		}
+	}
 	// Invariant: a nested script with no resolved text is never Static=true
 	// (an empty payload from a dropped --% tail or an unresolved value must
 	// escalate, never be trusted as "an empty script"). See N2.
@@ -527,78 +539,22 @@ func startProcessScript(c *Command) (NestedScript, bool) {
 			}
 		}
 	}
-	isCmd := baseName(exe) == "cmd"
-	if !isPSHost(exe) && !isCmd {
-		return NestedScript{}, false
-	}
-	val, ok := paramValue(c, "argumentlist", "args")
-	if !ok {
-		return NestedScript{}, false
-	}
-	// the ArgumentList is a string or an array of strings; build host words.
-	var words []hostWord
-	switch v := val.(type) {
-	case *ArrayLit:
-		for _, el := range v.Elements {
-			s, ok := LiteralString(el)
-			words = append(words, hostWord{s, ok})
-		}
+	dialect := ""
+	switch {
+	case isPSHost(exe):
+		dialect = "powershell"
+	case baseName(exe) == "cmd":
+		dialect = "cmd"
 	default:
-		if s, ok := LiteralString(val); ok {
-			for _, f := range strings.Fields(s) {
-				words = append(words, hostWord{f, true})
-			}
-		} else {
-			return NestedScript{Kind: KindStartProcessArgs, Dialect: "powershell", Source: c, Reason: ReasonNonLiteral}, true
-		}
-	}
-	if isCmd {
-		// Start-Process cmd -ArgumentList '/c','del C:\x': the payload is the
-		// cmd /c tail, not an ignored argument list (review 4 R4-6).
-		ns := NestedScript{Kind: KindStartProcessArgs, Dialect: "cmd", Source: c, Static: true}
-		var parts []string
-		seen := false
-		for i := 0; i < len(words); i++ {
-			w := words[i]
-			if !seen {
-				if w.static {
-					switch strings.ToLower(w.text) {
-					case "/c", "/k", "/r":
-						seen = true
-						continue
-					}
-				}
-				continue
-			}
-			if !w.static {
-				ns.Static = false
-				ns.Reason = ReasonNonLiteral
-				break
-			}
-			if w.text == "--%" {
-				continue
-			}
-			parts = append(parts, w.text)
-		}
-		if !seen {
-			return NestedScript{}, false
-		}
-		if ns.Static {
-			ns.Text = strings.Join(parts, " ")
-			if ns.Text == "" {
-				ns.Static = false
-				ns.Reason = ReasonNonLiteral
-			}
-		}
-		return ns, true
-	}
-	res := powerShellHostScripts(c, words)
-	if len(res) == 0 {
 		return NestedScript{}, false
 	}
-	ns := res[0]
-	ns.Kind = KindStartProcessArgs
-	return ns, true
+	// A child launched via Start-Process receives its command line through OS
+	// argument passing (CommandLineToArgvW join/split on every version, plus
+	// legacy quote dropping on 5.1), which psparse does not model. So the
+	// argument list is never trusted as a static nested script, in any form
+	// (list, string, positional, prefixed or mixed with variables): record only
+	// that a PowerShell / cmd child starts (review 5 R5-1/2/4/5/6/8).
+	return NestedScript{Kind: KindStartProcessArgs, Dialect: dialect, Source: c, Reason: ReasonChildArgv}, true
 }
 
 // nestedFromScriptBlockCreate handles [scriptblock]::Create('<text>') and the

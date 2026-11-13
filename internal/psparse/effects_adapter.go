@@ -268,6 +268,11 @@ func safeQuotedLiteral(s string) bool {
 		if r == '`' || r < 0x20 || r > 0x7e {
 			return false
 		}
+		// PowerShell -Path expands * ? [ ] even inside quotes, so a quoted path
+		// value with a wildcard metachar is not an exact literal (review 5 R5-3).
+		if r == '*' || r == '?' || r == '[' || r == ']' {
+			return false
+		}
 	}
 	return true
 }

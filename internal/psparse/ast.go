@@ -29,6 +29,9 @@ const (
 	ReasonDialectAmbiguous = "ps_dialect_ambiguous" // escape decodes differently under PS 5.1 vs 7
 	ReasonUnsafeLiteral    = "ps_unsafe_literal"    // static source has a rune outside the safe allowlist
 	ReasonHostOption       = "ps_host_option"       // a host CLI (powershell/pwsh) option outside the modeled set
+	ReasonChildArgv        = "ps_child_argv"        // a child process argv (Start-Process) we do not model
+	ReasonLegacyQuoting    = "ps_legacy_quoting"    // a nested payload whose quotes 5.1/legacy argv would drop
+	ReasonWildcard         = "ps_wildcard"          // a quoted path value with a wildcard metachar (* ? [ ])
 )
 
 // Script is the root: an ordered list of statements plus the parameter block

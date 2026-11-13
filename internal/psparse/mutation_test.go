@@ -64,11 +64,17 @@ func TestStaticAllowlistMutation(t *testing.T) {
 	// literal and must stay static, so a quoted nested script resolves (effects
 	// re-parses it and re-gates its leaves) instead of going opaque.
 	for _, s := range []string{
-		`'Remove-Item C:\x; Get-Date'`, `'del a & del b'`, `'a|b'`,
-		`'$x (1)'`, `'[int]'`, `'*.tmp'`,
+		`'Remove-Item C:\x; Get-Date'`, `'del a & del b'`, `'a|b'`, `'$x (1)'`,
 	} {
 		if _, ok := firstArgStatic("Write-Output " + s); !ok {
 			t.Errorf("quoted structural %s: non-static, want static (R4-7 widening)", s)
+		}
+	}
+	// A wildcard metachar expands even inside quotes, so a quoted path value
+	// with * ? [ ] is non-static (review 5 R5-3).
+	for _, s := range []string{`'*.tmp'`, `'[int]'`, `"/home/u/.ss[h]"`, `"/et?"`, `'a*b'`} {
+		if v, ok := firstArgStatic("Remove-Item " + s); ok {
+			t.Errorf("quoted wildcard %s: static %q, want non-static (R5-3)", s, v)
 		}
 	}
 }
