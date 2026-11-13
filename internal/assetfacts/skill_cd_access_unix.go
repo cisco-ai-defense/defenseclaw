@@ -19,7 +19,7 @@ func callerCanEnterDirectory(path string, uid, gid int) bool {
 		return false
 	}
 	for dir := filepath.Clean(path); ; dir = filepath.Dir(dir) {
-		info, err := os.Stat(dir)
+		info, err := fsStat(dir)
 		if err != nil || !info.IsDir() {
 			return false
 		}
