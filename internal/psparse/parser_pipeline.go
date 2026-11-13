@@ -219,7 +219,9 @@ func (p *parser) parseNameRun(first Token) Expr {
 		case TokGeneric, TokVariable, TokNumber, TokDot, TokString, TokOperator:
 			end = t.End
 			p.advance()
-		case TokDollarParen, TokLParen, TokAtParen, TokLBracket, TokAtBrace, TokLBrace:
+		case TokDollarParen, TokLBracket:
+			// a $( ) or [ ] glued into a name is literal (k=$(..), a[1<<2]=x);
+			// a plain ( / @( / { / @{ starts a separate argument (`$( ) -> name "$").
 			end = p.consumeBalancedEnd()
 		default:
 			goto doneName

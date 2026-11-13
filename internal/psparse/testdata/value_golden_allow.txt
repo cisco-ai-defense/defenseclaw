@@ -8,7 +8,6 @@ UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/
 V3JpdGUtT3V0cHV0IC1hJ2In	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hImIi	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hJHg=	pending step-3: parameter vs argument boundary
-YCQoUmVtb3ZlLUl0ZW0gQzpceCk=	pending step-3: backtick-escaped $( ) name
 V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
