@@ -234,3 +234,29 @@ func TestProjectProtectedDirectoryWrite(t *testing.T) {
 		t.Fatalf("write to ~/.ssh/authorized_keys: ssh state = %q, want known", got)
 	}
 }
+
+// Rule (c): a canonical path whose shape matches a protected file but in an
+// unexpected directory (a CDPATH / reassigned-HOME resolution that came out
+// canonical but wrong) is unknown, not clean, so it lands in the unknown tier.
+func TestProjectWrongDirectoryShape(t *testing.T) {
+	write := func(path string) []*semanticpb.EffectFact {
+		return Project(effects.Result{Effects: []effects.Effect{{
+			Kind: effects.KindWrite, TargetState: effects.TargetStateKnown, RoleState: effects.RoleStateKnown,
+			Target: effects.Target{Type: effects.TargetPath, Path: path, Flavor: effects.FlavorPOSIX},
+		}}}, Env{Home: testHome, Resolve: fakeResolver(nil)})
+	}
+	cases := []struct{ name, path, set, want string }{
+		{"wrong-dir authorized_keys is unknown", "/tmp/stage/.ssh/authorized_keys", SetSSHAuthorizedKeys, semantic.ProtectedUnknown},
+		{"wrong-home authorized_keys is unknown", "/srv/other/.ssh/authorized_keys", SetSSHAuthorizedKeys, semantic.ProtectedUnknown},
+		{"wrong-dir bashrc is unknown", "/tmp/proj/.bashrc", SetShellRC, semantic.ProtectedUnknown},
+		{"exact real-home authorized_keys stays known", testHome + "/.ssh/authorized_keys", SetSSHAuthorizedKeys, semantic.ProtectedKnown},
+		{"ordinary unrelated path stays no", "/tmp/stage/notes.txt", "", semantic.ProtectedNo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strongestState(write(tc.path), tc.set); got != tc.want {
+				t.Fatalf("write %q set %q: state = %q, want %q", tc.path, tc.set, got, tc.want)
+			}
+		})
+	}
+}
