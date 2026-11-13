@@ -153,6 +153,9 @@ func TestSpecOverlayFolders(t *testing.T) {
 	if uid, ok := owner(spec.Files, kit.XDGConfigHome+"/git"); !ok || uid != 1000 {
 		t.Errorf("devin %s/git: user-owned entry = %v, %v", kit.XDGConfigHome, uid, ok)
 
+	}
+}
+
 // The --connector help lists kit.Connectors: each one has a kit spec, and
 // the list is exactly what the relay can start.
 func TestEveryListedConnectorHasAKitSpec(t *testing.T) {
