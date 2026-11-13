@@ -189,9 +189,8 @@ wrappers and builds the harness images (the first build downloads about
 3 GB). On a Linux host where `/dev/kvm` exists it asks the same MicroVM
 question, with a default of yes only when the kernel lacks Landlock; if the
 host cannot start a MicroVM yet (KVM access, `e2fsprogs`, the driver binary),
-it stops with the way on and installs none of those itself. With OpenShell
-0.1.6, Linux KVM MicroVM sandboxes do not start on per-user or managed
-computers even when setup offers them; see [MicroVMs with KVM on Linux](#microvms-with-kvm-on-linux).
+it stops with the way on and installs none of those itself; see
+[MicroVMs with KVM on Linux](#microvms-with-kvm-on-linux).
 
 ```bash
 defenseclaw sandbox setup
@@ -1982,7 +1981,7 @@ sudo loginctl enable-linger $USER
 
 On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) is intended to run each sandbox as a small virtual machine with a Linux kernel of its own, as it does on a Mac. The Docker driver stays the default. A MicroVM can supply Landlock when the host kernel lacks it. `sandbox setup` offers the switch on a host where `/dev/kvm` exists, and the answer defaults to yes only when Landlock is missing.
 
-With OpenShell 0.1.6, Linux KVM MicroVM sandboxes do not start on per-user or managed computers, even if setup selects the driver. Until a fixed OpenShell release is supported, use Docker on a host with Landlock ABI 3 or newer. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. On a managed computer, ask your administrator to set `enterprise.openshell.driver: docker` and run `ensure`; `driver_fallback: docker` does not cover this refusal. See [the Linux sandbox guide](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm).
+Before each MicroVM create, on Linux and macOS, DefenseClaw prepares the driver's overlay template (`~/.local/state/openshell/vm-driver/images/overlay-templates`, or under the gateway's `state_dir`) with root-owned folders, with the `mke2fs` and `debugfs` the driver uses: OpenShell 0.1.6 makes them the gateway account's, and the workload check trusts the guest's `localhost` resolver only on a root-owned path. A template that cannot be prepared refuses the create before anything is built ([guide](/docs/sandboxes/guide#a-microvm-create-is-refused-the-overlay-template)).
 
 | Needs | Details |
 | --- | --- |

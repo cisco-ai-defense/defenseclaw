@@ -67,7 +67,7 @@ The words these settings take (`prerequisite`, `setup`, `docker`, `vm`, `auto`, 
 | Key | Meaning |
 | --- | --- |
 | `install` | `prerequisite` (default) or `setup`. |
-| `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux needs the driver binary, which the stock OpenShell rpm lacks. |
+| `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`. An explicit `docker` on macOS needs a Docker engine whose Linux kernel has Landlock and does not need MicroVM `e2fsprogs`; Docker Desktop's Linux VM has no Landlock, so with Docker Desktop people get `driver_unsupported` and `vm` is the macOS driver. `vm` or `auto` with `install: prerequisite` on Linux needs the driver binary, which the stock OpenShell rpm lacks. |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. |
 | `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.6"`; `prerequisite` also accepts a range inside `>=0.1.6 <0.2.0`. Sandboxes run only on 0.1.6 or later: `setup` installs 0.1.6 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.6 is a failed row, whatever the pin allows. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. This is the administrator's key only: a per-user config has no `openshell.gateway_port`. |
@@ -275,7 +275,7 @@ On Linux, `driver: vm` or `driver: auto` wants OpenShell's MicroVM driver. When 
 
 The MicroVM driver checks are in [The MicroVM driver](#the-microvm-driver).
 
-With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on either per-user or managed computers. On a managed computer, the OpenShell gateway also runs as the enrolled account; OpenShell gives that account ownership of the guest root folder, so DefenseClaw cannot trust its `localhost` resolver and refuses and deletes the sandbox. `driver_fallback: docker` does not cover this refusal because KVM is available and the MicroVM was selected. Until a fixed OpenShell release is supported, the administrator sets `enterprise.openshell.driver: docker` (the Linux default) and runs `ensure`. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. Before a driver switch, have users save work from existing sandboxes as described above.
+OpenShell 0.1.6's MicroVM driver makes the guest's root folder belong to the account the gateway runs as, the enrolled account on a managed computer, and DefenseClaw trusts a guest's `localhost` resolver only on a root-owned path. Before each MicroVM create, on Linux and macOS, DefenseClaw therefore formats the driver's overlay template itself (`~/.local/state/openshell/vm-driver/images/overlay-templates`, or under the gateway's `state_dir`) with root-owned folders, with the `e2fsprogs` the driver uses. Nothing needs to be set and nobody gets extra rights; the resolver check is unchanged. When the template cannot be prepared the create is refused before anything is built, with the reason ([A MicroVM create is refused: the overlay template](/docs/sandboxes/guide#a-microvm-create-is-refused-the-overlay-template)).
 
 ### The MicroVM driver
 
@@ -684,6 +684,8 @@ Every sandbox record carries the profile (name, digest, match, matched group), t
 
 When a sandbox can't run for a person, the refusal says why in words and the record carries a short reason code: the `reason` of `log.sandbox.host_run_unavailable` and `log.sandbox.host_run_refused`. The Windows refusal asks the person to quote it. Group and driver settings are read again within about 30 seconds, so a fix takes effect on the next run.
 
+The managed gateway judges each person's access by their account and never enters their home. On macOS, `/var/run/docker.sock` is Docker Desktop's link into the home of the account whose Docker Desktop started last, under a `~/.docker` only that account can open, so the gateway judges the link by the owner of the home it leads into: the person's own Docker Desktop, another account's, or any other socket by its modes. Do not widen `~/.docker` or add the gateway account to a group for this.
+
 | Reason code | What it means | What to do |
 | --- | --- | --- |
 | `required_for` | Not a failure. The person's profile lists this agent in `required_for` and the agent started on the host. | The person runs `defenseclaw sandbox run`. |
@@ -691,11 +693,11 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | `sandboxes_off` | `openshell.enabled` is off on this computer | Turn it on and run `ensure` |
 | `root_account` | The account is root | Run as a standard user |
 | `account_unverified` | DefenseClaw could not verify the account behind the call | `enterprise <os> profile-explain --user NAME`; check the identity source |
-| `no_docker` | Docker is not running (Docker driver) | Start Docker for the person |
+| `no_docker` | Docker is not running (Docker driver), or on macOS `/var/run/docker.sock` leads to another account's Docker Desktop | Start Docker (Docker Desktop in the person's own desktop session) for the person |
 | `no_docker_access`, `no_docker_group` | The Docker socket isn't read-write for the account, or the account is not in the group that can use it | Add the person to the group the message names (`docker`) |
 | `no_kvm_group`, `no_kvm_access` | `driver_fallback: none` and the account can't open `/dev/kvm` | Add the person to the group the message names (`kvm`), or allow the Docker fallback |
 | `no_kvm` | `driver_fallback: none` and the CPU shows no virtualization or `/dev/kvm` is missing | Enable hardware (nested) virtualization, or allow the Docker fallback |
-| `driver_unsupported` | The organization's `driver` isn't one this computer can run | Set a driver the OS supports |
+| `driver_unsupported` | The organization's `driver` isn't one this computer can run, or on macOS `driver: docker` and the person's Docker is Docker Desktop, whose Linux VM has no Landlock | Set a driver the OS supports (`vm` on macOS) |
 | `prerequisite_missing` | OpenShell or Docker is missing or not set up, or the installed OpenShell is a release the host does not run sandboxes on; the sentence names the piece, and for an OpenShell release that runs no DefenseClaw sandbox it says so (`sandboxes are unavailable: OpenShell 0.1.5 runs no DefenseClaw sandbox: OpenShell 0.1.6 or later is required; ask your administrator to upgrade OpenShell`) | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
 | `account_busy` | Another account holds the sandbox ports | Clears when that account has no sandbox running |
 | `sandbox_port_busy` | An ordinary process holds the configured sandbox ingress or egress port | Free that port, or set a different `openshell.ingress_port` or `openshell.egress_port` in the admin config |

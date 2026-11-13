@@ -208,7 +208,7 @@ Continue with [run an agent](/docs/sandboxes/first-session).
 
 On a host with KVM, the `vm` driver is intended to run each sandbox as a small virtual machine with its own kernel, including when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [`sandbox pull NAME --apply`](/docs/sandboxes/guide#pull-on-macos) brings the work into your project (`--branch` or `--patch-out FILE` saves it elsewhere).
 
-With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on either per-user or managed computers. OpenShell gives the sandbox account ownership of the guest root folder, so DefenseClaw cannot trust its `localhost` resolver and refuses and deletes the sandbox. Until a fixed OpenShell release is supported, use Docker. On a per-user computer, run `defenseclaw sandbox setup` and answer no to MicroVMs. On a managed computer, ask your administrator to set `enterprise.openshell.driver: docker` and run `ensure`; `driver_fallback: docker` does not cover this refusal. See [the sandbox guide](/docs/sandboxes/guide#microvm-create-is-refused-on-linux-with-kvm).
+MicroVMs run on per-user and managed computers. OpenShell 0.1.6's driver gives the guest's root folder to the gateway's account, so before each MicroVM create DefenseClaw prepares the driver's overlay template with root-owned folders, with the same `e2fsprogs`, and the guest's `localhost` check can trust it. If that fails, see [the sandbox guide](/docs/sandboxes/guide#a-microvm-create-is-refused-the-overlay-template).
 
 ## One OpenShell gateway per machine
 
@@ -236,7 +236,7 @@ Run `defenseclaw sandbox doctor` first. These are the Linux-only failures it rep
 
 **Cause:** the kernel does not report Landlock ABI 3 or newer with `landlock` in its `lsm=` list. OpenShell refuses to start a sandbox without it.
 
-**Fix:** boot a kernel with Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport), then use Docker. With OpenShell 0.1.6, MicroVM sandboxes on Linux with KVM do not start on per-user or managed computers, so selecting MicroVMs does not resolve this check ([known limit](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)).
+**Fix:** boot a kernel with Landlock ABI 3 or newer (6.2 or newer upstream, or a distribution kernel with a backport), then use Docker, or run sandboxes in [MicroVMs with KVM](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm), which boot a kernel of their own.
 
 **Check:** `cat /sys/kernel/security/lsm` lists `landlock` and the check passes.
 

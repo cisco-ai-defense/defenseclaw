@@ -212,6 +212,7 @@ At the end DefenseClaw brings the work back as a git bundle, checks it and revie
 
 - Every MicroVM gets the same 4 vCPUs, 4 GiB of memory and 16 GiB disk for changes, set in the gateway's `gateway.toml`. `--cpu` and `--memory` have no effect.
 - Each image the driver has started keeps about 5 GB in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` removes unused ones.
+- Before each create DefenseClaw prepares the driver's overlay template under `~/.local/state/openshell/vm-driver/images/overlay-templates` with root-owned folders, with the driver's `e2fsprogs`: OpenShell 0.1.6 makes them your account's, and the guest's `localhost` check refuses a root folder the workload owns. This holds on a managed Mac too, where the gateway runs as your account.
 
 ## Limits on a Mac
 
@@ -269,7 +270,7 @@ Run `defenseclaw sandbox doctor` first. These are the macOS-only failures it rep
 
 **Cause:** the gateway still runs the Docker driver, and Docker Desktop's Linux VM kernel has no Landlock. DefenseClaw refuses this combination before it builds anything.
 
-**Fix:** run `defenseclaw sandbox setup` (or `sandbox doctor --fix`) and answer yes to the MicroVM question. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted.
+**Fix:** run `defenseclaw sandbox setup` (or `sandbox doctor --fix`) and answer yes to the MicroVM question. Sandboxes made on the Docker driver cannot start on MicroVMs: setup lists them first, and after the switch they can only be deleted. On a managed Mac whose administrator set `enterprise.openshell.driver: docker`, `sandbox run` says "your organization's sandbox driver is docker, and Docker Desktop's Linux VM has no Landlock": ask IT to set `vm`, the macOS driver.
 
 **Check:** the **Gateway compute driver** row reads `vm`.
 

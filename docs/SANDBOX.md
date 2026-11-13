@@ -2987,14 +2987,17 @@ the lifecycle's prerequisite record carries the fallback's readiness under
 `status`, `policy explain`, `doctor` (`managed-driver`) and the telemetry
 (`defenseclaw.sandbox.driver_reason`).
 
-With OpenShell 0.1.6, a selected MicroVM on Linux with KVM is refused after
-create because the account owns the guest root folder and DefenseClaw cannot
-trust the guest's `localhost` resolver. This affects per-user and managed
-gateways. `driver_fallback: docker` does not cover this refusal: it is chosen
-before create when KVM or the driver is unavailable. Until a fixed OpenShell
-release is supported, a managed administrator sets
-`enterprise.openshell.driver: docker` and runs `ensure`. On a per-user install,
-run `defenseclaw sandbox setup` and answer no to MicroVMs.
+Before each MicroVM create (Linux and macOS), the manager calls
+`Options.VMOverlayTemplate` (`manager.GatewayVMOverlayTemplate`,
+`openshell.VMOverlayTemplate`): OpenShell 0.1.5 to 0.1.7-pre formats the vm
+driver's overlay template from `upper/`, `work/` and `config/` folders of the
+gateway's account, so a non-root gateway's guest `/` is the workload's uid and
+the workload check (`trusted_resolver`) refuses it. DefenseClaw formats the
+template (`images/overlay-templates/sandbox-overlay-ext4-v1/<bytes>.ext4`)
+with those folders 0:0 0755, reads it back with `debugfs` and renames it into
+place; the driver reuses a template of the right size. The check is
+unchanged, and a template that cannot be prepared refuses the create with
+`CodeUnavailable` before the image is exported.
 
 The enterprise packages install
 `defenseclaw` as a root-owned link to `defenseclaw-gateway`, which under that
