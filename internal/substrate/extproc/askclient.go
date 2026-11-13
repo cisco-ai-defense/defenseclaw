@@ -80,7 +80,10 @@ type askWire struct {
 	Host    string `json:"host"`
 	Summary string `json:"summary,omitempty"`
 	Reason  string `json:"reason,omitempty"`
-	AskID   string `json:"ask_id,omitempty"`
+	// Rule keys the approval: an ask_hosts approval covers the host, a
+	// url_rules one its rule only (GAP-0177).
+	Rule  string `json:"rule,omitempty"`
+	AskID string `json:"ask_id,omitempty"`
 }
 
 type askAnswer struct {
@@ -95,8 +98,14 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 	var in askWire
 	in.Actor.Atespace, in.Actor.Name, in.Actor.UID = req.Actor.Atespace, req.Actor.Name, req.Actor.UID
 	in.Host = req.Host
+	// The person who answers sees the method, the host and, for a url
+	// rule, the path prefix the approval covers.
 	in.Summary = strings.TrimSpace(req.Method + " " + req.Host)
+	if req.PathPrefix != "" {
+		in.Summary += " " + req.PathPrefix + "*"
+	}
 	if req.Rule != "" {
+		in.Rule = req.Rule
 		in.Reason = "the egress policy asks first (" + req.Rule + ")"
 	}
 	for {
