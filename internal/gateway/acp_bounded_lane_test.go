@@ -19,12 +19,20 @@ import (
 // locations than acpMaxFrameToolCalls has the first ones judged and is then
 // raised to the unknown tier of the pack in every tier, and a block among the
 // judged ones (the seen element, a write into the DefenseClaw state folder)
-// still decides past the cap (rel-1-0-10:GAP-0296, GAP-0331).
+// still decides past the cap; after the cap it is not judged one by one, so
+// the unknown tier is what holds (rel-1-0-10:GAP-0296, GAP-0331).
 func init() {
 	registerBoundedLane(boundedLaneCap{
-		lane: "s7/acp permission locations", cap: bounded.Locations, limit: acpMaxFrameToolCalls, adopted: true,
-		gen: func(size int, shape boundedShape) boundedLaneCall {
-			return boundedLaneCall{tool: "session/request_permission", input: map[string]any{"locations": size, "seen": shape.seen}}
+		lane: "s7/acp permission locations", cap: bounded.Locations, limit: acpMaxFrameToolCalls,
+		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
+			if shape.nested || shape.multi {
+				return boundedLaneCall{}, false // a permission has one list of locations
+			}
+			return boundedLaneCall{tool: "session/request_permission", input: map[string]any{
+				"locations": size, "seen": shape.seen, "seenAfter": shape.seenAfter}}, true
+		},
+		seen: func() boundedLaneCall {
+			return boundedLaneCall{tool: "session/request_permission", input: map[string]any{"locations": 1, "seen": true}}
 		},
 		decide: boundedDecideACPPermission,
 	})
@@ -36,13 +44,21 @@ func init() {
 func boundedDecideACPPermission(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string) {
 	t.Helper()
 	count, _ := call.input["locations"].(int)
+	state := filepath.Join(env.home, ".defenseclaw", "config.yaml")
 	var locations []any
 	if call.input["seen"] == true {
-		locations = append(locations, map[string]any{"path": filepath.Join(env.home, ".defenseclaw", "config.yaml")})
+		locations = append(locations, map[string]any{"path": state})
+		count--
+	}
+	after := call.input["seenAfter"] == true
+	if after {
 		count--
 	}
 	for i := 0; i < count; i++ {
 		locations = append(locations, map[string]any{"path": filepath.Join(env.cwd, fmt.Sprintf("f%d.txt", i))})
+	}
+	if after {
+		locations = append(locations, map[string]any{"path": state})
 	}
 	frame := acpFrameJSON(t, 1, "session/request_permission", map[string]any{"sessionId": "s", "options": []any{},
 		"toolCall": map[string]any{"toolCallId": "t", "kind": "edit", "title": "Edit", "locations": locations}})

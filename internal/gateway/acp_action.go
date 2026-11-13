@@ -55,7 +55,7 @@ type acpFrameAction struct {
 	// whose shape is not known). What was read is judged as usual and the
 	// verdict is then raised to the unknown tier of the pack
 	// (internal/guardrail/bounded), never below.
-	trunc bounded.Truncated
+	trunc bounded.CapSet
 }
 
 // acpMaxFrameToolCalls bounds the locations of one frame that are judged one
@@ -90,10 +90,9 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 		if json.Unmarshal(msg.Params, &params) != nil || !acpJSONObject(params.ToolCall) {
 			return acpFrameAction{calls: []acpToolCall{{unread: true}}, enforceable: true}, true
 		}
-		toolCall, trunc := acpMergeToolCall(req.ToolCallState, params.ToolCall)
-		calls, prose, more := acpToolCallUpdateCalls(toolCall, goos, true)
-		trunc.Merge(more)
-		return acpFrameAction{calls: calls, enforceable: true, prose: prose, trunc: trunc}, true
+		toolCall, merged := acpMergeToolCall(req.ToolCallState, params.ToolCall)
+		calls, prose, read := acpToolCallUpdateCalls(toolCall, goos, true)
+		return acpFrameAction{calls: calls, enforceable: true, prose: prose, trunc: merged.Union(read)}, true
 	case "session/update":
 		var params struct {
 			Update json.RawMessage `json:"update"`
@@ -109,21 +108,20 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 			return acpFrameAction{}, false
 		}
 		update2 := params.Update
-		var trunc bounded.Truncated
+		var merged bounded.CapSet
 		if acpUpdateNamesAnAction(update2) {
 			// A report that carries the kind, input or locations of the call
 			// is the call as the editor merges it onto the earlier reports;
 			// a status or output update alone names no action.
-			update2, trunc = acpMergeToolCall(req.ToolCallState, update2)
+			update2, merged = acpMergeToolCall(req.ToolCallState, update2)
 		}
-		calls, prose, more := acpToolCallUpdateCalls(update2, goos, false)
-		trunc.Merge(more)
+		calls, prose, read := acpToolCallUpdateCalls(update2, goos, false)
 		if len(calls) == 0 {
 			// A status or output report names no action: its text is agent
 			// output, judged as before.
 			return acpFrameAction{}, false
 		}
-		return acpFrameAction{calls: calls, prose: prose, trunc: trunc}, true
+		return acpFrameAction{calls: calls, prose: prose, trunc: merged.Union(read)}, true
 	}
 	if acp.Classify(msg, req.Direction) != acp.SurfaceTool {
 		return acpFrameAction{}, false
@@ -218,7 +216,8 @@ func acpFileCall(method string, raw json.RawMessage) acpToolCall {
 // of it (a permission is asked before the action, so the strictest file
 // reading applies). It is never judged as a generic tool, which reads its
 // locations as reads (rel-1-0-10:GAP-0330).
-func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (calls []acpToolCall, prose string, trunc bounded.Truncated) {
+func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (calls []acpToolCall, prose string, caps bounded.CapSet) {
+	var trunc bounded.Truncated // one per reading, never copied
 	var call struct {
 		Kind      string          `json:"kind"`
 		Title     string          `json:"title"`
@@ -229,9 +228,9 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	}
 	if json.Unmarshal(raw, &call) != nil {
 		if permission {
-			return []acpToolCall{{unread: true}}, "", trunc
+			return []acpToolCall{{unread: true}}, "", trunc.Set()
 		}
-		return nil, "", trunc
+		return nil, "", trunc.Set()
 	}
 	prose = acpToolCallProse(raw)
 	input := map[string]json.RawMessage{}
@@ -255,9 +254,9 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 		if permission {
 			// The editor is asked to allow an action the frame does not
 			// show: it cannot be shown to be safe.
-			return []acpToolCall{{unread: true}}, prose, trunc
+			return []acpToolCall{{unread: true}}, prose, trunc.Set()
 		}
-		return nil, prose, trunc
+		return nil, prose, trunc.Set()
 	}
 	// The text an edit writes, under the names ACP agents use. Kiro's own
 	// fs_write and str_replace inputs say file_text, old_str and new_str
@@ -301,10 +300,10 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 			if !hasInput {
 				args = json.RawMessage(`{}`)
 			}
-			return []acpToolCall{{tool: "shell", args: args}}, prose, trunc
+			return []acpToolCall{{tool: "shell", args: args}}, prose, trunc.Set()
 		}
 		return []acpToolCall{{tool: "shell", args: acpCommandArgs(command),
-			cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}}, prose, trunc
+			cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}}, prose, trunc.Set()
 	case "read":
 		addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
 	case "edit":
@@ -328,7 +327,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 		}
 	}
 	if len(calls) > 0 {
-		return calls, prose, trunc
+		return calls, prose, trunc.Set()
 	}
 	// Any other kind (search, move, think, other) or a kind the input does
 	// not fit: a tool call under the tool's name, read by the non-shell tool
@@ -339,7 +338,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	}
 	calls = append(calls, acpToolCall{tool: acpToolName(call.Title, kind), args: args})
 	addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
-	return calls, prose, trunc
+	return calls, prose, trunc.Set()
 }
 
 // acpUpdateNamesAnAction reports that a tool_call report carries the kind,
@@ -361,10 +360,10 @@ func acpUpdateNamesAnAction(raw json.RawMessage) bool {
 // kept of the call it names (state, Evaluation.ToolCallState), as the editor
 // does: a field own holds replaces the kept one. A field the guard left out
 // of the state for size is a cap hit.
-func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.Truncated) {
+func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapSet) {
 	var trunc bounded.Truncated
 	if len(state) == 0 {
-		return own, trunc
+		return own, trunc.Set()
 	}
 	var kept struct {
 		Kind      json.RawMessage `json:"kind"`
@@ -375,7 +374,7 @@ func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.Trun
 	}
 	var fields map[string]json.RawMessage
 	if len(state) > acp.MaxFrameBytes || json.Unmarshal(state, &kept) != nil || json.Unmarshal(own, &fields) != nil || fields == nil {
-		return own, trunc
+		return own, trunc.Set()
 	}
 	if kept.Truncated {
 		trunc.Hit(bounded.Bytes)
@@ -388,7 +387,7 @@ func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.Trun
 			fields[name] = value
 		}
 	}
-	return acpMarshal(fields), trunc
+	return acpMarshal(fields), trunc.Set()
 }
 
 // acpToolCallProse is the text of a ToolCall other than its rawInput and
@@ -542,7 +541,8 @@ func (a *APIServer) inspectACPFrameAction(
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	session := acpFrameSessionID(req, false)
 	tier := a.boundedTier(ctx, connectorName)
-	trunc := action.trunc
+	var trunc bounded.Truncated
+	trunc.Merge(action.trunc)
 	for _, call := range action.calls {
 		var judged *ToolInspectVerdict
 		cwd := acpCallDirectory(req.SessionCWD, call.cwd)
@@ -581,7 +581,7 @@ func (a *APIServer) inspectACPFrameAction(
 	// read relative to nothing is at least the unknown tier of the pack: alert
 	// in the default and permissive packs (the editor still asks the user a
 	// permission), block in strict.
-	verdict.floorBoundedTruncated(trunc, tier)
+	verdict.floorBoundedTruncated(trunc.Set(), tier)
 	if verdict != nil && !action.enforceable {
 		if decided := normalizeCodexAction(verdict.Action); decided == "block" || decided == "confirm" {
 			capped := *verdict
