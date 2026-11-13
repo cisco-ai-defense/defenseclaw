@@ -175,15 +175,21 @@ func TestEvaluateCodexHook_ActiveConnectorImpliesEnabled(t *testing.T) {
 
 	req := codexHookRequest{
 		HookEventName: "UserPromptSubmit",
-		Prompt:        trustExploitKeyword(),
+		Prompt:        userTypedBlockingPrompt(),
 	}
 	resp := api.evaluateCodexHook(context.Background(), req)
 
 	if resp.RawAction != "block" {
-		t.Errorf("RawAction = %q, want block (trust-exploit rule must fire)", resp.RawAction)
+		t.Errorf("RawAction = %q, want block (the secret rule must fire)", resp.RawAction)
 	}
 	if resp.Severity != "CRITICAL" {
 		t.Errorf("Severity = %q, want CRITICAL", resp.Severity)
+	}
+	// The trust rule fires on typed text too, capped at HIGH (an alert).
+	req.Prompt = trustExploitKeyword()
+	resp = api.evaluateCodexHook(context.Background(), req)
+	if resp.RawAction != "alert" || resp.Severity != "HIGH" {
+		t.Errorf("typed trust prompt = %s %s, want a HIGH alert (user-typed ceiling)", resp.RawAction, resp.Severity)
 	}
 }
 
@@ -270,7 +276,7 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 
 	req := codexHookRequest{
 		HookEventName: "UserPromptSubmit",
-		Prompt:        trustExploitKeyword(),
+		Prompt:        userTypedBlockingPrompt(),
 	}
 	resp := api.evaluateCodexHook(context.Background(), req)
 
@@ -1034,14 +1040,14 @@ func TestEvaluateCodexHook_UserPromptUsesContentRuleBoundary(t *testing.T) {
 		}
 	})
 
-	t.Run("trust injection remains enforceable", func(t *testing.T) {
+	t.Run("trust injection on typed text alerts", func(t *testing.T) {
 		resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
 			HookEventName: "UserPromptSubmit",
 			Prompt:        trustExploitKeyword(),
 		})
-		if resp.RawAction != "block" || resp.Severity != "CRITICAL" ||
+		if resp.RawAction != "alert" || resp.Severity != "HIGH" ||
 			!containsString(resp.Findings, "TRUST-JAILBREAK:Jailbreak attempt") {
-			t.Fatalf("response = %+v, want trust injection blocked", resp)
+			t.Fatalf("response = %+v, want the trust finding kept and capped at a HIGH alert", resp)
 		}
 	})
 

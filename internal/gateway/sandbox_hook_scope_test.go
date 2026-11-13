@@ -141,9 +141,9 @@ func TestSandboxHooksEnforceInObserveMode(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Connector = "claudecode" // guardrail.mode unset: observe
 	api := &APIServer{scannerCfg: cfg}
-	// The prompt TestEvaluateClaudeCodeHook_ExplicitEnableStillWorks uses:
-	// rule TRUST-JAILBREAK blocks it.
-	req := claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: "jailbreak mode activated"}
+	// The prompt TestEvaluateClaudeCodeHook_ExplicitEnableStillWorks uses: a
+	// provider key in the prompt blocks it.
+	req := claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: userTypedBlockingPrompt()}
 	host := api.evaluateClaudeCodeHook(context.Background(), req)
 	if host.RawAction != "block" || host.Action != "allow" || !host.WouldBlock || host.Mode != "observe" {
 		t.Fatalf("host hook in observe mode = %+v, want allow with would_block", host)
