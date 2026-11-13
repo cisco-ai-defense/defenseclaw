@@ -145,7 +145,7 @@ The gateway's `enterprise acp` command has `enroll`, `verify` and `revoke`, each
 
 | Surface | ACP methods | Protection |
 | --- | --- | --- |
-| Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON; no batches; 1 MiB frame and 128 pending-ID limits. An error response with a null `id` is checked and forwarded. In action mode any other invalid frame ends the session and names the side that sent it. |
+| Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON; no batches; an object that names one key twice, or two keys that differ only in letter case, is invalid; 1 MiB frame and 128 pending-ID limits. An error response with a null `id` is checked and forwarded. In action mode any other invalid frame ends the session and names the side that sent it. |
 | Prompt | `session/prompt` | Rules, scanners, optional judge, observe or action policy. |
 | Output | `session/update` and the prompt response | Checked per frame and again over the whole buffered turn. Action mode releases nothing before the terminal prompt response passes. |
 | Approval | `session/request_permission`, `elicitation/create` | The tool call the request asks about is judged as the hook connector would judge it (below); `elicitation/create` is checked as content. An unresolved confirmation fails closed in action mode. |
@@ -159,8 +159,9 @@ A frame that makes the editor or the agent act (`terminal/create`, `fs/read_text
 
 - A block refuses the frame; the editor shows the reason, as for any other blocked frame.
 - An alert is allowed and recorded.
-- A frame that must carry an action but not in the documented shape (a `terminal/create` with no command, a permission request that shows no action) is refused as unreadable. It is never treated as clean.
-- A tool call the agent reports after it ran it (`tool_call` in `session/update`) cannot be refused any more. Its finding is recorded and the report is allowed; the agent's own permission request, sent before it ran, is where the action is judged.
+- A frame that must carry an action but not in the documented shape (a `terminal/create` with no command, a permission request that shows no action, a permission that names more than 64 locations) is refused as unreadable. It is never treated as clean, and never judged in part.
+- A command runs in the directory the frame names, else in the directory the editor gave the session (`session/new`, `session/load`), which the guard sends with each agent frame. A command with neither is refused as unreadable.
+- A tool call the agent reports after it ran it (`tool_call` in `session/update`) cannot be refused any more. A block of it is recorded as an alert that would have blocked, with the finding and its severity, and the report is allowed; the agent's own permission request, sent before it ran, is where the action is judged.
 
 Protocol version: ACP `schema-v1.21.0`.
 

@@ -160,6 +160,12 @@ type Evaluation struct {
 	Method    string          `json:"method,omitempty"`
 	Payload   json.RawMessage `json:"payload"`
 	Aggregate bool            `json:"aggregate,omitempty"`
+	// SessionCWD is the working directory the editor gave the session the
+	// frame belongs to (session/new, session/load), as the guard saw it. A
+	// terminal/create or a tool call that names no directory of its own runs
+	// there, and its command is judged there (rel-1-0-10:GAP-0297). Empty
+	// when the guard did not see the session start.
+	SessionCWD string `json:"session_cwd,omitempty"`
 }
 
 type Verdict struct {

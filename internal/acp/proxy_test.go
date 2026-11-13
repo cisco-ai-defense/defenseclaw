@@ -1112,3 +1112,60 @@ func TestCopyFramesGatewayRefusalIsNotReportedAsNoAnswer(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0297: the guard remembers the directory the editor gave each
+// session and sends it with the agent frames of that session, so the gateway
+// judges a terminal/create that names no directory where the editor runs it.
+func TestCopyFramesSendsTheSessionDirectoryWithAgentFrames(t *testing.T) {
+	evaluator := &recordingEvaluator{}
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+	opts := ProxyOptions{Mode: ModeAction, Evaluator: evaluator, Stderr: io.Discard}
+	clientFrames := `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp/x","mcpServers":[]}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"loaded","cwd":"/tmp/y","mcpServers":[]}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(clientFrames), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	agentFrames := `{"jsonrpc":"2.0","id":1,"result":{"sessionId":"new1"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"result":null}` + "\n" +
+		`{"jsonrpc":"2.0","id":9,"method":"terminal/create","params":{"sessionId":"new1","command":"echo ok"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":10,"method":"terminal/create","params":{"sessionId":"loaded","command":"echo ok"}}` + "\n" +
+		`{"jsonrpc":"2.0","id":11,"method":"terminal/create","params":{"sessionId":"unknown","command":"echo ok"}}` + "\n"
+	if err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(agentFrames), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, seen := range evaluator.seen {
+		if seen.Direction == AgentToClient && seen.Method == "terminal/create" {
+			msg, err := ParseMessage(seen.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got[promptSessionID(msg)] = seen.SessionCWD
+		}
+	}
+	want := map[string]string{"new1": "/tmp/x", "loaded": "/tmp/y", "unknown": ""}
+	for session, cwd := range want {
+		if value, ok := got[session]; !ok || value != cwd {
+			t.Errorf("session %s: session_cwd %q (seen %v), want %q", session, value, ok, cwd)
+		}
+	}
+	for _, seen := range evaluator.seen {
+		if seen.Direction == ClientToAgent && seen.SessionCWD != "" {
+			t.Errorf("an editor frame carries session_cwd %q", seen.SessionCWD)
+		}
+	}
+}
+
+func TestProxyStateBoundsTheSessionDirectoriesItKeeps(t *testing.T) {
+	state := &proxyState{}
+	for i := 0; i < maxTrackedSessions+10; i++ {
+		state.noteSessionCWD(Message{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "session/load",
+			Params: json.RawMessage(fmt.Sprintf(`{"sessionId":"s%d","cwd":"/tmp/x"}`, i))}, ClientToAgent, "")
+	}
+	if len(state.sessionCWDs) != maxTrackedSessions {
+		t.Fatalf("%d session directories kept, want %d", len(state.sessionCWDs), maxTrackedSessions)
+	}
+	if state.sessionCWD(fmt.Sprintf("s%d", maxTrackedSessions+5)) != "" {
+		t.Fatal("a session past the bound has a directory")
+	}
+}

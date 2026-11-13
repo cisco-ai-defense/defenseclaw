@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode"
 )
 
 var (
@@ -112,10 +114,29 @@ func validJSONRPCID(id json.RawMessage) bool {
 	return number.String() != ""
 }
 
+// foldJSONKey is a key as encoding/json matches it to a struct field: with
+// simple case folding, each rune read as the smallest rune of its fold orbit.
+func foldJSONKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		smallest := r
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < smallest {
+				smallest = folded
+			}
+		}
+		return smallest
+	}, key)
+}
+
 // rejectDuplicateJSONKeys recursively rejects ambiguous objects. Different
 // JSON implementations disagree about whether the first or last duplicate
 // wins, which otherwise creates a parser-smuggling boundary between the guard
-// and the ACP peer.
+// and the ACP peer. Keys that differ only in letter case are duplicates too
+// (rel-1-0-10:GAP-0295): encoding/json, which reads every frame here, matches
+// a field name without regard to case and keeps the last such key, while the
+// editor and the agent (serde and other exact-match readers) read the exact
+// key, so a "Command" after a "command" made the guard judge one action and
+// the editor run another.
 func rejectDuplicateJSONKeys(frame []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(frame))
 	decoder.UseNumber()
@@ -131,7 +152,7 @@ func rejectDuplicateJSONKeys(frame []byte) error {
 		}
 		switch delim {
 		case '{':
-			seen := map[string]struct{}{}
+			seen := map[string]string{}
 			for decoder.More() {
 				keyToken, keyErr := decoder.Token()
 				if keyErr != nil {
@@ -141,10 +162,14 @@ func rejectDuplicateJSONKeys(frame []byte) error {
 				if !keyOK {
 					return errors.New("object key is not a string")
 				}
-				if _, duplicate := seen[key]; duplicate {
-					return fmt.Errorf("duplicate JSON key %q", key)
+				folded := foldJSONKey(key)
+				if first, duplicate := seen[folded]; duplicate {
+					if first == key {
+						return fmt.Errorf("duplicate JSON key %q", key)
+					}
+					return fmt.Errorf("JSON keys %q and %q differ only in letter case", first, key)
 				}
-				seen[key] = struct{}{}
+				seen[folded] = key
 				if err := visit(); err != nil {
 					return err
 				}

@@ -205,6 +205,9 @@ type acpActionEnv struct {
 	hookAPI *APIServer
 	project string
 	mode    acp.Mode
+	// sessionCWD is the directory the editor gave the session, as the guard
+	// sends it (Evaluation.SessionCWD): the project, unless a test changes it.
+	sessionCWD string
 }
 
 func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
@@ -236,7 +239,7 @@ func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
 	api.scannerCfg = cfg
 	api.initGuardrailProfiles(cfg)
 	return &acpActionEnv{
-		acpAPI: api, capture: capture, project: project, mode: acp.ModeAction,
+		acpAPI: api, capture: capture, project: project, mode: acp.ModeAction, sessionCWD: project,
 		hookAPI: &APIServer{scannerCfg: cfg, health: NewSidecarHealth()},
 	}
 }
@@ -244,20 +247,7 @@ func newACPActionEnv(t *testing.T, pack string) *acpActionEnv {
 // evaluate sends one agent-to-client (or other) ACP frame to the gateway.
 func (e *acpActionEnv) evaluate(t *testing.T, direction acp.Direction, frame []byte) acp.Verdict {
 	t.Helper()
-	msg, err := acp.ParseMessageAllowingNullIDErrors(frame)
-	if err != nil {
-		t.Fatalf("frame does not parse: %v", err)
-	}
-	body, err := json.Marshal(acp.Evaluation{
-		Profile: "default", Mode: e.mode, AgentID: "kiro", ClientID: "zed",
-		Direction: direction, Surface: acp.Classify(msg, direction), Method: msg.Method, Payload: frame,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
-	e.acpAPI.handleACPEvaluate(response, request)
+	response := e.post(t, direction, frame, "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -266,6 +256,35 @@ func (e *acpActionEnv) evaluate(t *testing.T, direction acp.Direction, frame []b
 		t.Fatal(err)
 	}
 	return verdict
+}
+
+// post sends one frame as the guard does and returns the gateway's answer.
+// The envelope names the frame's method and surface as the guard read them;
+// a frame the guard would not parse at all is sent with the method given by
+// asMethod (and surface tool).
+func (e *acpActionEnv) post(t *testing.T, direction acp.Direction, frame []byte, asMethod string) *httptest.ResponseRecorder {
+	t.Helper()
+	evaluation := acp.Evaluation{
+		Profile: "default", Mode: e.mode, AgentID: "kiro", ClientID: "zed",
+		Direction: direction, Payload: frame, SessionCWD: e.sessionCWD,
+	}
+	if asMethod != "" {
+		evaluation.Method, evaluation.Surface = asMethod, acp.SurfaceTool
+	} else {
+		msg, err := acp.ParseMessageAllowingNullIDErrors(frame)
+		if err != nil {
+			t.Fatalf("frame does not parse: %v", err)
+		}
+		evaluation.Surface, evaluation.Method = acp.Classify(msg, direction), msg.Method
+	}
+	body, err := json.Marshal(evaluation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+	e.acpAPI.handleACPEvaluate(response, request)
+	return response
 }
 
 func acpFrameJSON(t *testing.T, id int, method string, params any) []byte {
@@ -394,11 +413,11 @@ func TestACPActionVerdictSemantics(t *testing.T) {
 				if read.Action != "alert" || read.RawAction != "alert" {
 					t.Errorf("read of a credential file: %+v, want an alert (allowed and logged)", read)
 				}
-				// The guard cannot refuse what the agent already ran: as for a hook
-				// event that cannot block, the finding is detection-only (allowed,
-				// severity kept) and the audit row carries it.
-				if report.Action != "allow" || report.Severity != "CRITICAL" {
-					t.Errorf("report of a write the agent ran: %+v, want an allowed finding of severity CRITICAL", report)
+				// The guard cannot refuse what the agent already ran: the report
+				// is an alert that would have blocked (raw block, would_block),
+				// allowed, severity kept, and the audit row carries it.
+				if report.Action != "alert" || report.RawAction != "block" || !report.WouldBlock || report.Severity != "CRITICAL" {
+					t.Errorf("report of a write the agent ran: %+v, want an alert of severity CRITICAL that would have blocked", report)
 				}
 				return
 			}
@@ -408,8 +427,8 @@ func TestACPActionVerdictSemantics(t *testing.T) {
 			if read.Action != "allow" || read.RawAction != "alert" {
 				t.Errorf("observe, read of a credential file: %+v, want an allowed alert", read)
 			}
-			if report.Action != "allow" || report.Severity != "CRITICAL" {
-				t.Errorf("observe, report: %+v, want an allowed finding of severity CRITICAL", report)
+			if report.Action != "allow" || report.RawAction != "block" || !report.WouldBlock || report.Severity != "CRITICAL" {
+				t.Errorf("observe, report: %+v, want an allowed would-block of severity CRITICAL", report)
 			}
 		})
 	}

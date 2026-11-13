@@ -49,6 +49,10 @@ type acpParityPair struct {
 	method    string
 	params    map[string]any
 	id0       int // JSON-RPC id of the frame; 0 for a notification
+	// noCWD sends a terminal/create that names no directory: the editor runs
+	// it in the session's, which the guard sends with the frame
+	// (Evaluation.SessionCWD, rel-1-0-10:GAP-0297).
+	noCWD bool
 }
 
 func loadACPParityCases(t *testing.T) []acpParityCase {
@@ -109,10 +113,13 @@ func acpParityPairs(t *testing.T, cases []acpParityCase) (pairs []acpParityPair,
 			if strings.EqualFold(c.Tool, "powershell") || runtime.GOOS == "windows" {
 				hookTool = "execute_pwsh"
 			}
-			pairs = append(pairs, acpParityPair{
+			pair := acpParityPair{
 				id: c.ID, hookTool: hookTool, hookInput: map[string]any{"command": command},
 				method: "terminal/create", params: map[string]any{"sessionId": "s", "command": command}, id0: 1,
-			})
+			}
+			pairs = append(pairs, pair)
+			pair.id, pair.noCWD = c.ID+"/nocwd", true
+			pairs = append(pairs, pair)
 		case "write":
 			path, ok1 := str("file_path")
 			content, ok2 := str("content")
@@ -205,7 +212,7 @@ func acpVerdictRuleIDs(t *testing.T, body map[string]any) []string {
 func TestACPActionParityWithKiroHook(t *testing.T) {
 	cases := loadACPParityCases(t)
 	pairs, skipped := acpParityPairs(t, cases)
-	if len(pairs) < 200 {
+	if len(pairs) < 400 {
 		t.Fatalf("only %d pairs from %d cases", len(pairs), len(cases))
 	}
 	for _, pack := range []string{"default", "permissive", "strict"} {
@@ -222,10 +229,23 @@ func TestACPActionParityWithKiroHook(t *testing.T) {
 				params := pair.params
 				if pair.method == "terminal/create" {
 					// The hook payload names the session's working directory;
-					// terminal/create names the command's.
-					params = map[string]any{"sessionId": "s", "command": pair.params["command"], "cwd": env.project}
+					// terminal/create names the command's, or none: then the
+					// editor runs it in the session's, which the guard sends
+					// with the evaluation (env.sessionCWD, the project).
+					params = map[string]any{"sessionId": "s", "command": pair.params["command"]}
+					if !pair.noCWD {
+						params["cwd"] = env.project
+					}
 				}
 				frame := acpFrameJSON(t, pair.id0, pair.method, params)
+				// A file frame names an absolute path and the hook call of the
+				// pair carries no directory either, so the guard sends none:
+				// the corpus holds Windows spellings that a POSIX gateway
+				// reads as relative to a directory when it has one.
+				env.sessionCWD = ""
+				if pair.method == "terminal/create" {
+					env.sessionCWD = env.project
+				}
 				acpRaw[i] = env.evaluate(t, acp.AgentToClient, frame).RawAction
 			}
 			events := readStoredGuardrailEventsV8(t, env.capture.store.DatabasePath())
@@ -233,6 +253,7 @@ func TestACPActionParityWithKiroHook(t *testing.T) {
 				t.Fatalf("%d guardrail events for %d ACP frames", len(events), len(pairs))
 			}
 			mismatches, flagged, aliased := 0, 0, 0
+			flaggedBy := map[string]int{}
 			classes := map[string][]string{}
 			for i, pair := range pairs {
 				ids := acpVerdictRuleIDs(t, events[i].Body)
@@ -249,6 +270,7 @@ func TestACPActionParityWithKiroHook(t *testing.T) {
 				hookAction, acpAction := normalizeCodexAction(hooks[i].raw), normalizeCodexAction(acpRaw[i])
 				if hookAction != "allow" || len(want) > 0 {
 					flagged++
+					flaggedBy[pair.method]++
 				}
 				if hookAction != acpAction || !slices.Equal(want, got) {
 					mismatches++
@@ -259,10 +281,21 @@ func TestACPActionParityWithKiroHook(t *testing.T) {
 			for class, ids := range classes {
 				t.Errorf("%d pairs: %s (e.g. %s)", len(ids), class, ids[0])
 			}
-			t.Logf("%s: %d cases -> %d pairs (%d cases without an ACP frame), %d flagged by the hook, %d with the PATH-WIN-* twin of the same rule, %d mismatches",
-				pack, len(cases), len(pairs), skipped, flagged, aliased, mismatches)
+			t.Logf("%s: %d cases -> %d pairs (%d cases without an ACP frame), %d flagged by the hook (%v), %d with the PATH-WIN-* twin of the same rule, %d mismatches",
+				pack, len(cases), len(pairs), skipped, flagged, flaggedBy, aliased, mismatches)
 			if mismatches > 0 {
 				t.Errorf("%d of %d pairs differ", mismatches, len(pairs))
+			}
+			// The pairs must carry findings: a rule pack that failed to load
+			// allows every pair on both surfaces and agrees with itself. The
+			// floors are about 60% of what each method flags in each pack
+			// (shell cases and their no-directory twins counted twice).
+			for method, floor := range map[string]int{
+				"terminal/create": 60, "fs/write_text_file": 40, "session/request_permission": 40, "fs/read_text_file": 15,
+			} {
+				if flaggedBy[method] < floor {
+					t.Errorf("only %d %s pairs were flagged by the hook, want at least %d: the rules did not load?", flaggedBy[method], method, floor)
+				}
 			}
 		})
 	}

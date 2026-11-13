@@ -6,10 +6,12 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -50,8 +52,11 @@ type acpFrameAction struct {
 }
 
 // acpMaxFrameToolCalls bounds the calls one frame may have judged (a
-// permission naming many locations).
-const acpMaxFrameToolCalls = 8
+// permission naming many locations). A frame that names more is refused as
+// unread, never judged in part: a location past the bound was never judged,
+// and a permission is the one point where the action can still be refused
+// (rel-1-0-10:GAP-0296).
+const acpMaxFrameToolCalls = 64
 
 // acpFrameToolCalls is the action of one ACP frame. ok is false for a frame
 // that performs none (a prompt, agent text, a terminal's lifecycle, a
@@ -210,6 +215,9 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	for _, location := range call.Locations {
 		if path := strings.TrimSpace(location.Path); path != "" && !slices.Contains(paths, path) {
 			paths = append(paths, path)
+			if len(paths) > acpMaxFrameToolCalls {
+				break // addPaths refuses the frame as unread
+			}
 		}
 	}
 	if !hasInput && len(paths) == 0 {
@@ -224,6 +232,7 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	addPaths := func(tool string, args func(path string) map[string]string) {
 		for _, path := range paths {
 			if len(calls) == acpMaxFrameToolCalls {
+				calls = append(calls, acpToolCall{unread: true})
 				return
 			}
 			calls = append(calls, acpToolCall{tool: tool, args: acpMarshal(args(path))})
@@ -246,9 +255,13 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool) (
 	case "read":
 		addPaths("Read", func(path string) map[string]string { return map[string]string{"file_path": path} })
 	case "edit":
-		content, hasContent := acpInputText(input, "content")
-		oldText, hasOld := acpInputText(input, "old_string")
-		newText, hasNew := acpInputText(input, "new_string")
+		// The text an edit writes, under the names ACP agents use. Kiro's own
+		// fs_write and str_replace inputs say file_text, old_str and new_str
+		// (connector.KiroTrustedWriteArgs); read only as "content", the text
+		// never reached the content rules.
+		content, hasContent := acpInputTextOf(input, "content", "file_text", "fileText", "text")
+		oldText, hasOld := acpInputTextOf(input, "old_string", "old_str", "oldStr", "oldString")
+		newText, hasNew := acpInputTextOf(input, "new_string", "new_str", "newStr", "newString")
 		addPaths("Write", func(path string) map[string]string {
 			switch {
 			case hasOld && hasNew && path == paths[0]:
@@ -327,6 +340,16 @@ func acpInputString(input map[string]json.RawMessage, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// acpInputTextOf is the text under the first of keys that holds a string.
+func acpInputTextOf(input map[string]json.RawMessage, keys ...string) (string, bool) {
+	for _, key := range keys {
+		if value, ok := acpInputText(input, key); ok {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 func acpInputText(input map[string]json.RawMessage, key string) (string, bool) {
@@ -412,24 +435,38 @@ func (a *APIServer) inspectACPFrameAction(
 ) (verdict *ToolInspectVerdict, reportOnly bool) {
 	profile := a.hookProfileForRequest(ctx, connectorName)
 	session := acpFrameSessionID(req, false)
+	secureClient := a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration()
 	for _, call := range action.calls {
 		var judged *ToolInspectVerdict
-		if call.unread {
+		cwd := acpCallDirectory(req.SessionCWD, call.cwd)
+		switch {
+		case call.unread:
 			judged = acpUnreadToolCallVerdict(connectorName)
-		} else {
+		case call.tool == "shell" && !filepath.IsAbs(cwd) && !secureClient:
+			// A command runs in the directory the editor gave the session
+			// when the frame names none. With neither known, the rules would
+			// read the files a command names relative to nothing, so the
+			// command is unknown, never clean (rel-1-0-10:GAP-0297). The
+			// guard of Secure Client sends no session directory.
+			judged = acpUnreadToolCallVerdict(connectorName)
+		default:
+			// Judged as the hook path judges a tool call that can be
+			// refused. The report of a tool the agent already ran is then
+			// capped below: an alert that would have blocked, as for a hook
+			// event outside a connector's block events.
 			judged = a.inspectAgentHookToolCall(ctx, agentHookRequest{
 				ConnectorName: connectorName,
 				HookEventName: req.Method,
 				SessionID:     session,
-				// The working directory is read as a hook event's is: kept as
-				// reported, and placed by the same rule (Windows cleaning, the
-				// account's own folders) for the rules that need a place.
-				CWD:         hookCWDForContext(ctx, call.cwd),
-				ReportedCWD: strings.TrimSpace(call.cwd),
+				// The working directory is read as a hook event's is: kept
+				// as reported, and placed by the same rule (Windows cleaning,
+				// the account's own folders) for the rules that need a place.
+				CWD:         hookCWDForContext(ctx, cwd),
+				ReportedCWD: cwd,
 				ToolName:    call.tool,
 				ToolArgs:    call.args,
 				Direction:   "tool_call",
-			}, profile, action.enforceable)
+			}, profile, true)
 		}
 		verdict = strongerACPVerdict(verdict, judged)
 	}
@@ -451,6 +488,19 @@ func (a *APIServer) inspectACPFrameAction(
 		verdict = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 	return verdict, reportOnly
+}
+
+// acpCallDirectory is the directory an ACP action runs in: the one the frame
+// names (joined to the session's when relative), else the session's, else "".
+func acpCallDirectory(sessionCWD, callCWD string) string {
+	sessionCWD, callCWD = strings.TrimSpace(sessionCWD), strings.TrimSpace(callCWD)
+	if callCWD == "" {
+		return sessionCWD
+	}
+	if filepath.IsAbs(callCWD) || sessionCWD == "" {
+		return callCWD
+	}
+	return hookpaths.JoinDirectoryText(sessionCWD, callCWD)
 }
 
 // acpUnreadToolCallVerdict refuses an ACP action the frame does not carry

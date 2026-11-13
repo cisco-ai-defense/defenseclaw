@@ -184,6 +184,12 @@ type proxyState struct {
 	// failClosed is the last authenticated verdict's "closed".
 	openSessions map[string]bool
 	failClosed   bool
+	// sessionCWDs are the working directories the editor gave its sessions,
+	// by session ID, and newSessionCWDs those of a session/new (or fork)
+	// still waiting for its answer, by request ID. A frame that names no
+	// directory of its own is judged in its session's (GAP-0297).
+	sessionCWDs    map[string]string
+	newSessionCWDs map[string]string
 	// silenceGen and silenceTimer drive the notice for an agent that does
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
@@ -265,6 +271,69 @@ func (s *proxyState) recordFailMode(session string, verdict Verdict) {
 		}
 		s.openSessions[session] = true
 	}
+}
+
+// maxTrackedSessions bounds the session directories one guard remembers.
+const maxTrackedSessions = 1024
+
+// noteSessionCWD remembers the working directory of a session the editor
+// starts: session/load and session/resume name the session and its directory;
+// session/new and session/fork name the directory and the answer names the
+// session. matched is the method of the request a response answers.
+func (s *proxyState) noteSessionCWD(msg Message, direction Direction, matched string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if direction == ClientToAgent && msg.IsRequest() {
+		var params struct {
+			SessionID string `json:"sessionId"`
+			CWD       string `json:"cwd"`
+		}
+		if json.Unmarshal(msg.Params, &params) != nil || strings.TrimSpace(params.CWD) == "" {
+			return
+		}
+		switch msg.Method {
+		case "session/new", "session/fork":
+			if len(s.newSessionCWDs) < MaxPendingIDs {
+				if s.newSessionCWDs == nil {
+					s.newSessionCWDs = map[string]string{}
+				}
+				s.newSessionCWDs[msg.IDKey()] = params.CWD
+			}
+		case "session/load", "session/resume":
+			s.setSessionCWDLocked(params.SessionID, params.CWD)
+		}
+		return
+	}
+	if direction == AgentToClient && msg.Method == "" && (matched == "session/new" || matched == "session/fork") {
+		cwd, ok := s.newSessionCWDs[msg.IDKey()]
+		delete(s.newSessionCWDs, msg.IDKey())
+		var result struct {
+			SessionID string `json:"sessionId"`
+		}
+		if ok && json.Unmarshal(msg.Result, &result) == nil {
+			s.setSessionCWDLocked(result.SessionID, cwd)
+		}
+	}
+}
+
+func (s *proxyState) setSessionCWDLocked(session, cwd string) {
+	if session == "" {
+		return
+	}
+	if _, known := s.sessionCWDs[session]; !known && len(s.sessionCWDs) >= maxTrackedSessions {
+		return
+	}
+	if s.sessionCWDs == nil {
+		s.sessionCWDs = map[string]string{}
+	}
+	s.sessionCWDs[session] = cwd
+}
+
+// sessionCWD is the directory the editor gave session, or "".
+func (s *proxyState) sessionCWD(session string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sessionCWDs[session]
 }
 
 // forgetFailOpen drops every open fail mode: an answer that failed
@@ -1097,10 +1166,15 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			}
 			continue
 		}
-		verdict, evalErr := evaluate(ctx, opts, Evaluation{
+		state.noteSessionCWD(msg, direction, matchedMethod)
+		evaluation := Evaluation{
 			Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
 			Direction: direction, Surface: Classify(msg, direction), Method: msg.Method, Payload: msg.Raw,
-		})
+		}
+		if direction == AgentToClient && msg.Method != "" {
+			evaluation.SessionCWD = state.sessionCWD(promptSessionID(msg))
+		}
+		verdict, evalErr := evaluate(ctx, opts, evaluation)
 		if evalErr != nil && state.peerProtocolFixes && ctx.Err() != nil {
 			// The session is ending: an evaluation the shutdown cancelled
 			// is not a gateway problem to report (GAP-0351).
