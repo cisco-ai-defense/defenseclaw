@@ -2378,7 +2378,7 @@ class GatewayConfig:
             return bool(value) and not is_secret_ref_text(value) and value.strip() != openclaw
 
         token_env = (self.token_env or "").strip()
-        for name in (token_env, DEFENSECLAW_GATEWAY_TOKEN_ENV):
+        for name in (token_env, _GATEWAY_TOKEN_ENV_NAME):
             if not name or is_openclaw_gateway_token_env(name):
                 continue
             val = os.environ.get(name, "")
@@ -2389,7 +2389,7 @@ class GatewayConfig:
 
 # The DefenseClaw master gateway token and the OpenClaw WebSocket credential
 # (R-TOK). They are separate values; see GatewayConfig.resolved_token.
-DEFENSECLAW_GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
+_GATEWAY_TOKEN_ENV_NAME = "DEFENSECLAW_GATEWAY_TOKEN"
 OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
 
 
