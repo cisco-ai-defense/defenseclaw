@@ -375,7 +375,7 @@ func (l *lexer) lexDash() {
 	// --% stop-parsing: a standalone --% (at a token boundary) makes the rest
 	// of the logical line verbatim; the tail ends at a newline or an unquoted
 	// pipe or &&/|| (a ; and redirects are verbatim). --%glued is a bareword.
-	if l.peek(1) == '-' && l.peek(2) == '%' {
+	if isDash(l.peek(1)) && l.peek(2) == '%' {
 		n := l.peek(3)
 		boundary := n == -1 || n == '\n' || isSpace(n) || n == '|' || n == '&' || n == ';'
 		if !boundary {
@@ -416,7 +416,9 @@ func (l *lexer) lexDash() {
 	}
 	// '--name' is a double-dash bareword argument in PowerShell, not an
 	// operator; only a bare '--' (decrement / no following name) is the operator.
-	if l.peek(1) == '-' {
+	// Unicode dashes (en/em/horizontal-bar) count as dashes too, so '––x' is a
+	// single bareword argument '––x', matching pwsh.
+	if isDash(l.peek(1)) {
 		if isNameStart(l.peek(2)) || l.peek(2) == '/' {
 			l.lexBareword()
 			return

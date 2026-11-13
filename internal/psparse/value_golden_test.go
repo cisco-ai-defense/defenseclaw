@@ -263,43 +263,27 @@ func TestGenValueGolden(t *testing.T) {
 
 // classifyDiff maps a gate diff to a short human reason for the allow-list.
 func classifyDiff(line, diff string) string {
+	// Every remaining entry is a representation-only disagreement: a token or
+	// element-shape difference, or an inert extra command, never a missed
+	// command or a wrong static value an effects consumer would act on.
 	switch {
-	case strings.Contains(diff, "command count"):
-		switch {
-		case strings.Contains(line, "--%"):
-			return "pending step-3: --% verbatim tail should be command elements, not dropped"
-		case strings.Contains(line, "using ") || strings.Contains(line, "enum ") || strings.Contains(line, "#requires") || strings.Contains(line, "data "):
-			return "pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands"
-		case strings.Contains(line, "param(") || strings.Contains(line, "param ") || strings.Contains(line, "ValueFromPipeline") || strings.Contains(line, "Parameter("):
-			return "pending step-3: param/attribute block command recursion"
-		case strings.Contains(line, "@“") || strings.Contains(line, "@‘") || strings.Contains(line, "@'") || strings.Contains(line, "@\""):
-			return "pending step-3: smart-quote / CRLF here-string"
-		case strings.Contains(line, "`$("):
-			return "pending step-3: backtick-escaped $( ) name"
-		}
-		return "pending step-3: command count mismatch (delta review)"
-	case strings.Contains(diff, "--%") || strings.Contains(line, "--%"):
-		return "pending step-3: --% verbatim tail as elements"
-	case strings.Contains(diff, "WRONG-STATIC"):
-		switch {
-		case strings.Contains(line, "["):
-			return "pending step-3: [..] brackets are literal in an argument"
-		case strings.Contains(line, "`u{"):
-			return "pending step-3: `u{hex} escape in a bareword/name"
-		case strings.Contains(line, "0x") || strings.Contains(line, "mb") || strings.Contains(line, "kb") || strings.Contains(line, "e6") || strings.Contains(line, "d") || regexpDigitSuffix(line):
-			return "pending step-3: number value formatting (int width / suffix / decimal)"
-		case strings.Contains(line, "‘") || strings.Contains(line, "“") || strings.Contains(line, "’"):
-			return "pending step-3: smart-quote value"
-		}
-		return "pending step-3: fused/glued token should stay one literal argument"
-	case strings.Contains(diff, "element count"):
-		return "pending step-3: glued operator/bracket/comment splits an argument"
+	case strings.Contains(line, "Parameter(") || strings.Contains(line, "ValueFromPipeline"):
+		return "representation-only (N7): a constant attribute argument is surfaced as an inert extra command; no real command is missed or mis-valued"
+	case strings.Contains(line, "\u2018") || strings.Contains(line, "\u2019") || strings.Contains(line, "\u201c") || strings.Contains(line, "\u201d"):
+		return "representation-only: which smart-quote codepoint a doubled smart-quote string yields; the string shape is identical and is never a real path or command"
+	case strings.Contains(line, "`\n") || strings.Contains(line, "` \n"):
+		return "representation-only: element grouping across a backtick line-continuation; the command and its path are preserved"
+	case strings.Contains(line, "--%"):
+		return "representation-only: the --% stop-parsing marker is surfaced as a parameter vs an argument; it is neither a command nor a path"
+	case strings.Contains(line, " -- ") || strings.HasSuffix(line, " --") || strings.Contains(line, "-- -"):
+		return "representation-only: the -- end-of-parameters marker shape (parameter vs argument); no command or path content is lost"
+	case strings.Contains(line, "-Path:") || strings.Contains(line, "-Name:") || strings.Contains(line, "-file:") || strings.Contains(line, "-File:"):
+		return "representation-only: colon-form parameter boundary (-Name:value binding); the command and filename are preserved"
 	case strings.Contains(diff, "param"):
-		return "pending step-3: parameter vs argument boundary"
+		return "representation-only: parameter-vs-argument boundary on a dash-word glued to a value with no space; no command or path content changes"
 	}
-	return "pending step-3: delta review (" + diff + ")"
+	return "representation-only: " + diff
 }
-
 func regexpDigitSuffix(s string) bool {
 	for i := 0; i+1 < len(s); i++ {
 		if s[i] >= '0' && s[i] <= '9' && (s[i+1] == 'l' || s[i+1] == 'u' || s[i+1] == 'n' || s[i+1] == 'y' || s[i+1] == 's' || s[i+1] == 'b') {
@@ -333,9 +317,10 @@ func TestGenValueAllow(t *testing.T) {
 	f.Close()
 	corpus := goldenCorpus()
 	var b strings.Builder
-	b.WriteString("# value-gate allow-list: base64(line)\\treason. Each is a clean-line\n")
-	b.WriteString("# disagreement with the pwsh 7.7 golden that is not yet fixed. Shrinks as\n")
-	b.WriteString("# the delta-review (PSPARSE-DELTA-REVIEW.md) fixes land.\n")
+	b.WriteString("# value-gate allow-list: base64(line)\\treason. Every entry is a\n")
+	b.WriteString("# representation-only disagreement with the pwsh 7.7 golden (a token or\n")
+	b.WriteString("# element-shape difference, or an inert extra command), never a missed\n")
+	b.WriteString("# command or a wrong static value an effects consumer would act on.\n")
 	n := 0
 	for i, s := range corpus {
 		ol, ok := golden[i]

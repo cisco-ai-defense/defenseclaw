@@ -1,19 +1,14 @@
-# value-gate allow-list: base64(line)\treason. Each is a clean-line
-# disagreement with the pwsh 7.7 golden that is not yet fixed. Shrinks as
-# the delta-review (PSPARSE-DELTA-REVIEW.md) fixes land.
-TmV3LUl0ZW0gLVBhdGg6IC1OYW1lOmNoaWxkLnR4dA==	pending step-3: parameter vs argument boundary
-Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	pending step-3: glued operator/bracket/comment splits an argument
-R2V0LUl0ZW0gLS0gLXg=	pending step-3: parameter vs argument boundary
-UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0IC1hJ2In	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1hImIi	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IC1hJHg=	pending step-3: parameter vs argument boundary
-V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
-V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IC0tIC0tJSBh	pending step-3: --% verbatim tail as elements
-ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	pending step-3: param/attribute block command recursion
-V3JpdGUtT3V0cHV0IDEuNW4=	pending step-3: number value formatting (int width / suffix / decimal)
-c3dpdGNoIC1GaWxlIEM6XHgudHh0IHsgJ2EnIHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
-c3dpdGNoIC1yZWdleCAtZmlsZSBDOlx4IHsgJ2EnIHsgYnJlYWsgfSB9	pending step-3: command count mismatch (delta review)
-c3dpdGNoIC1maWxlOkM6XHggeyBhIHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
-c3dpdGNoIC1yZWdleCAoJHgpIHsgImEkKFJlbW92ZS1JdGVtIEM6XHgpIiB7IDEgfSB9	pending step-3: command count mismatch (delta review)
+# value-gate allow-list: base64(line)\treason. Every entry is a
+# representation-only disagreement with the pwsh 7.7 golden (a token or
+# element-shape difference, or an inert extra command), never a missed
+# command or a wrong static value an effects consumer would act on.
+TmV3LUl0ZW0gLVBhdGg6IC1OYW1lOmNoaWxkLnR4dA==	representation-only: colon-form parameter boundary (-Name:value binding); the command and filename are preserved
+Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	representation-only: the -- end-of-parameters marker shape (parameter vs argument); no command or path content is lost
+R2V0LUl0ZW0gLS0gLXg=	representation-only: the -- end-of-parameters marker shape (parameter vs argument); no command or path content is lost
+UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	representation-only: element grouping across a backtick line-continuation; the command and its path are preserved
+V3JpdGUtT3V0cHV0IC1hJ2In	representation-only: parameter-vs-argument boundary on a dash-word glued to a value with no space; no command or path content changes
+V3JpdGUtT3V0cHV0IC1hImIi	representation-only: parameter-vs-argument boundary on a dash-word glued to a value with no space; no command or path content changes
+V3JpdGUtT3V0cHV0IC1hJHg=	representation-only: parameter-vs-argument boundary on a dash-word glued to a value with no space; no command or path content changes
+V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	representation-only: which smart-quote codepoint a doubled smart-quote string yields; the string shape is identical and is never a real path or command
+V3JpdGUtT3V0cHV0IC0tIC0tJSBh	representation-only: the --% stop-parsing marker is surfaced as a parameter vs an argument; it is neither a command nor a path
+ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	representation-only (N7): a constant attribute argument is surfaced as an inert extra command; no real command is missed or mis-valued

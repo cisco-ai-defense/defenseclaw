@@ -365,6 +365,7 @@ func numberLit(t Token) *Number {
 	// trailing numeric type suffix (l u y s n d and combos)
 	isDecimalType := false
 	unsigned := false
+	bigInt := false
 	for len(raw) > 0 {
 		c := raw[len(raw)-1]
 		if c == 'd' || c == 'D' {
@@ -372,6 +373,9 @@ func numberLit(t Token) *Number {
 		}
 		if c == 'u' || c == 'U' {
 			unsigned = true
+		}
+		if c == 'n' || c == 'N' {
+			bigInt = true
 		}
 		if strings.IndexByte("lLuUyYsSnNdD", c) >= 0 {
 			raw = raw[:len(raw)-1]
@@ -417,6 +421,11 @@ func numberLit(t Token) *Number {
 		n.Display, n.OK = raw, true
 		return n
 	default:
+		if bigInt {
+			// a [bigint] literal with a non-integer mantissa (e.g. 1.5n) rounds
+			// to an integer in pwsh; we do not assert that value statically.
+			return n
+		}
 		if f, err := strconv.ParseFloat(raw, 64); err == nil {
 			f *= float64(mult)
 			n.Value = f

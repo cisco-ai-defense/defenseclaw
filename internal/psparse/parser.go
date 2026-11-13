@@ -422,12 +422,16 @@ func (p *parser) parseControl(kw string) Statement {
 		switch {
 		case p.at(TokLParen):
 			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
+		case kw == "switch" && (p.at(TokDollarParen) || p.at(TokAtParen)):
+			// switch $(...) / @(...): an evaluated condition, walk its commands
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
 		case p.at(TokLBrace):
 			if kw == "switch" {
 				p.parseSwitchBody(blk)
-			} else {
-				blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
+				blk.start, blk.end = start, p.prevEnd()
+				return blk
 			}
+			blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
 		case p.at(TokParameter):
 			// a control option such as switch -regex / -wildcard / -file
 			p.advance()
@@ -436,6 +440,14 @@ func (p *parser) parseControl(kw string) Statement {
 		case p.at(TokLBracket):
 			// a trap/catch type filter like  catch [IOException] { }
 			p.skipBracketType()
+		case p.at(TokEOF):
+			blk.start, blk.end = start, p.prevEnd()
+			return blk
+		case kw == "switch":
+			// the switch condition value or an option value (e.g. -File <path>):
+			// a literal to match on, never a command to run. Consume it silently
+			// so the body { } is reached instead of leaking as a top-level command.
+			p.advance()
 		default:
 			blk.start, blk.end = start, p.prevEnd()
 			return blk
@@ -467,6 +479,10 @@ func (p *parser) parseSwitchBody(blk *Block) {
 		case p.at(TokLParen):
 			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
 		case p.at(TokDollarParen), p.at(TokAtParen):
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
+		case p.at(TokString):
+			// a clause pattern that is an (expandable) string may embed $( ) or
+			// subexpressions that run commands; parse it so they are walked.
 			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
 		default:
 			p.advance() // a bare clause label / separator
