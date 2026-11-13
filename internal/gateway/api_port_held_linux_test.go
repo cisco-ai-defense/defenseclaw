@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -80,13 +81,13 @@ func TestNoteAPIPortHolderAuditsAnotherAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := os.ReadFile(key)
-	a.noteAPIPortHolder()
+	a.noteAPIPortHolder(syscall.EADDRINUSE)
 	raw, err := os.ReadFile(filepath.Join(a.configDataDir(), "hooks", routePortHeldName))
 	if err != nil {
 		t.Fatalf("held-port mark: %v", err)
 	}
 	var mark routePortHeld
-	if json.Unmarshal(raw, &mark) != nil || mark.UID != 4242 || mark.Addr != "127.0.0.1:18970" {
+	if json.Unmarshal(raw, &mark) != nil || mark.UID == nil || *mark.UID != 4242 || mark.Addr != "127.0.0.1:18970" {
 		t.Fatalf("mark: %s", raw)
 	}
 	if after, _ := os.ReadFile(key); string(after) != string(before) {
@@ -102,7 +103,7 @@ func TestNoteAPIPortHolderAuditsAnotherAccount(t *testing.T) {
 func TestNoteAPIPortHolderIgnoresTheOwnAccount(t *testing.T) {
 	useProcNetFixture(t, strings.ReplaceAll(procNetTCPFixture, "  4242  ", "  1000  "), "")
 	a, store := heldPortServer(t, true)
-	a.noteAPIPortHolder()
+	a.noteAPIPortHolder(syscall.EADDRINUSE)
 	if _, err := os.Stat(filepath.Join(a.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
 		t.Fatalf("own listener (a gateway still stopping) is no hijack: %v", err)
 	}
@@ -115,11 +116,33 @@ func TestNoteAPIPortHolderIgnoresTheOwnAccount(t *testing.T) {
 func TestNoteAPIPortHolderWithoutRouteOnly(t *testing.T) {
 	useProcNetFixture(t, procNetTCPFixture, "")
 	b, store := heldPortServer(t, false)
-	b.noteAPIPortHolder()
+	b.noteAPIPortHolder(syscall.EADDRINUSE)
 	if _, err := os.Stat(filepath.Join(b.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
 		t.Fatalf("no route-only, no mark: %v", err)
 	}
 	if events, err := store.ListEvents(10); len(events) != 1 {
 		t.Fatalf("audit without route-only: %+v %v", events, err)
+	}
+}
+
+// A restart: the first conflict is this account (its exiting gateway), and
+// another account takes the port before the next attempt. The holder is
+// looked up again, so the mark is written and audited once (REVIEW P2-3).
+func TestNoteHeldAPIPortLooksAgainAfterTheOwnAccount(t *testing.T) {
+	useProcNetFixture(t, strings.ReplaceAll(procNetTCPFixture, "  4242  ", "  1000  "), "")
+	a, store := heldPortServer(t, true)
+	mark := filepath.Join(a.configDataDir(), "hooks", routePortHeldName)
+	a.noteHeldAPIPort(syscall.EADDRINUSE)
+	if _, err := os.Stat(mark); !os.IsNotExist(err) {
+		t.Fatalf("own listener: %v", err)
+	}
+	useProcNetFixture(t, procNetTCPFixture, "")
+	a.noteHeldAPIPort(syscall.EADDRINUSE)
+	a.noteHeldAPIPort(syscall.EADDRINUSE)
+	if _, err := os.Stat(mark); err != nil {
+		t.Fatalf("another account after the own one: %v", err)
+	}
+	if events, err := store.ListEvents(10); err != nil || len(events) != 1 {
+		t.Fatalf("one audit: %+v %v", events, err)
 	}
 }

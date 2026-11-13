@@ -23,7 +23,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
@@ -180,7 +179,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	upstream, ok := cfg.Routing.RouteOnly.Upstreams[connector]
 	if !ok || strings.TrimSpace(upstream.BaseURL) == "" {
-		routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "routing.route_only.upstreams."+connector+" is not set; run the routing enable step again")
+		routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "routing.route_only.upstreams."+connector+" is not set; set its base_url and api in config.yaml")
 		return
 	}
 	// Gateway signing (DESIGN 7.3, 15.6): the agent sends no AWS credential
@@ -927,7 +926,7 @@ func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *conn
 // removed, routing turned on or off, upstream or API address changed).
 // Managed hosts are skipped: the guardian owns agent files there.
 func (s *Sidecar) applyRouteOnlyRenders(oldCfg, newCfg *config.Config) {
-	if s == nil || oldCfg == nil || newCfg == nil || managed.IsManagedEnterprise(newCfg.DeploymentMode) {
+	if s == nil || oldCfg == nil || !ossRouteOnlyGateway(newCfg) {
 		return
 	}
 	names := map[string]bool{}
@@ -948,7 +947,7 @@ func (s *Sidecar) applyRouteOnlyRenders(oldCfg, newCfg *config.Config) {
 // rerenderRouteOnly renders the route-only agent config of every routed
 // connector again from cfg (OSS only), as after a route key rotation.
 func (s *Sidecar) rerenderRouteOnly(cfg *config.Config) {
-	if s == nil || cfg == nil || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if s == nil || !ossRouteOnlyGateway(cfg) {
 		return
 	}
 	registry := connector.NewDefaultRegistry()
