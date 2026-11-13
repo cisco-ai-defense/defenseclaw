@@ -41,6 +41,12 @@ import (
 const (
 	substrateSkillRoleFile   = "skill_file"
 	substrateQuarantineField = "substrate_quarantine"
+	// substrateUnscannedField names fingerprinted skill folders that were
+	// not attached and that the gateway has no scan of (A5's contract: the
+	// kit attaches them again in its next post).
+	substrateUnscannedField = "substrate_unscanned"
+	// substrateSkillsSeenMax bounds the scanned-fingerprint memory.
+	substrateSkillsSeenMax = 100000
 	// substrateSkillFoldersMax bounds the folders scanned per call (the
 	// kit sends at most 4).
 	substrateSkillFoldersMax = 8
@@ -117,6 +123,56 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, f *SubstrateF
 	if len(out) > 0 {
 		st.logRefusal("%d attached skill folder(s) blocked by the runtime skill scan", len(out))
 	}
+	// Remember what was scanned, by actor, folder and fingerprint, so a
+	// later post that only fingerprints the folder counts it as scanned.
+	if actor, ok := substrateActorFrom(ctx); ok && f != nil {
+		for _, fp := range f.Skills {
+			dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
+			if _, scanned := folders[dir]; scanned && fp.FP != "" {
+				st.rememberSkill(actor.UID, dir, fp.FP)
+			}
+		}
+	}
+	return out
+}
+
+// SubstrateUnscanned is one entry of the substrate_unscanned field.
+type SubstrateUnscanned struct {
+	Path string `json:"path"`
+	FP   string `json:"fp,omitempty"`
+}
+
+func (st *substrateState) rememberSkill(uid, dir, fp string) {
+	st.skillsMu.Lock()
+	defer st.skillsMu.Unlock()
+	if st.skillsSeen == nil || len(st.skillsSeen) >= substrateSkillsSeenMax {
+		st.skillsSeen = map[string]string{}
+	}
+	st.skillsSeen[uid+"\x00"+dir] = fp
+}
+
+// substrateUnscannedSkills lists the fingerprinted folders the kit did not
+// attach whose current fingerprint has not been scanned here: they count
+// as not scanned (A5's handoff). A replica that did not see the scan names
+// the folder too; the kit then attaches it once more, which costs bytes
+// only.
+func (st *substrateState) substrateUnscannedSkills(ctx context.Context, f *SubstrateFacts) []SubstrateUnscanned {
+	actor, ok := substrateActorFrom(ctx)
+	if !ok || f == nil || st.cfg.Skills == nil {
+		return nil
+	}
+	var out []SubstrateUnscanned
+	st.skillsMu.Lock()
+	defer st.skillsMu.Unlock()
+	for _, fp := range f.Skills {
+		if fp.Attached || fp.FP == "" {
+			continue
+		}
+		dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
+		if st.skillsSeen[actor.UID+"\x00"+dir] != fp.FP {
+			out = append(out, SubstrateUnscanned{Path: dir, FP: fp.FP})
+		}
+	}
 	return out
 }
 
@@ -144,20 +200,23 @@ func (r *substrateAnswerRecorder) Write(b []byte) (int, error) {
 // withSubstrateAnswer serves next, adds the quarantine field (when q has
 // entries) to a 200 JSON object answer, and returns the answer body for
 // the decision log. Any other answer passes unchanged.
-func withSubstrateAnswer(w http.ResponseWriter, r *http.Request, next http.Handler, q []SubstrateQuarantine) []byte {
+func withSubstrateAnswer(w http.ResponseWriter, r *http.Request, next http.Handler, q []SubstrateQuarantine, unscanned []SubstrateUnscanned) []byte {
 	rec := &substrateAnswerRecorder{header: http.Header{}}
 	next.ServeHTTP(rec, r)
 	body := rec.body.Bytes()
 	original := body
-	if rec.status == http.StatusOK && len(q) > 0 {
+	if rec.status == http.StatusOK && (len(q) > 0 || len(unscanned) > 0) {
 		var obj map[string]json.RawMessage
 		if json.Unmarshal(body, &obj) == nil && obj != nil {
-			if raw, err := json.Marshal(q); err == nil {
-				obj[substrateQuarantineField] = raw
-				if merged, err := json.Marshal(obj); err == nil {
-					body = append(merged, '\n')
-					rec.header.Set("Content-Type", "application/json")
-				}
+			if len(q) > 0 {
+				obj[substrateQuarantineField], _ = json.Marshal(q)
+			}
+			if len(unscanned) > 0 {
+				obj[substrateUnscannedField], _ = json.Marshal(unscanned)
+			}
+			if merged, err := json.Marshal(obj); err == nil {
+				body = append(merged, '\n')
+				rec.header.Set("Content-Type", "application/json")
 			}
 		}
 	}

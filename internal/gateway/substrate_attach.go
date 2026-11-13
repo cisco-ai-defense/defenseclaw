@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -48,6 +49,49 @@ import (
 // crosses the laptop's network. The hop from the router to the relay is
 // inside the cluster network; it is plain HTTP until the relay serves TLS
 // with a certificate the gateway can verify (GAP-0109, documented limit).
+
+// substrateAttachPath is the attach route and everything below it.
+var substrateAttachPath = regexp.MustCompile(`^/api/v1/substrate/actors/[^/]+/[^/]+/attach(/.*)?$`)
+
+const (
+	// substrateAttachFrameMax bounds an attach request that is not a
+	// workspace upload (poll frames, exec and task requests).
+	substrateAttachFrameMax int64 = 4 << 20
+	// substrateTarOverhead is what a tar body carries beyond its content:
+	// headers and padding (as the relay allows).
+	substrateTarOverhead int64 = 1 << 20
+)
+
+// substrateAttachBodyCap is the body cap of one attach request: the
+// workspace cap (E23) for a file upload, a frame cap otherwise.
+func substrateAttachBodyCap(r *http.Request, workspaceMax int64) int64 {
+	if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/attach/files") {
+		if workspaceMax <= 0 {
+			workspaceMax = 1 << 30
+		}
+		return workspaceMax + substrateTarOverhead
+	}
+	return substrateAttachFrameMax
+}
+
+// substrateAttachCSRF is the browser gate of attach traffic: a request
+// that changes state carries the DefenseClaw client tag and no foreign
+// Origin, as for every admin route, but any Content-Type (a tar stream, a
+// WebSocket upgrade). The person check runs after it.
+func substrateAttachCSRF(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" && !isLocalhostOrigin(o) {
+			writeSubstrateJSONError(w, http.StatusForbidden, "origin_blocked")
+			return
+		}
+		safe := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if !safe && r.Header.Get("X-DefenseClaw-Client") == "" {
+			writeSubstrateJSONError(w, http.StatusForbidden, "client_tag_required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // SubstrateRelayDialer opens a connection to an actor's relay port.
 type SubstrateRelayDialer interface {

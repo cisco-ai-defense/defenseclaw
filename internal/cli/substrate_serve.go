@@ -416,8 +416,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			return out, err
 		}
 		llm, err := gateway.NewSubstrateLLMHandler(gateway.SubstrateLLMConfig{
-			Providers: gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
-			Proxy:     llmProxy,
+			Providers:     gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
+			Proxy:         llmProxy,
+			BedrockModels: c.Substrate.LLM.BedrockModels,
 		})
 		if err != nil {
 			return out, err
@@ -450,6 +451,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Relays: substrateRelays(),
 			Skills: newRuntimeSkillScanner(c),
 			Info:   substrateInfo(c),
+			// E23: the workspace cap of an upload through attach.
+			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
@@ -593,6 +596,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	defer chains.Close()
 	chains.Register(srv)
+	// A crashed or deleted actor asks nothing any more (E16): its open asks
+	// close when the controller reports the lifecycle event.
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleClosesAsks(chains.Lifecycle, askStore)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -738,4 +744,23 @@ func loadChainKey(path string) error {
 		return fmt.Errorf("serve: chain key: %w", err)
 	}
 	return gateway.SetToolValueLineageKey([]byte(strings.TrimSpace(string(raw))))
+}
+
+// substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
+// crashed or deleted event the actor's pending asks are closed.
+func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
+	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+		res, err := next(ctx, ev)
+		if err != nil {
+			return res, err
+		}
+		switch ev.Event {
+		case chainstate.LifecycleCrashed:
+			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
+		case chainstate.LifecycleDeleted:
+			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+		}
+		return res, nil
+	}
 }
