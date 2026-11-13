@@ -263,7 +263,7 @@ func renderCodexRoute(raw []byte, route *RouteOnlySetup, b *routeEnvBackup) ([]b
 		// Keep the provider the first render wrapped: the gateway forwards to
 		// the upstream recorded at enable, so its key settings must match.
 		if prev != w.ID {
-			return nil, fmt.Errorf("Codex now selects provider %q but route-only was enabled for %q; run routing disable and enable again", w.ID, prev)
+			return nil, fmt.Errorf("Codex now selects provider %q but route-only was enabled for %q; remove codex from routing.route_only.connectors in config.yaml, then add it again with its upstream", w.ID, prev)
 		}
 	}
 	b.Wrapped = map[string]interface{}{"id": w.ID}

@@ -459,11 +459,26 @@ func (s *routeOnlyServer) holdCredential(cfg *config.Config, a *routeOnlyAttempt
 // hosts only); replaceable in tests.
 var routingCredentialValue = func(cfg *config.Config, name string) string { return cfg.RoutingCredential(name) }
 
+// routeOnlyHeldCredential is the value of the first routing.models[]
+// credential that covers provider at the origin of base, or "".
 func routeOnlyHeldCredential(cfg *config.Config, base, provider string) string {
+	for _, name := range routeOnlyCoveringCredentials(cfg, base, provider) {
+		if key := routingCredentialValue(cfg, name); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+// routeOnlyCoveringCredentials lists, in config order, the
+// routing.models[].credential names of provider at the origin of base
+// (stored on this host or not).
+func routeOnlyCoveringCredentials(cfg *config.Config, base, provider string) []string {
 	if cfg == nil {
-		return ""
+		return nil
 	}
 	origin := originOf(base)
+	var names []string
 	for _, m := range cfg.Routing.Models {
 		if !strings.EqualFold(m.Provider, provider) || strings.TrimSpace(m.Credential) == "" {
 			continue
@@ -472,14 +487,11 @@ func routeOnlyHeldCredential(cfg *config.Config, base, provider string) string {
 		if mOrigin == "" {
 			mOrigin = providerDefaultOrigins[strings.ToLower(m.Provider)]
 		}
-		if !strings.EqualFold(mOrigin, origin) {
-			continue
-		}
-		if key := routingCredentialValue(cfg, m.Credential); key != "" {
-			return key
+		if strings.EqualFold(mOrigin, origin) {
+			names = append(names, strings.TrimSpace(m.Credential))
 		}
 	}
-	return ""
+	return names
 }
 
 // routeCallerRefusalText is the 401 message for an unverified caller.
