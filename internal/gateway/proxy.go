@@ -1429,6 +1429,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	if ollamaSystemText != "" {
 		inspectRaw = ollamaSystemText + "\n" + userText
 	}
+	// Every prompt-side text of the body, not only the user turn: system,
+	// developer and instructions text wherever it sits, and the tool
+	// results sent back since the model's last turn (GAP-0196).
+	side := passthroughPrompt(body)
+	inspectRaw = joinPromptText(inspectRaw, side.Text)
 	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
@@ -1437,9 +1442,18 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
 	passthroughSeverity := ""
-	if userText != "" &&
+	if side.Unreadable != "" && p.uninspectablePrompt(r.Context(), label, mode, side.Unreadable) {
+		p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream,
+			blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+side.Unreadable))
+		return
+	}
+	inspectPrompt := userText != "" &&
 		!isHeartbeatMessage(userText, partial.Messages) &&
-		!isSessionStartupMessage(userText) {
+		!isSessionStartupMessage(userText)
+	if userText == "" && side.Text != "" {
+		inspectPrompt = true
+	}
+	if inspectPrompt {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = meta.PromptID
@@ -3256,6 +3270,21 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
 	inspectText := promptInspectText(req.Messages)
+	// Every prompt-side text of the body, as on the passthrough: system and
+	// developer turns after the user turn and the tool results sent since
+	// the model's last turn (GAP-0196). The original body, before
+	// DefenseClaw adds its own notice.
+	chatSide := passthroughPrompt(body)
+	inspectText = joinPromptText(inspectText, chatSide.Text)
+	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
+		msg := blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+chatSide.Unreadable)
+		if req.Stream {
+			p.writeBlockedStream(w, req.Model, msg)
+		} else {
+			p.writeBlockedResponse(w, req.Model, msg)
+		}
+		return
+	}
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	pendingRoutedPrompt := false
