@@ -328,13 +328,18 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	switch {
 	case choice == "allow" && res.risk <= d.allowAt:
 		res.route = decisionAllow
-	case choice == "block" && res.risk >= d.blockAt && score >= d.blockRiskScore &&
-		!(d.escalateRuleFlagged && decisionRuleFloorFrom(ctx)):
+	case choice == "block" && res.risk >= d.blockAt && score >= d.blockRiskScore && !d.ruleFlagEscalates(ctx):
 		// A confident block needs the disposition AND the risk score (R4),
 		// and never lands on a call the rules flagged (RF): those escalate.
 		res.route = decisionBlock
 	}
 	return res
+}
+
+// ruleFlagEscalates reports whether the rules flagged this call and
+// decision_model.escalate_rule_flagged keeps a confident block off it.
+func (d *decisionModel) ruleFlagEscalates(ctx context.Context) bool {
+	return d.escalateRuleFlagged && decisionRuleFloorFrom(ctx)
 }
 
 type decisionParseError struct{ msg string }
