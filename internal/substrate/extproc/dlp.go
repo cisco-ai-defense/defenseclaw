@@ -18,7 +18,6 @@ package extproc
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/exactvalue"
 )
 
 // Finding kinds, also refusal categories when a finding refuses.
@@ -117,14 +117,11 @@ func unboundPlaceholder(bs []binding, host, s string) (string, bool) {
 	return "", false
 }
 
-// minExactValueLen keeps short values from matching everywhere.
-const minExactValueLen = 8
-
 // secretValues reads the actor_secrets values from a mounted Secret
-// directory, one file per name, and keeps the forms a value is matched in:
-// as is, base64 (standard and URL alphabets, with and without padding) and
-// URL-encoded. Files are read again when they change (rotation needs no
-// restart). Values never leave this type.
+// directory, one file per name, and keeps the forms a value is matched in
+// (exactvalue.Forms, shared with the gateway /llm check). Files are read
+// again when they change (rotation needs no restart). Values never leave
+// this type.
 type secretValues struct {
 	dir     string
 	refresh time.Duration
@@ -172,25 +169,8 @@ func (s *secretValues) forms(name string) []string {
 		delete(s.cache, name)
 		return nil
 	}
-	s.cache[name] = secretFile{checked: now, mod: st.ModTime(), size: st.Size(), forms: valueForms(strings.TrimSpace(string(data)))}
+	s.cache[name] = secretFile{checked: now, mod: st.ModTime(), size: st.Size(), forms: exactvalue.Forms(strings.TrimSpace(string(data)))}
 	return s.cache[name].forms
-}
-
-func valueForms(v string) []string {
-	if len(v) < minExactValueLen {
-		return nil
-	}
-	b := []byte(v)
-	seen := map[string]bool{}
-	var out []string
-	for _, f := range []string{v, base64.StdEncoding.EncodeToString(b), base64.RawStdEncoding.EncodeToString(b),
-		base64.URLEncoding.EncodeToString(b), base64.RawURLEncoding.EncodeToString(b), url.QueryEscape(v), url.PathEscape(v)} {
-		if !seen[f] {
-			seen[f] = true
-			out = append(out, f)
-		}
-	}
-	return out
 }
 
 // exactValue returns the name of the first actor secret whose value is in s.

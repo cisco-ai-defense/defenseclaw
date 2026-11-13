@@ -17,11 +17,8 @@
 package gateway
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"maps"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -30,6 +27,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/exactvalue"
 )
 
 // The profile runtime keys the cluster gateway reads (PLAN §7.3): an
@@ -68,10 +66,6 @@ func SubstrateUnattendedAskFor(cfg *config.Config, profile string) SubstrateUnat
 	return SubstrateUnattendedAsk{Queue: true, Timeout: floor.EffectiveAskTimeout(cfg.Substrate.EffectiveAskTimeout())}
 }
 
-// substrateMinExposedValue keeps short values from matching everywhere (the
-// callout's minExactValueLen).
-const substrateMinExposedValue = 8
-
 var substrateExposedName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
 
 // SubstrateExposedValues returns, for a profile, the values of its
@@ -98,7 +92,7 @@ func SubstrateExposedValues(cfg *config.Config, dir string) func(profile string)
 			if err != nil || len(data) > 64<<10 {
 				continue
 			}
-			if v := strings.TrimSpace(string(data)); len(v) >= substrateMinExposedValue {
+			if v := strings.TrimSpace(string(data)); len(v) >= exactvalue.MinLen {
 				out[name] = v
 			}
 		}
@@ -107,33 +101,16 @@ func SubstrateExposedValues(cfg *config.Config, dir string) func(profile string)
 }
 
 // substrateExposedValueIn returns the name of the first exposed value found
-// in body: as is, JSON-escaped (a prompt is a JSON string), base64
-// (standard and URL alphabets, padded or not) or URL-encoded, the callout's
-// forms plus the JSON one.
+// in body, in the forms the callout matches too (exactvalue.Forms: as is,
+// JSON-escaped, base64, URL-encoded).
 func substrateExposedValueIn(body []byte, values map[string]string) (string, bool) {
 	text := string(body)
 	for _, name := range slices.Sorted(maps.Keys(values)) {
-		for _, form := range substrateValueForms(values[name]) {
+		for _, form := range exactvalue.Forms(values[name]) {
 			if strings.Contains(text, form) {
 				return name, true
 			}
 		}
 	}
 	return "", false
-}
-
-func substrateValueForms(v string) []string {
-	b := []byte(v)
-	escaped, _ := json.Marshal(v)
-	seen := map[string]bool{}
-	var out []string
-	for _, f := range []string{v, strings.Trim(string(escaped), `"`), base64.StdEncoding.EncodeToString(b),
-		base64.RawStdEncoding.EncodeToString(b), base64.URLEncoding.EncodeToString(b), base64.RawURLEncoding.EncodeToString(b),
-		url.QueryEscape(v), url.PathEscape(v)} {
-		if f != "" && !seen[f] {
-			seen[f] = true
-			out = append(out, f)
-		}
-	}
-	return out
 }
