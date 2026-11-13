@@ -96,7 +96,7 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 	// The value runs to the first character a secret does not use.
 	if end := strings.IndexFunc(value, func(r rune) bool {
 		letterOrDigit := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
-		return !letterOrDigit && !strings.ContainsRune("_-+/=.!@#$%^&*~", r)
+		return !letterOrDigit && !strings.ContainsRune("_-+/.!@#$%^&*~", r)
 	}); end >= 0 {
 		// A name followed by "(" is a call, not a value.
 		if value[end] == '(' {
@@ -136,6 +136,23 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 		if longest < 10 {
 			return false
 		}
+	}
+	// A value made mostly of words (SalesDemo2026, Password.123) is a phrase
+	// a person chose, not a generated secret: a generated one has no long
+	// run of letters. Words of five letters or more count against it.
+	wordLetters, run := 0, 0
+	for _, r := range value + " " {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			run++
+			continue
+		}
+		if run >= 5 {
+			wordLetters += run
+		}
+		run = 0
+	}
+	if wordLetters*10 >= len(value)*6 {
+		return false
 	}
 	var letters, upper, lowerCount, digits, symbols int
 	for _, r := range value {
