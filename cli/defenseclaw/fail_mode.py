@@ -838,6 +838,13 @@ def _native_openclaw(connector: str) -> bool:
     return connector == "openclaw" and not uses_guardrail_proxy(connector)
 
 
+def _openclaw_provenance(connector: str) -> str:
+    # The fail-mode provenance label of a proxy connector.
+    if _native_openclaw(connector):
+        return "native-hooks"
+    return "proxy-and-hooks" if _hybrid_openclaw(connector) else "proxy-backed"
+
+
 def _hybrid_openclaw(connector: str) -> bool:
     # OpenClaw on Linux and macOS with the native plugin hooks next to the
     # guardrail proxy (hookMode hybrid in openclaw.json).
@@ -855,7 +862,10 @@ def _hybrid_openclaw(connector: str) -> bool:
 def proxy_outage_note(mode: str, connector: str = "") -> str:
     if _hybrid_openclaw(connector):
         if mode == "open":
-            return "proxy and plugin hooks: tool calls, prompts and model requests continue with a warning while the gateway is down"
+            return (
+                "proxy and plugin hooks: tool calls, prompts and model requests continue with a warning "
+                "while the gateway is down"
+            )
         return "proxy and plugin hooks: blocked while the gateway is down"
     if _native_openclaw(connector):
         if mode == "open":
@@ -1054,7 +1064,7 @@ def _connector_fail_mode_report(
         outage = proxy_model_outage_mode(cfg, name)
         return {
             "effective": outage,
-            "provenance": "native-hooks" if _native_openclaw(name) else "proxy-and-hooks" if _hybrid_openclaw(name) else "proxy-backed",
+            "provenance": _openclaw_provenance(name),
             "note": proxy_outage_note(outage, name),
             "configured": configured,
             "desired": outage,
