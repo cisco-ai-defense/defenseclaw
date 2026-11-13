@@ -1,0 +1,4 @@
+transformers>=4.51.3,<5
+accelerate
+huggingface-hub
+hf_xet

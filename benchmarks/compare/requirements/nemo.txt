@@ -1,0 +1,6 @@
+nemoguardrails==0.24.1
+yara-python
+onnxruntime
+transformers>=4.44,<5
+scikit-learn
+einops

@@ -1,0 +1,5 @@
+llamafirewall==1.0.3
+codeshield==1.0.1
+openai>=1.76
+transformers>=4.51.3,<5
+huggingface-hub
