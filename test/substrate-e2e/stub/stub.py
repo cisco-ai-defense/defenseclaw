@@ -17,9 +17,9 @@ import urllib.request
 
 PORT = int(os.environ.get("STUB_PORT", "8080"))
 HOOK_URL = os.environ.get("STUB_HOOK_URL", "")
-# The version the gateway's actor listener accepts (internal/gateway/substrate_hook.go). The real kit sends
-# kit.EnvelopeVersion; GAP-0138 is the disagreement between the two.
-ENVELOPE_VERSION = os.environ.get("STUB_ENVELOPE_VERSION", "dcactor/1")
+# The version the shipped kit sends (kit.EnvelopeVersion). GAP-0138: older builds of the gateway accept only
+# "dcactor/1"; set STUB_ENVELOPE_VERSION for such a build.
+ENVELOPE_VERSION = os.environ.get("STUB_ENVELOPE_VERSION", "1")
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
