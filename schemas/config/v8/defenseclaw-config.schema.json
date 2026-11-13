@@ -1548,6 +1548,164 @@
         "judge_first"
       ]
     },
+    "cascadeJudge": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The LLM judge's role in the guardrail cascade. Values are checked by the gateway: an invalid value makes the cascade fall back (last-known-good, else the pack defaults).",
+      "properties": {
+        "max_action": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Highest action the judge lane can decide: block (default), confirm, alert or log."
+        },
+        "block_needs_system_one": {
+          "type": "boolean",
+          "description": "A judge block stands only when System One also confidently blocked the call; otherwise it is a confirm. Default false."
+        },
+        "no_verdict": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "What a call gets when the judge gives no verdict: rules (default, the rule verdict) or unknown (at least the unknown tier)."
+        }
+      }
+    },
+    "cascadeSystemOne": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "System One outcome handling. on_unsure at every scope; the routing overrides (allow_threshold, block_threshold, block_risk_score, escalate_rule_flagged) only under a connector or profile scope: the global values are in decision_model.",
+      "properties": {
+        "allow_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "block_threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "block_risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "escalate_rule_flagged": {
+          "type": "boolean"
+        },
+        "on_unsure": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Cascade 2 (System One without the judge): confirm (default), alert, or rules (the rule verdict stands)."
+        }
+      }
+    },
+    "cascadeLanes": {
+      "type": "object",
+      "maxProperties": 64,
+      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only accepts off and shadow.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 16
+      }
+    },
+    "cascadeScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "guardrail.cascade settings a connector or profile scope may set (docs: guardrail/configure-cascade).",
+      "properties": {
+        "unknown": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Unknown and TRUNCATED tier: pack (default), alert, confirm or block. Never below alert."
+        },
+        "judge": {
+          "$ref": "#/$defs/cascadeJudge"
+        },
+        "system_one": {
+          "$ref": "#/$defs/cascadeSystemOne"
+        },
+        "lanes": {
+          "$ref": "#/$defs/cascadeLanes"
+        }
+      }
+    },
+    "cascadePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Rego final-decision policy (package defenseclaw.cascade, rule decisions). Off while module is unset.",
+      "properties": {
+        "module": {
+          "$ref": "#/$defs/assetFileRef"
+        },
+        "lowest": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Lowest action the policy may set on a call a layer flagged: allow, log, alert (default) or confirm."
+        },
+        "highest": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Highest action the policy may set: alert, confirm or block (default)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 50,
+          "description": "Bound of one evaluation; 0 = 5 ms."
+        }
+      }
+    },
+    "cascadeAdmin": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Administrator locks (top level only).",
+      "properties": {
+        "locked": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 96
+          },
+          "description": "Keys no connector or profile scope may set."
+        },
+        "critical_floor": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Lowest action a proven CRITICAL finding can end at: alert (default), confirm, block, or log (explicit opt-out)."
+        }
+      }
+    },
+    "cascade": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "guardrail.cascade: what each layer of the cascade does with its outcome, the unknown tier, lane switches, the Rego policy and admin locks. Empty = today's decisions.",
+      "properties": {
+        "unknown": {
+          "type": "string",
+          "maxLength": 32,
+          "description": "Unknown and TRUNCATED tier: pack (default), alert, confirm or block. Never below alert."
+        },
+        "judge": {
+          "$ref": "#/$defs/cascadeJudge"
+        },
+        "system_one": {
+          "$ref": "#/$defs/cascadeSystemOne"
+        },
+        "lanes": {
+          "$ref": "#/$defs/cascadeLanes"
+        },
+        "policy": {
+          "$ref": "#/$defs/cascadePolicy"
+        },
+        "admin": {
+          "$ref": "#/$defs/cascadeAdmin"
+        }
+      }
+    },
     "hilt": {
       "type": "object",
       "additionalProperties": false,
@@ -1674,6 +1832,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascadeScope"
+        },
         "mode": {
           "$ref": "#/$defs/guardrailModeOrInherit"
         },
@@ -1719,6 +1880,9 @@
       "additionalProperties": false,
       "description": "Named guardrail policy overrides for the subjects guardrail.profile_assignments selects. Precedence: profile.connectors[c], then the profile field, then guardrail.connectors[c], then the application_protection overlay, then guardrail.*. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascadeScope"
+        },
         "description": {
           "$ref": "#/$defs/boundedString"
         },
@@ -1983,6 +2147,9 @@
       "additionalProperties": false,
       "description": "Per-connector overrides inside one guardrail profile. enabled and hook_fail_mode are not allowed: both are baked into the installed hooks.",
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascadeScope"
+        },
         "mode": {
           "$ref": "#/$defs/guardrailModeOrInherit"
         },
@@ -2077,6 +2244,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "cascade": {
+          "$ref": "#/$defs/cascade"
+        },
         "enabled": {
           "type": "boolean"
         },
