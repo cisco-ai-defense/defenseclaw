@@ -1171,7 +1171,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// actions are evaluated through the tool-call path where execution facts
 	// are available, rather than treating their literal appearance in prose as
 	// an action.
-	ruleFindings := scanProxyContentRules(ctx, content)
+	ruleFindings := scanProxyContentRules(ctx, content, proxyTextOrigin(direction))
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -1415,7 +1415,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Keep the same content/action boundary as regex_judge. The trusted action
 	// dispatcher remains responsible for command, path, cognitive-file, and C2
 	// enforcement because it can reason over parsed execution facts.
-	ruleFindings := scanProxyContentRules(ctx, content)
+	ruleFindings := scanProxyContentRules(ctx, content, proxyTextOrigin(direction))
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -1843,11 +1843,21 @@ func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanV
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
 // request, with the rule pack of its profile (proxyRuleGeneration).
-func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
+func scanProxyContentRules(ctx context.Context, content string, origin ruleTextOrigin) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	return scanUntrustedContentRules(proxyRuleGeneration(ctx), content)
+	return scanUntrustedContentRules(proxyRuleGeneration(ctx), content, origin)
+}
+
+// proxyTextOrigin is the author of the text the guardrail proxy inspects in a
+// direction. The prompt direction is the user turn in progress (promptTurnText);
+// a completion is the model, so it keeps the unspecified origin.
+func proxyTextOrigin(direction string) ruleTextOrigin {
+	if isPromptDirection(direction) {
+		return ruleTextOriginUserTyped
+	}
+	return ruleTextOriginUnspecified
 }
 
 // scanUntrustedContentRules is the content rule scan of untrusted text with
@@ -1858,8 +1868,8 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 // same to a model and must not read differently to the rules. The hook path
 // does the same (messageRuleFindings); the Secure Client generation keeps its
 // single pass.
-func scanUntrustedContentRules(generation *compiledRulePackCategories, content string) []RuleFinding {
-	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
+func scanUntrustedContentRules(generation *compiledRulePackCategories, content string, origin ruleTextOrigin) []RuleFinding {
+	findings := scanContentRuleCategoryFromOrigin(generation, content, "", ruleContentScopeUntrusted, "", origin)
 	if secureClientGeneration() {
 		return findings
 	}
@@ -1872,7 +1882,7 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 		seen[finding.RuleID] = true
 	}
 	for _, finding := range scanRuleGeneration(generation, folded, "", ruleScanOptions{
-		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
+		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit", origin: origin,
 	}) {
 		if !seen[finding.RuleID] {
 			findings = append(findings, finding)
@@ -2010,7 +2020,7 @@ func scanLocalPatternsWithActivation(
 	// hit is at least MEDIUM, HIGH for the high-signal ones. A rule-pack
 	// finding carries its own severity and nothing else (rel-1-0-10:GAP-0172).
 	maxRuleSev := "NONE"
-	ruleFindings := scanUntrustedContentRules(rules, content)
+	ruleFindings := scanUntrustedContentRules(rules, content, proxyTextOrigin(direction))
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {

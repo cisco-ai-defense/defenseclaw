@@ -3611,7 +3611,15 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			}
 			a.observeUserDownloadRequest(ctx, req.Content)
 		}
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		promptRequest := &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName}
+		if isToolJudgeIntentEvent(req.HookEventName) {
+			// The same turn-start events seed the user task above, so the same
+			// events carry text the user typed. BeforeModel, transformed prompts
+			// and subagent starts can hold model or tool text and keep the
+			// unspecified origin.
+			promptRequest.textOrigin = ruleTextOriginUserTyped
+		}
+		verdict = a.inspectMessageContent(ctx, promptRequest)
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
