@@ -1951,16 +1951,18 @@ func scanLocalPatternsWithActivation(
 			flags = append(flags, p)
 		}
 	}
-	// The operator's local patterns above are their own floor; every built-in
-	// secret, PII and trust detection comes from the rule pack, read exactly
-	// as the hook path reads prompts and tool results (messageRuleFindings:
-	// the content categories, their match validators and placeholder checks,
-	// and the folded view for trust rules). The proxy used to add its own
-	// secret regexes here, so a completion and a tool result holding the same
-	// text were decided by different detectors (rel-1-0-10:GAP-0210, GAP-0213).
-	// Literal commands, paths, cognitive files and C2 indicators are action
-	// categories and need parsed tool-call facts before they can enforce.
-	localFlags := len(flags) > 0 || len(localPIICandidates) > 0
+	// The operator's local patterns above are their own floor (the legacy
+	// detectors: a hit is at least MEDIUM, HIGH for the high-signal ones);
+	// every built-in secret, PII and trust detection comes from the rule pack,
+	// read exactly as the hook path reads prompts and tool results
+	// (messageRuleFindings: the content categories, their match validators and
+	// placeholder checks, and the folded view for trust rules). The proxy used
+	// to add its own secret regexes here, so a completion and a tool result
+	// holding the same text were decided by different detectors
+	// (rel-1-0-10:GAP-0210, GAP-0213). A rule-pack finding carries its own
+	// severity (rel-1-0-10:GAP-0172). Literal commands, paths, cognitive files
+	// and C2 indicators are action categories and need parsed tool-call facts
+	// before they can enforce.
 	maxRuleSev := "NONE"
 	ruleFindings := scanUntrustedContentRules(rules, content)
 	catalogPIIEvidence := make(map[string]struct{})
@@ -1981,13 +1983,29 @@ func scanLocalPatternsWithActivation(
 		flags = append(flags, candidate.flag)
 		isHigh = true
 	}
+	legacySeverity := "NONE"
+	if len(flags) > 0 {
+		legacySeverity = "MEDIUM"
+		if isHigh {
+			legacySeverity = "HIGH"
+		}
+	}
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
-		if severityRank[rf.Severity] >= severityRank["HIGH"] {
-			isHigh = true
+		ruleSeverity := rf.Severity
+		if severityRank[ruleSeverity] == 0 || (direction == "prompt" && rf.enforcement == findingEnforcementDetectionOnly && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
+			// A rule without a known severity, and on a prompt a shipped
+			// weak-literal rule that the trust-literal context demoted to
+			// detection-only LOW (TRUST-FICTIONAL, TRUST-PROMPT-EXTRACT), keep
+			// the MEDIUM floor the prompt scan always gave them. Whether the
+			// prompt path should honor that demotion as the tool path does is
+			// the injection floor's decision (rel-1-0-10:GAP-0175). A completion
+			// keeps the hook path's severity (rel-1-0-10:GAP-0210,
+			// TestModelResponseCheckReadsTheHookDetectors).
+			ruleSeverity = "MEDIUM"
 		}
-		if severityRank[rf.Severity] > severityRank[maxRuleSev] {
-			maxRuleSev = rf.Severity
+		if severityRank[ruleSeverity] > severityRank[maxRuleSev] {
+			maxRuleSev = ruleSeverity
 		}
 	}
 
@@ -1995,15 +2013,9 @@ func scanLocalPatternsWithActivation(
 		return allowVerdict("local-pattern")
 	}
 
-	// A rule finding carries its own severity, as on the hook path (a LOW
-	// documentation-domain address stays LOW); an operator local pattern is
-	// MEDIUM, or HIGH for the injection, PII and exfiltration floors.
-	severity := maxRuleSev
-	if localFlags && severityRank[severity] < severityRank["MEDIUM"] {
-		severity = "MEDIUM"
-	}
-	if isHigh && severityRank[severity] < severityRank["HIGH"] {
-		severity = "HIGH"
+	severity := legacySeverity
+	if severityRank[maxRuleSev] > severityRank[severity] {
+		severity = maxRuleSev
 	}
 
 	action := guardrailFallbackActionForSeverity(severity)

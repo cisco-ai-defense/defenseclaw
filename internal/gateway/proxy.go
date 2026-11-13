@@ -1810,7 +1810,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		if blocked != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (%d bytes held back and not sent)\n",
-				blocked.Severity, redaction.Reason(blocked.Reason), guard.Held())
+				blocked.Severity, logDisplayReason(blocked.Reason), guard.Held())
 			p.recordTelemetry(r.Context(), "completion", label, blocked, 0, mode, true)
 			return
 		}
@@ -3584,7 +3584,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	guard := newCompletionStreamGuard(p.streamGuardCheck(llmCtx, r, aliasModel, mode), p.streamGuardScanEvery())
 	blockStream := func(verdict *ScanVerdict) {
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back and not sent)\n",
-			verdict.Severity, redaction.Reason(verdict.Reason), guard.Held())
+			verdict.Severity, logDisplayReason(verdict.Reason), guard.Held())
 		overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, verdict, 0, mode, true)
 		modelTrace.AddGuardrailOverlay(overlay)
 		p.enqueueBlockNotification(verdict, "completion", aliasModel)
@@ -4706,11 +4706,11 @@ func logVerdict(severity, action string, verdict *ScanVerdict, elapsed time.Dura
 		// through redaction.Reason so rule-IDs pass verbatim
 		// but raw literals are masked unless Reveal is set.
 		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s%s  %s\n",
-			severity, action, scannerStr, redaction.Reason(verdict.Reason))
+			severity, action, scannerStr, logDisplayReason(verdict.Reason))
 		if len(verdict.Findings) > 0 {
 			scrubbed := make([]string, len(verdict.Findings))
 			for i, f := range verdict.Findings {
-				scrubbed[i] = redaction.Reason(f)
+				scrubbed[i] = logDisplayReason(f)
 			}
 			fmt.Fprintf(os.Stderr, "  findings: %s\n", strings.Join(scrubbed, ", "))
 		}

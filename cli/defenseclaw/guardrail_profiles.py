@@ -83,6 +83,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "142667a6bbc21568e2a15eda35555d88c62870b7db04005f2dbff71acb3dc6b8",
             # 1.0.10 (s7/response, GAP-0210): SEC-HF-TOKEN, with s7/secret-recall and s7/promptfloor merged.
             "54dbe6f0d23d20a9284f0bbb9b301d0ed39b2830f37254fe8bf82c855010c762",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "3c30a91dfbda99fe4f72e5d78d300979fa0fb1561f8495018b9b1184ba10ff29",
+            # 1.0.10 (s7/response + s7/promptfloor-g172, GAP-0210/GAP-0175/GAP-0172): SEC-HF-TOKEN, the floor and the email PII rules.
+            "06422549362bbecb5804657fe8dfdb289895acfe2a061cae1c6d6e302a2f3555",
         }
     ),
     "permissive": frozenset(
@@ -122,6 +128,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "669543a89607b9b4df8add58250a5a6ecb88093cba081deeeaf86c28ef1d186c",
             # 1.0.10 (s7/response, GAP-0210): SEC-HF-TOKEN, with s7/secret-recall and s7/promptfloor merged.
             "99a13f72380b322fd8f7b31365d81f72d7efa072426aece56d4fea23ae210dc8",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "7ff6d705d7fa27e88f79060c0172119e17d4b19206ea44f0e84e79616e1cb8e5",
+            # 1.0.10 (s7/response + s7/promptfloor-g172, GAP-0210/GAP-0175/GAP-0172): SEC-HF-TOKEN, the floor and the email PII rules.
+            "f3d5959db82cda451572a4eef328a6f894258c5c6341e754b43d26b96b038d96",
         }
     ),
     "strict": frozenset(
@@ -160,6 +172,12 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "3c6307f82175c29c77bd7a65dde22ad185caafa61844908351db47221aab258a",
             # 1.0.10 (s7/response, GAP-0210): SEC-HF-TOKEN, with s7/secret-recall and s7/promptfloor merged.
             "0fc7a1497b70d1a51e6470281931e13783a5f0a4f344fa042a40041df293e8d2",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
+            # 1.0.10 (s7/promptfloor + s7/pii-email, GAP-0175/GAP-0172): prompt-injection floor and the two email PII rules.
+            "5db217d923f7cc8d20e1af9077f11478e568cba974add100cb5ed6fb5d5174b5",
+            # 1.0.10 (s7/response + s7/promptfloor-g172, GAP-0210/GAP-0175/GAP-0172): SEC-HF-TOKEN, the floor and the email PII rules.
+            "f40d6b4d189f4ba215d36d2a7b38a721d403628fe2b0facf7c7383e7a7b52da7",
         }
     ),
 }

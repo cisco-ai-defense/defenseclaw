@@ -111,6 +111,36 @@ func trustedBuiltInFindingLabel(label string) bool {
 	return false
 }
 
+// logDisplayReason is the stderr diagnostic form of a verdict reason or
+// finding label. A "matched: <rule-id>:<title>, ..." reason, or a single
+// "<rule-id>:<title>" label, whose every label is a compiled-in or loaded
+// rule-pack rule keeps its titles: they are the pack author's static text.
+// Anything else goes through redaction.Reason. Before, the generic redaction
+// kept the rule id and hashed the title, so "ENT-EMAIL-BULK:Email address"
+// logged as "ENT-EMAIL-BULK:<redacted len=13 sha=f2488fd4>", which reads as a
+// 13-byte match span that exists nowhere in the request (substrate-1:GAP-0159
+// side finding).
+func logDisplayReason(reason string) string {
+	if redaction.Reveal() || reason == "" {
+		return reason
+	}
+	body, matched := strings.CutPrefix(reason, builtInMatchReasonPrefix)
+	if !matched {
+		body = reason
+	}
+	labels := splitMatchLabels(body)
+	if len(labels) == 0 {
+		return redaction.Reason(reason)
+	}
+	for _, label := range labels {
+		id, title, ok := strings.Cut(label, ":")
+		if !ok || (!trustedBuiltInFindingLabel(label) && !activeRulePackLabel(id, title)) {
+			return redaction.Reason(reason)
+		}
+	}
+	return reason
+}
+
 // trustedShipAuthoredReason reports a reason DefenseClaw wrote from its own
 // text only: catalog rule labels, CodeGuard counts, the unparsed and
 // oversize refusals, the install-window refusal and the session-start gate
