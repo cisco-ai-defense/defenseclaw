@@ -300,9 +300,3 @@ func (c *Client) TestSecret(ctx context.Context, name string) (map[string]any, e
 	var out map[string]any
 	return out, c.do(ctx, http.MethodPost, "secrets/"+url.PathEscape(name)+"/test", nil, map[string]any{}, &out)
 }
-
-// FleetStatus returns the administrator status document.
-func (c *Client) FleetStatus(ctx context.Context) (map[string]any, error) {
-	var out map[string]any
-	return out, c.do(ctx, http.MethodGet, "fleet/status", nil, nil, &out)
-}
