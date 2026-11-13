@@ -222,9 +222,13 @@ func TierOf(strict, managed, permissive bool) Tier {
 }
 
 // Unknown is the verdict of the unknown tier: alert in the default and
-// permissive tiers, block in strict and managed.
+// permissive tiers, block in strict. A managed install with a pack that is
+// not strict alerts as the default does (the owner ruling of
+// rel-1-0-6:GAP-0675: a call whose only basis is an evaluation limit alerts
+// outside the strict profile, managed included); a managed install with the
+// strict pack is TierStrict and blocks.
 func Unknown(tier Tier) Action {
-	if tier == TierStrict || tier == TierManaged {
+	if tier == TierStrict {
 		return Block
 	}
 	return Alert

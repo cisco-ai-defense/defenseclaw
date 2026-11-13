@@ -36,6 +36,8 @@ var overBudgetRows = []overBudget{
 	{"pipe", shellparse.MaxChainOperators + 1}, {"or", 4096},
 	{"subst-pipe", 3000}, {"group-pipe", 3000}, {"block-pipe", 3000}, {"redirect-pipe", 3000}, {"assign-pipe", 3000},
 	{"unparsed-pipe", 2000}, {"arith", 3000}, {"flat-words", 20000}, {"flat-stmts", 12000},
+	// Nesting past shellparse.MaxNestingDepth (GAP-2537, GAP-0312).
+	{"nest", shellparse.MaxNestingDepth + 1}, {"nest", 2000},
 }
 
 func (row overBudget) command() string { return budgetShapeNamed(row.shape).command(row.n) }
@@ -57,17 +59,31 @@ func TestParseBudgetCallsTakeTheEvaluationLimitPath(t *testing.T) {
 }
 
 // TestParseBudgetReasonIsExplicit pins the reason and the profile mapping of
-// the finding.
+// the finding: the bound rule's reason with the cap, then parse_budget_exceeded;
+// an alert in the default tier and in a managed install whose pack is not
+// strict (rel-1-0-6:GAP-0675), a block in strict (managed strict included).
 func TestParseBudgetReasonIsExplicit(t *testing.T) {
-	findings := trustedActionBudgetFindings(true)
-	if len(findings) != 1 || findings[0].RuleID != "ACTION-COMPOUND-LIMIT" || findings[0].Evidence != "parse_budget_exceeded" {
-		t.Fatalf("findings = %+v", findings)
-	}
-	if action := guardrailActionForProfile(findings, false, func() bool { return false }, func(string) string { return guardrailActionBlock }); action != guardrailActionAlert {
-		t.Fatalf("default tier: %s, want alert", action)
-	}
-	if action := guardrailActionForProfile(findings, false, func() bool { return true }, func(string) string { return guardrailActionBlock }); action != guardrailActionBlock {
-		t.Fatalf("strict tier: %s, want block", action)
+	truncated := shellparse.BudgetTruncated(shellparse.BudgetNodes)
+	for _, tc := range []struct {
+		name    string
+		request trustedActionRequest
+		want    string
+	}{
+		{"default", trustedActionRequest{EnforcementCapable: true}, guardrailActionAlert},
+		{"managed", trustedActionRequest{EnforcementCapable: true, ManagedInstall: true}, guardrailActionAlert},
+		{"strict", trustedActionRequest{EnforcementCapable: true, StrictPolicy: true}, guardrailActionBlock},
+		{"managed strict", trustedActionRequest{EnforcementCapable: true, StrictPolicy: true, ManagedInstall: true}, guardrailActionBlock},
+	} {
+		findings := withBudgetTruncation(tc.request, truncated)
+		if len(findings) != 1 || findings[0].RuleID != "ACTION-COMPOUND-LIMIT" ||
+			findings[0].Evidence != "bounded_truncated cap=nodes; parse_budget_exceeded" {
+			t.Fatalf("%s: findings = %+v", tc.name, findings)
+		}
+		strict := tc.request.StrictPolicy
+		got := guardrailActionForProfile(findings, false, func() bool { return strict }, func(string) string { return guardrailActionBlock })
+		if got != tc.want {
+			t.Errorf("%s: %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -95,7 +111,7 @@ func TestParseBudgetKeepsTheStateWriteProof(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	rows := append([]overBudget{
-		{"pipe", 100}, {"and", 100}, {"pipe", shellparse.MaxChainOperators},
+		{"pipe", 100}, {"and", 100}, {"pipe", shellparse.MaxChainOperators}, {"nest", shellparse.MaxNestingDepth},
 	}, overBudgetRows...)
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"observe", "action"} {
@@ -106,9 +122,15 @@ func TestParseBudgetKeepsTheStateWriteProof(t *testing.T) {
 					if row.shape == "arith" || row.shape == "flat-words" {
 						separator = "\n"
 					}
-					write := row.command() + separator + "printf changed >> " + state
-					if got := gap0568HookAction(t, api, connector, home, cwd, write, cell.client, cell.managed); got != guardrailActionBlock {
-						t.Errorf("%s/%s client=%t managed=%t state write after %s: action %q, want block", connector, mode, cell.client, cell.managed, row, got)
+					// The write after the padding (GAP-0281) and before it
+					// (GAP-0312: the statements read before the cap are judged).
+					for _, form := range []struct{ name, command string }{
+						{"after", row.command() + separator + "printf changed >> " + state},
+						{"before", "printf changed >> " + state + separator + row.command()},
+					} {
+						if got := gap0568HookAction(t, api, connector, home, cwd, form.command, cell.client, cell.managed); got != guardrailActionBlock {
+							t.Errorf("%s/%s client=%t managed=%t state write %s %s: action %q, want block", connector, mode, cell.client, cell.managed, form.name, row, got)
+						}
 					}
 					if mode == "action" && shellparse.BudgetExceeded(row.command()) != "" {
 						if got := gap0568HookAction(t, api, connector, home, cwd, row.command(), cell.client, cell.managed); got == guardrailActionAllow {

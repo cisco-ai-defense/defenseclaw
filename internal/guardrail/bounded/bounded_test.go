@@ -91,8 +91,8 @@ func TestFloorIsAtLeastUnknownAndBase(t *testing.T) {
 		}
 	}
 	if Unknown(TierDefault) != Alert || Unknown(TierPermissive) != Alert ||
-		Unknown(TierStrict) != Block || Unknown(TierManaged) != Block {
-		t.Fatal("unknown tier: default/permissive alert, strict/managed block")
+		Unknown(TierStrict) != Block || Unknown(TierManaged) != Alert {
+		t.Fatal("unknown tier: default, permissive and managed alert, strict (managed strict too) blocks")
 	}
 	if TierOf(true, true, false) != TierStrict || TierOf(false, true, true) != TierManaged ||
 		TierOf(false, false, true) != TierPermissive || TierOf(false, false, false) != TierDefault {

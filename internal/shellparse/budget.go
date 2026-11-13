@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -109,6 +110,27 @@ const (
 	BudgetDepth    = "tree_depth"
 	BudgetUnparsed = "unparsed_chain"
 )
+
+// BudgetTruncated is the bound rule's view of a budget reason
+// (BudgetExceeded): the cap kind the reading hit, for the verdict floor of
+// internal/guardrail/bounded. The reasons map to the kinds: bytes to Bytes;
+// nesting and tree depth to Depth; tree nodes to Nodes; chain operators,
+// tokens, brace expansion and an unparsed chain to Items.
+func BudgetTruncated(reason string) bounded.Truncated {
+	var t bounded.Truncated
+	switch reason {
+	case "":
+	case BudgetBytes:
+		t.Hit(bounded.Bytes)
+	case BudgetNesting, BudgetDepth:
+		t.Hit(bounded.Depth)
+	case BudgetNodes:
+		t.Hit(bounded.Nodes)
+	default:
+		t.Hit(bounded.Items)
+	}
+	return t
+}
 
 // TooDeep reports whether command is past the reading budget (see
 // BudgetExceeded). Callers take their over-limit path and never hand such a
