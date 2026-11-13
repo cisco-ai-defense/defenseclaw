@@ -6,6 +6,10 @@
 package actionfacts
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -15,10 +19,12 @@ func srFacts(command string) Facts {
 }
 
 func TestEscapedBinaryFileWrite(t *testing.T) {
-	run := strings.Repeat(`\x41`, 24)
-	short := strings.Repeat(`\x41`, 23)
-	octal := strings.Repeat(`\101`, 24)
+	run := strings.Repeat(`\x41`, 40)
+	short := strings.Repeat(`\x41`, 32) // a SHA-256 digest or an AES-256 key is this long
+	justOver := strings.Repeat(`\x41`, 33)
+	octal := strings.Repeat(`\101`, 40)
 	elf := `\x7f\x45\x4c\x46\x02\x01\x01\x00`
+	shebang := `\x23\x21\x2f\x62\x69\x6e\x2f\x73\x68\x0a`
 	key := strings.Repeat(`\x1f`, 16)
 	for _, test := range []struct {
 		name, command string
@@ -31,7 +37,9 @@ func TestEscapedBinaryFileWrite(t *testing.T) {
 		{"executable magic needs only eight", `printf '` + elf + `' > f`, true},
 		{"non-executable eight bytes", `printf '` + strings.Repeat(`\x41`, 8) + `' > f`, false},
 		{"sixteen byte key fixture", `printf '` + key + `' > /app/key`, false},
-		{"twenty-three escapes", `echo -ne "` + short + `" >> drop`, false},
+		{"script magic needs only eight", `printf '` + shebang + `' > f`, true},
+		{"thirty-two bytes is a key or digest size", `echo -ne "` + short + `" >> drop`, false},
+		{"thirty-three bytes is not key material", `echo -ne "` + justOver + `" >> drop`, true},
 		{"no file", `echo -ne "` + run + `"`, false},
 		{"device", `echo -ne "` + run + `" > /dev/null`, false},
 		{"plain text", `echo hello >> notes.txt`, false},
@@ -95,5 +103,45 @@ func TestBareAddressDownloadThenRunFetchedFile(t *testing.T) {
 				t.Fatalf("got %t want %t for %q", got, test.want, test.command)
 			}
 		})
+	}
+}
+
+// TestBareAddressDownloadThenRunFixtures runs the shared download-then-execute
+// fixture cases, loaded by id, as one action each: the fetch and the run joined
+// with "; ". Only the case whose host is a bare public address is this rule's;
+// hostname, loopback, private-address and other-file cases are not.
+func TestBareAddressDownloadThenRunFixtures(t *testing.T) {
+	file, err := os.Open(filepath.Join("..", "..", "benchmarks", "fixtures", "download-execute-chain-v1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1<<20), 1<<20)
+	seen := 0
+	for scanner.Scan() {
+		var row struct {
+			ID      string `json:"id"`
+			Payload struct {
+				Events []struct {
+					Command string `json:"command"`
+				} `json:"events"`
+			} `json:"payload"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			t.Fatal(err)
+		}
+		var commands []string
+		for _, event := range row.Payload.Events {
+			commands = append(commands, event.Command)
+		}
+		seen++
+		want := strings.HasSuffix(row.ID, "/public-ip-absolute")
+		if got := BareAddressDownloadThenRunFetchedFile(srFacts(strings.Join(commands, "; "))); got != want {
+			t.Errorf("%s: got %t want %t", row.ID, got, want)
+		}
+	}
+	if err := scanner.Err(); err != nil || seen < 20 {
+		t.Fatalf("fixture rows=%d err=%v", seen, err)
 	}
 }

@@ -29,24 +29,33 @@ var (
 	)
 )
 
-// Escaped-byte runs shorter than this are fixtures, keys and digests (a
-// 16-byte key and a 20-byte hash are ordinary terminal-task content); a
-// payload has to be written in chunks of this size or more. The value is the
-// smallest chunk seen in the tuning half of the dropper sessions; a run that
-// starts with an executable-format magic needs only escapedMagicRunBytes.
+// A run of escaped bytes is reported only when it cannot be a key, a digest
+// or a short fixture, by structure and not by a threshold fitted to a corpus:
+//
+//   - it is longer than the longest ordinary key or digest, which is 32 bytes
+//     (an AES-256 key, a SHA-256 digest; the common smaller sizes 16, 20, 24
+//     and 28 are below it). A run of 33 bytes or more is program or payload
+//     bytes, not key material; or
+//   - it begins with the magic of an executable or a script (ELF, PE, Mach-O,
+//     a "#!" line) and is at least escapedMagicRunBytes long, a header and not
+//     two stray bytes. This covers the first chunk of a binary at any size.
+//
+// Chunks of exactly 32 bytes or fewer without a magic are left alone: they
+// are indistinguishable from a key, which is the cost of not alerting on
+// every fixture write.
 const (
-	escapedBinaryRunBytes = 24
-	escapedMagicRunBytes  = 8
+	escapedLongestKeyBytes = 32
+	escapedMagicRunBytes   = 8
 )
 
 // EscapedBinaryFileWrite reports a direct echo or printf whose operand holds
 // a run of byte escapes (hex or octal) and whose output goes to a file (a
-// write or append redirect, or a pipe into tee with a file operand). The run
-// must be at least escapedBinaryRunBytes long, or at least escapedMagicRunBytes
-// long and start with an ELF, PE or Mach-O magic. The bytes are not text and
-// the escape form hides them from content scanning. Dropper chains append a
-// binary one chunk at a time, so the test is per call and does not need the
-// first chunk (the magic) to be present.
+// write or append redirect, or a pipe into tee with a file operand), where the
+// run is longer than any key or digest or starts with an executable or script
+// magic (see above). The bytes are not text and the escape form hides them
+// from content scanning. Dropper chains append a binary one chunk at a time,
+// so the test is per call and does not need the first chunk (the magic) to be
+// present.
 func EscapedBinaryFileWrite(facts Facts) bool {
 	if facts.Parse.Dialect != DialectPOSIX {
 		return false
@@ -71,8 +80,8 @@ func hasEscapedByteRun(command CommandFact) bool {
 		}
 		for _, run := range escapedByteRunPattern.FindAllString(argument, -1) {
 			decoded := decodeEscapedRun(run)
-			if len(decoded) >= escapedBinaryRunBytes ||
-				(len(decoded) >= escapedMagicRunBytes && hasExecutableMagic(decoded)) {
+			if len(decoded) > escapedLongestKeyBytes ||
+				(len(decoded) >= escapedMagicRunBytes && hasProgramMagic(decoded)) {
 				return true
 			}
 		}
@@ -86,13 +95,13 @@ func decodeEscapedRun(run string) []byte {
 	for _, token := range tokens {
 		var value uint64
 		var err error
-		if token[1] == 'x' {
+		switch {
+		case token[1] == 'x':
 			value, err = strconv.ParseUint(token[2:], 16, 8)
-		} else {
-			value, err = strconv.ParseUint(strings.TrimPrefix(token[1:], "0"), 8, 16)
-			if len(token) == 4 {
-				value, err = strconv.ParseUint(token[1:], 8, 16)
-			}
+		case len(token) == 5: // \0ooo
+			value, err = strconv.ParseUint(token[2:], 8, 16)
+		default: // \ooo
+			value, err = strconv.ParseUint(token[1:], 8, 16)
 		}
 		if err != nil || value > 255 {
 			break
@@ -102,8 +111,9 @@ func decodeEscapedRun(run string) []byte {
 	return decoded
 }
 
-func hasExecutableMagic(data []byte) bool {
+func hasProgramMagic(data []byte) bool {
 	for _, magic := range [][]byte{
+		{'#', '!'},
 		{0x7f, 'E', 'L', 'F'},
 		{'M', 'Z'},
 		{0xcf, 0xfa, 0xed, 0xfe}, {0xce, 0xfa, 0xed, 0xfe},

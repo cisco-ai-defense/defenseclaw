@@ -2430,7 +2430,7 @@
                 {
                   "id": "exec.escaped_binary_write",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-escaped-binary-write^",
+                  "pattern": "inert-exec-escaped-binary-write^",
                   "title": "Binary bytes written to a file through shell escapes",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -2443,7 +2443,7 @@
                 {
                   "id": "account.literal_password_change_via_stdin",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-account-literal-password-change-via-stdin^",
+                  "pattern": "inert-account-literal-password-change-via-stdin^",
                   "title": "Account password set from literal stdin",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -2456,7 +2456,7 @@
                 {
                   "id": "exec.download_then_run_fetched_file",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-download-then-run-fetched-file^",
+                  "pattern": "inert-exec-download-then-run-fetched-file^",
                   "title": "File fetched from a bare IP address and then run",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -2468,7 +2468,7 @@
                 {
                   "id": "source_control.clone_then_run_or_adhoc_push",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-source-control-clone-then-run-or-adhoc-push^",
+                  "pattern": "inert-source-control-clone-then-run-or-adhoc-push^",
                   "title": "Git clone whose files are then run, or push to an ad-hoc remote",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -2481,7 +2481,7 @@
                 {
                   "id": "exec.inline_code_network_and_exec",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-inline-code-network-and-exec^",
+                  "pattern": "inert-exec-inline-code-network-and-exec^",
                   "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -6471,7 +6471,7 @@
                 {
                   "id": "exec.escaped_binary_write",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-escaped-binary-write^",
+                  "pattern": "inert-exec-escaped-binary-write^",
                   "title": "Binary bytes written to a file through shell escapes",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -6484,7 +6484,7 @@
                 {
                   "id": "account.literal_password_change_via_stdin",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-account-literal-password-change-via-stdin^",
+                  "pattern": "inert-account-literal-password-change-via-stdin^",
                   "title": "Account password set from literal stdin",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -6497,7 +6497,7 @@
                 {
                   "id": "exec.download_then_run_fetched_file",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-download-then-run-fetched-file^",
+                  "pattern": "inert-exec-download-then-run-fetched-file^",
                   "title": "File fetched from a bare IP address and then run",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -6509,7 +6509,7 @@
                 {
                   "id": "source_control.clone_then_run_or_adhoc_push",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-source-control-clone-then-run-or-adhoc-push^",
+                  "pattern": "inert-source-control-clone-then-run-or-adhoc-push^",
                   "title": "Git clone whose files are then run, or push to an ad-hoc remote",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -6522,7 +6522,7 @@
                 {
                   "id": "exec.inline_code_network_and_exec",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-inline-code-network-and-exec^",
+                  "pattern": "inert-exec-inline-code-network-and-exec^",
                   "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -10252,7 +10252,7 @@
                 {
                   "id": "exec.escaped_binary_write",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-escaped-binary-write^",
+                  "pattern": "inert-exec-escaped-binary-write^",
                   "title": "Binary bytes written to a file through shell escapes",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -10265,7 +10265,7 @@
                 {
                   "id": "account.literal_password_change_via_stdin",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-account-literal-password-change-via-stdin^",
+                  "pattern": "inert-account-literal-password-change-via-stdin^",
                   "title": "Account password set from literal stdin",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -10278,7 +10278,7 @@
                 {
                   "id": "exec.download_then_run_fetched_file",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-download-then-run-fetched-file^",
+                  "pattern": "inert-exec-download-then-run-fetched-file^",
                   "title": "File fetched from a bare IP address and then run",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -10290,7 +10290,7 @@
                 {
                   "id": "source_control.clone_then_run_or_adhoc_push",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-source-control-clone-then-run-or-adhoc-push^",
+                  "pattern": "inert-source-control-clone-then-run-or-adhoc-push^",
                   "title": "Git clone whose files are then run, or push to an ad-hoc remote",
                   "severity": "MEDIUM",
                   "confidence": 0.8,
@@ -10303,7 +10303,7 @@
                 {
                   "id": "exec.inline_code_network_and_exec",
                   "tool_call_only": true,
-                  "pattern": "s7-inert-exec-inline-code-network-and-exec^",
+                  "pattern": "inert-exec-inline-code-network-and-exec^",
                   "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
                   "severity": "HIGH",
                   "confidence": 0.85,

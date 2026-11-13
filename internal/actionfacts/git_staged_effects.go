@@ -12,9 +12,11 @@ import (
 
 // GitCloneThenRunOrAdHocPush is detection evidence for two source-control
 // effects: a git clone whose files the same action then runs (a path named
-// inside the clone, or any path run after a cd into it), and a git push to a
-// remote given as a URL or user@host:path instead of a configured remote
-// name. Neither is an enforcement proof.
+// inside the clone, or a script or program run by path after a cd into it),
+// and a git push to a remote given inline instead of a configured remote
+// name. Running a package manager or build tool in the clone (npm install,
+// make, go test) is ordinary work and is not a run of the clone's files.
+// Neither effect is an enforcement proof.
 func GitCloneThenRunOrAdHocPush(facts Facts) bool {
 	if facts.Parse.Dialect != DialectPOSIX {
 		return false
@@ -62,10 +64,14 @@ func gitPushNamesAdHocRemote(args []string) bool {
 }
 
 // isAdHocGitRemote reports a push destination given inline instead of as a
-// configured remote name, in a form a contributor workflow does not use: a
-// user@host:path remote on a host that is not a well-known code-hosting
-// service, or a URL whose host is a bare public IP address. Pushes to a
-// fork URL on a forge are ordinary and not reported.
+// configured remote name, in a form a contributor workflow does not use. The
+// two ssh spellings of a remote, user@host:path and ssh://host/path, are one
+// case: ad hoc when the host is not a well-known code-hosting service, so a
+// self-hosted server reached inline alerts in both forms and a push to a
+// forge never does. A URL over another transport (https, git) is ad hoc only
+// when its host is a bare public IP address, since a named https remote
+// carries a normal authenticated push. Pushes to a fork URL on a forge are
+// ordinary and not reported.
 func isAdHocGitRemote(value string) bool {
 	if scheme := strings.Index(value, "://"); scheme >= 0 {
 		host := value[scheme+3:]
@@ -74,6 +80,10 @@ func isAdHocGitRemote(value string) bool {
 		}
 		if cut := strings.IndexAny(host, "/:"); cut >= 0 {
 			host = host[:cut]
+		}
+		switch strings.ToLower(value[:scheme]) {
+		case "ssh", "git+ssh", "ssh+git":
+			return host != "" && !knownCodeForge(host)
 		}
 		return parsesAsUntrustedAddress(host)
 	}
@@ -87,7 +97,7 @@ func isAdHocGitRemote(value string) bool {
 func knownCodeForge(host string) bool {
 	switch strings.ToLower(host) {
 	case "github.com", "gitlab.com", "bitbucket.org", "ssh.dev.azure.com", "vs-ssh.visualstudio.com",
-		"git.sr.ht", "codeberg.org", "source.developers.google.com":
+		"git.sr.ht", "codeberg.org", "source.developers.google.com", "ssh.github.com":
 		return true
 	}
 	return false
@@ -114,9 +124,6 @@ func runsFileAfterClone(facts Facts, cloneIndex int, directory string) bool {
 			inside = true
 			continue
 		}
-		if inside && cloneBuildRunner(later) {
-			return true
-		}
 		if len(later.Argv) > 0 && strings.HasPrefix(cleanRelative(later.Argv[0]), directory+"/") {
 			return true
 		}
@@ -128,21 +135,6 @@ func runsFileAfterClone(facts Facts, cloneIndex int, directory string) bool {
 				return true
 			}
 		}
-	}
-	return false
-}
-
-// cloneBuildRunner reports the package and build entry points that execute
-// repository-defined scripts: install hooks, Makefile recipes, npm scripts.
-func cloneBuildRunner(command CommandFact) bool {
-	if len(command.Argv) == 0 {
-		return false
-	}
-	switch path.Base(command.Argv[0]) {
-	case "cmake", "pip", "pip3", "python", "python3", "npm", "yarn", "pnpm", "bundle", "cargo", "go", "mvn", "gradle":
-		return len(command.Argv) > 1
-	case "make":
-		return true
 	}
 	return false
 }
