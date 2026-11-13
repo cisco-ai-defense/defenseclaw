@@ -150,6 +150,9 @@ func TestToolJudgeSystemMessageNamesTheNonce(t *testing.T) {
 // The cost of building a sample from a 1 MiB argument is linear and small:
 // the per-'<' work of the tag fold (3 s per MiB of '<') is gone (GAP-0317).
 func TestToolJudgeSampleCostOfHugeArguments(t *testing.T) {
+	if hookAnswerRaceBuild {
+		t.Skip("a wall-clock bound says nothing under the race detector (about 10x slower); the plain run is the gate")
+	}
 	j, _ := newNonceTestJudge()
 	ctx := ContextWithSessionID(context.Background(), "nonce-cost")
 	j.ObserveSessionPrompt(ctx, "write the page")
