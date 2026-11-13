@@ -303,11 +303,45 @@ func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	if len(mock.captured) != 1 {
 		t.Fatalf("injection judge called %d time(s) on a tool result, want 1", len(mock.captured))
 	}
-	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+	if sys := mock.captured[0].Messages[0].Content; !strings.HasPrefix(sys, toolResultInjectionSystemPrompt) {
 		t.Fatalf("tool result judged with another system prompt: %.80q", sys)
 	}
 	if v.Severity == "CRITICAL" || v.Action == guardrailActionBlock {
 		t.Fatalf("tool-result judge hit = %s %s; want HIGH at most and no block in the default posture", v.Severity, v.Action)
+	}
+}
+
+// A Claude Code PostToolUse hands the tool-result judge its tool and call
+// (the hook inspects the output as "message"), and the session's user
+// request from UserPromptSubmit, in the system message.
+func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"claudecode"}},
+		"judge_first", mock)
+	a.scannerCfg.Guardrail.Connector = "claudecode"
+	home := t.TempDir()
+	ctx := ContextWithSessionID(t.Context(), "s-trctx")
+	judge := a.hookJudge.Load()
+	judge.ObserveSessionPrompt(ctx, "update the parser fixtures")
+	a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "Read",
+		ToolInput:    map[string]interface{}{"file_path": filepath.Join(home, "testdata", "cases.json")},
+		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
+	})
+	var system string
+	for _, req := range mock.captured {
+		if strings.HasPrefix(req.Messages[0].Content, toolResultInjectionSystemPrompt) {
+			system = req.Messages[0].Content
+		}
+	}
+	if system == "" {
+		t.Fatalf("no tool-result injection judge call (%d calls)", len(mock.captured))
+	}
+	for _, want := range []string{"\ntool: Read\n", "\ncall: read ", filepath.Join("testdata", "cases.json"), "\nuser_request: update the parser fixtures"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system message lacks %q:\n%s", want, system[len(toolResultInjectionSystemPrompt):])
+		}
 	}
 }
 
