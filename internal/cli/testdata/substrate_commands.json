@@ -1185,7 +1185,7 @@
     "path": "substrate setup",
     "use": "setup",
     "short": "Add DefenseClaw's settings to the SubstrateInstall file (administrators)",
-    "long": "Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress\ncallout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,\nthe callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,\nand says what to do. Nothing here contacts the cluster.\n\nThe result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps\nthe old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.\n\nWith --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and\nmanifests a global owner can apply, and reads no install file.\n\nNext: run ate-setup deploy with the new file, then install the chart with helm install.",
+    "long": "Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress\ncallout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,\nthe callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,\nand says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it can, the key set the\ngateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does not answer.\n\nThe result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps\nthe old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.\n\nWith --print-access-policies and --plan FILE it prints the access policies the install would write, as commands and\nmanifests a global owner can apply, and reads no install file.\n\nNext: run ate-setup deploy with the new file, then install the chart with helm install.",
     "example": "defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw --dry-run\ndefenseclaw substrate setup --install-file install.yaml --capability route-timeouts --yes\ndefenseclaw substrate setup --print-access-policies --plan plan.json",
     "flags": [
       {
@@ -1223,6 +1223,22 @@
         "type": "bool",
         "default": "false",
         "usage": "same as --output json"
+      },
+      {
+        "name": "keys-url",
+        "type": "string",
+        "default": "https://idp.ate-system.svc/openid/v1/jwks",
+        "usage": "the key set the gateway verifies actor tokens with (substrate.identity.keys_url), checked with --issuer"
+      },
+      {
+        "name": "kube-context",
+        "type": "string",
+        "usage": "kubectl context for the --issuer check"
+      },
+      {
+        "name": "kubeconfig",
+        "type": "string",
+        "usage": "kubectl configuration file for the --issuer check (default: kubectl's own)"
       },
       {
         "name": "namespace",

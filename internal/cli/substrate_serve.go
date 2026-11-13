@@ -149,7 +149,10 @@ func init() {
 	f.StringSliceVar(&serveFlags.calloutPeerIDs, "callout-peer-id", nil, "SPIFFE IDs of the callout (the egress chain check only)")
 	f.StringSliceVar(&serveFlags.controllerPeerIDs, "controller-peer-id", nil, "SPIFFE IDs of the controller (registrations, lifecycle and activity)")
 	f.StringSliceVar(&serveFlags.leaderIDs, "leader-id", nil, "SPIFFE IDs the leader may present")
-	f.StringVar(&serveFlags.issuerCA, "issuer-ca", "/run/servicedns.podcert.ate.dev/trust-bundle.pem", "trust bundle of the actor JWT issuer")
+	// Deprecated: substrate.identity.keys_ca_file. Kept until CERT-110 for
+	// the lab manifests that still pass it; set, it wins over the config.
+	f.StringVar(&serveFlags.issuerCA, "issuer-ca", "", "deprecated: use substrate.identity.keys_ca_file")
+	_ = f.MarkDeprecated("issuer-ca", "use substrate.identity.keys_ca_file")
 	f.StringVar(&serveFlags.sessionKeyFile, "session-key-file", "/var/run/secrets/defenseclaw-relay-session/private.pem", "relay session signing key")
 	f.StringVar(&serveFlags.calloutTokenFile, "callout-token-file", "/var/run/secrets/defenseclaw-callout-judge/token", "callout service token")
 	f.StringVar(&serveFlags.llmCredDir, "llm-credentials-dir", "/var/run/secrets/defenseclaw-llm", "provider keys, one file per provider")
@@ -420,10 +423,19 @@ func substrateOIDCPeople(c *config.Config) (*identity.PersonVerifier, error) {
 func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.SubstrateBuilder {
 	return func(api *gateway.APIServer, llmProxy http.Handler) (gateway.SubstrateConfig, error) {
 		var out gateway.SubstrateConfig
-		ks, err := identity.NewKeySet(identity.KeySetOptions{Issuer: c.Substrate.Identity.Issuer, CAFile: serveFlags.issuerCA})
+		ks, err := substrateActorKeySet(c)
 		if err != nil {
 			return out, err
 		}
+		// A keys URL that does not answer refuses every actor token: say so
+		// in the pod log at start, not only per request.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if chk := substrateActorKeysCheck(ctx, ks); chk.Status == "fail" {
+				fmt.Fprintf(os.Stderr, "[substrate] %s: %s; fix: %s\n", chk.ID, chk.Detail, chk.Fix)
+			}
+		}()
 		ate, err := substrateATEClient(c)
 		if err != nil {
 			return out, fmt.Errorf("serve: control API client: %w", err)
@@ -514,7 +526,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
-					substrateRouterCheck(ctx, router, routerErr)}
+					substrateRouterCheck(ctx, router, routerErr), substrateActorKeysCheck(ctx, ks)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl.Attestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
@@ -809,6 +821,48 @@ func relayDialer(d *routerDialer) gateway.SubstrateRelayDialer {
 		return nil
 	}
 	return d
+}
+
+// substrateActorKeySet is the actor token key set: iss must equal
+// substrate.identity.issuer, and the keys come from the keys URL (the idp
+// Service by default), never from the issuer's own host, so a per-cluster
+// issuer need not resolve (GAP-0194).
+func substrateActorKeySet(c *config.Config) (*identity.KeySet, error) {
+	ca := c.Substrate.EffectiveKeysCAFile()
+	if serveFlags.issuerCA != "" {
+		ca = serveFlags.issuerCA
+	}
+	return identity.NewKeySet(identity.KeySetOptions{
+		Issuer: c.Substrate.Identity.Issuer, KeysURL: c.Substrate.EffectiveKeysURL(), CAFile: ca,
+	})
+}
+
+// substrateActorKeysCheck is the admin doctor row for the actor token key
+// set: the keys URL answers with signing keys, and the issuer the idp
+// serves (what ate-api-server puts in iss) is substrate.identity.issuer.
+func substrateActorKeysCheck(ctx context.Context, ks *identity.KeySet) gateway.SubstrateCheck {
+	const id = "substrate.actor_keys"
+	if ks == nil {
+		return gateway.SubstrateCheck{ID: id, Status: "fail", Detail: "the actor token key set is not configured"}
+	}
+	n, err := ks.Probe(ctx)
+	if err != nil {
+		return gateway.SubstrateCheck{ID: id, Status: "fail",
+			Detail: "the keys URL " + ks.KeysURL() + " does not answer: " + err.Error() + "; every actor token is refused",
+			Fix:    "set substrate.identity.keys_url to the idp Service key set (chart value substrate.actorKeys.url) and keys_ca_file to the CA that signed it"}
+	}
+	served, err := ks.ServedIssuer(ctx)
+	switch {
+	case err != nil:
+		return gateway.SubstrateCheck{ID: id, Status: "warn",
+			Detail: fmt.Sprintf("the keys URL answers (%d keys), but the idp discovery document could not be read to compare the issuer: %v", n, err)}
+	case served != ks.Issuer():
+		return gateway.SubstrateCheck{ID: id, Status: "fail",
+			Detail: fmt.Sprintf("Substrate signs actor tokens with issuer %q, but substrate.identity.issuer is %q: every actor token is refused", served, ks.Issuer()),
+			Fix:    "set substrate.identity.issuer to the issuer given to setup --issuer and ate-setup deploy"}
+	}
+	return gateway.SubstrateCheck{ID: id, Status: "pass",
+		Detail: fmt.Sprintf("the keys URL answers (%d keys) and Substrate's issuer matches substrate.identity.issuer", n)}
 }
 
 // substrateInfo is the admin listener's unauthenticated sign-in

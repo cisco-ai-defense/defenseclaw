@@ -46,6 +46,8 @@ Every value is checked by `values.schema.json`. The main ones:
 | `config.substrate.launcher_atespaces` | {} | profile to atespaces; only DefenseClaw edits these |
 | `managedAtespaces` | [] | other atespaces DefenseClaw writes egress policy in |
 | `substrate.namespace`, `substrate.apiAddress`, `substrate.apiAudience` | ate-system | where Substrate runs |
+| `substrate.actorKeys.url` | `""` | the key set the gateway verifies actor tokens with (`config.substrate.identity.keys_url`); empty is the idp Service, `https://idp.<substrate.namespace>.svc/openid/v1/jwks`. The token's `iss` is compared with `config.substrate.identity.issuer` as a string, so a unique per-cluster issuer need not resolve (GAP-0194). A URL on another in-cluster Service or a private address may need a change to `networkPolicy.egress` |
+| `substrate.actorKeys.caConfigMap` | `""` | a ConfigMap (key `ca.crt`) with the PEM CA of the keys URL certificate, mounted on the gateway as `keys_ca_file`; empty is the servicedns trust bundle, which signs the idp Service certificate |
 | `substrate.credentialProvider.*` | grant on, namespace `defenseclaw-actor-secrets` | the launcher atespaces' grant in the Kubernetes credential provider policy |
 | `bootstrap.ownerTokenSecret` | "" | a global owner's token Secret (key `token`) for the OpenFGA bootstrap |
 | `callout.judge.tokenSecret` | `defenseclaw-callout-judge` | the callout's token for the MCP tool verdict route on the admin Service; the chain-key hook creates this Secret when absent. `""` turns the route off (tools/call alerts on OSS, refused on managed) |

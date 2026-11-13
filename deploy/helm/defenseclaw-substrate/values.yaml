@@ -44,6 +44,19 @@ substrate:
     podPort: 8444
     # The relay port inside the actor (the kit's relay).
     relayPort: 8080
+  # The key set the gateway verifies actor tokens with (GAP-0194). The
+  # gateway compares a token's iss with config.substrate.identity.issuer as a
+  # string and reads the keys from this URL, never from the issuer's host, so
+  # a unique per-cluster issuer (setup --issuer) need not resolve. url empty:
+  # the idp Service, https://idp.<substrate namespace>.svc/openid/v1/jwks
+  # (config.substrate.identity.keys_url). caConfigMap: a ConfigMap in this
+  # namespace whose key ca.crt is the PEM CA of the url's certificate,
+  # mounted on the gateway; empty: the servicedns trust bundle, which signs
+  # the idp Service certificate. A url on another in-cluster Service or a
+  # private address may need a change to networkPolicy.egress.
+  actorKeys:
+    url: ""
+    caConfigMap: ""
   # The upstream Kubernetes credential provider. The bootstrap Job grants the
   # launcher atespaces the secrets namespace below in its namespace policy,
   # and the pre-delete Job removes the grant.

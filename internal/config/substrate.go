@@ -177,7 +177,16 @@ type SubstrateIdentityConfig struct {
 	TokenLifetimeSeconds int64  `mapstructure:"token_lifetime_seconds" yaml:"token_lifetime_seconds,omitempty"`
 	// ActorCertOID is the ActorIdentity extension OID in actor
 	// certificates (it changes after the CNCF donation).
-	ActorCertOID string                        `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
+	ActorCertOID string `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
+	// KeysURL is where the gateway reads the keys that sign actor tokens
+	// (a JWK set). Empty: the in-cluster idp Service,
+	// https://idp.<substrate namespace>.svc/openid/v1/jwks, whatever the
+	// issuer is, so a per-cluster issuer is only compared as the iss
+	// string and need not resolve (GAP-0194). KeysCAFile is the PEM bundle
+	// that signed the keys URL's certificate (empty: the servicedns trust
+	// bundle the chart mounts).
+	KeysURL      string                        `mapstructure:"keys_url"       yaml:"keys_url,omitempty"`
+	KeysCAFile   string                        `mapstructure:"keys_ca_file"   yaml:"keys_ca_file,omitempty"`
 	OIDC         SubstrateOIDCConfig           `mapstructure:"oidc"           yaml:"oidc,omitempty"`
 	WorkloadOIDC []SubstrateWorkloadOIDCConfig `mapstructure:"workload_oidc" yaml:"workload_oidc,omitempty"`
 	// AdminGroups are the groups (OIDC groups claim, or Kubernetes groups
@@ -380,6 +389,12 @@ const (
 	// it expires (GAP-0133); 300 s is the upstream minimum.
 	DefaultSubstrateTokenLifetime = 300
 	DefaultSubstrateActorCertOID  = "1.3.6.1.4.1.11129.2.12.2"
+	// DefaultSubstrateNamespace is where Substrate runs when the API
+	// address does not name another namespace.
+	DefaultSubstrateNamespace = "ate-system"
+	// DefaultSubstrateKeysCAFile is the servicedns trust bundle the chart
+	// projects into the gateway: it signs the idp Service's certificate.
+	DefaultSubstrateKeysCAFile = "/run/servicedns.podcert.ate.dev/trust-bundle.pem"
 	// The Service defaults are fully qualified: the egress DNS relay answers
 	// only names an actor's policy lists, so the rule, the kit's URLs and
 	// the request Host must all be this one spelling (GAP-0023).
@@ -483,6 +498,35 @@ func (s SubstrateConfig) EffectiveAudience() string {
 	return orDefault(s.Identity.Audience, DefaultSubstrateAudience)
 }
 
+// SubstrateNamespace is the namespace Substrate runs in, read from the API
+// address (api.<namespace>.svc[.cluster.local]:port), else ate-system.
+func (s SubstrateConfig) SubstrateNamespace() string {
+	host := strings.TrimSpace(s.API.Address)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimSuffix(host, "."), ".cluster.local")
+	if parts := strings.Split(host, "."); len(parts) == 3 && parts[0] == "api" && parts[2] == "svc" && parts[1] != "" {
+		return parts[1]
+	}
+	return DefaultSubstrateNamespace
+}
+
+// EffectiveKeysURL is identity.keys_url, or the idp Service's key set
+// (GAP-0194): ate-idp-server serves it at /openid/v1/jwks.
+func (s SubstrateConfig) EffectiveKeysURL() string {
+	if u := strings.TrimSpace(s.Identity.KeysURL); u != "" {
+		return u
+	}
+	return "https://idp." + s.SubstrateNamespace() + ".svc/openid/v1/jwks"
+}
+
+// EffectiveKeysCAFile is identity.keys_ca_file, or the servicedns trust
+// bundle.
+func (s SubstrateConfig) EffectiveKeysCAFile() string {
+	return orDefault(s.Identity.KeysCAFile, DefaultSubstrateKeysCAFile)
+}
+
 func (s SubstrateConfig) EffectiveTokenLifetime() int64 {
 	if s.Identity.TokenLifetimeSeconds == 0 {
 		return DefaultSubstrateTokenLifetime
@@ -570,6 +614,9 @@ func (s *SubstrateConfig) Validate() error {
 	}
 	if oid := id.ActorCertOID; oid != "" && !substrateOIDRe.MatchString(oid) {
 		bad("identity.actor_cert_oid", "%q is not a dotted OID", oid)
+	}
+	if u := id.KeysURL; u != "" && (!httpsURL(u) || strings.TrimSpace(u) != u) {
+		bad("identity.keys_url", "%q must be an https URL with no query or fragment", u)
 	}
 	if o := id.OIDC; o.Issuer != "" || o.ClientID != "" {
 		if !httpsURL(o.Issuer) {

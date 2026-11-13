@@ -18,6 +18,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -113,6 +114,7 @@ func TestSubstrate_Admin_SetupWritesNextToTheFile(t *testing.T) {
 }
 
 func TestSubstrate_Admin_SetupGoldens(t *testing.T) {
+	fakeKubectl(t, errors.New("kubectl is not installed or not on PATH"))
 	cases := []struct {
 		name   string
 		golden string

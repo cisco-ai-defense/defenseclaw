@@ -117,6 +117,15 @@ unless config names a file. */ -}}
 {{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
 {{- end -}}
+{{- /* The actor token key set (GAP-0194): chart values fill
+identity.keys_url and keys_ca_file unless config sets them. */ -}}
+{{- $keys := .Values.substrate.actorKeys | default dict -}}
+{{- if or $keys.url $keys.caConfigMap -}}
+{{- $id := get $sub "identity" | default dict -}}
+{{- if and $keys.url (not (hasKey $id "keys_url")) }}{{ $_ := set $id "keys_url" $keys.url }}{{ end -}}
+{{- if and $keys.caConfigMap (not (hasKey $id "keys_ca_file")) }}{{ $_ := set $id "keys_ca_file" "/etc/defenseclaw-substrate/actor-keys-ca/ca.crt" }}{{ end -}}
+{{- $_ := set $sub "identity" $id -}}
+{{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- with .Values.deploymentMode }}{{ $_ := set $cfg "deployment_mode" . }}{{ end -}}
 {{- if and (include "dc.managed" .) (not (hasKey $cfg "data_dir")) -}}
@@ -302,6 +311,15 @@ initContainers:
             podcert.ate.dev/canarying: live
         path: trust-bundle.pem
 {{- end }}
+{{- if and .ctx.Values.substrate.actorKeys.caConfigMap (eq .component "gateway") }}
+- name: actor-keys-ca
+  configMap:
+    name: {{ .ctx.Values.substrate.actorKeys.caConfigMap }}
+    items:
+    - key: ca.crt
+      path: ca.crt
+    defaultMode: 0444
+{{- end }}
 {{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
 - name: bundle-anchors
   secret:
@@ -339,6 +357,11 @@ initContainers:
 {{- if and .ctx.Values.podCertificates.enabled .serving }}
 - name: servicedns
   mountPath: /run/servicedns.podcert.ate.dev
+  readOnly: true
+{{- end }}
+{{- if and .ctx.Values.substrate.actorKeys.caConfigMap (eq .component "gateway") }}
+- name: actor-keys-ca
+  mountPath: /etc/defenseclaw-substrate/actor-keys-ca
   readOnly: true
 {{- end }}
 {{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}

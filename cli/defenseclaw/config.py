@@ -4408,6 +4408,11 @@ class SubstrateIdentityConfig:
     audience: str = ""
     token_lifetime_seconds: int | None = None
     actor_cert_oid: str = ""
+    # The actor token key set (GAP-0194): empty is the idp Service,
+    # https://idp.<substrate namespace>.svc/openid/v1/jwks, whatever the
+    # issuer is; keys_ca_file empty is the servicedns trust bundle.
+    keys_url: str = ""
+    keys_ca_file: str = ""
     oidc: SubstrateOIDCConfig = field(default_factory=SubstrateOIDCConfig)
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
     # Groups whose members are Substrate administrators (GAP-0191).
@@ -7855,6 +7860,8 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
             audience=str(ident.get("audience", "") or ""),
             token_lifetime_seconds=_optional_number(ident.get("token_lifetime_seconds"), int),
             actor_cert_oid=str(ident.get("actor_cert_oid", "") or ""),
+            keys_url=str(ident.get("keys_url", "") or ""),
+            keys_ca_file=str(ident.get("keys_ca_file", "") or ""),
             oidc=SubstrateOIDCConfig(
                 issuer=str(oidc.get("issuer", "") or ""),
                 client_id=str(oidc.get("client_id", "") or ""),

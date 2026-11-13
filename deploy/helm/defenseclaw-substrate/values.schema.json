@@ -124,6 +124,26 @@
             "type": "string"
           }
         },
+        "actorKeys": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {
+              "type": "string",
+              "pattern": "^(https://[^?#\\s]+)?$"
+            },
+            "caConfigMap": {
+              "anyOf": [
+                {
+                  "const": ""
+                },
+                {
+                  "$ref": "#/definitions/dnsLabel"
+                }
+              ]
+            }
+          }
+        },
         "credentialProvider": {
           "type": "object",
           "additionalProperties": false,

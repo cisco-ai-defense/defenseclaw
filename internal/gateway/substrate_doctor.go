@@ -24,14 +24,17 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 )
 
 // Gateway-side checks for `defenseclaw substrate admin doctor`, from where
 // the gateway runs (its DNS, its network):
 //
 //	GET /api/v1/substrate/doctor   (administrators)  {"checks":[{id,status,detail,fix}]}
-//	GET /api/v1/substrate/info     (no sign-in)      {sign_in, issuer, client_id, attach}
+//	GET /api/v1/substrate/info     (no sign-in)      {sign_in, issuer, client_id, attach, actor_tokens}
 //
 // substrate.model_upstreams_private (GAP-0040): a cluster that reaches a
 // model provider through a VPC interface endpoint resolves the provider
@@ -129,6 +132,67 @@ func (a *APIServer) substrateInfo(st *substrateState) http.HandlerFunc {
 			info[k] = v
 		}
 		info["attach"] = st.cfg.Relays != nil
+		if h, ok := st.tokens.report(time.Now()); ok {
+			info["actor_tokens"] = h
+		}
 		writeSubstrateJSON(w, http.StatusOK, info)
 	}
+}
+
+// actorTokenRefusalWindow is how long a cluster-wide actor token refusal
+// is reported when no actor token has verified since.
+const actorTokenRefusalWindow = 10 * time.Minute
+
+// actorTokenHealth tracks the actor token refusals that hit every actor of
+// the cluster at once: the key set cannot be read, the issuer differs from
+// the one Substrate signs with, or the control API cannot answer. A
+// refusal of one bad token (signature, audience, UID) is not tracked.
+type actorTokenHealth struct {
+	mu           sync.Mutex
+	lastReason   identity.Reason
+	lastRefused  time.Time
+	lastVerified time.Time
+}
+
+// ActorTokenState is the /info actor_tokens member: present only while
+// actor tokens are being refused cluster-wide. It names a reason, never a
+// token or a caller.
+type ActorTokenState struct {
+	State  string `json:"state"` // refusing
+	Reason string `json:"reason"`
+	Since  string `json:"since"`
+}
+
+func clusterWideRefusal(r identity.Reason) bool {
+	switch r {
+	case identity.ReasonKeysetFailed, identity.ReasonIssuer, identity.ReasonUnavailable:
+		return true
+	}
+	return false
+}
+
+func (h *actorTokenHealth) refused(r identity.Reason, now time.Time) {
+	if !clusterWideRefusal(r) {
+		return
+	}
+	h.mu.Lock()
+	h.lastReason, h.lastRefused = r, now
+	h.mu.Unlock()
+}
+
+func (h *actorTokenHealth) verified(now time.Time) {
+	h.mu.Lock()
+	h.lastVerified = now
+	h.mu.Unlock()
+}
+
+// report returns the state while the last cluster-wide refusal is newer
+// than the last verified token and inside the window.
+func (h *actorTokenHealth) report(now time.Time) (ActorTokenState, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastRefused.IsZero() || !h.lastRefused.After(h.lastVerified) || now.Sub(h.lastRefused) > actorTokenRefusalWindow {
+		return ActorTokenState{}, false
+	}
+	return ActorTokenState{State: "refusing", Reason: string(h.lastReason), Since: h.lastRefused.UTC().Format(time.RFC3339)}, true
 }

@@ -240,6 +240,11 @@ type substrateState struct {
 	pending    map[string]int
 	pendingOld map[string]int
 
+	// tokens remembers cluster-wide actor token refusals (the key set,
+	// the issuer, the control API), which /info reports so a launcher
+	// never calls a task finished whose every call was refused (GAP-0194).
+	tokens actorTokenHealth
+
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
 	adminHandler         http.Handler
@@ -582,9 +587,11 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 			}
 			// The message names the check, never token bytes (identity.Error).
 			st.logRefusal("actor token refused: %s (%v)", reason, err)
+			st.tokens.refused(reason, time.Now())
 			writeSubstrateRefusal(w, status, string(reason))
 			return
 		}
+		st.tokens.verified(time.Now())
 		// The fair-share limits run right after the token check, before
 		// the registration lookup and the envelope read, so a flooding
 		// actor costs no leader call and no body read (GAP-0057).
