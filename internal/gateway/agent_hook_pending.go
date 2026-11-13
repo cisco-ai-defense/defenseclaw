@@ -216,6 +216,12 @@ type pendingHookOccurrence struct {
 	Settled bool
 	// Attempts counts recovery tries recorded before each.
 	Attempts int `json:",omitempty"`
+	// unjournaled is an occurrence of a gateway that keeps no journal row
+	// for its calls (journalsHookDeliveries): a per-user gateway runs no
+	// recovery, so a row would only be written and deleted, each with a
+	// synchronous=FULL fsync on the answer path. The call still has its
+	// stable record IDs and its receipt-backed write context.
+	unjournaled bool
 }
 
 type sandboxPendingHookReceipt struct {
@@ -531,6 +537,13 @@ func (a *APIServer) journalHookDelivery(
 	if a.store == nil {
 		return p, errors.New("hook audit store is unavailable")
 	}
+	if p.SandboxReceipt == nil && !a.journalsHookDeliveries() {
+		// Only recovery reads a journal row, and only a standalone managed
+		// gateway runs it. Two durable fsyncs per call held per-user
+		// answers on a disk that is slow to flush (rel-1-0-10 GAP-0088).
+		p.unjournaled = true
+		return p, nil
+	}
 	data, err := encodePendingHookOccurrence(p)
 	if err != nil {
 		return p, err
@@ -560,6 +573,11 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 	}
 	verdict := pendingResponse(resp)
 	p.Decided = &verdict
+	if p.unjournaled {
+		// No recovery can write this call differently: its records leave
+		// as any other record does.
+		return ctx
+	}
 	data, err := encodePendingHookOccurrence(p)
 	if err == nil {
 		// No row: the journal refused it, so no recovery follows.
@@ -577,7 +595,7 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 // running server takes it once this handler is done
 // (wakePendingHookRecovery).
 func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
-	if p == nil {
+	if p == nil || p.unjournaled {
 		return
 	}
 	settled := false
