@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,10 +61,21 @@ func (p *GuardrailProxy) writeBlockedPassthroughBedrock(w http.ResponseWriter, p
 		model = bedrockModelFromPath(path)
 	}
 
-	switch action {
-	case bedrockActionConverseStream, bedrockActionInvokeResponseStream:
+	// InvokeModel and InvokeModelWithResponseStream carry the model
+	// vendor's own body, so for an Anthropic model the block is an Anthropic
+	// Messages reply (a "chunk" event per Messages event when streaming).
+	// Converse frames there left Claude Code with "no events" and then
+	// "JSON but not a Message", and the block text was never shown
+	// (GAP-0149).
+	anthropic := bedrockAnthropicModel(model)
+	switch {
+	case action == bedrockActionInvokeResponseStream && anthropic:
+		p.writeBlockedStreamBedrockInvokeAnthropic(w, model, msg)
+	case action == bedrockActionInvoke && anthropic:
+		writeBlockedResponseBedrockInvokeAnthropic(w, model, msg)
+	case action == bedrockActionConverseStream || action == bedrockActionInvokeResponseStream:
 		p.writeBlockedStreamBedrockConverse(w, model, msg)
-	case bedrockActionConverse, bedrockActionInvoke:
+	case action == bedrockActionConverse || action == bedrockActionInvoke:
 		p.writeBlockedResponseBedrockConverse(w, model, msg)
 	default:
 		// Unknown Bedrock action — default to non-streaming JSON so the
@@ -291,4 +303,71 @@ func writeBedrockEventStreamFrame(w io.Writer, eventType string, payload map[str
 		Payload: body,
 	}
 	return eventstream.NewEncoder().Encode(w, msg)
+}
+
+// bedrockAnthropicModel reports an Anthropic model ID or inference profile
+// ("anthropic.claude-...", "us.anthropic.claude-...", an ARN naming one).
+func bedrockAnthropicModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "anthropic.")
+}
+
+// bedrockBlockedAnthropicMessage is the Anthropic Messages reply of a
+// block: one text block with the block message, ending as a normal turn.
+func bedrockBlockedAnthropicMessage(model, msg string) map[string]any {
+	return map[string]any{
+		"id": "msg_defenseclaw_block", "type": "message", "role": "assistant", "model": model,
+		"content":     []map[string]any{{"type": "text", "text": msg}},
+		"stop_reason": bedrockBlockStopReason, "stop_sequence": nil,
+		"usage":               map[string]int{"input_tokens": 0, "output_tokens": 1},
+		"defenseclaw_blocked": true,
+	}
+}
+
+// writeBlockedResponseBedrockInvokeAnthropic answers a blocked InvokeModel
+// call for an Anthropic model.
+func writeBlockedResponseBedrockInvokeAnthropic(w http.ResponseWriter, model, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bedrockBlockedAnthropicMessage(model, msg))
+}
+
+// writeBlockedStreamBedrockInvokeAnthropic answers a blocked
+// InvokeModelWithResponseStream call for an Anthropic model: the Messages
+// stream events, each in a Bedrock "chunk" event whose payload is
+// {"bytes": base64(event JSON)}, the framing the AWS SDK and Claude Code
+// read.
+func (p *GuardrailProxy) writeBlockedStreamBedrockInvokeAnthropic(w http.ResponseWriter, model, msg string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeBlockedResponseBedrockInvokeAnthropic(w, model, msg)
+		return
+	}
+	w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+	w.Header().Set("X-DefenseClaw-Blocked", "true")
+	w.WriteHeader(http.StatusOK)
+	start := bedrockBlockedAnthropicMessage(model, msg)
+	start["content"], start["stop_reason"] = []any{}, nil
+	start["usage"] = map[string]int{"input_tokens": 0, "output_tokens": 0}
+	events := []map[string]any{
+		{"type": "message_start", "message": start},
+		{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}},
+		{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": msg}},
+		{"type": "content_block_stop", "index": 0},
+		{"type": "message_delta", "delta": map[string]any{"stop_reason": bedrockBlockStopReason, "stop_sequence": nil},
+			"usage": map[string]int{"output_tokens": 1}},
+		{"type": "message_stop", "amazon-bedrock-invocationMetrics": map[string]int{
+			"inputTokenCount": 0, "outputTokenCount": 1, "invocationLatency": 0, "firstByteLatency": 0}},
+	}
+	for _, ev := range events {
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			continue
+		}
+		if err := writeBedrockEventStreamFrame(w, "chunk", map[string]any{"bytes": base64.StdEncoding.EncodeToString(raw)}); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] bedrock block-stream chunk error: %v\n", err)
+			return
+		}
+		flusher.Flush()
+	}
 }

@@ -69,6 +69,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -839,23 +840,6 @@ func buildTranslateInput(cfg *config.Config) routing.TranslateInput {
 	return input
 }
 
-func buildModelRouterBackends(cfg *config.Config) []ModelRouterBackend {
-	if cfg == nil {
-		return nil
-	}
-	backends := make([]ModelRouterBackend, 0, len(cfg.Routing.Models))
-	for _, model := range cfg.Routing.Models {
-		backends = append(backends, ModelRouterBackend{
-			Name:      model.Name,
-			Provider:  model.Provider,
-			Model:     model.Model,
-			BaseURL:   model.BaseURL,
-			APIKeyEnv: model.APIKeyEnv,
-		})
-	}
-	return backends
-}
-
 func effectiveRoutingHealthDetails(cfg config.RoutingConfig) map[string]interface{} {
 	mode := "managed"
 	if strings.TrimSpace(cfg.Remote.Endpoint) != "" {
@@ -868,6 +852,7 @@ func effectiveRoutingHealthDetails(cfg config.RoutingConfig) map[string]interfac
 	}
 	details := map[string]interface{}{
 		"enabled":     true,
+		"classifier":  cfg.EffectiveClassifier(),
 		"mode":        mode,
 		"version":     version,
 		"model_count": len(cfg.Models),
@@ -1116,64 +1101,69 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
 	}
 
-	// Initialize semantic router (managed or remote). Sidecar owns this
-	// instance so repeated in-process runs cannot inherit a stale global router.
+	// Initialize semantic routing. The routing engine (internal/routing/
+	// engine) is built per config generation, so policy changes apply
+	// without a restart and routing.enabled can be turned on by a reload.
+	// Only classifier vllm_sr starts the vLLM Semantic Router container (or
+	// uses its remote endpoint); that part stays restart-bound. Sidecar owns
+	// these instances so repeated in-process runs cannot inherit a stale
+	// global router.
 	var routingHealthChecker modelRouterHealthChecker
 	var routingHealthDetails map[string]interface{}
+	var vllmClassifier engine.Classifier
 	s.modelRouter = nil
 	s.health.SetRouting(StateDisabled, "", map[string]interface{}{"enabled": false})
-	if s.currentConfig().Routing.Enabled {
-		routingHealthDetails = effectiveRoutingHealthDetails(s.currentConfig().Routing)
-		s.health.SetRouting(StateStarting, "", routingHealthDetails)
-		orchCfg := routing.OrchestratorConfig{
-			Enabled:        true,
-			Version:        s.currentConfig().Routing.Version,
-			Port:           s.currentConfig().Routing.Port,
-			DataDir:        s.currentConfig().DataDir,
-			RemoteEndpoint: s.currentConfig().Routing.Remote.Endpoint,
-			TimeoutMs:      s.currentConfig().Routing.Remote.TimeoutMs,
-			TranslateInput: buildTranslateInput(s.currentConfig()),
-		}
-		result, err := routing.StartManagedRouter(runCtx, orchCfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[routing] startup failed: %v (routing disabled)\n", err)
-			s.health.SetRouting(StateError, err.Error(), routingHealthDetails)
-			s.publishRoutingHealthTransitionV8(runCtx, routingHealthV8StartupFailed)
-			emitError(runCtx, "routing", "init-failed", "semantic router disabled", err)
-		} else if result != nil {
-			timeoutMs := orchCfg.TimeoutMs
-			if timeoutMs == 0 {
-				timeoutMs = 50
+	if rcfg := s.currentConfig().Routing; rcfg.Enabled {
+		routingHealthDetails = effectiveRoutingHealthDetails(rcfg)
+		if rcfg.EffectiveClassifier() != config.RoutingClassifierVLLMSR {
+			s.health.SetRouting(StateRunning, "", routingHealthDetails)
+		} else {
+			s.health.SetRouting(StateStarting, "", routingHealthDetails)
+			orchCfg := routing.OrchestratorConfig{
+				Enabled:        true,
+				Version:        rcfg.Version,
+				Port:           rcfg.Port,
+				DataDir:        s.currentConfig().DataDir,
+				RemoteEndpoint: rcfg.Remote.Endpoint,
+				TimeoutMs:      rcfg.Remote.TimeoutMs,
+				TranslateInput: buildTranslateInput(s.currentConfig()),
 			}
-			client := NewConfiguredRemoteRouterClient(
-				result.Endpoint,
-				timeoutMs,
-				buildModelRouterBackends(s.currentConfig()),
-				filepath.Join(s.currentConfig().DataDir, ".env"),
-			)
-			if !client.Healthy(runCtx) {
-				err := errors.New(modelRouterHealthProbeError)
+			result, err := routing.StartManagedRouter(runCtx, orchCfg)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "[routing] startup failed: %v (routing disabled)\n", err)
 				s.health.SetRouting(StateError, err.Error(), routingHealthDetails)
 				s.publishRoutingHealthTransitionV8(runCtx, routingHealthV8StartupFailed)
-				if result.Lifecycle != nil {
-					_ = result.Lifecycle.Stop()
+				emitError(runCtx, "routing", "init-failed", "semantic router disabled", err)
+			} else if result != nil {
+				timeoutMs := orchCfg.TimeoutMs
+				if timeoutMs == 0 {
+					timeoutMs = 50
 				}
-			} else {
-				s.modelRouter = client
-				routingHealthChecker = client
-				s.health.SetRouting(StateRunning, "", routingHealthDetails)
-				fmt.Fprintf(os.Stderr, "[guardrail] semantic model router enabled (endpoint=%s)\n", result.Endpoint)
-				defer func() {
+				client := NewRemoteRouterClient(result.Endpoint, timeoutMs)
+				if !client.Healthy(runCtx) {
+					err := errors.New(modelRouterHealthProbeError)
+					fmt.Fprintf(os.Stderr, "[routing] startup failed: %v (routing disabled)\n", err)
+					s.health.SetRouting(StateError, err.Error(), routingHealthDetails)
+					s.publishRoutingHealthTransitionV8(runCtx, routingHealthV8StartupFailed)
 					if result.Lifecycle != nil {
 						_ = result.Lifecycle.Stop()
 					}
-					s.modelRouter = nil
-					s.health.SetRouting(StateStopped, "", routingHealthDetails)
-				}()
+				} else {
+					vllmClassifier = client
+					routingHealthChecker = client
+					s.health.SetRouting(StateRunning, "", routingHealthDetails)
+					fmt.Fprintf(os.Stderr, "[guardrail] semantic model router enabled (endpoint=%s)\n", result.Endpoint)
+					defer func() {
+						if result.Lifecycle != nil {
+							_ = result.Lifecycle.Stop()
+						}
+						s.health.SetRouting(StateStopped, "", routingHealthDetails)
+					}()
+				}
 			}
 		}
 	}
+	s.modelRouter = newEngineRouter(s.currentConfig(), vllmClassifier, filepath.Join(s.currentConfig().DataDir, ".env"))
 
 	s.logSecureClientPolicyEngine()
 

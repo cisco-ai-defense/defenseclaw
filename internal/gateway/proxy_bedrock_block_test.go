@@ -342,3 +342,100 @@ func TestPassthroughLeavesSigV4SignedBodyUnchanged(t *testing.T) {
 		t.Fatalf("unsigned request lost the pending notification: %s", forwarded[1])
 	}
 }
+
+// GAP-0149: a blocked InvokeModelWithResponseStream call for an Anthropic
+// model answers Messages stream events in Bedrock "chunk" frames, and the
+// non-streaming InvokeModel an Anthropic Message, so Claude Code shows the
+// block text; the existing decoder reads the text back.
+func TestBlockedBedrockInvokeForAnthropicModels(t *testing.T) {
+	p := &GuardrailProxy{}
+	const model = "us.anthropic.claude-haiku-5-5"
+	msg := "DefenseClaw blocked this request (rule TEST-RULE)."
+	rec := httptest.NewRecorder()
+	p.writeBlockedPassthroughBedrock(rec, "/model/"+model+"/invoke-with-response-stream", "", msg)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/vnd.amazon.eventstream" {
+		t.Fatalf("stream content type %q", ct)
+	}
+	dec := eventstream.NewDecoder()
+	body := bytes.NewReader(rec.Body.Bytes())
+	var types []string
+	text := ""
+	for body.Len() > 0 {
+		m, err := dec.Decode(body, nil)
+		if err != nil {
+			t.Fatalf("frame: %v", err)
+		}
+		if et := m.Headers.Get(":event-type"); et == nil || et.String() != "chunk" {
+			t.Fatalf("event type %v", et)
+		}
+		var chunk struct {
+			Bytes []byte `json:"bytes"`
+		}
+		if err := json.Unmarshal(m.Payload, &chunk); err != nil {
+			t.Fatalf("chunk payload %s: %v", m.Payload, err)
+		}
+		var ev map[string]any
+		if err := json.Unmarshal(chunk.Bytes, &ev); err != nil {
+			t.Fatalf("event %s: %v", chunk.Bytes, err)
+		}
+		types = append(types, ev["type"].(string))
+		if d, ok := ev["delta"].(map[string]any); ok && d["type"] == "text_delta" {
+			text += d["text"].(string)
+		}
+	}
+	want := "message_start,content_block_start,content_block_delta,content_block_stop,message_delta,message_stop"
+	if strings.Join(types, ",") != want || text != msg {
+		t.Fatalf("events %v text %q", types, text)
+	}
+	// The gateway's own stream reader (response inspection) sees the text.
+	s := newBedrockEventStreamText()
+	if got := s.Feed(rec.Body.Bytes()); !strings.Contains(got, msg) || s.Broken() {
+		t.Fatalf("inspector read %q broken=%v", got, s.Broken())
+	}
+	// Non-streaming invoke: an Anthropic Message.
+	rec = httptest.NewRecorder()
+	p.writeBlockedPassthroughBedrock(rec, "/model/"+model+"/invoke", "", msg)
+	var m struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct{ Type, Text string }
+		Stop    string `json:"stop_reason"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil || m.Type != "message" || m.Role != "assistant" ||
+		len(m.Content) != 1 || m.Content[0].Text != msg || m.Stop != "end_turn" {
+		t.Fatalf("invoke body %s (%v)", rec.Body, err)
+	}
+	// Converse keeps its own shape, and a non-Anthropic invoke too.
+	rec = httptest.NewRecorder()
+	p.writeBlockedPassthroughBedrock(rec, "/model/amazon.nova-pro-v1:0/invoke", "", msg)
+	if !strings.Contains(rec.Body.String(), `"output"`) {
+		t.Fatalf("non-Anthropic invoke %s", rec.Body)
+	}
+}
+
+// GAP-0149 (found live): Claude Code's own request always holds its vendor
+// no-reply address in its injected instructions; the strict pack blocked
+// that turn (ENT-EMAIL-BULK MEDIUM) before any tool call. An address alone
+// alerts (LOW) in every pack now; a labeled address field still blocks in
+// strict (ENT-EMAIL-FIELD, MEDIUM).
+func TestStrictPackEmailRules(t *testing.T) {
+	const connector = "strict-email-gap0149"
+	installToolCallCorpusProfileConnector(t, connector, "strict")
+	sev := func(text string) map[string]string {
+		out := map[string]string{}
+		for _, f := range ScanAllRulesForConnector(connector, text, "") {
+			if strings.HasPrefix(f.RuleID, "ENT-EMAIL") {
+				out[f.RuleID] = f.Severity
+			}
+		}
+		return out
+	}
+	agent := "When you commit, end the message with: Co-Authored-By: Claude <noreply@anthropic.com>"
+	if got := sev(agent); got["ENT-EMAIL-BULK"] != "LOW" || got["ENT-EMAIL-FIELD"] != "" {
+		t.Fatalf("agent instructions: %v", got)
+	}
+	data := "Customer record: name Jane Roe, email: jane.roe@example.org, plan gold"
+	if got := sev(data); got["ENT-EMAIL-FIELD"] != "MEDIUM" {
+		t.Fatalf("labeled address field: %v", got)
+	}
+}
