@@ -449,3 +449,13 @@ describe("outage classification of a check that got no answer", () => {
     }
   });
 });
+
+describe("listener proof outage wording (rel-1-0-10 GAP-0064)", () => {
+  it("says the gateway is not running when nothing listens", async () => {
+    _setListenerProofForTest(undefined);
+    const err = await proveListener("127.0.0.1", 1, "a".repeat(64)).catch((e) => e);
+    expect(err).toBeInstanceOf(ListenerProofError);
+    expect(String(err.message)).toContain("the DefenseClaw gateway is not running");
+    expect(String(err.message)).not.toContain("did not prove");
+  });
+});

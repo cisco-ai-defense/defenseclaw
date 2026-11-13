@@ -963,20 +963,33 @@ actor ConfigStore {
         return out
     }
 
-    /// Upstream precedence ladder (config.py::resolved_token):
+    /// Upstream precedence ladder (config.py::resolved_token, config.go ResolvedToken):
     /// 1. env var named by gateway.token_env  2. DEFENSECLAW_GATEWAY_TOKEN
-    /// 3. OPENCLAW_GATEWAY_TOKEN              4. literal gateway.token
+    /// 3. literal gateway.token
+    /// OPENCLAW_GATEWAY_TOKEN is the OpenClaw WebSocket credential, never the
+    /// DefenseClaw API token: a token_env naming it is skipped, and so is any
+    /// value equal to it (a 1.0.9 install saved the OpenClaw token as both).
     private func resolveToken(root: YAMLNode, dotenv: [String: String]) -> String? {
         func env(_ key: String) -> String? {
             if let v = ProcessInfo.processInfo.environment[key], !v.isEmpty { return v }
             if let v = dotenv[key], !v.isEmpty { return v }
             return nil
         }
-        if let name = root["gateway.token_env"]?.string, let v = env(name) { return v }
-        if let v = env("DEFENSECLAW_GATEWAY_TOKEN") { return v }
-        if let v = env("OPENCLAW_GATEWAY_TOKEN") { return v }
-        return root["gateway.token"]?.string
+        let openClawToken = env(Self.openClawGatewayTokenEnv)
+        func usable(_ v: String?) -> String? {
+            guard let v, !v.isEmpty else { return nil }
+            if let oc = openClawToken, oc == v { return nil }
+            return v
+        }
+        if let name = root["gateway.token_env"]?.string,
+           name != Self.openClawGatewayTokenEnv,
+           let v = usable(env(name)) { return v }
+        if let v = usable(env("DEFENSECLAW_GATEWAY_TOKEN")) { return v }
+        return usable(root["gateway.token"]?.string)
     }
+
+    /// The OpenClaw gateway credential name (connectors.openclaw WebSocket only).
+    static let openClawGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 
     @discardableResult
     func reload() -> DefenseClawConfig {

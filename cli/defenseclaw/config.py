@@ -50,7 +50,6 @@ from defenseclaw import (
     connector_paths,
     credential_provenance,
     envvars,
-    gateway_token_adoption,
     legacy_connector,
 )
 from defenseclaw.config_writer import ManagedConfigWriteError
@@ -2349,43 +2348,57 @@ class GatewayConfig:
     watchdog: GatewayWatchdogConfig = field(default_factory=GatewayWatchdogConfig)
 
     def resolved_token(self) -> str:
-        """Return the gateway auth token, walking the precedence ladder.
+        """Return the DefenseClaw master gateway token.
 
-        Resolution order:
+        Mirror of ``GatewayConfig.ResolvedToken`` in internal/config/config.go;
+        the two must agree. Resolution order:
 
-        1. ``self.token_env`` — operator-supplied override, ALWAYS wins.
-           This lets ``defenseclaw setup`` / ops tooling pin the var
-           name explicitly without us guessing.
-        2. ``DEFENSECLAW_GATEWAY_TOKEN`` — the canonical name the Go
-           gateway (`internal/gateway/firstboot.go::EnsureGatewayToken`)
-           writes to ``~/.defenseclaw/.env`` on first boot.
-        3. ``OPENCLAW_GATEWAY_TOKEN`` — back-compat shim for installs
-           that bootstrapped before the defenseclaw rename. The Go
-           gateway also reads this for the same reason; honouring it
-           here keeps the two sides symmetric.
-        4. ``self.token`` — literal value from ``config.yaml``. Last
-           resort because plaintext secrets in YAML are discouraged
-           (and ``_warn_plaintext_secrets`` already nags about it).
+        1. ``self.token_env`` - an operator-chosen variable name, unless it
+           names ``OPENCLAW_GATEWAY_TOKEN``.
+        2. ``DEFENSECLAW_GATEWAY_TOKEN`` - the name the gateway mints into
+           ``~/.defenseclaw/.env`` (EnsureGatewayToken).
+        3. ``self.token`` - the literal from ``config.yaml``.
 
-        When ``.env`` holds both gateway-token spellings with different
-        values, the earlier name in this order wins, except that a copy the
-        gateway adopted from ``openclaw.json`` (recorded by the marker comment
-        in ``.env``, see ``defenseclaw.gateway_token_adoption``) never shadows a
-        value the operator saved under the other spelling: the load leaves the
-        adopted copy out. ``defenseclaw keys set`` on either name replaces every
-        spelling already saved.
+        ``OPENCLAW_GATEWAY_TOKEN`` is never the master (R-TOK): it is only the
+        credential the gateway presents to the OpenClaw WebSocket, and the
+        OpenClaw account, its plugins and any tool that reads openclaw.json
+        hold it. A candidate whose value equals it is skipped too, because a
+        1.0.9 adoption wrote the OpenClaw token under both names; the gateway
+        and ``defenseclaw migrate`` mint a separate master then. SecretRef text
+        an earlier build saved as a token is never one (#1404).
 
-        Returns the empty string when no token is reachable; callers
-        gate on the truthiness, so empty == "unauthenticated".
+        Returns the empty string when no token is reachable; callers gate on
+        the truthiness, so empty == "unauthenticated".
         """
-        # SecretRef text an earlier build saved as a token is never one (#1404).
         from defenseclaw.connector_paths import is_secret_ref_text
 
-        for name in (self.token_env, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
-            val = os.environ.get(name, "") if name else ""
-            if val and not is_secret_ref_text(val):
+        openclaw = os.environ.get(OPENCLAW_GATEWAY_TOKEN_ENV, "").strip()
+
+        def usable(value: str) -> bool:
+            return bool(value) and not is_secret_ref_text(value) and value.strip() != openclaw
+
+        token_env = (self.token_env or "").strip()
+        for name in (token_env, DEFENSECLAW_GATEWAY_TOKEN_ENV):
+            if not name or is_openclaw_gateway_token_env(name):
+                continue
+            val = os.environ.get(name, "")
+            if usable(val):
                 return val
-        return "" if is_secret_ref_text(self.token) else self.token
+        return self.token if usable(self.token) else ""
+
+
+# The DefenseClaw master gateway token and the OpenClaw WebSocket credential
+# (R-TOK). They are separate values; see GatewayConfig.resolved_token.
+DEFENSECLAW_GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
+OPENCLAW_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
+
+
+def is_openclaw_gateway_token_env(name: str) -> bool:
+    """True when *name* is ``OPENCLAW_GATEWAY_TOKEN`` (any case on Windows)."""
+    name = (name or "").strip()
+    if os.name == "nt":
+        return name.upper() == OPENCLAW_GATEWAY_TOKEN_ENV
+    return name == OPENCLAW_GATEWAY_TOKEN_ENV
 
 
 @dataclass
@@ -8070,8 +8083,6 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
-        # An adopted gateway token copy never shadows the one the operator saved.
-        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -8106,12 +8117,6 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 seen_keys.add(key)
                 current = os.environ.get(key)
                 injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
-                if gateway_token_adoption.is_shadowed(shadowed, key):
-                    # A long-lived process (the TUI) may hold the adopted copy an
-                    # earlier load injected.
-                    if current is not None and injected:
-                        del os.environ[key]
-                    continue
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(

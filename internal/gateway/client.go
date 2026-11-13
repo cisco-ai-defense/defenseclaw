@@ -27,9 +27,11 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -39,7 +41,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -80,6 +82,10 @@ type Client struct {
 	bufferHandshakeEvents bool
 	handshakeBuf          []EventFrame
 
+	// noOperatorAdmin is connectors.openclaw.operator_admin false: connect
+	// asks OpenClaw for read, write and approvals only.
+	noOperatorAdmin atomic.Bool
+
 	// OnEvent is called for every non-connect event frame.
 	OnEvent func(EventFrame)
 
@@ -88,10 +94,11 @@ type Client struct {
 	// OpenClaw pairing or token rejection, and "" for any other failure.
 	OnConnectError func(err error, hint string)
 
-	// refreshedToken is the gateway token handleConnectRejection adopted from
-	// openclaw.json after boot. The API server accepts it next to its
-	// boot token until the next restart (GAP-2259).
-	refreshedToken atomic.Pointer[string]
+	// openClawToken is the OpenClaw WebSocket credential auth repair adopted
+	// after boot (re-read from openclaw.json, or OPENCLAW_GATEWAY_TOKEN when
+	// openclaw.json holds none). It is never the DefenseClaw gateway token,
+	// and the API server and proxy never accept it (R-TOK).
+	openClawToken atomic.Pointer[string]
 
 	// tokenRetryEvery and tokenWatch override tokenNotPersistedRetry and
 	// tokenWatchInterval; tests set them, zero means the default.
@@ -99,14 +106,26 @@ type Client struct {
 	tokenWatch      time.Duration
 }
 
-// RefreshedToken returns the gateway token re-read from openclaw.json at
-// runtime, or "" when none was adopted since boot.
-func (c *Client) RefreshedToken() string {
-	if c == nil {
-		return ""
+// wsToken is the credential this client presents on the OpenClaw WebSocket:
+// the one auth repair adopted, else the saved OPENCLAW_GATEWAY_TOKEN
+// (cfg.OpenClawToken), else openclaw.json gateway.auth.token. It is never
+// cfg.Token, the DefenseClaw gateway token (R-TOK): before 1.0.10 the two
+// were one value, so everything that could read openclaw.json held the
+// token that allows blocked tools and stops the gateway.
+func (c *Client) wsToken() string {
+	// The DefenseClaw master token never goes to OpenClaw (R-TOK).
+	notMaster := func(t string) bool {
+		master := strings.TrimSpace(c.cfg.Token)
+		return t != "" && (master == "" || !constantTimeStringMatch(t, master))
 	}
-	if p := c.refreshedToken.Load(); p != nil {
+	if p := c.openClawToken.Load(); p != nil && notMaster(*p) {
 		return *p
+	}
+	if t := strings.TrimSpace(c.cfg.OpenClawToken); notMaster(t) {
+		return t
+	}
+	if t, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath()); ok && notMaster(t) {
+		return t
 	}
 	return ""
 }
@@ -143,6 +162,10 @@ func NewClient(cfg *config.GatewayConfig, dataDirs ...string) (*Client, error) {
 	// fingerprint, on the same canonical path used for identity custody.
 	cfg.DeviceKeyFile = target
 
+	if dataDir != "" {
+		d := dataDir
+		openClawDataDir.Store(&d)
+	}
 	return &Client{
 		cfg:     cfg,
 		device:  device,
@@ -237,9 +260,24 @@ func (c *Client) Connect(ctx context.Context) error {
 // listener is not this account's (GAP-0594).
 var errOpenClawListenerUnverified = errors.New("the OpenClaw gateway listener does not belong to this account")
 
+// ErrOpenClawRemediationUnavailable is returned for an OpenClaw RPC that
+// needs operator.admin (skills.update, config.patch) when DefenseClaw runs
+// without it: connectors.openclaw.operator_admin false, or OpenClaw refused
+// the scope. The block stays recorded and enforced at DefenseClaw admission
+// and inspect; only the OpenClaw-side disable is not sent.
+var ErrOpenClawRemediationUnavailable = errors.New("openclaw_remediation_unavailable (scope operator.admin)")
+
+// openClawRemediationUnavailableAction marks the alert and audit row of a
+// block OpenClaw was not told about.
+const openClawRemediationUnavailableAction = "openclaw_remediation_unavailable"
+
+// openClawAdminMethods are the OpenClaw RPCs that need operator.admin.
+var openClawAdminMethods = map[string]bool{"skills.update": true, "config.patch": true}
+
 // verifyOpenClawListener checks the account of the accepted server socket:
 // on Linux this account or root, on macOS this account only (the socket
-// owner is read from this account's processes). Replaceable in tests.
+// owner is read from this account's processes), on Windows this account or
+// LocalSystem (the kernel TCP table names the owner). Replaceable in tests.
 var verifyOpenClawListener = hookexec.VerifyLocalPeer
 
 // dialOpenClawListener opens the TCP connection of the OpenClaw WebSocket.
@@ -247,8 +285,9 @@ var verifyOpenClawListener = hookexec.VerifyLocalPeer
 // to this account, before DefenseClaw writes any byte to it, so a process
 // of another account that holds the port while OpenClaw restarts never gets
 // the WebSocket upgrade, the gateway token or the device signature
-// (GAP-0594). A listener on another host is protected by TLS, not by this
-// check. Windows does not run the OpenClaw connector.
+// (GAP-0594). On Windows (native OpenClaw) the listener must belong to this
+// account or LocalSystem. A listener on another host is protected by TLS,
+// not by this check.
 func dialOpenClawListener(ctx context.Context, network, addr string) (net.Conn, error) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(ctx, network, addr)
@@ -259,16 +298,61 @@ func dialOpenClawListener(ctx context.Context, network, addr string) (net.Conn, 
 		return conn, nil
 	}
 	if err := verifyOpenClawListener(conn); err != nil {
+		if acceptOpenClawPluginAccountListener(conn) {
+			return conn, nil
+		}
 		_ = conn.Close()
 		return nil, fmt.Errorf("%w (%s): %v", errOpenClawListenerUnverified, addr, err)
 	}
 	return conn, nil
 }
 
+// openClawListenerAccount is connectors.openclaw.plugin_account: in the
+// separate-user layout the OpenClaw gateway listens as that account, not as
+// this one. The sidecar sets it from config.yaml.
+var openClawListenerAccount atomic.Pointer[string]
+
+func setOpenClawListenerAccount(account string) {
+	account = strings.TrimSpace(account)
+	openClawListenerAccount.Store(&account)
+}
+
+// acceptOpenClawPluginAccountListener accepts, in the separate-user layout,
+// a listener owned by the OpenClaw account (connectors.openclaw.plugin_account).
+// On Linux the kernel connection table names the owner of the accepted
+// socket; on macOS the TCP pcb list does (peercred), without privileges. Any
+// other owner, or an owner that cannot be read, is refused (OC review 3 P2-1:
+// an unverified macOS accept handed the OpenClaw credential to whoever held
+// the port while OpenClaw restarted).
+func acceptOpenClawPluginAccountListener(conn net.Conn) bool {
+	p := openClawListenerAccount.Load()
+	if p == nil || *p == "" {
+		return false
+	}
+	u, err := user.Lookup(*p)
+	if err != nil {
+		return false
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil || uid <= 0 {
+		return false
+	}
+	if runtime.GOOS == "darwin" {
+		local, lok := conn.LocalAddr().(*net.TCPAddr)
+		remote, rok := conn.RemoteAddr().(*net.TCPAddr)
+		if !lok || !rok {
+			return false
+		}
+		owner, err := peercred.LoopbackTCPPeerUID(local, remote)
+		return err == nil && owner == uid
+	}
+	return hookexec.VerifyLocalPeerOwnedBy(conn, uid) == nil
+}
+
 // openClawListenerOwnerChecked reports whether conn's listener account is
-// checked: a loopback connection on Linux or macOS.
+// checked: a loopback connection on Linux, macOS or Windows.
 func openClawListenerOwnerChecked(conn net.Conn) bool {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "windows" {
 		return false
 	}
 	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
@@ -399,13 +483,17 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 	clientMode := "backend"
 	role := "operator"
 	scopes := []string{"operator.read", "operator.write", "operator.admin", "operator.approvals"}
+	if !c.RequestsOperatorAdmin() {
+		scopes = []string{"operator.read", "operator.write", "operator.approvals"}
+	}
+	token := c.wsToken()
 
 	deviceParams := ConnectDeviceParams{
 		ClientID:   clientID,
 		ClientMode: clientMode,
 		Role:       role,
 		Scopes:     scopes,
-		Token:      c.cfg.Token,
+		Token:      token,
 		Nonce:      nonce,
 		Platform:   runtime.GOOS,
 	}
@@ -423,7 +511,7 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 		"scopes": scopes,
 		"caps":   []string{"tool-events"},
 		"auth": map[string]interface{}{
-			"token": c.cfg.Token,
+			"token": token,
 		},
 		"device":    c.device.ConnectDevice(deviceParams),
 		"userAgent": "defenseclaw/1.0.0",
@@ -432,7 +520,7 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 
 	if c.debug {
 		if debugData, err := json.MarshalIndent(params, "  ", "  "); err == nil {
-			redacted := redactToken(string(debugData), c.cfg.Token)
+			redacted := redactToken(string(debugData), token)
 			fmt.Fprintf(os.Stderr, "[gateway] connect params:\n  %s\n", redacted)
 		}
 	}
@@ -554,6 +642,9 @@ func (c *Client) readLoop(conn *websocket.Conn, readDone chan struct{}) {
 
 // Request sends an RPC request and waits for the response.
 func (c *Client) Request(ctx context.Context, method string, params interface{}) (json.RawMessage, error) {
+	if openClawAdminMethods[method] && !c.RequestsOperatorAdmin() {
+		return nil, fmt.Errorf("gateway: %s: %w", method, ErrOpenClawRemediationUnavailable)
+	}
 	resp, err := c.request(ctx, method, params)
 	if err != nil {
 		return nil, err
@@ -564,6 +655,10 @@ func (c *Client) Request(ctx context.Context, method string, params interface{})
 		if resp.Error != nil {
 			msg = resp.Error.Message
 			code = resp.Error.Code
+		}
+		if openClawAdminMethods[method] && strings.Contains(strings.ToLower(msg), "operator.admin") {
+			// A pairing approved without the admin scope: same degrade.
+			return nil, fmt.Errorf("gateway: %s: %s (%s): %w", method, msg, code, ErrOpenClawRemediationUnavailable)
 		}
 		return nil, fmt.Errorf("gateway: %s: %s (%s)", method, msg, code)
 	}
@@ -722,11 +817,16 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
-		tokenBefore := c.cfg.Token
+		tokenBefore := c.wsToken()
+		if c.shouldRefreshToken(err) && c.openClawToken.Load() == nil {
+			// Pin the rejected token, which may have come from openclaw.json,
+			// so a rotation of openclaw.json reads as a change below.
+			c.openClawToken.Store(&tokenBefore)
+		}
 		hint := c.handleConnectRejection(err)
 		wait := backoff
 		var wake func() bool
-		restart := c.cfg.Token != tokenBefore
+		restart := c.wsToken() != tokenBefore
 		switch {
 		case restart:
 			wait = base
@@ -835,7 +935,7 @@ func (c *Client) persistedTokenChanged() bool {
 		return false
 	}
 	token, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath())
-	return ok && token != c.cfg.Token
+	return ok && token != c.wsToken()
 }
 
 // adoptPersistedToken makes the gateway token persisted in openclaw.json the
@@ -846,34 +946,30 @@ func (c *Client) adoptPersistedToken() {
 		return
 	}
 	token, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath())
-	if !ok || token == c.cfg.Token {
+	if !ok || token == c.wsToken() {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] openclaw.json now holds a gateway token; trying it\n")
 	c.adoptOpenClawToken(token)
 }
 
-// adoptOpenClawToken makes token, read from openclaw.json, the gateway token
-// of this client, the API server and the on-disk token sources.
+// adoptOpenClawToken makes token, read from openclaw.json, the OpenClaw
+// WebSocket credential of this client and saves it as OPENCLAW_GATEWAY_TOKEN
+// in the data directory .env, so the next boot sends it first. It changes
+// nothing else: the DefenseClaw gateway token (cfg.Token, .env
+// DEFENSECLAW_GATEWAY_TOKEN, hooks/.token) is never an OpenClaw token
+// (R-TOK). Persistence is best effort; the in-memory adoption already took
+// effect.
 func (c *Client) adoptOpenClawToken(token string) {
-	c.cfg.Token = token
-	c.refreshedToken.Store(&token)
-
-	// Persist the refreshed token to disk so hook scripts and
-	// operator shells see the same value. Without this, the in-
-	// memory refresh only helps the sidecar itself — downstream
-	// consumers (hooks/.token, .env) stay stale and every
-	// hook-driven request 401s until the next full sidecar
-	// restart re-reads openclaw.json on boot.
-	//
-	// Keep refreshed credentials in the configured data directory even
-	// when device_key_file is nested beneath it. Errors are logged but
-	// not returned — persistence is best-effort, the primary in-memory
-	// refresh already succeeded.
-	if c.dataDir != "" {
-		if err := persistRefreshedToken(c.dataDir, token); err != nil {
-			fmt.Fprintf(os.Stderr, "[gateway] WARNING: failed to persist refreshed token to disk: %v — hook scripts may 401 until next restart\n", err)
-		}
+	c.openClawToken.Store(&token)
+	if c.dataDir == "" {
+		return
+	}
+	firstBootMu.Lock()
+	err := appendEnvLine(filepath.Join(c.dataDir, ".env"), config.OpenClawGatewayTokenEnv, token)
+	firstBootMu.Unlock()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] WARNING: failed to save the OpenClaw gateway token as OPENCLAW_GATEWAY_TOKEN: %v; the next restart re-reads openclaw.json\n", err)
 	}
 }
 
@@ -890,23 +986,20 @@ func (c *Client) adoptOpenClawToken(token string) {
 //
 // A rotated shared gateway.auth.token is re-read from openclaw.json. The
 // read changes no OpenClaw state; the token is written only to
-// DefenseClaw's own .env and hooks/.token.
+// DefenseClaw own .env, as OPENCLAW_GATEWAY_TOKEN.
 // ---------------------------------------------------------------------------
 
 // openClawGiveTokenStep is the one way to give the background gateway a
 // token it cannot read from openclaw.json. A variable exported in the shell
 // that starts the gateway does not reach the daemon, so it is not offered.
 //
-// Token precedence, highest first: a token the operator saved with
-// defenseclaw keys set (the process environment and ~/.defenseclaw/.env),
-// the gateway.auth.token in openclaw.json, and the copy the gateway adopted
-// from openclaw.json earlier. An adopted copy is rewritten whenever
-// openclaw.json holds a different token, and keys set replaces it under
-// both variable names, so a stale copy never shadows a newer saved token. A
-// token saved by editing one spelling in .env also wins over the adopted copy
-// under the other: adoption records the copy it wrote in a marker comment, and
-// every .env reader leaves a marked copy out when the other spelling differs
-// (envvars.ShadowedAdoptedGatewayTokens).
+// The OpenClaw WebSocket credential, highest first: the token auth repair
+// adopted since boot, OPENCLAW_GATEWAY_TOKEN saved with defenseclaw keys set
+// (the process environment and ~/.defenseclaw/.env), then gateway.auth.token
+// in openclaw.json. When OpenClaw rejects it, the client re-reads
+// openclaw.json and saves a different token as OPENCLAW_GATEWAY_TOKEN. It is
+// never the DefenseClaw gateway token (DEFENSECLAW_GATEWAY_TOKEN), which
+// keys set OPENCLAW_GATEWAY_TOKEN does not change.
 const openClawGiveTokenStep = "defenseclaw keys set OPENCLAW_GATEWAY_TOKEN and restart the gateway with " +
 	"defenseclaw-gateway restart (a variable exported in your shell does not reach the background gateway)"
 
@@ -955,6 +1048,19 @@ func openClawPairingApprovalHint(deviceID string) string {
 		"DefenseClaw keeps retrying and connects once it is approved"
 }
 
+// SetOperatorAdmin is connectors.openclaw.operator_admin. It takes effect on
+// the next connect.
+func (c *Client) SetOperatorAdmin(on bool) { c.noOperatorAdmin.Store(!on) }
+
+// RequestsOperatorAdmin reports whether connect asks OpenClaw for
+// operator.admin (the default).
+func (c *Client) RequestsOperatorAdmin() bool { return !c.noOperatorAdmin.Load() }
+
+// openClawNoAdminOptOut is appended to the pairing hint of a scope upgrade
+// while DefenseClaw asks for operator.admin.
+const openClawNoAdminOptOut = ". Or, to run without OpenClaw-side remediation (no operator.admin), set " +
+	"connectors.openclaw.operator_admin: false and restart the gateway"
+
 // handleConnectRejection reacts to a failed connect attempt. It returns the
 // operator step for an OpenClaw pairing or token rejection, or "" for any
 // other failure. It never writes OpenClaw state.
@@ -967,6 +1073,9 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 		return hint
 	case openClawPairingApprovalNeeded(connectErr):
 		hint = openClawPairingApprovalHint(c.device.DeviceID)
+		if c.RequestsOperatorAdmin() && strings.Contains(strings.ToLower(connectErr.Error()), "more scopes than") {
+			hint += openClawNoAdminOptOut
+		}
 		fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
 	case isAuthError(connectErr):
 		hint = openClawTokenRejectedHint
@@ -993,7 +1102,7 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 		switch env := openClawEnvGatewayToken(); {
 		case env == "":
 			hint = openClawTokenNotPersistedHint
-		case env != c.cfg.Token:
+		case env != c.wsToken():
 			newToken, ok, fromEnv = env, true, true
 		default:
 			hint = openClawTokenEnvRejectedHint
@@ -1002,123 +1111,17 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 			fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
 		}
 	}
-	if fromEnv && newToken != c.cfg.Token {
-		// Only this connection tries it. It is not DefenseClaw's own token,
-		// so it is not written to .env or the hook token file.
+	current := c.wsToken()
+	if fromEnv && newToken != current {
+		// Only this connection tries it; it came from the environment, so
+		// nothing is saved.
 		fmt.Fprintf(os.Stderr, "[gateway] openclaw.json has no gateway.auth.token; trying OPENCLAW_GATEWAY_TOKEN\n")
-		c.cfg.Token = newToken
-	} else if ok && newToken != c.cfg.Token {
-		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
+		c.openClawToken.Store(&newToken)
+	} else if ok && newToken != current {
+		fmt.Fprintf(os.Stderr, "[gateway] OpenClaw gateway token refreshed from openclaw.json\n")
 		c.adoptOpenClawToken(newToken)
 	}
 	return hint
-}
-
-// persistRefreshedToken writes newToken into the on-disk token sources
-// that downstream consumers read:
-//
-//   - <dataDir>/.env              — sourced by operator shells and
-//     loaded into the sidecar process env at boot
-//   - <dataDir>/hooks/.token      — sourced by claude-code-hook.sh and
-//     codex-hook.sh before every call to the API server
-//
-// The .env file is modified in place, preserving unrelated entries.
-// Both OPENCLAW_GATEWAY_TOKEN (legacy env var) and
-// DEFENSECLAW_GATEWAY_TOKEN (current canonical name) are updated so
-// either naming convention works.
-//
-// hooks/.token is skipped when the hooks directory is missing (e.g.
-// connector not yet set up); that's not an error.
-//
-// T5.8 symmetry note: both writes below go through
-// managed.WriteServiceRuntimeFile with the same PinnedDeploymentMode +
-// (implicit) WindowsServiceAccountEnv lookup, so a transient unset of
-// either env produces the same failure at both call sites — surfaced
-// as the clear "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT is not set" error
-// from T3.5 rather than a divergent pair of "untrusted-owner" vs
-// "not-owned-by-caller" wrapper errors. When one call fails the other
-// is skipped, so the file pair cannot end up with a mixed old/new
-// token from a partial rotation.
-func persistRefreshedToken(dataDir, newToken string) error {
-	if err := updateEnvFileToken(filepath.Join(dataDir, ".env"), newToken); err != nil {
-		return fmt.Errorf("update .env: %w", err)
-	}
-
-	hookTokenPath := filepath.Join(dataDir, "hooks", ".token")
-	if _, err := os.Stat(filepath.Dir(hookTokenPath)); err == nil {
-		content := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", newToken)
-		if err := managed.WriteServiceRuntimeFile(
-			managed.PinnedDeploymentMode(), hookTokenPath, "gateway hook token", []byte(content),
-		); err != nil {
-			return fmt.Errorf("write hooks/.token: %w", err)
-		}
-	}
-	return nil
-}
-
-// updateEnvFileToken rewrites OPENCLAW_GATEWAY_TOKEN and
-// DEFENSECLAW_GATEWAY_TOKEN lines in a .env-style file. Missing keys
-// are appended. The file is created if it doesn't exist. Other lines
-// (LLM keys, comments, etc.) are preserved verbatim, except the adopted-token
-// marker: newToken is an adopted copy, so the marker is replaced with one that
-// records it. A later edit of one spelling then shows which value the operator
-// saved, and every .env reader prefers it (envvars.ShadowedAdoptedGatewayTokens).
-func updateEnvFileToken(path, newToken string) error {
-	var lines []string
-	var existing []byte
-	if data, err := os.ReadFile(path); err == nil {
-		existing = data
-		for _, line := range envvars.DotEnvLines(data) {
-			if !envvars.IsAdoptedGatewayTokenMarker(line) {
-				lines = append(lines, line)
-			}
-		}
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-
-	keys := map[string]bool{
-		"OPENCLAW_GATEWAY_TOKEN":    false,
-		"DEFENSECLAW_GATEWAY_TOKEN": false,
-	}
-
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		for k := range keys {
-			if strings.HasPrefix(trimmed, k+"=") {
-				lines[i] = k + "=" + newToken
-				keys[k] = true
-				break
-			}
-		}
-	}
-
-	for k, seen := range keys {
-		if !seen {
-			lines = append(lines, k+"="+newToken)
-		}
-	}
-
-	// Trim trailing blank lines, then let the one .env serializer end every
-	// line with the single line ending it picks for the file.
-	for len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	lines = append(lines, envvars.AdoptedGatewayTokenMarker(newToken))
-	out := string(envvars.SerializeDotEnv(existing, lines))
-	// The whole new file is checked before anything is published: a file over the
-	// size every reader accepts would lose the token, so it is refused and the
-	// current file stays as it is.
-	if err := checkDotEnvSize(path, len(out)); err != nil {
-		return err
-	}
-
-	return managed.WriteServiceRuntimeFile(
-		managed.PinnedDeploymentMode(), path, "gateway dotenv", []byte(out),
-	)
 }
 
 // shouldRefreshToken reports whether the gateway token is re-read from
@@ -1214,10 +1217,19 @@ var errOpenClawTokenNotPersisted = errors.New("openclaw.json has no gateway.auth
 // ClawHome. Before 1.0.10 the client always read ~/.openclaw and ignored
 // claw.home_dir.
 func (c *Client) openClawConfigPath() string {
-	if path := strings.TrimSpace(c.cfg.OpenClawConfigPath); path != "" {
+	return openClawConfigPathOf(c.cfg)
+}
+
+// openClawConfigPathOf is the openclaw.json of g, or "" when g names neither
+// a config file nor a home directory.
+func openClawConfigPathOf(g *config.GatewayConfig) string {
+	if path := strings.TrimSpace(g.OpenClawConfigPath); path != "" {
 		return path
 	}
-	return filepath.Join(c.cfg.ClawHome, ".openclaw", "openclaw.json")
+	if strings.TrimSpace(g.ClawHome) == "" {
+		return ""
+	}
+	return filepath.Join(g.ClawHome, ".openclaw", "openclaw.json")
 }
 
 // readOpenClawGatewayToken reads <home>/.openclaw/openclaw.json.
@@ -1262,7 +1274,13 @@ func readOpenClawGatewayTokenAt(path string) (string, bool, error) {
 		Source string `json:"source"`
 		ID     string `json:"id"`
 	}
-	if json.Unmarshal(raw, &ref) == nil && ref.Source == "env" && openClawEnvNameRE.MatchString(ref.ID) {
+	// The gateway sends what this resolves to the OpenClaw gateway, so a
+	// reference may name only a variable that is not a DefenseClaw credential
+	// (R-TOK; OC review 3 P1-1: openclaw.json could name ANTHROPIC_API_KEY or
+	// the DefenseClaw token and receive it). In the separate-user layout
+	// another account owns openclaw.json and OpenClaw reads the variable from
+	// its own environment, so no reference is resolved here at all.
+	if json.Unmarshal(raw, &ref) == nil && ref.Source == "env" && openClawEnvRefAllowed(ref.ID) {
 		if value := os.Getenv(ref.ID); value != "" {
 			return value, true, nil
 		}
@@ -1283,6 +1301,45 @@ func openClawEnvGatewayToken() string {
 
 var openClawEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+// openClawSecretNameRE matches variable names that hold a credential
+// DefenseClaw or its connectors use (mirrors the Python setup refusal,
+// _names_defenseclaw_credential).
+var openClawSecretNameRE = regexp.MustCompile(`(?i)^DEFENSECLAW_|API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|SESSION_TOKEN|BEARER`)
+
+// openClawDataDir is the DefenseClaw data folder of the running client: a
+// name its .env defines (the gateway loads that file into its environment)
+// is a DefenseClaw credential and is never resolved for OpenClaw.
+var openClawDataDir atomic.Pointer[string]
+
+// openClawEnvRefAllowed reports whether an openclaw.json SecretRef may be
+// resolved from this process environment: the OpenClaw variable itself, or
+// a plain name that is no credential DefenseClaw holds, and never in the
+// separate-user layout.
+func openClawEnvRefAllowed(name string) bool {
+	if p := openClawListenerAccount.Load(); p != nil && *p != "" {
+		return false
+	}
+	if !openClawEnvNameRE.MatchString(name) {
+		return false
+	}
+	if gatewayTokenEnvNameEqual(name, "OPENCLAW_GATEWAY_TOKEN") {
+		return true
+	}
+	if openClawSecretNameRE.MatchString(name) {
+		return false
+	}
+	if d := openClawDataDir.Load(); d != nil && *d != "" {
+		if values, err := loadDotEnv(filepath.Join(*d, ".env")); err == nil {
+			for key := range values {
+				if gatewayTokenEnvNameEqual(key, name) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
 func truncateBytes(b []byte, maxLen int) string {
 	s := string(b)
 	if len(s) <= maxLen {
@@ -1297,4 +1354,13 @@ func redactToken(s, token string) string {
 	}
 	redacted := token[:4] + "..." + token[len(token)-4:]
 	return strings.ReplaceAll(s, token, redacted)
+}
+
+// gatewayTokenEnvNameEqual compares environment names as the platform does
+// (case-insensitive on Windows).
+func gatewayTokenEnvNameEqual(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }

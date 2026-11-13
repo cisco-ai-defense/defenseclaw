@@ -766,7 +766,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := ensureWindowsManagedOpenCodePort(target.conn.Name(), target.home, target.sid.String(), opts.OpenCodeServicePort, opts.OpenCodeServicePortRequired); err != nil {
 				return err
 			}
-			target.conn.SetCredentials(target.setup.APIToken, opts.MasterKey)
+			target.conn.SetCredentials(target.setup.APIToken)
 			if err := target.conn.Setup(ctx, target.setup); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed under target SID %s: %w", target.conn.Name(), target.sid, err)
 			}

@@ -21,8 +21,10 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // openClawPluginScope is the connector scope of the OpenClaw plugin
@@ -34,7 +36,8 @@ const openClawPluginScope = "openclaw"
 // openClawPluginRoutes are the management routes, besides /api/v1/inspect/*
 // (X-DefenseClaw-Connector: openclaw) and the listener proofs, that the
 // OpenClaw plugin credential authenticates: exactly the calls the plugin
-// makes. Before 1.0.10 the plugin held the master gateway token, which can
+// makes, and the skill scan of its install-policy command (defenseclaw-gateway
+// connector openclaw install-policy). Before 1.0.10 the plugin held the master gateway token, which can
 // also loosen policy and stop the gateway. The table is closed: an unlisted
 // route or method takes only the master gateway token, so a leaked plugin
 // credential can read the block and allow lists, write audit and scan rows
@@ -48,6 +51,7 @@ var openClawPluginRoutes = map[string]string{
 	"/policy/evaluate":  http.MethodPost,
 	"/scan/result":      http.MethodPost,
 	"/v1/plugin/scan":   http.MethodPost,
+	"/v1/skill/scan":    http.MethodPost,
 	"/api/v1/scan/code": http.MethodPost,
 	openClawRuntimePath: http.MethodGet,
 }
@@ -62,6 +66,21 @@ const openClawRuntimePath = "/api/v1/openclaw/runtime"
 func openClawPluginRoute(method, path string) bool {
 	want, ok := openClawPluginRoutes[path]
 	return ok && strings.EqualFold(method, want)
+}
+
+// openClawInspectBudget is how long the plugin waits for a verdict: the hook
+// judge budget plus 2 s for the rule and AI Defense phases, or the approval
+// timeout plus 5 s when human approval is on. Before 1.0.10 the plugin waited
+// 2 s without approval, so a judge verdict arrived after the plugin had
+// already applied its outage mode.
+func openClawInspectBudget(cfg *config.Config, hilt bool, approvalTimeoutS int) time.Duration {
+	budget := hookJudgeTimeout(cfg) + 2*time.Second
+	if hilt {
+		if approval := time.Duration(approvalTimeoutS+5) * time.Second; approval > budget {
+			budget = approval
+		}
+	}
+	return budget
 }
 
 // handleOpenClawRuntime returns the guardrail settings of the openclaw
@@ -85,10 +104,16 @@ func (a *APIServer) handleOpenClawRuntime(w http.ResponseWriter, r *http.Request
 	if timeout <= 0 {
 		timeout = 30
 	}
+	hilt := cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled
+	if authenticatedInspectConnector(r.Context()) == openClawPluginScope {
+		a.health.RecordOpenClawPluginSeen(r.URL.Query().Get("hook_mode"))
+	}
 	a.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"mode":               mode,
-		"hilt_enabled":       cfg.EffectiveHILTForConnector(openClawPluginScope).Enabled,
+		"hilt_enabled":       hilt,
 		"approval_timeout_s": timeout,
+		"inspect_timeout_ms": openClawInspectBudget(cfg, hilt, timeout).Milliseconds(),
+		"prompt_gate":        cfg.Connectors.OpenClaw.Hooks.PromptGate,
 	})
 }
 
@@ -107,6 +132,11 @@ func (a *APIServer) refuseOpenClawPluginPath(w http.ResponseWriter, r *http.Requ
 		return false
 	}
 	if openClawPathUnderAny(target, openClawPluginRoots(cfg)) {
+		return false
+	}
+	// OpenClaw stages a skill or plugin install under the temporary folder
+	// of its account; a staged folder that account owns may be scanned.
+	if openClawStagedByAccount(target, strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)) {
 		return false
 	}
 	a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "path is outside the OpenClaw account"})
@@ -156,4 +186,46 @@ func (a *APIServer) openClawConnectorRegistered() bool {
 	}
 	_, ok := a.connectorRegistry.Get(openClawPluginScope)
 	return ok
+}
+
+// openClawPluginProofToken is the openclaw connector-scoped credential the
+// plugin proves the listener with (hooks/.hook-openclaw.token), or "" when
+// there is none or its teardown revoked it.
+func (a *APIServer) openClawPluginProofToken() string {
+	dataDir := a.configDataDir()
+	if dataDir == "" || connector.HookAPITokenRevoked(dataDir, openClawPluginScope) {
+		return ""
+	}
+	token, err := connector.LoadHookAPIToken(dataDir, openClawPluginScope)
+	if err != nil {
+		return ""
+	}
+	return token
+}
+
+// openClawPluginAccount is connectors.openclaw.plugin_account, or "".
+func (a *APIServer) openClawPluginAccount() string {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+}
+
+// withOpenClawSetupOpts fills the OpenClaw layout of config.yaml into opts,
+// so a teardown of a removed openclaw connector acts on the same files as
+// its setup (rel-1-0-10 GAP-0083: the separate-user credential stayed).
+func withOpenClawSetupOpts(opts connector.SetupOpts, cfg *config.Config) connector.SetupOpts {
+	if cfg == nil {
+		return opts
+	}
+	opts.OpenClawHome = cfg.OpenClawHome()
+	opts.OpenClawConfigPath = cfg.OpenClawConfigPath()
+	opts.OpenClawPluginDir = cfg.OpenClawExternalPluginDir()
+	opts.OpenClawPluginAccount = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginAccount)
+	opts.OpenClawPluginTokenFile = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenFile)
+	opts.OpenClawPluginTokenGroup = strings.TrimSpace(cfg.Connectors.OpenClaw.PluginTokenGroup)
+	opts.OpenClawHooksMode = cfg.OpenClawHooksMode()
+	opts.OpenClawPromptGate = cfg.Connectors.OpenClaw.Hooks.PromptGate
+	return opts
 }

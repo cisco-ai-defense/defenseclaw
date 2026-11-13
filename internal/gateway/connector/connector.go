@@ -98,9 +98,23 @@ type SetupOpts struct {
 	// (connectors.openclaw.plugin_account, plugin_token_file,
 	// plugin_token_group): OpenClaw runs as another account, owns
 	// openclaw.json, and reads the plugin credential from the token file.
-	OpenClawPluginAccount    string
+	OpenClawPluginAccount string
+	// OpenClawHooksMode is connectors.openclaw.hooks.mode (auto or proxy);
+	// Setup resolves it with the OpenClaw version (ResolveOpenClawHookMode).
+	OpenClawHooksMode string
+	// OpenClawPromptGate is connectors.openclaw.hooks.prompt_gate.
+	OpenClawPromptGate       bool
 	OpenClawPluginTokenFile  string
 	OpenClawPluginTokenGroup string
+	// OpenClawInstallPolicy is connectors.openclaw.install_policy resolved
+	// (config.OpenClawInstallPolicyOn): setup registers DefenseClaw as
+	// OpenClaw security.installPolicy. OpenClawInstallPolicyTimeoutMs is the
+	// exec timeout it writes and OpenClawInstallPolicyFailsClosed the answer
+	// on a gateway outage, which the separate-user block carries because the
+	// OpenClaw account cannot read config.yaml there.
+	OpenClawInstallPolicy            bool
+	OpenClawInstallPolicyTimeoutMs   int
+	OpenClawInstallPolicyFailsClosed bool
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
@@ -348,11 +362,11 @@ type Connector interface {
 	Authenticate(r *http.Request) bool
 	Route(r *http.Request, body []byte) (*ConnectorSignals, error)
 
-	// SetCredentials injects the gateway token and master key at sidecar
+	// SetCredentials injects the gateway token at sidecar
 	// boot. Every connector must implement this so that a missing
 	// implementation causes a compile-time error rather than a silent
 	// runtime auth bypass via the old type-assertion path.
-	SetCredentials(gatewayToken, masterKey string)
+	SetCredentials(gatewayToken string)
 
 	// VerifyClean checks that the connector's teardown left no stale
 	// artifacts (hooks, env files, config patches, shims). Returns nil
@@ -563,11 +577,11 @@ const (
 
 // LLMTrafficModeForConnector returns the traffic mode for a connector
 // name: "proxy" for the proxy/chat connectors (OpenClaw, ZeptoClaw)
-// that interpose on the LLM data path, "hooks-only" for every hook
-// connector. This is the authoritative classifier the API and CLI use
+// that interpose on the LLM data path on this host, "hooks-only" for every
+// hook connector and for OpenClaw in native mode (Windows). This is the authoritative classifier the API and CLI use
 // to describe custom-provider enforcement per connector.
 func LLMTrafficModeForConnector(name string) string {
-	if IsProxyConnector(normalizeConnectorName(name)) {
+	if UsesGuardrailProxy(normalizeConnectorName(name)) {
 		return LLMTrafficModeProxy
 	}
 	return LLMTrafficModeHooksOnly

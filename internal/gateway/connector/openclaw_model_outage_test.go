@@ -30,7 +30,7 @@ func TestOpenClawModelOutagePromptHookGrantFollowsHostVersion(t *testing.T) {
 			}
 			root := t.TempDir()
 			configPath := filepath.Join(root, "openclaw.json")
-			if err := patchOpenClawConfig(configPath, filepath.Join(root, "extensions", "defenseclaw"), false, false, allowed); err != nil {
+			if err := patchOpenClawConfig(configPath, filepath.Join(root, "extensions", "defenseclaw"), false, false, allowed, openClawPluginKeys{}); err != nil {
 				t.Fatal(err)
 			}
 			content, err := os.ReadFile(configPath)
@@ -86,7 +86,7 @@ func TestOpenClawConversationHookGrantKeepsOperatorHooks(t *testing.T) {
 				},
 			})
 			for i := 0; i < 2; i++ {
-				if err := patchOpenClawConfig(configPath, filepath.Join(root, "extensions", "defenseclaw"), false, false, true); err != nil {
+				if err := patchOpenClawConfig(configPath, filepath.Join(root, "extensions", "defenseclaw"), false, false, true, openClawPluginKeys{}); err != nil {
 					t.Fatal(err)
 				}
 			}

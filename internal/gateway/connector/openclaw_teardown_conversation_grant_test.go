@@ -31,7 +31,7 @@ func openClawGrantFixture(t *testing.T, before string) (configPath string, opts 
 	if err := captureManagedFileBackup(dataDir, "openclaw", "openclaw.json", configPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := patchOpenClawConfig(configPath, filepath.Join(ocHome, "extensions", "defenseclaw"), false, false, true); err != nil {
+	if err := patchOpenClawConfig(configPath, filepath.Join(ocHome, "extensions", "defenseclaw"), false, false, true, openClawPluginKeys{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := updateManagedFileBackupPostHash(dataDir, "openclaw", "openclaw.json", configPath); err != nil {
@@ -212,7 +212,7 @@ func TestOpenClawRepeatedSetupOverASavedFileKeepsTheGrantOwnership(t *testing.T)
 				if exactRestore {
 					t.Fatal("a saved file must not be offered the exact restore")
 				}
-				if err := patchOpenClawConfig(configPath, extDir, false, false, true); err != nil {
+				if err := patchOpenClawConfig(configPath, extDir, false, false, true, openClawPluginKeys{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -246,7 +246,7 @@ func TestOpenClawRepeatedSetupOverASavedFileKeepsAnOperatorGrant(t *testing.T) {
 	if _, err := openClawSnapshotUsable(opts.DataDir, "openclaw", configPath); err != nil {
 		t.Fatal(err)
 	}
-	if err := patchOpenClawConfig(configPath, extDir, false, false, true); err != nil {
+	if err := patchOpenClawConfig(configPath, extDir, false, false, true, openClawPluginKeys{}); err != nil {
 		t.Fatal(err)
 	}
 	previous := openClawTeardownNoticeOutput

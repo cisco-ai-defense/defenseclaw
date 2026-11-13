@@ -52,6 +52,7 @@ enum ScannerProbe {
         binDirs.contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(name)") }
     }
 
+    /// The OpenClaw WebSocket credential. It is never the DefenseClaw API token.
     private static let openClawGatewayToken = "OPENCLAW_GATEWAY_TOKEN"
 
     /// Mirrors DefenseClaw credentials._openclaw_gateway_token: the upstream

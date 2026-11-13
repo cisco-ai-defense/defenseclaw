@@ -29,9 +29,10 @@ import (
 )
 
 // openClawTokenDirOwnerOK is the owner rule for the folder of the plugin
-// token file: root or this account, never the plugin account, so the plugin
-// account cannot swap the file or the folder. Tests replace it.
-var openClawTokenDirOwnerOK = func(uid uint32) bool { return uid == 0 || int(uid) == os.Geteuid() }
+// token file: this account, which writes the file there (a root-owned
+// folder cannot take it, rel-1-0-10 GAP-0077), never the plugin account, so
+// the plugin account cannot swap the file or the folder. Tests replace it.
+var openClawTokenDirOwnerOK = func(uid uint32) bool { return int(uid) == os.Geteuid() }
 
 // openClawBroadGroups are groups every standard account of a host is in;
 // a plugin credential readable by one of them is readable by everyone.
@@ -101,7 +102,7 @@ func publishOpenClawPluginToken(path, group, account, token string) error {
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !openClawTokenDirOwnerOK(st.Uid) {
-		return fmt.Errorf("folder %s must belong to root or this account", dir)
+		return fmt.Errorf("folder %s must belong to the DefenseClaw account (mode 0755 or 0750), which writes the credential there", dir)
 	}
 	g, err := user.LookupGroup(group)
 	if err != nil {
@@ -109,6 +110,10 @@ func publishOpenClawPluginToken(path, group, account, token string) error {
 	}
 	if account != "" && !openClawGroupHasMember(g, account) {
 		return fmt.Errorf("plugin_account %s is not in plugin_token_group %s", account, group)
+	}
+	// Giving the file to the group needs this account in it too (GAP-0080).
+	if me, err := user.Current(); err == nil && os.Geteuid() != 0 && !openClawGroupHasMember(g, me.Username) {
+		return fmt.Errorf("the DefenseClaw account %s is not in plugin_token_group %s; add both accounts to the group (usermod -aG %s %s); the membership applies to processes started after it, so restart the service manager of that account (or log in again) and then the DefenseClaw gateway", me.Username, group, group, me.Username)
 	}
 	gid, err := strconv.Atoi(g.Gid)
 	if err != nil {

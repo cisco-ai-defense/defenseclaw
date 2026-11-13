@@ -81,7 +81,6 @@ def patch_openclaw_config(
     openclaw_config_file: str,
     model_name: str,  # kept for API compat — no longer used (fetch interceptor handles routing)
     proxy_port: int,  # kept for API compat — no longer used
-    master_key: str,  # kept for API compat — no longer used
     original_model: str,
     guardrail_host: str = "localhost",
     data_dir: str = "",
@@ -99,7 +98,7 @@ def patch_openclaw_config(
     ``doctor --fix`` a deterministic rollback target even after many
     ``.bak.N`` rotations have occurred.
     """
-    _ = model_name, proxy_port, master_key, guardrail_host  # unused — fetch interceptor handles routing
+    _ = model_name, proxy_port, guardrail_host  # unused — fetch interceptor handles routing
     path = _expand(openclaw_config_file)
 
     try:

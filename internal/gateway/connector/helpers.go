@@ -1800,8 +1800,9 @@ func ExtractBearerKey(value string) string {
 //  3. x-api-key header (Anthropic)
 //  4. Authorization header
 //
-// Keys prefixed with "sk-dc-" (DefenseClaw master keys) are skipped so they
-// don't leak upstream.
+// Keys prefixed with "sk-dc-" are skipped. DefenseClaw no longer issues them,
+// but a stale value left in a pre-1.0.10 agent config must not be forwarded
+// upstream as a provider key. Remove in 1.1.
 func ExtractAPIKey(r *http.Request) string {
 	if aiAuth := r.Header.Get("X-AI-Auth"); aiAuth != "" {
 		key := ExtractBearerKey(aiAuth)
@@ -1977,17 +1978,10 @@ func AcceptLoopbackWithWarning(r *http.Request, configuredCredential, connectorN
 	return true
 }
 
-func authenticateHookBridgeRequest(r *http.Request, gatewayToken, masterKey, connectorName, loopbackReason string, warned *sync.Once) bool {
+func authenticateHookBridgeRequest(r *http.Request, gatewayToken, connectorName, loopbackReason string, warned *sync.Once) bool {
 	provided := ExtractBearerKey(r.Header.Get("Authorization"))
 	if gatewayToken != "" && SecureTokenMatch(provided, gatewayToken) {
 		return true
 	}
-	if masterKey != "" && SecureTokenMatch(provided, masterKey) {
-		return true
-	}
-	configuredCredential := gatewayToken
-	if configuredCredential == "" {
-		configuredCredential = masterKey
-	}
-	return AcceptLoopbackWithWarning(r, configuredCredential, connectorName, loopbackReason, warned)
+	return AcceptLoopbackWithWarning(r, gatewayToken, connectorName, loopbackReason, warned)
 }

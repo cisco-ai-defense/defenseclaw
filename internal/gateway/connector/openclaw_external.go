@@ -60,29 +60,31 @@ func verifyExternalOpenClawPlugin(dir string, paths openClawPaths) error {
 	if err := openClawPluginTreeTrusted(dir); err != nil {
 		return fmt.Errorf("openclaw: the administrator-installed plugin at %s is not protected (%v); %s", dir, err, openClawExportHint(dir))
 	}
-	if !openClawExtensionExactBundle(dir) {
-		return fmt.Errorf("openclaw: the plugin at %s (version %s) is not the plugin of this DefenseClaw build (version %s); %s",
-			dir, openClawPluginVersionAt(dir), openClawEmbeddedPluginVersion(), openClawExportHint(dir))
+	if diff := openClawBundleDifference(dir); diff != "" {
+		return fmt.Errorf("openclaw: the plugin at %s (version %s) is not the plugin of this DefenseClaw build (version %s): %s; %s",
+			dir, openClawPluginVersionAt(dir), openClawEmbeddedPluginVersion(), diff, openClawExportHint(dir))
 	}
 	return nil
 }
 
-// openClawExtensionExactBundle reports whether dir holds exactly the
-// embedded plugin files, byte for byte, and nothing else.
-func openClawExtensionExactBundle(dir string) bool {
-	want := 0
+// openClawBundleDifference names the first way dir differs from the
+// embedded plugin (a changed, added, missing or non-regular file), or "".
+func openClawBundleDifference(dir string) string {
+	want := map[string]bool{}
 	if err := fs.WalkDir(openClawExtensionFS, openClawPluginRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if !d.IsDir() && path.Base(p) != openClawPlaceholderName {
-			want++
+			rel := strings.TrimPrefix(p, openClawPluginRoot+"/")
+			want[rel] = true
 		}
 		return nil
-	}); err != nil || want == 0 {
-		return false
+	}); err != nil || len(want) == 0 {
+		return "this build embeds no plugin"
 	}
-	files := 0
+	diff := ""
+	seen := map[string]bool{}
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -90,25 +92,40 @@ func openClawExtensionExactBundle(dir string) bool {
 		if d.IsDir() {
 			return nil
 		}
-		if !d.Type().IsRegular() {
-			return errNotBundledFile
-		}
 		rel, err := filepath.Rel(dir, p)
 		if err != nil {
 			return err
 		}
-		embedded, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, filepath.ToSlash(rel)))
-		if err != nil {
+		rel = filepath.ToSlash(rel)
+		switch {
+		case !d.Type().IsRegular():
+			diff = rel + " is not a regular file"
+		case !want[rel]:
+			diff = rel + " is not part of the plugin"
+		default:
+			embedded, _ := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, rel))
+			if have, err := os.ReadFile(p); err != nil || !bytes.Equal(have, embedded) {
+				diff = rel + " differs"
+			}
+		}
+		if diff != "" {
 			return errNotBundledFile
 		}
-		have, err := os.ReadFile(p)
-		if err != nil || !bytes.Equal(have, embedded) {
-			return errNotBundledFile
-		}
-		files++
+		seen[rel] = true
 		return nil
 	})
-	return err == nil && files == want
+	if diff != "" {
+		return diff
+	}
+	if err != nil {
+		return err.Error()
+	}
+	for rel := range want {
+		if !seen[rel] {
+			return rel + " is missing"
+		}
+	}
+	return ""
 }
 
 func openClawPluginVersionFrom(data []byte) string {
@@ -169,8 +186,10 @@ func openClawPreflight(paths openClawPaths, externalDir string) error {
 // OpenClawPreflight is openClawPreflight for opts (the CLI preflight
 // command and the upgrade check).
 func (c *OpenClawConnector) OpenClawPreflight(opts SetupOpts) error {
-	paths := c.pathsFor(opts)
-	return openClawPreflight(paths, paths.external)
+	// The same check setup runs first, separate-user layout included
+	// (rel-1-0-10 GAP-0078: the command applied the owner checks of the
+	// one-account layout to the OpenClaw account files).
+	return c.checkAgentSettings(opts)
 }
 
 // ExportOpenClawPlugin writes the embedded plugin into dir, which must not
@@ -212,4 +231,27 @@ func openClawTreeOwnedForWrite(dir string) error {
 		}
 		return nil
 	})
+}
+
+// checkAgentSettings is the check setup runs before it changes anything
+// (defenseclaw-gateway connector check-agent-settings): the OpenClaw
+// preflight, so an edited or unprotected administrator-installed plugin, or
+// OpenClaw files of another account, stop the setup before config.yaml is
+// saved and the gateway restarts (rel-1-0-10 GAP-0075). On Windows an
+// OpenClaw known to be older than the native hooks is refused here too.
+func (c *OpenClawConnector) checkAgentSettings(opts SetupOpts) error {
+	if openClawHooksGOOS == "windows" && openClawLacksNativeHooks(openClawObservedVersion(opts)) {
+		return fmt.Errorf("openclaw: on Windows DefenseClaw guards OpenClaw through its native plugin hooks, which need OpenClaw %s or later; upgrade OpenClaw (npm install -g openclaw@latest)", OpenClawNativeHooksSince)
+	}
+	paths := c.pathsFor(opts)
+	if openClawSeparateUser(opts) {
+		if paths.external == "" {
+			return fmt.Errorf("%w: connectors.openclaw.plugin_account needs plugin_install: external", errOpenClawPreflight)
+		}
+		if err := verifyExternalOpenClawPlugin(paths.external, paths); err != nil {
+			return fmt.Errorf("%w: %v", errOpenClawPreflight, err)
+		}
+		return nil
+	}
+	return openClawPreflight(paths, paths.external)
 }

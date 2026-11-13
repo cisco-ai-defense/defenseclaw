@@ -507,10 +507,12 @@ def test_from_config_refreshes_token_created_after_logger_initialization(
             "DEFENSECLAW_GATEWAY_TOKEN=fresh-canonical-token\n",
             "fresh-canonical-token",
         ),
+        # R-TOK: a token_env naming the OpenClaw credential is ignored, so the
+        # canonical master is the refreshed token.
         (
             "OPENCLAW_GATEWAY_TOKEN",
-            "DEFENSECLAW_GATEWAY_TOKEN=unselected-canonical-token\nOPENCLAW_GATEWAY_TOKEN=fresh-legacy-token\n",
-            "fresh-legacy-token",
+            "DEFENSECLAW_GATEWAY_TOKEN=fresh-canonical-token\nOPENCLAW_GATEWAY_TOKEN=openclaw-side-token\n",
+            "fresh-canonical-token",
         ),
         (
             "",

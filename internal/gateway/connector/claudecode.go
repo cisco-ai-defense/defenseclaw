@@ -46,7 +46,6 @@ import (
 // Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
 	gatewayToken string
-	masterKey    string
 }
 
 // NewClaudeCodeConnector creates a new Claude Code connector.
@@ -425,17 +424,8 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
-			return true
-		}
-	}
-
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	// No gateway token configured: trust loopback callers. The operator opts
+	// into requiring auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
 	if c.gatewayToken == "" {
 		return isLoopback
 	}
@@ -443,9 +433,8 @@ func (c *ClaudeCodeConnector) Authenticate(r *http.Request) bool {
 	return false
 }
 
-func (c *ClaudeCodeConnector) SetCredentials(gatewayToken, masterKey string) {
+func (c *ClaudeCodeConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
