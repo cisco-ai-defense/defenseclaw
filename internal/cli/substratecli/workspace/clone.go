@@ -17,8 +17,8 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -42,29 +42,11 @@ import (
 
 const cloneTimeout = 15 * time.Minute
 
-type cloneRecord struct {
-	Version   int       `json:"version"`
-	Name      string    `json:"name"`
-	URL       string    `json:"url"`
-	Ref       string    `json:"ref,omitempty"`
-	RemoteDir string    `json:"remote_dir"`
-	ClonedAt  time.Time `json:"cloned_at"`
-}
-
-func clonePath(dataDir, name string) string {
-	return filepath.Join(dataDir, "substrate", "clones", name+".json")
-}
-
-func loadCloneRecord(dataDir, name string) (*cloneRecord, error) {
-	b, err := os.ReadFile(clonePath(dataDir, name))
-	if err != nil {
-		return nil, err
-	}
-	var r cloneRecord
-	if json.Unmarshal(b, &r) != nil || r.Name != name {
-		return nil, errors.New("workspace: the clone record is not readable")
-	}
-	return &r, nil
+// CloneResult is where a clone landed in the actor. Note, when set, says
+// why pull will not be able to review the agent's work on it.
+type CloneResult struct {
+	Dir  string
+	Note string
 }
 
 var (
@@ -153,19 +135,21 @@ func (e *CloneError) Error() string {
 	return msg
 }
 
-// Clone clones rawURL (at ref) into the actor's working directory and
-// records where, so the agent starts there and checkpoint and undo find it.
-// It returns the clone's folder in the actor.
-func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (string, error) {
+// Clone clones rawURL (at ref) into the actor's working directory. It then
+// reads the clone back once, before the agent runs, and keeps it as a host
+// copy baseline on this computer (the same private git directory the host
+// copy uses), so the agent starts in the clone, checkpoint and undo find it,
+// and pull reviews and brings back what the agent changed on any OS.
+func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (*CloneResult, error) {
 	if err := CheckCloneURL(rawURL); err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := CheckCloneRef(ref); err != nil {
-		return "", err
+		return nil, err
 	}
 	root, err := c.Root(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	dir := path.Join(root, cloneFolder(rawURL))
 	env := map[string]string{"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/true", "SSH_ASKPASS": "/bin/true"}
@@ -183,20 +167,95 @@ func Clone(ctx context.Context, c *Client, dataDir, name, rawURL, ref string) (s
 	// swaps for the bound token. No prompt, no local or ext transport.
 	if err := run("git", "-c", "protocol.file.allow=never", "-c", "protocol.ext.allow=never",
 		"clone", "--quiet", "--", rawURL, dir); err != nil {
-		return "", err
+		return nil, err
 	}
 	if ref != "" {
 		if err := run("git", "-C", dir, "-c", "advice.detachedHead=false", "checkout", "--quiet", ref, "--"); err != nil {
-			return "", err
+			return nil, err
 		}
 	}
-	rec := cloneRecord{Version: 1, Name: name, URL: rawURL, Ref: ref, RemoteDir: dir, ClonedAt: time.Now().UTC()}
-	b, _ := json.MarshalIndent(rec, "", "  ")
-	p := clonePath(dataDir, name)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err == nil {
-		_ = os.WriteFile(p, b, 0o600)
+	rec := &hostRecord{Version: hostRecordVersion, Name: name, Folder: path.Base(dir), RemoteDir: dir,
+		CloneURL: rawURL, CloneRef: ref, UploadedAt: time.Now().UTC()}
+	res := &CloneResult{Dir: dir}
+	if err := cloneBaseline(ctx, c, dataDir, rec); err != nil {
+		rec.Baseline, rec.Files, rec.Bytes = "", 0, 0
+		res.Note = "pull cannot review this agent's work (" + lastLine(strings.TrimPrefix(err.Error(), "workspace: ")) +
+			"); push from inside the agent with git instead"
 	}
-	return dir, nil
+	if err := rec.save(dataDir); err != nil {
+		return nil, fmt.Errorf("workspace: record the clone: %w", err)
+	}
+	return res, nil
+}
+
+// cloneBaseline reads the fresh clone back (the host copy's own reader:
+// regular files only, no .git, no package caches, secret files held back)
+// and commits it as the record's baseline in a new private git directory.
+func cloneBaseline(ctx context.Context, c *Client, dataDir string, rec *hostRecord) error {
+	gitDir := hostGitDir(dataDir, rec.Name)
+	_ = os.RemoveAll(gitDir)
+	if err := os.MkdirAll(hostDir(dataDir), 0o700); err != nil {
+		return err
+	}
+	if _, err := hostGit(ctx, hostDir(dataDir), nil, nil, "init", "-q", "--bare", gitDir); err != nil {
+		return err
+	}
+	stage := filepath.Join(hostDir(dataDir), rec.Name+".base")
+	_ = os.RemoveAll(stage)
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		return err
+	}
+	defer os.RemoveAll(stage)
+	files, _, _, err := c.downloadHostTree(ctx, rec, stage)
+	if err != nil {
+		return err
+	}
+	base, err := hostCommit(ctx, gitDir, stage, files, "")
+	if err != nil {
+		return err
+	}
+	rec.Baseline, rec.Files = base, len(files)
+	for _, f := range files {
+		rec.Bytes += f.size
+	}
+	return nil
+}
+
+// cloneIgnored drops the files the clone's own ignore rules exclude (build
+// output the agent made) unless the baseline has them: a file the clone
+// came with is always compared, so an ignore rule cannot hide its change.
+func cloneIgnored(ctx context.Context, gitDir, stage, base string, files []hostFile) []hostFile {
+	env := []string{"GIT_DIR=" + gitDir}
+	out, err := hostGit(ctx, stage, env, nil, "ls-tree", "-r", "-z", "--name-only", base)
+	if err != nil {
+		return files
+	}
+	known := map[string]bool{}
+	for _, p := range splitNUL(out) {
+		known[p] = true
+	}
+	var in bytes.Buffer
+	for _, f := range files {
+		if !known[f.rel] {
+			in.WriteString(f.rel)
+			in.WriteByte(0)
+		}
+	}
+	if in.Len() == 0 {
+		return files
+	}
+	out, _ = hostGit(ctx, stage, append(env, "GIT_WORK_TREE="+stage), in.Bytes(), "check-ignore", "-z", "--stdin", "--no-index")
+	ignored := map[string]bool{}
+	for _, p := range splitNUL(out) {
+		ignored[p] = true
+	}
+	kept := files[:0]
+	for _, f := range files {
+		if !ignored[f.rel] {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 func lastLine(v ...string) string {

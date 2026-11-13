@@ -157,7 +157,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	defer rel.Close()
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
-	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout})
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: "."})
 	if err != nil {
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}

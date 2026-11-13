@@ -38,6 +38,7 @@ func TestCloneInTheActor(t *testing.T) {
 	_ = os.MkdirAll(src, 0o755)
 	o.git(src, "init", "-q", "-b", "main")
 	hcWrite(t, src, "hello.txt", "hello from the repo\n")
+	hcWrite(t, src, ".gitignore", "build/\n")
 	o.git(src, "add", ".")
 	o.git(src, "commit", "-qm", "one")
 	o.git(src, "branch", "feature")
@@ -51,9 +52,13 @@ func TestCloneInTheActor(t *testing.T) {
 
 	workdir, c := hcActor(t)
 	ctx := context.Background()
-	dir, err := Clone(ctx, c, o.data, "cl1", srv.URL+"/app.git", "feature")
+	res, err := Clone(ctx, c, o.data, "cl1", srv.URL+"/app.git", "feature")
 	if err != nil {
 		t.Fatalf("Clone: %v", err)
+	}
+	dir := res.Dir
+	if res.Note != "" {
+		t.Errorf("clone note %q, want none", res.Note)
 	}
 	if dir != workdir+"/app" {
 		t.Fatalf("clone dir %q", dir)
@@ -63,6 +68,40 @@ func TestCloneInTheActor(t *testing.T) {
 	}
 	if RemoteDirOf(o.data, "cl1") != dir {
 		t.Errorf("RemoteDirOf = %q", RemoteDirOf(o.data, "cl1"))
+	}
+
+	// The agent works in the clone; pull, run in a checkout of the same
+	// repository on this computer, reviews and brings back only that.
+	hcWrite(t, dir, "feature.txt", "on the branch\nedited by the agent\n")
+	hcWrite(t, dir, "new.txt", "made by the agent\n")
+	hcWrite(t, dir, "build/out.o", "ignored build output\n")
+	hcWrite(t, dir, ".env", "API_KEY=never-brought-back\n")
+	local := filepath.Join(t.TempDir(), "app")
+	o.git(filepath.Dir(local), "clone", "-q", "-b", "feature", srv.URL+"/app.git", local)
+	rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: o.data, Name: "cl1", Label: "cl1", Project: local})
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	got := map[string]string{}
+	for _, f := range rv.Changed {
+		got[f.Path] = f.Status
+	}
+	if len(got) != 2 || got["feature.txt"] != "modified" || got["new.txt"] != "added" {
+		t.Fatalf("review %v, want feature.txt modified and new.txt added only\n%s", got, rv.Text)
+	}
+	if _, err := Apply(ctx, ApplyOptions{DataDir: o.data, Name: "cl1", Mode: ModeApply}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(local, "feature.txt")); string(b) != "on the branch\nedited by the agent\n" {
+		t.Errorf("feature.txt after apply %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(local, "new.txt")); string(b) != "made by the agent\n" {
+		t.Errorf("new.txt after apply %q", b)
+	}
+	for _, never := range []string{"build/out.o", ".env"} {
+		if _, err := os.Stat(filepath.Join(local, never)); err == nil {
+			t.Errorf("%s was brought back", never)
+		}
 	}
 
 	// A repository that is not there: git says why, in plain words.

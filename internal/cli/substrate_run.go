@@ -374,11 +374,14 @@ func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	defer rel.Close()
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
-	dir, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
+	res, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
 	if err != nil {
 		return withExitCode(err, 1)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(dir))
+	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
+	if res.Note != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %s.\n", safetext.Line(res.Note))
+	}
 	return nil
 }
 

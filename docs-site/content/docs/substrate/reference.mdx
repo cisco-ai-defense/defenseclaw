@@ -60,7 +60,7 @@ Every read command has `--output text|json` and `--json`, and every command take
 
 ### Files
 
-`run` copies your folder and `pull` brings the agent's work back with git on your computer (Git for Windows on Windows): git's ignore rules decide what is copied, secret files stay behind, and the bytes are copied as they are, line endings included. `--clone URL` instead clones the repository inside the agent, through the cluster's network rules, which add the credential for the hosts your profile allows; nothing of your computer's credentials is sent. Put no user name or token in the address.
+`run` copies your folder and `pull` brings the agent's work back with git on your computer (Git for Windows on Windows): git's ignore rules decide what is copied, secret files stay behind, and the bytes are copied as they are, line endings included. `--clone URL` instead clones the repository inside the agent, through the cluster's network rules, which add the credential for the hosts your profile allows; nothing of your computer's credentials is sent. Put no user name or token in the address. To bring a clone's changes home, run `pull` in a checkout of the same repository: it reviews what the agent changed since the clone, and `--apply` writes it into that folder.
 
 `substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). On macOS the key that seals them is an item only the DefenseClaw program may read without asking; macOS asks once after you install a new DefenseClaw build, and over SSH the keychain must be unlocked (`security unlock-keychain`).
 
