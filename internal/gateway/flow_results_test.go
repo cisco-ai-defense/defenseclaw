@@ -8,10 +8,12 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/flow"
 )
 
@@ -19,6 +21,27 @@ import (
 // shape: the value a credential read printed must reach the session as a
 // keyed digest, and a later call that sends it must be a flow.secret_egress
 // finding. The secret is a synthetic test string.
+
+// r2Dir is a working directory that exists in the host's path namespace (a POSIX path is not a place on a Windows host).
+func r2Dir() string {
+	if runtime.GOOS == "windows" {
+		return `C:\Users\u\p`
+	}
+	return "/home/u/p"
+}
+
+// The dispatch inputs below carry no DialectHint, so the extractor reads them
+// as POSIX on every host and their paths stay POSIX; only the result adapter
+// derives its dialect from the host and the session.
+
+// r2JSONPath rewrites the fixture directory inside a JSON text for the host.
+func r2JSONPath(s string) string {
+	if runtime.GOOS != "windows" {
+		return s
+	}
+	s = strings.ReplaceAll(s, "/home/u/p/", `C:\\Users\\u\\p\\`)
+	return strings.ReplaceAll(s, "/home/u/p", `C:\\Users\\u\\p`)
+}
 
 const r2GatewaySecret = "sflow_r2gw_0123456789abcdefQRST"
 
@@ -81,7 +104,7 @@ func r2Index(t *testing.T, tc r2ResultCase, sid string) int {
 	}
 	req := agentHookRequest{
 		ConnectorName: tc.connector, HookEventName: tc.event, SessionID: sid, ToolName: tc.tool,
-		ToolArgs: json.RawMessage(tc.args), CWD: "/home/u/p", Payload: payload,
+		ToolArgs: json.RawMessage(r2JSONPath(tc.args)), CWD: r2Dir(), Payload: payload,
 	}
 	addSecretFlowResultValues(context.Background(), req)
 	st, ok := secretFlowSessions.lookup(sid)
@@ -260,4 +283,29 @@ func TestSecretFlowDispatchMCPAndOneCall(t *testing.T) {
 			t.Fatal("a read inside a command substitution is not a finding")
 		}
 	})
+}
+
+// A Windows host places every call in the Windows path namespace; a bare shell
+// command there is Git Bash's POSIX grammar. Other hosts are unchanged.
+func TestSecretFlowHostOptions(t *testing.T) {
+	shell := effects.Call{Surface: effects.SurfaceShell, Command: "cat .env"}
+	file := effects.Call{Surface: effects.SurfaceFileTool, Tool: "Read"}
+	got := secretFlowHostOptionsFor("windows", shell, effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone})
+	if got.Flavor != effects.FlavorWindows || got.Dialect != effects.DialectPOSIX {
+		t.Errorf("windows host, bare shell: flavor=%v dialect=%v", got.Flavor, got.Dialect)
+	}
+	got = secretFlowHostOptionsFor("windows", file, effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone})
+	if got.Flavor != effects.FlavorWindows || got.Dialect != effects.DialectNone {
+		t.Errorf("windows host, file tool: flavor=%v dialect=%v", got.Flavor, got.Dialect)
+	}
+	ps := effects.Options{Flavor: effects.FlavorWindows, Dialect: effects.DialectPowerShell}
+	if got = secretFlowHostOptionsFor("windows", shell, ps); got.Flavor != ps.Flavor || got.Dialect != ps.Dialect {
+		t.Errorf("an explicit PowerShell dialect is kept: %+v", got)
+	}
+	posix := effects.Options{Flavor: effects.FlavorPOSIX, Dialect: effects.DialectNone}
+	for _, goos := range []string{"linux", "darwin"} {
+		if got = secretFlowHostOptionsFor(goos, shell, posix); got.Flavor != posix.Flavor || got.Dialect != posix.Dialect {
+			t.Errorf("%s host changed the options: %+v", goos, got)
+		}
+	}
 }

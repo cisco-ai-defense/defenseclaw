@@ -143,6 +143,27 @@ func secretFlowResultText(payload map[string]interface{}, content string) string
 	return sb.String()
 }
 
+// secretFlowHostOptions places a call in the path namespace of the host the
+// hook runs on. A hook runs on the same machine as its agent, so on a Windows
+// host every path (a Read tool's C:\... path, a Git Bash command's cwd) is a
+// Windows path whatever the shell: the flavor is Windows, and a shell command
+// with no PowerShell/cmd hint is read as the POSIX grammar of Git Bash. Without
+// this a Windows cwd on a POSIX flavor is unplaceable and no read is labeled.
+func secretFlowHostOptions(call effects.Call, opts effects.Options) effects.Options {
+	return secretFlowHostOptionsFor(runtime.GOOS, call, opts)
+}
+
+func secretFlowHostOptionsFor(goos string, call effects.Call, opts effects.Options) effects.Options {
+	if goos != "windows" || opts.Flavor == effects.FlavorWindows {
+		return opts
+	}
+	opts.Flavor = effects.FlavorWindows
+	if (opts.Dialect == effects.DialectNone || opts.Dialect == "") && call.Surface == effects.SurfaceShell {
+		opts.Dialect = effects.DialectPOSIX
+	}
+	return opts
+}
+
 // secretFlowCaseInsensitive reports a path namespace that folds case: Windows
 // paths always, and a macOS host. It is derived from the call's flavor and the
 // gateway's own OS, as the effect lane's callers do.
@@ -200,6 +221,7 @@ func secretFlowResultCall(req agentHookRequest, home string) (effects.Call, effe
 	if !has {
 		return effects.Call{}, effects.Options{}, false
 	}
+	opts = secretFlowHostOptions(call, opts)
 	opts.CaseInsensitive = secretFlowCaseInsensitive(opts.Flavor)
 	return call, opts, true
 }

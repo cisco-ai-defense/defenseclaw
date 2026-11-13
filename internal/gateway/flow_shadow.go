@@ -326,6 +326,8 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 		return nil
 	}
 	opts.Flavor = cfg.Flavor
+	opts = secretFlowHostOptions(call, opts)
+	cfg.Flavor = opts.Flavor
 	opts.CaseInsensitive = secretFlowCaseInsensitive(cfg.Flavor)
 	res := effects.Extract(call, opts)
 	// scanText is the call's raw command / argument text, scanned at a sink for

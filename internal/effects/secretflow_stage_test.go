@@ -197,3 +197,17 @@ func TestSecretFlowSCPOptions(t *testing.T) {
 		}
 	})
 }
+
+// PowerShell's cat is Get-Content: a credential read through it is a read.
+func TestSecretFlowPowerShellCatIsARead(t *testing.T) {
+	r := Extract(Call{Surface: SurfaceShell, Command: `cat .env | Out-String`}, winPS)
+	var read bool
+	for _, e := range r.Effects {
+		if e.Kind == KindRead && contains(e.Target.Spelling, ".env") {
+			read = true
+		}
+	}
+	if !read {
+		t.Fatalf("cat .env under PowerShell is not a read: %s", fmtRes(r))
+	}
+}

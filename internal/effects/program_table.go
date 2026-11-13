@@ -353,7 +353,7 @@ func buildWindowsTable() {
 	add(Program{Names: []string{"set-content", "add-content", "out-file"}, Pos: PosFirstWrite, PipeRole: RoleWrite,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-literalpath": {Value: true, Role: RoleWrite},
 			"-filepath": {Value: true, Role: RoleWrite}, "-value": {Value: true, Role: RoleIgnore}}})
-	add(Program{Names: []string{"get-content", "gc"}, Pos: PosAllRead, PipeRole: RoleRead,
+	add(Program{Names: []string{"get-content", "gc", "cat"}, Pos: PosAllRead, PipeRole: RoleRead,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}}})
 	add(Program{Names: []string{"copy-item", "cpi"}, Pos: PosSourcesDest,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}, "-destination": {Value: true, Role: RoleWrite}}})
