@@ -148,69 +148,152 @@ func clientRow(rows []tcpOwnerRow, local, remote *net.TCPAddr) (tcpOwnerRow, err
 	}
 }
 
+// TCPConnOwner is the process the owner-module table names for the client
+// end of a loopback connection: its PID and the connection creation time.
+type TCPConnOwner struct {
+	PID        uint32
+	CreateTime uint64
+}
+
+// PeerIdentity is the account of a verified loopback client process.
+type PeerIdentity struct {
+	SID       string
+	SessionID uint32
+}
+
 // peerProcess is the opened client process (tcp_windows.go; fakes in the
 // tests). While it is open its PID cannot be reused.
 type peerProcess interface {
 	// CreationTime is the FILETIME the process started (GetProcessTimes).
 	CreationTime() (uint64, error)
-	UserSID() (string, error)
+	// Identity is the token user SID and session of the process.
+	Identity() (PeerIdentity, error)
 	Close()
 }
 
-// ownerSIDLookup maps the client end of a loopback connection to the user
-// SID of the process that owns it.
+// ownerSIDLookup maps the client end of a loopback connection to the
+// account of the process that owns it.
 type ownerSIDLookup struct {
 	rows func() ([]tcpOwnerRow, error)
 	open func(pid uint32) (peerProcess, error)
 }
 
-// lookup reads the client row, opens its owning PID and refuses the answer
-// unless that process started no later than the connection was created.
-// The table keeps the PID of the process that created the socket even
-// after that process exits and another process (of any account) gets the
-// PID, with the handle inherited or duplicated into a survivor; a process
-// that started after the connection existed cannot have created it (S1
-// REVIEW-code-slice4 P1-1). The table is read again with the process open
-// and must show the same PID and creation time on the same row. A missing
-// creation time on either side is refused, and every failure is an error:
-// the caller treats it as unverified, never as a fallback identity.
-func (l ownerSIDLookup) lookup(local, remote *net.TCPAddr) (string, error) {
+// clientOwner reads the client row of the connection (no process is
+// opened): the gateway side of the peer broker request.
+func (l ownerSIDLookup) clientOwner(local, remote *net.TCPAddr) (TCPConnOwner, error) {
 	rows, err := l.rows()
 	if err != nil {
-		return "", err
+		return TCPConnOwner{}, err
 	}
 	row, err := clientRow(rows, local, remote)
 	if err != nil {
-		return "", err
+		return TCPConnOwner{}, err
 	}
 	if row.CreateTime == 0 {
-		return "", errors.New("peercred: the TCP table has no creation time for the loopback connection")
+		return TCPConnOwner{}, errors.New("peercred: the TCP table has no creation time for the loopback connection")
 	}
-	process, err := l.open(row.PID)
+	return TCPConnOwner{PID: row.PID, CreateTime: row.CreateTime}, nil
+}
+
+// serverRowOwnedBy checks that the server end of the connection (local is
+// the address it was accepted on) is one ESTABLISHED row owned by pid: the
+// peer broker answers only for connections its caller accepted.
+func serverRowOwnedBy(rows []tcpOwnerRow, local, remote *net.TCPAddr, pid uint32) error {
+	var found []tcpOwnerRow
+	for _, row := range rows {
+		if row.State != mibTCPStateEstab {
+			continue
+		}
+		if row.LocalPort != local.Port || !row.LocalIP.Equal(local.IP) {
+			continue
+		}
+		if row.RemotePort != remote.Port || !row.RemoteIP.Equal(remote.IP) {
+			continue
+		}
+		found = append(found, row)
+	}
+	switch {
+	case len(found) == 0:
+		return ErrPeerNotFound
+	case len(found) > 1:
+		return errors.New("peercred: more than one process owns the server end of the loopback connection")
+	case found[0].PID != pid || pid == 0:
+		return ErrNotAccepted
+	}
+	return nil
+}
+
+// ErrNotAccepted reports a connection whose server end the asking process
+// does not own.
+var ErrNotAccepted = errors.New("peercred: the asking process did not accept this loopback connection")
+
+// ErrOwnerChanged reports a client end that is no longer owned by the
+// process (PID and connection creation time) the request named.
+var ErrOwnerChanged = errors.New("peercred: the loopback connection is not owned by the process the request names")
+
+// verify is the peer broker answer (S1 Q7). The server end must be owned by
+// serverPID (the authenticated gateway) and the client end by want (the
+// PID and creation time the gateway read). It opens that PID and refuses
+// the answer unless the process started no later than the connection was
+// created: the table keeps the PID of the process that created the socket
+// even after it exits and another process (of any account) gets the PID,
+// with the handle inherited or duplicated into a survivor; a process that
+// started after the connection existed cannot have created it (S1
+// REVIEW-code-slice4 P1-1). The table is read again with the process open
+// and must show the same rows. A missing creation time is refused, and
+// every failure is an error: the caller treats it as unverified, never as
+// a fallback identity.
+func (l ownerSIDLookup) verify(local, remote *net.TCPAddr, serverPID uint32, want TCPConnOwner) (PeerIdentity, error) {
+	if want.PID == 0 || want.CreateTime == 0 {
+		return PeerIdentity{}, ErrOwnerChanged
+	}
+	check := func() error {
+		rows, err := l.rows()
+		if err != nil {
+			return err
+		}
+		if err := serverRowOwnedBy(rows, local, remote, serverPID); err != nil {
+			return err
+		}
+		row, err := clientRow(rows, local, remote)
+		if err != nil {
+			return err
+		}
+		if row.PID != want.PID || row.CreateTime != want.CreateTime {
+			return ErrOwnerChanged
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return PeerIdentity{}, err
+	}
+	process, err := l.open(want.PID)
 	if err != nil {
-		return "", err
+		return PeerIdentity{}, err
 	}
 	defer process.Close()
 	started, err := process.CreationTime()
 	if err != nil {
-		return "", fmt.Errorf("peercred: read the client process creation time: %w", err)
+		return PeerIdentity{}, fmt.Errorf("peercred: read the client process creation time: %w", err)
 	}
 	if started == 0 {
-		return "", errors.New("peercred: the client process has no creation time")
+		return PeerIdentity{}, errors.New("peercred: the client process has no creation time")
 	}
-	if started > row.CreateTime {
-		return "", fmt.Errorf("peercred: process %d started after the loopback connection was created (its PID was reused)", row.PID)
+	if started > want.CreateTime {
+		return PeerIdentity{}, fmt.Errorf("peercred: process %d started after the loopback connection was created (its PID was reused)", want.PID)
 	}
-	sid, err := process.UserSID()
+	identity, err := process.Identity()
 	if err != nil {
-		return "", err
+		return PeerIdentity{}, err
 	}
-	again, err := l.rows()
-	if err != nil {
-		return "", err
+	if identity.SID == "" {
+		return PeerIdentity{}, errors.New("peercred: the client token has no user SID")
 	}
-	if row2, err := clientRow(again, local, remote); err != nil || row2.PID != row.PID || row2.CreateTime != row.CreateTime {
-		return "", errors.New("peercred: the loopback connection changed owner while it was read")
+	if err := check(); err != nil {
+		if errors.Is(err, ErrOwnerChanged) {
+			return PeerIdentity{}, errors.New("peercred: the loopback connection changed owner while it was read")
+		}
+		return PeerIdentity{}, err
 	}
-	return sid, nil
+	return identity, nil
 }

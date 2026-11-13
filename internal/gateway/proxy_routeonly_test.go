@@ -127,10 +127,18 @@ func TestRouteOnlyRefusals(t *testing.T) {
 			}
 		})
 	}
+	if atomic.LoadInt32(&f.origHits)+atomic.LoadInt32(&f.altHits) != 0 {
+		t.Fatal("a refused request reached an upstream")
+	}
+	if runtime.GOOS == "windows" {
+		// OSS Windows: the valid route credential alone names the gateway
+		// owner (DESIGN 18.2), so another kernel account is not refused.
+		return
+	}
 	prev := acpLoopbackPeerUID
 	acpLoopbackPeerUID = func(*http.Request) (int, error) { return os.Getuid() + 1, nil }
 	defer func() { acpLoopbackPeerUID = prev }()
-	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hi"), nil); rec.Code != 401 && runtime.GOOS != "windows" {
+	if rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("hi"), nil); rec.Code != 401 {
 		t.Fatalf("another account = %d, want 401", rec.Code)
 	}
 	if atomic.LoadInt32(&f.origHits)+atomic.LoadInt32(&f.altHits) != 0 {
@@ -336,5 +344,16 @@ func TestRouteOnlyHotReloadRendersAndRestores(t *testing.T) {
 	s.applyRouteOnlyRenders(f.cfg, off)
 	if raw, _ := os.ReadFile(settings); string(raw) != original {
 		t.Fatalf("disable did not restore byte for byte: %q", raw)
+	}
+}
+
+func TestRouteOnlyErrorBodiesAreProviderNative(t *testing.T) {
+	for family, key := range map[string]string{"messages": "type", "responses": "error", "chat": "error", "invoke": "message"} {
+		rec := httptest.NewRecorder()
+		routeOnlyErrorFor(rec, family, http.StatusForbidden, "permission_error", "denied")
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body[key] == nil {
+			t.Fatalf("%s body = %s", family, rec.Body.String())
+		}
 	}
 }

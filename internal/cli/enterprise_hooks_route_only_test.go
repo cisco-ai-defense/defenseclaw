@@ -52,3 +52,47 @@ func TestEnterpriseHookRouteOnlyRendersEnrolledUsersOnly(t *testing.T) {
 		t.Fatal("OSS installs render through Setup, not the guardian")
 	}
 }
+
+// The Windows guardian paths (install, verify, reconcile) render route-only
+// per enrolled SID only on Windows; Linux and macOS share those paths with
+// the Secure Client profile and get nothing from them.
+func TestEnterpriseHookWindowsRouteOnlyRendersPerSID(t *testing.T) {
+	prevCfg, prevToken, prevLog, prevGOOS := cfg, enterpriseHookRouteToken, enterpriseHookRouteOnlyLog, enterpriseHookRouteOnlyGOOS
+	t.Cleanup(func() {
+		cfg, enterpriseHookRouteToken, enterpriseHookRouteOnlyLog, enterpriseHookRouteOnlyGOOS = prevCfg, prevToken, prevLog, prevGOOS
+	})
+	enterpriseHookRouteOnlyLog = io.Discard
+	const alice, carol = "S-1-5-21-100-200-300-1001", "S-1-5-21-100-200-300-1003"
+	cfg = &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Enterprise.Enrollment.ExemptUsers = []string{"CORP\\carol", "S-1-5-21-100-200-300-1004"}
+	cfg.Routing.Enabled = true
+	cfg.Routing.RouteOnly = config.RoutingRouteOnlyConfig{Connectors: []string{"claudecode", "codex"}, Upstreams: map[string]config.RoutingUpstreamConfig{
+		"claudecode": {BaseURL: "https://api.anthropic.com", API: "messages"},
+		"codex":      {BaseURL: "https://api.openai.com/v1", API: "responses"},
+	}}
+	enterpriseHookRouteToken = func(_, connectorName, identity string) (string, error) {
+		return "route-" + connectorName + "-" + identity, nil
+	}
+	enterpriseHookRouteOnlyGOOS = "linux"
+	if r := enterpriseHookWindowsRouteOnly("codex", "CORP\\alice", alice, "127.0.0.1:18970"); r != nil {
+		t.Fatalf("a non-Windows guardian path rendered %+v", r)
+	}
+	enterpriseHookRouteOnlyGOOS = "windows"
+	for _, name := range []string{"claudecode", "codex"} {
+		r := enterpriseHookWindowsRouteOnly(name, "CORP\\alice", alice, "127.0.0.1:18970")
+		if r == nil || r.Token != "route-"+name+"-"+alice || r.BaseURL != "http://127.0.0.1:18970/r/"+name {
+			t.Fatalf("%s render for an enrolled SID = %+v", name, r)
+		}
+	}
+	for label, got := range map[string]*connector.RouteOnlySetup{
+		"exempt by DOMAIN\\name (any case)": enterpriseHookWindowsRouteOnly("codex", "corp\\CAROL", carol, "127.0.0.1:18970"),
+		"exempt by SID":                     enterpriseHookWindowsRouteOnly("codex", "CORP\\dave", "s-1-5-21-100-200-300-1004", "127.0.0.1:18970"),
+		"not routed":                        enterpriseHookWindowsRouteOnly("cursor", "CORP\\alice", alice, "127.0.0.1:18970"),
+		"exempt by bare name":               enterpriseHookWindowsRouteOnly("codex", "carol@corp.example", carol, "127.0.0.1:18970"),
+	} {
+		if got != nil {
+			t.Fatalf("%s must not render: %+v", label, got)
+		}
+	}
+}

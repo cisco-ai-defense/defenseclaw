@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // routeOnlyBaseURLOS lists, per route-capable connector, the OSes whose
@@ -30,22 +31,19 @@ func RouteOnlyCapableOn(connector, goos string) bool {
 // for goos (S1 DESIGN 15.6, 17.1, 19): secrets come from protected
 // credential refs only (no *_env names, which would read the gateway
 // service environment), route-only connectors need routing base_url on the
-// target OS, and managed Windows route-only stays off until a live probe
-// confirms the Windows kernel peer factor under the LocalSystem gateway
-// (S1 DESIGN 20.6) and the Windows guardian renders route-only per user
-// (rel-1-0-10:GAP-0012).
+// target OS. Managed Windows route-only is valid: the guardian renders it
+// per enrolled user and its peer SID broker proves each caller (S1 DESIGN
+// 21, rel-1-0-10:GAP-0012).
 func validateManagedRouting(cfg *Config, goos string) error {
 	r := cfg.Routing
 	for i, m := range r.Models {
-		if strings.TrimSpace(m.APIKeyEnv) != "" {
-			// 1.0.9 managed configs may carry api_key_env models with
-			// routing off (the vllm_sr era); the gateway ignores the name on
-			// a managed host (credential refs only), so only a config that
-			// turns routing on is refused (S1 REVIEW-code-slice4 P2-1).
-			if r.Enabled {
-				return fmt.Errorf("config routing.models[%d].api_key_env is not allowed on a managed host with routing.enabled: name a protected credential in routing.models[%d].credential", i, i)
-			}
-			fmt.Fprintf(managedRoutingWarnings, "warning: config routing.models[%d].api_key_env is ignored on a managed host; name a protected credential in routing.models[%d].credential before turning routing on\n", i, i)
+		if strings.TrimSpace(m.APIKeyEnv) != "" && strings.TrimSpace(m.Credential) == "" {
+			// 1.0.9 and 1.0.8 managed configs carry api_key_env models (the
+			// vllm_sr era), with routing on or off. They keep their meaning
+			// after the upgrade (owner rule: the upgrade must work): the
+			// gateway still reads the named variable when no credential is
+			// set, and doctor asks for a protected credential instead.
+			warnManagedRoutingOnce(fmt.Sprintf("warning: config routing.models[%d].api_key_env reads the gateway service environment on a managed host; store the key with enterprise secret set and name it in routing.models[%d].credential\n", i, i))
 		}
 		if err := managedBedrockEnvRefusal(fmt.Sprintf("routing.models[%d].bedrock", i), m.Bedrock); err != nil {
 			return err
@@ -67,9 +65,10 @@ func validateManagedRouting(cfg *Config, goos string) error {
 	if len(r.RouteOnly.Connectors) == 0 {
 		return nil
 	}
-	if goos == "windows" {
-		return fmt.Errorf("config routing.route_only is not available on managed Windows in this release (windows_no_peer_factor): the gateway service cannot yet prove which account opened a loopback connection; route proxy traffic only, or use route-only on managed Linux and macOS")
-	}
+	// Managed Windows: the guardian peer SID broker proves the account of
+	// each loopback caller (S1 Q7); the gateway refuses every route-only
+	// caller while the broker does not answer (doctor: Route-only peer
+	// broker), so the config itself is valid there.
 	for i, c := range r.RouteOnly.Connectors {
 		if goos != "" && !RouteOnlyCapableOn(c, goos) {
 			return fmt.Errorf("config routing.route_only.connectors[%d] %q has no routing base_url capability on %s", i, c, goos)
@@ -97,8 +96,8 @@ func validateManagedRouting(cfg *Config, goos string) error {
 }
 
 // routeOnlyCustodyGOOS lists the managed OSes where route-only forwards no
-// agent credential (no socket activation of the API port). Windows is
-// refused above until its peer factor is proved live (S1 DESIGN 20.6).
+// agent credential (no socket activation of the API port); the gateway
+// uses its own credential there.
 func routeOnlyCustodyGOOS(goos string) bool { return goos == "darwin" || goos == "windows" }
 
 // RoutingProviderDefaultOrigins is the API origin of a provider whose
@@ -152,9 +151,26 @@ func routeOnlyCustodyCovered(r RoutingConfig, up RoutingUpstreamConfig) bool {
 	return false
 }
 
-// managedRoutingWarnings receives the notes of keys a managed host
-// ignores; replaceable in tests.
+// managedRoutingWarnings receives the managed routing notes; replaceable in
+// tests.
 var managedRoutingWarnings io.Writer = os.Stderr
+
+var (
+	managedRoutingWarnedMu sync.Mutex
+	managedRoutingWarned   = map[string]bool{}
+)
+
+// warnManagedRoutingOnce prints a note once per process (validation runs on
+// every ensure and reload); doctor keeps reporting it.
+func warnManagedRoutingOnce(msg string) {
+	managedRoutingWarnedMu.Lock()
+	defer managedRoutingWarnedMu.Unlock()
+	if managedRoutingWarned[msg] && managedRoutingWarnings == os.Stderr {
+		return
+	}
+	managedRoutingWarned[msg] = true
+	fmt.Fprint(managedRoutingWarnings, msg)
+}
 
 // managedBedrockEnvRefusal refuses the Bedrock keys new in 1.0.10 that
 // read the gateway service environment or its account files: every *_env

@@ -2167,6 +2167,9 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
 				status["profile_warnings"] = warnings
 			}
+			if broker := routePeerBrokerProbe(r, cfg); broker != nil {
+				status["route_peer_broker"] = broker
+			}
 		}
 	}
 

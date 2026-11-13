@@ -215,11 +215,25 @@ func installWindowsCodexManagedResult(
 					err,
 				))
 			}
+			// Route-only last, in the target own config.toml (S1 DESIGN 21;
+			// the home override is already on this profile); nil removes an
+			// earlier render.
+			if err := applyWindowsRouteOnly(target.conn, target.dataDir, opts.RouteOnly); err != nil {
+				return fail(errors.Join(err, discardWindowsManagedRuntimeGeneration(generation)))
+			}
 			return nil
 		})
 	})
 	if err != nil {
 		return InstallResult{}, err
+	}
+	// A later failure takes the render back: the target is not protected,
+	// so its route credential would only be refused.
+	routeRollback := func() error {
+		if opts.RouteOnly == nil {
+			return nil
+		}
+		return restoreWindowsRouteOnlyAsTarget(target.conn, target.sid, target.home, target.dataDir)
 	}
 	generationCommit, err := windowsManagedRuntimeGenerationCommit(generation)
 	if err != nil {
@@ -231,6 +245,7 @@ func installWindowsCodexManagedResult(
 				target.home,
 				func() error { return restoreWindowsCodexUserRuntime(transaction) },
 			),
+			routeRollback(),
 		)
 	}
 	// Publish this SID only after its target-owned runtime has been hardened and
@@ -248,6 +263,7 @@ func installWindowsCodexManagedResult(
 				target.home,
 				func() error { return restoreWindowsCodexUserRuntime(transaction) },
 			),
+			routeRollback(),
 		)
 	}
 	nextTargets := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentTargets)+1)
@@ -278,6 +294,7 @@ func installWindowsCodexManagedResult(
 			fmt.Errorf("enterprise hooks: publish Codex target enrollment: %w", err),
 			generationErr,
 			rollbackErr,
+			routeRollback(),
 		)
 	}
 	retireWindowsManagedRuntimePreviousGeneration(generationCommit)
@@ -329,6 +346,10 @@ func verifyWindowsCodexManagedResult(
 		)
 	}
 	if err := verifyWindowsCodexUserRuntime(target, machineOpts.RequirementsPath); err != nil {
+		return InstallResult{}, err
+	}
+	// Route-only drift (S1 DESIGN 18.3, 21): the guardian repair re-renders.
+	if err := verifyWindowsRouteOnly(target.conn, target.home, target.dataDir, opts.RouteOnly); err != nil {
 		return InstallResult{}, err
 	}
 	otlpReport, err := windowsManagedUserNativeOTLPCheck("codex", target.home, target.dataDir, target.sid, opts.APIAddr, opts.ProxyAddr)

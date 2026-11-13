@@ -96,9 +96,26 @@ func routeOnlyDispatch(ro func() *routeOnlyServer, next http.Handler) http.Handl
 }
 
 func routeOnlyError(w http.ResponseWriter, status int, kind, msg string) {
+	routeOnlyErrorFor(w, "", status, kind, msg)
+}
+
+// routeOnlyErrorFor writes the error in the shape the agent API uses
+// (S11 F6: provider-native refusal bodies): Anthropic Messages, OpenAI
+// chat/Responses, Bedrock.
+func routeOnlyErrorFor(w http.ResponseWriter, family string, status int, kind, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	body, _ := json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": kind, "message": "[DefenseClaw] " + msg}})
+	msg = "[DefenseClaw] " + msg
+	var body []byte
+	switch family {
+	case config.RoutingAPIChat, config.RoutingAPIResponses:
+		body, _ = json.Marshal(map[string]any{"error": map[string]any{"message": msg, "type": kind, "code": kind}})
+	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
+		w.Header().Set("X-Amzn-ErrorType", "AccessDeniedException")
+		body, _ = json.Marshal(map[string]any{"message": msg})
+	default:
+		body, _ = json.Marshal(map[string]any{"type": "error", "error": map[string]string{"type": kind, "message": msg}})
+	}
 	_, _ = w.Write(body)
 }
 
@@ -291,7 +308,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		original.usage.Route.Decision = modelusage.DecisionFallback
 	}
 	if routedOutcome.Result == SemanticRouteDenied {
-		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
+		routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
 	if attempt != nil && custody && attempt.keepInbound && attempt.signer == nil && !s.holdCredential(cfg, attempt, attempt.provider) {
@@ -572,11 +589,14 @@ func mustUnescape(p string) string {
 var routeOnlyDropHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Connection", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
 	"Host", "Content-Length", "X-Ai-Auth", "Origin", "Cookie",
+	// The client Accept-Encoding is not forwarded (GAP-0097): Go transport
+	// asks for gzip and decodes it, so the usage record reads the reply.
+	"Accept-Encoding",
 }
 
 // headers allowed across a credential boundary (a routed backend that is
 // not the agent own provider and origin).
-var routeOnlyBoundaryHeaders = []string{"Content-Type", "Accept", "Accept-Encoding", "User-Agent", "Anthropic-Version", "Anthropic-Beta", "Openai-Beta"}
+var routeOnlyBoundaryHeaders = []string{"Content-Type", "Accept", "User-Agent", "Anthropic-Version", "Anthropic-Beta", "Openai-Beta"}
 
 func connectionNamed(h http.Header) map[string]bool {
 	out := map[string]bool{}
@@ -776,6 +796,12 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response, call mode
 		}
 		if err != nil {
 			if !streaming && len(body) > 0 {
+				// The caller gets the bytes as they came; the usage record
+				// reads them decoded when the transport left an encoding
+				// (GAP-0097).
+				if decoded, ok := decodeReplyBody(resp.Header.Clone(), body); ok {
+					body = decoded
+				}
 				call.Body(body)
 			}
 			if errors.Is(err, io.EOF) {

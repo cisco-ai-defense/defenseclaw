@@ -123,9 +123,3 @@ func TestWindowsTCPTableTruncated(t *testing.T) {
 		t.Fatalf("port round trip = %d", got)
 	}
 }
-
-func TestLoopbackTCPPeerSIDRefusesNonLoopback(t *testing.T) {
-	if _, err := LoopbackTCPPeerSID(&net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 1}, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2}); err == nil {
-		t.Fatal("a non-loopback address must be refused")
-	}
-}

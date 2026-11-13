@@ -294,13 +294,17 @@ func (s *userScopedCredentialStore) enrolledFor(identity, connectorName string) 
 	return s.enrolled[canonical+"\x00"+strings.ToLower(strings.TrimSpace(connectorName))]
 }
 
-// routeEnrollments are the identity 0 connector pairs of the protected
-// targets that can carry a route credential.
+// routeEnrollments are the identity 0 connector pairs of the ledger
+// targets that can carry a route credential. A target row counts whether
+// its last apply succeeded or not: a failed apply that recovers is not an
+// enrollment that ended and came back, so it keeps its route credential
+// (only a row that left the ledger and returns bumps the generation; S1
+// REVIEW-code-slice4 P3-2). Credentials are still derived only for OK rows.
 func routeEnrollments(ledger managedHookLedger) map[string]bool {
 	out := map[string]bool{}
 	for _, target := range ledger.Targets {
 		name := strings.ToLower(strings.TrimSpace(target.Connector))
-		if !target.OK || !slices.Contains(config.RouteOnlyCapableConnectors, name) {
+		if !slices.Contains(config.RouteOnlyCapableConnectors, name) {
 			continue
 		}
 		if identity, ok := userScopedLedgerIdentity(target); ok {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // enterpriseHookRouteOnly is the route-only rendering the standalone
@@ -38,6 +39,21 @@ func enterpriseHookRouteOnly(connectorName, account, identity, apiAddr string) *
 	}
 	return gateway.ManagedRouteOnlySetup(cfg, name, apiAddr, token)
 }
+
+// enterpriseHookWindowsRouteOnly is enterpriseHookRouteOnly for the
+// Windows guardian paths (install, verify, reconcile), which Linux and
+// macOS share with the Secure Client profile; the standalone Unix guardian
+// sets RouteOnly in its own worker paths. nil off Windows.
+func enterpriseHookWindowsRouteOnly(connectorName, account, sid, apiAddr string) *connector.RouteOnlySetup {
+	if enterpriseHookRouteOnlyGOOS != "windows" {
+		return nil
+	}
+	return enterpriseHookRouteOnly(connectorName, account, sid, apiAddr)
+}
+
+// enterpriseHookRouteOnlyGOOS selects the Windows guardian paths;
+// replaceable in tests.
+var enterpriseHookRouteOnlyGOOS = runtime.GOOS
 
 // enterpriseHookRouteOnlyLog receives the guardian route-only notes.
 var enterpriseHookRouteOnlyLog io.Writer = os.Stderr
@@ -65,16 +81,26 @@ var enterpriseHookRouteToken = func(dataDir, connectorName, identity string) (st
 
 // enterpriseHookRouteOnlyExempt reports exempt_users naming the account by
 // its name or its uid or SID (the exact forms; a directory-fact match the
-// gateway also makes refuses such a caller on /r/ with 401).
+// gateway also makes refuses such a caller on /r/ with 401). On Windows the
+// name compares without case and without its DOMAIN\ or @domain part, as
+// the gateway windowsExemptListed does, so a bare entry also skips the
+// render of a domain account.
 func enterpriseHookRouteOnlyExempt(entries []string, account, identity string) bool {
 	account = strings.TrimSpace(account)
+	windowsNames := enterpriseHookRouteOnlyGOOS == "windows"
 	for _, entry := range entries {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
 		}
-		if strings.EqualFold(entry, identity) || (account != "" && (entry == account || (runtime.GOOS == "windows" && strings.EqualFold(entry, account)))) {
+		if strings.EqualFold(entry, identity) || (account != "" && entry == account) {
 			return true
+		}
+		if windowsNames && account != "" {
+			bare := useridentity.BareAccountName(account)
+			if strings.EqualFold(entry, account) || (bare != "" && strings.EqualFold(useridentity.BareAccountName(entry), bare)) {
+				return true
+			}
 		}
 	}
 	return false

@@ -223,3 +223,38 @@ func TestModelUsageBuildErrorDetail(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 }
+
+func TestModelUsageIsAppliedToTheModelSpan(t *testing.T) {
+	cost := 0.0042
+	rec := modelusage.Record{
+		Facts: modelusage.CallFacts{
+			RequestID: "r1", APIFamily: modelusage.FamilyMessages, CallRole: modelusage.RoleAgent,
+			SelectedModel: "claude-haiku-4-5", Route: modelusage.RouteFacts{Decision: modelusage.DecisionApplied, RuleID: "cheap"},
+		},
+		Usage: modelusage.Usage{Input: 100, Output: 20, CacheRead: 60, Has: modelusage.HasInput | modelusage.HasOutput | modelusage.HasCacheRead, Source: modelusage.SourceProvider},
+		Cost:  modelusage.Cost{USD: &cost, Basis: modelusage.BasisComputed, TableVersion: "t1"},
+		Total: 250 * time.Millisecond,
+	}
+	var in observability.SpanModelChatInput
+	applyModelUsageToSpanV8(&in, rec)
+	if v, ok := in.GenAIUsageInputTokens.Get(); !ok || v != 100 {
+		t.Fatalf("input tokens %v %v", v, ok)
+	}
+	if v, ok := in.DefenseClawUsageCacheReadTokens.Get(); !ok || v != 60 {
+		t.Fatalf("cache read %v %v", v, ok)
+	}
+	if _, ok := in.DefenseClawUsageReasoningTokens.Get(); ok {
+		t.Fatal("an absent reasoning count must stay absent on the span")
+	}
+	if v, ok := in.DefenseClawCostUsd.Get(); !ok || v != cost {
+		t.Fatalf("cost %v %v", v, ok)
+	}
+	if v, ok := in.DefenseClawCostBasis.Get(); !ok || v != "computed" {
+		t.Fatalf("basis %v %v", v, ok)
+	}
+	var none observability.SpanModelChatInput
+	applyModelUsageToSpanV8(&none, modelusage.Record{})
+	if _, ok := none.DefenseClawCostUsd.Get(); ok {
+		t.Fatal("an empty record must not touch the span")
+	}
+}

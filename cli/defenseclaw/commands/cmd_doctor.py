@@ -7687,12 +7687,15 @@ def _check_windows_gateway_diagnostics(
         status_error = ""
 
     runtime: dict = {}
+    peer_broker = None
     if status_code == 200:
         try:
             payload = json.loads(status_body)
             candidate = payload.get("runtime", {}) if isinstance(payload, dict) else {}
             if isinstance(candidate, dict):
                 runtime = candidate
+            if isinstance(payload, dict):
+                peer_broker = payload.get("route_peer_broker")
         except (json.JSONDecodeError, TypeError):
             runtime = {}
 
@@ -7775,7 +7778,35 @@ def _check_windows_gateway_diagnostics(
         _emit("fail", "Gateway home", "running gateway uses a different canonical data home", r=r)
     else:
         _emit("pass", "Gateway home", "running gateway uses this canonical data home", r=r)
+    _emit_route_peer_broker_row(peer_broker, r)
     return True
+
+
+def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
+    """Managed Windows route-only: the hook guardian peer SID broker.
+
+    The gateway adds ``route_peer_broker`` to its authenticated status only
+    on a managed Windows host with route-only connectors; it asks the broker
+    about the status connection itself. While the broker does not answer the
+    gateway refuses every route-only caller.
+    """
+    if not isinstance(broker, dict):
+        return
+    state = broker.get("state")
+    detail = str(broker.get("detail") or "")[:300]
+    suffix = f" ({detail})" if detail else ""
+    if state == "ok":
+        _emit("pass", "Route-only peer broker", "the hook guardian proves the account of each route-only caller", r=r)
+    elif state == "unavailable":
+        _emit(
+            "fail",
+            "Route-only peer broker",
+            "the hook guardian peer broker does not answer, so the gateway refuses every route-only "
+            "Claude Code and Codex call (401); start or repair the DefenseClaw hook guardian service" + suffix,
+            r=r,
+        )
+    else:
+        _emit("warn", "Route-only peer broker", "the hook guardian peer broker did not verify this connection" + suffix, r=r)
 
 
 def _watchdog_enabled(cfg) -> bool:
@@ -13219,6 +13250,42 @@ def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
+    """Warn about routed models a managed host keys by api_key_env.
+
+    1.0.9 and 1.0.8 managed configs name routed keys by api_key_env; 1.0.10
+    keeps them working (the gateway service environment or its .env), and
+    asks for a protected credential instead (S1 lead item 1).
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return
+    enterprise = getattr(cfg, "enterprise", None)
+    if str(getattr(enterprise, "profile", "") or "").strip().lower() == "secure_client":
+        return
+    routing = getattr(cfg, "routing", None)
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return
+    models = getattr(routing, "models", []) or []
+    legacy = [
+        str(m.get("name") or i)
+        for i, m in enumerate(models)
+        if isinstance(m, dict) and str(m.get("api_key_env") or "").strip() and not str(m.get("credential") or "").strip()
+    ]
+    if not legacy:
+        return
+    names = ", ".join(legacy[:8])
+    _emit(
+        "warn",
+        "Routing model keys",
+        f"{len(legacy)} routed model(s) read their key from the gateway service environment: {names}",
+        remediation=(
+            "store each key with defenseclaw-gateway enterprise secret set --name <name> --from-stdin "
+            "and name it in routing.models[].credential in the admin config"
+        ),
+        r=r,
+    )
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
@@ -16366,6 +16433,7 @@ def doctor(
     _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
     _check_route_only(cfg, r, live_health=sidecar_health)
+    _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
         # Preserve the established Linux/macOS evidence collectors. Windows
