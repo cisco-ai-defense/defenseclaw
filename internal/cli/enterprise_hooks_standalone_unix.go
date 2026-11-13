@@ -945,6 +945,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			HookCredentialIdentity:             identity,
 			ForeignHookGuardBinary:             standaloneForeignHookGuardBinary(target.Connector),
 			ManagedHookBinary:                  standaloneManagedHookBinary(),
+			RouteOnly:                          enterpriseHookRouteOnly(target.Connector, account.User, identity, apiAddr),
 		}
 		if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 			for _, dir := range dirs {
@@ -1527,6 +1528,7 @@ func enterpriseHookInstallTarget(ctx context.Context, opts enterprisehooks.Insta
 	opts.APIToken, opts.OTLPPathToken = token, otlpToken
 	opts.ManagedHookSocket, opts.ManagedServiceUID = hookSocket, serviceUID
 	opts.HookCredentialIdentity = identity
+	opts.RouteOnly = enterpriseHookRouteOnly(opts.ConnectorName, account.User, identity, opts.APIAddr)
 	target := enterpriseHookWorkerTarget{Index: 0, Mode: enterpriseHookWorkerModeInstall, PreviouslyProtected: opts.AllowMissingHookConfigRepair, Options: enterpriseHookWorkerOptionsFrom(opts)}
 	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, map[int]*enterpriseHookWorkerJob{
 		account.UID: {Account: account, Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true, Targets: []enterpriseHookWorkerTarget{target}}},

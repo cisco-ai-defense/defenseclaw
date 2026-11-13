@@ -70,6 +70,19 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
+	// apiBindFoundHeld: the first API bind of Run found the port held
+	// (another process, possibly another account, had it while this
+	// gateway restarted); set by acquireAPIListener, read by Run.
+	apiBindFoundHeld bool
+	// apiPortHolderNoted: a bind conflict of this acquire named the holder
+	// (noteHeldAPIPort); reset by acquireAPIListener.
+	apiPortHolderNoted atomic.Bool
+
+	// routeOnly serves /r/<connector>/ (route-only mode); nil = not mounted.
+	routeOnly atomic.Pointer[routeOnlyServer]
+	// onRouteKeyRotated renders the route-only agent configs again after
+	// rotateRouteKeyAfterHeldPort replaced the OSS route key (set by Sidecar).
+	onRouteKeyRotated func()
 	// modelUsage is the local usage store behind GET /usage (nil until the
 	// sidecar binds it; the store itself reports whether it is on).
 	modelUsage atomic.Pointer[usageQuerierBox]
@@ -1084,6 +1097,14 @@ func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
 	a.connectorRegistry = reg
 }
 
+// SetRouteOnly installs the route-only server for hook connectors.
+func (a *APIServer) SetRouteOnly(s *routeOnlyServer) {
+	if s != nil {
+		s.api = a
+	}
+	a.routeOnly.Store(s)
+}
+
 // SetFleetAPI registers the Edge Connector fleet management API so its
 // routes are mounted when the HTTP server starts.
 func (a *APIServer) SetFleetAPI(api *fleet.API) {
@@ -1294,11 +1315,26 @@ func (a *APIServer) servesOpenClawRoutes() bool {
 // kernel reclaim the port so the restarted gateway can bind it. Non-address-in-use
 // errors and context cancellation return immediately.
 func listenWithRetry(ctx context.Context, addr string, budget time.Duration) (net.Listener, error) {
+	return listenWithRetryNotingHeld(ctx, addr, budget, nil, nil)
+}
+
+// listenWithRetryNotingHeld is listenWithRetry that sets *held when any
+// attempt found the address held (a bind conflict), even if a later one won,
+// and calls onHeld (when set) with the error of every such attempt.
+func listenWithRetryNotingHeld(ctx context.Context, addr string, budget time.Duration, held *bool, onHeld func(error)) (net.Listener, error) {
 	deadline := time.Now().Add(budget)
 	for attempt := 1; ; attempt++ {
 		ln, err := apiListenTCP(ctx, addr)
 		if err == nil {
 			return ln, nil
+		}
+		if isBindConflict(err) {
+			if held != nil {
+				*held = true
+			}
+			if onHeld != nil {
+				onHeld(err)
+			}
 		}
 		if !isBindConflict(err) || time.Now().After(deadline) || ctx.Err() != nil {
 			if isBindConflict(err) {
@@ -1528,6 +1564,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		mux.Handle("/api/v1/fleet/", http.StripPrefix("/api/v1/fleet", a.fleetAPI.Handler()))
 	}
 	a.registerSandboxRoutes(mux)
+	a.registerRoutingRoutes(mux)
 
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)
@@ -1540,6 +1577,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	handler = CorrelationMiddleware(reg)(handler)
+	// Route-only requests leave before Correlation, token auth, CSRF and
+	// the body limit (DESIGN 16.1); everything else is untouched.
+	handler = routeOnlyDispatch(a.routeOnly.Load, handler)
 	// request-ID then scoped W3C extraction so generated hook spans retain the
 	// agent parent without creating an unregistered SDK server span.
 	handler = requestIDMiddleware(handler)
@@ -1556,6 +1596,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 		Handler:     handler,
 		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// Slow-header and idle-connection bounds (no WriteTimeout: model
+		// streams on /r/ and long hook answers stay open) (DESIGN 16.12).
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 		// A standalone hook sends the asset facts of its request in a header
 		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
 		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
@@ -1635,12 +1679,19 @@ func (a *APIServer) Run(ctx context.Context) error {
 		}()
 	}
 
-	serveTCP := func(ln net.Listener) {
+	serveTCP := func(ln net.Listener, portWasHeld bool) {
 		if err := a.recordRuntimeAPIAddress(ln); err != nil {
 			_ = ln.Close()
 			errCh <- fmt.Errorf("record the running gateway listener: %w; check data directory permissions and run defenseclaw-gateway start", err)
 			return
 		}
+		// The port is ours: a managed Windows gateway keeps its route epoch,
+		// or rotates it before the first request when the port was held
+		// during the restart (S1 DESIGN 17.1, 18.4, 19, 20.1).
+		a.startRouteEpoch(portWasHeld)
+		// OSS: a route key another account could have received is replaced
+		// before the first request (S1 DESIGN 17.1).
+		a.rotateRouteKeyAfterHeldPort()
 		go func() {
 			fmt.Fprintf(os.Stderr, "[sidecar-api] listening on %s\n", a.addr)
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -1656,7 +1707,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	ln, lnErr := a.acquireAPIListener(ctx)
 	switch {
 	case lnErr == nil:
-		serveTCP(ln)
+		serveTCP(ln, a.apiBindFoundHeld)
 		a.health.SetAPI(StateRunning, "", apiDetails)
 	case a.apiPortHeld(hookSrv != nil, lnErr) && ctx.Err() == nil:
 		// Another process holds the TCP port. Keep serving the hook socket
@@ -1707,7 +1758,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		case ln := <-tcpBound:
 			tcpBound = nil
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s was released; the API is bound again\n", a.addr)
-			serveTCP(ln)
+			serveTCP(ln, true)
 			a.health.SetAPI(StateRunning, "", apiDetails)
 		case err := <-errCh:
 			a.health.SetAPI(StateError, err.Error(), nil)
@@ -2116,6 +2167,9 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		if cfg.StandaloneEnterprise() {
 			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
 				status["profile_warnings"] = warnings
+			}
+			if broker := routePeerBrokerProbe(r, cfg); broker != nil {
+				status["route_peer_broker"] = broker
 			}
 		}
 	}
