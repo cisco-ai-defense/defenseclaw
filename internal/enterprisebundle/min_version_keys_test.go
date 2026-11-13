@@ -324,3 +324,47 @@ func TestComposeRequiresProductFloorForRoutingAdmin(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeRequiresProductFloorForTokenomics(t *testing.T) {
+	for name, block := range map[string]string{
+		"tokenomics": "observability:\n  tokenomics:\n    enabled: true\n    local_store:\n      enabled: true\n",
+		"pricing":    "observability:\n  pricing:\n    version: \"2026-11-12.1\"\n    models:\n      - provider: openai\n        model: gpt-4.1-mini\n        input_per_mtok: 0.4\n        output_per_mtok: 1.6\n",
+		// An explicit disable still writes the key a 1.0.9 device refuses.
+		"tokenomics off": "observability:\n  tokenomics:\n    enabled: false\n",
+	} {
+		for _, tc := range []struct {
+			min    string
+			refuse bool
+		}{{"", true}, {"1.0.6", true}, {"1.0.9", true}, {"1.0.10", false}, {"1.1.0", false}} {
+			root, b := writeBundle(t, bundleConfig(t)+block)
+			in := enterprisebundle.ComposeInput{
+				Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+				Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+				MinProductVersion: tc.min, ProductVersion: "1.0.10", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+			}
+			_, _, err := enterprisebundle.Compose(context.Background(), in)
+			if tc.refuse {
+				if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(errString(err), "observability.") || !strings.Contains(errString(err), "1.0.10") {
+					t.Errorf("%s, min %q: got %v, want config_invalid naming the observability key and 1.0.10", name, tc.min, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Errorf("%s, min %q: %v", name, tc.min, err)
+			}
+		}
+	}
+}
+
+// A bundle that sets only 1.0.9 observability keys needs no 1.0.10 floor.
+func TestComposeNeedsNoTokenomicsFloorForEarlierObservability(t *testing.T) {
+	root, b := writeBundle(t, bundleConfig(t)+"observability:\n  local:\n    enabled: true\n")
+	in := enterprisebundle.ComposeInput{
+		Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+		Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+		ProductVersion: "1.0.9", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+	}
+	if _, _, err := enterprisebundle.Compose(context.Background(), in); err != nil && strings.Contains(errString(err), "tokenomics") {
+		t.Fatalf("an observability block without tokenomics was refused for the tokenomics floor: %v", err)
+	}
+}

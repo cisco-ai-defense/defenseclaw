@@ -704,7 +704,7 @@ Omissions compile to an explicit effective policy; inspect it with `defenseclaw 
 
 ### Tokenomics and pricing
 
-`observability.tokenomics` records what every model call used and cost. `observability.pricing` is the price table it reads. Both are off or absent by default, and an absent block behaves exactly as before 1.0.10. See [Tokenomics](/docs/observability/tokenomics) for what a usage record holds and how cost is computed.
+`observability.tokenomics` records what every model call used and cost. `observability.pricing` is the price table it reads. Both are off or absent by default, and an absent block behaves exactly as before 1.0.10. See [Tokenomics](/docs/observability/tokenomics) for what a usage record holds and how cost is computed. On a managed host both blocks come from the admin `config.yaml` in the signed policy bundle, and a bundle that sets either one needs `--min-product-version 1.0.10`, even when the value is `enabled: false`.
 
 Prices are never compiled into DefenseClaw. The gateway prices a call only from `observability.pricing` in `config.yaml`. A model with no entry has no cost, not a zero cost. On a managed host both blocks come from the admin `config.yaml` in the signed bundle.
 
