@@ -72,20 +72,40 @@ func strongestState(facts []*semanticpb.EffectFact, set string) string {
 	return best
 }
 
-func TestProjectOutsideHome(t *testing.T) {
+func TestProjectNarrowedMutations(t *testing.T) {
+	// Owner 2026-11-13: the unknown tier fires only when the target could
+	// resolve to a protected file. A mutation whose target cannot (a workspace
+	// path, an extraction into a non-protected dir, a fully dynamic dest) is
+	// clean, not an alert.
 	cases := []struct{ name, command, set, want string }{
-		{"outside-home case 1: tar extract to /etc is outside_home unknown", `tar -xf a.tar -C /etc`, SetOutsideHome, semantic.ProtectedUnknown},
-		{"outside-home case 2: dynamic destination is outside_home unknown", `echo x > "$DEST"`, SetOutsideHome, semantic.ProtectedUnknown},
-		{"outside-home case 3: ordinary home write is clean everywhere", `echo x > ~/work/out.txt`, "", semantic.ProtectedNo},
-		{"outside-home case 4: ordinary home write not outside_home", `echo x > ~/work/out.txt`, SetOutsideHome, semantic.ProtectedNo},
+		{"tar extract into a non-protected dir is clean", `tar -xf a.tar -C /etc`, "", semantic.ProtectedNo},
+		{"fully dynamic write is clean", `echo x > "$DEST"`, "", semantic.ProtectedNo},
+		{"ordinary workspace write is clean", `cp a.conf a.conf.bak`, "", semantic.ProtectedNo},
+		{"ordinary workspace delete glob is clean", `rm -f build/*.o`, "", semantic.ProtectedNo},
+		{"home write is clean", `echo x > ~/work/out.txt`, "", semantic.ProtectedNo},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := projectCommand(t, tc.command, Env{Home: testHome, Resolve: fakeResolver(nil)})
 			if got := strongestState(facts, tc.set); got != tc.want {
-				t.Fatalf("command %q set %q: state = %q, want %q", tc.command, tc.set, got, tc.want)
+				t.Fatalf("command %q: state = %q, want %q", tc.command, got, tc.want)
 			}
 		})
+	}
+}
+
+// A dynamic cwd that leaves the path empty but whose as-written spelling is a
+// relative protected file (../.ssh/authorized_keys) still lands in the unknown
+// tier via the shape match on the spelling (keep attacks).
+func TestProjectRelativeProtectedSpelling(t *testing.T) {
+	res := effects.Result{Effects: []effects.Effect{{
+		Kind: effects.KindWrite, TargetState: effects.TargetStateUnknown, RoleState: effects.RoleStateKnown,
+		Reasons: []effects.Reason{{Code: effects.ReasonDynamicCWD, Scope: effects.ScopeTarget}},
+		Target:  effects.Target{Type: effects.TargetPath, Spelling: "../.ssh/authorized_keys", Flavor: effects.FlavorPOSIX},
+	}}}
+	facts := Project(res, Env{Home: testHome, Resolve: fakeResolver(nil)})
+	if got := strongestState(facts, SetSSHAuthorizedKeys); got != semantic.ProtectedUnknown {
+		t.Fatalf("relative protected spelling: ssh state = %q, want unknown", got)
 	}
 }
 
@@ -128,16 +148,10 @@ func TestProjectProtectedGrades(t *testing.T) {
 			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedKnown,
 		},
 		{
-			name:    "protected-set case 6: dynamic write is outside_home unknown, not a named set",
+			name:    "protected-set case 6: a dynamic write that cannot resolve to a protected file is clean",
 			command: `echo x > "$DEST"`,
 			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
-			set:     SetOutsideHome, want: semantic.ProtectedUnknown,
-		},
-		{
-			name:    "protected-set case 6b: dynamic write does not claim the ssh set",
-			command: `echo x > "$DEST"`,
-			env:     Env{Home: testHome, Resolve: fakeResolver(nil)},
-			set:     SetSSHAuthorizedKeys, want: semantic.ProtectedNo,
+			set:     "", want: semantic.ProtectedNo,
 		},
 		{
 			name:    "protected-set case 6c: dynamic read has no protected signal",

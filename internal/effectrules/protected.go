@@ -40,11 +40,15 @@ func gradeTarget(t effects.Target, state effects.TargetState, set protectedSet, 
 		}
 		return gradeNo
 	}
-	// No lexical path: the spelling is fully dynamic, with no information at
-	// all. It is not claimed as a member of any NAMED set (that would make a
-	// benign dynamic read look like a credential read); a dynamic MUTATION is
-	// still caught away-from-home by the outside_home signal in the projector.
+	// No lexical path: the spelling is fully dynamic. A relative spelling can
+	// still name a protected file (a dynamic cwd plus ../.ssh/authorized_keys),
+	// so check the shape; otherwise it carries no protected signal and is not
+	// claimed as a member of any named set (which would make a benign dynamic
+	// read look like a credential read).
 	if t.Path == "" {
+		if suspiciousShape(t, set, flavor) {
+			return gradeUnknown
+		}
 		return gradeNo
 	}
 	// A concrete lexical name that is a member is authoritative even before
@@ -80,7 +84,7 @@ func gradeTarget(t effects.Target, state effects.TargetState, set protectedSet, 
 		// list, or a link placed there) stays suspect.
 		return gradeUnknown
 	}
-	if suspiciousShape(t.Path, set, flavor) {
+	if suspiciousShape(t, set, flavor) {
 		// A canonical path whose basename/shape is a protected file's but in an
 		// unexpected directory (a CDPATH / reassigned-HOME resolution that came
 		// out canonical but wrong): unknown, not clean (rule c).
@@ -225,7 +229,7 @@ func matchBasis(t effects.Target, grade setGrade, set protectedSet, flavor effec
 		return "dynamic"
 	case underProtectedDir(t.Path, set, flavor):
 		return "dir"
-	case suspiciousShape(t.Path, set, flavor):
+	case suspiciousShape(t, set, flavor):
 		return "wrong_dir"
 	default:
 		return "unresolved"
@@ -252,18 +256,23 @@ func dirExact(p string, set protectedSet, flavor effects.Flavor) bool {
 // or .../.bashrc) but which is not an exact member -- a protected basename in
 // an unexpected directory. memberExact has already been checked by the
 // caller, so any tail hit here is a wrong-directory match.
-func suspiciousShape(p string, set protectedSet, flavor effects.Flavor) bool {
-	if p == "" {
-		return false
-	}
-	key := canon(p, flavor)
-	for _, tail := range set.tails {
-		if tail == "" {
+func suspiciousShape(t effects.Target, set protectedSet, flavor effects.Flavor) bool {
+	// Match the resolved path and the as-written spelling: a dynamic cwd that
+	// left the path empty can still carry a relative spelling whose tail is a
+	// protected file (../.ssh/authorized_keys, ~/.bashrc).
+	for _, cand := range []string{t.Path, t.Spelling} {
+		if cand == "" {
 			continue
 		}
-		// tail begins with a separator; match it at a component boundary.
-		if hasSuffixSep(key, canon(tail, flavor)) {
-			return true
+		key := canon(cand, flavor)
+		for _, tail := range set.tails {
+			if tail == "" {
+				continue
+			}
+			// tail begins with a separator; match at a component boundary.
+			if hasSuffixSep(key, canon(tail, flavor)) {
+				return true
+			}
 		}
 	}
 	return false

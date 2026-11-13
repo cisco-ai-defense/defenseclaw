@@ -127,12 +127,6 @@ func projectTarget(
 			}
 		}
 	}
-	if awayFromHomeUnknown(t, state, kind, home, flavor) {
-		pt.Protected = append(pt.Protected, &semanticpb.ProtectedMatch{
-			Set:   SetOutsideHome,
-			State: string(gradeUnknown),
-		})
-	}
 	return pt
 }
 
@@ -146,25 +140,6 @@ func hasExactFileMatch(pt *semanticpb.EffectTarget, set string) bool {
 		}
 	}
 	return false
-}
-
-// awayFromHomeUnknown reports a mutation whose destination we cannot vouch
-// for: an unresolved target (dynamic, glob or a link the resolver could not
-// follow) that is away from the user home. A fully dynamic target counts
-// (it could land anywhere); a concrete absolute path counts only when it is
-// not under home. A resolved target under home is the agent's own workspace
-// and is not flagged.
-func awayFromHomeUnknown(t effects.Target, state effects.TargetState, kind effects.Kind, home string, flavor effects.Flavor) bool {
-	if !mutatingKind(kind) || state == effects.TargetStateKnown {
-		return false
-	}
-	if t.Path == "" {
-		return true // fully dynamic: could be away from home
-	}
-	if home == "" {
-		return true
-	}
-	return !atOrUnder(canon(t.Path, flavor), canon(home, flavor))
 }
 
 func mutatingKind(kind effects.Kind) bool {
