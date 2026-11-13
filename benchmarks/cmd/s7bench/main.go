@@ -231,6 +231,12 @@ func main() {
 	judgeURL := flag.String("judge-url", "", "judge base URL")
 	dmURL := flag.String("dm-url", "", "decision model System One URL; empty: off")
 	dmModel := flag.String("dm-model", "", "decision model name")
+	dmProtocol := flag.String("dm-protocol", "", "decision_model.protocol: system-one or gemini-decisions (empty: product default)")
+	dmCacheDir := flag.String("dm-cache-dir", "", "bench-only answer cache: a loopback relay in front of -dm-url stores every answer under sha256(request body) in this dir and replays hits")
+	dmCacheOnly := flag.Bool("dm-cache-only", false, "with -dm-cache-dir: replay only, a miss fails the call (offline, no key needed)")
+	dmCacheInflight := flag.Int("dm-cache-inflight", 8, "with -dm-cache-dir: upstream requests in flight per harness process")
+	dmCacheTPM := flag.Int("dm-cache-tpm", 0, "with -dm-cache-dir: input tokens per minute this process may send upstream (0: no pacing)")
+	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
 	judgeParallel := flag.Int("judge-max-parallel", 16, "guardrail.judge.max_parallel; the local proxy stands in for a remote endpoint, which the product does not serialize (a loopback judge URL defaults to 1)")
@@ -261,7 +267,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
 		os.Exit(2)
 	}
-	if *dmURL != "" && !dmLoopback(*dmURL) && !dmKeyPresent() {
+	if *dmURL != "" && !dmLoopback(*dmURL) && !dmKeyPresent() && !(*dmCacheDir != "" && *dmCacheOnly) {
 		fmt.Fprintln(os.Stderr, "[s7bench] FATAL: an external decision model endpoint needs DEFENSECLAW_DECISION_MODEL_KEY in the environment (s7gate --dm-key-file)")
 		os.Exit(2)
 	}
@@ -365,11 +371,29 @@ func main() {
 		cfg.Guardrail.Judge.MaxParallelExplicit = true
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
+	var dmc *dmCache
 	if *dmURL != "" {
-		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: *dmURL, Timeout: *dmTimeout,
+		baseURL := *dmURL
+		if *dmCacheDir != "" {
+			logPath := *dmCacheLog
+			if logPath == "" {
+				logPath = filepath.Join(filepath.Dir(filepath.Clean(*dmCacheDir)), "log", fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405"), os.Getpid()))
+			}
+			u, c, err := startDMCache(*dmURL, (config.DecisionModelConfig{Protocol: *dmProtocol}).EffectiveProtocol(), *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, logPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "[s7bench] FATAL: dm cache:", err)
+				os.Exit(2)
+			}
+			baseURL, dmc = u, c
+			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v inflight=%d tpm=%d\n", *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM)
+		}
+		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
 			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock}
 		if *dmHook {
 			cfg.DecisionModel.HookConnectors = strings.FieldsFunc(*dmHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
+			if len(cfg.DecisionModel.HookConnectors) == 1 && cfg.DecisionModel.HookConnectors[0] == "all" {
+				cfg.DecisionModel.HookConnectors = []string{"*"}
+			}
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
@@ -469,6 +493,9 @@ func main() {
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintf(os.Stderr, "[s7bench] done cases=%d decisions=%d in %.1fs\n", done.Load(), decisions.Load(), time.Since(start).Seconds())
+	if dmc != nil {
+		fmt.Fprintf(os.Stderr, "[s7bench] %s\n", dmc.summary())
+	}
 	casesTotal.Store(done.Load())
 	decisionsTotal.Store(decisions.Load())
 	stats := engine.Stats(context.Background())
