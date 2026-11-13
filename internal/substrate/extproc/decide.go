@@ -474,6 +474,17 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 		// A body sent without a length, larger than the cap.
 		return e.uninspected(v, whyOverCap)
 	}
+	// Inspect what the origin reads (GAP-0044): a gzip body or a UTF-8 BOM
+	// is decoded, and a body that can't be is refused or alerted, never
+	// passed as "no tool call".
+	body, why := decodeBody(body, req.header("content-encoding"), req.ContentType, e.cfg.BodyMaxBytes)
+	switch why {
+	case "":
+	case whyOverCap:
+		return e.uninspected(v, whyOverCap)
+	default:
+		return e.unreadable(v, why)
+	}
 	v.BodyInspected = true
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
@@ -488,6 +499,11 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	}
 	if _, mcp := e.mcpHosts.match(req.Host); !mcp {
 		return v
+	}
+	// The DLP scans ran on the decoded text; a tool call needs JSON the
+	// callout can parse as the server will.
+	if why := jsonRPCReadable(body); why != "" {
+		return e.unreadable(v, why)
 	}
 	calls, err := parseToolCalls(body)
 	if err != nil {
