@@ -154,7 +154,23 @@ func LiteralString(e Expr) (string, bool) {
 		// obfuscated name/path (i`u{65}x, C:\tmp\`[a]) can never resolve to a
 		// trusted literal. (The AST Static flag itself stays set for node-kind
 		// matching against the reference parser.)
-		if v.Static && safeStaticLiteral(v.Raw) && safeStaticLiteral(v.Value) {
+		if !v.Static {
+			return "", false
+		}
+		if v.Bare || v.Kind == StrBare {
+			// a bareword / command name: the strict class (an operator-class
+			// rune here would be a real separator, not literal text).
+			if safeStaticLiteral(v.Raw) && safeStaticLiteral(v.Value) {
+				return v.Value, true
+			}
+			return "", false
+		}
+		// a quoted string literal: its contents are literal (never operators),
+		// and when it is a nested script effects re-parses it and re-gates the
+		// leaves, so the wider class (printable ASCII, but still no backtick,
+		// control rune or non-ASCII) is safe and avoids making ordinary quoted
+		// payloads opaque (review 4 R4-7).
+		if safeQuotedLiteral(v.Raw) && safeQuotedLiteral(v.Value) {
 			return v.Value, true
 		}
 		return "", false
@@ -236,6 +252,20 @@ func safeStaticLiteral(s string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// safeQuotedLiteral is the wider class for a quoted string literal (and for a
+// nested script's text): every rune must be printable ASCII (0x20..0x7e) and
+// not a backtick. It rejects backtick escapes, control runes and non-ASCII
+// (the value-changing / homoglyph vectors) but allows the structural
+// punctuation that is literal inside quotes (; & | ( ) { } [ ] $ * ? etc.).
+func safeQuotedLiteral(s string) bool {
+	for _, r := range s {
+		if r == '`' || r < 0x20 || r > 0x7e {
+			return false
+		}
 	}
 	return true
 }
