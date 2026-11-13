@@ -71,6 +71,12 @@ var effectShadowTimeCap = 50 * time.Millisecond
 // guarded part of effectShadowRun, so a test can make the run panic or stall.
 var effectShadowFaultHook func()
 
+// effectShadowLiveOff stops the hook from starting the async run. Only the
+// s7bench harness sets it: the harness measures the same core through
+// EvaluateDeterministicAction (effectShadowRun) and reads the answer per case,
+// so a second run per hook call would only double the CPU and the audit rows.
+var effectShadowLiveOff bool
+
 var (
 	effectShadowSlots   = make(chan struct{}, effectShadowMaxConcurrent)
 	effectShadowDropped atomic.Int64
@@ -165,7 +171,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 // and hands the answer to record. It returns at once. When every slot is in
 // use the run is dropped and counted, never queued behind the hook.
 func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, tier effectTierMode, record func(EffectShadowResult)) {
-	if record == nil {
+	if record == nil || effectShadowLiveOff {
 		return
 	}
 	select {

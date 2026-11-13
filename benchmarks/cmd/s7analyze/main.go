@@ -125,10 +125,7 @@ func decide(res effects.Result, facts []*semanticpb.EffectFact) (touch, restrict
 				prog = "(" + f.GetOrigin().GetSurface() + ")"
 			}
 			base = redactBase(t.GetPath(), t.GetGlob())
-			rs := make([]string, 0, len(f.GetReasons()))
-			for _, r := range f.GetReasons() {
-				rs = append(rs, r)
-			}
+			rs := append([]string(nil), f.GetReasons()...)
 			reasons = strings.Join(rs, ",")
 		}
 		for _, m := range t.GetProtected() {

@@ -190,10 +190,9 @@ func joinFlavor(flavor effects.Flavor, parts ...string) string {
 			continue
 		}
 		p = strings.TrimRight(p, "/\\")
-		switch {
-		case out == "":
+		if out == "" {
 			out = p
-		default:
+		} else {
 			out += sep + strings.TrimLeft(p, "/\\")
 		}
 	}
