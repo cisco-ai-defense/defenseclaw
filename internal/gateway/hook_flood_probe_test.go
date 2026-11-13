@@ -124,8 +124,11 @@ func TestHookFloodKeepsPendingIdentityPerCall(t *testing.T) {
 		return audit.CorrelationOperationStatus(got)
 	}
 	terminal("flood-session-01", "toolu_00")
-	if got := status("flood-session-01", "toolu_00"); got != audit.CorrelationOperationCompleted {
-		t.Fatalf("exact session terminal left status %s, want completed", got)
+	// The exact session's operation is resolved, which deletes it (S8 R5).
+	var resolvedLeft int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations WHERE session_id=? AND operation_id=?`,
+		"flood-session-01", "toolu_00").Scan(&resolvedLeft); err != nil || resolvedLeft != 0 {
+		t.Fatalf("exact session terminal left %d operations (err %v), want 0", resolvedLeft, err)
 	}
 	if got := status("flood-session-00", "toolu_00"); got != audit.CorrelationOperationActive {
 		t.Fatalf("another session's operation changed to %s", got)

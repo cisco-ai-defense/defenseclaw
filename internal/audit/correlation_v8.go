@@ -1892,16 +1892,7 @@ func (tx *CorrelationTx) PutPendingOperation(
 const (
 	correlationPendingResolveSQL = `DELETE FROM correlation_pending_operations
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
-		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'
-		AND NOT EXISTS (SELECT 1 FROM correlation_pending_operations AS other
-			WHERE other.connector_instance_id=correlation_pending_operations.connector_instance_id
-			AND other.operation_namespace=correlation_pending_operations.operation_namespace
-			AND other.operation_kind=correlation_pending_operations.operation_kind
-			AND other.operation_id=correlation_pending_operations.operation_id
-			AND other.operation_type=correlation_pending_operations.operation_type
-			AND other.status='active'
-			AND (other.scope_kind<>correlation_pending_operations.scope_kind
-				OR other.scope_id<>correlation_pending_operations.scope_id))`
+		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=? AND status='active'`
 	correlationPendingMarkResolvedSQL = `UPDATE correlation_pending_operations SET
 		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
@@ -1914,17 +1905,24 @@ const (
 		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`
 )
 
-// ResolvePendingOperation ends the active operation at locator. It deletes
-// it: every reader of pending operations asks for active ones, and every
-// caller treats an operation already ended (ErrCorrelationStale) and one
-// never started (ErrCorrelationNotFound) alike, so the ended row, with its
-// terminal event and status, was never read again and only took bytes until
-// retention (S8 R5). The one exception keeps the row, marked with its end as
-// before: another scope holds an operation of the same ID (a provider ID
-// reused across sessions). Without the ended row, a second delivery of this
-// end would meet that operation and be refused as a scope conflict instead
-// of being found stale. Ended rows are still removed by retention's
-// ended-operation batch, as are those a 1.0.9 binary left.
+// ResolvePendingOperation ends the active operation at locator.
+//
+// Outside Secure Client it deletes the operation: every reader of pending
+// operations asks for active ones, and every caller treats an operation
+// already ended (ErrCorrelationStale) and one not in the locator's scope
+// (ErrCorrelationNotFound) alike, so the ended row, with its terminal event
+// and status, was never read again and only took bytes until retention (S8
+// R5). Without that row an end can no longer tell "ended already" from
+// "another scope holds an operation of this ID" (a provider ID reused across
+// sessions, in either order), so both are ErrCorrelationNotFound: a second
+// delivery of an end, or a late one, is recorded without a pending join and
+// never fails the hook's correlation, and the other scope's operation stays
+// active. An operation a 1.0.9 binary ended is still found stale. Ended rows
+// are removed by retention's ended-operation batch.
+//
+// A Secure Client store keeps main's state: the operation is marked ended
+// with terminalEventID, status and terminalAt, and an operation of the ID in
+// another scope only is ErrCorrelationConflict.
 func (tx *CorrelationTx) ResolvePendingOperation(
 	ctx context.Context,
 	locator CorrelationPendingLocator,
@@ -1947,23 +1945,16 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 	if terminalAt.IsZero() {
 		terminalAt = time.Now().UTC()
 	}
-	deleted, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
-		tx.repo.store.sqliteBusyObservabilityV8(), correlationPendingResolveSQL,
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type), string(locator.ScopeKind), locator.ScopeID)
-	if err != nil {
-		return fmt.Errorf("audit: resolve correlation pending operation: %w", err)
+	key := []any{string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind),
+		locator.OperationID, string(locator.Type), string(locator.ScopeKind), locator.ScopeID}
+	secureClient := tx.repo.store.secureClientSchema
+	statement, args := correlationPendingResolveSQL, key
+	if secureClient {
+		statement = correlationPendingMarkResolvedSQL
+		args = append([]any{string(terminalEventID), unixNano(terminalAt), string(status), unixNano(terminalAt)}, key...)
 	}
-	if changed, err := deleted.RowsAffected(); err != nil {
-		return fmt.Errorf("audit: inspect resolved correlation pending operation: %w", err)
-	} else if changed == 1 {
-		return nil
-	}
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve_mark",
-		tx.repo.store.sqliteBusyObservabilityV8(), correlationPendingMarkResolvedSQL,
-		string(terminalEventID), unixNano(terminalAt), string(status), unixNano(terminalAt),
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type), string(locator.ScopeKind), locator.ScopeID)
+	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
+		tx.repo.store.sqliteBusyObservabilityV8(), statement, args...)
 	if err != nil {
 		return fmt.Errorf("audit: resolve correlation pending operation: %w", err)
 	}
@@ -1975,19 +1966,18 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		return nil
 	}
 	var exactStatus string
-	err = tx.tx.QueryRowContext(ctx, correlationPendingExactStatusSQL,
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type), string(locator.ScopeKind), locator.ScopeID).Scan(&exactStatus)
+	err = tx.tx.QueryRowContext(ctx, correlationPendingExactStatusSQL, key...).Scan(&exactStatus)
 	if err == nil {
 		return ErrCorrelationStale
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("audit: inspect unresolved exact pending operation: %w", err)
 	}
+	if !secureClient {
+		return ErrCorrelationNotFound
+	}
 	var otherScope int
-	err = tx.tx.QueryRowContext(ctx, correlationPendingOtherScopeSQL,
-		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
-		string(locator.Type)).Scan(&otherScope)
+	err = tx.tx.QueryRowContext(ctx, correlationPendingOtherScopeSQL, key[:5]...).Scan(&otherScope)
 	if err == nil {
 		return fmt.Errorf("audit: pending operation exists in a different scope: %w", ErrCorrelationConflict)
 	}

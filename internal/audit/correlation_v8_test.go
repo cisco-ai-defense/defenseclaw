@@ -883,22 +883,25 @@ func TestCorrelationPendingOperationsAreTypedScopedAndRestartSafe(t *testing.T) 
 				OperationID: "provider-reused-id", Type: CorrelationOperationTool,
 				ScopeKind: CorrelationOperationScopeSession, ScopeID: "session-c",
 			}
+			// No operation in session c: not found, whatever other sessions
+			// hold (S8 R5; a Secure Client store reports the scope conflict,
+			// TestSecureClientResolvePendingOperationKeepsMainsState).
 			if err := tx.ResolvePendingOperation(t.Context(), wrongScope, event.SemanticEventID,
-				CorrelationOperationCompleted, event.ReceivedTime); !errors.Is(err, ErrCorrelationConflict) {
-				t.Fatalf("scope mismatch error=%v", err)
+				CorrelationOperationCompleted, event.ReceivedTime); !errors.Is(err, ErrCorrelationNotFound) {
+				t.Errorf("scope mismatch error=%v, want not found", err)
 			}
 			correct := wrongScope
 			correct.ScopeID = "session-a"
 			if err := tx.ResolvePendingOperation(t.Context(), correct, event.SemanticEventID,
 				CorrelationOperationCompleted, event.ReceivedTime); err != nil {
-				t.Fatal(err)
+				t.Error(err)
 			}
-			// Session b holds an operation of the same ID, so the ended
-			// operation stays marked and the same end again is stale, not a
-			// scope conflict (S8 R5).
+			// Resolved means deleted: the same end again, while session b
+			// holds an operation of the same ID, is not found, not a scope
+			// conflict that would fail the hook's correlation (S8 R5).
 			if err := tx.ResolvePendingOperation(t.Context(), correct, event.SemanticEventID,
-				CorrelationOperationCompleted, event.ReceivedTime); !errors.Is(err, ErrCorrelationStale) {
-				t.Errorf("second resolve error=%v, want stale", err)
+				CorrelationOperationCompleted, event.ReceivedTime); !errors.Is(err, ErrCorrelationNotFound) {
+				t.Errorf("second resolve error=%v, want not found", err)
 			}
 		},
 	})
@@ -908,9 +911,8 @@ func TestCorrelationPendingOperationsAreTypedScopedAndRestartSafe(t *testing.T) 
 		Type: CorrelationOperationTool, ScopeKind: CorrelationOperationScopeSession,
 		ScopeID: "session-a",
 	})
-	if err != nil || len(completed) != 1 || completed[0].Status != CorrelationOperationCompleted ||
-		completed[0].TerminalSemanticEventID != terminal.SemanticEventID {
-		t.Fatalf("completed=%+v err=%v", completed, err)
+	if err != nil || len(completed) != 0 {
+		t.Fatalf("resolved operation kept: %+v err=%v (terminal %s)", completed, err, terminal.SemanticEventID)
 	}
 	stillActive, err := repo.FindUniquePendingOperation(t.Context(), CorrelationPendingQuery{
 		ConnectorInstanceID: instance.ConnectorInstanceID, Namespace: "codex",
