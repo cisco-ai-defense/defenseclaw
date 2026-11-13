@@ -41,8 +41,13 @@ For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the a
 
 - One S3 bucket with server-side encryption, public access blocked and a lifecycle rule. Snapshots under `snapshots/`, assets under `microvm-assets/`.
 - Give the node role a policy limited to that bucket: list, get, put, delete and multipart. With S3 there is no per-actor storage credential, unlike Google Cloud Storage.
-- An ActorTemplate image must be pinned by digest. A tag fails with `must be pinned by digest`. For ECR, push and use the digest.
+- An ActorTemplate image must be pinned by digest. A tag fails with `must be pinned by digest`. For ECR, push and use the digest. `template publish` to ECR needs `--registry-auth-host HOST --registry-user AWS --registry-password-file FILE`: the login goes only to a host named there.
+- An attested template in a private registry is refused for now. The gateway and the controller read the attestation without a login and get HTTP 401, so create fails with `sandbox.template unverified`. Attested templates need a registry both can read without a login until the registry login for them is in a release.
 - Upstream demo images aren't published. Use your own.
+
+## Reaching the admin listener
+
+The chart exposes the admin Service on a ClusterIP only. For laptops, set `admin.expose.type` to `LoadBalancer` or `Ingress`. A `LoadBalancer` needs `admin.expose.loadBalancer.sourceRanges` (the client ranges allowed) and takes `admin.expose.loadBalancer.annotations`, for example the ones that make an internal network load balancer. Set `admin.url` to the https address laptops use (required for `LoadBalancer`; `login --kube` sends a credential only to that address) and `admin.tlsSecretName` to a `kubernetes.io/tls` Secret for that name. Without a Secret the listener presents its in-cluster certificate, which laptops don't trust for other names, so give them `--admin-ca-file`.
 
 ## Egress and credentials
 
