@@ -383,8 +383,8 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'privacy-high-assurance',
     title: 'Privacy high assurance',
     status: 'selectable',
-    ruleCount: 13,
-    coverage: 'Label-bound PII, payment-card, financial, identity, and medical-record signals.',
+    ruleCount: 14,
+    coverage: 'Label-bound PII, bulk email lists, payment-card, financial, identity, and medical-record signals.',
   },
   {
     id: 'cloud-production-protection',

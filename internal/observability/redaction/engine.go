@@ -161,6 +161,35 @@ func (engine *Engine) Reproject(projection Projection, profile Profile) (Project
 	return clone, clone.report.clone(), nil
 }
 
+// ProjectFields redacts a classified object that never became a Record: the
+// copy of a record the v8 schema gate refused, kept by the opt-in
+// rejected-record store (#1442). It applies the same field-class modes,
+// detectors and match budget as Project, so the store holds what a
+// destination with this profile would hold. A leaf without a class fails the
+// whole object; a field the profile cannot transform fails closed as in
+// Project.
+func (engine *Engine) ProjectFields(
+	object map[string]any,
+	classes map[string]observability.FieldClass,
+	profile Profile,
+) (map[string]any, error) {
+	if engine == nil || engine.origin == nil || !validProfile(profile) {
+		return nil, &ProjectionError{Code: ProjectionFailureContext}
+	}
+	if err := preflightFieldMap(object, classes); err != nil {
+		return nil, &ProjectionError{Code: ProjectionFailureClassification}
+	}
+	state := projectionWalkState{
+		engine: engine, profile: profile, classes: classes,
+		report: newReportBuilder(profile), budget: NewRecordMatchBudget(),
+	}
+	projected, err := state.walkObject(object, "")
+	if err != nil {
+		return nil, &ProjectionError{Code: ProjectionFailureSerialization}
+	}
+	return projected, nil
+}
+
 func validProfile(profile Profile) bool {
 	if profile.name == "" || profile.fingerprint != profileFingerprint(profile) {
 		return false

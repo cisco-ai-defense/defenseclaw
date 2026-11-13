@@ -128,6 +128,9 @@ type Runtime struct {
 	shutdownLossesCounted bool
 	carried               carriedShutdownLosses
 	localWriteLosses      *localWriteLossJournal
+	// rejected is the process-stable owner of the opt-in rejected-record
+	// store; its generations are inert while the key is off.
+	rejected *rejectedRecordFactory
 }
 
 // PendingLocalWriteLosses returns the log records whose mandatory SQLite
@@ -164,8 +167,15 @@ type EmitContext struct {
 }
 
 func (snapshot EmitContext) Plan() *config.ObservabilityV8Plan { return snapshot.plan }
-func (snapshot EmitContext) Digest() string                    { return snapshot.digest }
-func (snapshot EmitContext) Generation() uint64                { return snapshot.generation }
+
+// NewEmitContextForTest is an EmitContext bound to plan, for a test emitter
+// that routes a builder's record on a chosen plan. Production emit contexts
+// come only from the runtime.
+func NewEmitContextForTest(plan *config.ObservabilityV8Plan) EmitContext {
+	return EmitContext{plan: plan}
+}
+func (snapshot EmitContext) Digest() string     { return snapshot.digest }
+func (snapshot EmitContext) Generation() uint64 { return snapshot.generation }
 
 // InboundLocalTraceResource returns the sealed local resource prepared from the
 // same provider generation that admitted an imported trace target. Ordinary
@@ -280,9 +290,14 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	if options.TelemetryProviderFactory != nil {
 		factories = append(factories, options.TelemetryProviderFactory)
 	}
+	rejectedFactory := &rejectedRecordFactory{
+		store: options.Store, engine: options.Engine,
+		log: options.RetentionController.log, secureClient: options.SecureClient,
+	}
 	factories = append(factories,
 		factory,
 		dispatchFactory,
+		rejectedFactory,
 	)
 	manager, err := runtimegraph.New(
 		ctx,
@@ -312,7 +327,7 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
 		destinationObserver: destinationObserver, secureClient: options.SecureClient,
-		localWriteLosses: lostWrites,
+		localWriteLosses: lostWrites, rejected: rejectedFactory,
 	}, nil
 }
 

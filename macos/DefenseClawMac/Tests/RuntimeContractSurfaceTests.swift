@@ -27,6 +27,7 @@ enum RuntimeContractSurfaceTests {
         precondition(titles.contains("setup amp"), "Amp setup command is missing")
         precondition(titles.contains("setup kiro"), "Kiro setup command is missing")
         precondition(titles.contains("setup cowork"), "Cowork setup command is missing")
+        precondition(!titles.contains("setup omnigent") && !titles.contains("setup openhands"), "retired connector setup commands remain")
         precondition(titles.contains("setup galileo"), "Galileo setup command is missing")
         // `keys set` secret transport (runtime 1.0.0+ documents --value-stdin).
         let keysSetArgv = ["keys", "set", "OPENAI_API_KEY"]
