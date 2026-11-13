@@ -80,6 +80,8 @@ type Fake struct {
 	calls     map[string]int
 	writes    []PolicyWrite
 	closed    bool
+	// epoch numbers the worker processes actors run under.
+	epoch int64
 }
 
 var _ ateapi.Client = (*Fake)(nil)
@@ -193,18 +195,66 @@ func (f *Fake) SetState(ref *ateapi.ObjectRef, state ateapi.ActorState) error {
 	if !ok {
 		return status.Errorf(codes.NotFound, "actor %s not found", key(ref))
 	}
-	if state == ateapi.ActorStateSuspended && a.Status.State == ateapi.ActorStateRunning {
+	switch {
+	case state == a.Status.State:
+	case state == ateapi.ActorStateSuspended && a.Status.State == ateapi.ActorStateRunning:
 		// A suspend takes a new snapshot generation, as SuspendActor does.
-		a.Status.LastAssignedGeneration++
+		f.suspendLocked(a)
+	case state == ateapi.ActorStateRunning:
+		f.runLocked(a)
+	default:
+		if state == ateapi.ActorStateCrashed || state == ateapi.ActorStateSuspended {
+			a.Status.WorkerAssignment = nil
+		}
+		a.Status.State = state
 	}
-	a.Status.State = state
 	f.bump(a.Metadata)
 	return nil
 }
 
+// fakeNode is the node that holds the fake's node-local snapshots.
+const fakeNode = "fake-node-1"
+
+// suspendLocked takes a new snapshot generation, as an async SuspendActor
+// does on a real cluster (E1, substrate-1 f8): the newest snapshot is
+// last_assigned_generation, its files stay on the node (locality and
+// assigned_node) and its upload is PENDING.
+func (f *Fake) suspendLocked(a *ateapi.Actor) {
+	s := a.Status
+	s.LastAssignedGeneration++
+	s.Snapshots = append(s.Snapshots, &ateapi.Snapshot{Uuid: uuid.NewString(), Generation: s.LastAssignedGeneration,
+		Owner: ateapi.SnapshotOwnerActor, Fidelity: ateapi.SnapshotFidelityMemory, Locality: fakeNode,
+		DurableSnapshot: &ateapi.SnapshotStorage{State: ateapi.SnapshotStoragePending}})
+	s.AssignedNode, s.WorkerAssignment = fakeNode, nil
+	s.State = ateapi.ActorStateSuspended
+}
+
+// runLocked places the actor on a new worker process (worker_epoch), as a
+// resume does. A resume keeps the snapshot files on the node.
+func (f *Fake) runLocked(a *ateapi.Actor) {
+	f.epoch++
+	a.Status.AssignedNode = fakeNode
+	a.Status.WorkerAssignment = &ateapi.WorkerAssignment{WorkerPod: "worker-" + strconv.FormatInt(f.epoch, 10),
+		WorkerPodUid: uuid.NewString(), NodeName: fakeNode, WorkerEpoch: f.epoch}
+	a.Status.State = ateapi.ActorStateRunning
+}
+
+// head is the actor's newest snapshot, nil for none.
+func head(s *ateapi.ActorStatus) *ateapi.Snapshot {
+	var h *ateapi.Snapshot
+	for _, sn := range s.GetSnapshots() {
+		if h == nil || sn.GetGeneration() > h.GetGeneration() {
+			h = sn
+		}
+	}
+	return h
+}
+
 // Revert moves an actor back to SUSPENDED at its durable snapshot, as
-// RevertActor does: no new snapshot generation (the controller tells a
-// revert from a suspend by that).
+// RevertActor does on a real cluster (E1, substrate-1 f8): no new snapshot
+// generation; a newest snapshot not yet uploaded becomes stale and leaves
+// the list, an uploaded one loses its node-local files; assigned_node is
+// cleared. A SUSPENDED actor needs a node-local snapshot to revert.
 func (f *Fake) Revert(ref *ateapi.ObjectRef) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -212,12 +262,43 @@ func (f *Fake) Revert(ref *ateapi.ObjectRef) error {
 	if !ok {
 		return status.Errorf(codes.NotFound, "actor %s not found", key(ref))
 	}
-	switch a.Status.State {
-	case ateapi.ActorStateRunning, ateapi.ActorStateCrashed, ateapi.ActorStateSuspended:
+	s := a.Status
+	h := head(s)
+	switch s.State {
+	case ateapi.ActorStateRunning, ateapi.ActorStateCrashed:
+	case ateapi.ActorStateSuspended:
+		if h.GetLocality() == "" {
+			return status.Errorf(codes.FailedPrecondition, "actor %s is already at its durable snapshot", key(ref))
+		}
 	default:
-		return status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)
+		return status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), s.State)
 	}
-	a.Status.State = ateapi.ActorStateSuspended
+	switch {
+	case h == nil:
+	case h.GetDurableSnapshot().GetState() == ateapi.SnapshotStorageCompleted:
+		h.Locality = ""
+	default:
+		s.Snapshots = slices.DeleteFunc(s.Snapshots, func(x *ateapi.Snapshot) bool { return x == h })
+	}
+	s.State, s.AssignedNode, s.WorkerAssignment = ateapi.ActorStateSuspended, "", nil
+	f.bump(a.Metadata)
+	return nil
+}
+
+// CompleteUpload marks the actor's newest snapshot uploaded, as a sync
+// suspend or a finished async upload leaves it (the files stay on the node).
+func (f *Fake) CompleteUpload(ref *ateapi.ObjectRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	a, ok := f.actors[key(ref)]
+	if !ok {
+		return status.Errorf(codes.NotFound, "actor %s not found", key(ref))
+	}
+	h := head(a.Status)
+	if h == nil {
+		return status.Errorf(codes.FailedPrecondition, "actor %s has no snapshot", key(ref))
+	}
+	h.DurableSnapshot = &ateapi.SnapshotStorage{State: ateapi.SnapshotStorageCompleted}
 	f.bump(a.Metadata)
 	return nil
 }
@@ -370,8 +451,7 @@ func (f *Fake) SuspendActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.A
 	switch a.Status.State {
 	case ateapi.ActorStateSuspended:
 	case ateapi.ActorStateRunning:
-		a.Status.State = ateapi.ActorStateSuspended
-		a.Status.LastAssignedGeneration++
+		f.suspendLocked(a)
 		f.bump(a.Metadata)
 	default:
 		return nil, status.Errorf(codes.FailedPrecondition, "actor %s is %s", key(ref), a.Status.State)
@@ -419,7 +499,7 @@ func (f *Fake) ResumeActor(_ context.Context, ref *ateapi.ObjectRef) (*ateapi.Ac
 	case ateapi.ActorStateRunning:
 		return clone(a), false, nil
 	case ateapi.ActorStateSuspended:
-		a.Status.State = ateapi.ActorStateRunning
+		f.runLocked(a)
 		f.bump(a.Metadata)
 		return clone(a), true, nil
 	}
