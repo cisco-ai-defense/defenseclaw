@@ -179,7 +179,10 @@ func TestSourcedWriterBehindLinksIsBlockedUnderAnyShellLauncher(t *testing.T) {
 		})
 	}
 	if ran == 0 {
-		t.Fatal("no link chain could be made on this host, so no launcher row was judged")
+		// As before the rotation: a host that cannot make any link (a
+		// Windows runner without the symlink privilege) skips every link
+		// count, so the test says it judged nothing there.
+		t.Skip("no link chain could be made on this host, so no launcher row was judged")
 	}
 	for j, launcher := range launchers {
 		for kind := range kinds {
