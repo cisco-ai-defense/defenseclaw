@@ -164,3 +164,33 @@ func TestLauncherAttachesThroughTheRealAdminHandler(t *testing.T) {
 		t.Errorf("a JSON route took a tar body: %d, want 415", code)
 	}
 }
+
+// A gateway with no route to agents (no router address, GAP-0157) answers
+// 503 attach_unavailable: the launcher stops at once and says what is
+// missing, instead of waiting as for a full cluster.
+func TestLauncherSaysWhenTheClusterHasNoAttachRoute(t *testing.T) {
+	f := newSubstrateFixture(t)
+	f.api.substrateState().cfg.Relays = nil
+	srv := httptest.NewTLSServer(f.admin)
+	defer srv.Close()
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := attach.Status(ctx, attach.Options{
+		Target: attach.Target{Atespace: "eng-web", Name: "alice-1"}, Gateway: attach.Gateway{BaseURL: srv.URL, CAFile: ca},
+		Bearer: func(context.Context) (string, error) { return "p-alice", nil }, NoBanner: true, NoAsks: true,
+	})
+	if !errors.Is(err, attach.ErrAttachOff) {
+		t.Fatalf("err = %v, want ErrAttachOff", err)
+	}
+	if !strings.Contains(err.Error(), "attach is not set up") || strings.Contains(err.Error(), "full") {
+		t.Errorf("message %q", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("the launcher waited %s for a refusal that does not change", time.Since(start))
+	}
+}

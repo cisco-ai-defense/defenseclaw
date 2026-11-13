@@ -92,14 +92,20 @@ func NewClient(hc *http.Client, baseURL string, token func(context.Context) (str
 	return &Client{HTTP: hc, BaseURL: strings.TrimRight(baseURL, "/"), Token: token}
 }
 
-// HTTPError is a refusal by the relay.
+// HTTPError is a refusal by the relay, or by the cluster gateway in front of
+// it (Reason set: the gateway answers JSON with a reason).
 type HTTPError struct {
 	Op      string
 	Status  int
 	Message string
+	// Reason is the gateway refusal reason, such as attach_unavailable.
+	Reason string
 }
 
 func (e *HTTPError) Error() string {
+	if e.Reason != "" {
+		return e.gatewayError()
+	}
 	msg := fmt.Sprintf("the actor refused %s (HTTP %d)", e.Op, e.Status)
 	switch {
 	case e.Status == http.StatusUnauthorized:
@@ -109,6 +115,21 @@ func (e *HTTPError) Error() string {
 		msg += ": " + safetext.Line(e.Message)
 	}
 	return msg
+}
+
+// gatewayError says in plain words what the gateway answered, with what to do.
+func (e *HTTPError) gatewayError() string {
+	switch e.Reason {
+	case "attach_unavailable":
+		return "the cluster cannot connect you to agents yet: its gateway has no route to them (attach is not set up). Ask your administrator; defenseclaw substrate doctor shows the check"
+	case "relay_unreachable":
+		return "the cluster could not reach the agent; it may still be starting. Try again in a moment, or check it with: defenseclaw substrate status"
+	case "no_actor", "not_found":
+		return "the cluster has no such agent of yours; list yours with: defenseclaw substrate list"
+	case "client_tag_required", "origin_blocked":
+		return "the cluster refused " + e.Op + " (" + e.Reason + "); this launcher may be too old for the cluster, update DefenseClaw"
+	}
+	return fmt.Sprintf("the cluster refused %s (HTTP %d: %s)", e.Op, e.Status, strings.ReplaceAll(safetext.Line(e.Reason), "_", " "))
 }
 
 // request sends one request and returns the response when its status is
@@ -146,7 +167,16 @@ func (c *Client) request(ctx context.Context, op, method, route string, q url.Va
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	resp.Body.Close()
 	msg := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(b)), "relay: "))
-	return nil, &HTTPError{Op: op, Status: resp.StatusCode, Message: msg}
+	herr := &HTTPError{Op: op, Status: resp.StatusCode, Message: msg}
+	// The gateway in front of the relay answers {"error": ..., "reason": ...}.
+	var g struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(b, &g) == nil && g.Reason != "" {
+		herr.Reason = g.Reason
+	}
+	return nil, herr
 }
 
 // DetectRoot asks the relay for the actor's working directory (the image
