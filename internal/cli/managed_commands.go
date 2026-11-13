@@ -273,6 +273,13 @@ var managedCommands = []managedCommand{
 		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "compact"},
 		Note: "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service.",
 	},
+	{
+		Command: "defenseclaw audit rejected",
+		Windows: managedAdminOnly,
+		Probes:  [][]string{{"audit", "rejected"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"audit", "rejected"},
+		Note: "The records the schema gate refused are part of the managed audit store, which is administrator-only.",
+	},
 }
 
 // launcherOffers reports whether the launcher runs args at all. The bare

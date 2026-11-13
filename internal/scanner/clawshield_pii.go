@@ -43,9 +43,32 @@ type csPIIRule struct {
 	pattern  *regexp.Regexp
 	severity Severity
 	// validator, when set, must accept text[start:end] for a match to count.
-	validator   func(text string, start, end int) bool
-	contextPat  *regexp.Regexp
+	validator  func(text string, start, end int) bool
+	contextPat *regexp.Regexp
+	// once reports at most one finding per file for this rule.
+	once        bool
 	remediation string
+}
+
+var csEmailPattern = regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`)
+
+const (
+	csEmailListMinDistinct = 5
+	csEmailListWindow      = 4096
+)
+
+// csEmailListAt reports csEmailListMinDistinct or more distinct addresses
+// within csEmailListWindow bytes from the address at start.
+func csEmailListAt(text string, start, _ int) bool {
+	end := min(len(text), start+csEmailListWindow)
+	seen := make(map[string]struct{}, csEmailListMinDistinct)
+	for _, loc := range csEmailPattern.FindAllStringIndex(text[start:end], -1) {
+		seen[strings.ToLower(text[start+loc[0]:start+loc[1]])] = struct{}{}
+		if len(seen) >= csEmailListMinDistinct {
+			return true
+		}
+	}
+	return false
 }
 
 var csPIIRules = []csPIIRule{
@@ -62,7 +85,11 @@ var csPIIRules = []csPIIRule{
 	{id: "CS-PII-SSN-SPACE", category: "ssn", pattern: regexp.MustCompile(`\b[0-9]{3}\s[0-9]{2}\s[0-9]{4}\b`), severity: SeverityCritical, remediation: "Remove SSNs; never store or transmit in plaintext"},
 
 	// Email
-	{id: "CS-PII-EMAIL", category: "email", pattern: regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`), severity: SeverityMedium, remediation: "Avoid hardcoding email addresses; use configuration or environment variables"},
+	// Email: one address is LOW (an author or vendor contact); five or more
+	// distinct addresses together is a bulk list (MEDIUM, one finding per
+	// file). Same rule as the guardrail packs (substrate-1:GAP-0149, GAP-0159).
+	{id: "CS-PII-EMAIL", category: "email", pattern: csEmailPattern, severity: SeverityLow, remediation: "Avoid hardcoding email addresses; use configuration or environment variables"},
+	{id: "CS-PII-EMAIL-LIST", category: "email", pattern: csEmailPattern, severity: SeverityMedium, validator: csEmailListAt, once: true, remediation: "Remove lists of email addresses; load contact data from a protected store"},
 
 	// Phone (US — requires separator to avoid false positives on timestamps)
 	{id: "CS-PII-PHONE-1", category: "phone", pattern: regexp.MustCompile(`\b(?:\+1[\s.-]?)?\(?[0-9]{3}\)[\s.-]?[0-9]{3}[\s.-][0-9]{4}\b`), severity: SeverityMedium, remediation: "Remove phone numbers from code and logs"},
@@ -145,6 +172,9 @@ func csPIIScanContent(content []byte, path string) []Finding {
 				Scanner:     "clawshield-pii",
 				Tags:        []string{"pii", rule.category, "clawshield"},
 			})
+			if rule.once {
+				break
+			}
 		}
 	}
 

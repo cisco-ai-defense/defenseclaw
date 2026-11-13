@@ -64,6 +64,13 @@ const (
 	// SQLite subsystem
 	ErrCodeSQLiteBusy ErrorCode = "SQLITE_BUSY"
 
+	// Rejected-record store (observability.local.keep_rejected_records,
+	// #1442): a batch of refused records could not be written to audit.db,
+	// or refused records were dropped (queue full, per-run cap, generation
+	// stopping) instead of kept.
+	ErrCodeRejectedRecordStoreFailed ErrorCode = "REJECTED_RECORD_STORE_FAILED"
+	ErrCodeRejectedRecordDropped     ErrorCode = "REJECTED_RECORD_DROPPED"
+
 	// Any subsystem
 	ErrCodePanicRecovered ErrorCode = "PANIC_RECOVERED"
 
@@ -194,6 +201,8 @@ func AllErrorCodes() []ErrorCode {
 		ErrCodeUpstreamError,
 		ErrCodeStreamTimeout,
 		ErrCodeSQLiteBusy,
+		ErrCodeRejectedRecordStoreFailed,
+		ErrCodeRejectedRecordDropped,
 		ErrCodePanicRecovered,
 		ErrCodeLLMBridgeError,
 		ErrCodeSchemaViolation,

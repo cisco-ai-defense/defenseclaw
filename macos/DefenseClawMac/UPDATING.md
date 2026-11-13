@@ -45,6 +45,8 @@ The updater performs a three-way merge using the commit in [upstream.lock.toml](
 
 Review upstream changes since the old locked SHA before accepting the generated diff.
 
+The command palette table `CommandRegistry.all` in `DefenseClawMac/DataLayer/CommandRegistry.swift` is generated from the TUI's `cli/defenseclaw/tui/registry_data.py`. If the merge conflicts inside that table, take either side and regenerate it with `python3 scripts/sync-macos-command-registry.py`; `make macos-app-test-scripts` runs it with `--check`.
+
 Only sync these maintained paths:
 
 ```text
@@ -52,13 +54,13 @@ DefenseClawMac.xcodeproj/
 DefenseClawMac/
 GatewayAdminHelper/
 Tests/
-script/build_and_run.sh
-script/build_gateway_admin_helper.sh
-script/test_connector_onboarding.sh
+script/
 tools/
 images/
 .gitignore
 ```
+
+`script/` is synced except the runners in `excluded_runners` in `scripts/update-macos-app.sh`. Those runners test the bundled runtime or the standalone DMG wrapper Cisco does not ship, need a desktop session, check a 0.8.10 runtime, or Cisco keeps its own version under the same name: `test_runtime_contract_surfaces.sh` without the DMG-wrapper checks. `Tests/PolicyCatalogBridgeTests.py` needs the DefenseClaw Python package, so it runs in the CLI test suite (`cli/tests/test_macos_policy_catalog_bridge.py`). Every runner in `script/` must be listed in `macos-app-test-scripts` in the Makefile.
 
 Do not import upstream Git metadata, `.codex`, personal signing identities, a duplicate `LICENSE`, or design/planning documents that the monorepo supersedes. Port relevant changes from the standalone DMG script into `scripts/build-macos-app-release.sh`; do not restore its hard-coded team, keychain profile, embedded runtime payload, or download-from-an-already-published-release assumptions.
 

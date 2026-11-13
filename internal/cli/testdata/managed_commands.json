@@ -210,6 +210,15 @@
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "audit compact",
       "note": "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service."
+    },
+    {
+      "command": "defenseclaw audit rejected",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "audit rejected",
+      "note": "The records the schema gate refused are part of the managed audit store, which is administrator-only."
     }
   ]
 }

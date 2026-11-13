@@ -78,6 +78,27 @@ class PolicyCatalogBridgeTests(unittest.TestCase):
             self.assertEqual(action["arguments"][:3], ["policy", "edit", "guardrail"])
             self.assertIn("inactive policy", action["consequence"])
 
+    def test_unscoped_approval_preview_checks_every_affected_connector(self):
+        from dataclasses import replace
+        read = read_policy_catalog(self.cfg)
+        global_row = next(row for row in read.postures if row.scope == "global")
+        connector = next(row for row in read.postures if row.scope == "codex")
+        read.postures = [replace(global_row, hilt="off"),
+                         replace(connector, scope="codex", hilt="MEDIUM+"),
+                         replace(connector, scope="claudecode", hilt="off")]
+        with patch("defenseclaw.tui.policy_panel.read_policy_catalog", return_value=read):
+            data = self.catalog()
+        rows = next(view for view in data["views"] if view["id"] == "posture")["rows"]
+        global_actions = next(row for row in rows if row["cells"][0] == "global")["actions"]
+        off = next(action for action in global_actions if action["arguments"][:3] == ["guardrail", "hilt", "off"])
+        self.assertTrue(off["weaker"], "global off must not hide weakening a connector override")
+        self.assertIn("codex", off["consequence"])
+        self.assertIn("every active connector", off["consequence"])
+        self.assertIn("global default stays", off["consequence"])
+        own = next(row for row in rows if row["cells"][0] == "claudecode")
+        own_off = next(action for action in own["actions"] if action["arguments"][:3] == ["guardrail", "hilt", "off"])
+        self.assertFalse(own_off["weaker"], "a scoped command must not inherit another connector's weakening")
+
     def test_active_policy_changes_live_unified_thresholds(self):
         from dataclasses import replace
         catalog = read_policy_catalog(self.cfg)

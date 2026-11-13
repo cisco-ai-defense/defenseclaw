@@ -1628,6 +1628,13 @@ final class AppState {
             guard config.guardrailEnabled else { return "" }
             var parts: [String] = []
             if let m = config.guardrailMode, !m.isEmpty { parts.append(m) }
+            // Hook checks the rules decided without a judge verdict, then the
+            // judge's state, right after the mode (TUI guardrail_detail).
+            let judge = sub("guardrail")?.details ?? [:]
+            if let fallbacks = judge["judge_fallbacks"].flatMap({ Int($0) }), fallbacks > 0 { parts.append("fallbacks \(fallbacks)") }
+            if let judgeState = judge["judge_state"], ["failing", "degraded"].contains(judgeState) {
+                parts.append("judge \(judgeState): \(judge["judge_failed_calls"] ?? "0")/\(judge["judge_recent_calls"] ?? "0") calls failed")
+            }
             if let p = config.guardrailPort { parts.append("port \(p)") }
             if !config.guardrailRulePack.isEmpty { parts.append(config.guardrailRulePack) }
             return parts.joined(separator: ", ")
@@ -1835,7 +1842,13 @@ final class AppState {
         let gatewayBroken = !gatewayReachable || !["running", "disabled"].contains(gatewayState)
         let gatewayStandalone = gatewayReachable && gatewayState == "disabled"
         let guardrailOff = !config.guardrailEnabled
-        let skillScannerAvailable = ScannerProbe.binaryInstalled("skill-scanner")
+        // 1.0.7 runs the venv copy of skill-scanner even when it is not
+        // linked into PATH, so an unlinked install is not "unavailable". Until
+        // the first pulse resolves the probe paths the answer is unknown, not
+        // "unavailable": a venv-only install must not flash the notice at launch.
+        let skillScannerAvailable = !probeResolved || ScannerProbe.available(
+            "skill-scanner", cliPath: probeCLIPath, shellFound: shellResolvedScanners
+        )
 
         if gatewayBroken && guardrailOff && !skillScannerAvailable {
             notices.append(.init(level: .info, message: "First time? Head to the Setup panel to configure DefenseClaw."))
@@ -1897,10 +1910,12 @@ final class AppState {
         // "Gateway is offline" error.
         if gatewayReachable, let primary = health.primaryConnector, installDetected {
             let live = primary.name.trimmingCharacters(in: .whitespaces)
-            // The drift check compares against claw.mode with the runtime
-            // loader's "openclaw" default (NOT connectorMode's fallback chain).
-            let configured = config.clawMode.trimmingCharacters(in: .whitespaces)
-            if !live.isEmpty, !configured.isEmpty, live != configured {
+            // The drift check compares against the TUI's claw_mode: claw.mode
+            // with the loader's "openclaw" default, blank when the config names
+            // no connector (NOT connectorMode's fallback chain).
+            let configured = config.displayClawMode.trimmingCharacters(in: .whitespaces)
+            if ConnectorOnboarding.hasConnectorDrift(configured: configured, live: live,
+                                                       registered: Array(config.connectorModes.keys)) {
                 notices.append(.init(level: .warn, message: "Connector drift: configured \(friendlyConnectorName(configured)) but gateway is routing for \(friendlyConnectorName(live)) - restart the sidecar after editing claw.mode"))
             }
             if primary.requests == 0, health.uptimeMs > 60_000 {
@@ -2442,7 +2457,7 @@ final class AppState {
     /// Connectors-table fallback roster.
     static let knownConnectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
                                   "cursor", "devin", "copilot",
-                                  "antigravity", "opencode", "amp"]
+                                  "antigravity", "opencode", "amp", "kiro"]
 
     func configuredConnectors() -> [String] {
         let fromHealth = health.connectors.map(\.name)
