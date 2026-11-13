@@ -293,6 +293,8 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 
 	var pending *audit.CorrelationPendingMatch
 	var pendingLocator *audit.CorrelationPendingLocator
+	// settledStart is the start event of the tool call this end settles.
+	var settledStart audit.SemanticEventID
 	if lifecycle == connector.CorrelationLifecycleToolEnd && spec.Allows(connector.CorrelationInferenceUniquePendingTool) {
 		operation, identity, found, findErr := findHookPendingOperation(
 			ctx, repo, instance.ConnectorInstanceID, req, spec,
@@ -309,6 +311,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 				appendHookCorrelationValue(&req, connector.CorrelationTargetTool, req.ToolInvocationID, connector.CorrelationOriginDerived)
 			}
 			restoreHookOperationContext(&req, operation)
+			settledStart = operation.StartSemanticEventID
 		}
 		if identity.valid() {
 			pending = identity.pendingMatch(audit.CorrelationOperationTool, req.ToolInvocationID, req.ToolName, req)
@@ -565,6 +568,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		if resolveErr != nil && !errors.Is(resolveErr, audit.ErrCorrelationStale) &&
 			!errors.Is(resolveErr, audit.ErrCorrelationNotFound) {
 			return ctx, req, resolveErr
+		}
+		// The end settled the call it resolved: the start's replay receipt
+		// has done its job (DeleteSettledReceipts).
+		if resolveErr == nil && settledStart != "" {
+			if err := tx.DeleteSettledReceipts(ctx, settledStart); err != nil {
+				return ctx, req, err
+			}
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleModelEnd && pendingLocator != nil &&

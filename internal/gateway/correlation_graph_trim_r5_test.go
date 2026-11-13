@@ -4,9 +4,12 @@
 package gateway
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -276,4 +279,73 @@ func TestSettledToolCallLeavesNoPendingOperation(t *testing.T) {
 	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_pending_operations`); got != 0 {
 		t.Fatalf("a replayed PostToolUse left %d pending operations, want 0", got)
 	}
+}
+
+// sendClaudeToolHookForTest sends one Claude Code PreToolUse or PostToolUse
+// of "git status" through the full hook handler of fixture.
+func sendClaudeToolHookForTest(t *testing.T, fixture auditFailureHookFixture, cwd, event, toolUseID string) {
+	t.Helper()
+	payload := map[string]any{
+		"hook_event_name": event, "session_id": "session-r5-settle", "cwd": cwd,
+		"tool_name": "Bash", "tool_use_id": toolUseID, "tool_input": map[string]any{"command": "git status"},
+	}
+	if event == "PostToolUse" {
+		payload["tool_response"] = map[string]any{"stdout": "On branch main", "stderr": "", "interrupted": false}
+	}
+	recorder := httptest.NewRecorder()
+	fixture.api.handleAgentHook("claudecode").ServeHTTP(recorder,
+		httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(mustBenchJSON(t, payload))))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s: status %d body %.200s", event, recorder.Code, recorder.Body.String())
+	}
+}
+
+// waitForCorrelationRowsForTest waits up to 5 s for query to count want.
+func waitForCorrelationRowsForTest(t *testing.T, path string, want int, query string, args ...any) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := countCorrelationRowsForTest(t, path, query, args...)
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %d rows, want %d", query, got, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSettledClaudeToolCallReleasesItsReplayReceipt: a PreToolUse sent
+// again before its PostToolUse is still suppressed as a replay; the
+// PostToolUse deletes the start's accepted receipt; a PreToolUse sent again
+// after it is evaluated and recorded again, never dropped (S8 R5).
+func TestSettledClaudeToolCallReleasesItsReplayReceipt(t *testing.T) {
+	fixture := newAuditFailureHookFixture(t, "open")
+	cwd := t.TempDir()
+	const accepted = `SELECT COUNT(*) FROM correlation_receipts WHERE accepted_time_unix_nano IS NOT NULL`
+	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_settle")
+	waitForCorrelationRowsForTest(t, fixture.path, 1, accepted)
+	events := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`)
+
+	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_settle")
+	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`); got != events {
+		t.Fatalf("a replay before the PostToolUse added %d occurrences", got-events)
+	}
+	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_receipts
+		WHERE delivery_count=2`); got != 1 {
+		t.Fatalf("the replay before the PostToolUse was not counted on its receipt (%d)", got)
+	}
+
+	sendClaudeToolHookForTest(t, fixture, cwd, "PostToolUse", "toolu_r5_settle")
+	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_receipts`); got != 0 {
+		t.Fatalf("the settled call kept %d receipts, want 0", got)
+	}
+	events = countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`)
+
+	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_settle")
+	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`); got != events+1 {
+		t.Fatalf("a replay after the PostToolUse recorded %d occurrences, want 1", got-events)
+	}
+	waitForCorrelationRowsForTest(t, fixture.path, 1, accepted)
 }

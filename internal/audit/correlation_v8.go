@@ -1381,6 +1381,39 @@ func (repo *CorrelationRepository) markReceiptCanonicalPersisted(
 	return nil
 }
 
+// correlationReceiptSettleSQL is DeleteSettledReceipts' statement; it seeks
+// idx_correlation_receipts_event.
+const correlationReceiptSettleSQL = `DELETE FROM correlation_receipts
+	WHERE semantic_event_id=? AND accepted_time_unix_nano IS NOT NULL`
+
+// DeleteSettledReceipts deletes the accepted delivery receipts of the start
+// of a tool call that its end has just settled. A receipt suppresses a
+// replay of the start: the agent sending the same PreToolUse again while it
+// waits for the answer. Once the call's PostToolUse came, the agent has
+// moved on, and the receipt only held bytes (and its event) for its week
+// of TTL. A replay that still comes after this is evaluated and recorded
+// again, as one past the TTL is: a duplicate record, never a missed check.
+// A receipt not yet accepted stays, so the start's acceptance mark, which
+// can still be on its way, finds it (finalizeHookCorrelationReceiptBounded);
+// retention removes it when it expires. A Secure Client store keeps
+// main's receipts (S8 R5).
+func (tx *CorrelationTx) DeleteSettledReceipts(ctx context.Context, start SemanticEventID) error {
+	if err := tx.usable(ctx); err != nil {
+		return err
+	}
+	if err := validateUUIDv7("settled start semantic event id", string(start)); err != nil {
+		return err
+	}
+	if tx.repo.store.secureClientSchema {
+		return nil
+	}
+	if _, err := txExecContextObserved(ctx, tx.tx, "correlation_receipt_settle",
+		tx.repo.store.sqliteBusyObservabilityV8(), correlationReceiptSettleSQL, string(start)); err != nil {
+		return fmt.Errorf("audit: delete settled correlation receipts: %w", err)
+	}
+	return nil
+}
+
 // MarkOccurrenceCanonicalPersisted finalizes exactly one pending receipt.
 // Hooks, native OTLP, proxy, and stream coordinators may all use this API only
 // after their canonical local observation/export-eligibility commit succeeds.
