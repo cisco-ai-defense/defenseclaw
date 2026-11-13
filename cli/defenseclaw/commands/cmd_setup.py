@@ -1464,7 +1464,7 @@ def setup_llm(
     "--on-confident-block",
     type=click.Choice(["escalate", "decide"], case_sensitive=False),
     default=None,
-    help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
+    help="Retired: a confident block always goes to the judge. Only escalate is meaningful; decide is accepted for old scripts and acts as escalate.",
 )
 @click.option(
     "--connectors",

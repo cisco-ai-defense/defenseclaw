@@ -35,7 +35,8 @@ func TestDecisionModelDefaultsOff(t *testing.T) {
 		}
 		if d.EffectiveAllowThreshold() != 0.30 || d.EffectiveBlockThreshold() != 0.75 ||
 			d.EffectiveTimeoutSeconds() != 1 || d.EffectiveOnConfidentBlock() != DecisionModelEscalate ||
-			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv || d.EffectiveProtocol() != DecisionModelProtocolSystemOne {
+			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv || d.EffectiveProtocol() != DecisionModelProtocolSystemOne ||
+			d.EffectiveBlockRiskScore() != 1.5 || !d.EffectiveEscalateRuleFlagged() {
 			t.Fatalf("v%d: effective defaults = %+v", version, d)
 		}
 	}
@@ -71,6 +72,8 @@ func TestDecisionModelLoadRefusesBadBlock(t *testing.T) {
 		"bad mode":        "decision_model:\n  on_confident_block: maybe\n",
 		"url credentials": "decision_model:\n  base_url: https://user:pw@dm.example/v1/systemone\n",
 		"bad protocol":    "decision_model:\n  protocol: openai\n",
+		"risk score high": "decision_model:\n  block_risk_score: 2.5\n",
+		"risk score neg":  "decision_model:\n  block_risk_score: -1\n",
 	}
 	for name, section := range cases {
 		if _, err := LoadFromFile(writeDecisionModelConfig(t, 9, section)); err == nil {
@@ -121,6 +124,22 @@ func TestDecisionModelProtocol(t *testing.T) {
 	good := "config_version: 9\ndecision_model:\n  protocol: gemini-decisions\n"
 	if err := ValidateV8SchemaBytes("config.yaml", []byte(good)); err != nil {
 		t.Fatalf("schema refused protocol: %v", err)
+	}
+}
+
+// TestDecisionModelSaferRoutingConfig: block_risk_score and
+// escalate_rule_flagged load and pass the schema; decide still loads.
+func TestDecisionModelSaferRoutingConfig(t *testing.T) {
+	cfg, err := LoadFromFile(writeDecisionModelConfig(t, 9, "decision_model:\n  block_risk_score: 1.2\n  escalate_rule_flagged: false\n  on_confident_block: decide\n"))
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	d := cfg.DecisionModel
+	if d.EffectiveBlockRiskScore() != 1.2 || d.EffectiveEscalateRuleFlagged() || d.EffectiveOnConfidentBlock() != DecisionModelDecide {
+		t.Fatalf("decision_model = %+v", d)
+	}
+	if err := ValidateV8SchemaBytes("config.yaml", []byte("config_version: 9\ndecision_model:\n  block_risk_score: 1.5\n  escalate_rule_flagged: true\n")); err != nil {
+		t.Fatalf("schema refused the routing keys: %v", err)
 	}
 }
 

@@ -740,3 +740,18 @@ def test_system_one_protocol_against_the_decisions_api_fails(gemini, tmp_path):
     dm = DecisionModelConfig(enabled=True, model="gemini-decision-1", base_url=gemini)
     result = dmod.ping(dm, str(tmp_path))
     assert not result.ok and result.detail == "HTTP 400"
+
+
+def test_safer_routing_defaults_round_trip_and_validation(home):
+    dm = DecisionModelConfig()
+    assert dm.effective_block_risk_score() == 1.5 and dm.effective_escalate_rule_flagged() is True
+    assert "block_risk_score must be between 0 and 2" in DecisionModelConfig(block_risk_score=2.5).validation_error()
+    (home / "config.yaml").write_text(
+        "config_version: 9\ndecision_model:\n  block_risk_score: 1.2\n  escalate_rule_flagged: false\n  on_confident_block: decide\n"
+    )
+    cfg = config_module.load()
+    assert cfg.decision_model.effective_block_risk_score() == 1.2
+    assert cfg.decision_model.effective_escalate_rule_flagged() is False
+    rows = dict(dmod.summary_rows(cfg))
+    assert rows["decision_model.on_confident_block"].startswith("decide (retired")
+    assert rows["decision_model.block_risk_score"] == "1.20" and rows["decision_model.escalate_rule_flagged"] == "false"

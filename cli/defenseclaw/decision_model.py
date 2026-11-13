@@ -379,7 +379,12 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.timeout", f"{dm.effective_timeout():g}s"),
         ("decision_model.allow_threshold", f"{dm.effective_allow_threshold():.2f}"),
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
-        ("decision_model.on_confident_block", dm.effective_on_confident_block()),
+        ("decision_model.block_risk_score", f"{dm.effective_block_risk_score():.2f}"),
+        ("decision_model.escalate_rule_flagged", "true" if dm.effective_escalate_rule_flagged() else "false"),
+        (
+            "decision_model.on_confident_block",
+            "escalate" if dm.effective_on_confident_block() == "escalate" else "decide (retired: acts as escalate)",
+        ),
         ("decision_model.hook_connectors", ", ".join(dm.hook_connectors) or "(none: only in front of the LLM judge)"),
     ]
     return rows

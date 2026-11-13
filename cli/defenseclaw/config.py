@@ -1766,7 +1766,9 @@ DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
 DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
 DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
 DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+# "decide" is retired (owner 2026-11-13: a decision-model block is never final); it still loads and acts as escalate.
 DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE = 1.5
 # Wire protocols: System One ({model, state, questions}, Bearer token) and
 # Google's Decisions API ({model, input, questions}, x-goog-api-key).
 DECISION_MODEL_PROTOCOL_SYSTEM_ONE = "system-one"
@@ -1802,6 +1804,10 @@ class DecisionModelConfig:
     allow_threshold: float = 0.0
     block_threshold: float = 0.0
     on_confident_block: str = ""
+    # A confident block also needs the risk score answer (0..2) at or above this; 0 = 1.5.
+    block_risk_score: float = 0.0
+    # A call the rules flagged never gets a confident block (it escalates); None = true.
+    escalate_rule_flagged: bool | None = None
     # Connectors whose hook-lane tool calls the model answers on its own
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
@@ -1826,6 +1832,12 @@ class DecisionModelConfig:
     def effective_block_threshold(self) -> float:
         return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
 
+    def effective_block_risk_score(self) -> float:
+        return self.block_risk_score if self.block_risk_score > 0 else DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE
+
+    def effective_escalate_rule_flagged(self) -> bool:
+        return self.escalate_rule_flagged is not False
+
     def effective_on_confident_block(self) -> str:
         return (self.on_confident_block or "").strip().lower() or "escalate"
 
@@ -1847,6 +1859,8 @@ class DecisionModelConfig:
                 f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
                 f"block_threshold ({self.effective_block_threshold()})"
             )
+        if not 0 <= self.block_risk_score <= 2:
+            return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
             return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
         if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
@@ -1930,6 +1944,11 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         allow_threshold=_num("allow_threshold"),
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        block_risk_score=_num("block_risk_score"),
+        escalate_rule_flagged=(
+            None if raw.get("escalate_rule_flagged") is None
+            else raw.get("escalate_rule_flagged") is True or str(raw.get("escalate_rule_flagged")).strip().lower() == "true"
+        ),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 

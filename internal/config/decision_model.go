@@ -29,11 +29,18 @@ const (
 	DefaultDecisionModelBlockThreshold = 0.75
 	DefaultDecisionModelTimeoutSeconds = 1.0
 	maxDecisionModelTimeoutSeconds     = 30.0
+	// DefaultDecisionModelBlockRiskScore: a confident block also needs the
+	// risk score answer (0 ordinary, 1 dual use, 2 clear serious harm) at or
+	// above this (owner decision 2026-11-13, S7 SYSONE.md R4).
+	DefaultDecisionModelBlockRiskScore = 1.5
+	maxDecisionModelRiskScore          = 2.0
 
 	// DecisionModelEscalate sends a confident block to the LLM judge and
 	// keeps the decision model's finding as a floor the judge can raise.
 	DecisionModelEscalate = "escalate"
-	// DecisionModelDecide lets a confident block stand without the judge.
+	// DecisionModelDecide is retired (owner decision 2026-11-13: a decision
+	// model block is never final). It is still accepted so a config written
+	// by 1.0.9 loads, and it acts as escalate. Accepted until 1.1.
 	DecisionModelDecide = "decide"
 
 	// DecisionModelProtocolSystemOne is the System One wire protocol:
@@ -84,10 +91,17 @@ type DecisionModelConfig struct {
 	// BlockThreshold: a risk at or above it is a confident block
 	// (0 = 0.75).
 	BlockThreshold float64 `mapstructure:"block_threshold" yaml:"block_threshold,omitempty"`
-	// OnConfidentBlock is escalate (default: the judge still runs and the
-	// decision model's finding is a floor) or decide (the finding stands
-	// without the judge).
+	// OnConfidentBlock is escalate: in cascade 3 the judge still runs on a
+	// confident block and the decision model's finding is a floor. The
+	// retired value decide is accepted and acts as escalate.
 	OnConfidentBlock string `mapstructure:"on_confident_block" yaml:"on_confident_block,omitempty"`
+	// BlockRiskScore: a confident block also needs the risk score answer
+	// at or above it (0 = 1.5; range 0..2). Below it the call escalates.
+	BlockRiskScore float64 `mapstructure:"block_risk_score" yaml:"block_risk_score,omitempty"`
+	// EscalateRuleFlagged: a call the rules already flagged never gets a
+	// decision-model confident block; it escalates (the judge, or a
+	// confirmation in cascade 2). Unset = true.
+	EscalateRuleFlagged *bool `mapstructure:"escalate_rule_flagged" yaml:"escalate_rule_flagged,omitempty"`
 	// HookConnectors lists the connectors whose hook tool calls the
 	// decision model answers on its own where the LLM judge does not judge
 	// them (cascade 2: rules, then the decision model). "*" matches every
@@ -145,6 +159,19 @@ func (d DecisionModelConfig) EffectiveBlockThreshold() float64 {
 	return DefaultDecisionModelBlockThreshold
 }
 
+// EffectiveBlockRiskScore returns BlockRiskScore or the default.
+func (d DecisionModelConfig) EffectiveBlockRiskScore() float64 {
+	if d.BlockRiskScore > 0 {
+		return d.BlockRiskScore
+	}
+	return DefaultDecisionModelBlockRiskScore
+}
+
+// EffectiveEscalateRuleFlagged returns EscalateRuleFlagged, true when unset.
+func (d DecisionModelConfig) EffectiveEscalateRuleFlagged() bool {
+	return d.EscalateRuleFlagged == nil || *d.EscalateRuleFlagged
+}
+
 // EffectiveOnConfidentBlock returns OnConfidentBlock or escalate.
 func (d DecisionModelConfig) EffectiveOnConfidentBlock() string {
 	if v := strings.ToLower(strings.TrimSpace(d.OnConfidentBlock)); v != "" {
@@ -181,6 +208,9 @@ func (d DecisionModelConfig) Validate() error {
 	}
 	if allow >= block {
 		return fmt.Errorf("allow_threshold (%v) must be lower than block_threshold (%v)", allow, block)
+	}
+	if math.IsNaN(d.BlockRiskScore) || d.BlockRiskScore < 0 || d.BlockRiskScore > maxDecisionModelRiskScore {
+		return fmt.Errorf("block_risk_score must be between 0 and %v, got %v", maxDecisionModelRiskScore, d.BlockRiskScore)
 	}
 	if math.IsNaN(d.Timeout) || d.Timeout < 0 || d.Timeout > maxDecisionModelTimeoutSeconds {
 		return fmt.Errorf("timeout must be between 0 and %v seconds, got %v", maxDecisionModelTimeoutSeconds, d.Timeout)
