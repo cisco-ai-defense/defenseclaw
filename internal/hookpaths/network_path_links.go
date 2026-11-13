@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
@@ -165,7 +166,8 @@ func walkShareLinks(path string, followLast bool, trust bool) (resolved string, 
 			cur = next
 			continue
 		}
-		target, err := os.Readlink(next)
+		target, err := os.Readlink(fixturefs.Map(next))
+		target = fixturefs.Unmap(target)
 		if err != nil {
 			cur = next
 			continue
