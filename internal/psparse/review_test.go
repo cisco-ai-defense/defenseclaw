@@ -182,13 +182,13 @@ func TestRevNested(t *testing.T) {
 	type tc struct{ name, src, wantKind, wantText string }
 	cases := []tc{
 		{"enc_prefix", "powershell -enc " + b, KindEncodedCommand, payload},
-		{"encodedc_prefix", "powershell -EncodedC " + b, KindEncodedCommand, payload},
+		{"encodedc_prefix", "powershell -EncodedC " + b, KindEncodedCommand, "<dyn>"}, // abbreviation: outside the tested host shapes
 		{"classic_cradle", "powershell -NoP -NonI -W Hidden -Exec Bypass -Enc " + b, KindEncodedCommand, payload},
 		{"exec_bypass_command_pos", "powershell -ExecutionPolicy Bypass -File x.ps1", "", ""},
-		{"slash_enc", "powershell /enc " + b, KindEncodedCommand, payload},
-		{"endash_enc", "powershell –enc " + b, KindEncodedCommand, payload},
+		{"slash_enc", "powershell /enc " + b, KindEncodedCommand, "<dyn>"},  // /enc: outside the tested host shapes
+		{"endash_enc", "powershell –enc " + b, KindEncodedCommand, "<dyn>"}, // en-dash switch: outside the tested host shapes
 		{"command_rest_args", `powershell -Command Remove-Item C:\x`, KindPowerShellCommand, payload},
-		{"command_prefix_com", `powershell -com "Remove-Item C:\x"`, KindPowerShellCommand, payload},
+		{"command_prefix_com", `powershell -com "Remove-Item C:\x"`, KindPowerShellCommand, "<dyn>"}, // -com: outside the tested host shapes
 		{"host_full_path", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -EncodedCommand ` + b, KindEncodedCommand, payload},
 		{"host_call_op_full_path", `& "C:\Program Files\PowerShell\7\pwsh.exe" -c "Remove-Item C:\x"`, KindPowerShellCommand, payload},
 		{"iex_pipeline_literal", `'Remove-Item C:\x' | iex`, KindIEXLiteral, payload},
@@ -198,7 +198,7 @@ func TestRevNested(t *testing.T) {
 		{"start_process_noprofile_enc", "Start-Process powershell -ArgumentList '-NoProfile','-EncodedCommand','" + b + "'", KindStartProcessArgs, "<dyn>"},
 		{"scriptblock_full_type", `[System.Management.Automation.ScriptBlock]::Create('Remove-Item C:\x')`, KindScriptBlockCreate, payload},
 		{"cmd_c_rest", `cmd /c del C:\x`, KindCmdC, `del C:\x`},
-		{"cmd_full_path", `C:\Windows\System32\cmd.exe /c "del C:\x"`, KindCmdC, `del C:\x`},
+		{"cmd_full_path", `C:\Windows\System32\cmd.exe /c "del C:\x"`, KindCmdC, "<dyn>"}, // a quoted payload word is NotStatic (review 9 R9-2)
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

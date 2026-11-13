@@ -15,6 +15,13 @@
 // resolve statically is represented by an ErrorExpr or an UnknownStatement
 // carrying a Reason code, so callers can escalate rather than silently miss.
 //
+// Static is an allowlist over host-call shapes. A powershell / pwsh / cmd
+// invocation yields a Static nested script only when its argv is one of the
+// tested shapes in host_shapes.go (whole-word host options from a fixed list,
+// then one -Command or -EncodedCommand switch, or cmd's /c /k /r); each shape
+// has pwsh 7.7 differential rows. Anything else is NotStatic with a reason
+// code, and a newly found spelling is a corpus row, never a new special case.
+//
 // Cost of failing closed on child-process argv. psparse does not model how a
 // native host (powershell, pwsh, cmd) receives its command line, so a nested
 // script is reported Static only when its resolved text is certain to be what
