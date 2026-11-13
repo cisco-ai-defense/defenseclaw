@@ -28,6 +28,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
@@ -119,7 +120,7 @@ func cloneFolder(raw string) string {
 	var b strings.Builder
 	for _, r := range n {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		case unicode.IsLetter(r), unicode.IsDigit(r), r == '-', r == '_', r == '.':
 			b.WriteRune(r)
 		}
 	}

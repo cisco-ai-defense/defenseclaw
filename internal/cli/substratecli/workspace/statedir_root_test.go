@@ -65,3 +65,38 @@ func TestCopyStateOutsideTheWorkdirAndPullBringsTheFileBack(t *testing.T) {
 		t.Fatalf("pull does not bring the file back: %q", rv.Text)
 	}
 }
+
+// LC-J9e: a project folder with a non-ASCII name keeps it in the actor, and
+// pull reads it back.
+func TestCopyKeepsANonASCIIFolderName(t *testing.T) {
+	if runtimeUnsupported() {
+		t.Skip("copy mode is Linux and macOS only")
+	}
+	o := newOperator(t)
+	proj := filepath.Join(filepath.Dir(o.project), "proj-ñ-日本")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o.project = proj
+	o.initRepo()
+	a := newActor(t)
+	c := a.client()
+	ctx := context.Background()
+	res, err := Start(ctx, StartOptions{Transport: c, Project: proj, Name: "c-utf8", DataDir: o.data, Home: o.home})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if res.RemoteDir != a.workdir+"/proj-ñ-日本" {
+		t.Fatalf("remote dir %q", res.RemoteDir)
+	}
+	if _, err := os.Stat(filepath.Join(res.RemoteDir, "README.md")); err != nil {
+		t.Fatalf("the copy is not at its folder: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(res.RemoteDir, "new.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rv, err := Pull(ctx, PullOptions{Exec: c, DataDir: o.data, Name: "c-utf8"})
+	if err != nil || rv.Empty {
+		t.Fatalf("Pull: %v %q", err, rv.Text)
+	}
+}
