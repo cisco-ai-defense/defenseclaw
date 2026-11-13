@@ -3715,6 +3715,13 @@ var windowsEnterpriseKnownCodes = []string{
 	// A Setup-owned record another account owns or can write: a repair that
 	// carries the payload keeps it aside and writes it again (GAP-0602).
 	"untrusted_record",
+	// The launch images of the new release could not be staged or did not
+	// start (GAP-0751). The rollback text follows the throw, so the code is
+	// not at the start of the message. Exit 1603: every agent hook config
+	// still names the installed image.
+	"hook_image_start_failed",
+	"hook_image_digest_mismatch",
+	"hook_image_stage_failed",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the

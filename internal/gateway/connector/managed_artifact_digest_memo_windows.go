@@ -29,25 +29,30 @@ var (
 )
 
 // managedEnterpriseHookBinaryPath reports whether path is a hook image of
-// this managed enterprise deployment: the hook managedEnterpriseWindowsHookBinary
-// resolves, or another hook image of the same install bin (the transition
-// image the guardian keeps, or a launch folder under bin\hooks, GAP-0751),
-// an administrator-owned file that no untrusted account can write, on a
-// fixed NTFS volume. Per-user files, agent executables and repository
-// builds are never memoized.
+// this managed enterprise deployment: the transition image beside the
+// running gateway, or a launch image under that bin's hooks folder
+// (GAP-0751), an administrator-owned file that no untrusted account can
+// write, on a fixed NTFS volume. It is a path check only: the memo runs
+// inside hashing, so it must not resolve the launch set (which hashes).
+// Per-user files, agent executables and repository builds are never memoized.
 func managedEnterpriseHookBinaryPath(path string) bool {
+	if !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return false
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return false
 	}
-	hook := managedEnterpriseWindowsHookBinary(executable)
-	if hook == "" {
+	executable, err = filepath.Abs(executable)
+	if err != nil {
 		return false
 	}
-	if strings.EqualFold(filepath.Clean(hook), filepath.Clean(path)) {
-		return true
+	transition := filepath.Clean(filepath.Join(filepath.Dir(executable), windowsHookBinaryName))
+	path = filepath.Clean(path)
+	if !strings.EqualFold(transition, path) && !winpath.SameEnterpriseHookImageFamily(path, transition) {
+		return false
 	}
-	return winpath.SameEnterpriseHookImageFamily(filepath.Clean(path), hook) &&
+	return stableNativeWindowsPE(path) &&
 		managed.ValidateExecutableFilePath(path, "enterprise hook executable") == nil
 }
 
