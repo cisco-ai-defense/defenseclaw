@@ -62,7 +62,7 @@ Flags:
   --block-at LEVEL                lowest finding severity that blocks the build: critical, high, medium, low or none (default high)
   --policy-generation N           policy generation recorded in the attestation (default 1)
   --builder-id ID                 builder id recorded in the attestation
-  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or bedrock-mantle)
+  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or openai; default from substrate.llm.providers)
   --model ID                      default model id
   --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of --config)
   --fail-mode MODE                interactive outage mode: open or closed
