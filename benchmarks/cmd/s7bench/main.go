@@ -42,13 +42,33 @@ type event struct {
 	Outcome  string          `json:"outcome"`
 	// Result is the tool output (tool-result surface corpora); sent as the PostToolUse tool_response with -surface tool-result.
 	Result string `json:"result"`
+	// ToolResult is case-v1 events[].tool_result (optional): the tool output of the source trace. The hook surface replays it as the PostToolUse
+	// tool_response (shell tools: stdout), so the response-side rules see the text the agent saw.
+	ToolResult *struct {
+		Text string `json:"text"`
+	} `json:"tool_result"`
+}
+
+// resultText is the tool output an event carries: the tool-result surface field, else the optional case-v1 tool_result.
+func (e event) resultText() string {
+	if e.Result != "" {
+		return e.Result
+	}
+	if e.ToolResult != nil {
+		return e.ToolResult.Text
+	}
+	return ""
 }
 
 type payload struct {
 	event
 	Events []event `json:"events"`
 	Intent string  `json:"user_intent"`
-	Prompt string  `json:"user_prompt"`
+	// EventResult is the tool_result of a single-call case (payload.event_result; a window carries it on events[]).
+	EventResult *struct {
+		Text string `json:"text"`
+	} `json:"event_result"`
+	Prompt string `json:"user_prompt"`
 	// Content is case-v1 payload.content: the user's request (AgentDojo, MCPTox, InjecAgent, agent-trace) or, for prompt corpora, the user turn.
 	Content string `json:"content"`
 }
@@ -460,7 +480,11 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 	ctx := context.Background()
 	events := c.Payload.Events
 	if len(events) == 0 {
-		events = []event{c.Payload.event}
+		one := c.Payload.event
+		if one.ToolResult == nil {
+			one.ToolResult = c.Payload.EventResult
+		}
+		events = []event{one}
 	}
 	cwd := "/home/bench/work"
 	if surface == "prompt" {
@@ -559,10 +583,16 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 			dm, jv := e.Layers(ctx, sid, tool, string(input), wantDM, wantJudge)
 			r.DM, r.Judge = &dm, &jv
 		}
-		if (post && ev.Outcome == "succeeded") || surface == "tool-result" {
+		if (post && (ev.Outcome == "succeeded" || ev.resultText() != "")) || surface == "tool-result" {
 			var resp any = map[string]any{"stdout": "", "stderr": "", "interrupted": false}
 			if surface == "tool-result" {
-				resp = ev.Result
+				resp = ev.resultText()
+			} else if t := ev.resultText(); t != "" {
+				if mapped == "shell" {
+					resp = map[string]any{"stdout": t, "stderr": "", "interrupted": false}
+				} else {
+					resp = t
+				}
 			}
 			pb, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": sid, "cwd": ecwd,
 				"tool_name": tool, "tool_input": input, "tool_response": resp,
