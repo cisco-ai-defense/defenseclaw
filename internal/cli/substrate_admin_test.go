@@ -48,8 +48,6 @@ type subAdminFake struct {
 	srv          *httptest.Server
 	caFile       string
 	actorsStatus int
-	verifyStatus int
-	verifyDoc    fleet.VerifyDocument
 	issuerAnswer string
 	sessionCert  api.SessionCert
 	bundleStatus int
@@ -69,11 +67,7 @@ type subAdminFake struct {
 
 func newSubAdminFake(t *testing.T) *subAdminFake {
 	t.Helper()
-	f := &subAdminFake{attachStatus: 200, actorsStatus: 200, verifyStatus: 200, bundleStatus: 200, statusStatus: 200,
-		verifyDoc: fleet.VerifyDocument{SchemaVersion: 1, Command: "verify", OK: true, Checks: []fleet.Check{
-			{ID: fleet.CheckIssuer, Status: fleet.Pass, Message: "the issuer is unique"},
-			{ID: fleet.CheckCallout, Status: fleet.Pass, Message: "the callout is registered"},
-		}},
+	f := &subAdminFake{attachStatus: 200, actorsStatus: 200, bundleStatus: 200, statusStatus: 200,
 		sessionCert: api.SessionCert{Token: "t", ClientCertificatePEM: "pem", ClientKeyPEM: "key"},
 		statusBody:  `{"bundles":[{"name":"policy.bundle","atespaces":["team-a"]}]}`,
 	}
@@ -89,14 +83,6 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 			return
 		}
 		writeJSONStatus(w, 200, `{"actors":[{"atespace":"a1","name":"n1"}]}`)
-	})
-	mux.HandleFunc("/api/v1/substrate/fleet/verify", func(w http.ResponseWriter, r *http.Request) {
-		if f.verifyStatus != 200 {
-			writeJSONStatus(w, f.verifyStatus, `{"error":"x","reason":"admin_only"}`)
-			return
-		}
-		b, _ := json.Marshal(f.verifyDoc)
-		writeJSONStatus(w, 200, string(b))
 	})
 	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/status", func(w http.ResponseWriter, r *http.Request) {
 		if f.attachStatus != 200 {
@@ -215,17 +201,14 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 		{
 			name:    "green",
 			want:    []string{"ok    context", "ok    token_store", "the test store", "ok    admin_address", "ok    sign_in", "ok    sign_in_server", "ok    attach", "attach through the gateway works"},
-			notWant: []string{"not ready"},
+			notWant: []string{"not ready", "cluster.", "skip  cluster"},
 		},
 		{
-			name:    "green with cluster checks",
+			// The cluster checks read the cluster with kubectl only.
+			name:    "--cluster without the install file says what is missing",
 			args:    []string{"--cluster"},
-			want:    []string{"ok    cluster.issuer_unique", "ok    cluster.callout_registered", "ready for agents"},
-			notWant: []string{"not ready"},
-		},
-		{
-			name: "cluster checks run by themselves",
-			want: []string{"cluster.issuer_unique", "ready for agents"},
+			want:    []string{"skip  cluster", "give --install-file FILE", "ready for agents"},
+			notWant: []string{"cluster.issuer"},
 		},
 		{
 			name:   "warnings do not block",
@@ -291,37 +274,6 @@ func TestSubstrate_Admin_Doctor(t *testing.T) {
 			openErr:  errors.New("no cluster is configured"),
 			wantExit: 1,
 			want:     []string{"fail  context", "no cluster is configured", "skip  admin_address", "context: defenseclaw substrate login --admin-url"},
-		},
-		{
-			name: "cluster check fails",
-			mutate: func(f *subAdminFake, c *auth.Context) {
-				f.verifyDoc.OK = false
-				f.verifyDoc.Checks = append(f.verifyDoc.Checks, fleet.Check{ID: fleet.CheckBucket, Status: fleet.Fail, Message: "the bucket is public"},
-					fleet.Check{ID: fleet.CheckIngressClients, Status: fleet.Warn, Message: "2 other router clients"})
-			},
-			wantExit: 1,
-			want: []string{"fail  cluster.snapshot_bucket", "the bucket is public", "warn  cluster.ingress_clients", "not ready: 1 problem(s)",
-				"cluster.snapshot_bucket: turn on encryption and block public access"},
-		},
-		{
-			name:    "cluster checks are for administrators",
-			mutate:  func(f *subAdminFake, c *auth.Context) { f.verifyStatus = 403 },
-			args:    []string{"--cluster"},
-			want:    []string{"skip  cluster", "cluster checks are for administrators", "ready for agents"},
-			notWant: []string{"cluster.issuer"},
-		},
-		{
-			name:    "cluster without the checks yet",
-			mutate:  func(f *subAdminFake, c *auth.Context) { f.verifyStatus = 501 },
-			args:    []string{"--cluster"},
-			want:    []string{"skip  cluster", "this cluster does not offer them yet", "ready for agents"},
-			notWant: []string{"cluster.issuer"},
-		},
-		{
-			name:    "refused cluster checks are silent without --cluster",
-			mutate:  func(f *subAdminFake, c *auth.Context) { f.verifyStatus = 403 },
-			want:    []string{"ok    sign_in", "ready for agents"},
-			notWant: []string{"administrators", "skip  cluster"},
 		},
 	}
 	for _, tc := range cases {
@@ -609,4 +561,17 @@ func TestSubstrate_Admin_BundleStatus(t *testing.T) {
 			t.Fatalf("err %v (exit %d)", err, commandExitCode(err))
 		}
 	})
+}
+
+// TestDoctorConvertFleetNamesTheFix: a failed or warned cluster check gets
+// its fix line in doctor.
+func TestDoctorConvertFleetNamesTheFix(t *testing.T) {
+	rows := doctorConvertFleet([]fleet.Check{{ID: fleet.CheckBucket, Status: fleet.Fail, Message: "the bucket is public"},
+		{ID: fleet.CheckIngressClients, Status: fleet.Warn, Message: "2 other router clients"},
+		{ID: fleet.CheckIssuer, Status: fleet.Pass, Message: "unique"}})
+	if len(rows) != 3 || rows[0].ID != "cluster.snapshot_bucket" || rows[0].Status != doctorFail ||
+		!strings.Contains(rows[0].Fix, "turn on encryption and block public access") || rows[1].Status != doctorWarn ||
+		rows[1].Fix == "" || rows[2].Status != doctorOK || rows[2].Fix != "" {
+		t.Fatalf("rows = %+v", rows)
+	}
 }

@@ -229,7 +229,6 @@ func TestSubstrateActorListenerServesOnlyItsRoutes(t *testing.T) {
 	admin := []string{"/api/v1/substrate/actors", "/api/v1/substrate/asks", "/api/v1/substrate/decisions",
 		"/api/v1/substrate/policy/explain", "/api/v1/substrate/usage", "/api/v1/substrate/secrets",
 		"/api/v1/substrate/batches", "/api/v1/substrate/session-cert", substrateCalloutPath,
-		"/api/v1/substrate/fleet/status", "/api/v1/substrate/fleet/verify",
 		"/api/v1/substrate/hook/", "/api/v1/substrate/hook/notaconnector", "/api/v1/substrate/notify/claudecode",
 		"/api/v1/substrate/inspect/other", "/llm/", "/", "/api/v1/claude-code/hook", "/api/v1/codex/notify"}
 	for _, path := range append(mainAPIRoutePaths(t), admin...) {

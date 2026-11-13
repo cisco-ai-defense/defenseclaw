@@ -218,7 +218,7 @@ def exec_capture(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
         ["login", "--kube", "--kubeconfig", "/tmp/kc", "--kube-context", "dev"],
         ["doctor", "--json"],
         ["verify", "--install-file", "install.yaml", "--json"],
-        ["status", "--cluster", "--api", "--json"],
+        ["status", "--cluster", "--install-file", "install.yaml", "--json"],
         ["setup", "--remove", "--dry-run"],
         ["bundle", "apply", "bundle.dcbundle", "--atespaces", "eng,ops"],
         ["bundle", "status"],

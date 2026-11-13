@@ -102,10 +102,9 @@ over TLS, you are signed in and the cluster accepts it, the sign-in server match
 you have what it asks for, and your sign-in can be kept safely. Nothing needs to be installed here, and nothing in the
 cluster changes.
 
-Administrators get the cluster's own checks too (version, issuer, snapshot bucket, access policies, egress callout, router
-clients, routes, API access). They run by themselves when the cluster offers them; --cluster shows why when it does not.
-With --install-file (the SubstrateInstall file you gave ate-setup) they are read with kubectl instead, which needs no
-sign-in to the gateway.
+Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, egress callout, router
+clients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: they are read with
+kubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without it says what is missing.
 
 The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each failed check says how to fix
 it, and the exit code is 1.`,
@@ -168,18 +167,15 @@ func runSubstrateDoctor(cmd *cobra.Command, out *substrateOutput, com *substrate
 		}
 	} else {
 		name = s.Name
-		doctorCluster(ctx, d, s, clusterFlag)
+		doctorCluster(ctx, d, s)
 	}
 
-	if kf.installFile != "" {
-		// Read with kubectl: these replace the gateway's own copy of the checks.
-		kept := d.checks[:0]
-		for _, c := range d.checks {
-			if !strings.HasPrefix(c.ID, "cluster") {
-				kept = append(kept, c)
-			}
-		}
-		d.checks = append(kept, doctorKubeChecks(ctx, kf)...)
+	switch {
+	case kf.installFile != "":
+		d.checks = append(d.checks, doctorKubeChecks(ctx, kf)...)
+	case clusterFlag:
+		d.add("cluster", doctorSkip, "the cluster checks read the cluster with kubectl: give --install-file FILE (the "+
+			"SubstrateInstall file you gave ate-setup)", "")
 	}
 
 	rep := substrateDoctorReport{Context: name, Checks: d.checks}
@@ -237,7 +233,7 @@ func printSubstrateDoctor(w io.Writer, rep substrateDoctorReport) {
 }
 
 // doctorCluster runs the checks that need the cluster and the context.
-func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession, clusterFlag bool) {
+func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession) {
 	c := s.Ctx
 
 	// 3. The admin address answers over TLS.
@@ -289,13 +285,6 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession, clust
 
 	// 6. Attach through the gateway.
 	d.checks = append(d.checks, doctorAttach(ctx, s, mine, signedIn))
-
-	// 7. The cluster's own checks.
-	if adminOK && signedIn {
-		d.checks = append(d.checks, doctorFleetChecks(ctx, s.Client, clusterFlag)...)
-	} else if clusterFlag {
-		d.add("cluster", doctorSkip, "not checked: sign in and reach the admin address first", "")
-	}
 }
 
 func doctorSignInServer(ctx context.Context, c auth.Context) substrateCheck {
@@ -385,28 +374,6 @@ func doctorAttach(ctx context.Context, s *substrateSession, mine []api.Actor, si
 		return substrateCheck{ID: id, Status: doctorFail, Summary: "attach through the gateway failed: " + doctorFirstLine(err), Fix: "check the admin address and the cluster's gateway, then run doctor again"}
 	}
 	return substrateCheck{ID: id, Status: doctorOK, Summary: "attach through the gateway works (reached " + a.Atespace + "/" + a.Name + ")"}
-}
-
-// doctorFleetChecks reads the administrator verify document. explicit says
-// the person asked for it with --cluster: then a refusal is shown as a skip.
-func doctorFleetChecks(ctx context.Context, cl *api.Client, explicit bool) []substrateCheck {
-	doc, err := cl.FleetVerifyDocument(ctx)
-	if err != nil {
-		if !explicit {
-			return nil
-		}
-		if e, ok := api.AsError(err); ok {
-			switch {
-			case e.Status == http.StatusForbidden:
-				return []substrateCheck{{ID: "cluster", Status: doctorSkip, Summary: "cluster checks are for administrators"}}
-			case e.NotImplemented() || e.Status == http.StatusNotFound:
-				return []substrateCheck{{ID: "cluster", Status: doctorSkip, Summary: "this cluster does not offer them yet"}}
-			}
-			return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: substrateAPIMessage(e), Fix: "run doctor again in a minute, or ask your administrator"}}
-		}
-		return []substrateCheck{{ID: "cluster", Status: doctorFail, Summary: "the cluster checks could not be read: " + doctorFirstLine(err), Fix: "run doctor again in a minute"}}
-	}
-	return doctorConvertFleet(doc.Checks)
 }
 
 // doctorConvertFleet turns A8's fleet checks into doctor rows.

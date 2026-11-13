@@ -278,13 +278,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "and nothing in the\n"
             "cluster changes.\n"
             "\n"
-            "Administrators get the cluster's own checks too (version, issuer, snapshot bucket, access policies, "
+            "Administrators add the cluster's own checks (version, issuer, snapshot bucket, access policies, "
             "egress callout, router\n"
-            "clients, routes, API access). They run by themselves when the cluster offers them; --cluster shows "
-            "why when it does not.\n"
-            "With --install-file (the SubstrateInstall file you gave ate-setup) they are read with kubectl "
-            "instead, which needs no\n"
-            "sign-in to the gateway.\n"
+            "clients, routes, API access) with --install-file, the SubstrateInstall file you gave ate-setup: "
+            "they are read with\n"
+            "kubectl and your own cloud credentials, the same as defenseclaw substrate verify. --cluster without "
+            "it says what is missing.\n"
             "\n"
             'The last line is "ready for agents" when no check failed. Otherwise it is "not ready" and each '
             "failed check says how to fix\n"
@@ -799,20 +798,11 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and "
             "callout,\n"
             "the agents in the cluster and the setup checks. It reads the cluster with kubectl (give "
-            "--install-file), or\n"
-            "with --api from the DefenseClaw gateway. Exit 75 means the cluster could not be reached; there is "
-            "no document."
+            "--install-file).\n"
+            "Exit 75 means the cluster could not be reached; there is no document."
         ),
         args=(_Arg("name", required=False),),
         flags=(
-            _Flag(
-                "api",
-                "bool",
-                (
-                    "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with "
-                    "kubectl"
-                ),
-            ),
             _Flag("batch", "string", "show every agent of this batch", metavar="ID"),
             _Flag("cluster", "bool", "administrators: show the health and setup checks of the whole cluster"),
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
@@ -1111,26 +1101,20 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "private and\n"
             "encrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody "
             "else\n"
-            "can reach agents through the router. By default it reads the cluster with kubectl; --api reads the "
-            "same\n"
-            "checks from the DefenseClaw gateway.\n"
+            "can reach agents through the router. It reads the cluster with kubectl and the snapshot bucket with "
+            "your\n"
+            "own aws or gcloud CLI.\n"
             "\n"
             "Exit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the "
             "cluster\n"
             "could not be reached; there is no document, retry later. With --json it prints the verify document."
         ),
-        example="defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --api --json",
+        example=(
+            "defenseclaw substrate verify --install-file install.yaml\n"
+            "defenseclaw substrate verify --install-file install.yaml --json"
+        ),
         flags=(
-            _Flag(
-                "api",
-                "bool",
-                (
-                    "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with "
-                    "kubectl"
-                ),
-            ),
             _Flag("config", "string", "DefenseClaw config.yaml (default: read from the cluster)"),
-            _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),
             _Flag(
                 "install-file",
                 "string",
