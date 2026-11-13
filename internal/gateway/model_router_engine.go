@@ -79,9 +79,13 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	}
 	var eng *engine.Engine
 	classifier := r.classifierFor(cfg)
-	if cfg != nil && cfg.Routing.Enabled && cfg.Routing.EffectiveClassifier() == config.RoutingClassifierVLLMSR && classifier == nil {
+	if cfg != nil && cfg.Routing.Enabled && cfg.Routing.EffectiveClassifier() == config.RoutingClassifierVLLMSR && classifier == nil &&
+		!cfg.StandaloneEnterprise() {
 		// The vLLM Semantic Router did not start: routing stays off, as in
-		// 1.0.9 (health already reports the failure).
+		// 1.0.9 (health already reports the failure). A managed device keeps
+		// the engine with no classifier, so every request takes the
+		// classifier-failure path (the original request) while the admin
+		// floor and Gate still judge it (S11 REVIEW-slice3 F12).
 	} else {
 		var err error
 		eng, err = engine.New(cfg, engine.Options{

@@ -171,3 +171,27 @@ func mustRouterEngine(t *testing.T, r *engineRouter) *engine.Engine {
 	}
 	return eng
 }
+
+// S11 REVIEW-slice3 S1-5: a managed device keeps the engine when the vLLM
+// Semantic Router is down, so the admin floor still applies.
+func TestEngineRouterManagedKeepsEngineWithoutVLLM(t *testing.T) {
+	cfg := engineRouterTestConfig()
+	cfg.Routing.Classifier = ""
+	cfg.Routing.Decisions = cfg.Routing.Decisions[:1]
+	if newEngineRouter(cfg, nil, "").RouterActive(context.Background()) {
+		t.Fatal("OSS without the container keeps 1.0.9 routing off")
+	}
+	cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	cfg.Enterprise.Profile = "standalone"
+	if !cfg.StandaloneEnterprise() {
+		t.Skip("fixture is not standalone on this build")
+	}
+	r := newEngineRouter(cfg, nil, "")
+	if !r.RouterActive(context.Background()) {
+		t.Fatal("managed must keep the engine")
+	}
+	out := r.RouteDetailed(context.Background(), &ModelRouterInput{Model: "m", Messages: []ChatMessage{{Role: "user", Content: "refactor"}}})
+	if out.Result != SemanticRouteFallback {
+		t.Fatalf("no classifier = %+v, want the original request", out)
+	}
+}
