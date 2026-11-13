@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sockdiag"
 )
 
 // procSelfNet holds this network namespace's socket tables. /proc/net is
@@ -422,6 +424,14 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	if err != nil || serverTable != clientTable {
 		return -1, errors.New("connected gateway endpoints have different address families")
 	}
+	if procNet == procSelfNet {
+		if sock, ok := exactAcceptedSocket(client, server); ok {
+			if sock.Inode == 0 {
+				return -1, errConnectedSocketNotAccepted
+			}
+			return int(sock.UID), nil
+		}
+	}
 	uid, err := readConnectedTCPUID(procNet, serverTable, clientKey, serverKey)
 	if err == nil || !errors.Is(err, errConnectedSocketNotFound) || serverTable != "tcp" {
 		return uid, err
@@ -430,6 +440,23 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	// using IPv4-mapped addresses, even though this client dialed tcp4.
 	return readConnectedTCPUID(procNet, "tcp6", mappedTCP6Endpoint(client), mappedTCP6Endpoint(server))
 }
+
+// exactAcceptedSocket is the kernel's exact lookup of the server end of
+// client->server in this network namespace (sockdiag): the socket whose local
+// end is server and whose remote end is client, ESTABLISHED, with the owner
+// and inode its procfs row prints. ok is false for any answer that is not
+// that socket (none, a listener or TIME_WAIT entry, netlink unavailable or
+// refused, a malformed reply): the caller then reads the procfs tables as
+// before, so the proof never rests on a doubtful netlink answer. It replaces
+// a read of every TCP socket of the host on each call.
+func exactAcceptedSocket(client, server *net.TCPAddr) (sockdiag.Socket, bool) {
+	sock, err := exactEstablishedTCP(server, client)
+	return sock, err == nil
+}
+
+// exactEstablishedTCP is sockdiag.EstablishedTCP; a test replaces it to make
+// the netlink lookup fail.
+var exactEstablishedTCP = sockdiag.EstablishedTCP
 
 func readConnectedTCPUID(procNet, table, clientKey, serverKey string) (int, error) {
 	file, err := os.Open(filepath.Join(procNet, table))

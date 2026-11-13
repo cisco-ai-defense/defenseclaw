@@ -34,9 +34,18 @@ func perUserConnectedPeerPIDWithin(ctx context.Context, client, server *net.TCPA
 	if err != nil || clientTable != table {
 		return 0, false
 	}
-	inode := procSocketInode(table, "01", serverKey, clientKey)
-	if inode == "" && table == "tcp" {
-		inode = procSocketInode("tcp6", "01", mappedTCP6Endpoint(server), mappedTCP6Endpoint(client))
+	inode := ""
+	if sock, ok := exactAcceptedSocket(client, server); ok {
+		// The one ESTABLISHED socket of this tuple: the procfs rows hold no
+		// other, so the tables are not read.
+		if int(sock.UID) == os.Geteuid() && sock.Inode != 0 {
+			inode = strconv.FormatUint(uint64(sock.Inode), 10)
+		}
+	} else {
+		inode = procSocketInode(table, "01", serverKey, clientKey)
+		if inode == "" && table == "tcp" {
+			inode = procSocketInode("tcp6", "01", mappedTCP6Endpoint(server), mappedTCP6Endpoint(client))
+		}
 	}
 	// More than one holder of the accepted socket (a dup in another
 	// process) is no known peer (review r3 finding 2).
