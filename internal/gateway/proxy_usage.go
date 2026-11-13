@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"sync"
@@ -20,13 +21,17 @@ import (
 
 const usageBodyCap = 10 << 20
 
-// usageRecorder is the process usage engine (S10), or the no-op recorder.
+// usageRecorder is the process usage engine (S10) while tokenomics is on,
+// else the no-op recorder (no wrapper, no response copy: off is free).
 func usageRecorder() modelusage.Recorder {
-	if e := processModelUsage.Load(); e != nil {
+	if e := processModelUsage.Load(); e != nil && e.Enabled() {
 		return e
 	}
 	return modelusage.Noop
 }
+
+// usageOn reports whether usage records are kept at all.
+func usageOn() bool { return usageRecorder() != modelusage.Noop }
 
 // usageAPIFamily maps a request path to the usage API family.
 func usageAPIFamily(path string) modelusage.APIFamily {
@@ -145,6 +150,9 @@ func (u *usageResponseWriter) end(err error) {
 // beginUsage starts the usage record of one forwarded call and returns the
 // writer to answer through and the function that ends the record.
 func beginUsage(ctx context.Context, w http.ResponseWriter, f modelusage.CallFacts) (http.ResponseWriter, func(error)) {
+	if !usageOn() {
+		return w, func(error) {}
+	}
 	if f.StartedAt.IsZero() {
 		f.StartedAt = time.Now()
 	}
@@ -156,11 +164,45 @@ func beginUsage(ctx context.Context, w http.ResponseWriter, f modelusage.CallFac
 	return uw, uw.end
 }
 
-// streamingPath reports a Bedrock streaming path.
+// streamingPath reports a path that streams whatever the body says:
+// Bedrock converse-stream / invoke-with-response-stream and Gemini
+// streamGenerateContent.
 func streamingPath(path string) bool {
+	if strings.Contains(path, ":streamGenerateContent") {
+		return true
+	}
 	switch bedrockActionFromPath(path) {
 	case "converse-stream", "invoke-with-response-stream":
 		return true
 	}
 	return false
+}
+
+// usageStreaming decides whether a request streams: the path, the body
+// stream flag, and Ollama, which streams unless stream is false.
+func usageStreaming(path string, body []byte, bodyStream bool) bool {
+	if streamingPath(path) || bodyStream {
+		return true
+	}
+	p := strings.TrimRight(path, "/")
+	if strings.HasSuffix(p, "/api/generate") || strings.HasSuffix(p, "/api/chat") {
+		var probe struct {
+			Stream *bool `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		return probe.Stream == nil || *probe.Stream
+	}
+	return false
+}
+
+// usageDecision is the record decision of a forwarded call: applied only
+// when the call went to the routed backend.
+func usageDecision(rf modelusage.RouteFacts, routed bool) modelusage.RouteFacts {
+	if rf.Decision == modelusage.DecisionApplied && !routed {
+		rf.Decision = modelusage.DecisionFallback
+		if rf.FallbackReason == "" || rf.FallbackReason == SemanticRouteFailureNone {
+			rf.FallbackReason = SemanticRouteFailureFiltered
+		}
+	}
+	return rf
 }

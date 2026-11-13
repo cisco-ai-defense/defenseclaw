@@ -215,12 +215,17 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	original.usage = routeOnlyUsageFacts(connector, native, family, body)
 	attempt, routedOutcome, originalAllowed := s.decide(r, connector, native, family, upstream, inClass, body)
-	original.usage.Route = usageRouteFacts(routedOutcome, true)
-	if attempt == nil && original.usage.Route.Decision == modelusage.DecisionFallback && routedOutcome.Result == "" {
+	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
+	if routedOutcome.Result == "" {
 		original.usage.Route.Decision = modelusage.DecisionPassthrough
+	}
+	if routedOutcome.Route != nil {
+		// Unrouted calls are charged too (S11 budgets).
+		original.usage.ChargeKeys = routedOutcome.Route.ChargeKeys
 	}
 	if attempt != nil {
 		attempt.usage = original.usage
+		attempt.usage.Route = usageRouteFacts(routedOutcome, true)
 		attempt.usage.SelectedProvider = attempt.provider
 		if routedOutcome.Decision != nil {
 			attempt.usage.SelectedModel = routedOutcome.Decision.Model
@@ -664,6 +669,7 @@ func retryableRouteStatus(status int, crossProvider bool) bool {
 // twice; 500, 502 and 504 are never retried.
 func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Request, routed routeOnlyAttempt, original *routeOnlyAttempt, body []byte) {
 	started := time.Now()
+	routed.usage.RequestID = RequestIDFromContext(r.Context())
 	call := usageRecorder().Begin(r.Context(), routed.usage)
 	resp, wrote, err := s.send(r, routed, body, nil)
 	if resp != nil {
@@ -691,7 +697,13 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
-	call := usageRecorder().Begin(r.Context(), a.usage)
+	var call modelusage.Call = modelusage.Noop.Begin(r.Context(), a.usage)
+	if a.usage.Listener != "" {
+		// Calls without facts (GET models, bodies streamed unbuffered) are
+		// not model calls with usage the gateway can attribute.
+		a.usage.RequestID = RequestIDFromContext(r.Context())
+		call = usageRecorder().Begin(r.Context(), a.usage)
+	}
 	resp, _, err := s.send(r, a, body, rest)
 	if err != nil {
 		call.End(err)
@@ -811,7 +823,7 @@ func routeOnlyUsageFacts(connector, native, family string, body []byte) modelusa
 	provider := routeOnlyProvider(family)
 	return modelusage.CallFacts{
 		Listener: engine.ListenerRouteOnly, Connector: connector, APIFamily: fam, CallRole: modelusage.RoleAgent,
-		Streaming:         probe.Stream || streamingPath(native),
+		Streaming:         usageStreaming(native, body, probe.Stream),
 		RequestedProvider: provider, RequestedModel: model, SelectedProvider: provider, SelectedModel: model,
 		Subject: routeOwner(), SubjectKind: "route_credential", IdentityVerified: true,
 	}

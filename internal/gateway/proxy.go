@@ -1680,10 +1680,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		var finishUsage func(error)
 		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
 			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: usageAPIFamily(r.URL.Path),
-			CallRole: modelusage.RoleAgent, Streaming: partial.Stream || streamingPath(r.URL.Path),
+			CallRole: modelusage.RoleAgent, Streaming: usageStreaming(r.URL.Path, body, partial.Stream),
 			RequestedProvider: requestedProvider, RequestedModel: requestedModel,
 			SelectedProvider: selectedProvider, SelectedModel: selectedModel,
-			Route: usageRouteFacts(routeOutcome, p.routerActive(r.Context())), ChargeKeys: chargeKeys,
+			Route: usageDecision(usageRouteFacts(routeOutcome, p.routerActive(r.Context())), routed), ChargeKeys: chargeKeys,
 		})
 		defer finishUsage(nil)
 	}
