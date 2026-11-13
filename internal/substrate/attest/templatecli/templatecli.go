@@ -486,6 +486,9 @@ func printScan(w io.Writer, s attest.ScanSummary, h attest.HookChecks) {
 		}
 	}
 	printAccepted(w, s.Accepted)
+	for _, n := range s.Notes {
+		fmt.Fprintf(w, "  NOTE %s\n", n)
+	}
 	fmt.Fprintf(w, "hook files root-owned: %v; phone-home switches off: %v\n", h.RootOwned, h.PhoneHomeOff)
 	for _, f := range h.Files {
 		if !f.OK {

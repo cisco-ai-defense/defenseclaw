@@ -92,7 +92,7 @@ func TestClaudeCodeOverlay(t *testing.T) {
 	if err := json.Unmarshal(file(ov, ConfigPath), &cfg); err != nil || cfg.Validate() != nil {
 		t.Fatalf("kit config %v", err)
 	}
-	if cfg.HookContracts["claudecode"] != "claudecode-hooks-v1" || cfg.Relay.Connector != "claudecode" ||
+	if cfg.HookContracts["claudecode"] != "claudecode-hooks-v2" || cfg.Relay.Connector != "claudecode" ||
 		cfg.Relay.Workdir != "/work" || cfg.Relay.Interactive[0] != "/usr/local/bin/claude" || cfg.Relay.Headless[2] != "{prompt}" {
 		t.Fatalf("kit config %+v", cfg)
 	}

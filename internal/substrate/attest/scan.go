@@ -228,12 +228,16 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	// Plugins: a directory with a plugin manifest. Their skills and MCP
 	// servers are found by the other passes; the plugin is judged by its
 	// hook commands.
+	var claudePlugins []string
 	for _, manifest := range []string{"/.claude-plugin/plugin.json", "/.codex-plugin/plugin.json"} {
 		for _, p := range fsys.Paths() {
 			if !strings.HasSuffix(p, manifest) {
 				continue
 			}
 			dir := strings.TrimSuffix(p, manifest)
+			if manifest == "/.claude-plugin/plugin.json" {
+				claudePlugins = append(claudePlugins, dir)
+			}
 			sum.Plugins++
 			note(ConfigScannerName, "1")
 			res := &scanner.ScanResult{Scanner: ConfigScannerName, Target: dir, Timestamp: o.now()}
@@ -342,11 +346,14 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	if err != nil {
 		return nil, err
 	}
-	user, _, _, _, err := cfg.Container()
+	user, workdir, _, _, err := cfg.Container()
 	if err != nil {
 		return nil, err
 	}
 	rep.User = user
+	if note := userScopePluginNote(claudePlugins, workdir); note != "" {
+		sum.Notes = append(sum.Notes, note)
+	}
 	rep.Hooks = checkHooks(fsys, env, user, o)
 	sum.Verdict = worse(sum.Verdict, VerdictClean)
 	for _, a := range o.AcceptFindings {
@@ -361,6 +368,49 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		sum.Accepted = append(sum.Accepted, a)
 	}
 	return rep, nil
+}
+
+// userPluginRoot is the folder of a Claude Code plugin that was installed at
+// user scope: the personal config folder of the image user.
+const userPluginRoot = "/.claude/plugins/"
+
+// userScopePluginNote is the note for a template that carries Claude Code
+// plugins in a personal folder (~/.claude/plugins). An actor starts Claude
+// Code with CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1, which keeps the
+// workload's own files from starting code outside the hook (a
+// processWrapper launcher, plugin folders), so Claude loads no user-scope
+// plugin there. The plugins are still scanned and admitted. A plugin in the
+// project folder (workdir) or under /etc (managed config) is not user scope.
+// It is a note and not a finding: it never changes a verdict (GAP-0279).
+// Empty when no plugin is in a personal folder.
+func userScopePluginNote(dirs []string, workdir string) string {
+	var names []string
+	for _, dir := range dirs {
+		if workdir != "" && (dir == workdir || strings.HasPrefix(dir, strings.TrimRight(workdir, "/")+"/")) {
+			continue
+		}
+		if strings.HasPrefix(dir, "/etc/") || !strings.Contains(dir+"/", userPluginRoot) {
+			continue
+		}
+		names = append(names, path.Base(dir))
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	return "user-scope plugins do not load in Substrate actors, because personal config is restricted " +
+		"(CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1); use project or managed scope instead. " +
+		"Plugins in a personal folder: " + strings.Join(dedupe(names), ", ")
+}
+
+func dedupe(sorted []string) []string {
+	out := sorted[:0]
+	for i, s := range sorted {
+		if i == 0 || s != sorted[i-1] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // RuleLinkUnresolvable is the finding for a SKILL.md or MCP config that is a

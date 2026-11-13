@@ -41,7 +41,7 @@
         "status": "artifacts",
         "tamperTier": "managed",
         "hookConfig": "/etc/claude-code/managed-settings.d/50-defenseclaw.json",
-        "harnessPin": "2.1.156",
+        "harnessPin": "2.1.311",
         "verified": "verified"
       },
       "substrate": { "wave": 1, "headless": "claude -p", "status": "live" },
