@@ -19,11 +19,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -208,6 +211,9 @@ func main() {
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
 	connectorFlag := flag.String("connector", "claudecode", "claudecode (legacy: every case as a Claude Code call) | auto (each case to the hook handler of its strata.provider connector, with that connector's payload shape) | a connector name")
+	scratch := flag.String("scratch-dir", "", "parent directory of the run's scratch dir (default: the system temp dir)")
+	scratchCapMB := flag.Int("scratch-cap-mb", 2048, "fail the run loudly when its scratch dir (audit.db + WAL) passes this many MiB")
+	walGuard := flag.Bool("wal-guard", true, "run the product audit WAL guard pass every 500 ms (false reproduces the unbounded WAL growth; measurement only, keep -scratch-cap-mb low)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	flag.Parse()
@@ -215,11 +221,63 @@ func main() {
 		fmt.Fprintln(os.Stderr, "need -corpus -out -policy-dir")
 		os.Exit(2)
 	}
-	dataDir, err := os.MkdirTemp("", "s7bench-")
+	dataDir, err := os.MkdirTemp(*scratch, "s7bench-")
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dataDir)
+	var engine *gateway.S7Engine
+	var scratchPeak atomic.Int64
+	var decisionsTotal, casesTotal atomic.Int64
+	startRun := time.Now()
+	// The scratch dir is removed on every way out: normal end, panic, SIGINT/SIGTERM/SIGHUP, boot failure, cap exceeded.
+	cleaned := atomic.Bool{}
+	cleanup := func() {
+		if cleaned.Swap(true) {
+			return
+		}
+		if engine != nil {
+			engine.Close()
+		}
+		_ = os.RemoveAll(dataDir)
+	}
+	defer cleanup()
+	defer func() {
+		if r := recover(); r != nil {
+			cleanup()
+			panic(r)
+		}
+	}()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		sig := <-sigs
+		fmt.Fprintf(os.Stderr, "[s7bench] %v: removing scratch dir %s and exiting\n", sig, dataDir)
+		cleanup()
+		os.Exit(130)
+	}()
+	dirSize := func() int64 {
+		var n int64
+		_ = filepath.Walk(dataDir, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && info.Mode().IsRegular() {
+				n += info.Size()
+			}
+			return nil
+		})
+		return n
+	}
+	go func() {
+		for range time.Tick(time.Second) {
+			n := dirSize()
+			if n > scratchPeak.Load() {
+				scratchPeak.Store(n)
+			}
+			if n > int64(*scratchCapMB)<<20 {
+				fmt.Fprintf(os.Stderr, "[s7bench] FATAL: scratch dir %s is %d MiB, over the %d MiB cap (audit.db + WAL growth); removing it and exiting 3\n", dataDir, n>>20, *scratchCapMB)
+				cleanup()
+				os.Exit(3)
+			}
+		}
+	}()
 
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ConfigVersionV9
@@ -263,10 +321,16 @@ func main() {
 			cfg.DecisionModel.HookConnectors = []string{"claudecode"}
 		}
 	}
-	engine, err := gateway.S7NewEngineMulti(cfg, "claudecode", extra)
+	var err2 error
+	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)
+	err = err2
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "boot:", err)
+		cleanup()
 		os.Exit(1)
+	}
+	if !*walGuard {
+		engine.Close()
 	}
 	hasJudge, hasDM := engine.HasJudge()
 	fmt.Fprintf(os.Stderr, "[s7bench] pack=%s mode=%s strategy=%s judge=%v dm=%v layers=%q\n", *pack, *mode, *strategy, hasJudge, hasDM, *layers)
@@ -347,6 +411,15 @@ func main() {
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintf(os.Stderr, "[s7bench] done cases=%d decisions=%d in %.1fs\n", done.Load(), decisions.Load(), time.Since(start).Seconds())
+	casesTotal.Store(done.Load())
+	decisionsTotal.Store(decisions.Load())
+	stats := engine.Stats(context.Background())
+	wall := time.Since(startRun).Seconds()
+	rs := map[string]any{"cases": casesTotal.Load(), "decisions": decisionsTotal.Load(), "wall_s": wall, "decisions_per_s": float64(decisionsTotal.Load()) / wall,
+		"scratch_peak_bytes": scratchPeak.Load(), "scratch_cap_mb": *scratchCapMB, "load1_at_end": loadAvg(), "audit": stats, "pack": *pack, "connector_flag": *connectorFlag, "gomaxprocs": runtime.GOMAXPROCS(0)}
+	if b, err := json.MarshalIndent(rs, "", " "); err == nil {
+		_ = os.WriteFile(*out+".runstats.json", b, 0o644)
+	}
 }
 
 type hookResp struct {
@@ -463,6 +536,18 @@ func firstNonEmpty(v ...string) string {
 		if s != "" {
 			return s
 		}
+	}
+	return ""
+}
+
+func loadAvg() string {
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(b))
+	if len(f) > 0 {
+		return f[0]
 	}
 	return ""
 }
