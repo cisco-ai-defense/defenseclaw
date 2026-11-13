@@ -228,6 +228,7 @@ type substrateState struct {
 	// alerted is alertOnce's memory (substrate_skills.go).
 	alertMu sync.Mutex
 	alerted map[string]bool
+	pending map[string]int
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler

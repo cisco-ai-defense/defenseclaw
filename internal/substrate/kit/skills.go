@@ -4,15 +4,14 @@
 package kit
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
 // Skills that arrive mid-session (substrate-1 GAP-0039). Claude Code loads
@@ -45,13 +44,19 @@ const (
 	// RoleSkillFile is the attached-file role of a skill folder's file.
 	RoleSkillFile = "skill_file"
 
-	maxSkillFoldersPerCall = 4
-	maxSkillFilesPerFolder = 64
-	maxSkillFoldersPerRoot = 64
-	maxSkillDepth          = 3
-	quarantineDirName      = ".defenseclaw-quarantine"
-	skillCacheName         = "skill-receipts.json"
-	maxSkillCacheEntries   = 512
+	// maxSkillFoldersPerCall matches the folders the gateway scans per post.
+	maxSkillFoldersPerCall = 8
+	// maxSkillFoldersListed bounds the folders one post lists (envelope
+	// size); past it a root is one Over entry.
+	maxSkillFoldersListed = 512
+	// maxSkillReadBytes bounds what one pass reads to digest folders.
+	maxSkillReadBytes = 32 << 20
+	// Plugin skill roots: how deep below ~/.claude/plugins, how many.
+	maxPluginDepth       = 6
+	maxPluginRoots       = 64
+	quarantineDirName    = ".defenseclaw-quarantine"
+	skillCacheName       = "skill-receipts.json"
+	maxSkillCacheEntries = 1024
 )
 
 // skillScanEvents are the events on which the kit looks at the roots:
@@ -63,139 +68,234 @@ var skillScanEvents = map[string]bool{
 	"PostToolUse": true, "postToolUse": true, "SessionStart": true, "sessionStart": true, "Stop": true, "stop": true,
 }
 
-// skillRoots are the directories whose subfolders an agent loads as skills,
-// in the home and the project.
+// skillRoots are the directories whose subfolders an agent loads as skills:
+// in the home and the project, and every skills folder of an installed
+// Claude Code plugin (~/.claude/plugins/.../skills, also the project's).
 func skillRoots(home, cwd string) []string {
 	var roots []string
 	seen := map[string]bool{}
+	add := func(r string) {
+		if !seen[r] {
+			seen[r] = true
+			roots = append(roots, r)
+		}
+	}
 	for _, base := range []string{home, cwd} {
 		if base == "" || !filepath.IsAbs(base) {
 			continue
 		}
 		for _, rel := range []string{".claude/skills", ".codex/skills", ".agents/skills"} {
-			r := filepath.Join(base, rel)
-			if !seen[r] {
-				seen[r] = true
-				roots = append(roots, r)
-			}
+			add(filepath.Join(base, rel))
+		}
+		for _, r := range pluginSkillRoots(filepath.Join(base, ".claude", "plugins")) {
+			add(r)
 		}
 	}
 	return roots
 }
 
-// skillFolder is one folder under a skill root.
-type skillFolder struct {
-	Path  string
-	FP    string
-	Files []string
-	// Over is set when the folder has more files than the kit attaches.
-	Over bool
+// pluginSkillRoots finds the folders named skills below a plugins folder
+// (cache/<marketplace>/<plugin>/<version>/skills and the like), at most
+// maxPluginDepth deep and maxPluginRoots of them. Links are not followed
+// while searching (a plugin folder that links elsewhere is a folder the
+// agent loads from too, but a link loop must not hang the hook).
+func pluginSkillRoots(plugins string) []string {
+	var out []string
+	var walk func(d string, depth int)
+	walk = func(d string, depth int) {
+		if depth > maxPluginDepth || len(out) >= maxPluginRoots {
+			return
+		}
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			p := filepath.Join(d, e.Name())
+			if e.Name() == "skills" {
+				if len(out) < maxPluginRoots {
+					out = append(out, p)
+				}
+				continue
+			}
+			walk(p, depth+1)
+		}
+	}
+	walk(plugins, 0)
+	return out
 }
 
-// scanSkillFolders fingerprints every folder under roots from lstat data.
+// skillFolder is one folder under a skill root.
+type skillFolder struct {
+	Path string
+	// FP is the content digest (skilldigest.Digest) of the files the kit
+	// attaches; "" when the folder is over a cap (Over).
+	FP    string
+	Files []string
+	// Over is set when the folder has no digest: more files, deeper files or
+	// bigger files than the kit attaches, a file it cannot read, or the pass's
+	// read budget ran out. The gateway's fail mode decides for such a folder:
+	// managed and strict refuse it, OSS default tiers alert.
+	Over bool
+	// Root marks the entry that stands for the folders of a root past
+	// maxSkillFoldersListed (Path is the root).
+	Root bool
+}
+
+// scanSkillFolders lists every folder under roots (a symlinked folder is
+// followed, as the agent follows it) and digests its content. Past
+// maxSkillFoldersListed folders the rest of each root is one Over entry for
+// the root, so a folder is never left out silently.
 func scanSkillFolders(roots []string) []skillFolder {
 	var out []skillFolder
+	budget := int64(maxSkillReadBytes)
+	listed := 0
 	for _, root := range roots {
 		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
 		}
-		n := 0
 		for _, e := range entries {
-			if n >= maxSkillFoldersPerRoot {
+			p := filepath.Join(root, e.Name())
+			info, err := os.Stat(p)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if listed >= maxSkillFoldersListed {
+				out = append(out, skillFolder{Path: root, Over: true, Root: true})
 				break
 			}
-			p := filepath.Join(root, e.Name())
-			info, err := os.Lstat(p)
-			if err != nil || !info.IsDir() {
-				// A symlinked skill folder is followed by the agent; the
-				// kit attaches what it points at.
-				if err == nil && info.Mode()&os.ModeSymlink != 0 {
-					if t, err := os.Stat(p); err == nil && t.IsDir() {
-						info = t
-					} else {
-						continue
-					}
-				} else {
-					continue
-				}
-			}
-			n++
-			out = append(out, fingerprintFolder(p))
+			listed++
+			var f skillFolder
+			f, budget = digestFolder(p, budget)
+			out = append(out, f)
 		}
 	}
 	return out
 }
 
-func fingerprintFolder(dir string) skillFolder {
+// digestFolder reads the folder's regular files (as the agent reads them:
+// links followed) at most skilldigest.MaxDepth folders deep and digests their
+// content. budget bounds the bytes one pass reads.
+func digestFolder(dir string, budget int64) (skillFolder, int64) {
 	f := skillFolder{Path: dir}
-	h := sha256.New()
+	files := map[string][]byte{}
+	over := false
 	var walk func(d string, depth int)
 	walk = func(d string, depth int) {
+		if over {
+			return
+		}
 		entries, err := os.ReadDir(d)
 		if err != nil {
-			fmt.Fprintf(h, "E %s\n", d)
+			over = true
 			return
 		}
 		for _, e := range entries {
+			if over {
+				return
+			}
 			p := filepath.Join(d, e.Name())
 			info, err := os.Stat(p)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(h, "%s %o %d %d\n", strings.TrimPrefix(p, dir), uint32(info.Mode()), info.Size(), info.ModTime().UnixNano())
 			switch {
-			case info.IsDir() && depth < maxSkillDepth:
+			case err != nil:
+				continue // a dangling link has no content for the agent either
+			case info.IsDir():
+				if depth >= skilldigest.MaxDepth {
+					over = true // deeper than the kit attaches
+					return
+				}
 				walk(p, depth+1)
 			case info.Mode().IsRegular():
-				if len(f.Files) < maxSkillFilesPerFolder {
-					f.Files = append(f.Files, p)
-				} else {
-					f.Over = true
+				if len(files) >= skilldigest.MaxFiles || info.Size() > skilldigest.MaxFileBytes || info.Size() > budget {
+					over = true
+					return
 				}
+				b, err := os.ReadFile(p)
+				if err != nil || int64(len(b)) > skilldigest.MaxFileBytes {
+					over = true
+					return
+				}
+				budget -= int64(len(b))
+				rel, _ := filepath.Rel(dir, p)
+				files[filepath.ToSlash(rel)] = b
+				f.Files = append(f.Files, p)
 			}
 		}
 	}
 	walk(dir, 0)
 	sort.Strings(f.Files)
-	f.FP = hex.EncodeToString(h.Sum(nil))[:32]
-	return f
+	if !over {
+		f.FP = skilldigest.Digest(files)
+	}
+	if f.FP == "" {
+		f.Over, f.Files = true, nil
+	}
+	return f, budget
 }
 
-// collectSkills lists every folder's fingerprint in f and attaches the files
-// of the folders the cache has no receipt for (new, changed, or never
-// scanned) within budget, at most maxSkillFoldersPerCall. A folder with a
-// receipt for its current fingerprint is listed with the receipt instead of
-// its files. It returns every listed folder and its fingerprint.
-func collectSkills(f *Facts, roots []string, known map[string]skillCacheEntry, budget int64) (map[string]string, int64) {
+// collectSkills lists every folder in f: with its receipt when the cache has
+// one for its current content, else attached when it fits, else pending
+// (f.Truncated). Pending folders are attached least recently attached first,
+// so folders that change on every call cannot keep another one pending
+// forever. It returns every listed folder and its fingerprint, and the
+// folders it attached.
+func collectSkills(f *Facts, roots []string, known map[string]skillCacheEntry, budget int64) (map[string]string, []string) {
 	listed := map[string]string{}
-	attachedFolders := 0
+	var pending []skillFolder
 	for _, folder := range scanSkillFolders(roots) {
-		fp := SkillFingerprint{Path: folder.Path, FP: folder.FP}
+		fp := SkillFingerprint{Path: folder.Path, FP: folder.FP, Over: folder.Over}
 		listed[folder.Path] = folder.FP
-		if k, ok := known[folder.Path]; ok && k.FP == folder.FP && k.Receipt != "" {
-			fp.Receipt = k.Receipt
-		} else if attachedFolders >= maxSkillFoldersPerCall || budget <= 0 {
-			f.Truncated = true
-		} else {
-			for _, file := range folder.Files {
-				budget = attach(f, RoleSkillFile, file, "", budget)
+		if !folder.Over {
+			if k, ok := known[folder.Path]; ok && k.FP == folder.FP && k.Receipt != "" {
+				fp.Receipt = k.Receipt
+			} else {
+				pending = append(pending, folder)
 			}
-			if folder.Over {
-				f.Truncated = true
-			}
-			fp.Attached = true
-			attachedFolders++
 		}
 		f.Skills = append(f.Skills, fp)
 	}
-	return listed, budget
+	sort.SliceStable(pending, func(i, j int) bool {
+		a, b := known[pending[i].Path].LastAttached, known[pending[j].Path].LastAttached
+		if a != b {
+			return a < b
+		}
+		return pending[i].Path < pending[j].Path
+	})
+	var attached []string
+	for _, folder := range pending {
+		size := int64(0)
+		for _, file := range folder.Files {
+			if info, err := os.Stat(file); err == nil {
+				size += info.Size()
+			}
+		}
+		if len(attached) >= maxSkillFoldersPerCall || size > budget {
+			f.Truncated = true
+			continue
+		}
+		for _, file := range folder.Files {
+			budget = attach(f, RoleSkillFile, file, "", budget)
+		}
+		for i := range f.Skills {
+			if f.Skills[i].Path == folder.Path {
+				f.Skills[i].Attached = true
+			}
+		}
+		attached = append(attached, folder.Path)
+	}
+	return listed, attached
 }
 
-// skillCacheEntry is a folder fingerprint and the gateway's scan receipt.
+// skillCacheEntry is a folder fingerprint, the gateway's scan receipt and
+// when the kit last attached the folder (rotation order).
 type skillCacheEntry struct {
-	FP      string `json:"fp"`
-	Receipt string `json:"receipt"`
+	FP           string `json:"fp"`
+	Receipt      string `json:"receipt"`
+	LastAttached int64  `json:"last_attached,omitempty"`
 }
 
 // The receipt cache, ~/.defenseclaw/skill-receipts.json, only saves bytes
@@ -222,7 +322,7 @@ func saveSkillCache(home string, m map[string]skillCacheEntry) {
 	}
 	if len(m) > maxSkillCacheEntries {
 		// Keep the bound: drop entries in path order (a dropped folder is
-		// only attached once more).
+		// only attached once more, first in the rotation).
 		keys := make([]string, 0, len(m))
 		for k := range m {
 			keys = append(keys, k)
@@ -263,11 +363,12 @@ type skillAnswer struct {
 }
 
 // applySkillAnswer acts on a 2xx answer to a post that listed the folders in
-// listed: receipts are kept for the fingerprint the kit listed, a folder the
-// gateway names unscanned loses its cache entry (so its files go with the
-// next post), and a quarantined folder is moved out of its skill root. It
-// returns what it moved.
-func applySkillAnswer(home string, answer []byte, listed map[string]string, now time.Time) []string {
+// listed and attached those in attached: their attach time is kept (rotation
+// order), receipts are kept for the fingerprint the kit listed, a folder the
+// gateway names unscanned loses its receipt (so its files go with a later
+// post), and a quarantined folder is moved out of its skill root. It returns
+// what it moved.
+func applySkillAnswer(home string, answer []byte, listed map[string]string, attached []string, now time.Time) []string {
 	if len(listed) == 0 {
 		return nil
 	}
@@ -277,17 +378,26 @@ func applySkillAnswer(home string, answer []byte, listed map[string]string, now 
 	}
 	cache := loadSkillCache(home)
 	changed := false
+	for _, dir := range attached {
+		e := cache[dir]
+		e.FP, e.Receipt, e.LastAttached = listed[dir], "", now.UnixNano()
+		cache[dir] = e
+		changed = true
+	}
 	for _, s := range a.Scanned {
 		dir := filepath.Clean(s.Path)
 		if fp, ok := listed[dir]; ok && fp == s.FP && s.Receipt != "" {
-			cache[dir] = skillCacheEntry{FP: s.FP, Receipt: s.Receipt}
+			e := cache[dir]
+			e.FP, e.Receipt = s.FP, s.Receipt
+			cache[dir] = e
 			changed = true
 		}
 	}
 	for _, u := range a.Unscanned {
 		dir := filepath.Clean(u.Path)
-		if _, ok := cache[dir]; ok {
-			delete(cache, dir)
+		if e, ok := cache[dir]; ok && e.Receipt != "" {
+			e.Receipt = ""
+			cache[dir] = e
 			changed = true
 		}
 	}
