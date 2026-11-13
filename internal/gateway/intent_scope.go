@@ -23,6 +23,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -44,6 +45,8 @@ const (
 	intentScopeFinding    = "INTENT-SCOPE-SEND"
 	maxNamedScopeTargets  = 20
 	maxScopeDestinations  = 16
+	maxScopeDepth         = 10
+	maxScopeValues        = 1024
 	pendingScopeFloorsCap = 256
 )
 
@@ -164,21 +167,26 @@ type scopeString struct{ key, value string }
 
 // scopeStrings returns every string value of the call's JSON arguments with
 // the name of the key it sits under; arguments that are not JSON come back as
-// one value with no key.
-func scopeStrings(args string) []scopeString {
+// one value with no key. A walk that reaches the depth or value cap records it
+// in trunc: the call is then out of scope (the bound rule,
+// internal/guardrail/bounded), never silently clean.
+func scopeStrings(args string, trunc *bounded.Truncated) []scopeString {
 	var root any
 	if err := json.Unmarshal([]byte(args), &root); err != nil {
 		return []scopeString{{"", args}}
 	}
 	var out []scopeString
+	values := bounded.NewCounter(trunc, bounded.Nodes, maxScopeValues)
 	var walk func(key string, v any, depth int)
 	walk = func(key string, v any, depth int) {
-		if depth > 6 || len(out) > 256 {
+		if !trunc.Within(bounded.Depth, depth, maxScopeDepth) {
 			return
 		}
 		switch t := v.(type) {
 		case string:
-			out = append(out, scopeString{strings.ToLower(key), t})
+			if values.Take() {
+				out = append(out, scopeString{strings.ToLower(key), t})
+			}
 		case []any:
 			for _, e := range t {
 				walk(key, e, depth+1)
@@ -269,11 +277,11 @@ func scopeToolVerb(toolName string) (sends, reads bool) {
 	return false, false
 }
 
-// callSendDestinations returns the places a sending call goes to; nil for a
-// call that does not send.
-func callSendDestinations(toolName, args string) []scopeDest {
+// callSendDestinations returns the places a sending call goes to, and the caps
+// its reading hit; nil for a call that does not send.
+func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []scopeDest {
 	toolSends, toolReads := scopeToolVerb(toolName)
-	values := scopeStrings(args)
+	values := scopeStrings(args, trunc)
 	var texts []string
 	shell := false
 	for _, v := range values {
@@ -301,9 +309,13 @@ func callSendDestinations(toolName, args string) []scopeDest {
 	}
 	seen := map[string]bool{}
 	var out []scopeDest
+	destinations := bounded.NewCounter(trunc, bounded.Items, maxScopeDestinations)
 	add := func(d scopeDest) {
 		key := d.host + "|" + d.mailbox
-		if (d.host != "" || d.mailbox != "") && !seen[key] && len(out) < maxScopeDestinations {
+		if (d.host == "" && d.mailbox == "") || seen[key] {
+			return
+		}
+		if destinations.Take() {
 			seen[key] = true
 			out = append(out, d)
 		}
@@ -311,10 +323,11 @@ func callSendDestinations(toolName, args string) []scopeDest {
 	for _, t := range texts {
 		shellText := scopeShellSendRe.MatchString(t)
 		mailCommand := shellText && scopeMailProgramRe.MatchString(t)
-		for _, m := range scopeURLHostRe.FindAllStringSubmatch(t, -1) {
+		// One match past the cap is enough to know the cap is hit.
+		for _, m := range scopeURLHostRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
 			add(scopeDest{host: strings.ToLower(m[1])})
 		}
-		for _, m := range scopeEmailRe.FindAllStringSubmatch(t, -1) {
+		for _, m := range scopeEmailRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
 			if shellText && !mailCommand {
 				add(scopeDest{host: strings.ToLower(m[1])})
 			} else {
@@ -362,11 +375,12 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 	if strings.TrimSpace(intent) == "" {
 		return ""
 	}
-	dests := callSendDestinations(toolName, args)
-	if len(dests) == 0 {
-		return ""
-	}
+	var trunc bounded.Truncated
+	dests := callSendDestinations(toolName, args, &trunc)
 	named := append(namedScopeTargets(intent), sessionTargets...)
+	// What was read before a cap is still judged, and a call cut short at a cap
+	// is judged as unknown at least: the stricter of the two stands.
+	exceeded := false
 	for _, d := range dests {
 		if d.mailbox != "" {
 			if scopeNamedMailbox(d.mailbox, named) {
@@ -375,6 +389,17 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 		} else if scopeLoopback(d.host) || scopeNamedHost(d.host, named) {
 			continue
 		}
+		exceeded = true
+		break
+	}
+	if trunc.Any() {
+		reason := "the call is too large to read in full, so it is judged as outside the user's task (" + trunc.Set().Reason() + ")"
+		if exceeded {
+			reason = "the call sends data to a destination the user's task does not name, and it is too large to read in full (" + trunc.Set().Reason() + ")"
+		}
+		return reason
+	}
+	if exceeded {
 		return "the call sends data to a destination the user's task does not name"
 	}
 	return ""
@@ -432,6 +457,13 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 		Reason:   reason,
 		Findings: []string{intentScopeFinding},
 		Scanner:  "intent-scope",
+	}
+	if i := strings.Index(reason, bounded.ReasonCode); i >= 0 {
+		// A walk cut short at a cap also carries the shared evaluation-limit finding
+		// naming the cap, and the severity of the unknown tier: an alert in the
+		// default and permissive packs (their alert_at), a block in the strict pack.
+		floor.Severity = "HIGH"
+		floor.Findings = append(floor.Findings, evaluationLimitRuleID+":"+boundedTruncatedTitle+" ("+strings.TrimSuffix(reason[i:], ")")+")")
 	}
 	if judged == nil {
 		return floor

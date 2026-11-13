@@ -123,7 +123,8 @@ type LLMJudge struct {
 	// decisionStates holds each prepared call's decision-model state until
 	// it is judged (keepDecisionState / takeDecisionState).
 	decisionStatesMu sync.Mutex
-	decisionStates   map[string]decisionModelState
+	decisionStates   map[[sha256.Size]byte]decisionStateEntry
+	decisionStateSeq uint64
 	// calls bounds and orders the judge calls sent to the model when
 	// guardrail.judge.max_parallel is set (nil: no limit).
 	calls *judgeScheduler
@@ -2311,6 +2312,24 @@ func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scope
 	j.toolContext[sessionID] = entry
 }
 
+// ClearSessionTask drops the session's task and keeps its recent calls and
+// scope targets: a prompt turned out not to be a task after calls had begun.
+func (j *LLMJudge) ClearSessionTask(ctx context.Context) {
+	if j == nil {
+		return
+	}
+	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	if sessionID == "" {
+		return
+	}
+	j.toolContextMu.Lock()
+	defer j.toolContextMu.Unlock()
+	if entry, ok := j.toolContext[sessionID]; ok {
+		entry.userIntent = ""
+		j.toolContext[sessionID] = entry
+	}
+}
+
 // inheritToolJudgeContext copies the per-session intent and recent calls of
 // the judge a config or rule-pack change replaces, so live sessions keep
 // their task across the rebuild instead of being judged with none until
@@ -2399,7 +2418,6 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	sanitizedTool := sanitizeToolName(toolName)
 	// The prompt lives only in the rule pack (policies/guardrail/<profile>,
 	// embedded copy in internal/guardrail/defaults). A judge built without a
 	// pack uses the embedded one rather than a separate in-code copy, which
@@ -2408,7 +2426,9 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	if jc := j.rp.ToolInjectionJudge(); jc != nil && jc.SystemPrompt != "" {
 		basePrompt = jc.SystemPrompt
 	}
-	systemPrompt := fmt.Sprintf(basePrompt, sanitizedTool)
+	// The tool name is the tool attribute of CURRENT_TOOL_CALL; text the session
+	// chose does not go into the system message (a forged nonce line).
+	systemPrompt := fmt.Sprintf(basePrompt, "see the tool attribute of CURRENT_TOOL_CALL")
 	if nonce := toolJudgeSampleNonce(sample); nonce != "" {
 		systemPrompt += "\n\n" + toolJudgeNonceLine(nonce)
 	}
@@ -2418,7 +2438,9 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 
 	messages := []ChatMessage{
 		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: wrapJudgeSample(sample)},
+		// The sections delimit themselves with the call's nonce; an outer marker
+		// the session could close adds nothing.
+		{Role: "user", Content: sample},
 	}
 	llmCtx, judgeTrace := j.startJudgeTrace(
 		ctx, kind, "tool_call", maxTok, messages, time.Now().UTC(),
