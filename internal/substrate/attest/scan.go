@@ -764,6 +764,11 @@ func (s *MCPStaticScanner) Scan(ctx context.Context, target string) (*scanner.Sc
 	if err != nil {
 		res.ExitCode = 1
 		res.ScanError = "mcp-scanner failed: " + strings.TrimSpace(firstLine(stderr.String(), err.Error()))
+		if errors.Is(err, exec.ErrNotFound) {
+			// No scanner here (the distroless gateway image): the runtime
+			// fail mode decides; the build treats it as a failed scan.
+			return res, fmt.Errorf("%w: %s", scanner.ErrScannerNotFound, bin)
+		}
 		return res, nil
 	}
 	findings, perr := parseMCPStaticOutput(out)

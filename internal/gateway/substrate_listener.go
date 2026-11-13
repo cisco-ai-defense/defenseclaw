@@ -153,6 +153,9 @@ type SubstrateConfig struct {
 	// actor of this connector without a scan is refused (managed installs and
 	// the strict tier) rather than alerted on (OSS default tiers).
 	BlockUnscannedSkills func(connector string) bool
+	// MCP is the runtime MCP scan of hook events (E20, GAP-0185); nil
+	// turns it off. BlockUnscannedSkills is its fail mode too.
+	MCP SubstrateMCPScanner
 	// TemplateSkills returns the admitted skill folder digests of the attested
 	// template "atespace/name" (the controller's verdict): a folder with one
 	// of them is trusted without a scan (GAP-0164). Nil trusts none.
@@ -232,9 +235,10 @@ type substrateState struct {
 	// alert raises an audit alert (the API server's logger).
 	alert func(ctx context.Context, severity, summary string, details map[string]any)
 	// alerted is alertOnce's memory (substrate_skills.go).
-	alertMu sync.Mutex
-	alerted map[string]bool
-	pending map[string]int
+	alertMu    sync.Mutex
+	alerted    map[string]bool
+	pending    map[string]int
+	pendingOld map[string]int
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler

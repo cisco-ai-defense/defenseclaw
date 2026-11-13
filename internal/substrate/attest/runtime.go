@@ -226,14 +226,21 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 					return nil, err
 				}
 				sr, err := r.MCPStatic.Scan(ctx, tf)
-				if err != nil || sr == nil {
-					sr = failedScan(r.MCPStatic.Name(), a.Name, err)
+				if err != nil && scanner.Unavailable(err) {
+					// The tool scan cannot run here: the config rules above
+					// still decide, and the fail mode decides the rest
+					// (Unavailable; GAP-0185, as for skills in GAP-0164).
+					unavailable = true
+				} else {
+					if err != nil || sr == nil {
+						sr = failedScan(r.MCPStatic.Name(), a.Name, err)
+					}
+					res.Findings = append(res.Findings, sr.Findings...)
+					if sr.ScanError != "" {
+						res.ScanError, res.ExitCode = sr.ScanError, sr.ExitCode
+					}
+					res.Scanner = r.MCPStatic.Name()
 				}
-				res.Findings = append(res.Findings, sr.Findings...)
-				if sr.ScanError != "" {
-					res.ScanError, res.ExitCode = sr.ScanError, sr.ExitCode
-				}
-				res.Scanner = r.MCPStatic.Name()
 			}
 		}
 	default:
