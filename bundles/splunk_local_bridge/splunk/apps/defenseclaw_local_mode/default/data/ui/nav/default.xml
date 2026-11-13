@@ -9,6 +9,7 @@
     <view name="gateway_health" />
     <view name="gateway_logs" />
     <view name="model_usage_and_cost" />
+    <view name="model_tokenomics" />
   </collection>
   <collection label="Demo Dashboards">
     <view name="agent_tokenomics_overview" />

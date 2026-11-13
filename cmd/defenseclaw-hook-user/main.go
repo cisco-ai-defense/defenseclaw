@@ -224,7 +224,9 @@ func run(home, addr string, stdin io.Reader, stdout, stderr io.Writer, startedAt
 		opts.MaxBody, opts.MaxBodyLowered = maxBody, maxBody < hookexec.DefaultMaxBody
 	}
 	if gateway != "" {
-		opts.OutageFailModeNow = func() string { return outageMode(gateway, hookDir) }
+		opts.OutageFailModeNow = func() string {
+			return sharedOutageMode(gateway, hookDir, time.Now(), func() string { return outageMode(gateway, hookDir) })
+		}
 		opts.GatewayRecovery = gatewayRecovery(gateway, home)
 	}
 	return hookexec.Run(context.Background(), opts)
