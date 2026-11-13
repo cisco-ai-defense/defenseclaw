@@ -30,7 +30,6 @@ import (
 var (
 	budgetStoreConfigPath string
 	issueSecretFile       string
-	issueBundleConfig     string
 	issueUsers            []string
 	issueGroups           []string
 	issueCapUSD           float64

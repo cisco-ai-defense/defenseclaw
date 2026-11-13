@@ -4,17 +4,27 @@
 package config
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// abs makes a slash path absolute on the running OS (a drive on Windows).
+func abs(p string) string {
+	if runtime.GOOS == "windows" {
+		return `C:` + filepath.FromSlash(p)
+	}
+	return p
+}
 
 func TestValidateRoutingBudgetStore(t *testing.T) {
 	ok := &RoutingBudgetStoreConfig{URL: "https://budgets.example.test:8443", SyncInterval: "30s", TimeoutMs: 2000}
 	if err := ValidateRoutingBudgetStore(ok, true); err != nil {
 		t.Fatalf("device config: %v", err)
 	}
-	server := &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: ":8443", TLSCertFile: "/etc/s/cert.pem",
-		TLSKeyFile: "/etc/s/key.pem", DBPath: "/var/lib/s/store.db"}}
+	server := &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: ":8443", TLSCertFile: abs("/etc/s/cert.pem"),
+		TLSKeyFile: abs("/etc/s/key.pem"), DBPath: abs("/var/lib/s/store.db")}}
 	if err := ValidateRoutingBudgetStore(server, false); err != nil {
 		t.Fatalf("store host config: %v", err)
 	}
@@ -33,9 +43,9 @@ func TestValidateRoutingBudgetStore(t *testing.T) {
 		{"timeout", &RoutingBudgetStoreConfig{URL: "https://b", TimeoutMs: 50}, true, "100 to 10000"},
 		{"relative ca", &RoutingBudgetStoreConfig{URL: "https://b", CAFile: "ca.pem"}, true, "absolute"},
 		{"server in a device config", &RoutingBudgetStoreConfig{URL: "https://b", Server: server.Server}, true, "store host"},
-		{"server without TLS", &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: ":8443", DBPath: "/d"}}, false, "HTTPS only"},
-		{"server listen", &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: "8443", TLSCertFile: "/c", TLSKeyFile: "/k", DBPath: "/d"}}, false, "host:port"},
-		{"server cap", &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: ":8443", TLSCertFile: "/c", TLSKeyFile: "/k", DBPath: "/d", DeviceDailyCapUSD: -1}}, false, "device_daily_cap_usd"},
+		{"server without TLS", &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: ":8443", DBPath: abs("/d")}}, false, "HTTPS only"},
+		{"server listen", &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: "8443", TLSCertFile: abs("/c"), TLSKeyFile: abs("/k"), DBPath: abs("/d")}}, false, "host:port"},
+		{"server cap", &RoutingBudgetStoreConfig{Server: &RoutingBudgetStoreServerConfig{Listen: ":8443", TLSCertFile: abs("/c"), TLSKeyFile: abs("/k"), DBPath: abs("/d"), DeviceDailyCapUSD: -1}}, false, "device_daily_cap_usd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := ValidateRoutingBudgetStore(tc.store, tc.device)
