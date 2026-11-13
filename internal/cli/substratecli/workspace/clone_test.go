@@ -89,7 +89,7 @@ func TestCloneRefusesWhatIsNotARepositoryAddress(t *testing.T) {
 			t.Errorf("ref %q accepted", bad)
 		}
 	}
-	if cloneFolder("git@github.com:me/My-App.git") != "My-App" || cloneFolder("https://h/x/") != "x" {
+	if cloneFolder("git@github.com:me/My-App.git") != "My-App" || cloneFolder("https://h/x/") != "x" || cloneFolder("https://h/team/projekt-über.git") != "projekt-über" {
 		t.Error("folder names")
 	}
 	// Seen on stk: the egress guard answers 503; the person learns who refused.
