@@ -5,6 +5,8 @@ package config
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -34,7 +36,14 @@ func validateManagedRouting(cfg *Config, goos string) error {
 	r := cfg.Routing
 	for i, m := range r.Models {
 		if strings.TrimSpace(m.APIKeyEnv) != "" {
-			return fmt.Errorf("config routing.models[%d].api_key_env is not allowed on a managed host: name a protected credential in routing.models[%d].credential", i, i)
+			// 1.0.9 managed configs may carry api_key_env models with
+			// routing off (the vllm_sr era); the gateway ignores the name on
+			// a managed host (credential refs only), so only a config that
+			// turns routing on is refused (S1 REVIEW-code-slice4 P2-1).
+			if r.Enabled {
+				return fmt.Errorf("config routing.models[%d].api_key_env is not allowed on a managed host with routing.enabled: name a protected credential in routing.models[%d].credential", i, i)
+			}
+			fmt.Fprintf(managedRoutingWarnings, "warning: config routing.models[%d].api_key_env is ignored on a managed host; name a protected credential in routing.models[%d].credential before turning routing on\n", i, i)
 		}
 		if err := managedBedrockEnvRefusal(fmt.Sprintf("routing.models[%d].bedrock", i), m.Bedrock); err != nil {
 			return err
@@ -67,9 +76,20 @@ func validateManagedRouting(cfg *Config, goos string) error {
 	return nil
 }
 
+// managedRoutingWarnings receives the notes of keys a managed host
+// ignores; replaceable in tests.
+var managedRoutingWarnings io.Writer = os.Stderr
+
+// managedBedrockEnvRefusal refuses the Bedrock keys new in 1.0.10 that
+// read the gateway service environment or its account files: every *_env
+// name, and auth profile (a shared AWS profile of the service account;
+// managed hosts use *_credential refs or instance_role, DESIGN 15.6).
 func managedBedrockEnvRefusal(field string, b *RoutingBedrockAuthConfig) error {
 	if b == nil {
 		return nil
+	}
+	if strings.EqualFold(strings.TrimSpace(b.Auth), RoutingBedrockAuthProfile) {
+		return fmt.Errorf("config %s.auth profile is not allowed on a managed host: use iam_credentials with *_credential names, or instance_role", field)
 	}
 	for key, v := range map[string]string{"access_key_env": b.AccessKeyEnv, "secret_key_env": b.SecretKeyEnv, "session_token_env": b.SessionTokenEnv} {
 		if strings.TrimSpace(v) != "" {
