@@ -46,7 +46,7 @@ func main() {
 	gid := flag.Int("gid", 1000, "image USER gid")
 	gateway := flag.String("gateway-url", kit.DefaultGatewayURL, "actor listener base URL")
 	failMode := flag.String("fail-mode", "closed", "interactive outage mode (open or closed)")
-	provider := flag.String("provider", "", "model route (claudecode: bedrock|anthropic; codex: openai|bedrock-mantle)")
+	provider := flag.String("provider", "", "model route (claudecode: bedrock|anthropic; codex: bedrock|openai; default from substrate.llm.providers)")
 	model := flag.String("model", "", "default model id")
 	version := flag.String("kit-version", "dev", "kit version (also the DefenseClaw version label)")
 	listen := flag.String("relay-listen", ":8080", "relay listen address")
@@ -123,6 +123,10 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	// the settings are rendered for the agent the image runs.
 	agentVersion := kit.AgentVersion(name, ctx.HarnessVersion)
 	art, err := kit.SubstrateArtifacts(h.Provider, agentVersion, cfg)
+	if err != nil {
+		return err
+	}
+	provider, err = kit.ModelProvider(name, provider, nil)
 	if err != nil {
 		return err
 	}
