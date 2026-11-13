@@ -216,7 +216,12 @@ func (p *sedScan) substitute() bool {
 		return false
 	}
 	p.i++
-	if !p.part(delimiter) || !p.part(delimiter) {
+	// the first part (regex or source set) and the second (replacement or
+	// target set) each end at an unescaped delimiter
+	if !p.part(delimiter) {
+		return false
+	}
+	if !p.part(delimiter) {
 		return false
 	}
 	for p.more() {
@@ -242,7 +247,12 @@ func (p *sedScan) transliterate() bool {
 		return false
 	}
 	p.i++
-	if !p.part(delimiter) || !p.part(delimiter) {
+	// the first part (regex or source set) and the second (replacement or
+	// target set) each end at an unescaped delimiter
+	if !p.part(delimiter) {
+		return false
+	}
+	if !p.part(delimiter) {
 		return false
 	}
 	return p.endCommand()
