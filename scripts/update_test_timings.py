@@ -43,6 +43,11 @@ test_windows_remaining_package_shards_leave_room_in_their_step) was set on
 median times (GAP-1066). Download each run into its own directory, for example
   for r in <run1> <run2> <run3>; do gh run download $r --pattern 'go-test-timings-*' --dir t/$r; done
   scripts/update_test_timings.py go t/<run1> t/<run2> t/<run3>
+A refresh drops the tests this tree does not define. To weigh the tests of
+a branch about to merge (feat/substrate before its hand-off to rel), run the
+refresh in a checkout of that branch with this tree's scripts and copy the
+file back: unrecorded, a new test weighs "*" (about 0.24 s in the gateway),
+and three such tests of 186 s together ran a gateway shard into its -timeout.
 A top-level test weighs its share of the package wall time
 (go_test_report.TopLevelShares): parallel tests that ran side by side split
 the time they shared, and a test of parallel subtests weighs the time they held.
