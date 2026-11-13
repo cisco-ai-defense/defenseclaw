@@ -439,7 +439,7 @@ sudo tail -n 100 /Library/Logs/Cisco/SecureClient/DefenseClaw/hook-guardian.err.
 
 ## Endpoint health report
 
-About every 30 minutes the gateway sends Cisco AI Defense an endpoint health report and writes the last one to
+From 1.0.10, about every 30 minutes the gateway sends Cisco AI Defense an endpoint health report and writes the last one to
 `diagnostics/health_report_last.json` under its `data_dir` (`runtime`). Run elevated (as root on macOS),
 `enterprise windows status --json` and `enterprise macos status --json` summarize it in a `health_report` object.
 The object is absent until the first report:
@@ -455,9 +455,8 @@ The object is absent until the first report:
 | `error` | `unreadable`, `access_denied` or `invalid`: the file exists but could not be used |
 
 The text output adds one line, such as `Health report: degraded (HOOKS_PARTIAL) at 2026-11-12T11:30:00Z, delivery queued`.
-The report never changes `ok` or the exit code, and `verify` does not check it. On macOS a degraded, unhealthy
-or stale report, or one that was not delivered to Cisco AI Defense, also adds one `endpoint_health_degraded` warning.
-The gateway sends nothing until the Cisco AI Defense endpoint is configured.
+The report never changes `ok`, `warnings` or the exit code, and `verify` does not check it. Read `status`, `stale`
+and `delivery.result` to find a device that needs attention. The gateway sends nothing until the Cisco AI Defense endpoint is configured.
 
 ## Restart-required controls
 

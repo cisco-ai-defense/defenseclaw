@@ -24,11 +24,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
-// CodeEndpointHealthDegraded warns that the gateway's last endpoint health
-// report is degraded or unhealthy, or is stale. Status only; it never makes a
-// result fail.
-const CodeEndpointHealthDegraded = "endpoint_health_degraded"
-
 // Health report read errors: bounded codes, never raw error text.
 const (
 	// HealthReportUnreadable: the file is not a regular file (a link, a
@@ -211,21 +206,6 @@ func healthReportTime(value string) (time.Time, bool) {
 	return parsed.UTC(), true
 }
 
-// NeedsAttention reports whether the report is degraded, unhealthy or stale.
-// A report that could not be read (Error) is reported in the block only.
-func (s *HealthReportState) NeedsAttention() bool {
-	if s == nil || s.Error != "" {
-		return false
-	}
-	return s.Stale || s.Status == "degraded" || s.Status == "unhealthy" || s.deliveryFailed()
-}
-
-// deliveryFailed reports a last report that did not reach the managed
-// destination.
-func (s *HealthReportState) deliveryFailed() bool {
-	return s != nil && s.Delivery != nil && (s.Delivery.Result == "failed" || s.Delivery.Result == "not_routed")
-}
-
 // Summary is the one-line text form, such as
 // "degraded (HOOKS_PARTIAL) at 2026-11-12T10:00:00Z, delivery queued";
 // "" for nil.
@@ -253,27 +233,14 @@ func (s *HealthReportState) Summary() string {
 	return line
 }
 
-// SetHealthReport puts state in the result's health_report block and, when
-// it is degraded, unhealthy or stale, adds one endpoint_health_degraded
-// warning naming its status and reason codes. It never adds an error, so OK
-// and the exit code do not change. nil leaves the result as it is.
+// SetHealthReport puts state in the result's health_report block. The block
+// is the whole effect: no warning and no error, so warnings, OK and the exit
+// code are those of the result without it, as on Windows, where the installer
+// owns the status document and only the block is added. nil leaves the
+// result as it is.
 func (r *Result) SetHealthReport(state *HealthReportState) {
 	if r == nil || state == nil {
 		return
 	}
 	r.HealthReport = state
-	if !state.NeedsAttention() {
-		return
-	}
-	message := "the last endpoint health report is " + state.Status
-	if len(state.ReasonCodes) > 0 {
-		message += " (" + strings.Join(state.ReasonCodes, ", ") + ")"
-	}
-	if state.Stale {
-		message += " and stale: the gateway has not reported for more than three report intervals"
-	}
-	if state.deliveryFailed() {
-		message += "; it was not delivered to Cisco AI Defense (" + state.Delivery.Result + ")"
-	}
-	r.AddWarning(CodeEndpointHealthDegraded, message)
 }

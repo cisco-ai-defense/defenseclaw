@@ -194,8 +194,8 @@ func TestReadHealthReportEmptyDataDir(t *testing.T) {
 
 func TestHealthReportStateNilSafe(t *testing.T) {
 	var state *HealthReportState
-	if state.Summary() != "" || state.NeedsAttention() {
-		t.Fatal("a nil state must render nothing and need no attention")
+	if state.Summary() != "" {
+		t.Fatal("a nil state must render nothing")
 	}
 	r := New("status", "secure_client", "darwin", "1.0.9")
 	r.SetHealthReport(nil)
@@ -232,22 +232,22 @@ func TestHealthReportSummary(t *testing.T) {
 	}
 }
 
-// A degraded, unhealthy or stale report adds one warning and never an error:
-// ok and the exit code are those of the result without it.
-func TestSetHealthReportWarnsWithoutFailing(t *testing.T) {
+// The report only adds its block, on macOS as on Windows: never a warning and
+// never an error, so warnings, ok and the exit code are those of the result
+// without it, whatever the report says.
+func TestSetHealthReportAddsOnlyTheBlock(t *testing.T) {
 	cases := map[string]struct {
 		state *HealthReportState
-		warn  bool
 	}{
-		"healthy":     {&HealthReportState{Status: "healthy", ObservedAt: "2026-11-12T11:30:00Z"}, false},
-		"starting":    {&HealthReportState{Status: "starting", ObservedAt: "2026-11-12T11:30:00Z"}, false},
-		"degraded":    {&HealthReportState{Status: "degraded", ReasonCodes: []string{"HOOKS_PARTIAL", "CMID_UNAVAILABLE"}}, true},
-		"unhealthy":   {&HealthReportState{Status: "unhealthy", ReasonCodes: []string{"POLICY_MISSING"}}, true},
-		"stale":       {&HealthReportState{Status: "healthy", Stale: true}, true},
-		"unreadable":  {&HealthReportState{Error: HealthReportUnreadable}, false},
-		"delivered":   {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "queued"}}, false},
-		"emit failed": {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "failed"}}, true},
-		"not routed":  {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "not_routed"}}, true},
+		"healthy":     {&HealthReportState{Status: "healthy", ObservedAt: "2026-11-12T11:30:00Z"}},
+		"starting":    {&HealthReportState{Status: "starting", ObservedAt: "2026-11-12T11:30:00Z"}},
+		"degraded":    {&HealthReportState{Status: "degraded", ReasonCodes: []string{"HOOKS_PARTIAL", "CMID_UNAVAILABLE"}}},
+		"unhealthy":   {&HealthReportState{Status: "unhealthy", ReasonCodes: []string{"POLICY_MISSING"}}},
+		"stale":       {&HealthReportState{Status: "healthy", Stale: true}},
+		"unreadable":  {&HealthReportState{Error: HealthReportUnreadable}},
+		"delivered":   {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "queued"}}},
+		"emit failed": {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "failed"}}},
+		"not routed":  {&HealthReportState{Status: "healthy", Delivery: &HealthReportDelivery{Result: "not_routed"}}},
 	}
 	for name, tc := range cases {
 		for _, goos := range []string{"darwin", "windows"} {
@@ -255,28 +255,16 @@ func TestSetHealthReportWarnsWithoutFailing(t *testing.T) {
 			r.Installed = true
 			r.CoverageComplete, r.SecurityComplete = true, true
 			r.Finish(goos, 0)
+			warningsBefore := len(r.Warnings)
 			r.SetHealthReport(tc.state)
 			if r.HealthReport != tc.state || !r.OK || r.ExitCode != ExitOK || len(r.Errors) != 0 {
 				t.Fatalf("%s %s: result changed beyond the block: %+v", name, goos, r)
 			}
+			if len(r.Warnings) != warningsBefore {
+				t.Fatalf("%s %s: the report added warnings %v", name, goos, r.Warnings[warningsBefore:])
+			}
 			if r.Finish(goos, 0) != ExitOK || !r.OK {
 				t.Fatalf("%s %s: a finished result with the report is not ok", name, goos)
-			}
-			var warnings []Message
-			for _, warning := range r.Warnings {
-				if warning.Code == CodeEndpointHealthDegraded {
-					warnings = append(warnings, warning)
-				}
-			}
-			if (len(warnings) == 1) != tc.warn || len(warnings) > 1 {
-				t.Fatalf("%s %s: endpoint_health_degraded warnings %v, want one: %v", name, goos, warnings, tc.warn)
-			}
-			if tc.warn {
-				for _, code := range tc.state.ReasonCodes {
-					if !strings.Contains(warnings[0].Message, code) || !strings.Contains(warnings[0].Message, tc.state.Status) {
-						t.Fatalf("%s: warning %q does not name the status and %s", name, warnings[0].Message, code)
-					}
-				}
 			}
 		}
 	}

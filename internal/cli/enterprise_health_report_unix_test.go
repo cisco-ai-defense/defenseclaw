@@ -101,9 +101,11 @@ func TestSecureClientMacOSStatusReportsHealthReport(t *testing.T) {
 	if err := printLifecycleResult(&out, r, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "  health report: degraded (HOOKS_PARTIAL) at 2026-11-12T11:30:00Z, delivery queued\n") ||
-		!strings.Contains(out.String(), "endpoint_health_degraded: the last endpoint health report is degraded (HOOKS_PARTIAL)") {
-		t.Fatalf("status text has no health report line or warning:\n%s", out.String())
+	if !strings.Contains(out.String(), "  health report: degraded (HOOKS_PARTIAL) at 2026-11-12T11:30:00Z, delivery queued\n") {
+		t.Fatalf("status text has no health report line:\n%s", out.String())
+	}
+	if len(r.Warnings) != 0 {
+		t.Fatalf("a degraded report added warnings, unlike Windows: %v", r.Warnings)
 	}
 }
 
