@@ -130,6 +130,12 @@ type LLMJudge struct {
 	toolContextMu sync.Mutex
 	toolContext   map[string]toolJudgeSessionContext
 
+	// scopeFloors holds, per prepared sample, the scope finding of a call that
+	// sends data to a destination the user's task does not name
+	// (intent_scope.go); runToolDecision applies it to the judge's verdict.
+	scopeFloorsMu sync.Mutex
+	scopeFloors   map[string]string
+
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
 	// traceV8Authoritative remains true after a v8 runtime detaches. A nil
@@ -2154,7 +2160,14 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 
 	var sample strings.Builder
 	if entry.userIntent != "" {
-		sample.WriteString("<SESSION_USER_INTENT untrusted=\"true\">\n")
+		// named_targets is the scope of the task as Go read it: the hosts,
+		// addresses and paths the task names, or none. The task is a scope to
+		// check a call against, not a permission.
+		targets := "none"
+		if named := namedScopeTargets(entry.userIntent); len(named) > 0 {
+			targets = strings.Join(named, ", ")
+		}
+		fmt.Fprintf(&sample, "<SESSION_USER_INTENT untrusted=\"true\" named_targets=%q>\n", targets)
 		sample.WriteString(entry.userIntent)
 		sample.WriteString("\n</SESSION_USER_INTENT>\n")
 	}
@@ -2165,6 +2178,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		}
 	}
 	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+	if reason := intentScopeExceeded(entry.userIntent, toolName, args); reason != "" {
+		j.keepScopeFloor(sample.String(), reason)
+	}
 	if j.decision != nil {
 		state := decisionModelState{
 			SessionUserIntent: entry.userIntent,

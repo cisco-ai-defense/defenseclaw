@@ -425,6 +425,12 @@ func (j *LLMJudge) takeDecisionState(sample, toolName, args string) decisionMode
 // runToolDecision is the tool-call judge with the decision model in front.
 // It returns the verdict the judge lane uses.
 func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	floor := j.takeScopeFloor(sample)
+	return applyIntentScopeFloor(j.runToolDecisionVerdict(ctx, toolName, args, sample), floor)
+}
+
+// runToolDecisionVerdict is runToolDecision before the task-scope floor.
+func (j *LLMJudge) runToolDecisionVerdict(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
 	if j.decisionOnly {
 		return j.runDecisionAlone(ctx, toolName, args, sample)
