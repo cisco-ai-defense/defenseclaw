@@ -156,9 +156,12 @@ func TestHookAuditWriteFailureFollowsPolicyTier(t *testing.T) {
 		}
 		defer database.Close()
 		// The row of record of a benign per-user allow is its hook_decision
-		// row (#1384); a full disk refuses either kind.
+		// row (#1384): the store refuses it and the connector-hook row, and
+		// keeps the fail-mode decision (raw action alert) the call writes next.
 		if _, err := database.Exec(`CREATE TRIGGER zz_audit_disk_full BEFORE INSERT ON audit_events
-			WHEN NEW.action IN ('connector-hook', 'hook_decision') BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+			WHEN NEW.action = 'connector-hook' OR (NEW.action = 'hook_decision'
+				AND instr(NEW.projected_record_json, '"defenseclaw.guardrail.raw_action":"allow"') > 0)
+			BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
 			t.Fatal(err)
 		}
 		out := fixture.preToolUse(t, "toolu-full")
@@ -172,6 +175,15 @@ func TestHookAuditWriteFailureFollowsPolicyTier(t *testing.T) {
 		}
 		if got := lastHookDecisionAction(t, fixture.path); got != "allow" {
 			t.Fatalf("hook_decision action %q, want allow", got)
+		}
+		var tool, raw string
+		if err := database.QueryRow(`SELECT json_extract(projected_record_json,'$.correlation.tool_invocation_id'),
+			json_extract(projected_record_json,'$.body."defenseclaw.guardrail.raw_action"')
+			FROM audit_events WHERE event_name = 'hook_decision' ORDER BY rowid DESC LIMIT 1`).Scan(&tool, &raw); err != nil {
+			t.Fatal(err)
+		}
+		if tool != "toolu-full" || raw != "alert" {
+			t.Fatalf("newest hook_decision is of %q with raw action %q, want the degraded-audit alert of toolu-full", tool, raw)
 		}
 		if blocks := fixture.api.health.statsFor("claudecode").toolBlocks.Load(); blocks != 0 {
 			t.Fatalf("status tool blocks = %d after an allowed audit failure, want 0", blocks)

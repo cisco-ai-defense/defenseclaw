@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from defenseclaw.db import Store
-from defenseclaw.hook_metrics import count_once_hook_rows, hook_row_decision, hook_row_verdict
+from defenseclaw.hook_metrics import count_once_hook_rows, hook_row_decision
 from defenseclaw.models import Event
 from defenseclaw.tui.panels.audit import AuditPanelModel, _without_duplicate_hook_decisions
 
@@ -102,25 +102,15 @@ def _seed(store: Store) -> None:
     store.db.commit()
 
 
-def test_verdict_reads_both_row_kinds_alike() -> None:
-    hook = hook_row_verdict(
-        "connector-hook", "connector=codex action=block raw_action=block mode=action reason=x", None, 1,
-    )
-    decision = hook_row_verdict("hook_decision", "", _body("block", "block", enforced=True, reason="rule SEC-1"),
-                                connector="codex")
-    assert hook is not None and decision is not None
-    assert (hook.decision, hook.action, hook.enforced) == ("block", "block", True)
-    assert (decision.decision, decision.action, decision.enforced) == ("block", "block", True)
-    assert decision.reason == "rule SEC-1"
-    assert decision.event == "PreToolUse"
-    assert decision.rule_ids == ("SEC-1",)
-    assert decision.elapsed_ms == 12
-    # A redacted reason is not text: it is not compared or shown.
-    redacted = hook_row_verdict("hook_decision", "", _body("allow", "alert", reason={"redacted": True}))
-    assert redacted is not None and redacted.reason == "" and redacted.decision == "alert"
+def test_decision_reads_both_row_kinds_alike() -> None:
+    assert hook_row_decision("connector-hook", "connector=codex action=block raw_action=block mode=action", None, 1) \
+        == "block"
+    assert hook_row_decision("hook_decision", "", _body("block", "block", enforced=True)) == "block"
+    # The body may come as JSON text (payload_json) too.
+    assert hook_row_decision("hook_decision", "", json.dumps(_body("allow", "allow"))) == "allow"
+    assert hook_row_decision("hook_decision", "", _body("allow", "alert", reason={"redacted": True})) == "alert"
     # Observe mode turns a block action into an alert, as for connector-hook rows.
-    observed = hook_row_verdict("hook_decision", "", _body("block", "block", mode="observe"))
-    assert observed is not None and observed.decision == "alert"
+    assert hook_row_decision("hook_decision", "", _body("block", "block", mode="observe")) == "alert"
     assert hook_row_decision("scan-finding", "action=block") == ""
 
 
@@ -186,3 +176,36 @@ def test_routine_count_attributes_hook_decision_rows_by_column(store: Store) -> 
     assert store.count_routine_events() == 6
     assert store.count_routine_events("claudecode") == 6
     assert store.count_routine_events("codex") == 0
+
+
+def _insert_synthetic_stop(store: Store, row_id: str, sid: str, at: datetime) -> None:
+    structured = {"schema": "defenseclaw.hook.v1", "connector": "claudecode", "event": "Stop",
+                  "action": "allow", "raw_action": "allow", "mode": "action", "would_block": False}
+    store.db.execute(
+        """INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity,
+               connector, bucket, event_name, payload_json, projected_record_json)
+           VALUES (?, ?, 'connector-hook-synthetic', 'Stop', 'defenseclaw', ?, ?, 'INFO', 'claudecode',
+               'guardrail.evaluation', 'legacy.audit.connector.hook.synthetic', NULL, ?)""",
+        (row_id, at.isoformat(), "connector=claudecode result=ok action=allow raw_action=allow mode=action",
+         json.dumps(structured), _projected(sid)),
+    )
+
+
+def test_synthetic_stop_is_not_an_extra_decision(store: Store) -> None:
+    """A synthetic Stop keeps its connector-hook-synthetic row and its
+    hook_decision row (same semantic event): neither the recent list nor the
+    overview totals show the hook_decision row as a decision of its own."""
+
+    _seed(store)
+    before_stats = store.connector_hook_event_stats()["claudecode"]["calls"]
+    before_ids = sorted(event.id for event in store.list_connector_hook_event_summaries(10))
+    at = _BASE + timedelta(seconds=5)
+    _insert_synthetic_stop(store, "stop-syn", "sid-stop", at)
+    body = _body("allow", "allow")
+    body["defenseclaw.hook.event"] = "Stop"
+    _insert_hook_decision(store, "stop-hd", "sid-stop", at + timedelta(milliseconds=1), body)
+    store.db.commit()
+    assert store.connector_hook_event_stats()["claudecode"]["calls"] == before_stats
+    assert sorted(event.id for event in store.list_connector_hook_event_summaries(10)) == before_ids
+    shown = [event.id for event in _without_duplicate_hook_decisions(store.list_event_summaries(50))]
+    assert "stop-syn" in shown and "stop-hd" not in shown

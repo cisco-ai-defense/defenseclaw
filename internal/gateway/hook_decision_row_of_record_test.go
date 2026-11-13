@@ -16,9 +16,213 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
+
+// exported is every record the destination got whose event name is name.
+func (r *hookRemoteRecorder) exported(name string) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, copies := range r.records {
+		for _, record := range copies {
+			if strings.Contains(record, `"event_name":"`+name+`"`) {
+				out = append(out, record)
+			}
+		}
+	}
+	return out
+}
+
+// waitExported waits until the destination got at least want records of
+// name, then a little longer so a late extra copy is seen too.
+func (r *hookRemoteRecorder) waitExported(name string, want int) {
+	deadline := time.Now().Add(10 * time.Second)
+	for len(r.exported(name)) < want && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(300 * time.Millisecond)
+}
+
+const rowOfRecordRawAllow = `"defenseclaw.guardrail.raw_action":"allow"`
+
+// assertOnlyTheFailModeDecision checks a call whose row of record did not
+// commit: no allow decision and no connector-hook record of the abandoned
+// attempt is exported or stored, and exactly one decision, the fail-mode
+// verdict the agent got, is exported and stored (S8 R4 review P1, P2).
+func assertOnlyTheFailModeDecision(t *testing.T, f auditFailureHookFixture, remote *hookRemoteRecorder) {
+	t.Helper()
+	remote.waitExported("hook_decision", 1)
+	decisions := remote.exported("hook_decision")
+	if len(decisions) != 1 || strings.Contains(decisions[0], rowOfRecordRawAllow) {
+		t.Fatalf("exported hook_decision records = %d (%.300v), want exactly the fail-mode one", len(decisions), decisions)
+	}
+	if got := remote.exported("legacy.audit.connector.hook"); len(got) != 0 {
+		t.Fatalf("exported connector-hook records of the abandoned attempt = %d, want none", len(got))
+	}
+	db, err := sql.Open("sqlite", "file:"+f.path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var stored, staleAllow int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(instr(projected_record_json, ?) > 0),0)
+		FROM audit_events WHERE event_name = 'hook_decision'`, rowOfRecordRawAllow).Scan(&stored, &staleAllow); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 1 || staleAllow != 0 {
+		t.Fatalf("stored hook_decision rows = %d (%d allow), want one fail-mode row and no allow", stored, staleAllow)
+	}
+}
+
+// A panic in the audit section after the row of record was queued and
+// before the connector-hook record: the queued allow is abandoned, so the
+// fail-mode block of the strict tier is the call's only decision record,
+// stored and exported (S8 R4 review P1).
+func TestRowOfRecordPanicBeforeItsFlushLeavesOnlyTheFailModeDecision(t *testing.T) {
+	injectStagePanic(t, everyCallAt("finalize_audit_row_of_record"))
+	remote := newHookRemoteRecorder()
+	f := newPerUserHookFixtureExportingTo(t, remote)
+	f.api.scannerCfg.Guardrail.RulePack = "strict"
+	out := postRowOfRecordHook(t, f.api, map[string]any{"hook_event_name": "PreToolUse", "session_id": "s-row-panic",
+		"cwd": t.TempDir(), "tool_name": "Bash", "tool_use_id": "toolu_row_panic", "tool_input": map[string]any{"command": "git status"}})
+	if out["action"] != "block" {
+		t.Fatalf("answer %v, want the strict fail-mode block", out)
+	}
+	assertOnlyTheFailModeDecision(t, f, remote)
+}
+
+// The store refuses the row of record when it commits: the verdict is the
+// fail-mode one, the allow decision and the connector-hook record of the
+// attempt are not exported, and exactly one fail-mode decision is exported
+// and stored (S8 R4 review P2: CallWritesCommitted, ExportAfterCallCommit).
+func TestRowOfRecordThatDidNotCommitIsNeverExported(t *testing.T) {
+	remote := newHookRemoteRecorder()
+	f := newPerUserHookFixtureExportingTo(t, remote)
+	f.api.scannerCfg.Guardrail.RulePack = "strict"
+	db, err := sql.Open("sqlite", f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER zz_refuse_allow_decision BEFORE INSERT ON audit_events
+		WHEN NEW.action = 'hook_decision' AND instr(NEW.projected_record_json, '` + rowOfRecordRawAllow + `') > 0
+		BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	out := postRowOfRecordHook(t, f.api, map[string]any{"hook_event_name": "PreToolUse", "session_id": "s-row-refused",
+		"cwd": t.TempDir(), "tool_name": "Bash", "tool_use_id": "toolu_row_refused", "tool_input": map[string]any{"command": "git status"}})
+	if out["action"] != "block" {
+		t.Fatalf("answer %v, want the strict fail-mode block", out)
+	}
+	assertOnlyTheFailModeDecision(t, f, remote)
+}
+
+// With guardrail.evaluation logs off no hook_decision row is kept, so the
+// call keeps its connector-hook, tool_start and requested rows locally, as
+// in 1.0.9 (S8 R4 review P3-5).
+func TestHookCallKeepsItsRowsWhenHookDecisionsAreNotCollected(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixtureCollectingNo(t, nil, observability.BucketGuardrailEvaluation)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	if api.hookDecisionRecordsKept() {
+		t.Fatal("hookDecisionRecordsKept with guardrail.evaluation logs off")
+	}
+	postRowOfRecordHook(t, api, map[string]any{"hook_event_name": "PreToolUse", "session_id": "s-no-decisions",
+		"cwd": t.TempDir(), "tool_name": "Bash", "tool_use_id": "toolu_no_decisions", "tool_input": map[string]any{"command": "git status"}})
+	local := localRowsByEvent(t, fixture.path)
+	if local["tool_start"] != 1 || local["tool.invocation.requested"] != 1 || local["hook_decision"] != 0 {
+		t.Fatalf("local rows by event = %v, want tool_start and tool.invocation.requested kept locally", local)
+	}
+}
+
+// A restart after a SessionStart, and after a PostToolUse, restores the
+// cursor from the lifecycle row of that event: only a tool_start has its
+// lifecycle facts in a hook_decision row, so no other event has two
+// candidate rows (S8 R4 review P3-5).
+func TestHookLifecycleRestoresAfterSessionStartAndPostToolUse(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		calls []map[string]any
+		event string
+	}{
+		{"session start", []map[string]any{{"hook_event_name": "SessionStart", "source": "startup"}}, "session_start"},
+		{"post tool use", []map[string]any{
+			{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_use_id": "toolu_post_1", "tool_input": map[string]any{"command": "git status"}},
+			{"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_use_id": "toolu_post_1", "tool_input": map[string]any{"command": "git status"},
+				"tool_response": map[string]any{"stdout": "clean"}},
+		}, "tool_end"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installCorrelationHMACForTest()
+			installDefaultProfileConnector(t, "claudecode")
+			fixture := newSignedSidecarRuntimeFixture(t, true)
+			fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+			if err != nil {
+				t.Fatal(err)
+			}
+			logger := audit.NewLogger(fixture.store)
+			logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			newAPI := func() *APIServer {
+				api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+				bindHookLifecycleV8(t, api, fixture.runtime)
+				return api
+			}
+			session := "s-restore-" + strings.ReplaceAll(tc.name, " ", "-")
+			cwd := t.TempDir()
+			first := newAPI()
+			for _, call := range tc.calls {
+				call["session_id"], call["cwd"] = session, cwd
+				postRowOfRecordHook(t, first, call)
+			}
+			db, err := sql.Open("sqlite", "file:"+fixture.path+"?mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recordID, agentID, raw string
+			if err := db.QueryRow(`SELECT id, COALESCE(agent_id,''), json_extract(projected_record_json,'$.body') FROM audit_events
+				WHERE event_name = ? AND session_id = ? ORDER BY rowid DESC LIMIT 1`, tc.event, session).Scan(&recordID, &agentID, &raw); err != nil {
+				t.Fatalf("no %s lifecycle row: %v", tc.event, err)
+			}
+			db.Close()
+			var body map[string]any
+			if err := json.Unmarshal([]byte(raw), &body); err != nil {
+				t.Fatal(err)
+			}
+			restarted := newAPI()
+			history, ok := restarted.observabilityV8RuntimeEmitter().(hookLifecycleHistoryRuntime)
+			if !ok {
+				t.Fatal("the runtime serves no lifecycle history")
+			}
+			projection, found, err := history.LatestLifecycleProjection(context.Background(), audit.LifecycleProjectionQuery{
+				Connector: "claudecode", SessionID: session, AgentID: agentID,
+			})
+			if err != nil || !found || projection.RecordID != recordID || projection.Event != tc.event ||
+				projection.ExecutionID != body["defenseclaw.agent.execution.id"] {
+				t.Fatalf("lifecycle history = %+v, %t, %v; want the %s row %s", projection, found, err, tc.event, recordID)
+			}
+		})
+	}
+}
 
 // newPerUserHookFixtureExportingTo is the per-user Claude Code fixture of
 // newAuditFailureHookFixture with every log also sent to remote.
@@ -306,8 +510,13 @@ func TestHookDecisionIsRowOfRecordOnlyForBenignPerUserAllows(t *testing.T) {
 		env      HookAuditEnvelope
 		panicked bool
 		managed  bool
+		profile  string
 		want     bool
 	}{
+		{name: "cowork", ctx: context.WithValue(batch, coworkContextKey{}, hookexec.CoworkContext{SessionID: "cowork-1"})},
+		{name: "sandbox connector", ctx: sandboxauth.WithRequest(batch, sandboxauth.Binding{ID: "binding-1", Connector: "claudecode"}, nil)},
+		{name: "secure client", managed: true, profile: managed.ProfileSecureClient},
+		{name: "standalone journal", managed: true, profile: managed.ProfileStandalone},
 		{name: "benign allow", want: true},
 		{name: "no open batch", ctx: t.Context()},
 		{name: "block", resp: agentHookResponse{Action: "block", RawAction: "block"}},
@@ -343,11 +552,21 @@ func TestHookDecisionIsRowOfRecordOnlyForBenignPerUserAllows(t *testing.T) {
 			if env.Result == "" {
 				env = okEnv
 			}
-			previous := api.scannerCfg.DeploymentMode
+			previous, previousProfile := api.scannerCfg.DeploymentMode, api.scannerCfg.Enterprise.Profile
 			if tc.managed {
 				api.scannerCfg.DeploymentMode = "managed_enterprise"
+				api.scannerCfg.Enterprise.Profile = tc.profile
 			}
-			defer func() { api.scannerCfg.DeploymentMode = previous }()
+			defer func() { api.scannerCfg.DeploymentMode, api.scannerCfg.Enterprise.Profile = previous, previousProfile }()
+			if tc.profile == managed.ProfileSecureClient && (!api.managedAIDOnly() || !api.scannerCfg.SecureClientIntegration()) {
+				t.Fatal("the Secure Client case does not select the managed AID-only posture")
+			}
+			if tc.profile == managed.ProfileStandalone && !api.journalsHookDeliveries() {
+				t.Fatal("the standalone case does not journal hook deliveries")
+			}
+			if tc.name == "sandbox connector" && !sandboxHookForConnector(ctx, "claudecode") {
+				t.Fatal("the sandbox case is not a sandbox request")
+			}
 			if got := api.hookDecisionIsRowOfRecord(ctx, req, resp, env, tc.panicked); got != tc.want {
 				t.Fatalf("hookDecisionIsRowOfRecord = %t, want %t", got, tc.want)
 			}
