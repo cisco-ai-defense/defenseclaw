@@ -92,6 +92,11 @@ type Options struct {
 	// registration ("" for none). The leader copies the parent's windows the
 	// first time it sees the child, whatever comes first (GAP-0091).
 	ParentOf func(ctx context.Context, atespace, uid string) (string, error)
+	// Deleted reports whether the actor's registration is marked deleted
+	// (true also when it has none). A deleted event purges only then: the
+	// controller marks the registration first, and a peer that cannot write
+	// registrations cannot wipe a live actor's chains (GAP-0142).
+	Deleted func(ctx context.Context, atespace, uid string) (bool, error)
 	// OnCrashed closes the actor's open asks when it crashes (the ask store).
 	OnCrashed func(ctx context.Context, actor Actor)
 	// Now replaces the clock (tests).
@@ -125,6 +130,8 @@ type actorEntry struct {
 	intents  *intentstore.Process
 	openMu   sync.Mutex
 	purged   bool
+	// purgeIdle is a delete that waits for the calls holding the entry.
+	purgeIdle bool
 }
 
 // actorState is what the leader keeps of an actor on the volume: its
@@ -138,6 +145,9 @@ type actorState struct {
 	// an older one arriving late is ignored (GAP-0092).
 	LastEventUnixNano int64 `json:"last_event_unix_nano,omitempty"`
 	Retired           bool  `json:"retired,omitempty"`
+	// Forked is set once the child's clock started from its parent's; a
+	// later or repeated fork event copies missing windows only (GAP-0142).
+	Forked bool `json:"forked,omitempty"`
 	// Task is the launcher-registered --task text.
 	Task string `json:"task,omitempty"`
 }
@@ -316,6 +326,9 @@ func (s *Service) acquire(a Actor) (*actorEntry, func(), error) {
 		return nil, nil, &leader.WireError{Code: leader.CodeUnavailable, Message: "chain store closed"}
 	}
 	e := s.actors[a.key()]
+	if e != nil && e.purgeIdle {
+		return nil, nil, errEvicted
+	}
 	if e == nil {
 		s.makeRoomLocked(a.Atespace)
 		e = &actorEntry{actor: a, lastUsed: s.opts.Now()}
@@ -326,8 +339,16 @@ func (s *Service) acquire(a Actor) (*actorEntry, func(), error) {
 		s.mu.Lock()
 		e.refs--
 		e.lastUsed = s.opts.Now()
-		s.closeIdleLocked()
+		if e.refs == 0 && e.purgeIdle && !e.purged {
+			s.purgeLocked(e)
+		}
+		toClose := s.closeIdleLocked()
 		s.mu.Unlock()
+		// Closing a store checkpoints its WAL: never under the service
+		// mutex, which every call of every actor takes (GAP-0142).
+		for _, st := range toClose {
+			_ = st.Close()
+		}
 	}, nil
 }
 
@@ -357,11 +378,15 @@ func (s *Service) makeRoomLocked(atespace string) {
 	}
 }
 
-// closeIdleLocked closes the least recently used idle stores past the cap.
-func (s *Service) closeIdleLocked() {
+// closeIdleLocked takes the least recently used idle stores out of use
+// past the cap, down to 7/8 of it, so a busy leader past the cap does not
+// close and reopen a store on every call (GAP-0142). The caller closes the
+// returned stores after it unlocks.
+func (s *Service) closeIdleLocked() []*audit.Store {
 	if s.open <= s.opts.MaxOpenStores {
-		return
+		return nil
 	}
+	low := s.opts.MaxOpenStores - s.opts.MaxOpenStores/8
 	var idle []*actorEntry
 	for _, e := range s.actors {
 		if e.store != nil && e.refs == 0 {
@@ -369,14 +394,16 @@ func (s *Service) closeIdleLocked() {
 		}
 	}
 	sort.Slice(idle, func(i, j int) bool { return idle[i].lastUsed.Before(idle[j].lastUsed) })
+	var out []*audit.Store
 	for _, e := range idle {
-		if s.open <= s.opts.MaxOpenStores {
-			return
+		if s.open <= low {
+			break
 		}
-		_ = e.store.Close()
+		out = append(out, e.store)
 		e.store = nil
 		s.open--
 	}
+	return out
 }
 
 // purgeLocked removes everything the leader holds of an actor.
@@ -508,11 +535,15 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	}
 	cst := child.state
 	s.mu.Unlock()
-	cst.SuspendedNanos = pst.SuspendedNanos
-	if pst.SinceUnixNano != 0 && at.UnixNano() > pst.SinceUnixNano {
-		cst.SuspendedNanos += at.UnixNano() - pst.SinceUnixNano
+	if !cst.Forked {
+		// The child's clock starts from the parent's running time once; a
+		// late or repeated fork event never resets the child's own time.
+		cst.SuspendedNanos = pst.SuspendedNanos
+		if pst.SinceUnixNano != 0 && at.UnixNano() > pst.SinceUnixNano {
+			cst.SuspendedNanos += at.UnixNano() - pst.SinceUnixNano
+		}
+		cst.SinceUnixNano, cst.Forked = 0, true
 	}
-	cst.SinceUnixNano = 0
 	if cst.Task == "" {
 		cst.Task = pst.Task
 	}
@@ -739,9 +770,27 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 		at = time.Unix(0, in.AtUnixNano)
 	}
 	if in.Event == LifecycleDeleted {
+		if s.opts.Deleted != nil {
+			gone, err := s.opts.Deleted(ctx, in.Actor.Atespace, in.Actor.UID)
+			if err != nil {
+				return LifecycleResult{}, err
+			}
+			if !gone {
+				// Not the controller's delete of a gone actor: keep the
+				// chains (an ignored event is not retried).
+				s.warnf("delete of %s/%s ignored: its registration is not marked deleted", in.Actor.Atespace, in.Actor.UID)
+				return LifecycleResult{Ignored: true}, nil
+			}
+		}
 		s.mu.Lock()
 		if e := s.actors[in.Actor.key()]; e != nil {
-			s.purgeLocked(e)
+			if e.refs > 0 {
+				// Calls still hold the store: purge when the last returns,
+				// and admit no new ones.
+				e.purgeIdle = true
+			} else {
+				s.purgeLocked(e)
+			}
 		}
 		s.mu.Unlock()
 		return LifecycleResult{}, nil
@@ -780,6 +829,18 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 	case LifecycleForked:
 		if in.Parent == nil {
 			return LifecycleResult{}, bad(errors.New("chainstate: a fork names its parent"))
+		}
+		if s.opts.ParentOf != nil {
+			// The parent is the verified registration's, never the
+			// caller's word alone (GAP-0142).
+			parent, err := s.opts.ParentOf(ctx, in.Actor.Atespace, in.Actor.UID)
+			if err != nil {
+				return LifecycleResult{}, err
+			}
+			if parent == "" || parent != in.Parent.UID || in.Parent.Atespace != in.Actor.Atespace {
+				s.warnf("fork event for %s/%s ignored: its registration names parent %q", in.Actor.Atespace, in.Actor.UID, parent)
+				return LifecycleResult{Ignored: true}, nil
+			}
 		}
 		st, instance, err := s.storeOf(ctx, e)
 		if err != nil {

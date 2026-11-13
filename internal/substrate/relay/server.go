@@ -192,17 +192,17 @@ func (s *Server) Handler() http.Handler {
 	// The wake-up probe of the actor template: no authentication, no state,
 	// nothing started.
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
-	mux.HandleFunc("GET /dcrelay/1/ws", s.serveWS)
-	mux.HandleFunc("POST /dcrelay/1/poll", s.pollOpen)
-	mux.HandleFunc("GET /dcrelay/1/poll/{id}", s.pollRead)
-	mux.HandleFunc("POST /dcrelay/1/poll/{id}", s.pollWrite)
-	mux.HandleFunc("DELETE /dcrelay/1/poll/{id}", s.pollClose)
-	mux.HandleFunc("POST /dcrelay/1/task", s.taskStart)
-	mux.HandleFunc("GET /dcrelay/1/task/{id}", s.taskFollow)
-	mux.HandleFunc("GET /dcrelay/1/status", s.status)
-	mux.HandleFunc("POST /dcrelay/1/exec", s.fileExec)
-	mux.HandleFunc("PUT /dcrelay/1/files", s.filePut)
-	mux.HandleFunc("GET /dcrelay/1/files", s.fileGet)
+	mux.HandleFunc("GET "+Path(RouteWS), s.serveWS)
+	mux.HandleFunc("POST "+Path(RoutePoll), s.pollOpen)
+	mux.HandleFunc("GET "+Path(RoutePoll+"/{id}"), s.pollRead)
+	mux.HandleFunc("POST "+Path(RoutePoll+"/{id}"), s.pollWrite)
+	mux.HandleFunc("DELETE "+Path(RoutePoll+"/{id}"), s.pollClose)
+	mux.HandleFunc("POST "+Path(RouteTask), s.taskStart)
+	mux.HandleFunc("GET "+Path(RouteTask+"/{id}"), s.taskFollow)
+	mux.HandleFunc("GET "+Path(RouteStatus), s.status)
+	mux.HandleFunc("POST "+Path(RouteExec), s.fileExec)
+	mux.HandleFunc("PUT "+Path(RouteFiles), s.filePut)
+	mux.HandleFunc("GET "+Path(RouteFiles), s.fileGet)
 	return mux
 }
 
@@ -281,6 +281,23 @@ func termSize(r *http.Request) (uint16, uint16) {
 	return cols, rows
 }
 
+// startDir applies the dir query parameter of an attach: the folder the
+// agent starts in when it is not running yet. It answers 400 itself when
+// the folder is refused.
+func (s *Server) startDir(w http.ResponseWriter, r *http.Request) bool {
+	q := r.URL.Query().Get("dir")
+	if q == "" {
+		return true
+	}
+	d, err := s.projectDir(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	s.agent.UseDir(d)
+	return true
+}
+
 // open pre-connects, starts the agent if needed and attaches to it.
 func (s *Server) open(ctx context.Context, cols, rows uint16) (*Attachment, error) {
 	s.preconnect(ctx)
@@ -336,7 +353,7 @@ var upgrader = websocket.Upgrader{
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.auth(w, r, "ws", true)
-	if !ok {
+	if !ok || !s.startDir(w, r) {
 		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -437,14 +454,14 @@ func (p *pollAttachment) touch() {
 
 func (p *pollAttachment) end() {
 	p.once.Do(func() {
-		p.Attachment.Close()
+		p.Close() // the embedded Attachment
 		close(p.done)
 	})
 }
 
 func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.auth(w, r, "poll", true)
-	if !ok {
+	if !ok || !s.startDir(w, r) {
 		return
 	}
 	s.mu.Lock()

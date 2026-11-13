@@ -1,6 +1,8 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package gateway
 
 import (
@@ -114,7 +116,7 @@ func TestLauncherAttachesThroughTheRealAdminHandler(t *testing.T) {
 	}
 	defer tun.Close()
 	big := bytes.Repeat([]byte("t"), 2<<20)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, tun.BaseURL()+"/dcrelay/1/files?dir=/work", bytes.NewReader(big))
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, relay.RouteURL(tun.BaseURL(), relay.RouteFiles)+"?dir=/work", bytes.NewReader(big))
 	req.Header.Set("Content-Type", "application/x-tar")
 	resp, err := tun.HTTPClient().Do(req)
 	if err != nil {
@@ -127,7 +129,7 @@ func TestLauncherAttachesThroughTheRealAdminHandler(t *testing.T) {
 	// run --task, the long-poll transport and exec are POSTs (GAP-0102):
 	// through the tunnel they carry the client tag and pass the gate.
 	for _, route := range []string{"task", "poll", "exec"} {
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tun.BaseURL()+"/dcrelay/1/"+route, strings.NewReader("{}"))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, relay.RouteURL(tun.BaseURL(), route), strings.NewReader("{}"))
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := tun.HTTPClient().Do(req)
 		if err != nil {
@@ -162,5 +164,35 @@ func TestLauncherAttachesThroughTheRealAdminHandler(t *testing.T) {
 	}
 	if code := raw(http.MethodPost, "/api/v1/substrate/actors", "application/x-tar", true); code != http.StatusUnsupportedMediaType {
 		t.Errorf("a JSON route took a tar body: %d, want 415", code)
+	}
+}
+
+// A gateway with no route to agents (no router address, GAP-0157) answers
+// 503 attach_unavailable: the launcher stops at once and says what is
+// missing, instead of waiting as for a full cluster.
+func TestLauncherSaysWhenTheClusterHasNoAttachRoute(t *testing.T) {
+	f := newSubstrateFixture(t)
+	f.api.substrateState().cfg.Relays = nil
+	srv := httptest.NewTLSServer(f.admin)
+	defer srv.Close()
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := attach.Status(ctx, attach.Options{
+		Target: attach.Target{Atespace: "eng-web", Name: "alice-1"}, Gateway: attach.Gateway{BaseURL: srv.URL, CAFile: ca},
+		Bearer: func(context.Context) (string, error) { return "p-alice", nil }, NoBanner: true, NoAsks: true,
+	})
+	if !errors.Is(err, attach.ErrAttachOff) {
+		t.Fatalf("err = %v, want ErrAttachOff", err)
+	}
+	if !strings.Contains(err.Error(), "attach is not set up") || strings.Contains(err.Error(), "full") {
+		t.Errorf("message %q", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("the launcher waited %s for a refusal that does not change", time.Since(start))
 	}
 }

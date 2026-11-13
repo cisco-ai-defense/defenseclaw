@@ -87,7 +87,7 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits. Over budget answers `429` with `Retry-After` |
 | `substrate.extproc.enabled` | `true` | The egress callout |
 | `substrate.extproc.failure_mode` | `closed` | What the egress gateway does when the callout fails |
-| `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it |
+| `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it. `on` says it does; `off` checks headers only. In managed enterprise, `auto` refuses requests to listed MCP servers until the callout has received a body |
 | `substrate.extproc.body_max_bytes` | `1048576` | Largest body the callout reads |
 | `substrate.extproc.mcp_hosts` | `[]` | Hosts whose bodies are read as MCP calls |
 | `substrate.llm.providers` | all the gateway proxy serves | Providers actors may reach, only through the proxy |

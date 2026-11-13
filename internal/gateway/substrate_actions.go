@@ -59,6 +59,38 @@ type SubstratePolicyEnsurer func(ctx context.Context, atespace, name string) err
 type SubstrateATEActions struct {
 	Client ateapi.Client
 	Ensure SubstratePolicyEnsurer
+	// ConnectorOf reads the connector a template was built for (its attested
+	// label, GAP-0160). Nil, or "" for an unattested template, means the
+	// template names none.
+	ConnectorOf func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error)
+}
+
+// SubstrateTemplateConnector is the optional part of an Actions that tells
+// the create route which connector a template carries.
+type SubstrateTemplateConnector interface {
+	TemplateConnector(ctx context.Context, atespace, template string) (string, error)
+}
+
+// TemplateConnector implements SubstrateTemplateConnector.
+func (s *SubstrateATEActions) TemplateConnector(ctx context.Context, atespace, template string) (string, error) {
+	if s.ConnectorOf == nil {
+		return "", nil
+	}
+	tmplSpace, tmplName := atespace, strings.TrimSpace(template)
+	if a, n, ok := strings.Cut(tmplName, "/"); ok {
+		tmplSpace, tmplName = a, n
+	}
+	if !substrateActorNameRE.MatchString(tmplName) || tmplSpace != atespace {
+		return "", ErrSubstrateTemplateNotFound
+	}
+	t, err := s.Client.GetActorTemplate(ctx, ateapi.Ref(tmplSpace, tmplName))
+	if ateapi.IsNotFound(err) {
+		return "", ErrSubstrateTemplateNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.ConnectorOf(ctx, t)
 }
 
 var substrateActorNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)

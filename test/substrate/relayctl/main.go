@@ -283,6 +283,6 @@ func task(args []string) (int, error) {
 		return -1, err
 	}
 	enc := json.NewEncoder(os.Stdout)
-	return relay.RunTask(context.Background(), nil, *url, tok, relay.TaskRequest{Prompt: *prompt},
+	return relay.RunTask(context.Background(), nil, relay.RouteBase(*url), tok, relay.TaskRequest{Prompt: *prompt},
 		func(e relay.TaskEvent) { _ = enc.Encode(e) })
 }

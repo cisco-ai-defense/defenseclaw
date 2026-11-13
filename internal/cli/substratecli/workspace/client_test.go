@@ -124,7 +124,7 @@ func TestClientExecErrors(t *testing.T) {
 		}
 	})
 	t.Run("wrong token", func(t *testing.T) {
-		c := NewClient(a.srv.Client(), a.srv.URL, func(context.Context) (string, error) { return "secret-wrong-token", nil })
+		c := NewClient(a.srv.Client(), relay.RouteBase(a.srv.URL), func(context.Context) (string, error) { return "secret-wrong-token", nil })
 		_, err := c.Exec(context.Background(), "", osw.ExecRequest{Argv: []string{"true"}})
 		var h *HTTPError
 		if !errors.As(err, &h) || h.Status != http.StatusUnauthorized || strings.Contains(err.Error(), "secret-wrong-token") {
@@ -135,7 +135,7 @@ func TestClientExecErrors(t *testing.T) {
 		}
 	})
 	t.Run("token source fails", func(t *testing.T) {
-		c := NewClient(a.srv.Client(), a.srv.URL, func(context.Context) (string, error) { return "", errors.New("not signed in") })
+		c := NewClient(a.srv.Client(), relay.RouteBase(a.srv.URL), func(context.Context) (string, error) { return "", errors.New("not signed in") })
 		if _, err := c.Exec(context.Background(), "", osw.ExecRequest{Argv: []string{"true"}}); err == nil || !strings.Contains(err.Error(), "not signed in") {
 			t.Fatalf("err = %v", err)
 		}
@@ -144,7 +144,7 @@ func TestClientExecErrors(t *testing.T) {
 		dead := httptest.NewServer(http.NotFoundHandler())
 		url := dead.URL
 		dead.Close()
-		c := NewClient(&http.Client{}, url, func(context.Context) (string, error) { return testToken, nil })
+		c := NewClient(&http.Client{}, relay.RouteBase(url), func(context.Context) (string, error) { return testToken, nil })
 		if _, err := c.Exec(context.Background(), "", osw.ExecRequest{Argv: []string{"true"}}); err == nil || !strings.Contains(err.Error(), "in the actor") {
 			t.Fatalf("err = %v", err)
 		}
@@ -183,7 +183,7 @@ func TestClientRetriesOnlyIdempotentCommands(t *testing.T) {
 	}{{"idempotent", true, false, 3}, {"not idempotent", false, true, 1}} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &flaky{next: a.srv.Client().Transport, fail: 2}
-			c := NewClient(&http.Client{Transport: f}, a.srv.URL, func(context.Context) (string, error) { return testToken, nil })
+			c := NewClient(&http.Client{Transport: f}, relay.RouteBase(a.srv.URL), func(context.Context) (string, error) { return testToken, nil })
 			res, err := c.Exec(context.Background(), "", osw.ExecRequest{Argv: []string{"echo", "ok"}, Idempotent: tc.idempotent})
 			if (err != nil) != tc.wantErr || f.calls.Load() != tc.wantCalls {
 				t.Fatalf("err = %v, calls = %d", err, f.calls.Load())
@@ -318,7 +318,7 @@ func TestClientTransferErrors(t *testing.T) {
 		}
 	})
 	t.Run("wrong token on upload", func(t *testing.T) {
-		bad := NewClient(a.srv.Client(), a.srv.URL, func(context.Context) (string, error) { return "nope", nil })
+		bad := NewClient(a.srv.Client(), relay.RouteBase(a.srv.URL), func(context.Context) (string, error) { return "nope", nil })
 		src := filepath.Join(t.TempDir(), "p")
 		write(t, src, "f", "x", 0o644)
 		var h *HTTPError

@@ -208,7 +208,8 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ready": true, "body_mode": eng.BodyModeStatus(), "chain_dropped": eng.ChainDropped(),
+				"ready": true, "body_mode": eng.BodyModeStatus(), "body_inspection": cfg.BodyInspection,
+				"degraded": eng.Degraded(), "chain_dropped": eng.ChainDropped(),
 			})
 		})
 		health = &http.Server{Addr: o.healthListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
