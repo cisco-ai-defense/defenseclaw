@@ -527,7 +527,8 @@ func startProcessScript(c *Command) (NestedScript, bool) {
 			}
 		}
 	}
-	if !isPSHost(exe) {
+	isCmd := baseName(exe) == "cmd"
+	if !isPSHost(exe) && !isCmd {
 		return NestedScript{}, false
 	}
 	val, ok := paramValue(c, "argumentlist", "args")
@@ -550,6 +551,46 @@ func startProcessScript(c *Command) (NestedScript, bool) {
 		} else {
 			return NestedScript{Kind: KindStartProcessArgs, Dialect: "powershell", Source: c, Reason: ReasonNonLiteral}, true
 		}
+	}
+	if isCmd {
+		// Start-Process cmd -ArgumentList '/c','del C:\x': the payload is the
+		// cmd /c tail, not an ignored argument list (review 4 R4-6).
+		ns := NestedScript{Kind: KindStartProcessArgs, Dialect: "cmd", Source: c, Static: true}
+		var parts []string
+		seen := false
+		for i := 0; i < len(words); i++ {
+			w := words[i]
+			if !seen {
+				if w.static {
+					switch strings.ToLower(w.text) {
+					case "/c", "/k", "/r":
+						seen = true
+						continue
+					}
+				}
+				continue
+			}
+			if !w.static {
+				ns.Static = false
+				ns.Reason = ReasonNonLiteral
+				break
+			}
+			if w.text == "--%" {
+				continue
+			}
+			parts = append(parts, w.text)
+		}
+		if !seen {
+			return NestedScript{}, false
+		}
+		if ns.Static {
+			ns.Text = strings.Join(parts, " ")
+			if ns.Text == "" {
+				ns.Static = false
+				ns.Reason = ReasonNonLiteral
+			}
+		}
+		return ns, true
 	}
 	res := powerShellHostScripts(c, words)
 	if len(res) == 0 {

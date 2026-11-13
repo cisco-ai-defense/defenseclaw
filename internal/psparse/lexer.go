@@ -703,6 +703,7 @@ func (l *lexer) lexBareword() {
 		r := l.cur()
 		if r == '`' {
 			if l.peek(1) == 'u' && l.peek(2) == '{' { // `u{hex} escape stays in the word
+				escBracket = true // `u{5B}/`u{5D} may be a bracket; keep the word whole
 				l.i += 3
 				for l.i < len(l.runes) && l.cur() != '}' {
 					l.i++
