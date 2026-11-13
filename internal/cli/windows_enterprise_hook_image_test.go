@@ -326,7 +326,7 @@ func TestHookImageUpgradeFromTheFixedPathLayout(t *testing.T) {
 		t.Fatalf("third stage = %+v", third)
 	}
 	d11, _ := winpath.EnterpriseHookImageDigest(hook11)
-	pruned := pruneWindowsHookImages(f, hookImageTestBin, []string{d11})
+	pruned := pruneOldUnnamed(f, hookImageTestBin, []string{d11})
 	if !pruned.OK || len(pruned.Removed) != 1 || pruned.Removed[0] != launchDir(hook10) || len(pruned.Kept) != 2 || len(pruned.InUse) != 0 {
 		t.Fatalf("prune = %+v", pruned)
 	}
@@ -507,7 +507,7 @@ func TestHookImagePrune(t *testing.T) {
 	f.put(root+`\`+strings.Repeat("6", 16), &fakeHookImageNode{dir: true, link: true})
 	f.renameErr = map[string]error{strings.ToLower(root + `\` + busy): errors.New("The process cannot access the file because it is being used by another process.")}
 
-	report := pruneWindowsHookImages(f, hookImageTestBin, []string{strings.ToUpper(kept)})
+	report := pruneOldUnnamed(f, hookImageTestBin, []string{strings.ToUpper(kept)})
 	if !report.OK {
 		t.Fatalf("prune = %+v", report)
 	}
@@ -543,12 +543,12 @@ func TestHookImagePrune(t *testing.T) {
 	f.removeErr = map[string]error{}
 	victim := root + `\` + busy
 	f.removeErr[strings.ToLower(root+`\.staging-`+fmt.Sprintf("%032x", f.random+1))] = errors.New("access denied")
-	again := pruneWindowsHookImages(f, hookImageTestBin, []string{kept})
+	again := pruneOldUnnamed(f, hookImageTestBin, []string{kept})
 	if !again.OK || len(again.Removed) != 1 || again.Removed[0] != victim || len(again.Notes) == 0 {
 		t.Fatalf("second prune = %+v", again)
 	}
 	f.removeErr = nil
-	third := pruneWindowsHookImages(f, hookImageTestBin, []string{kept})
+	third := pruneOldUnnamed(f, hookImageTestBin, []string{kept})
 	if !third.OK || len(third.Removed) != 1 || !strings.Contains(third.Removed[0], ".staging-") {
 		t.Fatalf("third prune = %+v", third)
 	}
@@ -556,21 +556,21 @@ func TestHookImagePrune(t *testing.T) {
 
 func TestHookImagePruneRefusals(t *testing.T) {
 	f := newFakeHookImageFS()
-	if r := pruneWindowsHookImages(f, hookImageTestBin, nil); !r.OK || len(r.Removed) != 0 {
+	if r := pruneOldUnnamed(f, hookImageTestBin, nil); !r.OK || len(r.Removed) != 0 {
 		t.Fatalf("no hooks folder = %+v", r)
 	}
 	f.dir(hookImageTestBin + `\hooks`)
 	f.dir(hookImageTestBin + `\hooks\` + strings.Repeat("7", 16))
 	// Without a readable transition image the current folder is unknown:
 	// nothing is removed.
-	if r := pruneWindowsHookImages(f, hookImageTestBin, nil); r.OK || r.Error == "" {
+	if r := pruneOldUnnamed(f, hookImageTestBin, nil); r.OK || r.Error == "" {
 		t.Fatalf("unknown current = %+v", r)
 	}
 	if _, ok := f.get(hookImageTestBin + `\hooks\` + strings.Repeat("7", 16)); !ok {
 		t.Fatal("prune removed a folder while the current one was unknown")
 	}
 	installRelease(f, "x")
-	if r := pruneWindowsHookImages(f, hookImageTestBin, []string{"../etc"}); r.OK || !strings.Contains(r.Error, "--keep") {
+	if r := pruneOldUnnamed(f, hookImageTestBin, []string{"../etc"}); r.OK || !strings.Contains(r.Error, "--keep") {
 		t.Fatalf("bad keep = %+v", r)
 	}
 }
