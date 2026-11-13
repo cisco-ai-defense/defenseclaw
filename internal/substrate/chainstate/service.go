@@ -117,6 +117,21 @@ type Service struct {
 	open    int
 	closed  bool
 	stripes [256]sync.Mutex
+	// egress records the callout's egress steps off the RPC (GAP-0179).
+	egress *egressWorker
+	// purging holds the actors whose files are being removed, after their
+	// entry left the index: purges close stores and remove files outside
+	// mu, which the egress check takes (GAP-0179), and no call reaches the
+	// actor until the files are gone.
+	purging map[string]bool
+	// purges are the purges whose files wait for runPurges.
+	purges []purgeJob
+}
+
+// purgeJob is a purged actor's store and files, removed after mu.
+type purgeJob struct {
+	actor Actor
+	store *audit.Store
 }
 
 // actorEntry is one actor's state. Fields are guarded by Service.mu except
@@ -132,6 +147,18 @@ type actorEntry struct {
 	purged   bool
 	// purgeIdle is a delete that waits for the calls holding the entry.
 	purgeIdle bool
+	// memo is what the callout's chain check answers from (GAP-0179).
+	memo egressMemo
+	// stateMu orders the state file writes, so the newest memo is the one
+	// on the volume.
+	stateMu sync.Mutex
+	// linkMu orders the fork parent's lookup (parent, parentKnown) and the
+	// memo link (memoLinked), which the egress check makes without the
+	// store (GAP-0091 with GAP-0179).
+	linkMu      sync.Mutex
+	parent      string
+	parentKnown bool
+	memoLinked  bool
 }
 
 // actorState is what the leader keeps of an actor on the volume: its
@@ -150,6 +177,9 @@ type actorState struct {
 	Forked bool `json:"forked,omitempty"`
 	// Task is the launcher-registered --task text.
 	Task string `json:"task,omitempty"`
+	// Egress is the egress memo (GAP-0179), filled when the file is
+	// written. A state file without it is from an older leader.
+	Egress *egressSnapshot `json:"egress,omitempty"`
 }
 
 // running is wall in the actor's running time.
@@ -196,10 +226,27 @@ func New(opts Options) (*Service, error) {
 			return nil, err
 		}
 	}
-	s := &Service{opts: opts, actors: map[string]*actorEntry{}}
+	s := &Service{opts: opts, actors: map[string]*actorEntry{}, purging: map[string]bool{}}
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	for _, e := range s.actors {
+		// A known actor is past its first call: a fork was linked then.
+		e.memoLinked = true
+		switch _, err := os.Stat(s.dbPath(e.actor)); {
+		case e.state.Egress != nil:
+			// The memo this leader's predecessor saved covers the store.
+			e.memo.restore(e.state.Egress)
+		case errors.Is(err, os.ErrNotExist):
+			// No store: nothing the memo would miss.
+			e.memo.warm = true
+		default:
+			// A store from a leader that saved no memo: the first egress
+			// check answers errWarming, and the worker warms the memo.
+		}
+		e.state.Egress = nil
+	}
+	s.startEgressWorker()
 	return s, nil
 }
 
@@ -234,8 +281,11 @@ func (s *Service) warnf(format string, args ...any) {
 	fmt.Fprintf(s.opts.Warn, "[chainstate] warning: "+format+"\n", args...)
 }
 
-// Close closes every store.
+// Close stops the egress worker (after it has written what it holds) and
+// closes every store.
 func (s *Service) Close() error {
+	s.egress.stop()
+	s.runPurges()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed = true
@@ -317,24 +367,40 @@ var errEvicted = &leader.WireError{Code: leader.CodeUnavailable, Message: "the a
 // An actor seen for the first time gets an entry (evicting another when the
 // atespace is full).
 func (s *Service) acquire(a Actor) (*actorEntry, func(), error) {
+	return s.acquireWith(a, false)
+}
+
+// acquireWith is acquire; quick (the egress check) leaves the store
+// closes and file removals its release makes to a goroutine, so the check
+// never waits on the volume (GAP-0179).
+func (s *Service) acquireWith(a Actor, quick bool) (*actorEntry, func(), error) {
 	if err := a.Validate(); err != nil {
 		return nil, nil, bad(err)
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return nil, nil, &leader.WireError{Code: leader.CodeUnavailable, Message: "chain store closed"}
 	}
 	e := s.actors[a.key()]
-	if e != nil && e.purgeIdle {
+	if (e != nil && e.purgeIdle) || s.purging[a.key()] {
+		s.mu.Unlock()
 		return nil, nil, errEvicted
 	}
 	if e == nil {
 		s.makeRoomLocked(a.Atespace)
+		// A new actor has no store this leader has not seen: the memo
+		// covers it from the start.
 		e = &actorEntry{actor: a, lastUsed: s.opts.Now()}
+		e.memo.warm = true
 		s.actors[a.key()] = e
 	}
 	e.refs++
+	evicted := len(s.purges) > 0
+	s.mu.Unlock()
+	if evicted {
+		s.after(quick, s.runPurges)
+	}
 	return e, func() {
 		s.mu.Lock()
 		e.refs--
@@ -346,10 +412,22 @@ func (s *Service) acquire(a Actor) (*actorEntry, func(), error) {
 		s.mu.Unlock()
 		// Closing a store checkpoints its WAL: never under the service
 		// mutex, which every call of every actor takes (GAP-0142).
-		for _, st := range toClose {
-			_ = st.Close()
-		}
+		s.after(quick, func() {
+			for _, st := range toClose {
+				_ = st.Close()
+			}
+			s.runPurges()
+		})
 	}, nil
+}
+
+// after runs f now, or in a goroutine for a quick call.
+func (s *Service) after(quick bool, f func()) {
+	if quick {
+		go f()
+		return
+	}
+	f()
 }
 
 // makeRoomLocked evicts one actor of atespace when it is full: a retired
@@ -406,20 +484,41 @@ func (s *Service) closeIdleLocked() []*audit.Store {
 	return out
 }
 
-// purgeLocked removes everything the leader holds of an actor.
+// purgeLocked takes an actor out of the index; runPurges, after mu, closes
+// its store and removes its files. Until then the actor answers
+// errEvicted.
 func (s *Service) purgeLocked(e *actorEntry) {
+	job := purgeJob{actor: e.actor, store: e.store}
 	if e.store != nil {
-		_ = e.store.Close()
 		e.store = nil
 		s.open--
 	}
 	e.purged = true
 	delete(s.actors, e.actor.key())
-	db := s.dbPath(e.actor)
-	for _, p := range []string{db, db + "-wal", db + "-shm", s.statePath(e.actor)} {
-		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
-			s.warnf("purge %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+	s.purging[e.actor.key()] = true
+	s.purges = append(s.purges, job)
+}
+
+// runPurges closes the stores and removes the files of the purged actors
+// (never under mu).
+func (s *Service) runPurges() {
+	s.mu.Lock()
+	jobs := s.purges
+	s.purges = nil
+	s.mu.Unlock()
+	for _, j := range jobs {
+		if j.store != nil {
+			_ = j.store.Close()
 		}
+		db := s.dbPath(j.actor)
+		for _, p := range []string{db, db + "-wal", db + "-shm", s.statePath(j.actor)} {
+			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.warnf("purge %s/%s: %v", j.actor.Atespace, j.actor.UID, err)
+			}
+		}
+		s.mu.Lock()
+		delete(s.purging, j.actor.key())
+		s.mu.Unlock()
 	}
 }
 
@@ -482,6 +581,13 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 			return nil, "", errForkUnlinked
 		}
 	}
+	if fresh {
+		// The state file says a memo-keeping leader made this store, so
+		// the next leader answers from the saved memo (GAP-0179).
+		if err := s.writeState(e); err != nil {
+			s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+		}
+	}
 	s.mu.Lock()
 	if e.purged {
 		s.mu.Unlock()
@@ -501,7 +607,9 @@ var errForkUnlinked = &leader.WireError{Code: leader.CodeUnavailable, Message: "
 // linkFork copies the parent's windows into a new child store (not yet
 // published) when the verified registration names a parent.
 func (s *Service) linkFork(ctx context.Context, e *actorEntry, st *audit.Store, instance audit.ConnectorInstanceID) error {
-	parent, err := s.opts.ParentOf(ctx, e.actor.Atespace, e.actor.UID)
+	e.linkMu.Lock()
+	parent, err := s.parentOfLocked(ctx, e)
+	e.linkMu.Unlock()
 	if err != nil {
 		return fmt.Errorf("parent: %w", err)
 	}
@@ -530,23 +638,19 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	childDigest, _ := audit.ToolChainActorScopeDigest(child.actor.Atespace, child.actor.UID)
 	s.mu.Lock()
 	var pst actorState
-	if pe := s.actors[parent.key()]; pe != nil {
+	pe := s.actors[parent.key()]
+	if pe != nil {
 		pst = pe.state
 	}
 	cst := child.state
 	s.mu.Unlock()
-	if !cst.Forked {
-		// The child's clock starts from the parent's running time once; a
-		// late or repeated fork event never resets the child's own time.
-		cst.SuspendedNanos = pst.SuspendedNanos
-		if pst.SinceUnixNano != 0 && at.UnixNano() > pst.SinceUnixNano {
-			cst.SuspendedNanos += at.UnixNano() - pst.SinceUnixNano
-		}
-		cst.SinceUnixNano, cst.Forked = 0, true
+	if pe != nil {
+		// The egress memo gets the parent's windows too: the egress check
+		// answers from it (GAP-0179). A parent this leader has no entry
+		// for has no store either (load indexes every store).
+		child.memo.merge(&pe.memo)
 	}
-	if cst.Task == "" {
-		cst.Task = pst.Task
-	}
+	cst = forkClock(cst, pst, at)
 	result := LifecycleResult{}
 	if _, err := os.Stat(s.dbPath(parent)); err == nil {
 		r, err := st.CopyToolChainFork(ctx, s.dbPath(parent), audit.ToolChainForkCopy{
@@ -567,6 +671,84 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	return result, s.setState(child, cst)
 }
 
+// forkClock starts a child's clock from its parent's running time, once:
+// a late or repeated fork event never resets the child's own time. The
+// child takes the parent's task if it has none.
+func forkClock(cst, pst actorState, at time.Time) actorState {
+	if !cst.Forked {
+		cst.SuspendedNanos = pst.SuspendedNanos
+		if pst.SinceUnixNano != 0 && at.UnixNano() > pst.SinceUnixNano {
+			cst.SuspendedNanos += at.UnixNano() - pst.SinceUnixNano
+		}
+		cst.SinceUnixNano, cst.Forked = 0, true
+	}
+	if cst.Task == "" {
+		cst.Task = pst.Task
+	}
+	return cst
+}
+
+// parentOfLocked is the actor's fork parent from its registration, looked
+// up once (e.linkMu held).
+func (s *Service) parentOfLocked(ctx context.Context, e *actorEntry) (string, error) {
+	if e.parentKnown || s.opts.ParentOf == nil {
+		return e.parent, nil
+	}
+	parent, err := s.opts.ParentOf(ctx, e.actor.Atespace, e.actor.UID)
+	if err != nil {
+		return "", err
+	}
+	e.parent, e.parentKnown = parent, true
+	return parent, nil
+}
+
+// linkMemo gives a new forked actor's egress memo its parent's windows
+// and clock at its first egress check, without the store (GAP-0091 with
+// GAP-0179): a clone before any hook is checked against what the parent
+// did. A concurrent check of the child waits for it. A failed lookup
+// answers errForkUnlinked (the callout's chain failure mode applies), and
+// the next check tries again. The worker's store open copies the stored
+// windows and saves the clock.
+func (s *Service) linkMemo(ctx context.Context, e *actorEntry) error {
+	if s.opts.ParentOf == nil {
+		return nil
+	}
+	e.linkMu.Lock()
+	defer e.linkMu.Unlock()
+	if e.memoLinked {
+		return nil
+	}
+	s.mu.Lock()
+	opened := e.store != nil
+	s.mu.Unlock()
+	if opened {
+		// storeOf linked the store, and copyFork the memo.
+		e.memoLinked = true
+		return nil
+	}
+	parent, err := s.parentOfLocked(ctx, e)
+	if err != nil {
+		s.warnf("fork link for %s/%s failed, its chain calls answer unavailable until it succeeds: %v", e.actor.Atespace, e.actor.UID, err)
+		return errForkUnlinked
+	}
+	if parent != "" && parent != e.actor.UID {
+		s.mu.Lock()
+		pe := s.actors[Actor{Atespace: e.actor.Atespace, UID: parent}.key()]
+		var pst actorState
+		if pe != nil {
+			pst = pe.state
+		}
+		// In memory only: copyFork saves it with the store.
+		e.state = forkClock(e.state, pst, s.opts.Now())
+		s.mu.Unlock()
+		if pe != nil {
+			e.memo.merge(&pe.memo)
+		}
+	}
+	e.memoLinked = true
+	return nil
+}
+
 func (s *Service) stateOf(e *actorEntry) actorState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -577,6 +759,20 @@ func (s *Service) setState(e *actorEntry, st actorState) error {
 	s.mu.Lock()
 	e.state = st
 	s.mu.Unlock()
+	return s.writeState(e)
+}
+
+// writeState saves the actor's state with its egress memo.
+func (s *Service) writeState(e *actorEntry) error {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	s.mu.Lock()
+	st, purged := e.state, e.purged
+	s.mu.Unlock()
+	if purged {
+		return nil
+	}
+	st.Egress = e.memo.snapshot()
 	return writeFileAtomic(s.statePath(e.actor), mustJSON(st))
 }
 
@@ -631,7 +827,24 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 			return ObserveResponse{}, bad(err)
 		}
 		x.ConnectorInstanceID = instance
-		result, err = repo.Observe(ctx, x)
+		at := s.stateOf(e).running(s.opts.Now()).UnixNano()
+		mask := x.Projection.DetectionStepMask
+		if in.Scope == ScopeActor && startsEgressChain(mask) {
+			// The memo and its saved copy learn a chain start before the
+			// store does (GAP-0179): a failure after this is stricter.
+			e.memo.noteStep1(at, mask)
+			if err := s.writeState(e); err != nil {
+				return ObserveResponse{}, err
+			}
+		}
+		var r audit.ToolChainObserveResult
+		r, err = repo.Observe(ctx, x)
+		result = r
+		if err == nil && in.Scope == ScopeActor && e.memo.noteObserved(at, mask, r.DetectedChainIDs) {
+			if werr := s.writeState(e); werr != nil {
+				s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, werr)
+			}
+		}
 	case OpResolve:
 		var x audit.ToolChainResolvePendingInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -660,6 +873,12 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		}
 		x.ConnectorInstanceID = instance
 		result, err = repo.ResetForTerminalEventSession(ctx, x)
+		if err == nil && in.Scope == ScopeActor {
+			e.memo.reset(false)
+			if werr := s.writeState(e); werr != nil {
+				s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, werr)
+			}
+		}
 	case OpAttach:
 		var x AttachInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -793,6 +1012,7 @@ func (s *Service) Lifecycle(ctx context.Context, in LifecycleEvent) (LifecycleRe
 			}
 		}
 		s.mu.Unlock()
+		s.runPurges()
 		return LifecycleResult{}, nil
 	}
 	if in.Event == LifecycleCrashed {
@@ -909,27 +1129,52 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 		}
 		n++
 	}
+	e.memo.reset(true)
+	if err := s.writeState(e); err != nil {
+		s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+	}
 	return LifecycleResult{Barriers: n}, nil
 }
 
-// Egress serves ChainEgress: the callout's observed egress step, recorded in
-// the actor window under its active ruleset at the leader's receive time and
-// checked against the egress chains. An actor with no actor window has
-// nothing to match.
+// Egress serves ChainEgress: the callout's synchronous chain check. It
+// answers from the actor's memo (no store access, GAP-0179) and hands the
+// step to the egress worker, which records it in the actor window under
+// its active ruleset. A memo that does not yet cover a store an older
+// leader left on the volume answers errWarming. A new forked actor's memo
+// is linked to its parent's first (linkMemo).
 func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, error) {
-	e, release, err := s.acquire(in.Actor)
+	e, release, err := s.acquireWith(in.Actor, true)
 	if err != nil {
 		return EgressVerdict{}, err
 	}
 	defer release()
+	if err := s.linkMemo(ctx, e); err != nil {
+		return EgressVerdict{}, err
+	}
+	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()).UnixNano(), s.opts.EgressAction)
+	s.egress.push(egressRecord{actor: e.actor, in: in})
+	if !ok {
+		return EgressVerdict{}, errWarming
+	}
+	return v, nil
+}
+
+// recordEgress is the worker's exact record of an egress step: the event
+// in the actor window, and the memo warmed with the store's own verdict.
+func (s *Service) recordEgress(ctx context.Context, in EgressRequest) error {
+	e, release, err := s.acquire(in.Actor)
+	if err != nil {
+		return err
+	}
+	defer release()
 	st, instance, err := s.storeOf(ctx, e)
 	if err != nil {
-		return EgressVerdict{}, err
+		return err
 	}
 	defer s.lock(in.Actor)()
 	windows, err := st.ToolChainInstanceWindows(ctx, instance)
 	if err != nil {
-		return EgressVerdict{}, err
+		return err
 	}
 	ruleset := ""
 	for _, w := range windows {
@@ -938,7 +1183,11 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 		}
 	}
 	if ruleset == "" {
-		return EgressVerdict{}, nil
+		// No actor window: nothing to record or to match.
+		if e.memo.warmUp() {
+			return s.writeState(e)
+		}
+		return nil
 	}
 	var mask uint64
 	for _, id := range egressChains {
@@ -948,28 +1197,26 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 	}
 	repo, err := s.repo(ctx, st, e, ScopeActor)
 	if err != nil {
-		return EgressVerdict{}, err
+		return err
 	}
 	id, fp, err := s.syntheticEvent(ctx, st, instance, e, "substrate.egress", lifecycleSession("egress"), s.opts.Now())
 	if err != nil {
-		return EgressVerdict{}, err
+		return err
 	}
 	result, err := repo.Observe(ctx, audit.ToolChainObserveInput{SemanticEventID: id, ConnectorInstanceID: instance,
 		InputFingerprint: fp, RulesetFingerprint: ruleset,
 		Projection: guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusComplete, DetectionStepMask: mask}})
 	if err != nil {
-		return EgressVerdict{}, err
+		return err
 	}
-	v := EgressVerdict{Detected: result.DetectedChainIDs}
-	for _, chain := range result.DetectedChainIDs {
-		if egressDenyChains[chain] {
-			v.Rule = chain
-			v.Reason = "Earlier in this actor's work it read a secret; DefenseClaw blocks sending data off the cluster after that."
-			v.Deny = s.opts.EgressAction == EgressBlock
-			break
-		}
+	// The store's own verdict on the step: a detection the memo did not
+	// have (a window from an older leader) is kept, and the memo now
+	// covers the store and is saved with it.
+	fresh := e.memo.noteObserved(s.stateOf(e).running(s.opts.Now()).UnixNano(), mask, result.DetectedChainIDs)
+	if cold := e.memo.warmUp(); fresh || cold {
+		return s.writeState(e)
 	}
-	return v, nil
+	return nil
 }
 
 // SweepResult counts what a sweep did.
@@ -1004,8 +1251,9 @@ func (s *Service) Sweep(_ context.Context) (SweepResult, error) {
 		}
 	}
 	s.mu.Unlock()
+	s.runPurges()
 	for _, e := range retired {
-		if err := writeFileAtomic(s.statePath(e.actor), mustJSON(s.stateOf(e))); err != nil {
+		if err := s.writeState(e); err != nil {
 			return res, err
 		}
 		res.Retired++

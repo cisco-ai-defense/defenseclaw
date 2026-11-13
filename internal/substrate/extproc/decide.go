@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -128,6 +129,9 @@ type Verdict struct {
 	Findings  []string
 	// Retryable refusals (the callout could not decide) answer 503.
 	Retryable bool
+	// formRules marks a form POST whose body may override its method
+	// (GAP-0046): DecideBody decides it again on the body's _method.
+	formRules bool
 	// WantBody asks the server to switch the request to buffered body mode.
 	WantBody      bool
 	BodyInspected bool
@@ -326,34 +330,28 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		return v
 	}
 
-	askRule, askPrefix := "", ""
 	// URL rules match the canonical path (GAP-0046): an equivalent
 	// spelling (/./admin, /%61dmin, //admin) matches like the plain one, and
 	// a path an origin could read another way is refused where a path rule
-	// applies.
-	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
-	methods := requestMethods(req)
-	for _, r := range pol.urlRules {
-		if !r.appliesTo(req.Host, methods) {
-			continue
+	// applies. Every method the request can stand for counts: its own, each
+	// value of an override header and of a _method query parameter.
+	var askRule *urlRule
+	refusal, rule, refused := e.urlRuleVerdict(v, req, pol, requestMethods(req))
+	switch {
+	case refused:
+		return refusal
+	case rule != nil && rule.action == "ask":
+		askRule = rule
+	}
+	// A form POST can name its method in the body (_method), which the
+	// callout reads only in body mode (GAP-0046). formPending marks a
+	// request that a method-scoped rule would refuse or ask for under some
+	// method: its body decides.
+	formPending := false
+	if formOverridable(req) {
+		if _, any, _ := e.urlRuleVerdict(v, req, pol, pol.ruleMethods()); any != nil && any != rule {
+			formPending = true
 		}
-		if r.pathPrefix != "" {
-			if pathErr != nil {
-				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
-					"The request path uses an ambiguous encoding (an encoded slash, backslash, semicolon, percent sign or control character, or a dot segment with parameters), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
-			}
-			if !r.matchesPath(reqPath) {
-				continue
-			}
-		}
-		switch r.action {
-		case "deny":
-			return deny(v, CategoryURLRule, sourceProfile, r.name,
-				"This actor's profile does not allow "+req.Method+" requests to this path on "+req.Host+".")
-		case "ask":
-			askRule, askPrefix = "url_rules:"+r.name, r.pathPrefix
-		}
-		break
 	}
 
 	for _, f := range append(e.scanURL(req, pol), e.scanHeaders(req, pol)...) {
@@ -389,14 +387,18 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		v.Findings = append(v.Findings, "chain_unchecked:"+chainWhy)
 	}
 
-	if askRule == "" {
+	var target *askTarget
+	switch {
+	case askRule != nil:
+		t := askFor(askRule, req, requestMethods(req))
+		target = &t
+	default:
 		if pat, ok := pol.askHosts.match(req.Host); ok {
-			askRule = "ask_hosts:" + pat
+			target = &askTarget{rule: "ask_hosts:" + pat}
 		}
 	}
-	if askRule != "" {
-		v = e.ask(ctx, v, req, pol, askRule, askPrefix)
-		if !v.Allow {
+	if target != nil {
+		if v = e.ask(ctx, v, req, pol, *target); !v.Allow {
 			return v
 		}
 	}
@@ -407,7 +409,123 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	}
 	var why string
 	v.WantBody, why = e.wantBody(req)
+	if formPending {
+		return e.formOverridePending(v, req)
+	}
 	return e.uninspected(v, why)
+}
+
+// urlRuleVerdict applies pol's URL rules to the request under methods:
+// a refusal (deny, or an ambiguous path where a path rule applies) with
+// refused true, else the ask rule to raise (nil for none). URL rules only
+// tighten, by strength and not by order (GAP-0171): every rule that
+// applies counts, substrate.admin's and the profile's, and the strictest
+// wins (deny, then ask). An approval of the ask never lifts a deny, since
+// the deny is decided first.
+func (e *Engine) urlRuleVerdict(v Verdict, req *Request, pol *Policy, methods []string) (Verdict, *urlRule, bool) {
+	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
+	var ask *urlRule
+	for i := range pol.urlRules {
+		r := &pol.urlRules[i]
+		if !r.appliesTo(req.Host, methods) {
+			continue
+		}
+		if r.pathPrefix != "" {
+			if pathErr != nil {
+				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
+					"The request path uses an ambiguous encoding (an encoded slash, backslash, semicolon, percent sign or control character, or a dot segment), so DefenseClaw can't check it against this profile's path rules for "+req.Host+"."), r, true
+			}
+			if !r.matchesPath(reqPath) {
+				continue
+			}
+		}
+		switch {
+		case r.action == "deny":
+			return deny(v, CategoryURLRule, sourceProfile, r.name,
+				"This actor's profile does not allow "+strings.Join(methods, " or ")+" requests to this path on "+req.Host+"."), r, true
+		case r.action == "ask" && ask == nil:
+			ask = r
+		}
+	}
+	return v, ask, false
+}
+
+// formOverridable is a form POST, whose body a framework may read for a
+// _method override (Rails Rack::MethodOverride, Laravel, Symfony).
+func formOverridable(req *Request) bool {
+	if !strings.EqualFold(req.Method, "POST") || req.EndOfStream {
+		return false
+	}
+	ct := strings.ToLower(strings.TrimSpace(req.ContentType))
+	return strings.HasPrefix(ct, "application/x-www-form-urlencoded") || strings.HasPrefix(ct, "multipart/form-data")
+}
+
+// formOverridePending asks for the body of a form POST a method-scoped rule
+// would refuse or ask for under its _method override; a body the callout
+// can't read (multipart, over the cap, body inspection off or not shown
+// to work) follows the failure mode (GAP-0046).
+func (e *Engine) formOverridePending(v Verdict, req *Request) Verdict {
+	v.formRules = true
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(req.ContentType)), "multipart/") || req.ContentLength > e.cfg.BodyMaxBytes || !e.body.want() ||
+		(e.closedAuto() && !e.body.confirmed()) {
+		v.WantBody = false
+		if e.cfg.FailureMode == FailureClosed {
+			return deny(v, CategoryBodyUninspected, sourceProfile, "method_override",
+				"This form request may name another method in its body (_method), and DefenseClaw can't read the body to check it against this profile's method rules.")
+		}
+		v.Alert = true
+		v.Findings = append(v.Findings, "method_override_unchecked")
+		return v
+	}
+	v.WantBody = true
+	return v
+}
+
+// checkFormOverride decides a form POST again with the _method values its
+// body names (formPending in DecideHeaders).
+func (e *Engine) checkFormOverride(ctx context.Context, req *Request, pol *Policy, v Verdict, body []byte) Verdict {
+	methods := append(requestMethods(req), formMethods(body)...)
+	refusal, rule, refused := e.urlRuleVerdict(v, req, pol, methods)
+	switch {
+	case refused:
+		return refusal
+	case rule != nil && rule.action == "ask":
+		return e.ask(ctx, v, req, pol, askFor(rule, req, methods))
+	}
+	return v
+}
+
+// askTarget is what an ask names: the rule that raised it, and for an url
+// rule the methods it asks about and its path prefix. An approval binds to
+// exactly what the person saw (GAP-0177, STEER 03:40Z): host, rule id,
+// method and path prefix. The gateway keys approvals by host and rule, so
+// the methods are part of an url rule ask's rule key.
+type askTarget struct {
+	rule   string
+	method string
+	path   string
+}
+
+// askFor is the ask of url rule r for a request standing for methods (its
+// own and every override it names): the methods r lists among them, sorted
+// (all of them for a rule without methods).
+func askFor(r *urlRule, req *Request, methods []string) askTarget {
+	var ms []string
+	for _, m := range methods {
+		if (len(r.methods) == 0 || r.methods[m]) && !slices.Contains(ms, m) {
+			ms = append(ms, m)
+		}
+	}
+	if len(ms) == 0 {
+		ms = []string{strings.ToUpper(req.Method)}
+	}
+	slices.Sort(ms)
+	method := strings.Join(ms, ",")
+	t := askTarget{rule: "url_rules:" + r.name + " " + method, method: method, path: r.pathPrefix}
+	if t.path == "" {
+		t.path = "/"
+	}
+	return t
 }
 
 // Why an inspected host's body is not inspected. The first two are framing
@@ -452,15 +570,20 @@ func (e *Engine) uninspected(v Verdict, why string) Verdict {
 	return v
 }
 
-func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, rule, pathPrefix string) Verdict {
+func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, t askTarget) Verdict {
+	rule := t.rule
 	if e.asks == nil {
 		// No approvals service yet: an unanswerable ask is a denial (D12).
 		return deny(v, CategoryAskDenied, sourceAsk, rule, "This host needs an approval, and no approvals service is configured.")
 	}
 	actx, cancel := context.WithTimeout(ctx, e.cfg.Ask.Hold)
 	defer cancel()
-	res, err := e.asks.Ask(actx, AskRequest{Actor: req.Actor, Profile: pol.Name, Host: req.Host, Method: req.Method,
-		Rule: rule, PathPrefix: pathPrefix, UnattendedAsks: pol.UnattendedAsks})
+	method := t.method
+	if method == "" {
+		method = req.Method
+	}
+	res, err := e.asks.Ask(actx, AskRequest{Actor: req.Actor, Profile: pol.Name, Host: req.Host, Method: method,
+		Rule: rule, PathPrefix: t.path, UnattendedAsks: pol.UnattendedAsks})
 	v.AskID = res.ID
 	switch {
 	case err != nil && !errors.Is(err, context.DeadlineExceeded):
@@ -544,6 +667,18 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
 		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")
+	}
+	if v.formRules {
+		if v = e.checkFormOverride(ctx, req, pol, v, body); !v.Allow {
+			return v
+		}
+		_, mcp := e.mcpHosts.match(req.Host)
+		_, listed := e.bodyHosts.match(req.Host)
+		if !mcp && !listed {
+			// The body was read for the override only: no DLP on a host
+			// that is not inspected (D9).
+			return v
+		}
 	}
 	for _, f := range e.scanBody(req, pol, body) {
 		if f.deny {
