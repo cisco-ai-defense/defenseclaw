@@ -366,6 +366,8 @@ func numberLit(t Token) *Number {
 	isDecimalType := false
 	unsigned := false
 	bigInt := false
+	narrow := false     // y (sbyte) or s (int16): a narrow signed integer type
+	typeSuffix := false // any trailing l/u/y/s/n/d type suffix
 	for len(raw) > 0 {
 		c := raw[len(raw)-1]
 		if c == 'd' || c == 'D' {
@@ -377,13 +379,27 @@ func numberLit(t Token) *Number {
 		if c == 'n' || c == 'N' {
 			bigInt = true
 		}
+		if c == 'y' || c == 'Y' || c == 's' || c == 'S' {
+			narrow = true
+		}
 		if strings.IndexByte("lLuUyYsSnNdD", c) >= 0 {
+			typeSuffix = true
 			raw = raw[:len(raw)-1]
 			continue
 		}
 		break
 	}
 	low := strings.ToLower(raw)
+	// Conservatism for numeric suffix/multiplier combinations whose exact pwsh
+	// value depends on signed-width wrap or suffix/multiplier ordering we do not
+	// model (0xFFy -> -1, 0x100y -> bareword, 1kbl, 1.5l -> 2): do not assert a
+	// value (review 3 R11). Numbers are never a path/program, so non-static is
+	// safe. (Plain forms -- 0x10, 1kb, 1.5, 1u, 10l -- are unaffected.)
+	hexOrBin := strings.HasPrefix(low, "0x") || strings.HasPrefix(low, "0b")
+	fractional := strings.ContainsAny(raw, ".eE")
+	if (narrow && hexOrBin) || (mult != 1 && typeSuffix) || (fractional && (narrow || (typeSuffix && !isDecimalType && !bigInt))) {
+		return n
+	}
 	setInt := func(v int64) {
 		n.Value, n.Int = float64(v), true
 		n.Display, n.OK = strconv.FormatInt(v, 10), true
