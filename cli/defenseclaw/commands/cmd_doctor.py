@@ -299,6 +299,7 @@ class _DoctorResult:
         "list_processes",
         "quiet",
         "gateway_down",
+        "gateway_holder",
         "sidecar_unverified",
         "gateway_start_waited",
     )
@@ -334,6 +335,8 @@ class _DoctorResult:
         # supervised gateway is not serving the API port; later rows that
         # would only repeat it stay quiet.
         self.gateway_down = ""
+        # The process the Sidecar API row named when gateway_down is "foreign".
+        self.gateway_holder = ""
         # True once the Sidecar API row found a listener on the API port that
         # is not this account's verified gateway (its /health still answers).
         self.sidecar_unverified = False
@@ -5837,7 +5840,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 r=r,
                 remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
-            r.gateway_down = "foreign"
+            r.gateway_down, r.gateway_holder = "foreign", holder
             return None
         else:
             # /health is public: any process on the port answers it. This row
@@ -6083,7 +6086,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                 r=r,
                 remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
             )
-            r.gateway_down = "foreign"
+            r.gateway_down, r.gateway_holder = "foreign", holder
         elif trust.code == "missing":
             start, remediation = _stopped_gateway_start_advice(cfg)
             _emit(
@@ -6109,7 +6112,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             r=r,
             remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
         )
-        r.gateway_down = "foreign"
+        r.gateway_down, r.gateway_holder = "foreign", holder
     elif code == 0 and "refused" in body.lower():
         start, remediation = _stopped_gateway_start_advice(cfg)
         _emit(
@@ -7806,7 +7809,12 @@ def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
             r=r,
         )
     else:
-        _emit("warn", "Route-only peer broker", "the hook guardian peer broker did not verify this connection" + suffix, r=r)
+        _emit(
+            "warn",
+            "Route-only peer broker",
+            "the hook guardian peer broker did not verify this connection" + suffix,
+            r=r,
+        )
 
 
 def _watchdog_enabled(cfg) -> bool:
@@ -13278,7 +13286,9 @@ def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     legacy = [
         str(m.get("name") or i)
         for i, m in enumerate(models)
-        if isinstance(m, dict) and str(m.get("api_key_env") or "").strip() and not str(m.get("credential") or "").strip()
+        if isinstance(m, dict)
+        and str(m.get("api_key_env") or "").strip()
+        and not str(m.get("credential") or "").strip()
     ]
     if not legacy:
         return
@@ -13359,12 +13369,31 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
 def _check_route_only(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Route-only rows per connector (S1 DESIGN 7.2, 7.4, 17.1): readiness the
     gateway reports in /health (custody without a gateway key fails), the
-    agent config, gateway Bedrock signing, a held API port, a shared Mac."""
-    from defenseclaw.commands.cmd_status import _enterprise_profile
-    from defenseclaw.doctor_route_only import route_only_rows
+    agent config, gateway Bedrock signing, a held API port, a shared Mac.
 
+    Live readiness is read only from this account's verified gateway: a
+    foreground gateway, a port another process holds and an unverified
+    listener each get their own state row (REVIEW-code-doctor P2-2)."""
+    from defenseclaw import doctor_route_only as dro
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    gateway = ""
+    if r.gateway_down == "foreground":
+        gateway = dro.GATEWAY_FOREGROUND
+    elif r.gateway_down == "foreign":
+        gateway = dro.GATEWAY_FOREIGN
+    elif r.sidecar_unverified and r.gateway_down != "stopped":
+        gateway = dro.GATEWAY_UNVERIFIED
+    holder = r.gateway_holder if gateway == dro.GATEWAY_FOREIGN else ""
     try:
-        rows = route_only_rows(cfg, live_health, profile=_enterprise_profile(cfg))
+        rows = dro.route_only_rows(
+            cfg,
+            live_health,
+            profile=_enterprise_profile(cfg),
+            gateway=gateway,
+            holder="" if holder == ROOT_GATEWAY_REASON else holder,
+            holder_fix=_foreign_gateway_port_remediation(cfg, holder=holder) if gateway == dro.GATEWAY_FOREIGN else "",
+        )
     except Exception as exc:  # a broken agent file must not stop doctor
         _emit("warn", "Route-only", f"could not check route-only: {single_line(str(exc))[:200]}", r=r)
         return

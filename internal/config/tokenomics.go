@@ -287,7 +287,7 @@ func (p PricingConfig) Validate() error {
 			return fmt.Errorf("%s: %s/%s is listed twice", path, m.Provider, m.Model)
 		}
 		seen[key] = true
-		if err := m.PriceRatesConfig.validate(path, true); err != nil {
+		if err := m.validate(path, true); err != nil {
 			return err
 		}
 	}

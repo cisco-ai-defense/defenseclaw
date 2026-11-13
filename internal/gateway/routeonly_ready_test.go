@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -41,14 +42,11 @@ func TestRouteOnlyReadinessCredentialClasses(t *testing.T) {
 	anthropic := config.RoutingUpstreamConfig{BaseURL: "https://api.anthropic.com", API: config.RoutingAPIMessages}
 	cfg := readinessConfig(anthropic)
 	var signers bedrockSigners
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, true)); !r.Ready || r.Credential != routeCredentialAgent || r.Custody || r.Provider != "anthropic" || r.Upstream != "https://api.anthropic.com" {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers)); !r.Ready || r.Credential != routeCredentialAgent || r.Custody || r.Provider != "anthropic" || r.Upstream != "https://api.anthropic.com" {
 		t.Fatalf("OSS passthrough: %+v", r)
 	}
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, false)); r.Ready || !strings.Contains(r.Fix, "restart the gateway") {
-		t.Fatalf("listener not mounted: %+v", r)
-	}
 	cfg.Routing.Enabled = false
-	if got := routeOnlyReadinessFor(cfg, "linux", &signers, true); got != nil {
+	if got := routeOnlyReadinessFor(cfg, "linux", &signers); got != nil {
 		t.Fatalf("routing off reports nothing: %+v", got)
 	}
 
@@ -57,29 +55,36 @@ func TestRouteOnlyReadinessCredentialClasses(t *testing.T) {
 	cfg = readinessConfig(anthropic)
 	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
 	useRoutingCredentials(t, map[string]string{"anthropic-key": "sk-ant-held", "openai-key": "sk-held"})
-	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, true))
+	r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers))
 	if r.Ready || !r.Custody || r.Credential != routeCredentialMissing || r.Fix != "set routing.models[].credential for anthropic (base_url https://api.anthropic.com) in the policy bundle" {
 		t.Fatalf("custody without a gateway key: %+v", r)
 	}
 	cfg.Routing.Models = []config.RoutingModelBackend{{Name: "gpt", Provider: "openai", Model: "gpt-5", Credential: "openai-key"}}
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, true)); r.Ready || r.Credential != routeCredentialMissing {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers)); r.Ready || r.Credential != routeCredentialMissing {
 		t.Fatalf("a key of another provider does not cover the upstream: %+v", r)
 	}
 	cfg.Routing.Models = append(cfg.Routing.Models, config.RoutingModelBackend{Name: "sonnet", Provider: "anthropic", Model: "claude-sonnet", Credential: "anthropic-key"})
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers, true)); !r.Ready || r.Credential != routeCredentialHeld {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "darwin", &signers)); !r.Ready || r.Credential != routeCredentialHeld {
 		t.Fatalf("custody with a gateway key: %+v", r)
 	}
 	cfg.Routing.Models[1].Credential = "unreadable"
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "windows", &signers, true)); r.Ready || r.Credential != routeCredentialMissing {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "windows", &signers)); r.Ready || r.Credential != routeCredentialMissing ||
+		!strings.Contains(r.Problem, "unreadable is named in the policy bundle but not stored") ||
+		r.Fix != "store it: defenseclaw-gateway enterprise secret set --name unreadable --from-stdin" {
 		t.Fatalf("a credential ref that does not resolve: %+v", r)
 	}
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, true)); !r.Ready || r.Custody || r.Credential != routeCredentialAgent {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers)); !r.Ready || r.Custody || r.Credential != routeCredentialAgent {
 		t.Fatalf("managed Linux passes the agent credential through: %+v", r)
 	}
 
 	delete(cfg.Routing.RouteOnly.Upstreams, "claudecode")
-	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers, true)); r.Ready || !strings.Contains(r.Fix, "policy bundle") {
+	if r := onlyReadiness(t, routeOnlyReadinessFor(cfg, "linux", &signers)); r.Ready || !strings.Contains(r.Fix, "policy bundle") {
 		t.Fatalf("missing upstream on a managed host: %+v", r)
+	}
+	oss := readinessConfig(config.RoutingUpstreamConfig{})
+	if r := onlyReadiness(t, routeOnlyReadinessFor(oss, "linux", &signers)); r.Ready ||
+		r.Fix != "set routing.route_only.upstreams.claudecode (base_url and api) in config.yaml" {
+		t.Fatalf("missing upstream on an OSS host: %+v", r)
 	}
 }
 
@@ -96,7 +101,7 @@ func TestRouteOnlyReadinessBedrockSigning(t *testing.T) {
 			cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
 		}
 		var signers bedrockSigners
-		return onlyReadiness(t, routeOnlyReadinessFor(cfg, goos, &signers, true))
+		return onlyReadiness(t, routeOnlyReadinessFor(cfg, goos, &signers))
 	}
 	r := check(iam, base, "linux")
 	if !r.Ready || r.Credential != routeCredentialSigning || r.Signing == nil || !r.Signing.Signer || !r.Signing.Credential || r.Signing.Region != "us-west-2" {
@@ -104,12 +109,14 @@ func TestRouteOnlyReadinessBedrockSigning(t *testing.T) {
 	}
 	mismatch := *iam
 	mismatch.Region = "us-east-1"
-	if r := check(&mismatch, base, "linux"); r.Ready || r.Signing.RegionOK || !strings.Contains(r.Signing.RegionError, "does not match") {
+	if r := check(&mismatch, base, "linux"); r.Ready || r.Signing.RegionOK || !strings.Contains(r.Signing.RegionError, "does not match") ||
+		r.Fix != "set routing.route_only.upstreams.claudecode.bedrock.region to the region of the upstream host in config.yaml" {
 		t.Fatalf("region mismatch: %+v", r.Signing)
 	}
 	unset := *iam
 	unset.AccessKeyEnv, unset.SecretKeyEnv = "DC_READY_UNSET_AK", "DC_READY_UNSET_SK"
-	if r := check(&unset, base, "linux"); r.Ready || !r.Signing.Signer || r.Signing.Credential || r.Signing.CredentialError == "" {
+	if r := check(&unset, base, "linux"); r.Ready || !r.Signing.Signer || r.Signing.Credential || r.Signing.CredentialError == "" ||
+		!strings.Contains(r.Fix, "aws sso login") {
 		t.Fatalf("no credential: %+v", r.Signing)
 	}
 	corp := *iam
@@ -134,7 +141,7 @@ func TestRouteOnlyReadinessBedrockSigning(t *testing.T) {
 		t.Fatalf("profile present: %+v", found.Signing)
 	}
 	missing := check(&config.RoutingBedrockAuthConfig{Auth: config.RoutingBedrockAuthProfile, Profile: "gone"}, base, "linux")
-	if missing.Ready || missing.Signing.ProfileFound == nil || *missing.Signing.ProfileFound {
+	if missing.Ready || missing.Signing.ProfileFound == nil || *missing.Signing.ProfileFound || !strings.Contains(missing.Fix, "create AWS profile gone") {
 		t.Fatalf("profile missing: %+v", missing.Signing)
 	}
 
@@ -150,7 +157,7 @@ func TestHealthSnapshotCarriesRouteOnlyReadiness(t *testing.T) {
 	h := NewSidecarHealth()
 	details := map[string]interface{}{"enabled": true, "classifier": "rules"}
 	h.SetRouting(StateRunning, "", details)
-	h.SetRouteOnlyReadiness([]routeOnlyReadiness{{Connector: "codex", Mounted: true, Credential: routeCredentialMissing, Custody: true, Fix: "set it"}})
+	h.SetRouteOnlyReadiness([]routeOnlyReadiness{{Connector: "codex", Credential: routeCredentialMissing, Custody: true, Fix: "set it"}})
 	snap := h.Snapshot()
 	if _, ok := details["route_only"]; ok {
 		t.Fatal("the stored routing details must not be written")
@@ -206,4 +213,14 @@ func TestManagedCustodyGatewaySigningNeedsNoHeldKey(t *testing.T) {
 		t.Fatalf("custody signed call = %d %s (orig %d)", rec.Code, rec.Body.String(), len(f.orig))
 	}
 	mustVerify(t, f.orig[0])
+}
+
+// AWS request ids change on every call: cut from readiness text so the
+// periodic recheck publishes nothing new (REVIEW P4-3).
+func TestReadinessErrorDropsAWSRequestIDs(t *testing.T) {
+	a := readinessError(errors.New("operation error STS: GetCallerIdentity, https response error StatusCode: 403, RequestID: 1f0c6a4e-2b7d-4c1e-9a3f-0d2e5b6c7a8f, api error ExpiredToken"))
+	b := readinessError(errors.New("operation error STS: GetCallerIdentity, https response error StatusCode: 403, RequestID: 9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b, api error ExpiredToken"))
+	if a != b || !strings.Contains(a, "RequestID: -, api error ExpiredToken") {
+		t.Fatalf("%q != %q", a, b)
+	}
 }

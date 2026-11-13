@@ -23,7 +23,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
@@ -167,7 +166,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isModels := strings.HasSuffix(strings.TrimRight(native, "/"), "/models") || strings.Contains(native, "/models/")
-	if r.Method != http.MethodPost && !((r.Method == http.MethodGet || r.Method == http.MethodHead) && isModels) {
+	if r.Method != http.MethodPost && ((r.Method != http.MethodGet && r.Method != http.MethodHead) || !isModels) {
 		routeOnlyError(w, http.StatusMethodNotAllowed, "invalid_request_error", "route-only accepts POST, and GET on the models path")
 		return
 	}
@@ -175,12 +174,19 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !caller.Verified {
 		// Never the credential or a header value: the connector and why.
 		fmt.Fprintf(os.Stderr, "[routing] route-only refused connector=%s reason=%s\n", connector, caller.Reason)
+		if caller.Reason == routeCallerPeerLookupLimited {
+			// A burst of new connections over the account own lookup bound:
+			// agents retry a 429.
+			w.Header().Set("Retry-After", "1")
+			routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", routeCallerRefusalText(caller.Reason))
+			return
+		}
 		routeOnlyError(w, http.StatusUnauthorized, "authentication_error", routeCallerRefusalText(caller.Reason))
 		return
 	}
 	upstream, ok := cfg.Routing.RouteOnly.Upstreams[connector]
 	if !ok || strings.TrimSpace(upstream.BaseURL) == "" {
-		routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "routing.route_only.upstreams."+connector+" is not set; run the routing enable step again")
+		routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "routing.route_only.upstreams."+connector+" is not set; set its base_url and api in config.yaml")
 		return
 	}
 	// Gateway signing (DESIGN 7.3, 15.6): the agent sends no AWS credential
@@ -688,7 +694,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
-	var call modelusage.Call = modelusage.Noop.Begin(r.Context(), a.usage)
+	call := modelusage.Noop.Begin(r.Context(), a.usage)
 	if a.usage.Listener != "" {
 		// Calls without facts (GET models, bodies streamed unbuffered) are
 		// not model calls with usage the gateway can attribute.
@@ -927,7 +933,7 @@ func routeOnlySetupBase(cfg *config.Config, connectorName, apiAddr string) *conn
 // removed, routing turned on or off, upstream or API address changed).
 // Managed hosts are skipped: the guardian owns agent files there.
 func (s *Sidecar) applyRouteOnlyRenders(oldCfg, newCfg *config.Config) {
-	if s == nil || oldCfg == nil || newCfg == nil || managed.IsManagedEnterprise(newCfg.DeploymentMode) {
+	if s == nil || oldCfg == nil || !ossRouteOnlyGateway(newCfg) {
 		return
 	}
 	names := map[string]bool{}
@@ -948,7 +954,7 @@ func (s *Sidecar) applyRouteOnlyRenders(oldCfg, newCfg *config.Config) {
 // rerenderRouteOnly renders the route-only agent config of every routed
 // connector again from cfg (OSS only), as after a route key rotation.
 func (s *Sidecar) rerenderRouteOnly(cfg *config.Config) {
-	if s == nil || cfg == nil || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if s == nil || !ossRouteOnlyGateway(cfg) {
 		return
 	}
 	registry := connector.NewDefaultRegistry()

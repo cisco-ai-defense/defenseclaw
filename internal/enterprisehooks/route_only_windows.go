@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -58,14 +59,53 @@ func restoreWindowsRouteOnlyAsTarget(conn connector.Connector, sid *windows.SID,
 // verifyWindowsRouteOnly fails with route_config_drift when the rendering
 // differs from the one config.yaml selects (edited, missing, stale
 // credential, or left after routing was turned off), so the guardian
-// repair re-renders it. Read only.
-func verifyWindowsRouteOnly(conn connector.Connector, home, dataDir string, route *connector.RouteOnlySetup) error {
+// repair re-renders it. Read only. Verify runs as the service and these
+// files are the target own, so they are read as the other account checks
+// read them (readWindowsAccountConfig: bounded, a link only to a file the
+// account owns, a share or mapped drive as the account; S1
+// REVIEW-code-winroute P3-3), with errors that carry no path or content.
+func verifyWindowsRouteOnly(conn connector.Connector, sid *windows.SID, home, dataDir string, route *connector.RouteOnlySetup) error {
+	read := func(path string) ([]byte, error) {
+		data, _, err := readWindowsAccountConfig(path, sid, home)
+		return data, windowsRouteOnlyReadError(err)
+	}
 	return connector.WithUserHomeDir(home, func() error {
-		if err := connector.RouteOnlyDrift(conn, connector.SetupOpts{DataDir: dataDir}, route); err != nil {
+		if err := connector.RouteOnlyDriftWithReader(conn, connector.SetupOpts{DataDir: dataDir}, route, read); err != nil {
 			return fmt.Errorf("enterprise hooks: %w", err)
 		}
 		return nil
 	})
+}
+
+// windowsRouteOnlyReadError is the category of a failed account-file read:
+// os.ErrNotExist kept, never the path or the underlying text.
+func windowsRouteOnlyReadError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, os.ErrNotExist):
+		return os.ErrNotExist
+	case errors.Is(err, errWindowsAccountFileNotOwned):
+		return errors.New("an agent file is reached through a link to a file the account does not own")
+	case errors.Is(err, errWindowsAccountConfigNeedsSession):
+		return errors.New("an agent file is read as the account and the account has no signed-in session")
+	case errors.Is(err, connector.ErrUserNativeOTLPFileTooLarge):
+		return errors.New("an agent file is larger than the read limit")
+	}
+	return errors.New("an agent file cannot be read")
+}
+
+// restoreWindowsRouteOnlyAfterRemoval runs the route-only restore of a
+// removed target, called only once the removal succeeded, and only when the
+// caller passes the mutation identity check: a removal that failed or was
+// refused leaves the render of a target that is still enrolled and protected
+// (S1 REVIEW-code-winroute P3-4).
+func restoreWindowsRouteOnlyAfterRemoval(opts InstallOptions) {
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		windowsRouteOnlyWarn(fmt.Sprintf("enterprise hooks: %s route-only settings were not restored for the removed target: %v", strings.ToLower(strings.TrimSpace(opts.ConnectorName)), err))
+		return
+	}
+	removeWindowsRouteOnlyOnUnenroll(opts)
 }
 
 // removeWindowsRouteOnlyOnUnenroll restores the agent values a route-only
