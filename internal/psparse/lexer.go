@@ -28,8 +28,9 @@ type lexer struct {
 	// used to decide whether '-' / '.' / '@' start an operator or a word, and
 	// whether we are at a command-start position.
 	prevSignificant TokenKind
-	prevWasValue    bool // last token could end a value (for dash disambiguation)
-	atStart         bool // at a token boundary (for '#' comment vs bareword)
+	prevWasValue    bool   // last token could end a value (for dash disambiguation)
+	atStart         bool   // at a token boundary (for '#' comment vs bareword)
+	braceStack      []byte // 'h' for an open @{ hashtable, 'b' for a { scriptblock
 }
 
 func newLexer(src string) *lexer {
@@ -147,6 +148,7 @@ func (l *lexer) lex() []Token {
 			a := l.i
 			l.i += 2
 			l.emit(TokAtBrace, a, l.i)
+			l.braceStack = append(l.braceStack, 'h')
 		case r == '@' && isNameStart(l.peek(1)):
 			l.lexSplatVariable()
 		case r == '$':
@@ -554,10 +556,14 @@ func (l *lexer) lexOperatorOrWord() {
 	case '{':
 		l.i++
 		l.emit(TokLBrace, a, l.i)
+		l.braceStack = append(l.braceStack, 'b')
 		return
 	case '}':
 		l.i++
 		l.emit(TokRBrace, a, l.i)
+		if len(l.braceStack) > 0 {
+			l.braceStack = l.braceStack[:len(l.braceStack)-1]
+		}
 		return
 	case '[':
 		l.i++
@@ -720,6 +726,12 @@ func (l *lexer) lexBareword() {
 			break
 		}
 		if (r == '[' || r == ']') && !escBracket {
+			break
+		}
+		if r == '=' && len(l.braceStack) > 0 && l.braceStack[len(l.braceStack)-1] == 'h' {
+			// inside @{ }, '=' separates a key from its value; end the key (and
+			// any bareword) here so the value's commands are parsed, not glued
+			// into the key token (review 4 R4-1).
 			break
 		}
 		if strings.ContainsRune(";,|&(){}", r) || isSingleQuote(r) || isDoubleQuote(r) {

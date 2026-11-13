@@ -53,6 +53,12 @@ var revExtraLines = []string{
 	`Remove-Item C:\tmp\a,C:\Windows`, `Remove-Item -Path C:\tmp\a, C:\Windows -Recurse`,
 	`Remove-Item -Path:C:\a,C:\b`, `Write-Output 'C:\tmp\a','C:\Windows'`,
 	`Write-Output C:\a, 'C:\b', "C:\c"`, `Copy-Item C:\a,C:\Windows\System32\x.dll C:\dst`,
+	// review 4 R4-1: a hashtable bareword key fused to = must not hide the value's commands
+	`@{b=Remove-Item C:\x}`, `@{a=1;b=Remove-Item C:\x}`, `@{a= Remove-Item C:\x}`,
+	`$h=@{a=1;b=Remove-Item C:\x}`, `@{a=1;b=(Remove-Item C:\x)}`, `@{a=1;b={Remove-Item C:\x}}`,
+	`@{a=1;b=& rm C:\x}`, `@{a=1;b=iex 'Remove-Item C:\x'}`, `@{a=1;b=powershell -c Remove-Item C:\x}`,
+	`Write-Output @{a=1;b=Remove-Item C:\x}`, `Remove-Item @{a=1;b=Remove-Item C:\x}`,
+	`@{a =1}`, `@{a = 1}`, `@{'a'=Remove-Item C:\x}`, `@{"a"=Remove-Item C:\x}`, `@{1=Remove-Item C:\x}`,
 }
 
 func bq2(s string) string { return strings.ReplaceAll(s, "§", "`") }

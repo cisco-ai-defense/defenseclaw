@@ -161,334 +161,350 @@
 {"i":160,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\tmp\\a"},{"s":true,"v":"C:\\Windows"}]}]}]}
 {"i":161,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\a"},{"s":true,"v":"C:\\b"},{"s":true,"v":"C:\\c"}]}]}]}
 {"i":162,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\a"},{"s":true,"v":"C:\\Windows\\System32\\x.dll"}]},{"s":true,"v":"C:\\dst"}]}]}
-{"i":163,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"%#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":164,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"*#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":165,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":166,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":167,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":168,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"=#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":169,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"!#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":170,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":171,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\Windows"},{"p":"recurse","c":null}]}]}
-{"i":172,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"."},{"p":"recurse","c":null},{"p":"force","c":null}]}]}
-{"i":173,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":":x"},{"p":"force","c":null}]}]}
-{"i":174,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>"},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":175,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"recurse","c":{"s":false,"v":""}}]}]}
-{"i":176,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":{"s":false,"v":""}},{"s":true,"v":"C:\\x"}]}]}
-{"i":177,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":178,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":179,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":180,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":181,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":182,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\n-Recurse"}]}]}
-{"i":183,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"-Recurse"},"els":[]}]}
-{"i":184,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":false,"v":""}]}]}
-{"i":185,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":186,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":187,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":188,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":189,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
-{"i":190,"err":true,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
-{"i":191,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
-{"i":192,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
-{"i":193,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\a"},{"p":"path","c":null},{"s":true,"v":"C:\\b"}]}]}
-{"i":194,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":195,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[]}]}
-{"i":196,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"f","c":null}]}]}
-{"i":197,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"s":true,"v":"C:\\x"},{"p":"in","c":null},{"s":true,"v":"y"}]}]}
-{"i":198,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"},{"s":true,"v":"*"},{"s":true,"v":"c"}]}]}
-{"i":199,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"p":"join","c":null},{"s":true,"v":"b"}]}]}
-{"i":200,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":201,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":202,"err":false,"cmds":[{"name":{"s":true,"v":"-Value"},"els":[{"s":false,"v":""}]}]}
-{"i":203,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":204,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b c\\d"}]}]}
-{"i":205,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
-{"i":206,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"b"}]}]}
-{"i":207,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":208,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a$env:X\\b"}]}]}
-{"i":209,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"abcd"}]}]}
-{"i":210,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":211,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":212,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":213,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""},{"s":true,"v":"\\x"}]},{"name":{"s":true,"v":"Get-Location"},"els":[]}]}
-{"i":214,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\x"},{"s":true,"v":"C:\\yz"}]}]}]}
-{"i":215,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\ab"}]}]}
-{"i":216,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":{"s":true,"v":"C:\\ab c"}}]}]}
-{"i":217,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"*.ps1"}]}]}
-{"i":218,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":".\\a b"}]}]}
-{"i":219,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"~\\a b\\c"}]}]}
-{"i":220,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\[ab]c"}]}]}
-{"i":221,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a[0]"}]}]}
-{"i":222,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"b"}]}]}
-{"i":223,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"z"}]}]}
-{"i":224,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":225,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--foo=barbaz"}]}]}
-{"i":226,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"bc"}]}]}]}
-{"i":227,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abcde"}]}]}
-{"i":228,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1-2-3"}]}]}
-{"i":229,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.2.3"}]}]}
-{"i":230,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1+2"}]}]}
-{"i":231,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1*2"}]}]}
-{"i":232,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1-2"}]}]}
-{"i":233,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0x10-1"}]}]}
-{"i":234,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\\[b]"}]}]}
-{"i":235,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[a]"}]}]}
-{"i":236,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[int]"}]}]}
-{"i":237,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\[a]\\b"}]}]}
-{"i":238,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]},{"name":{"s":true,"v":"b"},"els":[]}]}
-{"i":239,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":240,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":false,"v":""}]}]}
-{"i":241,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]}]}
-{"i":242,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"a"}]}]}
-{"i":243,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""},{"s":true,"v":"c"}]},{"name":{"s":true,"v":"b"},"els":[]}]}
-{"i":244,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@b"}]}]}
-{"i":245,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@"},{"s":false,"v":""}]}]}
-{"i":246,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"user@host:/path"}]}]}
-{"i":247,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a!b"}]}]}
-{"i":248,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":249,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":250,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":251,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":252,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>b"}]}]}
-{"i":253,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
-{"i":254,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\'b"}]}]}
-{"i":255,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
-{"i":256,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":257,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":258,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":259,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":260,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":261,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]},{"s":false,"v":"","l":[{"s":true,"v":"c"},{"s":true,"v":"d"}]}]}]}
-{"i":262,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\*\\y"}]}]}
-{"i":263,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
-{"i":264,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
-{"i":265,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"a$x","c":null}]}]}
-{"i":266,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"'y"}]}]}
-{"i":267,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":".5x"}]}]}
-{"i":268,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5.x"}]}]}
-{"i":269,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":270,"err":false,"cmds":[{"name":{"s":true,"v":"R\u001bmo\u000b\u001b-I\t\u001bm"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":271,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":272,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":273,"err":false,"cmds":[{"name":{"s":true,"v":"i\u001bx"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":274,"err":false,"cmds":[{"name":{"s":true,"v":"I\nvoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":275,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":276,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":277,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":278,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":279,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b"}]}]}
-{"i":280,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\tb"}]}]}
-{"i":281,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0000b"}]}]}
-{"i":282,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0007b"}]}]}
-{"i":283,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\fb"}]}]}
-{"i":284,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u000bb"}]}]}
-{"i":285,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\rb"}]}]}
-{"i":286,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"A"}]}]}
-{"i":287,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"aAb"}]}]}
-{"i":288,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\u001b"}]}]}
-{"i":289,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$env:X"}]}]}
-{"i":290,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$"},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":291,"err":false,"cmds":[{"name":{"s":true,"v":"$"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":292,"err":false,"cmds":[{"name":{"s":true,"v":"$x"},"els":[]}]}
-{"i":293,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"@x"}]}]}
-{"i":294,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`b"}]}]}
-{"i":295,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a;b"}]}]}
-{"i":296,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a|b"}]}]}
-{"i":297,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a#b"}]}]}
-{"i":298,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-Recurse"}]}]}
-{"i":299,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"-Recurse"}]}]}
-{"i":300,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":301,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":302,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":303,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
-{"i":304,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
-{"i":305,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a�b"}]}]}
-{"i":306,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a😀b"}]}]}
-{"i":307,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"{a"}]}]}
-{"i":308,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"(1"}]}]}
-{"i":309,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`"}]}]}
-{"i":310,"err":false,"cmds":[{"name":{"s":true,"v":"rm"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":311,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$(Remove-Item C:\\x)"}]}]}
-{"i":312,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x,C:\\y"}]}]}
-{"i":313,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"'a"}]}]}
-{"i":314,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"`"}]}]}
-{"i":315,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
-{"i":316,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
-{"i":317,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":318,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
-{"i":319,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a‘b"}]}]}
-{"i":320,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":321,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":322,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":323,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":324,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":325,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a’b"}]}]}
-{"i":326,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
-{"i":327,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
-{"i":328,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":null},{"s":true,"v":"C:\\x"}]}]}
-{"i":329,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
-{"i":330,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
-{"i":331,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a–b"}]}]}
-{"i":332,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"p":"path","c":{"s":true,"v":"C:\\x"}}]}]}
-{"i":333,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":334,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"x"}]}]}
-{"i":335,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":336,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":337,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":163,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":164,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":165,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":166,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":167,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":168,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":169,"err":false,"cmds":[{"name":{"s":true,"v":"rm"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":170,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":171,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":172,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":173,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":174,"err":false,"cmds":[]}
+{"i":175,"err":false,"cmds":[]}
+{"i":176,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":177,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":178,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":179,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"%#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":180,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"*#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":181,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":182,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":183,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":184,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"=#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":185,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"!#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":186,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":187,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\Windows"},{"p":"recurse","c":null}]}]}
+{"i":188,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"."},{"p":"recurse","c":null},{"p":"force","c":null}]}]}
+{"i":189,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":":x"},{"p":"force","c":null}]}]}
+{"i":190,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>"},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":191,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"recurse","c":{"s":false,"v":""}}]}]}
+{"i":192,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":{"s":false,"v":""}},{"s":true,"v":"C:\\x"}]}]}
+{"i":193,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":194,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":195,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":196,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":197,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":198,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\n-Recurse"}]}]}
+{"i":199,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"-Recurse"},"els":[]}]}
+{"i":200,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":false,"v":""}]}]}
+{"i":201,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":202,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":203,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":204,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":205,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
+{"i":206,"err":true,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
+{"i":207,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
+{"i":208,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
+{"i":209,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\a"},{"p":"path","c":null},{"s":true,"v":"C:\\b"}]}]}
+{"i":210,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":211,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[]}]}
+{"i":212,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"f","c":null}]}]}
+{"i":213,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"s":true,"v":"C:\\x"},{"p":"in","c":null},{"s":true,"v":"y"}]}]}
+{"i":214,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"},{"s":true,"v":"*"},{"s":true,"v":"c"}]}]}
+{"i":215,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"p":"join","c":null},{"s":true,"v":"b"}]}]}
+{"i":216,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":217,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":218,"err":false,"cmds":[{"name":{"s":true,"v":"-Value"},"els":[{"s":false,"v":""}]}]}
+{"i":219,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":220,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b c\\d"}]}]}
+{"i":221,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
+{"i":222,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"b"}]}]}
+{"i":223,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":224,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a$env:X\\b"}]}]}
+{"i":225,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"abcd"}]}]}
+{"i":226,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":227,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":228,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":229,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""},{"s":true,"v":"\\x"}]},{"name":{"s":true,"v":"Get-Location"},"els":[]}]}
+{"i":230,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\x"},{"s":true,"v":"C:\\yz"}]}]}]}
+{"i":231,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\ab"}]}]}
+{"i":232,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":{"s":true,"v":"C:\\ab c"}}]}]}
+{"i":233,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"*.ps1"}]}]}
+{"i":234,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":".\\a b"}]}]}
+{"i":235,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"~\\a b\\c"}]}]}
+{"i":236,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\[ab]c"}]}]}
+{"i":237,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a[0]"}]}]}
+{"i":238,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"b"}]}]}
+{"i":239,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"z"}]}]}
+{"i":240,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":241,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--foo=barbaz"}]}]}
+{"i":242,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"bc"}]}]}]}
+{"i":243,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abcde"}]}]}
+{"i":244,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1-2-3"}]}]}
+{"i":245,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.2.3"}]}]}
+{"i":246,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1+2"}]}]}
+{"i":247,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1*2"}]}]}
+{"i":248,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1-2"}]}]}
+{"i":249,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0x10-1"}]}]}
+{"i":250,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\\[b]"}]}]}
+{"i":251,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[a]"}]}]}
+{"i":252,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[int]"}]}]}
+{"i":253,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\[a]\\b"}]}]}
+{"i":254,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]},{"name":{"s":true,"v":"b"},"els":[]}]}
+{"i":255,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":256,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":false,"v":""}]}]}
+{"i":257,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]}]}
+{"i":258,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"a"}]}]}
+{"i":259,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""},{"s":true,"v":"c"}]},{"name":{"s":true,"v":"b"},"els":[]}]}
+{"i":260,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@b"}]}]}
+{"i":261,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@"},{"s":false,"v":""}]}]}
+{"i":262,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"user@host:/path"}]}]}
+{"i":263,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a!b"}]}]}
+{"i":264,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":265,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":266,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":267,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":268,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>b"}]}]}
+{"i":269,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
+{"i":270,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\'b"}]}]}
+{"i":271,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
+{"i":272,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":273,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":274,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":275,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":276,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":277,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]},{"s":false,"v":"","l":[{"s":true,"v":"c"},{"s":true,"v":"d"}]}]}]}
+{"i":278,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\*\\y"}]}]}
+{"i":279,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
+{"i":280,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
+{"i":281,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"a$x","c":null}]}]}
+{"i":282,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"'y"}]}]}
+{"i":283,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":".5x"}]}]}
+{"i":284,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5.x"}]}]}
+{"i":285,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":286,"err":false,"cmds":[{"name":{"s":true,"v":"R\u001bmo\u000b\u001b-I\t\u001bm"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":287,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":288,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":289,"err":false,"cmds":[{"name":{"s":true,"v":"i\u001bx"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":290,"err":false,"cmds":[{"name":{"s":true,"v":"I\nvoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":291,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":292,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":293,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":294,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":295,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b"}]}]}
+{"i":296,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\tb"}]}]}
+{"i":297,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0000b"}]}]}
+{"i":298,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0007b"}]}]}
+{"i":299,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\fb"}]}]}
+{"i":300,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u000bb"}]}]}
+{"i":301,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\rb"}]}]}
+{"i":302,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"A"}]}]}
+{"i":303,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"aAb"}]}]}
+{"i":304,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\u001b"}]}]}
+{"i":305,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$env:X"}]}]}
+{"i":306,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$"},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":307,"err":false,"cmds":[{"name":{"s":true,"v":"$"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":308,"err":false,"cmds":[{"name":{"s":true,"v":"$x"},"els":[]}]}
+{"i":309,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"@x"}]}]}
+{"i":310,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`b"}]}]}
+{"i":311,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a;b"}]}]}
+{"i":312,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a|b"}]}]}
+{"i":313,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a#b"}]}]}
+{"i":314,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-Recurse"}]}]}
+{"i":315,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"-Recurse"}]}]}
+{"i":316,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":317,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":318,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":319,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
+{"i":320,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
+{"i":321,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a�b"}]}]}
+{"i":322,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a😀b"}]}]}
+{"i":323,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"{a"}]}]}
+{"i":324,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"(1"}]}]}
+{"i":325,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`"}]}]}
+{"i":326,"err":false,"cmds":[{"name":{"s":true,"v":"rm"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":327,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$(Remove-Item C:\\x)"}]}]}
+{"i":328,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x,C:\\y"}]}]}
+{"i":329,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"'a"}]}]}
+{"i":330,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"`"}]}]}
+{"i":331,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
+{"i":332,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
+{"i":333,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":334,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
+{"i":335,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a‘b"}]}]}
+{"i":336,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":337,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
 {"i":338,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
 {"i":339,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
 {"i":340,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":341,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
-{"i":342,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"ab c"}]}]}
-{"i":343,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5–3"}]}]}
-{"i":344,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"––x"}]}]}
-{"i":345,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"p":"path","c":null},{"p":"x","c":null}]}]}
-{"i":346,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a b"}]}]}
-{"i":347,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"\"a b\""}]}]}
-{"i":348,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":349,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a ; Remove-Item C:\\x"}]}]}
-{"i":350,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a \"|\" b"}]}]}
-{"i":351,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"%TEMP%"}]}]}
-{"i":352,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del %TEMP%\\x"}]}]}
-{"i":353,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"--%"},{"s":true,"v":"b"}]}]}
-{"i":354,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":""}]}]}
-{"i":355,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%a"}]}]}
-{"i":356,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
-{"i":357,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
-{"i":358,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"-","c":null},{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
-{"i":359,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":360,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":361,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a 2>&1"}]}]}
-{"i":362,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"'a "}]},{"name":{"s":true,"v":"b"},"els":[]}]}
-{"i":363,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":364,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ep","c":null},{"s":true,"v":"bypass"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":365,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":366,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":367,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":368,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"-"}]}]}
-{"i":369,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":370,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"p":"arg","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":371,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel C:\\x"}]}]}
-{"i":372,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel"},{"s":true,"v":"C:\\x"}]}]}
-{"i":373,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d"},{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
-{"i":374,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"git"},{"s":true,"v":"log"},{"p":"n","c":null},{"s":true,"v":"1"}]}]}
-{"i":375,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":376,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":377,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":378,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":379,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":380,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":381,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":382,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":383,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":384,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":385,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":386,"err":false,"cmds":[]}
-{"i":387,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":388,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":389,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":390,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":391,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":341,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a’b"}]}]}
+{"i":342,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
+{"i":343,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
+{"i":344,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":null},{"s":true,"v":"C:\\x"}]}]}
+{"i":345,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
+{"i":346,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
+{"i":347,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a–b"}]}]}
+{"i":348,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"p":"path","c":{"s":true,"v":"C:\\x"}}]}]}
+{"i":349,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":350,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"x"}]}]}
+{"i":351,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":352,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":353,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":354,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":355,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":356,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":357,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
+{"i":358,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"ab c"}]}]}
+{"i":359,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5–3"}]}]}
+{"i":360,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"––x"}]}]}
+{"i":361,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"p":"path","c":null},{"p":"x","c":null}]}]}
+{"i":362,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a b"}]}]}
+{"i":363,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"\"a b\""}]}]}
+{"i":364,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":365,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a ; Remove-Item C:\\x"}]}]}
+{"i":366,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a \"|\" b"}]}]}
+{"i":367,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"%TEMP%"}]}]}
+{"i":368,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del %TEMP%\\x"}]}]}
+{"i":369,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"--%"},{"s":true,"v":"b"}]}]}
+{"i":370,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":""}]}]}
+{"i":371,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%a"}]}]}
+{"i":372,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
+{"i":373,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
+{"i":374,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"-","c":null},{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
+{"i":375,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":376,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":377,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a 2>&1"}]}]}
+{"i":378,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"'a "}]},{"name":{"s":true,"v":"b"},"els":[]}]}
+{"i":379,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":380,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ep","c":null},{"s":true,"v":"bypass"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":381,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":382,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":383,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":384,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"-"}]}]}
+{"i":385,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":386,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"p":"arg","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":387,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel C:\\x"}]}]}
+{"i":388,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel"},{"s":true,"v":"C:\\x"}]}]}
+{"i":389,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d"},{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":390,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"git"},{"s":true,"v":"log"},{"p":"n","c":null},{"s":true,"v":"1"}]}]}
+{"i":391,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
 {"i":392,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
 {"i":393,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":394,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"y"}]}]}
-{"i":395,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\z"}]}]}
-{"i":396,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"b"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"c"}]}]}
-{"i":397,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":394,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":395,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":396,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":397,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
 {"i":398,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":399,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":400,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":401,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":402,"err":true,"cmds":[{"name":{"s":true,"v":"Get-Random"},"els":[]}]}
-{"i":403,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
-{"i":404,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-2147483648"}]}]}
-{"i":405,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"12345678901234567"}]}]}
-{"i":406,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775808"}]}]}
-{"i":407,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1000000"}]}]}
-{"i":408,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1572864"}]}]}
-{"i":409,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.0"}]}]}
-{"i":410,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.50"}]}]}
-{"i":411,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":412,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":413,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
-{"i":414,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":415,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":416,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":417,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":418,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":419,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":420,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
-{"i":421,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E-05"}]}]}
-{"i":422,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+20"}]}]}
-{"i":423,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.5"}]}]}
-{"i":424,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
-{"i":425,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":426,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"16"}]}]}
-{"i":427,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1099511627776"}]}]}
-{"i":428,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1125899906842624"}]}]}
-{"i":429,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Infinity"}]}]}
-{"i":430,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0"}]}]}
-{"i":431,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1kbx"}]}]}
-{"i":432,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1228800"}]}]}
-{"i":433,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"7"}]}]}
-{"i":434,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"+5"}]}]}
-{"i":435,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1..3"}]}]}
-{"i":436,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Process"},"els":[{"p":"id","c":null},{"s":true,"v":"16"}]}]}
-{"i":437,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
-{"i":438,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"4294967295"}]}]}
-{"i":439,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2147483648"}]}]}
-{"i":440,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+15"}]}]}
-{"i":441,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"123456789.123"}]}]}
-{"i":442,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.1"}]}]}
-{"i":443,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.5E-07"}]}]}
-{"i":444,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
-{"i":445,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775807"}]}]}
-{"i":446,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2"}]}]}
-{"i":447,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":448,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":449,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":450,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":451,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":452,"err":false,"cmds":[]}
-{"i":453,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":454,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":455,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":456,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":457,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":458,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":459,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":460,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":461,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\r\nb"}]}]}
-{"i":462,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
-{"i":463,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
-{"i":464,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
-{"i":465,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":466,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":467,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":468,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
-{"i":469,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
-{"i":470,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a'@b"}]}]}
-{"i":471,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc\""}]}]}
-{"i":472,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":473,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$x"}]}]}
-{"i":474,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\"\"b"}]}]}
-{"i":475,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[]}]}
-{"i":476,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":477,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":478,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":479,"err":false,"cmds":[{"name":{"s":true,"v":"Out-String"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":480,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":481,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"C:\\x.ps1"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":482,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":483,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[]}]}
-{"i":484,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":485,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
-{"i":486,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":487,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/V:ON"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":488,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/k"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":489,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":490,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":491,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\a b"}]}]}
-{"i":492,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/r"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":493,"err":false,"cmds":[{"name":{"s":true,"v":"CMD"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"DEL"},{"s":true,"v":"C:\\x"}]}]}
+{"i":399,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":400,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":401,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":402,"err":false,"cmds":[]}
+{"i":403,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":404,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":405,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":406,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":407,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":408,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":409,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":410,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"y"}]}]}
+{"i":411,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\z"}]}]}
+{"i":412,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"b"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"c"}]}]}
+{"i":413,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":414,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":415,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":416,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":417,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":418,"err":true,"cmds":[{"name":{"s":true,"v":"Get-Random"},"els":[]}]}
+{"i":419,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
+{"i":420,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-2147483648"}]}]}
+{"i":421,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"12345678901234567"}]}]}
+{"i":422,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775808"}]}]}
+{"i":423,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1000000"}]}]}
+{"i":424,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1572864"}]}]}
+{"i":425,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.0"}]}]}
+{"i":426,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.50"}]}]}
+{"i":427,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":428,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":429,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
+{"i":430,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":431,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":432,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":433,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":434,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":435,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":436,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
+{"i":437,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E-05"}]}]}
+{"i":438,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+20"}]}]}
+{"i":439,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.5"}]}]}
+{"i":440,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
+{"i":441,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":442,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"16"}]}]}
+{"i":443,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1099511627776"}]}]}
+{"i":444,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1125899906842624"}]}]}
+{"i":445,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Infinity"}]}]}
+{"i":446,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0"}]}]}
+{"i":447,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1kbx"}]}]}
+{"i":448,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1228800"}]}]}
+{"i":449,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"7"}]}]}
+{"i":450,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"+5"}]}]}
+{"i":451,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1..3"}]}]}
+{"i":452,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Process"},"els":[{"p":"id","c":null},{"s":true,"v":"16"}]}]}
+{"i":453,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
+{"i":454,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"4294967295"}]}]}
+{"i":455,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2147483648"}]}]}
+{"i":456,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+15"}]}]}
+{"i":457,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"123456789.123"}]}]}
+{"i":458,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.1"}]}]}
+{"i":459,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.5E-07"}]}]}
+{"i":460,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
+{"i":461,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775807"}]}]}
+{"i":462,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2"}]}]}
+{"i":463,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":464,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":465,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":466,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":467,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":468,"err":false,"cmds":[]}
+{"i":469,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":470,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":471,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":472,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":473,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":474,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":475,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":476,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":477,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\r\nb"}]}]}
+{"i":478,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
+{"i":479,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
+{"i":480,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":481,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":482,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":483,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":484,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
+{"i":485,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
+{"i":486,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a'@b"}]}]}
+{"i":487,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc\""}]}]}
+{"i":488,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":489,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$x"}]}]}
+{"i":490,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\"\"b"}]}]}
+{"i":491,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[]}]}
+{"i":492,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":493,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":494,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":495,"err":false,"cmds":[{"name":{"s":true,"v":"Out-String"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":496,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":497,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"C:\\x.ps1"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":498,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":499,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[]}]}
+{"i":500,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":501,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":502,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":503,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/V:ON"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":504,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/k"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":505,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":506,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":507,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\a b"}]}]}
+{"i":508,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/r"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":509,"err":false,"cmds":[{"name":{"s":true,"v":"CMD"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"DEL"},{"s":true,"v":"C:\\x"}]}]}
