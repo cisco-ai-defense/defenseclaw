@@ -2301,6 +2301,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Connector = serverConnector
 	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
+	r = r.WithContext(withCascadeTrace(r.Context(), a.decisionConfig(r.Context()), serverConnector))
 
 	scanTimeout := inspectScanTimeout
 	if a.inspectToolScanTimeout > 0 {
@@ -2369,6 +2370,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		if req.BoundedPrefixReview {
 			verdict.markOversizeUninspected()
 		}
+		surface := "tool_call"
+		if strings.EqualFold(req.Tool, "message") {
+			surface = "message"
+		}
+		verdict = a.applyCascadeFinal(r.Context(), serverConnector, surface, "", req.Tool, verdict)
 		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 		// A lock that appeared during the scan still decides this request.

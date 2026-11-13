@@ -42,13 +42,13 @@ func TestCascadeFinalActionTable(t *testing.T) {
 		return []policy.CascadeDecision{{Action: action, ID: id, Reason: id}}
 	}
 	tests := []struct {
-		name                         string
-		before                       string
-		flagged, critical            bool
-		decisions                    []policy.CascadeDecision
-		err                          error
-		lowest, highest, floor       string
-		want, decidedBy, policyRule  string
+		name                        string
+		before                      string
+		flagged, critical           bool
+		decisions                   []policy.CascadeDecision
+		err                         error
+		lowest, highest, floor      string
+		want, decidedBy, policyRule string
 	}{
 		{"no decision keeps the cascade", "alert", true, false, nil, nil, "", "", "", "alert", "", ""},
 		{"raise an allow", "allow", false, false, dec("block", "r1"), nil, "", "", "", "block", "policy", "r1"},
@@ -423,4 +423,3 @@ func TestCascadePolicyInputHasNoContent(t *testing.T) {
 		t.Fatalf("policy input lacks the finding: %s", raw)
 	}
 }
-

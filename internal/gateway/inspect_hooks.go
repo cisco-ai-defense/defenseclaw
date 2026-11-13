@@ -183,6 +183,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "prompt", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 	// The strict tier refuses a prompt while an install or upgrade holds this
 	// account's data directory, as on the hook and tool routes (GAP-1438).
@@ -272,6 +273,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "response", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)
@@ -392,6 +394,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	if req.BoundedPrefixReview {
 		verdict.markOversizeUninspected()
 	}
+	verdict = a.applyCascadeFinal(r.Context(), profileRequestConnector(r.Context()), "tool_result", "", "", verdict)
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
 	elapsed := time.Since(t0)

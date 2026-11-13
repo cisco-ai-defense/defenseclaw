@@ -277,6 +277,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP inspection unavailable"})
 		return
 	}
+	verdict = a.applyCascadeFinal(scanCtx, agent.ConnectorID, "acp", direction, "", verdict)
 	verdict.applyMode(mode)
 	result := acp.Verdict{
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,

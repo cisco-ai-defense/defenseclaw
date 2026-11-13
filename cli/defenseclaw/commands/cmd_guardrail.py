@@ -6715,3 +6715,39 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
 from defenseclaw.commands.cmd_judge import judge as _judge_group  # noqa: E402
 
 guardrail.add_command(_judge_group)
+
+
+# ---------------------------------------------------------------------------
+# guardrail cascade
+# ---------------------------------------------------------------------------
+
+
+@guardrail.group("cascade")
+def cascade_group() -> None:
+    """Show how the guardrail cascade decides (rules, System One, judge, Rego policy)."""
+
+
+@cascade_group.command("explain")
+@click.option("--connector", default="", help="Agent connector (claudecode, codex, ...); empty for the global scope.")
+@click.option("--profile", default="", help="Resolve for the subjects of this guardrail profile.")
+@click.option(
+    "--input",
+    "input_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Replay one decision: a cascade policy input (JSON) through the Rego policy and the limits.",
+)
+@click.option("--json", "json_out", is_flag=True, help="Print JSON.")
+def cascade_explain_cmd(connector: str, profile: str, input_path: str | None, json_out: bool) -> None:
+    """Show the effective cascade for a connector: what runs, what each outcome does,
+    the unknown tier, lanes, the Rego policy and locks, and the key that set each value.
+    With --input, also which layer or policy rule set the final action of that decision."""
+    from defenseclaw import cascade
+
+    payload, error = cascade.gateway_explain(connector, profile, input_path or "", as_json=json_out)
+    if error:
+        raise click.ClickException(error)
+    if json_out:
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        click.echo(str(payload).rstrip("\n"))
