@@ -336,6 +336,26 @@ def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
             assert int(minutes) <= 14, f"{name}: go test -timeout {minutes}m leaves no room in a 20-minute job"
 
 
+def test_pull_request_workflows_use_no_actions_setup_go_cache() -> None:
+    # actions/setup-go's own cache saves an entry per branch (520-700 MB
+    # each, the repository's cache quota). In a pull request's scope a small
+    # one was restored before main's shared Go cache (PR #1456: every macOS
+    # job compiled cold). Pull request jobs use ./.github/actions/setup-go or
+    # set cache: false.
+    for name, job_id, job in _pull_request_jobs():
+        for step in job.get("steps") or []:
+            if str(step.get("uses", "")).startswith("actions/setup-go@"):
+                assert (step.get("with") or {}).get("cache") is False, (
+                    f"{name}:{job_id} uses the actions/setup-go cache"
+                )
+
+
+def test_the_shared_go_cache_restores_only_its_own_entries() -> None:
+    action = yaml.safe_load((ROOT / ".github/actions/setup-go/action.yml").read_text(encoding="utf-8"))
+    restore = next(step for step in action["runs"]["steps"] if step.get("id") == "restore")
+    assert restore["with"]["restore-keys"].strip().splitlines() == ["${{ steps.paths.outputs.prefix }}"]
+
+
 def test_every_go_cache_save_writes_the_entry_its_job_restores() -> None:
     # A job with its own Go cache entry (a release cross-compile) must save
     # under that entry; saving under "shared" would leave its own entry

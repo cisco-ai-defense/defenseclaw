@@ -2370,6 +2370,9 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version: stable
+          # No per-branch actions/setup-go cache entry (the repository's cache
+          # quota); the shared Go cache is for go.mod's Go only.
+          cache: false
       - name: The shipped binaries start without stderr output on the latest Go
         shell: bash
         env:

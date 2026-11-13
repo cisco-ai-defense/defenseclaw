@@ -112,6 +112,12 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          # No actions/setup-go cache in a pull request workflow: it saved a
+          # 520-700 MB setup-go-<OS>- entry per branch (the repository's cache
+          # quota) and, in the pull request's own scope, an 11 MB macOS entry
+          # that the shared Go cache's old fallback key restored before main's
+          # (PR #1456). These jobs build little and take 1-2.5 minutes.
+          cache: false
       - name: Verify fixture SHA-256
         run: |
           set -euo pipefail
@@ -202,6 +208,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          cache: false
       - name: Verify fixture SHA-256
         run: |
           set -euo pipefail
@@ -280,6 +287,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          cache: false
       - name: Prepare payload from fixture + vendor tree
         run: |
           set -euo pipefail
@@ -337,6 +345,7 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
+          cache: false
       - name: Prepare payload from fixture + vendor tree
         run: |
           set -euo pipefail
