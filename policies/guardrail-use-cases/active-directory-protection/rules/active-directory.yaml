@@ -2,8 +2,8 @@ version: 1
 category: active-directory-protection
 rules:
   # Kerberos service-ticket (Kerberoasting) and AS-REP roasting requests.
-  # The built-in default pack ships this rule at HIGH, so default alerts and
-  # strict blocks (a per-mode ASK is a separate change owned by stream S8,
+  # The built-in default pack ships this rule at HIGH (it also covers
+  # credentialed NetExec there), so default alerts and strict blocks (a per-mode ASK is a separate change owned by stream S8,
   # rel-1-0-10:GAP-0017). This opt-in pack raises it to CRITICAL so a managed
   # Windows domain blocks the request in every profile. The code-owned
   # prerequisite (ExactDirectoryCredentialTicketRequest) gates it. Blocking the
@@ -37,20 +37,25 @@ rules:
     confidence: 0.99
     tags: [credential, active-directory, windows, protected-domain, credential-dumping]
 
-  # Credential use against a domain service with a password or NT hash on the
-  # command line, through NetExec / CrackMapExec (rel-1-0-10:GAP-0014). The
-  # code-owned classifier now completes this argv (ExactNetExecDomainServiceAuth)
-  # and marks a credential-read operation, so the match is enforcement-eligible.
-  # The NTDS dump form is owned by the built-in default rule above, so it is
-  # excluded here.
+  # Credential use against a domain service through NetExec / CrackMapExec
+  # (rel-1-0-10:GAP-0014): a password, NT/LM hash, Kerberos key or ccache, a
+  # username, or an empty (anonymous) credential, under POSIX shells, PowerShell
+  # or cmd. The code-owned classifier completes this argv
+  # (ExactNetExecDomainServiceAuth) and marks a credential-read operation, so the
+  # match is enforcement-eligible. Without this pack the built-in HIGH
+  # credential.directory_ticket_request rule covers the same calls (default
+  # alerts, strict blocks). The NTDS dump form is owned by the built-in
+  # credential.directory_credential_acquisition rule, so it is excluded here.
   - id: credential.directory_service_credential_use
     tool_call_only: true
+    # owner-gated: directoryServiceCredentialUsePrerequisite decides; the CEL is
+    # the shared cheap NetExec candidate filter.
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['nxc', 'netexec', 'crackmapexec'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: 'a^'
-    title: "Authenticate to a domain service with a password or hash (NetExec)"
+    title: "Use a credential against a domain service: password, hash, key, ticket or empty (NetExec)"
     severity: CRITICAL
     confidence: 0.99
     tags: [credential, active-directory, netexec, protected-domain, bounded-grammar]
@@ -59,6 +64,9 @@ rules:
   # a BloodHound or mass-enumeration module. Shares the completed NetExec argv.
   - id: recon.directory_bulk_collection
     tool_call_only: true
+    # owner-gated: directoryBulkCollectionPrerequisite requires the ldap protocol
+    # and a BloodHound or mass-enumeration option; the CEL is the shared cheap
+    # NetExec candidate filter (kept identical to stay within the cost limit).
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['nxc', 'netexec', 'crackmapexec'] &&
@@ -74,6 +82,9 @@ rules:
   # completed NetExec argv and its credential-read operation.
   - id: credential.directory_password_spray
     tool_call_only: true
+    # owner-gated: directoryPasswordSprayPrerequisite requires a wordlist file as
+    # the username or password operand; the CEL is the shared cheap NetExec
+    # candidate filter.
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['nxc', 'netexec', 'crackmapexec'] &&

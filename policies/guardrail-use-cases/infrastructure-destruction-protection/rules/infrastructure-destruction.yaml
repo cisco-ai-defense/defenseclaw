@@ -2,6 +2,8 @@ version: 1
 category: infrastructure-destruction-protection
 rules:
   - id: impact.protected_filesystem_format
+    # owner-gated: filesystemWipePrerequisite proves a filesystem format of a protected device;
+    # the CEL is only the cheap operation-class filter (kept short for the cost limit).
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)
@@ -12,6 +14,8 @@ rules:
     confidence: 0.99
     tags: [destructive, storage, production-safety]
   - id: impact.protected_device_wipe
+    # owner-gated: destructiveDeviceWritePrerequisite proves a destructive write to a protected device;
+    # the CEL is only the cheap operation-class filter (kept short for the cost limit).
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)
@@ -22,6 +26,8 @@ rules:
     confidence: 0.99
     tags: [destructive, storage, production-safety]
   - id: impact.protected_access_control_change
+    # owner-gated: accessControlMutationDisposition proves a protected access-control weakening;
+    # the CEL is only the cheap operation-class filter (kept short for the cost limit).
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)

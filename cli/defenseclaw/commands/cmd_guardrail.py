@@ -5145,16 +5145,39 @@ def _validate_composed_protections(
 ) -> None:
     """Refuse an opt-in protection pack a running gateway would reject.
 
-    Composes the scope's base rule pack with the resulting ``protections`` list
-    through the authoritative Go loader (the same compose the gateway runs on
-    reload) and fails on a definitive invalid result -- most importantly the
-    semantic rule-cost limit on a large base such as strict (rel-1-0-10:GAP-0050).
-    A missing or incompatible helper is best-effort: the check is skipped rather
-    than block a legitimate change.
+    Composes the scope's base rule pack with every ``guardrail.rules`` layer that
+    shapes the scope -- global, connector, profile and profile connector, widest
+    first, each with its protections, enable, disable and severity overrides --
+    with this scope's ``protections`` replaced by *desired*. That is the compose
+    the gateway runs on reload, so packs enabled at different scopes add up
+    here as they do there. It runs through the authoritative Go loader and fails
+    on a definitive invalid result -- most importantly the semantic rule-cost
+    limit on a large base such as strict (rel-1-0-10:GAP-0050). A missing or
+    incompatible helper is best-effort: the check is skipped rather than block a
+    legitimate change.
     """
     from defenseclaw import policy_catalog, rulepack_validation
 
     blocks = _scope_blocks(app.cfg, connector_key, profile)
+    target = _scope_block(app.cfg, connector_key, profile)
+
+    def _layer(rules) -> dict:
+        if rules is None:
+            return {}
+        layer: dict = {}
+        for key in ("protections", "enable", "disable"):
+            values = [str(v) for v in (getattr(rules, key, None) or [])]
+            if values:
+                layer[key] = values
+        overrides = {str(k): str(v) for k, v in (getattr(rules, "severity_overrides", None) or {}).items()}
+        if overrides:
+            layer["severity_overrides"] = overrides
+        return layer
+
+    layers = [layer for block in blocks if block is not target and (layer := _layer(getattr(block, "rules", None)))]
+    own = _layer(getattr(target, "rules", None) if target is not None else None)
+    own["protections"] = list(desired)
+    layers.append(own)
     pack_dir = ""
     for block in reversed(blocks):
         pack_dir = policy_catalog.configured_pack_dir(app.cfg, block)
@@ -5165,7 +5188,7 @@ def _validate_composed_protections(
     if not pack_dir:
         return
     try:
-        result = rulepack_validation.validate_rule_pack(pack_dir, protections=desired)
+        result = rulepack_validation.validate_rule_pack(pack_dir, layers=layers)
     except rulepack_validation.RulePackValidationBridgeError:
         return
     if getattr(result, "valid", True):

@@ -15,18 +15,30 @@ The v1 block claim covers, on a complete static invocation:
 - **Export of the directory credential database** — `ntdsutil` Install-From-Media
   (`ifm ... create full`). The built-in default pack only alerts on these.
 - **Credential use against a domain service** — NetExec / CrackMapExec
-  (`nxc`, `netexec`, `crackmapexec`) authenticating to `smb`, `ldap`, `mssql`,
-  `winrm`, `wmi`, `rdp`, `ssh`, `ftp`, `vnc`, `nfs` or `smtp` with a password
-  (`-p`/`--password`), an NT or LM:NT hash (`-H`/`--hash`/`--hashes`), a Kerberos
-  ticket cache (`--use-kcache`), or empty (anonymous) credentials, in any
-  argument order. The built-in default pack alerts on this (strict blocks it);
-  this pack blocks it. DefenseClaw does not decode the credential value, so a
-  dynamic (`$VAR`, command-substituted) credential or target is not blocked.
+  (`nxc`, `netexec`, `crackmapexec`, and on Windows `nxc.exe` or a
+  path-qualified binary, under PowerShell or cmd as well as POSIX shells)
+  authenticating to `smb`, `ldap`, `mssql`, `winrm`, `wmi`, `rdp`, `ssh`, `ftp`,
+  `vnc`, `nfs` or `smtp` with a username (`-u`), a password (`-p`/`--password`),
+  an NT or LM:NT hash (`-H`/`--hash`/`--hashes`), a Kerberos key or ticket cache
+  (`-k`, `--aesKey`, `--use-kcache`), or empty (anonymous) credentials, in any
+  argument order and after NetExec's global options (`--verbose`, `--debug`,
+  `-t`, `--timeout`, `--log`, ...). Rule `credential.directory_service_credential_use`
+  (CRITICAL). Without this pack the built-in default alerts on the same calls
+  through `credential.directory_ticket_request` (HIGH), and strict blocks them;
+  this pack blocks them in every profile. DefenseClaw does not decode the
+  credential value, so a dynamic (`$VAR`, `$env:VAR`, `%VAR%`, command-substituted)
+  credential or target is not blocked.
 - **Bulk directory collection for attack-path mapping** — a NetExec `ldap`
   run with a BloodHound or mass-enumeration module (`--bloodhound`, `--users`,
   `--groups`, `--kerberoasting`, `--asreproast`).
 - **Password spraying** — a NetExec run whose user or password set is a
   wordlist file (`.txt`/`.lst`), against one or many domain hosts.
+
+`guardrail protection enable` composes the scope's rule pack with every
+`guardrail.rules` layer that applies to it (global, connector, profile), the way
+the gateway does on reload, and refuses a combination the gateway could not load
+(for example one over the semantic rule-cost limit). If the installed gateway is
+too old to run that check, the change is saved without it.
 
 Directory replication / secrets dumps (`impacket-secretsdump`, DCSync,
 `nxc --ntds`, offline `hashcat`/`john` of Kerberos hashes) are already blocked

@@ -428,7 +428,7 @@ export const HIGH_ASSURANCE_PACKS = [
     status: 'selectable',
     ruleCount: 5,
     coverage:
-      'Kerberos ticket requests, NTDS database export, NetExec/CrackMapExec credential use, bulk LDAP collection, and password spraying against a managed domain.',
+      'Kerberos ticket requests, NTDS database export, NetExec/CrackMapExec credential use, bulk LDAP collection, and password spraying against a managed domain. Without the pack, the built-in default alerts on credentialed NetExec and strict blocks it.',
   },
 ] as const satisfies readonly HighAssurancePack[];
 

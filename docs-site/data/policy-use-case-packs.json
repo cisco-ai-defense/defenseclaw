@@ -47,7 +47,7 @@
               "tool_call_only": true,
               "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
               "pattern": "a^",
-              "title": "Authenticate to a domain service with a password or hash (NetExec)",
+              "title": "Use a credential against a domain service: password, hash, key, ticket or empty (NetExec)",
               "severity": "CRITICAL",
               "confidence": 0.99,
               "tags": [

@@ -119,7 +119,10 @@ permissive, or strict profiles.
 - `active-directory-protection` blocks Kerberos ticket requests, NTDS database
   export, NetExec/CrackMapExec credential use and password spraying against
   domain services, and bulk LDAP collection. Assign it to a connector on a
-  host that can reach a managed Active Directory domain.
+  host that can reach a managed Active Directory domain. Without the pack, the
+  built-in default already alerts on credentialed NetExec/CrackMapExec
+  (`credential.directory_ticket_request`, HIGH) and strict blocks it; the pack
+  blocks it in every profile.
 - `ssh-authorized-keys-protection` is a contract only and cannot be activated.
   It defines how an approved-fingerprint allowlist would guard writes to
   `~/.ssh/authorized_keys`. Do not point `policy_dir` at it; see its

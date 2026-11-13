@@ -109,7 +109,7 @@ def validate_rule_pack(
     path: str,
     *,
     gateway_binary: str | None = None,
-    protections: tuple[str, ...] = (),
+    layers: list[dict] | None = None,
 ) -> RulePackValidationResult:
     """Validate *path* with the canonical offline Go validator.
 
@@ -133,8 +133,10 @@ def validate_rule_pack(
         )
 
     argv = [binary, "rulepack", "validate", "--dir", path, "--json"]
-    if protections:
-        argv += ["--protections", ",".join(protections)]
+    if layers:
+        # guardrail.rules layers, widest scope first, composed over the pack
+        # the way the gateway composes them on reload (rel-1-0-10:GAP-0050).
+        argv += ["--layers-json", json.dumps(layers, separators=(",", ":"))]
     try:
         completed = subprocess.run(
             argv,

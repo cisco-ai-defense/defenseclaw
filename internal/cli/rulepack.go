@@ -117,6 +117,7 @@ var (
 	rulePackValidateDir         string
 	rulePackValidateJSON        bool
 	rulePackValidateProtections string
+	rulePackValidateLayersJSON  string
 
 	// rulePackServiceReadProblemFn is replaced by tests.
 	rulePackServiceReadProblemFn = rulePackServiceReadProblem
@@ -140,6 +141,14 @@ func init() {
 		"protections",
 		"",
 		"comma-separated opt-in protection packs to compose over the pack before validating",
+	)
+	rulePackValidateCmd.Flags().StringVar(
+		&rulePackValidateLayersJSON,
+		"layers-json",
+		"",
+		"JSON array of guardrail.rules layers, widest scope first (protections, enable, disable, "+
+			"severity_overrides), to compose over the pack before validating, as the gateway does on reload; "+
+			"--protections is applied after them",
 	)
 	rulePackCmd.AddCommand(rulePackValidateCmd)
 	rootCmd.AddCommand(rulePackCmd)
@@ -186,8 +195,12 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
 	}
 
-	if protections := parseRulePackProtections(rulePackValidateProtections); len(protections) > 0 {
-		composed, composeErr := guardrail.Compose(rp, cliProtectionPackSource, guardrail.Customization{Protections: protections})
+	layers, err := rulePackValidateCustomizations(rulePackValidateLayersJSON, rulePackValidateProtections)
+	if err != nil {
+		return err
+	}
+	if len(layers) > 0 {
+		composed, composeErr := guardrail.Compose(rp, cliProtectionPackSource, layers...)
 		if composeErr != nil {
 			diagnostic := rulePackDiagnostic(composeErr)
 			response := rulePackWireResponse{
@@ -432,6 +445,50 @@ func cliProtectionPackSource(name string) ([]guardrail.ProtectionRuleFile, error
 	out := make([]guardrail.ProtectionRuleFile, 0, len(files))
 	for _, file := range files {
 		out = append(out, guardrail.ProtectionRuleFile{Name: file.Path, Data: file.Data})
+	}
+	return out, nil
+}
+
+// rulePackValidateLayer is one guardrail.rules layer of --layers-json: the
+// fields that change which rules are on and at what severity, so the composed
+// pack is checked against the same limits the gateway applies on reload
+// (rel-1-0-10:GAP-0050 N6).
+type rulePackValidateLayer struct {
+	Protections       []string          `json:"protections"`
+	Enable            []string          `json:"enable"`
+	Disable           []string          `json:"disable"`
+	SeverityOverrides map[string]string `json:"severity_overrides"`
+}
+
+// rulePackValidateCustomizations turns --layers-json and --protections into
+// the guardrail.Compose layers, in order: the JSON layers widest scope first,
+// then --protections as one more layer.
+func rulePackValidateCustomizations(layersJSON, protections string) ([]guardrail.Customization, error) {
+	var out []guardrail.Customization
+	if strings.TrimSpace(layersJSON) != "" {
+		decoder := json.NewDecoder(strings.NewReader(layersJSON))
+		decoder.DisallowUnknownFields()
+		var layers []rulePackValidateLayer
+		if err := decoder.Decode(&layers); err != nil {
+			return nil, fmt.Errorf("--layers-json is not a JSON array of rules layers: %w", err)
+		}
+		if decoder.More() {
+			return nil, errors.New("--layers-json has trailing data after the JSON array")
+		}
+		for _, layer := range layers {
+			c := guardrail.Customization{
+				Protections:       layer.Protections,
+				Enable:            layer.Enable,
+				Disable:           layer.Disable,
+				SeverityOverrides: layer.SeverityOverrides,
+			}
+			if !c.IsZero() {
+				out = append(out, c)
+			}
+		}
+	}
+	if list := parseRulePackProtections(protections); len(list) > 0 {
+		out = append(out, guardrail.Customization{Protections: list})
 	}
 	return out, nil
 }

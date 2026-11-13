@@ -358,3 +358,52 @@ func TestRulePackValidateJSONBoundsItsWarnings(t *testing.T) {
 		t.Fatalf("last warning = %q, want the count of the rules not named", last)
 	}
 }
+
+// TestRulePackValidateComposesLayersJSON checks --layers-json, the check
+// `guardrail protection enable` runs: every scope's guardrail.rules layer is
+// composed over the pack as the gateway does on reload, so packs enabled at
+// different scopes add up and a bad override fails (rel-1-0-10:GAP-0050).
+func TestRulePackValidateComposesLayersJSON(t *testing.T) {
+	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
+	previousLayers, previousProtections := rulePackValidateLayersJSON, rulePackValidateProtections
+	previousOutput := rulePackValidateCmd.OutOrStdout()
+	t.Cleanup(func() {
+		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
+		rulePackValidateLayersJSON, rulePackValidateProtections = previousLayers, previousProtections
+		rulePackValidateCmd.SetOut(previousOutput)
+	})
+	rulePackValidateDir = shippedRulePackForCLITest(t, "strict")
+	rulePackValidateJSON = true
+	rulePackValidateProtections = ""
+	run := func(layers string) (rulePackWireResponse, error) {
+		t.Helper()
+		rulePackValidateLayersJSON = layers
+		output := &strings.Builder{}
+		rulePackValidateCmd.SetOut(output)
+		err := rulePackValidateCmd.RunE(rulePackValidateCmd, nil)
+		var response rulePackWireResponse
+		if output.Len() > 0 {
+			if jsonErr := json.Unmarshal([]byte(output.String()), &response); jsonErr != nil {
+				t.Fatalf("output is not JSON: %v", jsonErr)
+			}
+		}
+		return response, err
+	}
+
+	base, err := run("")
+	if err != nil || !base.Valid || base.Summary == nil {
+		t.Fatalf("base: err=%v response=%+v", err, base)
+	}
+	layered, err := run(`[{"protections":["active-directory-protection"]},` +
+		`{"protections":["infrastructure-destruction-protection"],"severity_overrides":{"impact.iac_full_destroy":"HIGH"}}]`)
+	if err != nil || !layered.Valid || layered.Summary == nil || layered.Summary.RuleCount <= base.Summary.RuleCount {
+		t.Fatalf("layered: err=%v response=%+v base rules=%d", err, layered, base.Summary.RuleCount)
+	}
+	bad, err := run(`[{"severity_overrides":{"no.such_rule":"HIGH"}}]`)
+	if err == nil || bad.Valid || bad.Error == nil {
+		t.Fatalf("an override of an unknown rule composed: err=%v response=%+v", err, bad)
+	}
+	if _, err := run(`{"protections":[]}`); err == nil || !strings.Contains(err.Error(), "--layers-json") {
+		t.Fatalf("malformed --layers-json err = %v", err)
+	}
+}
