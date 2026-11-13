@@ -61,12 +61,36 @@ func gitPushNamesAdHocRemote(args []string) bool {
 	return false
 }
 
+// isAdHocGitRemote reports a push destination given inline instead of as a
+// configured remote name, in a form a contributor workflow does not use: a
+// user@host:path remote on a host that is not a well-known code-hosting
+// service, or a URL whose host is a bare public IP address. Pushes to a
+// fork URL on a forge are ordinary and not reported.
 func isAdHocGitRemote(value string) bool {
-	if strings.Contains(value, "://") {
-		return true
+	if scheme := strings.Index(value, "://"); scheme >= 0 {
+		host := value[scheme+3:]
+		if at := strings.LastIndexByte(host, '@'); at >= 0 {
+			host = host[at+1:]
+		}
+		if cut := strings.IndexAny(host, "/:"); cut >= 0 {
+			host = host[:cut]
+		}
+		return parsesAsUntrustedAddress(host)
 	}
 	at, colon := strings.IndexByte(value, '@'), strings.IndexByte(value, ':')
-	return at > 0 && colon > at
+	if at <= 0 || colon <= at {
+		return false
+	}
+	return !knownCodeForge(value[at+1 : colon])
+}
+
+func knownCodeForge(host string) bool {
+	switch strings.ToLower(host) {
+	case "github.com", "gitlab.com", "bitbucket.org", "ssh.dev.azure.com", "vs-ssh.visualstudio.com",
+		"git.sr.ht", "codeberg.org", "source.developers.google.com":
+		return true
+	}
+	return false
 }
 
 func gitCloneThenRunsClonedFile(facts Facts) bool {

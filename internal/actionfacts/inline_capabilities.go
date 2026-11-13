@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"net/netip"
 	"path"
 	"regexp"
 	"strings"
@@ -140,7 +141,8 @@ func InlineCodeNetworkAndExec(facts Facts) bool {
 		if code == "" {
 			continue
 		}
-		network := identifierMatcher(row.network).MatchString(code) || inlineLiteralURLPattern.MatchString(code)
+		network := (identifierMatcher(row.network).MatchString(code) || inlineLiteralURLPattern.MatchString(code)) &&
+			!inlineCodeOnlyLocal(code)
 		if network && identifierMatcher(row.exec).MatchString(code) {
 			return true
 		}
@@ -202,4 +204,31 @@ func RemoteRunnerURL(facts Facts) bool {
 		}
 	}
 	return false
+}
+
+var (
+	inlineHostLiteralPattern = lazyMustCompile(
+		`(?i)(?:https?://)?((?:[0-9]{1,3}\.){3}[0-9]{1,3}|localhost|::1|\[::1\]|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|org|net|io|dev|sh|ru|cn|xyz|info|biz|top|cc|tk|ml|ga|cf|gq|app|cloud|site|online|co|me|us|uk|de|fr|jp|kr))\b`,
+	)
+)
+
+// inlineCodeOnlyLocal reports code whose every literal host is loopback or
+// private: a test of a local service, not a connection out. Code that names
+// no host at all is not local (the host is dynamic).
+func inlineCodeOnlyLocal(code string) bool {
+	hosts := inlineHostLiteralPattern.FindAllStringSubmatch(code, -1)
+	if len(hosts) == 0 {
+		return false
+	}
+	for _, match := range hosts {
+		host := strings.ToLower(strings.Trim(match[1], "[]"))
+		if host == "localhost" || host == "::1" {
+			continue
+		}
+		address, err := netip.ParseAddr(host)
+		if err != nil || !(address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast()) {
+			return false
+		}
+	}
+	return true
 }

@@ -8,6 +8,7 @@ package actionfacts
 import (
 	"net/netip"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -20,20 +21,32 @@ import (
 
 var (
 	escapedByteRunPattern = lazyMustCompile(
-		`(?:\\x[0-9a-fA-F]{2}){8,}|(?:\\0?[0-7]{3}){8,}`,
+		`(?:\\x[0-9a-fA-F]{2}|\\0?[0-7]{3})+`,
 	)
+	escapeTokenPattern  = lazyMustCompile(`\\x[0-9a-fA-F]{2}|\\0?[0-7]{3}`)
 	bareIPv4HostPattern = lazyMustCompile(
 		`(?:^|[/@=\s'"])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]{1,5})?(?:[/?#\s'"]|$)`,
 	)
 )
 
-// EscapedBinaryFileWrite reports a direct echo or printf whose operand is a
-// run of at least eight hex or octal byte escapes and whose output goes to a
-// file (a write or append redirect, or a pipe into tee with a file operand).
-// A coding agent has no reason to build a file this way: the bytes are not
-// text, and the escape form hides them from content scanning. Dropper chains
-// append a binary one chunk at a time, so the run test is per call and does
-// not need the first chunk (the executable magic) to be present.
+// Escaped-byte runs shorter than this are fixtures, keys and digests (a
+// 16-byte key and a 20-byte hash are ordinary terminal-task content); a
+// payload has to be written in chunks of this size or more. The value is the
+// smallest chunk seen in the tuning half of the dropper sessions; a run that
+// starts with an executable-format magic needs only escapedMagicRunBytes.
+const (
+	escapedBinaryRunBytes = 24
+	escapedMagicRunBytes  = 8
+)
+
+// EscapedBinaryFileWrite reports a direct echo or printf whose operand holds
+// a run of byte escapes (hex or octal) and whose output goes to a file (a
+// write or append redirect, or a pipe into tee with a file operand). The run
+// must be at least escapedBinaryRunBytes long, or at least escapedMagicRunBytes
+// long and start with an ELF, PE or Mach-O magic. The bytes are not text and
+// the escape form hides them from content scanning. Dropper chains append a
+// binary one chunk at a time, so the test is per call and does not need the
+// first chunk (the magic) to be present.
 func EscapedBinaryFileWrite(facts Facts) bool {
 	if facts.Parse.Dialect != DialectPOSIX {
 		return false
@@ -56,7 +69,48 @@ func hasEscapedByteRun(command CommandFact) bool {
 		if index == 0 {
 			continue
 		}
-		if escapedByteRunPattern.MatchString(argument) {
+		for _, run := range escapedByteRunPattern.FindAllString(argument, -1) {
+			decoded := decodeEscapedRun(run)
+			if len(decoded) >= escapedBinaryRunBytes ||
+				(len(decoded) >= escapedMagicRunBytes && hasExecutableMagic(decoded)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func decodeEscapedRun(run string) []byte {
+	tokens := escapeTokenPattern.FindAllString(run, -1)
+	decoded := make([]byte, 0, len(tokens))
+	for _, token := range tokens {
+		var value uint64
+		var err error
+		if token[1] == 'x' {
+			value, err = strconv.ParseUint(token[2:], 16, 8)
+		} else {
+			value, err = strconv.ParseUint(strings.TrimPrefix(token[1:], "0"), 8, 16)
+			if len(token) == 4 {
+				value, err = strconv.ParseUint(token[1:], 8, 16)
+			}
+		}
+		if err != nil || value > 255 {
+			break
+		}
+		decoded = append(decoded, byte(value))
+	}
+	return decoded
+}
+
+func hasExecutableMagic(data []byte) bool {
+	for _, magic := range [][]byte{
+		{0x7f, 'E', 'L', 'F'},
+		{'M', 'Z'},
+		{0xcf, 0xfa, 0xed, 0xfe}, {0xce, 0xfa, 0xed, 0xfe},
+		{0xfe, 0xed, 0xfa, 0xcf}, {0xfe, 0xed, 0xfa, 0xce},
+		{0xca, 0xfe, 0xba, 0xbe},
+	} {
+		if len(data) >= len(magic) && string(data[:len(magic)]) == string(magic) {
 			return true
 		}
 	}

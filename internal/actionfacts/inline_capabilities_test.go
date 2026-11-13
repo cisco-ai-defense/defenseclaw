@@ -14,6 +14,8 @@ func TestInlineCodeNetworkAndExec(t *testing.T) {
 	}{
 		{"python socket and subprocess", `python3 -c 'import socket,subprocess; s=socket.socket(); subprocess.call(["id"])'`, true},
 		{"python url and os.system", `python3 -c "import os; os.system('curl https://example.org/x')"`, true},
+		{"loopback service test is not a connection out", `python3 -c "import socket,subprocess; subprocess.Popen(['./d']); socket.socket().connect(('127.0.0.1', 9))"`, false},
+		{"loopback and a public host", `python3 -c "import socket,subprocess; subprocess.Popen(['./d']); socket.socket().connect(('203.0.113.9', 9)); x='127.0.0.1'"`, true},
 		{"python exec only", `python3 -c "import os; os.system('ls')"`, false},
 		{"python network only", `python3 -c "import urllib.request; print(1)"`, false},
 		{"node net and child_process", `node -e "const n=require('net'); require('child_process').exec('id')"`, true},

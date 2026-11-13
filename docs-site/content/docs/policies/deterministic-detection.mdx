@@ -119,11 +119,11 @@ Five alert-only rules report effects a coding agent has little reason to produce
 
 | Rule | Effect it reports |
 | --- | --- |
-| `exec.escaped_binary_write` | `echo` or `printf` writes a run of eight or more hex or octal byte escapes to a file (redirect or `tee`). Droppers append a binary chunk by chunk, so the run test is per call. |
+| `exec.escaped_binary_write` | `echo` or `printf` writes a run of 24 or more hex or octal byte escapes (or 8 or more that start with an ELF, PE or Mach-O magic) to a file (redirect or `tee`). Droppers append a binary chunk by chunk, so the test is per call; shorter runs are keys and fixtures. |
 | `account.literal_password_change_via_stdin` | `passwd` fed by `echo` or `printf`, or `passwd` or `chpasswd` piped on into a shell. A `chpasswd` run on its own is account automation and does not match. |
 | `exec.download_then_run_fetched_file` | `wget`, `curl`, `tftp` or `ftpget` takes a file from a bare public IPv4 address and a later command of the same action runs that file name, after a copy, or after the fetched archive was unpacked. Hostnames are not covered. |
-| `source_control.clone_then_run_or_adhoc_push` | `git clone` followed by running a file of the clone (or a build entry point after a `cd` into it), and `git push` to a URL or `user@host:path` remote. |
-| `exec.inline_code_network_and_exec` | An interpreter one-liner (`python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, `bun -e`, `deno eval`) that asks for a network capability and a process spawn or exec capability, and `bun run`, `deno run`, `npx`, `pnpm dlx` told to run a URL. Capabilities are read from a table of documented library and builtin names in `internal/actionfacts/inline_capabilities.go`, not from what the code is for. |
+| `source_control.clone_then_run_or_adhoc_push` | `git clone` followed by running a file of the clone (or a build entry point after a `cd` into it), and `git push` to a `user@host:path` remote on a host that is not a well-known code forge, or to a URL on a bare public IP address. A push to a fork URL on a forge is ordinary and does not match. |
+| `exec.inline_code_network_and_exec` | An interpreter one-liner (`python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, `bun -e`, `deno eval`) that asks for a network capability (not just a loopback or private address) and a process spawn or exec capability, and `bun run`, `deno run`, `npx`, `pnpm dlx` told to run a URL. Capabilities are read from a table of documented library and builtin names in `internal/actionfacts/inline_capabilities.go`, not from what the code is for. |
 
 ## ActionFacts
 

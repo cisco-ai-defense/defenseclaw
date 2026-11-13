@@ -15,9 +15,11 @@ func srFacts(command string) Facts {
 }
 
 func TestEscapedBinaryFileWrite(t *testing.T) {
-	run := strings.Repeat(`\x41`, 8)
-	short := strings.Repeat(`\x41`, 7)
-	octal := strings.Repeat(`\101`, 8)
+	run := strings.Repeat(`\x41`, 24)
+	short := strings.Repeat(`\x41`, 23)
+	octal := strings.Repeat(`\101`, 24)
+	elf := `\x7f\x45\x4c\x46\x02\x01\x01\x00`
+	key := strings.Repeat(`\x1f`, 16)
 	for _, test := range []struct {
 		name, command string
 		want          bool
@@ -26,7 +28,10 @@ func TestEscapedBinaryFileWrite(t *testing.T) {
 		{"echo truncate no space", `echo -ne '` + run + `'>./drop`, true},
 		{"printf octal", `printf '` + octal + `' >> /tmp/f`, true},
 		{"tee", `echo -ne "` + run + `" | tee -a /tmp/f`, true},
-		{"seven escapes", `echo -ne "` + short + `" >> drop`, false},
+		{"executable magic needs only eight", `printf '` + elf + `' > f`, true},
+		{"non-executable eight bytes", `printf '` + strings.Repeat(`\x41`, 8) + `' > f`, false},
+		{"sixteen byte key fixture", `printf '` + key + `' > /app/key`, false},
+		{"twenty-three escapes", `echo -ne "` + short + `" >> drop`, false},
 		{"no file", `echo -ne "` + run + `"`, false},
 		{"device", `echo -ne "` + run + `" > /dev/null`, false},
 		{"plain text", `echo hello >> notes.txt`, false},
