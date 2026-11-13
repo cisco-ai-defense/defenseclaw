@@ -41,6 +41,8 @@ type PullOptions struct {
 	// DataDir and Name identify the copy Start made.
 	DataDir string
 	Name    string
+	// Label is how the review names the agent ("" shows Name, the copy id).
+	Label string
 	// MaxBundleBytes caps the result bundle (1 GiB by default); Timeout the
 	// in-actor capture (10 minutes).
 	MaxBundleBytes int64
@@ -115,7 +117,11 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 			rv.Diff = []byte(diff)
 		}
 	}
-	rv.Text = rv.render(opts.Name)
+	label := opts.Label
+	if label == "" {
+		label = opts.Name
+	}
+	rv.Text = rv.render(label)
 	return rv, nil
 }
 
