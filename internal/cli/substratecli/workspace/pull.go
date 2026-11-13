@@ -43,6 +43,9 @@ type PullOptions struct {
 	Name    string
 	// Label is how the review names the agent ("" shows Name, the copy id).
 	Label string
+	// Project is the folder a clone's changes are reviewed against and
+	// brought into (the current folder when empty). A copy has its own.
+	Project string
 	// MaxBundleBytes caps the result bundle (1 GiB by default); Timeout the
 	// in-actor capture (10 minutes).
 	MaxBundleBytes int64
@@ -101,10 +104,8 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 	if opts.Exec == nil {
 		return nil, errors.New("workspace: pull needs a transport to the actor")
 	}
-	if hostCopy {
-		if _, err := loadHostRecord(opts.DataDir, opts.Name); err == nil {
-			return hostPull(ctx, opts, firstNonEmpty(opts.Label, opts.Name))
-		}
+	if usesHostCopy(opts.DataDir, opts.Name) {
+		return hostPull(ctx, opts, firstNonEmpty(opts.Label, opts.Name))
 	}
 	label := opts.Label
 	if label == "" {
@@ -396,7 +397,7 @@ func (m ApplyMode) toOSW() (osw.ApplyMode, error) {
 // A branch or a patch file runs nothing, so they need no yes unless a secret
 // would go into the branch's history.
 func Apply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
-	if _, err := loadHostRecord(opts.DataDir, opts.Name); err == nil && hostCopy {
+	if usesHostCopy(opts.DataDir, opts.Name) {
 		return hostApply(ctx, opts)
 	}
 	mode, err := opts.Mode.toOSW()

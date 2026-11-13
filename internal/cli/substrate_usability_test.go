@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -120,6 +121,42 @@ func TestSubstrateRunNeedsNoProfile(t *testing.T) {
 	}
 	if tg.profile != "" {
 		t.Errorf("profile %q, want empty (the cluster picks)", tg.profile)
+	}
+}
+
+// GAP-0184: OpenCode runs (proven in an actor although its OpenShell harness
+// is unverified); the connectors with no Substrate proof stay refused.
+func TestSubstrateRunVerifiedConnectors(t *testing.T) {
+	t.Setenv("DEFENSECLAW_SUBSTRATE_PROFILE", "")
+	t.Setenv("DEFENSECLAW_SUBSTRATE_TEMPLATE", "")
+	tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, "opencode")
+	if err != nil {
+		t.Fatalf("run opencode refused: %v", err)
+	}
+	if tg.connName != "opencode" {
+		t.Errorf("connector %q, want opencode", tg.connName)
+	}
+	for _, agent := range []string{"amp", "cursor-agent", "devin"} {
+		_, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, agent)
+		if err == nil || !strings.Contains(err.Error(), "not verified yet") {
+			t.Errorf("run %s: %v, want the not-verified refusal", agent, err)
+		}
+	}
+}
+
+// Live on stk (f7-clone4, 11-13 05:53Z): pull with stdin from /dev/null (a char device) asked for a
+// yes instead of printing the hint.
+func TestSubstrateInteractiveNeedsATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old }()
+	if substrateInteractive() {
+		t.Error("stdin from the null device counted as a terminal")
 	}
 }
 

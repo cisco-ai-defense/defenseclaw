@@ -23,7 +23,7 @@ keywords:
 | Codex | `codex exec` | DefenseClaw gateway (`/llm/openai`) | Hooks, headless and interactive proven in an actor, on a real model, in the lab. **Model route:** the shipped gateway serves Codex through the OpenAI provider and needs an OpenAI key in `defenseclaw-llm`. The Bedrock (Mantle) route used in the lab is not in the shipped gateway yet |
 | GitHub Copilot CLI | `copilot -p` | DefenseClaw gateway | Hooks and a real model proven in an actor, in the lab. **Model route:** the Bedrock route the lab used is not in the shipped gateway yet, so it has no working model route there today |
 | Hermes | `hermes chat -q` | DefenseClaw gateway | Same as Copilot CLI |
-| OpenCode | `opencode run` | DefenseClaw gateway | Same as Copilot CLI. `defenseclaw substrate run opencode` is also refused today: the launcher answers "OpenCode is not verified yet, so it does not run" |
+| OpenCode | `opencode run` | DefenseClaw gateway | Same as Copilot CLI. `defenseclaw substrate run opencode` starts it: its plugin sends its hook events through the actor kit |
 | Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `KIRO_API_KEY` |
 | Antigravity CLI | `agy -p` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `GEMINI_API_KEY` |
 | Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | Hook path proven. **No model run.** `run` refuses it ("not verified yet") |
