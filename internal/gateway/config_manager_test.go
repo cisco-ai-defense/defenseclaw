@@ -2270,8 +2270,12 @@ func TestConnectorModeMatchesDeclaredTrafficMode(t *testing.T) {
 		mode, _ := row["mode"].(string)
 		surface, _ := row["enforcement_surface"].(string)
 		if wantProxy {
-			if mode != "guardrail" || surface != "llm_proxy" {
-				t.Errorf("%s: mode=%q surface=%q, want guardrail/llm_proxy", name, mode, surface)
+			want := "llm_proxy"
+			if name == "openclaw" {
+				want = "llm_proxy_and_plugin_hooks"
+			}
+			if mode != "guardrail" || surface != want {
+				t.Errorf("%s: mode=%q surface=%q, want guardrail/%s", name, mode, surface, want)
 			}
 			continue
 		}

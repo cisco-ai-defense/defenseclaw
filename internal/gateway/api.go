@@ -2318,6 +2318,11 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 	}
+	// OpenClaw blocks tool calls (and prompts with the prompt gate) through
+	// its plugin hooks next to the proxy (rel-1-0-10 GAP-0063).
+	if name == "openclaw" && intercept {
+		surface = "llm_proxy_and_plugin_hooks"
+	}
 
 	// A host install registers only the connector's hooks: setup turns the
 	// native OTel exporters off (they run only in the OpenShell sandbox

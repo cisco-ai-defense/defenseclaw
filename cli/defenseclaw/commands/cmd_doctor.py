@@ -19028,7 +19028,14 @@ def _check_hook_contract_lock(
     pathext: str | None = None,
 ) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
-        _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        detail = f"{connector} uses proxy/chat surfaces"
+        if connector == "openclaw":
+            from defenseclaw.openclaw_plugin_config import configured_openclaw_hook_mode
+
+            mode = configured_openclaw_hook_mode(cfg)
+            if mode != "proxy":
+                detail = f"openclaw uses its plugin hooks in {mode} mode, which need no hook contract lock"
+        _emit("skip", "Hook contract", detail, r=r)
         return
     if connector == "kiro":
         _emit(

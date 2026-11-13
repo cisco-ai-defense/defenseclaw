@@ -962,7 +962,12 @@ def assess_connector_health(
                     status=HealthStatus.SUPPORTED,
                     reason_code="proxy-connector-not-version-gated" if proxy else "connector-not-version-gated",
                     summary=(
-                        f"{public_name} uses a proxy contract and is not agent-version gated"
+                        (
+                            f"{public_name} uses its plugin hooks next to the proxy and is not agent-version gated "
+                            "(native hooks need OpenClaw 2026.8.35 or later)"
+                            if connector == "openclaw"
+                            else f"{public_name} uses a proxy contract and is not agent-version gated"
+                        )
                         if proxy
                         else f"{public_name} is not agent-version gated"
                     ),
