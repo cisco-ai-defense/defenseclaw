@@ -1552,14 +1552,7 @@ const minEchoedBlockMessageLen = 16
 func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	content := req.Content
 	if content == "" {
-		var parsed map[string]interface{}
-		if err := json.Unmarshal(req.Args, &parsed); err == nil {
-			if c, ok := parsed["content"].(string); ok {
-				content = c
-			} else if c, ok := parsed["body"].(string); ok {
-				content = c
-			}
-		}
+		content = messageTextFromArgs(req.Args)
 	}
 
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
@@ -2297,9 +2290,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 				defer workerDone()
 			}
 			var v *ToolInspectVerdict
-			if strings.EqualFold(req.Tool, "message") {
+			if strings.EqualFold(req.Tool, "message") && !messageCallHasNoText(&req) {
 				v = a.inspectMessageContent(workerCtx, &req)
 			} else {
+				// A message call with no text in its args (GAP-0177) is not
+				// allowed unread: it takes the tool policy like any tool
+				// without a known shape.
 				// Pass the 200ms-capped ctx so the tool-call judge lane's
 				// deadline guard short-circuits on this generic endpoint
 				// (mirroring the message lane); native hook callers go

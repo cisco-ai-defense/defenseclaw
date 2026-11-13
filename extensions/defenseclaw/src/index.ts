@@ -78,6 +78,7 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
+import { extractMessageText } from "./message-text.js";
 import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor, MODEL_OUTAGE_WARNING } from "./fetch-interceptor.js";
@@ -608,11 +609,12 @@ export default function (api: DefenseClawPluginHost) {
     // every guardrail-* audit row in SQLite ends up NULL on those columns.
     trackToolContext(ctx);
 
-    if (event.toolName === "message") {
-      const content =
-        (event.params?.content as string) || (event.params?.body as string) || "";
-      if (!content) return;
-
+    // GAP-0177: a message call keeps its text in any string field of the
+    // params (content, body, text, message, caption, nested blocks, ...). Read
+    // them all. A call with no text at all is not skipped: it takes the generic
+    // inspection below, where the gateway applies the tool policy to its args.
+    const content = event.toolName === "message" ? extractMessageText(event.params) : "";
+    if (content) {
       const verdict = await inspectTool(
         {
           tool: "message",

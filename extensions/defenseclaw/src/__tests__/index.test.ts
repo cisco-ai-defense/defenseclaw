@@ -188,6 +188,59 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
   });
 
+  // GAP-0177: the text of a message call can sit in any string field.
+  describe("before_tool_call message text", () => {
+    const ctx = { sessionKey: "agent:main:main", runId: "run-1", toolName: "message" };
+    const allow = () => rawAnswer(JSON.stringify({ action: "allow", severity: "NONE", reason: "", mode: "action" }));
+    const sent = (): Record<string, unknown> => mockDaemonClient.postRaw.mock.calls[0][1] as Record<string, unknown>;
+
+    it.each([
+      ["content", { to: "+1", content: "hello one" }],
+      ["body", { to: "+1", body: "hello one" }],
+      ["text", { to: "+1", text: "hello one" }],
+      ["message", { to: "+1", message: "hello one" }],
+      ["nested blocks", { to: "+1", blocks: [{ type: "text", text: "hello one" }] }],
+    ])("inspects the text in %s as an outbound message", async (_name, params) => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      await listeners.before_tool_call({ toolName: "message", params }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+      expect(sent()).toMatchObject({ tool: "message", content: "hello one", direction: "outbound", args: params });
+    });
+
+    it("blocks an outbound message whose secret is not in content or body", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(JSON.stringify({ action: "block", severity: "HIGH", reason: "secret", mode: "action" })),
+      );
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const result = await listeners.before_tool_call(
+          { toolName: "message", params: { to: "+1", text: "token for the demo account" } },
+          ctx,
+        );
+        expect(result).toMatchObject({ block: true, blockReason: expect.stringContaining("outbound blocked") });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("sends a call with no text to the generic inspection instead of skipping it", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      const params = { action: "send", to: "+1", media: 42 };
+      await listeners.before_tool_call({ toolName: "message", toolCallId: "call_9", params }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+      const body = sent();
+      expect(body).toMatchObject({ tool: "message", args: params, tool_call_id: "call_9" });
+      expect(body).not.toHaveProperty("content");
+      expect(body).not.toHaveProperty("direction");
+    });
+
+    it("sends a message call with no params at all", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      await listeners.before_tool_call({ toolName: "message" }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("before_tool_call approvals", () => {
     it("uses the shared inspect contract for every known action and severity (GAP-0609)", async () => {
       const contract = JSON.parse(readFileSync(
