@@ -39,7 +39,7 @@ func TestParseOfLargeCommandHandsEveryCallerItsOwnTree(t *testing.T) {
 		if comments {
 			parse = ParseWithComments
 		}
-		fresh, ok := parseCommand(command, comments)
+		fresh, ok, _ := parseCommand(command, comments)
 		if !ok {
 			t.Fatal("the large command does not parse")
 		}
