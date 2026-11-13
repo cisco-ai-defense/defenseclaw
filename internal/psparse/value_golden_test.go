@@ -42,6 +42,9 @@ func goldenCorpus() []string {
 	for _, s := range rev2Lines {
 		add(rev2Expand(s))
 	}
+	for _, s := range rev6Lines() {
+		add(rev2Expand(s))
+	}
 	return out
 }
 
@@ -321,15 +324,6 @@ func classifyDiff(line, diff string) string {
 		return "representation-only (R7, P3): a dash-word glued to a value with no space; pwsh fuses it into one argument, mine splits it into a parameter plus value. Contrived; no command or path content, and no wrong static path or program"
 	}
 	return "representation-only: " + diff
-}
-
-func regexpDigitSuffix(s string) bool {
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] >= '0' && s[i] <= '9' && (s[i+1] == 'l' || s[i+1] == 'u' || s[i+1] == 'n' || s[i+1] == 'y' || s[i+1] == 's' || s[i+1] == 'b') {
-			return true
-		}
-	}
-	return false
 }
 
 // TestGenValueAllow writes the allow-list of the gate's current clean-line

@@ -11,3 +11,4 @@ V3JpdGUtT3V0cHV0IC1hImIi	representation-only (R7, P3): a dash-word glued to a va
 V3JpdGUtT3V0cHV0IC1hJHg=	representation-only (R7, P3): a dash-word glued to a value with no space; pwsh fuses it into one argument, mine splits it into a parameter plus value. Contrived; no command or path content, and no wrong static path or program
 V3JpdGUtT3V0cHV0IC0tIC0tJSBh	representation-only: the -- before a --% stop-parsing marker is read as a parameter vs pwsh's positional; the verbatim --% tail is preserved
 ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	representation-only (N7): a constant attribute argument is surfaced as an inert extra command; no real command is missed or mis-valued
+LWpvaW4gKCdSZW1vdmUtJywnSXRlbSBDOlx4JykgfCBpZXg=	representation-only: command count mine=2 oracle=1

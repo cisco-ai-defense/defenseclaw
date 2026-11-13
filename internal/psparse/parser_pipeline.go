@@ -514,10 +514,8 @@ func (p *parser) parseRedirection() *Redirection {
 	if t.ColonArg != "" { // stream merge like 2>&1
 		return r
 	}
-	if t.Value == "<" {
-		// input redirection target
-	}
-	// target is the next argument expression
+	// "<" input redirection and > / >> / 2> ... all take the next argument
+	// expression (parsed below) as the target.
 	p.skipComments()
 	if !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) && !p.at(TokPipe) {
 		if a := p.parseCommandArg(); a != nil {

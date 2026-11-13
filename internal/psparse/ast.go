@@ -32,6 +32,8 @@ const (
 	ReasonChildArgv        = "ps_child_argv"        // a child process argv (Start-Process) we do not model
 	ReasonLegacyQuoting    = "ps_legacy_quoting"    // a nested payload whose quotes 5.1/legacy argv would drop
 	ReasonWildcard         = "ps_wildcard"          // a quoted path value with a wildcard metachar (* ? [ ])
+	ReasonStdin            = "ps_stdin"             // a host command value of exactly "-" (the script is read from stdin, not argv)
+	ReasonCmdArgv          = "ps_cmd_argv"          // a cmd payload psparse cannot locate (fused/combined /c|/k|/r, splat, or dynamic argv)
 )
 
 // Script is the root: an ordered list of statements plus the parameter block

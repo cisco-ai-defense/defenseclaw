@@ -157,7 +157,16 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 	// -EncodedCommand (base64) and an in-process iex literal are not affected.
 	if sc != nil && sc.Dialect != DialectPwsh7 {
 		for i := range out {
-			if out[i].Static && (out[i].Kind == KindPowerShellCommand || out[i].Kind == KindCmdC) && strings.ContainsRune(out[i].Text, '"') {
+			if !out[i].Static || (out[i].Kind != KindPowerShellCommand && out[i].Kind != KindCmdC) {
+				continue
+			}
+			// legacy (5.1) native argument passing drops or reinterprets a double
+			// quote in the payload text (review 5 R5-1/R5-2), and wraps a
+			// whitespace-bearing host word that ends in a backslash in quotes
+			// without doubling that backslash, injecting a literal quote the
+			// resolved text does not show (review 6 R6-3). Either way the resolved
+			// text is not what the child runs: treat it as opaque.
+			if strings.ContainsRune(out[i].Text, '"') || hasLegacyTrailingBackslash(out[i].Source) {
 				out[i].Static, out[i].Text, out[i].Reason = false, "", ReasonLegacyQuoting
 			}
 		}
@@ -174,6 +183,22 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 		}
 	}
 	return out
+}
+
+// hasLegacyTrailingBackslash reports whether any static host word of a
+// command contains whitespace and ends in a backslash -- the shape Windows
+// PowerShell 5.1 / legacy native argument passing mis-quotes (review 6 R6-3).
+func hasLegacyTrailingBackslash(n Node) bool {
+	c, ok := n.(*Command)
+	if !ok {
+		return false
+	}
+	for _, w := range hostWords(c) {
+		if w.static && strings.HasSuffix(w.text, `\`) && strings.ContainsAny(w.text, " \t") {
+			return true
+		}
+	}
+	return false
 }
 
 // baseName lower-cases and strips the directory and a trailing .exe from a
@@ -329,6 +354,12 @@ func joinRest(words []hostWord, kind, dialect string, src Node) NestedScript {
 	}
 	if ns.Static {
 		ns.Text = strings.Join(parts, " ")
+		if ns.Text == "-" {
+			// a -Command / positional command value of exactly "-" tells the
+			// host to read the script from stdin; the script is not in the argv,
+			// so it is not a static nested script (review 6 R6-1).
+			ns.Static, ns.Text, ns.Reason = false, "", ReasonStdin
+		}
 	}
 	return ns
 }
@@ -481,7 +512,57 @@ func cmdCScript(c *Command) (NestedScript, bool) {
 			return ns, true
 		}
 	}
+	// No bare /c|/k|/r switch word was found. If the invocation still carries
+	// a word that could hide a command line -- a non-static word (a splat
+	// `cmd @a` or `$var`), or a static word that is a fused, combined or colon
+	// run switch (`/crd`, `/d/c`, `"/c rd ..."`, `/c:rd`) rather than the bare
+	// switch -- psparse cannot locate the payload. Emit a non-static cmd
+	// script so the effects lane treats the invocation as opaque instead of
+	// fully known (review 6 R6-2).
+	if cmdHasHiddenPayload(c) {
+		return NestedScript{Kind: KindCmdC, Dialect: "cmd", Source: c, Reason: ReasonCmdArgv}, true
+	}
 	return NestedScript{}, false
+}
+
+// cmdHasHiddenPayload reports whether a cmd invocation with no bare /c|/k|/r
+// switch nonetheless carries a word that could hold a hidden command line.
+func cmdHasHiddenPayload(c *Command) bool {
+	for _, el := range c.Elements {
+		switch e := el.(type) {
+		case *Parameter:
+			if !safeStaticLiteral(e.Name) {
+				return true
+			}
+		case *Arg:
+			s, ok := LiteralString(e.Value)
+			if !ok || cmdSwitchLike(s) {
+				return true
+			}
+		case Expr:
+			s, ok := LiteralString(e)
+			if !ok || cmdSwitchLike(s) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cmdSwitchLike reports whether a static cmd word looks like a run switch
+// (/c /k /r) fused or combined with other text, so the bare-switch scan did
+// not recognise it but cmd.exe would still run a command line from it.
+func cmdSwitchLike(s string) bool {
+	l := strings.ToLower(strings.TrimSpace(s))
+	for _, sw := range []string{"/c", "/k", "/r"} {
+		if l == sw {
+			return false // the bare switch is handled by the main scan
+		}
+		if strings.Contains(l, sw) {
+			return true
+		}
+	}
+	return false
 }
 
 // iexArgScript handles Invoke-Expression / iex with an explicit value
