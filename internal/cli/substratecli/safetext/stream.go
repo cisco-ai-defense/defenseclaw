@@ -313,6 +313,12 @@ func csiAllowed(body []byte, final byte) bool {
 				return false
 			}
 		}
+	case 'p': // DECSCL (CSI Pl ; Pc " p) sets the conformance level and, with Pc 0 or 2, 8-bit controls (as ESC SP G)
+		for _, b := range body {
+			if b == '"' {
+				return false
+			}
+		}
 	}
 	return true
 }

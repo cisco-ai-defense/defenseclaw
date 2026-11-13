@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 
@@ -152,26 +153,43 @@ type SubstrateTemplateConnector interface {
 	TemplateConnector(ctx context.Context, atespace, template string) (string, error)
 }
 
-// TemplateConnector implements SubstrateTemplateConnector.
-func (s *SubstrateATEActions) TemplateConnector(ctx context.Context, atespace, template string) (string, error) {
+// SubstrateTemplateKitReader is the optional part of an Actions that reads
+// a template's attested kit once: the create route takes the connector from
+// it and hands the same kit to Create (SubstrateCreate.Kit), so the
+// connector, the agent version and the digest of one create come from one
+// attestation read, not two (GAP-0201 residual).
+type SubstrateTemplateKitReader interface {
+	ReadTemplateKit(ctx context.Context, atespace, template string) (SubstrateTemplateKit, error)
+}
+
+// ReadTemplateKit implements SubstrateTemplateKitReader. With no TemplateKit
+// reader it answers no kit and no error. A template that does not exist is
+// ErrSubstrateTemplateNotFound; anything the attestor did not positively
+// attest with a label is an error wrapping ErrSubstrateTemplateAttestation.
+func (s *SubstrateATEActions) ReadTemplateKit(ctx context.Context, atespace, template string) (SubstrateTemplateKit, error) {
 	if s.TemplateKit == nil {
-		return "", nil
+		return SubstrateTemplateKit{}, nil
 	}
 	tmplSpace, tmplName := atespace, strings.TrimSpace(template)
 	if a, n, ok := strings.Cut(tmplName, "/"); ok {
 		tmplSpace, tmplName = a, n
 	}
 	if !substrateActorNameRE.MatchString(tmplName) || tmplSpace != atespace {
-		return "", ErrSubstrateTemplateNotFound
+		return SubstrateTemplateKit{}, ErrSubstrateTemplateNotFound
 	}
 	t, err := s.Client.GetActorTemplate(ctx, ateapi.Ref(tmplSpace, tmplName))
 	if ateapi.IsNotFound(err) {
-		return "", ErrSubstrateTemplateNotFound
+		return SubstrateTemplateKit{}, ErrSubstrateTemplateNotFound
 	}
 	if err != nil {
-		return "", err
+		return SubstrateTemplateKit{}, err
 	}
-	kit, err := s.TemplateKit(ctx, t)
+	return s.TemplateKit(ctx, t)
+}
+
+// TemplateConnector implements SubstrateTemplateConnector.
+func (s *SubstrateATEActions) TemplateConnector(ctx context.Context, atespace, template string) (string, error) {
+	kit, err := s.ReadTemplateKit(ctx, atespace, template)
 	return kit.Connector, err
 }
 
@@ -198,14 +216,20 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	}
 	// The registration names the agent version and the hook contract the
 	// signed statement gives: the hook profile, and so the actor's chain
-	// window, is resolved from them (GAP-0201).
-	kit, err := s.templateKit(ctx, tmpl)
-	if err != nil {
-		// The create route decided by mode already (GAP-0181): managed
-		// refused before this call, open source warned. Such a template
-		// records no agent version, so its steps are reported as unrecorded
-		// (GAP-0201).
-		kit = SubstrateTemplateKit{}
+	// window, is resolved from them (GAP-0201). The create route reads the
+	// attestation once and passes it in req.Kit; reading it again here
+	// could answer from a different read than the connector it decided on.
+	// A template whose attestation cannot be read records no agent version,
+	// so its steps are reported as unrecorded (GAP-0201): the create route
+	// decided by mode already (GAP-0181), managed refused before this call,
+	// open source warned.
+	var kit SubstrateTemplateKit
+	if req.Kit != nil {
+		kit = *req.Kit
+	} else if k, kerr := s.templateKit(ctx, tmpl); kerr != nil {
+		fmt.Fprintf(os.Stderr, "[substrate] template %s/%s: %v\n", tmplSpace, tmplName, kerr)
+	} else {
+		kit = k
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {

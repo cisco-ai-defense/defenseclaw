@@ -935,7 +935,10 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
 		res, err := next(ctx, ev)
-		if err != nil {
+		if err != nil || res.Ignored {
+			// An ignored event changed nothing (a delete of an actor whose
+			// registration is not marked deleted): its asks stay open too
+			// (GAP-0142 residual).
 			return res, err
 		}
 		switch ev.Event {

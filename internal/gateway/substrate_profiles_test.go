@@ -83,6 +83,8 @@ func TestSubstrateWorkloadWildcardBoundaries(t *testing.T) {
 	}{
 		{"repo:acme/web:*", "repo:acme/web:ref:refs/heads/main", true},
 		{"repo:acme/web:*", "repo:acme/web-evil:ref:main", false},
+		{"repo:*", "repo:acme/web:ref:main", false},
+		{"repo:acme/*", "repo:acme/web:ref:main", true},
 		{"repo:acme/web*", "repo:acme/web-evil:ref:main", false},
 		{"repo:acme/web*", "repo:acme/web:ref:main", false},
 		{"*", "repo:anything", false},

@@ -65,3 +65,23 @@ func TestBodyOnAndOSSAutoAskForTheBody(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0146 residual: a managed callout with body_inspection off forwards
+// every MCP tools/call with its body unread; readiness says so (it said
+// nothing). OSS installs and the other settings are not degraded by it.
+func TestManagedBodyInspectionOffIsReportedDegraded(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*Config, *Options)
+		want   string
+	}{
+		"managed off": {func(c *Config, _ *Options) { c.Managed, c.BodyInspection = true, BodyOff }, "mcp_bodies_not_inspected"},
+		"oss off":     {func(c *Config, _ *Options) { c.BodyInspection = BodyOff }, ""},
+		"managed on":  {func(c *Config, _ *Options) { c.Managed, c.BodyInspection = true, BodyOn }, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := newHarness(t, tc.mutate).eng.Degraded(); got != tc.want {
+				t.Fatalf("degraded = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

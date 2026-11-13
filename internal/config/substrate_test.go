@@ -243,6 +243,10 @@ func TestSubstrateValidate(t *testing.T) {
 		"workload raw-prefix subject": func(s *SubstrateConfig) {
 			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Subject: "repo:acme/web*"}}
 		},
+		// GAP-0043 residual: a wildcard right after the first segment trusts every repository.
+		"workload first-segment wildcard": func(s *SubstrateConfig) {
+			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Subject: "repo:*"}}
+		},
 		"workload empty claims": func(s *SubstrateConfig) {
 			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Audience: "dc", Claims: map[string]string{}}}
 		},

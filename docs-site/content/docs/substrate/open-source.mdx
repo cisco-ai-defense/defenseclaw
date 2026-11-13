@@ -177,6 +177,8 @@ User-scope Claude Code plugins do not load in Substrate actors, because personal
 
 Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
 
+After a build, and every time you move a pinned agent version, start the agent the way an actor does: `deploy/images/actor-kit/startcheck.sh IMAGE` (it needs docker) runs the image's interactive and `--task` commands with no network and fails if the agent exits at launch or refuses its configuration. A new agent release can drop a setting the kit passes, and the image still builds.
+
 Then check the image and publish it. `publish` copies it to the registry the cluster pulls from and, with `--template`, creates the ActorTemplate from the attested image:
 
 ```bash

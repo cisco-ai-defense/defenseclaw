@@ -230,7 +230,7 @@ func TestHostChainLaneKeepsTheManagedSwitchGAP0211(t *testing.T) {
 
 // TestTrustedActionManagedSwitchGAP0211: dispatchTrustedAction
 // (trusted_action_dispatch.go) returns no findings on a managed host call,
-// and evaluates a verified Substrate actor's call (isVerifiedSubstrateActor).
+// and evaluates a verified Substrate actor's call (isSubstrateActorRequest).
 func TestTrustedActionManagedSwitchGAP0211(t *testing.T) {
 	const connector = "r104-gap-0531"
 	installToolCallCorpusProfileConnector(t, connector, "default")

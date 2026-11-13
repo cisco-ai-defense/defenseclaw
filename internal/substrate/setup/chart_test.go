@@ -100,6 +100,7 @@ func TestChartRefusesBadValues(t *testing.T) {
 	for name, set := range map[string]string{
 		"hpa below 2":               "gateway.hpa.minReplicas=1",
 		"short digest":              "image.digest=sha256:abc",
+		"empty relay secret":        "gateway.relaySessionSecret=", // rendered secretName: "" and a hook Role naming ""
 		"bad atespace":              "managedAtespaces={Bad_Name}",
 		"ingress no host":           "admin.expose.type=Ingress",
 		"ingress no tls":            "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",

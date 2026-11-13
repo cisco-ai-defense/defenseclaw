@@ -234,10 +234,16 @@ func (e *Engine) BodyModeStatus() string { return e.body.status() }
 
 // Degraded names what the callout can't do now, for readiness and doctor:
 // "mcp_refused_until_body_support" while closed-mode auto refuses MCP
-// requests to listed hosts (GAP-0146), "" otherwise.
+// requests to listed hosts (GAP-0146); "mcp_bodies_not_inspected" for a
+// managed callout whose admin set body_inspection off, which records every
+// MCP request to a listed host but never reads its body (GAP-0146
+// residual); "" otherwise.
 func (e *Engine) Degraded() string {
-	if e.closedAuto() && len(e.cfg.MCPHosts) > 0 && !e.body.confirmed() {
+	switch {
+	case e.closedAuto() && len(e.cfg.MCPHosts) > 0 && !e.body.confirmed():
 		return "mcp_refused_until_body_support"
+	case e.cfg.Managed && e.cfg.BodyInspection == BodyOff && len(e.cfg.MCPHosts) > 0:
+		return "mcp_bodies_not_inspected"
 	}
 	return ""
 }
@@ -250,8 +256,13 @@ func (e *Engine) closedAuto() bool {
 	return e.cfg.Managed && e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto
 }
 
-// InvalidateActor is the lifecycle hook: a deleted, recreated or forked
-// actor's cached UID is dropped.
+// InvalidateActor drops an actor's cached UID. Nothing in the callout
+// process calls it: lifecycle events reach the gateway, not this process, so
+// the cache's own age limit (UIDCache) bounds how long a same-name actor
+// that was deleted and created again keeps its predecessor's UID. In that
+// window its verdict calls carry the old UID and the gateway, which finds
+// the old registration deleted or none, refuses them (closed, never wrongly
+// allowed). Tests use it to stand for the age limit passing.
 func (e *Engine) InvalidateActor(atespace, name string) { e.uids.Invalidate(atespace, name) }
 
 // ChainDropped is how many observed_egress steps the full queue dropped.
