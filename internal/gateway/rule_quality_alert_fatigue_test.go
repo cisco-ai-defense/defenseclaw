@@ -159,14 +159,11 @@ func TestAlertFatigueActionModePreservesWeakExplicitCredentials(t *testing.T) {
 		}
 	}
 
-	for _, assignment := range []string{
-		"password=changeme123", "password=dummysecret", "password=examplepass",
-	} {
-		verdict := scanLocalPatterns("prompt", assignment)
-		if verdict.Action != "alert" || verdict.Severity != "MEDIUM" || len(verdict.Findings) == 0 {
-			t.Errorf("Action fallback suppressed explicit weak password %q: %+v", assignment, verdict)
-		}
-	}
+	// A bare placeholder password (changeme123, dummysecret, examplepass)
+	// outside a connection string is not a finding on any surface since the
+	// proxy-only password detector was removed (rel-1-0-10:GAP-0210,
+	// GAP-0213); TestModelResponseCheckReadsTheHookDetectors holds the proxy
+	// and the hook path to one detector set.
 }
 
 func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
