@@ -400,7 +400,7 @@ func (p *parser) parseFusedArg() Expr {
 		return lead
 	}
 	s0, _ := lead.Span()
-	return composeAtoms(atoms, s0, end)
+	return p.composeAtoms(atoms, s0, end)
 }
 
 // barewordExpr builds an argument bareword as an expandable string: it decodes
@@ -452,7 +452,7 @@ func (p *parser) parseArgAtom() Expr {
 // variable or a $( ) sub-expression (as PowerShell does).
 func fusableLead(e Expr) bool {
 	switch v := e.(type) {
-	case *Variable, *SubExpr:
+	case *Variable, *SubExpr, *Number:
 		return true
 	case *StringLit:
 		return v.Bare
@@ -464,19 +464,24 @@ func fusableLead(e Expr) bool {
 // every atom resolves to a literal, otherwise an expandable string whose Parts
 // are the atoms (Static=false). It never returns a static value the pieces
 // disagree with.
-func composeAtoms(atoms []Expr, s0, end int) Expr {
-	var b strings.Builder
+func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 	static := true
 	for _, a := range atoms {
-		if v, ok := LiteralString(a); ok {
-			b.WriteString(v)
-		} else {
+		if _, ok := LiteralString(a); !ok {
 			static = false
 			break
 		}
 	}
 	if static {
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: b.String(), Static: true, Bare: true}
+		// A fused all-literal argument is a single generic token: its value is
+		// the processed source span (quote delimiters dropped, backtick escapes
+		// decoded, $(...) kept literal) -- not the per-atom values, so a glued
+		// number keeps its source text (0x10-1 stays "0x10-1", not "16-1").
+		val := ""
+		if s0 >= 0 && end <= len(p.src) && end >= s0 {
+			val = nameValue(p.src[s0:end])
+		}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: true, Bare: true}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {

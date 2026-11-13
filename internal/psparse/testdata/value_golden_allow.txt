@@ -9,15 +9,10 @@ R2V0LUl0ZW0gLS0gLXg=	pending step-3: parameter vs argument boundary
 JiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
 LiB7IFJlbW92ZS1JdGVtIEM6XHggfQ==	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0ICQoMSl4	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0IDEtMg==	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0ICdhJyM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
 V3JpdGUtT3V0cHV0ICgxKSM7IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: command count mismatch (delta review)
 UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/comment splits an argument
 UmVtb3ZlLUl0ZW0gJChHZXQtTG9jYXRpb24pXHg=	pending step-3: glued operator/bracket/comment splits an argument
-V3JpdGUtT3V0cHV0IDEtMi0z	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDErMg==	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDEqMg==	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IDB4MTAtMQ==	pending step-3: number value formatting (int width / suffix / decimal)
 V3JpdGUtT3V0cHV0ICQoMSkkKDIp	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0ICdhJyNi	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0ICJhIiNi	pending step-3: glued operator/bracket/comment splits an argument
@@ -34,7 +29,6 @@ V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IEDigJwKeCAkeQrigJ1A	pending step-3: smart-quote / CRLF here-string
 V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote / CRLF here-string
 V3JpdGUtT3V0cHV0IGHigJhiIGPigJk=	pending step-3: smart-quote value
-V3JpdGUtT3V0cHV0IDXigJMz	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC0tJSBhIGI=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSAiYSBiIg==	pending step-3: --% verbatim tail as elements
