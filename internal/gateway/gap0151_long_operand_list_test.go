@@ -34,6 +34,9 @@ type hookCall struct {
 	// allows it (an overwritten ordinary destination). A false block is
 	// not a protection the managed gateway lacks.
 	benignPerUserBlock bool
+	// startup, when set, is the X-DefenseClaw-Shell-Startup header value the
+	// hook client sends with the call.
+	startup string
 }
 
 // eachConcurrently runs work for every index on all processors.
@@ -119,6 +122,9 @@ func (f b36ManagedHookFixture) serve(call *hookCall) (string, string) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(call.payload)))
 	if call.managed && call.header != "" {
 		req.Header.Set(hookpaths.Header, call.header)
+	}
+	if call.startup != "" {
+		req.Header.Set(hookpaths.ShellStartupHeader, call.startup)
 	}
 	if call.connector == "codex" {
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)

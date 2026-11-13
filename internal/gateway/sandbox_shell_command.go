@@ -145,6 +145,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
+		ShellStartup:                  action.ShellStartup,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
 	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {

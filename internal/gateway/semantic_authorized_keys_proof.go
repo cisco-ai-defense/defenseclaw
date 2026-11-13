@@ -1024,7 +1024,7 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
 	if command, ok := trustedBashCommandInput(request.Input); ok &&
 		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
-			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+			request.ResolvedWriteTargets, request.ProtectedHomeHook, request.ShellStartup) {
 		return false
 	}
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {

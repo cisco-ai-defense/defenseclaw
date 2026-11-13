@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -32,6 +31,16 @@ func NoDereferenceTouchSafe(command, cwd, home string) bool {
 	return safe
 }
 
+// NoDereferenceTouchSafeIn is NoDereferenceTouchSafe judged against the
+// agent's shell startup (nil: this process's own).
+func NoDereferenceTouchSafeIn(command, cwd, home string, startup *ShellStartup) bool {
+	if startup == nil {
+		return NoDereferenceTouchSafe(command, cwd, home)
+	}
+	safe, _ := noDereferenceTouchStatusIn(command, cwd, home, *startup)
+	return safe
+}
+
 // noDereferenceTouchStatus reads the entries touch changes. A regular file
 // is checked by identity; -h changes a symbolic link's entry instead.
 //
@@ -42,6 +51,12 @@ func NoDereferenceTouchSafe(command, cwd, home string) bool {
 // (RHEL's which, a host profile's helpers) dropped the protected reading
 // too, and the quoted hard link reached the protected file.
 func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget bool) {
+	return noDereferenceTouchStatusIn(command, cwd, home, CurrentShellStartup())
+}
+
+// noDereferenceTouchStatusIn is noDereferenceTouchStatus with the agent's
+// shell startup (a per-user gateway reads it from the client's header).
+func noDereferenceTouchStatusIn(command, cwd, home string, startup ShellStartup) (safe, protectedTarget bool) {
 	if !strings.Contains(command, "touch") ||
 		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
 		return false, false
@@ -79,44 +94,15 @@ func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget 
 			protectedTarget = true
 		}
 	}
-	return !unknown && !protectedTarget && !noDereferenceTouchStartupUnknown(), protectedTarget
+	return !unknown && !protectedTarget && !startup.mayChange("touch", "gtouch"), protectedTarget
 }
 
-// noDereferenceTouchStartupUnknown reports a shell startup that can change
-// what the touch statement runs: a startup file (BASH_ENV, ENV), or an
-// exported function that bash calls instead of touch or gtouch (bash accepts
-// slashes in a function name, so /usr/bin/touch can be one) or for a missing
-// program (command_not_found_handle). The statement calls no other function,
-// so an exported function of another name leaves the proof intact. An export
-// spelled neither name%% (bash 4.3+) nor name() (older patched bash) is
-// unknown.
-func noDereferenceTouchStartupUnknown() bool { return startupMayChangeProgram("touch", "gtouch") }
-
-// startupMayChangeProgram reports a shell startup that can change what a
-// statement running one of programs does (see noDereferenceTouchStartupUnknown).
+// startupMayChangeProgram reports a shell startup of this process that can
+// change what a statement running one of programs does: a startup file, an
+// exported function named for the program (any path spelling), or
+// command_not_found_handle (see ShellStartup).
 func startupMayChangeProgram(programs ...string) bool {
-	if os.Getenv("BASH_ENV") != "" || os.Getenv("ENV") != "" {
-		return true
-	}
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		function, exported := strings.CutPrefix(name, "BASH_FUNC_")
-		if !exported {
-			continue
-		}
-		function, modern := strings.CutSuffix(function, "%%")
-		if !modern {
-			var patched bool
-			if function, patched = strings.CutSuffix(function, "()"); !patched {
-				return true
-			}
-		}
-		base := function[strings.LastIndexByte(function, '/')+1:]
-		if slices.Contains(programs, base) || function == "command_not_found_handle" {
-			return true
-		}
-	}
-	return false
+	return CurrentShellStartup().mayChange(programs...)
 }
 
 // entryOnlyStatement reads the bounded statement the entry-only proofs

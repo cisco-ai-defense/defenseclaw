@@ -157,6 +157,17 @@ func Quotings() []Quoting {
 	}
 }
 
+// verbEffectOn is the effect of a verb on a name that is a symlink or a
+// hard link. install through a symlink is judged a write of what it leads
+// to (rel-1-0-6 GAP-0389: its behavior differs between implementations),
+// where mv and sed -i replace the symlink.
+func verbEffectOn(v Verb, symlink bool) Effect {
+	if v.ID == "install" && symlink {
+		return Content
+	}
+	return v.Effect
+}
+
 // Verb is a writer prefix with the effect it has on the operand.
 type Verb struct {
 	ID, Prefix string
@@ -207,7 +218,7 @@ func Rows(n Names) []Row {
 				rows = append(rows, Row{
 					ID:      "HL-" + alias.id + "-" + q.ID + "-" + v.ID,
 					Command: v.Prefix + q.Spell(alias.name),
-					Effect:  v.Effect, Target: Alias,
+					Effect:  verbEffectOn(v, alias.sym), Target: Alias,
 					Entry: v.NoDereference && alias.sym,
 				})
 			}
@@ -225,7 +236,7 @@ func Rows(n Names) []Row {
 			rows = append(rows, Row{
 				ID:      "HL-var-" + target.id + "-" + v.ID,
 				Command: "p=" + target.name + "; " + v.Prefix + `"$p"`,
-				Effect:  v.Effect, Target: Alias, Entry: v.NoDereference && target.id == "sym",
+				Effect:  verbEffectOn(v, target.id == "sym"), Target: Alias, Entry: v.NoDereference && target.id == "sym",
 			})
 		}
 	}

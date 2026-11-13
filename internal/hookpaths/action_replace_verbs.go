@@ -26,6 +26,10 @@ import (
 // hard link of a protected file, or a symlink to a file. The operands go
 // through the one word resolver.
 func replaceVerbSafe(command, cwd, home string) bool {
+	return replaceVerbSafeIn(command, cwd, home, CurrentShellStartup())
+}
+
+func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 	if !filepath.IsAbs(cwd) || home == "" || actionWindowsHome(home) ||
 		!strings.Contains(command, "mv") && !strings.Contains(command, "install") && !strings.Contains(command, "sed") {
 		return false
@@ -40,7 +44,7 @@ func replaceVerbSafe(command, cwd, home string) bool {
 	}
 	name := programBase(program)
 	words, ok := replaceVerbOperandWords(name, call.Args[1:], home)
-	if !ok || startupMayChangeProgram(name) {
+	if !ok || startup.mayChange(name) {
 		return false
 	}
 	options := shellGlobOptionsFromEnv(os.Getenv)
@@ -82,6 +86,13 @@ func replaceVerbSafe(command, cwd, home string) bool {
 				return false
 			}
 		case info.Mode()&os.ModeSymlink != 0:
+			// mv replaces a symlink and GNU sed -i refuses one, but what
+			// install does with a symlink destination differs between
+			// implementations (GAP-0389 pins it blocked): only a hard-link
+			// name is proved for install.
+			if name == "install" || name == "ginstall" {
+				return false
+			}
 			if target, serr := pathStat(entry); serr == nil && target.IsDir() {
 				return false
 			}

@@ -236,12 +236,21 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		posixWords := !spelledWindows && !actionPosixWindowsHome(home)
 		globOptions := shellGlobOptionsFromEnv(os.Getenv)
 		checkWord := func(word *syntax.Word) bool {
+			resolverWord := posixWords && !stateOnly && shellWordNeedsResolver(word)
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
 			if !known && activeGlob {
 				value, known = actionWordValueWithGlob(word, values, effectiveCWD, home, true)
 			}
-			if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+			if resolverWord {
+				// The resolver reads this word: its escaped pattern is the
+				// one recorded and judged, not the flattened value.
+				for _, target := range resolverWordTargets(word) {
+					if pattern, active := resolverWordPattern(target, values, effectiveCWD); active && check(pattern, false, effectiveCWD) {
+						return true
+					}
+				}
+			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
 				if check(value, false, effectiveCWD) {
@@ -257,7 +266,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// an unmatched pattern that bash passes as the literal word) go
 			// through the one resolver, and every candidate it names is
 			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
-			if posixWords && !stateOnly && shellWordNeedsResolver(word) {
+			if resolverWord {
 				settled := true
 				for _, target := range resolverWordTargets(word) {
 					resolved := resolveShellWord(target, values, effectiveCWD, globOptions)

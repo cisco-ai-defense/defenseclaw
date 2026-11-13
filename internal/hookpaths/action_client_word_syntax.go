@@ -45,6 +45,12 @@ func ReplaceVerbShape(command, cwd, home string) bool {
 
 // ReplaceVerbSafe is the replace-verb proof for a per-user gateway, which
 // reads the same files as the hook client.
-func ReplaceVerbSafe(command, cwd, home string) bool {
-	return ReplaceVerbShape(command, cwd, home) && replaceVerbSafe(command, cwd, home)
+func ReplaceVerbSafe(command, cwd, home string, startup *ShellStartup) bool {
+	if !ReplaceVerbShape(command, cwd, home) {
+		return false
+	}
+	if startup == nil {
+		return replaceVerbSafe(command, cwd, home)
+	}
+	return replaceVerbSafeIn(command, cwd, home, *startup)
 }

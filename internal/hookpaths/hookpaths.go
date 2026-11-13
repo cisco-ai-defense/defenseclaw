@@ -1997,10 +1997,11 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
 						protectedDecision = false
 					}
-					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
-						// A per-user gateway can resolve a variable write through
-						// the user's links. Carry that positive decision to managed
-						// gateways, excluding an unconditionally overwritten value.
+					if !protectedDecision && !noDereferenceTouchSafe && (actionClientVariableWriteCandidate(command, home) || actionClientShellWordSyntax(command)) {
+						// A per-user gateway can resolve a variable or an expanded
+						// word through the user's links. Carry that positive
+						// decision to managed gateways, excluding a value the
+						// call proves dead (GAP-0326, GAP-0327).
 						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
 							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 							!actionClientProvedOverwrittenRedirect(command, cwd, home)
@@ -2024,10 +2025,6 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// cannot read the user's home, so the client carries that
 				// decision for every verb, not a fixed list (GAP-0326,
 				// GAP-0327: managed at least as strict as per-user).
-				if !protectedDecision && !noDereferenceTouchSafe && !isApplyPatchToolName(tool) &&
-					actionClientShellWordSyntax(command) {
-					protectedDecision = ActionCommandDecision(command, cwd, home) != ""
-				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)

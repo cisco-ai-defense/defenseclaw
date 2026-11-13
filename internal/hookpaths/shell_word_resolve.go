@@ -91,22 +91,7 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 		return resolvedWord{uncertain: wordUncertainDynamic}
 	}
 	home := values["HOME"]
-	pairs := []string{"PWD=" + cwd}
-	for name, value := range values {
-		if name != "PWD" {
-			pairs = append(pairs, name+"="+value)
-		}
-	}
-	cfg := &expand.Config{
-		Env:     expand.ListEnviron(pairs...),
-		NoUnset: true,
-		CmdSubst: func(io.Writer, *syntax.CmdSubst) error {
-			return errors.New("command substitution")
-		},
-		ProcSubst: func(*syntax.ProcSubst) (string, error) {
-			return "", errors.New("process substitution")
-		},
-	}
+	cfg := resolverConfig(values, cwd)
 	pattern, ok := resolverPattern(word, cfg, home)
 	if !ok {
 		return resolvedWord{uncertain: wordUncertainDynamic}
@@ -143,6 +128,42 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	// when its directory exists; a name under one that is not there names
 	// nothing.
 	return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, true)}
+}
+
+// resolverConfig is the quote-removal environment: known values only, no
+// command or process substitution, no globbing.
+func resolverConfig(values actionValues, cwd string) *expand.Config {
+	pairs := []string{"PWD=" + cwd}
+	for name, value := range values {
+		if name != "PWD" {
+			pairs = append(pairs, name+"="+value)
+		}
+	}
+	return &expand.Config{
+		Env:     expand.ListEnviron(pairs...),
+		NoUnset: true,
+		CmdSubst: func(io.Writer, *syntax.CmdSubst) error {
+			return errors.New("command substitution")
+		},
+		ProcSubst: func(*syntax.ProcSubst) (string, error) {
+			return "", errors.New("process substitution")
+		},
+	}
+}
+
+// resolverWordPattern is the word as the glob pattern the shell expands,
+// when it holds an active glob character. The mention scan records and
+// judges this pattern for the words the resolver reads, not the plain value
+// that spells a quoted bracket as a pattern character.
+func resolverWordPattern(word *syntax.Word, values actionValues, cwd string) (string, bool) {
+	if word == nil || !resolverWordKnown(word, values) {
+		return "", false
+	}
+	pattern, ok := resolverPattern(word, resolverConfig(values, cwd), values["HOME"])
+	if !ok || !resolverPatternActive(pattern) {
+		return "", false
+	}
+	return pattern, true
 }
 
 func resolverCandidates(fields []string, cwd string, needParent bool) []string {

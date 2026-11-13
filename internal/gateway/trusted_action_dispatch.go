@@ -210,6 +210,9 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
+	// ShellStartup is the shell startup of the agent's process, from the
+	// hook client's header (nil: an older client; the gateway's own).
+	ShellStartup *hookpaths.ShellStartup
 	// ActiveAgentFileIdentities maps the hook client's file identity of each
 	// instruction file the session loaded to that file, for a gateway that
 	// cannot read it (hookpaths.LoadedIdentityPrefix).
@@ -397,6 +400,9 @@ func dispatchTrustedAction(
 	}
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
+	}
+	if request.ShellStartup != nil {
+		request.targetMemo.WithShellStartup(request.ShellStartup)
 	}
 	if request.simpleMemo == nil {
 		request.simpleMemo = &trustedSimpleMemo{}

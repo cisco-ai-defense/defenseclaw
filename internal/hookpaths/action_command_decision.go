@@ -73,12 +73,13 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
-	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
+	startup := memo.shellStartup()
+	if safe, protected := noDereferenceTouchStatusIn(command, cwd, home, startup); protected {
 		return "protected-target"
 	} else if safe {
 		return ""
 	}
-	if replaceVerbSafe(command, cwd, home) {
+	if replaceVerbSafeIn(command, cwd, home, startup) {
 		return ""
 	}
 	if actionStartupConditionalAliasRedirect(command) {
@@ -189,7 +190,10 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
-	if NoDereferenceTouchSafe(command, cwd, home) || replaceVerbSafe(command, cwd, home) {
+	if startup := memo.shellStartup(); func() bool {
+		safe, _ := noDereferenceTouchStatusIn(command, cwd, home, startup)
+		return safe || replaceVerbSafeIn(command, cwd, home, startup)
+	}() {
 		return false
 	}
 	protected := memo.protectedFiles(home)
