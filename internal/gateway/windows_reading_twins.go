@@ -9,44 +9,34 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-// windowsReadingTwinRequests are the other ways a Windows hook's shell call
-// can read when the reading its dialect choice picked is not complete
-// (rel-1-0-10:GAP-0366, GAP-0367). The hook has one hint per call, but the
-// harness runs PowerShell or a POSIX shell (Git Bash), and a call that one
-// reading cannot place may be exactly what the other reads. Each twin is the
-// call judged as that other shell where the hook placed it in none, and, for
-// a partial PowerShell reading, as its readable statements alone. The callers merge only what a twin proves
-// (withTwinProvenBlocks), so no finding of the chosen reading is dropped and
-// a twin only adds.
+// windowsReadingTwinRequests are the other readings a Windows hook's shell
+// call is judged with when the reading its dialect choice picked is partial
+// (rel-1-0-10:GAP-0367). One statement the PowerShell reading cannot read
+// makes the whole call partial, and a partial call proves none of the
+// multi-statement findings its readable statements make together, so the
+// statements that each parse complete are also judged alone
+// (actionfacts.PowerShellReadableStatementsTwin). The callers merge only what a
+// twin proves (withTwinProvenBlocks): no finding of the chosen reading is
+// dropped and a twin only adds.
+//
+// The call is deliberately not also judged as the other shell. A Git Bash call
+// read as PowerShell, or a PowerShell call read as POSIX, gains findings the
+// shell that runs it never has: TestR105GAP2304WindowsGitBashHomeDrivePaths
+// blocked its benign copy cases with that twin. The NetExec identity of
+// GAP-0366 is one program name in every dialect instead (netExecProgramFamily).
 func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.Facts) []trustedActionRequest {
 	if !request.windowsDialectReadings || request.readingTwin || request.simpleCommandPass ||
 		facts.Authoritative() || facts.Parse.Status == actionfacts.StatusLimitExceeded {
 		return nil
 	}
-	var twins []trustedActionRequest
-	chosen := facts.Parse.Dialect
-	// The other shell is judged only where the hook placed the call in no
-	// shell: a call it did place (the Claude Code PowerShell tool, a Bash call
-	// that Git Bash reads alone, a Codex call whose PowerShell parse it took) is
-	// the shell it was placed in, and reading it as another shell would add
-	// findings the shell that runs it never has.
-	if request.Input.DialectHint == "" {
-		for _, other := range []actionfacts.Dialect{actionfacts.DialectPowerShell, actionfacts.DialectPOSIX} {
-			if other == chosen {
-				continue
-			}
-			twin := windowsReadingTwin(request)
-			twin.Input.DialectHint = other
-			twins = append(twins, twin)
-		}
+	readable, ok := actionfacts.PowerShellReadableStatementsTwin(request.Input, facts)
+	if !ok {
+		return nil
 	}
-	if readable, ok := actionfacts.PowerShellReadableStatementsTwin(request.Input, facts); ok {
-		twin := windowsReadingTwin(request)
-		twin.Input = readable
-		twin.LegacyText = readable.Command
-		twins = append(twins, twin)
-	}
-	return twins
+	twin := windowsReadingTwin(request)
+	twin.Input = readable
+	twin.LegacyText = readable.Command
+	return []trustedActionRequest{twin}
 }
 
 // windowsReadingTwin is a copy of request that judges one more reading: it

@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -65,50 +66,50 @@ func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testi
 	}
 }
 
-// TestWindowsReadingTwinRequests pins which calls get the other readings: only
-// a Windows hook's call, only when its chosen reading is not complete, never a
-// reading itself.
+// TestWindowsReadingTwinRequests pins which calls get the readable-statements
+// reading: only a Windows hook's call, only when its reading is partial, never
+// a reading itself, and never the other shell (a Git Bash call read as
+// PowerShell blocked benign copies, TestR105GAP2304WindowsGitBashHomeDrivePaths).
 func TestWindowsReadingTwinRequests(t *testing.T) {
-	partial := actionfacts.Facts{Parse: actionfacts.ParseResult{
-		Status: actionfacts.StatusPartial, Dialect: actionfacts.DialectPowerShell,
-	}}
-	complete := actionfacts.Facts{Parse: actionfacts.ParseResult{
-		Status: actionfacts.StatusComplete, Dialect: actionfacts.DialectPowerShell,
-	}}
-	hook := trustedActionRequest{windowsDialectReadings: true}
-	hints := func(twins []trustedActionRequest) []actionfacts.Dialect {
-		var out []actionfacts.Dialect
-		for _, twin := range twins {
-			if !twin.readingTwin || twin.windowsDialectReadings || twin.record != nil {
-				t.Fatalf("a twin must be a recording-free reading that makes no readings: %+v", twin)
-			}
-			out = append(out, twin.Input.DialectHint)
-		}
-		return out
+	const unreadable = "Write-Output $(Get-Date)"
+	input := actionfacts.Input{
+		Tool: "shell", CWD: `C:\repo`, DialectHint: actionfacts.DialectPowerShell,
+		Command: "Get-Location\n" + unreadable + "\nGet-Date",
 	}
-	if got := hints(windowsReadingTwinRequests(hook, partial)); !slices.Equal(got, []actionfacts.Dialect{actionfacts.DialectPOSIX}) {
-		t.Fatalf("partial PowerShell reading: twin hints %v, want [posix]", got)
+	partial := actionfacts.Analyze(input)
+	if partial.Authoritative() || partial.Parse.Dialect != actionfacts.DialectPowerShell {
+		t.Fatalf("fixture is not a partial PowerShell reading: %+v", partial.Parse)
 	}
-	posixPartial := partial
-	posixPartial.Parse.Dialect = actionfacts.DialectPOSIX
-	if got := hints(windowsReadingTwinRequests(hook, posixPartial)); !slices.Equal(got, []actionfacts.Dialect{actionfacts.DialectPowerShell}) {
-		t.Fatalf("partial POSIX reading: twin hints %v, want [powershell]", got)
+	hook := trustedActionRequest{Input: input, windowsDialectReadings: true}
+	twins := windowsReadingTwinRequests(hook, partial)
+	if len(twins) != 1 {
+		t.Fatalf("got %d twins, want the readable-statements one", len(twins))
 	}
-	placed := hook
-	placed.Input.DialectHint = actionfacts.DialectPOSIX
-	if got := hints(windowsReadingTwinRequests(placed, posixPartial)); len(got) != 0 {
-		t.Fatalf("a call the hook placed in a shell got the other shell's reading: %v", got)
+	twin := twins[0]
+	if !twin.readingTwin || twin.windowsDialectReadings || twin.record != nil ||
+		twin.Input.DialectHint != actionfacts.DialectPowerShell ||
+		strings.Contains(twin.Input.Command, unreadable) || twin.LegacyText != twin.Input.Command {
+		t.Fatalf("twin is not a recording-free readable-statements reading: %+v", twin)
 	}
 	for name, request := range map[string]trustedActionRequest{
-		"not a Windows hook call": {},
-		"already a reading":       {windowsDialectReadings: true, readingTwin: true},
-		"a simple-command pass":   {windowsDialectReadings: true, simpleCommandPass: true},
+		"not a Windows hook call": {Input: input},
+		"already a reading":       {Input: input, windowsDialectReadings: true, readingTwin: true},
+		"a simple-command pass":   {Input: input, windowsDialectReadings: true, simpleCommandPass: true},
 	} {
-		if twins := windowsReadingTwinRequests(request, partial); len(twins) != 0 {
-			t.Fatalf("%s got %d twins", name, len(twins))
+		if got := windowsReadingTwinRequests(request, partial); len(got) != 0 {
+			t.Fatalf("%s got %d twins", name, len(got))
 		}
 	}
-	if twins := windowsReadingTwinRequests(hook, complete); len(twins) != 0 {
-		t.Fatalf("a complete reading got %d twins", len(twins))
+	posix := hook
+	posix.Input.DialectHint = actionfacts.DialectPOSIX
+	posixPartial := partial
+	posixPartial.Parse.Dialect = actionfacts.DialectPOSIX
+	if got := windowsReadingTwinRequests(posix, posixPartial); len(got) != 0 {
+		t.Fatalf("a POSIX reading got %d twins: the other shell is never read", len(got))
+	}
+	complete := partial
+	complete.Parse.Status = actionfacts.StatusComplete
+	if got := windowsReadingTwinRequests(hook, complete); len(got) != 0 {
+		t.Fatalf("a complete reading got %d twins", len(got))
 	}
 }
