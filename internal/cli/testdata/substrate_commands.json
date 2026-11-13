@@ -479,7 +479,7 @@
       {
         "name": "kube-namespace",
         "type": "string",
-        "usage": "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record names --admin-url)"
+        "usage": "with --kube, the namespace DefenseClaw runs in (required; without it login only says which namespace publishes --admin-url)"
       },
       {
         "name": "kube-service-account",
