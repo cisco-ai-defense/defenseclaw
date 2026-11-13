@@ -468,13 +468,47 @@ func TestExtractMessageArgsRoutingCost(t *testing.T) {
 	}
 }
 
-// An attachment too long to decode is undecided: the call is truncated, never
-// skipped (GAP-0328).
-func TestExtractMessageArgsLongAttachmentIsUndecided(t *testing.T) {
-	raw, _ := json.Marshal(map[string]string{"buffer": strings.Repeat("AAEC", messagePayloadMaxChars/4+1)})
-	got := extractMessageArgs(raw)
-	if !got.Truncated.Has(bounded.Bytes) || got.Text != "" {
-		t.Errorf("a %d-character buffer: truncated bytes = %v, text %q, want undecided", messagePayloadMaxChars+4, got.Truncated.Has(bounded.Bytes), got.Text)
+// An attachment is read as a stream within a fixed budget of characters per
+// call (GAP-0328, GAP-0338): inside it the content decides, past it the unread
+// part is truncated, never skipped, and a 4 MB or 16 MB attachment costs no
+// more than one at the budget.
+func TestExtractMessageArgsAttachmentBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		chars     int
+		truncated bool
+	}{
+		{"1 MiB", 1 << 20, false},
+		{"at the budget", messagePayloadMaxChars, false},
+		{"4 MB", 4 << 20, true},
+		{"16 MB", 16 << 20, true},
+	} {
+		raw, err := json.Marshal(map[string]string{"message": "hi", "buffer": strings.Repeat("AAEC", tc.chars/4)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		got := extractMessageArgs(raw)
+		if took := time.Since(start); took > 750*time.Millisecond {
+			t.Errorf("%s: reading the call took %v", tc.name, took)
+		}
+		if got.Text != "hi" || got.Truncated.Has(bounded.Bytes) != tc.truncated {
+			t.Errorf("%s: text %q, truncated bytes = %v, want hi and %v", tc.name, got.Text, got.Truncated.Has(bounded.Bytes), tc.truncated)
+		}
+	}
+	// Text after the budget is unread and the call says so; text inside it is read.
+	sentence := []byte("a sentence that is long enough to be a run of text")
+	for len(sentence)%3 != 0 {
+		sentence = append(sentence, ' ')
+	}
+	tail := base64.StdEncoding.EncodeToString(sentence)
+	late, _ := json.Marshal(map[string]string{"buffer": strings.Repeat("AAEC", messagePayloadMaxChars/4) + tail})
+	if got := extractMessageArgs(late); !got.Truncated.Has(bounded.Bytes) || got.Text != "" {
+		t.Errorf("text past the budget: text %q truncated %v, want unread and truncated", got.Text, got.Truncated.Has(bounded.Bytes))
+	}
+	early, _ := json.Marshal(map[string]string{"buffer": tail + strings.Repeat("AAEC", 1<<20/4)})
+	if got := extractMessageArgs(early); got.Truncated.Any() || !strings.Contains(got.Text, "a sentence that is long enough") {
+		t.Errorf("text inside the budget: text %q truncated %v", got.Text, got.Truncated.Any())
 	}
 }
 

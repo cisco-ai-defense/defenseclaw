@@ -68,10 +68,13 @@ const (
 	// messagePayloadMinBytes is the length from which a base64 value of an
 	// attachment field is read as a payload, not as text.
 	messagePayloadMinBytes = 1024
-	// messagePayloadMaxChars is the longest base64 payload decoded and read in
-	// full (8 MiB). A longer one is undecided: the call is truncated, never
-	// skipped.
-	messagePayloadMaxChars = 8 << 20
+	// messagePayloadMaxChars is the base64 characters of attachments one call
+	// has decoded and read (2 MiB, 1.5 MiB of bytes): a work budget in
+	// characters, never wall-clock time, and about 10 ms of work. What is past
+	// it is unread: the call is truncated, never skipped.
+	messagePayloadMaxChars = 2 << 20
+	// messagePayloadChunk is the decoded bytes read at a time.
+	messagePayloadChunk = 32 << 10
 	// messageRunMinBytes is the shortest run of text bytes read out of a
 	// decoded attachment. Random binary data has such a run about once in 10^7
 	// bytes, so a photo yields none.
@@ -160,6 +163,7 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 }
 
 type messageWalk struct {
+	payloadUsed int
 	parts       []string
 	nodes       int
 	trunc       bounded.Truncated
@@ -356,14 +360,15 @@ func messageAttachmentField(key string) bool {
 }
 
 // attachment reads a long value of an attachment field that is base64 all
-// through (a data URL or the bare payload) and reports whether it did. The
-// whole payload is decoded and the whole of it is read for text: a run of
-// text bytes anywhere in it (a message sent as a file, text behind a binary
-// header) is message text, and only a payload with no such run is binary and
-// skipped, spending no text budget. The declared media type decides nothing;
-// the bytes do. A payload too long to decode is undecided: the call is
-// truncated, never skipped. A value with anything but base64 in it is not a
-// payload and is read as text by the caller.
+// through (a data URL or the bare payload) and reports whether it did. It is
+// decoded as a stream, within the call's budget of messagePayloadMaxChars
+// characters, and read for text: a run of text bytes anywhere in it (a message
+// sent as a file, text behind a binary header) is message text, and only a
+// payload with no such run is binary and skipped, spending no text budget. The
+// declared media type decides nothing; the bytes do. What is past the budget is
+// unread: the call is truncated, never skipped and never decoded for seconds on
+// the 200 ms path. A value with anything but base64 in it is not a payload and
+// is read as text by the caller.
 func (w *messageWalk) attachment(s string) bool {
 	if len(s) < messagePayloadMinBytes {
 		return false
@@ -377,7 +382,17 @@ func (w *messageWalk) attachment(s string) bool {
 		}
 		payload = s[i+len(";base64,"):]
 	}
-	if len(payload) < messagePayloadMinBytes || !messageAllBase64(payload) {
+	if len(payload) < messagePayloadMinBytes {
+		return false
+	}
+	// The part inside the budget (whole groups of four characters).
+	read := payload
+	if left := messagePayloadMaxChars - w.payloadUsed; len(payload) > left {
+		read = payload[:max(left, 0)&^3]
+		w.trunc.Hit(bounded.Bytes)
+	}
+	enc, ok := messageBase64Encoding(read, len(read) == len(payload))
+	if !ok {
 		return false
 	}
 	if w.nodes >= messageTextMaxNodes {
@@ -385,72 +400,122 @@ func (w *messageWalk) attachment(s string) bool {
 		return true
 	}
 	w.nodes++
-	if len(payload) > messagePayloadMaxChars {
-		w.trunc.Hit(bounded.Bytes)
-		return true
-	}
-	decoded, ok := messageDecodeBase64(payload)
-	if !ok {
+	w.payloadUsed += len(read)
+	text, decoded := messageStreamTextRuns(base64.NewDecoder(enc, strings.NewReader(read)))
+	if !decoded {
 		return false
 	}
-	if text := messageTextRuns(decoded); text != "" {
+	if text != "" {
 		w.leaf(text)
 	}
 	return true
 }
 
-// messageAllBase64 reports a value made only of base64 characters (either
-// alphabet, padding and line breaks), all through.
-func messageAllBase64(s string) bool {
+// messageBase64Encoding is the alphabet and padding of a base64 value, which
+// must be base64 characters all through (either alphabet, padding and line
+// breaks, not both alphabets).
+func messageBase64Encoding(s string, whole bool) (*base64.Encoding, bool) {
+	std, url := false, false
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
-			c == '+' || c == '/' || c == '-' || c == '_' || c == '=' || c == '\r' || c == '\n') {
-			return false
+		switch c := s[i]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '=', c == '\r', c == '\n':
+		case c == '+' || c == '/':
+			std = true
+		case c == '-' || c == '_':
+			url = true
+		default:
+			return nil, false
 		}
 	}
-	return true
-}
-
-// messageDecodeBase64 decodes a base64 payload of either alphabet, padded or
-// not.
-func messageDecodeBase64(s string) ([]byte, bool) {
-	s = strings.NewReplacer("\r", "", "\n", "").Replace(s)
-	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
-		if b, err := enc.DecodeString(s); err == nil {
-			return b, true
-		}
+	if std && url {
+		return nil, false
 	}
-	return nil, false
+	enc := base64.StdEncoding
+	if url {
+		enc = base64.URLEncoding
+	}
+	if !whole || !strings.HasSuffix(strings.TrimRight(s, "\r\n"), "=") {
+		enc = enc.WithPadding(base64.NoPadding)
+	}
+	return enc, true
 }
 
-// messageTextRuns returns the runs of at least messageRunMinBytes text bytes
-// (printable characters and white space of valid UTF-8) of decoded data,
-// joined by newlines: all of a text file, the text of a binary file.
-func messageTextRuns(b []byte) string {
+// messageStreamTextRuns reads decoded data in chunks and returns the runs of
+// at least messageRunMinBytes text bytes (printable characters and white space
+// of valid UTF-8) joined by newlines: all of a text file, the text of a binary
+// file. It reports false when the stream is not valid base64. The text
+// returned is bounded by messageTextMaxBytes, past it the reading stops.
+func messageStreamTextRuns(r io.Reader) (string, bool) {
 	var out []string
-	start := -1
-	flush := func(end int) {
-		if start >= 0 && end-start >= messageRunMinBytes {
-			out = append(out, string(b[start:end]))
+	var run []byte
+	total := 0
+	flush := func() {
+		if len(run) >= messageRunMinBytes {
+			out = append(out, string(run))
+			total += len(run) + 1
 		}
-		start = -1
+		run = run[:0]
 	}
-	for i := 0; i < len(b); {
-		r, size := utf8.DecodeRune(b[i:])
-		if r == utf8.RuneError && size == 1 || !(unicode.IsPrint(r) || r == '\n' || r == '\r' || r == '\t') {
-			flush(i)
+	buf := make([]byte, 0, messagePayloadChunk+utf8.UTFMax)
+	for {
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		final := err != nil
+		if err != nil && err != io.EOF {
+			return "", false
+		}
+		end := len(buf)
+		if !final {
+			// A character cut by the end of the chunk waits for the next one.
+			for k := 1; k < utf8.UTFMax && k <= len(buf); k++ {
+				if utf8.RuneStart(buf[len(buf)-k]) {
+					if !utf8.FullRune(buf[len(buf)-k:]) {
+						end = len(buf) - k
+					}
+					break
+				}
+			}
+		}
+		for i := 0; i < end; {
+			c := buf[i]
+			if c < utf8.RuneSelf {
+				if messagePrintableASCII[c] {
+					run = append(run, c)
+				} else {
+					flush()
+				}
+				i++
+				continue
+			}
+			rn, size := utf8.DecodeRune(buf[i:end])
+			if rn == utf8.RuneError && size == 1 || !unicode.IsPrint(rn) {
+				flush()
+			} else {
+				run = append(run, buf[i:i+size]...)
+			}
 			i += size
-			continue
 		}
-		if start < 0 {
-			start = i
+		buf = append(buf[:0], buf[end:]...)
+		if total+len(run) > messageTextMaxBytes {
+			break
 		}
-		i += size
+		if final {
+			break
+		}
 	}
-	flush(len(b))
-	return strings.Join(out, "\n")
+	flush()
+	return strings.Join(out, "\n"), true
 }
+
+// messagePrintableASCII marks the ASCII bytes of a text run: printable
+// characters, newline, carriage return and tab.
+var messagePrintableASCII = func() (t [utf8.RuneSelf]bool) {
+	for c := byte(0x20); c < 0x7f; c++ {
+		t[c] = true
+	}
+	t['\n'], t['\r'], t['\t'] = true, true, true
+	return t
+}()
 
 // messageRoutingArgs is the args the tool-policy lane reads for a message
 // call's routing values: the recipient, target and channel strings under
