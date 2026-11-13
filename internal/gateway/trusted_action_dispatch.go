@@ -383,7 +383,7 @@ func dispatchTrustedAction(
 		if mode := effectsRulesModeFor(); mode == effectRulesOn {
 			effectRequest := request
 			defer func() {
-				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode), mode)...)
+				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)
 			}()
 		}
 	}

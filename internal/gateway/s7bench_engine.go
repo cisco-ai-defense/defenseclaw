@@ -128,7 +128,8 @@ type S7Det struct {
 	// Effect is the effect-model rule lane verdict (guardrail.effects_rules
 	// shadow or on), computed beside today's answer for the disagreement
 	// measurement. Nil when the lane is off.
-	Effect *EffectShadowResult `json:"effect,omitempty"`
+	Effect     *EffectShadowResult `json:"effect,omitempty"`
+	EffectFull *EffectShadowResult `json:"effect_full,omitempty"`
 }
 
 // Deterministic evaluates the call the way evaluateAgentHook projects it.
@@ -151,6 +152,7 @@ func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json
 		out.Findings = append(out.Findings, S7Finding{RuleID: f.RuleID, Severity: f.Severity, Confidence: f.Confidence, Disposition: f.Disposition, Route: f.Route})
 	}
 	out.Effect = r.EffectShadow
+	out.EffectFull = r.EffectShadowFull
 	return out
 }
 

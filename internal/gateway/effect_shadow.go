@@ -39,6 +39,28 @@ const (
 	effectRulesOn     effectRulesMode = "on"
 )
 
+// effectTierMode is how far the effect lane may block: restricted (the
+// owner's listed-command tier) or full (the full effect model).
+type effectTierMode string
+
+const (
+	tierRestricted effectTierMode = "restricted"
+	tierFull       effectTierMode = "full"
+)
+
+// effectsRulesTierFor reads the live generation's effects_rules_tier.
+// Absent or unknown is restricted (the shipped default).
+func effectsRulesTierFor() effectTierMode {
+	g := currentGeneration()
+	if g == nil || g.Config == nil {
+		return tierRestricted
+	}
+	if effectTierMode(g.Config.Guardrail.EffectsRulesTier) == tierFull {
+		return tierFull
+	}
+	return tierRestricted
+}
+
 // effectResolverOverride, when set, replaces the file-system link resolver in
 // computeEffectShadow. It is nil in production (the hookpaths reader is used)
 // and set by the s7bench harness to a lexical resolver, because the harness
@@ -124,7 +146,7 @@ func effectCall(connector string, in actionfacts.Input) (effects.Call, effects.O
 // computeEffectShadow runs the effect lane for one request and returns its
 // verdict. It never mutates the request or today's findings. The protected-set
 // grade follows links through the hook's own reader (read-only).
-func computeEffectShadow(request trustedActionRequest, mode effectRulesMode) EffectShadowResult {
+func computeEffectShadow(request trustedActionRequest, mode effectRulesMode, tier effectTierMode) EffectShadowResult {
 	res := EffectShadowResult{Mode: string(mode), Tier: string(effectTierClean), Action: guardrailActionAllow}
 	call, opts, ok := effectCall(request.Connector, request.Input)
 	if !ok {
@@ -136,7 +158,7 @@ func computeEffectShadow(request trustedActionRequest, mode effectRulesMode) Eff
 		Flavor:  opts.Flavor,
 		Resolve: effectResolverOverride,
 	})
-	c := classifyEffects(result, facts, opts.Flavor)
+	c := classifyEffects(result, facts, opts.Flavor, tier)
 	strictOrManaged := request.StrictPolicy || request.ManagedInstall
 	res.Sets, res.Program, res.Kind = c.sets, c.program, c.kind
 	switch {
@@ -170,7 +192,7 @@ type effectClass struct {
 // restricted tier (block); anything else that touches a protected set,
 // including any UNKNOWN effect that could reach one, is the unknown tier;
 // otherwise clean.
-func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor) effectClass {
+func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flavor effects.Flavor, tier effectTierMode) effectClass {
 	var c effectClass
 	fullyAccounted := len(result.Unknowns) == 0
 	var touchSets []string
@@ -213,7 +235,10 @@ func classifyEffects(result effects.Result, facts []*semanticpb.EffectFact, flav
 			f.GetTargetState() != "known" || f.GetRoleState() != "known" || len(f.GetReasons()) != 0 {
 			continue
 		}
-		if !effectrules.RestrictedBlockCommand(f.GetOrigin().GetProgram(), effects.Surface(f.GetOrigin().GetSurface())) {
+		// The restricted tier gates blocking to a reviewed command list; the
+		// full tier trusts the effect model for any mutating command.
+		if tier == tierRestricted &&
+			!effectrules.RestrictedBlockCommand(f.GetOrigin().GetProgram(), effects.Surface(f.GetOrigin().GetSurface())) {
 			continue
 		}
 		if !effectrules.CanonicalAbsolute(t.GetPath(), flavor) {
