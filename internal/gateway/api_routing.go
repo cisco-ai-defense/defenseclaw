@@ -49,6 +49,10 @@ func (a *APIServer) routingAPICaller(r *http.Request, cfg *config.Config) (key s
 	if peer, viaHookSocket := managedHookPeerFromContext(r.Context()); viaHookSocket {
 		key = strconv.Itoa(peer.UID)
 	}
+	if sid, viaPipe := routingPipeCallerFromContext(r.Context()); viaPipe {
+		// The Windows own-status pipe: the account its client token names.
+		key, admin = sid, false
+	}
 	if !admin && cfg.Routing.Admin != nil && cfg.Routing.Admin.Visibility.EffectiveUsersSee() == config.RoutingUsersSeeNone {
 		// routing.admin.visibility.users_see none: only administrators read.
 		return "", false, false

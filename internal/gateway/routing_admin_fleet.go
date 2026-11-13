@@ -53,7 +53,7 @@ func (f *fleetState) apply(cfg *config.Config) {
 		store = cfg.Routing.Admin.BudgetStore
 	}
 	if store == nil || strings.TrimSpace(store.URL) == "" {
-		*f = fleetState{}
+		f.resetLocked() // never *f = fleetState{}: that would wipe the held mutex
 		return
 	}
 	f.bundle = map[string]bool{}
@@ -92,6 +92,13 @@ func (f *fleetState) apply(cfg *config.Config) {
 		return
 	}
 	f.installLocked(cred, client)
+}
+
+// resetLocked drops the store: budgets count on this device only.
+func (f *fleetState) resetLocked() {
+	f.sig, f.client, f.cred, f.err = "", nil, nil, ""
+	f.toFleet, f.fromFleet, f.userAll, f.connAll = nil, nil, nil, nil
+	f.bundle, f.users, f.byFleet = nil, nil, nil
 }
 
 // installLocked takes the decoded credential and its client.

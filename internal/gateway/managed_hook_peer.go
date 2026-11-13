@@ -743,11 +743,11 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		}
 		defer release()
 		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath || r.URL.Path == managed.OwnStatusPath ||
-			strings.HasPrefix(r.URL.Path, routingAPIPrefix) {
+			(strings.HasPrefix(r.URL.Path, routingAPIPrefix) && r.Method == http.MethodGet) {
 			// Any kernel-verified local account may report its own refused
 			// policy write, or read its own guardrail profile, own status or
-			// own routing (decisions, budgets, a dry run; the handlers return
-			// the caller own entries only); the routes have no connector to
+			// own routing (decisions and budgets, reads only, as the Windows
+			// own-status pipe; the handlers return the caller own entries only); the routes have no connector to
 			// enroll for.
 			next.ServeHTTP(w, r)
 			return

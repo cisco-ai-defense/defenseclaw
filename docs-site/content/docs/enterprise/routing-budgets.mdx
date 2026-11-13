@@ -128,7 +128,7 @@ What a device may do:
 - The cap counts per UTC day of the spend. Yesterday's spend can still grow for a day (a call that started before midnight), so just after midnight a device can add up to two caps within a few hours.
 - One device may run at most 16 gateway processes at once, store spend from at most 64 gateway processes a day, and use at most 64 connector names a day beyond its credential's keys.
 - Spend made while a device cannot reach the store for more than a day counts on that device only; it never reaches the fleet total.
-- A budget you remove from the bundle is no longer sent or asked about; you may remove it from the store config too.
+- A budget you remove from the bundle is no longer sent or asked about. Remove it from the store config only after the new bundle has reached every device.
 
 More:
 
@@ -155,3 +155,5 @@ defenseclaw routing rules list      # rules and notes on rules that do less than
 defenseclaw routing budgets list    # spend this period, and whether it is the fleet or this device only
 defenseclaw routing test "write a parser" --as-user DCLAB\\alice   # administrators: which model, which rule
 ```
+
+On a managed device a standard user runs the same `status`, `budgets list` and `explain` commands and sees only their own decisions and budgets: the gateway answers on its hook socket (Linux, macOS) or its service pipe (Windows) for the account that asks. `routing.admin.visibility.users_see: none` turns that off. `routing test` is for administrators on a managed device.
