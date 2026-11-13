@@ -18,8 +18,10 @@ package extproc
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -209,9 +211,16 @@ func (e *Engine) immediate(req *Request, v Verdict) *extprocv3.ProcessingRespons
 		}}}
 }
 
+// newRequestID is a random id for one request (16 hex characters).
+func newRequestID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
+}
+
 // requestFrom builds a Request from the first message.
 func (e *Engine) requestFrom(msg *extprocv3.ProcessingRequest, h *extprocv3.HttpHeaders) *Request {
-	req := &Request{ContentLength: -1, EndOfStream: h.GetEndOfStream(), Start: e.now()}
+	req := &Request{ID: newRequestID(), ContentLength: -1, EndOfStream: h.GetEndOfStream(), Start: e.now()}
 	req.Actor, req.IdentityErr = actorFromAttributes(msg.GetAttributes(), e.cfg.ActorTrustDomain)
 	for _, hv := range h.GetHeaders().GetHeaders() {
 		v := hv.GetValue()

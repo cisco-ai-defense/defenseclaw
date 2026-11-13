@@ -341,6 +341,14 @@ func substratePeople(c *config.Config) (gateway.SubstratePersonVerifier, error) 
 	return nil, nil
 }
 
+// substrateNoPeople refuses every sign-in: the admin listener of a
+// cluster with no sign-in configured serves the callout route only.
+type substrateNoPeople struct{}
+
+func (substrateNoPeople) Verify(context.Context, string) (identity.Person, error) {
+	return identity.Person{}, &identity.Error{Reason: identity.ReasonIssuer, Message: "no sign-in is configured on this cluster"}
+}
+
 // substrateKubeSignIn reports whether people sign in with Kubernetes
 // credentials: no OIDC issuer, not a managed install, not turned off.
 func substrateKubeSignIn(c *config.Config) bool {
@@ -410,6 +418,15 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		people, err := substratePeople(c)
 		if err != nil {
 			return out, err
+		}
+		if people == nil && !managed.IsManagedEnterprise(c.DeploymentMode) {
+			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
+				// GAP-0015: with no sign-in at all, the admin listener still
+				// runs for the callout's tool verdict route (its own bearer
+				// token); every person route refuses.
+				fmt.Fprintln(os.Stderr, "[substrate] no sign-in is configured: the admin listener serves the callout verdict route only")
+				people = substrateNoPeople{}
+			}
 		}
 		servingTLS, err := substrateServingTLS()
 		if err != nil {
@@ -492,7 +509,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "[substrate] no substrate.identity.oidc issuer: the admin listener does not run")
+			fmt.Fprintln(os.Stderr, "[substrate] no sign-in and no callout token: the admin listener does not run")
 		}
 		if _, err := os.Stat(serveFlags.sessionKeyFile); err == nil {
 			issuer := "https://" + strings.TrimSpace(c.Substrate.Services.Admin)

@@ -44,12 +44,18 @@ func calloutConfigFrom(t *testing.T, out []byte) *extproc.Config {
 // neither.
 func TestChartCalloutManaged(t *testing.T) {
 	helm := helmBinary(t)
-	cc := calloutConfigFrom(t, renderChart(t, helm, "default", "--set", "config.deployment_mode=managed_enterprise"))
+	// A managed install names its template registries (F1's validate rule).
+	images := "config.substrate.templates.allowed_images[0]=registry.example.com/defenseclaw/*"
+	cc := calloutConfigFrom(t, renderChart(t, helm, "default", "--set", "config.deployment_mode=managed_enterprise", "--set", images))
 	if !cc.Managed || cc.Chain.FailureMode != extproc.ChainAuto {
 		t.Errorf("managed/auto: managed=%v chain.failure_mode=%q", cc.Managed, cc.Chain.FailureMode)
 	}
+	// GAP-0015: the tool verdict route is on by default.
+	if cc.Judge.URL == "" || cc.Judge.TokenFile == "" {
+		t.Errorf("managed: no tool verdict route by default: %+v", cc.Judge)
+	}
 	args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion,
-		"--set", "config.deployment_mode=managed_enterprise", "--set", "config.substrate.extproc.chain.failure_mode=open"}
+		"--set", "config.deployment_mode=managed_enterprise", "--set", images, "--set", "config.substrate.extproc.chain.failure_mode=open"}
 	if err := exec.Command(helm, args...).Run(); err == nil {
 		t.Error("managed/open: accepted")
 	}

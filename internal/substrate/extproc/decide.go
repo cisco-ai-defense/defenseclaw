@@ -65,6 +65,8 @@ type Header struct {
 
 // Request is the part of a request the Engine decides on.
 type Request struct {
+	// ID names the request in its event and in the tool verdict call.
+	ID          string
 	Actor       ActorRef
 	IdentityErr error
 	Method      string
@@ -514,6 +516,14 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 		return v
 	}
 	if e.judge == nil {
+		// No rule path (callout.judge.tokenSecret turned off): the tool
+		// rules can't run, so the call is never a silent allow
+		// (GAP-0015). A managed install refuses it.
+		if e.cfg.Managed {
+			return deny(v, CategoryMCPToolBlocked, sourceTool, "tool_rules_not_configured",
+				"DefenseClaw can't check this MCP tool call: the tool rules are not configured for the egress callout.")
+		}
+		v.Alert = true
 		v.Findings = append(v.Findings, "tool_rules_not_configured")
 		return v
 	}
@@ -521,9 +531,19 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	if server == "" {
 		server = req.Host
 	}
+	// The verdict route matches MCP asset rules on the URL (scheme, host and
+	// path, never the query) and ties its findings to the session and to
+	// this request's event (GAP-0015).
+	scheme := strings.ToLower(req.Scheme)
+	if scheme == "" {
+		scheme = "https"
+	}
+	callURL := scheme + "://" + req.Host + pathOnly(req.Path)
+	session := clip(req.header("mcp-session-id"), 128)
 	for _, c := range calls {
 		jctx, cancel := context.WithTimeout(ctx, e.cfg.Judge.Timeout)
-		tv, err := e.judge.JudgeToolCall(jctx, ToolCall{Actor: req.Actor, Server: server, Host: req.Host, Tool: c.name, Args: c.args})
+		tv, err := e.judge.JudgeToolCall(jctx, ToolCall{Actor: req.Actor, Server: server, Host: req.Host, URL: callURL,
+			Tool: c.name, Args: c.args, SessionID: session, RequestID: req.ID})
 		cancel()
 		if err != nil {
 			return e.failure(v, CategoryCalloutError, "DefenseClaw could not check this MCP tool call against its tool rules.")
