@@ -181,7 +181,11 @@ defenseclaw substrate template build --connector claudecode \
 
 ![defenseclaw substrate template build stopped by the build scan: BLOCKED, the build scan blocked the image because of the MCP server notes in /work/.mcp.json (a template build blocks HIGH findings), the counts of 1 skill and 1 MCP server scanned with 1 high finding, a CLEAN line for the github skill, and the note that the hook files are root-owned](/images/substrate/oss/mcp-build-refused.png)
 
+A plugin folder in a personal skills folder (`~/.claude/skills`) does not load as a plugin in Substrate actors, because personal config is restricted (`CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1`). Claude Code loads it as skills only. The scan still checks it and prints a note. Install it as a marketplace plugin and enable it at project or managed scope instead.
+
 Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
+
+After a build, and every time you move a pinned agent version, start the agent the way an actor does: `deploy/images/actor-kit/startcheck.sh IMAGE` (it needs docker) runs the image's interactive and `--task` commands with no network and fails if the agent exits at launch or refuses its configuration. A new agent release can drop a setting the kit passes, and the image still builds.
 
 Then check the image and publish it. `publish` copies it to the registry the cluster pulls from and, with `--template`, creates the ActorTemplate from the attested image:
 

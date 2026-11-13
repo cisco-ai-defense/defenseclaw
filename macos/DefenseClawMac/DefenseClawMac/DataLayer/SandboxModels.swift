@@ -44,6 +44,57 @@ struct SandboxDriver: Sendable, Hashable {
     }
 }
 
+enum SandboxStopOutcome {
+    /// Whether exit 5 was the unsynced-disk refusal rather than the full-disk
+    /// one: only the former has a stop-anyway path (`--discard-unsynced`).
+    static func refusedForUnsyncedDisk(output: String) -> Bool {
+        output.split(whereSeparator: \.isWhitespace).joined(separator: " ").contains("disk could not be synced first")
+    }
+
+    static func keptRunning(name: String, output: String) -> String {
+        if refusedForUnsyncedDisk(output: output) {
+            // GAP-1595: the CLI's own question was not answered on a terminal.
+            return "\(name) keeps running: its MicroVM's disk could not be synced first, so a stop now would lose what it wrote "
+                + "since its last sync. Save the work you need (Pull to branch, or defenseclaw sandbox pull \(name) --apply), "
+                + "confirm the result, then stop it again; defenseclaw sandbox stop \(name) --discard-unsynced stops it anyway, losing that."
+        }
+        return "\(name) keeps running: its MicroVM disk is full and holds unpulled work. Free space in the sandbox "
+            + "(defenseclaw sandbox exec \(name) -- df -h /), save its work (Pull to branch, or sandbox pull \(name) --apply), "
+            + "confirm the result, then stop it; delete it to give that work up. See Activity for details."
+    }
+}
+
+/// The sandbox commands the Sandboxes panel runs beyond stop/pull/undo, kept
+/// here so their argv shape is unit-tested against `defenseclaw sandbox --help`.
+enum SandboxCommands {
+    /// `sandbox stop NAME --yes --discard-unsynced` (runtime 1.0.7): stops a
+    /// sandbox whose MicroVM disk could not be synced, losing what it wrote
+    /// since its last sync — the command the refusal text names.
+    static func stopDiscardingUnsynced(_ name: String) -> [String] {
+        ["sandbox", "stop", name, "--yes", "--discard-unsynced"]
+    }
+
+    /// `sandbox delete NAME --yes`: the TUI's d key runs the asking command on
+    /// a terminal; the Mac asks in a dialog, then answers yes.
+    static func delete(_ name: String) -> [String] {
+        ["sandbox", "delete", name, "--yes"]
+    }
+
+    static func discardUnsyncedWarning(name: String) -> String {
+        "Stops \(name) without syncing its MicroVM disk first (sandbox stop --discard-unsynced), so what it wrote "
+            + "since its last sync is lost. Save the work you need first: Pull to branch, or defenseclaw sandbox pull "
+            + "\(name) --apply."
+    }
+
+    static func deleteWarning(name: String, copyMode: Bool) -> String {
+        var text = "Deletes \(name) with its providers, credentials and snapshots (sandbox delete). "
+        text += copyMode
+            ? "Work on its copy that never came back to the folder (never pulled, or pulled and not applied) is discarded."
+            : "Its last snapshot goes with it, so Undo is no longer possible afterwards."
+        return text
+    }
+}
+
 struct SandboxStatus: Sendable, Hashable {
     var loaded = false
     var enabled = false
@@ -118,6 +169,14 @@ struct SandboxRow: Identifiable, Sendable, Hashable {
     /// next start takes a new undo point, whoever starts the sandbox.
     var undoAccepted = false
     var nestedRepos: [String] = []
+    /// The daemon's warnings and policy clamps for the detail (the TUI's
+    /// "Warning" and "Policy clamp" rows): a legacy-supervisor session that
+    /// runs unprotected names the command that ends it here.
+    var warnings: [String] = []
+    var violations: [String] = []
+    /// The session runs the supervisor of an OpenShell release older than
+    /// the oldest supported one; the daemon never stops it on its own.
+    var oldSupervisor = false
     /// The harness image, tagged as `sandbox image list` shows it. Not the
     /// run image a MicroVM boots (defenseclaw.invalid/sandbox-run:...), a
     /// name no other view shows (GAP-0188).
@@ -404,8 +463,8 @@ struct SandboxSnapshot: Sendable {
     /// what asks depends on each sandbox's pack.
     static let noAsksText = "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
         + "to a private-network address with any pack, to a host off the allowlist with balanced, "
-        + "and to every new destination with strict. A port on this machine asks only if the run named it "
-        + "with --host-port PORT; approve that ask to open the port."
+        + "and to every new destination with strict. A port on this machine asks only if the run named it with --host-port PORT; "
+        + "approve that ask to open the port."
 
     var status = SandboxStatus()
     var sandboxes: [SandboxRow] = []
@@ -978,6 +1037,15 @@ enum SandboxDecoding {
         row.hookFailurePlaceholder = str(hooks["last_hook_failure_cause"]) == "credential_placeholder_refused"
         row.hooksAnsweredAt = DCDates.parse(hooks["hooks_answered_at"])
         row.orphaned = (d["orphaned"] as? Bool) ?? false
+        row.oldSupervisor = (d["old_supervisor"] as? Bool) ?? false
+        row.warnings = list(d["warnings"]).map { str($0) }.filter { !$0.isEmpty }
+        // The daemon's violations are objects (sandboxapi.Violation); the TUI
+        // shows each one's message, else its detail (sandbox_state.py).
+        row.violations = list(d["violations"]).map { raw -> String in
+            let violation = dict(raw)
+            let message = str(violation["message"])
+            return message.isEmpty ? str(violation["detail"]) : message
+        }.filter { !$0.isEmpty }
         row.image = str(d["image"])
         row.createdAt = DCDates.parse(d["created_at"])
         row.modelProviders = int(egress["model_providers"])

@@ -50,11 +50,10 @@ type Leader struct {
 	StoreSchema int  `json:"store_schema,omitempty"`
 }
 
-// Controller is the controller and how far behind Substrate it is.
+// Controller is the controller's replicas.
 type Controller struct {
-	Desired    int  `json:"desired"`
-	Ready      int  `json:"ready"`
-	LagSeconds *int `json:"lag_seconds,omitempty"`
+	Desired int `json:"desired"`
+	Ready   int `json:"ready"`
 }
 
 // Callout is the egress callout and its registration.
@@ -74,45 +73,19 @@ type Health struct {
 	Callout    Callout    `json:"callout"`
 }
 
-// Atespace is the policy state of one atespace DefenseClaw writes in.
+// Atespace is one launcher or managed atespace and its actors.
 type Atespace struct {
-	Name       string `json:"atespace"`
-	Launcher   bool   `json:"launcher"`
-	Actors     int    `json:"actors"`
-	Policies   int    `json:"policies"`
-	Drift      int    `json:"drift"`
-	Conflicts  int    `json:"conflicts"`
-	Unattested int    `json:"unattested"`
+	Name     string         `json:"atespace"`
+	Launcher bool           `json:"launcher"`
+	Actors   int            `json:"actors"`
+	States   map[string]int `json:"states"`
 }
 
-// Inventory counts actors and templates across the cluster.
+// Inventory counts every actor and template in the cluster.
 type Inventory struct {
-	Actors              int `json:"actors"`
-	Running             int `json:"running"`
-	Suspended           int `json:"suspended"`
-	Templates           int `json:"templates"`
-	UnattestedTemplates int `json:"unattested_templates"`
-	ForeignActors       int `json:"foreign_actors"`
-}
-
-// Activity is the last window's activity and spend (stream 10 usage), in
-// integers so it forwards. The whole member is absent when usage is not
-// reported.
-type Activity struct {
-	WindowSeconds int   `json:"window_seconds"`
-	HookDecisions int   `json:"hook_decisions"`
-	Blocked       int   `json:"blocked"`
-	ModelRequests int   `json:"model_requests"`
-	CostMicroUSD  int64 `json:"cost_micro_usd"`
-}
-
-// Batch is one unattended batch.
-type Batch struct {
-	BatchID   string `json:"batch_id"`
-	Tasks     int    `json:"tasks"`
-	Running   int    `json:"running"`
-	Succeeded int    `json:"succeeded"`
-	Failed    int    `json:"failed"`
+	Actors    int            `json:"actors"`
+	States    map[string]int `json:"states"`
+	Templates int            `json:"templates"`
 }
 
 // StatusDocument is `defenseclaw substrate status --json`.
@@ -125,9 +98,7 @@ type StatusDocument struct {
 	Cluster            Cluster    `json:"cluster"`
 	Health             Health     `json:"health"`
 	Atespaces          []Atespace `json:"atespaces"`
-	Inventory          Inventory  `json:"inventory"`
-	Activity           *Activity  `json:"activity,omitempty"`
-	Batches            []Batch    `json:"batches"`
+	Inventory          *Inventory `json:"inventory,omitempty"`
 	Checks             []Check    `json:"checks"`
 }
 
@@ -145,14 +116,15 @@ type VerifyDocument struct {
 }
 
 // Report is what the CLI collected for a status document beyond Observed.
+// Inventory is nil, and Atespaces empty, when the actors could not be read;
+// InventoryNote says why (for the text output only: it is free text).
 type Report struct {
 	ProductVersion string
 	Now            time.Time
 	Health         Health
 	Atespaces      []Atespace
-	Inventory      Inventory
-	Activity       *Activity
-	Batches        []Batch
+	Inventory      *Inventory
+	InventoryNote  string
 }
 
 // ClusterOf builds the cluster member from what was observed.
@@ -188,8 +160,9 @@ func HealthState(h Health, checks []Check) string {
 	return Healthy
 }
 
-// BuildStatus assembles the status document. Lists are never null, and the
-// atespaces are sorted by name, so equal states print equal documents.
+// BuildStatus assembles the status document. Lists and state maps are never
+// null, and the atespaces are sorted by name, so equal states print equal
+// documents.
 func BuildStatus(o Observed, r Report) StatusDocument {
 	checks := RunChecks(o)
 	h := r.Health
@@ -198,8 +171,19 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 	h.State = HealthState(h, checks)
 	atespaces := append([]Atespace{}, r.Atespaces...)
 	sort.Slice(atespaces, func(i, j int) bool { return atespaces[i].Name < atespaces[j].Name })
-	batches := append([]Batch{}, r.Batches...)
-	sort.Slice(batches, func(i, j int) bool { return batches[i].BatchID < batches[j].BatchID })
+	for i := range atespaces {
+		if atespaces[i].States == nil {
+			atespaces[i].States = map[string]int{}
+		}
+	}
+	var inv *Inventory
+	if r.Inventory != nil {
+		c := *r.Inventory
+		if c.States == nil {
+			c.States = map[string]int{}
+		}
+		inv = &c
+	}
 	return StatusDocument{
 		SchemaVersion:      1,
 		Command:            "status",
@@ -209,9 +193,7 @@ func BuildStatus(o Observed, r Report) StatusDocument {
 		Cluster:            ClusterOf(o),
 		Health:             h,
 		Atespaces:          atespaces,
-		Inventory:          r.Inventory,
-		Activity:           r.Activity,
-		Batches:            batches,
+		Inventory:          inv,
 		Checks:             checks,
 	}
 }

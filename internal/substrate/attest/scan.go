@@ -228,12 +228,16 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	// Plugins: a directory with a plugin manifest. Their skills and MCP
 	// servers are found by the other passes; the plugin is judged by its
 	// hook commands.
+	var claudePlugins []string
 	for _, manifest := range []string{"/.claude-plugin/plugin.json", "/.codex-plugin/plugin.json"} {
 		for _, p := range fsys.Paths() {
 			if !strings.HasSuffix(p, manifest) {
 				continue
 			}
 			dir := strings.TrimSuffix(p, manifest)
+			if manifest == "/.claude-plugin/plugin.json" {
+				claudePlugins = append(claudePlugins, dir)
+			}
 			sum.Plugins++
 			note(ConfigScannerName, "1")
 			res := &scanner.ScanResult{Scanner: ConfigScannerName, Target: dir, Timestamp: o.now()}
@@ -342,11 +346,14 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	if err != nil {
 		return nil, err
 	}
-	user, _, _, _, err := cfg.Container()
+	user, workdir, _, _, err := cfg.Container()
 	if err != nil {
 		return nil, err
 	}
 	rep.User = user
+	if note := personalSkillsPluginNote(claudePlugins, workdir); note != "" {
+		sum.Notes = append(sum.Notes, note)
+	}
 	rep.Hooks = checkHooks(fsys, env, user, o)
 	sum.Verdict = worse(sum.Verdict, VerdictClean)
 	for _, a := range o.AcceptFindings {
@@ -361,6 +368,53 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		sum.Accepted = append(sum.Accepted, a)
 	}
 	return rep, nil
+}
+
+// personalSkillsSuffix ends the path of a personal skills folder (the image
+// user's ~/.claude/skills).
+const personalSkillsSuffix = "/.claude/skills"
+
+// personalSkillsPluginNote is the note for a template that carries a Claude
+// Code plugin folder directly in a personal skills folder
+// (~/.claude/skills/NAME/.claude-plugin/plugin.json). An actor starts Claude
+// Code with CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1, which keeps the
+// workload's own files from starting code outside the hook, and with it
+// Claude Code does not load such a folder as a plugin: it loads as skills
+// only (measured on 2.1.311: "[skill-as-plugin] not loading plugins from N
+// folder(s) in your own skills directory"). Plugins installed from a
+// marketplace (~/.claude/plugins/cache, whichever settings file enables them)
+// do load, so they get no note, and nor does a plugin in the project folder
+// (workdir) or under /etc (managed config). It is a note and not a finding:
+// the plugin is still scanned and admitted, and no verdict changes (GAP-0279).
+// Empty when no plugin sits in a personal skills folder.
+func personalSkillsPluginNote(dirs []string, workdir string) string {
+	var names []string
+	for _, dir := range dirs {
+		if workdir != "" && (dir == workdir || strings.HasPrefix(dir, strings.TrimRight(workdir, "/")+"/")) {
+			continue
+		}
+		if strings.HasPrefix(dir, "/etc/") || !strings.HasSuffix(path.Dir(dir), personalSkillsSuffix) {
+			continue
+		}
+		names = append(names, path.Base(dir))
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	sort.Strings(names)
+	return "a plugin folder in a personal skills folder (~/.claude/skills) does not load as a plugin in Substrate actors, " +
+		"because personal config is restricted (CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1): Claude Code loads it as skills only. " +
+		"Install it as a marketplace plugin enabled at project or managed scope instead. Affected: " + strings.Join(dedupe(names), ", ")
+}
+
+func dedupe(sorted []string) []string {
+	out := sorted[:0]
+	for i, s := range sorted {
+		if i == 0 || s != sorted[i-1] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // RuleLinkUnresolvable is the finding for a SKILL.md or MCP config that is a

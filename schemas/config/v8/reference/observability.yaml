@@ -276,6 +276,10 @@ observability:
     retention_days: 7
     # Opt-in size cap in MiB (64 or more); 0 keeps retention by days only.
     max_store_mb: 0
+    # Opt-in: keep a redacted copy of each record the v8 schema gate refuses (defenseclaw audit rejected).
+    keep_rejected_records: false
+    # Row cap of that store, 100 to 1000000; ignored while it is off.
+    rejected_records_max_rows: 10000
   # Optional exports. Presence defaults enabled:true. Every example is disabled
   # so this exhaustive reference is safe to inspect without exporting data.
   destinations:

@@ -172,6 +172,13 @@ func (s *Server) projectDir(p string) (string, error) {
 	if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
 		return "", errors.New("relay: no such folder in the actor")
 	}
+	// A folder that is a link to somewhere outside the working directory is
+	// not inside it (GAP-0163 residual): compare where both really are.
+	if real, err := filepath.EvalSymlinks(d); err != nil {
+		return "", errors.New("relay: no such folder in the actor")
+	} else if realRoot, err := filepath.EvalSymlinks(root); err != nil || (real != realRoot && !strings.HasPrefix(real, realRoot+string(filepath.Separator))) {
+		return "", errors.New("relay: the agent starts only inside its working directory")
+	}
 	return d, nil
 }
 

@@ -63,11 +63,10 @@ func healthyReport() Report {
 	return Report{
 		ProductVersion: "1.0.10", Now: time.Date(2026, 11, 13, 15, 4, 5, 0, time.UTC),
 		Health: Health{Gateway: Replicas{2, 2}, Leader: Leader{Ready: true, LeaseHeld: true, StoreSchema: 1},
-			Controller: Controller{Desired: 2, Ready: 2, LagSeconds: ptr(1)}, Callout: Callout{Desired: 2, Ready: 2}},
-		Atespaces: []Atespace{{Name: "eng-web", Launcher: true, Actors: 3, Policies: 3}, {Name: "data-team", Actors: 1, Policies: 1}},
-		Inventory: Inventory{Actors: 4, Running: 1, Suspended: 3, Templates: 2},
-		Activity:  &Activity{WindowSeconds: 3600, HookDecisions: 120, Blocked: 2, ModelRequests: 40, CostMicroUSD: 1250000},
-		Batches:   []Batch{{BatchID: "b-2", Tasks: 50, Running: 10, Succeeded: 38, Failed: 2}, {BatchID: "b-1", Tasks: 1, Succeeded: 1}},
+			Controller: Controller{Desired: 2, Ready: 2}, Callout: Callout{Desired: 2, Ready: 2}},
+		Atespaces: []Atespace{{Name: "eng-web", Launcher: true, Actors: 3, States: map[string]int{"running": 1, "suspended": 2}},
+			{Name: "data-team", Actors: 1, States: map[string]int{"suspended": 1}}, {Name: "empty"}},
+		Inventory: &Inventory{Actors: 5, States: map[string]int{"running": 1, "suspended": 3, "crashed": 1}, Templates: 2},
 	}
 }
 
@@ -79,7 +78,7 @@ func TestStatusDocumentMatchesTheContract(t *testing.T) {
 			t.Errorf("check %s = %s: %s", c.ID, c.Status, c.Message)
 		}
 	}
-	if doc.Health.State != Healthy || !doc.Health.Callout.Registered || doc.Atespaces[0].Name != "data-team" || doc.Batches[0].BatchID != "b-1" {
+	if doc.Health.State != Healthy || !doc.Health.Callout.Registered || doc.Atespaces[0].Name != "data-team" || doc.Atespaces[1].States == nil {
 		t.Errorf("status %+v", doc)
 	}
 	got := s.ValidateValue(t, "substrate-status.schema.json", doc)
@@ -89,11 +88,11 @@ func TestStatusDocumentMatchesTheContract(t *testing.T) {
 	if raw, _ := json.Marshal(doc); strings.Contains(string(raw), "idp.cluster-a.example") {
 		t.Error("the status document carries the issuer URL")
 	}
-	// A degraded, minimal document validates too: no activity, empty lists,
-	// unread values.
+	// A degraded, minimal document validates too: no inventory (the actors
+	// could not be read), empty lists, unread values.
 	o := Observed{Namespace: "defenseclaw-system", SupportedVersions: ">=1.0.0 <1.1.0", CalloutPort: 9443}
 	min := BuildStatus(o, Report{ProductVersion: "1.0.10", Now: time.Unix(0, 0)})
-	if min.Health.State != Down || min.Atespaces == nil || min.Batches == nil {
+	if min.Health.State != Down || min.Atespaces == nil || min.Inventory != nil {
 		t.Errorf("minimal %+v", min)
 	}
 	min.Cluster.Name = "kind"
@@ -129,8 +128,6 @@ func TestMembersMatchTheSchemas(t *testing.T) {
 		"substrate-status.schema.json#/$defs/health/properties/callout":    reflect.TypeOf(Callout{}),
 		"substrate-status.schema.json#/$defs/atespace":                     reflect.TypeOf(Atespace{}),
 		"substrate-status.schema.json#/$defs/inventory":                    reflect.TypeOf(Inventory{}),
-		"substrate-status.schema.json#/$defs/activity":                     reflect.TypeOf(Activity{}),
-		"substrate-status.schema.json#/$defs/batch":                        reflect.TypeOf(Batch{}),
 		"substrate-status.schema.json#/$defs/check":                        reflect.TypeOf(Check{}),
 		"substrate-verify.schema.json#/$defs/check":                        reflect.TypeOf(Check{}),
 	} {

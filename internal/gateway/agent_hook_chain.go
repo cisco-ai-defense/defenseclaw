@@ -267,7 +267,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	// The switch is the host daemon's: a verified Substrate actor's steps
 	// always feed its actor window on the leader, which the callout's egress
 	// check reads, in every tier (GAP-0211).
-	if a == nil || (ManagedEnterpriseActive() && !isVerifiedSubstrateActor(ctx)) || req.toolChain == nil {
+	if a == nil || (ManagedEnterpriseActive() && !isSubstrateActorRequest(ctx)) || req.toolChain == nil {
 		return resp, finalization
 	}
 
@@ -420,12 +420,15 @@ func (a *APIServer) applyAgentHookToolChains(
 	if !projectionEligible {
 		return resp, finalization
 	}
-	rulesetFingerprint, err := activeToolChainRulesetFingerprint(
+	rulesetFingerprint, err := toolChainRulesetFingerprint(
 		ctx,
 		req.ConnectorName,
 		profile,
 	)
 	if err != nil {
+		// No fingerprint, no observation: an actor's step is reported, not
+		// dropped (GAP-0201 residual).
+		rootMissed = "the active tool chain ruleset could not be fingerprinted: " + err.Error()
 		return resp, finalization
 	}
 
@@ -2797,6 +2800,10 @@ var toolChainRelevantRuleIDs = []string{
 	"secrets.cloud_secret_manager_read",
 	"secrets.workload_identity_token_read",
 }
+
+// toolChainRulesetFingerprint is activeToolChainRulesetFingerprint; a test
+// replaces it to prove what a failed read does.
+var toolChainRulesetFingerprint = activeToolChainRulesetFingerprint
 
 func activeToolChainRulesetFingerprint(
 	ctx context.Context,

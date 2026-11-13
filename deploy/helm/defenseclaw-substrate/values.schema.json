@@ -317,7 +317,8 @@
           "type": "object"
         },
         "relaySessionSecret": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "authDelegatorBinding": {
           "type": "string",

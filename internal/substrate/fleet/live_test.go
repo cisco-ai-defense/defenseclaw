@@ -86,7 +86,7 @@ func TestStatusFromALiveCluster(t *testing.T) {
 	callout := r("defenseclaw-callout")
 	report := Report{ProductVersion: "1.0.10", Now: time.Now(),
 		Health: Health{Gateway: r("defenseclaw-gateway"), Leader: Leader{Ready: leader.Ready > 0},
-			Controller: Controller{Desired: ctrl.Desired, Ready: ctrl.Ready}, Callout: Callout{Desired: callout.Desired, Ready: callout.Ready}},
+			Controller: Controller(ctrl), Callout: Callout{Desired: callout.Desired, Ready: callout.Ready}},
 		Atespaces: []Atespace{{Name: "a8-launch", Launcher: true}, {Name: "a8-gv"}},
 	}
 	s := compile(t)

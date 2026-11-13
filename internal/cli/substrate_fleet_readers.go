@@ -16,12 +16,12 @@
 
 package cli
 
-// The verify readers that need more than one kubectl get (GAP-0200,
-// GAP-0209): the snapshot bucket through the object store's own CLI, the
-// access policies through ate-api-server as the gateway's ServiceAccount,
-// and the actor listener's routes through a port-forward. Every check
-// they feed reports only what they read; a reader that cannot read says
-// why in the check.
+// The verify and status readers that need more than one kubectl get
+// (GAP-0200, GAP-0209, GAP-0216): the snapshot bucket through the object
+// store's own CLI, the access policies and the actors through
+// ate-api-server as the gateway's ServiceAccount, and the actor listener's
+// routes through a port-forward. Every check and status line they feed
+// reports only what they read; a reader that cannot read says why.
 
 import (
 	"bufio"
@@ -172,9 +172,9 @@ func readActorRoutes(ctx context.Context, f *substrateClusterFlags, o *fleet.Obs
 
 // --- the access policies (GAP-0209) -----------------------------------------
 
-// substrateAccessPolicies connects to ate-api-server as the gateway's
+// substrateClusterAPI connects to ate-api-server as the gateway's
 // ServiceAccount; tests replace it. The caller closes the result.
-var substrateAccessPolicies = func(ctx context.Context, f *substrateClusterFlags, api apiTarget) (accessPolicyReader, error) {
+var substrateClusterAPI = func(ctx context.Context, f *substrateClusterFlags, api apiTarget) (clusterAPIReader, error) {
 	dir, err := os.MkdirTemp("", "dc-verify-")
 	if err != nil {
 		return nil, err
@@ -232,24 +232,54 @@ var substrateAccessPolicies = func(ctx context.Context, f *substrateClusterFlags
 		cleanup()
 		return nil, err
 	}
-	return &apiPolicyReader{API: setup.API{Client: c}, done: func() { stop(); cleanup() }}, nil
+	return &apiClusterReader{API: setup.API{Client: c}, done: func() { stop(); cleanup() }}, nil
 }
 
 const servicednsSigner = "servicedns.podcert.ate.dev/identity"
 
-// accessPolicyReader reads one access policy ("" is the global one); nil
-// with no error when there is none.
-type accessPolicyReader interface {
+// clusterAPIReader is what verify and status read from ate-api-server.
+// GetAccessPolicy reads one access policy ("" is the global one; nil with no
+// error when there is none). Actors lists every actor in the cluster and
+// Templates counts every actor template.
+type clusterAPIReader interface {
 	GetAccessPolicy(ctx context.Context, atespace string) (*setup.AccessPolicy, error)
+	Actors(ctx context.Context) ([]fleetActor, error)
+	Templates(ctx context.Context) (int, error)
 	Close() error
 }
 
-type apiPolicyReader struct {
+// fleetActor is an actor's atespace and lifecycle state (Substrate's
+// ActorState in lower case, for example "running").
+type fleetActor struct{ Atespace, State string }
+
+type apiClusterReader struct {
 	setup.API
 	done func()
 }
 
-func (r *apiPolicyReader) Close() error {
+func (r *apiClusterReader) Actors(ctx context.Context) ([]fleetActor, error) {
+	actors, err := ateapi.AllActors(ctx, r.Client, "", ateapi.MaxPageSize)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]fleetActor, 0, len(actors))
+	for _, a := range actors {
+		out = append(out, fleetActor{Atespace: a.GetMetadata().GetAtespace(), State: actorStateWord(a.GetStatus().GetState())})
+	}
+	return out, nil
+}
+
+func (r *apiClusterReader) Templates(ctx context.Context) (int, error) {
+	t, err := ateapi.AllActorTemplates(ctx, r.Client, "", ateapi.MaxPageSize)
+	return len(t), err
+}
+
+// actorStateWord is ACTOR_STATE_RUNNING as "running".
+func actorStateWord(s ateapi.ActorState) string {
+	return strings.ToLower(strings.TrimPrefix(s.String(), "ACTOR_STATE_"))
+}
+
+func (r *apiClusterReader) Close() error {
 	err := r.API.Close()
 	r.done()
 	return err
@@ -289,8 +319,9 @@ func substrateAPITarget(address, serverName, substrateNS string) (apiTarget, err
 }
 
 // readAccessPolicies fills the grants DefenseClaw needs (the chart's plan)
-// and the access policies ate-api-server holds for them.
-func readAccessPolicies(ctx context.Context, f *substrateClusterFlags, o *fleet.Observed, launcher []string, api apiTarget, apiErr error) {
+// and the access policies ate-api-server holds for them; apiErr says why
+// there is no connection to ate-api-server.
+func readAccessPolicies(ctx context.Context, f *substrateClusterFlags, o *fleet.Observed, launcher []string, r clusterAPIReader, apiErr error) {
 	o.LauncherAtespaces = launcher
 	o.WritableAtespaces = append([]string{}, launcher...)
 	for _, a := range f.managedAtespaces {
@@ -301,15 +332,9 @@ func readAccessPolicies(ctx context.Context, f *substrateClusterFlags, o *fleet.
 	slices.Sort(o.WritableAtespaces)
 	o.Editors, o.GlobalViewers = setup.ChartEditors(f.namespace), setup.ChartGlobalViewers(f.namespace)
 	if apiErr != nil {
-		o.PoliciesNote = apiErr.Error()
+		o.PoliciesNote = firstLineOf(apiErr.Error())
 		return
 	}
-	r, err := substrateAccessPolicies(ctx, f, api)
-	if err != nil {
-		o.PoliciesNote = firstLineOf(err.Error())
-		return
-	}
-	defer r.Close()
 	read := func(atespace string) (*setup.AccessPolicy, bool) {
 		p, err := r.GetAccessPolicy(ctx, atespace)
 		if err != nil {
@@ -337,6 +362,43 @@ func readAccessPolicies(ctx context.Context, f *substrateClusterFlags, o *fleet.
 		}
 	}
 	o.GlobalPolicy, o.AtespacePolicies, o.PoliciesReadable = global, per, true
+}
+
+// readInventory counts every actor of the cluster by state and every
+// template, and the actors of each launcher and managed atespace, as the
+// gateway's ServiceAccount (a global viewer) reads them. When they cannot
+// be read, the report has no inventory and says why.
+func readInventory(ctx context.Context, r *fleet.Report, launcher, writable []string, api clusterAPIReader, apiErr error) {
+	if apiErr != nil {
+		r.InventoryNote = firstLineOf(apiErr.Error())
+		return
+	}
+	actors, err := api.Actors(ctx)
+	if err != nil {
+		r.InventoryNote = "the actors: " + policyErrWords(err)
+		return
+	}
+	templates, err := api.Templates(ctx)
+	if err != nil {
+		r.InventoryNote = "the actor templates: " + policyErrWords(err)
+		return
+	}
+	inv := &fleet.Inventory{Actors: len(actors), States: map[string]int{}, Templates: templates}
+	spaces := map[string]*fleet.Atespace{}
+	for _, a := range writable {
+		spaces[a] = &fleet.Atespace{Name: a, Launcher: slices.Contains(launcher, a), States: map[string]int{}}
+	}
+	for _, a := range actors {
+		inv.States[a.State]++
+		if sp, ok := spaces[a.Atespace]; ok {
+			sp.Actors++
+			sp.States[a.State]++
+		}
+	}
+	r.Inventory = inv
+	for _, a := range writable {
+		r.Atespaces = append(r.Atespaces, *spaces[a])
+	}
 }
 
 func policyErrWords(err error) string {

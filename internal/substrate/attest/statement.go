@@ -153,6 +153,11 @@ type ScanSummary struct {
 	// block. A block never gets an attestation from the build.
 	Verdict string     `json:"verdict"`
 	Items   []ScanItem `json:"items,omitempty"`
+	// Notes are plain statements about what the scan saw that the verdict
+	// does not carry (no finding, no block): for example that a plugin folder
+	// in a personal skills folder does not load as a plugin in an actor
+	// (rel-1-0-10 GAP-0279).
+	Notes []string `json:"notes,omitempty"`
 	// Accepted are the admin's audited acceptances of findings that the
 	// build floor would have blocked (template build --accept-finding).
 	Accepted []AcceptedFinding `json:"acceptedFindings,omitempty"`

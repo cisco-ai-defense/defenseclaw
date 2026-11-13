@@ -1844,7 +1844,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				p.resolveConfirm(r.Context(), r, initVerdict, "completion", label, mode)
 				if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-PREBLOCK severity=%s %s (blocked before any output sent to client)\n",
-						initVerdict.Severity, redaction.Reason(initVerdict.Reason))
+						initVerdict.Severity, logDisplayReason(initVerdict.Reason))
 					p.recordTelemetry(r.Context(), "completion", label, initVerdict, 0, mode, true)
 					preblocked = true
 					return false
@@ -1956,7 +1956,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 						p.resolveConfirm(r.Context(), r, midVerdict, "completion", label, mode)
 						if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
-								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
+								midVerdict.Severity, logDisplayReason(midVerdict.Reason), lastScanLen+len(chunk))
 							p.recordTelemetry(r.Context(), "completion", label, midVerdict, 0, mode, true)
 							if bedrockStream != nil {
 								bedrockBlockMsg = blockMessage(customBlockMsg, "completion", midVerdict.Reason)
@@ -3829,7 +3829,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 			if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s\n",
-					midVerdict.Severity, redaction.Reason(midVerdict.Reason))
+					midVerdict.Severity, logDisplayReason(midVerdict.Reason))
 				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, midVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
 				p.enqueueBlockNotification(midVerdict, "completion", aliasModel)
@@ -3882,7 +3882,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			p.resolveConfirm(r.Context(), r, initVerdict, "completion", aliasModel, mode)
 			if initVerdict.Severity != "NONE" && initVerdict.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-PREBLOCK severity=%s %s\n",
-					initVerdict.Severity, redaction.Reason(initVerdict.Reason))
+					initVerdict.Severity, logDisplayReason(initVerdict.Reason))
 				overlay := p.recordTelemetry(llmCtx, "completion", aliasModel, initVerdict, 0, mode, true)
 				modelTrace.AddGuardrailOverlay(overlay)
 				p.enqueueBlockNotification(initVerdict, "completion", aliasModel)
@@ -4953,11 +4953,11 @@ func logVerdict(severity, action string, verdict *ScanVerdict, elapsed time.Dura
 		// through redaction.Reason so rule-IDs pass verbatim
 		// but raw literals are masked unless Reveal is set.
 		fmt.Fprintf(os.Stderr, "  verdict: \033[91m%s\033[0m  action=%s%s  %s\n",
-			severity, action, scannerStr, redaction.Reason(verdict.Reason))
+			severity, action, scannerStr, logDisplayReason(verdict.Reason))
 		if len(verdict.Findings) > 0 {
 			scrubbed := make([]string, len(verdict.Findings))
 			for i, f := range verdict.Findings {
-				scrubbed[i] = redaction.Reason(f)
+				scrubbed[i] = logDisplayReason(f)
 			}
 			fmt.Fprintf(os.Stderr, "  findings: %s\n", strings.Join(scrubbed, ", "))
 		}

@@ -1291,7 +1291,7 @@
     "path": "substrate status",
     "use": "status [name]",
     "short": "Show who you are signed in as, or one agent or batch in detail",
-    "long": "Without a name, shows the cluster and account in use and how many agents you have.\nWith a name, shows that agent: where it runs, which profile guards it and its batch.\nWith --batch, shows every agent of a batch run.\n\nFor administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,\nthe agents in the cluster and the setup checks. It reads the cluster with kubectl (give --install-file).\nExit 75 means the cluster could not be reached; there is no document.",
+    "long": "Without a name, shows the cluster and account in use and how many agents you have.\nWith a name, shows that agent: where it runs, which profile guards it and its batch.\nWith --batch, shows every agent of a batch run.\n\nFor administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,\nthe agents and templates in the cluster (agents by state, also per launcher and managed atespace) and the setup\nchecks. It reads the cluster with kubectl (give --install-file).\nExit 75 means the cluster could not be reached; there is no document.",
     "args": [
       {
         "name": "name",
