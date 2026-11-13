@@ -1633,13 +1633,16 @@ func nativeHookBinaryOwnershipCandidates() []string {
 	// and the installed payload may itself have been quarantined. Known
 	// installer locations plus the pre-installer ~/.local launcher remain
 	// teardown authority. All comparisons still require one exact command.
-	return uniqueNonEmptyStrings(append(
+	// The standalone launch images under bin\hooks\<16 hex> are this
+	// install's too (GAP-0751): a registration an earlier release wrote
+	// names the transition image or an earlier launch folder.
+	return uniqueNonEmptyStrings(append(append(
 		hookBinaries,
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
 		canonicalStandaloneWindowsHookBinary(),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
-	))
+	), standaloneWindowsHookLaunchImages()...))
 }
 
 func isDefenseClawHookExecutable(exe string) bool {
@@ -1672,13 +1675,19 @@ func isDefenseClawHookExecutable(exe string) bool {
 }
 
 // isDefenseClawManagedHookExecutable recognizes only the exact current
-// launcher or native Setup's canonical installed launcher. Structured exec
-// hooks use this narrower predicate so a foreign absolute or PATH-resolved
-// command is never claimed merely because its basename resembles ours.
+// launcher, native Setup's canonical installed launcher, or a hook image of
+// the standalone install bin (the transition image or a launch image under
+// bin\hooks\<16 hex>, GAP-0751). Structured exec hooks use this narrower
+// predicate so a foreign absolute or PATH-resolved command is never claimed
+// merely because its basename resembles ours.
 func isDefenseClawManagedHookExecutable(exe string) bool {
 	exe = strings.TrimSpace(exe)
 	if exe == "" || (!filepath.IsAbs(exe) && !isWindowsDriveAbsolutePath(exe)) {
 		return false
+	}
+	if standalone := canonicalStandaloneWindowsHookBinary(); standalone != "" &&
+		winpath.SameEnterpriseHookImageFamily(exe, standalone) {
+		return true
 	}
 	for _, owned := range uniqueNonEmptyStrings([]string{
 		defenseclawHookBinary(),

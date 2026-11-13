@@ -2006,6 +2006,11 @@ type GuardrailConfig struct {
 	// alert / strict and managed block). The feature's rollout rides
 	// guardrail.effects_rules; these are its own settings.
 	SecretFlow SecretFlowConfig `mapstructure:"secret_flow" yaml:"secret_flow,omitempty"`
+	// Cascade is guardrail.cascade (cascade.go): what each layer of the
+	// cascade does with its outcome, the unknown tier, lane switches, the
+	// Rego final-decision policy and the administrator's locks. Read through
+	// Config.ResolveCascade.
+	Cascade CascadeConfig `mapstructure:"cascade" yaml:"cascade,omitempty"`
 
 	// profileConnectors is set only on a configuration DerivedForProfile
 	// returns: the profile's own connectors map, keyed by normalized
@@ -2022,6 +2027,10 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// profileCascade and profileName are the profile's own cascade scope and
+	// its name on a derived configuration (ResolveCascade).
+	profileCascade *CascadeScope
+	profileName    string
 	// customPackBase is the directory of the config file that declares
 	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
 	// is each custom_packs entry as the loader checked it, once. Both are
@@ -2073,6 +2082,11 @@ type PerConnectorGuardrailConfig struct {
 	// (mode/hilt/rule_pack_dir) are retained so re-enable restores it
 	// with no re-prompt.
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+
+	// Cascade is this scope's guardrail.cascade (cascade.go); nil inherits.
+	// Not supported in the application_protection overlays this struct also
+	// types (ValidateCascade).
+	Cascade *CascadeScope `mapstructure:"cascade" yaml:"cascade,omitempty" json:"Cascade,omitempty"`
 }
 
 // normalizeConnectorKey canonicalizes a connector name for
@@ -2474,6 +2488,27 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	return "regex_judge"
 }
 
+// Values of guardrail.judge.intent_scope.
+const (
+	IntentScopeAlert  = "alert"
+	IntentScopeShadow = "shadow"
+	IntentScopeOff    = "off"
+)
+
+// IntentScopeMode is the normalized guardrail.judge.intent_scope. The built-in
+// default is the last line of this function: it is the one line that decides
+// whether INTENT-SCOPE-SEND ships raising alerts or recording only (shadow).
+// An unknown value enforces: a typo never turns the check off.
+func (j JudgeConfig) IntentScopeMode() string {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case IntentScopeShadow:
+		return IntentScopeShadow
+	case IntentScopeOff:
+		return IntentScopeOff
+	}
+	return IntentScopeAlert
+}
+
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
@@ -2512,6 +2547,13 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// IntentScope is what the tool judge does with a call that sends data to a
+	// destination the user's task does not name (INTENT-SCOPE-SEND): "alert"
+	// raises at least a MEDIUM finding, "shadow" records the finding in a judge
+	// event and leaves the verdict alone, "off" does not look. Empty is the
+	// built-in default (IntentScopeMode).
+	IntentScope string `mapstructure:"intent_scope" yaml:"intent_scope,omitempty"`
 
 	// MaxParallel bounds how many judge calls the gateway sends to the
 	// judge model at once; an explicit 0 sets no bound. When omitted,
@@ -3350,6 +3392,14 @@ func loadConfigSourceCheckedWithLayout(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	// An invalid guardrail.cascade does not refuse the configuration: the
+	// cascade falls back to the last-known-good one, else the pack defaults,
+	// and doctor, status and the audit log say so. Writers refuse it first
+	// (ValidateCandidate).
+	cfg.loadCascade()
+	if cfg.Guardrail.Cascade.invalid != nil && ReportConfigLoadError != nil {
+		ReportConfigLoadError(context.Background(), "guardrail_cascade_invalid")
 	}
 	if err := cfg.ValidateIdentityChainSettings(); err != nil {
 		if ReportConfigLoadError != nil {

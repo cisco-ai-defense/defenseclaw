@@ -67,6 +67,9 @@ type GuardrailProfile struct {
 	// request_access overrides); nil adds nothing. See
 	// TightenOpenShellAdmin.
 	Sandbox *OpenShellAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	// Cascade is the profile's guardrail.cascade scope (cascade.go); nil
+	// inherits.
+	Cascade *CascadeScope `mapstructure:"cascade" yaml:"cascade,omitempty"`
 	// Routing tightens routing.admin (and routing.*) for subjects of this
 	// profile; nil adds nothing. See TightenRoutingPolicy.
 	Routing *RoutingPolicyConfig `mapstructure:"routing" yaml:"routing,omitempty"`
@@ -324,7 +327,7 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 	}
-	return deriveProfileFrom(base, profile), nil
+	return deriveProfileFrom(base, name, profile), nil
 }
 
 // deriveProfileFrom applies profile to a shallow copy of base, a private
@@ -334,12 +337,13 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 // connector_hooks, so the copy gets its own of those maps. One copy for all
 // profiles instead of one each: with 1,000 profiles the copies took a fifth
 // of the gateway start (GAP-0276).
-func deriveProfileFrom(base *Config, profile GuardrailProfile) *Config {
+func deriveProfileFrom(base *Config, name string, profile GuardrailProfile) *Config {
 	out := *base
 	out.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
 	out.ApplicationProtection.Connectors = maps.Clone(base.ApplicationProtection.Connectors)
 	out.ConnectorHooks = maps.Clone(base.ConnectorHooks)
 	applyGuardrailProfile(&out, profile)
+	out.Guardrail.profileName = name
 	return &out
 }
 
@@ -375,7 +379,7 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 	out := make(map[string]DerivedGuardrailProfile, len(names))
 	for _, name := range names {
 		profile := c.Guardrail.Profiles[name]
-		derived := deriveProfileFrom(base, profile)
+		derived := deriveProfileFrom(base, name, profile)
 		floor, floorDigest, err := c.SandboxFloor(name)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
@@ -425,6 +429,11 @@ type guardrailPolicyDigestView struct {
 	// a policy that changed only it digested the same (GAP-0934). The
 	// default is left out, so the digest of a policy at full is unchanged.
 	CiscoTrustLevel string `json:"cisco_trust_level,omitempty"`
+	// Cascade and ProfileCascade are guardrail.cascade and the profile's
+	// own cascade scope, left out when unset so the digest of a policy
+	// without them is unchanged.
+	Cascade        *CascadeConfig `json:"cascade,omitempty"`
+	ProfileCascade *CascadeScope  `json:"profile_cascade,omitempty"`
 }
 
 // GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
@@ -484,6 +493,11 @@ func guardrailPolicyDigest(cfg *Config, sandboxDigest string, rewrite func(strin
 		rules := g.Rules
 		view.Rules = &rules
 	}
+	if !g.Cascade.IsZero() {
+		cascade := g.Cascade
+		view.Cascade = &cascade
+	}
+	view.ProfileCascade = g.profileCascade
 	if len(g.profileConnectors) > 0 {
 		view.ProfileConnectors = g.profileConnectors
 	}
@@ -644,6 +658,7 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		pc.Guardrail = overlayGuardrailPolicy(pc.Guardrail, fields, false)
 		ap.Connectors[name] = pc
 	}
+	g.profileCascade = profile.Cascade
 	g.profileMode = strings.TrimSpace(fields.Mode)
 	if g.profileMode != "" {
 		clearHookModes(out, "")
@@ -659,6 +674,7 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		}
 		entry := overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
 		entry.Rules = pc.Rules
+		entry.Cascade = pc.Cascade
 		g.profileConnectors[key] = entry
 		if strings.TrimSpace(pc.Mode) != "" {
 			clearHookModes(out, key)
@@ -774,6 +790,9 @@ func (c *Config) DeepCopy() (*Config, error) {
 	// The custom_packs verdict the loader recorded belongs to the load, not to
 	// the copy: a copy never re-reads a folder that has changed since.
 	out.Guardrail.customPackBase, out.Guardrail.customRulePackChecks = c.Guardrail.customPackBase, maps.Clone(c.Guardrail.customRulePackChecks)
+	// The verified policy module and the fallback verdict belong to the load,
+	// like the custom_packs verdict.
+	out.Guardrail.Cascade.policySource, out.Guardrail.Cascade.invalid = c.Guardrail.Cascade.policySource, c.Guardrail.Cascade.invalid
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir

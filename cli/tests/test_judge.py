@@ -258,3 +258,18 @@ class TestCLIFlagParsing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJudgeIntentScope(unittest.TestCase):
+    def test_default_is_empty(self):
+        from defenseclaw.config import JudgeConfig
+
+        self.assertEqual(JudgeConfig().intent_scope, "")
+
+    def test_from_dict(self):
+        from defenseclaw.config import _merge_guardrail
+
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True, "intent_scope": "shadow"}}, "/tmp/test")
+        self.assertEqual(gc.judge.intent_scope, "shadow")
+        gc = _merge_guardrail({"enabled": True, "judge": {"enabled": True}}, "/tmp/test")
+        self.assertEqual(gc.judge.intent_scope, "")

@@ -375,6 +375,12 @@ func secretFlowLaneMode(g config.GuardrailConfig) flowLaneMode {
 // runSecretFlowShadow runs the flow step for one call and returns findings.
 // Shadow records the hit only; in on an egress finding may participate. It is called once at the outermost trusted-action dispatch.
 func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (findings []RuleFinding) {
+	return runSecretFlowShadowChain(ctx, request, &chainCallState{})
+}
+
+// runSecretFlowShadowChain is runSecretFlowShadow with the per-call state the
+// scope chain (chain_effects.go) shares with the flow step.
+func runSecretFlowShadowChain(ctx context.Context, request trustedActionRequest, cc *chainCallState) (findings []RuleFinding) {
 	// The lane must never change an answer by failing: a panic inside it is
 	// counted and the call proceeds as if the lane were off.
 	defer func() {
@@ -414,15 +420,8 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 	st := secretFlowSessions.session(sid, cfg)
 	secretFlowSessions.noteDialect(sid, request.Input.DialectHint)
 	out := st.Step(res, scanText, cfg)
-	// The scope chain: a session armed by a sensitive result sends to a
-	// destination no prompt named. Only when the flow step found nothing of its
-	// own on this call (its value and file proofs are stronger evidence).
-	if len(out.Hits) == 0 {
-		if hit, act, ok := chainEffectsHit(sid, request.Input, cfg); ok {
-			out.Hits = append(out.Hits, hit)
-			out.Action = act
-		}
-	}
+	// The value-join subset of the scope chain reads the step's own proof.
+	extra := chainValueJoin(ctx, request, sid, out, cfg, cc)
 	if len(out.Hits) > 0 {
 		now := time.Now().UTC().Format(time.RFC3339)
 		recs := make([]FlowHitRecord, 0, len(out.Hits))
@@ -442,9 +441,9 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (fin
 	// it passes through the same proof boundary as every enforcing finding so
 	// a non-enforcement-capable connector is demoted to detection-only.
 	if mode != flowLaneOn {
-		return nil
+		return extra
 	}
-	return applyTrustedActionProofBoundary(flowShadowFindings(out, mode), request.EnforcementCapable)
+	return append(applyTrustedActionProofBoundary(flowShadowFindings(out, mode), request.EnforcementCapable), extra...)
 }
 
 // flowShadowFindings turns a flow verdict into findings. A clean or allow
@@ -480,13 +479,8 @@ func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
 		Confidence: 0.9,
 		Tags:       tags,
 	}
-	if len(kinds) == 1 && kinds[string(flow.HitScopeSend)] {
-		f.RuleID = chainEffectsRuleID
-		f.Title = "Sensitive data was read in this session, then sent to a destination the user never named"
-		f.Confidence = 0.8
-	}
 	f.disposition = findingDispositionFlowSecretEgress
-	f.proof = newFindingProof(findingProofFlow, f.RuleID, mode == flowLaneOn)
+	f.proof = newFindingProof(findingProofFlow, flow.RuleIDEgress, mode == flowLaneOn)
 	if out.Action == flow.ActionAlert {
 		f.enforcement = findingEnforcementAlertOnly
 	} else {
