@@ -433,3 +433,22 @@ reaches the file in about a minute and both re-read it.
     - {key: anchors.pem, path: anchors.pem}
 {{- end }}
 {{- end -}}
+
+{{/*
+The gateway's attach route reaches actor relays through the atenet router
+(GAP-0157). It needs the pod identity certificate, so it is on only with pod
+certificates.
+*/}}
+{{- define "dc.routerFlags" -}}
+{{- $r := .Values.substrate.router -}}
+{{- if and $r.enabled .Values.podCertificates.enabled -}}
+- --router-address={{ $r.address | default (printf "atenet-router.%s.svc:8444" .Values.substrate.namespace) }}
+{{- with $r.serverName }}
+- --router-server-name={{ . }}
+{{- end }}
+{{- with $r.caFile }}
+- --router-ca-file={{ . }}
+{{- end }}
+- --relay-port={{ $r.relayPort }}
+{{- end -}}
+{{- end -}}

@@ -41,6 +41,8 @@ type PullOptions struct {
 	// DataDir and Name identify the copy Start made.
 	DataDir string
 	Name    string
+	// Label is how the review names the agent ("" shows Name, the copy id).
+	Label string
 	// MaxBundleBytes caps the result bundle (1 GiB by default); Timeout the
 	// in-actor capture (10 minutes).
 	MaxBundleBytes int64
@@ -99,13 +101,17 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 	if opts.Exec == nil {
 		return nil, errors.New("workspace: pull needs a transport to the actor")
 	}
+	label := opts.Label
+	if label == "" {
+		label = opts.Name
+	}
 	res, err := osw.Pull(ctx, osw.PullOptions{
 		DataDir: opts.DataDir, Name: opts.Name, Exec: opts.Exec,
 		MaxBundleBytes: opts.MaxBundleBytes, Timeout: opts.Timeout,
 		Scanners: opts.Scanners, SensitiveGlobs: opts.SensitiveGlobs,
 	})
 	if err != nil {
-		return nil, cleanErr("pull "+opts.Name, err)
+		return nil, cleanErr("read "+label, err)
 	}
 	rv := buildReview(res)
 	if !res.Empty() {
@@ -115,7 +121,7 @@ func Pull(ctx context.Context, opts PullOptions) (*Review, error) {
 			rv.Diff = []byte(diff)
 		}
 	}
-	rv.Text = rv.render(opts.Name)
+	rv.Text = rv.render(label)
 	return rv, nil
 }
 

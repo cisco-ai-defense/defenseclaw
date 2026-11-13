@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -200,8 +201,16 @@ func (k *Kube) ScaleDeployment(ctx context.Context, namespace, name string, repl
 }
 
 // DeploymentPods implements KubeAPI.
+// It counts the pods of the Deployment's selector that have not finished,
+// terminating pods included: status.replicas leaves those out, and a pod in
+// its grace period can still write a policy (GAP-0056).
 func (k *Kube) DeploymentPods(ctx context.Context, namespace, name string) (int32, error) {
 	var d struct {
+		Spec struct {
+			Selector struct {
+				MatchLabels map[string]string `json:"matchLabels"`
+			} `json:"selector"`
+		} `json:"spec"`
 		Status struct {
 			Replicas int32 `json:"replicas"`
 		} `json:"status"`
@@ -212,7 +221,42 @@ func (k *Kube) DeploymentPods(ctx context.Context, namespace, name string) (int3
 		}
 		return 0, err
 	}
-	return d.Status.Replicas, nil
+	sel := podSelector(d.Spec.Selector.MatchLabels)
+	if sel == "" {
+		return 0, fmt.Errorf("deployment %s/%s has no matchLabels selector to count its pods by", namespace, name)
+	}
+	var pods struct {
+		Items []struct {
+			Status struct {
+				Phase string `json:"phase"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	path := "/api/v1/namespaces/" + url.PathEscape(namespace) + "/pods?labelSelector=" + url.QueryEscape(sel)
+	if err := k.do(ctx, http.MethodGet, path, "", nil, &pods); err != nil {
+		return 0, err
+	}
+	var n int32
+	for _, p := range pods.Items {
+		if p.Status.Phase != "Succeeded" && p.Status.Phase != "Failed" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// podSelector is matchLabels as a label selector, keys sorted.
+func podSelector(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+labels[k])
+	}
+	return strings.Join(parts, ",")
 }
 
 // CreateConfigMap creates a ConfigMap (the leader's store state).

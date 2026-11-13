@@ -52,6 +52,10 @@ spec:
     {{- range $.Values.substrate.podPorts }}
     - {protocol: TCP, port: {{ . }}}
     {{- end }}
+    {{- if and (eq $c "gateway") $.Values.substrate.router.enabled $.Values.podCertificates.enabled }}
+    # The router's CONNECT-TLS listener (attach, GAP-0157).
+    - {protocol: TCP, port: {{ $.Values.substrate.router.podPort }}}
+    {{- end }}
   {{- if ne $c "callout" }}
   # Model providers (/llm) and template registries (controller), the
   # Kubernetes API (leader Lease, store state, resets;

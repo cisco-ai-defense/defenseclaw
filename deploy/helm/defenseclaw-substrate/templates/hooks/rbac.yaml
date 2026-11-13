@@ -103,10 +103,20 @@ metadata:
   annotations:
     {{- include "dc.hookRBACAnnotations" (dict "hooks" "pre-delete") | nindent 4 }}
 rules:
+# Read the controller's selector; scale it through the scale subresource
+# only (no patch of the Deployment itself).
 - apiGroups: [apps]
-  resources: [deployments, deployments/scale]
+  resources: [deployments]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments/scale]
   resourceNames: [defenseclaw-controller]
   verbs: [get, patch]
+# Count its pods, terminating ones included (list cannot be limited by name).
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
