@@ -65,15 +65,7 @@ func trustedActionPersistsCredentialLiteral(facts actionfacts.Facts) bool {
 // writes, stores or runs something. A tool whose name carries no such verb
 // (read_query, list_directory, search_nodes, get_secret) is read-only here.
 func trustedActionMutatingToolName(tool string) bool {
-	leaf := tool
-	if i := strings.LastIndex(leaf, "__"); i >= 0 {
-		leaf = leaf[i+2:]
-	} else if i := strings.LastIndexByte(leaf, '.'); i >= 0 {
-		leaf = leaf[i+1:]
-	}
-	for _, word := range strings.FieldsFunc(leaf, func(r rune) bool {
-		return r == '_' || r == '-' || r == '.' || r == ' '
-	}) {
+	for _, word := range toolLeafWords(tool) {
 		switch word {
 		case "write", "create", "add", "insert", "update", "set", "put", "store", "save", "append",
 			"upsert", "post", "send", "publish", "execute", "exec", "run", "push", "commit", "upload",

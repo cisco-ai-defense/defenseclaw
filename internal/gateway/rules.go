@@ -1133,30 +1133,10 @@ func scanRuleCategoriesWithOptions(
 					continue // already found on raw pass
 				}
 				if rule.ID == secretAssignmentRuleID {
-					// A secret assignment is read in the text as written, not in
-					// the shell-normalized copy (normalizeShell turns an escaped
-					// newline into the letter n and so joins one assignment to
-					// the next), and with the JSON string escapes decoded so a
-					// key at the start of a line is at a word boundary.
-					decoded := jsonStringDecoded(text)
-					if decoded == text {
-						continue
-					}
-					loc := firstAcceptedRuleMatch(*rule, decoded)
-					if loc == nil {
-						continue
-					}
-					f := RuleFinding{
-						RuleID:     rule.ID,
-						Title:      rule.Title,
-						Severity:   rule.Severity,
-						Confidence: rule.Confidence,
-						Evidence:   sanitizeEvidence(decoded[loc[0]:minInt(loc[1], loc[0]+80)]),
-						Tags:       rule.Tags,
-					}
-					f = adjustConfidence(toolName, f)
-					f = applyTrustLiteralContext(generation, cat.Name, rule, decoded, f)
-					findings = append(findings, f)
+					// A secret assignment is read in the text as written.
+					// normalizeShell turns an escaped newline into the letter n
+					// and so joins one assignment to the next; the rule pattern
+					// reads the JSON escape itself.
 					continue
 				}
 				loc := normalizedMatches.match(rule, normalizedText, normalizedScan)

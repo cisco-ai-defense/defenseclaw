@@ -18,11 +18,18 @@ import (
 const secretAssignmentRuleID = "SEC-SECRET-ASSIGN"
 
 // secretAssignmentParts splits a SEC-SECRET-ASSIGN candidate into the key
-// prefix words, the credential keyword, the key suffix words and the value.
-// It mirrors the rule pattern in policies/guardrail/*/rules/secrets.yaml.
+// identifier and the value. The rule pattern in
+// policies/guardrail/*/rules/secrets.yaml finds an identifier that holds a
+// credential keyword anywhere in it; the words of the identifier decide
+// (secretAssignmentKeyIsCredential).
 var secretAssignmentParts = regexp.MustCompile(
-	`(?i)^\W?((?:[a-z0-9]+[_-])*)(password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|refresh[_-]?token|token|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?((?:[_-][a-z0-9]+)*)` +
-		`\\*["']?\s*(?:[:=,(]|\s+is\s+|=>)\s*\\*["']?(.+)$`)
+	`^\W?([A-Za-z0-9_-]+)\\*["']?\s*(?:[:=,(]|\s+is\s+|=>)\s*\\*["']?(.+)$`)
+
+// secretAssignmentKeywords are the words, joined, that name a credential.
+var secretAssignmentKeywords = map[string]bool{
+	"password": true, "passwd": true, "pwd": true, "passphrase": true, "secret": true, "token": true,
+	"apikey": true, "privatekey": true, "encryptionkey": true, "signingkey": true, "credential": true,
+}
 
 // secretAssignmentKeySuffixes are words after the credential keyword that
 // make the key describe the credential rather than hold it: token_count,
@@ -52,39 +59,64 @@ var secretAssignmentKeyPrefixes = map[string]bool{
 	"next": true, "page": true,
 }
 
-// secretAssignmentPlaceholderTokens mark a value as a stand-in a person wrote
-// on purpose. A leaked credential does not announce itself. A word counts
-// only as a whole token of the value (split at _ - .), with or without digits
-// around it, or as most of a longer token (examplekey); never as a few letters
-// inside a random run.
+// secretAssignmentPlaceholderTokens are the words a stand-in value is made of.
+// A leaked credential does not announce itself; a value is a placeholder only
+// when it is made of nothing else (your_api_key_here_1234, changeme123,
+// example_token_value), never because one of these words sits next to random
+// characters.
 var secretAssignmentPlaceholderTokens = map[string]bool{
 	"example": true, "sample": true, "placeholder": true, "changeme": true, "replace": true, "dummy": true,
 	"fake": true, "mock": true, "redacted": true, "your": true, "yourtoken": true, "yoursecret": true,
 	"todo": true, "fixme": true, "insert": true, "enter": true, "notreal": true, "testtest": true,
 	"foobar": true, "lorem": true, "password123": true, "secret123": true, "abc123": true, "qwerty": true,
-	"letmein": true, "hunter2": true,
+	"letmein": true, "hunter2": true, "test": true,
 }
 
-// secretAssignmentPlaceholderValue reports a value that is a stand-in.
+// secretAssignmentFillerTokens may sit between placeholder words.
+var secretAssignmentFillerTokens = map[string]bool{
+	"api": true, "key": true, "token": true, "secret": true, "here": true, "value": true, "password": true,
+	"id": true, "name": true, "goes": true, "the": true, "my": true, "a": true, "of": true, "to": true,
+	"me": true, "change": true, "not": true, "real": true, "new": true, "old": true,
+}
+
+// secretAssignmentPlaceholderValue reports a value made only of placeholder
+// and filler words, with at least one placeholder word, or of a run of x.
 func secretAssignmentPlaceholderValue(value string) bool {
 	lower := strings.ToLower(value)
-	if strings.Contains(lower, "xxxx") {
+	if strings.Contains(lower, "xxxx") && strings.Trim(lower, "x0123456789_-.") == "" {
 		return true
 	}
 	tokens := strings.FieldsFunc(lower, func(r rune) bool { return r == '_' || r == '-' || r == '.' })
-	candidates := make([]string, 0, 2*len(tokens))
-	candidates = append(candidates, tokens...)
-	for i := 0; i+1 < len(tokens); i++ {
-		candidates = append(candidates, tokens[i]+tokens[i+1]) // change_me, not_real
-	}
-	for _, token := range candidates {
-		if secretAssignmentPlaceholderTokens[token] || secretAssignmentPlaceholderTokens[strings.Trim(token, "0123456789")] {
-			return true
+	sawPlaceholder := false
+	for i := 0; i < len(tokens); i++ {
+		token := strings.Trim(tokens[i], "0123456789")
+		if token == "" {
+			continue
 		}
-		for word := range secretAssignmentPlaceholderTokens {
-			if len(word) >= 5 && strings.Contains(token, word) && len(word)*10 >= len(token)*6 {
-				return true
-			}
+		if i+1 < len(tokens) && secretAssignmentPlaceholderTokens[token+strings.Trim(tokens[i+1], "0123456789")] {
+			sawPlaceholder = true // change_me, not_real
+			i++
+			continue
+		}
+		switch {
+		case secretAssignmentPlaceholderTokens[tokens[i]] || secretAssignmentPlaceholderTokens[token]:
+			sawPlaceholder = true
+		case secretAssignmentFillerTokens[token]:
+		case secretAssignmentMostlyPlaceholderWord(token):
+			sawPlaceholder = true
+		default:
+			return false
+		}
+	}
+	return sawPlaceholder
+}
+
+// secretAssignmentMostlyPlaceholderWord reports one token that is a
+// placeholder word with a short tail (examplekey, changemenow).
+func secretAssignmentMostlyPlaceholderWord(token string) bool {
+	for word := range secretAssignmentPlaceholderTokens {
+		if len(word) >= 5 && strings.HasPrefix(token, word) && len(word)*10 >= len(token)*6 {
+			return true
 		}
 	}
 	return false
@@ -106,18 +138,38 @@ func acceptedSecretAssignment(match string) bool {
 	if m == nil {
 		return false
 	}
-	split := func(r rune) bool { return r == '_' || r == '-' }
-	for _, word := range strings.FieldsFunc(strings.ToLower(m[1]), split) {
-		if secretAssignmentKeyPrefixes[word] {
-			return false
+	return secretAssignmentKeyIsCredential(m[1]) && secretAssignmentValueLooksSecret(m[2])
+}
+
+// secretAssignmentKeyIsCredential reports an identifier that holds a credential
+// and does not merely describe one. The identifier is cut into words at _ and
+// -, at a lower to upper case change and before the last capital of an
+// acronym (dbPassword, SECRET_KEY, apiKey, HTTPToken), so a name is read, not
+// listed. One word, or two or three joined (api + key), must be a credential
+// keyword; no other word of the identifier may mark a setting around it
+// (max_tokens, token_count, isSecret).
+func secretAssignmentKeyIsCredential(key string) bool {
+	words := identifierWords(key)
+	for i := range words {
+		for j := i; j < len(words) && j < i+3; j++ {
+			joined := strings.Join(words[i:j+1], "")
+			if !secretAssignmentKeywords[strings.TrimSuffix(joined, "s")] && !secretAssignmentKeywords[joined] {
+				continue
+			}
+			for _, word := range words[:i] {
+				if secretAssignmentKeyPrefixes[word] {
+					return false
+				}
+			}
+			for _, word := range words[j+1:] {
+				if secretAssignmentKeySuffixes[word] {
+					return false
+				}
+			}
+			return true
 		}
 	}
-	for _, word := range strings.FieldsFunc(strings.ToLower(m[3]), split) {
-		if secretAssignmentKeySuffixes[word] {
-			return false
-		}
-	}
-	return secretAssignmentValueLooksSecret(m[4])
+	return false
 }
 
 func secretAssignmentValueLooksSecret(raw string) bool {
@@ -315,37 +367,3 @@ func secretAssignmentIdentifier(value string) bool {
 // not a slot.
 var secretAssignmentWholeReference = regexp.MustCompile(
 	`^(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Z_][A-Z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|\{\{[^{}]*\}\}|<[A-Za-z_][A-Za-z0-9_-]*>|\$\([^()]*\))$`)
-
-// jsonStringDecoded undoes the JSON string escapes that decide where a line
-// starts or a quote closes (backslash n, r, t, quote, backslash, slash), so
-// text taken from the arguments of a call reads as the person or the tool
-// wrote it. A rule that anchors on a word boundary (SEC-SECRET-ASSIGN) cannot
-// see a key that follows the two characters backslash and n.
-func jsonStringDecoded(s string) string {
-	if !strings.Contains(s, "\\") {
-		return s
-	}
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		if s[i] != '\\' || i+1 == len(s) {
-			b.WriteByte(s[i])
-			continue
-		}
-		switch s[i+1] {
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		case 't':
-			b.WriteByte('\t')
-		case '"', '\\', '/':
-			b.WriteByte(s[i+1])
-		default:
-			b.WriteByte(s[i])
-			continue
-		}
-		i++
-	}
-	return b.String()
-}

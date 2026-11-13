@@ -297,7 +297,16 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 		return func(_, match string, _, _ int) bool { return acceptedPublicIPv4Download(match) }
 	}
 	if ruleID == secretAssignmentRuleID {
-		return func(_, match string, _, _ int) bool { return acceptedSecretAssignment(match) }
+		return func(text, match string, start, _ int) bool {
+			// The call text is JSON: an escaped newline, return or tab is the two
+			// characters backslash and n, r or t, and the word boundary the
+			// pattern found sits between them and the key. The letter is the
+			// escape, not the first letter of the key.
+			if start > 0 && text[start-1] == '\\' && strings.IndexByte("nrt", match[0]) >= 0 {
+				match = match[1:]
+			}
+			return acceptedSecretAssignment(match)
+		}
 	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }
