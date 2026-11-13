@@ -170,6 +170,11 @@ func trustedActionActiveSSHPrivateKeyContentRead(facts actionfacts.Facts) bool {
 		if !ok || command.Effect != actionfacts.EffectExecute {
 			continue
 		}
+		if trustedActionPrivateHomeCopy(facts, command) {
+			// A copy of the key to a private place in the same home leaves
+			// its content with the user (rel-1-0-10:GAP-0018).
+			continue
+		}
 		expandingOperand := false
 		for _, argument := range command.Arguments {
 			if argument.Expands && matchesSSHPrivateKey(argument.Value) {
@@ -479,6 +484,9 @@ func trustedActionClassifySensitivePathRisk(
 		case actionfacts.PathAccessWrite,
 			actionfacts.PathAccessAppend,
 			actionfacts.PathAccessDelete:
+			if trustedActionKeyNamedWriteOutsideSSHDir(ruleID, candidate) {
+				continue
+			}
 			if trustedActionExecutingCommand(facts, candidate.CommandID) {
 				return trustedActionSensitivePathMutation
 			}
