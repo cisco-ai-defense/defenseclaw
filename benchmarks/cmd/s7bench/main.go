@@ -330,7 +330,7 @@ func main() {
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	gateway.S7ApplyFlow(cfg, *secretFlow)
 	if *chainLanes != "" {
-		parts := strings.Split(*chainLanes, ",")
+		parts := strings.FieldsFunc(*chainLanes, func(r rune) bool { return r == 0x2c || r == 0x3a })
 		if len(parts) != 2 {
 			fmt.Fprintln(os.Stderr, "-chain-lanes needs two values")
 			os.Exit(2)
