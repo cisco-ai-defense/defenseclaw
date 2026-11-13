@@ -263,6 +263,9 @@ const (
 	// completion so dashboards can split out MCP-tool risk from
 	// user-facing chat risk.
 	DirectionToolCall Direction = "tool_call"
+	// DirectionToolResult marks inspections of a tool's output on its way
+	// to the model (hook PostToolUse results, proxy tool-role messages).
+	DirectionToolResult Direction = "tool_result"
 )
 
 // Event is the single envelope type every gateway observability

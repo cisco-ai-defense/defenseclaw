@@ -853,15 +853,22 @@ func scanContentRuleCategoryWithGeneration(
 	scope ruleContentScope,
 	category string,
 ) []RuleFinding {
+	return scanContentRulesWithOptions(generation, text, toolName, scope, ruleScanOptions{onlyCategory: category})
+}
+
+// scanContentRulesWithOptions is scanContentRuleCategoryWithGeneration with
+// the caller's category options (the content scope is set from scope).
+func scanContentRulesWithOptions(
+	generation *compiledRulePackCategories,
+	text, toolName string,
+	scope ruleContentScope,
+	options ruleScanOptions,
+) []RuleFinding {
 	if scope == ruleContentScopeSource {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
-	findings := scanRuleGeneration(
-		generation,
-		text,
-		toolName,
-		ruleScanOptions{contentScope: scope, onlyCategory: category},
-	)
+	options.contentScope = scope
+	findings := scanRuleGeneration(generation, text, toolName, options)
 	if scope == ruleContentScopeSource {
 		// Physically verified test, fixture, and bundled rule sources are useful
 		// telemetry, but their contents are not an action by the agent. Keeping
@@ -889,8 +896,12 @@ const (
 type ruleScanOptions struct {
 	includeToolCallOnly bool
 	excludeTrustExploit bool
-	excludedRuleIDs     map[string]struct{}
-	onlyRuleIDs         map[string]struct{}
+	// excludeEnterpriseData leaves the enterprise-data category (cards, IBANs,
+	// phone numbers, email addresses) out: the tool-result surface, where
+	// those values are the data the user asked a tool for.
+	excludeEnterpriseData bool
+	excludedRuleIDs       map[string]struct{}
+	onlyRuleIDs           map[string]struct{}
 	// onlyRule, when set, admits only the rules it reports true for.
 	onlyRule     func(ruleID string) bool
 	contentScope ruleContentScope
@@ -918,6 +929,9 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 		return false
 	}
 	if o.excludeTrustExploit && category == "trust-exploit" {
+		return false
+	}
+	if o.excludeEnterpriseData && category == "enterprise-data" {
 		return false
 	}
 	if o.contentScope == ruleContentScopeAll {

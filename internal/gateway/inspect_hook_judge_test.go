@@ -285,19 +285,29 @@ func TestHookJudge_ProviderErrorFailsOpen(t *testing.T) {
 // Hook tool_result content maps to the judge's "completion" direction;
 // with only the injection judge enabled (a prompt-direction judge) no
 // sub-judge applies, so the provider must not be called.
-func TestHookJudge_ToolResultMapsToCompletionDirection(t *testing.T) {
+// A tool's output gets the injection judge with the tool-result prompt
+// (rel-1-0-10 GAP-0171: it used to be judged as a completion, PII only), and
+// the verdict follows the tool-result disposition: HIGH at most, so the
+// default posture alerts and never blocks a call that has already run.
+func TestHookJudge_ToolResultRunsToolResultInjectionJudge(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
 		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
 		"judge_first", mock)
 
-	a.inspectMessageContent(t.Context(), &ToolInspectRequest{
+	v := a.inspectMessageContent(t.Context(), &ToolInspectRequest{
 		Tool: "fetch_url", Content: "tool output: hello there",
 		Direction: "tool_result", Connector: "hermes",
 	})
 
-	if len(mock.captured) != 0 {
-		t.Fatalf("injection judge called %d time(s) on completion-direction content", len(mock.captured))
+	if len(mock.captured) != 1 {
+		t.Fatalf("injection judge called %d time(s) on a tool result, want 1", len(mock.captured))
+	}
+	if sys := mock.captured[0].Messages[0].Content; sys != toolResultInjectionSystemPrompt {
+		t.Fatalf("tool result judged with another system prompt: %.80q", sys)
+	}
+	if v.Severity == "CRITICAL" || v.Action == guardrailActionBlock {
+		t.Fatalf("tool-result judge hit = %s %s; want HIGH at most and no block in the default posture", v.Severity, v.Action)
 	}
 }
 

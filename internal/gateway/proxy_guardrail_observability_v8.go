@@ -1049,6 +1049,8 @@ func proxyGuardrailTargetType(direction string) string {
 		return "completion"
 	case "tool-call", "tool_call":
 		return "tool_call"
+	case directionToolResult:
+		return directionToolResult
 	default:
 		return "inspect"
 	}

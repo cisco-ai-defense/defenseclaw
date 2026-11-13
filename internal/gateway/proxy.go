@@ -1489,6 +1489,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// --- Tool results the request carries for the first time (GAP-0171) ---
+	if p.enforceProxyToolResults(r.Context(), trailingToolResults(partial.Messages, partial.Input, partial.Contents), label, mode, customBlockMsg, func(msg string) {
+		p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
+	}) {
+		return
+	}
+
 	// --- Launder prior DefenseClaw-generated assistant turns ---
 	//
 	// When a previous turn was blocked, we returned a synthetic
@@ -3155,6 +3162,18 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
+	}
+
+	// --- Tool results the request carries for the first time (GAP-0171) ---
+	if p.enforceProxyToolResults(agentCtx, trailingToolResults(req.Messages, nil, nil), req.Model, mode, customBlockMsg, func(msg string) {
+		traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
+		if req.Stream {
+			p.writeBlockedStream(w, req.Model, msg)
+		} else {
+			p.writeBlockedResponse(w, req.Model, msg)
+		}
+	}) {
+		return
 	}
 
 	// --- Semantic Model Router ---
