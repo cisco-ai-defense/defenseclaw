@@ -29,6 +29,10 @@ const (
 	RejectedRecordMaxPayloadBytes = 16 << 10
 	// RejectedRecordMaxBatch bounds the rows one write transaction inserts.
 	RejectedRecordMaxBatch = 16
+	// RejectedRecordTrimBatch bounds the rows one trim transaction deletes,
+	// so lowering the cap from 1000000 to 100 is many short transactions,
+	// never one long one holding the writer.
+	RejectedRecordTrimBatch = 512
 	// RejectedRecordsMinRows and RejectedRecordsMaxRows bound
 	// observability.local.rejected_records_max_rows.
 	RejectedRecordsMinRows = 100
@@ -49,6 +53,10 @@ const (
 )
 
 func migrateRejectedRecords(ex dbExecer) error {
+	// A Secure Client store keeps main's schema; the store is never on there.
+	if form, ok := ex.(interface{ secureClientMigration() bool }); ok && form.secureClientMigration() {
+		return nil
+	}
 	if _, err := ex.Exec(`CREATE TABLE IF NOT EXISTS rejected_records (
 		id INTEGER PRIMARY KEY,
 		stored_at TEXT NOT NULL,
@@ -100,8 +108,12 @@ type RejectedRecordRow struct {
 }
 
 // InsertRejectedRecords appends up to RejectedRecordMaxBatch rows in one
-// short transaction and then deletes the oldest rows past maxRows. The store
-// must be ready; a read-only or Secure Client store is not a writer here.
+// short transaction; TrimRejectedRecords then keeps the row cap. maxRows is
+// checked here so a caller cannot write without a valid cap. The store must
+// be ready; a read-only or Secure Client store is not a writer here. Each
+// attempt takes the write baton like the grouped hook writes (GAP-0490), so
+// this transaction and the durable hook journal commit take turns instead of
+// meeting SQLITE_BUSY.
 func (s *Store) InsertRejectedRecords(ctx context.Context, rows []RejectedRecordRow, maxRows int) error {
 	if s == nil || s.db == nil {
 		return errors.New("audit: rejected records: store is not initialized")
@@ -128,6 +140,11 @@ func (s *Store) InsertRejectedRecords(ctx context.Context, rows []RejectedRecord
 	}
 	defer release()
 	return retryBusy(ctx, "rejected_records_insert", func() error {
+		turn, turnErr := s.writeBaton.acquire(ctx)
+		if turnErr != nil {
+			return turnErr
+		}
+		defer turn()
 		tx, beginErr := s.db.BeginTx(ctx, nil)
 		if beginErr != nil {
 			return beginErr
@@ -151,17 +168,64 @@ func (s *Store) InsertRejectedRecords(ctx context.Context, rows []RejectedRecord
 				return execErr
 			}
 		}
-		// Rows leave only oldest first (this cap and retention), so the ids
-		// of the kept rows are contiguous and the cap is one indexed range
-		// delete; an OFFSET walk would read up to maxRows rows while this
-		// transaction holds the write lock. A gap can only make it keep
-		// fewer rows than the cap.
-		if _, execErr := tx.ExecContext(ctx, `DELETE FROM rejected_records
-			WHERE id <= (SELECT MAX(id) FROM rejected_records) - ?`, maxRows); execErr != nil {
-			return execErr
-		}
 		return tx.Commit()
 	})
+}
+
+// TrimRejectedRecords deletes at most limit of the oldest rows past maxRows
+// in one short transaction under the write baton, and reports whether rows
+// past the cap remain. Rows leave only oldest first (this cap and
+// retention), so the kept ids are contiguous and "past the cap" is
+// id <= MAX(id) - maxRows; a gap can only make it keep fewer rows. Callers
+// loop, yielding between calls.
+func (s *Store) TrimRejectedRecords(ctx context.Context, maxRows, limit int) (deleted int64, more bool, err error) {
+	if s == nil || s.db == nil {
+		return 0, false, errors.New("audit: rejected records: store is not initialized")
+	}
+	if ctx == nil {
+		return 0, false, errors.New("audit: rejected records: context is required")
+	}
+	if maxRows < RejectedRecordsMinRows || maxRows > RejectedRecordsMaxRows || limit < 1 || limit > RejectedRecordTrimBatch {
+		return 0, false, fmt.Errorf("audit: rejected records: trim cap %d / batch %d is out of range", maxRows, limit)
+	}
+	if err := s.awaitWALHeadroom(ctx); err != nil {
+		return 0, false, err
+	}
+	release, err := s.acquireReady()
+	if err != nil {
+		return 0, false, err
+	}
+	defer release()
+	err = retryBusy(ctx, "rejected_records_trim", func() error {
+		turn, turnErr := s.writeBaton.acquire(ctx)
+		if turnErr != nil {
+			return turnErr
+		}
+		defer turn()
+		tx, beginErr := s.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer tx.Rollback() //nolint:errcheck
+		result, execErr := tx.ExecContext(ctx, `DELETE FROM rejected_records WHERE id IN (
+			SELECT id FROM rejected_records
+			WHERE id <= (SELECT MAX(id) FROM rejected_records) - ?
+			ORDER BY id LIMIT ?
+		)`, maxRows, limit)
+		if execErr != nil {
+			return execErr
+		}
+		rows, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		deleted = rows
+		return nil
+	})
+	return deleted, err == nil && deleted == int64(limit), err
 }
 
 // boundRejectedRecordRow applies the column bounds, so a caller can never

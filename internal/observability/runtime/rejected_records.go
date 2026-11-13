@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -35,12 +36,15 @@ const (
 	rejectedRecordWriteTimeout = 5 * time.Second
 	// rejectedRecordLogInterval spaces the drop and failure log lines.
 	rejectedRecordLogInterval = time.Minute
+	// rejectedRecordTrimPause is the wait between two trim batches.
+	rejectedRecordTrimPause = 5 * time.Millisecond
 )
 
 // RejectedRecordStats are the process totals of the rejected-record store.
-// DroppedRunCap counts records past the per-run cap: a gateway run writes at
-// most rejected_records_max_rows rows, so a flood of refused records cannot
-// keep rewriting the table.
+// DroppedRunCap counts records past the per-run cap: one run of the store
+// (from the generation that turns it on, or a reload that keeps it on, to
+// the next) queues at most rejected_records_max_rows rows, so a flood of
+// refused records cannot keep rewriting the table.
 type RejectedRecordStats struct {
 	Stored          uint64 `json:"stored"`
 	DroppedQueue    uint64 `json:"dropped_queue_full"`
@@ -50,7 +54,7 @@ type RejectedRecordStats struct {
 }
 
 type rejectedRecordCounters struct {
-	offered, stored, droppedQueue, droppedRunCap, droppedStopping, writeFailed atomic.Uint64
+	stored, droppedQueue, droppedRunCap, droppedStopping, writeFailed atomic.Uint64
 }
 
 func (counters *rejectedRecordCounters) snapshot() RejectedRecordStats {
@@ -67,8 +71,8 @@ func (*rejectedRecordError) Error() string {
 	return "observability rejected-record store initialization failed"
 }
 
-// rejectedRecordFactory is process-stable: its counters, the per-run cap
-// included, span reloads.
+// rejectedRecordFactory is process-stable: its counters are process totals.
+// The per-run cap belongs to each generation's writer.
 type rejectedRecordFactory struct {
 	store        *audit.Store
 	engine       *redaction.Engine
@@ -100,15 +104,19 @@ func (factory *rejectedRecordFactory) Prepare(
 		factory.store == nil || factory.engine == nil {
 		return nil, &rejectedRecordError{}
 	}
-	profile, ok := redaction.BuiltInProfile(redaction.ProfileSensitive)
+	sensitive, ok := redaction.BuiltInProfile(redaction.ProfileSensitive)
 	if !ok {
 		return nil, &rejectedRecordError{}
 	}
+	// A plan whose catalog does not resolve keeps every record at strict
+	// (profileFor), never at less than its bucket's local profile.
+	catalog, catalogErr := input.Config.Plan.RedactionProfileCatalog()
 	return &rejectedRecordWriter{
-		factory: factory, profile: profile, maxRows: maxRows,
+		factory: factory, plan: input.Config.Plan, catalog: catalog, catalogOK: catalogErr == nil,
+		sensitive: sensitive, profiles: map[observability.Bucket]redaction.Profile{}, maxRows: maxRows,
 		queue: make(chan observability.RejectedRecord, rejectedRecordQueueItems),
 		stop:  make(chan struct{}), done: make(chan struct{}),
-		now: time.Now,
+		now: time.Now, trimPause: rejectedRecordTrimPause,
 	}, nil
 }
 
@@ -125,15 +133,29 @@ func (*rejectedRecordsOff) Drain(context.Context) error      { return nil }
 func (*rejectedRecordsOff) Close(context.Context) error      { return nil }
 
 // rejectedRecordWriter owns one generation's queue and its one writer
-// goroutine, started at Activate. It redacts each record with the sensitive
-// profile at the projection boundary (redaction.Engine.ProjectFields), so
-// audit.db never holds a raw refused payload.
+// goroutine, started at Activate. The producer's raw copy waits in the queue
+// (process memory only); the writer redacts it at the projection boundary
+// (redaction.Engine.ProjectFields) with, per field class, the stricter of
+// the sensitive profile and the local profile of the record's bucket, and
+// only that redacted copy reaches audit.db.
 type rejectedRecordWriter struct {
-	factory *rejectedRecordFactory
-	profile redaction.Profile
-	maxRows int
-	queue   chan observability.RejectedRecord
-	now     func() time.Time
+	factory   *rejectedRecordFactory
+	plan      *config.ObservabilityV8Plan
+	catalog   redaction.ProfileCatalog
+	catalogOK bool
+	sensitive redaction.Profile
+	maxRows   int
+	queue     chan observability.RejectedRecord
+	now       func() time.Time
+	trimPause time.Duration
+
+	// intakeMu orders offers against StopIntake: an offer holds it shared
+	// while it checks accepting and queues, StopIntake holds it exclusive
+	// to stop intake, so once StopIntake returns no offer can still queue
+	// and Drain's final pass sees every queued record.
+	intakeMu sync.RWMutex
+	// queued is this run's reserved rows, the per-run cap's count.
+	queued atomic.Int64
 
 	lifecycleMu sync.Mutex
 	accepting   atomic.Bool
@@ -144,25 +166,50 @@ type rejectedRecordWriter struct {
 	uninstall   func()
 
 	// Touched by the writer goroutine only.
+	profiles     map[observability.Bucket]redaction.Profile
 	lastLog      time.Time
 	loggedDrops  uint64
 	loggedFailed uint64
 }
 
-// OfferRejectedRecord never blocks: it queues, or drops and counts.
+// ReserveRejectedRecord decides, before the producer builds the copy,
+// whether the record can be kept: intake on, this run under its cap and room
+// in the queue. A refusal is counted here.
+func (writer *rejectedRecordWriter) ReserveRejectedRecord() bool {
+	writer.intakeMu.RLock()
+	defer writer.intakeMu.RUnlock()
+	counters := &writer.factory.counters
+	switch {
+	case !writer.accepting.Load():
+		counters.droppedStopping.Add(1)
+		return false
+	case len(writer.queue) >= cap(writer.queue):
+		counters.droppedQueue.Add(1)
+		return false
+	case writer.queued.Add(1) > int64(writer.maxRows):
+		writer.queued.Add(-1)
+		counters.droppedRunCap.Add(1)
+		return false
+	}
+	return true
+}
+
+// OfferRejectedRecord never blocks: it queues a reserved record, or drops
+// and counts it (the queue filled, or intake stopped, since the reservation)
+// and gives the reserved row back.
 func (writer *rejectedRecordWriter) OfferRejectedRecord(record observability.RejectedRecord) {
+	writer.intakeMu.RLock()
+	defer writer.intakeMu.RUnlock()
 	counters := &writer.factory.counters
 	if !writer.accepting.Load() {
+		writer.queued.Add(-1)
 		counters.droppedStopping.Add(1)
-		return
-	}
-	if counters.offered.Add(1) > uint64(writer.maxRows) {
-		counters.droppedRunCap.Add(1)
 		return
 	}
 	select {
 	case writer.queue <- record:
 	default:
+		writer.queued.Add(-1)
 		counters.droppedQueue.Add(1)
 	}
 }
@@ -182,7 +229,9 @@ func (writer *rejectedRecordWriter) Activate() {
 func (writer *rejectedRecordWriter) StopIntake(context.Context) error {
 	writer.lifecycleMu.Lock()
 	defer writer.lifecycleMu.Unlock()
+	writer.intakeMu.Lock()
 	writer.accepting.Store(false)
+	writer.intakeMu.Unlock()
 	if writer.uninstall != nil {
 		writer.uninstall()
 		writer.uninstall = nil
@@ -216,6 +265,9 @@ func (writer *rejectedRecordWriter) Close(ctx context.Context) error {
 
 func (writer *rejectedRecordWriter) run() {
 	defer close(writer.done)
+	// A reload that lowered the cap trims the table now, not at the next
+	// refused record.
+	writer.trim()
 	batch := make([]observability.RejectedRecord, 0, audit.RejectedRecordMaxBatch)
 	for {
 		select {
@@ -223,6 +275,7 @@ func (writer *rejectedRecordWriter) run() {
 			batch = append(batch[:0], record)
 			batch = writer.fill(batch)
 			writer.write(batch)
+			writer.trim()
 		case <-writer.stop:
 			for {
 				batch = writer.fill(batch[:0])
@@ -268,6 +321,50 @@ func (writer *rejectedRecordWriter) write(batch []observability.RejectedRecord) 
 	writer.logCounters(false)
 }
 
+// trim keeps the row cap in bounded batches (audit.RejectedRecordTrimBatch
+// rows per transaction), pausing between them so hook writes get the store
+// in between. It stops early when the generation stops; the next run of the
+// store finishes it.
+func (writer *rejectedRecordWriter) trim() {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), rejectedRecordWriteTimeout)
+		_, more, err := writer.factory.store.TrimRejectedRecords(ctx, writer.maxRows, audit.RejectedRecordTrimBatch)
+		cancel()
+		if err != nil {
+			writer.logFailure(err)
+			return
+		}
+		if !more {
+			return
+		}
+		select {
+		case <-writer.stop:
+			return
+		case <-time.After(writer.trimPause):
+		}
+	}
+}
+
+// profileFor is the stricter of the sensitive profile and the local profile
+// of bucket; strict when the bucket or its profile cannot be resolved.
+func (writer *rejectedRecordWriter) profileFor(bucket observability.Bucket) redaction.Profile {
+	if profile, ok := writer.profiles[bucket]; ok {
+		return profile
+	}
+	profile, _ := redaction.BuiltInProfile(redaction.ProfileStrict)
+	if writer.catalogOK && writer.plan != nil {
+		if name, err := writer.plan.ResolveLocalRedactionProfile(bucket); err == nil {
+			if local, ok := writer.catalog.Resolve(name); ok {
+				if combined, err := redaction.StricterProfile("rejected_records_"+redaction.ProfileName(bucket), writer.sensitive, local); err == nil {
+					profile = combined
+				}
+			}
+		}
+	}
+	writer.profiles[bucket] = profile
+	return profile
+}
+
 // row redacts one record. A payload the profile cannot project, or one over
 // audit.RejectedRecordMaxPayloadBytes, is not kept: the row keeps the
 // metadata and lists the field keys.
@@ -281,7 +378,7 @@ func (writer *rejectedRecordWriter) row(record observability.RejectedRecord, sto
 		PayloadState:  audit.RejectedPayloadRedacted,
 		OmittedFields: append([]string(nil), record.OmittedFields...),
 	}
-	projected, err := writer.factory.engine.ProjectFields(record.Body, record.FieldClasses, writer.profile)
+	projected, err := writer.factory.engine.ProjectFields(record.Body, record.FieldClasses, writer.profileFor(record.Bucket))
 	var encoded []byte
 	if err == nil {
 		encoded, err = json.Marshal(projected)

@@ -70,9 +70,14 @@ func (record RejectedRecord) ErrorText() string {
 	return text
 }
 
-// RejectedRecordSink receives refused records. OfferRejectedRecord must not
-// block or do I/O: it queues the record, or drops and counts it.
+// RejectedRecordSink receives refused records. Neither method may block or
+// do I/O. ReserveRejectedRecord is asked first, before the copy is built on
+// the producer's goroutine: false means the record would be dropped (the
+// sink has counted it) and no copy is made. After true the producer builds
+// the copy and hands it to OfferRejectedRecord, which queues it or drops and
+// counts it.
 type RejectedRecordSink interface {
+	ReserveRejectedRecord() bool
 	OfferRejectedRecord(RejectedRecord)
 }
 
@@ -120,6 +125,9 @@ func offerRejectedFamilyRecord(
 	if !errors.As(err, &buildError) || buildError.code == FamilyBuildInvalidDependency {
 		return
 	}
+	if !slot.sink.ReserveRejectedRecord() {
+		return
+	}
 	record := RejectedRecord{
 		ObservedAt:          time.Now().UTC(),
 		Signal:              signal,
@@ -164,6 +172,12 @@ func captureRejectedFamilyValues(
 			continue
 		}
 		if _, duplicate := body[value.key]; duplicate {
+			continue
+		}
+		// Measure the producer's value before copying it: a multi-MB value
+		// is left out without being canonicalized.
+		if raw := rejectedValueBytes(value.value); raw > RejectedRecordMaxFieldBytes || captured+raw > RejectedRecordMaxCaptureBytes {
+			omitted[value.key] = struct{}{}
 			continue
 		}
 		canonical, err := canonicalFamilyJSONValue(value.value)

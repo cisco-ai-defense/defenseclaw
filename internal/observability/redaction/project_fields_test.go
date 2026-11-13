@@ -64,3 +64,45 @@ func TestProjectFieldsRedactsARefusedRecordCopyLikeProject(t *testing.T) {
 		t.Fatal("a nil engine projected")
 	}
 }
+
+func TestStricterProfileNeverKeepsMoreThanEither(t *testing.T) {
+	sensitive, _ := BuiltInProfile(ProfileSensitive)
+	strict, _ := BuiltInProfile(ProfileStrict)
+	none, _ := BuiltInProfile(ProfileNone)
+	content, _ := BuiltInProfile(ProfileContent)
+	for _, tc := range []struct {
+		a, b Profile
+		want ProfileName
+	}{
+		{sensitive, strict, ProfileStrict}, {strict, sensitive, ProfileStrict},
+		{sensitive, none, ProfileSensitive}, {sensitive, content, ProfileContent},
+	} {
+		got, err := StricterProfile("rejected_records_test", tc.a, tc.b)
+		if err != nil || got.Name() != tc.want {
+			t.Fatalf("StricterProfile(%s, %s) = %s, %v; want %s", tc.a.Name(), tc.b.Name(), got.Name(), err, tc.want)
+		}
+	}
+	// A custom profile that hashes content but keeps evidence by detection:
+	// the result takes the stricter cell of each class.
+	custom, err := NewCustomProfile("hash_content", ProfileSensitive, nil, map[observability.FieldClass]TransformationMode{
+		observability.FieldClassContent: ModeHash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mixed, err := StricterProfile("rejected_records_test", custom, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, class := range observability.FieldClasses() {
+		modeA, _ := custom.Mode(class)
+		modeB, _ := content.Mode(class)
+		got, _ := mixed.Mode(class)
+		if modeStrictness(got) < modeStrictness(modeA) || modeStrictness(got) < modeStrictness(modeB) {
+			t.Fatalf("class %s: %s is weaker than %s or %s", class, got, modeA, modeB)
+		}
+	}
+	if !validProfile(mixed) {
+		t.Fatal("combined profile does not validate")
+	}
+}

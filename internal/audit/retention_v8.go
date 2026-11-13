@@ -910,6 +910,14 @@ func (reaper *RetentionReaper) drainAuditTable(
 	baselineAt time.Time,
 	result *RetentionRunResult,
 ) error {
+	if spec.class == RetentionRejectedRecords {
+		// A Secure Client store has no rejected_records table (it keeps
+		// main's schema), so there is nothing to reap there.
+		present, err := tableExists(reaper.store.db, spec.table)
+		if err != nil || !present {
+			return err
+		}
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err

@@ -8,6 +8,7 @@ import (
 	"context"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,14 +174,24 @@ func TestRejectedRecordStoreOnKeepsARedactedCopyAndReloadOffStopsIt(t *testing.T
 	waitRejectedRows(t, dependencies.store, 1)
 }
 
+func offerRejectedForTest(writer *rejectedRecordWriter) {
+	if writer.ReserveRejectedRecord() {
+		writer.OfferRejectedRecord(observability.RejectedRecord{})
+	}
+}
+
+func idleRejectedWriter(factory *rejectedRecordFactory, maxRows, queue int) *rejectedRecordWriter {
+	return &rejectedRecordWriter{
+		factory: factory, maxRows: maxRows, queue: make(chan observability.RejectedRecord, queue),
+		stop: make(chan struct{}), done: make(chan struct{}), now: time.Now,
+		profiles: map[observability.Bucket]redaction.Profile{},
+	}
+}
+
 func TestRejectedRecordWriterDropsAndCountsInsteadOfBlocking(t *testing.T) {
 	factory := &rejectedRecordFactory{}
-	writer := &rejectedRecordWriter{
-		factory: factory, maxRows: audit.RejectedRecordsMinRows,
-		queue: make(chan observability.RejectedRecord, 2),
-		stop:  make(chan struct{}), done: make(chan struct{}), now: time.Now,
-	}
-	writer.OfferRejectedRecord(observability.RejectedRecord{})
+	writer := idleRejectedWriter(factory, audit.RejectedRecordsMinRows, 2)
+	offerRejectedForTest(writer)
 	if stats := factory.counters.snapshot(); stats.DroppedStopping != 1 {
 		t.Fatalf("an inactive writer queued: %+v", stats)
 	}
@@ -189,17 +200,182 @@ func TestRejectedRecordWriterDropsAndCountsInsteadOfBlocking(t *testing.T) {
 	go func() {
 		defer close(done)
 		for index := 0; index < audit.RejectedRecordsMinRows+10; index++ {
-			writer.OfferRejectedRecord(observability.RejectedRecord{})
+			offerRejectedForTest(writer)
 		}
 	}()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("OfferRejectedRecord blocked on a full queue")
+		t.Fatal("a refused record blocked on a full queue")
 	}
+	// A full queue drops without using the run's rows: only queued rows count
+	// toward the cap.
 	stats := factory.counters.snapshot()
-	if len(writer.queue) != 2 || stats.DroppedQueue != uint64(audit.RejectedRecordsMinRows-2) || stats.DroppedRunCap != 10 {
-		t.Fatalf("queued=%d stats=%+v", len(writer.queue), stats)
+	if len(writer.queue) != 2 || writer.queued.Load() != 2 ||
+		stats.DroppedQueue != uint64(audit.RejectedRecordsMinRows+8) || stats.DroppedRunCap != 0 {
+		t.Fatalf("queued=%d reserved=%d stats=%+v", len(writer.queue), writer.queued.Load(), stats)
+	}
+}
+
+func TestRejectedRecordRunCapCountsQueuedRowsAndResetsPerGeneration(t *testing.T) {
+	factory := &rejectedRecordFactory{}
+	first := idleRejectedWriter(factory, audit.RejectedRecordsMinRows, rejectedRecordQueueItems)
+	first.accepting.Store(true)
+	for index := 0; index < audit.RejectedRecordsMinRows+10; index++ {
+		offerRejectedForTest(first)
+	}
+	if stats := factory.counters.snapshot(); len(first.queue) != audit.RejectedRecordsMinRows || stats.DroppedRunCap != 10 {
+		t.Fatalf("queued=%d stats=%+v", len(first.queue), stats)
+	}
+	// The next generation (a reload, or turning the key off and on) starts a
+	// new run with its own count.
+	second := idleRejectedWriter(factory, audit.RejectedRecordsMinRows, rejectedRecordQueueItems)
+	second.accepting.Store(true)
+	offerRejectedForTest(second)
+	if len(second.queue) != 1 {
+		t.Fatal("a new run inherited the previous run's cap")
+	}
+}
+
+// Every refused record offered while intake stops is either written or
+// counted as dropped: no offer can queue after Drain's final pass.
+func TestRejectedRecordDrainAccountsForEveryOffer(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	factory := &rejectedRecordFactory{store: dependencies.store, engine: dependencies.engine}
+	component, err := factory.Prepare(context.Background(),
+		runtimegraph.BuildInput{Config: runtimegraph.ConfigFromPlan(keepRejectedPlan(t, dependencies, true), false)},
+		&runtimegraph.Acquisitions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := component.(*rejectedRecordWriter)
+	writer.Activate()
+	defer observability.ClearRejectedRecordSink()
+	const producers, each = 8, 200
+	var wait sync.WaitGroup
+	for producer := 0; producer < producers; producer++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for index := 0; index < each; index++ {
+				if writer.ReserveRejectedRecord() {
+					writer.OfferRejectedRecord(observability.RejectedRecord{
+						Signal: observability.SignalLogs, Bucket: observability.BucketComplianceActivity,
+						Reason: observability.FamilyBuildConstraint, Body: map[string]any{},
+						FieldClasses: map[string]observability.FieldClass{},
+					})
+				}
+			}
+		}()
+	}
+	time.Sleep(2 * time.Millisecond)
+	if err := writer.Drain(lifecycleTestContext(t)); err != nil {
+		t.Fatal(err)
+	}
+	wait.Wait()
+	stats := factory.counters.snapshot()
+	total := stats.Stored + stats.WriteFailed + stats.DroppedQueue + stats.DroppedRunCap + stats.DroppedStopping
+	if total != producers*each || len(writer.queue) != 0 {
+		t.Fatalf("accounted %d of %d offers (queue left %d): %+v", total, producers*each, len(writer.queue), stats)
+	}
+	if count, _ := dependencies.store.CountRejectedRecords(t.Context()); uint64(count) != stats.Stored {
+		t.Fatalf("rows=%d stored=%d", count, stats.Stored)
+	}
+}
+
+func TestRejectedRecordWriterTrimsALoweredCapInBoundedBatches(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	rows := make([]audit.RejectedRecordRow, 0, audit.RejectedRecordMaxBatch)
+	for batch := 0; batch < 80; batch++ {
+		rows = rows[:0]
+		for index := 0; index < audit.RejectedRecordMaxBatch; index++ {
+			rows = append(rows, audit.RejectedRecordRow{Signal: "logs", ReasonCode: "constraint_violation"})
+		}
+		if err := dependencies.store.InsertRejectedRecords(t.Context(), rows, audit.RejectedRecordsMaxRows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer := idleRejectedWriter(&rejectedRecordFactory{store: dependencies.store}, audit.RejectedRecordsMinRows, 1)
+	writer.trimPause = time.Millisecond
+	writer.trim()
+	if count, _ := dependencies.store.CountRejectedRecords(t.Context()); count != audit.RejectedRecordsMinRows {
+		t.Fatalf("rows after trim=%d want %d", count, audit.RejectedRecordsMinRows)
+	}
+}
+
+const rejectedTestPrivateKey = "-----BEGIN PRIVATE KEY-----\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY-----"
+
+func rejectedSecretsRecord(bucket observability.Bucket) observability.RejectedRecord {
+	return observability.RejectedRecord{
+		Bucket: bucket, Reason: observability.FamilyBuildConstraint,
+		Body: map[string]any{
+			"gen_ai.prompt":           "please summarise the merger memo for project bluebird",
+			"defenseclaw.file.body":   "root:x:0:0:root:/root:/bin/bash\ndb_password_line_here",
+			"defenseclaw.key":         "key material\n" + rejectedTestPrivateKey,
+			"defenseclaw.hook.result": "success",
+		},
+		FieldClasses: map[string]observability.FieldClass{
+			"/gen_ai.prompt":           observability.FieldClassContent,
+			"/defenseclaw.file.body":   observability.FieldClassEvidence,
+			"/defenseclaw.key":         observability.FieldClassContent,
+			"/defenseclaw.hook.result": observability.FieldClassMetadata,
+		},
+	}
+}
+
+func TestRejectedRecordRedactionIsNeverLessThanTheBucketsLocalProfile(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	keep := true
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90, func(source *config.ObservabilityV8Source) {
+		source.Local.KeepRejectedRecords = &keep
+		source.Buckets = map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
+			observability.BucketComplianceActivity: {RedactionProfile: "strict"},
+		}
+	})
+	// A production engine holds the correlation key; without it the keyed
+	// detect transforms fail every dynamic field closed.
+	keyed, err := redaction.NewEngine(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &rejectedRecordFactory{store: dependencies.store, engine: keyed}
+	component, err := factory.Prepare(context.Background(),
+		runtimegraph.BuildInput{Config: runtimegraph.ConfigFromPlan(plan, false)}, &runtimegraph.Acquisitions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := component.(*rejectedRecordWriter)
+
+	strict := writer.row(rejectedSecretsRecord(observability.BucketComplianceActivity), time.Now())
+	for _, leaked := range []string{"BEGIN PRIVATE KEY", "AAAAAAAAAAAAAAAA", "root:x:0:0", "bluebird"} {
+		if bytes.Contains(strict.Payload, []byte(leaked)) {
+			t.Fatalf("a strict bucket kept %q: %s", leaked, strict.Payload)
+		}
+	}
+	if !bytes.Contains(strict.Payload, []byte(`"defenseclaw.hook.result":"success"`)) {
+		t.Fatalf("metadata lost: %s", strict.Payload)
+	}
+
+	// Another bucket keeps its default local profile (none): the store still
+	// applies sensitive, so the key is redacted while the prompt text stays.
+	var other observability.Bucket
+	for _, bucket := range observability.Buckets() {
+		if bucket != observability.BucketComplianceActivity {
+			other = bucket
+			break
+		}
+	}
+	sensitive := writer.row(rejectedSecretsRecord(other), time.Now())
+	if bytes.Contains(sensitive.Payload, []byte("BEGIN PRIVATE KEY")) || bytes.Contains(sensitive.Payload, []byte("AAAAAAAAAAAAAAAA")) {
+		t.Fatalf("sensitive kept the private key: %s", sensitive.Payload)
+	}
+	if !bytes.Contains(sensitive.Payload, []byte("bluebird")) {
+		t.Fatalf("sensitive is the documented floor; prompt text expected: %s", sensitive.Payload)
+	}
+	// An unknown bucket is kept at strict.
+	unknown := writer.row(rejectedSecretsRecord("not-a-bucket"), time.Now())
+	if bytes.Contains(unknown.Payload, []byte("bluebird")) {
+		t.Fatalf("an unresolvable bucket was not kept at strict: %s", unknown.Payload)
 	}
 }
 
@@ -209,7 +385,8 @@ func TestRejectedRecordWriterKeepsMetadataWhenThePayloadCannotBeKept(t *testing.
 		t.Fatal(err)
 	}
 	profile, _ := redaction.BuiltInProfile(redaction.ProfileSensitive)
-	writer := &rejectedRecordWriter{factory: &rejectedRecordFactory{engine: engine}, profile: profile, now: time.Now}
+	writer := &rejectedRecordWriter{factory: &rejectedRecordFactory{engine: engine}, sensitive: profile, now: time.Now,
+		profiles: map[observability.Bucket]redaction.Profile{}}
 	unclassified := writer.row(observability.RejectedRecord{
 		Reason: observability.FamilyBuildConstraint, Body: map[string]any{"a": "b"},
 	}, time.Now())

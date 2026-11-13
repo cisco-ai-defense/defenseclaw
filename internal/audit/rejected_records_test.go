@@ -58,6 +58,10 @@ func TestInsertRejectedRecordsKeepsTheNewestRowsUnderTheCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if count, _ := store.CountRejectedRecords(t.Context()); count != 150 {
+		t.Fatalf("insert trimmed: rows=%d, want all 150 until TrimRejectedRecords runs", count)
+	}
+	trimRejectedForTest(t, store, RejectedRecordsMinRows)
 	count, err := store.CountRejectedRecords(t.Context())
 	if err != nil || count != RejectedRecordsMinRows {
 		t.Fatalf("rows=%d err=%v, want the cap %d", count, err, RejectedRecordsMinRows)
@@ -222,5 +226,83 @@ func assertRejectedRecordRetentionBoundary(t *testing.T, store *Store) {
 	}
 	if before, equal, after := count("rejected-before"), count("rejected-equal"), count("rejected-after"); before != 0 || equal != 1 || after != 1 {
 		t.Errorf("rejected_records boundary before=%d equal=%d after=%d, want 0,1,1", before, equal, after)
+	}
+}
+
+func trimRejectedForTest(t *testing.T, store *Store, maxRows int) {
+	t.Helper()
+	for {
+		_, more, err := store.TrimRejectedRecords(t.Context(), maxRows, RejectedRecordTrimBatch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !more {
+			return
+		}
+	}
+}
+
+// Lowering the cap from 1000000 to 100 must not be one long delete holding
+// the writer: each call deletes at most its batch and says whether more is left.
+func TestTrimRejectedRecordsDeletesInBoundedBatches(t *testing.T) {
+	store, _ := newRetentionStores(t)
+	base := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	rows := make([]RejectedRecordRow, 0, RejectedRecordMaxBatch)
+	for batch := 0; batch < 70; batch++ {
+		rows = rows[:0]
+		for index := 0; index < RejectedRecordMaxBatch; index++ {
+			n := batch*RejectedRecordMaxBatch + index
+			rows = append(rows, rejectedTestRow(base.Add(time.Duration(n)*time.Millisecond), fmt.Sprintf("row-%04d", n)))
+		}
+		if err := store.InsertRejectedRecords(t.Context(), rows, RejectedRecordsMaxRows); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const total = 70 * RejectedRecordMaxBatch // 1120
+	first, more, err := store.TrimRejectedRecords(t.Context(), RejectedRecordsMinRows, RejectedRecordTrimBatch)
+	if err != nil || first != RejectedRecordTrimBatch || !more {
+		t.Fatalf("first trim deleted=%d more=%v err=%v", first, more, err)
+	}
+	second, more, err := store.TrimRejectedRecords(t.Context(), RejectedRecordsMinRows, RejectedRecordTrimBatch)
+	if err != nil || second != total-RejectedRecordsMinRows-RejectedRecordTrimBatch || more {
+		t.Fatalf("second trim deleted=%d more=%v err=%v", second, more, err)
+	}
+	if count, _ := store.CountRejectedRecords(t.Context()); count != RejectedRecordsMinRows {
+		t.Fatalf("rows=%d", count)
+	}
+	newest, _ := store.ListRejectedRecords(t.Context(), RejectedRecordQuery{Limit: 1})
+	if len(newest) != 1 || !strings.HasSuffix(newest[0].ErrorText, fmt.Sprintf("row-%04d", total-1)) {
+		t.Fatalf("trim removed the newest rows: %+v", newest)
+	}
+	for _, bad := range [][2]int{{0, 10}, {RejectedRecordsMinRows, 0}, {RejectedRecordsMinRows, RejectedRecordTrimBatch + 1}} {
+		if _, _, err := store.TrimRejectedRecords(t.Context(), bad[0], bad[1]); err == nil {
+			t.Fatalf("trim cap/batch %v accepted", bad)
+		}
+	}
+}
+
+// A Secure Client store keeps main's schema: no rejected_records table, and
+// retention still runs without it.
+func TestSecureClientStoreHasNoRejectedRecordsTable(t *testing.T) {
+	directory := t.TempDir()
+	store, err := NewStore(filepath.Join(directory, "audit.db"), WithSecureClientSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if present, err := tableExists(store.db, "rejected_records"); err != nil || present {
+		t.Fatalf("Secure Client store has rejected_records=%v err=%v", present, err)
+	}
+	judge, err := NewJudgeBodyStore(filepath.Join(directory, "judge_bodies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = judge.Close() })
+	reaper := newRetentionReaperAt(t, store, judge, 7, time.Now(), RetentionOptions{SecureClient: true}, retentionHooks{})
+	if _, err := reaper.Run(t.Context()); err != nil {
+		t.Fatalf("retention on a store without rejected_records: %v", err)
 	}
 }

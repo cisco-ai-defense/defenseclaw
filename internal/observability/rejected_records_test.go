@@ -14,9 +14,12 @@ import (
 // refused records too and may run beside this one.
 type recordingRejectedSink struct {
 	marker string
+	refuse bool
 	mu     sync.Mutex
 	got    []RejectedRecord
 }
+
+func (sink *recordingRejectedSink) ReserveRejectedRecord() bool { return !sink.refuse }
 
 func (sink *recordingRejectedSink) OfferRejectedRecord(record RejectedRecord) {
 	if requestID, _ := record.Body["defenseclaw.request.id"].(string); !strings.HasPrefix(requestID, sink.marker) {
@@ -165,4 +168,37 @@ func asFamilyBuildError(err error, target **FamilyBuildError) bool {
 		*target = typed
 	}
 	return ok
+}
+
+func TestRejectedRecordNoCopyWhenTheSinkRefusesTheReservation(t *testing.T) {
+	builder, _ := testFamilyBuilder(t)
+	sink := &recordingRejectedSink{marker: "rejected-reserve-", refuse: true}
+	uninstall := InstallRejectedRecordSink(sink)
+	defer uninstall()
+	if _, err := builder.BuildLogCompatHookDecision(rejectedTestHookDecision("rejected-reserve-1", "success")); err == nil {
+		t.Fatal("refused input was accepted")
+	}
+	if got := sink.records(); len(got) != 0 {
+		t.Fatalf("a refused reservation still offered %d records", len(got))
+	}
+}
+
+func TestRejectedRecordCaptureSkipsAMultiMegabyteValueBeforeCopying(t *testing.T) {
+	huge := strings.Repeat("x", 4<<20)
+	body, _, omitted := captureRejectedFamilyValues(
+		[]familyFieldDescriptor{{key: "big", fieldClass: FieldClassContent}, {key: "small", fieldClass: FieldClassMetadata}},
+		familyFieldValues{{key: "big", value: huge, present: true}, {key: "small", value: "ok", present: true}},
+	)
+	if _, kept := body["big"]; kept || body["small"] != "ok" || len(omitted) != 1 || omitted[0] != "big" {
+		t.Fatalf("body keys=%d omitted=%v", len(body), omitted)
+	}
+	allocs := testing.AllocsPerRun(5, func() {
+		captureRejectedFamilyValues(
+			[]familyFieldDescriptor{{key: "big", fieldClass: FieldClassContent}},
+			familyFieldValues{{key: "big", value: huge, present: true}},
+		)
+	})
+	if allocs > 12 {
+		t.Fatalf("an oversize value was copied: %.0f allocations", allocs)
+	}
 }
