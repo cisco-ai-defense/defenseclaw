@@ -2463,6 +2463,11 @@ func toolValueLineageSourceKindForSensitiveRead(
 		return 0, false
 	}
 	value := strings.ToLower(strings.ReplaceAll(selected, `\`, "/"))
+	// An identity is "<flavor>\x00<path>"; the credentials-file table reads
+	// the path (it refuses a value with a NUL byte).
+	if index := strings.LastIndexByte(value, 0); index >= 0 {
+		value = value[index+1:]
+	}
 	switch {
 	case matchesEnvironmentFile(value) || matchesProcEnvironCandidate(value):
 		return toolValueLineageSourceEnv, true
