@@ -128,6 +128,32 @@ func relayWorkdir(configured string) string {
 	return "/work"
 }
 
+// stateRoot is where launchers keep the private state of a project copy
+// (pull bundles, baselines, checkpoints; GAP-0163): a 0700 folder under the
+// relay user's home, outside the working directory, so it is not in the
+// folder the agent works in or lists. "" (the launcher then uses a folder
+// beside the copy) when there is no such home or it is inside the
+// working directory. The agent runs as the same user, so it could still
+// read it on purpose; that is a documented limit.
+func (s *Server) stateRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil || !filepath.IsAbs(home) || filepath.Clean(home) == "/" {
+		return ""
+	}
+	work := filepath.Clean(relayWorkdir(s.opts.Config.Relay.Workdir))
+	d := filepath.Join(home, ".local", "state", "defenseclaw", "copies")
+	if d == work || strings.HasPrefix(d, work+string(filepath.Separator)) || strings.HasPrefix(work, d+string(filepath.Separator)) {
+		return ""
+	}
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return ""
+	}
+	if fi, err := os.Lstat(d); err != nil || !fi.IsDir() || fi.Mode().Perm()&0o077 != 0 {
+		return ""
+	}
+	return d
+}
+
 // projectDir checks the directory a person asks the agent to start in (the
 // copy of their project, GAP-0163): a directory inside the relay working
 // directory. "" means the working directory itself.

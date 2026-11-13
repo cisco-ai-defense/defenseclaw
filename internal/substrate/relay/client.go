@@ -37,6 +37,10 @@ type AttachOptions struct {
 	// every route is BaseURL + "/" + route. Without it BaseURL is the relay
 	// origin and the routes are under Prefix.
 	FlatRoutes bool
+	// OnUnsent sees the size of every chunk of input that was read but
+	// could not be sent because the connection ended (GAP-0003), so the
+	// caller can say so instead of losing keys silently.
+	OnUnsent func(n int)
 	// Dir is the folder in the actor the agent starts in when it is not
 	// running yet (the copy of the project); "" keeps the relay default.
 	Dir string
@@ -172,7 +176,9 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		}()
 	}
 	detached := make(chan bool, 1)
-	go func() { detached <- pumpInput(in, func(b []byte) error { return send(Encode(FrameData, b)) }) }()
+	go func() {
+		detached <- pumpInput(in, o.unsentTracked(func(b []byte) error { return send(Encode(FrameData, b)) }))
+	}()
 	select {
 	case <-done:
 	case d := <-detached:
@@ -295,7 +301,9 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 		}()
 	}
 	detached := make(chan bool, 1)
-	go func() { detached <- pumpInput(in, func(b []byte) error { return send(Encode(FrameData, b)) }) }()
+	go func() {
+		detached <- pumpInput(in, o.unsentTracked(func(b []byte) error { return send(Encode(FrameData, b)) }))
+	}()
 	select {
 	case <-done:
 	case d := <-detached:
@@ -312,6 +320,17 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	resMu.Lock()
 	defer resMu.Unlock()
 	return res, nil
+}
+
+// unsentTracked wraps send so a chunk that fails is reported (OnUnsent).
+func (o AttachOptions) unsentTracked(send func([]byte) error) func([]byte) error {
+	return func(b []byte) error {
+		err := send(b)
+		if err != nil && o.OnUnsent != nil && len(b) > 0 {
+			o.OnUnsent(len(b))
+		}
+		return err
+	}
 }
 
 // routeBase is where the routes begin for origin (BaseURL, or its ws:// form).

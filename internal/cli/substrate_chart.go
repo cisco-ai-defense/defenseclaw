@@ -155,6 +155,14 @@ func init() {
 				}
 				return setup.EnsureChainKey(ctx, plan, kube)
 			}),
+		substrateChartStep("relay-session", "Create the relay session key Secret when it does not exist",
+			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
+				kube, err := substrateChartKube()
+				if err != nil {
+					return setup.StepReport{Step: "relay-session"}, err
+				}
+				return setup.EnsureRelaySessionKey(ctx, plan, kube)
+			}),
 		substrateChartStep("pre-delete", "Remove DefenseClaw-written egress policies and grants before uninstall",
 			func(ctx context.Context, plan setup.ChartPlan) (setup.StepReport, error) {
 				kube, err := substrateChartKube()

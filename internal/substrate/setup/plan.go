@@ -46,6 +46,9 @@ type ChartPlan struct {
 	// Kubernetes sign-in (GAP-0153); "" when there is none. The uninstall
 	// names it among what goes.
 	AuthDelegatorBinding string `json:"auth_delegator_binding,omitempty"`
+	// RelaySessionSecret is the relay session key Secret the relay-session
+	// hook creates when absent (gateway.relaySessionSecret).
+	RelaySessionSecret string `json:"relay_session_secret,omitempty"`
 }
 
 // PlanAPI is the ate-api-server address and token audience.

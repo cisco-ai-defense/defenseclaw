@@ -284,6 +284,35 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	return t, nil
 }
 
+// substrateNoWorkerMessage says the pool is full (GAP-0167), how many of the
+// person's own agents hold a worker, and how to free one.
+func substrateNoWorkerMessage(ctx context.Context, s *substrateSession) string {
+	msg := "the cluster has no free worker for a new agent right now; nothing was started."
+	actors, err := s.Client.List(ctx, api.ListOptions{})
+	if err != nil {
+		return msg + " " + substrateNoWorkerNext
+	}
+	var running []string
+	for _, a := range actors {
+		if !a.Deleted && (a.State == "running" || a.State == "resuming") {
+			running = append(running, a.Name)
+		}
+	}
+	switch len(running) {
+	case 0:
+		return msg + " None of your agents are running, so the pool is busy with other work; try again later or ask your administrator for more workers."
+	case 1:
+		return msg + " 1 of your agents is running (" + running[0] + "). " + substrateNoWorkerNext
+	}
+	shown := running
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	return msg + fmt.Sprintf(" %d of your agents are running (%s). ", len(running), strings.Join(shown, ", ")) + substrateNoWorkerNext
+}
+
+const substrateNoWorkerNext = "Free a worker with: defenseclaw substrate delete NAME (see them all with defenseclaw substrate list), or ask your administrator for more workers."
+
 func substrateFirst(v ...string) string {
 	for _, s := range v {
 		if strings.TrimSpace(s) != "" {
@@ -309,6 +338,9 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	}
 	a, err = s.Client.Create(ctx, req)
 	if err != nil {
+		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
+			return a, withExitCode(errors.New(substrateNoWorkerMessage(ctx, s)), substrateAPIExit(e))
+		}
 		return a, substrateFail(err)
 	}
 	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))

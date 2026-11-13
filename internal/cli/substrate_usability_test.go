@@ -132,3 +132,25 @@ func TestSubstrateNoFreeWorkerMessage(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0167: the message counts the person own running agents.
+func TestSubstrateNoWorkerCountsRunningAgents(t *testing.T) {
+	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
+		"GET actors": jsonReply(map[string]any{"actors": []map[string]any{
+			{"atespace": "eng-web", "name": "a1", "state": "running"},
+			{"atespace": "eng-web", "name": "a2", "state": "running"},
+			{"atespace": "eng-web", "name": "a3", "state": "suspended"},
+		}}),
+	}}
+	useFakeAdmin(t, f)
+	s, err := substrateOpen(nil, &substrateCommon{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := substrateNoWorkerMessage(t.Context(), s)
+	for _, want := range []string{"no free worker", "nothing was started", "2 of your agents are running (a1, a2)", "defenseclaw substrate delete NAME"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("%q lacks %q", msg, want)
+		}
+	}
+}

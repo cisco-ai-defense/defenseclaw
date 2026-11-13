@@ -48,17 +48,7 @@ helm upgrade defenseclaw ... --set bootstrap.ownerTokenSecret=ate-bootstrap-owne
 
 Without a token, `defenseclaw substrate setup --print-access-policies` prints the policies for an admin to apply.
 
-People attach to their agents with a short-lived session token the gateway signs. Make its key pair once and store it where the gateway reads it:
-
-```bash
-openssl ecparam -name prime256v1 -genkey -noout -out private.pem
-openssl ec -in private.pem -pubout -out relay-session.pub
-kubectl -n defenseclaw-system create secret generic defenseclaw-relay-session \
-  --from-file=private.pem --from-file=public.pem=relay-session.pub
-rm private.pem
-```
-
-Keep `relay-session.pub`: every agent image is built with it.
+The chart creates the key pair that signs attach sessions (Secret `defenseclaw-relay-session`); build every agent image with its public half, `kubectl -n defenseclaw-system get secret defenseclaw-relay-session -o jsonpath='{.data.public\.pem}' | base64 -d > relay-session.pub`.
 
 </Step>
 

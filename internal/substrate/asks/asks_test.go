@@ -115,3 +115,19 @@ func TestCloseActorEndsItsAsks(t *testing.T) {
 	}
 	_ = other
 }
+
+// TST-0306 live finding: an expired host ask names its host in the
+// decisions view (it was empty; only tool asks had a target).
+func TestExpiredAskDecisionNamesTheHost(t *testing.T) {
+	now := time.Now()
+	s := NewMemory()
+	s.Now = func() time.Time { return now }
+	ctx := context.Background()
+	_, _ = s.OpenAsk(ctx, Ask{Atespace: "eng-web", Actor: "a1", UID: "u1", OwnerID: "o", Host: "files.pythonhosted.org", TimeoutSeconds: 60})
+	now = now.Add(61 * time.Second)
+	_, _ = s.List(ctx, ListRequest{OwnerID: "o"})
+	ds, _ := s.Decisions(ctx, ListRequest{OwnerID: "o"})
+	if len(ds) != 1 || ds[0].Verdict != StateExpired || ds[0].Tool != "files.pythonhosted.org" {
+		t.Fatalf("decisions %+v", ds)
+	}
+}

@@ -30,7 +30,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/skilldigest"
 )
 
 // Skill folders that arrive without a tool call (GAP-0039, A9's design):
@@ -77,31 +77,48 @@ type SubstrateQuarantine struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// substrateSkillFolders groups the attached skill files by folder:
-// <root>/skills/<name>, the folder the kit attached.
+// substrateSkillFolders groups the attached skill files by the folders the
+// kit listed as attached (facts.skills), so a skill folder's own subfolder
+// named "skills" or a plugin's skills root groups the same way.
 func substrateSkillFolders(f *SubstrateFacts) map[string][]SubstrateAttachedFile {
 	if f == nil {
 		return nil
 	}
 	out := map[string][]SubstrateAttachedFile{}
+	for _, fp := range f.Skills {
+		if fp.Attached && !fp.Over {
+			out[path.Clean("/"+strings.TrimPrefix(fp.Path, "/"))] = nil
+		}
+	}
 	for _, file := range f.Files {
 		if file.Role != substrateSkillRoleFile {
 			continue
 		}
 		p := path.Clean("/" + strings.TrimPrefix(file.Path, "/"))
-		i := strings.LastIndex(p, "/skills/")
-		if i < 0 {
-			continue
+		best := ""
+		for dir := range out {
+			if strings.HasPrefix(p, dir+"/") && len(dir) > len(best) {
+				best = dir
+			}
 		}
-		rest := p[i+len("/skills/"):]
-		name, _, _ := strings.Cut(rest, "/")
-		if name == "" || name == "." || name == ".." {
-			continue
+		if best != "" {
+			out[best] = append(out[best], file)
 		}
-		dir := p[:i] + "/skills/" + name
-		out[dir] = append(out[dir], file)
 	}
 	return out
+}
+
+// substrateRefuseOrAlert applies the fail mode to a folder DefenseClaw could
+// not scan (GAP-0039, GAP-0164): managed installs and the strict tier refuse
+// it with a HIGH alert, the OSS default tiers alert (MEDIUM). It returns the
+// quarantine entry, or nil when the folder is allowed.
+func (st *substrateState) substrateRefuseOrAlert(ctx context.Context, connector, dir, why string, f *SubstrateFacts) *SubstrateQuarantine {
+	if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
+		st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: "+why, dir, f, nil)
+		return &SubstrateQuarantine{Path: dir, Reason: why + "; this install refuses skills it could not scan"}
+	}
+	st.alertOnce(ctx, "MEDIUM", "Substrate skill folder allowed unscanned: "+why, dir, f, nil)
+	return nil
 }
 
 // substrateScanSkills scans the attached folders and returns the ones to
@@ -109,9 +126,25 @@ func substrateSkillFolders(f *SubstrateFacts) map[string][]SubstrateAttachedFile
 // blocks the folder: the kit attached it because the model would see it
 // next (fail closed, as the runtime scan does for an incomplete folder).
 func (st *substrateState) substrateScanSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned) {
-	folders := substrateSkillFolders(f)
-	if len(folders) == 0 || st.cfg.Skills == nil {
+	if f == nil || st.cfg.Skills == nil {
 		return nil, nil
+	}
+	var out []SubstrateQuarantine
+	// A folder past a kit cap (too many, too deep or too big files, or the
+	// root's folders past the listing cap) has no digest and cannot be
+	// scanned whole: the fail mode decides (GAP-0039).
+	for _, fp := range f.Skills {
+		if fp.Over {
+			dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the skill folder is larger than DefenseClaw scans (more files, deeper or bigger files than the kit attaches)", f); q != nil {
+				out = append(out, *q)
+			}
+		}
+	}
+	folders := substrateSkillFolders(f)
+	listedFP := map[string]string{}
+	for _, fp := range f.Skills {
+		listedFP[path.Clean("/"+strings.TrimPrefix(fp.Path, "/"))] = fp.FP
 	}
 	dirs := make([]string, 0, len(folders))
 	for d := range folders {
@@ -119,30 +152,35 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 	}
 	sort.Strings(dirs)
 	trusted := st.templateSkillDigests(ctx)
-	var out []SubstrateQuarantine
-	passed := map[string]bool{}
+	passed := map[string]string{} // folder -> the digest it passed with
 	for i, dir := range dirs {
 		if i >= substrateSkillFoldersMax {
 			break
 		}
+		// The receipt binds the content the gateway saw: its own digest of
+		// the attached files must be the fingerprint the kit listed, so a
+		// folder whose files did not all come (or came cut) gets none.
+		d := substrateSkillFolderDigest(dir, folders[dir])
+		if d == "" || d != listedFP[dir] {
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the attached files are not the whole skill folder", f); q != nil {
+				out = append(out, *q)
+			}
+			continue
+		}
 		// GAP-0164: a folder that is exactly what the attested template build
 		// scanned and admitted is trusted from the attestation.
-		if d := substrateSkillFolderDigest(dir, folders[dir]); d != "" && trusted[d] {
-			passed[dir] = true
+		if trusted[d] {
+			passed[dir] = d
 			continue
 		}
 		blocked, reason, err := st.cfg.Skills.ScanSkillFolder(ctx, path.Base(dir), dir, folders[dir])
 		switch {
 		case errors.Is(err, ErrSubstrateSkillScannerUnavailable):
-			// No scanner can run here: the fail mode decides (managed and
-			// strict refuse, OSS default tiers allow), never silently.
-			if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
-				blocked, reason = true, "no skill scanner can run in the gateway, and this install refuses unscanned skills"
-				st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: no skill scanner can run in the gateway", dir, f, err)
-			} else {
-				st.alertOnce(ctx, "MEDIUM", "Substrate skill folder allowed unscanned: no skill scanner can run in the gateway", dir, f, err)
-				continue // allowed, but no receipt: it is not scanned
+			// No scanner can run here: the fail mode decides, never silently.
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "no skill scanner can run in the gateway", f); q != nil {
+				out = append(out, *q)
 			}
+			continue
 		case err != nil:
 			blocked, reason = true, "the skill scan could not complete"
 			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: the skill scan could not complete", dir, f, err)
@@ -152,21 +190,20 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 		if blocked {
 			out = append(out, SubstrateQuarantine{Path: dir, Reason: reason})
 		} else {
-			passed[dir] = true
+			passed[dir] = d
 		}
 	}
 	if len(out) > 0 {
-		st.logRefusal("%d attached skill folder(s) blocked by the runtime skill scan", len(out))
+		st.logRefusal("%d skill folder(s) refused", len(out))
 	}
 	// A receipt for each folder that passed, bound to the actor, the folder
-	// and the fingerprint the kit listed with its files: any replica that
-	// shares the receipt key accepts it in a later post (GAP-0039).
+	// and the content digest the gateway computed: any replica that shares
+	// the receipt key accepts it in a later post (GAP-0039).
 	var scanned []SubstrateScanned
-	if actor, ok := substrateActorFrom(ctx); ok && f != nil {
-		for _, fp := range f.Skills {
-			dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
-			if fp.Attached && fp.FP != "" && passed[dir] {
-				scanned = append(scanned, SubstrateScanned{Path: dir, FP: fp.FP, Receipt: st.skillReceipt(actor.UID, dir, fp.FP)})
+	if actor, ok := substrateActorFrom(ctx); ok {
+		for _, dir := range dirs {
+			if d, ok := passed[dir]; ok {
+				scanned = append(scanned, SubstrateScanned{Path: dir, FP: d, Receipt: st.skillReceipt(actor.UID, dir, d)})
 			}
 		}
 	}
@@ -200,7 +237,7 @@ func (st *substrateState) templateSkillDigests(ctx context.Context) map[string]b
 	return out
 }
 
-// substrateSkillFolderDigest is attest.SkillFolderDigest over the folder's
+// substrateSkillFolderDigest is skilldigest.Digest over the folder's
 // attached files, computed from their content (the kit's sha256 is a claim).
 // A folder with a cut file is never matched.
 func substrateSkillFolderDigest(dir string, files []SubstrateAttachedFile) string {
@@ -216,7 +253,7 @@ func substrateSkillFolderDigest(dir string, files []SubstrateAttachedFile) strin
 		}
 		m[rel] = f.Content
 	}
-	return attest.SkillFolderDigest(m)
+	return skilldigest.Digest(m)
 }
 
 // alertOnce raises one audit alert per actor, folder, fingerprint and
@@ -249,8 +286,24 @@ func (st *substrateState) alertOnce(ctx context.Context, severity, summary, dir 
 	st.alert(ctx, severity, summary, details)
 }
 
-// substrateAlertMemory bounds alertOnce's memory.
+// substrateAlertMemory bounds alertOnce's and pendingPosts' memory.
 const substrateAlertMemory = 10000
+
+// substrateSkillMaxPending is how many posts a folder may stay pending.
+const substrateSkillMaxPending = 8
+
+// pendingPosts counts the posts in which a folder fingerprint stayed pending
+// on this replica (bounded memory).
+func (st *substrateState) pendingPosts(uid, dir, fp string) int {
+	key := uid + "\x00" + dir + "\x00" + fp
+	st.alertMu.Lock()
+	defer st.alertMu.Unlock()
+	if st.pending == nil || len(st.pending) >= substrateAlertMemory {
+		st.pending = map[string]int{}
+	}
+	st.pending[key]++
+	return st.pending[key]
+}
 
 // SubstrateUnscanned is one entry of the substrate_unscanned field.
 type SubstrateUnscanned struct {
@@ -291,8 +344,9 @@ func (st *substrateState) skillReceiptOK(uid, dir, fp, receipt string) bool {
 //     tier the folder is refused (quarantined, so the agent cannot load or
 //     use it), and in the OSS default tiers it raises an alert.
 //
-// A folder whose files did not fit (truncated) is pending, not refused: it
-// is attached in a later post. Without a receipt key every replica shares,
+// A folder whose files did not fit (truncated) is pending, not refused, for
+// at most substrateSkillMaxPending posts (per replica); then it counts as
+// one the kit had room for. Without a receipt key every replica shares,
 // a receipt from another replica cannot be checked, so a folder that has one
 // is only named, never refused.
 func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateUnscanned, []SubstrateQuarantine) {
@@ -311,7 +365,15 @@ func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connecto
 			continue
 		}
 		out = append(out, SubstrateUnscanned{Path: dir, FP: fp.FP})
-		if f.Truncated || (fp.Receipt != "" && !st.receiptShared) {
+		if fp.Receipt != "" && !st.receiptShared {
+			continue
+		}
+		// A folder that did not fit is pending, for a bounded number of
+		// posts: the kit rotates pending folders least recently attached
+		// first, so one still pending after substrateSkillMaxPending posts
+		// is being kept out (folders that change on every call, an edited
+		// rotation): it counts as one the kit had room for.
+		if f.Truncated && st.pendingPosts(actor.UID, dir, fp.FP) <= substrateSkillMaxPending {
 			continue
 		}
 		block := st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector)

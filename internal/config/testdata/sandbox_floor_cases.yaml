@@ -506,6 +506,62 @@ cases:
           contractors:
             sandbox: {unattended_asks: allow}
 
+  - name: profile-ask-keys
+    valid: true
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox:
+              ask_hosts: [uploads.example.com, "*.files.example.com"]
+              url_rules:
+                - {name: no-admin, hosts: [api.example.com], methods: [POST], path_prefix: /admin/, action: deny}
+                - {hosts: [api.example.com], path_prefix: /releases, action: ask}
+
+  - name: profile-invalid-ask-host
+    valid: false
+    error: 'sandbox.ask_hosts[0]: "Uploads.Example.com" must be a lower-case host name or "*.<host>"'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {ask_hosts: [Uploads.Example.com]}
+
+  - name: profile-url-rule-allow-refused
+    valid: false
+    error: 'sandbox.url_rules[0].action "allow" must be one of deny, ask'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox:
+              url_rules:
+                - {hosts: [api.example.com], action: allow}
+
+  - name: profile-url-rule-ambiguous-prefix
+    valid: false
+    error: 'sandbox.url_rules[0].path_prefix "/admin/../x" must start with "/" and have no percent sign, semicolon, backslash or dot segment'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox:
+              url_rules:
+                - {hosts: [api.example.com], path_prefix: /admin/../x, action: deny}
+
+  - name: admin-ask-hosts-refused
+    valid: false
+    error: "openshell: admin.ask_hosts is an Agent Substrate key; set it in substrate.admin or a guardrail profile's sandbox section"
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          ask_hosts: [uploads.example.com]
+
   - name: profile-invalid-actor-secret
     valid: false
     error: 'sandbox.actor_secrets[0]: "../etc/passwd" must be a secret key (letters, digits, ".", "_" and "-")'
