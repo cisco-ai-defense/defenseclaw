@@ -1531,7 +1531,8 @@ rules:
     tool_call_only: true
     # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
     # internal/actionfacts selects this rule; the regex is inert.
-    pattern: 'a^'
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 's7-inert-exec-escaped-binary-write^'
     title: "Binary bytes written to a file through shell escapes"
     severity: HIGH
     confidence: 0.9
@@ -1540,7 +1541,8 @@ rules:
     tool_call_only: true
     # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
     # internal/actionfacts selects this rule; the regex is inert.
-    pattern: 'a^'
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 's7-inert-account-literal-password-change-via-stdin^'
     title: "Account password set from literal stdin"
     severity: HIGH
     confidence: 0.9
@@ -1549,7 +1551,8 @@ rules:
     tool_call_only: true
     # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
     # internal/actionfacts selects this rule; the regex is inert.
-    pattern: 'a^'
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 's7-inert-exec-download-then-run-fetched-file^'
     title: "File fetched from a bare IP address and then run"
     severity: HIGH
     confidence: 0.9
@@ -1558,7 +1561,8 @@ rules:
     tool_call_only: true
     # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
     # internal/actionfacts selects this rule; the regex is inert.
-    pattern: 'a^'
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 's7-inert-source-control-clone-then-run-or-adhoc-push^'
     title: "Git clone whose files are then run, or push to an ad-hoc remote"
     severity: MEDIUM
     confidence: 0.8
@@ -1567,7 +1571,8 @@ rules:
     tool_call_only: true
     # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
     # internal/actionfacts selects this rule; the regex is inert.
-    pattern: 'a^'
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 's7-inert-exec-inline-code-network-and-exec^'
     title: "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL"
     severity: HIGH
     confidence: 0.85
