@@ -293,10 +293,8 @@ type egressWorker struct {
 	closed  bool
 }
 
-func (s *Service) startEgressWorker() { s.startEgressWorkerWith(s.recordEgress) }
-
-// startEgressWorkerWith runs the worker with record (tests slow it down).
-func (s *Service) startEgressWorkerWith(record func(context.Context, EgressRequest) error) {
+// startEgressWorker runs the worker.
+func (s *Service) startEgressWorker() {
 	w := &egressWorker{ch: make(chan egressRecord, egressQueueSize), done: make(chan struct{})}
 	s.egress = w
 	go func() {
@@ -327,7 +325,7 @@ func (s *Service) startEgressWorkerWith(record func(context.Context, EgressReque
 				if r.sync {
 					err = s.warmMemo(ctx, r.actor)
 				} else {
-					err = record(ctx, r.in)
+					err = s.recordEgress(ctx, r.in)
 				}
 				if err != nil {
 					s.warnf("chain worker for %s/%s: %v", r.actor.Atespace, r.actor.UID, err)
