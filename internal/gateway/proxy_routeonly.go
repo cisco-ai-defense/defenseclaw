@@ -175,6 +175,13 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !caller.Verified {
 		// Never the credential or a header value: the connector and why.
 		fmt.Fprintf(os.Stderr, "[routing] route-only refused connector=%s reason=%s\n", connector, caller.Reason)
+		if caller.Reason == routeCallerPeerLookupLimited {
+			// A burst of new connections over the account own lookup bound:
+			// agents retry a 429.
+			w.Header().Set("Retry-After", "1")
+			routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", routeCallerRefusalText(caller.Reason))
+			return
+		}
 		routeOnlyError(w, http.StatusUnauthorized, "authentication_error", routeCallerRefusalText(caller.Reason))
 		return
 	}

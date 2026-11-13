@@ -41,6 +41,7 @@ const (
 	routeCallerAuthorizerUnavailable = "authorizer_unavailable"
 	routeCallerPeerUnverified        = "peer_unverified"
 	routeCallerPeerBrokerUnavailable = "peer_broker_unavailable"
+	routeCallerPeerLookupLimited     = "peer_lookup_limited"
 	routeCallerPeerMismatch          = "peer_mismatch"
 	routeCallerRoot                  = "root"
 	routeCallerServiceAccount        = "service_account"
@@ -193,7 +194,10 @@ func decideWindowsRouteCaller(in routeCallerInputs) routeCaller {
 		return unverifiedRoute(routeCallerCredentialInvalid)
 	}
 	if in.PeerSIDErr != nil {
-		if errors.Is(in.PeerSIDErr, peerbroker.ErrUnavailable) {
+		switch {
+		case errors.Is(in.PeerSIDErr, errRoutePeerLookupLimited):
+			return unverifiedRoute(routeCallerPeerLookupLimited)
+		case errors.Is(in.PeerSIDErr, peerbroker.ErrUnavailable):
 			return unverifiedRoute(routeCallerPeerBrokerUnavailable)
 		}
 		return unverifiedRoute(routeCallerPeerUnverified)
@@ -293,12 +297,19 @@ func (p *acpConnPeer) lookupSID(ctx context.Context, ask routePeerAsk) (string, 
 // of a loopback connection this gateway accepted (managed Windows, S1 Q7
 // lead ruling: the gateway gets no SeDebugPrivilege and has no in-process
 // fallback; an error that wraps peerbroker.ErrUnavailable means no trusted
-// broker answered, and the caller is unverified). Replaceable in tests.
+// broker answered, and the caller is unverified). Each identity has its own
+// bound on lookups (routePeerLookups, REVIEW-code-winroute P3-2), so one
+// account cannot hold every broker slot. Replaceable in tests.
 var routePeerSID = func(ctx context.Context, ask routePeerAsk, local, remote *net.TCPAddr) (string, error) {
 	client, err := routePeerBrokerClient(ask.DataDir)
 	if err != nil {
 		return "", err
 	}
+	release, err := routePeerLookups.acquire(ctx, ask.Identity)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	identity, err := client.Lookup(ctx, local, remote)
 	if err != nil {
 		return "", err
@@ -520,6 +531,8 @@ func routeCallerRefusalText(reason string) string {
 		return "the caller is not the account this gateway runs as"
 	case routeCallerCredentialMismatch, routeCallerPeerMismatch:
 		return "the route credential belongs to another account"
+	case routeCallerPeerLookupLimited:
+		return "too many new connections from this account at once; retry shortly"
 	default:
 		return "this account is not verified for routing through DefenseClaw (" + reason + "); run defenseclaw doctor"
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed/peerbroker"
@@ -130,5 +131,80 @@ func TestManagedWindowsRouteCallerAsksTheBrokerOnlyWithAValidCredential(t *testi
 	}
 	if got := api.verifiedRouteCaller(r, "codex", false, ""); got.Verified || got.Reason != routeCallerPeerBrokerUnavailable || asked != 1 {
 		t.Fatalf("proxy caller = %+v after %d broker calls; want one call and %s", got, asked, routeCallerPeerBrokerUnavailable)
+	}
+}
+
+// TestRoutePeerLookupLimiterBoundsOneIdentity: one identity gets at most
+// routePeerLookupInFlight lookups at once and routePeerLookupBurst in a
+// burst; another identity is not affected (REVIEW-code-winroute P3-2).
+func TestRoutePeerLookupLimiterBoundsOneIdentity(t *testing.T) {
+	l := &routePeerLimiter{}
+	short := func() context.Context {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		t.Cleanup(cancel)
+		return ctx
+	}
+	var releases []func()
+	for i := 0; i < routePeerLookupInFlight; i++ {
+		release, err := l.acquire(context.Background(), "S-1-5-21-1-2-3-1001")
+		if err != nil {
+			t.Fatalf("lookup %d refused: %v", i, err)
+		}
+		releases = append(releases, release)
+	}
+	if _, err := l.acquire(short(), "S-1-5-21-1-2-3-1001"); !errors.Is(err, errRoutePeerLookupLimited) {
+		t.Fatalf("lookup over the in-flight cap = %v; want limited", err)
+	}
+	other, err := l.acquire(short(), "S-1-5-21-1-2-3-1002")
+	if err != nil {
+		t.Fatalf("another account was limited: %v", err)
+	}
+	other()
+	for _, release := range releases {
+		release()
+	}
+	// The burst: 40 lookups in a row pass (one agent opening many
+	// connections), the next waits for the rate and a short wait fails.
+	for i := routePeerLookupInFlight + 1; i < routePeerLookupBurst; i++ {
+		release, err := l.acquire(context.Background(), "S-1-5-21-1-2-3-1001")
+		if err != nil {
+			t.Fatalf("burst lookup %d refused: %v", i, err)
+		}
+		release()
+	}
+	// The bucket refills at routePeerLookupRate a second, so a slow run may
+	// pass a few more; lookups in a row without a wait are refused soon.
+	limited := false
+	for i := 0; i < 100 && !limited; i++ {
+		release, err := l.acquire(short(), "S-1-5-21-1-2-3-1001")
+		if errors.Is(err, errRoutePeerLookupLimited) {
+			limited = true
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+	}
+	if !limited {
+		t.Fatal("lookups over the burst were never limited")
+	}
+	release, err := l.acquire(context.Background(), "S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatalf("a lookup within the wait was refused: %v", err)
+	}
+	release()
+}
+
+// TestManagedWindowsRouteCallerLimitedIsItsOwnReason: a lookup over the
+// account bound is unverified with its own reason (429 on /r/), not a
+// broker outage.
+func TestManagedWindowsRouteCallerLimitedIsItsOwnReason(t *testing.T) {
+	in := routeCallerInputs{Managed: true, Windows: true, Connector: "codex", RequireCredential: true, CredentialIdentity: "S-1-5-21-1-2-3-1001", PeerSIDErr: errRoutePeerLookupLimited}
+	if got := decideRouteCaller(in); got.Verified || got.Reason != routeCallerPeerLookupLimited {
+		t.Fatalf("decide = %+v; want %s", got, routeCallerPeerLookupLimited)
+	}
+	if text := routeCallerRefusalText(routeCallerPeerLookupLimited); !strings.Contains(text, "retry") {
+		t.Fatalf("refusal text %q", text)
 	}
 }
