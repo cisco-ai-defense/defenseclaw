@@ -104,6 +104,10 @@ type ScanVerdict struct {
 	// judge (cascade 2): the hook lane maps it with the ask armed
 	// (decisionModelConfirmAction). In-process only.
 	decisionConfirm bool
+	// reviewOnly marks a tool-judge verdict whose only finding is one
+	// needs_review category (MEDIUM, nothing actionable): audit-only in the
+	// default pack when the rules did not flag the call (judgeReviewOnlyAudit).
+	reviewOnly bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

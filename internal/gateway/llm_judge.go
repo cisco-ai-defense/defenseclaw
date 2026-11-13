@@ -2463,11 +2463,12 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
 	}
 	return &ScanVerdict{
-		Action:   action,
-		Severity: severity,
-		Reason:   reason,
-		Findings: findings,
-		Scanner:  "llm-judge-tool",
+		Action:     action,
+		Severity:   severity,
+		Reason:     reason,
+		Findings:   findings,
+		Scanner:    "llm-judge-tool",
+		reviewOnly: severity == "MEDIUM" && len(findings) == 1 && actionableSignals == 0,
 	}
 }
 

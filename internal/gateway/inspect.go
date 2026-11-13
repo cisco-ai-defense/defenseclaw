@@ -2003,7 +2003,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		resume := yieldHookRunSlot(ctx)
 		v := call(ctx)
 		resume()
-		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	}
 
 	// A bounded action hook cancels the model request when its answer
@@ -2044,7 +2044,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	defer resume()
 	select {
 	case v := <-done:
-		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
+		return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
 	case <-wait.C:
 	case <-ctx.Done():
 	}
@@ -2171,6 +2171,30 @@ func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strat
 // hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
 // the judge gave none (the caller keeps the regex/AID verdict), else v with
 // its action set by the connector block_at / alert_at.
+// judgeReviewOnlyAudit makes a lone review finding of the tool judge audit
+// only in the default pack (owner decision 2026-11-13, GAP-0045): when the
+// judge's only finding is one needs_review category (MEDIUM, nothing
+// actionable) and the rules did not flag the call, the call is allowed. The
+// finding stays on the verdict, so the hook records it (the judge event and
+// the scan finding rows) without an alert. Strict and permissive keep their
+// levels, a call the rules flagged keeps the alert, and HIGH and CRITICAL
+// judge verdicts are unchanged. Secure Client keeps the judge action.
+func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool, v *ScanVerdict) *ScanVerdict {
+	if v == nil || !v.reviewOnly || ruleFlagged || cfg == nil || cfg.SecureClientIntegration() {
+		return v
+	}
+	if guardrailPackPosture(&cfg.Guardrail, cfg.Guardrail.EffectiveRulePackRef(connector)) != "default" {
+		return v
+	}
+	if normalizedGuardrailAction(v.Action) != guardrailActionAlert {
+		return v
+	}
+	out := *v
+	out.Action = guardrailActionAllow
+	out.Reason = strings.TrimSpace(out.Reason + " (audit only: a lone review finding of the judge in the default pack)")
+	return &out
+}
+
 func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection string, v *ScanVerdict) *ScanVerdict {
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
