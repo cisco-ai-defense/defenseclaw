@@ -52,7 +52,7 @@ Metrics:
 
 ## Run
 
-On defenseclaw-dev (Docker and Bedrock through the instance role):
+On <bench-host> (a Linux development host with Docker and Bedrock through the instance role):
 
 ```bash
 go build -o /tmp/routing-eval ./benchmarks/routing/cmd/routing-eval
