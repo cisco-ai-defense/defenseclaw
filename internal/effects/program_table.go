@@ -265,13 +265,22 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"python", "python3", "node", "nodejs", "ruby", "perl", "php"}, Pos: PosFirstExec,
 		Flags: map[string]Flag{"-c": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-m": {Value: true, Role: RoleIgnore}}})
 	add(Program{Names: []string{"git"}, Pos: PosGit,
-		Flags: map[string]Flag{
+		Flags: fl(map[string]Flag{
 			"-c": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore},
 			"--output": {Value: true, Role: RoleOutput}, "--upload-pack": {Value: true, Role: RoleExecCode},
-			"--exec-path": {Value: true, Role: RoleIgnore}}})
+			"--exec-path": {Value: true, Role: RoleIgnore}, "--git-dir": {Value: true, Role: RoleIgnore},
+			"--work-tree": {Value: true, Role: RoleIgnore}, "--namespace": {Value: true, Role: RoleIgnore}},
+			"-p", "-P", "-v", "-h", "--paginate", "--no-pager", "--bare", "--version", "--help", "--no-replace-objects", "--literal-pathspecs", "--no-optional-locks", "--html-path", "--info-path", "--man-path")})
 	add(Program{Names: []string{"go"}, Pos: PosNone,
 		Flags: map[string]Flag{"-exec": {Value: true, Role: RoleExecCode}, "-toolexec": {Value: true, Role: RoleExecCode}}})
-	add(Program{Names: []string{"echo", "printf", "true", "false", "pwd", "ls", "cd", "pushd", "popd", "export", "set", "test", "[", "alias"}, Pos: PosNone})
+	add(Program{Names: []string{"echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "test", "[", "alias", "ps", "df", "du", "env", "date", "whoami", "id", "uname", "hostname", "which", "basename", "dirname", "wc", "sort", "uniq", "cut", "tr", "sleep", "kill", "jobs", "wait", "clear", "stat", "file", "readlink", "realpath"}, Pos: PosNone,
+		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
+	// ls: a very common read-only lister; its switches are benign (no path
+	// effect is modeled, but it must not be flagged for a normal -la).
+	add(Program{Names: []string{"ls", "ll", "la", "dir", "vdir", "exa", "eza", "lsd"}, Pos: PosNone,
+		Flags: fl(map[string]Flag{"--color": {Value: true, Role: RoleIgnore}, "--time-style": {Value: true, Role: RoleIgnore}, "--sort": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-I": {Value: true, Role: RoleIgnore}, "--block-size": {Value: true, Role: RoleIgnore}},
+			"-l", "-a", "-A", "-h", "-R", "-t", "-r", "-S", "-1", "-d", "-F", "-i", "-n", "-o", "-g", "-c", "-u", "-s", "-p", "-Q", "-q", "-k", "-m", "-x", "-C", "-B", "-G", "-L", "-T", "-U", "-v", "-X", "-Z", "-f", "-b", "-N", "-e",
+			"--all", "--almost-all", "--human-readable", "--recursive", "--reverse", "--classify", "--color", "--group-directories-first", "--full-time", "--inode", "--numeric-uid-gid", "--size")})
 }
 
 func buildWindowsTable() {
