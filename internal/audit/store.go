@@ -144,6 +144,14 @@ type Event struct {
 	// rides in the structured envelope and the raw column as on main, not in
 	// a path-class record field (issue #1092).
 	RulePackDirInEnvelope bool `json:"-"`
+	// SemanticEventID, LogicalEventID and ConnectorInstanceID name the
+	// correlation event of a hook failure report row: the row of a call
+	// whose audit write failed pairs with the hook_decision record of that
+	// call, so readers count the call once (#1384). Empty on every other
+	// row, whose runtime takes them from the context envelope.
+	SemanticEventID     string `json:"-"`
+	LogicalEventID      string `json:"-"`
+	ConnectorInstanceID string `json:"-"`
 
 	// WorkspaceHostPaths are the folders connected to the Claude Cowork
 	// session of a claudecode hook row. There is no SQLite column: the
@@ -2483,6 +2491,17 @@ func (s *Store) LatestHookVerdictOfEvent(ctx context.Context, semanticEventID st
 		return StoredHookVerdict{}, false, err
 	}
 	return s.StoredHookVerdict(ctx, id)
+}
+
+// correlationEventExists reports whether the correlation ledger still holds
+// the semantic event id.
+func (s *Store) correlationEventExists(ctx context.Context, id string) bool {
+	if s == nil || !s.Ready() || id == "" {
+		return false
+	}
+	var one int
+	return s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx,
+		`SELECT 1 FROM correlation_events WHERE semantic_event_id = ?`, id), &one) == nil
 }
 
 // DatabaseFileReplaced reports whether the database path no longer names

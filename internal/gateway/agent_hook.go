@@ -86,8 +86,12 @@ func getFallbackConnectorRegistry() *connector.Registry {
 }
 
 type agentHookRequest struct {
-	pendingOccurrenceID          string
-	pendingBodyBytes             int64
+	pendingOccurrenceID string
+	pendingBodyBytes    int64
+	// pendingJournaled is a call whose occurrence has a journal row
+	// recovery reads (journalHookDelivery on a gateway that runs it, or a
+	// call recovery itself replays).
+	pendingJournaled             bool
 	pendingRecovery              bool
 	pendingProvenance            *pendingHookProvenance
 	sandboxReceiptAcknowledgment bool
@@ -290,7 +294,8 @@ func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context
 }
 
 // A receipt-capable per-user call has already offered its answer before its
-// terminal records are written. Its pending occurrence is durable, so give
+// terminal records are written, and only those records hold it (a per-user
+// gateway journals no occurrence, rel-1-0-10 GAP-0088), so give
 // finalization a fresh window after earlier telemetry used the ordinary 10 s
 // window. Writes queued in that window finish after its deadline. This does
 // not extend the hook's answer deadline or Secure Client's path.
@@ -1701,30 +1706,53 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// verdict waits for that commit, as it waited for its row alone.
 			auditCtx, auditOutcome := audit.WithCallWriteOutcome(ctx)
 			connectorCtx := auditCtx
+			var decisionCtx context.Context
+			var decisionOutcome *audit.CallWriteOutcome
+			flushed := false
+			defer func() {
+				if !flushed && decisionInAudit {
+					// A panic between the queued row of record and its flush:
+					// the row and every export of the attempt are dropped, so
+					// the fail-mode verdict the call now gets is its only
+					// decision record (S8 R4 review P1).
+					audit.AbandonCallWrites(decisionCtx, errHookAuditSectionPanicked)
+					decisionInAudit = false
+				}
+			}()
 			if a.hookDecisionIsRowOfRecord(ctx, req, resp, env, panicked) {
-				connectorCtx, decisionInAudit = a.writeHookDecisionRowOfRecord(auditCtx, req, resp, env)
+				connectorCtx, decisionCtx, decisionOutcome, decisionInAudit = a.writeHookDecisionRowOfRecord(auditCtx, req, resp, env)
 			}
+			hookStageForTest(ctx, "finalize_audit_row_of_record")
 			auditErr = a.logConnectorHookAuditEnvelope(connectorCtx, env)
 			if auditErr != nil && decisionInAudit {
 				// The connector-hook record failed beside the row of record:
 				// the call is unaudited as in 1.0.9, so its queued
 				// hook_decision row and export are dropped, and the decision
 				// is recorded below with the fail-mode verdict.
-				audit.AbandonCallWrites(auditCtx, auditErr)
+				audit.AbandonCallWrites(decisionCtx, auditErr)
 				decisionInAudit = false
 			}
 			audit.FlushCallWrites(ctx)
+			flushed = true
 			if auditErr == nil {
 				auditErr = auditOutcome.Err()
+			}
+			if auditErr == nil && decisionInAudit {
+				// The verdict stands only when its row of record committed;
+				// its export and the connector-hook export follow the same
+				// outcome (ExportAfterCallCommit).
+				auditErr = decisionOutcome.Err()
 			}
 			result.AuditPersisted = auditErr == nil
 			result.DecisionSettled = decisionInAudit && result.AuditPersisted
 		})
-		// A call backed by a pending occurrence (w3-g3-obs; only a
-		// receipt-capable delivery has one) is recovered from the published
-		// occurrence, which holds the answer the agent got: the records keep
-		// that answer instead of a fail-mode verdict the agent never saw.
-		recoverable := req.pendingOccurrenceID != ""
+		// A call backed by a journaled occurrence (w3-g3-obs; only a
+		// receipt-capable delivery on a gateway that runs recovery has one)
+		// is recovered from the published occurrence, which holds the answer
+		// the agent got: the records keep that answer instead of a fail-mode
+		// verdict the agent never saw. An unjournaled occurrence keeps its
+		// record IDs but nothing recovers it.
+		recoverable := req.pendingJournaled
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
@@ -1733,7 +1761,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			// A pending occurrence keeps its delivery state for recovery: never
 			// report a retroactive block the agent did not receive (s2-obs). An
 			// answer already on the wire (delivered) is never replaced either.
-			if !delivered && !recoverable && req.pendingOccurrenceID == "" {
+			if !delivered && !recoverable {
 				if !clientLeft || resp.Action != hookActionUnconfirmed {
 					// An unconfirmed call whose client left stays unconfirmed:
 					// an audit fault must not turn a proposal nobody delivered

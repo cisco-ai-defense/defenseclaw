@@ -36,6 +36,14 @@ func (l hookFailureLine) auditGap() bool {
 // gateway records a shed or abandoned call at admission instead. Best effort:
 // a log that cannot be written leaves the stderr line of the failed audit
 // write as the only trace.
+// correlatedOrEmpty is value for a call whose correlation write held.
+func correlatedOrEmpty(req agentHookRequest, value string) string {
+	if req.CorrelationUnavailable {
+		return ""
+	}
+	return value
+}
+
 func (a *APIServer) recordUnauditedHookCall(connectorName string, req agentHookRequest, resp agentHookResponse) {
 	if a == nil || !hookFailOpenReportApplies(a.scannerCfg) || a.scannerCfg.SecureClientIntegration() ||
 		req.ToolInvocationID == "" || !hookexec.ToolGateEvent(connectorName, req.HookEventName) {
@@ -63,11 +71,18 @@ func (a *APIServer) recordUnauditedHookCall(connectorName string, req agentHookR
 		Category  string `json:"category"`
 		FailMode  string `json:"fail_mode"`
 		Outcome   string `json:"outcome"`
+		// The correlation event of the call: its hook_decision record and
+		// the row the report writes from this line are counted once.
+		SemanticEventID     string `json:"semantic_event_id,omitempty"`
+		LogicalEventID      string `json:"logical_event_id,omitempty"`
+		ConnectorInstanceID string `json:"connector_instance_id,omitempty"`
 	}{
 		TS: time.Now().UTC().Format(time.RFC3339), Connector: connectorName, Hook: "defenseclaw-gateway",
 		Event: req.HookEventName, SessionID: req.SessionID, CallID: req.ToolInvocationID, ToolID: req.ToolInvocationID,
 		Reason: "the gateway could not write this call's audit record", Category: hookAuditGapCategory,
 		FailMode: mode, Outcome: outcome,
+		SemanticEventID: correlatedOrEmpty(req, req.SemanticEventID), LogicalEventID: correlatedOrEmpty(req, req.LogicalEventID),
+		ConnectorInstanceID: correlatedOrEmpty(req, req.ConnectorInstanceID),
 	})
 	if err != nil {
 		return

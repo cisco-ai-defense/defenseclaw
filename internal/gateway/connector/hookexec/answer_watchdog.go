@@ -169,6 +169,12 @@ type answerWatchdog struct {
 	closeLateAnswer bool
 	watchDone       chan struct{}
 	watchDoneOnce   sync.Once
+	// records counts the goroutines watch starts to write the record of its
+	// answer (the ordinary failure line and the prepared marker). watch exits
+	// once one of them has recorded the answer; the other may still be
+	// writing in the account's logs folder. Production exits the process
+	// there; a test that simulates the exit waits for them (records.Wait).
+	records sync.WaitGroup
 	// answeredInTime is set when answered stood a managed call's watchdog
 	// down before its deadline: the call's own answer is then the one
 	// written, also when the call finishes after the deadline (GAP-0648
@@ -1126,7 +1132,9 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		done := make(chan struct{})
 		localDone = done
 		logFailure := w.fallback.logFailure
+		w.records.Add(1)
 		go func() {
+			defer w.records.Done()
 			defer close(done)
 			logFailure()
 		}()
@@ -1141,7 +1149,11 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		}
 		result := make(chan bool, 1)
 		markerDone = result
-		go func() { result <- w.failureLog.appendFallback() }()
+		w.records.Add(1)
+		go func() {
+			defer w.records.Done()
+			result <- w.failureLog.appendFallback()
+		}()
 	}
 	// Prefer a prepared ordinary descriptor. If its open is still pending,
 	// the prepared fallback can record the committed answer immediately.

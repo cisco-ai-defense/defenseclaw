@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from defenseclaw.audit_time_order import audit_time_order
-from defenseclaw.hook_metrics import HOOK_DECISION_ACTION, hook_row_decision
+from defenseclaw.hook_metrics import CONNECTOR_HOOK_PAIR_ACTIONS, HOOK_DECISION_ACTION, hook_row_decision
 from defenseclaw.models import ActionEntry, Event
 from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
 
@@ -1148,7 +1148,7 @@ def _without_duplicate_hook_decisions(events: list[Event]) -> list[Event]:
     paired = {
         event.semantic_event_id
         for event in events
-        if event.action.lower() == "connector-hook" and event.semantic_event_id
+        if event.action.lower() in CONNECTOR_HOOK_PAIR_ACTIONS and event.semantic_event_id
     }
     hook_rows = [
         (event_connector(event).lower(), event.timestamp)

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -53,30 +54,75 @@ func (a *APIServer) hookDecisionIsRowOfRecord(
 	return audit.CallWritesOpen(ctx, a.store)
 }
 
+// errHookAuditSectionPanicked abandons the row of record of a call whose
+// audit section panicked before its flush.
+var errHookAuditSectionPanicked = errors.New("gateway: the hook audit section panicked")
+
+// errHookDecisionNotRowOfRecord abandons whatever a decision record that was
+// not kept as the row of record may have queued.
+var errHookDecisionNotRowOfRecord = errors.New("gateway: the hook decision record was not kept")
+
 // writeHookDecisionRowOfRecord queues the hook_decision record of a call
 // whose row of record it is (hookDecisionIsRowOfRecord) on the call's open
-// batch, before the connector-hook record. Its export waits for the batch to
-// commit and is dropped when it did not: the call then answers with its
-// fail-mode verdict and exports a new decision record carrying it. It
-// returns the context the connector-hook record is written with: export only
-// when the decision record was queued, else unchanged (the connector-hook
-// row of 1.0.9 is written: the record could not be built, its collection is
-// off, or the runtime failed it at once).
+// batch, before the connector-hook record, with an outcome of its own:
+// decisionOutcome holds exactly this write, so the verdict, the record's
+// export and the connector-hook export all follow whether this one row
+// committed (one write in one savepoint, so it never commits in part). The
+// exports wait for the batch to commit and are dropped when it did not
+// (observability.WithExportAfterCallCommit): the call then answers with its
+// fail-mode verdict and exports a new decision record carrying it.
+// connectorCtx writes the connector-hook record export only. ok is false
+// when the record was not queued (it could not be built, its collection is
+// off, or the runtime failed it at once): the connector-hook row of 1.0.9 is
+// written then.
 func (a *APIServer) writeHookDecisionRowOfRecord(
 	ctx context.Context,
 	req agentHookRequest,
 	resp agentHookResponse,
 	env HookAuditEnvelope,
-) (context.Context, bool) {
-	meta, connectorName, ok := a.hookDecisionMeta(ctx, req)
-	if !ok {
-		return ctx, false
+) (connectorCtx, decisionCtx context.Context, decisionOutcome *audit.CallWriteOutcome, ok bool) {
+	meta, connectorName, built := a.hookDecisionMeta(ctx, req)
+	if !built {
+		return ctx, nil, nil, false
 	}
-	decision := a.emitHookDecisionLogV8(observability.WithExportAfterCallCommit(ctx), req, resp, env, false, meta, connectorName)
-	if decision != hookDecisionLogPersisted {
-		return ctx, false
+	attemptCtx, attemptOutcome := audit.WithCallWriteOutcome(observability.WithExportAfterCallCommit(ctx))
+	handedBack := false
+	defer func() {
+		if handedBack {
+			return
+		}
+		if recovered := recover(); recovered != nil {
+			// A panic after the record was queued and before the audit
+			// section holds it: drop it here, since the section's own guard
+			// does not know of it yet (S8 R4 review P1).
+			audit.AbandonCallWrites(attemptCtx, errHookAuditSectionPanicked)
+			panic(recovered)
+		}
+	}()
+	if a.emitHookDecisionLogV8(attemptCtx, req, resp, env, false, meta, connectorName) != hookDecisionLogPersisted {
+		audit.AbandonCallWrites(attemptCtx, errHookDecisionNotRowOfRecord)
+		handedBack = true
+		return ctx, nil, nil, false
 	}
-	return observability.WithExportOnlyInCall(ctx), true
+	hookStageForTest(ctx, "finalize_audit_row_queued")
+	handedBack = true
+	return observability.WithExportOnlyInCall(attemptCtx), attemptCtx, attemptOutcome, true
+}
+
+// hookLogsCollectedRuntime reports whether the active plan collects the
+// logs of a bucket.
+type hookLogsCollectedRuntime interface {
+	LogsCollected(observability.Bucket) bool
+}
+
+// hookDecisionRecordsKept reports whether the active plan keeps hook_decision
+// records (the guardrail.evaluation logs). The records a hook call exports
+// only (tool_start, tool.invocation.requested) are exported only when it
+// does: their facts are then in the call's hook_decision row. With that
+// collection off they stay local, as in 1.0.9 (S8 R4 review P3-5).
+func (a *APIServer) hookDecisionRecordsKept() bool {
+	runtime, ok := a.observabilityV8RuntimeEmitter().(hookLogsCollectedRuntime)
+	return ok && runtime.LogsCollected(observability.BucketGuardrailEvaluation)
 }
 
 // recordHookDecisionMetricsOfCall records the hook decision metrics of a

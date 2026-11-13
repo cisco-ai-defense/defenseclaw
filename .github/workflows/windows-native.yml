@@ -186,7 +186,8 @@ jobs:
             'TestWindowsShippedRulePacksConverges',
             'TestWindowsShippedRulePacksRealTrustMovesAnUntrustedRootAside',
             'TestWindowsShippedRulePacksRealTrustRewritesALinkInside',
-            'TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild'
+            'TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild',
+            'TestWindowsShippedRulePacksRealTrustAcceptsAnAdministratorOwnedChild'
           )) {
             if ([string]$shipped.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($shippedTest)) ") {
               throw "$shippedTest did not complete with PASS on the native Windows runner"

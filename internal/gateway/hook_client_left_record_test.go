@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -257,41 +258,60 @@ func TestReportedFailOpenToolCallNamesItsToolID(t *testing.T) {
 // unconfirmed.
 func joinByToolID(t *testing.T, store *audit.Store) map[string][]string {
 	t.Helper()
-	rows, err := store.ListEvents(1000)
+	db, err := sql.Open("sqlite", "file:"+store.DatabasePath()+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
-	outcomes := map[string][]string{}
-	// A benign per-user allow keeps only its hook_decision row (#1384): it
-	// is the call's row when no connector-hook row names the call.
-	hookRowOf := map[string]bool{}
-	for _, row := range rows {
-		if row.ToolID != "" && row.Action == string(audit.ActionConnectorHook) {
-			hookRowOf[row.ToolID] = true
-		}
+	defer db.Close()
+	// A benign per-user allow keeps only its hook_decision row (#1384), and a
+	// call whose audit write failed has its fail-mode hook_decision row: that
+	// row is the call's record unless a connector-hook or report row names
+	// the same correlation event.
+	rows, err := db.Query(`SELECT COALESCE(NULLIF(event.tool_id,''),
+			json_extract(event.projected_record_json,'$.correlation.tool_invocation_id'),''),
+		event.action, COALESCE(event.details,''),
+		COALESCE(json_extract(event.projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'')
+		FROM audit_events AS event
+		WHERE event.action IN ('connector-hook','guardrail-block')
+		   OR (event.action = 'hook_decision'
+		       AND json_extract(event.projected_record_json,'$.correlation.semantic_event_id') IS NOT NULL
+		       AND NOT EXISTS (SELECT 1 FROM audit_events AS other
+		           WHERE other.action IN ('connector-hook','connector-hook-synthetic','guardrail-block')
+		             AND json_extract(other.projected_record_json,'$.correlation.semantic_event_id') =
+		                 json_extract(event.projected_record_json,'$.correlation.semantic_event_id')))
+		ORDER BY event.rowid DESC`)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, row := range rows {
-		if row.ToolID != "" && row.Action == "hook_decision" && !hookRowOf[row.ToolID] {
-			action, _ := row.Structured["defenseclaw.guardrail.effective_action"].(string)
-			outcomes[row.ToolID] = append(outcomes[row.ToolID], action)
+	defer rows.Close()
+	outcomes := map[string][]string{}
+	for rows.Next() {
+		var toolID, action, details, effective string
+		if err := rows.Scan(&toolID, &action, &details, &effective); err != nil {
+			t.Fatal(err)
+		}
+		if toolID == "" {
 			continue
 		}
-		if row.ToolID == "" || (row.Action != string(audit.ActionConnectorHook) && row.Action != string(audit.ActionGuardrailBlock)) {
-			continue
-		}
-		outcome := ""
-		for _, field := range strings.Fields(row.Details) {
-			if value, ok := strings.CutPrefix(field, "action="); ok {
-				outcome = value
+		outcome := effective
+		if action != "hook_decision" {
+			outcome = ""
+			for _, field := range strings.Fields(details) {
+				if value, ok := strings.CutPrefix(field, "action="); ok {
+					outcome = value
+				}
 			}
 		}
-		if row.Action == string(audit.ActionGuardrailBlock) {
+		if action == string(audit.ActionGuardrailBlock) {
 			outcome = "block"
 		}
-		if strings.Contains(strings.ToLower(row.Details), "unconfirmed") {
+		if strings.Contains(strings.ToLower(details), "unconfirmed") {
 			outcome = "unconfirmed"
 		}
-		outcomes[row.ToolID] = append(outcomes[row.ToolID], outcome)
+		outcomes[toolID] = append(outcomes[toolID], outcome)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return outcomes
 }

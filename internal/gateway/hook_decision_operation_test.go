@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
 
@@ -131,7 +132,8 @@ func TestHookDeliveryPhaseSnapshotNeverBorrowsAnotherToolCallsOperation(t *testi
 func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
-	fixture := newSidecarRuntimeFixture(t, true)
+	remote := newHookRemoteRecorder()
+	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatal(err)
@@ -180,18 +182,23 @@ func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 	// A benign per-user allow keeps one local row, its hook_decision row,
 	// which names the operation of its own tool call; connector-hook and
 	// tool_start are exported only (#1384).
-	rows, err := db.Query(`SELECT action, `+audit.StructuredJSONReadSQL("", true, true)+` FROM audit_events WHERE session_id=? AND action IN ('hook_decision','connector-hook','tool_invocation')`, session)
+	rows, err := db.Query(`SELECT action, `+audit.StructuredJSONReadSQL("", true, true)+`,
+		COALESCE(json_extract(projected_record_json,'$.correlation.tool_invocation_id'),'')
+		FROM audit_events WHERE session_id=? AND action IN ('hook_decision','connector-hook','tool_invocation')`, session)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
+	// A benign per-user allow stores only its hook_decision row; the tool
+	// record of the same call is exported (#1384). Each decision row names
+	// the operation of the requested tool record of its own tool call.
 	decisions := map[string]int{}
-	toolOperations := map[string]bool{}
+	decisionOfTool := map[string]string{}
 	decisionRows := 0
 	for rows.Next() {
-		var action string
+		var action, toolID string
 		var structured sql.NullString
-		if err := rows.Scan(&action, &structured); err != nil {
+		if err := rows.Scan(&action, &structured, &toolID); err != nil {
 			t.Fatal(err)
 		}
 		var doc any
@@ -201,9 +208,7 @@ func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 			decisionRows++
 			id := findJSONString(doc, "defenseclaw.operation.id")
 			decisions[id]++
-			if id != "" {
-				toolOperations[id] = true
-			}
+			decisionOfTool[toolID] = id
 		default:
 			t.Errorf("a %s row of a benign per-user allow is stored; it is exported only", action)
 		}
@@ -211,12 +216,22 @@ func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if decisionRows != calls || len(toolOperations) != calls {
-		t.Fatalf("decision rows=%d tool operations=%d, want %d each", decisionRows, len(toolOperations), calls)
+	remote.waitExported(observability.TelemetryEventToolInvocationRequested, calls)
+	toolOperations := map[string]string{}
+	for _, record := range remote.exported(observability.TelemetryEventToolInvocationRequested) {
+		var doc any
+		if err := json.Unmarshal([]byte(record), &doc); err != nil {
+			t.Fatalf("exported tool record is not JSON: %v", err)
+		}
+		toolOperations[findJSONString(doc, "tool_invocation_id")] = findJSONString(doc, "defenseclaw.operation.id")
 	}
-	for operation, count := range decisions {
-		if count != 1 || !toolOperations[operation] {
-			t.Errorf("decision operation %q: %d rows, links to a tool call=%t; want 1 row of its own call", operation, count, toolOperations[operation])
+	if decisionRows != calls || len(toolOperations) != calls || len(decisions) != calls {
+		t.Fatalf("decision rows=%d distinct decision operations=%d exported tool records=%d, want %d each",
+			decisionRows, len(decisions), len(toolOperations), calls)
+	}
+	for toolID, operation := range decisionOfTool {
+		if operation == "" || toolOperations[toolID] != operation {
+			t.Errorf("tool call %q: decision operation %q, its tool record names %q; want its own call", toolID, operation, toolOperations[toolID])
 		}
 	}
 }
