@@ -64,7 +64,48 @@ func TestGAP0431SignedStepRangeFourCell(t *testing.T) {
 }
 
 func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
+	runGAP0431QuotedTouchIdentity(t, newB36ManagedHookFixture(t), true)
+}
+
+// The hook reads the shell startup from the account's environment. An
+// exported function the touch statement never calls (RHEL exports which, the
+// shared dev host exports its own helpers) must leave every reading as it is,
+// and a startup that can change what runs (a startup file or a function that
+// replaces touch) may only withhold the safe proof: each protected hard link
+// still blocks (GAP-0293: it was allowed on a host whose profile exported a
+// function).
+func TestGAP0431QuotedTouchIdentityShellStartupFourCell(t *testing.T) {
+	for _, tc := range []struct {
+		name, variable string
+		startupFile    bool
+		exact          bool
+	}{
+		{name: "unrelated-exported-function", variable: "BASH_FUNC_s7probe%%", exact: true},
+		{name: "unrelated-patched-export", variable: "BASH_FUNC_s7probe()", exact: true},
+		{name: "exported-touch-function", variable: "BASH_FUNC_touch%%"},
+		{name: "exported-path-touch-function", variable: "BASH_FUNC_/usr/bin/touch%%"},
+		{name: "startup-file", variable: "BASH_ENV", startupFile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newB36ManagedHookFixture(t)
+			value := "() {  :\n}"
+			if tc.startupFile {
+				value = filepath.Join(f.home, "startup.sh")
+				if err := os.WriteFile(value, []byte(":\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(tc.variable, value)
+			runGAP0431QuotedTouchIdentity(t, f, tc.exact)
+		})
+	}
+}
+
+// runGAP0431QuotedTouchIdentity runs the quoted touch identity rows in all
+// four cells. Every protected row must block; exact also holds each ordinary
+// row to allow.
+func runGAP0431QuotedTouchIdentity(t *testing.T, f b36ManagedHookFixture, exact bool) {
+	t.Helper()
 	if err := os.Link(f.keys, filepath.Join(f.project, "alias[1]")); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +167,7 @@ func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
 	f.answerAll(t, calls)
 	for i, call := range calls {
 		row := rows[i/4]
-		if call.verdict != row.want {
+		if call.verdict != row.want && (exact || row.want == "block") {
 			t.Errorf("%s: got %s, want %s", call.name, call.verdict, row.want)
 		}
 	}
