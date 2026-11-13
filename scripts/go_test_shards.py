@@ -27,7 +27,12 @@ timings a file weighs its source size. --check prints the shard weights and
 fails unless every discovered test (test mode) or package (package mode) is
 in exactly one shard. --match (test mode) keeps only the tests whose name a
 `go test -run` pattern without "/" selects (an unanchored search), so a job
-can shard a package's filtered subset.
+can shard a package's filtered subset. --bounded (test mode) prints the
+shard as several -run regexes of at most MAX_RUN_PATTERN_CHARS, one per
+line, for a caller that runs one go test per line: a Windows command line
+holds 32,767 characters, and a gateway shard of 733 names took 34,028
+(Windows Native CI 43331326436, gw6: "The filename or extension is too
+long").
 """
 
 from __future__ import annotations
@@ -304,6 +309,11 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="print every shard and verify the exact cover")
     parser.add_argument("--match", help="test mode: keep only the tests this go test -run pattern selects")
     parser.add_argument("--split-tests", action="store_true", help="test mode: balance each test separately")
+    parser.add_argument(
+        "--bounded",
+        action="store_true",
+        help="test mode, --shard-index: print the shard as -run regexes of at most MAX_RUN_PATTERN_CHARS, one per line",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -350,7 +360,12 @@ def main() -> int:
     selected = shards[args.shard_index]
     if not selected:
         parser.error("selected shard contains no tests")
-    print("\n".join(selected) if args.packages_file is not None else shard_regex(selected))
+    if args.packages_file is not None:
+        print("\n".join(selected))
+    elif args.bounded:
+        print("\n".join(bounded_regexes(selected)))
+    else:
+        print(shard_regex(selected))
     return 0
 
 

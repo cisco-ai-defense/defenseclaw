@@ -204,6 +204,49 @@ func (r launcherStartRun) row(form, shape, invocation string) string {
 	return fmt.Sprintf("ROW| %s | %s | %s | %s | %s | %s | %d |", form, shape, invocation, exit, clean(r.stdout), clean(r.stderr), r.elapsed.Milliseconds())
 }
 
+// warmLauncherStartRunner pays, before the timed rows, the one-time costs of
+// a fresh hosted runner that the first row would pay otherwise: the first
+// start of the new GUI-subsystem image (the antivirus' first sight of an
+// executable it has not seen) and the first starts of each shell. On the
+// Windows runner the first row (Codex guarded, PowerShell -Command, working
+// launcher) hung past its 30 s bound with no output, the same command
+// through cmd /C answered in 66 ms right after it, the second PowerShell row
+// took 10 s and every later PowerShell row about 250 ms (run 43229002732,
+// shard gw4). Nothing here is asserted; the rows keep their bounds and every
+// row still runs. Each shell is started until one start takes under 5 s
+// (at most three times).
+func warmLauncherStartRunner(t *testing.T, dir string, image []byte, shells ...string) {
+	t.Helper()
+	launcher := makeLauncherShape(t, dir, "working", image)
+	guard := filepath.Join(dir, windowsHookGuardBinaryName)
+	type warm struct {
+		name  string
+		start func(context.Context) *exec.Cmd
+	}
+	warms := []warm{
+		{"launcher image", func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, launcher) }},
+		{"guard image", func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, guard) }},
+	}
+	for _, shell := range shells {
+		if strings.EqualFold(filepath.Base(shell), "cmd.exe") {
+			warms = append(warms, warm{shell, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, shell, "/d", "/c", "exit 0") }})
+			continue
+		}
+		warms = append(warms, warm{shell, func(ctx context.Context) *exec.Cmd {
+			return exec.CommandContext(ctx, shell, "-NoProfile", "-Command", "exit 0")
+		}})
+	}
+	for _, w := range warms {
+		for attempt := 1; attempt <= 3; attempt++ {
+			result := runLauncherStartCommand(t, w.start, "", 2*time.Minute)
+			t.Logf("WARM| %s | start %d | exit %d | hung %v | %d ms |", w.name, attempt, result.exit, result.hung, result.elapsed.Milliseconds())
+			if !result.hung && result.elapsed < 5*time.Second {
+				break
+			}
+		}
+	}
+}
+
 // The per-user Windows hook commands answer a launcher that cannot start
 // with the agent's block of the event (rel-1-0-6 GAP-0676), every way the
 // agent starts them: Codex's guarded start and its bridge (PowerShell
@@ -222,6 +265,11 @@ func TestWindowsHookCommandsAnswerALauncherThatCannotStart(t *testing.T) {
 	cmdExe := filepath.Join(trustedWindowsSystemDirectory(), "cmd.exe")
 	powershell := windowsSystemPowerShellExe()
 	pwsh, pwshErr := exec.LookPath("pwsh.exe")
+	warmShells := []string{powershell, cmdExe}
+	if pwshErr == nil {
+		warmShells = append(warmShells, pwsh)
+	}
+	warmLauncherStartRunner(t, filepath.Join(root, "warm"), image, warmShells...)
 	psCommand := func(shell, command string) func(context.Context) *exec.Cmd {
 		return func(ctx context.Context) *exec.Cmd {
 			return exec.CommandContext(ctx, shell, "-NoProfile", "-Command", command)
@@ -393,6 +441,7 @@ func TestWindowsBridgeAnswersALauncherThatCannotStartInConstrainedLanguage(t *te
 		t.Fatal(err)
 	}
 	root := t.TempDir()
+	warmLauncherStartRunner(t, filepath.Join(root, "warm"), image, windowsSystemPowerShellExe())
 	for _, tc := range []struct {
 		name, payload string
 		render        func(string) string
