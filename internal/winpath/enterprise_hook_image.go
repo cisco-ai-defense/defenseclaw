@@ -54,8 +54,8 @@ type EnterpriseHookImageLocation struct {
 	// Name is EnterpriseHookImageName or EnterpriseHookGuardImageName, as
 	// spelled in bin (the comparison is case-insensitive).
 	Name string
-	// Digest is the launch folder name in lowercase (16 hex digits), empty
-	// for the transition image.
+	// Digest is the launch folder name (16 lowercase hex digits), empty for
+	// the transition image.
 	Digest string
 }
 
@@ -95,15 +95,17 @@ func joinWindowsPath(parent string, names ...string) string {
 	return out
 }
 
-// IsEnterpriseHookImageDirName reports a launch folder name: exactly 16 hex
-// digits. Setup creates it in lowercase; Windows names are case-insensitive,
-// so a path that spells it in another case names the same folder.
+// IsEnterpriseHookImageDirName reports a launch folder name: exactly 16
+// lowercase hex digits. Setup creates only that spelling, and the installer
+// module stamps, verifies and allowlists only that spelling, so the hook
+// trusts only that spelling too: a folder spelled in uppercase was not made
+// by Setup and is not a launch folder.
 func IsEnterpriseHookImageDirName(name string) bool {
 	if len(name) != enterpriseHookImageDigestLen {
 		return false
 	}
 	for _, r := range name {
-		hexDigit := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+		hexDigit := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
 		if !hexDigit {
 			return false
 		}
@@ -162,7 +164,7 @@ func ParseEnterpriseHookImagePath(path string) (EnterpriseHookImageLocation, boo
 	if !strings.EqualFold(lastWindowsName(bin), "bin") || isDriveRoot(bin) {
 		return EnterpriseHookImageLocation{}, false
 	}
-	return EnterpriseHookImageLocation{Bin: bin, Name: name, Digest: strings.ToLower(digest)}, true
+	return EnterpriseHookImageLocation{Bin: bin, Name: name, Digest: digest}, true
 }
 
 func lastWindowsName(value string) string {
@@ -349,9 +351,13 @@ func (osHookImageFS) FileSHA256(name string) (string, error) {
 // hookImageDigestMemo keeps the last digest of each image path while the
 // same file object (os.SameFile), size and modification time are there.
 // The guardian resolves the launch set for every target of every reconcile,
-// and an image is about 130 MB; a new object, a resize or a write that moves
-// the modification time is hashed again. The guardian checks the bytes of the
-// current images against the recorded digest on its own schedule.
+// and an image is about 150 MB; a new object, a resize or a write that moves
+// the modification time is hashed again. The digest is taken through one
+// opened handle and kept for the file object that handle has (its file ID on
+// Windows), and only when the path still names that object after the read:
+// a replace of the file during the read is never cached. The guardian checks
+// the bytes of the current images against the recorded digest on its own
+// schedule.
 type hookImageDigestMemo struct {
 	mu      sync.Mutex
 	entries map[string]hookImageDigestEntry
@@ -371,46 +377,70 @@ func (m *hookImageDigestMemo) sha256(
 	lstat func(string) (fs.FileInfo, error),
 	open func(string) (*os.File, error),
 ) (string, error) {
-	before, err := lstat(name)
+	current, err := lstat(name)
 	if err != nil {
 		return "", err
 	}
-	if !before.Mode().IsRegular() {
+	if !current.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", name)
 	}
 	key := strings.ToLower(cleanWindowsPath(name))
 	m.mu.Lock()
 	entry, ok := m.entries[key]
 	m.mu.Unlock()
-	if ok && entry.size == before.Size() && entry.modTime.Equal(before.ModTime()) && os.SameFile(entry.info, before) {
+	if ok && entry.size == current.Size() && entry.modTime.Equal(current.ModTime()) && os.SameFile(entry.info, current) {
 		return entry.digest, nil
 	}
 	file, err := open(name)
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.New()
-	_, copyErr := io.Copy(hash, file)
+	digest, held, err := hashOpenHookImage(file)
 	closeErr := file.Close()
-	if copyErr != nil {
-		return "", copyErr
+	if err != nil {
+		return "", err
 	}
 	if closeErr != nil {
 		return "", closeErr
 	}
-	digest := hex.EncodeToString(hash.Sum(nil))
+	// The path must still name the object that was read.
 	after, err := lstat(name)
 	if err != nil {
 		return "", err
 	}
-	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !os.SameFile(before, after) {
+	if !os.SameFile(held, after) || after.Size() != held.Size() || !after.ModTime().Equal(held.ModTime()) {
 		return "", fmt.Errorf("%s changed while it was read", name)
 	}
 	m.mu.Lock()
 	if m.entries == nil {
 		m.entries = make(map[string]hookImageDigestEntry)
 	}
-	m.entries[key] = hookImageDigestEntry{info: after, size: after.Size(), modTime: after.ModTime(), digest: digest}
+	m.entries[key] = hookImageDigestEntry{info: held, size: held.Size(), modTime: held.ModTime(), digest: digest}
 	m.mu.Unlock()
 	return digest, nil
+}
+
+// hashOpenHookImage hashes an opened image and returns the information of
+// the file object the handle has (read from the handle itself, before and
+// after the read, so its identity cannot come from another object).
+func hashOpenHookImage(file *os.File) (string, fs.FileInfo, error) {
+	before, err := file.Stat()
+	if err != nil {
+		return "", nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("%s is not a regular file", file.Name())
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", nil, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return "", nil, err
+	}
+	if !os.SameFile(before, after) || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return "", nil, fmt.Errorf("%s changed while it was read", file.Name())
+	}
+	return hex.EncodeToString(hash.Sum(nil)), after, nil
 }

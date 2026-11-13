@@ -33,8 +33,10 @@ func TestParseEnterpriseHookImagePath(t *testing.T) {
 		{testBin + `\hooks\0123456789abcdef\defenseclaw-hook.exe`, true, testBin, "0123456789abcdef"},
 		{testBin + `\HOOKS\0123456789abcdef\defenseclaw-hook-guard.exe`, true, testBin, "0123456789abcdef"},
 		{`C:/Program Files/Cisco/DefenseClaw/bin/hooks/0123456789abcdef/defenseclaw-hook.exe`, true, testBin, "0123456789abcdef"},
-		// The folder name is exactly 16 hex digits; Windows names ignore case.
-		{testBin + `\hooks\0123456789ABCDEF\defenseclaw-hook.exe`, true, testBin, "0123456789abcdef"},
+		// The folder name is exactly 16 lowercase hex digits, the only spelling
+		// Setup creates, stamps and allowlists (review P3-2).
+		{testBin + `\hooks\0123456789ABCDEF\defenseclaw-hook.exe`, false, "", ""},
+		{testBin + `\hooks\0123456789abcdeF\defenseclaw-hook.exe`, false, "", ""},
 		{testBin + `\hooks\0123456789abcdeg\defenseclaw-hook.exe`, false, "", ""},
 		{testBin + `\hooks\0123456789abcde\defenseclaw-hook.exe`, false, "", ""},
 		{testBin + `\hooks\0123456789abcdef0\defenseclaw-hook.exe`, false, "", ""},
@@ -71,7 +73,8 @@ func TestSameEnterpriseHookImageFamily(t *testing.T) {
 	}{
 		{fixed, launch, true},
 		{launch, older, true},
-		{strings.ToUpper(launch), older, true},
+		{strings.ToUpper(testBin) + `\hooks\0123456789abcdef\defenseclaw-hook.exe`, older, true},
+		{strings.ToUpper(launch), older, false},
 		{launch, launch, true},
 		{launch, guard, false},
 		{launch, otherRoot, false},
@@ -291,5 +294,41 @@ func TestHookImageDigestMemoRehashesANewObject(t *testing.T) {
 	}
 	if _, err := memo.sha256(dir, os.Lstat, open); err == nil {
 		t.Fatal("memo hashed a folder")
+	}
+}
+
+// A replace of the image between the handle's read and the path's last look
+// is reported and not cached (review P3-4).
+func TestHookImageDigestMemoRefusesAReplaceDuringTheRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "defenseclaw-hook.exe")
+	if err := os.WriteFile(path, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	memo := &hookImageDigestMemo{}
+	open := func(name string) (*os.File, error) {
+		file, err := os.Open(name)
+		if err != nil {
+			return nil, err
+		}
+		// Another object takes the name while this handle reads the first.
+		replacement := filepath.Join(dir, "next")
+		if err := os.WriteFile(replacement, []byte("two"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, name); err != nil {
+			t.Fatal(err)
+		}
+		return file, nil
+	}
+	if _, err := memo.sha256(path, os.Lstat, open); err == nil || !strings.Contains(err.Error(), "changed while it was read") {
+		t.Fatalf("a replace during the read = %v; want changed while it was read", err)
+	}
+	if len(memo.entries) != 0 {
+		t.Fatalf("the memo cached %v after a replace", memo.entries)
+	}
+	digest, err := memo.sha256(path, os.Lstat, os.Open)
+	if err != nil || digest != "3fc4ccfe745870e2c0d99f71f30ff0656c8dedd41cc1d7d3d376b0dbe685e2f3" {
+		t.Fatalf("the next read = %q, %v; want the digest of the new object", digest, err)
 	}
 }

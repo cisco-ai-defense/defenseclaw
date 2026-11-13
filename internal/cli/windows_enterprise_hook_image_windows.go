@@ -13,6 +13,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -22,9 +23,10 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+	"syscall"
 	"unsafe"
 
 	"github.com/spf13/cobra"
@@ -70,13 +72,15 @@ func newWindowsHookImageStageCommand() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := runWindowsHookImageStage(hookSHA, guardSHA)
-			return writeWindowsHookImageReport(cmd.OutOrStdout(), report, report.OK, report.Reason, report.Error)
+			summary := "hook image staged in " + report.Folder
+			return writeWindowsHookImageReport(cmd.OutOrStdout(), jsonOutput, report, summary, report.OK, report.Reason, report.Error)
 		},
 	}
 	command.Flags().StringVar(&hookSHA, "sha256", "", "SHA-256 of the hook Setup installed at bin\\defenseclaw-hook.exe")
 	command.Flags().StringVar(&guardSHA, "guard-sha256", "", "SHA-256 of the hook guard Setup installed at bin\\defenseclaw-hook-guard.exe")
-	// The report is always JSON; the flag keeps the lifecycle helpers' calling shape.
-	command.Flags().BoolVar(&jsonOutput, "json", true, "print the JSON report")
+	// Setup always passes --json and reads one JSON line; without it a person
+	// gets a one-line summary.
+	command.Flags().BoolVar(&jsonOutput, "json", false, "print the JSON report (Setup's form)")
 	return command
 }
 
@@ -91,20 +95,25 @@ func newWindowsHookImagePruneCommand() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := runWindowsHookImagePrune(keep)
-			return writeWindowsHookImageReport(cmd.OutOrStdout(), report, report.OK, "", report.Error)
+			summary := fmt.Sprintf("hook images pruned: %d removed, %d kept, %d in use", len(report.Removed), len(report.Kept), len(report.InUse))
+			return writeWindowsHookImageReport(cmd.OutOrStdout(), jsonOutput, report, summary, report.OK, "", report.Error)
 		},
 	}
 	command.Flags().StringArrayVar(&keep, "keep", nil, "launch folder (16 hex digits) to keep; repeat for each")
-	command.Flags().BoolVar(&jsonOutput, "json", true, "print the JSON report")
+	command.Flags().BoolVar(&jsonOutput, "json", false, "print the JSON report (Setup's form)")
 	return command
 }
 
-func writeWindowsHookImageReport(out io.Writer, report any, ok bool, reason, message string) error {
-	encoded, err := json.Marshal(report)
-	if err != nil {
-		return err
+func writeWindowsHookImageReport(out io.Writer, jsonOutput bool, report any, summary string, ok bool, reason, message string) error {
+	if jsonOutput {
+		encoded, err := json.Marshal(report)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, string(encoded))
+	} else if ok {
+		fmt.Fprintln(out, summary)
 	}
-	fmt.Fprintln(out, string(encoded))
 	if ok {
 		return nil
 	}
@@ -257,21 +266,92 @@ func (osWindowsHookImageFS) RandomHex(n int) (string, error) {
 
 type osWindowsHookImageStarter struct{}
 
-// Run starts path with no window and only the standard handles, inside a
-// kill-on-close job, and returns its standard output.
-func (osWindowsHookImageStarter) Run(path string, args []string, timeout time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+// Start runs one start check: no window, only the standard handles, inside a
+// kill-on-close job, under the filtered token (windowsHookImageFilteredToken)
+// when it can be made, and returns what the image printed and its status.
+func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookImageStartResult, error) {
+	var result windowsHookImageStartResult
+	ctx, cancel := context.WithTimeout(context.Background(), req.Timeout)
 	defer cancel()
-	cmd := processutil.CommandContext(ctx, path, args...)
-	cmd.Dir = filepath.Dir(path)
+	cmd := processutil.CommandContext(ctx, req.Path, req.Args...)
+	cmd.Dir = filepath.Dir(req.Path)
+	if req.Stdin != nil {
+		cmd.Stdin = bytes.NewReader(req.Stdin)
+	}
+	token, err := windowsHookImageFilteredToken()
+	if err != nil {
+		result.TokenProblem = err.Error()
+	} else {
+		defer token.Close()
+		cmd.SysProcAttr.Token = syscall.Token(token)
+		result.Restricted = true
+	}
 	stdout, stderr, err := processutil.OutputTree(cmd, false)
+	result.Stdout, result.Stderr = stdout, stderr
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return nil, fmt.Errorf("no answer within %s", timeout)
+		return result, fmt.Errorf("no answer within %s", req.Timeout)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+		return result, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", err, boundedWindowsHookImageText(stderr))
+		return result, fmt.Errorf("%w: %s", err, boundedWindowsHookImageText(stderr))
 	}
-	return stdout, nil
+	return result, nil
+}
+
+var procCreateRestrictedToken = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+
+// CreateRestrictedToken flags (winnt.h).
+const (
+	windowsDisableMaxPrivilege = 0x1
+	windowsLUAToken            = 0x4
+)
+
+// windowsHookImageFilteredToken is the token of the start checks: this
+// process's token with every privilege but SeChangeNotify removed and the
+// Administrators group deny-only, as a filtered (UAC) administrator or a
+// standard user runs. Application control and antivirus rules that apply to
+// users, not to elevated administrators, then decide the start as they will
+// for the agent's user. It is a restricted copy of this process's own
+// primary token, which CreateProcessAsUser takes without further privilege.
+// LUA_TOKEN is asked for and dropped when Windows refuses it.
+func windowsHookImageFilteredToken() (windows.Token, error) {
+	var process windows.Token
+	access := uint32(windows.TOKEN_DUPLICATE | windows.TOKEN_QUERY | windows.TOKEN_ASSIGN_PRIMARY |
+		windows.TOKEN_ADJUST_DEFAULT | windows.TOKEN_ADJUST_SESSIONID)
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), access, &process); err != nil {
+		return 0, fmt.Errorf("open this process's token: %w", err)
+	}
+	defer process.Close()
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return 0, fmt.Errorf("name the Administrators group: %w", err)
+	}
+	disable := []windows.SIDAndAttributes{{Sid: administrators}}
+	var lastErr error
+	for _, flags := range []uintptr{windowsDisableMaxPrivilege | windowsLUAToken, windowsDisableMaxPrivilege} {
+		var restricted windows.Token
+		ok, _, callErr := procCreateRestrictedToken.Call(
+			uintptr(process), flags,
+			uintptr(len(disable)), uintptr(unsafe.Pointer(&disable[0])),
+			0, 0, 0, 0,
+			uintptr(unsafe.Pointer(&restricted)))
+		if ok != 0 {
+			return restricted, nil
+		}
+		lastErr = callErr
+	}
+	return 0, fmt.Errorf("create the filtered token: %w", lastErr)
+}
+
+// windowsHookImageSharingViolation is a rename refused with
+// ERROR_SHARING_VIOLATION (a handle open in the folder without delete
+// sharing).
+func windowsHookImageSharingViolation(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
 }
 
 // windowsHookImageStandaloneBin is the bin whose launch set status, verify
