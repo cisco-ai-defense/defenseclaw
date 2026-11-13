@@ -104,6 +104,7 @@ func TestFirstStartAfterV8MigrationKeepsConfiguredMCPServers(t *testing.T) {
 		w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
 		w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
 		w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+		w.markMCPNoScanAdmissionsOwed() // as Run does at the start
 		w.runRescanCycle(context.Background())
 		return admitted
 	}
@@ -119,10 +120,35 @@ func TestFirstStartAfterV8MigrationKeepsConfiguredMCPServers(t *testing.T) {
 	servers = append(servers,
 		config.MCPServerEntry{Name: "late", Command: "/usr/bin/true", Connector: "claudecode"},
 		config.MCPServerEntry{Name: "late", Command: "/usr/bin/true", Connector: "codex"})
+	// The next start admits late, and the one-time 1.0.10 pass admits again
+	// the servers the bridge recorded without a scan (gas-ux-r2:GAP-0088):
+	// a plain baseline without a scan reads as a decided admission, and the
+	// strict tier blocks a server whose scan fails, as for a new server.
+	// The bridge still keeps them at the first start above.
 	admitted := start()
-	if len(admitted) != 2 || admitted[0].Verdict != VerdictBlocked || admitted[1].Verdict != VerdictBlocked ||
-		admitted[0].Event.Connector == admitted[1].Event.Connector {
-		t.Fatalf("the next start admitted %+v, want late blocked in claudecode and codex", admitted)
+	byName := map[string][]AdmissionResult{}
+	for _, r := range admitted {
+		byName[r.Event.Name] = append(byName[r.Event.Name], r)
+	}
+	for _, name := range []string{"late", "upg810-mcp"} {
+		got := byName[name]
+		if len(got) != 2 || got[0].Verdict != VerdictBlocked || got[1].Verdict != VerdictBlocked ||
+			got[0].Event.Connector == got[1].Event.Connector {
+			t.Fatalf("the next start admitted %s as %+v, want it blocked in claudecode and codex", name, got)
+		}
+	}
+	if len(admitted) != 4 {
+		t.Fatalf("the next start admitted %+v, want late and upg810-mcp only", admitted)
+	}
+	// A failed scan is tried again at later cycles (rel-1-0-6:GAP-0258); it
+	// stays blocked.
+	for _, r := range start() {
+		if r.Verdict != VerdictBlocked {
+			t.Fatalf("a third start admitted %+v, want every retry still blocked", r)
+		}
+	}
+	if _, err := store.GetTargetSnapshot(mcpNoScanHealType, mcpNoScanHealVersion); err != nil {
+		t.Fatalf("the one-time pass was not recorded done: %v", err)
 	}
 }
 

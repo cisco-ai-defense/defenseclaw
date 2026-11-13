@@ -48,6 +48,7 @@ ap.add_argument("--cap-usd", type=float, default=70.0)
 ap.add_argument("--region", default="us-east-1")
 ap.add_argument("--conc", type=int, default=16)
 ap.add_argument("--replay-latency", action="store_true")
+ap.add_argument("--drop-response-format", action="store_true", help="do not forward response_format (for a model whose structured output is broken on Mantle); the request and cache key then carry none")
 ap.add_argument("--cache-only", action="store_true", help="answer only from the cache; a miss is refused (503) and logged, never sent to a model")
 args = ap.parse_args()
 
@@ -194,7 +195,7 @@ class H(BaseHTTPRequestHandler):
             if self.path.endswith("/systemone"):
                 return self._send(404, {"error": {"message": "no System One model behind this proxy"}})
             msgs = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str) else "".join(p.get("text", "") for p in m["content"])} for m in body["messages"]]
-            text, tin, tout, stop = run("judge", body["model"].split("/", 1)[-1], msgs, int(body.get("max_tokens") or body.get("max_completion_tokens") or 512), body.get("temperature"), body.get("response_format"))
+            text, tin, tout, stop = run("judge", body["model"].split("/", 1)[-1], msgs, int(body.get("max_tokens") or body.get("max_completion_tokens") or 512), body.get("temperature"), None if args.drop_response_format else body.get("response_format"))
             self._send(200, {"id": "s7", "object": "chat.completion", "model": body["model"],
                              "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": stop or "stop"}],
                              "usage": {"prompt_tokens": tin, "completion_tokens": tout, "total_tokens": tin + tout}})
