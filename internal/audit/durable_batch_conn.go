@@ -140,8 +140,10 @@ func (s *Store) releaseUnlessGrouped(release func()) func() {
 // retryDurableBusy runs attempt again while the store answers SQLITE_BUSY,
 // for at most hookDeliveryJournalBusyWait, as the durable connection did
 // (commitDurableBatch); the last error is returned as it is. Each attempt is
-// recorded and counted as retryBusyObserved does, and a write lock another
-// process holds ends the wait at once (writeLockHeld).
+// recorded and counted as retryBusyObserved does. Unlike the other writers
+// it keeps waiting while another process holds the write lock: the journal
+// row of a managed answer waits out a lock for its whole bound
+// (TestHookDeliveryJournalWaitsOutABusyStore, rel-1-0-4 GAP-1790).
 func (s *Store) retryDurableBusy(ctx context.Context, op string, observer SQLiteBusyObservabilityV8, attempt func() error) error {
 	deadline := time.Now().Add(hookDeliveryJournalBusyWait)
 	pause := 10 * time.Millisecond
@@ -154,10 +156,6 @@ func (s *Store) retryDurableBusy(ctx context.Context, op string, observer SQLite
 		}
 		if observer != nil {
 			_ = observer.RecordSQLiteBusyMetric(ctx, op)
-		}
-		if s.writeLockHeld() {
-			s.applyWriteLockWait(writeLockApplyWait)
-			return s.markHeldLockError(err)
 		}
 		if !time.Now().Add(pause).Before(deadline) {
 			return err
