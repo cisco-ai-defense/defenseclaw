@@ -317,7 +317,12 @@ func TestKubeExec(t *testing.T) {
 			if tok.AccessToken != "exec-tok-marker" || tok.Principal != "plug" || tok.Kind != KindKube || !tok.Expiry.Equal(tc.wantExp) {
 				t.Fatalf("token = %v", tok)
 			}
-			if fe.name != "/opt/example/get-token" || !reflect.DeepEqual(fe.args, []string{"--cluster", "e1"}) {
+			wantName := "/opt/example/get-token"
+			if runtime.GOOS == "windows" {
+				// A POSIX absolute path is relative on Windows: the plugin command is resolved against the kubeconfig folder.
+				wantName = filepath.Join(dir, "opt", "example", "get-token")
+			}
+			if fe.name != wantName || !reflect.DeepEqual(fe.args, []string{"--cluster", "e1"}) {
 				t.Errorf("ran %q %q", fe.name, fe.args)
 			}
 			found := false
