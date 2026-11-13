@@ -58,6 +58,8 @@ TELEMETRY_REGISTRY_GENERATOR = ROOT / "scripts" / "generate_telemetry_registry.p
 # listing a type with no payload would name a shape nothing can satisfy. The
 # EventAIDiscovery constant survives as an observability classification key --
 # a different contract, pinned by internal/observability/classification_test.go.
+# "model_usage" is absent for the same reason: EventModelUsage is only the
+# classification key of the v8 model usage record and has no envelope payload.
 EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",

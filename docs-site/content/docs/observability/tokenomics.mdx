@@ -48,7 +48,7 @@ On a managed host both blocks come from the admin `config.yaml` in the signed bu
 
 ## What a usage record holds
 
-Each finished model call writes one `log.model.usage` record in the `model.io` bucket. It holds:
+Each finished model call writes one `log.model.usage` record in the `model.io` bucket, with the action `model_usage`. Audit sinks migrated from v7 do not receive it. It holds:
 
 | Part | Fields |
 | --- | --- |
