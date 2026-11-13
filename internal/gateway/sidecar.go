@@ -2493,8 +2493,6 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if rulePackChanged {
 		publishRulePackOverrides(rulePackCandidate.activeRules)
 		publishLocalPatternsOverride(rulePackCandidate.activePatterns)
-		// Judge verdicts were rendered under the previous pack.
-		InvalidateJudgeVerdictCache()
 	}
 	if api := s.apiSnapshot(); api != nil {
 		previousProfiles := api.guardrailProfileSet()

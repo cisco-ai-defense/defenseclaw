@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -127,7 +128,7 @@ func TestClaudePluginStagingIsNotAPlugin(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Guardrail.Connector = "claudecode"
 	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
-	staging := filepath.Join(cache, "temp_local_1759900000000", "skills", "epa-plug-ok-skill")
+	staging := filepath.Join(cache, fmt.Sprintf("temp_local_%d_k3x9q", time.Now().UnixMilli()), "skills", "epa-plug-ok-skill")
 	final := filepath.Join(cache, "epa-market", "epa-plug-ok", "1.0.0")
 	marketplace := filepath.Join(cache, "temp_review", "sample-plugin", "1.0.0")
 	for _, dir := range []string{staging, final, marketplace} {
