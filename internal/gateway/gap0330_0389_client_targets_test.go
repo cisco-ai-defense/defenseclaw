@@ -62,10 +62,9 @@ func TestGAP0330ConditionalBindingBeforeAbsoluteKeysFourCell(t *testing.T) {
 		}
 		rows = append(rows, hp7ClientRow{"GAP0330/" + form.name + "-benign", form.prefix + benignWrite + ordinary, "allow", "allow"})
 	}
-	// A variable the command binds twice names a target the proof cannot bound:
-	// unknown, so the default pack alerts (rel-1-0-10:GAP-0018) and managed mode
-	// allows the overwritten ordinary destination.
-	rows = append(rows, hp7ClientRow{"GAP0389/tee-overwritten-benign", `f=keylink; f=out3.txt; echo m | tee "$f"`, "allow", "alert"})
+	// The base already blocks this quoted tee form in per-user mode, while
+	// managed mode allows the overwritten ordinary destination.
+	rows = append(rows, hp7ClientRow{"GAP0389/tee-overwritten-benign", `f=keylink; f=out3.txt; echo m | tee "$f"`, "allow", "block"})
 	rows = append(rows, hp7ClientRow{"GAP0389/tee-quoted-protected", `f=keylink; echo m | tee "$f"`, "block", "block"})
 	checkHP7ClientRows(t, f, rows)
 }

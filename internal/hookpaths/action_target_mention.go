@@ -351,17 +351,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					}
 				}
 				for _, assign := range call.Assigns {
-					// A variable only holds the text: where it is used decides, and
-					// the use is judged with its value (actionUpdateValues).
-					if memo.nonWritesExcused() && len(call.Args) == 0 && !actionWordMayBePattern(assign.Value) {
-						if assign.Value != nil {
-							judgedWords = append(judgedWords, assign.Value)
-						}
-						continue
-					}
 					if assign.Value != nil && checkWord(assign.Value) {
 						found = true
 						return false
+					}
+					// A variable only holds the text: where it is used decides, and
+					// the use is judged with its value (actionUpdateValues). The text
+					// scan does not read a sentence a variable holds either.
+					if memo.nonWritesExcused() && len(call.Args) == 0 && assign.Value != nil {
+						judgedWords = append(judgedWords, assign.Value)
 					}
 				}
 				var moved *syntax.Word
@@ -5448,20 +5446,6 @@ func actionSSHSetupAndReadsOnly(file *syntax.File, cwd, home string) bool {
 func actionPathHasDotComponent(word string) bool {
 	for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if part == "." || part == ".." {
-			return true
-		}
-	}
-	return false
-}
-
-// actionWordMayBePattern reports a word with an unquoted pattern character: the
-// shell expands it to the names it selects, which may be a protected file.
-func actionWordMayBePattern(word *syntax.Word) bool {
-	if word == nil {
-		return false
-	}
-	for _, part := range word.Parts {
-		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[") {
 			return true
 		}
 	}

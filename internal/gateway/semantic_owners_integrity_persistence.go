@@ -1755,6 +1755,12 @@ func unprovenTargetMayWarn(request trustedActionRequest, commandText, home strin
 	if command == "" {
 		command = request.Input.Command
 	}
+	if unprovenIndirection.MatchString(strings.ToLower(command)) {
+		// The command builds its target through eval, a name reference, a
+		// trap, source or printf -v: the unknown is of its own making, which
+		// the owner rows of GAP-0356 and GAP-0229 pin as a block.
+		return false
+	}
 	if strings.ContainsAny(command, "*?[") {
 		// A pattern in the command may select a protected file in the working
 		// directory (f=keyl*; echo m >> $f): not unknown, but possibly named.
@@ -1778,6 +1784,11 @@ func unprovenTargetMayWarn(request trustedActionRequest, commandText, home strin
 	}
 	return true
 }
+
+// unprovenIndirection matches the shell constructs that rebind a name at run
+// time: eval, source (and the dot), trap, a name reference (declare -n, typeset
+// -n, local -n) and printf -v.
+var unprovenIndirection = lazyregexp.New(`(?m)(?:^|[\s;&|(){}])(?:eval|source|trap)(?:[\s;&|(){}]|$)|(?:^|[;&|(){}\n])\s*\.\s|\b(?:declare|typeset|local)\s+-\w*n\b|\bprintf\s+-v`)
 
 // unprovenWrite is what the authorized-keys proof held as unknown: the
 // hookpaths.UnprovenWriteTitle class and the operand at fault, if one was.
