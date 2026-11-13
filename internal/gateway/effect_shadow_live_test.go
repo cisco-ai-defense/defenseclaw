@@ -191,7 +191,7 @@ func TestEffectShadowAuditDetailsAreValueFree(t *testing.T) {
 	useEffectsRulesMode(t, "shadow")
 	res := effectShadowRun(shadowLiveRequest(shadowLiveWrite), effectRulesShadow, tierRestricted)[0]
 	details := effectShadowAuditDetails(res, 3)
-	for _, want := range []string{"mode=shadow", "tier=restricted", "would=block", "rules=effect.protected_target_restricted", "cost_us=", "dropped=3"} {
+	for _, want := range []string{"lane=effects-shadow mode=shadow", "tier=restricted", "would=block", "rules=effect.protected_target_restricted", "cost_us=", "dropped=3"} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details %q lack %q", details, want)
 		}

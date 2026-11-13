@@ -49,7 +49,6 @@ classes:
       ActionApprovalRequest: "approval-request"
       ActionApprovalGranted: "approval-granted"
       ActionApprovalDenied: "approval-denied"
-      ActionEffectsShadow: "effects-shadow"
       ActionToolCall: "tool-call"
       ActionToolResult: "tool-result"
       ActionConfigUpdate: "config-update"

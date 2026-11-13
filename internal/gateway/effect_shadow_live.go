@@ -71,12 +71,6 @@ var effectShadowTimeCap = 50 * time.Millisecond
 // guarded part of effectShadowRun, so a test can make the run panic or stall.
 var effectShadowFaultHook func()
 
-// effectShadowLiveOff stops the hook from starting the async run. Only the
-// s7bench harness sets it: the harness measures the same core through
-// EvaluateDeterministicAction (effectShadowRun) and reads the answer per case,
-// so a second run per hook call would only double the CPU and the audit rows.
-var effectShadowLiveOff bool
-
 var (
 	effectShadowSlots   = make(chan struct{}, effectShadowMaxConcurrent)
 	effectShadowDropped atomic.Int64
@@ -171,7 +165,7 @@ func effectShadowRun(request trustedActionRequest, mode effectRulesMode, tiers .
 // and hands the answer to record. It returns at once. When every slot is in
 // use the run is dropped and counted, never queued behind the hook.
 func scheduleEffectShadow(request trustedActionRequest, mode effectRulesMode, tier effectTierMode, record func(EffectShadowResult)) {
-	if record == nil || effectShadowLiveOff {
+	if record == nil {
 		return
 	}
 	select {
@@ -203,7 +197,7 @@ func effectShadowRecordWorthy(res EffectShadowResult) bool {
 // protected-set names, the program and the kind, never a path or a command).
 func effectShadowAuditDetails(res EffectShadowResult, dropped int64) string {
 	var b strings.Builder
-	b.WriteString("mode=" + res.Mode + " tier=" + res.Tier + " would=" + res.Action)
+	b.WriteString("lane=effects-shadow mode=" + res.Mode + " tier=" + res.Tier + " would=" + res.Action)
 	if len(res.Sets) > 0 {
 		b.WriteString(" sets=" + strings.Join(res.Sets, ","))
 	}
@@ -227,9 +221,11 @@ func effectShadowAuditDetails(res EffectShadowResult, dropped int64) string {
 	return b.String()
 }
 
-// recordEffectShadow writes the audit row of one finished shadow run. The row
-// is INFO, never an alert: a shadow verdict is a measurement. A nil server or
-// logger records nothing.
+// recordEffectShadow writes the audit row of one finished shadow run, as a
+// guardrail-inspection row (a guardrail evaluation; the shared audit and
+// telemetry registries get no new action) whose details start with
+// lane=effects-shadow. The row is INFO, never an alert: a shadow verdict is a
+// measurement. A nil server or logger records nothing.
 func (a *APIServer) recordEffectShadow(ctx context.Context, connectorName string, res EffectShadowResult) {
 	if a == nil || a.logger == nil || !effectShadowRecordWorthy(res) {
 		return
@@ -237,6 +233,6 @@ func (a *APIServer) recordEffectShadow(ctx context.Context, connectorName string
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_ = a.logger.LogActionCtx(context.WithoutCancel(ctx), string(audit.ActionEffectsShadow), connectorName,
+	_ = a.logger.LogActionCtx(context.WithoutCancel(ctx), string(audit.ActionGuardrailInspection), connectorName,
 		effectShadowAuditDetails(res, effectShadowDropped.Swap(0)))
 }

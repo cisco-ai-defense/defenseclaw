@@ -69,9 +69,6 @@ ACTION_APPROVAL_REQUEST: Final[str] = "approval-request"
 ACTION_APPROVAL_GRANTED: Final[str] = "approval-granted"
 ACTION_APPROVAL_DENIED: Final[str]  = "approval-denied"
 
-# Effect-model rule lane, live shadow run (measurement, never enforcement)
-ACTION_EFFECTS_SHADOW: Final[str] = "effects-shadow"
-
 # Tool runtime
 ACTION_TOOL_CALL: Final[str]   = "tool-call"
 ACTION_TOOL_RESULT: Final[str] = "tool-result"
@@ -364,7 +361,6 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_APPROVAL_REQUEST,
     ACTION_APPROVAL_GRANTED,
     ACTION_APPROVAL_DENIED,
-    ACTION_EFFECTS_SHADOW,
     ACTION_TOOL_CALL,
     ACTION_TOOL_RESULT,
     ACTION_CONFIG_UPDATE,
