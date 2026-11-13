@@ -154,6 +154,15 @@ func (s *sandboxRelayState) takeEgressRefusals() []SandboxEgressRefusal {
 
 // sandboxRelayEgressRefusals reads the refusals a relayed hook call
 // carries: one EgressRefusalsHeader value, or none (several are ignored).
+// The header is not authenticated beyond the admitted registration: the
+// relay sets it, but any process of the same user that the socket admits
+// can send one too. That is accepted: a refusal here is only text for the
+// answer of that registration's own call and a host:category entry in that
+// call's hook audit row (bounded and sanitized by
+// sandboxrelay.ParseEgressRefusals), never a verdict, an unblock or a
+// policy input, and the daemon marks told only the refusals it attached
+// to its own call (api_sandbox_ingress.go), so a forged value cannot hide
+// a real one (rel-1-0-10 GAP-0001 F5).
 func sandboxRelayEgressRefusals(h http.Header) []SandboxEgressRefusal {
 	values := h.Values(sandboxrelay.EgressRefusalsHeader)
 	if len(values) != 1 {
