@@ -41,6 +41,10 @@ func TestNewCredentialStartsANewWriter(t *testing.T) {
 	if rt.epoch != before {
 		t.Fatal("the same credential keeps the epoch")
 	}
+	rt.SetFleet(nil, nil) // the store off for a while
+	if rt.epoch != before {
+		t.Fatal("no fleet is no new writer")
+	}
 	rt.SetFleet(newFleet, nil)
 	if rt.epoch == before {
 		t.Fatal("a new credential starts a new epoch")
@@ -50,6 +54,9 @@ func TestNewCredentialStartsANewWriter(t *testing.T) {
 	}
 	if got, _ := rt.Ledger().Spend("user:d:*:1001", "day", time.Now()); got != 3 {
 		t.Fatalf("the spend keeps counting until the next sync: %v", got)
+	}
+	if len(oldFleet.pushed) != 1 || oldFleet.pushed[0].USD != 3 {
+		t.Fatalf("the old credential sends its last spend: %+v", oldFleet.pushed)
 	}
 	if rows := local.pushed[before]; len(rows) != 1 || rows[0].USD != 3 {
 		t.Fatalf("the old writer's spend is stored on this device: %+v", local.pushed)

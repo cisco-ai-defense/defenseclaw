@@ -35,6 +35,7 @@ type fleetState struct {
 	fromFleet map[string]string
 	userAll   map[string]bool   // budget ids of * user budgets in the credential
 	connAll   map[string]bool   // budget ids of * connector budgets in the credential
+	bundle    map[string]bool   // budget ids in the current bundle (a retired budget is never sent or asked)
 	users     map[string]string // local caller key -> fleet user id
 	byFleet   map[string]string // fleet user id -> local caller key
 	err       string
@@ -54,6 +55,10 @@ func (f *fleetState) apply(cfg *config.Config) {
 	if store == nil || strings.TrimSpace(store.URL) == "" {
 		*f = fleetState{}
 		return
+	}
+	f.bundle = map[string]bool{}
+	for _, b := range cfg.Routing.Admin.Budgets {
+		f.bundle[b.ID] = true
 	}
 	value := cfg.RoutingCredential(store.EffectiveCredential())
 	var ca []byte
@@ -175,6 +180,9 @@ func sameCanonical(a, b accountjoin.Account) bool {
 func (f *fleetState) ToFleet(local string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.inBundleLocked(local) {
+		return "", false
+	}
 	if prefix, caller, ok := splitUserStarKey(local); ok {
 		if !f.userAll[strings.TrimSuffix(strings.TrimPrefix(prefix, "user:"), ":*:")] {
 			return "", false
@@ -227,14 +235,31 @@ func (f *fleetState) Wanted() []string {
 	}
 	var out []string
 	for _, fleet := range f.toFleet {
+		if !f.inBundleLocked(fleet) {
+			continue
+		}
 		out = append(out, fleet)
 	}
 	for id := range f.userAll {
+		if f.bundle != nil && !f.bundle[id] {
+			continue
+		}
 		for _, uid := range f.users {
 			out = append(out, "user:"+id+":*:"+uid)
 		}
 	}
 	return out
+}
+
+// inBundleLocked reports whether the budget of a charge key is in the
+// current bundle (true while no bundle is known, as in tests).
+func (f *fleetState) inBundleLocked(key string) bool {
+	if f.bundle == nil {
+		return true
+	}
+	_, rest, _ := strings.Cut(key, ":")
+	id, _, _ := strings.Cut(rest, ":")
+	return f.bundle[id]
 }
 
 // splitUserStarKey splits user:<id>:*:<subject> into its prefix and subject.

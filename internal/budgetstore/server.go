@@ -78,6 +78,7 @@ type Store struct {
 	db         *sql.DB
 	now        func() time.Time
 	mu         sync.Mutex // serialises pushes so seq, cap and upserts agree
+	budgetMu   sync.Mutex // guards budgets (never held with mu)
 	budgets    map[string]Budget
 	defaultCap float64 // guarded by devMu
 
@@ -135,9 +136,9 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // SetBudgets installs the budget limits pooled answers use.
 func (s *Store) SetBudgets(b map[string]Budget) {
-	s.mu.Lock()
+	s.budgetMu.Lock()
 	s.budgets = b
-	s.mu.Unlock()
+	s.budgetMu.Unlock()
 }
 
 // SetDefaultCap sets the daily cap of devices issued without their own
@@ -320,6 +321,9 @@ const (
 	// MaxWritersPerDevice bounds the gateway processes of one device active
 	// within WriterIdle.
 	MaxWritersPerDevice = 16
+	// MaxEpochsPerDay bounds the writers (gateway processes) of one device
+	// that store spend on one UTC day (restarts and reloads stay far below).
+	MaxEpochsPerDay = 64
 	// MaxOpenKeysPerDay bounds the keys of one device and day beyond its
 	// credential's own (connector names of * connector budgets).
 	MaxOpenKeysPerDay = 64
@@ -365,34 +369,41 @@ func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
 	}
 	now := s.now().UTC()
 	today, yesterday := now.Format(time.DateOnly), now.AddDate(0, 0, -1).Format(time.DateOnly)
-	// The device's open days: spend over all writers and the keys in use.
+	// The device's open days: spend over all writers, its writers, and the
+	// keys in use beyond the credential's own (SQL aggregates, no row scan).
 	type dayState struct {
-		total float64
-		keys  map[string]bool
-		open  int // keys in use that the credential does not list
+		total  float64
+		epochs int
+		keys   map[string]bool // keys in use that the credential does not list
+		mine   bool            // this writer already stored on this day
 	}
 	days := map[string]*dayState{today: {keys: map[string]bool{}}, yesterday: {keys: map[string]bool{}}}
+	for day, d := range days {
+		var mine int
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(SUM(usd), 0), COUNT(DISTINCT epoch), COUNT(CASE WHEN epoch = ? THEN 1 END)
+			FROM spend WHERE device = ? AND day = ?`, req.Epoch, id, day).Scan(&d.total, &d.epochs, &mine); err != nil {
+			return err
+		}
+		d.mine = mine > 0
+	}
 	mine := map[[2]string]float64{} // (day, key) -> this writer's stored value
-	rows, err := tx.QueryContext(ctx, `SELECT day, charge_key, epoch, usd FROM spend WHERE device = ? AND day >= ?`, id, yesterday)
+	rows, err := tx.QueryContext(ctx, `SELECT day, charge_key, MAX(CASE WHEN epoch = ? THEN usd END) FROM spend
+		WHERE device = ? AND day >= ? GROUP BY day, charge_key`, req.Epoch, id, yesterday)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var day, key, epoch string
-		var usd float64
-		if err := rows.Scan(&day, &key, &epoch, &usd); err != nil {
+		var day, key string
+		var usd sql.NullFloat64
+		if err := rows.Scan(&day, &key, &usd); err != nil {
 			rows.Close()
 			return err
 		}
-		if d := days[day]; d != nil {
-			d.total += usd
-			if !d.keys[key] && !dev.keys[key] {
-				d.open++
-			}
-			d.keys[key] = true
+		if usd.Valid {
+			mine[[2]string{day, key}] = usd.Float64
 		}
-		if epoch == req.Epoch {
-			mine[[2]string{day, key}] = usd
+		if d := days[day]; d != nil && !dev.keys[key] {
+			d.keys[key] = true
 		}
 	}
 	err = rows.Err()
@@ -415,13 +426,18 @@ func (s *Store) Push(ctx context.Context, dev *device, req PushRequest) error {
 		if row.USD <= stored {
 			continue // rows never go down; an equal row changes nothing
 		}
-		if !d.keys[row.Key] && !dev.keys[row.Key] {
-			if d.open >= MaxOpenKeysPerDay {
+		if !d.mine {
+			if d.epochs >= MaxEpochsPerDay {
 				return errTooMany
 			}
-			d.open++
+			d.mine, d.epochs = true, d.epochs+1
 		}
-		d.keys[row.Key] = true
+		if !dev.keys[row.Key] && !d.keys[row.Key] {
+			if len(d.keys) >= MaxOpenKeysPerDay {
+				return errTooMany
+			}
+			d.keys[row.Key] = true
+		}
 		grow = append(grow, growth{day: row.Day, key: row.Key, stored: stored, add: row.USD - stored})
 		added[row.Day] += row.USD - stored
 	}
@@ -524,9 +540,9 @@ func (s *Store) exceeded(ctx context.Context, keys []string) ([]string, error) {
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	s.mu.Lock()
+	s.budgetMu.Lock()
 	budgets := s.budgets
-	s.mu.Unlock()
+	s.budgetMu.Unlock()
 	now := s.now()
 	today := now.UTC().Format(time.DateOnly)
 	byStart := map[string][]string{}
