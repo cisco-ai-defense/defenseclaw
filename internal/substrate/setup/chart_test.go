@@ -351,6 +351,13 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 	if !strings.Contains(string(out), "- chain-key") || !strings.Contains(string(out), "secretName: defenseclaw-chain-key") {
 		t.Errorf("%s: no chain-key hook or Secret mount", name)
 	}
+	// F4 follow-up: the relay session key is created by its own hook (never
+	// rendered), with its own ServiceAccount that may read only that
+	// Secret, and the gateway mounts it.
+	if !strings.Contains(string(out), "- relay-session\n") || !strings.Contains(string(out), "serviceAccountName: defenseclaw-relay-key") ||
+		!strings.Contains(string(out), "resourceNames: [\"defenseclaw-relay-session\"]") {
+		t.Errorf("%s: no relay-session hook with its own ServiceAccount", name)
+	}
 	if c, ok := byName["Deployment/defenseclaw-callout"]; ok {
 		raw, _ := yaml.Marshal(c.Spec)
 		if name != "minimal" && !strings.Contains(string(raw), "--leader-address=defenseclaw-leader.") {
