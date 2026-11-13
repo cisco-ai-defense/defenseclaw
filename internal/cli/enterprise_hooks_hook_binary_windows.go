@@ -116,9 +116,33 @@ func removeWindowsStandaloneReplacementCopies(stderr io.Writer) {
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}
-	for _, removed := range removeWindowsReplacementCopies(filepath.Join(roots.InstallRoot, "bin")) {
-		fmt.Fprintf(stderr, "[hook-guardian] removed %s, which no program runs any more\n", removed)
+	bin := filepath.Join(roots.InstallRoot, "bin")
+	dirs := append([]string{bin}, windowsLaunchHookImageFolders(bin)...)
+	for _, dir := range dirs {
+		for _, removed := range removeWindowsReplacementCopies(dir) {
+			fmt.Fprintf(stderr, "[hook-guardian] removed %s, which no program runs any more\n", removed)
+		}
 	}
+}
+
+// windowsLaunchHookImageFolders lists the launch folders under bin\hooks
+// (GAP-0751): plain folders named by 16 hex digits.
+func windowsLaunchHookImageFolders(bin string) []string {
+	root := winpath.EnterpriseHookImagesRoot(bin)
+	if info, err := os.Lstat(root); err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	var folders []string
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Type()&(os.ModeSymlink|os.ModeIrregular) == 0 && winpath.IsEnterpriseHookImageDirName(entry.Name()) {
+			folders = append(folders, filepath.Join(root, entry.Name()))
+		}
+	}
+	return folders
 }
 
 // removeWindowsReplacementCopies deletes each replacement copy in dir that
@@ -184,6 +208,9 @@ func keepWindowsStandaloneHookBinaryLocked(stderr io.Writer, onlyWhenDamaged boo
 	reportWindowsImageSwapLinkRefusal(stderr, target)
 	reportWindowsImageBackupRestrictFailure(stderr)
 	reportWindowsHeldSwapNotice(stderr, target)
+	// The launch image every agent config names (GAP-0751), kept exactly as
+	// the transition image above, from the same protected copy.
+	keepWindowsStandaloneLaunchHookImage(stderr, filepath.Dir(target), want, copyPath, !onlyWhenDamaged)
 	// The runtime files a hook start reads besides the binary: the same
 	// bounded close, per file, after the binary's check and restore and for a
 	// bounded number of held files, so a user who holds many of them cannot
@@ -200,6 +227,110 @@ func keepWindowsStandaloneHookBinaryLocked(stderr io.Writer, onlyWhenDamaged boo
 	windowsHookBinaryLastErr = ""
 	if damage != "" {
 		fmt.Fprintf(stderr, "[hook-guardian] tamper: restored the hook binary %s, which was %s, from the guardian's protected copy (sha256 %s)\n", target, damage, want)
+	}
+}
+
+// windowsLaunchHookImageLastErr keeps the launch image check from logging
+// the same failure every interval; windowsRetainedHookImageReported keeps
+// one line per retained folder and finding.
+var (
+	windowsLaunchHookImageLastErr    string
+	windowsRetainedHookImageReported = map[string]string{}
+)
+
+// windowsHookBinaryActiveGate is the holder gate keepWindowsManagedFileCopy
+// uses: the transition image's (windowsHolderGate), or, while the launch
+// image is checked, its own. Each file keeps its own persistence, backoff
+// and streak, so checking the launch image never restarts the two checks a
+// hold on the transition image needs (GAP-0755).
+var (
+	windowsHookBinaryActiveGate = &windowsHolderGate
+	windowsLaunchHolderGate     windowsHolderState
+)
+
+// keepWindowsStandaloneLaunchHookImage protects the launch image
+// <bin>\hooks\<want[:16]>\defenseclaw-hook.exe the way the transition image
+// is protected: the recorded digest (hashes.hook), the guardian's protected
+// copy as the restore source, the same swap and held-open handling. Only
+// when the launch folder exists: Setup creates it, and without it the
+// writers name the transition image and verify reports hook_image_not_staged.
+// The guard beside it is the transition guard's copy and, like the
+// transition guard, is checked by Setup and verify, not restored here. On a
+// reconcile pass the folders the last upgrade kept for older sessions are
+// checked once per change and reported, never restored or removed.
+func keepWindowsStandaloneLaunchHookImage(stderr io.Writer, bin, want, copyPath string, reconcile bool) {
+	folder, err := winpath.EnterpriseHookImageDir(bin, want)
+	if err != nil {
+		return
+	}
+	if info, err := os.Lstat(folder); err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return
+	}
+	target := filepath.Join(folder, winpath.EnterpriseHookImageName)
+	windowsHookBinaryActiveGate = &windowsLaunchHolderGate
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+	windowsHookBinaryActiveGate = &windowsHolderGate
+	reportWindowsHookBinaryDigestRefusal(stderr, target)
+	reportWindowsImageSwapLinkRefusal(stderr, target)
+	reportWindowsImageBackupRestrictFailure(stderr)
+	reportWindowsHeldSwapNotice(stderr, target)
+	switch {
+	case err != nil:
+		if message := err.Error(); message != windowsLaunchHookImageLastErr {
+			windowsLaunchHookImageLastErr = message
+			fmt.Fprintf(stderr, "[hook-guardian] %s\n", message)
+		}
+	case damage != "":
+		windowsLaunchHookImageLastErr = ""
+		fmt.Fprintf(stderr, "[hook-guardian] tamper: restored the hook binary %s, which was %s, from the guardian's protected copy (sha256 %s)\n", target, damage, want)
+	default:
+		windowsLaunchHookImageLastErr = ""
+	}
+	if reconcile {
+		reportWindowsRetainedHookImages(stderr, bin, filepath.Base(folder))
+	}
+}
+
+// reportWindowsRetainedHookImages names, once per finding, a retained
+// launch folder whose hook is missing or does not have the digest its name
+// says. Such a folder serves only agent sessions that started before the
+// last upgrade; Setup's next upgrade removes it.
+func reportWindowsRetainedHookImages(stderr io.Writer, bin, current string) {
+	for _, folder := range windowsLaunchHookImageFolders(bin) {
+		name := filepath.Base(folder)
+		if strings.EqualFold(name, current) {
+			continue
+		}
+		hook := filepath.Join(folder, winpath.EnterpriseHookImageName)
+		finding := ""
+		info, err := os.Lstat(hook)
+		switch {
+		case err != nil:
+			finding = "missing"
+		case !info.Mode().IsRegular():
+			finding = "not a regular file"
+		default:
+			stamp := fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+			if previous, ok := windowsRetainedHookImageReported[folder]; ok && strings.HasPrefix(previous, stamp+"|") {
+				continue
+			}
+			if sum, err := windowsFileSHA256Hex(hook); err != nil {
+				finding = "unreadable"
+			} else if digest, _ := winpath.EnterpriseHookImageDigest(sum); !strings.EqualFold(digest, name) {
+				finding = "changed (sha256 " + sum + ")"
+			}
+			windowsRetainedHookImageReported[folder] = stamp + "|" + finding
+			if finding == "" {
+				continue
+			}
+			fmt.Fprintf(stderr, "[hook-guardian] notice: the retained hook image %s is %s; it serves only agent sessions started before the last upgrade, and the next upgrade removes it\n", hook, finding)
+			continue
+		}
+		if windowsRetainedHookImageReported[folder] == "|"+finding {
+			continue
+		}
+		windowsRetainedHookImageReported[folder] = "|" + finding
+		fmt.Fprintf(stderr, "[hook-guardian] notice: the retained hook image %s is %s; it serves only agent sessions started before the last upgrade, and the next upgrade removes it\n", hook, finding)
 	}
 }
 
@@ -320,7 +451,7 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 	holdSeen := false
 	defer func() {
 		if !holdSeen {
-			windowsHolderGate.free()
+			windowsHookBinaryActiveGate.free()
 		}
 	}()
 	info, err := windowsHookBinaryLstat(target)
@@ -375,7 +506,7 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 			// handle, closes one handle at a time and backs off from a
 			// holder that takes it again. The file stays as it is.
 			holdSeen = true
-			closed, holdErr := endWindowsExclusiveHold(target)
+			closed, holdErr := endWindowsExclusiveHoldOn(windowsHookBinaryActiveGate, target, windowsHolderBinaryProbes)
 			if holdErr == nil && closed == 0 {
 				return "", nil
 			}

@@ -2062,6 +2062,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				literalOperands = append(literalOperands, quotedGlobNameWriteOperands(command, cwd, home, facts.Paths)...)
 				if concreteOperands.ready {
 					literalOperands = append(literalOperands, concreteOperands.loop...)
 					literalOperands = append(literalOperands, concreteOperands.sourceGlob...)

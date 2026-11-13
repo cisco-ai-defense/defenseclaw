@@ -5,6 +5,7 @@ package cli
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -51,6 +52,20 @@ func TestEnterpriseHookManagedInstallLayout(t *testing.T) {
 		if (layout.InstallRoot != "") != tc.wantInstall || (layout.StateRoot != "") != tc.wantState ||
 			ok != (tc.wantInstall || tc.wantState) {
 			t.Errorf("%s: layout = %+v, ok %t", name, layout, ok)
+		}
+	}
+
+	// A hook started from a launch folder (GAP-0751) repairs the install
+	// root of its bin (review 1 P3-5). Windows paths only.
+	if runtime.GOOS == "windows" {
+		launch := filepath.Join(install, "bin", "hooks", "0123456789abcdef", "defenseclaw-hook.exe")
+		layout, ok = enterpriseHookManagedInstallLayout(launch, dataDir, manifest, programFiles, programData)
+		if !ok || layout.InstallRoot != install {
+			t.Fatalf("launch folder hook layout = %+v, %t", layout, ok)
+		}
+		other := filepath.Join(install, "bin", "other", "0123456789abcdef", "defenseclaw-hook.exe")
+		if layout, _ := enterpriseHookManagedInstallLayout(other, dataDir, manifest, programFiles, programData); layout.InstallRoot != "" {
+			t.Fatalf("a hook outside bin and its launch folders got the install root %s", layout.InstallRoot)
 		}
 	}
 
