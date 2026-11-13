@@ -833,7 +833,9 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         provenance = "no-installed-mode" if os.name == "nt" else "config"
         self.assertEqual(
             labels["Mode"]["detail"],
-            f"action; fail-mode=closed; provenance={provenance}",
+            f"action; fail-mode=closed; provenance={provenance}; "
+            # What each kind of hook failure does (#1441).
+            "on failure: gateway down: block; no answer: block; hook or answer error: block",
         )
         self.assertIn("Rule pack", labels)
 
