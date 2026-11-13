@@ -13219,6 +13219,37 @@ def _check_agent_identity_ledger(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
+    """Warn about routed models a managed host keys by api_key_env.
+
+    1.0.9 and 1.0.8 managed configs name routed keys by api_key_env; 1.0.10
+    keeps them working (the gateway service environment or its .env), and
+    asks for a protected credential instead (S1 lead item 1).
+    """
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return
+    routing = getattr(cfg, "routing", None)
+    models = (getattr(routing, "models", []) or []) if routing is not None else []
+    legacy = [
+        str(m.get("name") or i)
+        for i, m in enumerate(models)
+        if isinstance(m, dict) and str(m.get("api_key_env") or "").strip() and not str(m.get("credential") or "").strip()
+    ]
+    if not legacy:
+        return
+    names = ", ".join(legacy[:8])
+    _emit(
+        "warn",
+        "Routing model keys",
+        f"{len(legacy)} routed model(s) read their key from the gateway service environment: {names}",
+        remediation=(
+            "store each key with defenseclaw-gateway enterprise secret set --name <name> --from-stdin "
+            "and name it in routing.models[].credential in the admin config"
+        ),
+        r=r,
+    )
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
@@ -16349,6 +16380,7 @@ def doctor(
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
+    _check_routing_managed_key_env(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
         # Preserve the established Linux/macOS evidence collectors. Windows
