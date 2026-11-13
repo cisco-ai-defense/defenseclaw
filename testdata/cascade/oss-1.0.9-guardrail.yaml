@@ -1,0 +1,31 @@
+# A per-user 1.0.9 config with every released cascade knob set (no
+# guardrail.cascade block). 1.0.10 must load it unchanged and decide the same
+# way: TestCascadeUpgradeFrom109Unchanged.
+config_version: 9
+data_dir: DATA_DIR
+guardrail:
+  enabled: true
+  mode: action
+  rule_pack: default
+  block_at: CRITICAL
+  alert_at: MEDIUM
+  hilt:
+    enabled: true
+    min_severity: HIGH
+  detection_strategy: regex_judge
+  detection_strategy_tool_call: regex_judge
+  judge:
+    enabled: true
+    hook_connectors: [claudecode]
+  connectors:
+    codex:
+      mode: action
+      block_at: HIGH
+decision_model:
+  enabled: true
+  model: system-one
+  base_url: https://decisions.example.invalid/v1/decisions
+  allow_threshold: 0.3
+  block_threshold: 0.75
+  on_confident_block: decide
+  hook_connectors: [codex]

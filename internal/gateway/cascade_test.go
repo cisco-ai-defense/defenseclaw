@@ -423,3 +423,43 @@ func TestCascadePolicyInputHasNoContent(t *testing.T) {
 		t.Fatalf("policy input lacks the finding: %s", raw)
 	}
 }
+
+// I11: a 1.0.9 config with every released cascade knob loads unchanged, its
+// cascade is the defaults, and explain names what runs where.
+func TestCascadeUpgradeFrom109Unchanged(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "testdata", "cascade", "oss-1.0.9-guardrail.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(dir, ".defenseclaw"))
+	doc := strings.ReplaceAll(string(raw), "DATA_DIR", filepath.Join(dir, "state"))
+	cfg, err := config.LoadRuntimeV8FromBytes("config.yaml", []byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inv := cfg.Guardrail.Cascade.Invalid(); inv != nil {
+		t.Fatalf("1.0.9 config made the cascade invalid: %s", inv.Error)
+	}
+	for _, connector := range []string{"", "claudecode", "codex"} {
+		if e := cfg.ResolveCascade(connector); !e.IsDefault() {
+			t.Fatalf("%s: a 1.0.9 config resolves a non-default cascade: %+v", connector, e)
+		}
+	}
+	claude, err := ExplainCascade(cfg, "claudecode", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claude.Judge.Runs != "escalation" || claude.SystemOne.Runs != "with_judge" || claude.Unknown.Action != "alert" ||
+		!claude.Rules.HILT || claude.CriticalFloor != "alert" || claude.Policy.Active || len(claude.Sources) != 2 {
+		t.Fatalf("claudecode = %+v", claude)
+	}
+	codex, err := ExplainCascade(cfg, "codex", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if codex.Judge.Runs != "off" || codex.SystemOne.Runs != "alone" || codex.Rules.BlockAt != "HIGH" || codex.SystemOne.OnUnsure != "confirm" {
+		t.Fatalf("codex = %+v", codex)
+	}
+}

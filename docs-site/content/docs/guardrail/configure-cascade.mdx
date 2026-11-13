@@ -1,0 +1,198 @@
+---
+title: Configure the cascade
+description: Choose what each guardrail layer does, rules, System One and the LLM judge, with config.yaml and an optional Rego policy. Lock settings on managed installs.
+keywords:
+  - guardrail.cascade
+  - guardrail cascade
+  - block or alert
+  - Rego policy
+  - OPA
+  - defenseclaw.cascade
+  - unknown tier
+  - critical_floor
+  - admin locked
+  - defenseclaw guardrail cascade explain
+---
+
+The guardrail decides each tool call, prompt and response in up to three layers. You choose what each layer does with its answer, and you can add a Rego policy that has the last word within limits you set.
+
+| Layer | Runs | What it answers |
+| --- | --- | --- |
+| Rules | Always (free, local) | Findings with a severity. `block_at`, `alert_at` and `hilt` map a severity to block, ask or alert. |
+| [System One](/docs/guardrail/decision-model) | When `decision_model` is on | Confident allow, unsure, or confident block. |
+| LLM judge | When `guardrail.judge` is on for the connector | A finding with a severity, mapped like a rule finding. |
+| Rego policy (optional) | When `guardrail.cascade.policy.module` is set | Raises or lowers the final action, within your limits. |
+
+With no `guardrail.cascade` block, every decision is the same as before: the defaults below are the rule pack's own behavior.
+
+## The order of a decision
+
+1. **Rules.** The rule pack and your `block_at`, `alert_at` and `hilt` settings decide. An input DefenseClaw could not read in full (too long, too deep, too many paths) is judged at least at the **unknown tier**.
+2. **System One** (if on). A confident allow lets the call through, unless the rules flagged it. A confident block needs both the block probability and the risk score, and never lands on a call the rules flagged. With the judge, a confident block always goes to the judge (it is never final). Without the judge, it blocks, and an unsure answer asks.
+3. **LLM judge** (if on). It runs on the calls the rules could not settle (`regex_judge`) or on every call (`judge_first`). Its role is set by `guardrail.cascade.judge`.
+4. **Rego policy** (if set). It sees the findings and every layer's answer, and may set the final action between `policy.lowest` and `policy.highest`.
+5. **The CRITICAL floor.** A proven CRITICAL finding never ends below `admin.critical_floor` (alert by default), whatever the layers or the policy decided.
+6. **Mode and the agent.** In `observe` mode nothing is blocked or asked. A confirm becomes the agent's own question where it can ask, and its usual fallback where it cannot.
+
+System One and the judge only ever **raise** the rules' verdict. The Rego policy is the only step that can lower it, and only within your limits.
+
+## Settings
+
+The released keys keep their meaning: `guardrail.mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `rules`, `guardrail.judge.*`, `guardrail.detection_strategy*` and `decision_model.*`. `guardrail.cascade` holds the rest.
+
+| Key | Values (default first) | What it does |
+| --- | --- | --- |
+| `cascade.unknown` | `pack`, `alert`, `confirm`, `block` | The unknown and truncated tier. `pack`: the strict pack blocks, default and permissive alert. Never below alert. |
+| `cascade.judge.max_action` | `block`, `confirm`, `alert`, `log` | The most the judge can decide. `alert` makes the judge advisory; `log` records its findings without an alert. |
+| `cascade.judge.block_needs_system_one` | `false`, `true` | `true`: a judge block stands only when System One also confidently blocked; otherwise the agent asks. |
+| `cascade.judge.no_verdict` | `rules`, `unknown` | When the judge (or System One alone) gives no answer: keep the rules' verdict, or judge the call at the unknown tier. |
+| `cascade.system_one.on_unsure` | `confirm`, `alert`, `rules` | System One without the judge, on an unsure answer or a refusal: ask, alert, or add nothing. |
+| `cascade.system_one.allow_threshold`, `.block_threshold`, `.block_risk_score`, `.escalate_rule_flagged` | the `decision_model` values | Per connector or profile only: override [System One's routing](/docs/guardrail/decision-model) for that scope. The global values stay in `decision_model`. |
+| `cascade.lanes.<lane>` | each lane's shipped value | `off`, `shadow` (record the lane's verdict, never change the answer) or `on`. A lane that ships shadow-only in this release accepts `off` and `shadow`. `defenseclaw guardrail cascade explain` lists the lanes. |
+| `cascade.policy.module` | unset | `{path: /absolute/path/cascade.rego, digest: "sha256:<hex>"}`. The Rego policy, pinned by its digest. |
+| `cascade.policy.lowest` | `alert`, `allow`, `log`, `confirm` | The lowest action the policy may set on a call any layer flagged. |
+| `cascade.policy.highest` | `block`, `confirm`, `alert` | The highest action the policy may set. |
+| `cascade.policy.timeout_ms` | `5` (up to `50`) | Time for one evaluation. A policy that errors or runs out of time judges the call at the unknown tier. |
+| `cascade.admin.critical_floor` | `alert`, `confirm`, `block`, `log` | The lowest action a proven CRITICAL finding can end at. `log` is the explicit opt-out, and doctor warns about it. |
+| `cascade.admin.locked` | `[]` | Keys no connector or profile may set: `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `rules`, `unknown`, `judge` (or `judge.<key>`), `system_one` (or `system_one.<key>`), `lanes` (or `lanes.<lane>`), or `*`. |
+
+### Scopes
+
+`guardrail.cascade` applies everywhere. `guardrail.connectors.<agent>.cascade`, `guardrail.profiles.<name>.cascade` and `guardrail.profiles.<name>.connectors.<agent>.cascade` override it, in the same order as `block_at`: a profile's connector beats the profile, which beats the connector, which beats the global block. `policy` and `admin` exist at the top level only. When a person matches several profiles, each key takes the strictest of their values.
+
+### Managed installs and locks
+
+On a managed install, config.yaml belongs to the administrator: no user command, file or environment variable can change it. Profiles are where settings are delegated to teams, and `admin.locked` keeps a key at its top-level value. A profile or connector that sets a locked key makes the cascade invalid (see below), so the lock cannot be worked around by editing a profile. The Rego limits (`policy.lowest`, `policy.highest`) and `admin.critical_floor` are top level only.
+
+### When the cascade is invalid
+
+Every writer (`defenseclaw config set`, setup, the TUI) refuses an invalid `guardrail.cascade` before it lands. If one reaches the gateway anyway, for example a policy module edited under its pin:
+
+- at start, the guardrail decides with the **last-known-good cascade** the gateway saved when it last ran a valid one, else with the **rule pack defaults** (no cascade settings);
+- on a reload, the running configuration stays, as for any invalid reload;
+- `defenseclaw doctor` fails the **Guardrail cascade** row, the gateway's health reports `policy.cascade_invalid`, and the audit log records a `guardrail-degraded` row. Each one names the key, the fix and the fallback. If the fallback is weaker than what you wrote (for example, your stricter unknown tier or your Rego policy is not running), it says so.
+
+## See what applies
+
+```bash
+defenseclaw guardrail cascade explain --connector claudecode
+defenseclaw guardrail cascade explain --connector codex --profile contractors --json
+```
+
+It prints what each layer does for that connector and profile, the unknown tier, the lanes, the Rego policy and its limits, the locks, and the config key that set each value.
+
+To see which layer or policy rule set the final action of one decision, save its policy input (the `input` the policy receives, below) as JSON and replay it:
+
+```bash
+defenseclaw guardrail cascade explain --connector codex --input decision.json
+```
+
+A live decision the policy changed also carries the finding `CASCADE-POLICY:<rule id>` in its audit row, and `CASCADE-CRITICAL-FLOOR` or `CASCADE-POLICY-ERROR` when those decided.
+
+## The Rego policy
+
+The module declares `package defenseclaw.cascade` and adds objects to the set `decisions`. Each object has an `action` (`allow`, `log`, `alert`, `confirm`, `block`), a `reason`, and an optional `id` that names the rule in explain and in the audit row. The strictest decision wins; no decision leaves the cascade's action as it is. Network built-ins (`http.send`, `net.lookup_ip_addr`) and `opa.runtime` are not available.
+
+The policy receives, for each call:
+
+| Field | What it holds |
+| --- | --- |
+| `surface`, `connector`, `event`, `tool` | Where the call came from: `tool_call`, `prompt`, `tool_result`, `response`, `message` or `acp`; the agent; its hook event; the tool name. |
+| `mode`, `pack` | `observe` or `action`; the rule pack's name and tier. |
+| `subject` | The verified profile (`profile`, `profiles` when several match), the group that matched, and how the person was identified. No user names or group lists. |
+| `findings` | Up to 64 rule findings: `rule_id`, `severity`, `enforceable`, `alert_only`, `confidence`, `tags`. No evidence, arguments or content. |
+| `flagged` | Whether any layer flagged the call. |
+| `truncated` | Whether the input was read only up to a limit. |
+| `layers` | `rules` (`action`, `severity`), `system_one` (`ran`, `route`, `risk`, `risk_score`, `action`), `judge` (`ran`, `failed`, `action`, `severity`, `confidence`), and the model layers' finding IDs. |
+| `cascade_action`, `unknown_action`, `limits` | The action before the policy, the unknown tier's action, and your limits. |
+
+The final action is the policy's strictest decision, held between `limits.lowest` (for a flagged call, never above the cascade's own action) and `limits.highest` (never below it), then raised to the CRITICAL floor where a proven CRITICAL finding exists.
+
+## Examples
+
+### Alert only, everywhere
+
+```yaml
+guardrail:
+  mode: observe
+  hook_fail_mode: open
+```
+
+Every layer still runs and records; nothing is blocked or asked. One protection stays on: an agent that writes into DefenseClaw's own files is blocked.
+
+### Strict blocking on secrets only
+
+Keep the default pack, and block any secret finding from MEDIUM up:
+
+```yaml
+guardrail:
+  rule_pack: default
+  cascade:
+    policy:
+      module: {path: /etc/defenseclaw/cascade.rego, digest: "sha256:<hex of the file>"}
+```
+
+```rego
+package defenseclaw.cascade
+import rego.v1
+
+decisions contains {"action": "block", "id": "secrets-medium", "reason": "secrets block at MEDIUM and above"} if {
+	some f in input.findings
+	f.enforceable
+	startswith(f.rule_id, "SEC-")
+	f.severity in {"MEDIUM", "HIGH", "CRITICAL"}
+}
+```
+
+### Block only when System One and the judge agree
+
+```yaml
+decision_model:
+  enabled: true
+  # model, base_url, protocol and key as in /docs/guardrail/decision-model
+guardrail:
+  judge:
+    enabled: true
+    hook_connectors: [claudecode, codex]
+  detection_strategy_tool_call: regex_judge
+  cascade:
+    judge:
+      block_needs_system_one: true
+```
+
+A judge block on a call System One did not confidently block asks the person instead (or alerts, where the agent cannot ask).
+
+### A team policy
+
+One module, with a rule per team, keyed on the verified profile:
+
+```rego
+package defenseclaw.cascade
+import rego.v1
+
+# Contractors: anything flagged HIGH or above blocks.
+decisions contains {"action": "block", "id": "contractors-high", "reason": "contractors: HIGH blocks"} if {
+	"contractors" in input.subject.profiles
+	some f in input.findings
+	f.severity in {"HIGH", "CRITICAL"}
+}
+
+# Data team: an unsure System One answer on a notebook edit is an alert, not a question.
+decisions contains {"action": "alert", "id": "data-notebooks", "reason": "data team: no asks on notebooks"} if {
+	"data-team" in input.subject.profiles
+	input.tool == "NotebookEdit"
+	input.cascade_action == "confirm"
+	input.layers.system_one.route == "unsure"
+}
+```
+
+With the default `policy.lowest: alert`, the second rule can turn a question into an alert but never let the call pass silently, and a proven CRITICAL finding stays at least an alert.
+
+## Rules that always hold
+
+- An empty `guardrail.cascade` decides exactly as the rule pack does.
+- The unknown tier is never below alert: an input DefenseClaw could not read in full is never a silent allow.
+- A proven CRITICAL finding never ends below `admin.critical_floor`; only the top-level administrator can set it to `log`, and doctor warns when it is.
+- System One and the judge never lower the rules' verdict. The Rego policy lowers only within `policy.lowest`, and an error or timeout raises the call to the unknown tier.
+- Without a policy module, no policy input is built and nothing is evaluated.
+- Under the Cisco Secure Client integration, `guardrail.cascade` is not available.
