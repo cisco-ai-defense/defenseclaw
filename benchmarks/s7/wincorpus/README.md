@@ -40,7 +40,7 @@ gets 1, the same value always gets the same placeholder inside one build, and a 
 | Windows computer names: `EC2AMAZ-*`, `WIN-*`, UNC `\\name\`, `-ComputerName`/`/s` operands | `LABPC<n>` (`LABPC<n>.labdomain<m>.example.com` for a FQDN) |
 | other host names: `dc-*` test aliases, `ip-*` / `ec2-*` EC2 names, private-TLD hosts | `labhost<n>` |
 | AD / DNS domains (private-TLD suffix, UPN suffix) and NetBIOS domains | `labdomain<n>.example.com`, `LABDOM<n>` (one number for both spellings of a domain) |
-| user names: `DOMAIN\user`, UPNs, `/user:` / `-User` / `/grant` operands | `labuser<n>`; the owner's names (denylist) | `alice` (built-ins such as Administrator and Guest are kept) |
+| user names: `DOMAIN\user`, UPNs, `/user:` / `-User` / `/grant` operands | `labuser<n>` (built-ins such as Administrator and Guest are kept; the owner's names come from the denylist and become `alice`) |
 | home paths with a user name: `C:\Users\x`, `C:/Users/x`, `/c/Users/x`, `/mnt/c/Users/x`, `/Users/x`, `/home/x` | `alice` |
 | SIDs `S-1-5-21-a-b-c[-rid]` | `S-1-5-21-1000000000-2000000000-<n>[-rid]` (the RID is kept) |
 | IPv4, IPv6 (with zone), MAC addresses | `198.51.100.<n>`, `2001:db8::<n>`, `00:00:5E:00:53:<n>` (documentation ranges; loopback and broadcast are kept) |
