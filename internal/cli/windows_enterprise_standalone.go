@@ -3722,6 +3722,10 @@ var windowsEnterpriseKnownCodes = []string{
 	"hook_image_start_failed",
 	"hook_image_digest_mismatch",
 	"hook_image_stage_failed",
+	// The new launch folder stayed busy (an antivirus or EDR scan of the new
+	// image) through the publish retries: retryable, exit 1618, nothing
+	// switched.
+	"hook_image_publish_busy",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
@@ -3746,13 +3750,15 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
-		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held":
+		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held", "hook_image_publish_busy":
 			// The lifecycle deferred before it changed anything, while hook
 			// calls of the installed release still run (GAP-1124), another
 			// program holds the installed hook open (GAP-2001) or a user
 			// holds the Codex state of 1.0.8 or the Codex requirements open
 			// in a way that would fail the run after the services stopped
-			// (GAP-0765, g582 round 11c).
+			// (GAP-0765, g582 round 11c), or an antivirus or EDR scan kept
+			// the new hook launch folder busy and the run rolled back
+			// (GAP-0751).
 			return enterprisestatus.WindowsExitBusy
 		case "guardian_state_held":
 			// A program holds a hook guardian state file open: the run

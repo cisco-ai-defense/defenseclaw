@@ -28475,7 +28475,7 @@ function Get-DefenseClawManagedHookImageLocation {
         }
     }
     if ($parts.Count -ge 5 -and
-        [string]$parts[-2] -cmatch '^[0-9A-Fa-f]{16}$' -and
+        [string]$parts[-2] -cmatch '^[0-9a-f]{16}$' -and
         [string]::Equals([string]$parts[-3], 'hooks', [StringComparison]::OrdinalIgnoreCase) -and
         [string]::Equals([string]$parts[-4], 'bin', [StringComparison]::OrdinalIgnoreCase)) {
         return [pscustomobject]@{
@@ -28584,6 +28584,11 @@ function Get-DefenseClawHookImageTreeItems {
     $root = [IO.Path]::Combine($BinDirectory, 'hooks')
     if ([IO.Directory]::Exists($root)) {
         $directories.Add([IO.Path]::GetFullPath($root).TrimEnd('\'))
+        # The marker `hook-image retire` writes before a rollback to 1.0.9.
+        $retired = [IO.Path]::Combine($root, '.retired')
+        if ([IO.File]::Exists($retired)) {
+            $files.Add([IO.Path]::GetFullPath($retired))
+        }
         foreach ($folder in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Force -Directory)) {
             if ([string]$folder.Name -cnotmatch '^(?:[0-9a-f]{16}|\.staging-[0-9a-f]{32})$') {
                 continue
@@ -28763,7 +28768,7 @@ function Install-DefenseClawStandaloneHookImage {
     if ($result.ExitCode -ne 0 -or $null -eq $ok -or $ok.Value -isnot [bool] -or -not [bool]$ok.Value) {
         $reasonProperty = $report.PSObject.Properties['reason']
         $reason = if ($null -eq $reasonProperty) { '' } else { [string]$reasonProperty.Value }
-        if ($reason -cnotin @('hook_image_start_failed', 'hook_image_digest_mismatch', 'hook_image_stage_failed')) {
+        if ($reason -cnotin @('hook_image_start_failed', 'hook_image_digest_mismatch', 'hook_image_stage_failed', 'hook_image_publish_busy')) {
             $reason = 'hook_image_stage_failed'
         }
         $errorProperty = $report.PSObject.Properties['error']
@@ -28773,6 +28778,10 @@ function Install-DefenseClawStandaloneHookImage {
                 'Next step: make sure application control (WDAC or AppLocker) and the antivirus let ' +
                 $root.TrimEnd('\') + '\*\defenseclaw-hook.exe and defenseclaw-hook-guard.exe beside it start ' +
                 '(allow the DefenseClaw signer rather than a folder), then ' + (Format-DefenseClawRerunStep -SameSetupCommand)
+            }
+            'hook_image_publish_busy' {
+                'Next step: an antivirus or EDR scan kept the new folder busy; ' +
+                (Format-DefenseClawRerunStep -SameSetupCommand) + ' (an MDM retries exit 1618 on its own)'
             }
             'hook_image_digest_mismatch' {
                 'Next step: ' + (Format-DefenseClawRerunStep -SameSetupCommand) + '; if it fails the same way, the hook in ' +
@@ -28852,6 +28861,27 @@ function Remove-DefenseClawTransactionCreatedHookImages {
                 (-not $item.PSIsContainer -and $full -notin $allowed.files)) {
                 throw "it contains an item DefenseClaw did not put there: $full"
             }
+        }
+        # Each launch folder is renamed to a staging name first, as the
+        # prune does: Windows refuses the rename while an image inside runs,
+        # so a folder is removed whole or kept whole, never half a launch set.
+        $kept = [Collections.Generic.List[string]]::new()
+        foreach ($folder in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Force -Directory)) {
+            $target = [string]$folder.FullName
+            if ([string]$folder.Name -cnotmatch '^\.staging-[0-9a-f]{32}$') {
+                $target = [IO.Path]::Combine($root, '.staging-' + [guid]::NewGuid().ToString('N'))
+                try {
+                    [IO.Directory]::Move([string]$folder.FullName, $target)
+                }
+                catch {
+                    $kept.Add(([string]$folder.FullName + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)))
+                    continue
+                }
+            }
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        }
+        if ($kept.Count -gt 0) {
+            throw ("a launch folder whose image still runs was kept whole: " + ($kept -join '; '))
         }
         Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
     }

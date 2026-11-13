@@ -339,7 +339,9 @@ def test_the_location_parser_mirrors_the_go_resolver(tmp_path: Path) -> None:
     bin_ = "C:\\Program Files\\Cisco\\DefenseClaw\\bin"
     assert result["locations"] == [
         f"{bin_}|defenseclaw-hook.exe|",
-        f"{bin_}|defenseclaw-hook-guard.exe|0123456789abcdef",
+        # An upper-case digest folder is not a launch folder (Setup creates
+        # only lower case; the Go parser refuses it too, review P3-2).
+        "none",
         f"{bin_}|defenseclaw-hook.exe|0123456789abcdef",
         "none", "none", "none", "none", "none", "none", "none", "none",
         "C:\\bin|defenseclaw-hook.exe|0123456789abcdef",
@@ -414,7 +416,7 @@ def test_the_gateway_command_contract_is_the_one_the_design_names() -> None:
     stage = _function_body(text, "Install-DefenseClawStandaloneHookImage")
     assert "$arguments = @('stage', '--sha256', $hookSHA256)" in stage
     assert "$arguments += @('--guard-sha256', $guardSHA256)" in stage
-    assert "@('hook_image_start_failed', 'hook_image_digest_mismatch', 'hook_image_stage_failed')" in stage
+    assert "@('hook_image_start_failed', 'hook_image_digest_mismatch', 'hook_image_stage_failed', 'hook_image_publish_busy')" in stage
     report = _function_body(text, "Get-DefenseClawHookImageGatewayReport")
     assert "@('enterprise', 'windows', 'hook-image') + $Arguments + @('--json')" in report
     assert re.search(r"\[string\]\$schema\.Value -cne '1'", report)
