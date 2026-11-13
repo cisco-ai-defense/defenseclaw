@@ -95,6 +95,10 @@ type DecisionModelConfig struct {
 	// it (cascade 3) whether or not the connector is listed. Empty, the
 	// default, keeps the decision model in front of the judge only.
 	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
+	// CallEffects adds state.call_effects (version 1): the typed effects of
+	// the current call (reads, writes, deletes, runs, sends), computed only
+	// for calls sent to the model, within 50 ms. Off by default.
+	CallEffects bool `mapstructure:"call_effects" yaml:"call_effects,omitempty"`
 }
 
 // Active reports whether the decision model should be called.
