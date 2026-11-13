@@ -189,8 +189,8 @@ type windowsHookImageStartResult struct {
 	// user's application control rules decide. TokenProblem says why not.
 	Restricted   bool
 	TokenProblem string
-	// Token names the token the start ran with (an enrolled account's
-	// session token, the filtered installer token or the installer token).
+	// Token names the token the start ran with (the filtered installer
+	// token, or the installer token when it could not be made).
 	Token string
 }
 
@@ -552,7 +552,8 @@ var windowsHookImageSelfTestArgs = []string{"hook", "--connector", "claudecode",
 // start, any other status, more than one answer or a bare exit 2 fail. The
 // managed hook may write one audit line for this call (a SYSTEM-attributed
 // row in the audit store and the SIEM export, tool Read of
-// defenseclaw-hook-image-self-test.txt).
+// defenseclaw-hook-image-self-test.txt), attributed to SYSTEM (or the
+// administrator who ran Setup), the account behind the filtered token.
 var windowsHookImageSelfTestInput = []byte(`{"session_id":"defenseclaw-hook-image-self-test",` +
 	`"transcript_path":"","cwd":"C:\\Windows\\Temp","hook_event_name":"PreToolUse","tool_name":"Read",` +
 	`"tool_input":{"file_path":"C:\\Windows\\Temp\\defenseclaw-hook-image-self-test.txt"}}` + "\n")

@@ -375,6 +375,28 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(guardianDir, "targets.yaml"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The machine folder the claudecode target watches must exist, so the
+	// scan meets it as a folder (the old reader opened it as a file and the
+	// scan was incomplete). Only what this test creates is removed.
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropIns := filepath.Join(programFiles, "ClaudeCode", "managed-settings.d")
+	for _, dir := range []string{filepath.Dir(dropIns), dropIns} {
+		if _, err := os.Lstat(dir); os.IsNotExist(err) {
+			if err := os.Mkdir(dir, 0o755); err != nil {
+				t.Fatalf("create %s (the test runs as an administrator): %v", dir, err)
+			}
+			created := dir
+			t.Cleanup(func() { _ = os.RemoveAll(created) })
+		}
+	}
+	probe := filepath.Join(dropIns, "zz-defenseclaw-hookimg-native-test.json")
+	if err := os.WriteFile(probe, []byte(`{"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(probe) })
 	roots := winpath.EnterpriseRoots{StateRoot: state, LifecycleDir: filepath.Join(state, "lifecycle")}
 	entries, problems := windowsHookImageConfigFiles(roots)
 	if len(problems) != 0 {
@@ -390,6 +412,9 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 		t.Fatalf("the claudecode target's settings.json is not an account file of the list: %+v", entries)
 	}
 	scan := scanWindowsHookImageConfigs(roots, `C:\Program Files\Cisco\DefenseClaw\bin`)
+	if len(scan.Incomplete) != 0 {
+		t.Fatalf("the scan is incomplete: %v", scan.Incomplete)
+	}
 	for _, line := range append(append([]string{}, scan.Incomplete...), scan.Skipped...) {
 		if strings.Contains(strings.ToLower(line), `managed-settings.d:`) {
 			t.Fatalf("the scan opened the managed-settings.d folder as a file: %s", line)
