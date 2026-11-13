@@ -7809,7 +7809,12 @@ def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
             r=r,
         )
     else:
-        _emit("warn", "Route-only peer broker", "the hook guardian peer broker did not verify this connection" + suffix, r=r)
+        _emit(
+            "warn",
+            "Route-only peer broker",
+            "the hook guardian peer broker did not verify this connection" + suffix,
+            r=r,
+        )
 
 
 def _watchdog_enabled(cfg) -> bool:
@@ -13272,7 +13277,9 @@ def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     legacy = [
         str(m.get("name") or i)
         for i, m in enumerate(models)
-        if isinstance(m, dict) and str(m.get("api_key_env") or "").strip() and not str(m.get("credential") or "").strip()
+        if isinstance(m, dict)
+        and str(m.get("api_key_env") or "").strip()
+        and not str(m.get("credential") or "").strip()
     ]
     if not legacy:
         return

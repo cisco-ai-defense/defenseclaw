@@ -182,7 +182,8 @@ def detect_upstream(connector: str) -> Upstream | None:
         profiles = doc.get("profiles") or {}
         if profile and isinstance(profiles.get(profile), dict) and profiles[profile].get("model_provider"):
             raise RouteOnlyError(
-                f"the active Codex profile {profile!r} sets its own model_provider; route-only routes the top-level provider only"
+                f"the active Codex profile {profile!r} sets its own model_provider; "
+                "route-only routes the top-level provider only"
             )
         provider = str(doc.get("model_provider") or "openai")
         if provider == CODEX_ROUTE_PROVIDER:
@@ -269,7 +270,8 @@ def enable(cfg: Any, connector: str) -> dict[str, Any]:
     if detected is None:
         if connector not in upstreams:
             raise RouteOnlyError(
-                f"{connector} already points at a DefenseClaw route-only endpoint but config.yaml has no upstream for it; "
+                f"{connector} already points at a DefenseClaw route-only endpoint "
+                "but config.yaml has no upstream for it; "
                 "run disable, check the agent configuration, then enable again"
             )
     else:

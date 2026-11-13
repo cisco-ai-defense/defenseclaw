@@ -166,7 +166,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	isModels := strings.HasSuffix(strings.TrimRight(native, "/"), "/models") || strings.Contains(native, "/models/")
-	if r.Method != http.MethodPost && !((r.Method == http.MethodGet || r.Method == http.MethodHead) && isModels) {
+	if r.Method != http.MethodPost && ((r.Method != http.MethodGet && r.Method != http.MethodHead) || !isModels) {
 		routeOnlyError(w, http.StatusMethodNotAllowed, "invalid_request_error", "route-only accepts POST, and GET on the models path")
 		return
 	}
@@ -694,7 +694,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
-	var call modelusage.Call = modelusage.Noop.Begin(r.Context(), a.usage)
+	call := modelusage.Noop.Begin(r.Context(), a.usage)
 	if a.usage.Listener != "" {
 		// Calls without facts (GET models, bodies streamed unbuffered) are
 		// not model calls with usage the gateway can attribute.
