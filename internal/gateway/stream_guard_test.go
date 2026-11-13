@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"math/rand"
 	"strings"
 	"testing"
@@ -246,5 +247,60 @@ func BenchmarkCompletionStreamPreGuard(b *testing.B) {
 				last = acc.Len()
 			}
 		}
+	}
+}
+
+// TestStreamingProxyBlocksSecretInLastBytes is GAP-0212 end to end on the /llm streaming path: a secret fixture split across
+// small chunks at the very end of a long completion is withheld and the stream ends with the block notice.
+func TestStreamingProxyBlocksSecretInLastBytes(t *testing.T) {
+	var secret string
+	for _, fx := range secretRuleTruePositives() {
+		if fx.wantID == "SEC-GITHUB-TOKEN" {
+			secret = fx.input
+		}
+	}
+	if secret == "" {
+		t.Fatal("GitHub token fixture missing")
+	}
+	text := streamGuardFiller(2600) + "\n" + secret
+	chunks := []StreamChunk{{ID: "c1", Object: "chat.completion.chunk", Model: "gpt-4",
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: "assistant"}}}}}
+	for off := 0; off < len(text); off += 7 {
+		end := off + 7
+		if end > len(text) {
+			end = len(text)
+		}
+		chunks = append(chunks, StreamChunk{ID: "c1", Object: "chat.completion.chunk", Model: "gpt-4",
+			Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: text[off:end]}}}})
+	}
+	_, insp := streamGuardTestCheck()
+	proxy := newTestProxy(t, &mockProvider{streamChunks: chunks}, insp, "action")
+	rec := postChat(t, proxy, mustJSON(t, map[string]interface{}{
+		"model": "gpt-4", "stream": true,
+		"messages": []map[string]interface{}{{"role": "user", "content": "summarize the change"}},
+	}))
+	body := rec.Body.String()
+	if !strings.Contains(body, "blocked") || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("stream did not end with the block notice")
+	}
+	var sent strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var chunk StreamChunk
+		if json.Unmarshal([]byte(data), &chunk) == nil && chunk.ID != "chatcmpl-blocked" && len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
+			sent.WriteString(chunk.Choices[0].Delta.Content)
+		}
+	}
+	if !strings.HasPrefix(text, sent.String()) {
+		t.Fatalf("the client received text that is not the model's")
+	}
+	if secretStart := len(text) - len(secret); sent.Len() > secretStart {
+		t.Fatalf("%d bytes sent, past the secret at %d", sent.Len(), secretStart)
+	}
+	if sent.Len() == 0 {
+		t.Fatalf("the clean text before the secret was never released")
 	}
 }
