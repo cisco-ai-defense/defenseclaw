@@ -13,6 +13,8 @@ package gateway
 import (
 	"context"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 // Closed semantic-routing result and failure-code dimensions. These are the
@@ -20,6 +22,8 @@ import (
 const (
 	SemanticRouteApplied  = "applied"
 	SemanticRouteFallback = "fallback"
+	// SemanticRouteDenied is a managed-only refusal (routing.admin).
+	SemanticRouteDenied = "denied"
 
 	SemanticRouteFailureNone           = "none"
 	SemanticRouteFailureTimeout        = "timeout"
@@ -28,6 +32,10 @@ const (
 	SemanticRouteFailureUnknownAlias   = "unknown_alias"
 	SemanticRouteFailureCredential     = "credential_failure"
 	SemanticRouteFailureConfig         = "configuration_failure"
+	SemanticRouteFailureFiltered       = "filtered"
+	SemanticRouteFailureBreakerOpen    = "breaker_open"
+	SemanticRouteFailureLowConfidence  = "low_confidence"
+	SemanticRouteFailureNoCandidate    = "no_candidate"
 )
 
 // SemanticRouteOutcome is the content-free routing decision for one request.
@@ -42,6 +50,12 @@ type SemanticRouteOutcome struct {
 	SelectedProvider string
 	SelectedModel    string
 	Decision         *ModelRouterDecision
+	// Deny is set when Result is denied (managed routing.admin refusal).
+	Deny *engine.DenyReason
+	// Route carries the engine facts (source, category, rule, filters,
+	// policy digest, charge keys) for usage records; nil for routers that
+	// are not the routing engine.
+	Route *engine.Decision
 }
 
 // detailedModelRouter is implemented by routers that can classify why a
@@ -52,7 +66,7 @@ type detailedModelRouter interface {
 
 func normalizeSemanticRouteOutcome(outcome SemanticRouteOutcome) SemanticRouteOutcome {
 	switch outcome.Result {
-	case SemanticRouteApplied, SemanticRouteFallback:
+	case SemanticRouteApplied, SemanticRouteFallback, SemanticRouteDenied:
 	default:
 		if outcome.Decision != nil {
 			outcome.Result = SemanticRouteApplied
@@ -67,7 +81,11 @@ func normalizeSemanticRouteOutcome(outcome SemanticRouteOutcome) SemanticRouteOu
 		SemanticRouteFailureDecode,
 		SemanticRouteFailureUnknownAlias,
 		SemanticRouteFailureCredential,
-		SemanticRouteFailureConfig:
+		SemanticRouteFailureConfig,
+		SemanticRouteFailureFiltered,
+		SemanticRouteFailureBreakerOpen,
+		SemanticRouteFailureLowConfidence,
+		SemanticRouteFailureNoCandidate:
 	default:
 		if outcome.Result == SemanticRouteApplied {
 			outcome.FailureCode = SemanticRouteFailureNone
@@ -119,23 +137,30 @@ type ModelRouter interface {
 	Route(ctx context.Context, input *ModelRouterInput) *ModelRouterDecision
 }
 
-// ModelRouterInput carries the request data and guardrail signals needed
-// for routing decisions. Populated by the proxy from the parsed ChatRequest
-// and pre-call inspection verdict.
+// ModelRouterInput carries what the proxy knows about one model request:
+// the parsed request, the pre-call guardrail severity and the verified
+// caller. Request headers (X-User-Id and the like) are never copied here,
+// so they can never select a route.
 type ModelRouterInput struct {
 	Model    string
 	Messages []ChatMessage
 	Stream   bool
+	Tools    []interface{}
 
-	// Rich context fields for semantic routing.
-	Tools          []interface{}
-	SessionID      string
-	ConversationID string
-	UserID         string
-	UserGroups     []string
-	Headers        map[string]string
-	Metadata       map[string]interface{}
-	RequestModel   string
+	RequestModel      string
+	APIFamily         string // config.RoutingAPI*; "" = chat
+	Connector         string
+	Listener          string // engine.Listener*
+	Severity          string
+	RequestedProvider string
+	CredentialClass   string
+	ConversationID    string
+	// Text overrides the classifier text taken from Messages (passthrough
+	// APIs that the proxy already reduced to human text).
+	Text      string
+	HasImages bool
+	Caller    engine.Caller
+	Profiles  []string
 }
 
 // ModelRouterDecision is the routing outcome. The proxy uses these fields
@@ -167,17 +192,6 @@ type ModelRouterDecision struct {
 
 	// Reason is a human-readable explanation for observability.
 	Reason string
-}
-
-// ModelRouterBackend is the gateway-owned forwarding target for one model
-// alias returned by the semantic router. Credentials stay in DefenseClaw and
-// are never sent to the classifier.
-type ModelRouterBackend struct {
-	Name      string
-	Provider  string
-	Model     string
-	BaseURL   string
-	APIKeyEnv string
 }
 
 // SetModelRouter installs an embedded model router into the proxy.
