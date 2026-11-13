@@ -10,7 +10,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// actionMoveProtectedEntry reports a plain mv (or gmv) whose renamed or
+// actionMoveProtectedEntryWithFile reports a plain mv (or gmv) whose renamed or
 // replaced directory entry is the .ssh directory or one of the protected
 // authorized-keys entries, read as the user: a source entry (mv ~/.ssh
 // elsewhere), a destination entry, or the entry a move into a directory
@@ -21,11 +21,8 @@ import (
 // cannot, so the hook client sends this reading as ActionDecisionKey
 // (GAP-2581). A destination that is a link to a file is judged by the link
 // entry itself (rename replaces the link), so the GAP-2559 benign move onto
-// a link keeps its allow.
-func actionMoveProtectedEntry(command, cwd, home string) bool {
-	return actionMoveProtectedEntryWithFile(command, cwd, home, nil)
-}
-
+// a link keeps its allow. file is the parsed command when the caller has
+// it, else nil.
 func actionMoveProtectedEntryWithFile(command, cwd, home string, file *syntax.File) bool {
 	if command == "" || home == "" || !filepath.IsAbs(cwd) {
 		return false

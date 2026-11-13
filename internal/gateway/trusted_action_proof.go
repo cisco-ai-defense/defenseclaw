@@ -133,11 +133,13 @@ func newParserShadowFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofParserShadow, ruleID, false)
 }
 
-// Only an actual evaluation limit can authorize a refusal. Parse uncertainty
-// remains a diagnostic and cannot decide an action.
+// Only an actual evaluation limit or an internal reader failure can
+// authorize a refusal; the profile turns either into an alert outside the
+// strict tier (guardrailActionForProfile). Parse uncertainty remains a
+// diagnostic and cannot decide an action.
 func newEvaluationFailureFindingProof(ruleID string) findingProof {
 	return newFindingProof(findingProofEvaluationFailure, ruleID,
-		ruleID == "ACTION-COMPOUND-LIMIT")
+		ruleID == "ACTION-COMPOUND-LIMIT" || ruleID == parseFailureRuleID)
 }
 
 func newFindingProof(

@@ -849,13 +849,126 @@ def proxy_requests_note(cfg: Any, connector: str, *, saved: str | None = None) -
     return "Its proxied model requests are blocked while the gateway is down."
 
 
+# The connectors whose hook runs a call that its verified gateway took and did
+# not answer in time, in the open outage mode, when the call plainly names
+# nothing a protected file could be reached through (GAP-0518: Go
+# hookpaths.LateOrdinaryCall and hookexec.OrdinaryNoAnswerPayload read only
+# Claude Code and Codex tool calls). Every other connector blocks such a call.
+_LATE_ORDINARY_CONNECTORS = frozenset({"claudecode", "codex"})
+
+# The kinds of hook failure failure_outcomes tells apart, in the order status
+# and doctor print them.
+FAILURE_KINDS = (
+    ("gateway_down", "gateway down"),
+    ("no_answer", "no answer"),
+    ("hook_error", "hook or answer error"),
+)
+
+
+def failure_outcomes(cfg: Any, connector: str, effective: str) -> dict[str, str] | None:
+    """What the hooks of *connector* do for each kind of failure (#1441).
+
+    A single fail-mode=open read as if every failure let a call run. The
+    hooks tell three kinds apart, and the outcome of each follows from the
+    effective outage mode, the deployment and the connector, as the hooks
+    decide it:
+
+    - gateway_down: no gateway took the call (a refused connection, a
+      gateway that is stopped or still restarting). It follows the outage
+      mode: allow (with a warning and a hook-failures.jsonl record) when
+      open, block when closed. A managed host allows it only when the
+      hook proves the gateway service is stopped
+      (allow-if-service-stopped).
+    - no_answer: a verified gateway took the call, or holds its listener
+      and accepts nothing (frozen), and gave no decision before the hook
+      deadline. In a per-user open mode Claude Code and Codex allow it with
+      the warning when the call names nothing a protected file could be
+      reached through (allow-ordinary); every other call, connector and
+      deployment blocks.
+    - hook_error: an answer the gateway gave (an error status, a
+      malformed or cut-off answer), a missing token, another listener on the
+      port, an install in progress or a local failure of the hook itself.
+      It blocks in every tier.
+
+    None where the breakdown does not apply: Secure Client (its hooks keep
+    their own open default), the proxy-backed connectors (no hooks) and a
+    connector Secure Client leaves open upstream.
+    """
+
+    name = normalize(connector)
+    mode = str(effective or "").strip().lower()
+    if mode not in _VALID_MODES:
+        return None
+    from defenseclaw.platform_support import is_proxy_connector
+
+    if is_proxy_connector(name) or upstream_fail_open(cfg, name):
+        return None
+    deployment, _tier = _fail_mode_note_context(cfg, cfg.guardrail, name)
+    if deployment == "secure-client":
+        return None
+    if mode == "closed":
+        return {"gateway_down": "block", "no_answer": "block", "hook_error": "block"}
+    if deployment == "managed":
+        return {"gateway_down": "allow-if-service-stopped", "no_answer": "block", "hook_error": "block"}
+    if name in _LATE_ORDINARY_CONNECTORS:
+        no_answer = "allow-ordinary"
+    elif sys.platform == "win32":
+        # The Windows native hook gives the no-answer allow by payload shape
+        # today, so an ordinary shell call of another hook connector can run
+        # too (GAP-0030, the hook answer path). Status says so rather than
+        # overstate the block.
+        no_answer = "block-windows-shell-may-run"
+    else:
+        no_answer = "block"
+    return {"gateway_down": "allow", "no_answer": no_answer, "hook_error": "block"}
+
+
+_FAILURE_OUTCOME_TEXT = {
+    "allow": "allow with a warning",
+    "allow-if-service-stopped": "allow with a warning when the hook proves the gateway service is stopped",
+    "allow-ordinary": "allow with a warning unless the call may reach a protected file",
+    "block-windows-shell-may-run": "block, but on Windows an ordinary shell call may run with a warning",
+    "block": "block",
+}
+
+
+def failure_outcomes_summary(outcomes: dict[str, str] | None) -> str:
+    """The on_failure outcomes of a report as status and doctor print them, or ""."""
+
+    if not outcomes:
+        return ""
+    parts = []
+    for key, label in FAILURE_KINDS:
+        outcome = outcomes.get(key) or "unknown"
+        parts.append(label + ": " + _FAILURE_OUTCOME_TEXT.get(outcome, outcome))
+    return "; ".join(parts)
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,
     *,
     inspect_effective_policy: bool = True,
 ) -> dict[str, Any]:
-    """Return the canonical read-only fail-mode report for a connector."""
+    """Return the canonical read-only fail-mode report for a connector.
+
+    on_failure (failure_outcomes) says what each kind of hook failure does
+    under the effective mode, so effective alone is not read as the
+    outcome of every failure (#1441).
+    """
+
+    report = _connector_fail_mode_report(cfg, connector, inspect_effective_policy=inspect_effective_policy)
+    report["on_failure"] = failure_outcomes(cfg, connector, str(report.get("effective") or ""))
+    return report
+
+
+def _connector_fail_mode_report(
+    cfg: Any,
+    connector: str,
+    *,
+    inspect_effective_policy: bool = True,
+) -> dict[str, Any]:
+    """The report of connector_fail_mode_report without its on_failure outcomes."""
 
     name = normalize(connector)
     guardrail = cfg.guardrail

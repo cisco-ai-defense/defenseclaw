@@ -290,8 +290,9 @@ llm:
     insecure_skip_verify: false
 
 # Optional semantic model classifier for proxy-mode OpenAI Chat Completions.
-# Routing-only edits are validated by config reload but activate on gateway
-# restart. Omit `remote` to run the pinned, loopback-only Docker sidecar.
+# With classifier: rules (in-process, no Docker) routing edits apply on reload;
+# classifier vllm_sr (the default when the key is absent) runs the pinned,
+# loopback-only Docker sidecar (omit `remote`) and its settings need a restart.
 routing:
   enabled: false
   version: "0.3.0"            # the only tested managed-sidecar contract
@@ -670,6 +671,29 @@ When `guardrail.connectors` lists agents, the active connector comes from that r
 ### Routing and observability behavior
 
 The `routing` block affects OpenClaw and ZeptoClaw only on the proxy's OpenAI-compatible Chat Completions path. `defenseclaw keys list` discovers each non-empty `api_key_env`; the classifier never receives the key value. See [Semantic routing](/docs/guardrail/semantic-routing).
+
+Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0.9 behavior. On a managed host they come from the admin `config.yaml` in the signed policy bundle, and a bundle that sets any of them needs `--min-product-version 1.0.10`.
+
+| Key | Values | Left out |
+| --- | --- | --- |
+| `routing.classifier` | `rules` (in-process, no Docker), `systemone`, `vllm_sr` | `vllm_sr` |
+| `routing.min_confidence` | 0 to 1; a lower classifier confidence counts as no answer | 0 |
+| `routing.on_classifier_error` | `original` (send the request unchanged), `rules` (ask the rules classifier) | `original` |
+| `routing.default_alias` | a `routing.models` alias used when nothing else is picked | the unconditional decision |
+| `routing.categories` | map of classifier category to alias | none |
+| `routing.allow_user_override` | `true` lets a request that names an allowed alias keep it | `false` |
+| `routing.sensitive` | `aliases` plus `severity_at_least` and/or `signals` (keyword signal names): at or above that guardrail severity, or when a listed signal matches, only these aliases are used. Best effort: regex and keyword checks miss personal data written in prose; for regulated groups give their profile an `allowed_aliases` list of local models only | none |
+| `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none |
+| `routing.models[].apis` | `chat`, `messages`, `responses`, `converse`, `invoke`: API families the backend serves without translation | the provider default |
+| `routing.models[].credential` | protected credential name on a managed host (`api_key_env` is for per-user installs) | none |
+| `routing.models[].bedrock` | `region`, `auth` (`passthrough`, `profile`, `instance_role`, `iam_credentials`) and the key names for gateway signing | none |
+| `routing.decisions[].conditions[].type` | `keyword`, plus `connector`, `api_family` and `request` (`has_tools`, `tool_turn`, `has_images`, `long_context`) with the `rules` or `systemone` classifier | `keyword` only |
+| `routing.route_only.connectors` | `claudecode`, `codex`: hook connectors whose model calls go through the gateway for routing and usage only | none |
+| `routing.route_only.upstreams.<connector>` | `base_url`, `api`, `bedrock`: where unrouted calls go; the route-only enable step writes it from the agent configuration | none |
+| `routing.admin` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`, `locked`: the organization floor | no floor |
+| `guardrail.profiles.<name>.routing` | `allowed_aliases`, `denied_providers`, `default_alias`, `categories`, `allow_user_override`: only tightens `routing.admin`; a key in `routing.admin.locked` is refused | nothing added |
+
+A profile overlay intersects `allowed_aliases`, adds to `denied_providers`, and can only turn `allow_user_override` off: it is on only when `routing.allow_user_override` is `true` and no layer sets it to `false`. A profile that names an alias the floor does not allow fails validation. `routing.admin` and `routing.route_only` are refused with the Secure Client integration.
 
 Omissions compile to an explicit effective policy; inspect it with `defenseclaw config show --effective --section observability` and `defenseclaw observability plan`. Destination kinds, buckets, routes and redaction are on [Observability](/docs/observability).
 
@@ -1059,7 +1083,8 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
 | `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms` | The hook guard |
-| `claw`, `agent`, `routing`, `plugin_dir` | Paths, identity, the model router and the connector plugins, captured at start |
+| `claw`, `agent`, `plugin_dir` | Paths, identity and the connector plugins, captured at start |
+| `routing.port`, `routing.version`, `routing.remote`, `routing.algorithm` (and, with classifier `vllm_sr`, `routing.enabled`, `routing.models`, `routing.signals`, `routing.decisions`, `routing.classifier`) | The vLLM Semantic Router container and its translated config; every other routing key, and all of them with the `rules` or `systemone` classifier, apply without a restart |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network`, `enterprise.openshell` | The deployment boundary |
 | `fleet.enabled`, `fleet.mqtt_broker_url`, `fleet.mqtt_require_tls`, `fleet.ota_key_env`, `fleet.emergency_key_env`, `fleet.device_key_env`, `fleet.mqtt_user_env`, `fleet.mqtt_pass_env` | MQTT connections and signing keys |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |

@@ -176,6 +176,34 @@ jobs:
           if ([string]$record.StdOut -notmatch "(?m)^--- PASS: $escapedRecordTest ") {
             throw "$recordTest did not complete with PASS on the native Windows runner (a SKIP leaves the real-ACL guard unexercised)"
           }
+      - name: Run native Windows enterprise Setup recovery and mutex tests
+        if: ${{ matrix.kind == 'checks' }}
+        run: |
+          # The standalone Setup recovery wait and its host-wide mutexes run
+          # only on Windows with an elevated token; none may SKIP here
+          # (rel-1-0-6:GAP-1080 and the 1.0.10 T1 review: a mutex another
+          # account owns is ignored, a rerun waits for the armed recovery).
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          $setupTests = @(
+            'TestStandaloneUninstallRecoveryHoldsItsMutexThroughTheReplay',
+            'TestStandaloneRerunWaitsForTheArmedRecoveryToFinish',
+            'TestStandaloneUninstallRerunDuringTheArmedRecoveryIsBusy',
+            'TestStandaloneSetupMutexIgnoresAMutexAnotherOwnerHolds',
+            'TestStandaloneSetupMutexWaitsForAMutexAdministratorsOwn',
+            'TestStandaloneRerunGoesOnWhenAnotherObjectSquatsTheRecoveryName',
+            'TestStandaloneEnsureGoesOnWithoutASquattedMutexAndHoldsNothing'
+          )
+          $setup = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', ('^(' + ($setupTests -join '|') + ')$'), './cmd/defenseclaw-enterprise-setup'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-enterprise-setup-recovery-test.log')
+          foreach ($test in $setupTests) {
+            $escaped = [regex]::Escape($test)
+            if ([string]$setup.StdOut -notmatch "(?m)^--- PASS: $escaped ") {
+              throw "$test did not complete with PASS on the native Windows runner (a SKIP leaves it unexercised)"
+            }
+          }
       - name: Run full native Windows redaction key package before downstream stress
         if: ${{ matrix.kind == 'checks' }}
         run: |

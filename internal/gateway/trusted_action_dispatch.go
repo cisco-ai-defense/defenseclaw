@@ -246,6 +246,12 @@ type trustedActionRequest struct {
 	// confirmed a protected file rather than conservatively holding an
 	// unresolved write.
 	resolvedTarget *bool
+	// unprovenTarget, when set, is told the class (hookpaths.UnprovenWriteTitle)
+	// and the operand of an authorized-keys proof that held a write whose
+	// target it could not resolve, rather than a protected file it found
+	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
+	// at fault (a directory walk or a pattern the shell expands).
+	unprovenTarget *unprovenWrite
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.
@@ -299,7 +305,17 @@ type trustedSimpleMemo struct {
 // commands returns actionfacts.SimpleCommands(input, facts): the split the memo
 // holds when input and facts are the ones it was made for, a fresh one
 // otherwise. The first split asked of an empty memo is kept.
-func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.SimpleCommand {
+func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) (simples []actionfacts.SimpleCommand) {
+	if trustedSimpleCommandsFaultHook != nil {
+		// Test-only seam (like hookEvaluatorPanicHook): a reader failure on
+		// the hook route is judged as SimpleCommands answers it.
+		defer func() {
+			if recover() != nil {
+				simples = []actionfacts.SimpleCommand{{EvaluationFailure: actionfacts.EvaluationFailureInternal}}
+			}
+		}()
+		trustedSimpleCommandsFaultHook()
+	}
 	if memo == nil {
 		return actionfacts.SimpleCommands(input, facts)
 	}
@@ -315,6 +331,11 @@ func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfac
 	memo.simples = actionfacts.SimpleCommands(input, facts)
 	return slices.Clone(memo.simples)
 }
+
+// trustedSimpleCommandsFaultHook is a test-only seam: when non-nil it runs
+// before the per-command split, so a route test can make the reader fail.
+// Production never sets it.
+var trustedSimpleCommandsFaultHook func()
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
 // carries counts only: raw shell text, argv, matched rule IDs, paths, and
@@ -657,9 +678,18 @@ func dispatchTrustedActionWith(
 				// GAP-0568).
 				simples = []actionfacts.SimpleCommand{{EvaluationFailure: "limit"}}
 			}
+			if slices.Contains(facts.Parse.Issues, actionfacts.IssueInternalParserFailure) {
+				// Analyze recovered from an internal error: the call was not
+				// read, so it is judged unknown, with a rule id.
+				simples = append([]actionfacts.SimpleCommand{{EvaluationFailure: actionfacts.EvaluationFailureInternal}}, simples...)
+			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
 			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
+						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
+						continue
+					}
 					if simple.EvaluationFailure != "limit" {
 						// A parser gap is already represented by the whole-action
 						// evaluation. It is not itself an enforcement finding.
@@ -9597,6 +9627,28 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 		Severity: "CRITICAL", Confidence: 1,
 		enforcement: findingEnforcementAllowed,
 	}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
+}
+
+// parseFailureRuleID is the finding of a call the reader failed on
+// internally (a recovered panic in the per-command reading or in Analyze).
+// Like the evaluation limit it carries no target: it alerts outside the
+// strict tier and blocks in it (guardrailActionForProfile), so a reader
+// error is never a silent allow and never a refusal without a rule id
+// (gas-ux-r2:GAP-0082).
+const parseFailureRuleID = "ACTION-PARSE-FAILURE"
+
+// parseFailureTitle is the ship-authored title of parseFailureRuleID.
+const parseFailureTitle = "DefenseClaw could not read this command (internal reader error), so it was not checked"
+
+// trustedActionParseFailureFindings is the verdict of a call the reader
+// failed on.
+func trustedActionParseFailureFindings(enforcementCapable bool) []RuleFinding {
+	failure := RuleFinding{
+		RuleID: parseFailureRuleID, Title: parseFailureTitle,
+		Severity: "CRITICAL", Confidence: 1,
+		enforcement: findingEnforcementAllowed,
+	}.withTrustedActionProof(newEvaluationFailureFindingProof(parseFailureRuleID))
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
