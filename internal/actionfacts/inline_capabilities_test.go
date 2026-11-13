@@ -41,6 +41,8 @@ func TestInlineCodeNetworkAndExec(t *testing.T) {
 		{"localhost name", `python3 -c "import socket,subprocess; subprocess.Popen(['./d']); socket.socket().connect(('localhost', 9))"`, false},
 		{"name under .localhost", `python3 -c "import socket,subprocess; subprocess.Popen(['./d']); socket.socket().connect(('api.localhost', 9))"`, false},
 		{"private range literal", `python3 -c "import socket,subprocess; subprocess.Popen(['./d']); socket.socket().connect(('10.0.0.5', 9))"`, false},
+		{"library file name is not a host", `python3 -c "import ctypes,subprocess; ctypes.CDLL('libc.so.6'); subprocess.run(['curl','http://127.0.0.1:9000'])"`, false},
+		{"version string is not a host", `python3 -c "import subprocess,urllib.request; subprocess.run(['x']); v='3.8.10'; urllib.request.urlopen('http://localhost/')"`, false},
 		{"dotted name that only looks local", `python3 -c "import socket,subprocess; subprocess.Popen(['./d']); socket.socket().connect(('localhost.example.org', 9))"`, true},
 		{"script file", `python3 script.py`, false},
 	} {

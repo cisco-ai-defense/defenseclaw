@@ -421,7 +421,7 @@ func runnerTargetIsURL(args, subcommands []string) bool {
 var (
 	inlineURLAuthorityPattern = lazyMustCompile(`[A-Za-z][A-Za-z0-9+.-]*://([^/?#\s'"]*)`)
 	inlineIPv4Pattern         = lazyMustCompile(`\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b`)
-	inlineDottedNamePattern   = lazyMustCompile(`(?i)^(?:localhost|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)$`)
+	inlineDottedNamePattern   = lazyMustCompile(`(?i)^(?:localhost|(?:[a-z0-9-]+\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+))$`)
 )
 
 // inlineCodeOnlyLocal reports code whose every literal host is local: the name
@@ -429,7 +429,7 @@ var (
 // or link-local range. The test is an allowlist. Any other host, whatever its
 // ending, makes the code a network client, and a host mentioned next to a
 // local one is not hidden by it. A host is the authority of a URL literal, an
-// IPv4 literal, or a whole string literal that is localhost or a dotted name. Code that
+// IPv4 literal, or a whole string literal that is localhost or a dotted name whose last label is alphabetic, as every top-level domain is (so a library file name such as libc.so.6 or a version string is not a host). Code that
 // names no host at all is not local (the host is dynamic).
 func inlineCodeOnlyLocal(literals []string) bool {
 	var hosts []string
