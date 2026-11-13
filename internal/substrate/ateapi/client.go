@@ -90,8 +90,6 @@ type (
 	DeleteOptions        = pb.DeleteOptions
 	DurabilityMode       = pb.DurabilityMode
 	ControlClient        = pb.ControlClient
-	ControlServer        = pb.ControlServer
-	UnimplementedControl = pb.UnimplementedControlServer
 )
 
 // Actor states.
@@ -120,12 +118,6 @@ const (
 	SnapshotStoragePending   = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_PENDING
 	SnapshotStorageCompleted = pb.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED
 )
-
-// RegisterControlServer registers a Control implementation on a gRPC server
-// (tests and fakes).
-func RegisterControlServer(s grpc.ServiceRegistrar, srv ControlServer) {
-	pb.RegisterControlServer(s, srv)
-}
 
 const (
 	// PolicyName is the only name an actor's singleton EgressPolicy may have.
