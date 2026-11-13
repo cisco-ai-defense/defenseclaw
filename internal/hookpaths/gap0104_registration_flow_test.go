@@ -74,3 +74,35 @@ func TestGAP0104RegistrationFlowCountsOnlyWritingParts(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0269: a find -exec child that is python with inline code is
+// handed the found file as an argument. Code that may write reaches it; code
+// that provably only reads does not. The two bodies are the existing
+// find -exec python rows of the gateway suite.
+func TestGAP0269FindExecPythonReachesTheFileItIsHanded(t *testing.T) {
+	home := t.TempDir()
+	settings := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		writes = `import sys; open(sys.argv[1], "w").write("")`
+		reads  = `import sys; print(open(sys.argv[1]).read())`
+	)
+	for _, tc := range []struct {
+		command string
+		want    []string
+	}{
+		{`find ~/.claude -name settings.json -exec python3 -c '` + writes + `' {} \;`, []string{settings}},
+		{`find ~/.claude -name settings.json -execdir python3 -c '` + writes + `' {} \;`, []string{settings}},
+		{`find ~/.claude -name settings.json -exec python3 -c '` + reads + `' {} \;`, nil},
+		{`for f in ~/.claude/settings.json; do python3 -c '` + writes + `' "$f"; done`, []string{settings}},
+	} {
+		if got := RegistrationWriteReached(tc.command, filepath.Join(home, "proj"), home, []string{settings}); !slices.Equal(got, tc.want) {
+			t.Errorf("%q: reached %v, want %v", tc.command, got, tc.want)
+		}
+	}
+}

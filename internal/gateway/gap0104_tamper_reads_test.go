@@ -115,6 +115,8 @@ func TestGAP0104ShellReadsOfProtectedFilesStayAllowed(t *testing.T) {
 		{name: "old-style tar extract a named hooks member", command: `tar xf /tmp/gap0104.tar -C ~ .defenseclaw/hooks/codex-hook.sh`, defaults: "block", strict: "block", rule: state, posix: true},
 		{name: "unzip a named state member into the home", command: `unzip -o /tmp/gap0104.zip .defenseclaw/config.yaml -d ~`, defaults: "block", strict: "block", rule: state, posix: true},
 		{name: "find exec python writes state", command: `find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`, defaults: "block", strict: "block", rule: state},
+		// rel-1-0-10:GAP-0269: the same existing row aimed at an agent hook config.
+		{name: "find exec python writes hook config", command: strings.NewReplacer("~/.defenseclaw -name config.yaml", "~/.claude -name settings.json").Replace(`find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`), defaults: "alert", strict: "block", rule: hookWrite},
 	}
 	for _, profile := range []string{"default", "strict"} {
 		t.Run(profile, func(t *testing.T) {

@@ -492,18 +492,24 @@ func pythonFromImportReads(t []pyTok, i int, from map[string]string) (int, bool)
 	return k - 1, true
 }
 
+// pythonIdentStart accepts ASCII identifier starts only. Python NFKC-normalises
+// identifiers, so a compatibility spelling of a builtin or module name (a
+// full-width letter) is that name; the reader does not normalise, so a
+// non-ASCII byte outside a string or comment ends the read
+// (rel-1-0-10:GAP-0269).
 func pythonIdentStart(c byte) bool {
-	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 func pythonIdentChar(c byte) bool {
 	return pythonIdentStart(c) || c >= '0' && c <= '9'
 }
 
-// pythonStringPrefix reports a string prefix: r, u, b, f and their pairs.
+// pythonStringPrefix reports a string prefix: r, u, b, f, t (the template
+// string, whose fields Python evaluates like an f-string) and their pairs.
 func pythonStringPrefix(word string) bool {
 	switch strings.ToLower(word) {
-	case "r", "u", "b", "f", "br", "rb", "fr", "rf":
+	case "r", "u", "b", "f", "t", "br", "rb", "fr", "rf", "tr", "rt":
 		return true
 	}
 	return false
@@ -521,7 +527,7 @@ func pythonOperator(rest string) string {
 }
 
 // pythonTokens splits code into tokens. Comments and string contents are
-// dropped, but the expressions of an f-string are read as code of their own
+// dropped, but the expressions of an f-string or t-string are read as code of their own
 // (depth bounds the nesting). A newline ends a statement outside brackets.
 func pythonTokens(code string, depth int) ([]pyTok, bool) {
 	if depth > 3 || len(code) > 1<<16 {
@@ -575,6 +581,12 @@ func pythonTokens(code string, depth int) ([]pyTok, bool) {
 				out, i = append(out, tokens...), next
 				continue
 			}
+			if j < len(code) && (code[j] == '\'' || code[j] == '"') {
+				// A name glued to a quote is a string prefix this reader does not
+				// know (or a keyword written against its string): not read
+				// (rel-1-0-10:GAP-0269).
+				return nil, false
+			}
 			out, i = append(out, pyTok{'i', word}), j
 		case c >= '0' && c <= '9' || c == '.' && i+1 < len(code) && code[i+1] >= '0' && code[i+1] <= '9':
 			j := i + 1
@@ -583,6 +595,8 @@ func pythonTokens(code string, depth int) ([]pyTok, bool) {
 				j++
 			}
 			out, i = append(out, pyTok{'n', code[i:j]}), j
+		case c >= 0x80:
+			return nil, false
 		default:
 			op := pythonOperator(code[i:])
 			switch op {
@@ -626,7 +640,7 @@ func pythonStringTokens(code string, start, quote int, prefix string, depth int)
 		}
 		j++
 	}
-	if strings.ContainsAny(prefix, "fF") {
+	if strings.ContainsAny(prefix, "fFtT") {
 		exprs, good := pythonFStringExprs(code[body:j], depth)
 		if !good {
 			return 0, nil, false

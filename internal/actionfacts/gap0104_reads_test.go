@@ -23,7 +23,9 @@ var gap0104PythonWriteFixtures = []struct{ id, code, callee string }{
 
 // gap0104DerivedWriteForms rewrites a fixture's call of its callable into a
 // reference to it: an alias, a parenthesised or subscripted callee, a call of
-// a computed value, an f-string field, a default-argument and a mapped value.
+// a computed value, an f-string or t-string field, a default-argument, a
+// mapped value, and a compatibility (full-width) respelling of the callable
+// that Python normalises to the same name (rel-1-0-10:GAP-0269).
 func gap0104DerivedWriteForms(code, callee string) map[string]string {
 	call := callee + "("
 	head, tail, _ := strings.Cut(code, call)
@@ -37,11 +39,25 @@ func gap0104DerivedWriteForms(code, callee string) map[string]string {
 		"subscripted":     head + "[" + callee + "][0](" + tail,
 		"computed":        head + "sorted([" + callee + "])[0](" + tail,
 		"f-string":        code[:strings.LastIndex(code, "; ")+2] + `print(f"{` + expr + `}")`,
+		"template-field":  code[:strings.LastIndex(code, "; ")+2] + `print(t"{` + expr + `}")`,
+		"template-raw":    code[:strings.LastIndex(code, "; ")+2] + `print(rt"{` + expr + `}")`,
+		"nfkc-callee":     head + gap0104FullWidth(callee) + "(" + tail,
+		"nfkc-key":        head + "sorted([1], key=" + gap0104FullWidth(callee) + ")",
 		"mapped":          head + "list(map(" + callee + ", [1]))",
 		"keyword-value":   head + "sorted([1], key=" + callee + ")",
 		"walrus-alias":    head + "(ref := " + callee + ")(" + tail,
 		"conditional-ref": head + "(" + callee + " if True else None)(" + tail,
 	}
+}
+
+// gap0104FullWidth respells the ASCII letters of name as full-width letters.
+func gap0104FullWidth(name string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return r + 0xFEE0
+		}
+		return r
+	}, name)
 }
 
 // rel-1-0-10:GAP-0104, GAP-0244: Python code is read-only only when every
@@ -107,6 +123,13 @@ except OSError as e:
 		`print(f"{x!r:{w}}")`:                      true,
 		`print(f"{open}")`:                         false,
 		`print(f"{")`:                              false,
+		`print(t"{open}")`:                         false,
+		`print(x"{open}")`:                         false,
+		`print(ur"a")`:                             false,
+		`print(rt"{open}")`:                        false,
+		`print(tr"{x!r}", t"{len(x)}")`:            true,
+		"x = 1; print(\uff58)":                     false,
+		"print(\"caf\u00e9\")":                     true,
 		`print(open("/h/c"`:                        false,
 		`print("a")(1)`:                            false,
 		`d = {}; d["k"](1)`:                        false,

@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // registrationWriteReachedAs is RegistrationWriteReached in one reading of
@@ -726,6 +728,28 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 		return targets
 	}
 	operands := args[1:]
+	if actionInterpreterKind(program) == "python" {
+		// python -c CODE ARG...: code that may write is handed its arguments
+		// (sys.argv), so each fixed argument is a path it may write. Code that
+		// provably only reads (actionfacts.PythonCodeOnlyReads) hands none
+		// (rel-1-0-10:GAP-0269).
+		words := []string{program}
+		for _, word := range operands {
+			value, fixed := actionWordValue(word, values, cwd, home)
+			if !fixed {
+				return targets
+			}
+			words = append(words, value)
+		}
+		if code, inline := actionInterpreterInlineCode(words, 0); inline && !actionfacts.PythonCodeOnlyReads(code) {
+			if at := slices.Index(words, code); at > 0 {
+				for _, word := range operands[at:] {
+					add(word)
+				}
+			}
+		}
+		return targets
+	}
 	switch programBase(program) {
 	case "rm", "unlink", "shred", "rmdir", "chmod", "chown", "chgrp", "setfacl", "chattr", "truncate", "tee":
 		for _, word := range operands {
