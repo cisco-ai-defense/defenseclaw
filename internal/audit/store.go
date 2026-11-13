@@ -2180,6 +2180,12 @@ var retentionCandidateIndexes = []struct{ name, table, create string }{
 	{"idx_correlation_pending_retention", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_retention
 		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
 		WHERE status<>'active'`},
+	// The open operations, for the same reason: retention also removes an
+	// operation that stayed open for the whole retention window, and must
+	// find it without reading the table (issue #1440).
+	{"idx_correlation_pending_stale", "correlation_pending_operations", `CREATE INDEX IF NOT EXISTS idx_correlation_pending_stale
+		ON correlation_pending_operations(updated_time_unix_nano, connector_instance_id, operation_id, operation_type)
+		WHERE status='active'`},
 }
 
 func (s *Store) indexRetentionCandidates() error {

@@ -1,13 +1,73 @@
 config_version: 9
 data_dir: '@HOME@'
-# A 1.0.8 per-user config after 'defenseclaw config set' of the audit store
-# keys 1.0.6 added (#1384). 1.0.8 has no rejected-record store (#1442): this
-# release loads it unchanged, with the store off.
+# The config that the 1.0.8 upgrade (its MigrateV9) wrote from the 0.8.10-v8
+# home (operator rule pack, skill-scanner policy file named custom, provider
+# overlay folded into llm_providers.custom), plus a semantic routing block
+# that 1.0.8 accepts. 1.0.8 and 1.0.9 write the same config; both are pinned.
 guardrail:
-  mode: observe
+  mode: action
+  custom_packs:
+    team:
+      path: @HOME@/policies/guardrail/team
+      digest: sha256:915047a334cc0d6800141e1f4c52df2978505f951a98911001a9d70ca7e6d03c
+  rule_pack: team
+scanners:
+  skill_scanner:
+    policy: custom
+    policy_file:
+      path: @HOME@/custom
+      digest: sha256:5c96c04167f2684aae76877470b96254b0636a029dd291f9a4d4d5194d0f6b18
+# T25 (#1442): the audit store keys 1.0.6 added (#1384), set with 'defenseclaw
+# config set'. 1.0.8 has no rejected-record store: 1.0.10 loads this with it off.
 observability:
   local:
     retention_days: 14
     max_store_mb: 256
 update:
   check: false
+llm_providers:
+  custom:
+    - name: acme
+      domains:
+        - llm.acme.internal
+        - eu.llm.acme.internal
+      env_keys:
+        - ACME_KEY
+        - ACME_EU_KEY
+      base_url: https://eu.llm.acme.internal/v1
+      available_models:
+        - acme-small
+      allowed_requests:
+        - chat
+# Semantic routing as 1.0.9 wrote it (vLLM Semantic Router, keyword
+# decisions); 1.0.10 must keep its meaning (no classifier key = vllm_sr).
+routing:
+  enabled: true
+  version: 0.3.0
+  port: 8801
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-4.1-mini
+      api_key_env: OPENAI_API_KEY
+    - name: local
+      provider: ollama
+      model: llama3.1
+      base_url: http://127.0.0.1:11434
+  signals:
+    keywords:
+      - name: code
+        keywords:
+          - refactor
+          - stack trace
+  decisions:
+    - name: code
+      priority: 10
+      conditions:
+        - type: keyword
+          name: code
+      model_refs:
+        - fast
+    - name: default
+      model_refs:
+        - local
