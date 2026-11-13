@@ -17,12 +17,17 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -41,6 +46,12 @@ import (
 //
 // Rules never read the task, so a rule finding stands whatever it says.
 
+// scopeUnreadableReason is the floor's reason for a command that may send and
+// whose destination could not be read (a host the shell builds, a syntax error,
+// a command past the parser's limits). It gets the unknown tier, like a call cut
+// short at a cap.
+const scopeUnreadableReason = "the call may send data and its destination cannot be read, so it is judged as outside the user's task (unreadable_send)"
+
 const (
 	intentScopeFinding    = "INTENT-SCOPE-SEND"
 	maxNamedScopeTargets  = 20
@@ -55,9 +66,6 @@ var (
 	scopeEmailRe   = lazyregexp.New(`(?i)\b[a-z0-9._%+-]+@([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,})\b`)
 	scopeDomainRe  = lazyregexp.New(`(?i)\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,})\b`)
 	scopePathRe    = lazyregexp.New(`(?:^|[\s"'(])((?:~|\.{1,2})?/[A-Za-z0-9._@%+=,~/-]{2,})`)
-	// A shell command that sends: curl or wget with a body or an upload, or a
-	// transfer or mail program. The destination is read from the same text.
-	scopeShellSendRe = lazyregexp.New(`(?i)\b(?:curl|wget|http|https|xh)\b[^\n]*?(?:\s-X\s*(?:POST|PUT|PATCH)\b|\s--request\s*(?:POST|PUT|PATCH)\b|\s-d\b|\s--data\b|\s--data-[a-z]+\b|\s-F\b|\s--form\b|\s-T\b|\s--upload-file\b|\s--json\b)|\b(?:scp|rsync|sftp|ncat|netcat|nc|mail|mailx|sendmail|swaks|aws\s+s3\s+(?:cp|sync|mv)|gsutil\s+(?:cp|rsync)|az\s+storage\s+blob\s+upload)\b`)
 )
 
 // scopeSendSegments and scopeReadSegments classify a tool name by its words
@@ -242,10 +250,6 @@ func scopeNamedMailbox(mailbox string, named []string) bool {
 	return false
 }
 
-// scopeMailProgramRe finds a mail program in a shell command: an address there
-// is a mailbox; user@host in scp, rsync or curl is a host.
-var scopeMailProgramRe = lazyregexp.New(`(?i)\b(?:mail|mailx|sendmail|swaks|msmtp|mutt)\b`)
-
 // scopeToolVerb reads what a tool does from its name: the verb is the last word
 // of a namespaced name (email.exists, http.post) or the first of a verb_noun
 // name (browse_website, send_email); a name whose ends are neither falls back
@@ -278,19 +282,17 @@ func scopeToolVerb(toolName string) (sends, reads bool) {
 }
 
 // callSendDestinations returns the places a sending call goes to, and the caps
-// its reading hit; nil for a call that does not send.
-func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []scopeDest {
+// its reading hit; nil for a call that does not send. unreadable reports a
+// command that may send and could not be read (the unknown tier applies to the
+// send; there is no text scan).
+func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dests []scopeDest, unreadable bool) {
 	toolSends, toolReads := scopeToolVerb(toolName)
 	values := scopeStrings(args, trunc)
-	var texts []string
-	shell := false
+	var texts, shellTexts []string
 	for _, v := range values {
 		switch {
 		case v.key == "command" || v.key == "cmd" || v.key == "script" || v.key == "code" || v.key == "":
-			if scopeShellSendRe.MatchString(v.value) {
-				shell = true
-				texts = append(texts, v.value)
-			}
+			shellTexts = append(shellTexts, v.value)
 		case scopeSinkKeys[v.key]:
 			if !toolReads || toolSends {
 				texts = append(texts, v.value)
@@ -300,12 +302,6 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 				texts = append(texts, v.value)
 			}
 		}
-	}
-	if !shell && !toolSends && len(texts) == 0 {
-		return nil
-	}
-	if !shell && toolReads && !toolSends {
-		return nil
 	}
 	seen := map[string]bool{}
 	var out []scopeDest
@@ -320,19 +316,24 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 			out = append(out, d)
 		}
 	}
+	// A shell command is read by its parsed effects: a send is a command that sends.
+	shell := false
+	if len(shellTexts) > 0 {
+		shell, unreadable = shellSendDestinations(toolName, args, shellTexts, add)
+	}
+	if !shell && !toolSends && len(texts) == 0 {
+		return nil, false
+	}
+	if !shell && toolReads && !toolSends {
+		return nil, false
+	}
 	for _, t := range texts {
-		shellText := scopeShellSendRe.MatchString(t)
-		mailCommand := shellText && scopeMailProgramRe.MatchString(t)
 		// One match past the cap is enough to know the cap is hit.
 		for _, m := range scopeURLHostRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
 			add(scopeDest{host: strings.ToLower(m[1])})
 		}
 		for _, m := range scopeEmailRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
-			if shellText && !mailCommand {
-				add(scopeDest{host: strings.ToLower(m[1])})
-			} else {
-				add(scopeDest{mailbox: strings.ToLower(m[0])})
-			}
+			add(scopeDest{mailbox: strings.ToLower(m[0])})
 		}
 		if !strings.Contains(t, "://") && !strings.Contains(t, "@") && !strings.ContainsAny(t, " \t\n/\\") {
 			// a bare host or domain in a destination key
@@ -341,7 +342,7 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 			}
 		}
 	}
-	return out
+	return out, unreadable
 }
 
 const maxSessionScopeTargets = 64
@@ -376,7 +377,7 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 		return ""
 	}
 	var trunc bounded.Truncated
-	dests := callSendDestinations(toolName, args, &trunc)
+	dests, unreadable := callSendDestinations(toolName, args, &trunc)
 	named := append(namedScopeTargets(intent), sessionTargets...)
 	// What was read before a cap is still judged, and a call cut short at a cap
 	// is judged as unknown at least: the stricter of the two stands.
@@ -391,6 +392,9 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 		}
 		exceeded = true
 		break
+	}
+	if unreadable {
+		return scopeUnreadableReason
 	}
 	if trunc.Any() {
 		reason := "the call is too large to read in full, so it is judged as outside the user's task (" + trunc.Set().Reason() + ")"
@@ -458,6 +462,9 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 		Findings: []string{intentScopeFinding},
 		Scanner:  "intent-scope",
 	}
+	if reason == scopeUnreadableReason {
+		floor.Severity = "HIGH"
+	}
 	if i := strings.Index(reason, bounded.ReasonCode); i >= 0 {
 		// A walk cut short at a cap also carries the shared evaluation-limit finding
 		// naming the cap, and the severity of the unknown tier: an alert in the
@@ -493,4 +500,29 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 	}
 	out.ScannerSources = appendUniqueStrings(out.ScannerSources, judged.Scanner, floor.Scanner)
 	return &out
+}
+
+// intentScopeMode is guardrail.judge.intent_scope of this judge.
+func (j *LLMJudge) intentScopeMode() string {
+	if j == nil || j.cfg == nil {
+		return config.IntentScopeAlert
+	}
+	return j.cfg.IntentScopeMode()
+}
+
+// recordIntentScopeShadow records a call the scope floor would have raised, in
+// shadow mode: a judge event of kind tool_intent_scope_shadow (action allow, the
+// finding INTENT-SCOPE-SEND, the tool name) and one log line with the reason.
+// The verdict is not touched.
+func (j *LLMJudge) recordIntentScopeShadow(ctx context.Context, toolName, args, reason string) {
+	shadow := applyIntentScopeFloor(nil, reason)
+	findings := judgeFindingsPayload(shadow)
+	for i := range findings {
+		findings[i].Source = "intent-scope-shadow"
+		findings[i].Evidence = reason
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] intent-scope shadow: tool=%s reason=%q (record only, verdict unchanged)\n", sanitizeToolName(toolName), reason)
+	emitJudge(ctx, "tool_intent_scope_shadow", j.model, gatewaylog.DirectionToolCall,
+		len(args), 0, "allow", deriveSeverity(shadow.Severity), "", "",
+		JudgeEmitOpts{Findings: findings, ToolName: sanitizeToolName(toolName)})
 }
