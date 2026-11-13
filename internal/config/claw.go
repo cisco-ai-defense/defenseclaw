@@ -18,6 +18,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -39,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	toml "github.com/pelletier/go-toml/v2"
 )
 
@@ -753,15 +756,19 @@ func readMCPServersOpenClaw(configFile string) ([]MCPServerEntry, error) {
 	return readMCPServersFromFile(configFile)
 }
 
+// readMCPServersViaCLI asks the OpenClaw CLI for mcp.servers, bounded to
+// 10 s, as a captured background process: on Windows with no console
+// window (a gateway in the user session flashed one for every inventory
+// pass and swallowed the keys typed meanwhile, rel-1-0-10 GAP-0056) and
+// with the process tree ended at the deadline.
 func readMCPServersViaCLI() ([]MCPServerEntry, error) {
-	cmd := exec.Command("openclaw", "config", "get", "mcp.servers")
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stdout, _, err := processutil.OutputTree(processutil.CommandContext(ctx, "openclaw", "config", "get", "mcp.servers"), false)
+	if err != nil {
 		return nil, fmt.Errorf("config: openclaw config get mcp.servers: %w", err)
 	}
-	return parseMCPServersJSON(stdout.Bytes())
+	return parseMCPServersJSON(stdout)
 }
 
 func readMCPServersFromFile(configFile string) ([]MCPServerEntry, error) {
