@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/budgetstore"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 var budgetStoreConfigPath string
@@ -47,9 +49,41 @@ tenant secret, base64 of 32 bytes, readable by its owner only), db_path
 	RunE: runBudgetStoreServe,
 }
 
+var budgetStoreSecretPath string
+
+var budgetStoreDeriveCmd = &cobra.Command{
+	Use:   "derive-auth-key",
+	Short: "Print the store's key file content from the tenant secret",
+	Long: `Reads the tenant secret (base64 of 32 bytes; the value devices hold as
+the protected credential routing-budget-store-key) from --secret-file and
+prints the store's key: the request-signing key only. Put the output in the
+store host's secret_file. The store never holds the tenant secret itself,
+so it cannot compute the keyed hash of a name.`,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		raw, err := readOwnerOnlyFile(budgetStoreSecretPath)
+		if err != nil {
+			return fmt.Errorf("derive-auth-key: %w", err)
+		}
+		secret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+		clear(raw)
+		if err != nil || len(secret) != budgetstore.SecretBytes {
+			return errors.New("derive-auth-key: the secret file must hold base64 of 32 bytes")
+		}
+		keys, err := budgetstore.DeriveKeys(secret)
+		clear(secret)
+		if err != nil {
+			return fmt.Errorf("derive-auth-key: %w", err)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), budgetstore.AuthKeyPrefix+base64.StdEncoding.EncodeToString(keys.AuthKey()))
+		return nil
+	},
+}
+
 func init() {
 	budgetStoreServeCmd.Flags().StringVar(&budgetStoreConfigPath, "config", "", "config.yaml with routing.admin.budget_store.server (required)")
-	budgetStoreCmd.AddCommand(budgetStoreServeCmd)
+	budgetStoreDeriveCmd.Flags().StringVar(&budgetStoreSecretPath, "secret-file", "", "file with the tenant secret (owner-only)")
+	_ = budgetStoreDeriveCmd.MarkFlagRequired("secret-file")
+	budgetStoreCmd.AddCommand(budgetStoreServeCmd, budgetStoreDeriveCmd)
 	rootCmd.AddCommand(budgetStoreCmd)
 }
 
@@ -68,14 +102,12 @@ func runBudgetStoreServe(cmd *cobra.Command, _ []string) error {
 	if err := config.ValidateRoutingBudgetStore(cfg.Routing.Admin.BudgetStore, false); err != nil {
 		return fmt.Errorf("budget-store serve: %w", err)
 	}
-	secret, err := readStoreSecretFile(srv.SecretFile)
+	keys, err := readStoreAuthKey(srv.SecretFile)
 	if err != nil {
 		return fmt.Errorf("budget-store serve: %w", err)
 	}
-	keys, err := budgetstore.DeriveKeys(secret)
-	clear(secret)
-	if err != nil {
-		return fmt.Errorf("budget-store serve: %w", err)
+	if _, err := readOwnerOnlyFile(srv.TLSKeyFile); err != nil {
+		return fmt.Errorf("budget-store serve: tls_key_file: %w", err)
 	}
 	tlsConfig, err := budgetstore.ServerTLSConfig(srv.TLSCertFile, srv.TLSKeyFile)
 	if err != nil {
@@ -90,7 +122,10 @@ func runBudgetStoreServe(cmd *cobra.Command, _ []string) error {
 	if rate == 0 {
 		rate = config.RoutingBudgetStoreDefaultRate
 	}
-	server := budgetstore.NewServer(srv.Listen, &budgetstore.Handler{Store: store, Keys: keys, Limit: budgetstore.RateLimiter(rate)}, tlsConfig)
+	// A high pre-authentication guard per address (many devices may share one
+	// behind NAT or a load balancer) and the configured limit per writer.
+	server := budgetstore.NewServer(srv.Listen, &budgetstore.Handler{Store: store, Keys: keys,
+		PreAuth: budgetstore.RateLimiter(rate * 20), Writer: budgetstore.RateLimiter(rate)}, tlsConfig)
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -122,24 +157,61 @@ func runBudgetStoreServe(cmd *cobra.Command, _ []string) error {
 	}
 }
 
-// readStoreSecretFile reads the tenant secret: base64 of 32 bytes, in a
-// file only its owner may read (POSIX mode 0600 or tighter).
-func readStoreSecretFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+// readStoreAuthKey reads the store's key file: the auth key written by
+// derive-auth-key. A raw tenant secret is refused: the store must not hold
+// the subject-hash key.
+func readStoreAuthKey(path string) (budgetstore.Keys, error) {
+	raw, err := readOwnerOnlyFile(path)
 	if err != nil {
-		return nil, errors.New("secret_file cannot be read")
+		return budgetstore.Keys{}, fmt.Errorf("secret_file: %w", err)
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("secret_file %s is readable by others (mode %o); chmod 600 it", path, info.Mode().Perm())
+	defer clear(raw)
+	text := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(text, budgetstore.AuthKeyPrefix) {
+		return budgetstore.Keys{}, errors.New("secret_file must hold the output of budget-store derive-auth-key, not the tenant secret")
 	}
-	raw, err := os.ReadFile(path)
+	auth, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(text, budgetstore.AuthKeyPrefix))
 	if err != nil {
-		return nil, errors.New("secret_file cannot be read")
+		return budgetstore.Keys{}, errors.New("secret_file holds a damaged auth key; run budget-store derive-auth-key again")
 	}
-	secret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
-	clear(raw)
-	if err != nil || len(secret) != budgetstore.SecretBytes {
-		return nil, errors.New("secret_file must hold the tenant secret: base64 of 32 bytes")
+	defer clear(auth)
+	return budgetstore.AuthKeys(auth)
+}
+
+// readOwnerOnlyFile reads a key file that is not a symlink, is owned by the
+// user running the store and is readable by that user only (POSIX), or that
+// only LocalSystem and Administrators may read (Windows).
+func readOwnerOnlyFile(path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("no file named")
 	}
-	return secret, nil
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, errors.New("cannot be read")
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("must be a regular file, not a link")
+	}
+	if runtime.GOOS == "windows" {
+		if err := managed.RejectUntrustedSecretReaders(path); err != nil {
+			return nil, err
+		}
+		return os.ReadFile(path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("cannot be read")
+	}
+	defer f.Close()
+	held, err := f.Stat()
+	if err != nil || !os.SameFile(info, held) {
+		return nil, errors.New("changed while it was opened")
+	}
+	if held.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("is readable by others (mode %o); chmod 600 it", held.Mode().Perm())
+	}
+	if !ownedByCurrentUser(held) {
+		return nil, errors.New("must be owned by the account that runs the store")
+	}
+	return io.ReadAll(io.LimitReader(f, 64<<10))
 }

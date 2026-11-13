@@ -24,6 +24,10 @@ func TestFleetKeysCarryNoNames(t *testing.T) {
 			{ID: "eng", Scope: "group", Subject: `DCLAB\eng`},
 			{ID: "codex", Scope: "connector", Subject: "codex"},
 		}}
+	f.allowKeysLocked()
+	if _, ok := f.ToFleet("group:eng:" + "0123456789ab"); ok {
+		t.Fatal("an unkeyed hash from before the store was on is never sent")
+	}
 	f.noteUser("S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001", "alice@dclab.test")
 	f.noteUser("2001", "", "") // no directory id: stays on this device
 	fleetKey, ok := f.ToFleet("user:daily:*:S-1-5-21-1-2-3-1001")

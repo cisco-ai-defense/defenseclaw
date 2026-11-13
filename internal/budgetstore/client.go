@@ -6,8 +6,10 @@ package budgetstore
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,7 +62,7 @@ func NewClient(rawURL string, keys Keys, caPEM []byte, timeout time.Duration) (*
 		keys: keys,
 		http: &http.Client{Transport: transport, Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		seq: uint64(time.Now().UnixNano()),
+		seq: randomSeqStart(),
 	}, nil
 }
 
@@ -118,15 +120,21 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 		return err
 	}
 	now := time.Now()
+	sig := c.keys.Sign(http.MethodPost, path, now, body)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(HeaderTime, fmt.Sprint(now.Unix()))
-	req.Header.Set(HeaderSignature, c.keys.Sign(http.MethodPost, path, now, body))
+	req.Header.Set(HeaderSignature, sig)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return errors.New("budget store unreachable")
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, MaxBodyBytes))
+	if resp.StatusCode != http.StatusUnauthorized && !c.keys.VerifyResponse(sig, resp.StatusCode, data, resp.Header.Get(HeaderResponse)) {
+		// Not the store's answer (a TLS-inspecting middlebox or a forged
+		// response): use none of it.
+		return errors.New("budget store answer is not signed by the store")
+	}
 	if resp.StatusCode != http.StatusOK {
 		var e ErrorResponse
 		_ = json.Unmarshal(data, &e)
@@ -142,4 +150,12 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 		}
 	}
 	return nil
+}
+
+// randomSeqStart starts the push sequence at a random point in the lower
+// half of the range, so a clock step cannot make it repeat.
+func randomSeqStart() uint64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return binary.BigEndian.Uint64(b[:]) >> 2
 }

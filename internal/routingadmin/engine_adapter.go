@@ -5,10 +5,10 @@ package routingadmin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
-	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +46,28 @@ type Runtime struct {
 	epoch    string
 	syncing  bool
 	kick     chan struct{}
+	pushMu   sync.Mutex // one push at a time: snapshot and send stay in order
+}
+
+// Kick asks the sync loop to sync now (a new user was seen).
+func (rt *Runtime) Kick() {
+	if rt == nil {
+		return
+	}
+	select {
+	case rt.kick <- struct{}{}:
+	default:
+	}
+}
+
+// SetInterval changes the sync interval (routing.admin.budget_store.sync_interval).
+func (rt *Runtime) SetInterval(d time.Duration) {
+	if rt == nil || d <= 0 {
+		return
+	}
+	rt.mu.Lock()
+	rt.interval = d
+	rt.mu.Unlock()
 }
 
 // DefaultSyncInterval is how often the ledger stores this process's spend
@@ -55,8 +77,10 @@ const DefaultSyncInterval = 30 * time.Second
 // NewRuntime returns an empty runtime; it costs nothing until a config
 // with routing.admin rules or budgets is compiled.
 func NewRuntime() *Runtime {
-	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1),
-		epoch: strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)}
+	var id [12]byte
+	_, _ = rand.Read(id[:])
+	// A random epoch: the store learns nothing about the process or host.
+	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1), epoch: hex.EncodeToString(id[:])}
 }
 
 // Decisions returns the recent-decisions ring.
@@ -235,21 +259,56 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	since := time.Unix(int64(dayNumber(time.Now())-LedgerDays)*86400, 0).UTC()
 	var rows []SeedRow
 	var err error
+	// This device's earlier processes always count: a fleet answer that
+	// leaves them out (a user with no fleet id, a store that lost data) can
+	// never lower what this device already knows.
+	localRows, localErr := local.Totals(ctx, epoch, since, nil)
 	if fleet != nil {
 		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
-			ledger.ApplyRemote(ids, fromFleet(rows, keys), time.Now())
+			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), time.Now())
+			if localErr != nil {
+				ledger.SyncFailed(localErr)
+			}
 			return
 		}
 		ledger.SyncFailed(err)
 	}
-	if rows, err = local.Totals(ctx, epoch, since, nil); err != nil {
-		ledger.SyncFailed(err)
+	if localErr != nil {
+		ledger.SyncFailed(localErr)
 		return
 	}
-	ledger.ApplyRemote(ids, rows, time.Now())
+	ledger.ApplyRemote(ids, localRows, time.Now())
 	if fleet != nil {
 		ledger.SyncFailed(errFleetFallback)
 	}
+}
+
+// maxRows merges two spend answers per (key, day), keeping the larger.
+func maxRows(a, b []SeedRow) []SeedRow {
+	type dk struct{ day, key string }
+	m := map[dk]float64{}
+	for _, rows := range [][]SeedRow{a, b} {
+		sum := map[dk]float64{}
+		for _, r := range rows {
+			sum[dk{r.Day, r.Key}] += r.USD
+		}
+		for k, v := range sum {
+			if v > m[k] {
+				m[k] = v
+			}
+		}
+	}
+	out := make([]SeedRow, 0, len(m))
+	for k, v := range m {
+		out = append(out, SeedRow{Day: k.day, Key: k.key, USD: v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day < out[j].Day
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out
 }
 
 var errFleetFallback = errors.New("fleet spend unavailable; counting this device only")
@@ -264,6 +323,8 @@ func (rt *Runtime) Flush(ctx context.Context) {
 }
 
 func (rt *Runtime) push(ctx context.Context) {
+	rt.pushMu.Lock()
+	defer rt.pushMu.Unlock()
 	rt.mu.Lock()
 	ledger, local, fleet, epoch := rt.ledger, rt.local, rt.fleet, rt.epoch
 	rt.mu.Unlock()

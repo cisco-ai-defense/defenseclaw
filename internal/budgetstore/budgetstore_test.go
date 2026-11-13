@@ -36,7 +36,7 @@ func serve(t *testing.T, keys Keys) (*Client, *Store, *httptest.Server) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv := httptest.NewTLSServer(&Handler{Store: store, Keys: keys})
+	srv := httptest.NewTLSServer(&Handler{Store: store, Keys: serverKeys(t, keys)})
 	t.Cleanup(srv.Close)
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
 	client, err := NewClient(srv.URL, keys, caPEM, 5*time.Second)
@@ -106,10 +106,10 @@ func TestAuthFailuresAndReplayAreRefused(t *testing.T) {
 	if code, reason := post(t, srv, keys, PathPush, body, time.Now()); code != http.StatusConflict || reason != "replayed" {
 		t.Fatalf("replay: %d %s", code, reason)
 	}
-	if code, reason := post(t, srv, testKeys(t, 2), PathPush, body, time.Now()); code != http.StatusUnauthorized || reason != "bad_signature" {
+	if code, reason := post(t, srv, testKeys(t, 2), PathPush, body, time.Now()); code != http.StatusUnauthorized || reason != "unauthorized" {
 		t.Fatalf("another tenant secret: %d %s", code, reason)
 	}
-	if code, reason := post(t, srv, keys, PathPush, body, time.Now().Add(-10*time.Minute)); code != http.StatusUnauthorized || reason != "clock_skew" {
+	if code, reason := post(t, srv, keys, PathPush, body, time.Now().Add(-10*time.Minute)); code != http.StatusUnauthorized || reason != "unauthorized" {
 		t.Fatalf("old request: %d %s", code, reason)
 	}
 	bad, _ := json.Marshal(PushRequest{Epoch: "e2", Seq: 1, Rows: []Row{{Day: today, Key: "user:Alice Smith", USD: 1}}})
@@ -151,7 +151,7 @@ func TestStoreFileHoldsNoNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewTLSServer(&Handler{Store: store, Keys: keys})
+	srv := httptest.NewTLSServer(&Handler{Store: store, Keys: serverKeys(t, keys)})
 	defer srv.Close()
 	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
 	client, _ := NewClient(srv.URL, keys, caPEM, 5*time.Second)
@@ -204,5 +204,57 @@ func TestRateLimiter(t *testing.T) {
 	limit := RateLimiter(2)
 	if !limit("a") || !limit("a") || limit("a") || !limit("b") {
 		t.Fatal("two per minute per host")
+	}
+}
+
+// serverKeys are the store's keys: the auth key only.
+func serverKeys(t *testing.T, device Keys) Keys {
+	t.Helper()
+	k, err := AuthKeys(device.AuthKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.SubjectHash("x") != "" {
+		t.Fatal("the store must not hold the subject key")
+	}
+	return k
+}
+
+func TestClientRefusesAnUnsignedOrRewrittenAnswer(t *testing.T) {
+	keys := testKeys(t, 1)
+	store, err := OpenStore(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	inner := &Handler{Store: store, Keys: serverKeys(t, keys)}
+	rewrite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := httptest.NewRecorder()
+		inner.ServeHTTP(rec, r)
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(bytes.Replace(rec.Body.Bytes(), []byte(`"rows":null`), []byte(`"rows":[{"day":"2026-11-12","key":"connector:c:codex","usd":9999}]`), 1))
+	})
+	srv := httptest.NewTLSServer(rewrite)
+	defer srv.Close()
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	client, _ := NewClient(srv.URL, keys, caPEM, 5*time.Second)
+	if _, err := client.Totals(context.Background(), "e1", time.Now().AddDate(0, 0, -1), []string{"connector:c:codex"}); err == nil {
+		t.Fatal("a rewritten answer must be refused")
+	}
+}
+
+func TestPushRefusesDaysOutsideTheWindow(t *testing.T) {
+	now := time.Now()
+	for _, day := range []string{"9999-12-31", now.AddDate(0, 0, -RetentionDays-2).Format(time.DateOnly)} {
+		req := PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: day, Key: "connector:c:codex", USD: 1}}}
+		if req.validate(now) == nil {
+			t.Fatalf("%s must be refused", day)
+		}
+	}
+	if (PushRequest{Epoch: "e1", Seq: 1 << 63}).validate(now) == nil {
+		t.Fatal("a sequence above 2^63-1 must be refused")
 	}
 }

@@ -35,10 +35,17 @@ const (
 	PathHealth = "/v1/health"
 )
 
-// Request headers.
+// Request and response headers.
 const (
 	HeaderTime      = "X-DC-Store-Time"
 	HeaderSignature = "X-DC-Store-Signature"
+	// HeaderResponse signs an answer over the request signature, the status
+	// and the body digest, so a TLS-inspecting middlebox cannot rewrite it.
+	HeaderResponse = "X-DC-Store-Response"
+	// AuthKeyPrefix marks the store's key file: the auth key only, never the
+	// tenant secret (the store must not be able to compute subject hashes).
+	AuthKeyPrefix = "dcbs-auth-v1:"
+	maxSeq        = 1<<63 - 1
 )
 
 // Bounds.
@@ -92,11 +99,24 @@ type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// Keys are the keys derived from the tenant secret.
+// Keys are the keys derived from the tenant secret. A device holds both;
+// the store holds only the auth key (AuthKeys), so it can verify requests
+// but cannot hash a name to find its key.
 type Keys struct {
 	auth    []byte
 	subject []byte
 }
+
+// AuthKeys returns keys that only sign and verify (the store's).
+func AuthKeys(auth []byte) (Keys, error) {
+	if len(auth) != sha256.Size {
+		return Keys{}, errors.New("budget store auth key must be 32 bytes")
+	}
+	return Keys{auth: append([]byte(nil), auth...)}, nil
+}
+
+// AuthKey returns the auth key, for the store's key file.
+func (k Keys) AuthKey() []byte { return append([]byte(nil), k.auth...) }
 
 // DeriveKeys derives the request-signing key and the subject-hash key from
 // the 32-byte tenant secret.
@@ -119,6 +139,9 @@ func DeriveKeys(secret []byte) (Keys, error) {
 // groups entry): the same on every device that holds the tenant secret,
 // unreadable to anyone who does not.
 func (k Keys) SubjectHash(subject string) string {
+	if len(k.subject) == 0 {
+		return ""
+	}
 	mac := hmac.New(sha256.New, k.subject)
 	_, _ = mac.Write([]byte(subject))
 	return "h" + hex.EncodeToString(mac.Sum(nil))[:24]
@@ -136,20 +159,42 @@ func (k Keys) mac(method, path, at string, body []byte) []byte {
 	return mac.Sum(nil)
 }
 
+// errUnauthorized is every authentication refusal (one code: a caller
+// without the secret learns nothing, not even the store clock).
+var errUnauthorized = errors.New("unauthorized")
+
 // Verify checks a request signature and its time against now.
 func (k Keys) Verify(method, path, atHeader, signature string, body []byte, now time.Time) error {
 	at, err := strconv.ParseInt(strings.TrimSpace(atHeader), 10, 64)
 	if err != nil {
-		return errors.New("bad_time")
+		return errUnauthorized
 	}
 	if d := now.Sub(time.Unix(at, 0)); d > MaxClockSkew || d < -MaxClockSkew {
-		return errors.New("clock_skew")
+		return errUnauthorized
 	}
 	got, err := hex.DecodeString(strings.TrimSpace(signature))
 	if err != nil || !hmac.Equal(got, k.mac(method, path, strconv.FormatInt(at, 10), body)) {
-		return errors.New("bad_signature")
+		return errUnauthorized
 	}
 	return nil
+}
+
+// SignResponse signs an answer to the request that carried requestSig.
+func (k Keys) SignResponse(requestSig string, status int, body []byte) string {
+	digest := sha256.Sum256(body)
+	mac := hmac.New(sha256.New, k.auth)
+	_, _ = mac.Write([]byte("response\n" + requestSig + "\n" + strconv.Itoa(status) + "\n" + hex.EncodeToString(digest[:])))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// VerifyResponse checks an answer signature.
+func (k Keys) VerifyResponse(requestSig string, status int, body []byte, signature string) bool {
+	got, err := hex.DecodeString(strings.TrimSpace(signature))
+	if err != nil {
+		return false
+	}
+	want, _ := hex.DecodeString(k.SignResponse(requestSig, status, body))
+	return hmac.Equal(got, want)
 }
 
 // ValidKey reports whether key is a charge key the store accepts.
@@ -163,20 +208,31 @@ func validDay(day string) bool {
 	return err == nil
 }
 
+// recentDay accepts only days the budgets can count: the retention window up
+// to tomorrow (a clock a little ahead), so no row lives past the prune.
+func recentDay(day string, now time.Time) bool {
+	t, err := time.Parse(time.DateOnly, day)
+	if err != nil {
+		return false
+	}
+	today := now.UTC().Truncate(24 * time.Hour)
+	return !t.Before(today.AddDate(0, 0, -RetentionDays)) && !t.After(today.AddDate(0, 0, 1))
+}
+
 func validUSD(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= maxUSD
 }
 
 // validate checks a push request.
-func (r PushRequest) validate() error {
-	if !ValidEpoch(r.Epoch) || r.Seq == 0 {
+func (r PushRequest) validate(now time.Time) error {
+	if !ValidEpoch(r.Epoch) || r.Seq == 0 || r.Seq > maxSeq {
 		return errors.New("bad_epoch")
 	}
 	if len(r.Rows) > MaxRows {
 		return errors.New("too_many_rows")
 	}
 	for _, row := range r.Rows {
-		if !validDay(row.Day) || !ValidKey(row.Key) || !validUSD(row.USD) {
+		if !recentDay(row.Day, now) || !ValidKey(row.Key) || !validUSD(row.USD) {
 			return errors.New("bad_row")
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -71,6 +72,12 @@ func (s *Store) Close() error { return s.db.Close() }
 // errReplay is a push whose sequence is not above the epoch's last one.
 var errReplay = errors.New("replayed")
 
+// errWriters is a push from a new writer while the store holds MaxWriters.
+var errWriters = errors.New("too_many_writers")
+
+// MaxWriters caps the writers (gateway processes) the store keeps.
+const MaxWriters = 100000
+
 // Push stores one epoch's absolute totals.
 func (s *Store) Push(ctx context.Context, req PushRequest) error {
 	s.mu.Lock()
@@ -83,6 +90,13 @@ func (s *Store) Push(ctx context.Context, req PushRequest) error {
 	var last uint64
 	switch err := tx.QueryRowContext(ctx, `SELECT last_seq FROM writers WHERE epoch = ?`, req.Epoch).Scan(&last); {
 	case errors.Is(err, sql.ErrNoRows):
+		var writers int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM writers`).Scan(&writers); err != nil {
+			return err
+		}
+		if writers >= MaxWriters {
+			return errWriters
+		}
 	case err != nil:
 		return err
 	case req.Seq <= last:
@@ -128,6 +142,10 @@ func (s *Store) Totals(ctx context.Context, req TotalsRequest) ([]Row, error) {
 				return nil, err
 			}
 			out = append(out, r)
+			if len(out) > MaxRows {
+				rows.Close()
+				return nil, errors.New("too_many_rows")
+			}
 		}
 		err = rows.Err()
 		rows.Close()
@@ -153,8 +171,11 @@ type Handler struct {
 	Store *Store
 	Keys  Keys
 	Now   func() time.Time
-	// Limit admits a request from a remote address (nil admits all).
-	Limit func(remote string) bool
+	// PreAuth admits a request from a remote address before its signature
+	// is checked (a high flood guard; nil admits all). Writer admits an
+	// authenticated request of one writer (epoch); nil admits all.
+	PreAuth func(remote string) bool
+	Writer  func(epoch string) bool
 }
 
 func (h *Handler) now() time.Time {
@@ -167,6 +188,13 @@ func (h *Handler) now() time.Time {
 // ServeHTTP authenticates and answers one request. Refusals carry a reason
 // code only; nothing from the request is logged or echoed.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.PreAuth != nil {
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		if !h.PreAuth(host) {
+			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{Error: "rate_limited"})
+			return
+		}
+	}
 	if r.URL.Path == PathHealth && r.Method == http.MethodGet {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
@@ -175,50 +203,65 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not_found"})
 		return
 	}
-	if h.Limit != nil {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if !h.Limit(host) {
-			writeJSON(w, http.StatusTooManyRequests, ErrorResponse{Error: "rate_limited"})
-			return
-		}
-	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
 	if err != nil || len(body) > MaxBodyBytes {
 		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{Error: "too_large"})
 		return
 	}
-	if err := h.Keys.Verify(r.Method, r.URL.Path, r.Header.Get(HeaderTime), r.Header.Get(HeaderSignature), body, h.now()); err != nil {
+	sig := r.Header.Get(HeaderSignature)
+	if err := h.Keys.Verify(r.Method, r.URL.Path, r.Header.Get(HeaderTime), sig, body, h.now()); err != nil {
 		writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: err.Error()})
 		return
 	}
+	signed := func(status int, v any) { h.writeSigned(w, sig, status, v) }
 	switch r.URL.Path {
 	case PathPush:
 		var req PushRequest
-		if err := json.Unmarshal(body, &req); err != nil || req.validate() != nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request"})
+		if err := json.Unmarshal(body, &req); err != nil || req.validate(h.now()) != nil {
+			signed(http.StatusBadRequest, ErrorResponse{Error: "bad_request"})
+			return
+		}
+		if h.Writer != nil && !h.Writer(req.Epoch) {
+			signed(http.StatusTooManyRequests, ErrorResponse{Error: "rate_limited"})
 			return
 		}
 		switch err := h.Store.Push(r.Context(), req); {
 		case errors.Is(err, errReplay):
-			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "replayed"})
+			signed(http.StatusConflict, ErrorResponse{Error: "replayed"})
+		case errors.Is(err, errWriters):
+			signed(http.StatusServiceUnavailable, ErrorResponse{Error: "too_many_writers"})
 		case err != nil:
-			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "store_unavailable"})
+			signed(http.StatusServiceUnavailable, ErrorResponse{Error: "store_unavailable"})
 		default:
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			signed(http.StatusOK, map[string]string{"status": "ok"})
 		}
 	case PathTotals:
 		var req TotalsRequest
 		if err := json.Unmarshal(body, &req); err != nil || req.validate() != nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad_request"})
+			signed(http.StatusBadRequest, ErrorResponse{Error: "bad_request"})
+			return
+		}
+		if h.Writer != nil && !h.Writer(req.Epoch) {
+			signed(http.StatusTooManyRequests, ErrorResponse{Error: "rate_limited"})
 			return
 		}
 		rows, err := h.Store.Totals(r.Context(), req)
 		if err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: "store_unavailable"})
+			signed(http.StatusServiceUnavailable, ErrorResponse{Error: "store_unavailable"})
 			return
 		}
-		writeJSON(w, http.StatusOK, TotalsResponse{Rows: rows})
+		signed(http.StatusOK, TotalsResponse{Rows: rows})
 	}
+}
+
+// writeSigned writes an authenticated answer with its response signature.
+func (h *Handler) writeSigned(w http.ResponseWriter, requestSig string, status int, v any) {
+	body, _ := json.Marshal(v)
+	w.Header().Set(HeaderResponse, h.Keys.SignResponse(requestSig, status, body))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -228,16 +271,25 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// RateLimiter admits at most perMinute requests per remote host.
+// RateLimiter admits at most perMinute requests per key (a remote host or
+// a writer) in each wall-clock minute. Old minutes are dropped one by one,
+// so a burst of new keys cannot reset everyone's count.
 func RateLimiter(perMinute int) func(string) bool {
 	var mu sync.Mutex
-	window := map[string][2]int64{} // host -> {minute, count}
+	window := map[string][2]int64{} // key -> {minute, count}
 	return func(host string) bool {
 		minute := time.Now().Unix() / 60
 		mu.Lock()
 		defer mu.Unlock()
-		if len(window) > 10000 {
-			window = map[string][2]int64{}
+		if len(window) > 50000 {
+			for k, w := range window {
+				if w[0] != minute {
+					delete(window, k)
+				}
+			}
+			if len(window) > 50000 {
+				return false
+			}
 		}
 		w := window[host]
 		if w[0] != minute {
@@ -259,11 +311,13 @@ func ServerTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	return &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}, nil
 }
 
-// NewServer returns the HTTPS server of h on addr.
+// NewServer returns the HTTPS server of h on addr. Its error log is
+// discarded: TLS handshake errors would write client addresses.
 func NewServer(addr string, h http.Handler, tlsConfig *tls.Config) *http.Server {
 	return &http.Server{
 		Addr: addr, Handler: h, TLSConfig: tlsConfig,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second,
 		IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10,
+		ErrorLog: log.New(io.Discard, "", 0),
 	}
 }

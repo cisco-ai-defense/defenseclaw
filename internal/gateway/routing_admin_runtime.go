@@ -174,7 +174,7 @@ func (s *Sidecar) startRoutingAdmin(ctx context.Context) {
 		return
 	}
 	s.applyRoutingAdmin(cfg)
-	routingAdminRuntime.SetCounters(ctx, routingadmin.NewLocalCounter(cfg.DataDir), routingAdminFleet.counter(), 0)
+	routingAdminRuntime.SetCounters(ctx, routingadmin.NewLocalCounter(cfg.DataDir), routingAdminFleet.counter(), routingAdminSyncInterval(cfg))
 	if routingAdminRuntime.For(cfg) != nil {
 		first, cancel := context.WithTimeout(ctx, 2*time.Second)
 		routingAdminRuntime.SyncOnce(first)
@@ -198,7 +198,17 @@ func (s *Sidecar) applyRoutingAdmin(cfg *config.Config) {
 	}
 	routingAdminRuntime.SetFeed(cfg.BudgetFeedReady())
 	routingAdminFleet.apply(cfg)
+	routingAdminRuntime.SetInterval(routingAdminSyncInterval(cfg))
 	routingAdminRuntime.SetFleet(routingAdminFleet.counter(), routingAdminFleet.mapper(), routingAdminFleet.hasher())
+}
+
+// routingAdminSyncInterval is routing.admin.budget_store.sync_interval (the
+// default without a store).
+func routingAdminSyncInterval(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Routing.Admin != nil && cfg.Routing.Admin.BudgetStore != nil {
+		return cfg.Routing.Admin.BudgetStore.EffectiveSyncInterval()
+	}
+	return routingadmin.DefaultSyncInterval
 }
 
 // routingAdminIdentitySelectors lists the groups routing.admin rules and
