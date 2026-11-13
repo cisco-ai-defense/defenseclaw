@@ -6997,7 +6997,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-IGNORE-PREVIOUS",
-        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?ignore\\s+(?:all\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions|rules|guidelines|context)",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?ignore\\s+(?:(?:all|any|every|the|these|those|of)\\s+)*(?:(?:your|my)\\s+)?(?:previous|prior|above|earlier|preceding|former)\\s+(?:instructions?|rules|guidelines|directions|context)",
         "title": "Ignore previous instructions",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -7022,7 +7022,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-DISREGARD",
-        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?disregard\\s+(?:all\\s+)?(?:previous|prior|above|your|earlier)\\s+(?:instructions|rules|guidelines|programming|context)",
+        "pattern": "(?im)(?:^|^\\[[^\\]\\n]{0,64}\\d{4}-\\d{2}-\\d{2}[ T]\\d{2}:\\d{2}[^\\]\\n]{0,32}\\]\\s*|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?disregard\\s+(?:(?:all|any|every|the|these|those|of)\\s+)*(?:(?:your|my)\\s+)?(?:previous|prior|above|earlier|preceding|former|your)\\s+(?:instructions?|rules|guidelines|programming|directions|context)",
         "title": "Disregard instructions",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -7413,6 +7413,162 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-ADDRESSED-DEFER",
+      "title": "Message to the assistant that defers the user's own task",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-ADDRESSED-DEFER",
+        "pattern": "(?is)\\b(?:message|note|notice)s?\\s+(?:from\\s+[^\\n.]{1,80}?\\s+)?to\\s+(?:you|the\\s+(?:ai|assistant|model|agent|llm|bot))\\b[\\s\\S]{0,500}?\\b(?:before|prior\\s+to|instead\\s+of)\\s+(?:you\\s+)?(?:can\\s+)?(?:solv|complet|finish|do|doing|continu|proceed|start|begin|resum|work)\\w*\\s+(?:on\\s+|with\\s+)?(?:the|your|my|this)\\s+(?:original\\s+|initial\\s+|first\\s+|main\\s+|earlier\\s+|previous\\s+)?(?:task|request|instruction|assignment)\\b",
+        "title": "Message to the assistant that defers the user's own task",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-CHAT-TEMPLATE-TOKEN",
+      "title": "Role-bearing chat-template token in user content",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-CHAT-TEMPLATE-TOKEN",
+        "pattern": "(?i)(?:<\\|im_start\\|>\\s*(?:system|assistant)\\b|<\\|start_header_id\\|>\\s*(?:system|assistant)\\b|<\\|(?:system|assistant)\\|>|<start_of_turn>\\s*(?:model|system)\\b|<<\\s*SYS\\s*>>|\\[INST\\])",
+        "title": "Role-bearing chat-template token in user content",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-FAKE-ROLE-HEADER",
+      "title": "Fake system or assistant header in user content",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-FAKE-ROLE-HEADER",
+        "pattern": "(?im)^[ \\t]*(?:#{2,6}[ \\t]*[(\\[]|[(\\[<]{1,2})[ \\t]*(?:system|assistant)[ _-]?(?:message|prompt|instructions?|note|override|update)[ \\t]*[)\\]>]{1,2}",
+        "title": "Fake system or assistant header in user content",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-HIDDEN-TAGS",
+      "title": "Unicode tag characters hide text",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-HIDDEN-TAGS",
+        "pattern": "[\\x{E0000}-\\x{E007F}]{8,}",
+        "title": "Unicode tag characters hide text",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "prompt-injection",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection",
+        "obfuscation"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-HIDDEN-INVISIBLE",
+      "title": "Large block of invisible characters",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-HIDDEN-INVISIBLE",
+        "pattern": "[\\x{200B}-\\x{200F}\\x{2060}-\\x{2064}\\x{FEFF}\\x{180E}\\x{00AD}\\x{061C}]{16,}",
+        "title": "Large block of invisible characters",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection",
+        "obfuscation"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-HIDDEN-BIDI",
+      "title": "Bidirectional override or isolate control",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-HIDDEN-BIDI",
+        "pattern": "[\\x{202D}\\x{202E}\\x{2066}-\\x{2068}][\\s\\S]{0,300}?[\\x{202C}\\x{2069}]",
+        "title": "Bidirectional override or isolate control",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "prompt-injection",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection",
+        "obfuscation"
       ],
       "data_axis": [
         "ingress_untrusted"
