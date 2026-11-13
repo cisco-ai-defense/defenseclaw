@@ -5605,13 +5605,16 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 			}
 		}
 	}
-	opts := connector.SetupOpts{
+	// The OpenClaw paths and the separate-user layout: removing the last
+	// connector must also delete the published plugin credential
+	// (rel-1-0-10 GAP-0083).
+	opts := withOpenClawSetupOpts(connector.SetupOpts{
 		DataDir:           s.currentConfig().DataDir,
 		ProxyAddr:         guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host),
 		APIAddr:           apiListenAddr(s.currentConfig()),
 		WorkspaceDir:      s.currentConfig().ConnectorWorkspaceDir(),
 		ManagedEnterprise: managed.IsManagedEnterprise(s.currentConfig().DeploymentMode),
-	}
+	}, s.currentConfig())
 	failed, dropped := teardownRemovedConnectorsReport(registry, previous, nil, opts, opts.WorkspaceDir, ctx)
 	for _, name := range dropped {
 		s.auditDroppedConnectorState(name, "removed")

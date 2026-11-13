@@ -785,6 +785,10 @@ export default function (api: DefenseClawPluginHost) {
     // the user prompt is inspected before the model reads it. OpenClaw keeps
     // only the replacement message in the transcript of a blocked run.
     api.on("before_agent_run", async (event, ctx) => {
+      // Until the gateway first answers, ask it once more: in the
+      // separate-user layout openclaw.json has no promptGate key and the
+      // gate is only in GET /api/v1/openclaw/runtime (rel-1-0-10 GAP-0138).
+      if (hookMode !== "native" && getRuntimeSettings().inspectTimeoutMs <= 0) await refreshRuntime();
       if (!promptGateOn()) return;
       const prompt = typeof event?.prompt === "string" ? event.prompt : "";
       if (!prompt) return;

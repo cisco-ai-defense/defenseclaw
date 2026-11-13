@@ -16075,6 +16075,11 @@ def execute_guardrail_setup(
             ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
             ux.ok(f"Tool inspection: {_tool_display(meta)}")
             ux.ok(f"Subprocess policy: {_subprocess_policy_display(connector_name, meta)}")
+            if connector_name == "openclaw":
+                from defenseclaw.openclaw_plugin_config import openclaw_separate_user_notes
+
+                for note in openclaw_separate_user_notes(app.cfg):
+                    ux.warn(note)
         else:
             ux.ok(f"Connector: {connector_name} (plugin)")
 

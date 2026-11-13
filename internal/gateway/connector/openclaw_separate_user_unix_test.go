@@ -95,6 +95,75 @@ func TestOpenClawSeparateUserLayout(t *testing.T) {
 	}
 }
 
+// rel-1-0-10 GAP-0116, GAP-0138, GAP-0139: an openclaw.json this account
+// cannot read is not a setup failure (OpenClaw rewrites it 0600); the block
+// has no promptGate key (the plugin reads the gate from the runtime); an
+// unknown OpenClaw version says why the block uses the proxy mode.
+func TestOpenClawSeparateUserUnreadableConfigAndRuntimePromptGate(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a 0000 file")
+	}
+	_, opts, home := openClawExternalFixture(t)
+	tokenDir := filepath.Join(filepath.Dir(home), "etc-dc")
+	if err := os.MkdirAll(tokenDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	grp, err := user.LookupGroupId(me.Gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prevBroad := openClawBroadGroups
+	openClawBroadGroups = map[string]bool{}
+	t.Cleanup(func() { openClawBroadGroups = prevBroad })
+	opts.OpenClawPluginAccount = me.Username
+	opts.OpenClawPluginTokenGroup = grp.Name
+	opts.OpenClawPluginTokenFile = filepath.Join(tokenDir, "openclaw-plugin.token")
+	opts.HookAPIToken = strings.Repeat("b", 64)
+	opts.HookAPITokenScoped = true
+	opts.OpenClawPromptGate = true
+	opts.AgentVersion = "2026.8.35"
+	c := NewOpenClawConnector()
+
+	block := openClawSeparateUserBlock(opts, c.pathsFor(opts))
+	if strings.Contains(block, "promptGate") {
+		t.Fatalf("block carries promptGate: %s", block)
+	}
+	if !strings.Contains(block, "allowConversationAccess") {
+		t.Fatalf("hybrid block lacks the conversation grant: %s", block)
+	}
+
+	configPath := filepath.Join(home, "openclaw.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup with an unreadable openclaw.json: %v", err)
+	}
+	if got := strings.TrimSpace(mustReadFileString(t, filepath.Join(opts.DataDir, "openclaw-merge.json"))); got != block {
+		t.Fatalf("openclaw-merge.json = %q, want the block", got)
+	}
+	// A failed setup rolls back through Teardown: the block stays (GAP-0081),
+	// the credential goes.
+	if err := c.Teardown(context.Background(), opts); err != nil && !strings.Contains(err.Error(), "revoke") {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opts.DataDir, "openclaw-merge.json")); err != nil {
+		t.Fatalf("teardown removed openclaw-merge.json: %v", err)
+	}
+	if _, err := os.Stat(opts.OpenClawPluginTokenFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("teardown left the token file: %v", err)
+	}
+
+	opts.AgentVersion = ""
+	if reason := openClawSeparateUserProxyReason(opts); !strings.Contains(reason, "could not run openclaw") {
+		t.Fatalf("proxy reason = %q", reason)
+	}
+}
+
 // The credential folder must not let the plugin account swap the file.
 func TestPublishOpenClawPluginTokenRefusesWritableFolder(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "shared")

@@ -103,6 +103,10 @@ def configured_openclaw_hook_mode(cfg: object) -> str:
     config_file = str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json"))
     try:
         document = openclaw_json5.load_file(os.path.expanduser(config_file))
+    except PermissionError:
+        # Separate-user layout: openclaw.json belongs to the OpenClaw account
+        # (rel-1-0-10 GAP-0116). The mode is the one setup put in the block.
+        return expected_openclaw_hook_mode(cfg)
     except (OSError, UnicodeError, openclaw_json5.OpenClawConfigSyntaxError):
         return "proxy"
     plugins = document.get("plugins") if isinstance(document, dict) else None
@@ -218,3 +222,68 @@ def openclaw_install_policy_wanted(cfg: object) -> bool:
     if guardrail is not None and hasattr(guardrail, "hook_policy_tier"):
         tier = guardrail.hook_policy_tier("openclaw")
     return tier == "strict"
+
+
+def openclaw_separate_user_notes(cfg: object) -> list[str]:
+    # What setup says in the separate-user layout (connectors.openclaw
+    # plugin_account) that the gateway cannot say itself: an openclaw.json
+    # this account cannot read is not checked (GAP-0116), and an OpenClaw
+    # this account cannot run gets the proxy mode (GAP-0139).
+    block = _openclaw_connector_block()
+    if not str(block.get("plugin_account") or "").strip():
+        return []
+    notes = []
+    claw = getattr(cfg, "claw", None)
+    home = str(getattr(claw, "home_dir", "") or "~/.openclaw")
+    config_file = os.path.expanduser(str(getattr(claw, "config_file", "") or os.path.join(home, "openclaw.json")))
+    merge = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "openclaw-merge.json")
+    try:
+        with open(config_file, "rb"):
+            pass
+    except PermissionError:
+        notes.append(
+            f"This account cannot read {config_file}, so setup did not check it: make sure the block in {merge} "
+            "is merged into it and the OpenClaw gateway was restarted. OpenClaw rewrites the file with mode 0600, "
+            "so a read grant does not last."
+        )
+    except OSError:
+        pass
+    hooks = block.get("hooks") if isinstance(block.get("hooks"), dict) else {}
+    if str(hooks.get("mode") or "").strip().lower() != "proxy" and not _cached_openclaw_version(cfg):
+        notes.append(
+            "This account could not run openclaw to read its version, so the block uses the proxy mode, without "
+            "the native hooks or the prompt gate. Install OpenClaw where both accounts can run it (such as "
+            "/usr/local/bin) and run setup again."
+        )
+    return notes
+
+
+def openclaw_plugin_package_candidates(cfg: object | None = None) -> list[str]:
+    # Where the OpenClaw plugin's package.json is: the administrator-installed
+    # plugin_dir, then <claw.home_dir>/extensions/defenseclaw (GAP-0140).
+    block = _openclaw_connector_block()
+    out = []
+    plugin_dir = str(block.get("plugin_dir") or "").strip()
+    if str(block.get("plugin_install") or "").strip().lower() == "external" and plugin_dir:
+        out.append(os.path.join(os.path.expanduser(plugin_dir), "package.json"))
+    claw = getattr(cfg, "claw", None) if cfg is not None else None
+    home = str(getattr(claw, "home_dir", "") or "") if claw is not None else ""
+    if not home:
+        home = _configured_claw_home()
+    out.append(os.path.join(os.path.expanduser(home or "~/.openclaw"), "extensions", "defenseclaw", "package.json"))
+    return out
+
+
+def _configured_claw_home() -> str:
+    # claw.home_dir in config.yaml, or "".
+    from defenseclaw.config import config_path
+
+    try:
+        import yaml
+
+        with open(config_path(), encoding="utf-8") as stream:
+            raw = yaml.safe_load(stream) or {}
+        claw = raw.get("claw") if isinstance(raw, dict) else None
+        return str(claw.get("home_dir") or "") if isinstance(claw, dict) else ""
+    except Exception:  # noqa: BLE001 - a lookup only
+        return ""
