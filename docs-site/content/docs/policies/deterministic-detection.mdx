@@ -97,7 +97,7 @@ disposition follows what the call does with it:
 | Writes the literal into a file (`Write`, `Edit`, patch tools), a memory entity or a database row (an MCP tool whose name says write, create, add, insert, update, set, store or run), or runs a shell command that is not a plain reader (`echo ... > file`, `export TOKEN=... && make`) | Alert in every profile. Never a block. |
 | Sends the literal to an external host (`curl -H "Authorization: ..."` to a public URL) or writes it to a sensitive path | Enforceable, as before |
 | Only looks at it: `grep`, `cat`, `Read`, `Grep`, a read-only MCP tool, an `echo` without a redirect | Audit telemetry (LOW, no alert) |
-| Writes it into a test, fixture, example or template file | Audit telemetry |
+| Writes it into test code or its sample data: a `test`, `tests`, `fixtures`, `testdata`, `mocks`, `examples` or `samples` folder, or a file named `test_x.py`, `x_test.go`, `x.test.js`, `x.spec.ts` or `conftest.py` | Audit telemetry |
 
 `SEC-SECRET-ASSIGN` finds the credentials that carry no provider prefix: a
 credential-named key (`password`, `secret`, `token`, `api_key`, `client_secret`

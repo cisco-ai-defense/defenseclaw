@@ -64,9 +64,22 @@ func TestCredentialLiteralDispositionFollowsWhatTheCallDoesWithIt(t *testing.T) 
 		{"write env file", "Write", map[string]any{"file_path": "/work/app/config.yaml", "content": "api_key: " + stripe}, credAlert},
 		{"edit", "Edit", map[string]any{"file_path": "/work/a.md", "old_string": "x", "new_string": "k " + stripe}, credAlert},
 		{"write to fixtures", "Write", map[string]any{"file_path": "/work/tests/fixtures/creds.md", "content": "password: " + password}, credAudit},
-		{"write to a template file", "Write", map[string]any{"file_path": "/work/deploy/deploy_template.sh", "content": "export API_KEY=" + stripe}, credAudit},
-		{"write to a jinja template", "Write", map[string]any{"file_path": "/work/app/config.json.j2", "content": "api_key: " + stripe}, credAudit},
+		{"write to a template file keeps the alert", "Write", map[string]any{"file_path": "/work/deploy/deploy_template.sh", "content": "export API_KEY=" + stripe}, credAlert},
+		{"write to a jinja template keeps the alert", "Write", map[string]any{"file_path": "/work/app/config.json.j2", "content": "api_key: " + stripe}, credAlert},
 		{"write a connection string with variable slots", "Write", map[string]any{"file_path": "/work/deploy/run.sh", "content": "psql postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/app"}, credNone},
+		{"name containing test is not a test file", "Write", map[string]any{"file_path": "/work/app/latest_creds.env", "content": "password: " + password}, credAlert},
+		{"name containing sample is not a sample file", "Write", map[string]any{"file_path": "/work/app/resample.py", "content": "password: " + password}, credAlert},
+		{"credentials_template is not a test file", "Write", map[string]any{"file_path": "/home/u/.aws/credentials_template", "content": "password: " + password}, credAlert},
+		{"dist file name is not a test file", "Write", map[string]any{"file_path": "/work/app/config.dist.php", "content": "password: " + password}, credAlert},
+		{"write to a spec file", "Write", map[string]any{"file_path": "/work/app/login.spec.ts", "content": "password: " + password}, credAudit},
+		{"write to a test_ file", "Write", map[string]any{"file_path": "/work/app/test_login.py", "content": "password: " + password}, credAudit},
+		{"write to a tests directory", "Write", map[string]any{"file_path": "/work/tests/helpers/creds.py", "content": "password: " + password}, credAudit},
+		{"line start in a multi-line env file", "Write", map[string]any{"file_path": "/work/app/.env", "content": "APP=1\nAPI_TOKEN=" + password + "\nPORT=8080\n"}, credAlert},
+		{"setting key at a line start", "Write", map[string]any{"file_path": "/work/app/.env", "content": "APP=1\nmax_tokens: 8192abcdefgh12\nPORT=8080\n"}, credNone},
+		{"line start inside a heredoc", "Bash", map[string]any{"command": "cat > /work/app.env <<'EOF'\nAPP=1\nDB_PASSWORD=" + password + "\nEOF"}, credAlert},
+		{"random value ending in EXAMPLEKEY", "Write", map[string]any{"file_path": "/work/app/.env", "content": "aws_secret_access_key = " + runtimeDetectorSignature("q9Zr4Vx2Lm7Kp3Wd8Yt5", "EXAMPLEKEY")}, credAlert},
+		{"reference before a literal password", "Bash", map[string]any{"command": "psql postgres://user:${DB_HOME}" + password + "@db.internal/app"}, credAudit},
+		{"variable slot in a connection string", "Bash", map[string]any{"command": "psql postgres://user:${DB_PASSWORD}@db.internal/app"}, credNone},
 		{"write to test file", "Write", map[string]any{"file_path": "/work/app/login_test.go", "content": "token := \"" + github + "\""}, credAudit},
 		{"write placeholders", "Write", map[string]any{"file_path": "/work/README.md", "content": "password: changeme123456\napi_key: YOUR_API_KEY_HERE_1234\ntoken: ${GITHUB_TOKEN_12345}\n"}, credNone},
 		{"memory entity", "mcp__memory__create_entities", map[string]any{"entities": []any{map[string]any{"name": "t", "observations": []any{"Password: " + password}}}}, credAlert},
@@ -119,6 +132,18 @@ func TestAWSDocumentedExampleSecretIsNotAFinding(t *testing.T) {
 	if !acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+runtimeDetectorSignature("q9Zr4Vx2", "Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4Eu9Rv3Xi8")) {
 		t.Error("a random 40-character secret was rejected")
 	}
+	for _, text := range []string{
+		"aws_secret_access_key = " + runtimeDetectorSignature("q9Zr4Vx2Lm7Kp3Wd8Yt5", "EXAMPLEKEY"),
+		"aws_secret_access_key = " + runtimeDetectorSignature("q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4", "EXAMPLEKEY"),
+		// The documented value, then a long run: another secret that starts with it.
+		"aws_secret_access_key = " + runtimeDetectorSignature("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1"),
+		// The documented words in a different case or position.
+		"aws_secret_access_key = " + runtimeDetectorSignature("exampleKEY", "q9Zr4Vx2Lm7Kp3Wd8Yt5Bn1Cs6"),
+	} {
+		if !acceptedCredentialMatch("SEC-AWS-SECRET", text) {
+			t.Errorf("a secret that only contains the documented words was dropped: %q", text)
+		}
+	}
 }
 
 func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
@@ -133,7 +158,10 @@ func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
 		{"vendor prefix token", "api_key: " + runtimeDetectorSignature("dd_api_", "7f8a9b0c1d2e", "3f4a5b6c7d8e"), true},
 		{"sql row", "'password','" + runtimeDetectorSignature("sm_3f7a9c1e5b", "2d4f6a8c0e7g"), true},
 		{"prose", "Password is " + runtimeDetectorSignature("PgDev_5k2m", "R7pQ3sT9vXzFa"), true},
+		{"random value containing a placeholder word", "password: " + runtimeDetectorSignature("Kj7mNp2Qr9", "exampleZ", "Xv4w"), true},
 		{"placeholder word", "password: changeme123456", false},
+		{"placeholder token between separators", "api_key: your_key_here_a1b2c3d4", false},
+		{"placeholder token as most of a token", "secret: examplekey1234", false},
 		{"your key", "api_key: YOUR_API_KEY_HERE_1234", false},
 		{"example", "token: example_token_value_1", false},
 		{"env reference", "password: ${DATABASE_PASSWORD_1}", false},
