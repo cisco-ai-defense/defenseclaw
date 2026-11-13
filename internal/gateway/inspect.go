@@ -1119,6 +1119,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
 		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
 	}
+	// An MCP or app tool is read as effects (internal/toolshape): the path it
+	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
+	ruleFindings = nonShellToolFindings(ctx, action, ruleFindings)
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()

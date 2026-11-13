@@ -1,0 +1,97 @@
+# Tool-shape table: how DefenseClaw reads a non-shell tool call (an MCP or app
+# tool) as effects. Data, not code: names and argument shapes only. A call the
+# table cannot place stays unknown (it is never "clean"). See toolshape.go.
+version: 1
+
+# Known MCP servers (the segment after mcp__) and name tokens -> family.
+servers:
+  filesystem: fs
+  fs: fs
+  files: fs
+  file: fs
+  git: vcs
+  github: vcs
+  gitlab: vcs
+  fetch: http
+  http: http
+  web: http
+  browser: http
+  postgres: db
+  postgresql: db
+  mysql: db
+  sqlite: db
+  db: db
+  database: db
+  sql: db
+  gmail: mail
+  smtp: mail
+  mail: mail
+  email: mail
+  outlook: mail
+  slack: chat
+  discord: chat
+  teams: chat
+  telegram: chat
+  kubernetes: k8s
+  k8s: k8s
+  kubectl: k8s
+  python: code
+  code: code
+  sandbox: code
+  interpreter: code
+  jupyter: code
+
+# Verb tokens of a tool name. Order is the priority when several occur.
+verbs:
+  delete: [delete, remove, rm, unlink, rmdir, erase, purge, destroy, drop, truncate, wipe]
+  write: [write, create, put, save, edit, append, update, patch, modify, replace, overwrite, mkdir, move, rename, copy, set]
+  exec: [exec, execute, run, eval, evaluate, invoke, spawn]
+  send: [send, post, publish, upload, email, mail, forward, notify, share, push, export, deliver, transmit]
+  list: [list, ls, dir, glob, search, find, tree]
+  read: [read, get, cat, view, open, load, head, tail, show, fetch, download, stat, info, describe]
+
+# Argument names that carry a path. The value must also look like a path.
+path_keys:
+  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd]
+  write: [output, output_path, output_file, dest, destination, dst, to_path, out, out_path, save_to]
+# Argument names that carry a URL or host.
+url_keys: [url, urls, uri, endpoint, href, link, webhook, webhook_url, api_endpoint, base_url, host, hostname, server, address]
+# Argument names that redirect output to another party (a copy, a forward, an
+# output sink). A literal address or URL here is a destination of its own.
+redirect_keys: [bcc, bcc_override, bcc_address, forward, forward_to, forward_results_to, forward_copy_to, output_url, results_url, callback_url, callback, export_to, report_to, send_copy_to, mirror_to, cc_override]
+# Argument names that name the primary recipients of a send.
+recipient_keys: [to, recipient, recipients, to_address, cc, channel, user, users, send_to]
+# Argument names that carry an SQL statement (a generic query key counts only
+# for a db tool or when the value starts like SQL).
+sql_keys: [sql, statement, statements, stmt, sql_query, queries, ddl, command_sql]
+sql_generic_keys: [query, q, command]
+# Argument names that carry source code, for code-execution tools.
+code_keys: [code, script, source_code, snippet, python, javascript, js, expression, program, source]
+# Name tokens that make a tool a code-execution tool.
+code_tool_tokens: [exec, execute, run, eval, evaluate, code, python, script, repl, interpreter, notebook, cell]
+
+# Security-setting changes. key: normalised argument name (lower-case, - and
+# camelCase become _). when: the value that makes it a downgrade.
+settings:
+  - {key: "^(skip|bypass|disable|no|without)_(2fa|mfa|otp|totp|auth|authentication|verify|verification|tls|ssl|cert|certificate|signature|check|audit|logging|approval|confirmation|password_check)$", when: "true", what: "turns an authentication or verification step off"}
+  - {key: "^(verify|verify_ssl|ssl_verify|verify_tls|tls_verify|verify_cert|check_certificate|reject_unauthorized|validate_certs|require_mfa|mfa_required|require_2fa|enforce_mfa|encryption|encrypted|audit_enabled|audit|logging_enabled|rotation_enabled|enforce_tls|require_tls|require_signature)$", when: "false", what: "turns a verification or logging control off"}
+  - {key: "^(insecure|allow_insecure|trust_all|trust_all_certs|accept_any_cert|ignore_ssl_errors|ignore_tls_errors|disable_ssl|disable_tls|unsafe_ssl)$", when: "true", what: "accepts unverified TLS"}
+  - {key: "^(embed_secrets|include_secrets|include_credentials|include_sensitive_data|include_sensitive|expose_secrets|log_secrets|log_sensitive_data|reveal_secrets|show_secrets)$", when: "true", what: "puts secrets or sensitive data into the output"}
+  - {key: "^(acl|access|visibility|permissions)$", when: "^(public_read|public_read_write|public|world_readable|world_writable)$", what: "makes the object public"}
+  - {key: "^(public|public_access|make_public|allow_public)$", when: "true", what: "makes the object public"}
+# An operation name inside an operations list that downgrades a control.
+setting_ops: "^(disable|turn_off|bypass|skip|remove|clear)_(mfa|2fa|otp|auth|authentication|audit|audit_log|logging|log|auto_patch|patch|encryption|tls|ssl|verification|firewall|security|scan|scanner|lockout|rate_limit|password_policy)$"
+
+# Decode-and-execute in code text: a decode feeds an evaluator.
+decode_exec:
+  - "(?is)\\b(?:exec|eval)\\s*\\(\\s*(?:compile\\s*\\(\\s*)?(?:[\\w.]*\\.)?(?:b64decode|b32decode|a85decode|decodebytes|decompress|fromhex|unhexlify)\\b"
+  - "(?is)\\b(?:exec|eval)\\s*\\(\\s*[\\w.]*\\.decode\\s*\\(.{0,80}?(?:base64|b64|hex|rot13|zlib)"
+  - "(?is)\\b(?:eval|Function)\\s*\\(\\s*(?:atob|Buffer\\.from)\\b"
+  - "(?is)new\\s+Function\\s*\\(\\s*(?:atob|Buffer\\.from)\\b"
+  - "(?is)base64\\s+(?:-d|--decode|-D)\\b[^\\n;]{0,120}\\|\\s*(?:sudo\\s+)?(?:sh|bash|zsh|python3?|perl|ruby|node)\\b"
+  - "(?is)FromBase64String\\b.{0,200}\\b(?:iex|Invoke-Expression)\\b"
+  - "(?is)\\b(?:iex|Invoke-Expression)\\b.{0,200}FromBase64String"
+  - "(?is)-(?:enc|encodedcommand|e)\\s+[A-Za-z0-9+/=]{40,}"
+
+# Destinations that are never a collector or paste endpoint.
+local_hosts: [localhost, "127.0.0.1", "::1", "0.0.0.0"]

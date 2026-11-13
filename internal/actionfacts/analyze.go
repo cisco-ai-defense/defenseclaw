@@ -1493,6 +1493,16 @@ func PathTool(tool string) bool {
 	return known && semantics.acceptsPaths
 }
 
+// KnownTool reports a tool name actionfacts reads with its own argument
+// semantics or runs as a command (a reviewed file, network or shell tool).
+// A name outside it, such as an MCP tool, is read by internal/toolshape.
+func KnownTool(tool string) bool {
+	if _, known := lookupToolArgumentSemantics(tool); known {
+		return true
+	}
+	return argsExecutionTool(tool)
+}
+
 func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 	if tool == "" || strings.TrimSpace(tool) != tool {
 		return toolArgumentSemantics{}, false

@@ -1525,3 +1525,59 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [integrity, system-binary, python, binary-hijacking, bounded-grammar]
+  - id: MCP-SQL-DESTRUCTIVE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Destructive SQL in a tool call"
+    severity: HIGH
+    confidence: 0.8
+    tags: [destructive, database, mcp]
+  - id: MCP-SQL-PRIVILEGE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Privilege-changing SQL in a tool call"
+    severity: HIGH
+    confidence: 0.8
+    tags: [privilege-escalation, database, mcp]
+  - id: MCP-SQL-AUDIT-OFF
+    tool_call_only: true
+    pattern: 'a^'
+    title: "SQL switches an audit or logging setting off"
+    severity: HIGH
+    confidence: 0.8
+    tags: [defense-evasion, database, mcp]
+  - id: MCP-SQL-CREDENTIAL
+    tool_call_only: true
+    pattern: 'a^'
+    title: "SQL sets a credential column"
+    severity: MEDIUM
+    confidence: 0.7
+    tags: [credential, database, mcp]
+  - id: MCP-SEND-REDIRECT
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Tool call copies or redirects its output to another party"
+    severity: HIGH
+    confidence: 0.75
+    tags: [exfiltration, network, mcp]
+  - id: MCP-SEND-COLLECTOR
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Tool call sends to a paste, file-drop or webhook-catcher host"
+    severity: HIGH
+    confidence: 0.85
+    tags: [exfiltration, network, mcp]
+  - id: MCP-SETTING-DOWNGRADE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Tool call turns a security control off"
+    severity: HIGH
+    confidence: 0.8
+    tags: [defense-evasion, configuration, mcp]
+  - id: MCP-CODE-DECODE-EXEC
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Code tool runs decoded text"
+    severity: HIGH
+    confidence: 0.85
+    tags: [execution, obfuscation, mcp]
