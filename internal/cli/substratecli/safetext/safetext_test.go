@@ -18,7 +18,6 @@ package safetext
 
 import (
 	"bytes"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -201,24 +200,6 @@ func FuzzCleanNeverLeavesAControl(f *testing.F) {
 			t.Fatalf("Clean(%q) = %q", in, got)
 		}
 	})
-}
-
-// streamLeaks reports what a filtered stream must never contain.
-var streamIntro = regexp.MustCompile("\x1b[\\]PX^_]|\x1b\\[[0-9;?]*t")
-
-func checkStreamOutput(t testing.TB, in, out []byte) {
-	t.Helper()
-	if !utf8.Valid(out) {
-		t.Fatalf("Stream(%q) = %q is not valid UTF-8", in, out)
-	}
-	for _, r := range string(out) {
-		if r >= 0x80 && r <= 0x9f {
-			t.Fatalf("Stream(%q) = %q has the C1 control %U", in, out, r)
-		}
-	}
-	if streamIntro.Match(out) {
-		t.Fatalf("Stream(%q) = %q still has a string sequence or window operation", in, out)
-	}
 }
 
 // GAP-0126: an escape sequence that follows a lone 0xC2 byte must not pass.

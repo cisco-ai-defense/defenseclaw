@@ -22,29 +22,65 @@ import (
 )
 
 // Stream is a stateful filter for the raw terminal stream of an attached
-// agent. A full-screen agent needs cursor movement, colors and the alternate
-// screen, so those pass. What cannot pass is everything that reaches outside
-// the screen: string sequences (OSC: the clipboard, window title, hyperlinks
-// and notifications; DCS, APC, PM and SOS: tmux passthrough, graphics, queries
-// the terminal answers), the CSI "window operation" family (CSI ... t), and 8-bit C1
-// controls (invalid UTF-8 is replaced before anything else is read). A sequence may be split across writes; the filter remembers where it was.
+// agent. A full-screen agent needs cursor movement, colors, charset
+// selection and the alternate screen, so those pass. What cannot pass is
+// everything that reaches outside the screen or changes how the terminal
+// reads the bytes that follow:
+//
+//   - string sequences: OSC (clipboard, window title, hyperlinks,
+//     notifications), DCS, APC, PM, SOS (tmux passthrough, graphics, queries
+//     the terminal answers) and the screen/tmux title (ESC k);
+//   - escapes that switch the coding system or the control set: ESC % (leave
+//     or enter UTF-8), ESC SP (7- or 8-bit controls), ESC ! and ESC " (C0
+//     and C1 sets), ESC & and ESC $. Once a terminal leaves UTF-8, an
+//     ordinary character such as U+00DD (C3 9D) becomes an 8-bit OSC;
+//   - CSI ... t (window operations and title reports), CSI ... i (media
+//     copy) and CSI ... * y (screen checksum report);
+//   - C1 controls, raw or UTF-8 encoded, and bytes that are not UTF-8
+//     (shown as U+FFFD).
+//
+// It is a parser, not a byte blacklist: it follows the ECMA-48 states a
+// terminal goes through (ground, escape, escape intermediate, CSI, control
+// string) and lets a sequence out only when it is whole and allowed. C0
+// controls inside a sequence act at once and the sequence goes on, as they
+// do on a terminal; CAN and SUB cancel it; ESC starts a new one. A sequence
+// may be split across writes: the filter remembers where it was, and the
+// output of every write leaves the terminal in its ground state.
 type Stream struct {
+	// ASCII shows every character outside ASCII as '?'. It is for a
+	// terminal that does not decode UTF-8 (TerminalUTF8 reports false),
+	// which reads the bytes 0x80 to 0x9f of an ordinary character as C1
+	// controls. The package default (UseASCII) applies when it is unset.
+	ASCII bool
+
 	state int
-	n     int    // bytes swallowed in the current string sequence
-	buf   []byte // the CSI or ESC sequence being read
+	n     int    // bytes swallowed in the current control string
+	buf   []byte // parameters and intermediates of the sequence being read
+	drop  bool   // the sequence being read is refused (or too long)
 	rune_ []byte // the UTF-8 character being read
 	need  int    // continuation bytes the character still needs
 }
 
 const (
-	stText    = iota
-	stEsc     // after ESC
-	stCSI     // inside a CSI sequence
-	stString  // inside OSC/DCS/APC/PM/SOS
-	stStringE // ESC seen inside a string (maybe the terminator)
-	stEscInt  // ESC with intermediates, waiting for the final byte
-	stUTF8    // inside a multi-byte character
+	stGround    = iota
+	stEsc       // after ESC
+	stEscInt    // ESC with intermediates, waiting for the final byte
+	stCSI       // inside a CSI sequence
+	stString    // inside OSC/DCS/APC/PM/SOS/ESC k
+	stStringEsc // ESC seen inside a string (ST, or the start of a new sequence)
+	stStringC2  // 0xC2 seen inside a string (maybe U+009C, ST in UTF-8)
+	stUTF8      // inside a multi-byte character
 )
+
+const (
+	can = 0x18
+	sub = 0x1a
+	esc = 0x1b
+)
+
+// maxSeq bounds the parameters and intermediates of one CSI sequence; a
+// longer one is read to its end and dropped.
+const maxSeq = 64
 
 // replacement is U+FFFD, shown for a byte that is not valid UTF-8.
 var replacement = []byte("\xef\xbf\xbd")
@@ -62,6 +98,23 @@ func (f *Stream) Filter(p []byte) []byte {
 	return out
 }
 
+func (f *Stream) ascii() bool { return f.ASCII || asciiOnly.Load() }
+
+func (f *Stream) bad(out []byte) []byte {
+	if f.ascii() {
+		return append(out, '?')
+	}
+	return append(out, replacement...)
+}
+
+// begin starts reading a sequence in state st.
+func (f *Stream) begin(st int) {
+	f.state, f.buf, f.drop, f.n = st, f.buf[:0], false, 0
+}
+
+// isC0 reports a C0 control that acts at once, inside a sequence too.
+func isC0(c byte) bool { return c < 0x20 && c != esc && c != can && c != sub }
+
 // step feeds one byte to the filter and appends what it lets through.
 func (f *Stream) step(c byte, out []byte) []byte {
 	switch f.state {
@@ -72,18 +125,20 @@ func (f *Stream) step(c byte, out []byte) []byte {
 			if f.need > 0 {
 				return out
 			}
-			f.state = stText
+			f.state = stGround
 			r, size := utf8.DecodeRune(f.rune_)
 			switch {
 			case r == utf8.RuneError && size <= 1:
-				out = append(out, replacement...)
+				out = f.bad(out)
 			case r >= 0x80 && r <= 0x9f:
 				// A UTF-8 encoded C1 control: dropped; the ones that open
 				// a string take the string with them.
 				switch r {
 				case 0x90, 0x98, 0x9d, 0x9e, 0x9f:
-					f.state, f.n = stString, 0
+					f.begin(stString)
 				}
+			case f.ascii():
+				out = append(out, '?')
 			default:
 				out = append(out, f.rune_...)
 			}
@@ -91,13 +146,14 @@ func (f *Stream) step(c byte, out []byte) []byte {
 		}
 		// The character was cut short: it is replaced, and this byte is
 		// read again as the start of whatever follows.
-		out = append(out, replacement...)
-		f.state = stText
+		out = f.bad(out)
+		f.state = stGround
 		return f.step(c, out)
-	case stText:
+
+	case stGround:
 		switch {
-		case c == 0x1b:
-			f.state = stEsc
+		case c == esc:
+			f.begin(stEsc)
 		case c < 0x80:
 			out = append(out, c)
 		case c >= 0xc2 && c <= 0xf4:
@@ -111,85 +167,154 @@ func (f *Stream) step(c byte, out []byte) []byte {
 				f.need = 3
 			}
 		default:
-			// A continuation byte on its own, 0xc0, 0xc1 or 0xf5 and up.
-			out = append(out, replacement...)
+			// A continuation byte on its own, a raw C1 control, 0xc0, 0xc1
+			// or 0xf5 and up.
+			out = f.bad(out)
 		}
+
 	case stEsc:
 		switch {
-		case c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_':
-			f.state, f.n = stString, 0
+		case isC0(c):
+			out = append(out, c)
+		case c == can || c == sub:
+			f.state = stGround
+		case c == esc, c == 0x7f:
+			// still waiting for what follows
+		case c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_' || c == 'k':
+			f.begin(stString)
 		case c == '[':
-			f.state, f.buf = stCSI, f.buf[:0]
-		case c == 0x1b:
-			// ESC ESC: still waiting for what follows the second.
+			f.begin(stCSI)
 		case c >= 0x20 && c <= 0x2f:
-			f.state, f.buf = stEscInt, append(f.buf[:0], c)
+			f.begin(stEscInt)
+			f.buf = append(f.buf, c)
+			f.drop = !escIntAllowed(c)
+		case c == '\\':
+			f.state = stGround // a string terminator with no string
+		case c >= 0x30 && c <= 0x7e:
+			f.state = stGround
+			out = append(out, esc, c)
 		default:
-			f.state = stText
-			if c >= 0x30 && c <= 0x7e {
-				out = append(out, 0x1b, c)
-			} else if c >= 0x80 {
-				return f.step(c, out)
-			}
+			f.state = stGround
+			return f.step(c, out)
 		}
+
 	case stEscInt:
 		switch {
+		case isC0(c):
+			out = append(out, c)
+		case c == can || c == sub:
+			f.state = stGround
+		case c == esc:
+			f.begin(stEsc)
+		case c == 0x7f:
 		case c >= 0x20 && c <= 0x2f:
 			f.buf = append(f.buf, c)
-		default:
-			f.state = stText
-			if c >= 0x30 && c <= 0x7e { // charset selection, keypad modes: kept
-				out = append(out, 0x1b)
+			if len(f.buf) > 3 {
+				f.drop = true
+			}
+		case c >= 0x30 && c <= 0x7e:
+			f.state = stGround
+			if !f.drop {
+				out = append(out, esc)
 				out = append(out, f.buf...)
 				out = append(out, c)
-			} else if c >= 0x80 {
-				return f.step(c, out)
 			}
+		default:
+			f.state = stGround
+			return f.step(c, out)
 		}
+
 	case stCSI:
 		switch {
+		case isC0(c):
+			out = append(out, c)
+		case c == can || c == sub:
+			f.state = stGround
+		case c == esc:
+			f.begin(stEsc)
+		case c == 0x7f:
 		case c >= 0x20 && c <= 0x3f:
-			f.buf = append(f.buf, c)
-			if len(f.buf) > 64 {
-				f.state, f.buf = stText, f.buf[:0]
+			if len(f.buf) < maxSeq {
+				f.buf = append(f.buf, c)
+			} else {
+				f.drop = true
 			}
 		case c >= 0x40 && c <= 0x7e:
-			f.state = stText
-			if c != 't' { // window operations: resize, report the title back, ...
-				out = append(out, 0x1b, '[')
+			f.state = stGround
+			if !f.drop && csiAllowed(f.buf, c) {
+				out = append(out, esc, '[')
 				out = append(out, f.buf...)
 				out = append(out, c)
 			}
-			f.buf = f.buf[:0]
 		default:
 			// Not a CSI byte: the sequence is abandoned and shows nothing.
-			f.state, f.buf = stText, f.buf[:0]
-			if c >= 0x80 || c == 0x1b {
-				return f.step(c, out)
-			}
+			f.state = stGround
+			return f.step(c, out)
 		}
+
 	case stString:
 		f.n++
 		switch {
-		case c == 0x07:
-			f.state = stText
-		case c == 0x1b:
-			f.state = stStringE
+		case c == 0x07, c == can, c == sub:
+			f.state = stGround
+		case c == esc:
+			f.state = stStringEsc
+		case c == 0xc2:
+			f.state = stStringC2
 		case c == '\n' || f.n > maxString:
-			f.state = stText
+			// An unterminated string does not swallow the screen.
+			f.state = stGround
 			out = append(out, c)
 		}
-	case stStringE:
-		switch c {
-		case '\\':
-			f.state = stText
-		case 0x1b:
-			// another ESC: stay
-		default:
-			f.state = stString
+
+	case stStringC2:
+		if c == 0x9c {
+			f.state = stGround
+			return out
 		}
+		f.state = stString
+		return f.step(c, out)
+
+	case stStringEsc:
+		if c == '\\' {
+			f.state = stGround
+			return out
+		}
+		// ESC ends the string on a terminal and starts a new sequence.
+		f.begin(stEsc)
+		return f.step(c, out)
 	}
 	return out
+}
+
+// escIntAllowed reports the first intermediates of an escape sequence that
+// may pass: charset designation (G0 to G3, 94 and 96 sets) and the DEC line
+// attributes (ESC # 3..8). Everything else switches the coding system or the
+// control set, or announces a conformance level.
+func escIntAllowed(c byte) bool {
+	switch c {
+	case '(', ')', '*', '+', '-', '.', '/', '#':
+		return true
+	}
+	return false
+}
+
+// csiAllowed reports whether a whole CSI sequence (parameters and
+// intermediates in body, final byte final) may pass.
+func csiAllowed(body []byte, final byte) bool {
+	switch final {
+	case 't': // window operations: resize, move, report the title back
+		return false
+	case 'i': // media copy: print the screen, start the printer channel
+		return false
+	case 'y': // DECRQCRA (CSI ... * y) reports a checksum of the screen
+		for _, b := range body {
+			if b == '*' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Writer wraps w so everything written to it is filtered first.

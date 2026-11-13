@@ -64,7 +64,13 @@ in a project folder. These commands need no local DefenseClaw install.`,
 // substratePreRun skips the daemon bootstrap and the local config: the
 // launcher talks to a cluster and runs on a laptop with nothing installed.
 // The administrator commands read config.yaml themselves when they need it.
-func substratePreRun(*cobra.Command, []string) error { return nil }
+// A terminal whose locale is not UTF-8 gets agent text as ASCII only
+// (safetext.UseASCII): it would read parts of ordinary characters as 8-bit
+// controls.
+func substratePreRun(*cobra.Command, []string) error {
+	safetext.UseASCII(!safetext.TerminalUTF8(os.Getenv))
+	return nil
+}
 
 // substrateOutput is the --output/--json pair every read command has.
 type substrateOutput struct {
