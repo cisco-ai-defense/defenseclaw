@@ -172,6 +172,7 @@ private enum GatewayAdminHelperTests {
         }
         testStagedExecutables()
         try testOwnershipRepair(root: root, account: account)
+        try testAgentConfigRepair(root: root, account: account)
         try testRepairOrder()
         try testRootProcessRecord(root: root)
         try testStop()
@@ -318,6 +319,88 @@ private enum GatewayAdminHelperTests {
             home: installation.descriptor, from: getuid() &+ 1, to: (getuid(), getgid()),
             change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
         check(untouched.restored.isEmpty && untouched.summary.contains("No root-owned"), "Nothing else is changed")
+    }
+
+    /// v1.1.36 port: agent config files outside the DefenseClaw home. With the
+    /// account as the "root" owner every folder is entered, so only the file
+    /// rules decide; with another account uid, an owned folder on the way is a
+    /// "root-owned" folder and is returned whole, once.
+    private static func testAgentConfigRepair(root: URL, account: InvokingAccount) throws {
+        let fm = FileManager.default
+        let home = root.appendingPathComponent("agent-home", isDirectory: true)
+        let outside = root.appendingPathComponent("agent-outside", isDirectory: true)
+        for directory in ["", ".claude", ".codex", ".copilot", ".copilot/hooks", ".hermes", ".kiro", ".kiro/agents", ".kiro/hooks"] {
+            try fm.createDirectory(at: home.appendingPathComponent(directory, isDirectory: true),
+                                   withIntermediateDirectories: false,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        }
+        try fm.createDirectory(at: outside, withIntermediateDirectories: false,
+                               attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        _ = chmod(home.appendingPathComponent(".hermes").path, 0o770)
+        let secret = outside.appendingPathComponent("system-file")
+        try Data("not the account's".utf8).write(to: secret)
+        for name in [".claude/settings.json", ".copilot/hooks/defenseclaw.json", ".hermes/config.yaml",
+                     ".kiro/agents/defenseclaw.json", ".kiro/hooks/defenseclaw.json"] {
+            try Data("{}".utf8).write(to: home.appendingPathComponent(name))
+            _ = chmod(home.appendingPathComponent(name).path, 0o600)
+        }
+        _ = chmod(home.appendingPathComponent(".copilot/hooks/defenseclaw.json").path, 0o620)
+        check(link(secret.path, home.appendingPathComponent(".codex/config.toml").path) == 0, "Could not prepare the hard-link fixture")
+        try fm.createSymbolicLink(at: home.appendingPathComponent(".cursor"), withDestinationURL: outside)
+        try Data("{}".utf8).write(to: outside.appendingPathComponent("hooks.json"))
+
+        let descriptor = try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid())
+        defer { close(descriptor) }
+        var changed: [String] = []
+        var descriptorsWereOpen = true
+        let files = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid(), getgid()),
+            change: { opened, relative in
+                var metadata = stat()
+                descriptorsWereOpen = descriptorsWereOpen && fstat(opened, &metadata) == 0
+                changed.append(relative)
+                return 0
+            })
+        check(descriptorsWereOpen, "Every agent config change must go through an open descriptor")
+        check(Set(changed) == ["~/.claude/settings.json", "~/.kiro/agents/defenseclaw.json", "~/.kiro/hooks/defenseclaw.json"],
+              "Only listed single-link regular files under private folders are returned: \(changed)")
+        check(files.skipped == ["~/.codex/config.toml", "~/.copilot/hooks/defenseclaw.json"],
+              "Hard-linked and group-writable files are reported, not changed: \(files.skipped)")
+        check(!changed.contains(where: { $0.hasPrefix("~/.cursor") || $0.hasPrefix("~/.hermes") }),
+              "A linked folder is never followed and a shared-writable folder is never entered")
+        check(!files.incomplete, "Missing agent configs are not an incomplete repair")
+
+        changed = []
+        let folders = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid(), to: (getuid() &+ 1, getgid()),
+            change: { _, relative in changed.append(relative); return 0 })
+        check(changed.filter { $0 == "~/.kiro" }.count == 1 && changed.contains("~/.kiro/agents/defenseclaw.json")
+              && changed.contains("~/.kiro/hooks/defenseclaw.json"),
+              "A root-owned folder on the way is returned whole, once: \(changed)")
+        check(changed.contains("~/.claude") && !changed.contains(where: { $0.hasPrefix("~/.cursor") }),
+              "Folder returns stay inside the account home: \(changed)")
+        check(folders.skipped.contains("~/.codex/config.toml"), "A hard link inside a returned folder stays unchanged")
+
+        let unlisted = GatewayAdminAgentConfigRepair.restore(
+            home: descriptor, from: getuid() &+ 1, to: (getuid(), getgid()),
+            change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
+        check(unlisted.restored.isEmpty, "Files of other owners are never changed")
+
+        rejects("A shared-writable account home is refused") {
+            _ = chmod(home.path, 0o770)
+            defer { _ = chmod(home.path, 0o700) }
+            close(try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid()))
+        }
+        rejects("An account home reached through a link is refused") {
+            let alias = root.appendingPathComponent("agent-home-link")
+            try? fm.createSymbolicLink(at: alias, withDestinationURL: home)
+            close(try GatewayAdminAgentConfigRepair.openAccountHome(alias.path, uid: getuid()))
+        }
+        rejects("Another account's home is refused") {
+            close(try GatewayAdminAgentConfigRepair.openAccountHome(home.path, uid: getuid() &+ 1))
+        }
+        check(GatewayAdminAgentConfigRepair.relativePaths.allSatisfy { !$0.hasPrefix("/") && !$0.contains("..") },
+              "The fixed agent config list stays relative to the account home")
     }
 
     /// Nothing changes while a root gateway the helper did not start runs;
