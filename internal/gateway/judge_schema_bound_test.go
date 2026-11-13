@@ -43,7 +43,7 @@ func TestJudgeSchemaBoundsEveryFreeTextField(t *testing.T) {
 		if !free && bounded != plain {
 			t.Errorf("%s: a schema with no free text must not change", kind)
 		}
-		if n := strings.Count(bounded, `"reasoning"`); n != strings.Count(bounded, `"reasoning":{"maxLength":200,`) {
+		if n := strings.Count(bounded, `"reasoning":{`); n != strings.Count(bounded, `"reasoning":{"maxLength":200,`) {
 			t.Errorf("%s: every one of %d reasoning fields must carry maxLength 200: %s", kind, n, bounded)
 		}
 		// tool-safe keys keep the bounds
