@@ -44,6 +44,8 @@ func TestHostScriptTwinOnlyAddsFindings(t *testing.T) {
 		{name: "launcher with profile switch", tool: "PowerShell", command: `powershell -NoProfile -Command "Remove-Item C:\ -Recurse -Force"`},
 		{name: "Git Bash launcher", tool: "Bash", command: `powershell.exe -c "Remove-Item C:\ -Recurse -Force"`, strengthens: true},
 		{name: "cmd launcher", tool: "PowerShell", command: `cmd /c rmdir /q /s C:\`},
+		{name: "cmd launcher in a POSIX tool keeps its backslashes", tool: "Bash", command: `cmd /c rmdir /q /s C:\`},
+		{name: "cmd launcher with a quoted line in a POSIX tool", tool: "Bash", command: `cmd /c "rmdir /q /s C:\"`},
 		{name: "benign wrapped read", tool: "PowerShell", command: `powershell -c "Get-Content README.md"`},
 		{name: "benign bare", tool: "PowerShell", command: `Get-ChildItem C:\work`},
 		{name: "benign posix", tool: "Bash", command: `ls -la /tmp`},

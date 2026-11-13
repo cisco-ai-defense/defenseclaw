@@ -12,7 +12,7 @@ import (
 const maxPowerShellTCPCommandLoopBytes = 8 * 1024
 
 var (
-	powerShellTCPConstructor = lazyMustCompile(`(?is)^\s*(\$[a-z_][a-z0-9_]*)\s*=\s*New-Object\s+(?:System\.)?Net\.Sockets\.TCPClient\s*\(\s*["']((?:[a-z0-9-]+\.)+[a-z0-9-]+|(?:\d{1,3}\.){3}\d{1,3})["']\s*,\s*(\d{1,5})\s*\)\s*;`)
+	powerShellTCPConstructor = lazyMustCompile(`(?is)^\s*(?:(?:set-location|sl|cd|chdir|push-location|pushd)\s+[^;{}$()\r\n]{1,200};\s*)?(\$[a-z_][a-z0-9_]*)\s*=\s*New-Object\s+(?:System\.)?Net\.Sockets\.TCPClient\s*\(\s*["']((?:[a-z0-9-]+\.)+[a-z0-9-]+|(?:\d{1,3}\.){3}\d{1,3})["']\s*,\s*(\d{1,5})\s*\)\s*;`)
 	powerShellTCPGetStream   = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*(\$[a-z_][a-z0-9_]*)\.GetStream\s*\(\s*\)\s*;`)
 	powerShellTCPReadLoop    = lazyMustCompile(`(?is)\bwhile\s*\(\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*=\s*(\$[a-z_][a-z0-9_]*)\.Read\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\.Length\s*\)\s*\)\s*-ne\s*0\s*\)\s*\{`)
 	powerShellTCPDecode      = lazyMustCompile(`(?is)(\$[a-z_][a-z0-9_]*)\s*=\s*(?:(?:\(\s*New-Object\s+Text\.(?:ASCII|UTF8)Encoding\s*\))|(?:\(\s*\[Text\.Encoding\]::(?:ASCII|UTF8)\s*\)))\.GetString\s*\(\s*(\$[a-z_][a-z0-9_]*)\s*,\s*0\s*,\s*(\$[a-z_][a-z0-9_]*)\s*\)\s*;`)

@@ -6318,12 +6318,13 @@ func commandByID(
 // powerShellCradleShadowOnly reports a download cradle (psparse's reading of
 // the script: Invoke-Expression of fetched content, in a spelling the tokenizer
 // cannot prove) in a call whose parse is partial. It adds the download-execute
-// finding in shadow: recorded, never enforced. The pipe form keeps the product's
-// rule (a partial parse raises nothing), so a call whose tokenizer facts already
-// hold the pipe form is not read again here.
-func powerShellCradleShadowOnly(input actionfacts.Input, facts actionfacts.Facts) bool {
-	return !powerShellDownloadExecPrerequisite(facts) &&
-		actionfacts.PowerShellFetchedContentExecution(input)
+// finding in shadow: recorded, never enforced. A partial tokenizer parse (a
+// statement list, a sibling the tokenizer does not model) keeps the product's
+// rule from enforcing the pipe form, but it does not change what runs: a fetch
+// whose output feeds Invoke-Expression is a cradle wherever it stands among the
+// statements, so the finding is raised for the record (rel-1-0-10:GAP-0160).
+func powerShellCradleShadowOnly(input actionfacts.Input, _ actionfacts.Facts) bool {
+	return actionfacts.PowerShellFetchedContentExecution(input)
 }
 
 func filterExactFallbackFindings(

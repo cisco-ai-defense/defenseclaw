@@ -586,6 +586,48 @@ func posixSoleHostCallSource(source string) (string, Dialect, bool) {
 	return script.body, script.dialect, true
 }
 
+// rawCMDLauncherLine is the line a `cmd /c <line>` call written in a POSIX
+// shell hands to cmd.exe when the text after /c is read as cmd.exe reads it, not
+// as the POSIX shell would split it: a POSIX word turns every backslash into an
+// escape and drops it, which destroys the registry and file paths the line
+// names, while the author of the call (and cmd.exe, given the text) means them
+// as written. One pair of quotes around the whole line is removed (cmd.exe
+// removes it too). Only the leading cmd launcher is read; anything before it is
+// no cmd call at all.
+func rawCMDLauncherLine(source string) (string, Dialect, bool) {
+	text := strings.TrimSpace(source)
+	word := func() string {
+		end := strings.IndexAny(text, " \t")
+		if end < 0 {
+			end = len(text)
+		}
+		first := text[:end]
+		text = strings.TrimLeft(text[end:], " \t")
+		return first
+	}
+	switch strings.ToLower(word()) {
+	case "cmd", "cmd.exe":
+	default:
+		return "", DialectNone, false
+	}
+	for text != "" {
+		switch switchWord := strings.ToLower(word()); switchWord {
+		case "/c", "/k":
+			line := text
+			if len(line) >= 2 && (line[0] == '"' && line[len(line)-1] == '"' ||
+				line[0] == '\'' && line[len(line)-1] == '\'') {
+				line = line[1 : len(line)-1]
+			}
+			line = strings.TrimSpace(line)
+			return line, DialectCMD, line != ""
+		case "/d", "/q", "/s", "/a", "/u":
+		default:
+			return "", DialectNone, false
+		}
+	}
+	return "", DialectNone, false
+}
+
 // HostScriptTwin is the second reading of a call that runs a static
 // powershell, pwsh or cmd launcher, a call block or an Invoke-Expression of a
 // literal: the same call written as the script it runs, in the script's own
@@ -624,7 +666,10 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 	default:
 		dialect, _ = chooseRawCommandDialect(input.Tool, input.DialectHint, source)
 		if dialect == DialectPOSIX || dialect == DialectNone || dialect == DialectMixed {
-			body, bodyDialect, ok := posixSoleHostCallSource(source)
+			body, bodyDialect, ok := rawCMDLauncherLine(source)
+			if !ok {
+				body, bodyDialect, ok = posixSoleHostCallSource(source)
+			}
 			if !ok {
 				return Input{}, false
 			}
