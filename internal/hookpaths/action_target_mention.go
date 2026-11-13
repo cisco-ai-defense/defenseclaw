@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -119,7 +120,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// the request cwd for the text scan.
 	// Git Bash spells a Windows drive /c/... (GAP-0781 RV8-1).
 	windowsHost := runtime.GOOS == "windows" && actionWindowsHome(home)
-	checkValue := func(value string, tilde bool, base string) bool {
+	// literal: the value is one entry name whose *, ?, [ and ] were quoted
+	// or escaped, so they are not a pattern (GAP-0293).
+	checkValue := func(value string, tilde bool, base string, literal bool) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
 		}
@@ -136,7 +139,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				value = filepath.Join(home, value[2:])
 			}
 		}
-		if strings.ContainsAny(value, "*?[]") {
+		if !literal && strings.ContainsAny(value, "*?[]") {
 			if stateOnly {
 				return false
 			}
@@ -172,19 +175,20 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	// resolved once per scan, because its answer depends only on the value,
 	// its tilde form and its base (GAP-2279, answer budget).
 	type mention struct {
-		value, base string
-		tilde       bool
+		value, base    string
+		tilde, literal bool
 	}
 	answers := map[mention]bool{}
-	check := func(value string, tilde bool, base string) bool {
-		key := mention{value: value, base: base, tilde: tilde}
+	checkAs := func(value string, tilde bool, base string, literal bool) bool {
+		key := mention{value: value, base: base, tilde: tilde, literal: literal}
 		found, seen := answers[key]
 		if !seen {
-			found = checkValue(value, tilde, base)
+			found = checkValue(value, tilde, base, literal)
 			answers[key] = found
 		}
 		return found && !globs.recording()
 	}
+	check := func(value string, tilde bool, base string) bool { return checkAs(value, tilde, base, false) }
 	if parsed {
 		// $USER and $LOGNAME name the home's own directory, as
 		// actionfacts reads /home/$USER/... (GAP-2269).
@@ -228,6 +232,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
+		// Quoting makes *, ? and [ literal only in a POSIX reading of a
+		// POSIX home; a Windows-spelled home reads them as wildcards.
+		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -235,6 +242,15 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				value, known = actionWordValueWithGlob(word, values, effectiveCWD, home, true)
 			}
 			if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
+				// The value spells a quoted part's glob characters as
+				// pattern characters ('k[1]'* reads as k[1]*, matching k1x
+				// and missing k[1]x). The pattern that escapes them is the
+				// shell's reading (GAP-0293).
+				if activeGlob && literalReading && noDereferenceTouchLiteralWord(word) {
+					if pattern, escaped := noDereferenceTouchPattern(word, home); escaped {
+						value = pattern
+					}
+				}
 				// A parsed value has had its shell tilde expanded already;
 				// a remaining "~/" was quoted, escaped or parameter-derived.
 				if check(value, false, effectiveCWD) {
@@ -244,6 +260,28 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					return check(target, actionAttachedTildeExpands(word, command), effectiveCWD)
 				}
 				return false
+			}
+			// Quoted or escaped glob characters are part of the name: the
+			// word names that one entry, a hard link of a protected file
+			// included (GAP-0293: 'k[1]' was never resolved).
+			if !literalReading {
+				return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
+			}
+			// A double-quoted or backslash-escaped one has no plain value:
+			// the shell's own field is the name.
+			if !known && noDereferenceTouchLiteralWord(word) {
+				if fields, err := shellparse.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, word); err == nil && len(fields) == 1 {
+					value, known = fields[0], true
+				}
+			}
+			if known {
+				if checkAs(value, false, effectiveCWD, true) {
+					return true
+				}
+				if _, target, attached := strings.Cut(value, "="); attached &&
+					checkAs(target, actionAttachedTildeExpands(word, command), effectiveCWD, true) {
+					return true
+				}
 			}
 			return !stateOnly && !globs.recording() && actionUnknownWordMayNameKey(word, effectiveCWD, home)
 		}
