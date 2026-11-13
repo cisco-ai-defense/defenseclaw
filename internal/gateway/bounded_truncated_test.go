@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The gateway side of the bound rule: withBoundedTruncation and
@@ -91,6 +92,30 @@ func TestFloorBoundedTruncatedVerdict(t *testing.T) {
 	v.floorBoundedTruncated(bounded.Truncated{}, bounded.TierStrict)
 	if v.Action != "allow" || len(v.Findings) != 0 {
 		t.Fatalf("untruncated verdict changed: %+v", v)
+	}
+}
+
+// boundedTier reads the tier a verdict-level lane floors with: the pack's
+// posture, then a managed install with local rules.
+func TestBoundedTierOfTheRequest(t *testing.T) {
+	for _, tc := range []struct {
+		posture string
+		managed bool
+		want    bounded.Tier
+	}{
+		{"default", false, bounded.TierDefault},
+		{"strict", false, bounded.TierStrict},
+		{"default", true, bounded.TierManaged},
+		{"strict", true, bounded.TierStrict},
+	} {
+		api := instructionProtectionTestAPIWithPack(t, "claudecode", "action", "", tc.posture)
+		if tc.managed {
+			api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			api.scannerCfg.Enterprise.Profile = managed.ProfileStandalone
+		}
+		if got := api.boundedTier(t.Context(), "claudecode"); got != tc.want {
+			t.Errorf("%s managed=%t: tier %d, want %d", tc.posture, tc.managed, got, tc.want)
+		}
 	}
 }
 
