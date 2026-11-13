@@ -37,6 +37,14 @@ func nestedCorpus() []string {
 		`cmd /c --% del %TEMP%\x`, `powershell -Command --% Remove-Item C:\x`,
 		`cmd /k dir`, `& $env:ComSpec /c del C:\x`,
 		`powershell -Command $payload`,
+		// review 3 R3: -Version/-v takes a value (the PS 2.0 downgrade evasion)
+		`powershell -Version 2 -c Remove-Item C:\x`, `powershell -v 2 -enc ZQBjAGgAbwAgAGgAaQA=`,
+		`powershell -Version 2.0 -Command "Remove-Item C:\y"`,
+		`powershell -Version 5.1 -NoProfile -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`,
+		`powershell -version 2 -nop -w hidden -c "Remove-Item C:\x"`,
+		// (the -Version positional-script and Start-Process -ArgumentList shapes
+		// are fixed and dump-verified too, but this nested oracle does not model
+		// positional/Start-Process extraction -- see R12 -- so they are not gated.)
 	}
 	seen := map[string]bool{}
 	var out []string

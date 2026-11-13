@@ -15,3 +15,8 @@
 {"i":14,"ns":[{"kind":"cmd-c","text":"dir","static":true}]}
 {"i":15,"ns":[]}
 {"i":16,"ns":[{"kind":"powershell-command","text":"","static":false}]}
+{"i":17,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":18,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":19,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\y","static":true}]}
+{"i":20,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":21,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}

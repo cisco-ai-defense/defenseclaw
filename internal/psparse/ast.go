@@ -28,6 +28,7 @@ const (
 	ReasonIncompleteExpr   = "ps_incomplete_expr"   // expression ended unexpectedly
 	ReasonDialectAmbiguous = "ps_dialect_ambiguous" // escape decodes differently under PS 5.1 vs 7
 	ReasonUnsafeLiteral    = "ps_unsafe_literal"    // static source has a rune outside the safe allowlist
+	ReasonHostOption       = "ps_host_option"       // a host CLI (powershell/pwsh) option outside the modeled set
 )
 
 // Script is the root: an ordered list of statements plus the parameter block
