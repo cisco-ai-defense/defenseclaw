@@ -29,9 +29,10 @@ func RouteOnlyCapableOn(connector, goos string) bool {
 // for goos (S1 DESIGN 15.6, 17.1, 19): secrets come from protected
 // credential refs only (no *_env names, which would read the gateway
 // service environment), route-only connectors need routing base_url on the
-// target OS, and managed Windows route-only stays off until the Windows
-// kernel peer factor works under the gateway service account and the
-// Windows guardian renders route-only per user (rel-1-0-10:GAP-0012).
+// target OS, and managed Windows route-only stays off until a live probe
+// confirms the Windows kernel peer factor under the LocalSystem gateway
+// (S1 DESIGN 20.6) and the Windows guardian renders route-only per user
+// (rel-1-0-10:GAP-0012).
 func validateManagedRouting(cfg *Config, goos string) error {
 	r := cfg.Routing
 	for i, m := range r.Models {
