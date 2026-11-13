@@ -172,6 +172,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `credentialProvider.secretsNamespace` | The namespace that holds the per-actor secret copies. Default `defenseclaw-actor-secrets`. Two releases in one cluster, for example a managed one next to an open-source one, each need their own. Only one of them can register the egress callout, because Substrate has one callout slot |
 | `substrate.actorKeys.url` | Sets `substrate.identity.keys_url`. Empty is the `idp` Service |
 | `substrate.actorKeys.caConfigMap` | A ConfigMap (key `ca.crt`) with the CA of the keys URL, mounted on the gateway as `keys_ca_file`. Empty is the servicedns trust bundle |
+| `networkPolicy.egress.extra` | Extra NetworkPolicy egress rules for every key-holding pod (gateway, leader, callout). The default allows DNS, the Kubernetes and Substrate APIs, the release's own Services, OTLP and model providers on 443 only. Use it for a private OIDC issuer, a private registry or EKS Pod Identity. See [the EKS page](/docs/substrate/eks#attested-templates-in-a-private-registry) |
 | `networkPolicy.adminFrom` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |
 | `observability.local.enabled` | A local collector for trying the chart |

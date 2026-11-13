@@ -105,6 +105,20 @@ Ask your administrator to run `defenseclaw substrate verify` and look at `actor_
 
 `verify` lists the `snapshot_bucket` check as `skipped` with "no object-storage snapshot location to check". It does not read the bucket yet, on any object store. Snapshots hold everything an actor held, so check yourself that the bucket is encrypted, private, in the cluster's region and has a retention rule. `delete` removes an agent's snapshots.
 
+### Sign-in fails with a timeout to the OIDC issuer
+
+The cluster uses a private OIDC issuer (`substrate.identity.oidc.issuer`), and the gateway can't reach it: the launcher can't finish signing in, or the cluster refuses the sign-in right after, and the gateway log shows a timeout to the issuer's address. The chart's default NetworkPolicy lets the gateway reach DNS, the Kubernetes and Substrate APIs, its own Services, OTLP and model providers on 443, and nothing else. Add the issuer's address and port to `networkPolicy.egress.extra` (an example is on [the EKS page](/docs/substrate/eks#attested-templates-in-a-private-registry)), and check that the issuer's security group admits the node and pod subnets. A private CA also needs `gateway.oidcCA`.
+
+### `verify` ends with warnings on a fresh install
+
+On a fresh install, `verify` reports these, and they are expected:
+
+- `snapshot_bucket` is `skipped`: `verify` does not read the bucket yet.
+- `openfga_grants` warns `could not read the access policies; run doctor as a global viewer`, and `actor_service_routes` warns `could not read the actor listener's routes`. No identity or Role clears them: the kubectl-based `verify` does not read the access policies or the listener's routes at all, so they warn for a cluster administrator too. They are not failures; the exit code stays 0.
+- `ingress_clients` warns `N other router client(s) can reach every actor`. That is real: another client in `ingressAllowedSPIFFEIDs` of the SubstrateInstall file can reach every actor without DefenseClaw. Remove the clients you don't need, then run `ate-setup deploy` again.
+
+A `fail` is not expected. `actor_keys` and `issuer_unique` should pass.
+
 ### Model calls to Bedrock fail through a VPC endpoint
 
 A Bedrock interface endpoint with private DNS resolves to a private address, and the guardrail proxy refuses private upstreams by default. Add the endpoint's address to `guardrail.allow_private_upstreams` (individual IPs, not ranges). The endpoint's security group must also admit the node security group on 443, or calls time out with a 503.
