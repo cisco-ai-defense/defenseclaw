@@ -153,6 +153,10 @@ type SubstrateConfig struct {
 	// actor of this connector without a scan is refused (managed installs and
 	// the strict tier) rather than alerted on (OSS default tiers).
 	BlockUnscannedSkills func(connector string) bool
+	// TemplateSkills returns the admitted skill folder digests of the attested
+	// template "atespace/name" (the controller's verdict): a folder with one
+	// of them is trusted without a scan (GAP-0164). Nil trusts none.
+	TemplateSkills func(ctx context.Context, template string) ([]string, error)
 	// SkillReceiptKey signs skill scan receipts; every replica must have the
 	// same key (derived from the shared chain key). Empty: a random key per
 	// process, so receipts hold only on the replica that gave them.
@@ -221,6 +225,9 @@ type substrateState struct {
 	receiptShared bool
 	// alert raises an audit alert (the API server's logger).
 	alert func(ctx context.Context, severity, summary string, details map[string]any)
+	// alerted is alertOnce's memory (substrate_skills.go).
+	alertMu sync.Mutex
+	alerted map[string]bool
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler

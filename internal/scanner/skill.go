@@ -473,6 +473,12 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
+	// A missing scanner is found here: the contained run reports only that
+	// its custody failed, which reads like a scanner that ran and failed
+	// (substrate-1 GAP-0164: a gateway image without skill-scanner).
+	if _, err := exec.LookPath(binary); err != nil {
+		return nil, scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, binary, s.commandArgs(scanPath, policy)...)
@@ -490,10 +496,6 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
-		}
-		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
-			return nil, scanErr
 		}
 		if !errors.As(err, &exitErr) {
 			result.ExitCode = -1

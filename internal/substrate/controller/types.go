@@ -44,6 +44,10 @@ type Attestation struct {
 	// attest.Verified.ValidUntil of the template's images); zero = the
 	// controller's own TTL only.
 	ValidUntil time.Time
+	// SkillDigests are the content digests of the skill folders the attested
+	// build scan admitted (attest.ScanItem.Digest), over all images: the
+	// gateway trusts a folder with one of them without scanning it (GAP-0164).
+	SkillDigests []string
 }
 
 // Attestor verifies a template's DefenseClaw attestation (lane A9

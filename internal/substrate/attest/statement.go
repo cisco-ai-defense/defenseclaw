@@ -182,6 +182,11 @@ type ScanItem struct {
 	// Accepted are rule ids whose findings were accepted for this item:
 	// without them the build floor blocked it.
 	Accepted []string `json:"accepted,omitempty"`
+	// Digest is the content digest of an admitted skill folder as the actor
+	// kit attaches it (SkillFolderDigest); the gateway trusts a folder with
+	// this digest without scanning it again (GAP-0164). Empty when the folder
+	// cannot be matched (too many files, entries the scan could not read).
+	Digest string `json:"digest,omitempty"`
 }
 
 // AcceptedFinding is an admin's audited acceptance of one finding rule at

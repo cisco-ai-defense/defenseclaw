@@ -9,12 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,7 +49,26 @@ var requireScannerTargetPath = func(path string) error {
 // managed scanner runtime never gets here: scannerRuntimePreflight stops
 // that scan first and says why the runtime was not used (GAP-0686).
 func scannerNotFound(name, binary, hint string) error {
-	return fmt.Errorf("scanner: %s not found at %q — %s", name, binary, hint)
+	return scannerNotFoundError{msg: fmt.Sprintf("scanner: %s not found at %q — %s", name, binary, hint)}
+}
+
+// ErrScannerNotFound matches the error of a scan whose scanner is not
+// installed (errors.Is).
+var ErrScannerNotFound = errors.New("scanner: not installed")
+
+type scannerNotFoundError struct{ msg string }
+
+func (e scannerNotFoundError) Error() string        { return e.msg }
+func (e scannerNotFoundError) Is(target error) bool { return target == ErrScannerNotFound }
+
+// Unavailable reports whether err means the scan never ran because no
+// scanner can run here: not installed, a managed runtime that is not ready,
+// or a host that refuses the namespaces scanner containment needs (a pod
+// under the default seccomp profile). A scan that ran and failed is not
+// unavailable.
+func Unavailable(err error) bool {
+	return errors.Is(err, ErrScannerNotFound) || errors.Is(err, exec.ErrNotFound) ||
+		errors.Is(err, ErrScannerRuntimeUnavailable) || errors.Is(err, processutil.ErrContainmentUnavailable)
 }
 
 // runtimeSettings is scanners.mcp_scanner as JSON with config.yaml's keys,
