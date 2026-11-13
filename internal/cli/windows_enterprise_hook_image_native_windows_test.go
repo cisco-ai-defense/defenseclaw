@@ -231,10 +231,10 @@ func TestWindowsHookImageNativeFolderDACL(t *testing.T) {
 // The start check ends an image that does not answer in time.
 func TestWindowsHookImageNativeStarterTimesOut(t *testing.T) {
 	image, _ := windowsHookImageNativeLaunchCopy(t)
-	t.Setenv(windowsHookImageNativeHelperEnv, "sleep")
 	began := time.Now()
 	_, err := (osWindowsHookImageStarter{}).Start(windowsHookImageStart{
 		Path: image, Args: windowsHookImageNativeHelperArgs(), Timeout: 3 * time.Second,
+		Env: []string{windowsHookImageNativeHelperEnv + "=sleep"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "no answer within") {
 		t.Fatalf("a hanging image = %v; want a timeout", err)
@@ -259,9 +259,9 @@ func TestWindowsHookImageNativeStarterInheritsNoHandles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(handle)
-	t.Setenv(windowsHookImageNativeHelperEnv, fmt.Sprintf("handle:%d:%s", uintptr(handle), filepath.Base(marker)))
 	result, err := (osWindowsHookImageStarter{}).Start(windowsHookImageStart{
 		Path: image, Args: windowsHookImageNativeHelperArgs(), Timeout: time.Minute,
+		Env: []string{windowsHookImageNativeHelperEnv + "=" + fmt.Sprintf("handle:%d:%s", uintptr(handle), filepath.Base(marker))},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -275,9 +275,9 @@ func TestWindowsHookImageNativeStarterInheritsNoHandles(t *testing.T) {
 // privileges, as an agent user's hook does.
 func TestWindowsHookImageNativeStarterUsesTheFilteredToken(t *testing.T) {
 	image, _ := windowsHookImageNativeLaunchCopy(t)
-	t.Setenv(windowsHookImageNativeHelperEnv, "token")
 	result, err := (osWindowsHookImageStarter{}).Start(windowsHookImageStart{
 		Path: image, Args: windowsHookImageNativeHelperArgs(), Timeout: time.Minute,
+		Env: []string{windowsHookImageNativeHelperEnv + "=token"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -373,7 +373,7 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 	if err := os.MkdirAll(guardianDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	manifest := "version: 1\ntargets:\n  - user: alice\n    user_home: '" + home + "'\n    sid: S-1-5-21-1-2-3-1001\n    connector: claudecode\n"
+	manifest := "version: 1\ntargets:\n  - user: alice\n    user_home: '" + home + "'\n    sid: S-1-5-21-1-2-3-1001\n    connector: claudecode\n    agent_version: 2.1.187\n"
 	if err := os.WriteFile(filepath.Join(guardianDir, "targets.yaml"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}

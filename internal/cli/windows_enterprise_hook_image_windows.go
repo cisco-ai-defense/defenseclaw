@@ -329,11 +329,9 @@ func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookIm
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, req.Path, req.Args...)
 	cmd.Dir = filepath.Dir(req.Path)
-	// CREATE_NO_WINDOW makes the child allocate a hidden console, which fails
-	// with STATUS_DLL_INIT_FAILED (0xC0000142) under a token whose
-	// Administrators group is deny-only (GAP-0751 native proof). The check
-	// needs no console: its streams are pipes, so it starts detached.
-	cmd.SysProcAttr.CreationFlags = cmd.SysProcAttr.CreationFlags&^windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS
+	if len(req.Env) > 0 {
+		cmd.Env = append(os.Environ(), req.Env...)
+	}
 	if req.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
@@ -346,6 +344,15 @@ func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookIm
 		cmd.SysProcAttr.Token = syscall.Token(token)
 		result.Restricted = true
 		result.Token = windowsHookImageFilteredTokenName
+		// A console a child (or the cmd.exe wrapper's child) must create dies
+		// with STATUS_DLL_INIT_FAILED (0xC0000142) under a token whose
+		// Administrators group is deny-only, whether it is asked for by
+		// CREATE_NO_WINDOW, CREATE_NEW_CONSOLE or implicitly (GAP-0751 native
+		// proof, Windows Server 2025). The child inherits this process's
+		// console instead, hidden: one is made here when there is none (Setup
+		// runs as a service).
+		defer ensureWindowsHookImageConsole()()
+		cmd.SysProcAttr.CreationFlags &^= windows.CREATE_NO_WINDOW
 	}
 	stdout, stderr, err := processutil.OutputTree(cmd, false)
 	result.Stdout, result.Stderr = stdout, stderr
@@ -361,6 +368,33 @@ func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookIm
 		return result, fmt.Errorf("%w: %s", err, boundedWindowsHookImageText(stderr))
 	}
 	return result, nil
+}
+
+var (
+	kernel32                    = windows.NewLazySystemDLL("kernel32.dll")
+	procGetConsoleProcessList   = kernel32.NewProc("GetConsoleProcessList")
+	procAllocConsole            = kernel32.NewProc("AllocConsole")
+	procFreeConsole             = kernel32.NewProc("FreeConsole")
+	procGetConsoleWindow        = kernel32.NewProc("GetConsoleWindow")
+	procShowWindowForHookImages = windows.NewLazySystemDLL("user32.dll").NewProc("ShowWindow")
+)
+
+// ensureWindowsHookImageConsole gives this process a hidden console when it
+// has none and returns the function that frees it again (a no-op when the
+// process already had one).
+func ensureWindowsHookImageConsole() func() {
+	var list [1]uint32
+	if count, _, _ := procGetConsoleProcessList.Call(uintptr(unsafe.Pointer(&list[0])), 1); count != 0 {
+		return func() {}
+	}
+	if ok, _, _ := procAllocConsole.Call(); ok == 0 {
+		return func() {}
+	}
+	if window, _, _ := procGetConsoleWindow.Call(); window != 0 {
+		const swHide = 0
+		_, _, _ = procShowWindowForHookImages.Call(window, swHide)
+	}
+	return func() { _, _, _ = procFreeConsole.Call() }
 }
 
 // windowsHookImageFilteredTokenName is how the report names the start
