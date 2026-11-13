@@ -404,7 +404,9 @@ func dispatchTrustedAction(
 		fctx := parent
 		freq := request
 		defer func() {
-			findings = append(findings, runSecretFlowShadow(fctx, freq)...)
+			cc := &chainCallState{}
+			findings = append(findings, runSecretFlowShadowChain(fctx, freq, cc)...)
+			findings = append(findings, runChainEffects(fctx, freq, cc)...)
 		}()
 	}
 	if ManagedEnterpriseActive() {

@@ -71,6 +71,10 @@ const (
 	// session named (chain.sensitive_read_then_unscoped_send). The gateway adds
 	// it; it is a scope proof, not a flow proof, and fires in default.
 	HitScopeSend HitKind = "scope_send"
+	// HitScopeValue: flow's own proof (a labelled file or a seen secret value) on a
+	// send to a destination no prompt of the session named
+	// (chain.sensitive_value_then_unscoped_send).
+	HitScopeValue HitKind = "scope_value"
 )
 
 // Hit is one sink finding.
