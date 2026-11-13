@@ -495,6 +495,14 @@ The guardian also watches the files in `C:\ProgramData\Cisco\DefenseClaw-HookRun
 
 **Check.** `defenseclaw-hook.exe --version` runs, and the guardian log shows no new `tamper:` line for the hook.
 
+#### Setup stops with hook_image_start_failed
+
+The error starts `hook_image_start_failed: the hook image of this release could not be staged` and says `Nothing switched: every agent hook still runs the installed image` (exit `1603`). Setup copied the new release's `defenseclaw-hook.exe` and `defenseclaw-hook-guard.exe` to a new folder under `C:\Program Files\Cisco\DefenseClaw\bin\hooks` and started each once, and one of them did not start or did not report this release's version and commit. The run rolled back, so every agent keeps the hook it had. The usual cause is application control or an antivirus that allows the old folder by path and not the new one.
+
+**Fix.** Allow the DefenseClaw signer (not a folder path) in WDAC or AppLocker, or the antivirus exclusion for `C:\Program Files\Cisco\DefenseClaw\bin\hooks\*\defenseclaw-hook.exe` and `defenseclaw-hook-guard.exe`, then run the same Setup command again. `hook_image_digest_mismatch` means the hook in `bin` changed while Setup ran: run Setup again, and if it repeats, find the program that writes that file. `hook_image_stage_failed` names the step that failed.
+
+**Check.** The Setup run exits `0` and `defenseclaw-gateway enterprise windows verify` reports no `hook_image_not_staged`.
+
 #### Setup refuses to replace the installed hook
 
 The error says `refusing to replace the installed hook` and ends `Nothing was stopped or changed` (exit `1603`). The installed `defenseclaw-hook.exe` does not match the digest in `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json` (`hashes.hook`), and the guardian's protected copy, `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\payload\defenseclaw-hook.exe`, is missing or does not match it either. Before an upgrade Setup keeps a rollback copy of the hook and checks it against that digest; with no matching copy it stops. The new release's `/repair` does not help: a Setup repairs only its own release and exits `1639`. `/uninstall` refuses with `unrecorded artifact hash drift`.
