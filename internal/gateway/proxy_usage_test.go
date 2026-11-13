@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -109,5 +110,41 @@ func TestPassthroughRecordsUsage(t *testing.T) {
 	}
 	if got.Usage.Input != 5 || got.Usage.Output != 2 {
 		t.Fatalf("usage = %+v", got.Usage)
+	}
+}
+
+func TestWithStreamIncludeUsage(t *testing.T) {
+	prev := processModelUsage.Load()
+	processModelUsage.Store(nil)
+	if out, added := withStreamIncludeUsage([]byte(`{"stream":true}`)); added || string(out) != `{"stream":true}` {
+		t.Fatal("tokenomics off must not change the body")
+	}
+	processModelUsage.Store(prev)
+	installUsageEngine(t)
+	for in, want := range map[string]bool{
+		`{"model":"m","stream":true}`:                                          true,
+		`{"model":"m","stream":true,"stream_options":{"include_usage":false}}`: true,
+		`{"model":"m","stream":true,"stream_options":{"include_usage":true}}`:  false,
+		`{"model":"m","stream":false}`:                                         false,
+		`not json`:                                                             false,
+	} {
+		out, added := withStreamIncludeUsage([]byte(in))
+		if added != want {
+			t.Fatalf("%s: added = %v", in, added)
+		}
+		if added {
+			var got struct {
+				StreamOptions struct {
+					IncludeUsage bool `json:"include_usage"`
+				} `json:"stream_options"`
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil || !got.StreamOptions.IncludeUsage || got.Model != "m" {
+				t.Fatalf("%s -> %s", in, out)
+			}
+		}
+	}
+	if !isUsageOnlyChunk(`{"choices":[],"usage":{"prompt_tokens":1}}`) || isUsageOnlyChunk(`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":1}}`) || isUsageOnlyChunk(`{"choices":[]}`) {
+		t.Fatal("usage-only chunk detection")
 	}
 }

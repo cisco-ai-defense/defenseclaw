@@ -206,3 +206,69 @@ func usageDecision(rf modelusage.RouteFacts, routed bool) modelusage.RouteFacts 
 	}
 	return rf
 }
+
+// includeUsageKey is set on a request context when the gateway added
+// stream_options.include_usage, so the usage-only chunk is not forwarded to
+// a client that never asked for it.
+type includeUsageKey struct{}
+
+// withStreamIncludeUsage adds stream_options.include_usage to a streamed
+// chat body when usage records are on and the client did not ask for it
+// (USAGE-INTERFACE v1). It returns the body and whether it added the flag.
+func withStreamIncludeUsage(body []byte) ([]byte, bool) {
+	if !usageOn() || len(body) == 0 {
+		return body, false
+	}
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil || raw == nil {
+		return body, false
+	}
+	var stream bool
+	if json.Unmarshal(raw["stream"], &stream) != nil || !stream {
+		return body, false
+	}
+	opts := map[string]json.RawMessage{}
+	if prior, ok := raw["stream_options"]; ok {
+		if json.Unmarshal(prior, &opts) != nil {
+			return body, false
+		}
+		var include bool
+		if json.Unmarshal(opts["include_usage"], &include) == nil && include {
+			return body, false
+		}
+	}
+	opts["include_usage"] = json.RawMessage("true")
+	encoded, err := json.Marshal(opts)
+	if err != nil {
+		return body, false
+	}
+	raw["stream_options"] = encoded
+	out, err := json.Marshal(raw)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+// isUsageOnlyChunk reports an SSE data payload that carries only usage (an
+// empty choices list), the chunk include_usage adds at the end.
+func isUsageOnlyChunk(payload string) bool {
+	var c struct {
+		Choices []json.RawMessage `json:"choices"`
+		Usage   json.RawMessage   `json:"usage"`
+	}
+	if json.Unmarshal([]byte(payload), &c) != nil {
+		return false
+	}
+	return len(c.Choices) == 0 && len(c.Usage) > 0 && string(c.Usage) != "null"
+}
+
+// recordChatUsage hands usage the proxy already parsed (Bifrost) to the
+// record of the call answering through w.
+func recordChatUsage(w http.ResponseWriter, u *ChatUsage) {
+	uw, ok := w.(*usageResponseWriter)
+	if !ok || u == nil {
+		return
+	}
+	uw.call.Usage(modelusage.ParsedUsage{Input: u.PromptTokens, Output: u.CompletionTokens, Source: "provider"})
+}

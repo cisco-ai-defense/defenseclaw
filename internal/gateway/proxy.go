@@ -3774,6 +3774,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
+	// Bifrost parsed the usage (it always asks for include_usage): hand it
+	// to the usage record of this call.
+	recordChatUsage(w, usage)
 	upstreamDuration := time.Since(llmStartTime)
 	// Flush any remaining initial buffer (short streams that completed
 	// before reaching the buffer threshold). Run a guardrail check first.
@@ -5899,6 +5902,12 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 		forwardBody = req.RawBody
 	}
 	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL, req.providers)
+	if req.Stream {
+		var added bool
+		if forwardBody, added = withStreamIncludeUsage(forwardBody); added {
+			r = r.WithContext(context.WithValue(r.Context(), includeUsageKey{}, true))
+		}
+	}
 
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
@@ -6139,6 +6148,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	streamResponseModel := ""
 	streamFinishReasons := []string{}
 	var streamUsage *ChatUsage
+	stripUsageChunk, _ := r.Context().Value(includeUsageKey{}).(bool)
 	// A well-formed stream reaches finalization at [DONE] and then EOF. Keep
 	// guardrail evaluation and its canonical telemetry exactly once.
 	finalTextInspected := false
@@ -6299,6 +6309,12 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return true
 		}
 
+		if stripUsageChunk {
+			if payloads := rawForwardSSEDataPayloads(frame); len(payloads) == 1 && isUsageOnlyChunk(payloads[0]) {
+				// The gateway asked for this chunk; the client did not.
+				return true
+			}
+		}
 		_, _ = w.Write(frame)
 		flusher.Flush()
 		return true
