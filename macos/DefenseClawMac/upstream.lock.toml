@@ -15,7 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 repository = "keitheobrien/defenseclaw_mac"
-tag = "v1.1.35"
-commit = "7adeb80eed62988f3e447ae970f3f0e35fc04941"
-source_version = "1.1.35"
+tag = "v1.1.36"
+commit = "31df78fb1b9ec92187c9bc35730f4bd9584c0e5e"
+source_version = "1.1.36"
 imported_at = "2026-11-13"
