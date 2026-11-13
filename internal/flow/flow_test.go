@@ -17,7 +17,7 @@ func testConfig() Config {
 	return Config{
 		Credentials: true, Reencodings: true,
 		MaxLabeledPaths: 512, MaxValueDigests: 256,
-		SinkDefault: ActionAlert, SinkStrict: ActionBlock, SinkManaged: ActionBlock,
+		SinkDefault: ActionAlert, SinkStrict: ActionBlock,
 		Home: "/home/u", Flavor: effects.FlavorPOSIX,
 	}
 }
@@ -111,19 +111,14 @@ func TestDefaultNeverBlocks(t *testing.T) {
 	}
 
 	strict := testConfig()
-	strict.StrictOrManaged = true
+	strict.Strict = true
 	r2, _ := stepAll(t, strict, seq...)
 	if r2.Action != ActionBlock {
 		t.Fatalf("strict action = %v, want block", r2.Action)
 	}
 
-	managed := testConfig()
-	managed.StrictOrManaged = true
-	managed.Managed = true
-	r3, _ := stepAll(t, managed, seq...)
-	if r3.Action != ActionBlock {
-		t.Fatalf("managed action = %v, want block", r3.Action)
-	}
+	// A managed install follows its pack (the engine has no managed input): the
+	// default pack alerts and the strict pack blocks, managed or not.
 }
 
 // TestSessionContextNeverFiresInDefault: a labeled session reaching an
@@ -146,7 +141,7 @@ func TestSessionContextNeverFiresInDefault(t *testing.T) {
 	}
 
 	strict := testConfig()
-	strict.StrictOrManaged = true
+	strict.Strict = true
 	r2, _ := stepAll(t, strict, seq...)
 	if r2.Action != ActionBlock {
 		t.Fatalf("strict session-context action = %v, want block", r2.Action)

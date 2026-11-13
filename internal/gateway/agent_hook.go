@@ -1106,7 +1106,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// Secret flow tracking: on a successful credential-read tool
 			// result, index its secret values into the session so a later
 			// outbound call that sends them (even re-encoded) is caught. It
-			// self-gates on guardrail.secret_flow.mode and records only keyed
+			// self-gates on guardrail.cascade.lanes.secret_flow and records only keyed
 			// digests, never the raw value.
 			addSecretFlowResultValues(ctx, req)
 			// Last, once the verdict is final: a sandbox verdict carries

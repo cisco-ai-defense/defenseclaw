@@ -14,12 +14,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/flow"
 )
 
-// TestSecretFlowLaneMode folds the rollout key (effects_rules) and the feature
-// switch (secret_flow.mode) into one effective mode.
+// TestSecretFlowLaneMode folds the effects lane (cascade.lanes.effects) and the feature
+// switch (cascade.lanes.secret_flow) into one effective mode.
 func TestSecretFlowLaneMode(t *testing.T) {
 	mk := func(rollout, mode string) config.GuardrailConfig {
-		g := config.GuardrailConfig{EffectsRules: rollout}
-		g.SecretFlow.Mode = mode
+		g := config.GuardrailConfig{}
+		g.Cascade.Lanes.Effects = rollout
+		g.Cascade.Lanes.SecretFlow = mode
 		return g
 	}
 	for _, tc := range []struct {
@@ -91,8 +92,8 @@ func withSecretFlowGeneration(t *testing.T, effectsRules, mode string) {
 	before := liveGeneration.Load()
 	t.Cleanup(func() { liveGeneration.Store(before); secretFlowSessions.reset() })
 	cfg := config.DefaultConfig()
-	cfg.Guardrail.EffectsRules = effectsRules
-	cfg.Guardrail.SecretFlow.Mode = mode
+	cfg.Guardrail.Cascade.Lanes.Effects = effectsRules
+	cfg.Guardrail.Cascade.Lanes.SecretFlow = mode
 	liveGeneration.Store(&Generation{N: 1, Config: cfg, activeRules: &compiledRulePackCategories{}})
 	secretFlowSessions.reset()
 }
@@ -115,7 +116,9 @@ func TestS7FRGatewayShadowVerdict(t *testing.T) {
 		{name: "effoff-strict", effects: "off", mode: "on", strict: true},
 		{name: "on-default", effects: "on", mode: "on", wantFindings: true, wantAlertOnly: true},
 		{name: "on-strict", effects: "on", mode: "on", strict: true, wantFindings: true, wantEnf: true},
-		{name: "on-managed", effects: "on", mode: "on", managed: true, wantFindings: true, wantEnf: true},
+		// A managed install follows its pack (D5): managed + default alerts, managed + strict blocks.
+		{name: "on-managed-default", effects: "on", mode: "on", managed: true, wantFindings: true, wantAlertOnly: true},
+		{name: "on-managed-strict", effects: "on", mode: "on", managed: true, strict: true, wantFindings: true, wantEnf: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

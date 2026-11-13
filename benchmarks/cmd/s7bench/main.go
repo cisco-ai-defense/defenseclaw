@@ -207,7 +207,7 @@ func main() {
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
-	effectsRules := flag.String("effects-rules", "", "guardrail.effects_rules lane: off|shadow|on (empty keeps the config default)")
+	effectsRules := flag.String("effects-rules", "", "guardrail.cascade.lanes.effects: off|shadow|on (empty keeps the config default)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
 	if *corpus == "" || *out == "" || *policyDir == "" {
@@ -233,7 +233,7 @@ func main() {
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	if *effectsRules != "" {
-		cfg.Guardrail.EffectsRules = *effectsRules
+		cfg.Guardrail.Cascade.Lanes.Effects = *effectsRules
 	}
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true

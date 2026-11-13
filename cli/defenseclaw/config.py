@@ -3037,9 +3037,8 @@ class SecretFlowLabelSets:
 
 @dataclass
 class SecretFlowSinkAction:
-    default: str = "alert"  # the default profile never blocks
-    strict: str = "block"
-    managed: str = "block"
+    default: str = "alert"  # the default pack never blocks
+    strict: str = "block"  # a managed install follows its pack
 
 
 @dataclass
@@ -3050,16 +3049,33 @@ class SecretFlowMemory:
 
 @dataclass
 class SecretFlowConfig:
-    """guardrail.secret_flow: Secret flow tracking settings. Rollout rides
-    guardrail.effects_rules; these are the feature's own settings. Mirrors
-    internal/config.SecretFlowConfig."""
+    """guardrail.secret_flow: Secret flow tracking settings. The live/shadow
+    switch is guardrail.cascade.lanes.secret_flow; these are the feature's own
+    settings. Mirrors internal/config.SecretFlowConfig."""
 
-    mode: str = "shadow"  # off | shadow | on (ships shadow)
     label_sets: SecretFlowLabelSets = field(default_factory=SecretFlowLabelSets)
     sink_action: SecretFlowSinkAction = field(default_factory=SecretFlowSinkAction)
     reencodings: bool = True
     memory: SecretFlowMemory = field(default_factory=SecretFlowMemory)
     destination_allowlist: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CascadeLanesConfig:
+    """guardrail.cascade.lanes: one live/shadow switch per lane. Both lanes ship
+    shadow-only in 1.0.10, so the values are off | shadow ("on" is refused by the
+    Go validator). Mirrors internal/config.CascadeLanes."""
+
+    effects: str = "shadow"
+    secret_flow: str = "shadow"
+
+
+@dataclass
+class CascadeConfig:
+    """guardrail.cascade (the per-lane switches so far). Mirrors
+    internal/config.CascadeConfig."""
+
+    lanes: CascadeLanesConfig = field(default_factory=CascadeLanesConfig)
 
 
 @dataclass
@@ -3090,7 +3106,7 @@ class GuardrailConfig:
     detection_strategy_prompt: str = ""  # per-direction override
     detection_strategy_completion: str = ""  # per-direction override
     detection_strategy_tool_call: str = ""  # per-direction override
-    effects_rules: str = "shadow"  # off | shadow | on (effect-model rule lane)
+    cascade: CascadeConfig = field(default_factory=CascadeConfig)  # per-lane live/shadow switches
     effects_rules_tier: str = "restricted"  # restricted | full (effect block scope)
     secret_flow: SecretFlowConfig = field(default_factory=SecretFlowConfig)  # Secret flow tracking
     # Run full judge classification on content with no regex signal
@@ -7029,7 +7045,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_prompt=raw.get("detection_strategy_prompt", ""),
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
-        effects_rules=raw.get("effects_rules", "shadow"),
+        cascade=_merge_cascade(raw.get("cascade")),
         effects_rules_tier=raw.get("effects_rules_tier", "restricted"),
         secret_flow=_merge_secret_flow(raw.get("secret_flow")),
         judge_sweep=raw.get("judge_sweep", True),
@@ -7237,6 +7253,20 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
     )
 
 
+def _merge_cascade(raw: dict[str, Any] | None) -> CascadeConfig:
+    if not isinstance(raw, dict):
+        return CascadeConfig()
+    lanes_raw = raw.get("lanes") or {}
+    if not isinstance(lanes_raw, dict):
+        return CascadeConfig()
+    return CascadeConfig(
+        lanes=CascadeLanesConfig(
+            effects=str(lanes_raw.get("effects", "shadow") or "shadow"),
+            secret_flow=str(lanes_raw.get("secret_flow", "shadow") or "shadow"),
+        )
+    )
+
+
 def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
     if not isinstance(raw, dict):
         return SecretFlowConfig()
@@ -7250,7 +7280,6 @@ def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
         else []
     )
     return SecretFlowConfig(
-        mode=str(raw.get("mode", "shadow") or "shadow"),
         label_sets=SecretFlowLabelSets(
             credentials=bool(label_raw.get("credentials", True)),
             extra_path_globs=_string_list(label_raw.get("extra_path_globs")),
@@ -7259,7 +7288,6 @@ def _merge_secret_flow(raw: dict[str, Any] | None) -> SecretFlowConfig:
         sink_action=SecretFlowSinkAction(
             default=str(sink_raw.get("default", "alert") or "alert"),
             strict=str(sink_raw.get("strict", "block") or "block"),
-            managed=str(sink_raw.get("managed", "block") or "block"),
         ),
         reencodings=bool(raw.get("reencodings", True)),
         memory=SecretFlowMemory(

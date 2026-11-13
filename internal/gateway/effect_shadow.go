@@ -26,7 +26,7 @@ import (
 //     the effect_unknown disposition to it);
 //   - otherwise clean.
 //
-// guardrail.effects_rules decides the lane: off (skip entirely, no cost),
+// guardrail.cascade.lanes.effects decides the lane: off (skip entirely, no cost),
 // shadow (compute and measure beside today's, never change the answer) or on
 // (the effect verdict participates). The lane ships shadow; the lead flips it
 // to on once the corpus numbers hold.
@@ -103,7 +103,7 @@ func effectsRulesModeFor() effectRulesMode {
 	if g == nil || g.Config == nil {
 		return effectRulesOff
 	}
-	switch effectRulesMode(g.Config.Guardrail.EffectsRules) {
+	switch effectRulesMode(g.Config.Guardrail.Cascade.Lanes.EffectsMode()) {
 	case effectRulesShadow:
 		return effectRulesShadow
 	case effectRulesOn:

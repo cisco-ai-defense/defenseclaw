@@ -10,12 +10,14 @@ import (
 	"testing"
 )
 
-// TestSecretFlowDefaults proves the shipped defaults: shadow mode, credentials
-// on, default alert / strict and managed block, re-encodings on, caps set.
+// TestSecretFlowDefaults proves the shipped defaults: shadow lane, credentials
+// on, default alert / strict block (a managed install follows its pack),
+// re-encodings on, caps set.
 func TestSecretFlowDefaults(t *testing.T) {
-	sf := DefaultConfig().Guardrail.SecretFlow
-	if sf.Mode != "shadow" {
-		t.Fatalf("default mode = %q, want shadow", sf.Mode)
+	cfg := DefaultConfig()
+	sf := cfg.Guardrail.SecretFlow
+	if got := cfg.Guardrail.Cascade.Lanes.SecretFlowMode(); got != "shadow" {
+		t.Fatalf("default secret_flow lane = %q, want shadow", got)
 	}
 	if !sf.CredentialsEnabled() {
 		t.Fatalf("credentials off by default")
@@ -23,14 +25,11 @@ func TestSecretFlowDefaults(t *testing.T) {
 	if !sf.Reencodings {
 		t.Fatalf("reencodings off by default")
 	}
-	if got := sf.SinkActionFor(false, false); got != "alert" {
+	if got := sf.SinkActionFor(false); got != "alert" {
 		t.Fatalf("default sink action = %q, want alert", got)
 	}
-	if got := sf.SinkActionFor(true, false); got != "block" {
+	if got := sf.SinkActionFor(true); got != "block" {
 		t.Fatalf("strict sink action = %q, want block", got)
-	}
-	if got := sf.SinkActionFor(false, true); got != "block" {
-		t.Fatalf("managed sink action = %q, want block", got)
 	}
 	if sf.Memory.MaxLabeledPaths != 512 || sf.Memory.MaxValueDigests != 256 {
 		t.Fatalf("memory caps = %+v, want 512/256", sf.Memory)
@@ -55,7 +54,7 @@ func TestSecretFlowUpgradeFrom109(t *testing.T) {
 		t.Fatalf("load 1.0.9 config: %v", err)
 	}
 	sf := cfg.Guardrail.SecretFlow
-	if sf.Mode != "shadow" || !sf.CredentialsEnabled() || sf.SinkActionFor(false, false) != "alert" {
+	if got := cfg.Guardrail.Cascade.Lanes.SecretFlowMode(); got != "shadow" || !sf.CredentialsEnabled() || sf.SinkActionFor(false) != "alert" {
 		t.Fatalf("1.0.9 upgrade did not yield shadow/credentials/alert defaults: %+v", sf)
 	}
 }
@@ -67,25 +66,8 @@ const upgrade109Config = `config_version: 9
 guardrail:
   mode: action
   detection_strategy: regex_judge
-  effects_rules: shadow
 observability: {}
 `
-
-// TestSecretFlowSchemaEnum accepts the three modes and refuses a typo.
-func TestSecretFlowSchemaEnum(t *testing.T) {
-	for _, value := range []string{"off", "shadow", "on"} {
-		raw := []byte("config_version: 9\nguardrail:\n  secret_flow:\n    mode: " + value + "\n")
-		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err != nil {
-			t.Fatalf("secret_flow mode %s: ValidateCandidate() = %v, want accept", value, err)
-		}
-	}
-	for _, value := range []string{"enabled", "Shadow", "true"} {
-		raw := []byte("config_version: 9\nguardrail:\n  secret_flow:\n    mode: " + value + "\n")
-		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil {
-			t.Fatalf("secret_flow mode %s: ValidateCandidate() accepted an invalid mode", value)
-		}
-	}
-}
 
 // TestSecretFlowDefaultNeverBlocks: the schema and the Go validator both
 // refuse sink_action.default = block (balanced defaults).
@@ -104,7 +86,7 @@ func TestSecretFlowDefaultNeverBlocks(t *testing.T) {
 func TestSecretFlowValidate(t *testing.T) {
 	ok := []SecretFlowConfig{
 		{},
-		{Mode: "on", SinkAction: SecretFlowSinkAction{Default: "alert", Strict: "block", Managed: "alert"}},
+		{SinkAction: SecretFlowSinkAction{Default: "alert", Strict: "block"}},
 		{Memory: SecretFlowMemory{MaxLabeledPaths: 1000, MaxValueDigests: 1000}},
 	}
 	for i, c := range ok {
@@ -113,7 +95,6 @@ func TestSecretFlowValidate(t *testing.T) {
 		}
 	}
 	bad := []SecretFlowConfig{
-		{Mode: "maybe"},
 		{SinkAction: SecretFlowSinkAction{Strict: "warn"}},
 		{Memory: SecretFlowMemory{MaxLabeledPaths: -1}},
 		{Memory: SecretFlowMemory{MaxValueDigests: 1 << 30}},

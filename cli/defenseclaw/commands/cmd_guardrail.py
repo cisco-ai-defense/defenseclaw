@@ -6650,24 +6650,30 @@ guardrail.add_command(_judge_group)
 # ---------------------------------------------------------------------------
 
 _SECRET_FLOW_SET_KEYS = {
-    "mode": ("secret_flow.mode", "off | shadow | on"),
+    "mode": ("cascade.lanes.secret_flow", "off | shadow"),
     "reencodings": ("secret_flow.reencodings", "true | false"),
     "credentials": ("secret_flow.label_sets.credentials", "true | false"),
     "sink-strict": ("secret_flow.sink_action.strict", "alert | block"),
-    "sink-managed": ("secret_flow.sink_action.managed", "alert | block"),
     "max-paths": ("secret_flow.memory.max_labeled_paths", "a non-negative integer"),
     "max-digests": ("secret_flow.memory.max_value_digests", "a non-negative integer"),
     "allowlist": ("secret_flow.destination_allowlist", "comma-separated hosts (empty clears)"),
 }
 
 
+def _cascade_lane(gc, name: str) -> str:
+    """The value of guardrail.cascade.lanes.<name> (shadow when unset)."""
+    lanes = getattr(getattr(gc, "cascade", None), "lanes", None)
+    return (getattr(lanes, name, "shadow") or "shadow") if lanes is not None else "shadow"
+
+
 def _secret_flow_lane_mode(gc) -> str:
-    """Fold the rollout key (effects_rules) and the feature switch into the
-    effective lane mode, mirroring internal/gateway.secretFlowLaneMode."""
-    rollout = getattr(gc, "effects_rules", "shadow") or "shadow"
+    """Fold the effects lane (cascade.lanes.effects) and the feature switch
+    (cascade.lanes.secret_flow) into the effective lane mode, mirroring
+    internal/gateway.secretFlowLaneMode."""
+    rollout = _cascade_lane(gc, "effects")
     if rollout == "off":
         return "off"
-    mode = (getattr(gc, "secret_flow", None).mode if getattr(gc, "secret_flow", None) else "shadow") or "shadow"
+    mode = _cascade_lane(gc, "secret_flow")
     if mode == "off":
         return "off"
     if mode == "on":
@@ -6686,9 +6692,10 @@ def secret_flow_group() -> None:
       set KEY VALUE    change one setting
       explain SESSION  why a hit fired in a session (paths redacted)
 
-    Rollout rides guardrail.effects_rules; this feature's own switch is
-    guardrail.secret_flow.mode. It ships in shadow (measured, never changes
-    the answer) until the real-trace alert rate is reviewed.
+    The lane switch is guardrail.cascade.lanes.secret_flow (off | shadow; the
+    lane also needs guardrail.cascade.lanes.effects not off). It ships in
+    shadow (measured, never changes the answer) until the real-trace alert
+    rate is reviewed.
     """
 
 
@@ -6721,9 +6728,9 @@ def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
     if as_json:
         click.echo(json.dumps({
             "version": 1,
-            "configured_mode": sf.mode,
+            "configured_mode": _cascade_lane(gc, "secret_flow"),
             "effective_mode": lane,
-            "effects_rules": getattr(gc, "effects_rules", ""),
+            "effects_lane": _cascade_lane(gc, "effects"),
             "label_sets": {
                 "credentials": sf.label_sets.credentials,
                 "extra_path_globs": list(sf.label_sets.extra_path_globs),
@@ -6732,7 +6739,6 @@ def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
             "sink_action": {
                 "default": sf.sink_action.default,
                 "strict": sf.sink_action.strict,
-                "managed": sf.sink_action.managed,
             },
             "reencodings": sf.reencodings,
             "memory": {
@@ -6746,10 +6752,10 @@ def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
 
     click.echo()
     click.echo(f"  {ux.bold('Secret flow tracking')}")
-    rollout = getattr(gc, "effects_rules", "") or ""
+    rollout = _cascade_lane(gc, "effects")
     click.echo(
-        f"  {ux.bold('mode:')} {ux.accent(sf.mode)}  "
-        f"{ux.dim('(effective: ' + lane + '; rollout guardrail.effects_rules=' + rollout + ')')}"
+        f"  {ux.bold('mode:')} {ux.accent(_cascade_lane(gc, 'secret_flow'))}  "
+        f"{ux.dim('(effective: ' + lane + '; guardrail.cascade.lanes.effects=' + rollout + ')')}"
     )
     sets = ["credentials" if sf.label_sets.credentials else ux.dim('credentials off')]
     if sf.label_sets.extra_path_globs:
@@ -6759,7 +6765,7 @@ def secret_flow_status_cmd(app: AppContext, as_json: bool = False) -> None:
     click.echo(f"  {ux.bold('label sets:')} {', '.join(sets)}")
     click.echo(
         f"  {ux.bold('sink action:')} default {sf.sink_action.default}, "
-        f"strict {sf.sink_action.strict}, managed {sf.sink_action.managed}"
+        f"strict {sf.sink_action.strict} {ux.dim('(a managed install follows its pack)')}"
     )
     click.echo(f"  {ux.bold('re-encodings:')} {'on' if sf.reencodings else 'off'}")
     click.echo(
@@ -6797,7 +6803,7 @@ def secret_flow_enable_cmd(app: AppContext) -> None:
     it enforce once you have reviewed the alert rate."""
     from defenseclaw import config_writer
 
-    _secret_flow_write(app, config_writer.Change("guardrail.secret_flow.mode", "shadow"),
+    _secret_flow_write(app, config_writer.Change("guardrail.cascade.lanes.secret_flow", "shadow"),
                         "guardrail secret-flow enable (mode=shadow)")
 
 
@@ -6807,7 +6813,7 @@ def secret_flow_disable_cmd(app: AppContext) -> None:
     """Turn Secret flow tracking off (no state kept, no cost)."""
     from defenseclaw import config_writer
 
-    _secret_flow_write(app, config_writer.Change("guardrail.secret_flow.mode", "off"),
+    _secret_flow_write(app, config_writer.Change("guardrail.cascade.lanes.secret_flow", "off"),
                         "guardrail secret-flow disable (mode=off)")
 
 
@@ -6820,17 +6826,16 @@ def secret_flow_set_cmd(app: AppContext, key: str, value: str) -> None:
 
     \b
     KEY is one of:
-      mode          off | shadow | on
+      mode          off | shadow   (guardrail.cascade.lanes.secret_flow)
       reencodings   true | false
       credentials   true | false   (the built-in credential label set)
       sink-strict   alert | block
-      sink-managed  alert | block
       max-paths     per-session labeled-path cap (integer)
       max-digests   per-session value-digest cap (integer)
       allowlist     comma-separated hosts that are not external (empty clears)
 
-    The default-profile sink action is fixed to alert (the default profile
-    never blocks) and is not settable here.
+    The default-pack sink action is fixed to alert (the default pack never
+    blocks) and is not settable here. A managed install follows its pack.
     """
     from defenseclaw import config_writer
 
@@ -6857,12 +6862,11 @@ def secret_flow_set_cmd(app: AppContext, key: str, value: str) -> None:
     elif key == "allowlist":
         hosts = [h.strip() for h in value.split(",") if h.strip()]
         change = config_writer.Change(dotted, hosts) if hosts else config_writer.Change(dotted, unset=True)
-    else:  # mode, sink-strict, sink-managed: closed enums
+    else:  # mode, sink-strict: closed enums
         v = value.strip()
         choices = {
-            "mode": ("off", "shadow", "on"),
+            "mode": ("off", "shadow"),
             "sink-strict": ("alert", "block"),
-            "sink-managed": ("alert", "block"),
         }[key]
         if v not in choices:
             ux.err(f"{key} takes one of {', '.join(choices)} (got {value!r}).", indent="  ")

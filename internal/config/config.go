@@ -1851,16 +1851,13 @@ type GuardrailConfig struct {
 	DetectionStrategyPrompt     string `mapstructure:"detection_strategy_prompt"     yaml:"detection_strategy_prompt,omitempty"`
 	DetectionStrategyCompletion string `mapstructure:"detection_strategy_completion" yaml:"detection_strategy_completion,omitempty"`
 	DetectionStrategyToolCall   string `mapstructure:"detection_strategy_tool_call"  yaml:"detection_strategy_tool_call,omitempty"`
-	// EffectsRules selects the effect-model rule lane: "off" (today's
-	// ActionFacts rules only), "shadow" (compute and log effect verdicts
-	// beside today's, never changing the answer) or "on" (effect verdicts
-	// decide). Ships "shadow"; the lead flips it to "on" once the corpus
-	// numbers hold.
-	EffectsRules string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
+	// Cascade holds the per-lane live/shadow switches (cascade.lanes.effects,
+	// cascade.lanes.secret_flow), see cascade_lanes.go.
+	Cascade CascadeConfig `mapstructure:"cascade" yaml:"cascade,omitempty"`
 	// EffectsRulesTier selects how far the effect lane may block: "restricted"
 	// (a listed command on an exact canonical known protected target) or
 	// "full" (any known mutation of a known protected target). Ships
-	// "restricted". It only matters while effects_rules is shadow or on.
+	// "restricted". It only matters while cascade.lanes.effects is shadow or on.
 	EffectsRulesTier string `mapstructure:"effects_rules_tier"            yaml:"effects_rules_tier,omitempty"`
 	JudgeSweep       bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
@@ -2001,9 +1998,9 @@ type GuardrailConfig struct {
 	Chains GuardrailChainsConfig `mapstructure:"chains" yaml:"chains,omitempty"`
 
 	// SecretFlow configures Secret flow tracking (secret_flow.go). Unset
-	// keeps the shipped defaults (shadow mode, credentials only, default
-	// alert / strict and managed block). The feature's rollout rides
-	// guardrail.effects_rules; these are its own settings.
+	// keeps the shipped defaults (credentials only; the sink action follows the
+	// pack: default alerts, strict blocks). Its live/shadow switch is
+	// cascade.lanes.secret_flow; these are its own settings.
 	SecretFlow SecretFlowConfig `mapstructure:"secret_flow" yaml:"secret_flow,omitempty"`
 
 	// profileConnectors is set only on a configuration DerivedForProfile
@@ -2380,6 +2377,9 @@ func (g *GuardrailConfig) Validate() error {
 		}
 	}
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
+		return err
+	}
+	if err := g.Cascade.Validate(); err != nil {
 		return err
 	}
 	if err := g.SecretFlow.Validate(); err != nil {
@@ -4158,14 +4158,13 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.judge.adjudication_timeout", 5.0)
 	viper.SetDefault("guardrail.detection_strategy", "regex_judge")
 	viper.SetDefault("guardrail.detection_strategy_completion", "regex_only")
-	viper.SetDefault("guardrail.effects_rules", "shadow")
+	viper.SetDefault("guardrail.cascade.lanes.effects", "shadow")
+	viper.SetDefault("guardrail.cascade.lanes.secret_flow", "shadow")
 	viper.SetDefault("guardrail.effects_rules_tier", "restricted")
-	viper.SetDefault("guardrail.secret_flow.mode", "shadow")
 	viper.SetDefault("guardrail.secret_flow.label_sets.credentials", true)
 	viper.SetDefault("guardrail.secret_flow.reencodings", true)
 	viper.SetDefault("guardrail.secret_flow.sink_action.default", "alert")
 	viper.SetDefault("guardrail.secret_flow.sink_action.strict", "block")
-	viper.SetDefault("guardrail.secret_flow.sink_action.managed", "block")
 	viper.SetDefault("guardrail.secret_flow.memory.max_labeled_paths", 512)
 	viper.SetDefault("guardrail.secret_flow.memory.max_value_digests", 256)
 	// judge_sweep runs the full LLM judge on content the regex

@@ -29,13 +29,13 @@ func shadowLiveRequest(command string) trustedActionRequest {
 	}
 }
 
-// useEffectsRulesMode publishes a generation with guardrail.effects_rules set
+// useEffectsRulesMode publishes a generation with guardrail.cascade.lanes.effects set
 // and a lexical link resolver, and restores both when the test ends.
 func useEffectsRulesMode(t *testing.T, mode string) {
 	t.Helper()
 	previous := liveGeneration.Load()
 	cfg := &config.Config{}
-	cfg.Guardrail.EffectsRules = mode
+	cfg.Guardrail.Cascade.Lanes.Effects = mode
 	cfg.Guardrail.EffectsRulesTier = string(tierRestricted)
 	liveGeneration.Store(&Generation{Config: cfg})
 	prevResolver := effectResolverOverride
@@ -85,7 +85,7 @@ func TestEffectShadowLiveRecordsAndIsVerdictNeutral(t *testing.T) {
 	useEffectsRulesMode(t, "off")
 	offFindings, offRecs := dispatchShadowLive(t, shadowLiveWrite, 0)
 	if len(offRecs) != 0 {
-		t.Fatalf("effects_rules=off recorded %d shadow runs, want 0", len(offRecs))
+		t.Fatalf("cascade.lanes.effects=off recorded %d shadow runs, want 0", len(offRecs))
 	}
 
 	useEffectsRulesMode(t, "shadow")

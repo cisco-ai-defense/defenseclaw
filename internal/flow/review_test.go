@@ -49,7 +49,7 @@ func TestValueLaneSinks(t *testing.T) {
 	for _, strict := range []bool{false, true} {
 		for _, tc := range cases {
 			cfg := testConfig()
-			cfg.StrictOrManaged = strict
+			cfg.Strict = strict
 			s := NewState(0, 0)
 			s.AddResultValues([]byte("AWS_SECRET_ACCESS_KEY="+secret+"\n"), "env", cfg)
 			r := stepCmd(s, tc.cmd, cfg)
@@ -113,7 +113,7 @@ func TestFalseHitExclusions(t *testing.T) {
 	for _, cmd := range benign {
 		for _, strict := range []bool{false, true} {
 			c := cfg
-			c.StrictOrManaged = strict
+			c.Strict = strict
 			if r := stepCmd(NewState(0, 0), cmd, c); len(r.Hits) != 0 {
 				t.Errorf("strict=%v %q false hit: %v", strict, cmd, hitKinds(r))
 			}

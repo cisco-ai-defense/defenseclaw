@@ -133,7 +133,7 @@ type S7Det struct {
 	Eligible   bool        `json:"eligible"`
 	Findings   []S7Finding `json:"findings,omitempty"`
 	IssueCodes []string    `json:"issues,omitempty"`
-	// Effect is the effect-model rule lane verdict (guardrail.effects_rules
+	// Effect is the effect-model rule lane verdict (guardrail.cascade.lanes.effects
 	// shadow or on), computed beside today's answer for the disagreement
 	// measurement. Nil when the lane is off.
 	Effect     *EffectShadowResult `json:"effect,omitempty"`

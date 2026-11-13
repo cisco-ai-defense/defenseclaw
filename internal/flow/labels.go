@@ -85,17 +85,12 @@ type Config struct {
 	// DestinationAllowlist holds hosts/host-suffixes that do not count as
 	// external sinks (your own git remote, a package registry).
 	DestinationAllowlist []string
-	// SinkDefault/SinkStrict/SinkManaged are the action per mode. Default is
-	// validated to never be block.
+	// SinkDefault/SinkStrict are the action per pack. Default is validated to
+	// never be block. A managed install follows its pack.
 	SinkDefault Action
 	SinkStrict  Action
-	SinkManaged Action
-	// StrictOrManaged is set by the caller for the strict profile and every
-	// managed install (they fail closed).
-	StrictOrManaged bool
-	// Managed is set for a managed install (reserved for internal labels from
-	// identity groups; not built yet).
-	Managed bool
+	// Strict is set by the caller for the strict pack.
+	Strict bool
 	// Home is the resolved user home, for the built-in credential set.
 	Home string
 	// Flavor selects path rules for the built-in set.
@@ -238,19 +233,16 @@ func (cfg Config) isAllowlistedHost(rawHost string) bool {
 }
 
 // action maps the hits to the action the active mode would take. Default never
-// blocks: SinkDefault is validated to alert. The caller passes StrictOrManaged.
+// blocks: SinkDefault is validated to alert. The caller passes Strict.
 func (cfg Config) action(hits []Hit) Action {
 	if len(hits) == 0 {
 		return ActionAllow
 	}
 	// A session-context-only hit never fires in default (brief step 3).
-	if !cfg.StrictOrManaged && onlySessionContext(hits) {
+	if !cfg.Strict && onlySessionContext(hits) {
 		return ActionAllow
 	}
-	if cfg.StrictOrManaged {
-		if cfg.Managed {
-			return cfg.SinkManaged
-		}
+	if cfg.Strict {
 		return cfg.SinkStrict
 	}
 	return cfg.SinkDefault

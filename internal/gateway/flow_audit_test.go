@@ -33,7 +33,7 @@ func TestSecretFlowShadowHitsReachTheAuditLog(t *testing.T) {
 			withSecretFlowGeneration(t, "shadow", "shadow")
 			store, logger := testStoreAndV8Logger(t)
 			cfg := config.DefaultConfig()
-			cfg.Guardrail.EffectsRules, cfg.Guardrail.SecretFlow.Mode = "shadow", "shadow"
+			cfg.Guardrail.Cascade.Lanes.Effects, cfg.Guardrail.Cascade.Lanes.SecretFlow = "shadow", "shadow"
 			_ = NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 			t.Cleanup(func() { SetSecretFlowAuditSink(nil) })
 

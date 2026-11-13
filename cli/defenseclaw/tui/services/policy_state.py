@@ -780,9 +780,9 @@ def chain_domain_label(domain: str) -> str:
 
 
 def secret_flow_effective_mode(effects_rules: str, mode: str) -> str:
-    """Fold the rollout key (guardrail.effects_rules) and the feature switch
-    (guardrail.secret_flow.mode) into the effective mode, mirroring
-    internal/gateway.secretFlowLaneMode."""
+    """Fold the effects lane (guardrail.cascade.lanes.effects) and the feature
+    switch (guardrail.cascade.lanes.secret_flow) into the effective mode,
+    mirroring internal/gateway.secretFlowLaneMode."""
     rollout = (effects_rules or "shadow")
     if rollout == "off":
         return "off"
@@ -964,16 +964,18 @@ class PoliciesPanelModel:
             label = getattr(sf, "label_sets", None)
             sink = getattr(sf, "sink_action", None)
             mem = getattr(sf, "memory", None)
+            lanes = getattr(getattr(guardrail, "cascade", None), "lanes", None)
+            effects_lane = getattr(lanes, "effects", "shadow") or "shadow"
+            flow_lane = getattr(lanes, "secret_flow", "shadow") or "shadow"
             self.secret_flow_cfg = {
-                "mode": getattr(sf, "mode", "shadow"),
-                "effective": secret_flow_effective_mode(getattr(guardrail, "effects_rules", "shadow"), getattr(sf, "mode", "shadow")),
-                "effects_rules": getattr(guardrail, "effects_rules", "shadow"),
+                "mode": flow_lane,
+                "effective": secret_flow_effective_mode(effects_lane, flow_lane),
+                "effects_lane": effects_lane,
                 "credentials": bool(getattr(label, "credentials", True)) if label is not None else True,
                 "extra_path_globs": list(getattr(label, "extra_path_globs", []) or []) if label is not None else [],
                 "extra_secret_patterns": list(getattr(label, "extra_secret_patterns", []) or []) if label is not None else [],
                 "sink_default": getattr(sink, "default", "alert") if sink is not None else "alert",
                 "sink_strict": getattr(sink, "strict", "block") if sink is not None else "block",
-                "sink_managed": getattr(sink, "managed", "block") if sink is not None else "block",
                 "reencodings": bool(getattr(sf, "reencodings", True)),
                 "max_labeled_paths": getattr(mem, "max_labeled_paths", 512) if mem is not None else 512,
                 "max_value_digests": getattr(mem, "max_value_digests", 256) if mem is not None else 256,
@@ -1059,7 +1061,7 @@ class PoliciesPanelModel:
         rows = [
             ("mode", f"{cfg.get('mode', 'shadow')} (effective {cfg.get('effective', 'shadow')})"),
             ("label sets", ", ".join(label_sets)),
-            ("sink action", f"default {cfg.get('sink_default')}, strict {cfg.get('sink_strict')}, managed {cfg.get('sink_managed')}"),
+            ("sink action", f"default {cfg.get('sink_default')}, strict {cfg.get('sink_strict')} (managed follows the pack)"),
             ("re-encodings", "on" if cfg.get("reencodings") else "off"),
             ("memory", f"{cfg.get('max_labeled_paths')} paths / {cfg.get('max_value_digests')} digests"),
             ("allowlist", allow),

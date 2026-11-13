@@ -228,7 +228,7 @@ type trustedActionRequest struct {
 	record          func(actionfacts.Facts, []RuleFinding)
 	recordTelemetry func(trustedActionTelemetry)
 	// recordEffectShadow receives the answer of the live shadow run of the
-	// effect lane (guardrail.effects_rules=shadow). Only the hook route sets it;
+	// effect lane (guardrail.cascade.lanes.effects=shadow). Only the hook route sets it;
 	// the dispatch takes it once, at the outermost call, and clears it so a
 	// twin or child request never runs the lane again.
 	recordEffectShadow func(EffectShadowResult)

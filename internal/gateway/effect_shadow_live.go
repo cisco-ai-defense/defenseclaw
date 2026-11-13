@@ -19,7 +19,7 @@ import (
 
 // The live shadow run of the effect-model rule lane (S7, GAP-0256).
 //
-// guardrail.effects_rules=shadow computes the effect lane beside today's rules
+// guardrail.cascade.lanes.effects=shadow computes the effect lane beside today's rules
 // on every outermost trusted-action dispatch of a hook call and writes what it
 // would have done, and never changes the answer:
 //

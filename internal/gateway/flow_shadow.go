@@ -25,8 +25,8 @@ import (
 // The Secret flow tracking lane (S7, 1.0.10). It runs the pure effect
 // extractor (internal/effects) and the flow step (internal/flow) over a small
 // bounded per-session state, beside today's rules. Its rollout rides the
-// shared guardrail.effects_rules lane (off disables it entirely, no cost);
-// guardrail.secret_flow.mode is the feature's own switch (off, shadow, on).
+// shared guardrail.cascade.lanes.effects lane (off disables it entirely, no cost);
+// guardrail.cascade.lanes.secret_flow is the feature's own switch (off, shadow).
 // The lane ships shadow: it computes and records a verdict without changing the
 // answer. In on, the verdict participates.
 //
@@ -326,7 +326,6 @@ func secretFlowConfig(ctx context.Context, request trustedActionRequest) (flow.C
 	case actionfacts.DialectPowerShell, actionfacts.DialectCMD:
 		flavor = effects.FlavorWindows
 	}
-	strictOrManaged := request.StrictPolicy || request.ManagedInstall
 	cfg := flow.Config{
 		Credentials:          sf.CredentialsEnabled(),
 		ExtraPathGlobs:       sf.LabelSets.ExtraPathGlobs,
@@ -335,27 +334,26 @@ func secretFlowConfig(ctx context.Context, request trustedActionRequest) (flow.C
 		MaxLabeledPaths:      sf.Memory.MaxLabeledPaths,
 		MaxValueDigests:      sf.Memory.MaxValueDigests,
 		DestinationAllowlist: sf.DestinationAllowlist,
-		SinkDefault:          flow.Action(sf.SinkActionFor(false, false)),
-		SinkStrict:           flow.Action(sf.SinkActionFor(true, false)),
-		SinkManaged:          flow.Action(sf.SinkActionFor(false, true)),
-		StrictOrManaged:      strictOrManaged,
-		Managed:              request.ManagedInstall,
+		SinkDefault:          flow.Action(sf.SinkActionFor(false)),
+		SinkStrict:           flow.Action(sf.SinkActionFor(true)),
+		Strict:               request.StrictPolicy,
 		Home:                 request.Input.ActiveHome,
 		Flavor:               flavor,
 	}
 	return cfg, mode, true
 }
 
-// secretFlowLaneMode folds the rollout key (guardrail.effects_rules) and the
-// feature switch (guardrail.secret_flow.mode) into one effective mode. The
+// secretFlowLaneMode folds the effects lane (guardrail.cascade.lanes.effects)
+// and the feature switch (guardrail.cascade.lanes.secret_flow) into one
+// effective mode. The
 // lane runs only when the effect lane is enabled; the verdict participates
 // only when both are on.
 func secretFlowLaneMode(g config.GuardrailConfig) flowLaneMode {
-	rollout := g.EffectsRules
+	rollout := g.Cascade.Lanes.EffectsMode()
 	if rollout == "off" {
 		return flowLaneOff
 	}
-	switch g.SecretFlow.Mode {
+	switch g.Cascade.Lanes.SecretFlowMode() {
 	case "off":
 		return flowLaneOff
 	case "on":
@@ -519,13 +517,12 @@ func (a *APIServer) handleSecretFlow(w http.ResponseWriter, r *http.Request) {
 	if live := a.runtimeConfigSnapshot(); live != nil {
 		sf := live.Guardrail.SecretFlow
 		resp["mode"] = string(secretFlowLaneMode(live.Guardrail))
-		resp["configured_mode"] = sf.Mode
-		resp["effects_rules"] = live.Guardrail.EffectsRules
+		resp["configured_mode"] = live.Guardrail.Cascade.Lanes.SecretFlowMode()
+		resp["effects_lane"] = live.Guardrail.Cascade.Lanes.EffectsMode()
 		resp["credentials"] = sf.CredentialsEnabled()
 		resp["reencodings"] = sf.Reencodings
-		resp["sink_default"] = sf.SinkActionFor(false, false)
-		resp["sink_strict"] = sf.SinkActionFor(true, false)
-		resp["sink_managed"] = sf.SinkActionFor(false, true)
+		resp["sink_default"] = sf.SinkActionFor(false)
+		resp["sink_strict"] = sf.SinkActionFor(true)
 		resp["extra_path_globs"] = sf.LabelSets.ExtraPathGlobs
 		resp["extra_secret_patterns"] = sf.LabelSets.ExtraSecretPatterns
 		resp["destination_allowlist"] = sf.DestinationAllowlist

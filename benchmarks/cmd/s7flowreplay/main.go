@@ -16,7 +16,7 @@
 //
 // Usage:
 //
-//	s7flowreplay -corpus <file.jsonl> [-mode default|strict|managed] [-examples 8] [-json]
+//	s7flowreplay -corpus <file.jsonl> [-mode default|strict] [-examples 8] [-json]
 package main
 
 import (
@@ -107,7 +107,7 @@ func buildCall(c call) (effects.Call, effects.Options, bool) {
 
 func main() {
 	corpus := flag.String("corpus", "", "case-v1 jsonl corpus")
-	modeName := flag.String("mode", "default", "default|strict|managed")
+	modeName := flag.String("mode", "default", "default|strict (the pack; a managed install follows its pack)")
 	examples := flag.Int("examples", 8, "redacted examples to print per hit kind")
 	asJSON := flag.Bool("json", false, "print the report as JSON")
 	explainCtx := flag.Int("explain-ctx", 0, "print up to N session_context hits with the sink effect's data shape (no paths or values)")
@@ -127,15 +127,12 @@ func main() {
 		MaxLabeledPaths:      sf.Memory.MaxLabeledPaths,
 		MaxValueDigests:      sf.Memory.MaxValueDigests,
 		DestinationAllowlist: sf.DestinationAllowlist,
-		SinkDefault:          flow.Action(sf.SinkActionFor(false, false)),
-		SinkStrict:           flow.Action(sf.SinkActionFor(true, false)),
-		SinkManaged:          flow.Action(sf.SinkActionFor(false, true)),
+		SinkDefault:          flow.Action(sf.SinkActionFor(false)),
+		SinkStrict:           flow.Action(sf.SinkActionFor(true)),
 	}
 	switch *modeName {
 	case "strict":
-		cfg.StrictOrManaged = true
-	case "managed":
-		cfg.StrictOrManaged, cfg.Managed = true, true
+		cfg.Strict = true
 	}
 
 	f, err := os.Open(*corpus)

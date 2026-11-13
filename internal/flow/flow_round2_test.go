@@ -27,7 +27,7 @@ func r2Seed(cfg Config) *State {
 
 func r2Strict() Config {
 	cfg := testConfig()
-	cfg.StrictOrManaged = true
+	cfg.Strict = true
 	return cfg
 }
 
@@ -45,7 +45,7 @@ func TestR2OneCallExfilDataLinked(t *testing.T) {
 	} {
 		for _, strict := range []bool{false, true} {
 			cfg := testConfig()
-			cfg.StrictOrManaged = strict
+			cfg.Strict = strict
 			r := stepCmd(NewState(0, 0), c.cmd, cfg)
 			if !hasHit(r, HitLabeledFile) {
 				t.Errorf("%s strict=%v: no labeled_file hit, got %v", c.name, strict, hitKinds(r))
@@ -116,7 +116,7 @@ func TestR2TokenizerCarriers(t *testing.T) {
 	} {
 		for _, strict := range []bool{false, true} {
 			c2 := cfg
-			c2.StrictOrManaged = strict
+			c2.Strict = strict
 			s := r2Seed(c2)
 			r := stepCmd(s, c.cmd, c2)
 			if !hasHit(r, HitValueMatch) {

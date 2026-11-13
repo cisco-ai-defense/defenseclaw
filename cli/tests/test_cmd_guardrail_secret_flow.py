@@ -70,19 +70,19 @@ def test_status_json(app):
 def test_enable_sets_shadow(app, captured_writes):
     res = _run(app, ["secret-flow", "enable"])
     assert res.exit_code == 0, res.output
-    assert any(c.path == "guardrail.secret_flow.mode" and c.value == "shadow" for c in captured_writes)
+    assert any(c.path == "guardrail.cascade.lanes.secret_flow" and c.value == "shadow" for c in captured_writes)
 
 
 def test_disable_sets_off(app, captured_writes):
     res = _run(app, ["secret-flow", "disable"])
     assert res.exit_code == 0, res.output
-    assert any(c.path == "guardrail.secret_flow.mode" and c.value == "off" for c in captured_writes)
+    assert any(c.path == "guardrail.cascade.lanes.secret_flow" and c.value == "off" for c in captured_writes)
 
 
 @pytest.mark.parametrize(
     "key,value,path,want",
     [
-        ("mode", "on", "guardrail.secret_flow.mode", "on"),
+        ("mode", "off", "guardrail.cascade.lanes.secret_flow", "off"),
         ("reencodings", "false", "guardrail.secret_flow.reencodings", False),
         ("credentials", "true", "guardrail.secret_flow.label_sets.credentials", True),
         ("sink-strict", "alert", "guardrail.secret_flow.sink_action.strict", "alert"),
@@ -111,6 +111,8 @@ def test_set_allowlist_and_clear(app, captured_writes):
     "args",
     [
         ["secret-flow", "set", "mode", "bogus"],
+        ["secret-flow", "set", "mode", "on"],
+        ["secret-flow", "set", "sink-managed", "block"],
         ["secret-flow", "set", "sink-strict", "warn"],
         ["secret-flow", "set", "reencodings", "maybe"],
         ["secret-flow", "set", "max-paths", "lots"],

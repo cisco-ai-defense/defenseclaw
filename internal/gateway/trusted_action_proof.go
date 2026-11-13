@@ -39,7 +39,7 @@ const (
 	// in shadow it rides along detection-only.
 	findingProofEffect
 	// findingProofFlow is the Secret flow tracking lane. It is authoritative
-	// only when secret_flow.mode is ON; in shadow it rides along
+	// only when cascade.lanes.secret_flow is ON; in shadow it rides along
 	// detection-only.
 	findingProofFlow
 )

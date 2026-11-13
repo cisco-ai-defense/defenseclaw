@@ -74,7 +74,7 @@ type DeterministicActionEvaluation struct {
 	ValueJoinDigests    [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	CELEvaluationStatus string
 	// EffectShadow is the effect-model rule lane verdict for this call,
-	// computed beside today's when guardrail.effects_rules is shadow or on.
+	// computed beside today's when guardrail.cascade.lanes.effects is shadow or on.
 	// It never changes result.Action in shadow; it is the measurement the
 	// benchmark diffs against today's answer. EffectShadow is the restricted
 	// tier; EffectShadowFull is the full tier, so one run compares both.
