@@ -26,6 +26,16 @@ import (
 
 const correlationReceiptTTL = 7 * 24 * time.Hour
 
+// correlationSettledReceiptTTL is how long the receipt of a PreToolUse
+// still suppresses a replay of it once its PostToolUse settled the call
+// (audit SettleReceipt). A replay suppressed in that time is not a second
+// decision of the call: no second pending operation or chain pending action,
+// audit row or chain step. The hour is twice the longest tool chain window
+// (guardrail.ToolChainMaxHorizon), so a replay that comes later can no
+// longer join the steps of the call it repeats; it is recorded again, as
+// one past correlationReceiptTTL always was (S8 R5).
+const correlationSettledReceiptTTL = time.Hour
+
 // correlateHookOccurrence is the hook-side occurrence transaction boundary.
 // Policy evaluation still runs for an exact transport replay, but the replay
 // receipt suppresses duplicate telemetry/audit emission after incrementing its
@@ -426,7 +436,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	exactIdentityClaims := []audit.CorrelationExactIdentityClaim(nil)
 	// A claim waits for the same provider ID on the native rail. A per-user
 	// hook has no native counterpart (nativePerUserHookOnly), so its claims
-	// were never paired and only took bytes (S8 R5).
+	// were never paired and only took bytes (S8 R5). What that gives up, on
+	// a per-user host only: a native exporter wired there by hand is never
+	// merged with the hook it mirrors (no same_as, no shared logical event)
+	// when the hook comes first, the usual order; and every PostToolUse
+	// delivered again (Claude Code sends no source event ID, so it has no
+	// receipt) is its own logical event instead of joining the first by its
+	// tool ID claim.
 	if hasLifecycle && !match.Conflict && !nativePerUserHookOnly {
 		exactIdentityClaims = correlationExactIdentityClaims(
 			spec, instance.ConnectorInstanceID, audit.CorrelationRailHook, lifecycle, allValues,
@@ -569,11 +585,16 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 			!errors.Is(resolveErr, audit.ErrCorrelationNotFound) {
 			return ctx, req, resolveErr
 		}
-		// The end settled the call it resolved: the start's replay receipt
-		// has done its job (DeleteSettledReceipts).
+		// The end settled the call it resolved: its start's own hook receipt
+		// (the key the PreToolUse claimed) expires soon (SettleReceipt).
 		if resolveErr == nil && settledStart != "" {
-			if err := tx.DeleteSettledReceipts(ctx, settledStart); err != nil {
-				return ctx, req, err
+			if startReceipt := correlationReceiptForHook(spec, instance.ConnectorInstanceID,
+				hookReceiptCaller(ctx), reviewedHookToolRetryDigest(spec, instance.ConnectorInstanceID, req,
+					connector.CorrelationLifecycleToolStart), fingerprintHex, now); startReceipt != nil {
+				if err := tx.SettleReceipt(ctx, instance.ConnectorInstanceID, startReceipt.SourceKeyDigest,
+					settledStart, now.Add(correlationSettledReceiptTTL)); err != nil {
+					return ctx, req, err
+				}
 			}
 		}
 	}

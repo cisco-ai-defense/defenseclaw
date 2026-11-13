@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"database/sql"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -22,12 +23,14 @@ import (
 // PreToolUse and its PostToolUse are two decisions. At fd29bfa7d3 a decision
 // left 8.8 KB. S8 R5 removed the indexes no query uses, the identifiers and
 // cross-rail claims no reader uses, the stored copy of the evidence every
-// semantic-event edge implies, the resolved pending operation and the
-// settled call's replay receipt: 5.5 KB is left. More than half of it is
-// the call's correlation observations (5 rows per decision, with 9
-// indexes), which R5 does not change; the rest is the events, the
-// session identifier, and the edges with their keys.
-const correlationGraphBudgetPerDecision = 5700
+// semantic-event edge implies and the resolved pending operation: 5.7 KB is
+// left. Half of it is the call's correlation observations (5 rows per
+// decision, with 9 indexes), which R5 does not change; the rest is the
+// events, the session identifier, the edges with their keys, and the
+// start's replay receipt, which the settle cuts to an hour
+// (correlationSettledReceiptTTL) but which is still there when this test
+// measures.
+const correlationGraphBudgetPerDecision = 6000
 
 // correlationGraphBytes is the page bytes of the correlation graph tables
 // and their indexes in the store at path, by name.
@@ -62,6 +65,29 @@ func correlationGraphBytes(t *testing.T, path string) map[string]int64 {
 	return result
 }
 
+// settledCorrelationGraphBytes is correlationGraphBytes once every receipt
+// mark has landed (they may finish after the answer,
+// hookReceiptFollowUpWait) and two reads 100 ms apart agree, so a slow
+// runner measures the same writes as a fast one.
+func settledCorrelationGraphBytes(t *testing.T, path string) map[string]int64 {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	previous := correlationGraphBytes(t, path)
+	for {
+		time.Sleep(100 * time.Millisecond)
+		current := correlationGraphBytes(t, path)
+		unaccepted := countCorrelationRowsForTest(t, path,
+			`SELECT COUNT(*) FROM correlation_receipts WHERE accepted_time_unix_nano IS NULL`)
+		if unaccepted == 0 && maps.Equal(previous, current) {
+			return current
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the correlation graph did not settle in 30 s (%d receipts unaccepted)", unaccepted)
+		}
+		previous = current
+	}
+}
+
 // TestClaudeCodeSettledToolCallCorrelationGraphBudget sends benign
 // PreToolUse and PostToolUse pairs through the real per-user Claude Code hook
 // handler and store, and holds the correlation graph bytes each decision of
@@ -91,16 +117,13 @@ func TestClaudeCodeSettledToolCallCorrelationGraphBudget(t *testing.T) {
 		send("PreToolUse", index)
 		send("PostToolUse", index)
 	}
-	// A receipt mark may finish after the answer (hookReceiptFollowUpWait).
-	time.Sleep(time.Second)
-	before := correlationGraphBytes(t, fixture.path)
+	before := settledCorrelationGraphBytes(t, fixture.path)
 	const measured = 200
 	for index := 100; index < 100+measured; index++ {
 		send("PreToolUse", index)
 		send("PostToolUse", index)
 	}
-	time.Sleep(time.Second)
-	after := correlationGraphBytes(t, fixture.path)
+	after := settledCorrelationGraphBytes(t, fixture.path)
 	names := make([]string, 0, len(after))
 	var total int64
 	for name, size := range after {
