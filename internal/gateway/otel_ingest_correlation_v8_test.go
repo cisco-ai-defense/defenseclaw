@@ -366,6 +366,7 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 	hook := correlateCodexToolStartWithoutNativeID(
 		t, t.Context(), api, "conversation-native-tool-1", "unique",
 	)
+	requireActivePendingStartForTest(t, fixture.path, hook.SemanticEventID, 1)
 	accounting, err := api.importDecodedOTLPRequestV8(
 		t.Context(), codexCorrelationToolRequest(now, ""),
 		otelSignalTraces, "codex", now,
@@ -399,18 +400,12 @@ func TestNativeOTLPIDlessToolLinksUniquePendingWithoutCollapse(t *testing.T) {
 		WHERE relationship_type='same_as'`).Scan(&sameAs); err != nil {
 		t.Fatal(err)
 	}
-	// The native end resolved the hook's pending start, which deletes it
-	// (S8 R5).
-	var pendingLeft int
-	if err := database.QueryRow(`SELECT COUNT(*)
-		FROM correlation_pending_operations WHERE operation_id=?`,
-		hook.ToolInvocationID).Scan(&pendingLeft); err != nil {
-		t.Fatal(err)
+	if causedBy != 1 || sameAs != 0 {
+		t.Fatalf("derived join caused_by=%d same_as=%d native=%q", causedBy, sameAs, nativeSemantic)
 	}
-	if causedBy != 1 || sameAs != 0 || pendingLeft != 0 {
-		t.Fatalf("derived join caused_by=%d same_as=%d pending left=%d native=%q",
-			causedBy, sameAs, pendingLeft, nativeSemantic)
-	}
+	// The native end that joined the start (caused_by) resolved its
+	// operation: only a successful resolve deletes the row (S8 R5).
+	requireActivePendingStartForTest(t, fixture.path, hook.SemanticEventID, 0)
 }
 
 func TestNativeOTLPIDlessToolAmbiguityRemainsUnresolved(t *testing.T) {
