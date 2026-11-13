@@ -58,10 +58,9 @@ type SubstrateCreate struct {
 	Template  string `json:"template"`
 	Connector string `json:"connector,omitempty"`
 	// Name is the actor name; empty lets the gateway choose one.
-	Name      string             `json:"name,omitempty"`
-	Workspace SubstrateWorkspace `json:"workspace,omitzero"`
-	Task      string             `json:"task,omitempty"`
-	BatchID   string             `json:"batch_id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Task    string `json:"task,omitempty"`
+	BatchID string `json:"batch_id,omitempty"`
 	// Unattended is a --task or --batch run (fail closed, D8).
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
@@ -73,15 +72,6 @@ type SubstrateCreate struct {
 	// SandboxClass is filled by the gateway from the profile (never from
 	// the request): the class the actor must run in (PLAN 7.3).
 	SandboxClass string `json:"-"`
-}
-
-// SubstrateWorkspace is what the actor starts with.
-type SubstrateWorkspace struct {
-	// UploadID names a workspace archive the launcher uploaded.
-	UploadID string `json:"upload_id,omitempty"`
-	// Clone is a repository URL to clone at first resume.
-	Clone string `json:"clone,omitempty"`
-	Ref   string `json:"ref,omitempty"`
 }
 
 // SubstrateCreated is the actor the control API created, suspended.

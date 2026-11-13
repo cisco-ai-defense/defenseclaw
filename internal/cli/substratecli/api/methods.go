@@ -78,24 +78,16 @@ func (s Secret) shown() Secret {
 	return s
 }
 
-// Workspace is what an actor starts with.
-type Workspace struct {
-	UploadID string `json:"upload_id,omitempty"`
-	Clone    string `json:"clone,omitempty"`
-	Ref      string `json:"ref,omitempty"`
-}
-
 // CreateRequest is POST /actors.
 type CreateRequest struct {
-	Profile    string    `json:"profile"`
-	Template   string    `json:"template"`
-	Connector  string    `json:"connector,omitempty"`
-	Name       string    `json:"name,omitempty"`
-	Workspace  Workspace `json:"workspace,omitzero"`
-	Task       string    `json:"task,omitempty"`
-	BatchID    string    `json:"batch_id,omitempty"`
-	Unattended bool      `json:"unattended,omitempty"`
-	Secrets    []string  `json:"secrets,omitempty"`
+	Profile    string   `json:"profile"`
+	Template   string   `json:"template"`
+	Connector  string   `json:"connector,omitempty"`
+	Name       string   `json:"name,omitempty"`
+	Task       string   `json:"task,omitempty"`
+	BatchID    string   `json:"batch_id,omitempty"`
+	Unattended bool     `json:"unattended,omitempty"`
+	Secrets    []string `json:"secrets,omitempty"`
 }
 
 // ListOptions filters ListActors.

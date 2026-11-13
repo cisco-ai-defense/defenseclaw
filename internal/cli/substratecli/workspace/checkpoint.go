@@ -148,6 +148,9 @@ func recordedState(dataDir, name string) (string, error) {
 	if dataDir == "" || name == "" {
 		return "", nil
 	}
+	if hr, err := loadHostRecord(dataDir, name); err == nil {
+		return hr.StateDir, nil
+	}
 	rec, err := osw.LoadCopy(dataDir, name)
 	if err != nil {
 		if errors.Is(err, osw.ErrCopyNotFound) {
