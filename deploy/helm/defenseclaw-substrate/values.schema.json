@@ -152,6 +152,35 @@
             "minimum": 1,
             "maximum": 65535
           }
+        },
+        "router": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "address": {
+              "type": "string",
+              "pattern": "^$|^[A-Za-z0-9.-]+:[0-9]{1,5}$"
+            },
+            "serverName": {
+              "type": "string"
+            },
+            "caFile": {
+              "type": "string"
+            },
+            "podPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "relayPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          }
         }
       }
     },

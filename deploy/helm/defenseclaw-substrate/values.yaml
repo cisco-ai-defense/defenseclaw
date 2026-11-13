@@ -27,6 +27,23 @@ substrate:
   # v1.0.0: ate-api-server 443 and 8445, ate-idp-server 8443). The egress
   # NetworkPolicies match pod ports, not Service ports.
   podPorts: [443, 8443, 8445]
+  # The atenet router's CONNECT-TLS listener, through which the gateway's
+  # attach route reaches an actor's relay for launchers (run, connect,
+  # pull, logs; GAP-0157). The gateway presents its pod identity; the router
+  # admits it only when its SPIFFE ID is in Substrate's cluster-global
+  # ingressAllowedSPIFFEIDs (`defenseclaw substrate setup` adds it; `substrate
+  # admin doctor` checks it). address empty: atenet-router.<namespace>.svc:8444.
+  # serverName empty: the address host. caFile: the servicedns trust bundle
+  # the gateway pod mounts. podPort is the router's container port, for the
+  # gateway's egress NetworkPolicy. enabled false turns attach off.
+  router:
+    enabled: true
+    address: ""
+    serverName: ""
+    caFile: /run/servicedns.podcert.ate.dev/trust-bundle.pem
+    podPort: 8444
+    # The relay port inside the actor (the kit's relay).
+    relayPort: 8080
   # The upstream Kubernetes credential provider. The bootstrap Job grants the
   # launcher atespaces the secrets namespace below in its namespace policy,
   # and the pre-delete Job removes the grant.

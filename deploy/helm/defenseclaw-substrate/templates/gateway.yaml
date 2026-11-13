@@ -60,6 +60,9 @@ spec:
         - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
         - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
         - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
+        {{- with include "dc.routerFlags" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
         env:

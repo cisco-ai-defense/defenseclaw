@@ -56,6 +56,12 @@ Every value is checked by `values.schema.json`. The main ones:
 | `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
 | `controller.templateAnchorsSecret` | `defenseclaw-template-anchors` | admin-only Secret (key `anchors.pem`) with the template signing keys; without it every template is refused |
 | `substrate.podPorts` | `[443, 8443, 8445]` | container ports of the Substrate pods DefenseClaw calls (ate-api-server, the idp JWKS); NetworkPolicies match pod ports, so change them when a Substrate release moves a port |
+| `substrate.router.enabled` | `true` | the gateway's attach route (run, connect, pull, logs, checkpoint) reaches actor relays through the atenet router; needs `podCertificates.enabled`. The router admits the gateway only when its SPIFFE ID is in Substrate's cluster-global `ingressAllowedSPIFFEIDs`: `defenseclaw substrate setup` adds it, `defenseclaw substrate admin doctor` checks it |
+| `substrate.router.address` | `""` | router CONNECT-TLS `host:port`; empty is `atenet-router.<substrate.namespace>.svc:8444` |
+| `substrate.router.serverName` | `""` | TLS name of the router certificate; empty is the address host |
+| `substrate.router.caFile` | `/run/servicedns.podcert.ate.dev/trust-bundle.pem` | trust bundle for the router certificate (the servicedns bundle the gateway pod mounts) |
+| `substrate.router.podPort` | `8444` | the router's container port, opened in the gateway's egress NetworkPolicy |
+| `substrate.router.relayPort` | `8080` | the relay port inside the actor |
 | `networkPolicy.egress.*` | on, OTLP 4317/4318 | egress limits for the gateway, leader and callout (DNS, Kubernetes and Substrate APIs, the release, OTLP; providers on 443 for gateway and leader) |
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |

@@ -67,6 +67,8 @@ spec:
     - {protocol: TCP, port: 443}
     - {protocol: TCP, port: 8443}
     - {protocol: TCP, port: 8445}
+    # The router's CONNECT-TLS listener (attach, GAP-0157).
+    - {protocol: TCP, port: 8444}
   # Model providers (/llm) and template registries (controller), the
   # Kubernetes API (leader Lease, store state, resets;
   # 6443 is its usual endpoint port). The callout needs neither.
@@ -1351,6 +1353,9 @@ spec:
         - --metrics-listen=:9464
         - --leader-address=defenseclaw-leader.defenseclaw-system.svc.cluster.local:7443
         - --leader-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
+        - --router-address=atenet-router.ate-system.svc:8444
+        - --router-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+        - --relay-port=8080
         - --peer-bundle=/var/run/ate/credential-bundle.pem
         - --peer-trust=/var/run/ate/podidentity-ca.crt
         - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
@@ -1887,10 +1892,20 @@ metadata:
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
 rules:
+# Read the controller's selector; scale it through the scale subresource
+# only (no patch of the Deployment itself).
 - apiGroups: [apps]
-  resources: [deployments, deployments/scale]
+  resources: [deployments]
+  resourceNames: [defenseclaw-controller]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments/scale]
   resourceNames: [defenseclaw-controller]
   verbs: [get, patch]
+# Count its pods, terminating ones included (list cannot be limited by name).
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [list]
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
