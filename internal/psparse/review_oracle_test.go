@@ -62,6 +62,8 @@ var revExtraLines = []string{
 	// review 5 R5-7: a control-flow hashtable value walks its commands, not "foreach"/"in"
 	`@{a=foreach($i in Remove-Item C:\Windows){1}}`, `@{a=if($x){Remove-Item C:\y}}`,
 	`@{a=while($x){Remove-Item C:\z}}`,
+	// review 5 R5-10: after a comma a -word is a list element, not a parameter
+	`Remove-Item a,-b`, `Remove-Item C:\a,-Recurse`,
 }
 
 func bq2(s string) string { return strings.ReplaceAll(s, "§", "`") }

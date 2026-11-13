@@ -246,7 +246,10 @@ func hostWords(c *Command) []hostWord {
 	for _, el := range c.Elements {
 		switch e := el.(type) {
 		case *Parameter:
-			out = append(out, hostWord{"-" + e.Name, true})
+			// gate the parameter name on the strict class too (review 5 R5-11):
+			// a name with a backtick / non-ASCII / control rune is not a trusted
+			// static word, so a positional join or host parse fails closed.
+			out = append(out, hostWord{"-" + e.Name, safeStaticLiteral(e.Name)})
 			if e.Colon != nil {
 				v, ok := LiteralString(e.Colon)
 				out = append(out, hostWord{v, ok})
