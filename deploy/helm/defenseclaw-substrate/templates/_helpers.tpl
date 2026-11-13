@@ -406,3 +406,30 @@ service account automount stays off). */}}
         - path: namespace
           fieldRef: {fieldPath: metadata.namespace}
 {{- end -}}
+
+{{/*
+The template trust anchors (admin-only Secret, key anchors.pem), mounted
+read-only at the directory of substrate.templates.trust_anchors' default
+(config.DefaultSubstrateTemplateAnchors). Both the controller and the
+gateway's create path admit templates with them (GAP-0154). A Secret update
+reaches the file in about a minute and both re-read it.
+*/}}
+{{- define "dc.templateAnchorsMount" -}}
+{{- if .Values.controller.templateAnchorsSecret -}}
+- name: template-anchors
+  mountPath: /etc/defenseclaw/substrate/template-anchors
+  readOnly: true
+{{- end }}
+{{- end -}}
+
+{{- define "dc.templateAnchorsVolume" -}}
+{{- if .Values.controller.templateAnchorsSecret -}}
+- name: template-anchors
+  secret:
+    secretName: {{ .Values.controller.templateAnchorsSecret }}
+    optional: true
+    defaultMode: 0440
+    items:
+    - {key: anchors.pem, path: anchors.pem}
+{{- end }}
+{{- end -}}

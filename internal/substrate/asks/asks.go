@@ -92,7 +92,17 @@ type Ask struct {
 	DecidedAt time.Time `json:"decided_at,omitzero"`
 	Always    bool      `json:"always,omitempty"`
 	Note      string    `json:"note,omitempty"`
+	// Unattended marks an ask an unattended actor queued (D12
+	// unattended_asks: queue): nobody is watching the run, so a person
+	// decides from `asks`, and the timeout denies it.
+	Unattended bool `json:"unattended,omitempty"`
+	// TimeoutSeconds, when over 0, replaces the store's expiry for this ask
+	// (the profile's ask_timeout, at most 24 h).
+	TimeoutSeconds int64 `json:"timeout_seconds,omitempty"`
 }
+
+// MaxAskTimeout bounds Ask.TimeoutSeconds (config ask_timeout).
+const MaxAskTimeout = 24 * time.Hour
 
 // Decision is one verdict that was not a plain allow.
 type Decision struct {
@@ -284,6 +294,9 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 	if exp <= 0 {
 		exp = DefaultAskExpiry
 	}
+	if t := time.Duration(a.TimeoutSeconds) * time.Second; a.TimeoutSeconds > 0 {
+		exp = min(t, MaxAskTimeout)
+	}
 	a.ID, a.Created, a.Expires, a.State = "ask-"+hex.EncodeToString(b), now, now.Add(exp), StatePending
 	a.DecidedBy, a.DecidedAt, a.Always = "", time.Time{}, false
 	if a.Kind == "" {
@@ -370,6 +383,27 @@ func (s *Store) List(_ context.Context, in ListRequest) ([]Ask, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
 	return out, nil
+}
+
+// CloseActor ends every pending ask of the actor UID (E16: a crashed or
+// deleted actor asks nothing any more) with state expired and reason, and
+// records one decision per ask. It returns how many it closed.
+func (s *Store) CloseActor(uid, reason string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	n := 0
+	for _, a := range s.asks {
+		if a.UID != uid || a.State != StatePending {
+			continue
+		}
+		a.State, a.DecidedAt, a.Note = StateExpired, now, truncate(reason, 512)
+		s.persist(a)
+		s.appendLocked(Decision{At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID, OwnerID: a.OwnerID,
+			Source: "ask", Tool: firstNonEmpty(a.Tool, a.Host), Verdict: StateExpired, Reason: a.Note})
+		n++
+	}
+	return n
 }
 
 // Pending lists the actor UIDs with an ask waiting (the idle check).

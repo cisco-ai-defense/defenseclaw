@@ -23,6 +23,9 @@ import (
 // it is nil and the relay refuses every attachment.
 func NewVerifier(cfg kit.Config) (Verifier, error) {
 	rc := cfg.Relay
+	if err := rc.CheckSessions(); err != nil {
+		return nil, err
+	}
 	if rc.VerifyURL != "" {
 		t, err := kit.NewTransport(cfg)
 		if err != nil {
@@ -32,9 +35,6 @@ func NewVerifier(cfg kit.Config) (Verifier, error) {
 	}
 	if len(rc.SessionKeys) == 0 {
 		return nil, nil
-	}
-	if rc.SessionIssuer == "" {
-		return nil, errors.New("relay session keys need relay.session_issuer (the issuer whose tokens they verify)")
 	}
 	keys := map[string]crypto.PublicKey{}
 	for kid, path := range rc.SessionKeys {

@@ -18,12 +18,16 @@ import (
 // key as unknown anyway; the floor makes the refusal the documented
 // product_too_old, and keeps a rollback to an older build from loading a
 // policy it cannot read.
-func CheckKeyProductFloor(cfg *config.Config, minProductVersion string) error {
+func CheckKeyProductFloor(cfg *config.Config, rawConfig []byte, minProductVersion string) error {
 	keys := cfg.UsesMinProductVersion106Keys()
 	floor := config.TrustedConnectorsMinProductVersion
 	if later := cfg.UsesMinProductVersion107Keys(); len(later) > 0 {
 		// enterprise.account_join: 1.0.7 and later.
 		keys, floor = append(keys, later...), config.AccountJoinMinProductVersion
+	}
+	if later := config.RoutingMinVersionKeysInRaw(rawConfig); len(later) > 0 {
+		// semantic routing policy, route-only and profile routing: 1.0.10 and later.
+		keys, floor = append(keys, later...), config.RoutingMinProductVersion
 	}
 	if len(keys) == 0 {
 		return nil

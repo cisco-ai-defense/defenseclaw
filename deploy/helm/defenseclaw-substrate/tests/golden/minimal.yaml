@@ -826,8 +826,6 @@ spec:
               items:
               - path: namespace
                 fieldRef: {fieldPath: metadata.namespace}
-      # Admin-only: only the controller mounts it; a Secret update reaches
-      # the file in about a minute and the controller re-reads it.
       - name: template-anchors
         secret:
           secretName: defenseclaw-template-anchors
@@ -977,6 +975,11 @@ spec:
         - name: callout-judge
           mountPath: /var/run/secrets/defenseclaw-callout-judge
           readOnly: true
+        # The create path admits a launcher actor with the controller's own
+        # attestation check (GAP-0154), so it reads the same anchors.
+        - name: template-anchors
+          mountPath: /etc/defenseclaw/substrate/template-anchors
+          readOnly: true
         # The admin route writes policy_conflict resets for the controller.
         - name: kube-api-token
           mountPath: /var/run/secrets/kubernetes.io/serviceaccount
@@ -1024,6 +1027,13 @@ spec:
           secretName: defenseclaw-callout-judge
           items:
           - {key: token, path: token}
+      - name: template-anchors
+        secret:
+          secretName: defenseclaw-template-anchors
+          optional: true
+          defaultMode: 0440
+          items:
+          - {key: anchors.pem, path: anchors.pem}
       - name: kube-api-token
         projected:
           sources:

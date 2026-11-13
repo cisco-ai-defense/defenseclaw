@@ -18,6 +18,8 @@ package cli
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -209,6 +211,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 			}
 		}
 		substrateStartupChecks(cfg)
+		// A managed gateway in a pod has no laptop lifecycle: the chart's
+		// read-only mounted config is the activated one (GAP-0135).
+		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+			gateway.SetSubstrateClusterActivation(gateway.SubstrateMountedConfigActivation(gateway.SubstrateFileOwner))
+		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
 	}
@@ -433,8 +440,12 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			return out, err
 		}
 		llm, err := gateway.NewSubstrateLLMHandler(gateway.SubstrateLLMConfig{
-			Providers: gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
-			Proxy:     llmProxy,
+			Providers:     gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
+			Proxy:         llmProxy,
+			BedrockModels: c.Substrate.LLM.BedrockModels,
+			// actor_secrets: exact-value DLP on prompts (PLAN §7.2), from
+			// the callout's actor-secrets Secret mounted in the gateway.
+			ExposedValues: gateway.SubstrateExposedValues(c, c.Substrate.Extproc.ActorSecretsDir),
 		})
 		if err != nil {
 			return out, err
@@ -443,7 +454,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if serveFlags.actorPlainHTTP {
 			actorTLS = nil
 		}
-		if err := loadChainKey(serveFlags.chainKeyFile); err != nil {
+		chainKey, err := loadChainKey(serveFlags.chainKeyFile)
+		if err != nil {
 			return out, err
 		}
 		toLeader := &leader.Client{BaseURL: base, HTTP: hc}
@@ -463,10 +475,20 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Actors: actors, Registrations: regs, Activity: recorder,
 			Chains: &chainstate.Client{Leader: toLeader},
 			Asks:   &asks.Client{Leader: toLeader}, Policies: ate,
+			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
+				return gateway.SubstrateUnattendedAskFor(c, profile)
+			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: substrateRelays(),
 			Skills: newRuntimeSkillScanner(c),
-			Info:   substrateInfo(c),
+			// GAP-0039: an unscanned skill folder is refused where hooks fail
+			// closed (managed, strict tier) and alerted on elsewhere; scan
+			// receipts hold on every replica that shares the chain key.
+			BlockUnscannedSkills: substrateBlocksUnscannedSkills(c),
+			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
+			Info:                 substrateInfo(c),
+			// E23: the workspace cap of an upload through attach.
+			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
@@ -479,6 +501,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			// D8: interactive actors fail as hosts do (managed closed, OSS
 			// open with a warning); unattended actors always closed.
 			FailOpenInteractive: !managed.IsManagedEnterprise(c.DeploymentMode),
+			// E9: a managed deployment refuses a vendor sign-in held in an actor.
+			Managed:            managed.IsManagedEnterprise(c.DeploymentMode),
+			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 			OnRateLimited: func(scope ratelimit.Scope, route string) {
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
 			},
@@ -512,8 +537,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			fmt.Fprintln(os.Stderr, "[substrate] no sign-in and no callout token: the admin listener does not run")
 		}
 		if _, err := os.Stat(serveFlags.sessionKeyFile); err == nil {
-			issuer := "https://" + strings.TrimSpace(c.Substrate.Services.Admin)
-			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, issuer)
+			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, c.Substrate.RelaySessionIssuer())
 			if err != nil {
 				return out, err
 			}
@@ -521,6 +545,27 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		}
 		ready.Store(true)
 		return out, nil
+	}
+}
+
+// substrateSecretPlaceholders resolves bound secret names to the environment
+// variable names the actor carries in their place. E9 looks there for a
+// vendor API key (CURSOR_API_KEY, AMP_API_KEY, KIRO_API_KEY, GEMINI_API_KEY).
+func substrateSecretPlaceholders(secrets []config.SubstrateSecret) func([]string) []string {
+	byName := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		if s.Inject.Placeholder != "" {
+			byName[s.Name] = s.Inject.Placeholder
+		}
+	}
+	return func(names []string) []string {
+		var out []string
+		for _, n := range names {
+			if p, ok := byName[n]; ok {
+				out = append(out, p)
+			}
+		}
+		return out
 	}
 }
 
@@ -610,6 +655,9 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	defer chains.Close()
 	chains.Register(srv)
+	// A crashed or deleted actor asks nothing any more (E16): its open asks
+	// close when the controller reports the lifecycle event.
+	srv.Handle(chainstate.MethodChainLifecycle, leader.Typed(substrateLifecycleClosesAsks(chains.Lifecycle, askStore)))
 	go func() { _ = chains.Run(ctx) }()
 	hs := &http.Server{Addr: serveFlags.leaderListen, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	if !serveFlags.plainHTTP {
@@ -746,14 +794,54 @@ func substrateStartupChecks(c *config.Config) {
 // loadChainKey sets the value lineage key every gateway replica shares
 // (Secret defenseclaw-chain-key). Without it each replica keeps its own
 // random key and value joins only match on the replica that saw both calls.
-func loadChainKey(path string) error {
+func loadChainKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "[substrate] warning: no chain key at %s: value-lineage chains match only within one replica\n", path)
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("serve: chain key: %w", err)
+		return nil, fmt.Errorf("serve: chain key: %w", err)
 	}
-	return gateway.SetToolValueLineageKey([]byte(strings.TrimSpace(string(raw))))
+	key := []byte(strings.TrimSpace(string(raw)))
+	return key, gateway.SetToolValueLineageKey(key)
+}
+
+// substrateSkillReceiptKey derives the skill scan receipt key from the
+// shared chain key, so a receipt one replica gives holds on all of them
+// (GAP-0039). No chain key: nil, and each replica uses its own.
+func substrateSkillReceiptKey(chainKey []byte) []byte {
+	if len(chainKey) == 0 {
+		return nil
+	}
+	m := hmac.New(sha256.New, chainKey)
+	m.Write([]byte("defenseclaw substrate skill receipt key v1"))
+	return m.Sum(nil)
+}
+
+// substrateBlocksUnscannedSkills refuses an unscanned skill folder where a
+// hook fails closed: managed installs and the strict tier of a connector.
+func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) bool {
+	return func(connector string) bool {
+		return managed.IsManagedEnterprise(c.DeploymentMode) || c.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict
+	}
+}
+
+// substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
+// crashed or deleted event the actor's pending asks are closed.
+func substrateLifecycleClosesAsks(next func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error),
+	asksStore interface{ CloseActor(uid, reason string) int }) func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+	return func(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+		res, err := next(ctx, ev)
+		if err != nil {
+			return res, err
+		}
+		switch ev.Event {
+		case chainstate.LifecycleCrashed:
+			asksStore.CloseActor(ev.Actor.UID, "the actor crashed")
+		case chainstate.LifecycleDeleted:
+			asksStore.CloseActor(ev.Actor.UID, "the actor was deleted")
+		}
+		return res, nil
+	}
 }

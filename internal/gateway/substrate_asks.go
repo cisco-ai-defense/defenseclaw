@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/asks"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
@@ -65,7 +66,7 @@ func askView(a asks.Ask) map[string]any {
 	return map[string]any{
 		"id": a.ID, "atespace": a.Atespace, "actor": a.Actor, "kind": a.Kind, "host": a.Host, "tool": a.Tool,
 		"summary": a.Summary, "reason": a.Reason, "severity": a.Severity, "created": a.Created, "expires": a.Expires,
-		"state": a.State,
+		"state": a.State, "unattended": a.Unattended,
 	}
 }
 
@@ -330,21 +331,65 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusNotFound, "actor_not_found")
 			return
 		}
-		if reg.Unattended {
-			// D12: an unattended run's ask is a deny, nobody is asked.
-			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateDenied, "reason": "unattended runs do not ask"})
-			return
-		}
-		got, err := st.cfg.Asks.OpenAsk(r.Context(), asks.Ask{
+		ask := asks.Ask{
 			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(),
 			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
-		})
+		}
+		if reg.Unattended {
+			// D12: an unattended run's ask is a deny unless the profile's
+			// unattended_asks is queue; then it waits for a person for
+			// ask_timeout, and the timeout denies it.
+			var rule SubstrateUnattendedAsk
+			if st.cfg.UnattendedAsk != nil {
+				rule = st.cfg.UnattendedAsk(reg.Profile)
+			}
+			if !rule.Queue {
+				writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateDenied, "reason": "unattended runs do not ask"})
+				return
+			}
+			ask.Unattended, ask.TimeoutSeconds = true, int64(rule.Timeout/time.Second)
+		}
+		got, err := st.cfg.Asks.OpenAsk(r.Context(), ask)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
 			return
 		}
+		if got.Unattended {
+			a.dispatchQueuedAskWebhook(got)
+		}
 		writeSubstrateJSON(w, http.StatusOK, askView(got))
 	})
+}
+
+// dispatchQueuedAskWebhook tells the configured webhooks that an unattended
+// actor's ask is waiting for a person (D12 queue): nobody watches the run,
+// so the notification is how the owner learns of it. It names the actor,
+// the host or tool and the expiry, never a request body.
+func (a *APIServer) dispatchQueuedAskWebhook(got asks.Ask) {
+	if a == nil || a.webhookSource == nil {
+		return
+	}
+	webhooks := a.webhookSource()
+	if webhooks == nil {
+		return
+	}
+	target := got.Host
+	if target == "" {
+		target = got.Tool
+	}
+	webhooks.Dispatch(audit.Event{
+		Timestamp: time.Now().UTC(), Action: string(audit.ActionApprovalRequest), Target: target, Actor: "defenseclaw-substrate",
+		Details: fmt.Sprintf("ask=%s actor=%s/%s unattended=true expires=%s", got.ID, got.Atespace, got.Actor,
+			got.Expires.UTC().Format(time.RFC3339)),
+		Severity: orDefaultString(got.Severity, "MEDIUM"),
+	})
+}
+
+func orDefaultString(v, def string) string {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	return v
 }
 
 // substrateRecordDecision keeps a hook verdict that was not a plain

@@ -150,7 +150,7 @@ func TestResolveContext(t *testing.T) {
 		{name: "flag beats env", flag: "a", env: map[string]string{EnvContext: "b"}, wantName: "a", wantAdmin: "https://a.example.test"},
 		{name: "env overrides", env: map[string]string{EnvAdminURL: "https://ci.example.test", EnvIssuer: "https://idp2.example.test/r"}, wantName: "a", wantAdmin: "https://ci.example.test", wantIssuer: "https://idp2.example.test/r"},
 		{name: "env audience", flag: "b", env: map[string]string{EnvWorkloadAudience: "dc-ci"}, wantName: "b", wantAdmin: "https://b.example.test", wantAud: "dc-ci"},
-		{name: "unknown name", flag: "zz", wantErr: `substrate context "zz" (from the --context flag) does not exist; run: defenseclaw substrate login --context zz --admin-url URL`},
+		{name: "unknown name", flag: "zz", wantErr: `there is no cluster named "zz" (from the --context flag); sign in to it with: defenseclaw substrate login --name zz --admin-url https://HOST:PORT`},
 		{name: "unknown name with env admin", flag: "ci", env: map[string]string{EnvAdminURL: "https://ci.example.test", EnvWorkloadAudience: "dc-ci"}, wantName: "ci", wantAdmin: "https://ci.example.test", wantAud: "dc-ci"},
 		{name: "bad override", env: map[string]string{EnvAdminURL: "http://ci.example.test"}, wantErr: "admin_url must use https"},
 	}
@@ -176,7 +176,7 @@ func TestResolveContext(t *testing.T) {
 func TestResolveContextEmpty(t *testing.T) {
 	setHome(t)
 	_, _, err := ResolveContext("")
-	if err == nil || !strings.Contains(err.Error(), "run: defenseclaw substrate login --admin-url URL") {
+	if err == nil || !strings.Contains(err.Error(), "run: defenseclaw substrate login --admin-url https://HOST:PORT") {
 		t.Fatalf("err = %v", err)
 	}
 	t.Setenv(EnvAdminURL, "https://ci.example.test")

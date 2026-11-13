@@ -137,7 +137,9 @@ leader:
 controller:
   # One replica (no Lease client in the controller yet).
   # The admin-only Secret with the template signing keys (key anchors.pem),
-  # mounted for substrate.templates.trust_anchors. Without it every template
+  # mounted read-only in the controller and the gateway (its create path
+  # admits launcher actors the same way, GAP-0154) for
+  # substrate.templates.trust_anchors. Without it every template
   # is refused (require_attested_templates).
   templateAnchorsSecret: defenseclaw-template-anchors
   args: []

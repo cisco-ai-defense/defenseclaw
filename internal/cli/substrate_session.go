@@ -17,8 +17,10 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 )
 
 type substrateLoginFlags struct {
@@ -43,6 +46,7 @@ type substrateLoginFlags struct {
 	kube         bool
 	kubeconfig   string
 	kubeContext  string
+	kubeNS       string
 	noBrowser    bool
 	workload     bool
 	workloadFile string
@@ -57,15 +61,17 @@ func newSubstrateLoginCmd() *cobra.Command {
 		Short: "Sign in to a cluster",
 		Long: `Signs you in to the cluster your organization runs, with your own account. It prints a web
 address and a short code; open the address in any browser, enter the code and approve. Your
-sign-in is kept in the system keychain, never in a file you can read. The first time, give the cluster's
-addresses (your administrator has them); after that, "defenseclaw substrate login" alone renews the sign-in.
+sign-in is kept in the system keychain, never in a file you can read. The first time, give the cluster
+address with --admin-url (your administrator has it); the cluster tells the launcher which sign-in server to
+use. After that, "defenseclaw substrate login" alone renews the sign-in.
 
 On a cluster that has no sign-in server (an open-source install), use --kube: you are then the Kubernetes user of
 your current kubeconfig, and nothing is stored.
 
 In CI, use --workload (or set DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE): the run is then attributed to the
 pipeline's own identity, with a GitHub Actions token or a projected Kubernetes token minted for the cluster's workload audience, and nothing is stored.`,
-		Example: "defenseclaw substrate login --admin-url https://admin.example.test:9443 --issuer https://sso.example.test/realms/corp --client-id defenseclaw-launcher\n" +
+		Example: "defenseclaw substrate login --admin-url https://admin.example.test:9443\n" +
+			"defenseclaw substrate login --admin-url https://admin.example.test:9443 --issuer https://sso.example.test/realms/corp --client-id defenseclaw-launcher\n" +
 			"defenseclaw substrate login\n" +
 			"defenseclaw substrate login --workload --workload-token-file /var/run/secrets/ci/token",
 		Args: cobra.NoArgs,
@@ -84,12 +90,52 @@ pipeline's own identity, with a GitHub Actions token or a projected Kubernetes t
 	fl.BoolVar(&f.kube, "kube", false, "sign in with your current kubeconfig identity (clusters without a sign-in server)")
 	fl.StringVar(&f.kubeconfig, "kubeconfig", "", "with --kube, the kubeconfig file (default: kubectl's own rules)")
 	fl.StringVar(&f.kubeContext, "kube-context", "", "with --kube, the kubeconfig context (default: its current one)")
+	fl.StringVar(&f.kubeNS, "kube-namespace", "", "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)")
 	fl.BoolVar(&f.noBrowser, "no-browser", false, "do not open a browser; print the address and code only")
 	fl.BoolVar(&f.workload, "workload", false, "sign in as a CI workload with the pipeline's own token")
 	fl.StringVar(&f.workloadFile, "workload-token-file", "", "file holding the workload token (CI)")
 	fl.StringVar(&f.profile, "default-profile", "", "profile to use when run is given none")
 	fl.StringVar(&f.template, "default-template", "", "template to use when run is given none")
 	return cmd
+}
+
+// substrateLoginInfo asks the cluster how people sign in to it (GET /info,
+// no token) and fills in the sign-in server and client id that were not
+// given, so the first sign-in needs only --admin-url. A flag that was given
+// wins. A cluster that signs people in with Kubernetes, or not at all, gets
+// the command or the person to ask instead.
+func substrateLoginInfo(ctx context.Context, c *auth.Context, w io.Writer) error {
+	if err := c.Validate(false); err != nil {
+		return withExitCode(err, substrateExitRefused)
+	}
+	cl, err := api.New(api.Options{Base: c.AdminURL, CAFile: c.AdminCAFile, Token: func(context.Context) (string, error) { return "", nil }})
+	if err != nil {
+		return withExitCode(err, substrateExitRefused)
+	}
+	info, err := cl.Info(ctx)
+	if e, ok := api.AsError(err); ok && (e.Status == 404 || e.NotImplemented()) {
+		return withExitCode(errors.New("this cluster does not say how to sign in; give --issuer URL and --client-id ID too (your administrator has them)"), 2)
+	}
+	if err != nil {
+		return substrateFail(err)
+	}
+	switch info.SignIn {
+	case "oidc":
+		if c.Issuer == "" {
+			c.Issuer = info.Issuer
+		}
+		if c.ClientID == "" {
+			c.ClientID = info.ClientID
+		}
+		if c.Issuer == "" || c.ClientID == "" {
+			return withExitCode(errors.New("the cluster does not name its whole sign-in server; give --issuer URL and --client-id ID (your administrator has them)"), 2)
+		}
+		fmt.Fprintf(w, "This cluster signs you in with %s.\n", safetext.Line(c.Issuer))
+		return nil
+	case "kubernetes":
+		return withExitCode(fmt.Errorf("this cluster signs you in with your Kubernetes identity. Run: defenseclaw substrate login --kube --admin-url %s", safetext.Line(c.AdminURL)), 2)
+	}
+	return withExitCode(errors.New("this cluster has no sign-in set up yet; ask your administrator to set up substrate.identity.oidc"), substrateExitRefused)
 }
 
 func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
@@ -133,19 +179,22 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	}
 	set("kubeconfig", &c.Kubeconfig, f.kubeconfig)
 	set("kube-context", &c.KubeContext, f.kubeContext)
+	set("kube-namespace", &c.KubeNamespace, f.kubeNS)
 	if c.Kube && (f.workload || f.noBrowser || fl.Changed("issuer") || fl.Changed("client-id")) {
 		return withExitCode(errors.New("--kube signs in with your kubeconfig; leave --workload, --issuer, --client-id and --no-browser out"), 2)
 	}
 	kube := c.Kube
 	workload := !kube && (f.workload || substrateWorkloadFromEnv(cmd) != nil)
 	if c.AdminURL == "" {
-		return withExitCode(errors.New("give the cluster's address the first time: defenseclaw substrate login --admin-url https://HOST:PORT --issuer URL --client-id ID (your administrator has these)"), 2)
+		return withExitCode(errors.New("give the cluster address the first time: defenseclaw substrate login --admin-url https://HOST:PORT (your administrator has it)"), 2)
+	}
+	if !workload && !kube && (c.Issuer == "" || c.ClientID == "") {
+		if err := substrateLoginInfo(ctx, &c, cmd.ErrOrStderr()); err != nil {
+			return err
+		}
 	}
 	if err := c.Validate(!workload && !kube); err != nil {
 		return withExitCode(err, substrateExitRefused)
-	}
-	if !workload && !kube && (c.Issuer == "" || c.ClientID == "") {
-		return withExitCode(errors.New("signing in needs --issuer and --client-id the first time (your administrator has them)"), 2)
 	}
 	persist := !workload && !kube
 	var store auth.Store
@@ -157,6 +206,13 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 	}
 	var tok *auth.Token
 	if kube {
+		// The kube credential goes only to an admin address the cluster itself
+		// names (GAP-0130); the check sends it to the Kubernetes API server alone.
+		var pin auth.KubePin
+		if pin, err = auth.KubeVerifyEndpoint(ctx, c.KubeOptions(), c.AdminURL, c.KubeNamespace); err != nil {
+			return substrateFail(err)
+		}
+		c = c.WithKubePin(pin)
 		tok, err = auth.KubeLogin(ctx, c.KubeOptions())
 	} else if workload {
 		tok, err = auth.WorkloadLogin(ctx, c, auth.WorkloadOptions{TokenFile: f.workloadFile})
@@ -194,7 +250,7 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 			if e, ok := api.AsError(err); ok && !e.NotImplemented() {
 				note = "You are signed in, but the cluster did not accept it yet: " + substrateAPIMessage(e)
 			} else if !ok {
-				note = "You are signed in, but the cluster could not be reached: " + err.Error()
+				note = "You are signed in, but the cluster could not be reached: " + safetext.Line(err.Error())
 			}
 		}
 	}
@@ -277,7 +333,7 @@ func newSubstrateWhoamiCmd() *cobra.Command {
 			}
 			fmt.Fprintf(w, "Signed in as %s (%s) on %s\n", substrateDash(tok.Principal), substrateDash(tok.Kind), s.Name)
 			if len(tok.Groups) > 0 {
-				fmt.Fprintf(w, "Groups:   %s\n", strings.Join(tok.Groups, ", "))
+				fmt.Fprintf(w, "Groups:   %s\n", safetext.Line(strings.Join(tok.Groups, ", ")))
 			}
 			if !tok.Expiry.IsZero() {
 				fmt.Fprintf(w, "Token:    renews itself; the current one lasts until %s\n", tok.Expiry.Local().Format(time.RFC1123))

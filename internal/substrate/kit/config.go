@@ -4,7 +4,14 @@
 package kit
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -65,6 +72,11 @@ type Config struct {
 	// FailMode is the interactive outage mode, "open" or "closed" (D8).
 	// Unattended runs are always closed.
 	FailMode string `json:"fail_mode"`
+	// Managed is a managed_enterprise image: the relay refuses to start an
+	// agent that signs in to a vendor account, because the token would sit
+	// in the actor and its snapshots (E9). The gateway decides the same from
+	// its own configuration; this is the second layer inside the actor.
+	Managed bool `json:"managed,omitempty"`
 	// ConnectTimeoutMS, MaxTimeMS and RetryMaxTimeMS budget one hook post
 	// and its single retry; both must fit the agent's 30 s hook envelope.
 	ConnectTimeoutMS int `json:"connect_timeout_ms"`
@@ -206,6 +218,53 @@ func (c Config) Validate() error {
 		return fmt.Errorf("actor kit config: max_attach_bytes must be 0..%d", MaxAttachBytes)
 	}
 	return nil
+}
+
+// CheckSessions is the relay's start-up rule for session verification
+// (GAP-0073). The template build applies the same rule (substrate-1
+// GAP-0147), so an image whose relay would refuse to start is never built.
+func (r RelayConfig) CheckSessions() error {
+	if r.VerifyURL != "" {
+		u, err := url.Parse(r.VerifyURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("relay verify_url %q is not an http or https URL", r.VerifyURL)
+		}
+		return nil
+	}
+	if len(r.SessionKeys) > 0 && strings.TrimSpace(r.SessionIssuer) == "" {
+		return errors.New("relay session keys need relay.session_issuer (the issuer whose tokens they verify)")
+	}
+	return nil
+}
+
+// SessionKeyID is the key id of a relay session public key (PKIX PEM, P-256
+// or Ed25519): the base64url SHA-256 of its PKIX encoding, the rule the
+// gateway's session signer uses for the kid of every token it issues
+// (identity.SessionSigner.KeyID).
+func SessionKeyID(pemBytes []byte) (string, error) {
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return "", errors.New("relay session key: no PEM block")
+	}
+	k, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("relay session key: %w", err)
+	}
+	switch kk := k.(type) {
+	case *ecdsa.PublicKey:
+		if kk.Curve != elliptic.P256() {
+			return "", errors.New("relay session key: the ECDSA key is not P-256")
+		}
+	case ed25519.PublicKey:
+	default:
+		return "", errors.New("relay session key: not a P-256 or Ed25519 public key")
+	}
+	der, err := x509.MarshalPKIXPublicKey(k)
+	if err != nil {
+		return "", fmt.Errorf("relay session key: %w", err)
+	}
+	sum := sha256.Sum256(der)
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
 func (c Config) connectTimeout() time.Duration {

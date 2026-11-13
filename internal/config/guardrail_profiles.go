@@ -67,6 +67,9 @@ type GuardrailProfile struct {
 	// request_access overrides); nil adds nothing. See
 	// TightenSandboxAdmin.
 	Sandbox *SandboxAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
+	// Routing tightens routing.admin (and routing.*) for subjects of this
+	// profile; nil adds nothing. See TightenRoutingPolicy.
+	Routing *RoutingPolicyConfig `mapstructure:"routing" yaml:"routing,omitempty"`
 
 	// Enabled and HookFailMode are NOT allowed in a profile: both are baked
 	// into the hooks installed on the machine, so they cannot vary by
@@ -151,7 +154,13 @@ func (c *Config) ValidateGuardrailProfiles() error {
 	if err := c.Guardrail.validateProfiles(c.SecureClientIntegration()); err != nil {
 		return err
 	}
-	return c.validateSandboxProfiles()
+	if err := c.validateSandboxProfiles(); err != nil {
+		return err
+	}
+	if err := c.validateSecureClientRouting(); err != nil {
+		return err
+	}
+	return c.validateRoutingProfiles()
 }
 
 // UnknownGuardrailProfileError is a profile name that an assignment or

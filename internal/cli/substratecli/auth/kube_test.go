@@ -377,13 +377,14 @@ func TestKubeSource(t *testing.T) {
 	dir := t.TempDir()
 	clk := newClock()
 	st := newMemStore()
+	pinned := Context{AdminURL: "https://admin.example.test", Kube: true, KubePinAdminURL: "https://admin.example.test:443", KubePinServer: "https://k8s.example.test:6443"}
 
 	// Exec: kept until refreshSkew before expiry, then run again.
 	fe := &fakeExec{fn: func(_ context.Context, n int) ([]byte, error) {
 		return answer(kubeExecV1, map[string]any{"token": "exec-tok-" + string(rune('0'+n)), "expirationTimestamp": clk.Now().Add(10 * time.Minute).UTC().Format(time.RFC3339)})(nil, n)
 	}}
 	cfg := writeFile(t, dir, "exec", execKubeconfig(kubeExecV1, ""))
-	src := NewSource("k", Context{AdminURL: "https://admin.example.test", Kube: true}, st, SourceOptions{Kube: &KubeOptions{Kubeconfig: cfg, Env: emptyEnv, RunExec: fe.run}, Now: clk.Now})
+	src := NewSource("k", pinned, st, SourceOptions{Kube: &KubeOptions{Kubeconfig: cfg, Env: emptyEnv, RunExec: fe.run}, Now: clk.Now})
 	step := func(advance time.Duration, want string, runs int) {
 		t.Helper()
 		clk.Add(advance)
@@ -403,8 +404,8 @@ func TestKubeSource(t *testing.T) {
 
 	// tokenFile: read on every call.
 	tf := writeFile(t, dir, "tok.txt", "file-tok-1")
-	fcfg := writeFile(t, dir, "file", "current-context: f\ncontexts:\n- {name: f, context: {user: fu}}\nusers:\n- {name: fu, user: {tokenFile: "+tf+"}}\n")
-	fsrc := NewSource("k", Context{}, st, SourceOptions{Kube: &KubeOptions{Kubeconfig: fcfg, Env: emptyEnv}, Now: clk.Now})
+	fcfg := writeFile(t, dir, "file", kubeCluster1+"current-context: f\ncontexts:\n- {name: f, context: {cluster: c1, user: fu}}\nusers:\n- {name: fu, user: {tokenFile: "+tf+"}}\n")
+	fsrc := NewSource("k", pinned, st, SourceOptions{Kube: &KubeOptions{Kubeconfig: fcfg, Env: emptyEnv}, Now: clk.Now})
 	for _, want := range []string{"file-tok-1", "file-tok-2"} {
 		writeFile(t, dir, "tok.txt", want)
 		if got, err := fsrc.Token(context.Background()); err != nil || got != want {
@@ -413,8 +414,8 @@ func TestKubeSource(t *testing.T) {
 	}
 
 	// Static token without expiry: kept 5 minutes.
-	scfg := writeFile(t, dir, "static", "current-context: s\ncontexts:\n- {name: s, context: {user: su}}\nusers:\n- {name: su, user: {token: static-1}}\n")
-	ssrc := NewSource("k", Context{}, st, SourceOptions{Kube: &KubeOptions{Kubeconfig: scfg, Env: emptyEnv}, Now: clk.Now})
+	scfg := writeFile(t, dir, "static", kubeCluster1+"current-context: s\ncontexts:\n- {name: s, context: {cluster: c1, user: su}}\nusers:\n- {name: su, user: {token: static-1}}\n")
+	ssrc := NewSource("k", pinned, st, SourceOptions{Kube: &KubeOptions{Kubeconfig: scfg, Env: emptyEnv}, Now: clk.Now})
 	sget := func(want string) {
 		t.Helper()
 		if got, err := ssrc.Token(context.Background()); err != nil || got != want {
@@ -422,7 +423,7 @@ func TestKubeSource(t *testing.T) {
 		}
 	}
 	sget("static-1")
-	writeFile(t, dir, "static", "current-context: s\ncontexts:\n- {name: s, context: {user: su}}\nusers:\n- {name: su, user: {token: static-2}}\n")
+	writeFile(t, dir, "static", kubeCluster1+"current-context: s\ncontexts:\n- {name: s, context: {cluster: c1, user: su}}\nusers:\n- {name: su, user: {token: static-2}}\n")
 	clk.Add(4 * time.Minute)
 	sget("static-1")
 	clk.Add(time.Minute + time.Second)
@@ -440,6 +441,8 @@ func TestKubeSource(t *testing.T) {
 		t.Fatalf("kube mode used the store: %d %d %d", st.loads, st.saves, st.deletes)
 	}
 }
+
+const kubeCluster1 = "clusters:\n- {name: c1, cluster: {server: \"https://k8s.example.test:6443\"}}\n"
 
 func TestStderrLine(t *testing.T) {
 	tests := []struct{ in, want string }{
