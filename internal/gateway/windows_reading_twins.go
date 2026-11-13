@@ -14,8 +14,8 @@ import (
 // (rel-1-0-10:GAP-0366, GAP-0367). The hook has one hint per call, but the
 // harness runs PowerShell or a POSIX shell (Git Bash), and a call that one
 // reading cannot place may be exactly what the other reads. Each twin is the
-// call judged as that other shell, and, for a partial PowerShell reading, as
-// its readable statements alone. The callers merge only what a twin proves
+// call judged as that other shell where the hook placed it in none, and, for
+// a partial PowerShell reading, as its readable statements alone. The callers merge only what a twin proves
 // (withTwinProvenBlocks), so no finding of the chosen reading is dropped and
 // a twin only adds.
 func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.Facts) []trustedActionRequest {
@@ -25,13 +25,20 @@ func windowsReadingTwinRequests(request trustedActionRequest, facts actionfacts.
 	}
 	var twins []trustedActionRequest
 	chosen := facts.Parse.Dialect
-	for _, other := range []actionfacts.Dialect{actionfacts.DialectPowerShell, actionfacts.DialectPOSIX} {
-		if other == chosen {
-			continue
+	// The other shell is judged only where the hook placed the call in no
+	// shell: a call it did place (the Claude Code PowerShell tool, a Bash call
+	// that Git Bash reads alone, a Codex call whose PowerShell parse it took) is
+	// the shell it was placed in, and reading it as another shell would add
+	// findings the shell that runs it never has.
+	if request.Input.DialectHint == "" {
+		for _, other := range []actionfacts.Dialect{actionfacts.DialectPowerShell, actionfacts.DialectPOSIX} {
+			if other == chosen {
+				continue
+			}
+			twin := windowsReadingTwin(request)
+			twin.Input.DialectHint = other
+			twins = append(twins, twin)
 		}
-		twin := windowsReadingTwin(request)
-		twin.Input.DialectHint = other
-		twins = append(twins, twin)
 	}
 	if readable, ok := actionfacts.PowerShellReadableStatementsTwin(request.Input, facts); ok {
 		twin := windowsReadingTwin(request)

@@ -94,6 +94,11 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 	if got := hints(windowsReadingTwinRequests(hook, posixPartial)); !slices.Equal(got, []actionfacts.Dialect{actionfacts.DialectPowerShell}) {
 		t.Fatalf("partial POSIX reading: twin hints %v, want [powershell]", got)
 	}
+	placed := hook
+	placed.Input.DialectHint = actionfacts.DialectPOSIX
+	if got := hints(windowsReadingTwinRequests(placed, posixPartial)); len(got) != 0 {
+		t.Fatalf("a call the hook placed in a shell got the other shell's reading: %v", got)
+	}
 	for name, request := range map[string]trustedActionRequest{
 		"not a Windows hook call": {},
 		"already a reading":       {windowsDialectReadings: true, readingTwin: true},
