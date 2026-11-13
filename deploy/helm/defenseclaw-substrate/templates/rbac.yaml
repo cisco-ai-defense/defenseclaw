@@ -36,6 +36,29 @@ subjects:
 - kind: ServiceAccount
   name: defenseclaw-gateway
   namespace: {{ .Release.Namespace }}
+{{- if include "dc.kubeSignIn" . }}
+---
+# The chart's one cluster-wide grant (lead ruling, STEER 2026-11-13 00:32Z):
+# the Kubernetes sign-in (no OIDC issuer, not managed) verifies a person's
+# token with a TokenReview, which is cluster-scoped, so the gateway
+# ServiceAccount is bound to system:auth-delegator (tokenreviews create,
+# subjectaccessreviews come with it). Never rendered with an OIDC issuer.
+# Named by gateway.authDelegatorBinding; helm removes it on uninstall.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dc.authDelegatorBinding" . }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: {{ .Release.Namespace }}
+{{- end }}
 ---
 # The controller reads and clears admin policy_conflict resets (the gateway
 # admin route writes them into defenseclaw-policy-resets).

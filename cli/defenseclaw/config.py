@@ -2213,7 +2213,13 @@ _SANDBOX_SUBSTRATE_ONLY_KEYS = (
 
 # The Agent Substrate floor keys, refused in openshell.admin (Go
 # SandboxSubstrateOnlyKeys).
-_SANDBOX_SUBSTRATE_ONLY_KEYS = ("sandbox_class", "idle_suspend_after", "unattended_asks", "ask_timeout", "actor_secrets")
+_SANDBOX_SUBSTRATE_ONLY_KEYS = (
+    "sandbox_class",
+    "idle_suspend_after",
+    "unattended_asks",
+    "ask_timeout",
+    "actor_secrets",
+)
 
 
 @dataclass

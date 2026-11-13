@@ -53,6 +53,15 @@ func resolveSubstrateActor(ctx context.Context, cl *api.Client, ref string) (api
 			hits = append(hits, a)
 		}
 	}
+	// run gives every agent a fresh suffix (GAP-0133), so the --name a
+	// person chose is a prefix: it names the one agent that has it.
+	if len(hits) == 0 && !strings.Contains(ref, "/") {
+		for _, a := range actors {
+			if rest, ok := strings.CutPrefix(a.Name, ref+"-"); ok && !a.Deleted && substrateIsSuffix(rest) {
+				hits = append(hits, a)
+			}
+		}
+	}
 	switch len(hits) {
 	case 0:
 		return api.Actor{}, fmt.Errorf("you have no agent named %q; list yours with: defenseclaw substrate list", ref)
@@ -64,6 +73,20 @@ func resolveSubstrateActor(ctx context.Context, cl *api.Client, ref string) (api
 		names = append(names, a.Atespace+"/"+a.Name)
 	}
 	return api.Actor{}, fmt.Errorf("%q matches more than one agent (%s); name it as ATESPACE/NAME", ref, strings.Join(names, ", "))
+}
+
+// substrateIsSuffix reports the random suffix run puts after a name
+// (newSubstrateID(4): eight hex digits).
+func substrateIsSuffix(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func substrateAge(t time.Time, now time.Time) string {
@@ -97,8 +120,9 @@ func substrateAskRun(a api.Ask, now time.Time) string {
 	return "unattended, " + substrateAge(now, a.Expires) + " left"
 }
 
+// substrateDash shows a value the cluster sent, as one safe line, or "-".
 func substrateDash(s string) string {
-	if s == "" {
+	if s = safetext.Line(s); s == "" {
 		return "-"
 	}
 	return s
@@ -150,9 +174,9 @@ them and how long ago they started. Administrators see only their own agents unl
 			now := time.Now()
 			rows := make([][]string, 0, len(live))
 			for _, a := range live {
-				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
+				rows = append(rows, []string{a.Atespace + "/" + a.Name, substrateDash(a.Connector), substrateDash(a.Profile), substrateDash(a.State), substrateAge(a.CreatedAt, now), substrateDash(a.BatchID)})
 			}
-			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "AGE", "BATCH"}, rows)
+			substrateTable(cmd.OutOrStdout(), []string{"NAME", "AGENT", "PROFILE", "STATE", "AGE", "BATCH"}, rows)
 			return nil
 		},
 	}
@@ -680,6 +704,7 @@ variable with --from-env VAR. It is never put on the command line.`,
 	}
 	com.add(cmd)
 	cmd.Flags().StringVar(&fromEnv, "from-env", "", "read the value from this environment variable")
+	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read the value from standard input")
 	return cmd
 }
@@ -752,6 +777,7 @@ func newSubstrateSecretsRmCmd() *cobra.Command {
 	}
 	com.add(cmd)
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	return cmd
 }
 
@@ -788,6 +814,7 @@ func newSubstrateSecretsTestCmd() *cobra.Command {
 	}
 	out.add(cmd)
 	com.add(cmd)
+	cmd.Flags().BoolVar(new(bool), "mine", true, "your own secret (the only kind this command acts on)")
 	return cmd
 }
 

@@ -197,7 +197,7 @@ func failFirst(n, status int, first http.Header) func(*http.Request) (int, http.
 	return func(r *http.Request) (int, http.Header) {
 		mu.Lock()
 		defer mu.Unlock()
-		if strings.HasSuffix(r.URL.Path, "/dcrelay/1/ws") {
+		if strings.HasSuffix(r.URL.Path, "/attach/ws") {
 			ws++
 		}
 		switch {

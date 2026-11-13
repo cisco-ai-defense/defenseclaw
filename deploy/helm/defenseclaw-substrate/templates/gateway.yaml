@@ -60,6 +60,9 @@ spec:
         - --metrics-listen=:{{ .Values.gateway.ports.metrics }}
         - --leader-address=defenseclaw-leader.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.leader.port }}
         - --leader-id={{ include "dc.spiffe" (dict "ctx" . "component" "gateway") }}
+        {{- with include "dc.routerFlags" . }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
         env:
@@ -85,6 +88,13 @@ spec:
         volumeMounts:
         {{- include "dc.volumeMounts" $sel | nindent 8 }}
         {{- include "dc.gatewaySecretMounts" . | nindent 8 }}
+        {{- if .Values.callout.actorSecrets.secretName }}
+        # Exposed actor_secrets values, for the /llm exact-value DLP (F3).
+        {{- include "dc.actorSecretsMount" . | nindent 8 }}
+        {{- end }}
+        # The create path admits a launcher actor with the controller's own
+        # attestation check (GAP-0154), so it reads the same anchors.
+        {{- include "dc.templateAnchorsMount" . | nindent 8 }}
         # The admin route writes policy_conflict resets for the controller.
         {{- include "dc.kubeTokenMount" . | nindent 8 }}
         {{- if .Values.admin.tlsSecretName }}
@@ -95,6 +105,10 @@ spec:
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.gatewaySecretVolumes" . | nindent 6 }}
+      {{- if .Values.callout.actorSecrets.secretName }}
+      {{- include "dc.actorSecretsVolume" . | nindent 6 }}
+      {{- end }}
+      {{- include "dc.templateAnchorsVolume" . | nindent 6 }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- if .Values.admin.tlsSecretName }}
       - name: admin-tls

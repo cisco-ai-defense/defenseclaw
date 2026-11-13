@@ -202,7 +202,13 @@ func (f *fakeAdmin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in := r.Clone(r.Context())
-	in.URL.Path = strings.TrimPrefix(r.URL.Path, testPrefixPath)
+	// The attach route of the gateway adds /dcrelay/1 itself; "" means the
+	// terminal WebSocket.
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, testPrefixPath), "/")
+	if rest == "" {
+		rest = "ws"
+	}
+	in.URL.Path = "/dcrelay/1/" + rest
 	in.URL.RawPath = ""
 	in.Header.Set("Authorization", "Bearer "+testToken)
 	f.relay.ServeHTTP(w, in)
@@ -232,7 +238,7 @@ func (f *fakeAdmin) count(match func(seen) bool) int {
 
 func isWS(s seen) bool { return s.ws }
 
-func isTaskRoute(s seen) bool { return strings.Contains(s.path, "/dcrelay/1/task") }
+func isTaskRoute(s seen) bool { return strings.Contains(s.path, "/attach/task") }
 
 // gateway returns the launcher settings that reach this listener.
 func (f *fakeAdmin) gateway(caFile string) Gateway {

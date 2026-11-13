@@ -510,7 +510,6 @@ func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
 				"ENT-US-PHONE",
 				"ENT-PHONE-E164",
 				"ENT-EMAIL-BULK",
-				"ENT-EMAIL-FIELD",
 				"ENT-PASSPORT-US",
 				"ENT-DL-CA",
 				"ENT-MEDICAL-RECORD",

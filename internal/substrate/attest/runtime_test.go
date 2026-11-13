@@ -86,6 +86,10 @@ func TestRuntimeMCPAdd(t *testing.T) {
 	}
 	// With a floor (a profile that wants it) it is a block.
 	rs.BlockAtOrAbove = "HIGH"
+	// Every reading of the clock is a second later, so the cached decision is stale on any OS: Windows clocks
+	// tick about every 15 ms and a one-nanosecond TTL kept the cached warn.
+	tick := time.Now().Add(time.Hour)
+	rs.Now = func() time.Time { tick = tick.Add(time.Second); return tick }
 	rs.TTL = time.Nanosecond
 	d, err = rs.Scan(ctx, assets[0])
 	if err != nil || d.Action != "block" {

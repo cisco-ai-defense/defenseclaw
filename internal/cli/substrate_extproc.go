@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/substrate/extproc"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/podcert"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
 
 // substrateExtprocFlags are the callout's flags.
@@ -57,14 +58,12 @@ var substrateExtprocOpts substrateExtprocFlags
 
 // substrateChainChecker answers the callout's synchronous chain check from
 // the leader (chainstate ChainEgress). The check also records the observed
-// egress step in the actor window, so the callout sets no ChainSink.
+// egress step in the actor window, so the callout sets no ChainSink. The
+// engine calls it only for an actor with a UID (an unregistered one is
+// unchecked there, GAP-0090).
 type substrateChainChecker struct{ client *chainstate.Client }
 
 func (c substrateChainChecker) CheckEgress(ctx context.Context, step extproc.ChainStep) (extproc.ChainVerdict, error) {
-	if step.Actor.UID == "" {
-		// No live UID (no resolver): the actor's window cannot be named.
-		return extproc.ChainVerdict{}, nil
-	}
 	v, err := c.client.CheckEgress(ctx, chainstate.EgressRequest{
 		Actor: chainstate.Actor{Atespace: step.Actor.Atespace, UID: step.Actor.UID},
 		Host:  step.Host, Method: step.Method,
@@ -72,22 +71,42 @@ func (c substrateChainChecker) CheckEgress(ctx context.Context, step extproc.Cha
 	return extproc.ChainVerdict{Deny: v.Deny, Rule: v.Rule, Reason: v.Reason}, err
 }
 
-func substrateExtprocChains(o substrateExtprocFlags) (substrateChainChecker, error) {
+// substrateActorDirectory resolves the actor name atenet-egress gives the
+// callout to its registration on the leader (GAP-0090): the UID that names
+// its chain window, its profile and whether it is unattended.
+type substrateActorDirectory struct{ regs *registry.Remote }
+
+func (d substrateActorDirectory) ResolveActor(ctx context.Context, atespace, name string) (extproc.ActorRecord, bool, error) {
+	l, err := d.regs.Lookup(ctx, atespace, name)
+	switch {
+	case err != nil:
+		return extproc.ActorRecord{}, false, err
+	case l.Found && l.Deleted:
+		return extproc.ActorRecord{}, false, nil
+	case !l.Found:
+		return extproc.ActorRecord{}, true, nil
+	}
+	return extproc.ActorRecord{UID: l.UID, Profile: l.Profile, Unattended: l.Unattended}, true, nil
+}
+
+// substrateExtprocLeader is the callout's leader client: the chain check
+// and the registration lookup, over mTLS with the pod identity.
+func substrateExtprocLeader(o substrateExtprocFlags) (*leader.Client, error) {
 	hc := &http.Client{Timeout: 5 * time.Second}
 	base := "https://" + o.leaderAddress
 	if o.insecurePlaintext {
 		base = "http://" + o.leaderAddress
 	} else {
 		if len(o.leaderIDs) == 0 {
-			return substrateChainChecker{}, errors.New("substrate-extproc: --leader-id names the leader's SPIFFE ID")
+			return nil, errors.New("substrate-extproc: --leader-id names the leader's SPIFFE ID")
 		}
 		files, err := podcert.NewFiles(o.peerBundle, o.peerTrust)
 		if err != nil {
-			return substrateChainChecker{}, err
+			return nil, err
 		}
 		hc.Transport = &http.Transport{TLSClientConfig: files.ClientConfig(o.leaderIDs), Proxy: nil}
 	}
-	return substrateChainChecker{client: &chainstate.Client{Leader: &leader.Client{BaseURL: base, HTTP: hc, Retry: time.Second}}}, nil
+	return &leader.Client{BaseURL: base, HTTP: hc, Retry: time.Second}, nil
 }
 
 // substrateExtprocCmd runs the Agent Substrate egress callout: the Envoy
@@ -154,14 +173,20 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	} else {
 		fmt.Fprintln(stderr, "substrate-extproc: judge.url is not the gateway callout route: ask-required hosts are refused")
 	}
-	if o.leaderAddress != "" {
-		chains, err := substrateExtprocChains(o)
+	switch {
+	case o.leaderAddress != "":
+		lc, err := substrateExtprocLeader(o)
 		if err != nil {
 			return err
 		}
-		opts.ChainChecker = chains
-	} else {
-		fmt.Fprintln(stderr, "substrate-extproc: no --leader-address: egress is not checked against the actors' chain windows")
+		opts.ChainChecker = substrateChainChecker{client: &chainstate.Client{Leader: lc}}
+		opts.UIDs = substrateActorDirectory{regs: &registry.Remote{Client: lc}}
+	case cfg.Managed:
+		// D8: a managed callout without the leader would check no chain and
+		// know no registration.
+		return errors.New("substrate-extproc: a managed install needs --leader-address (the chain check and the actor registrations)")
+	default:
+		fmt.Fprintln(stderr, "substrate-extproc: no --leader-address: egress is not checked against the actors' chain windows, and actors' registrations are unknown")
 	}
 	eng, err := extproc.NewEngine(opts)
 	if err != nil {
@@ -195,7 +220,8 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 		mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ready": true, "body_mode": eng.BodyModeStatus(), "chain_dropped": eng.ChainDropped(),
+				"ready": true, "body_mode": eng.BodyModeStatus(), "body_inspection": cfg.BodyInspection,
+				"degraded": eng.Degraded(), "chain_dropped": eng.ChainDropped(),
 			})
 		})
 		health = &http.Server{Addr: o.healthListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second}

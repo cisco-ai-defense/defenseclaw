@@ -110,6 +110,7 @@ var wave2Headless = map[string][]string{
 // load) and the Node warning about env-proxy is silenced, as the OpenShell
 // launcher does.
 var wave2RelayEnv = map[string]map[string]string{
+	"devin": {"XDG_CONFIG_HOME": XDGConfigHome},
 	"copilot": {
 		"LD_PRELOAD":   "/opt/defenseclaw-harness/copilot/lib/defenseclaw-pidfd.so",
 		"NODE_OPTIONS": "--disable-warning=UNDICI-EHPA",
@@ -136,6 +137,13 @@ var hookCommandRewrites = map[string][]struct {
 	// "command": "/…/kiro-hook.sh"
 	"kiro": {{regexp.MustCompile(regexp.QuoteMeta(connector.SandboxHookDir) + `/kiro-hook\.sh`),
 		HookBinary + ` --connector kiro`}},
+	// "command": "'/…/cursor-hook.sh'" (Cursor runs the command through a
+	// shell; the event is in the payload)
+	"cursor": {{regexp.MustCompile(`'` + regexp.QuoteMeta(connector.SandboxHookDir) + `/cursor-hook\.sh'`),
+		`'` + HookBinary + `' --connector cursor`}},
+	// "command": "/…/devin-hook.sh" (the event is in the payload)
+	"devin": {{regexp.MustCompile(regexp.QuoteMeta(connector.SandboxHookDir) + `/devin-hook\.sh`),
+		HookBinary + ` --connector devin`}},
 }
 
 // rewriteHookCommands applies the connector's rewrites to a rendered file
@@ -260,9 +268,92 @@ exec /usr/local/bin/agy "$@"
 // wave2Harden applies the connector-specific ownership rules: Antigravity's
 // hooks directory is root-owned (see AntigravityStart).
 func wave2Harden(ov *Overlay, name string, o OverlayOptions) {
-	if name != "antigravity" {
-		return
+	switch name {
+	case "antigravity":
+		antigravityHarden(ov, o)
+	case "devin":
+		devinHarden(ov, o)
 	}
+}
+
+// XDGConfigHome is the root-owned configuration home of Devin, whose hook
+// registration lives in a user configuration folder. Devin honours
+// XDG_CONFIG_HOME (measured on the pinned release), so the registration sits
+// outside the agent-owned HOME and nothing above it can be renamed or
+// replaced (GAP-0136; Antigravity's ~/.gemini still has this gap, GAP-0120).
+const XDGConfigHome = LibDir + "/xdg"
+
+// xdgUserDirs are the folders common tools write under their configuration
+// home; they stay the agent's.
+var xdgUserDirs = []string{"git", "pip", "uv", "gh", "pnpm", "npm", "configstore"}
+
+// moveToXDG moves a rendered file from ~/.config/<rel> to XDGConfigHome/<rel>,
+// root-owned and read-only, and reports whether it found the file.
+func moveToXDG(ov *Overlay, o OverlayOptions, rel string) bool {
+	from := path.Join(o.Home, ".config", rel)
+	for i := range ov.Files {
+		if ov.Files[i].Path == from {
+			ov.Files[i].Path = path.Join(XDGConfigHome, rel)
+			ov.Files[i].User, ov.Files[i].Mode = false, 0o644
+			return true
+		}
+	}
+	return false
+}
+
+// xdgEnv makes every folder of the registration's path root-owned and
+// readable (a folder the build makes on the way would otherwise be 0644, which
+// the agent cannot enter) and keeps the common tools' folders the agent's.
+func xdgEnv(ov *Overlay, rel ...string) {
+	ov.RootDirs = append(ov.RootDirs, XDGConfigHome)
+	for _, r := range rel {
+		ov.RootDirs = append(ov.RootDirs, path.Join(XDGConfigHome, r))
+	}
+	for _, d := range xdgUserDirs {
+		ov.UserDirs = append(ov.UserDirs, path.Join(XDGConfigHome, d))
+	}
+}
+
+// Amp cannot get the same protection. It loads plugins only from
+// <config home>/amp/plugins and chmods <config home>/amp to 0700 at every
+// start; with that folder root-owned it dies with "Unexpected error inside
+// Amp CLI" (measured on E1: a root-owned amp folder fails, an agent-owned one
+// with root-owned plugins works), and with it agent-owned the agent can
+// rename the plugins folder away. Amp is therefore built but refused in
+// managed (package signin, HookInAgentFolder) and warned about in open source.
+
+// devinHarden moves Devin's hook registration out of the agent's HOME. Devin rewrites the file at its first start only to add the
+// schema version, so the image carries it; credentials live in
+// ~/.local/share/devin, which stays the agent's, and state in
+// <config home>/devin/cli, pre-created for it. The OpenShell launcher's
+// restore copy is dead in an actor and is dropped.
+func devinHarden(ov *Overlay, o OverlayOptions) {
+	for i := range ov.Files {
+		if ov.Files[i].Path != path.Join(o.Home, ".config", "devin", "config.json") {
+			continue
+		}
+		var doc map[string]any
+		if err := json.Unmarshal(ov.Files[i].Data, &doc); err == nil {
+			doc["version"] = 1
+			if b, err := json.MarshalIndent(doc, "", "  "); err == nil {
+				ov.Files[i].Data = append(b, '\n')
+			}
+		}
+	}
+	moveToXDG(ov, o, "devin/config.json")
+	kept := ov.Files[:0]
+	for _, f := range ov.Files {
+		if f.Path != "/usr/local/lib/defenseclaw/devin/config.json" {
+			kept = append(kept, f)
+		}
+	}
+	ov.Files = kept
+	ov.Remove = append(ov.Remove, "/usr/local/lib/defenseclaw/devin/config.json", path.Join(o.Home, ".config", "devin"))
+	xdgEnv(ov, "devin")
+	ov.UserDirs = append(ov.UserDirs, path.Join(XDGConfigHome, "devin", "cli"))
+}
+
+func antigravityHarden(ov *Overlay, o OverlayOptions) {
 	hooks := path.Join(o.Home, ".gemini", "config", "hooks.json")
 	dir := path.Dir(hooks)
 	for i := range ov.Files {
@@ -292,15 +383,29 @@ func wave2UserFiles(name string, o OverlayOptions) []ImageFile {
 		// the kit has no launcher, so the image carries it.
 		doc := fmt.Sprintf("{\n  \"trustedWorkspaces\": [%q]\n}\n", o.Workdir)
 		return []ImageFile{start, {Path: path.Join(o.Home, ".gemini", "antigravity-cli", "settings.json"), Mode: 0o600, User: true, Data: []byte(doc)}}
+	case "amp":
+		// Amp has no "allow all" switch on the command line, only the
+		// setting amp.dangerouslyAllowAll. A headless run has nobody to
+		// answer a permission prompt, so it reads a root-owned settings file
+		// with the setting (--settings-file in its argv); an interactive run
+		// keeps Amp's own prompts.
+		return []ImageFile{{Path: AmpHeadlessSettings, Mode: 0o644, Data: []byte("{\n  \"amp.dangerouslyAllowAll\": true\n}\n")}}
 	}
 	return nil
 }
 
-// Wave-3 connectors (PLAN 4.3): built but refused until a vendor sign-in run
-// passes (E9, lane A11). Their argv comes from the pinned releases' --help
-// (lanes/a10/HANDOFF.md); no run was possible without a sign-in. Amp's
-// Substrate plugin transport does not exist yet, so its render is refused
-// (resolveSandboxTarget); the argv is recorded for when it does.
+// AmpHeadlessSettings is the root-owned settings file of an Amp headless run.
+const AmpHeadlessSettings = LibDir + "/amp/headless-settings.json"
+
+// Wave-3 connectors (PLAN 4.3): Cursor Agent CLI, Amp and Devin CLI. Their
+// only model route is a vendor account, so they run on a vendor API key that
+// egress adds (CURSOR_API_KEY, AMP_API_KEY) where the vendor offers one, and
+// otherwise on a sign-in held in the actor, which a managed deployment
+// refuses and an open-source one allows with a warning (E9, package signin).
+// Their argv comes from the pinned releases' --help (lanes/a10/HANDOFF.md).
+
+// Wave3Connectors are the connectors this part serves.
+var Wave3Connectors = []string{"cursor", "amp", "devin"}
 var wave3Interactive = map[string][]string{
 	"cursor": {"/usr/local/bin/cursor-agent"},
 	"amp":    {"/usr/local/bin/amp"},
@@ -309,10 +414,10 @@ var wave3Interactive = map[string][]string{
 
 var wave3Headless = map[string][]string{
 	"cursor": {"/usr/local/bin/cursor-agent", "-p", "{prompt}", "--force", "--trust"},
-	// Amp has no command-line switch for "allow all": its setting
-	// amp.dangerouslyAllowAll in ~/.config/amp/settings.json does that, and
-	// the Amp image (A11) must carry it.
-	"amp":   {"/usr/local/bin/amp", "-x", "{prompt}"},
+	// Amp has no command-line switch for "allow all": the setting
+	// amp.dangerouslyAllowAll does that, and the image carries it in a
+	// root-owned file that only a headless run reads.
+	"amp":   {"/usr/local/bin/amp", "--settings-file", AmpHeadlessSettings, "-x", "{prompt}"},
 	"devin": {"/usr/local/bin/devin", "--permission-mode", "dangerous", "--respect-workspace-trust", "false", "-p", "{prompt}"},
 }
 

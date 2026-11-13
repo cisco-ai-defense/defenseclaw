@@ -266,7 +266,8 @@ func TestDecideBody(t *testing.T) {
 		category string
 	}{
 		{"plain tools/call", string(mcpCall("list")), true, ""},
-		{"not json-rpc", "hello", true, ""},
+		{"json, not json-rpc", `{"hello":"world"}`, true, ""},
+		{"utf-8 bom", "\xef\xbb\xbf" + string(mcpCall("list")), true, ""},
 		{"duplicate method key", `{"jsonrpc":"2.0","method":"ping","method":"tools/call","params":{"name":"x"}}`, false, CategoryMCPToolBlocked},
 		{"duplicate tool name", `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"a","name":"b"}}`, false, CategoryMCPToolBlocked},
 		{"no tool name", `{"jsonrpc":"2.0","method":"tools/call","params":{}}`, false, CategoryMCPToolBlocked},
@@ -286,11 +287,13 @@ func TestDecideBody(t *testing.T) {
 		t.Fatalf("alert verdict: %+v", v)
 	}
 	h.judge.alert = false
-	// Case-folded keys are not the method the server reads: not a tools/call.
+	// A case-variant key is the method a Go-decoded server reads (GAP-0156):
+	// the call is judged.
 	before := len(h.judge.calls)
-	if v := h.eng.DecideBody(ctx, r, base, []byte(`{"jsonrpc":"2.0","METHOD":"tools/call","params":{"name":"x"}}`)); !v.Allow || len(h.judge.calls) != before {
-		t.Fatalf("case-folded key judged: %+v", v)
+	if v := h.eng.DecideBody(ctx, r, base, []byte(`{"jsonrpc":"2.0","METHOD":"tools/call","params":{"name":"x"}}`)); !v.Allow || len(h.judge.calls) != before+1 {
+		t.Fatalf("case-variant key not judged: %+v", v)
 	}
+	before = len(h.judge.calls)
 	batch := "[" + string(mcpCall("a")) + "," + string(mcpCall("b")) + "]"
 	h.judge.block = true
 	if v := h.eng.DecideBody(ctx, r, base, []byte(batch)); v.Allow || len(h.judge.calls) != before+1 {

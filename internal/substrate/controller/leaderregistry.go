@@ -37,12 +37,35 @@ type LeaderRegistry struct {
 	Now   func() time.Time
 }
 
-var _ Registry = (*LeaderRegistry)(nil)
+var (
+	_ Registry      = (*LeaderRegistry)(nil)
+	_ FreshRegistry = (*LeaderRegistry)(nil)
+	_ Tombstoner    = (*LeaderRegistry)(nil)
+)
 
 // Get implements Registry.
 func (l *LeaderRegistry) Get(ctx context.Context, atespace, uid string) (Registration, bool, error) {
 	r, ok, err := l.Store.Get(ctx, atespace, uid)
 	if err != nil || !ok || r.Deleted {
+		return Registration{}, false, err
+	}
+	return fromLeader(r), true, nil
+}
+
+// freshStore is a store that can read past its miss cache (registry.Remote).
+type freshStore interface {
+	GetFresh(ctx context.Context, atespace, uid string) (registry.Registration, bool, error)
+}
+
+// GetFresh implements FreshRegistry: past the store's miss cache when it has
+// one, else the same as Get.
+func (l *LeaderRegistry) GetFresh(ctx context.Context, atespace, uid string) (Registration, bool, error) {
+	fs, ok := l.Store.(freshStore)
+	if !ok {
+		return l.Get(ctx, atespace, uid)
+	}
+	r, found, err := fs.GetFresh(ctx, atespace, uid)
+	if err != nil || !found || r.Deleted {
 		return Registration{}, false, err
 	}
 	return fromLeader(r), true, nil
@@ -105,4 +128,16 @@ func (l *LeaderRegistry) Put(ctx context.Context, in Registration) error {
 		}
 	}
 	return l.Store.Put(ctx, reg)
+}
+
+// MarkDeleted implements Tombstoner: the actor is gone from Substrate, so its
+// registration becomes a tombstone (kept for audit; Get no longer finds it).
+// No registration, or one already deleted, needs nothing.
+func (l *LeaderRegistry) MarkDeleted(ctx context.Context, atespace, uid string) error {
+	cur, ok, err := l.Store.Get(ctx, atespace, uid)
+	if err != nil || !ok || cur.Deleted {
+		return err
+	}
+	cur.Deleted = true
+	return l.Store.Put(ctx, cur)
 }

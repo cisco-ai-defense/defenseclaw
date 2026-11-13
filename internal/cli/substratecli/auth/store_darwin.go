@@ -18,7 +18,10 @@
 
 package auth
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 // osStore uses the macOS Security tool by its absolute path only: a
 // "security" found earlier on PATH is never run.
@@ -26,5 +29,10 @@ func osStore() (Store, error) {
 	if fi, err := os.Stat(securityTool); err != nil || fi.IsDir() {
 		return nil, noKeychain("the macOS keychain cannot be used: " + securityTool + " is missing")
 	}
-	return newMacStore(execRunner, tokenDir()), nil
+	st := newMacStore(execRunner, tokenDir())
+	st.s.(*macKeySealer).native = newNativeKeychain()
+	st.desc = fmt.Sprintf("sealed files in %s (mode 0600), encrypted with a key kept in your macOS default keychain "+
+		"(item service %s, account %s); the item trusts this DefenseClaw program only, so it reads the key without asking, "+
+		"and any other program, %s included, needs your approval. A new DefenseClaw build asks once", tokenDir(), keychainService, macNativeAccount, securityTool)
+	return st, nil
 }

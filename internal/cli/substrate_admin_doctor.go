@@ -85,7 +85,7 @@ var (
 	substrateDoctorAlertWait = 300 * time.Millisecond
 )
 
-const substrateLoginFix = "defenseclaw substrate login --admin-url https://HOST:PORT --issuer URL --client-id ID (your administrator has these)"
+const substrateLoginFix = "defenseclaw substrate login --admin-url https://HOST:PORT (your administrator has the address)"
 
 func newSubstrateDoctorCmd() *cobra.Command {
 	var (
@@ -348,11 +348,21 @@ func doctorAttach(ctx context.Context, s *substrateSession, mine []api.Actor, si
 	if len(mine) == 0 {
 		return substrateCheck{ID: id, Status: doctorSkip, Summary: "can be checked once you have an agent; start one with: defenseclaw substrate run claude"}
 	}
+	// A running agent answers at once; one that is still starting would only
+	// show the wait.
 	a := mine[0]
+	for _, m := range mine {
+		if m.State == "running" {
+			a = m
+			break
+		}
+	}
 	o := attach.Options{
 		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
 		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer,
 		MaxWait: 5 * time.Second, NoBanner: true, NoAsks: true,
+		// The doctor prints its own lines; the wait messages stay out.
+		Err: io.Discard,
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -360,6 +370,8 @@ func doctorAttach(ctx context.Context, s *substrateSession, mine []api.Actor, si
 		switch {
 		case errors.Is(err, attach.ErrNotOffered):
 			return substrateCheck{ID: id, Status: doctorWarn, Summary: "this cluster does not offer attach through the gateway yet", Fix: "ask your administrator to upgrade DefenseClaw on the cluster"}
+		case errors.Is(err, attach.ErrAttachOff):
+			return substrateCheck{ID: id, Status: doctorFail, Summary: "the cluster gateway has no route to agents (attach is not set up)", Fix: "ask your administrator to give the gateway its router address (the --router-address setting)"}
 		case errors.Is(err, attach.ErrNotAllowed), errors.Is(err, attach.ErrNoActor):
 			return substrateCheck{ID: id, Status: doctorWarn, Summary: "the cluster would not let you reach " + a.Atespace + "/" + a.Name + ": " + doctorFirstLine(err), Fix: "run doctor again after defenseclaw substrate list shows an agent of yours"}
 		case errors.Is(err, attach.ErrNotSignedIn):

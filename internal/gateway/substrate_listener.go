@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -120,6 +121,15 @@ type SubstrateConfig struct {
 	// permissive tiers fail open with a warning; managed and strict fail
 	// closed). Unattended runs always fail closed (D8).
 	FailOpenInteractive bool
+	// Managed is a managed_enterprise deployment. It refuses an actor whose
+	// agent signs in to a vendor account, because the token would sit in the
+	// actor and its snapshots (E9); an open-source deployment allows it with
+	// a warning.
+	Managed bool
+	// SecretPlaceholders maps bound secret names to the environment variable
+	// names the actor carries in their place (substrate.secrets[].inject.
+	// placeholder). Nil means no secret is bound to a vendor key.
+	SecretPlaceholders func(names []string) []string
 	// LLM serves /llm/<provider>/... for a verified actor (nil: 404).
 	LLM http.Handler
 	// Actions creates and deletes actors for the launcher (nil: 501).
@@ -139,8 +149,26 @@ type SubstrateConfig struct {
 	// Skills scans the skill folders the kit attaches (GAP-0039); nil
 	// scans nothing.
 	Skills SubstrateSkillScanner
+	// BlockUnscannedSkills says whether a skill folder that reaches an
+	// actor of this connector without a scan is refused (managed installs and
+	// the strict tier) rather than alerted on (OSS default tiers).
+	BlockUnscannedSkills func(connector string) bool
+	// TemplateSkills returns the admitted skill folder digests of the attested
+	// template "atespace/name" (the controller's verdict): a folder with one
+	// of them is trusted without a scan (GAP-0164). Nil trusts none.
+	TemplateSkills func(ctx context.Context, template string) ([]string, error)
+	// SkillReceiptKey signs skill scan receipts; every replica must have the
+	// same key (derived from the shared chain key). Empty: a random key per
+	// process, so receipts hold only on the replica that gave them.
+	SkillReceiptKey []byte
 	// Asks is the leader's ask and decision store (nil: 501).
 	Asks SubstrateAskStore
+	// SandboxClass is the isolation class an actor of profile must run in
+	// (SubstrateSandboxClassFor: the profile floor's sandbox_class, never
+	// weaker than substrate.default_sandbox_class). Create puts it on the
+	// actor's worker selector when the template's class does not meet it.
+	// nil: the template decides.
+	SandboxClass func(profile string) string
 	// UnattendedAsk is what an unattended actor's ask does for its profile
 	// (SubstrateUnattendedAskFor; nil: deny, D12).
 	UnattendedAsk func(profile string) SubstrateUnattendedAsk
@@ -197,10 +225,15 @@ type substrateState struct {
 	// refused, not logged line by line.
 	refusals *rate.Limiter
 
-	// skillsSeen is the scanned skill fingerprint per actor UID and folder
-	// (substrate_skills.go).
-	skillsMu   sync.Mutex
-	skillsSeen map[string]string
+	// receiptKey signs skill scan receipts (substrate_skills.go);
+	// receiptShared says every replica has it.
+	receiptKey    []byte
+	receiptShared bool
+	// alert raises an audit alert (the API server's logger).
+	alert func(ctx context.Context, severity, summary string, details map[string]any)
+	// alerted is alertOnce's memory (substrate_skills.go).
+	alertMu sync.Mutex
+	alerted map[string]bool
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
@@ -237,7 +270,19 @@ func (a *APIServer) SetSubstrate(cfg SubstrateConfig) error {
 	if cfg.IsAdmin == nil {
 		cfg.IsAdmin = func(identity.Person) bool { return false }
 	}
-	st := &substrateState{cfg: cfg, refusals: rate.NewLimiter(5, 20)}
+	st := &substrateState{cfg: cfg, refusals: rate.NewLimiter(5, 20), receiptKey: cfg.SkillReceiptKey, receiptShared: len(cfg.SkillReceiptKey) > 0}
+	if !st.receiptShared {
+		st.receiptKey = make([]byte, 32)
+		if _, err := cryptorand.Read(st.receiptKey); err != nil {
+			return fmt.Errorf("substrate: skill receipt key: %w", err)
+		}
+	}
+	st.alert = func(ctx context.Context, severity, summary string, details map[string]any) {
+		if a.logger != nil {
+			_ = a.logger.LogAlertCtx(ctx, "substrate", severity, summary, details)
+		}
+		st.logRefusal("%s: %v", summary, details["folder"])
+	}
 	a.substrateMu.Lock()
 	a.substrate = st
 	a.substrateMu.Unlock()
@@ -566,6 +611,14 @@ func (a *APIServer) substrateActorAuthenticate(st *substrateState, next http.Han
 		key, kerr := sandboxreg.SubstrateKey(actor.Atespace, actor.UID)
 		if kerr != nil || key != reg.Key {
 			writeSubstrateRefusal(w, http.StatusForbidden, "actor_not_registered")
+			return
+		}
+		// E9: an actor made some other way than the launcher still gets
+		// nothing from a managed gateway when its agent signs in to a vendor
+		// account.
+		if d := st.cfg.signinDecision(reg.Connector, reg.Secrets); !d.Allowed {
+			st.logRefusal("actor %s refused: %s (%s)", actor.Ref(), substrateSigninRefusedCode, reg.Connector)
+			writeSubstrateSigninRefusal(w, d)
 			return
 		}
 		ctx := withSubstrateActor(r.Context(), verifiedSubstrateActor(actor.Atespace, actor.Name, actor.UID, actor.Subject, key))

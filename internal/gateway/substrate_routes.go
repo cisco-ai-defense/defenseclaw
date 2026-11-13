@@ -70,6 +70,9 @@ type SubstrateCreate struct {
 	Atespace string `json:"atespace,omitempty"`
 	// Owner is filled by the gateway (the verified person).
 	Owner registry.Person `json:"-"`
+	// SandboxClass is filled by the gateway from the profile (never from
+	// the request): the class the actor must run in (PLAN 7.3).
+	SandboxClass string `json:"-"`
 }
 
 // SubstrateWorkspace is what the actor starts with.
@@ -296,11 +299,49 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusForbidden, "atespace_not_allowed")
 			return
 		}
-		if strings.TrimSpace(req.Connector) == "" {
-			writeSubstrateJSONError(w, http.StatusBadRequest, "connector_required")
+		// One connector rule (GAP-0160): an omitted connector is the
+		// template's own (its attested label); a named one must equal it;
+		// a template that carries no label (or an Actions that cannot read
+		// it) leaves the launcher's word, and no word is connector_required.
+		tmplConnector, err := st.cfg.templateConnector(r.Context(), atespace, req.Template)
+		if errors.Is(err, ErrSubstrateTemplateNotFound) {
+			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
 			return
 		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[substrate] template lookup failed: %v\n", err)
+			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
+			return
+		}
+		named := strings.TrimSpace(req.Connector)
+		switch {
+		case named != "" && tmplConnector != "" && !sameSubstrateConnector(named, tmplConnector):
+			writeSubstrateJSONError(w, http.StatusBadRequest, "connector_mismatch")
+			return
+		case named == "" && tmplConnector == "":
+			writeSubstrateJSONError(w, http.StatusBadRequest, "connector_required")
+			return
+		case named == "":
+			// The profile was picked without a connector; pick it again for the
+			// template's, because a profile may be bound to one.
+			req.Connector = tmplConnector
+			if profile, atespace, err = resolve(c.person, req.Profile, req.Connector, c.admin); err != nil {
+				writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+				return
+			}
+		}
 		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
+		if st.cfg.SandboxClass != nil {
+			req.SandboxClass = st.cfg.SandboxClass(profile)
+		}
+		// E9: a managed deployment refuses an agent that signs in to a
+		// vendor account, before any actor exists. The connector is now the
+		// template's whenever the template has one; it is checked again
+		// below on what the created actor runs.
+		if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
+			writeSubstrateSigninRefusal(w, d)
+			return
+		}
 		created, err := st.cfg.Actions.Create(r.Context(), req)
 		switch {
 		case errors.Is(err, ErrSubstrateTemplateNotFound):
@@ -313,6 +354,15 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			fmt.Fprintf(os.Stderr, "[substrate] create actor failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
 			return
+		}
+		signinDecision := st.cfg.signinDecision(created.Connector, req.Secrets)
+		if !signinDecision.Allowed {
+			_ = st.cfg.Actions.Delete(context.WithoutCancel(r.Context()), created.Atespace, created.Name)
+			writeSubstrateSigninRefusal(w, signinDecision)
+			return
+		}
+		if signinDecision.Warn {
+			fmt.Fprintf(os.Stderr, "[substrate] warning: %s/%s: %s\n", created.Atespace, created.Name, signinDecision.Message)
 		}
 		reg := registry.Registration{
 			Atespace: created.Atespace, Name: created.Name, UID: created.UID, Person: req.Owner,
@@ -352,13 +402,27 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusForbidden, "actor_refused")
 				return
 			}
-			fmt.Fprintf(os.Stderr, "[substrate] resume failed: %v\n", err)
+			// GAP-0167: an actor that never ran holds nothing the person
+			// wants and would sit SUSPENDED in their list: remove it.
+			ctx := context.WithoutCancel(r.Context())
+			_ = st.cfg.Actions.Delete(ctx, created.Atespace, created.Name)
+			reg.Deleted = true
+			_ = st.cfg.Registrations.Put(ctx, reg)
+			fmt.Fprintf(os.Stderr, "[substrate] resume failed, actor %s/%s removed: %v\n", created.Atespace, created.Name, err)
+			if errors.Is(err, ErrSubstrateNoWorker) {
+				// No worker of the pool has room: the person can free one.
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "no_free_worker")
+				return
+			}
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
 		out := substrateActorView(reg)
+		if signinDecision.Warn {
+			out["warnings"] = []string{signinDecision.Message}
+		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, 0)
+			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -392,7 +456,14 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		out := make([]map[string]any, 0, len(regs))
 		for _, reg := range regs {
-			out = append(out, substrateActorView(reg))
+			v := substrateActorView(reg)
+			// GAP-0167: the person sees which agents hold a worker.
+			if st.cfg.Lookup != nil && !reg.Deleted {
+				if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
+					v["state"] = strings.ToLower(string(live.State))
+				}
+			}
+			out = append(out, v)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"actors": out})
 	}
@@ -487,7 +558,7 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		}
 		// The token names the person as issuer#subject: two issuers may
 		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, ttl)
+		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

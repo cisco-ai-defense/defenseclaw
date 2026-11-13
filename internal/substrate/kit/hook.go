@@ -16,7 +16,27 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
+
+// signinRefusal reads the gateway's E9 refusal: status 403 with reason
+// signin.RefusedCode, whose message is the text the agent shows.
+func signinRefusal(status int, body []byte) (string, bool) {
+	if status != 403 {
+		return "", false
+	}
+	var v struct {
+		Reason  string `json:"reason"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(body, &v) != nil || !signin.IsRefusalCode(v.Reason) {
+		return "", false
+	}
+	if v.Message == "" {
+		v.Message = "DefenseClaw refused this actor: its agent signs in to a vendor account, which a managed deployment does not allow."
+	}
+	return v.Message, true
+}
 
 // maxPayloadBytes is the agent event cap, the host hooks' 1 MiB
 // (hookexec.DefaultMaxBody): a larger event is refused closed.
@@ -137,8 +157,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	}
 	resp, _, err := send(ctx, Request{Path: HookPathPrefix + o.Connector, Header: header, Body: body})
 	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
-		o.rememberSkills(skillsSent)
-		if moved := quarantineSkills(resp.Body, skillsSent, time.Now()); len(moved) > 0 {
+		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, time.Now()); len(moved) > 0 {
 			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders moved out of the skill root: %s\n", strings.Join(moved, ", "))
 		}
 	}
@@ -158,6 +177,15 @@ func RunHook(ctx context.Context, o HookOptions) int {
 		}
 		return refuse("DefenseClaw actor hook failed: " + err.Error())
 	}
+	if msg, ok := signinRefusal(resp.Status, resp.Body); ok {
+		// E9: the gateway refused this actor's vendor sign-in. Say so, not
+		// "its identity was not accepted".
+		code, rerr := hookexec.RemoteRefused(call, msg)
+		if rerr != nil {
+			fmt.Fprintln(o.Stderr, "defenseclaw:", rerr)
+		}
+		return code
+	}
 	code, rerr := hookexec.RemoteAnswer(call, resp.Status, resp.Body)
 	if rerr != nil {
 		fmt.Fprintln(o.Stderr, "defenseclaw:", rerr)
@@ -166,11 +194,9 @@ func RunHook(ctx context.Context, o HookOptions) int {
 }
 
 // attachSkills lists every skill folder's fingerprint in env's facts and
-// attaches the files of the folders not in the kit's seen-cache. It returns
-// the fingerprints it sent. The cache only saves bytes: the gateway decides
-// on the fingerprints, and a folder it has not scanned whose files are not
-// attached is not scanned, so it is quarantined (a cache the agent edited
-// hides nothing).
+// attaches the files of the folders the receipt cache does not cover. It
+// returns the folders it listed. The cache only saves bytes: the gateway
+// checks every receipt, so a cache the agent edited hides nothing.
 func (o HookOptions) attachSkills(env *HookEnvelope, payload []byte) map[string]string {
 	var v struct {
 		CWD string `json:"cwd"`
@@ -198,9 +224,6 @@ func (o HookOptions) home() string {
 	h, _ := os.UserHomeDir()
 	return h
 }
-
-// rememberSkills adds the fingerprints the gateway answered for to the cache.
-func (o HookOptions) rememberSkills(sent map[string]string) { saveSkillCache(o.home(), sent) }
 
 // outageMode is the fail mode of a call: the gateway's word for this actor
 // when it answered (the registration decides, D8), else the configuration's;

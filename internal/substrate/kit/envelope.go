@@ -86,6 +86,9 @@ type SkillFingerprint struct {
 	Path     string `json:"path"`
 	FP       string `json:"fp"`
 	Attached bool   `json:"attached,omitempty"`
+	// Receipt is the gateway's scan receipt for FP; the files are then not
+	// attached.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 // PathFact is one path argument as the actor's file system resolves it.

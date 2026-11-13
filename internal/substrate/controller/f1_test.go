@@ -617,7 +617,8 @@ func TestLifecycleEventsToTheLeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.pass()
-	want := []string{"suspended", "resumed", "reverted", "crashed", "forked<" + a.GetMetadata().GetUid()}
+	// CRASHED -> SUSPENDED is a revert of the crashed actor (GAP-0141).
+	want := []string{"suspended", "resumed", "reverted", "crashed", "reverted", "forked<" + a.GetMetadata().GetUid()}
 	if got := life.names(); !slices.Equal(got, want) {
 		t.Fatalf("lifecycle = %v, want %v", got, want)
 	}
@@ -626,7 +627,7 @@ func TestLifecycleEventsToTheLeader(t *testing.T) {
 			t.Fatalf("event without controller time or actor: %+v", e)
 		}
 	}
-	if life.evs[4].Actor.UID != child.GetMetadata().GetUid() {
+	if life.evs[5].Actor.UID != child.GetMetadata().GetUid() {
 		t.Fatal("the fork event names the wrong actor")
 	}
 	// Leader down: events wait and go out in order when it is back.
@@ -644,8 +645,31 @@ func TestLifecycleEventsToTheLeader(t *testing.T) {
 	r.pass()
 	life.down = false
 	r.pass()
-	got := life.names()[5:]
+	got := life.names()[6:]
 	if !slices.Equal(got, []string{"resumed", "suspended", "deleted"}) {
 		t.Fatalf("after the outage: %v", got)
+	}
+}
+
+// GAP-0164: the attestor carries the admitted skill folder digests of every
+// image; a blocked item's digest never counts.
+func TestTemplateAttestorCarriesSkillDigests(t *testing.T) {
+	now := time.Date(2026, 11, 13, 2, 0, 0, 0, time.UTC)
+	img := "reg.example.com/dc/claude@" + digA
+	v := verified(digA, "1.0.10", now.Add(time.Minute))
+	v.Statement.Predicate.Scan.Items = []attest.ScanItem{
+		{Kind: "skill", Name: "github", Verdict: attest.VerdictClean, Digest: "sha256:good"},
+		{Kind: "skill", Name: "fmt", Verdict: attest.VerdictWarn, Digest: "sha256:warn"},
+		{Kind: "skill", Name: "evil", Verdict: attest.VerdictBlock, Digest: "sha256:evil"},
+		{Kind: "mcp", Name: "x", Verdict: attest.VerdictClean, Digest: "sha256:mcp"},
+	}
+	ta := &controller.TemplateAttestor{Verifier: fakeVerifier{by: map[string]*attest.Verified{img: v}}, Registries: []string{"reg.example.com"}}
+	att, err := ta.Attest(context.Background(), &ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "a", Name: "t"},
+		Containers: []*ateapi.Container{{Image: img}}})
+	if err != nil || !att.Attested {
+		t.Fatalf("attest: %+v %v", att, err)
+	}
+	if strings.Join(att.SkillDigests, ",") != "sha256:good,sha256:warn" {
+		t.Fatalf("skill digests %v", att.SkillDigests)
 	}
 }

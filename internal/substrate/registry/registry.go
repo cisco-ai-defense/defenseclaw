@@ -162,6 +162,42 @@ func (f Filter) match(r Registration) bool {
 	return true
 }
 
+// Lookup is what the callout learns of an actor from its name, the only
+// identity atenet-egress gives it (GAP-0090): the newest incarnation's
+// UID, profile and attendance. No person, secret or approval leaves the
+// leader this way.
+type Lookup struct {
+	Found bool `json:"found"`
+	// Deleted is a tombstone for the newest incarnation: the actor is gone.
+	Deleted    bool   `json:"deleted,omitempty"`
+	UID        string `json:"uid,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+	Unattended bool   `json:"unattended,omitempty"`
+}
+
+// LookupName finds the newest registration of atespace/name. An actor name
+// is reused only after a delete (the launcher never reuses one, GAP-0133),
+// so the newest record is the running incarnation, or its tombstone.
+func LookupName(ctx context.Context, s Store, atespace, name string) (Lookup, error) {
+	if atespace == "" || name == "" {
+		return Lookup{}, errors.New("registry: a lookup names the atespace and the actor")
+	}
+	rs, err := s.List(ctx, Filter{Atespace: atespace, IncludeDeleted: true})
+	if err != nil {
+		return Lookup{}, err
+	}
+	var best *Registration
+	for i := range rs {
+		if rs[i].Name == name && (best == nil || rs[i].CreatedAt.After(best.CreatedAt)) {
+			best = &rs[i]
+		}
+	}
+	if best == nil {
+		return Lookup{}, nil
+	}
+	return Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}, nil
+}
+
 // Store is a registration store.
 type Store interface {
 	Get(ctx context.Context, atespace, uid string) (Registration, bool, error)

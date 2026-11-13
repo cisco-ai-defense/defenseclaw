@@ -18,6 +18,8 @@ package cli
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -346,6 +348,14 @@ func substratePeople(c *config.Config) (gateway.SubstratePersonVerifier, error) 
 	return nil, nil
 }
 
+// substrateNoPeople refuses every sign-in: the admin listener of a
+// cluster with no sign-in configured serves the callout route only.
+type substrateNoPeople struct{}
+
+func (substrateNoPeople) Verify(context.Context, string) (identity.Person, error) {
+	return identity.Person{}, &identity.Error{Reason: identity.ReasonIssuer, Message: "no sign-in is configured on this cluster"}
+}
+
 // substrateKubeSignIn reports whether people sign in with Kubernetes
 // credentials: no OIDC issuer, not a managed install, not turned off.
 func substrateKubeSignIn(c *config.Config) bool {
@@ -416,6 +426,15 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, err
 		}
+		if people == nil && !managed.IsManagedEnterprise(c.DeploymentMode) {
+			if _, err := os.Stat(serveFlags.calloutTokenFile); err == nil {
+				// GAP-0015: with no sign-in at all, the admin listener still
+				// runs for the callout's tool verdict route (its own bearer
+				// token); every person route refuses.
+				fmt.Fprintln(os.Stderr, "[substrate] no sign-in is configured: the admin listener serves the callout verdict route only")
+				people = substrateNoPeople{}
+			}
+		}
 		servingTLS, err := substrateServingTLS()
 		if err != nil {
 			return out, err
@@ -435,7 +454,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if serveFlags.actorPlainHTTP {
 			actorTLS = nil
 		}
-		if err := loadChainKey(serveFlags.chainKeyFile); err != nil {
+		chainKey, err := loadChainKey(serveFlags.chainKeyFile)
+		if err != nil {
 			return out, err
 		}
 		toLeader := &leader.Client{BaseURL: base, HTTP: hc}
@@ -450,6 +470,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if err != nil {
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
+		router, routerErr := substrateRouter()
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
@@ -459,16 +480,25 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return gateway.SubstrateUnattendedAskFor(c, profile)
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
-			Relays: substrateRelays(),
+			Relays: relayDialer(router),
 			Skills: newRuntimeSkillScanner(c),
-			Info:   substrateInfo(c),
+			// GAP-0039: an unscanned skill folder is refused where hooks fail
+			// closed (managed, strict tier) and alerted on elsewhere; scan
+			// receipts hold on every replica that shares the chain key.
+			BlockUnscannedSkills: substrateBlocksUnscannedSkills(c),
+			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
+			TemplateSkills:       substrateTemplateSkills(ctl),
+			Info:                 substrateInfo(c),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
-					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
+					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
+					substrateRouterCheck(ctx, router, routerErr)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl)},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
+			// PLAN 7.3: the profile sandbox_class picks the class at create.
+			SandboxClass: gateway.SubstrateSandboxClassFor(c),
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -476,6 +506,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			// D8: interactive actors fail as hosts do (managed closed, OSS
 			// open with a warning); unattended actors always closed.
 			FailOpenInteractive: !managed.IsManagedEnterprise(c.DeploymentMode),
+			// E9: a managed deployment refuses a vendor sign-in held in an actor.
+			Managed:            managed.IsManagedEnterprise(c.DeploymentMode),
+			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 			OnRateLimited: func(scope ratelimit.Scope, route string) {
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
 			},
@@ -506,11 +539,10 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				out.CalloutToken = readSecretFile(serveFlags.calloutTokenFile)
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, "[substrate] no substrate.identity.oidc issuer: the admin listener does not run")
+			fmt.Fprintln(os.Stderr, "[substrate] no sign-in and no callout token: the admin listener does not run")
 		}
 		if _, err := os.Stat(serveFlags.sessionKeyFile); err == nil {
-			issuer := "https://" + strings.TrimSpace(c.Substrate.Services.Admin)
-			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, issuer)
+			s, err := identity.LoadSessionSigner(serveFlags.sessionKeyFile, c.Substrate.RelaySessionIssuer())
 			if err != nil {
 				return out, err
 			}
@@ -518,6 +550,27 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		}
 		ready.Store(true)
 		return out, nil
+	}
+}
+
+// substrateSecretPlaceholders resolves bound secret names to the environment
+// variable names the actor carries in their place. E9 looks there for a
+// vendor API key (CURSOR_API_KEY, AMP_API_KEY, KIRO_API_KEY, GEMINI_API_KEY).
+func substrateSecretPlaceholders(secrets []config.SubstrateSecret) func([]string) []string {
+	byName := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		if s.Inject.Placeholder != "" {
+			byName[s.Name] = s.Inject.Placeholder
+		}
+	}
+	return func(names []string) []string {
+		var out []string
+		for _, n := range names {
+			if p, ok := byName[n]; ok {
+				out = append(out, p)
+			}
+		}
+		return out
 	}
 }
 
@@ -601,6 +654,15 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 				return "", err
 			}
 			return reg.ParentUID, nil
+		},
+		// A delete purges only a registration the controller marked
+		// deleted (or an actor never registered) (GAP-0142).
+		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil {
+				return false, err
+			}
+			return !ok || reg.Deleted, nil
 		}})
 	if err != nil {
 		return err
@@ -662,8 +724,9 @@ func kubeHTTPClient() (*http.Client, error) {
 
 // substrateLeaderPermissions is who may call what on the leader
 // (GAP-0094): gateway replicas every method; the callout only the egress
-// chain check; the controller the registrations, the chain lifecycle and
-// the activity feed. An identity listed in two roles gets both sets.
+// chain check and the name lookup of a registration (GAP-0090); the
+// controller the registrations, the chain lifecycle and the activity feed.
+// An identity listed in two roles gets both sets.
 func substrateLeaderPermissions(gateways, callouts, controllers []string) leader.Permissions {
 	p := leader.Permissions{}
 	add := func(ids []string, methods ...string) {
@@ -674,7 +737,7 @@ func substrateLeaderPermissions(gateways, callouts, controllers []string) leader
 		}
 	}
 	add(gateways, "*")
-	add(callouts, chainstate.MethodChainEgress)
+	add(callouts, chainstate.MethodChainEgress, leader.MethodRegistrationLookup)
 	add(controllers, leader.MethodRegistrationGet, leader.MethodRegistrationList, leader.MethodRegistrationWrite,
 		chainstate.MethodChainLifecycle, leader.MethodActivitySnapshot)
 	return p
@@ -695,20 +758,32 @@ func substrateKubeSecrets() gateway.SubstrateSecretStore {
 	return &kubeSecrets{server: "https://" + net.JoinHostPort(host, port), tokenFile: serveFlags.kubeTokenFile, http: hc}
 }
 
-// substrateRelays is attach's way to the relays (nil when no router is
-// configured or the pod identity bundle is missing).
-func substrateRelays() gateway.SubstrateRelayDialer {
+// substrateRouter builds attach's way to the relays: nil, nil when no router
+// address is set; nil and the reason when it cannot be built. The doctor
+// row substrate.attach_router names either (GAP-0157).
+func substrateRouter() (*routerDialer, error) {
 	if serveFlags.routerAddress == "" {
-		return nil
+		fmt.Fprintln(os.Stderr, "[substrate] attach is off: no --router-address (run, connect, pull, logs and checkpoint answer attach_unavailable)")
+		return nil, nil
 	}
 	files, err := podcert.NewFiles(serveFlags.peerBundle, serveFlags.peerTrust)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[substrate] attach is off: pod identity: %v\n", err)
-		return nil
+		err = fmt.Errorf("pod identity: %w", err)
+		fmt.Fprintf(os.Stderr, "[substrate] attach is off: %v\n", err)
+		return nil, err
 	}
-	d, err := newRouterDialer(serveFlags.routerAddress, serveFlags.routerServerName, serveFlags.routerCAFile, serveFlags.relayPort, files)
+	d, err := newRouterDialer(serveFlags.routerAddress, serveFlags.routerServerName, serveFlags.routerCAFile, serveFlags.relayPort, files.Certificate)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[substrate] attach is off: %v\n", err)
+		return nil, err
+	}
+	return d, nil
+}
+
+// relayDialer is d as the attach route's dialer (a nil *routerDialer must be
+// a nil interface, so attach answers attach_unavailable).
+func relayDialer(d *routerDialer) gateway.SubstrateRelayDialer {
+	if d == nil {
 		return nil
 	}
 	return d
@@ -745,16 +820,37 @@ func substrateStartupChecks(c *config.Config) {
 // loadChainKey sets the value lineage key every gateway replica shares
 // (Secret defenseclaw-chain-key). Without it each replica keeps its own
 // random key and value joins only match on the replica that saw both calls.
-func loadChainKey(path string) error {
+func loadChainKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "[substrate] warning: no chain key at %s: value-lineage chains match only within one replica\n", path)
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("serve: chain key: %w", err)
+		return nil, fmt.Errorf("serve: chain key: %w", err)
 	}
-	return gateway.SetToolValueLineageKey([]byte(strings.TrimSpace(string(raw))))
+	key := []byte(strings.TrimSpace(string(raw)))
+	return key, gateway.SetToolValueLineageKey(key)
+}
+
+// substrateSkillReceiptKey derives the skill scan receipt key from the
+// shared chain key, so a receipt one replica gives holds on all of them
+// (GAP-0039). No chain key: nil, and each replica uses its own.
+func substrateSkillReceiptKey(chainKey []byte) []byte {
+	if len(chainKey) == 0 {
+		return nil
+	}
+	m := hmac.New(sha256.New, chainKey)
+	m.Write([]byte("defenseclaw substrate skill receipt key v1"))
+	return m.Sum(nil)
+}
+
+// substrateBlocksUnscannedSkills refuses an unscanned skill folder where a
+// hook fails closed: managed installs and the strict tier of a connector.
+func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) bool {
+	return func(connector string) bool {
+		return managed.IsManagedEnterprise(c.DeploymentMode) || c.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict
+	}
 }
 
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a

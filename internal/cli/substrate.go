@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // Exit codes of the substrate commands, besides 0 (done) and 1 (failed):
@@ -64,7 +65,38 @@ in a project folder. These commands need no local DefenseClaw install.`,
 // substratePreRun skips the daemon bootstrap and the local config: the
 // launcher talks to a cluster and runs on a laptop with nothing installed.
 // The administrator commands read config.yaml themselves when they need it.
-func substratePreRun(*cobra.Command, []string) error { return nil }
+// A terminal whose locale is not UTF-8 gets agent text as ASCII only
+// (safetext.UseASCII): it would read parts of ordinary characters as 8-bit
+// controls.
+func substratePreRun(cmd *cobra.Command, _ []string) error {
+	safetext.UseASCII(!safetext.TerminalUTF8(os.Getenv))
+	substrateShowErrors(cmd)
+	return nil
+}
+
+// substrateShowErrors makes the error cmd returns safe to print: its text
+// can carry what the cluster or the agent answered, and cobra prints it as
+// it is. The launcher writes its own hints over several lines, so the text
+// keeps its newlines (safetext.Clean); a value inside it that could forge a
+// line is already one line where it was read (api, workspace). Exit codes
+// survive (the error is wrapped, not replaced).
+func substrateShowErrors(cmd *cobra.Command) {
+	run := cmd.RunE
+	if run == nil {
+		return
+	}
+	cmd.RunE = func(c *cobra.Command, args []string) error {
+		if err := run(c, args); err != nil {
+			return substrateShownError{err}
+		}
+		return nil
+	}
+}
+
+type substrateShownError struct{ err error }
+
+func (e substrateShownError) Error() string { return safetext.Clean(e.err.Error()) }
+func (e substrateShownError) Unwrap() error { return e.err }
 
 // substrateOutput is the --output/--json pair every read command has.
 type substrateOutput struct {
@@ -147,10 +179,10 @@ func substrateWorkloadFromEnv(cmd *cobra.Command) *auth.WorkloadOptions {
 		file = f.Value.String()
 	}
 	if file == "" {
-		file = os.Getenv("DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE")
+		file = envvars.Getenv("DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE")
 	}
 	if file != "" || (os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL") != "" && os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN") != "") ||
-		os.Getenv("DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE") != "" {
+		envvars.Getenv("DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE") != "" {
 		return &auth.WorkloadOptions{TokenFile: file}
 	}
 	return nil
@@ -174,7 +206,7 @@ func substrateFail(err error) error {
 	if errors.Is(err, auth.ErrNotSignedIn) || errors.Is(err, attach.ErrNotSignedIn) {
 		return withExitCode(err, substrateExitSignedOut)
 	}
-	for _, refused := range []error{attach.ErrNotAllowed, attach.ErrNoActor, attach.ErrNotOffered} {
+	for _, refused := range []error{attach.ErrNotAllowed, attach.ErrNoActor, attach.ErrNotOffered, attach.ErrAttachOff} {
 		if errors.Is(err, refused) {
 			return withExitCode(err, substrateExitRefused)
 		}
@@ -213,6 +245,8 @@ func substrateAPIMessage(e *api.Error) string {
 		return "the cluster has no such item, or it is not yours"
 	case e.Status == 413:
 		return "that was too large for the cluster (" + orWord(e.Reason, "too large") + ")"
+	case e.Status == 503 && e.Reason == "no_free_worker":
+		return "the cluster has no free worker for a new agent right now; nothing was started. Your running agents hold workers: see them with defenseclaw substrate list, and free one with defenseclaw substrate delete NAME, or ask your administrator for more workers"
 	case e.Status == 429:
 		return "the cluster is rate limiting you; wait a moment and try again"
 	case e.Status == 502 || e.Status == 503:
@@ -229,9 +263,12 @@ func orWord(v, def string) string {
 }
 
 func writeSubstrateJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(safetext.JSON(b), '\n'))
+	return err
 }
 
 // substrateTable prints rows under a header with aligned columns.

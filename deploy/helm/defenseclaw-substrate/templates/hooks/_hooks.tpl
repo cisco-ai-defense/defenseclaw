@@ -21,6 +21,7 @@
   "controller_deployment" "defenseclaw-controller"
   "owner_token_secret" .Values.bootstrap.ownerTokenSecret
   "delete_owner_token" .Values.bootstrap.deleteTokenAfterUse
+  "auth_delegator_binding" (ternary (include "dc.authDelegatorBinding" .) "" (eq (include "dc.kubeSignIn" .) "true"))
 -}}
 {{- toPrettyJson $p -}}
 {{- end -}}

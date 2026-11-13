@@ -11,11 +11,14 @@
 package attach
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,6 +30,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 )
 
 const handshakeTimeout = 45 * time.Second
@@ -39,6 +44,10 @@ var (
 	ErrClusterFull = errors.New("the cluster is full")
 	ErrStarting    = errors.New("the agent is starting")
 	ErrNotOffered  = errors.New("this cluster does not offer attach through the gateway yet")
+	// ErrAttachOff: the gateway serves the route but has no way to reach
+	// agents (no router address; HTTP 503 attach_unavailable). Waiting does
+	// not help, so it is final.
+	ErrAttachOff = errors.New("the cluster gateway has no route to agents")
 )
 
 // RouteError is an answer of the gateway's attach route that is not a
@@ -64,6 +73,8 @@ func (e *RouteError) Error() string {
 		return fmt.Sprintf("the agent %s is starting (status %d)", e.Target.Name, e.Status)
 	case ErrNotOffered:
 		return ErrNotOffered.Error() + "; ask your administrator to upgrade DefenseClaw"
+	case ErrAttachOff:
+		return "the cluster cannot connect you to agents yet: its gateway has no route to them (attach is not set up). Ask your administrator; defenseclaw substrate doctor shows the check"
 	}
 	return fmt.Sprintf("the gateway answered %d %s", e.Status, http.StatusText(e.Status))
 }
@@ -73,7 +84,26 @@ func (e *RouteError) Unwrap() error { return e.Kind }
 
 // final: a refusal that a retry cannot change.
 func (e *RouteError) final() bool {
-	return e.Kind == ErrNotSignedIn || e.Kind == ErrNotAllowed || e.Kind == ErrNoActor || e.Kind == ErrNotOffered
+	return e.Kind == ErrNotSignedIn || e.Kind == ErrNotAllowed || e.Kind == ErrNoActor || e.Kind == ErrNotOffered || e.Kind == ErrAttachOff
+}
+
+// attachOff reports a 503 whose JSON reason is attach_unavailable. It reads
+// at most 4 KiB of the body and puts back what it read otherwise.
+func attachOff(resp *http.Response) bool {
+	if resp.StatusCode != http.StatusServiceUnavailable || resp.Body == nil {
+		return false
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var m map[string]any
+	if json.Unmarshal(b, &m) == nil && m["reason"] == "attach_unavailable" {
+		resp.Body.Close()
+		return true
+	}
+	resp.Body = struct {
+		io.Reader
+		io.Closer
+	}{io.MultiReader(bytes.NewReader(b), resp.Body), resp.Body}
+	return false
 }
 
 // waits: the cluster is full or the agent is starting; wait up to MaxWait.
@@ -202,10 +232,11 @@ type Gateway struct {
 // does). Its errors must not contain the token.
 type BearerFunc func(ctx context.Context) (string, error)
 
-// AttachPrefix is the URL under which the gateway serves one actor's relay:
-// every relay route (/dcrelay/1/ws, /poll, /task, /status, /exec, /files)
-// is reachable with its own path appended. This is the one place that
-// knows the route's shape.
+// AttachPrefix is the URL under which the gateway serves one actor relay.
+// It is the route base of every launcher client: each route of
+// relay.AttachRoutes is AttachPrefix + "/" + route (relay.RouteURL), the
+// gateway attach contract (GAP-0158). This is the one place that knows the
+// prefix.
 func AttachPrefix(adminURL string, t Target) (string, error) {
 	if err := t.validate(); err != nil {
 		return "", err
@@ -378,10 +409,13 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 	r.Header.Set("Authorization", "Bearer "+tok)
 	// The admin listener refuses a write without the client tag (its CSRF gate).
-	r.Header.Set("X-DefenseClaw-Client", "substrate-launcher")
+	api.SetClientHeaders(r.Header)
 	resp, err := tu.tr.RoundTrip(r)
 	if err != nil {
 		return nil, tu.netError(err)
+	}
+	if attachOff(resp) {
+		return nil, &RouteError{Status: resp.StatusCode, Target: tu.target, Kind: ErrAttachOff}
 	}
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusBadGateway, http.StatusGatewayTimeout:

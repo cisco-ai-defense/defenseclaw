@@ -25,7 +25,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 )
 
 // The launcher create flow over the Substrate control API (PLAN 5.3
@@ -59,6 +61,38 @@ type SubstratePolicyEnsurer func(ctx context.Context, atespace, name string) err
 type SubstrateATEActions struct {
 	Client ateapi.Client
 	Ensure SubstratePolicyEnsurer
+	// ConnectorOf reads the connector a template was built for (its attested
+	// label, GAP-0160). Nil, or "" for an unattested template, means the
+	// template names none.
+	ConnectorOf func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error)
+}
+
+// SubstrateTemplateConnector is the optional part of an Actions that tells
+// the create route which connector a template carries.
+type SubstrateTemplateConnector interface {
+	TemplateConnector(ctx context.Context, atespace, template string) (string, error)
+}
+
+// TemplateConnector implements SubstrateTemplateConnector.
+func (s *SubstrateATEActions) TemplateConnector(ctx context.Context, atespace, template string) (string, error) {
+	if s.ConnectorOf == nil {
+		return "", nil
+	}
+	tmplSpace, tmplName := atespace, strings.TrimSpace(template)
+	if a, n, ok := strings.Cut(tmplName, "/"); ok {
+		tmplSpace, tmplName = a, n
+	}
+	if !substrateActorNameRE.MatchString(tmplName) || tmplSpace != atespace {
+		return "", ErrSubstrateTemplateNotFound
+	}
+	t, err := s.Client.GetActorTemplate(ctx, ateapi.Ref(tmplSpace, tmplName))
+	if ateapi.IsNotFound(err) {
+		return "", ErrSubstrateTemplateNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.ConnectorOf(ctx, t)
 }
 
 var substrateActorNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -75,7 +109,8 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		return SubstrateCreated{}, ErrSubstrateTemplateNotFound
 	}
 	tref := ateapi.Ref(tmplSpace, tmplName)
-	if _, err := s.Client.GetActorTemplate(ctx, tref); err != nil {
+	tmpl, err := s.Client.GetActorTemplate(ctx, tref)
+	if err != nil {
 		if ateapi.IsNotFound(err) {
 			return SubstrateCreated{}, ErrSubstrateTemplateNotFound
 		}
@@ -89,8 +124,9 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		return SubstrateCreated{}, fmt.Errorf("%w: %q is not a valid actor name", ErrSubstrateActorExists, name)
 	}
 	a, err := s.Client.CreateActor(ctx, &ateapi.Actor{
-		Metadata:      &ateapi.ResourceMetadata{Atespace: req.Atespace, Name: name},
-		ActorTemplate: tref,
+		Metadata:       &ateapi.ResourceMetadata{Atespace: req.Atespace, Name: name},
+		ActorTemplate:  tref,
+		WorkerSelector: substrateClassSelector(tmpl, req.SandboxClass),
 	})
 	if ateapi.IsAlreadyExists(err) {
 		return SubstrateCreated{}, ErrSubstrateActorExists
@@ -104,6 +140,29 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	}, nil
 }
 
+// substrateClassSelector is the worker selector an actor needs to run in
+// class: nil when the template already meets it (its own selector applies),
+// else the template's labels with the class label set (PLAN 7.3,
+// controller.SandboxClassLabel), so the actor lands on a pool of that class
+// and the controller's class check passes.
+func substrateClassSelector(tmpl *ateapi.ActorTemplate, class string) *ateapi.Selector {
+	class = strings.ToLower(strings.TrimSpace(class))
+	labels := tmpl.GetWorkerSelector().GetMatchLabels()
+	have := strings.ToLower(labels[controller.SandboxClassLabel])
+	if have == "" {
+		have = config.SubstrateSandboxGVisor // every actor is at least gVisor (D7), as the controller counts it
+	}
+	if class == "" || config.SandboxClassSatisfies(have, class) {
+		return nil
+	}
+	out := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		out[k] = v
+	}
+	out[controller.SandboxClassLabel] = class
+	return &ateapi.Selector{MatchLabels: out}
+}
+
 // Resume writes the policy, then resumes. It runs after the registration
 // is written, so the controller attributes the actor to its person.
 func (s *SubstrateATEActions) Resume(ctx context.Context, atespace, name string) error {
@@ -114,8 +173,15 @@ func (s *SubstrateATEActions) Resume(ctx context.Context, atespace, name string)
 		return err
 	}
 	_, _, err := s.Client.ResumeActor(ctx, ateapi.Ref(atespace, name))
+	if ateapi.IsResourceExhausted(err) {
+		return fmt.Errorf("%w: %v", ErrSubstrateNoWorker, err)
+	}
 	return err
 }
+
+// ErrSubstrateNoWorker is a resume that no worker of the pool has room for
+// (RESOURCE_EXHAUSTED, GAP-0167).
+var ErrSubstrateNoWorker = errors.New("no worker has room for the actor")
 
 // Delete implements SubstrateActorActions.
 func (s *SubstrateATEActions) Delete(ctx context.Context, atespace, name string) error {

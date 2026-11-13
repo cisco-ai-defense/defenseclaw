@@ -36,6 +36,7 @@ const (
 type Event struct {
 	Time          time.Time         `json:"time"`
 	Event         string            `json:"event"`
+	RequestID     string            `json:"request_id,omitempty"`
 	Atespace      string            `json:"atespace,omitempty"`
 	Actor         string            `json:"actor,omitempty"`
 	ActorUID      string            `json:"actor_uid,omitempty"`
@@ -93,7 +94,7 @@ func (e *Engine) Finish(req *Request, v Verdict) {
 		return
 	}
 	ev := Event{
-		Time: e.now(), Event: EventEgressAllowed, Decision: "allow",
+		Time: e.now(), Event: EventEgressAllowed, Decision: "allow", RequestID: req.ID,
 		Atespace: req.Actor.Atespace, Actor: req.Actor.Name, ActorUID: req.Actor.UID, Profile: v.Profile,
 		Host: req.Host, Method: clip(req.Method, 16), Path: e.red.Path(req.Path),
 		Alert: v.Alert, Category: v.Category, Source: v.Source, Rule: v.Rule, Reason: v.Reason, Feed: v.Feed,

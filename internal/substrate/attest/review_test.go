@@ -118,7 +118,7 @@ func TestRegistryCredentialsStayHome(t *testing.T) {
 
 	// Credentials are sent only to hosts the admin lists: an image reference
 	// names its own registry, so it must not choose where they go.
-	reg := NewRegistry(RegistryOptions{PlainHTTP: []string{host}, Username: "svc", Password: "pw"})
+	reg := NewRegistry(RegistryOptions{PlainHTTP: []string{host}, Credentials: map[string]Credential{"other.example:5000": {Username: "svc", Password: "pw"}}})
 	_, _, _, err := reg.Manifest(context.Background(), ref)
 	if err == nil || gotAuth != "" || evilAuth != "" {
 		t.Fatalf("unlisted host got credentials: %q %q (%v)", gotAuth, evilAuth, err)
@@ -126,12 +126,13 @@ func TestRegistryCredentialsStayHome(t *testing.T) {
 	if strings.Contains(err.Error(), "SECRET-INTERNAL-TEXT") {
 		t.Fatalf("a response body leaked into the error: %v", err)
 	}
-	// Listed home registry: the credentials go there, never to the token
-	// service of another host.
-	reg = NewRegistry(RegistryOptions{PlainHTTP: []string{host}, Username: "svc", Password: "pw", AuthHosts: []string{host}})
+	// Listed home registry with a Bearer challenge whose realm is on another
+	// host: the login goes to neither (the registry asked for a token, not for
+	// Basic, and the realm is not one of its token hosts).
+	reg = NewRegistry(RegistryOptions{PlainHTTP: []string{host}, Credentials: map[string]Credential{host: {Username: "svc", Password: "pw"}}})
 	_, _, _, _ = reg.Manifest(context.Background(), ref)
-	if gotAuth == "" {
-		t.Fatal("the listed registry should get the credentials")
+	if gotAuth != "" {
+		t.Fatalf("the registry got credentials before asking for them: %q", gotAuth)
 	}
 	if evilAuth != "" {
 		t.Fatalf("a token realm on another host got the credentials: %q", evilAuth)

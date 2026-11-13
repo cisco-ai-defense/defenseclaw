@@ -84,8 +84,9 @@ type KubeAPI interface {
 	// ScaleDeployment sets a Deployment's replicas and returns the previous
 	// count; found is false when the Deployment does not exist.
 	ScaleDeployment(ctx context.Context, namespace, name string, replicas int32) (prev int32, found bool, err error)
-	// DeploymentPods is the number of pods a Deployment still runs
-	// (status.replicas); 0 when it does not exist.
+	// DeploymentPods is the number of pods a Deployment still has,
+	// terminating ones included (they can still write); 0 when it does not
+	// exist.
 	DeploymentPods(ctx context.Context, namespace, name string) (int32, error)
 }
 
@@ -310,17 +311,17 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 	r := StepReport{Step: "pre-delete"}
 	prev, stopped, err := stopController(ctx, plan, kube, &r)
 	if err != nil {
+		// stopController has put the controller back (or says it could not).
 		return r, fmt.Errorf("stop the controller before removing policies (it would write them again): %w", err)
 	}
-	restore := func() {
-		if !stopped || prev == 0 {
-			return
+	// restore ends a failed uninstall with the controller running again, so
+	// the policies that remain stay enforced; a failed scale-back is part of
+	// the error, never only a note (GAP-0056).
+	restore := func(cause error) error {
+		if !stopped {
+			return cause
 		}
-		if _, _, err := kube.ScaleDeployment(context.WithoutCancel(ctx), plan.Namespace, plan.ControllerDeployment, prev); err != nil {
-			r.note("could not scale %s back to %d: %v; scale it by hand so the remaining policies stay enforced", plan.ControllerDeployment, prev, err)
-		} else {
-			r.note("scaled %s back to %d: the uninstall stopped and the remaining policies stay enforced", plan.ControllerDeployment, prev)
-		}
+		return scaleBack(ctx, plan, kube, prev, &r, cause)
 	}
 	left, err := sweepPolicies(ctx, plan, api, &r)
 	if err == nil && len(left) == 0 {
@@ -336,25 +337,35 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 		}
 	}
 	if err != nil {
-		restore()
-		return r, err
+		return r, restore(err)
 	}
 	if plan.CredentialProvider.Grant {
 		if err := revokeProvider(ctx, plan, kube, &r); err != nil {
 			r.note("the credential provider grant stays: %v", err)
 		}
 	}
+	if plan.AuthDelegatorBinding != "" {
+		r.note("helm removes the cluster-wide ClusterRoleBinding %s (gateway ServiceAccount to system:auth-delegator, "+
+			"for the Kubernetes sign-in) with the release", plan.AuthDelegatorBinding)
+	}
 	r.Notes = append(r.Notes, PurgeSteps(plan)...)
 	if len(left) > 0 {
-		restore()
-		return r, fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
+		return r, restore(fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
 			"(kubectl ate delete egress-policy -a <atespace> <actor>), then uninstall again",
-			ErrPoliciesLeft, len(left), strings.Join(left, ", "))
+			ErrPoliciesLeft, len(left), strings.Join(left, ", ")))
 	}
 	return r, nil
 }
 
-// stopController scales the controller to 0 and waits for its pods to go.
+// ScaleBackTimeout bounds the scale-back after a failed uninstall step; it
+// runs even when the hook's own context is cancelled.
+var ScaleBackTimeout = 30 * time.Second
+
+// stopController scales the controller to 0 and waits until no pod of it
+// runs, terminating pods included. On any failure after the scale it puts
+// the replicas back before it returns, so a failed uninstall never leaves the
+// controller stopped with the policies in place (GAP-0056); stopped is then
+// false.
 func stopController(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepReport) (int32, bool, error) {
 	if plan.ControllerDeployment == "" {
 		r.note("the plan names no controller Deployment; nothing was stopped")
@@ -362,6 +373,10 @@ func stopController(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRe
 	}
 	prev, found, err := kube.ScaleDeployment(ctx, plan.Namespace, plan.ControllerDeployment, 0)
 	if err != nil {
+		if found {
+			// The scale may have gone through before the error.
+			return 0, false, scaleBack(ctx, plan, kube, prev, r, err)
+		}
 		return 0, false, err
 	}
 	if !found {
@@ -371,23 +386,40 @@ func stopController(ctx context.Context, plan ChartPlan, kube KubeAPI, r *StepRe
 	for {
 		n, err := kube.DeploymentPods(ctx, plan.Namespace, plan.ControllerDeployment)
 		if err != nil {
-			return prev, true, err
+			return 0, false, scaleBack(ctx, plan, kube, prev, r, fmt.Errorf("count the pods of %s: %w", plan.ControllerDeployment, err))
 		}
 		if n == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			_, _, _ = kube.ScaleDeployment(context.WithoutCancel(ctx), plan.Namespace, plan.ControllerDeployment, prev)
-			return prev, true, fmt.Errorf("%s still runs %d pod(s) after %s", plan.ControllerDeployment, n, ControllerStopTimeout)
+			return 0, false, scaleBack(ctx, plan, kube, prev, r, fmt.Errorf("%s still runs %d pod(s) after %s", plan.ControllerDeployment, n, ControllerStopTimeout))
 		}
 		select {
 		case <-ctx.Done():
-			return prev, true, ctx.Err()
+			return 0, false, scaleBack(ctx, plan, kube, prev, r, ctx.Err())
 		case <-time.After(pollEvery):
 		}
 	}
 	r.note("stopped %s (was %d replicas) so it cannot write policies during the uninstall", plan.ControllerDeployment, prev)
 	return prev, true, nil
+}
+
+// scaleBack returns the controller to prev replicas after cause stopped the
+// uninstall, and returns cause; when the scale-back fails too, the error
+// says the controller is stopped and how to start it.
+func scaleBack(ctx context.Context, plan ChartPlan, kube KubeAPI, prev int32, r *StepReport, cause error) error {
+	if prev == 0 {
+		return cause
+	}
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ScaleBackTimeout)
+	defer cancel()
+	if _, _, err := kube.ScaleDeployment(sctx, plan.Namespace, plan.ControllerDeployment, prev); err != nil {
+		return fmt.Errorf("%w; and %s could not be scaled back to %d (%v): it is stopped while DefenseClaw policies remain with "+
+			"nothing enforcing them; run: kubectl -n %s scale deployment/%s --replicas=%d",
+			cause, plan.ControllerDeployment, prev, err, plan.Namespace, plan.ControllerDeployment, prev)
+	}
+	r.note("scaled %s back to %d: the uninstall stopped and the remaining policies stay enforced", plan.ControllerDeployment, prev)
+	return cause
 }
 
 // sweepPolicies deletes every DefenseClaw egress policy and returns the
@@ -449,7 +481,7 @@ func PurgeSteps(plan ChartPlan) []string {
 	if spaces == "" {
 		spaces = "<atespace>"
 	}
-	return []string{
+	steps := []string{
 		"Snapshots stay in the Substrate snapshot bucket (storage.snapshotLocation): actor memory, disk and volumes, " +
 			"including anything an agent wrote. To purge them:",
 		"  1. Delete the actors you no longer need, which removes their snapshots: for a in " + spaces +
@@ -464,6 +496,11 @@ func PurgeSteps(plan ChartPlan) []string {
 			" out of the global policy and of the policies of " + strings.Join(orNone(plan.WritableAtespaces), ", ") +
 			" (kubectl ate get|update access-policy), so a later ServiceAccount of the same name gets nothing.",
 	}
+	if plan.AuthDelegatorBinding != "" {
+		steps = append(steps, "  6. After helm uninstall --no-hooks or a lost release, check the cluster-wide binding is gone: "+
+			"kubectl delete clusterrolebinding "+plan.AuthDelegatorBinding+" --ignore-not-found.")
+	}
+	return steps
 }
 
 func memberList(principals []string) []string {

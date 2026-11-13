@@ -1,12 +1,15 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// The actor kit runs in Linux actor images only (kit.Config refuses other systems); its tests render and
+// resolve paths for Linux.
+//go:build linux
+
 package kit
 
 import (
 	"bytes"
 	"encoding/json"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -16,9 +19,6 @@ import (
 
 func wave2Overlay(t *testing.T, name string) Overlay {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("sandbox artifacts render on Linux and macOS hosts")
-	}
 	h, ok := harness.Get(name)
 	if !ok {
 		t.Fatalf("no harness %s", name)

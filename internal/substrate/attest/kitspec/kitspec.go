@@ -50,11 +50,14 @@ type Options struct {
 	MetadataOnly bool
 
 	// Relay session verification (A2/A5): public keys by kid (PEM), the
-	// audience and the gateway check URL.
-	SessionKeys map[string][]byte
-	Audience    string
-	VerifyURL   string
-	RelayListen string
+	// issuer and audience their tokens carry, or the gateway check URL.
+	// Every kid must be the key's own id (kit.SessionKeyID), the one the
+	// gateway writes in each token; keys need the issuer (GAP-0147).
+	SessionKeys   map[string][]byte
+	SessionIssuer string
+	Audience      string
+	VerifyURL     string
+	RelayListen   string
 	// Providers recorded in the attestation.
 	Providers []string
 }
@@ -96,14 +99,30 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 		cfg.Relay.SessionAudience = o.Audience
 	}
 	cfg.Relay.VerifyURL = o.VerifyURL
+	cfg.Relay.SessionIssuer = strings.TrimSpace(o.SessionIssuer)
 	keyFiles := map[string][]byte{}
 	if len(o.SessionKeys) > 0 {
 		cfg.Relay.SessionKeys = map[string]string{}
 		for kid, pem := range o.SessionKeys {
+			id, err := kit.SessionKeyID(pem)
+			if err != nil {
+				return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %s: %w", kid, err)
+			}
+			if kid != id {
+				return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: session key id %q is not the key's id %q (the gateway signs with that kid)", kid, id)
+			}
 			p := path.Join(KeyDir, kid+".pem")
 			cfg.Relay.SessionKeys[kid] = p
 			keyFiles[p] = pem
 		}
+	}
+	// The rules the hook and the relay apply when they load the file: a
+	// configuration they would refuse is never baked into an image.
+	if err := cfg.Validate(); err != nil {
+		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %w", err)
+	}
+	if err := cfg.Relay.CheckSessions(); err != nil {
+		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %w", err)
 	}
 	// The kit may install a newer agent than the harness pins (GAP-0114).
 	agentVersion := kit.AgentVersion(o.Connector, ictx.HarnessVersion)

@@ -164,3 +164,6 @@ scripts/check_managed_paths.py
 # internal/cli/testdata/managed_commands.json; the Go table behind that file
 # is Go code and already runs the enterprise lanes.
 scripts/gen_managed_commands_docs.py
+# Test data of the Substrate chart goldens (values and rendered output for a managed_enterprise install). The Go
+# chart tests read them and already run in the Go suite; the files change nothing on a managed computer.
+deploy/helm/defenseclaw-substrate/tests/

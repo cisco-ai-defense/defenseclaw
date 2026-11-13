@@ -128,6 +128,27 @@ func relayWorkdir(configured string) string {
 	return "/work"
 }
 
+// projectDir checks the directory a person asks the agent to start in (the
+// copy of their project, GAP-0163): a directory inside the relay working
+// directory. "" means the working directory itself.
+func (s *Server) projectDir(p string) (string, error) {
+	root := filepath.Clean(relayWorkdir(s.opts.Config.Relay.Workdir))
+	if p == "" {
+		return root, nil
+	}
+	if strings.ContainsRune(p, 0) {
+		return "", errors.New("relay: the folder is not a path")
+	}
+	d := s.resolvePath(p)
+	if d != root && !strings.HasPrefix(d, root+string(filepath.Separator)) {
+		return "", errors.New("relay: the agent starts only inside its working directory")
+	}
+	if fi, err := os.Stat(d); err != nil || !fi.IsDir() {
+		return "", errors.New("relay: no such folder in the actor")
+	}
+	return d, nil
+}
+
 func (s *Server) resolvePath(p string) string {
 	if filepath.IsAbs(p) {
 		return filepath.Clean(p)

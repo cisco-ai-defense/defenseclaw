@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
 const (
@@ -97,6 +98,18 @@ func (s *Server) init() error {
 			env = append(env, k+"="+v)
 		}
 		s.agent = &Agent{Argv: rc.Interactive, Dir: rc.Workdir, Env: env}
+		// E9: no agent that signs in to a vendor account in a managed
+		// image; an open-source image says what the sign-in costs.
+		d := s.signinDecision()
+		if !d.Allowed {
+			s.log.Warn("relay.signin_refused", "connector", rc.Connector, "reason", d.Code)
+			s.initErr = &signinRefusal{msg: d.Message}
+			return
+		}
+		if d.Warn {
+			s.log.Warn("relay.signin_warning", "connector", rc.Connector)
+			s.agent.Banner = d.Message
+		}
 		if s.opts.Warm == nil {
 			t, err := kit.NewTransport(s.opts.Config)
 			if err != nil {
@@ -109,6 +122,26 @@ func (s *Server) init() error {
 		go s.watchResume()
 	})
 	return s.initErr
+}
+
+// signinRefusal is the E9 refusal of an agent that signs in to a vendor
+// account, in a managed image.
+type signinRefusal struct{ msg string }
+
+func (e *signinRefusal) Error() string { return e.msg }
+
+// signinDecision is E9 for this image: the connector's vendor API key
+// variable counts as bound when the actor carries it (a placeholder; egress
+// adds the real key).
+func (s *Server) signinDecision() signin.Decision {
+	rc := s.opts.Config.Relay
+	var bound []string
+	if k := signin.KeyEnv(rc.Connector); k != "" {
+		if _, ok := rc.Env[k]; ok || os.Getenv(k) != "" {
+			bound = append(bound, k)
+		}
+	}
+	return signin.Evaluate(rc.Connector, s.opts.Config.Managed, bound)
 }
 
 // watchResume pre-connects after a resume (a wall-clock jump), before the
@@ -159,17 +192,17 @@ func (s *Server) Handler() http.Handler {
 	// The wake-up probe of the actor template: no authentication, no state,
 	// nothing started.
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
-	mux.HandleFunc("GET /dcrelay/1/ws", s.serveWS)
-	mux.HandleFunc("POST /dcrelay/1/poll", s.pollOpen)
-	mux.HandleFunc("GET /dcrelay/1/poll/{id}", s.pollRead)
-	mux.HandleFunc("POST /dcrelay/1/poll/{id}", s.pollWrite)
-	mux.HandleFunc("DELETE /dcrelay/1/poll/{id}", s.pollClose)
-	mux.HandleFunc("POST /dcrelay/1/task", s.taskStart)
-	mux.HandleFunc("GET /dcrelay/1/task/{id}", s.taskFollow)
-	mux.HandleFunc("GET /dcrelay/1/status", s.status)
-	mux.HandleFunc("POST /dcrelay/1/exec", s.fileExec)
-	mux.HandleFunc("PUT /dcrelay/1/files", s.filePut)
-	mux.HandleFunc("GET /dcrelay/1/files", s.fileGet)
+	mux.HandleFunc("GET "+Path(RouteWS), s.serveWS)
+	mux.HandleFunc("POST "+Path(RoutePoll), s.pollOpen)
+	mux.HandleFunc("GET "+Path(RoutePoll+"/{id}"), s.pollRead)
+	mux.HandleFunc("POST "+Path(RoutePoll+"/{id}"), s.pollWrite)
+	mux.HandleFunc("DELETE "+Path(RoutePoll+"/{id}"), s.pollClose)
+	mux.HandleFunc("POST "+Path(RouteTask), s.taskStart)
+	mux.HandleFunc("GET "+Path(RouteTask+"/{id}"), s.taskFollow)
+	mux.HandleFunc("GET "+Path(RouteStatus), s.status)
+	mux.HandleFunc("POST "+Path(RouteExec), s.fileExec)
+	mux.HandleFunc("PUT "+Path(RouteFiles), s.filePut)
+	mux.HandleFunc("GET "+Path(RouteFiles), s.fileGet)
 	return mux
 }
 
@@ -196,7 +229,13 @@ func (s *Server) auth(w http.ResponseWriter, r *http.Request, what string, open 
 		}
 	}
 	if err := s.init(); err != nil {
-		http.Error(w, "relay: "+err.Error(), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		var refused *signinRefusal
+		if errors.As(err, &refused) {
+			// A rule, not a fault: the person is told why (E9).
+			status = http.StatusForbidden
+		}
+		http.Error(w, "relay: "+err.Error(), status)
 		return Session{}, false
 	}
 	s.log.Info("relay.accepted", "what", what, "person", sess.Person, "actor", sess.Actor, "actor_uid", sess.ActorUID, "jti", sess.TokenID)
@@ -240,6 +279,23 @@ func termSize(r *http.Request) (uint16, uint16) {
 		rows = uint16(n)
 	}
 	return cols, rows
+}
+
+// startDir applies the dir query parameter of an attach: the folder the
+// agent starts in when it is not running yet. It answers 400 itself when
+// the folder is refused.
+func (s *Server) startDir(w http.ResponseWriter, r *http.Request) bool {
+	q := r.URL.Query().Get("dir")
+	if q == "" {
+		return true
+	}
+	d, err := s.projectDir(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	s.agent.UseDir(d)
+	return true
 }
 
 // open pre-connects, starts the agent if needed and attaches to it.
@@ -297,7 +353,7 @@ var upgrader = websocket.Upgrader{
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.auth(w, r, "ws", true)
-	if !ok {
+	if !ok || !s.startDir(w, r) {
 		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -398,14 +454,14 @@ func (p *pollAttachment) touch() {
 
 func (p *pollAttachment) end() {
 	p.once.Do(func() {
-		p.Attachment.Close()
+		p.Close() // the embedded Attachment
 		close(p.done)
 	})
 }
 
 func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.auth(w, r, "poll", true)
-	if !ok {
+	if !ok || !s.startDir(w, r) {
 		return
 	}
 	s.mu.Lock()

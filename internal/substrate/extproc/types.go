@@ -26,19 +26,32 @@ import (
 type ActorRef struct {
 	Atespace string
 	Name     string
-	// UID is the live actor UID the UIDResolver returned; empty when no
-	// resolver is configured.
+	// UID is the live actor UID from its registration; empty when no
+	// resolver is configured or DefenseClaw has no registration for it.
 	UID string
+	// Profile and Unattended come from the registration (GAP-0090): the
+	// profile the gateway gave the actor, and a --task or --batch run.
+	Profile    string
+	Unattended bool
 }
 
 // Key is atespace/name, the identity the egress gateway gives.
 func (a ActorRef) Key() string { return a.Atespace + "/" + a.Name }
 
-// UIDResolver returns the live UID of an actor (the Control API GetActor,
-// RESUMING or RUNNING). live is false for an actor that does not exist or
-// is not running; err is an outage. A3's ateapi client implements it.
+// ActorRecord is what a UIDResolver knows of a live actor.
+type ActorRecord struct {
+	// UID is empty for an actor DefenseClaw has no registration for.
+	UID        string
+	Profile    string
+	Unattended bool
+}
+
+// UIDResolver resolves an actor's name, the only identity atenet-egress
+// gives the callout, to its current incarnation: the leader's registrations
+// (GAP-0090). live is false for a deleted actor; an actor with no
+// registration is live with an empty UID; err is an outage.
 type UIDResolver interface {
-	ResolveUID(ctx context.Context, atespace, name string) (uid string, live bool, err error)
+	ResolveActor(ctx context.Context, atespace, name string) (rec ActorRecord, live bool, err error)
 }
 
 // AskOutcome is what became of an ask.
@@ -108,9 +121,9 @@ type ChainVerdict struct {
 }
 
 // ChainChecker reports an egress-type chain (a secret read, then egress)
-// that the step would complete. It is called synchronously under a 20 ms
-// budget; a miss, an error or the deadline allows, and the hook-side step
-// stands.
+// that the step would complete. It is called synchronously under the chain
+// check budget, only for an actor with a UID; an error, a panic or the
+// deadline is an unchecked step, which follows chain.failure_mode.
 type ChainChecker interface {
 	CheckEgress(ctx context.Context, step ChainStep) (ChainVerdict, error)
 }
@@ -154,8 +167,9 @@ type ToolJudge interface {
 	JudgeToolCall(ctx context.Context, call ToolCall) (ToolVerdict, error)
 }
 
-// PolicySource gives the policy for an actor. StaticPolicies maps atespaces
-// to configured profiles; A2/A3 replace it with the registration lookup.
+// PolicySource gives the policy for an actor. StaticPolicies picks the
+// configured profile the actor's registration names (else the atespace's)
+// and marks an unattended actor.
 type PolicySource interface {
 	PolicyFor(ctx context.Context, actor ActorRef) (*Policy, error)
 }

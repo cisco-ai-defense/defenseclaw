@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -71,6 +72,19 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 	})
 }
 
+// substrateTemplateConnector reads the connector a template was built for
+// from its attestation (the signed io.defenseclaw.connector label); an
+// unattested template names none, and the controller refuses it at resume.
+func substrateTemplateConnector(ctl *controller.Controller) func(context.Context, *ateapi.ActorTemplate) (string, error) {
+	return func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error) {
+		att, err := ctl.Attestor().Attest(ctx, tmpl)
+		if err != nil || !att.Attested {
+			return "", nil
+		}
+		return att.Connector, nil
+	}
+}
+
 // substrateEnsurer is the create path's policy writer over a controller.
 func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer {
 	return func(ctx context.Context, atespace, name string) error {
@@ -104,5 +118,27 @@ func (s runtimeSkillScanner) ScanSkillFolder(ctx context.Context, name, dir stri
 	if err != nil {
 		return false, "", err
 	}
+	if d.Unavailable {
+		// No scanner can run in this pod: the gateway's fail mode decides
+		// (GAP-0164), never a quarantine on a scan that did not run.
+		return false, "", fmt.Errorf("%w: %s", gateway.ErrSubstrateSkillScannerUnavailable, d.Reason)
+	}
 	return d.Action == "block", d.Reason, nil
+}
+
+// substrateTemplateSkills reads an actor template's admitted skill folder
+// digests through the create path's controller (the same attestation check
+// and cache that admitted the template; GAP-0164).
+func substrateTemplateSkills(ctl *controller.Controller) func(ctx context.Context, template string) ([]string, error) {
+	return func(ctx context.Context, template string) ([]string, error) {
+		atespace, name, ok := strings.Cut(template, "/")
+		if !ok || atespace == "" || name == "" {
+			return nil, fmt.Errorf("template %q is not atespace/name", template)
+		}
+		digests, attested, err := ctl.TemplateSkillDigests(ctx, ateapi.Ref(atespace, name))
+		if err != nil || !attested {
+			return nil, err
+		}
+		return digests, nil
+	}
 }

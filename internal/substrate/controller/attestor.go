@@ -97,6 +97,13 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 		if !v.ValidUntil.IsZero() && (out.ValidUntil.IsZero() || v.ValidUntil.Before(out.ValidUntil)) {
 			out.ValidUntil = v.ValidUntil
 		}
+		if st := v.Statement; st != nil {
+			for _, it := range st.Predicate.Scan.Items {
+				if it.Kind == config.AdmissionTypeSkill && it.Digest != "" && it.Verdict != attest.VerdictBlock && !slices.Contains(out.SkillDigests, it.Digest) {
+					out.SkillDigests = append(out.SkillDigests, it.Digest)
+				}
+			}
+		}
 		if i == 0 {
 			out.Digest = v.Digest
 			if st := v.Statement; st != nil {

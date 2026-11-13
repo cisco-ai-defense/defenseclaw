@@ -84,7 +84,7 @@ On laptops, tamper protection keeps users from removing DefenseClaw. In a cluste
 
 ## Uninstall
 
-`helm uninstall` first removes every egress policy DefenseClaw wrote, so agents fall back to deny-all, and the credential provider grant. It fails while any remain, and prints the snapshot purge steps. Then run `defenseclaw substrate setup --remove` to take the callout out of the overlay. **Nothing is left open.** The store volume is kept unless you delete it. Delete the agents, or give them allow lists of your own.
+`helm uninstall` first removes every egress policy DefenseClaw wrote, so agents fall back to deny-all, and the credential provider grant. It fails while any remain, and prints the snapshot purge steps. Then run `defenseclaw substrate setup --remove` to take the callout out of the overlay. **Nothing is left open.** The store volume is kept unless you delete it. Delete the agents, or give them allow lists of your own. On a cluster where people sign in with Kubernetes credentials, the uninstall also removes the gateway's `system:auth-delegator` ClusterRoleBinding and names it in its log.
 
 ## Fleet management
 

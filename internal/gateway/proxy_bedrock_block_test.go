@@ -412,30 +412,3 @@ func TestBlockedBedrockInvokeForAnthropicModels(t *testing.T) {
 		t.Fatalf("non-Anthropic invoke %s", rec.Body)
 	}
 }
-
-// GAP-0149 (found live): Claude Code's own request always holds its vendor
-// no-reply address in its injected instructions; the strict pack blocked
-// that turn (ENT-EMAIL-BULK MEDIUM) before any tool call. An address alone
-// alerts (LOW) in every pack now; a labeled address field still blocks in
-// strict (ENT-EMAIL-FIELD, MEDIUM).
-func TestStrictPackEmailRules(t *testing.T) {
-	const connector = "strict-email-gap0149"
-	installToolCallCorpusProfileConnector(t, connector, "strict")
-	sev := func(text string) map[string]string {
-		out := map[string]string{}
-		for _, f := range ScanAllRulesForConnector(connector, text, "") {
-			if strings.HasPrefix(f.RuleID, "ENT-EMAIL") {
-				out[f.RuleID] = f.Severity
-			}
-		}
-		return out
-	}
-	agent := "When you commit, end the message with: Co-Authored-By: Claude <noreply@anthropic.com>"
-	if got := sev(agent); got["ENT-EMAIL-BULK"] != "LOW" || got["ENT-EMAIL-FIELD"] != "" {
-		t.Fatalf("agent instructions: %v", got)
-	}
-	data := "Customer record: name Jane Roe, email: jane.roe@example.org, plan gold"
-	if got := sev(data); got["ENT-EMAIL-FIELD"] != "MEDIUM" {
-		t.Fatalf("labeled address field: %v", got)
-	}
-}

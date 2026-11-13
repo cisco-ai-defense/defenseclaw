@@ -18,6 +18,7 @@ package extproc
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 )
 
@@ -29,14 +30,21 @@ var errAmbiguousPath = errors.New("ambiguous path encoding")
 // canonicalPath returns the form URL rules match (GAP-0046), from the path
 // part of :path (no query or fragment):
 //   - path parameters (";..." in a segment) are dropped, as servers that
-//     honour them do;
+//     honour them do; a segment that is empty, "." or ".." once its
+//     parameters are dropped ("..;", ".;x", ";x") is errAmbiguousPath,
+//     because origins that keep parameters read it as a name and origins
+//     that drop them as a dot segment (GAP-0046);
 //   - each segment is percent-decoded once; an escape that decodes to a
-//     slash, a backslash, NUL, "%" (double encoding) or a control
+//     slash, a backslash, NUL, "%" (double encoding), ";" or a control
 //     character, a malformed escape, a raw backslash or a raw control
 //     character is errAmbiguousPath, so no origin can read the request as a
 //     different path than the one matched;
-//   - empty segments are merged (//a is /a) and dot segments removed
-//     (RFC 3986 5.2.4), "." and ".." spelt with escapes included;
+//   - empty segments are merged (//a is /a) and "." segments removed,
+//     escaped spellings included;
+//   - a ".." segment, literal or escaped, is errAmbiguousPath: origins and
+//     proxies that route the raw path read /admin/../public under /admin,
+//     while RFC 3986 resolution reads /public, so no single canonical form
+//     is right for both (GAP-0046);
 //   - a trailing slash is kept, so /admin/ still matches a /admin/ prefix.
 //
 // "*" (OPTIONS *) is returned as is; any other path that does not start
@@ -56,21 +64,22 @@ func canonicalPath(raw string) (string, error) {
 	trailing := false
 	for i, p := range parts {
 		last := i == len(parts)-1
+		params := false
 		if j := strings.IndexByte(p, ';'); j >= 0 {
-			p = p[:j]
+			p, params = p[:j], true
 		}
 		seg, err := decodeSegment(p)
 		if err != nil {
 			return "", err
 		}
+		if params && (seg == "" || seg == "." || seg == "..") {
+			return "", errAmbiguousPath
+		}
 		switch seg {
 		case "", ".":
 			trailing = last
 		case "..":
-			if len(segs) > 0 {
-				segs = segs[:len(segs)-1]
-			}
-			trailing = last
+			return "", errAmbiguousPath
 		default:
 			segs = append(segs, seg)
 			trailing = false
@@ -102,7 +111,7 @@ func decodeSegment(s string) (string, error) {
 			}
 			c = unhex(s[i+1])<<4 | unhex(s[i+2])
 			i += 2
-			if c == '/' || c == '\\' || c == '%' {
+			if c == '/' || c == '\\' || c == '%' || c == ';' {
 				return "", errAmbiguousPath
 			}
 		}
@@ -134,6 +143,48 @@ func pathOnly(p string) string {
 		return p[:i]
 	}
 	return p
+}
+
+// methodOverrideHeaders are the headers some origins (and frameworks in
+// front of them) read as the request's real method (GAP-0046).
+var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", "x-method-override"}
+
+// methodOverrideParam is the query parameter frameworks read as the real
+// method (Laravel, Rails, Express method-override's query getter).
+const methodOverrideParam = "_method"
+
+// requestMethods is the request's method plus any method an override
+// header or a _method query parameter names, upper-cased.
+func requestMethods(req *Request) []string {
+	out := []string{strings.ToUpper(req.Method)}
+	for _, h := range req.Headers {
+		for _, name := range methodOverrideHeaders {
+			if h.Name == name {
+				if m := strings.ToUpper(strings.TrimSpace(h.Value)); m != "" {
+					out = append(out, m)
+				}
+			}
+		}
+	}
+	if i := strings.IndexByte(req.Path, '?'); i >= 0 {
+		q := req.Path[i+1:]
+		if j := strings.IndexByte(q, '#'); j >= 0 {
+			q = q[:j]
+		}
+		// Parsed leniently, as frameworks do: a malformed pair elsewhere in
+		// the query does not hide this one.
+		for _, pair := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
+			k, v, _ := strings.Cut(pair, "=")
+			if dk, err := url.QueryUnescape(k); err == nil && strings.EqualFold(dk, methodOverrideParam) {
+				if dv, err := url.QueryUnescape(v); err == nil {
+					if m := strings.ToUpper(strings.TrimSpace(dv)); m != "" {
+						out = append(out, m)
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // pathHasPrefix matches a canonical path against a canonical rule prefix on

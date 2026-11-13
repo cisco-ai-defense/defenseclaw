@@ -48,6 +48,18 @@ helm upgrade defenseclaw ... --set bootstrap.ownerTokenSecret=ate-bootstrap-owne
 
 Without a token, `defenseclaw substrate setup --print-access-policies` prints the policies for an admin to apply.
 
+People attach to their agents with a short-lived session token the gateway signs. Make its key pair once and store it where the gateway reads it:
+
+```bash
+openssl ecparam -name prime256v1 -genkey -noout -out private.pem
+openssl ec -in private.pem -pubout -out relay-session.pub
+kubectl -n defenseclaw-system create secret generic defenseclaw-relay-session \
+  --from-file=private.pem --from-file=public.pem=relay-session.pub
+rm private.pem
+```
+
+Keep `relay-session.pub`: every agent image is built with it.
+
 </Step>
 
 <Step>
@@ -78,7 +90,7 @@ The doctor checks that the gateway can verify agent identities, that the callout
 
 ### Sign in
 
-With your own cluster and no identity provider, use your Kubernetes identity. The launcher sends your current kubeconfig credentials and the gateway checks them with a Kubernetes TokenReview (or your client certificate through the API server). You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`.
+With your own cluster and no identity provider, use your Kubernetes identity. The launcher sends your current kubeconfig credentials and the gateway checks them with a Kubernetes TokenReview (or your client certificate through the API server). You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`. For this the chart makes its one cluster-wide grant: a ClusterRoleBinding of the gateway's service account to `system:auth-delegator` (TokenReviews are cluster-scoped), named by `gateway.authDelegatorBinding` (default `defenseclaw-auth-delegator-<namespace>-<release>`). It is not rendered when an OIDC issuer is set, on a managed install, or when the gateway runs with `--no-kube-sign-in`, and `helm uninstall` removes it.
 
 ```bash
 defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example.test
@@ -86,16 +98,13 @@ defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example
 
 `--kube-context` and `--kubeconfig` pick a different context or file. Nothing is stored: the launcher reads your kubeconfig each time.
 
-{/* TODO(substrate): the TokenReview path in the gateway (A2b) is being built; confirm the output when it lands. */}
-
 With an OIDC provider, sign in with the device flow instead:
 
 ```bash
-defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test \
-  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher
+defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test
 ```
 
-A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
+The cluster tells the launcher which sign-in server to use; `--issuer` and `--client-id` override it. A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
 
 </Step>
 
@@ -111,10 +120,11 @@ defenseclaw substrate template build --connector claudecode \
   --from registry.example.test/harness/claudecode@sha256:... \
   --to registry.example.test/actors/claudecode:1.0.10 \
   --hook-binary defenseclaw-actor-hook --relay-binary defenseclaw-actor-relay \
-  --key ./keys/attestation.key
+  --key ./keys/attestation.key \
+  --session-key relay-session.pub
 ```
 
-`template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). Wave 1 builds `claudecode` and `codex`. `template scan IMAGE` scans an image without changing it. Run `defenseclaw substrate template build --help` for every flag.
+`template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). Wave 1 builds `claudecode` and `codex`. `template scan IMAGE` scans an image without changing it. The relay in the image accepts only session tokens signed with that key by the gateway in `defenseclaw-system`. For an install in another namespace, add `--session-issuer https://defenseclaw-admin.NAMESPACE.svc.cluster.local`. Run `defenseclaw substrate template build --help` for every flag.
 
 Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
 

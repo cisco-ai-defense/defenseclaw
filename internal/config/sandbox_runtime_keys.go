@@ -335,10 +335,7 @@ func (c *Config) validateSubstrateProfiles() error {
 	if c == nil || (!c.Substrate.Enabled && len(c.Substrate.LauncherAtespaces) == 0) {
 		return nil
 	}
-	var names []string
-	for _, name := range sortedKeys(c.Substrate.LauncherAtespaces) {
-		names = append(names, name)
-	}
+	names := append([]string(nil), sortedKeys(c.Substrate.LauncherAtespaces)...)
 	for _, a := range c.Guardrail.ProfileAssignments {
 		if !a.Match.Substrate.Empty() && !slices.Contains(names, a.Profile) {
 			names = append(names, a.Profile)

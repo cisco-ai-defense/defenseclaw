@@ -35,9 +35,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
+	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -123,6 +126,12 @@ func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor
 		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 		Transport: tr, NoAsks: noAsks,
 	}
+	// The agent starts in the copy of the project, so what it writes where
+	// it starts comes back with pull (GAP-0163). A computer that did not
+	// upload the folder has no record and keeps the relay default.
+	if rec, err := osw.LoadCopy(auth.StateDir(), substrateCopyName(a)); err == nil && rec != nil {
+		o.Dir = rec.RemoteDir
+	}
 	if !noAsks {
 		o.Asks = substrateAsks{s.Client}
 	}
@@ -150,8 +159,24 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
+// substratePresence records this launcher for AI discovery while it is
+// attached (E26: discovery labels it the Agent Substrate launcher; process
+// snapshots keep no command line). The record holds the command, the
+// connector and the context name only. It returns the cleanup.
+func substratePresence(cmd *cobra.Command, a api.Actor) func() {
+	ctxName := ""
+	if name, _, err := auth.ResolveContext(""); err == nil {
+		ctxName = name
+	}
+	remove, _ := launcherpresence.Write(auth.StateDir(), launcherpresence.Record{
+		Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName),
+	})
+	return remove
+}
+
 // substrateAttachAndReport attaches and says how the session ended.
 func substrateAttachAndReport(ctx context.Context, cmd *cobra.Command, o attach.Options, a api.Actor) error {
+	defer substratePresence(cmd, a)()
 	res, err := attach.Attach(ctx, o)
 	w := cmd.ErrOrStderr()
 	if err != nil {
@@ -252,10 +277,9 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
 	t := substrateRunTarget{spec: spec, connName: spec.Name}
+	// No profile named: the cluster gives the person the profile their
+	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
-	if t.profile == "" {
-		return t, withExitCode(errors.New("name the guard profile: --profile NAME (ask your administrator which you may use), or save one with: defenseclaw substrate login --default-profile NAME"), 2)
-	}
 	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
 	return t, nil
 }
@@ -275,6 +299,10 @@ func substrateFirst(v ...string) string {
 func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSession, t substrateRunTarget, f *substrateRunFlags, req api.CreateRequest, project string) (a api.Actor, err error) {
 	w := cmd.ErrOrStderr()
 	req.Profile, req.Template, req.Connector = t.profile, t.template, t.connName
+	// Substrate's egress caches an actor's identity token by name, so a new
+	// actor that reuses a name is refused until the old token expires
+	// (GAP-0133). Every actor gets a name nobody had before.
+	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
 	if f.clone != "" {
 		req.Workspace = api.Workspace{Clone: f.clone, Ref: f.ref}
@@ -283,7 +311,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	if err != nil {
 		return a, substrateFail(err)
 	}
-	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, t.profile)
+	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
 	defer func() {
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -415,17 +443,9 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 		tctx, cancel = context.WithTimeout(ctx, f.timeout)
 		defer cancel()
 	}
-	emit := func(e relay.TaskEvent) {
-		if asJSON {
-			_ = writeSubstrateJSONLine(w, e)
-			return
-		}
-		switch e.Type {
-		case "stdout":
-			fmt.Fprintln(w, safetext.Clean(e.Data))
-		case "stderr", "error":
-			fmt.Fprintln(cmd.ErrOrStderr(), safetext.Clean(e.Data))
-		}
+	emit := attach.TextEmitter(w, cmd.ErrOrStderr())
+	if asJSON {
+		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONLine(w, e) }
 	}
 	code, err = attach.RunTask(tctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: emit})
 	if err != nil {
@@ -559,6 +579,39 @@ func writeSubstrateJSONCompact(w io.Writer, v any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s\n", b)
+	_, err = fmt.Fprintf(w, "%s\n", safetext.JSON(b))
 	return err
+}
+
+// uniqueSubstrateActorName returns label (or the agent's command when the
+// person gave none) with a random suffix. The launcher never reuses a name:
+// the label is only the readable part, and the full name is what list, connect
+// and delete show. The result is a DNS label of at most 63 characters.
+func uniqueSubstrateActorName(label, agent string) string {
+	clean := func(s string) string {
+		var b strings.Builder
+		dash := false
+		for _, r := range strings.ToLower(s) {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				b.WriteRune(r)
+				dash = false
+			case !dash && b.Len() > 0:
+				b.WriteByte('-')
+				dash = true
+			}
+		}
+		return strings.Trim(b.String(), "-")
+	}
+	base := clean(label)
+	if base == "" {
+		base = clean(agent)
+	}
+	if base == "" {
+		base = "agent"
+	}
+	if len(base) > 40 {
+		base = strings.Trim(base[:40], "-")
+	}
+	return base + "-" + newSubstrateID(4)
 }
