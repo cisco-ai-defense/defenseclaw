@@ -54,6 +54,7 @@ func TestOverLimitPatchPaddingKeepsContentRuleVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	used := map[[3]int]bool{}
+	var subtests []overLimitSubtest
 	for ci, c := range []struct {
 		name, target, attack, benign, rule string
 	}{
@@ -90,24 +91,25 @@ func TestOverLimitPatchPaddingKeepsContentRuleVerdict(t *testing.T) {
 			if p == first {
 				used[[3]int{1, pad, map[bool]int{false: 0, true: 1}[leading]}] = true
 			}
-			t.Run(fmt.Sprintf("%s/pad %d leading %t", c.name, pad, leading), func(t *testing.T) {
-				got := overLimitPatchVerdict(t, home, project, overLimitPatchCall([][2]string{{c.target, c.attack}}, pad, leading))
-				if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
-					t.Fatalf("not blocked by %s: %.600s", c.rule, got)
-				}
-				if strings.Contains(got, overLimitElidedContentTitle) {
-					t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got)
-				}
-				if p != first {
-					return
-				}
-				benign := overLimitPatchVerdict(t, home, project, overLimitPatchCall([][2]string{{c.target, c.benign}}, pad, leading))
-				if action := overLimitHookAction(t, benign); action == "block" {
-					t.Fatalf("benign text of %s blocked: %.600s", c.target, benign)
-				}
-			})
+			calls := map[string]nativeWriteCall{"attack": overLimitPatchCall([][2]string{{c.target, c.attack}}, pad, leading)}
+			if p == first {
+				calls["benign"] = overLimitPatchCall([][2]string{{c.target, c.benign}}, pad, leading)
+			}
+			subtests = append(subtests, overLimitSubtest{name: fmt.Sprintf("%s/pad %d leading %t", c.name, pad, leading), calls: calls,
+				check: func(t *testing.T, got map[string]string) {
+					if overLimitHookAction(t, got["attack"]) != "block" || !strings.Contains(got["attack"], c.rule) {
+						t.Fatalf("not blocked by %s: %.600s", c.rule, got["attack"])
+					}
+					if strings.Contains(got["attack"], overLimitElidedContentTitle) {
+						t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got["attack"])
+					}
+					if benign, ok := got["benign"]; ok && overLimitHookAction(t, benign) == "block" {
+						t.Fatalf("benign text of %s blocked: %.600s", c.target, benign)
+					}
+				}})
 		}
 	}
+	runOverLimitSubtests(t, home, project, subtests)
 	for _, pad := range []int{0, 250000, 300000, 1000000} {
 		for side := range 2 {
 			if !used[[3]int{0, pad, side}] {
