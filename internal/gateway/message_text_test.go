@@ -342,7 +342,7 @@ const messageTestSecret = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2"
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "openclaw message depth", cap: bounded.Depth, limit: messageTextMaxDepth,
-			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
+			decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
 				var v any = "text"
 				for range size + 1 {
 					v = map[string]any{"x": v}
@@ -350,23 +350,28 @@ func init() {
 				return v.(map[string]any)
 			})},
 		boundedLaneCap{lane: "openclaw message nodes", cap: bounded.Nodes, limit: messageTextMaxNodes,
-			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
-				items := make([]any, size-3, size-2)
+			decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
+				items := make([]any, size-4, size-3)
 				for i := range items {
 					items[i] = map[string]any{}
 				}
 				return map[string]any{"items": append(items, "late")}
 			})},
 		boundedLaneCap{lane: "openclaw message routing values", cap: bounded.Nodes, limit: messageTextMaxNodes,
-			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
-				return map[string]any{"text": "x", "to": slices.Repeat([]any{"r"}, size-2)}
+			decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
+				return map[string]any{"text": "x", "to": slices.Repeat([]any{"r"}, size-3)}
 			})},
 		boundedLaneCap{lane: "openclaw message bytes", cap: bounded.Bytes, limit: messageTextMaxBytes,
-			decide: boundedDecideOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
-				return map[string]any{"text": strings.Repeat("a", size)}
+			decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
+				return map[string]any{"text": strings.Repeat("a", size-len(boundedMessageCaption)-1)}
 			})},
 	)
 }
+
+// boundedMessageCaption is the text every lane input carries for the judge to
+// be asked about: one node and its bytes plus a newline are taken off each
+// cap's input so the input at the cap stays exactly at the cap.
+const boundedMessageCaption = "a short note that the judge is asked about"
 
 // boundedMessageCall is a message call of the params fill(size) builds, with
 // the lane's seen element (a key in the message field, which blocks in every
@@ -378,6 +383,8 @@ func boundedMessageCall(fill func(size int) map[string]any) func(int, boundedSha
 			return boundedLaneCall{}, false
 		}
 		params := fill(size)
+		// Text for the judge to be asked about whatever the cap dropped.
+		params["caption"] = boundedMessageCaption
 		switch {
 		case shape.seen:
 			params["message"] = "key: " + messageTestSecret
@@ -399,6 +406,21 @@ func boundedDecideOpenClawMessage(t *testing.T, api *APIServer, _ boundedEnv, ca
 	t.Helper()
 	api.inspectToolScanTimeout = 30 * time.Second
 	_, verdict := postInspectForConnector(t, api, "openclaw",
+		string(mustJSON(t, map[string]any{"tool": call.tool, "args": call.input, "direction": "outbound"})))
+	return verdict.Action, verdict.Findings
+}
+
+// boundedJudgeOpenClawMessage is the lane's judge row: the same call on the
+// API with the regex_judge stub, judged for the connector the stub is
+// configured for (claudecode): the message lane reaches the judge for a
+// truncated call before the floor, as it does for any message.
+func boundedJudgeOpenClawMessage(t *testing.T, api *APIServer, _ boundedEnv, call boundedLaneCall) (string, []string) {
+	t.Helper()
+	api.inspectToolScanTimeout = 30 * time.Second
+	// The stub judges tool calls only; a message is judged by the PII judge of
+	// the completion direction.
+	api.scannerCfg.Guardrail.Judge.PII, api.scannerCfg.Guardrail.Judge.PIICompletion = true, true
+	_, verdict := postInspectForConnector(t, api, "claudecode",
 		string(mustJSON(t, map[string]any{"tool": call.tool, "args": call.input, "direction": "outbound"})))
 	return verdict.Action, verdict.Findings
 }

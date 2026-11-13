@@ -557,7 +557,7 @@ func TestBoundRuleLaneTableRejectsMisuse(t *testing.T) {
 	for name, edit := range map[string]func(*boundedLaneCap){
 		"legacy outside the shell rows": func(l *boundedLaneCap) { l.path = boundedLegacyShellReading },
 		"unknown path":                  func(l *boundedLaneCap) { l.path = boundedLegacyShellReading + 1 },
-		"own route, no judge row":       func(l *boundedLaneCap) { l.decide = route },
+		"own route, no judge row":       func(l *boundedLaneCap) { l.decide, l.judge = route, nil },
 		"work on a non-time cap":        func(l *boundedLaneCap) { l.work = true },
 		"time cap without work":         func(l *boundedLaneCap) { l.cap = bounded.Time },
 		"OPEN for a whole tier":         func(l *boundedLaneCap) { l.open = map[string]string{"default": "rel-1-0-10:GAP-0312"} },
