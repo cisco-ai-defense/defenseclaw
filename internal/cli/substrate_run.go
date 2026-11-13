@@ -277,10 +277,9 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
 	t := substrateRunTarget{spec: spec, connName: spec.Name}
+	// No profile named: the cluster gives the person the profile their
+	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
-	if t.profile == "" {
-		return t, withExitCode(errors.New("name the guard profile: --profile NAME (ask your administrator which you may use), or save one with: defenseclaw substrate login --default-profile NAME"), 2)
-	}
 	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
 	return t, nil
 }
@@ -312,7 +311,7 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	if err != nil {
 		return a, substrateFail(err)
 	}
-	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, t.profile)
+	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
 	defer func() {
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)

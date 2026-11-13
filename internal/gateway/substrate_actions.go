@@ -141,8 +141,15 @@ func (s *SubstrateATEActions) Resume(ctx context.Context, atespace, name string)
 		return err
 	}
 	_, _, err := s.Client.ResumeActor(ctx, ateapi.Ref(atespace, name))
+	if ateapi.IsResourceExhausted(err) {
+		return fmt.Errorf("%w: %v", ErrSubstrateNoWorker, err)
+	}
 	return err
 }
+
+// ErrSubstrateNoWorker is a resume that no worker of the pool has room for
+// (RESOURCE_EXHAUSTED, GAP-0167).
+var ErrSubstrateNoWorker = errors.New("no worker has room for the actor")
 
 // Delete implements SubstrateActorActions.
 func (s *SubstrateATEActions) Delete(ctx context.Context, atespace, name string) error {

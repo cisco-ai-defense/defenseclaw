@@ -965,7 +965,7 @@
       {
         "name": "profile",
         "type": "string",
-        "usage": "guard profile to run under (default: the one from login)",
+        "usage": "guard profile to run under (default: the one the cluster gives you)",
         "metavar": "NAME"
       },
       {

@@ -87,7 +87,7 @@ to the agent.`,
 	f.out.add(cmd)
 	f.com.add(cmd)
 	fl := cmd.Flags()
-	fl.StringVar(&f.profile, "profile", "", "guard profile to run under (default: the one from login)")
+	fl.StringVar(&f.profile, "profile", "", "guard profile to run under (default: the one the cluster gives you)")
 	fl.StringVar(&f.template, "template", "", "agent image template (default: the one from login, else the agent's name)")
 	fl.StringVar(&f.name, "name", "", "a readable start for the agent's name; a random suffix is added, so a name is never used twice (default: the agent's command)")
 	fl.StringVar(&f.task, "task", "", "run headless with this task and no terminal")
