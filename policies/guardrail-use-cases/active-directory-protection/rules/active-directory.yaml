@@ -47,9 +47,7 @@ rules:
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['nxc', 'netexec', 'crackmapexec'] &&
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
-      c.argv.exists(a, a == '-p' || a == '--password' || a == '-H' || a == '--hash' || a == '--hashes') &&
-      !c.argv.exists(a, a == '--ntds'))
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: 'a^'
     title: "Authenticate to a domain service with a password or hash (NetExec)"
     severity: CRITICAL
@@ -63,9 +61,7 @@ rules:
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['nxc', 'netexec', 'crackmapexec'] &&
-      'ldap' in c.argv &&
-      c.argv.exists(a, a == '--bloodhound' || a == '--users' || a == '--groups' ||
-      a == '--kerberoasting' || a == '--asreproast'))
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: 'a^'
     title: "Bulk Active Directory collection for attack-path mapping (NetExec LDAP)"
     severity: CRITICAL
@@ -80,8 +76,7 @@ rules:
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['nxc', 'netexec', 'crackmapexec'] &&
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
-      c.argv.exists(a, a.endsWith('.txt') || a.endsWith('.lst')))
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: 'a^'
     title: "Password spraying against domain services (NetExec wordlist)"
     severity: CRITICAL

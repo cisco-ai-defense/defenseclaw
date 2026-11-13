@@ -109,6 +109,7 @@ def validate_rule_pack(
     path: str,
     *,
     gateway_binary: str | None = None,
+    protections: tuple[str, ...] = (),
 ) -> RulePackValidationResult:
     """Validate *path* with the canonical offline Go validator.
 
@@ -131,9 +132,12 @@ def validate_rule_pack(
             code="gateway_unavailable",
         )
 
+    argv = [binary, "rulepack", "validate", "--dir", path, "--json"]
+    if protections:
+        argv += ["--protections", ",".join(protections)]
     try:
         completed = subprocess.run(
-            [binary, "rulepack", "validate", "--dir", path, "--json"],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

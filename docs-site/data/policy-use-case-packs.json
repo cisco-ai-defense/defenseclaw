@@ -45,7 +45,7 @@
             {
               "id": "credential.directory_service_credential_use",
               "tool_call_only": true,
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && c.argv.exists(a, a == '-p' || a == '--password' || a == '-H' || a == '--hash' || a == '--hashes') && !c.argv.exists(a, a == '--ntds'))",
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
               "pattern": "a^",
               "title": "Authenticate to a domain service with a password or hash (NetExec)",
               "severity": "CRITICAL",
@@ -61,7 +61,7 @@
             {
               "id": "recon.directory_bulk_collection",
               "tool_call_only": true,
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && 'ldap' in c.argv && c.argv.exists(a, a == '--bloodhound' || a == '--users' || a == '--groups' || a == '--kerberoasting' || a == '--asreproast'))",
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
               "pattern": "a^",
               "title": "Bulk Active Directory collection for attack-path mapping (NetExec LDAP)",
               "severity": "CRITICAL",
@@ -78,7 +78,7 @@
             {
               "id": "credential.directory_password_spray",
               "tool_call_only": true,
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && c.argv.exists(a, a.endsWith('.txt') || a.endsWith('.lst')))",
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
               "pattern": "a^",
               "title": "Password spraying against domain services (NetExec wordlist)",
               "severity": "CRITICAL",
@@ -240,7 +240,7 @@
           "rules": [
             {
               "id": "impact.protected_filesystem_format",
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Protected device filesystem format",
@@ -254,7 +254,7 @@
             },
             {
               "id": "impact.protected_device_wipe",
-              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Protected device destructive write",
@@ -268,7 +268,7 @@
             },
             {
               "id": "impact.protected_access_control_change",
-              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Protected security material access-control weakening",

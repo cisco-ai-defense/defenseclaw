@@ -114,8 +114,9 @@ Example:
 }
 
 var (
-	rulePackValidateDir  string
-	rulePackValidateJSON bool
+	rulePackValidateDir         string
+	rulePackValidateJSON        bool
+	rulePackValidateProtections string
 
 	// rulePackServiceReadProblemFn is replaced by tests.
 	rulePackServiceReadProblemFn = rulePackServiceReadProblem
@@ -133,6 +134,12 @@ func init() {
 		"json",
 		false,
 		"emit a versioned machine-readable result",
+	)
+	rulePackValidateCmd.Flags().StringVar(
+		&rulePackValidateProtections,
+		"protections",
+		"",
+		"comma-separated opt-in protection packs to compose over the pack before validating",
 	)
 	rulePackCmd.AddCommand(rulePackValidateCmd)
 	rootCmd.AddCommand(rulePackCmd)
@@ -177,6 +184,24 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("rule-pack validation failed [%s]: check --dir %s (omit --dir to validate the embedded default pack)", diagnostic.Code, rulePackValidateDir)
 		}
 		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
+	}
+
+	if protections := parseRulePackProtections(rulePackValidateProtections); len(protections) > 0 {
+		composed, composeErr := guardrail.Compose(rp, cliProtectionPackSource, guardrail.Customization{Protections: protections})
+		if composeErr != nil {
+			diagnostic := rulePackDiagnostic(composeErr)
+			response := rulePackWireResponse{
+				WireVersion: rulePackWireVersion,
+				Kind:        "validation_error",
+				Valid:       false,
+				Error:       &diagnostic,
+			}
+			if writeErr := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); writeErr != nil {
+				return errors.New("rule-pack validation failed and its safe diagnostic could not be written")
+			}
+			return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
+		}
+		rp = composed
 	}
 
 	summary := rp.Summary()
@@ -395,4 +420,30 @@ func shippedDefaultRulePackDir() (string, func(), error) {
 func rulePackSecureClient() bool {
 	raw, err := os.ReadFile(config.ConfigPath())
 	return err == nil && config.SecureClientSource(raw)
+}
+
+// cliProtectionPackSource serves the embedded opt-in protection packs for the
+// --protections compose check, mirroring the gateway's own source.
+func cliProtectionPackSource(name string) ([]guardrail.ProtectionRuleFile, error) {
+	files, err := policyassets.ProtectionPackRules(name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]guardrail.ProtectionRuleFile, 0, len(files))
+	for _, file := range files {
+		out = append(out, guardrail.ProtectionRuleFile{Name: file.Path, Data: file.Data})
+	}
+	return out, nil
+}
+
+// parseRulePackProtections splits a comma-separated protection-pack list,
+// trimming blanks.
+func parseRulePackProtections(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }

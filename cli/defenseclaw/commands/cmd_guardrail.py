@@ -5135,6 +5135,52 @@ def protection_disable_cmd(
     _change_protection(app, name, connector, profile, enable=False, json_out=json_out)
 
 
+def _validate_composed_protections(
+    app: AppContext,
+    connector_key: str | None,
+    profile: str | None,
+    desired: tuple[str, ...],
+    where: str,
+    _fail,
+) -> None:
+    """Refuse an opt-in protection pack a running gateway would reject.
+
+    Composes the scope's base rule pack with the resulting ``protections`` list
+    through the authoritative Go loader (the same compose the gateway runs on
+    reload) and fails on a definitive invalid result -- most importantly the
+    semantic rule-cost limit on a large base such as strict (rel-1-0-10:GAP-0050).
+    A missing or incompatible helper is best-effort: the check is skipped rather
+    than block a legitimate change.
+    """
+    from defenseclaw import policy_catalog, rulepack_validation
+
+    blocks = _scope_blocks(app.cfg, connector_key, profile)
+    pack_dir = ""
+    for block in reversed(blocks):
+        pack_dir = policy_catalog.configured_pack_dir(app.cfg, block)
+        if pack_dir:
+            break
+    if not pack_dir:
+        pack_dir = policy_catalog.preset_pack_dir(app.cfg, "default")
+    if not pack_dir:
+        return
+    try:
+        result = rulepack_validation.validate_rule_pack(pack_dir, protections=desired)
+    except rulepack_validation.RulePackValidationBridgeError:
+        return
+    if getattr(result, "valid", True):
+        return
+    reason = ""
+    issue = getattr(result, "error", None)
+    if issue is not None:
+        reason = f" ({issue.code}: {issue.reason})" if getattr(issue, "reason", "") else f" ({issue.code})"
+    _fail(
+        1,
+        f"Turning on these protection packs for {where} would make a rule pack the gateway "
+        f"cannot load{reason}. Nothing was changed.",
+    )
+
+
 def _change_protection(
     app: AppContext,
     name: str,
@@ -5237,6 +5283,8 @@ def _change_protection(
         wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
         order = {p.name: index for index, p in enumerate(packs)}
         desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
+        if enable and desired:
+            _validate_composed_protections(app, connector_key, profile_name, tuple(desired), where, _fail)
         change = (
             config_writer.Change(path, desired)
             if desired else config_writer.Change(
