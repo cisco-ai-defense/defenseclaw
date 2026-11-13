@@ -78,7 +78,7 @@ func SubstrateUpstreamCheck(ctx context.Context, providers map[string]SubstrateL
 		}
 		for _, a := range addrs {
 			ip := net.ParseIP(a)
-			if ip == nil || !(ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
+			if ip == nil || (!ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
 				continue
 			}
 			private = append(private, n)
