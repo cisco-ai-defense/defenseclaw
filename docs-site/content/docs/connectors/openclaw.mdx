@@ -123,7 +123,7 @@ Rules:
 
 Use this layout when OpenClaw runs as its own OS account and the DefenseClaw gateway runs as another. The OpenClaw account owns `openclaw.json` and cannot read the DefenseClaw data folder. The layout needs the [administrator-installed plugin](#administrator-installed-plugin), so the OpenClaw account cannot change plugin code. Native Windows does not support it: config refuses `plugin_account` there, and OpenClaw and DefenseClaw run as one account.
 
-The examples use `openclaw` for the OpenClaw account and `defenseclaw` for the DefenseClaw account.
+The examples use `openclaw` for the OpenClaw account and `defenseclaw` for the DefenseClaw account. Both must be local accounts (in `/etc/passwd` and `/etc/group`, or the macOS local directory): the gateway does not resolve directory (AD, LDAP, SSSD) accounts for `plugin_account` and `plugin_token_group`.
 
 ```yaml
 connectors:
