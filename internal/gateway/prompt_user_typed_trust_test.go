@@ -31,6 +31,14 @@ import (
 // surface decides, never a rule ID. The attack text is the shared fixture of
 // prompt_injection_floor_test.go (floorOverridePrompt).
 
+// userTypedBlockingPrompt is a typed prompt that blocks in the default pack on
+// every surface: a provider key is a secret finding, not a trust finding, so the
+// user-typed ceiling does not touch it. Tests that need a prompt block to travel
+// through a transport, a mode or a profile use it.
+func userTypedBlockingPrompt() string {
+	return "AWS_ACCESS_KEY_ID=" + codexHighEntropyAWSKey()
+}
+
 func userTypedTrustGeneration(t *testing.T, profile string) *compiledRulePackCategories {
 	t.Helper()
 	generation, err := compileRulePackCategories(mustLoadRulePack(t, filepath.Join("..", "..", "policies", "guardrail", profile)))
@@ -133,6 +141,10 @@ func TestUserTypedTrustCeilingOnHookSurfaces(t *testing.T) {
 	submit := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: floorOverridePrompt})
 	if submit.RawAction != "alert" || submit.Severity != "HIGH" || !containsString(submit.Findings, "TRUST-IGNORE-PREVIOUS:Ignore previous instructions") {
 		t.Errorf("Claude Code UserPromptSubmit = %+v, want a HIGH alert", submit)
+	}
+	secret := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "UserPromptSubmit", Prompt: userTypedBlockingPrompt()})
+	if secret.RawAction != "block" || secret.Severity != "CRITICAL" {
+		t.Errorf("Claude Code UserPromptSubmit with a key = %+v, want the CRITICAL block (the ceiling is for trust findings only)", secret)
 	}
 	expansion := api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "UserPromptExpansion", Prompt: floorOverridePrompt})
 	if expansion.RawAction != "block" || expansion.Severity != "CRITICAL" {
