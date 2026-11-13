@@ -313,6 +313,38 @@ def _reference_document(version: int) -> dict[str, Any]:
                     ]
                 }
             },
+            "tokenomics": {
+                "enabled": False,
+                "record_routing_provenance": True,
+                "roles": ["agent", "judge", "decision_model", "ai_defense", "router_classifier"],
+                "native_otel_import": {"claudecode": True, "codex": True},
+                "cost": {"compute": True, "currency": "USD", "keep_reported": True},
+                "local_store": {"enabled": False, "retention_days": 30, "granularity": "hour"},
+                "metrics": {"labels": ["connector", "provider", "model", "route_decision", "call_role", "profile"]},
+            },
+            "pricing": {
+                "version": "example-1",
+                "unknown_model": "fallback",
+                "fallback": {
+                    "input_per_mtok": 3.0,
+                    "output_per_mtok": 15.0,
+                    "cache_read_per_mtok": 0.3,
+                    "cache_write_per_mtok": 3.75,
+                    "reasoning_per_mtok": 15.0,
+                },
+                "ai_defense": {"per_call_usd": 0.002},
+                "models": [
+                    {
+                        "provider": "example-provider",
+                        "model": "example-model*",
+                        "input_per_mtok": 1.0,
+                        "output_per_mtok": 5.0,
+                        "cache_read_per_mtok": 0.1,
+                        "cache_write_per_mtok": 1.25,
+                        "reasoning_per_mtok": 5.0,
+                    }
+                ],
+            },
             "local": {
                 "path": "~/.defenseclaw/audit.db",
                 "judge_bodies_path": "~/.defenseclaw/judge_bodies.db",
