@@ -66,6 +66,6 @@ python3 benchmarks/routing/systemone-standin/server.py --port 18791 --bedrock-mo
 /tmp/routing-eval -data benchmarks/routing/data -out /tmp/routing-eval-out -classifiers keyword,vllm_sr,systemone
 ```
 
-The command writes `results.json`, `results.md` and `predictions.jsonl` (labels and routes only, no prompt text). With only `-classifiers keyword` it needs neither Docker nor the network, so it also runs on dc-build-1 through `dcb`. `go test ./benchmarks/routing/...` checks the metrics, the pipeline, the keyword semantics and the shipped data files.
+The command writes `results.json`, `results.md` and `predictions.jsonl` (labels and routes only, no prompt text). With only `-classifiers keyword` it needs neither Docker nor the network, so it also runs on the build box through `dcb`. `go test ./benchmarks/routing/...` checks the metrics, the pipeline, the keyword semantics and the shipped data files.
 
 To add the S1 rules classifier, implement `routingeval.Classifier` for it and add a case to the switch in `cmd/routing-eval/main.go`.
