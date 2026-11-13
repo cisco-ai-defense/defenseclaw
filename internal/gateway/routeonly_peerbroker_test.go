@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -20,7 +21,8 @@ import (
 // status connection itself (doctor row), and nothing elsewhere.
 func TestRoutePeerBrokerProbe(t *testing.T) {
 	prevWindows, prevSID := routeCallerWindows, routePeerSID
-	t.Cleanup(func() { routeCallerWindows, routePeerSID = prevWindows, prevSID })
+	t.Cleanup(func() { routeCallerWindows, routePeerSID = prevWindows, prevSID; routePeerBrokerStatus.answer = nil })
+	fresh := func() { routePeerBrokerStatus.answer = nil }
 	cfg := &config.Config{DataDir: t.TempDir()}
 	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
 	cfg.Routing.Enabled = true
@@ -32,10 +34,10 @@ func TestRoutePeerBrokerProbe(t *testing.T) {
 	}
 	var asked int
 	answer := error(nil)
-	routePeerSID = func(local, remote *net.TCPAddr) (string, error) {
+	routePeerSID = func(_ context.Context, ask routePeerAsk, local, remote *net.TCPAddr) (string, error) {
 		asked++
-		if local.Port != 18970 || remote.Port != 51234 {
-			t.Fatalf("probe asked about %v -> %v", remote, local)
+		if local.Port != 18970 || remote.Port != 51234 || ask.DataDir != cfg.DataDir || ask.Identity != "" {
+			t.Fatalf("probe asked about %v -> %v (%+v)", remote, local, ask)
 		}
 		if answer != nil {
 			return "", answer
@@ -43,13 +45,26 @@ func TestRoutePeerBrokerProbe(t *testing.T) {
 		return "S-1-5-21-1-2-3-500", nil
 	}
 	routeCallerWindows = true
+	fresh()
 	if got := routePeerBrokerProbe(request(), cfg); got["state"] != "ok" {
 		t.Fatalf("probe = %v; want ok", got)
 	}
-	answer = errors.Join(peerbroker.ErrUnavailable, errors.New("pipe absent"))
-	if got := routePeerBrokerProbe(request(), cfg); got["state"] != "unavailable" {
-		t.Fatalf("probe = %v; want unavailable", got)
+	// P4-6: /status is polled; the answer is reused for a few seconds.
+	if got := routePeerBrokerProbe(request(), cfg); got["state"] != "ok" || asked != 1 {
+		t.Fatalf("probe = %v after %d broker calls; want the kept ok", got, asked)
 	}
+	fresh()
+	answer = errors.Join(peerbroker.ErrUnavailable, errors.New(`pipe absent C:\\ProgramData pid 4242`))
+	got := routePeerBrokerProbe(request(), cfg)
+	if detail, _ := got["detail"].(string); got["state"] != "unavailable" || strings.Contains(detail, "pipe absent") || strings.Contains(detail, "4242") || detail == "" {
+		t.Fatalf("probe = %v; want unavailable with the category text only", got)
+	}
+	fresh()
+	answer = &peerbroker.UnavailableError{Reason: peerbroker.UnavailableHeld, HolderPID: 77}
+	if got := routePeerBrokerProbe(request(), cfg); got["state"] != "unavailable" || !strings.Contains(got["detail"].(string), "process 77") {
+		t.Fatalf("probe = %v; want the pipe holder named", got)
+	}
+	fresh()
 	answer = peerbroker.ErrRefused
 	if got := routePeerBrokerProbe(request(), cfg); got["state"] != "refused" {
 		t.Fatalf("probe = %v; want refused", got)
@@ -62,6 +77,7 @@ func TestRoutePeerBrokerProbe(t *testing.T) {
 		"no route-only": func(c *config.Config) { c.Routing.RouteOnly = config.RoutingRouteOnlyConfig{} },
 	} {
 		routeCallerWindows = true
+		fresh()
 		c := *cfg
 		mut(&c)
 		if got := routePeerBrokerProbe(request(), &c); got != nil {
@@ -98,8 +114,11 @@ func TestManagedWindowsRouteCallerAsksTheBrokerOnlyWithAValidCredential(t *testi
 	api, _, _ := newUserScopedTestServer(t, true, ledger, nil)
 	routeCallerWindows = true
 	asked := 0
-	acpLoopbackPeerSID = func(*http.Request) (string, error) {
+	acpLoopbackPeerSID = func(_ *http.Request, ask routePeerAsk) (string, error) {
 		asked++
+		if ask.Identity != "" {
+			t.Fatalf("the proxy lookup carried identity %q", ask.Identity)
+		}
 		return "", peerbroker.ErrUnavailable
 	}
 	r := httptest.NewRequest(http.MethodPost, "/r/codex/responses", nil)

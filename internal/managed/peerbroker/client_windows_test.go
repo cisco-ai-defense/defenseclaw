@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -46,18 +48,33 @@ func loopbackPair(t *testing.T) net.Conn {
 	return server
 }
 
-// TestClientLookupWithoutBrokerIsUnavailableFast: no broker pipe = refused
-// quickly with ErrUnavailable (the gateway then refuses the caller).
+// testDataDir is a data dir with the hooks folder the record lives in.
+func testDataDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func unavailableReason(err error) (*UnavailableError, bool) {
+	var u *UnavailableError
+	return u, errors.As(err, &u)
+}
+
+// TestClientLookupWithoutBrokerIsUnavailableFast: no published pipe name =
+// refused quickly with ErrUnavailable (the gateway then refuses the caller).
 func TestClientLookupWithoutBrokerIsUnavailableFast(t *testing.T) {
 	conn := loopbackPair(t)
-	client, err := NewClient("DefenseClawCertGateway_00000000fe")
+	client, err := NewClient("DefenseClawCertGateway_00000000fe", testDataDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	started := time.Now()
 	_, err = client.Lookup(context.Background(), conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr))
-	if !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("Lookup = %v; want ErrUnavailable", err)
+	if u, ok := unavailableReason(err); !errors.Is(err, ErrUnavailable) || !ok || u.Reason != UnavailableNotPublished {
+		t.Fatalf("Lookup = %v; want ErrUnavailable %s", err, UnavailableNotPublished)
 	}
 	if elapsed := time.Since(started); elapsed > OperationTimeout {
 		t.Fatalf("an absent broker took %s to refuse", elapsed)
@@ -65,8 +82,9 @@ func TestClientLookupWithoutBrokerIsUnavailableFast(t *testing.T) {
 }
 
 // TestClientRefusesAPipeSquatter: while the guardian is down any account
-// can create a pipe with the broker name; the client must refuse a server
-// that is not LocalSystem and never send it the request.
+// that read the published name can create a pipe with it; the client must
+// refuse a server that is not LocalSystem, name its PID, and never send it
+// the request.
 func TestClientRefusesAPipeSquatter(t *testing.T) {
 	if runningAsLocalSystem(t) {
 		t.Skip("the squatter must be an ordinary account")
@@ -75,7 +93,11 @@ func TestClientRefusesAPipeSquatter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name, _ := windows.UTF16PtrFromString(names.Pipe)
+	pipeName, err := names.NewPipeName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _ := windows.UTF16PtrFromString(pipeName)
 	pipe, err := windows.CreateNamedPipe(name, windows.PIPE_ACCESS_DUPLEX, windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT, 1, MaxMessageBytes, MaxMessageBytes, 0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -89,11 +111,21 @@ func TestClientRefusesAPipeSquatter(t *testing.T) {
 		_ = windows.ReadFile(pipe, buffer, &n, nil)
 		got <- int(n)
 	}()
+	dataDir := testDataDir(t)
+	// The squatter names itself in the record (as if it could write it):
+	// the server identity check still refuses it.
+	if err := publishPipeName(names.PublishedPath(dataDir), names, pipeName); err != nil {
+		t.Fatal(err)
+	}
 	conn := loopbackPair(t)
-	client, _ := NewClient(names.Gateway)
+	client, _ := NewClient(names.Gateway, dataDir)
 	_, err = client.Lookup(context.Background(), conn.LocalAddr().(*net.TCPAddr), conn.RemoteAddr().(*net.TCPAddr))
-	if !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("Lookup against a squatter = %v; want ErrUnavailable", err)
+	u, ok := unavailableReason(err)
+	if !errors.Is(err, ErrUnavailable) || !ok || u.Reason != UnavailableHeld || u.HolderPID != windows.GetCurrentProcessId() {
+		t.Fatalf("Lookup against a squatter = %v; want ErrUnavailable held by this process", err)
+	}
+	if text := Describe(err); text == "" || !containsPID(text, u.HolderPID) {
+		t.Fatalf("status text %q does not name the holder", text)
 	}
 	select {
 	case n := <-got:
@@ -110,7 +142,7 @@ func TestNewServerRequiresLocalSystem(t *testing.T) {
 	if runningAsLocalSystem(t) {
 		t.Skip("running as LocalSystem")
 	}
-	if _, err := NewServer("DefenseClawGateway", nil); err == nil {
+	if _, err := NewServer("DefenseClawGateway", testDataDir(t), nil); err == nil {
 		t.Fatal("NewServer started as an ordinary account")
 	}
 }

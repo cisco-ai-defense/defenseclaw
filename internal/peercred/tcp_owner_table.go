@@ -157,8 +157,7 @@ type TCPConnOwner struct {
 
 // PeerIdentity is the account of a verified loopback client process.
 type PeerIdentity struct {
-	SID       string
-	SessionID uint32
+	SID string
 }
 
 // peerProcess is the opened client process (tcp_windows.go; fakes in the
@@ -166,7 +165,7 @@ type PeerIdentity struct {
 type peerProcess interface {
 	// CreationTime is the FILETIME the process started (GetProcessTimes).
 	CreationTime() (uint64, error)
-	// Identity is the token user SID and session of the process.
+	// Identity is the token user SID of the process.
 	Identity() (PeerIdentity, error)
 	Close()
 }
