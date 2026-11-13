@@ -205,7 +205,9 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer s.release(subject)
 
 	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true, signer: signer}
-	if custody {
+	// A gateway-signed call carries the gateway identity (the inbound AWS
+	// headers are stripped when it is signed), so custody needs no held key.
+	if custody && signer == nil {
 		if !s.holdCredential(cfg, &original, routeOnlyProvider(routeOnlyAPIFamily(native))) {
 			routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "route-only on this managed host forwards no agent credential: set routing.models[].credential for the upstream of "+connector)
 			return
@@ -292,7 +294,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
-	if attempt != nil && custody && attempt.keepInbound && !s.holdCredential(cfg, attempt, attempt.provider) {
+	if attempt != nil && custody && attempt.keepInbound && attempt.signer == nil && !s.holdCredential(cfg, attempt, attempt.provider) {
 		attempt = nil
 	}
 	if attempt == nil {

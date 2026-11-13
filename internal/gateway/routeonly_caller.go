@@ -375,6 +375,10 @@ func (s *routeOnlyServer) holdCredential(cfg *config.Config, a *routeOnlyAttempt
 	return true
 }
 
+// routingCredentialValue reads a protected routing credential (managed
+// hosts only); replaceable in tests.
+var routingCredentialValue = func(cfg *config.Config, name string) string { return cfg.RoutingCredential(name) }
+
 func routeOnlyHeldCredential(cfg *config.Config, base, provider string) string {
 	if cfg == nil {
 		return ""
@@ -391,7 +395,7 @@ func routeOnlyHeldCredential(cfg *config.Config, base, provider string) string {
 		if !strings.EqualFold(mOrigin, origin) {
 			continue
 		}
-		if key := cfg.RoutingCredential(m.Credential); key != "" {
+		if key := routingCredentialValue(cfg, m.Credential); key != "" {
 			return key
 		}
 	}

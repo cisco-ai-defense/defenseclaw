@@ -9148,8 +9148,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.SetGenerationSource(s.Generation)
 	}
 	if router, ok := s.modelRouter.(*engineRouter); ok && router != nil {
-		api.SetRouteOnly(newRouteOnlyServer(router, s.currentConfig, s.currentConfig().DataDir))
+		ro := newRouteOnlyServer(router, s.currentConfig, s.currentConfig().DataDir)
+		api.SetRouteOnly(ro)
 		api.onRouteKeyRotated = func() { s.rerenderRouteOnly(s.currentConfig()) }
+		go s.runRouteOnlyReadiness(ctx, ro)
 	}
 	// The API scans with the profile set of the current generation; deriving
 	// it again here doubled the profile work of every start (GAP-0276).

@@ -45,6 +45,28 @@ func TestValidateManagedRoutingRefusals(t *testing.T) {
 		{"bedrock instance_role", "linux", func(c *Config) {
 			c.Routing.Models[0].Bedrock = &RoutingBedrockAuthConfig{Auth: RoutingBedrockAuthInstanceRole}
 		}, ""},
+		{"macOS custody without a gateway credential", "darwin", func(c *Config) { c.Routing.Models[0].Credential = "" }, "set routing.models[].credential for anthropic (base_url https://api.anthropic.com)"},
+		{"macOS custody with a key of another origin", "darwin", func(c *Config) { c.Routing.Models[0].BaseURL = "https://llm.example.corp" }, "forwards no agent credential"},
+		{"macOS custody with a key of another provider", "darwin", func(c *Config) { c.Routing.Models[0].Provider = "openai" }, "forwards no agent credential"},
+		{"macOS custody Codex upstream covered", "darwin", func(c *Config) {
+			c.Routing.Models = append(c.Routing.Models, RoutingModelBackend{Name: "gpt", Provider: "openai", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", Credential: "openai-org"})
+			c.Routing.RouteOnly.Connectors = []string{"codex"}
+			c.Routing.RouteOnly.Upstreams = map[string]RoutingUpstreamConfig{"codex": {BaseURL: "https://api.openai.com/v1", API: "responses"}}
+		}, ""},
+		{"macOS custody ChatGPT login upstream", "darwin", func(c *Config) {
+			c.Routing.RouteOnly.Connectors = []string{"codex"}
+			c.Routing.RouteOnly.Upstreams = map[string]RoutingUpstreamConfig{"codex": {BaseURL: "https://chatgpt.com/backend-api/codex", API: "responses"}}
+		}, "set routing.models[].credential for openai (base_url https://chatgpt.com)"},
+		{"macOS custody gateway Bedrock signing", "darwin", func(c *Config) {
+			c.Routing.Models[0].Credential = ""
+			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "invoke", Bedrock: &RoutingBedrockAuthConfig{Auth: RoutingBedrockAuthInstanceRole}}
+		}, ""},
+		{"macOS custody Bedrock key passthrough", "darwin", func(c *Config) {
+			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "invoke", Bedrock: &RoutingBedrockAuthConfig{Auth: "passthrough"}}
+		}, "set routing.models[].credential for bedrock"},
+		{"macOS route-only without its upstream", "darwin", func(c *Config) { c.Routing.RouteOnly.Upstreams = nil }, "has no routing.route_only.upstreams.claudecode base_url"},
+		{"macOS route-only listed with routing off", "darwin", func(c *Config) { c.Routing.Enabled = false; c.Routing.Models[0].Credential = "" }, ""},
+		{"Linux passes the agent credential through", "linux", func(c *Config) { c.Routing.Models[0].Credential = "" }, ""},
 		{"systemone api_key_env with routing off", "linux", func(c *Config) {
 			c.Routing.Enabled = false
 			c.Routing.SystemOne = &RoutingSystemOneConfig{APIKeyEnv: "S1_KEY"}

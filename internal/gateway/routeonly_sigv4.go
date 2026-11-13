@@ -256,7 +256,7 @@ func newBedrockSigner(cfg *config.Config, b *config.RoutingBedrockAuthConfig, re
 func bedrockStaticCredentials(cfg *config.Config, b *config.RoutingBedrockAuthConfig, managedHost bool) aws.CredentialsProviderFunc {
 	read := func(envName, credName string) string {
 		if managedHost {
-			return cfg.RoutingCredential(credName)
+			return routingCredentialValue(cfg, credName)
 		}
 		if envName = strings.TrimSpace(envName); envName == "" {
 			return ""

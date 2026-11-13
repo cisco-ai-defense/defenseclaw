@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -73,8 +74,82 @@ func validateManagedRouting(cfg *Config, goos string) error {
 		if goos != "" && !RouteOnlyCapableOn(c, goos) {
 			return fmt.Errorf("config routing.route_only.connectors[%d] %q has no routing base_url capability on %s", i, c, goos)
 		}
+		if !r.Enabled || !routeOnlyCustodyGOOS(goos) {
+			continue
+		}
+		// Custody (S1 DESIGN 16.2, 20.7): managed macOS forwards no agent
+		// credential on route-only, so a connector the gateway holds no
+		// credential for would answer 503 on every model call. route_only is
+		// new in 1.0.10 (no 1.0.8 or 1.0.9 config has it), so refusing here
+		// breaks no upgrade; a ref that does not resolve on the host is a
+		// doctor FAIL instead.
+		up, ok := r.RouteOnly.Upstreams[c]
+		if !ok || strings.TrimSpace(up.BaseURL) == "" {
+			return fmt.Errorf("config routing.route_only.connectors[%d] %q has no routing.route_only.upstreams.%s base_url", i, c, c)
+		}
+		if !routeOnlyCustodyCovered(r, up) {
+			provider := RouteOnlyUpstreamProvider(up.API)
+			return fmt.Errorf("config routing.route_only.connectors[%d] %q: route-only on managed %s forwards no agent credential, so every model call would answer 503: set routing.models[].credential for %s (base_url %s), or gateway Bedrock signing for a Bedrock upstream",
+				i, c, goos, provider, routingOrigin(up.BaseURL))
+		}
 	}
 	return nil
+}
+
+// routeOnlyCustodyGOOS lists the managed OSes where route-only forwards no
+// agent credential (no socket activation of the API port). Windows is
+// refused above until its peer factor is proved live (S1 DESIGN 20.6).
+func routeOnlyCustodyGOOS(goos string) bool { return goos == "darwin" || goos == "windows" }
+
+// RoutingProviderDefaultOrigins is the API origin of a provider whose
+// routing.models entry names no base_url.
+var RoutingProviderDefaultOrigins = map[string]string{
+	"anthropic": "https://api.anthropic.com",
+	"openai":    "https://api.openai.com",
+}
+
+// RouteOnlyUpstreamProvider is the provider a route-only upstream API talks to.
+func RouteOnlyUpstreamProvider(api string) string {
+	switch api {
+	case RoutingAPIMessages:
+		return "anthropic"
+	case RoutingAPIConverse, RoutingAPIInvoke:
+		return "bedrock"
+	}
+	return "openai"
+}
+
+// routingOrigin is scheme://host of a base URL ("" when it has neither).
+func routingOrigin(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+// routeOnlyCustodyCovered reports whether the gateway has its own
+// credential for a route-only upstream: gateway Bedrock signing, or a
+// routing.models[].credential of the same provider and origin (the rule
+// the listener applies, internal/gateway routeOnlyHeldCredential).
+func routeOnlyCustodyCovered(r RoutingConfig, up RoutingUpstreamConfig) bool {
+	if b := up.Bedrock; b != nil && (b.Auth == RoutingBedrockAuthInstanceRole || b.Auth == RoutingBedrockAuthIAMCredentials) {
+		return true
+	}
+	provider, origin := RouteOnlyUpstreamProvider(up.API), routingOrigin(up.BaseURL)
+	for _, m := range r.Models {
+		if !strings.EqualFold(m.Provider, provider) || strings.TrimSpace(m.Credential) == "" {
+			continue
+		}
+		mOrigin := routingOrigin(m.BaseURL)
+		if mOrigin == "" {
+			mOrigin = RoutingProviderDefaultOrigins[strings.ToLower(m.Provider)]
+		}
+		if strings.EqualFold(mOrigin, origin) {
+			return true
+		}
+	}
+	return false
 }
 
 // managedRoutingWarnings receives the notes of keys a managed host

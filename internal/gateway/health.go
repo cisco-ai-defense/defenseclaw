@@ -358,6 +358,9 @@ type SidecarHealth struct {
 	// HealthSnapshot.Connector field.
 	connStats   map[string]*connectorStats
 	primaryConn string
+
+	// routeOnly is merged into routing.details.route_only by Snapshot.
+	routeOnly []routeOnlyReadiness
 }
 
 // connectorStats holds one connector's static health plus its atomic live
@@ -1029,6 +1032,30 @@ func (h *SidecarHealth) SetRouting(state SubsystemState, lastErr string, details
 	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+// SetRouteOnlyReadiness publishes the route-only readiness of every routed
+// connector (nil: none), shown as routing.details.route_only.
+func (h *SidecarHealth) SetRouteOnlyReadiness(r []routeOnlyReadiness) {
+	h.mu.Lock()
+	h.routeOnly = r
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// routingWithRouteOnly is the routing subsystem with the route-only
+// readiness in a copy of its details (the stored map is never written).
+func routingWithRouteOnly(routing SubsystemHealth, ro []routeOnlyReadiness) SubsystemHealth {
+	if len(ro) == 0 {
+		return routing
+	}
+	details := make(map[string]interface{}, len(routing.Details)+1)
+	for k, v := range routing.Details {
+		details[k] = v
+	}
+	details["route_only"] = append([]routeOnlyReadiness(nil), ro...)
+	routing.Details = details
+	return routing
 }
 
 func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, details map[string]interface{}) {
@@ -1783,7 +1810,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Config:                h.config,
 		API:                   h.api,
 		Guardrail:             withJudgeHealth(h.guardrail),
-		Routing:               h.routing,
+		Routing:               routingWithRouteOnly(h.routing, h.routeOnly),
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
 		AIRuntime:             h.aiRuntime,
