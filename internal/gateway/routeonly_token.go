@@ -161,3 +161,10 @@ func (s *routeTokenStore) Valid(connector, presented string) bool {
 	}
 	return false
 }
+
+// reset drops the cached keys, so the next request reads the key files.
+func (s *routeTokenStore) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.key, s.next, s.stamp, s.checked = nil, nil, "", time.Time{}
+}

@@ -913,22 +913,42 @@ func (s *Sidecar) applyRouteOnlyRenders(oldCfg, newCfg *config.Config) {
 		if reflect.DeepEqual(before, after) {
 			continue
 		}
-		conn, ok := registry.Get(name)
-		if !ok {
-			continue
-		}
-		rc, ok := conn.(connector.RouteOnlyConnector)
-		if !ok {
-			continue
-		}
-		if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: newCfg.DataDir}, after); err != nil {
-			fmt.Fprintf(os.Stderr, "[routing] route-only render for %s: %v\n", name, err)
-			continue
-		}
-		state := "removed"
-		if after != nil {
-			state = "written"
-		}
-		fmt.Fprintf(os.Stderr, "[routing] route-only config for %s %s; restart the agent to pick it up\n", name, state)
+		applyRouteOnlyRender(registry, newCfg, name, after)
 	}
+}
+
+// rerenderRouteOnly renders the route-only agent config of every routed
+// connector again from cfg (OSS only), as after a route key rotation.
+func (s *Sidecar) rerenderRouteOnly(cfg *config.Config) {
+	if s == nil || cfg == nil || managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return
+	}
+	registry := connector.NewDefaultRegistry()
+	for _, name := range routeOnlyConnectorsOf(cfg) {
+		if route := routeOnlySetupFor(cfg, name, apiListenAddr(cfg)); route != nil {
+			applyRouteOnlyRender(registry, cfg, name, route)
+		}
+	}
+}
+
+// applyRouteOnlyRender writes (route set) or restores (nil) the route-only
+// agent config of one connector.
+func applyRouteOnlyRender(registry *connector.Registry, cfg *config.Config, name string, route *connector.RouteOnlySetup) {
+	conn, ok := registry.Get(name)
+	if !ok {
+		return
+	}
+	rc, ok := conn.(connector.RouteOnlyConnector)
+	if !ok {
+		return
+	}
+	if err := rc.ApplyRouteOnly(connector.SetupOpts{DataDir: cfg.DataDir}, route); err != nil {
+		fmt.Fprintf(os.Stderr, "[routing] route-only render for %s: %v\n", name, err)
+		return
+	}
+	state := "removed"
+	if route != nil {
+		state = "written"
+	}
+	fmt.Fprintf(os.Stderr, "[routing] route-only config for %s %s; restart the agent to pick it up\n", name, state)
 }

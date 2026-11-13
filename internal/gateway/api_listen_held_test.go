@@ -31,7 +31,7 @@ func TestListenWithRetryNotesAHeldPort(t *testing.T) {
 	}{{0, false}, {1, true}} {
 		failures = tc.failures
 		held := false
-		ln, err := listenWithRetryNotingHeld(context.Background(), "127.0.0.1:18970", 5*time.Second, &held)
+		ln, err := listenWithRetryNotingHeld(context.Background(), "127.0.0.1:18970", 5*time.Second, &held, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
