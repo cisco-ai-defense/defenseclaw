@@ -493,7 +493,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl)},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),

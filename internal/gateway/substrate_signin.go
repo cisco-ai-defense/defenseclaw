@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
@@ -35,6 +36,22 @@ func (c SubstrateConfig) signinDecision(connector string, secrets []string) sign
 		placeholders = c.SecretPlaceholders(secrets)
 	}
 	return signin.Evaluate(sandboxauth.CanonicalConnector(connector), c.Managed, placeholders)
+}
+
+// templateConnector is the connector a template carries (its attested label),
+// or "" when the Actions cannot tell (GAP-0160). ErrSubstrateTemplateNotFound
+// is a template that does not exist.
+func (c SubstrateConfig) templateConnector(ctx context.Context, atespace, template string) (string, error) {
+	lk, ok := c.Actions.(SubstrateTemplateConnector)
+	if !ok {
+		return "", nil
+	}
+	return lk.TemplateConnector(ctx, atespace, template)
+}
+
+// sameSubstrateConnector compares two connector names as the sandbox does.
+func sameSubstrateConnector(a, b string) bool {
+	return sandboxauth.CanonicalConnector(a) == sandboxauth.CanonicalConnector(b)
 }
 
 // writeSubstrateSigninRefusal answers 403 with the reason code and the text
