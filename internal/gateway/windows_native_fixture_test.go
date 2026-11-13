@@ -49,7 +49,9 @@ var windowsNativeFixtureRules = []string{
 // windowsFixtureViaCmd lists the fixtures that are cmd.exe syntax which
 // PowerShell does not run as written: copy is Copy-Item there and /Y is no
 // parameter of it, so the PowerShell tool reaches the fixture as cmd /c <line>
-// (the script reading of that launcher, actionfacts.HostScriptTwin).
+// (the script reading of that launcher, actionfacts.HostScriptTwin). The
+// PowerShell spelling of the same replacement, Copy-Item SRC DST -Force, is an
+// owner spelling of its own (TestProvesWindowsAccessibilityFeatureHijack).
 var windowsFixtureViaCmd = map[string]bool{
 	"windows-accessibility-utilman-replacement": true,
 }

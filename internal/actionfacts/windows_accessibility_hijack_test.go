@@ -31,6 +31,36 @@ func TestProvesWindowsAccessibilityFeatureHijack(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "PowerShell Copy-Item utilman replacement",
+			command: `Copy-Item C:\Windows\System32\cmd.exe C:\Windows\System32\utilman.exe -Force`,
+			dialect: DialectPowerShell,
+			want:    true,
+		},
+		{
+			name:    "PowerShell copy alias sethc replacement",
+			command: `copy C:\Windows\System32\cmd.exe C:\Windows\System32\sethc.exe`,
+			dialect: DialectPowerShell,
+			want:    true,
+		},
+		{
+			name:    "PowerShell Copy-Item of another file over utilman",
+			command: `Copy-Item C:\tmp\other.exe C:\Windows\System32\utilman.exe -Force`,
+			dialect: DialectPowerShell,
+			want:    false,
+		},
+		{
+			name:    "PowerShell Copy-Item of cmd to an ordinary file",
+			command: `Copy-Item C:\Windows\System32\cmd.exe C:\tmp\cmd-copy.exe -Force`,
+			dialect: DialectPowerShell,
+			want:    false,
+		},
+		{
+			name:    "PowerShell Copy-Item with another switch",
+			command: `Copy-Item C:\Windows\System32\cmd.exe C:\Windows\System32\utilman.exe -Recurse`,
+			dialect: DialectPowerShell,
+			want:    false,
+		},
+		{
 			name:    "Atomic sticky keys replacement",
 			command: `copy /Y C:\Windows\System32\cmd.exe C:\Windows\System32\sethc.exe`,
 			dialect: DialectCMD,

@@ -62,16 +62,30 @@ func exactWindowsAccessibilityDebuggerHijack(command CommandFact) bool {
 }
 
 func exactWindowsAccessibilityBinaryReplacement(command CommandFact) bool {
-	if command.Dialect != DialectCMD || command.Program != "copy" ||
-		!hasFactOperation(command, OperationCopy) {
+	if !hasFactOperation(command, OperationCopy) {
 		return false
 	}
 	argv := command.Argv
-	if len(argv) == 4 {
-		if !strings.EqualFold(argv[1], "/y") {
-			return false
+	switch {
+	case command.Dialect == DialectCMD && command.Program == "copy":
+		if len(argv) == 4 {
+			if !strings.EqualFold(argv[1], "/y") {
+				return false
+			}
+			argv = append(argv[:1:1], argv[2:]...)
 		}
-		argv = append(argv[:1:1], argv[2:]...)
+	case command.Dialect == DialectPowerShell &&
+		(command.Program == "copy-item" || command.Program == "copy" || command.Program == "cp"):
+		// The PowerShell spelling of the same replacement: Copy-Item SRC DST,
+		// optionally -Force. (cmd's copy /Y is not a Copy-Item parameter.)
+		if len(argv) == 4 {
+			if !strings.EqualFold(argv[3], "-force") {
+				return false
+			}
+			argv = argv[:3]
+		}
+	default:
+		return false
 	}
 	if len(argv) != 3 {
 		return false
