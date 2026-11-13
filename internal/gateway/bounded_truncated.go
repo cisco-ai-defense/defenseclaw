@@ -19,27 +19,30 @@ import (
 // "bounded_truncated cap=<kinds>" in its title and evidence, so the audit
 // row, the finding events and the agent notice name the cap. No new audit
 // action, finding id or telemetry field.
+//
+// The unknown tier follows the pack (rel-1-0-6:GAP-0675): the profile maps
+// the evaluation-limit finding to an alert in the default and permissive
+// packs, a managed install's included, and to a block in the strict pack
+// (guardrailActionForProfile).
 
 // boundedTruncatedTitle is the ship-authored title of a truncated input. The
 // reason (a closed set of cap names) follows it; it carries no input text.
 const boundedTruncatedTitle = "Input exceeds policy evaluation limit, judged as unknown"
 
-// boundedRequestTier is the policy tier of a trusted-action request.
-func boundedRequestTier(request trustedActionRequest) bounded.Tier {
-	return bounded.TierOf(request.StrictPolicy, request.ManagedInstall, false)
-}
-
-// boundedTier is the policy tier of a call of connectorName judged now.
+// boundedTier is the tier of the pack a call of connectorName is judged by.
 func (a *APIServer) boundedTier(ctx context.Context, connectorName string) bounded.Tier {
-	return bounded.TierOf(a.strictPolicyTierForHook(ctx, connectorName), a.managedInstallForHook(ctx), false)
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil {
+		return bounded.TierDefault
+	}
+	return bounded.TierOf(cfg.HookPolicyTierForConnector(connectorName))
 }
 
 // boundedTruncatedFinding is the evaluation-limit finding of an input read up
-// to the caps in t. It blocks where the unknown tier blocks (strict, managed)
-// whatever the profile mapping of other limit findings is, and alerts in the
-// others. A call whose projection cannot authorize a block (enforcementCapable
-// false) still alerts: a truncated input is never a silent allow.
-func boundedTruncatedFinding(t bounded.Truncated, tier bounded.Tier, enforcementCapable bool) RuleFinding {
+// to the caps in t. A call whose projection cannot authorize a block
+// (enforcementCapable false) still alerts: a truncated input is never a
+// silent allow.
+func boundedTruncatedFinding(t bounded.Truncated, enforcementCapable bool) RuleFinding {
 	finding := trustedActionLimitFindings(enforcementCapable)[0]
 	reason := t.Reason()
 	finding.Title = boundedTruncatedTitle + " (" + reason + ")"
@@ -47,23 +50,21 @@ func boundedTruncatedFinding(t bounded.Truncated, tier bounded.Tier, enforcement
 	if !enforcementCapable {
 		finding.enforcement = findingEnforcementAlertOnly
 	}
-	finding.boundedBlock = bounded.Unknown(tier) == bounded.Block
 	return finding
 }
 
 // withBoundedTruncation adds the truncation of t to the findings of what was
 // read before the caps, which keep deciding on their own: the profile maps
-// the result to at least the unknown tier and never below those findings
-// (guardrailActionForProfile). An evaluation-limit finding the call already
-// carries is kept and takes the bounded reason and floor, so a call has one
+// the result to at least the unknown tier of the pack and never below those
+// findings (guardrailActionForProfile). An evaluation-limit finding the call
+// already carries is kept and takes the bounded reason, so a call has one
 // limit finding. The caller's slice is not changed. No cap hit: findings as
 // they are, without allocation.
 func withBoundedTruncation(findings []RuleFinding, t bounded.Truncated, request trustedActionRequest) []RuleFinding {
 	if !t.Any() {
 		return findings
 	}
-	tier := boundedRequestTier(request)
-	bound := boundedTruncatedFinding(t, tier, request.EnforcementCapable)
+	bound := boundedTruncatedFinding(t, request.EnforcementCapable)
 	index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
 		return canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	})
@@ -73,7 +74,6 @@ func withBoundedTruncation(findings []RuleFinding, t bounded.Truncated, request 
 	out := slices.Clone(findings)
 	existing := &out[index]
 	existing.Title, existing.Evidence = bound.Title, bound.Evidence
-	existing.boundedBlock = existing.boundedBlock || bound.boundedBlock
 	if !existing.contributesToEnforcement() && !existing.contributesToAlertOnly() {
 		// A detection-only limit finding would leave the call allowed.
 		existing.enforcement = bound.enforcement
@@ -83,15 +83,15 @@ func withBoundedTruncation(findings []RuleFinding, t bounded.Truncated, request 
 }
 
 // floorBoundedTruncated raises a verdict a lane decided for an input read up
-// to the caps in t to bounded.Floor: at least the unknown tier of tier, never
-// below the verdict. The evaluation-limit finding and the bounded reason are
-// added whatever the action, so the audit row names the cap. Run it before
-// applyMode, like markOversizeUninspected.
+// to the caps in t to bounded.Floor: at least the unknown tier of the pack,
+// never below the verdict. The evaluation-limit finding and the bounded
+// reason are added whatever the action, so the audit row names the cap. Run
+// it before applyMode, like markOversizeUninspected.
 func (v *ToolInspectVerdict) floorBoundedTruncated(t bounded.Truncated, tier bounded.Tier) {
 	if v == nil || !t.Any() {
 		return
 	}
-	bound := boundedTruncatedFinding(t, tier, true)
+	bound := boundedTruncatedFinding(t, true)
 	before := bounded.ParseAction(v.Action)
 	after := bounded.Floor(before, t, tier)
 	if after > before {

@@ -126,12 +126,11 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 // kept and decides on its own (rel-1-0-6:GAP-0675 round 12). The limit
 // finding that stands for a named operand the client map left out
 // (omittedOperand) is not returned here: that operand may be a link to a
-// protected file, so it keeps its block. Nor is the finding of an input read
-// up to a cap in a tier whose unknown verdict blocks (boundedBlock).
+// protected file, so it keeps its block.
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
 		id := canonicalTrustedRuleID(finding.RuleID)
-		return finding.contributesToEnforcement() && !finding.omittedOperand && !finding.boundedBlock &&
+		return finding.contributesToEnforcement() && !finding.omittedOperand &&
 			(id == evaluationLimitRuleID || id == canonicalTrustedRuleID(parseFailureRuleID))
 	}
 	if !slices.ContainsFunc(findings, isLimit) {

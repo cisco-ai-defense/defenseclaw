@@ -196,35 +196,35 @@ func Stricter(a, b Action) Action {
 	return a
 }
 
-// Tier is the policy tier a call is judged in.
+// Tier is the policy tier of the active rule pack. A managed install is
+// judged by its pack like any other install: a managed install that runs the
+// default pack is in the default tier (rel-1-0-6:GAP-0675).
 type Tier uint8
 
 const (
 	TierDefault Tier = iota
 	TierPermissive
 	TierStrict
-	// TierManaged is a managed enterprise install whose pack is not strict.
-	TierManaged
 )
 
-// TierOf is the tier of a call: strict when the active pack is strict,
-// else managed on a managed enterprise install, else permissive or default.
-func TierOf(strict, managed, permissive bool) Tier {
-	switch {
-	case strict:
+// TierOf is the tier of a pack posture as the config resolves it
+// (config.HookPolicyTier*: "default", "permissive", "strict"). Any other
+// value is the default tier.
+func TierOf(posture string) Tier {
+	switch posture {
+	case "strict":
 		return TierStrict
-	case managed:
-		return TierManaged
-	case permissive:
+	case "permissive":
 		return TierPermissive
 	}
 	return TierDefault
 }
 
-// Unknown is the verdict of the unknown tier: alert in the default and
-// permissive tiers, block in strict and managed.
+// Unknown is the verdict of the unknown tier: block in the strict pack;
+// alert in the default and permissive packs, which never block an unknown
+// case (where the connector can ask, its own confirm mapping applies).
 func Unknown(tier Tier) Action {
-	if tier == TierStrict || tier == TierManaged {
+	if tier == TierStrict {
 		return Block
 	}
 	return Alert

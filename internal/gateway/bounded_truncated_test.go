@@ -14,8 +14,8 @@ import (
 
 // The gateway side of the bound rule: withBoundedTruncation and
 // floorBoundedTruncated, mapped by the profile as every hook route maps them,
-// give at least the unknown tier and never less than the findings of the part
-// read before the cap.
+// give at least the unknown tier of the pack and never less than the findings
+// of the part read before the cap. A managed install is judged by its pack.
 func TestBoundedTruncationMapsToTheUnknownTier(t *testing.T) {
 	blockAt := func(severity string) string {
 		switch severity {
@@ -31,21 +31,30 @@ func TestBoundedTruncationMapsToTheUnknownTier(t *testing.T) {
 	tiers := []struct {
 		name            string
 		strict, managed bool
-	}{{"default", false, false}, {"strict", true, false}, {"managed", false, true}, {"managed strict", true, true}}
+		want            bounded.Action
+	}{
+		{"default", false, false, bounded.Alert},
+		{"strict", true, false, bounded.Block},
+		{"managed default", false, true, bounded.Alert},
+		{"managed strict", true, true, bounded.Block},
+	}
 	for _, tier := range tiers {
 		request := trustedActionRequest{StrictPolicy: tier.strict, ManagedInstall: tier.managed, EnforcementCapable: true}
-		want := bounded.Unknown(boundedRequestTier(request))
+		strict := func() bool { return tier.strict }
 		for _, seen := range [][]RuleFinding{nil, {advisory}, {keys}, trustedActionLimitFindings(true)} {
-			base := bounded.ParseAction(guardrailActionForProfile(seen, false, func() bool { return tier.strict }, blockAt))
+			base := bounded.ParseAction(guardrailActionForProfile(seen, false, strict, blockAt))
 			for _, c := range bounded.Caps() {
 				before := slices.Clone(seen)
 				findings := withBoundedTruncation(seen, bounded.Of(c), request)
 				if len(seen) != len(before) || (len(seen) > 0 && seen[0].Title != before[0].Title) {
 					t.Fatalf("%s: the caller's findings changed", tier.name)
 				}
-				got := bounded.ParseAction(guardrailActionForProfile(findings, false, func() bool { return tier.strict }, blockAt))
-				if got < want || got < base {
-					t.Errorf("%s cap %s seen=%v: %s, want at least %s and %s", tier.name, c, FindingStrings(seen), got, want, base)
+				got := bounded.ParseAction(guardrailActionForProfile(findings, false, strict, blockAt))
+				if got < tier.want || got < base {
+					t.Errorf("%s cap %s seen=%v: %s, want at least %s and %s", tier.name, c, FindingStrings(seen), got, tier.want, base)
+				}
+				if len(seen) == 0 && got != tier.want {
+					t.Errorf("%s cap %s, nothing seen: %s, want exactly %s", tier.name, c, got, tier.want)
 				}
 				limits := 0
 				for _, f := range findings {
@@ -74,13 +83,16 @@ func TestBoundedTruncationMapsToTheUnknownTier(t *testing.T) {
 }
 
 func TestFloorBoundedTruncatedVerdict(t *testing.T) {
-	for _, tier := range []bounded.Tier{bounded.TierDefault, bounded.TierPermissive, bounded.TierStrict, bounded.TierManaged} {
+	for _, tier := range []bounded.Tier{bounded.TierDefault, bounded.TierPermissive, bounded.TierStrict} {
 		for _, action := range []string{"allow", "alert", "confirm", "block"} {
 			v := &ToolInspectVerdict{Action: action, Severity: "LOW", Reason: "matched: x", Findings: []string{"x"}}
 			v.floorBoundedTruncated(bounded.Of(bounded.Bytes, bounded.Nodes), tier)
 			got := bounded.ParseAction(v.Action)
 			if got < bounded.Unknown(tier) || got < bounded.ParseAction(action) {
 				t.Errorf("tier %d %s: %s", tier, action, v.Action)
+			}
+			if action == "allow" && got != bounded.Unknown(tier) {
+				t.Errorf("tier %d allow: raised to %s, want %s", tier, v.Action, bounded.Unknown(tier))
 			}
 			if !strings.Contains(v.Reason, "bounded_truncated cap=bytes,nodes") || len(v.DetailedFindings) != 1 ||
 				!strings.HasPrefix(v.Findings[len(v.Findings)-1], evaluationLimitRuleID+":") {
@@ -95,8 +107,8 @@ func TestFloorBoundedTruncatedVerdict(t *testing.T) {
 	}
 }
 
-// boundedTier reads the tier a verdict-level lane floors with: the pack's
-// posture, then a managed install with local rules.
+// boundedTier is the tier of the pack: a managed install that runs the
+// default pack is in the default tier (rel-1-0-6:GAP-0675).
 func TestBoundedTierOfTheRequest(t *testing.T) {
 	for _, tc := range []struct {
 		posture string
@@ -104,8 +116,9 @@ func TestBoundedTierOfTheRequest(t *testing.T) {
 		want    bounded.Tier
 	}{
 		{"default", false, bounded.TierDefault},
+		{"permissive", false, bounded.TierPermissive},
 		{"strict", false, bounded.TierStrict},
-		{"default", true, bounded.TierManaged},
+		{"default", true, bounded.TierDefault},
 		{"strict", true, bounded.TierStrict},
 	} {
 		api := instructionProtectionTestAPIWithPack(t, "claudecode", "action", "", tc.posture)

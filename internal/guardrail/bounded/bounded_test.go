@@ -77,7 +77,7 @@ func TestReasonNamesEveryCapInOrder(t *testing.T) {
 // is at least the unknown tier and never below its base; an untruncated one
 // keeps its base.
 func TestFloorIsAtLeastUnknownAndBase(t *testing.T) {
-	for _, tier := range []Tier{TierDefault, TierPermissive, TierStrict, TierManaged} {
+	for _, tier := range []Tier{TierDefault, TierPermissive, TierStrict} {
 		for base := Allow; base <= Block; base++ {
 			if got := Floor(base, Truncated{}, tier); got != base {
 				t.Fatalf("tier %d base %s untruncated: %s", tier, base, got)
@@ -90,13 +90,14 @@ func TestFloorIsAtLeastUnknownAndBase(t *testing.T) {
 			}
 		}
 	}
-	if Unknown(TierDefault) != Alert || Unknown(TierPermissive) != Alert ||
-		Unknown(TierStrict) != Block || Unknown(TierManaged) != Block {
-		t.Fatal("unknown tier: default/permissive alert, strict/managed block")
+	if Unknown(TierDefault) != Alert || Unknown(TierPermissive) != Alert || Unknown(TierStrict) != Block {
+		t.Fatal("unknown tier: default/permissive alert, strict block")
 	}
-	if TierOf(true, true, false) != TierStrict || TierOf(false, true, true) != TierManaged ||
-		TierOf(false, false, true) != TierPermissive || TierOf(false, false, false) != TierDefault {
-		t.Fatal("TierOf order: strict, managed, permissive, default")
+	for posture, want := range map[string]Tier{"strict": TierStrict, "permissive": TierPermissive,
+		"default": TierDefault, "": TierDefault, "custom": TierDefault} {
+		if got := TierOf(posture); got != want {
+			t.Fatalf("TierOf(%q) = %d, want %d", posture, got, want)
+		}
 	}
 	for a := Allow; a <= Block; a++ {
 		if ParseAction(a.String()) != a {

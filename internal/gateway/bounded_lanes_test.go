@@ -22,7 +22,7 @@ import (
 // The cross-lane property test of the bound rule (internal/guardrail/bounded):
 // for every cap of every lane in boundedLanes, an input just past the cap,
 // and one far past it, is judged at least as strictly as the same shape at
-// the cap and at least at the unknown tier, in every tier; and an element
+// the cap and at least at the unknown tier of the pack, in every tier; and an element
 // the lane judges on its own, placed before the cap, still decides past it.
 //
 // A lane registers its caps from its own test file, so a new lane is covered
@@ -78,26 +78,22 @@ var boundedLanes []boundedLaneCap
 
 func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(boundedLanes, caps...) }
 
-// The shell reading bounds on rel/1.0.10 (lane s7/parselimits). They take
-// the evaluation-limit path (trustedActionLimitFindings) and adopt the
-// helper in s7/parselimits' follow-up delta.
+// The shell reading bounds on rel/1.0.10. Nesting and statements (lane
+// s7/parselimits) take the evaluation-limit path (trustedActionLimitFindings)
+// and adopt the helper in s7/parselimits' follow-up delta; the operand bound
+// goes through withBoundedTruncation.
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
 			gen:  boundedShellCall(boundedNestedSubshells),
-			open: map[string]string{"*": "rel-1-0-10:GAP-0312", "managed": boundedManagedLimitOpen}},
+			open: map[string]string{"*": "rel-1-0-10:GAP-0312"}},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
-			gen: boundedShellCall(gap0568Assignments), open: map[string]string{"managed": boundedManagedLimitOpen}},
+			gen: boundedShellCall(gap0568Assignments)},
+		// The operand bound adopted the helper (rel-1-0-10:GAP-0313).
 		boundedLaneCap{lane: "shell operands", cap: bounded.Items, limit: actionfacts.MaxOperandsPerCall,
-			gen: boundedShellCall(boundedListOperands), open: map[string]string{"*": "rel-1-0-10:GAP-0313"}},
+			adopted: true, gen: boundedShellCall(boundedListOperands)},
 	)
 }
-
-// boundedManagedLimitOpen: the evaluation-limit finding of the shell readers
-// alerts on a managed install with the default pack (rel-1-0-6:GAP-0675),
-// below the bound rule's managed floor, until the parse lane adopts
-// withBoundedTruncation.
-const boundedManagedLimitOpen = "managed floor of the shell evaluation limit (GAP-0675 vs bound rule, parselimits adoption)"
 
 // boundedShellStatements is the statement budget of one POSIX call
 // (actionfacts.maxStatementsAlone).
@@ -154,7 +150,9 @@ func boundedDecideClaudeCode(t *testing.T, api *APIServer, env boundedEnv, call 
 	return resp.Action, resp.Findings
 }
 
-// boundedTestTiers are the tiers every lane cap is checked in.
+// boundedTestTiers are the tiers every lane cap is checked in. The unknown
+// tier follows the pack: a managed install that runs the default pack is in
+// the default tier (rel-1-0-6:GAP-0675).
 var boundedTestTiers = []struct {
 	name, posture string
 	managed       bool
@@ -163,7 +161,7 @@ var boundedTestTiers = []struct {
 	{"default", "default", false, bounded.TierDefault},
 	{"permissive", "permissive", false, bounded.TierPermissive},
 	{"strict", "strict", false, bounded.TierStrict},
-	{"managed", "default", true, bounded.TierManaged},
+	{"managed", "default", true, bounded.TierDefault},
 	{"managed strict", "strict", true, bounded.TierStrict},
 }
 
