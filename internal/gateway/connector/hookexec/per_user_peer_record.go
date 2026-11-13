@@ -99,18 +99,6 @@ func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
 	})
 }
 
-func (r *PerUserPeerRecord) connectedServer() (*net.TCPAddr, bool) {
-	if r == nil {
-		return nil, false
-	}
-	select {
-	case <-r.connected:
-		return r.server, r.server != nil
-	default:
-		return nil, false
-	}
-}
-
 // wait returns the peer once its read is done, false when it is unknown or
 // the read did not end within wait.
 func (r *PerUserPeerRecord) wait(wait time.Duration) (perUserPeerProcess, bool) {
