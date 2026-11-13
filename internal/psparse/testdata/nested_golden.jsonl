@@ -20,3 +20,5 @@
 {"i":19,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\y","static":true}]}
 {"i":20,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
 {"i":21,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":22,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":23,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}

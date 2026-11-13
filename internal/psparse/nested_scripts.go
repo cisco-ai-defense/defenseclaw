@@ -262,11 +262,17 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 				switch canon {
 				case "command":
 					return []NestedScript{joinRest(words[i+1:], KindPowerShellCommand, "powershell", src)}
-				case "encodedcommand", "encodedarguments":
+				case "encodedcommand":
 					if i+1 < len(words) {
 						return []NestedScript{decodeWord(words[i+1], src)}
 					}
 					return []NestedScript{{Kind: KindEncodedCommand, Dialect: "powershell", Source: src, Reason: ReasonNonLiteral}}
+				case "encodedarguments":
+					// -EncodedArguments is serialized CLI XML passed to the child
+					// process, never the script to run; skip its value and keep
+					// scanning for -EncodedCommand / -Command (review 4 R4-4).
+					i++
+					continue
 				case "file":
 					return nil // a script file; its content is not inline
 				default:
@@ -490,6 +496,19 @@ func iexNested(c *Command, elems []PipelineElement, idx int) ([]NestedScript, bo
 	// no value: the script is this command's pipeline input.
 	if idx > 0 {
 		if prev, ok := elems[idx-1].(*ExprStatement); ok {
+			if arr, ok := prev.Expr.(*ArrayLit); ok {
+				// pwsh runs each element of a piped-in list as its own script,
+				// so emit one nested script per element; never join them
+				// (review 4 R4-3). Unresolvable elements stay non-static.
+				res := make([]NestedScript, 0, len(arr.Elements))
+				for _, el := range arr.Elements {
+					res = append(res, resolveNested(el, KindIEXLiteral, "powershell", c))
+				}
+				if len(res) == 0 {
+					res = append(res, NestedScript{Kind: KindIEXLiteral, Dialect: "powershell", Source: c, Reason: ReasonNonLiteral})
+				}
+				return res, true
+			}
 			return []NestedScript{resolveNested(prev.Expr, KindIEXLiteral, "powershell", c)}, true
 		}
 	}
