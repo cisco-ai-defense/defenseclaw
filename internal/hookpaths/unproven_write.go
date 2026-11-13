@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -21,19 +22,60 @@ import (
 const UnprovenReasonKey = "\x00unproven-write"
 
 var unprovenReasonTitles = map[string]string{
-	"trap":                 "A trap handler can write a protected file",
-	"function":             "A called function can write a protected file",
-	"dynamic-command":      "A dynamic command can write a protected file",
-	"dynamic-argument":     "A dynamic argument can select a protected file",
-	"eval-source":          "Evaluated or sourced code can write a protected file",
-	"interpreter-path":     "Interpreter file effects cannot be proved safe for the protected path",
-	"interpreter-argument": "An interpreter has a dynamic argument after writable code",
-	"shell-parse":          "A shell parse error leaves a protected write unproved",
-	"shell-parse-bound":    "A shell parse exceeded the protected write proof bound",
-	"copy-directory":       "A copy into a directory can select a protected file",
-	"cdpath":               "CDPATH can select a directory containing a protected file link",
-	"nested-shell":         "A nested shell or shell script can write a protected file",
+	"trap":                   "A trap handler can write a protected file",
+	"function":               "A called function can write a protected file",
+	"dynamic-command":        "A dynamic command can write a protected file",
+	"dynamic-argument":       "A dynamic argument can select a protected file",
+	"eval-source":            "Evaluated or sourced code can write a protected file",
+	"interpreter-path":       "Interpreter file effects cannot be proved safe for the protected path",
+	"interpreter-argument":   "An interpreter has a dynamic argument after writable code",
+	"shell-parse":            "A shell parse error leaves a protected write unproved",
+	"shell-parse-bound":      "A shell parse exceeded the protected write proof bound",
+	"copy-directory":         "A copy into a directory can select a protected file",
+	"cdpath":                 "CDPATH can select a directory containing a protected file link",
+	"nested-shell":           "A nested shell or shell script can write a protected file",
+	UnprovenLinkUnread:       "A link the command makes or changes could not be read and may lead to a protected file",
+	UnprovenTargetUnresolved: "A write target could not be resolved and may be a protected file",
 }
+
+// linkCallText is link-making code this package does not evaluate:
+// interpreter, PowerShell and Windows link calls, wider than opaqueLink
+// (Perl and Ruby symlink, a .NET or COM link call).
+var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\bFile\.link\b|\blink\s*\(|mklink|new-item|createsymboliclink|createhardlink`)
+
+// CommandMayMakeLink reports a command that may create a link itself, with a
+// target the static reading cannot place: a link program (also behind a
+// wrapper or a multicall binary), a copy with a link option, link-making
+// interpreter or Windows code, or code it does not read at all (eval,
+// source, a nested shell, a command substitution, a backtick). A link the
+// command makes can point anywhere, the home included, so a write the
+// authorized-keys proof holds as unknown in such a command is not
+// lowered (rel-1-0-10:GAP-0013 review F1).
+func CommandMayMakeLink(command string) bool {
+	if command == "" {
+		return false
+	}
+	if strings.Contains(command, "$(") || strings.Contains(command, "`") || strings.Contains(command, "<(") || strings.Contains(command, ">(") {
+		return true
+	}
+	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) {
+		return true
+	}
+	if tactics.RunsProgram(command, linkPrograms...) || tactics.RunsProgram(command, multicallPrograms...) {
+		return true
+	}
+	if tactics.RunsProgram(command, copyPrograms...) && copyLinkOption.MatchString(command) {
+		return true
+	}
+	return tactics.RunsProgram(command, "eval", "source", ".", "sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd", "busybox", "toybox")
+}
+
+// The classes of an authorized-keys proof that found no protected file but
+// could not show the write is ordinary (rel-1-0-10:GAP-0013).
+const (
+	UnprovenLinkUnread       = "link-unread"
+	UnprovenTargetUnresolved = "target-unresolved"
+)
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.
 func UnprovenWriteTitle(reason string) string {
