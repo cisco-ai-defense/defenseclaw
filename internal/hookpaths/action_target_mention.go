@@ -1708,6 +1708,8 @@ func actionGlobFacts(command, cwd, home string) map[string]string {
 const (
 	actionGlobMaxReads = 64
 	actionGlobMaxNames = 4096
+	// actionGlobMaxEntries bounds the names one expansion reads in all.
+	actionGlobMaxEntries = 1 << 18
 )
 
 // actionExpandGlob lists the existing names an absolute pattern selects. A
@@ -1737,6 +1739,8 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 	}
 	paths := []string{start}
 	reads := 0
+	// entries counts the names read from every folder of this expansion.
+	entries := 0
 	complete = true
 	for _, component := range strings.Split(rest, separator) {
 		if component == "" {
@@ -1778,20 +1782,41 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 				complete, unseen = false, true
 				continue
 			}
-			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
+			// The directory is read in chunks and matched as it streams, so
+			// a busy folder (/tmp, a build cache, node_modules: tens of
+			// thousands of names) is expanded like any other. Only a folder
+			// past the total read budget is unproved; the old bound counted
+			// the folder's names, not the matches, and made every pattern in
+			// a folder of more than 4096 names an authorized-keys block
+			// (rel-1-0-10:GAP-0018).
+			var matched []string
+			for {
+				chunk, chunkErr := directory.Readdirnames(actionGlobMaxNames)
+				entries += len(chunk)
+				for _, name := range chunk {
+					if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
+						matched = append(matched, name)
+					}
+				}
+				if chunkErr != nil {
+					err = chunkErr
+					break
+				}
+				if len(chunk) == 0 || entries > actionGlobMaxEntries {
+					break
+				}
+			}
 			_ = directory.Close()
 			if err != nil && err != io.EOF && actionGlobNotDirectory(dir, err) {
 				// A file the previous component matched has no entries;
 				// the shell skips it (*/* in a project with files).
 				continue
 			}
-			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
+			if err != nil && err != io.EOF || entries > actionGlobMaxEntries {
 				complete = false
 			}
-			for _, name := range names {
-				if actionGlobNameMatch(component, name) && !actionGlobSkipsDotName(component, name, dots) {
-					next = append(next, filepath.Join(dir, name))
-				}
+			for _, name := range matched {
+				next = append(next, filepath.Join(dir, name))
 			}
 		}
 		if len(next) == 0 {
@@ -2759,10 +2784,15 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// readers: du reports sizes, readlink and realpath print a
 			// resolved name; none has an output option.
 			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
-		case "echo":
-			// The literal */* operand prints expanded names. Every other
-			// statement remains subject to the same read-only walk.
-			safe = len(call.Args) == 2 && call.Args[0].Lit() == "echo" && call.Args[1].Lit() == "*/*"
+		case "echo", "printf":
+			// echo and printf print their operands (a glob prints the names
+			// it expands to). They write a file only through a redirect,
+			// which the walk above already refuses unless it discards the
+			// output, and through a process or command substitution, whose
+			// calls the walk visits as statements of their own. Keeping
+			// echo out of the read-only list blocked every call that only
+			// printed a /tmp glob (echo /tmp/x*.log) as an authorized-keys
+			// mutation (rel-1-0-10:GAP-0018).
 		case "ssh-keygen":
 			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
 				safe = false
