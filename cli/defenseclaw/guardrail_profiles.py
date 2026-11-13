@@ -80,7 +80,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             # 1.0.10 (s7/shellrecall): five alert-only effect rules (staged file, stdin password, download-run, git, inline code).
-            "12028135b085841069b3da06e51b8e5290e24d2cdafe0f83f6685f108a307ba3",
+            "0c6b529f58ca66b21d75505de7c7179752984312fa81182f6aa98c0d0ce9d366",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
         }
     ),
     "permissive": frozenset(
@@ -117,7 +119,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             # 1.0.10 (s7/shellrecall): five alert-only effect rules (staged file, stdin password, download-run, git, inline code).
-            "7707b1df968a00acb5991ab9a3851ffe416825eb1690963402c9ad52c3a2b64f",
+            "ac165304bda1a0d0e50b481336d8fe046664b09c989c68174ff166a43d597c7b",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
         }
     ),
     "strict": frozenset(
@@ -153,7 +157,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             # 1.0.10 (s7/shellrecall): five alert-only effect rules (staged file, stdin password, download-run, git, inline code).
-            "4d313d1d00b92e94888a6ba0da90e531956592331f89e4f64b63db9f5aca590f",
+            "64f59de7a4dbdb533289952c9fefaa320fb0f85f2adfa3dfb87cf7075fc91dae",
+            # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
+            "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
         }
     ),
 }

@@ -1079,28 +1079,44 @@ macos-app-build: macos-app-license-check
 	    build
 
 macos-app-test-scripts:
-	macos/DefenseClawMac/script/test_connector_onboarding.sh
-	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
-	macos/DefenseClawMac/script/test_ai_discovery_models.sh
+	python3 scripts/sync-macos-command-registry.py --check
+	macos/DefenseClawMac/script/test_ai_discovery_actions.sh
+	macos/DefenseClawMac/script/test_ai_model_discovery.sh
 	macos/DefenseClawMac/script/test_ai_runtime_models.sh
-	macos/DefenseClawMac/script/test_sandbox_models.sh
-	macos/DefenseClawMac/script/test_panel_registry.sh
-	macos/DefenseClawMac/script/test_numeric_safety.sh
-	macos/DefenseClawMac/script/test_output_safety.sh
-	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_alert_queue_projection.sh
 	macos/DefenseClawMac/script/test_app_state_signal_safety.sh
-	macos/DefenseClawMac/script/test_update_checker_verification.sh
-	macos/DefenseClawMac/script/test_installation_context.sh
-	macos/DefenseClawMac/script/test_local_model_discovery.sh
-	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
-	macos/DefenseClawMac/script/test_cowork_status.sh
-	macos/DefenseClawMac/script/test_gateway_auto_start.sh
-	macos/DefenseClawMac/script/test_gateway_administrator.sh
-	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
 	macos/DefenseClawMac/script/test_canonical_event_history.sh
+	macos/DefenseClawMac/script/test_catalog_action_safety.sh
+	macos/DefenseClawMac/script/test_cli_cancellation.sh
+	macos/DefenseClawMac/script/test_config_editor_contracts.sh
 	macos/DefenseClawMac/script/test_connector_inventory_compatibility.sh
+	macos/DefenseClawMac/script/test_connector_onboarding.sh
+	macos/DefenseClawMac/script/test_cowork_status.sh
+	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
+	macos/DefenseClawMac/script/test_gateway_admin_helper.sh
+	macos/DefenseClawMac/script/test_gateway_administrator.sh
+	macos/DefenseClawMac/script/test_gateway_auto_start.sh
 	macos/DefenseClawMac/script/test_inspector_layout_policy.sh
-	macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
+	macos/DefenseClawMac/script/test_installation_context.sh
+	macos/DefenseClawMac/script/test_inventory_capability_warnings.sh
+	macos/DefenseClawMac/script/test_local_model_discovery.sh
+	macos/DefenseClawMac/script/test_main_window_lifecycle.sh
+	macos/DefenseClawMac/script/test_numeric_safety.sh
+	macos/DefenseClawMac/script/test_operator_asset_lists.sh
+	macos/DefenseClawMac/script/test_output_safety.sh
+	macos/DefenseClawMac/script/test_overview_read_only_guidance.sh
+	macos/DefenseClawMac/script/test_panel_registry.sh
+	macos/DefenseClawMac/script/test_policy_models.sh
+	macos/DefenseClawMac/script/test_redaction_commands.sh
+	macos/DefenseClawMac/script/test_resource_boundaries.sh
+	macos/DefenseClawMac/script/test_runtime_contract_surfaces.sh
+	macos/DefenseClawMac/script/test_sandbox_inspection.sh
+	macos/DefenseClawMac/script/test_sandbox_models.sh
+	macos/DefenseClawMac/script/test_secret_file_safety.sh
+	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_structured_detail_parser.sh
+	macos/DefenseClawMac/script/test_toolbar_help.sh
+	macos/DefenseClawMac/script/test_update_checker_verification.sh
 
 macos-app-test: macos-app-test-scripts
 	$(MAKE) macos-app-build
@@ -1448,6 +1464,7 @@ _bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@mkdir -p cli/defenseclaw/_data/llm
+	@mkdir -p cli/defenseclaw/_data/pricing
 	@mkdir -p cli/defenseclaw/_data/config/v8
 	@rm -rf cli/defenseclaw/_data/telemetry/v8
 	@mkdir -p cli/defenseclaw/_data/telemetry/v8
@@ -1474,6 +1491,8 @@ _bundle-data: _checkout-write-preflight
 	@# Textual TUI model picker via importlib.resources. Tracked source lives
 	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
 	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
+	@# Reviewed default price table; only the CLI writers read it (init, setup tokenomics, upgrade).
+	cp bundles/pricing/default-pricing.json cli/defenseclaw/_data/pricing/
 	@# v8 config contracts are canonical under schemas/. The wheel receives
 	@# exact build-staging copies so importlib.resources works after install.
 	cp schemas/config/v8/defenseclaw-config.schema.json cli/defenseclaw/_data/config/v8/

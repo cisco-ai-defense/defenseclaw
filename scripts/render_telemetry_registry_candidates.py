@@ -223,6 +223,14 @@ _STRUCTURED_TYPE_IDS: Final = (
     "defenseclaw.inventory.agent_identifiers",
     "defenseclaw.inventory.agent_metadata_item",
     "defenseclaw.inventory.agent_metadata",
+    "defenseclaw.health.reason",
+    "defenseclaw.health.reasons",
+    "defenseclaw.health.subsystem_item",
+    "defenseclaw.health.subsystems",
+    "defenseclaw.health.hook_connector",
+    "defenseclaw.health.hook_connectors",
+    "defenseclaw.health.failing_target",
+    "defenseclaw.health.failing_targets",
 )
 _STRUCTURED_EXPECTED_BINDINGS: Final = (
     ("gen_ai.input.messages", "gen_ai.input_messages", "sealed_typed", "native_json"),
@@ -246,6 +254,15 @@ _STRUCTURED_EXPECTED_BINDINGS: Final = (
     ("defenseclaw.inventory.mcp.metadata", "defenseclaw.inventory.mcp_metadata", "sealed_typed", "native_json"),
     ("defenseclaw.inventory.agent.identifiers", "defenseclaw.inventory.agent_identifiers", "sealed_typed", "native_json"),
     ("defenseclaw.inventory.agent.metadata", "defenseclaw.inventory.agent_metadata", "sealed_typed", "native_json"),
+    ("defenseclaw.health.reasons", "defenseclaw.health.reasons", "sealed_typed", "native_json"),
+    ("defenseclaw.health.subsystems", "defenseclaw.health.subsystems", "sealed_typed", "native_json"),
+    ("defenseclaw.health.hooks.connectors", "defenseclaw.health.hook_connectors", "sealed_typed", "native_json"),
+    (
+        "defenseclaw.health.hooks.failing_targets",
+        "defenseclaw.health.failing_targets",
+        "sealed_typed",
+        "native_json",
+    ),
 )
 _STRUCTURED_EXPECTED_VARIANTS: Final = (
     ("text", "gen_ai.text_part"),
@@ -345,6 +362,34 @@ _STRUCTURED_EXPECTED_OBJECT_FIELDS: Final = {
         ("version", False, "scalar", "string"),
         ("probe_status", True, "scalar", "string"),
     ),
+    "defenseclaw.health.reason": (
+        ("code", True, "scalar", "string"),
+        ("component", True, "scalar", "string"),
+        ("severity", True, "scalar", "string"),
+        ("connector", False, "scalar", "string"),
+    ),
+    "defenseclaw.health.subsystem_item": (
+        ("name", True, "scalar", "string"),
+        ("state", True, "scalar", "string"),
+        ("since", False, "scalar", "string"),
+        ("error_class", False, "scalar", "string"),
+    ),
+    "defenseclaw.health.hook_connector": (
+        ("connector", True, "scalar", "string"),
+        ("targets", True, "scalar", "int64"),
+        ("ok", True, "scalar", "int64"),
+        ("failed", True, "scalar", "int64"),
+        ("pending", True, "scalar", "int64"),
+        ("last_activity_at", False, "scalar", "string"),
+        ("tool_inspection_mode", False, "scalar", "string"),
+    ),
+    "defenseclaw.health.failing_target": (
+        ("connector", True, "scalar", "string"),
+        ("user.id", False, "scalar", "string"),
+        ("user.id_kind", False, "scalar", "string"),
+        ("error_class", True, "scalar", "string"),
+        ("pending", True, "scalar", "boolean"),
+    ),
 }
 _STRUCTURED_SEALED_OBJECTS: Final = frozenset(
     {
@@ -355,6 +400,10 @@ _STRUCTURED_SEALED_OBJECTS: Final = frozenset(
         "defenseclaw.inventory.mcp_metadata_item",
         "defenseclaw.inventory.agent_identifier",
         "defenseclaw.inventory.agent_metadata_item",
+        "defenseclaw.health.reason",
+        "defenseclaw.health.subsystem_item",
+        "defenseclaw.health.hook_connector",
+        "defenseclaw.health.failing_target",
     }
 )
 _STRUCTURED_EXPECTED_ARRAYS: Final = {
@@ -368,6 +417,10 @@ _STRUCTURED_EXPECTED_ARRAYS: Final = {
     "defenseclaw.inventory.mcp_metadata": ("defenseclaw.inventory.mcp_metadata_item", 0, 256),
     "defenseclaw.inventory.agent_identifiers": ("defenseclaw.inventory.agent_identifier", 0, 64),
     "defenseclaw.inventory.agent_metadata": ("defenseclaw.inventory.agent_metadata_item", 0, 64),
+    "defenseclaw.health.reasons": ("defenseclaw.health.reason", 0, 32),
+    "defenseclaw.health.subsystems": ("defenseclaw.health.subsystem_item", 0, 16),
+    "defenseclaw.health.hook_connectors": ("defenseclaw.health.hook_connector", 0, 16),
+    "defenseclaw.health.failing_targets": ("defenseclaw.health.failing_target", 0, 16),
 }
 _STRUCTURED_NULLABLE_OPTIONALS: Final = {
     "gen_ai.chat_message": frozenset({"name"}),
@@ -397,7 +450,7 @@ _STRUCTURED_EXPECTED_KNOWN_VALUES: Final = {
     ("gen_ai.uri_part", "modality"): ("image", "video", "audio", "document"),
 }
 _STRUCTURED_DISPOSITIONS_SHA256: Final = "19aa6a80165bed241ae9e427b9b4f7cea9d0b7001c11e5f6460b84c89bd4c0c3"
-_STRUCTURED_TYPES_SHA256: Final = "7a9f94ce612f11e76ba2fc1f7707fd63fbd6886a55aa82484fc5584b50fafa70"
+_STRUCTURED_TYPES_SHA256: Final = "e930cdb58971080a64d8d6ab2bd3d8794719cf8c26551c13a59f57745086fe7b"
 _STRUCTURAL_CONTRACT_SHA256: Final = "a5f1dcae714d17b138a130a9a8b99f754165370974dbaef994976d67a8f8abaa"
 _CANONICAL_JSON_LIMITS: Final = {
     "max_depth": 8,
@@ -4827,6 +4880,7 @@ _INBOUND_CLASS_IDS: Final = (
     "otlp.codex.tool_result.v1",
     "otlp.claudecode.user_prompt.v1",
     "otlp.codex.response_completed.v1",
+    "otlp.claudecode.api_request.v1",
     "otlp.claudecode.token_usage.v1",
     "otlp.codex.token_usage.v1",
     "otlp.genai.duration.metric.v1",
@@ -5158,7 +5212,14 @@ def _candidate_inbound_otlp(
         if alias_id in alias_ids:
             raise CandidateRenderError("materialized inbound alias ID is duplicated")
         alias_ids.add(alias_id)
-        if target in {"$derived_duration_seconds", "$derived_cached_input_tokens"}:
+        if target in {
+            "$derived_duration_seconds",
+            "$derived_cached_input_tokens",
+            "$derived_reasoning_tokens",
+            "$derived_uncached_input_tokens",
+            "$derived_cache_read_tokens",
+            "$derived_cache_creation_tokens",
+        }:
             field_contract: JSONObject = {"field_class": "metadata", "sensitivity": "internal"}
         else:
             attribute = attributes.get(target)
@@ -5936,7 +5997,7 @@ def build_candidate_render_index(view: object) -> CandidateRenderIndex:
         attribute = attributes.get(ref)
         expected_field_types = (
             ("array",)
-            if ref.startswith("defenseclaw.inventory.")
+            if ref.startswith(("defenseclaw.inventory.", "defenseclaw.health."))
             else ("canonical_json",)
         )
         if attribute is None or attribute.field_types != expected_field_types:

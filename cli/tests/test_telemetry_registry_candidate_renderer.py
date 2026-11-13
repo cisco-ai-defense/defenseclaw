@@ -436,7 +436,7 @@ def test_candidate_enrichment_is_complete_typed_and_recursively_immutable(
         "registry_relative",
     }
     structured_fields = [item for item in index.enriched_fields.values() if item.context == "structured"]
-    assert len(structured_fields) == 68
+    assert len(structured_fields) == 88
     assert all(
         item.path_kind == "registry_relative"
         and item.input_placement == "structured_input"
@@ -1293,7 +1293,7 @@ def test_every_artifact_carries_candidate_authority_and_view_digest(
                 "authority": renderer.CANDIDATE_AUTHORITY,
                 "generator": renderer.GENERATOR_ID,
                 "materialized_view_sha256": view.typed_canonical_json_sha256,
-                "registry_version": 3,
+                "registry_version": 4,
             }
             assert artifact.ownership_marker == renderer.JSON_OWNERSHIP_MARKER
         else:

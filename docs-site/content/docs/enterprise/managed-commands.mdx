@@ -45,6 +45,8 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | `defenseclaw <other per-user command>` | Refused | Refused | Refused | Linux, macOS, Windows | Every other per-user command (acp, agent, aibom, codeguard, edge-connector, init, keys, migrate, observability, quickstart, registry, reset, settings, uninstall, version) belongs to the per-user install; each answers with the managed message and changes nothing. |
 | `defenseclaw policy show` | Refused | Refused | Administrators only | Linux, macOS, Windows | A standard account is told to use an elevated prompt. |
 | `defenseclaw audit export` | Refused | Refused | Administrators only | Linux, macOS, Windows | The managed audit log is administrator-only. |
+| `defenseclaw audit compact` | Refused | Refused | Administrators only | Linux, macOS, Windows | Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service. |
+| `defenseclaw audit rejected` | Refused | Refused | Administrators only | Linux, macOS, Windows | The records the schema gate refused are part of the managed audit store, which is administrator-only. |
 
 ## The launcher refusal
 

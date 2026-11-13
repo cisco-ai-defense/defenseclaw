@@ -143,9 +143,12 @@ word is still matched as text, as the shell decodes it (quotes and backslashes r
 link that the command names, directly or through a value DefenseClaw knows, or among the first 1024
 operands, is blocked in every profile, and so is a later name that is a link or a second name of a keys
 file. The other plain file names past the bound (a name with no protected part, no variable, glob or
-dot-dot, outside the system folders, that is no link) are not resolved further: the `default` and `permissive` profiles allow the
-call and raise the alert `ACTION-OPERAND-BOUND`, which names the bound, and the `strict` profile (and managed
-strict) blocks it with `ACTION-COMPOUND-LIMIT`. Pass such a list through a file (`xargs -a list.txt`) or split it.
+dot-dot, outside the system folders, that is no link) are not resolved further. The command gets the
+evaluation-limit finding `ACTION-COMPOUND-LIMIT` with the reason `bounded_truncated cap=items`: the `default` and
+`permissive` profiles allow it with that alert, and the `strict` profile (and managed strict) blocks it. Pass such a
+list through a file (`xargs -a list.txt`) or split it. Up to 1.0.9 this alert was the finding `ACTION-OPERAND-BOUND`;
+from 1.0.10 a SIEM filter or audit query on that id should match `ACTION-COMPOUND-LIMIT` with
+`bounded_truncated cap=items` in its evidence instead.
 
 ## What `setup guardrail` actually writes
 

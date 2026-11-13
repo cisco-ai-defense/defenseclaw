@@ -96,8 +96,8 @@ func (f b36ManagedHookFixture) answerOperandRow(t *testing.T, command, verdict s
 			t.Errorf("%s: verdict %s, want block; body %.200s", call.name, call.verdict, call.body)
 		case verdict == "alert" && !strings.Contains(call.body, `"action":"alert"`+","):
 			t.Errorf("%s: want an alert that allows; verdict %s body %.200s", call.name, call.verdict, call.body)
-		case verdict == "alert" && !strings.Contains(call.body, operandBoundRuleID):
-			t.Errorf("%s: the alert does not name %s: %.200s", call.name, operandBoundRuleID, call.body)
+		case verdict == "alert" && !strings.Contains(call.body, operandBoundReason):
+			t.Errorf("%s: the alert does not name %s: %.200s", call.name, operandBoundReason, call.body)
 		}
 	}
 	if err := os.Chmod(f.homes, 0o700); err != nil {

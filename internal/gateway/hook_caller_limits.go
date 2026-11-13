@@ -75,11 +75,14 @@ const (
 	// hookCallerRate and hookCallerBurst are one caller's sustained and
 	// burst request budget. An agent sends a few requests per tool call, so
 	// this leaves room for many parallel sessions of one user.
-	hookCallerRate  = 60
-	hookCallerBurst = 120
+	// 120/s carries the 100 tool calls a second of one account (bar H1,
+	// #1384).
+	hookCallerRate  = 120
+	hookCallerBurst = 240
 	// hookCallerInFlight bounds one caller's concurrent requests, running
 	// or waiting.
-	hookCallerInFlight = 32
+	// 64: 100 calls a second answered in up to 0.6 s.
+	hookCallerInFlight = 64
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
 	// at least four accounts' largest sandbox class caps. A caller's share is a
@@ -108,7 +111,11 @@ const (
 	managedHookOverloadedMessage  = "DefenseClaw is handling as many hook requests as it can; retry shortly"
 )
 
-var hookGlobalInFlightMin = 4 * max(sandboxUserHookInFlight, sandboxUserReceiptInFlight)
+// hookGlobalInFlightMin is a floor of its own, not tied to the sandbox
+// bounds: the 2800 requests 1.0.9 allowed (four accounts at 700). With the
+// answer-window bounds (560) it still lets four accounts hold their whole
+// in-flight bound at once (S8 lead review P2-1).
+const hookGlobalInFlightMin = 2800
 
 type hookCallerLimiter struct {
 	mu        sync.Mutex

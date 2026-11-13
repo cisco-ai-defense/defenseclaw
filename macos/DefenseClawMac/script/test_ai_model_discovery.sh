@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,14 +18,15 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-main-window-lifecycle-tests.XXXXXX")"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-local-model-tests.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 MODULE_CACHE="$BUILD_DIR/ModuleCache"
 mkdir -p "$MODULE_CACHE"
 
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
-  -module-cache-path "$MODULE_CACHE" -parse-as-library \
-  "$ROOT/Tests/MainWindowLifecycleContractTests.swift" \
-  -o "$BUILD_DIR/MainWindowLifecycleContractTests"
+  -module-cache-path "$MODULE_CACHE" \
+  "$ROOT/DefenseClawMac/DataLayer/Models.swift" \
+  "$ROOT/Tests/AIDiscoveryModelTests.swift" \
+  -o "$BUILD_DIR/AIDiscoveryModelTests"
 
-"$BUILD_DIR/MainWindowLifecycleContractTests" "$ROOT"
+"$BUILD_DIR/AIDiscoveryModelTests"

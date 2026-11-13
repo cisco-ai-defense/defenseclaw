@@ -109,6 +109,7 @@ var managedWindowsQuoteAllowed = map[string]string{
 	"internal/actionfacts/simple_commands.go":     "re-renders a command with its resolved variables for policy matching",
 	"internal/gateway/trusted_action_dispatch.go": "the gateway's command-line reader for trusted actions",
 	"internal/gateway/powershell_state_write.go":  "re-renders a ${provider:path} variable as a literal for the state-write matcher",
+	"internal/audit/compact.go":                   "a SQLite string literal for PRAGMA temp_store_directory (SQL doubles ' too); no PowerShell",
 }
 
 var (
