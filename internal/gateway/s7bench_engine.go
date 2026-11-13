@@ -35,6 +35,7 @@ type S7Engine struct {
 	sc        *Sidecar
 	api       *APIServer
 	hook      http.HandlerFunc
+	hooks     map[string]http.HandlerFunc
 	connector string
 	profile   string
 }
@@ -42,6 +43,12 @@ type S7Engine struct {
 // S7NewEngine boots the sidecar generation for cfg and returns the
 // connector's hook handler.
 func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
+	return S7NewEngineMulti(cfg, connectorName, nil)
+}
+
+// S7NewEngineMulti boots one generation with the hook handlers of connectorName and of every name in more, so a corpus can
+// send each case to the handler of its own connector.
+func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (*S7Engine, error) {
 	store, err := audit.NewStore(filepath.Join(cfg.DataDir, "audit.db"))
 	if err != nil {
 		return nil, fmt.Errorf("audit store: %w", err)
@@ -69,9 +76,16 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	if g := currentGeneration(); g != nil {
 		api.SetHookDecisionJudge(g.decisionJudge)
 	}
+	hooks := map[string]http.HandlerFunc{connectorName: api.handleUnifiedConnectorHook(connectorName)}
+	for _, name := range more {
+		if _, ok := hooks[name]; !ok {
+			hooks[name] = api.handleUnifiedConnectorHook(name)
+		}
+	}
 	return &S7Engine{
 		sc: sc, api: api, connector: connectorName,
-		hook:    api.handleUnifiedConnectorHook(connectorName),
+		hook:    hooks[connectorName],
+		hooks:   hooks,
 		profile: cfg.Guardrail.RulePack,
 	}, nil
 }
@@ -82,6 +96,19 @@ func (e *S7Engine) Hook(ctx context.Context, body []byte) (int, []byte) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	e.hook(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// HookFor answers one hook payload through the named connector's handler.
+func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte) (int, []byte) {
+	h, ok := e.hooks[connectorName]
+	if !ok {
+		h, connectorName = e.hook, e.connector
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+connectorName, bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h(rec, req)
 	return rec.Code, rec.Body.Bytes()
 }
 
@@ -118,13 +145,18 @@ type S7Det struct {
 
 // Deterministic evaluates the call the way evaluateAgentHook projects it.
 func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json.RawMessage, cwd string) S7Det {
-	actionTool := agentHookTrustedActionTool(e.connector, toolName, runtime.GOOS)
-	trusted, toolCWD := agentHookTrustedActionArgs(e.connector, toolName, args)
+	return e.DeterministicFor(ctx, e.connector, toolName, args, cwd)
+}
+
+// DeterministicFor is Deterministic for the named connector.
+func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName string, args json.RawMessage, cwd string) S7Det {
+	actionTool := agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS)
+	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, args)
 	if toolCWD == "" {
 		toolCWD = cwd
 	}
 	in := actionfacts.Input{Tool: actionTool, Args: trusted, CWD: toolCWD}
-	r := EvaluateDeterministicAction(ctx, in, string(args), e.connector, e.profile)
+	r := EvaluateDeterministicAction(ctx, in, string(args), connectorName, e.profile)
 	out := S7Det{Tool: actionTool, Parse: r.ParseStatus, Dialect: r.Dialect, Severity: r.Severity,
 		EnforceSev: r.EnforceableSeverity, Action: r.Action, Eligible: r.EnforcementEligible, IssueCodes: r.IssueCodes}
 	for _, f := range r.Findings {

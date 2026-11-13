@@ -49,10 +49,14 @@ type payload struct {
 type corpusCase struct {
 	ID      string  `json:"id"`
 	Payload payload `json:"payload"`
+	Strata  struct {
+		Provider string `json:"provider"`
+	} `json:"strata"`
 }
 
 type record struct {
 	Case       string            `json:"case"`
+	Connector  string            `json:"connector,omitempty"`
 	Idx        int               `json:"idx"`
 	N          int               `json:"n"`
 	SrcTool    string            `json:"src_tool"`
@@ -203,6 +207,7 @@ func main() {
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
+	connectorFlag := flag.String("connector", "claudecode", "claudecode (legacy: every case as a Claude Code call) | auto (each case to the hook handler of its strata.provider connector, with that connector's payload shape) | a connector name")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	flag.Parse()
@@ -226,6 +231,20 @@ func main() {
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.ClaudeCode.Enabled = true
 	cfg.ClaudeCode.Mode = *mode
+	cfg.Codex.Enabled = true
+	cfg.Codex.Mode = *mode
+	extra := []string{}
+	if *connectorFlag != "claudecode" {
+		cfg.ConnectorHooks = map[string]config.AgentHookConfig{}
+		names := []string{"codex"}
+		for name := range knownConnectors {
+			if name != "claudecode" && name != "codex" {
+				cfg.ConnectorHooks[name] = config.AgentHookConfig{Enabled: true, Mode: *mode}
+			}
+			names = append(names, name)
+		}
+		extra = names
+	}
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	if *judgeModel != "" {
@@ -244,7 +263,7 @@ func main() {
 			cfg.DecisionModel.HookConnectors = []string{"claudecode"}
 		}
 	}
-	engine, err := gateway.S7NewEngine(cfg, "claudecode")
+	engine, err := gateway.S7NewEngineMulti(cfg, "claudecode", extra)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "boot:", err)
 		os.Exit(1)
@@ -300,7 +319,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				runCase(engine, c, *post, *det, wantDM, wantJudge, emit, &decisions)
+				runCase(engine, c, *connectorFlag, *post, *det, wantDM, wantJudge, emit, &decisions)
 				if n := done.Add(1); n%1000 == 0 {
 					fmt.Fprintf(os.Stderr, "[s7bench] %d cases %d decisions %.0fs\n", n, decisions.Load(), time.Since(start).Seconds())
 				}
@@ -340,7 +359,9 @@ type hookResp struct {
 	RuleIDs    []string `json:"rule_ids"`
 }
 
-func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge bool, emit func(record), decisions *atomic.Int64) {
+func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det, wantDM, wantJudge bool, emit func(record), decisions *atomic.Int64) {
+	conn := connectorOf(connectorFlag, c.Strata.Provider)
+	legacy := connectorFlag == "claudecode"
 	h := sha256.Sum256([]byte(c.ID))
 	sid := "s7-" + hex.EncodeToString(h[:12])
 	ctx := context.Background()
@@ -351,10 +372,17 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 	cwd := "/home/bench/work"
 	if intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt); intent != "" {
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": intent, "transcript_path": ""})
-		e.Hook(ctx, body)
+		e.HookFor(ctx, conn, body)
 	}
 	for i, ev := range events {
-		tool, input, mapped := mapTool(ev)
+		var tool string
+		var input json.RawMessage
+		var mapped string
+		if legacy {
+			tool, input, mapped = mapTool(ev)
+		} else {
+			tool, input, mapped = buildCall(conn, ev)
+		}
 		ecwd := cwd
 		if ev.CWD != "" {
 			ecwd = ev.CWD
@@ -362,9 +390,16 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": sid, "cwd": ecwd,
 			"tool_name": tool, "tool_input": input, "permission_mode": "default", "transcript_path": "",
 			"tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
+		if conn == "codex" {
+			var bm map[string]any
+			_ = json.Unmarshal(body, &bm)
+			bm["turn_id"] = sid
+			bm["model"] = "bench"
+			body, _ = json.Marshal(bm)
+		}
 		t0 := time.Now()
-		status, resp := e.Hook(ctx, body)
-		r := record{Case: c.ID, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
+		status, resp := e.HookFor(ctx, conn, body)
+		r := record{Case: c.ID, Connector: conn, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
 		var hr hookResp
 		if err := json.Unmarshal(resp, &hr); err != nil {
@@ -380,7 +415,7 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 			r.Err = fmt.Sprintf("http %d", status)
 		}
 		if det {
-			d := e.Deterministic(ctx, tool, input, ecwd)
+			d := e.DeterministicFor(ctx, conn, tool, input, ecwd)
 			r.Det = &d
 		}
 		if wantDM || wantJudge {
@@ -391,7 +426,7 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 			pb, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": sid, "cwd": ecwd,
 				"tool_name": tool, "tool_input": input, "tool_response": map[string]any{"stdout": "", "stderr": "", "interrupted": false},
 				"transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
-			r.PostStatus, _ = e.Hook(ctx, pb)
+			r.PostStatus, _ = e.HookFor(ctx, conn, pb)
 		}
 		decisions.Add(1)
 		emit(r)
