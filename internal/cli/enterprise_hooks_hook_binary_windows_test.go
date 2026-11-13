@@ -794,13 +794,17 @@ func runWindowsReacquiringHolder(t *testing.T, cmd *exec.Cmd) (stop func(), reop
 // startWindowsRotatingHolder opens path with no sharing and, every 300 ms,
 // duplicates that handle to a new value and closes the old one, so the file
 // is never free and no handle value lasts two checks. When its handle is
-// closed by someone else it opens the file again. state is the latest handle
-// value, how many times it rotated and how many times it lost the handle.
-func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), state func() (handle int64, rotations, lost int)) {
+// closed by someone else it says so ("lost n") and opens the file again only
+// after allowReopen: a re-open on its own next tick raced the test's start of
+// the freed hook (the start failed while the close had worked). state is the
+// latest handle value (-1 while it waits to re-open), how many times it
+// rotated and how many times it lost the handle.
+func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), state func() (handle int64, rotations, lost int), allowReopen func()) {
 	t.Helper()
 	if _, err := os.Stat(shell); err != nil {
 		t.Skipf("PowerShell unavailable: %v", err)
 	}
+	gate := filepath.Join(t.TempDir(), "reopen")
 	script := strings.Join([]string{
 		`Add-Type -TypeDefinition @'`,
 		`using System; using System.Runtime.InteropServices;`,
@@ -812,6 +816,7 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		`}`,
 		`'@`,
 		fmt.Sprintf(`$p = '%s'`, strings.ReplaceAll(path, "'", "''")),
+		fmt.Sprintf(`$g = '%s'`, strings.ReplaceAll(gate, "'", "''")),
 		`$me = [R]::GetCurrentProcess(); $rot = 0; $lost = 0; $keep = @()`,
 		`$h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero)`,
 		`[Console]::Out.WriteLine('ready'); [Console]::Out.Flush()`,
@@ -822,7 +827,12 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 		// -1 is "could not open" (the hook is in use for a moment): try again; it is not a handle to rotate.
 		`  if ($h.ToInt64() -eq -1) { $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
 		`  elseif ([R]::DuplicateHandle($me, $h, $me, [ref]$n, 0, $false, 2)) { [void][R]::CloseHandle($h); $h = $n; $rot++ }`,
-		`  else { $lost++; $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
+		// The handle is gone (closed by the guardian): report it, then wait
+		// for the test to let it open the file again.
+		`  else { $lost++; [Console]::Out.WriteLine('lost ' + $lost); [Console]::Out.Flush()`,
+		`    while (-not (Test-Path -LiteralPath $g)) { Start-Sleep -Milliseconds 50 }`,
+		`    Remove-Item -LiteralPath $g -Force`,
+		`    $h = [R]::CreateFileW($p, 2147483648, 0, [IntPtr]::Zero, 3, 128, [IntPtr]::Zero) }`,
 		`  [Console]::Out.WriteLine('state ' + $h.ToInt64() + ' ' + $rot + ' ' + $lost); [Console]::Out.Flush()`,
 		`}`,
 	}, "\n")
@@ -869,6 +879,10 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 				mu.Lock()
 				last.handle, last.rotations, last.lo = h, r, l
 				mu.Unlock()
+			} else if _, err := fmt.Sscanf(line, "lost %d", &l); err == nil {
+				mu.Lock()
+				last.handle, last.lo = -1, l
+				mu.Unlock()
 			}
 		}
 	}()
@@ -888,10 +902,14 @@ func startWindowsRotatingHolder(t *testing.T, shell, path string) (stop func(), 
 	}
 	t.Cleanup(stop)
 	return stop, func() (int64, int, int) {
-		mu.Lock()
-		defer mu.Unlock()
-		return last.handle, last.rotations, last.lo
-	}
+			mu.Lock()
+			defer mu.Unlock()
+			return last.handle, last.rotations, last.lo
+		}, func() {
+			if err := os.WriteFile(gate, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 }
 
 // GAP-0755: a holder that hands its file to a new handle value
@@ -937,7 +955,7 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 		out, err := exec.Command(target).Output()
 		return err == nil && len(strings.TrimSpace(string(out))) > 0
 	}
-	_, state := startWindowsRotatingHolder(t, powershellForTest(), target)
+	_, state, allowReopen := startWindowsRotatingHolder(t, powershellForTest(), target)
 	if started() {
 		t.Fatal("a start succeeded while another process held the hook with no sharing")
 	}
@@ -960,7 +978,8 @@ func TestKeepWindowsManagedFileCopyEndsAHoldThatRotatesItsHandle(t *testing.T) {
 		t.Fatalf("second check: start works %v, rows %+v", started(), rows)
 	}
 	waitFor(t, 10*time.Second, func() bool { _, _, l := state(); return l > lostBefore })
-	time.Sleep(900 * time.Millisecond) // it has opened the file again by now
+	allowReopen()
+	waitFor(t, 10*time.Second, func() bool { h, _, l := state(); return l > lostBefore && h != -1 }) // it holds the file again
 	// The next check is inside the backoff (10 s).
 	advance(windowsHookBinaryCheckInterval)
 	check()
