@@ -38,7 +38,11 @@ const (
 	RoleSkillFile = "skill_file"
 	RoleMCPConfig = "mcp_config"
 	RoleMCPServer = "mcp_server"
-	RoleRead      = "read_target"
+	// RoleMCPConfigWrite is the content an MCP config of the connector will
+	// have after this Write or Edit (the kit applies the edit to the file;
+	// GAP-0185): its servers decide the call.
+	RoleMCPConfigWrite = "mcp_config_write"
+	RoleRead           = "read_target"
 )
 
 // AttachedFile is a file the kit read for the gateway. Everything in it is a
@@ -359,8 +363,15 @@ func skillRelative(p string) string {
 
 var (
 	skillPathInCommand = regexp.MustCompile(`(\S*(?:\.claude|\.codex|\.agents)/skills/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
-	mcpAddJSONRE       = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add-json\b`)
-	mcpAddRE           = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add(?:\s|$)`)
+	// The vendor CLIs' "mcp add" under any name (GAP-0185): the CLI run
+	// through node, npx, a quoted or split name. The literal vendor form
+	// (vendorMCPRE) also turns a command it cannot read into a refusal under
+	// the fail mode; any other form only adds the servers it can read, and the
+	// configs the kit attaches at agent start and before every MCP tool call
+	// decide the rest.
+	mcpAddJSONRE = regexp.MustCompile(`\bmcp\s+add-json\b`)
+	mcpAddRE     = regexp.MustCompile(`\bmcp\s+(?:add|install)(?:\s|$)`)
+	vendorMCPRE  = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+`)
 	// mcpOnlyFile are config files that exist for MCP servers only, so any
 	// partial edit of one may add a server.
 	mcpOnlyFile    = map[string]bool{".mcp.json": true, "mcp.json": true, "managed-mcp.json": true}
@@ -375,9 +386,17 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 	var ev struct {
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
+		CWD       string          `json:"cwd"`
 	}
 	if json.Unmarshal(payload, &ev) != nil {
 		return nil
+	}
+	// Writes the kit read as the config's next content.
+	kitWrites := map[string]bool{}
+	for _, f := range attached {
+		if f.Role == RoleMCPConfigWrite {
+			kitWrites[path.Clean("/"+f.Path)] = true
+		}
 	}
 	var in map[string]any
 	_ = json.Unmarshal(ev.ToolInput, &in)
@@ -483,7 +502,7 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 	// write that mentions servers but cannot be read as a whole (an Edit
 	// fragment, a patch, invalid text) becomes an asset with no definition,
 	// which Scan refuses: the caller's fail mode decides, never an allow.
-	if target != "" && mcpConfigWrite.MatchString(target) && (writeTool || patch != "") {
+	if target != "" && !kitWrites[path.Clean("/"+target)] && mcpConfigWrite.MatchString(target) && (writeTool || patch != "") {
 		text := content
 		if text == "" {
 			text = patch
@@ -508,27 +527,38 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		}
 	}
 	// MCP servers added by "claude mcp add" / "codex mcp add" (add-json too).
+	vendor := vendorMCPRE.MatchString(command)
 	if command != "" && mcpAddJSONRE.MatchString(command) {
 		s, amb := parseMCPAddJSON(command)
 		if amb != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached), Ambiguous: amb.Error()})
 		} else if s != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add-json", Server: s, Files: serverFiles(attached)})
-		} else {
+		} else if vendor {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached)})
 		}
 	} else if command != "" && mcpAddRE.MatchString(command) {
 		if s := parseMCPAddCommand(command); s != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add", Server: s, Files: serverFiles(attached)})
-		} else {
+		} else if vendor {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add", Path: "mcp add", Files: serverFiles(attached)})
 		}
 	}
 	// An MCP admission event: the kit attached the repository's MCP
 	// configuration and the server files (E20). A configuration that does not
 	// parse, or was cut by the kit's cap, is not read as "no servers".
+	//
+	// The kit attaches every MCP source of the connector (project, user and
+	// local scope, from the connector's MCP surface) and the next content of
+	// a config a Write or Edit changes (RoleMCPConfigWrite, whose servers
+	// decide that call). Of ~/.claude.json only the user scope and the
+	// local scope of this working folder start servers here.
+	cwd := ""
+	if ev.CWD != "" {
+		cwd = path.Clean("/" + filepath.ToSlash(ev.CWD))
+	}
 	for _, f := range attached {
-		if f.Role != RoleMCPConfig {
+		if f.Role != RoleMCPConfig && f.Role != RoleMCPConfigWrite {
 			continue
 		}
 		servers, err := ParseMCPConfig(f.Path, f.Content)
@@ -542,6 +572,9 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		}
 		for _, s := range servers {
 			s := s
+			if s.Scope != "" && cwd != "" && path.Clean("/"+filepath.ToSlash(s.Scope)) != cwd {
+				continue
+			}
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: f.Path, Server: &s, Files: serverFiles(attached)})
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const (
@@ -98,11 +100,15 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 			}
 		}
 	}
-	// The repository's MCP config and server files: at SessionStart (the
-	// agent starts the servers) and before every call of an MCP tool, which
-	// the gateway refuses when the scan blocks its server (E20, GAP-0185).
+	// Every MCP config the connector reads (project, user and local scope)
+	// and the in-repository server files: at SessionStart (the agent starts
+	// the servers) and before every call of an MCP tool, which the gateway
+	// refuses when the scan blocks its server (E20, GAP-0185).
 	if event == "SessionStart" || event == "sessionStart" || (isPre && strings.HasPrefix(view.ToolName, "mcp__")) {
 		budget = attachMCP(f, connector, cwd, budget)
+	} else if isPre {
+		// A Write or Edit of one of those configs: its next content.
+		budget = attachMCPWrite(f, connector, cwd, input, budget)
 	}
 	_ = budget
 	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated && !f.readsSkill {
@@ -295,44 +301,198 @@ func attach(f *Facts, role, path, resolved string, budget int64) int64 {
 	return budget - int64(len(content))
 }
 
-// attachMCP attaches the repository's MCP configuration for the connector
-// and the in-repository files its stdio servers start (E20), so the gateway
-// can scan them with mcp-scanner before the agent starts them.
-func attachMCP(f *Facts, connector, cwd string, budget int64) int64 {
-	var cfgPath string
-	var servers []mcpServer
-	switch connector {
-	case "claudecode":
-		cfgPath = filepath.Join(cwd, ".mcp.json")
-		servers = claudeMCPServers(cfgPath)
-	case "codex":
-		cfgPath = filepath.Join(cwd, ".codex", "config.toml")
-		servers = codexMCPServers(cfgPath)
-	default:
-		return budget
+// mcpConfigPaths are the files the connector reads MCP servers from, in
+// every scope (project, user, local), taken from the connector's own MCP
+// surface (connector.ConnectorCapabilities.MCP, the paths the host
+// inventory and setup use), so every connector the kit runs gets its
+// sources by construction (GAP-0185).
+func mcpConfigPaths(connectorName, cwd string) []string {
+	c, ok := connector.NewDefaultRegistry().Get(connectorName)
+	if !ok {
+		return nil
 	}
-	if _, err := os.Lstat(cfgPath); err != nil {
-		return budget
+	cp, ok := c.(connector.ConnectorCapabilityProvider)
+	if !ok {
+		return nil
 	}
-	budget = attach(f, "mcp_config", cfgPath, "", budget)
-	for _, s := range servers {
-		for _, cand := range append([]string{s.Command}, s.Args...) {
-			if !looksLikePath(cand) {
+	m := cp.Capabilities(connector.SetupOpts{WorkspaceDir: cwd}).MCP
+	if !m.Supported {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, list := range [][]string{m.ConfigPaths, m.ReadPaths, m.WritePaths} {
+		for _, p := range list {
+			if p == "" || !filepath.IsAbs(p) {
 				continue
-			}
-			p := cand
-			if !filepath.IsAbs(p) {
-				p = filepath.Join(cwd, p)
 			}
 			p = filepath.Clean(p)
-			resolved, err := filepath.EvalSymlinks(p)
-			if err != nil || !within(resolved, cwd) {
-				continue
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
 			}
-			budget = attach(f, "mcp_server", p, resolved, budget)
+		}
+	}
+	return out
+}
+
+// attachMCP attaches every MCP config of the connector that exists and the
+// in-repository files its stdio servers start (E20), so the gateway can
+// scan them before the agent starts or calls them.
+func attachMCP(f *Facts, connectorName, cwd string, budget int64) int64 {
+	for _, cfgPath := range mcpConfigPaths(connectorName, cwd) {
+		if _, err := os.Lstat(cfgPath); err != nil {
+			continue
+		}
+		budget = attach(f, "mcp_config", cfgPath, "", budget)
+		var servers []mcpServer
+		switch {
+		case strings.HasSuffix(cfgPath, ".toml"):
+			servers = codexMCPServers(cfgPath)
+		case strings.HasSuffix(cfgPath, ".json"):
+			servers = claudeMCPServers(cfgPath, cwd)
+		}
+		for _, s := range servers {
+			for _, cand := range append([]string{s.Command}, s.Args...) {
+				if !looksLikePath(cand) {
+					continue
+				}
+				p := cand
+				if !filepath.IsAbs(p) {
+					p = filepath.Join(cwd, p)
+				}
+				p = filepath.Clean(p)
+				resolved, err := filepath.EvalSymlinks(p)
+				if err != nil || !within(resolved, cwd) {
+					continue
+				}
+				budget = attach(f, "mcp_server", p, resolved, budget)
+			}
 		}
 	}
 	return budget
+}
+
+// attachMCPWrite attaches, for a file tool call that writes or edits one of
+// the connector's MCP configs, the content the file will have after it
+// (role mcp_config_write): a Write's content, or the edits applied to the
+// file as it is now. A call shape the kit cannot apply attaches nothing;
+// the gateway then reads the call itself and an edit fragment follows the
+// fail mode.
+func attachMCPWrite(f *Facts, connectorName, cwd string, input any, budget int64) int64 {
+	in, ok := input.(map[string]any)
+	if !ok {
+		return budget
+	}
+	target := firstString(in, "file_path", "filePath", "path")
+	if target == "" {
+		return budget
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(cwd, target)
+	}
+	target = filepath.Clean(target)
+	resolvedTarget, terr := filepath.EvalSymlinks(target)
+	match := false
+	for _, p := range mcpConfigPaths(connectorName, cwd) {
+		if p == target {
+			match = true
+			break
+		}
+		if rp, err := filepath.EvalSymlinks(p); terr == nil && err == nil && rp == resolvedTarget {
+			match = true
+			break
+		}
+	}
+	if !match {
+		return budget
+	}
+	content, cut, ok := nextContent(in, target, budget)
+	if !ok {
+		return budget
+	}
+	sum := sha256.Sum256(content)
+	a := AttachedFile{Role: "mcp_config_write", Path: target, Size: int64(len(content)), SHA256: hex.EncodeToString(sum[:]), Content: content, Truncated: cut}
+	if cut {
+		f.Truncated = true
+	}
+	f.Files = append(f.Files, a)
+	return budget - int64(len(content))
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// nextContent is the file's content after a Write (content) or an Edit
+// (old_string/new_string, oldString/newString, edits[]), cut to limit.
+func nextContent(in map[string]any, target string, limit int64) (content []byte, cut, ok bool) {
+	if limit < 0 {
+		limit = 0
+	}
+	clip := func(b []byte) ([]byte, bool, bool) {
+		if int64(len(b)) > limit {
+			return b[:limit], true, true
+		}
+		return b, false, true
+	}
+	if s, isStr := in["content"].(string); isStr {
+		return clip([]byte(s))
+	}
+	edits := []map[string]any{in}
+	if list, isList := in["edits"].([]any); isList {
+		edits = edits[:0]
+		for _, e := range list {
+			if m, isMap := e.(map[string]any); isMap {
+				edits = append(edits, m)
+			}
+		}
+	}
+	file, err := os.Open(target)
+	var cur []byte
+	if err == nil {
+		cur, _ = io.ReadAll(io.LimitReader(file, limit+1))
+		file.Close()
+		if int64(len(cur)) > limit {
+			return cur[:limit], true, true
+		}
+	}
+	text, applied := string(cur), false
+	for _, e := range edits {
+		oldS, okOld := e["old_string"].(string)
+		newS, okNew := e["new_string"].(string)
+		if !okOld && !okNew {
+			oldS, okOld = e["oldString"].(string)
+			newS, okNew = e["newString"].(string)
+		}
+		if !okNew {
+			continue
+		}
+		applied = true
+		all, _ := e["replace_all"].(bool)
+		if !all {
+			all, _ = e["replaceAll"].(bool)
+		}
+		switch {
+		case oldS == "" && text == "":
+			text = newS
+		case oldS == "":
+			// The agent refuses an empty old_string on a file with content.
+		case all:
+			text = strings.ReplaceAll(text, oldS, newS)
+		default:
+			text = strings.Replace(text, oldS, newS, 1)
+		}
+	}
+	if !applied {
+		return nil, false, false
+	}
+	return clip([]byte(text))
 }
 
 type mcpServer struct {
@@ -367,14 +527,25 @@ func readSmall(path string) []byte {
 // claudeMCPServers reads the stdio servers of a Claude Code MCP config by
 // the exact keys Claude Code reads (encoding/json's struct matching folds
 // case, GAP-0176): the kit attaches the files these servers start.
-func claudeMCPServers(path string) []mcpServer {
+func claudeMCPServers(path, cwd string) []mcpServer {
 	var doc map[string]json.RawMessage
 	if json.Unmarshal(readSmall(path), &doc) != nil {
 		return nil
 	}
-	var servers map[string]map[string]json.RawMessage
-	if json.Unmarshal(doc["mcpServers"], &servers) != nil {
-		return nil
+	servers := map[string]map[string]json.RawMessage{}
+	_ = json.Unmarshal(doc["mcpServers"], &servers)
+	if cwd != "" {
+		// ~/.claude.json: the local scope of this folder (claude mcp add's
+		// default) starts servers too.
+		var projects map[string]map[string]json.RawMessage
+		if json.Unmarshal(doc["projects"], &projects) == nil {
+			var local map[string]map[string]json.RawMessage
+			if json.Unmarshal(projects[cwd]["mcpServers"], &local) == nil {
+				for n, v := range local {
+					servers["local\x00"+n] = v
+				}
+			}
+		}
 	}
 	names := make([]string, 0, len(servers))
 	for n := range servers {

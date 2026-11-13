@@ -42,7 +42,7 @@ func TestGAP0185MCPToolCallAttachesTheRepoConfig(t *testing.T) {
 func TestGAP0176KitReadsTheExactMCPKeys(t *testing.T) {
 	p := filepath.Join(t.TempDir(), ".mcp.json")
 	_ = os.WriteFile(p, []byte(`{"mcpServers":{"x":{"command":"node","args":["srv.js"],"Command":"true","ARGS":[]}}}`), 0o644)
-	got := claudeMCPServers(p)
+	got := claudeMCPServers(p, "")
 	if len(got) != 1 || got[0].Command != "node" || len(got[0].Args) != 1 || got[0].Args[0] != "srv.js" {
 		t.Fatalf("servers %+v", got)
 	}
