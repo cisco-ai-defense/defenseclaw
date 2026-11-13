@@ -239,8 +239,8 @@ func main() {
 	dmCacheRPM := flag.Int("dm-cache-rpm", 0, "with -dm-cache-dir: upstream requests per minute this process may send (0: no pacing)")
 	dmCacheBudgetFile := flag.String("dm-cache-budget-file", "", "with -dm-cache-dir: file that counts upstream requests across processes")
 	dmCacheBudget := flag.Int64("dm-cache-budget", 0, "with -dm-cache-budget-file: upstream requests allowed in all (0: no cap)")
-	dmBlockRiskScore := flag.Float64("dm-block-risk-score", 0, "bench routing variant: a confident block also needs the risk score answer >= this (0: off, production)")
-	dmRuleFlagEscalates := flag.Bool("dm-rule-flag-escalates", false, "bench routing variant: a confident block on a call the rules flagged escalates instead")
+	dmBlockRiskScore := flag.Float64("dm-block-risk-score", 0, "decision_model.block_risk_score (0: product default 1.5; 0.0001 turns the gate off for the R0 replay)")
+	dmRuleFlagged := flag.String("dm-escalate-rule-flagged", "", "decision_model.escalate_rule_flagged: true, false or empty (product default true)")
 	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
@@ -393,7 +393,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v inflight=%d tpm=%d rpm=%d budget=%d\n", *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudget)
 		}
 		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
-			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock}
+			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock, BlockRiskScore: *dmBlockRiskScore}
+		if v := strings.TrimSpace(*dmRuleFlagged); v != "" {
+			b := v == "true"
+			cfg.DecisionModel.EscalateRuleFlagged = &b
+		}
 		if *dmHook {
 			cfg.DecisionModel.HookConnectors = strings.FieldsFunc(*dmHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
 			if len(cfg.DecisionModel.HookConnectors) == 1 && cfg.DecisionModel.HookConnectors[0] == "all" {
@@ -402,7 +406,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
-	gateway.S7SetDecisionRouting(*dmBlockRiskScore, *dmRuleFlagEscalates, *dmCacheDir != "" && *dmCacheOnly)
+	gateway.S7SetDecisionRouting(*dmCacheDir != "" && *dmCacheOnly)
 	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
 	var err2 error
 	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)

@@ -29,11 +29,18 @@ const (
 	DefaultDecisionModelBlockThreshold = 0.75
 	DefaultDecisionModelTimeoutSeconds = 1.0
 	maxDecisionModelTimeoutSeconds     = 30.0
+	// DefaultDecisionModelBlockRiskScore: a confident block also needs the
+	// risk score answer (0 ordinary, 1 dual use, 2 clear serious harm) at or
+	// above this (owner decision 2026-11-13, S7 SYSONE.md R4).
+	DefaultDecisionModelBlockRiskScore = 1.5
+	maxDecisionModelRiskScore          = 2.0
 
 	// DecisionModelEscalate sends a confident block to the LLM judge and
 	// keeps the decision model's finding as a floor the judge can raise.
 	DecisionModelEscalate = "escalate"
-	// DecisionModelDecide lets a confident block stand without the judge.
+	// DecisionModelDecide is retired (owner decision 2026-11-13: a decision
+	// model block is never final). It is still accepted so a config written
+	// by 1.0.9 loads, and it acts as escalate. Accepted until 1.1.
 	DecisionModelDecide = "decide"
 
 	// DecisionModelProtocolSystemOne is the System One wire protocol:
@@ -84,10 +91,17 @@ type DecisionModelConfig struct {
 	// BlockThreshold: a risk at or above it is a confident block
 	// (0 = 0.75).
 	BlockThreshold float64 `mapstructure:"block_threshold" yaml:"block_threshold,omitempty"`
-	// OnConfidentBlock is escalate (default: the judge still runs and the
-	// decision model's finding is a floor) or decide (the finding stands
-	// without the judge).
+	// OnConfidentBlock is escalate: in cascade 3 the judge still runs on a
+	// confident block and the decision model's finding is a floor. The
+	// retired value decide is accepted and acts as escalate.
 	OnConfidentBlock string `mapstructure:"on_confident_block" yaml:"on_confident_block,omitempty"`
+	// BlockRiskScore: a confident block also needs the risk score answer
+	// at or above it (0 = 1.5; range 0..2). Below it the call escalates.
+	BlockRiskScore float64 `mapstructure:"block_risk_score" yaml:"block_risk_score,omitempty"`
+	// EscalateRuleFlagged: a call the rules already flagged never gets a
+	// decision-model confident block; it escalates (the judge, or a
+	// confirmation in cascade 2). Unset = true.
+	EscalateRuleFlagged *bool `mapstructure:"escalate_rule_flagged" yaml:"escalate_rule_flagged,omitempty"`
 	// HookConnectors lists the connectors whose hook tool calls the
 	// decision model answers on its own where the LLM judge does not judge
 	// them (cascade 2: rules, then the decision model). "*" matches every
@@ -145,6 +159,19 @@ func (d DecisionModelConfig) EffectiveBlockThreshold() float64 {
 	return DefaultDecisionModelBlockThreshold
 }
 
+// EffectiveBlockRiskScore returns BlockRiskScore or the default.
+func (d DecisionModelConfig) EffectiveBlockRiskScore() float64 {
+	if d.BlockRiskScore > 0 {
+		return d.BlockRiskScore
+	}
+	return DefaultDecisionModelBlockRiskScore
+}
+
+// EffectiveEscalateRuleFlagged returns EscalateRuleFlagged, true when unset.
+func (d DecisionModelConfig) EffectiveEscalateRuleFlagged() bool {
+	return d.EscalateRuleFlagged == nil || *d.EscalateRuleFlagged
+}
+
 // EffectiveOnConfidentBlock returns OnConfidentBlock or escalate.
 func (d DecisionModelConfig) EffectiveOnConfidentBlock() string {
 	if v := strings.ToLower(strings.TrimSpace(d.OnConfidentBlock)); v != "" {
@@ -153,10 +180,11 @@ func (d DecisionModelConfig) EffectiveOnConfidentBlock() string {
 	return DecisionModelEscalate
 }
 
-// EffectiveProtocol returns Protocol or system-one.
+// EffectiveProtocol returns Protocol or system-one. Validate admits only
+// the exact values, so no folding happens here.
 func (d DecisionModelConfig) EffectiveProtocol() string {
-	if v := strings.ToLower(strings.TrimSpace(d.Protocol)); v != "" {
-		return v
+	if d.Protocol != "" {
+		return d.Protocol
 	}
 	return DecisionModelProtocolSystemOne
 }
@@ -181,6 +209,9 @@ func (d DecisionModelConfig) Validate() error {
 	if allow >= block {
 		return fmt.Errorf("allow_threshold (%v) must be lower than block_threshold (%v)", allow, block)
 	}
+	if math.IsNaN(d.BlockRiskScore) || d.BlockRiskScore < 0 || d.BlockRiskScore > maxDecisionModelRiskScore {
+		return fmt.Errorf("block_risk_score must be between 0 and %v, got %v", maxDecisionModelRiskScore, d.BlockRiskScore)
+	}
 	if math.IsNaN(d.Timeout) || d.Timeout < 0 || d.Timeout > maxDecisionModelTimeoutSeconds {
 		return fmt.Errorf("timeout must be between 0 and %v seconds, got %v", maxDecisionModelTimeoutSeconds, d.Timeout)
 	}
@@ -189,8 +220,9 @@ func (d DecisionModelConfig) Validate() error {
 	default:
 		return fmt.Errorf("on_confident_block must be %q or %q, got %q", DecisionModelEscalate, DecisionModelDecide, d.OnConfidentBlock)
 	}
-	switch d.EffectiveProtocol() {
-	case DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions:
+	// Exact values only, as the config schema has them (no case folding).
+	switch d.Protocol {
+	case "", DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions:
 	default:
 		return fmt.Errorf("protocol must be %q or %q, got %q", DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions, d.Protocol)
 	}
@@ -210,6 +242,14 @@ func (d DecisionModelConfig) Validate() error {
 	return nil
 }
 
+// decisionModelKeyQueryParams are query parameters that carry a key or a
+// token (Google's examples put the AI Studio key in ?key=).
+var decisionModelKeyQueryParams = map[string]bool{
+	"key": true, "api_key": true, "apikey": true, "api-key": true, "x-goog-api-key": true,
+	"access_token": true, "token": true, "auth_token": true, "auth": true, "secret": true,
+	"client_secret": true, "password": true,
+}
+
 // ValidateDecisionModelURL allows https anywhere and plain http only to a
 // loopback host, so tool-call arguments and the bearer token never cross
 // the network in clear text. Credentials in the URL are refused.
@@ -220,6 +260,11 @@ func ValidateDecisionModelURL(raw string) error {
 	}
 	if u.User != nil {
 		return fmt.Errorf("base_url must not carry credentials; put the token in %s", DefenseClawDecisionModelKeyEnv)
+	}
+	for name := range u.Query() {
+		if decisionModelKeyQueryParams[strings.ToLower(name)] {
+			return fmt.Errorf("base_url must not carry a key in its query string (%s=); put the key in %s (decision_model.api_key_env)", name, DefenseClawDecisionModelKeyEnv)
+		}
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
