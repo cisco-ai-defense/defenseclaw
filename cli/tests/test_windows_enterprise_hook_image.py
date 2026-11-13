@@ -47,7 +47,10 @@ def test_the_stage_runs_after_the_payload_and_before_any_hook_config_writer() ->
     lifecycle = _function_body(_text(), "Invoke-DefenseClawInstallLikeLifecycle")
     stage = lifecycle.index("Install-DefenseClawStandaloneHookImage `")
     opened = lifecycle.index("$snapshot = New-DefenseClawTransaction `")
-    assert lifecycle.index("Install-DefenseClawStandaloneShippedRulePacks `") < stage
+    # The payload loop (the transition images) comes first; the #1445 rule
+    # packs are written later, after the applied config copy, and do not
+    # depend on the launch images.
+    assert stage < lifecycle.index("Install-DefenseClawStandaloneShippedRulePacks `")
     assert lifecycle.index("Install-DefenseClawSourceDescriptor `\n                -Source $Sources[$name]") < stage
     assert stage < lifecycle.index("throw \"required managed artifact is missing after $Action staging: $requiredPath\"")
     assert stage > opened
