@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -377,9 +378,18 @@ func main() {
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
+		// The judge covers every connector the run sends cases to: with
+		// -connector auto a Codex or Cursor case goes to its own handler,
+		// which a claudecode-only list left unjudged.
 		cfg.Guardrail.Judge.HookConnectors = strings.FieldsFunc(*judgeHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
 		if len(cfg.Guardrail.Judge.HookConnectors) == 1 && cfg.Guardrail.Judge.HookConnectors[0] == "all" {
 			cfg.Guardrail.Judge.HookConnectors = []string{"*"}
+		} else {
+			for _, name := range extra {
+				if !slices.Contains(cfg.Guardrail.Judge.HookConnectors, name) {
+					cfg.Guardrail.Judge.HookConnectors = append(cfg.Guardrail.Judge.HookConnectors, name)
+				}
+			}
 		}
 		if *judgeTimeout > 0 {
 			cfg.Guardrail.Judge.HookTimeout = *judgeTimeout
