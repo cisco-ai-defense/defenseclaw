@@ -3879,6 +3879,14 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				// schema-aware Amp resolver instead of watching static defaults.
 				compTargets["skill"] = ampWatcherSkillDirs(cfg)
 				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
+			} else if cfg != nil && strings.TrimSpace(cfg.Claw.HomeDir) != "" && strings.EqualFold(strings.TrimSpace(conn.Name()), "openclaw") {
+				// claw.home_dir and openclaw.json skills.load.extraDirs from
+				// config: the connector's own targets are the gateway
+				// account's ~/.openclaw until its paths are set, which in the
+				// separate-user layout is another account's tree
+				// (rel-1-0-10 GAP-0203).
+				compTargets["skill"] = absoluteDirs(cfg.SkillDirsForConnector("openclaw"))
+				compTargets["plugin"] = absoluteDirs(cfg.PluginDirsForConnector("openclaw"))
 			} else if strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode") {
 				activeRoot := ""
 				if cfg != nil {
@@ -3965,6 +3973,12 @@ func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
 			continue
+		}
+		if oc, ok := conn.(interface {
+			SetOpenClawPaths(home, config, external string)
+		}); ok {
+			// Before any caller reads the connector's targets (GAP-0203).
+			oc.SetOpenClawPaths(cfg.OpenClawHome(), cfg.OpenClawConfigPath(), cfg.OpenClawExternalPluginDir())
 		}
 		conns = append(conns, conn)
 	}

@@ -18306,6 +18306,17 @@ def _restart_openclaw_gateway() -> bool:
     to swallow every failure and return ``None`` so the caller could not
     tell the OpenClaw gateway never came back — setup then reported
     success while traffic kept flowing past a down (fail-open) gateway."""
+    from defenseclaw.openclaw_plugin_config import _openclaw_connector_block
+
+    if str(_openclaw_connector_block().get("plugin_account") or "").strip():
+        # Separate-user layout: the OpenClaw gateway runs as the OpenClaw
+        # account; `openclaw gateway restart` here would name this account's
+        # (or another) service (rel-1-0-10 GAP-0207).
+        click.echo(
+            "  openclaw-gateway: not restarted from this account (separate-user layout); "
+            "restart it as the OpenClaw account or with its service unit"
+        )
+        return False
     click.echo("  openclaw-gateway: restarting...", nl=False)
     try:
         # npm installs OpenClaw on Windows as openclaw.cmd, which
