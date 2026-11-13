@@ -529,6 +529,11 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 	if got := artifacts.Env["CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG"]; got != "1" {
 		t.Errorf("sandbox create env CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG = %q, want 1", got)
 	}
+	// The managed copy keeps a user env block from turning the flag off for
+	// the processes Claude Code starts.
+	if got, _ := merged["CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG"].(string); got != "1" {
+		t.Errorf("merged managed env CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG = %q, want 1", got)
+	}
 	for _, key := range append(provider, service...) {
 		value, ok := merged[key]
 		if s, _ := value.(string); ok && claudeCodeOTLPEndpointKey(key) && strings.HasPrefix(s, "http://host.openshell.internal:18971") {

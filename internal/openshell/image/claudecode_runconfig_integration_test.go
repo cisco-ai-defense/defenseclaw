@@ -600,7 +600,8 @@ func (r *ccLiveRig) run(ctx context.Context) {
 		sc.setup = ccProgram(helper, "echo ran >>"+shQuote(helperRan), "echo 'Basic ZGNwcm9iZTpwcm9iZQ=='") +
 			"rm -f " + shQuote(helperRan) + "\n" +
 			user(map[string]interface{}{"proxyAuthHelper": helper, "env": map[string]string{"CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER": "1"}})
-		sc.env = map[string]string{"HTTPS_PROXY": r.proxyURL, "HTTP_PROXY": r.proxyURL, "https_proxy": r.proxyURL, "http_proxy": r.proxyURL}
+		// NO_PROXY as the sandbox sets it (harness.Spec.Env): the ingress is reached directly.
+		sc.env = map[string]string{"HTTPS_PROXY": r.proxyURL, "HTTP_PROXY": r.proxyURL, "https_proxy": r.proxyURL, "http_proxy": r.proxyURL, "NO_PROXY": "host.openshell.internal", "no_proxy": "host.openshell.internal"}
 		sc.markers = []string{helperRan}
 		return sc
 	}
