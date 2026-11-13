@@ -95,8 +95,10 @@ jobs:
         path: ${{ runner.temp }}/assets
     - name: Install into a throwaway HOME
       run: python3 scripts/perf/dcperf.py provision --assets "$RUNNER_TEMP/assets" --home "$RUNNER_TEMP/perf-home"
+    - name: strace
+      run: bash scripts/runner-apt-install.sh strace strace
     - name: g88 diag
-      run: python3 scripts/perf/g88diag2.py "$RUNNER_TEMP/perf-home" "$RUNNER_TEMP/g88diag.json" ${{ matrix.mode }}
+      run: grep -m1 "model name" /proc/cpuinfo; python3 scripts/perf/g88diag3.py "$RUNNER_TEMP/perf-home" "$RUNNER_TEMP/g88diag.json" ${{ matrix.mode }}
     - name: Stop the gateway
       if: ${{ always() }}
       env:
@@ -113,13 +115,11 @@ jobs:
       fail-fast: false
       matrix:
         mode:
-        - now
-        - sync
-        - wait20
+        - plain
+        - strace
         rep:
         - 1
         - 2
         - 3
-        - 4
 'on':
   workflow_dispatch: null
