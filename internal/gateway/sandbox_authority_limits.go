@@ -21,7 +21,6 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -75,27 +74,22 @@ const (
 
 var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
 
-// managedSandboxInFlightLimits uses one rendered ingress attempt's maximum
-// lifetime for hooks and the gateway's receipt window for acknowledgements.
-// These are separate HTTP requests with separate account rate buckets.
+// sandboxInFlightWindow sizes the per-uid in-flight bounds: the hook answer
+// window (3.5 s) and a little slack. A relayed call held past it no longer
+// gets an answer its sandbox hook can use, so the bound holds what the
+// account bucket admits over one answer window, plus its burst: 560 at
+// 100/s burst 200 (S8 DESIGN section 9, major 5). Sizing it by the 12 s
+// attempt and 15 s receipt lifetimes, as the 40/s budget did, would let a
+// stalled store pin 1400 and 1700 requests per account (S8 lead review
+// P2-1).
+const sandboxInFlightWindow = 3600 * time.Millisecond
+
+// managedSandboxInFlightLimits sizes the hook and the receipt in-flight
+// bounds (separate HTTP requests with separate account rate buckets) by the
+// answer window.
 func managedSandboxInFlightLimits() (hook, receipt int) {
-	return sandboxWindowCapacity(sandboxHookAttemptWindow()), sandboxWindowCapacity(sandboxHookReceiptWindow)
-}
-
-// sandboxHookAttemptWindow is the longest lifetime of one rendered ingress
-// attempt.
-func sandboxHookAttemptWindow() time.Duration {
-	first, retry := connector.SandboxHookAttemptBudgets()
-	return max(first, retry)
-}
-
-// sandboxWindowCapacityAt is the burst plus what rate admits over window.
-func sandboxWindowCapacityAt(rate int, window time.Duration) int {
-	return sandboxUserHookBurst + int((time.Duration(rate)*window+time.Second-1)/time.Second)
-}
-
-func sandboxWindowCapacity(window time.Duration) int {
-	return sandboxWindowCapacityAt(sandboxUserHookRate, window)
+	capacity := sandboxUserHookBurst + int((time.Duration(sandboxUserHookRate)*sandboxInFlightWindow+time.Second-1)/time.Second)
+	return capacity, capacity
 }
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per

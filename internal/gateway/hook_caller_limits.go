@@ -111,7 +111,11 @@ const (
 	managedHookOverloadedMessage  = "DefenseClaw is handling as many hook requests as it can; retry shortly"
 )
 
-var hookGlobalInFlightMin = 4 * max(sandboxUserHookInFlight, sandboxUserReceiptInFlight)
+// hookGlobalInFlightMin is a floor of its own, not tied to the sandbox
+// bounds: the 2800 requests 1.0.9 allowed (four accounts at 700). With the
+// answer-window bounds (560) it still lets four accounts hold their whole
+// in-flight bound at once (S8 lead review P2-1).
+const hookGlobalInFlightMin = 2800
 
 type hookCallerLimiter struct {
 	mu        sync.Mutex

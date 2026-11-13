@@ -40,8 +40,9 @@ func (l StandaloneLayout) OwnedPaths() []string {
 
 // StandaloneWindowsOwnFolders returns the folders that hold a standalone
 // Windows deployment under the given Program Files and ProgramData roots:
-// the install root below Program Files and the state root, the hook runtime
-// and the scanner runtime below ProgramData, each as a full path. They come
+// the install root below Program Files and the state root, the hook runtime,
+// the scanner runtime and the shipped rule packs below ProgramData, each as
+// a full path. They come
 // from the layout itself, so a folder that the lifecycle adds is covered as
 // well. The roots are the trusted registration (TrustedStandaloneWindowsRoots)
 // or any other canonical absolute drive roots StandaloneWindowsLayoutForRoots
@@ -62,7 +63,8 @@ func StandaloneWindowsOwnFolders(programFiles, programData string) []string {
 	}
 	programFiles = strings.TrimRight(strings.TrimSpace(programFiles), `\`)
 	programData = strings.TrimRight(strings.TrimSpace(programData), `\`)
-	owned := append(probe.OwnedPaths(), StandaloneWindowsScannerRuntimeDirForRoot(probeData))
+	owned := append(probe.OwnedPaths(), StandaloneWindowsScannerRuntimeDirForRoot(probeData),
+		StandaloneWindowsShippedRulePacksDirForRoot(probeData))
 	var folders []string
 	for _, value := range owned {
 		for _, root := range [][2]string{{probeFiles, programFiles}, {probeData, programData}} {
