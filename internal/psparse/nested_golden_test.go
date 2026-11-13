@@ -34,7 +34,9 @@ func nestedCorpus() []string {
 		`powershell -ExecutionPolicy Bypass -File x.ps1`,
 		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`,
 		`cmd /c del C:\x`, `cmd /c "del C:\x"`, `cmd.exe /c del C:\x & del C:\y`,
-		`cmd /c --% del %TEMP%\x`, `powershell -Command --% Remove-Item C:\x`,
+		`cmd /c --% del %TEMP%\x`,
+		// (powershell -Command --% <text> is non-static since review 8 R8-1: the caller
+		// expands %NAME% in the tail, which the AST oracle does not model; see rev7_test.go.)
 		`cmd /k dir`, `& $env:ComSpec /c del C:\x`,
 		`powershell -Command $payload`,
 		// review 3 R3: -Version/-v takes a value (the PS 2.0 downgrade evasion)
@@ -45,6 +47,16 @@ func nestedCorpus() []string {
 		// (the -Version positional-script and Start-Process -ArgumentList shapes
 		// are fixed and dump-verified too, but this nested oracle does not model
 		// positional/Start-Process extraction -- see R12 -- so they are not gated.)
+		// review 4 R4-4: -EncodedArguments is a value flag, never the payload
+		`powershell -EncodedArguments UABMAEEAQwBFAEgATwBMAEQA -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`,
+		`powershell -encodeda UABMAEEAQwBFAEgATwBMAEQA -c Remove-Item C:\x`,
+		// tested host-call shapes (host_shapes.go): switches, options, multi-word and encoded
+		`pwsh -nop -noni -c Write-Output a`, `powershell -NoLogo -NoProfile -NonInteractive -Command "Get-Date"`,
+		`pwsh -w hidden -ep Bypass -c Get-Date`, `powershell -c Write-Output a b`,
+		`pwsh -e ZQBjAGgAbwAgAGgAaQA=`, `pwsh -wd C:\ -c Get-Date`, `pwsh -if text -of text -c Get-Date`,
+		`cmd /q /d /c ver`, `cmd /e:on /v:off /c ver`, `cmd /K ver`, `cmd /s /r ver`, `cmd /a /u /c ver`,
+		// outside the tested shapes: the oracle resolves a script, psparse is NotStatic (nestedUnderStatic)
+		`cmd foo /c ver`, `pwsh -nop -foo -c Get-Date`, `pwsh -sta -version 2 -c Get-Date`,
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -55,6 +67,25 @@ func nestedCorpus() []string {
 		}
 	}
 	return out
+}
+
+// nestedUnderStatic are corpus lines outside the tested host-call shapes
+// (host_shapes.go): the AST oracle resolves a script text, psparse reports
+// NotStatic. The gate still fails if psparse is Static and disagrees.
+var nestedUnderStatic = map[string]bool{
+	`cmd /c "del C:\x"`:                                                                          true, // a payload word with a quote or whitespace (review 9 R9-2)
+	`pwsh -wd C:\ -c Get-Date`:                                                                   true, // -wd moves the child's working directory (review 9 R9-1)
+	`cmd /c --% del %TEMP%\x`:                                                                    true,
+	`powershell -Version 2 -c Remove-Item C:\x`:                                                  true,
+	`powershell -v 2 -enc ZQBjAGgAbwAgAGgAaQA=`:                                                  true,
+	`powershell -Version 2.0 -Command "Remove-Item C:\y"`:                                        true,
+	`powershell -Version 5.1 -NoProfile -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`:                    true,
+	`powershell -version 2 -nop -w hidden -c "Remove-Item C:\x"`:                                 true,
+	`powershell -EncodedArguments UABMAEEAQwBFAEgATwBMAEQA -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`: true,
+	`powershell -encodeda UABMAEEAQwBFAEgATwBMAEQA -c Remove-Item C:\x`:                          true,
+	`cmd foo /c ver`:                   true,
+	`pwsh -nop -foo -c Get-Date`:       true,
+	`pwsh -sta -version 2 -c Get-Date`: true,
 }
 
 type nestedGoldLine struct {
@@ -111,6 +142,19 @@ func TestNestedGolden(t *testing.T) {
 			t.Errorf("nested #%d %q: no golden entry", i, s)
 			continue
 		}
+		if nestedUnderStatic[s] && len(mine) == len(want) {
+			// outside the tested host-call shapes: psparse is NotStatic where the
+			// AST oracle resolves a script. Never the other way round.
+			ok := true
+			for k := range mine {
+				if mine[k].Static && (!want[k].Static || mine[k].Text != want[k].Text) {
+					ok = false
+				}
+			}
+			if ok {
+				continue
+			}
+		}
 		if !sameNested(mine, want) {
 			t.Errorf("nested #%d %q:\n mine=%v\n want=%v", i, s, mine, want)
 		}
@@ -163,9 +207,12 @@ func TestGenNestedGolden(t *testing.T) {
 }
 
 // nestedOracleScript extracts, for each input line, the nested payload the way
-// pwsh resolves it: the element values after -Command / a decoded
-// -EncodedCommand / the cmd /c tail / an Invoke-Expression value or pipeline
-// input / [scriptblock]::Create's argument, using pwsh's own AST element values.
+// pwsh resolves it. It models only the powershell/pwsh host (-Command, a
+// decoded -EncodedCommand, a positional/-Version script) and the cmd /c tail,
+// which is what the gated nestedCorpus covers. Invoke-Expression,
+// [scriptblock]::Create and Start-Process -ArgumentList are NOT modelled here
+// (review 4 R12); their extraction is covered by direct unit tests
+// (TestNestedIEXList, nested_scripts_test.go) instead of this golden.
 const nestedOracleScript = `
 param([string]$InFile)
 $ErrorActionPreference = 'Stop'

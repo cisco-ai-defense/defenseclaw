@@ -33,6 +33,25 @@ func parsePOSIX(command string, o Options) *Script {
 type posixWalker struct {
 	out       *Script
 	pipeDepth int
+	// link is the && / || relation of the statement being lowered to the one
+	// before it; every statement lowered while it is set carries it (round 8 F).
+	link Op
+}
+
+// linked lowers the right side of && / || with the link set.
+func (w *posixWalker) linked(op Op, fn func()) {
+	prev := w.link
+	w.link = op
+	fn()
+	w.link = prev
+}
+
+// add appends a lowered statement, tagging it with the active && / || link.
+func (w *posixWalker) add(st *Stmt) {
+	if st.Link == OpNone {
+		st.Link = w.link
+	}
+	w.out.Stmts = append(w.out.Stmts, st)
 }
 
 func (w *posixWalker) unknown(reason ReasonCode, node syntax.Node) {
@@ -66,7 +85,7 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 		}
 		c := &Cmd{Sub: sub, Cond: cond, Span: span(st)}
 		w.redirs(st, c)
-		w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
+		w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
 	case *syntax.IfClause:
 		w.ifClause(cmd, cond)
 		w.compoundRedirs(st, cond)
@@ -85,12 +104,12 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 					tmp := &Cmd{}
 					w.scanCmdSubsts(word, tmp)
 					for _, sub := range tmp.Nested {
-						w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
+						w.add(&Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
 					}
 				}
 				// the loop rebinds its variable: drop its static value.
 				if wl.Name != nil && wl.Name.Value != "" {
-					w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Assigns: []Assign{{Name: wl.Name.Value, Unbind: true}}}}})
+					w.add(&Stmt{Cmds: []*Cmd{{Assigns: []Assign{{Name: wl.Name.Value, Unbind: true}}}}})
 				}
 			}
 		}
@@ -117,7 +136,7 @@ func (w *posixWalker) stmt(st *syntax.Stmt, cond, pipeIn bool) {
 			nw := &posixWalker{out: sub}
 			nw.stmt(cmd.Body, true, false)
 			sub.Funcs = nil // a nested function definition does not shadow outside
-			w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
+			w.add(&Stmt{Cmds: []*Cmd{{Sub: sub, Cond: true}}, Cond: true})
 		}
 	case *syntax.DeclClause:
 		w.declClause(st, cmd, cond, pipeIn)
@@ -139,7 +158,7 @@ func (w *posixWalker) compoundRedirs(st *syntax.Stmt, cond bool) {
 	c := &Cmd{Cond: cond, Span: span(st)}
 	w.redirs(st, c)
 	if len(c.Redirs) > 0 {
-		w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
+		w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(st)})
 	}
 }
 
@@ -147,10 +166,10 @@ func (w *posixWalker) binary(st *syntax.Stmt, cmd *syntax.BinaryCmd, cond bool) 
 	switch cmd.Op {
 	case syntax.AndStmt:
 		w.stmt(cmd.X, cond, false)
-		w.stmt(cmd.Y, true, false)
+		w.linked(OpAnd, func() { w.stmt(cmd.Y, true, false) })
 	case syntax.OrStmt:
 		w.stmt(cmd.X, cond, false)
-		w.stmt(cmd.Y, true, false)
+		w.linked(OpOr, func() { w.stmt(cmd.Y, true, false) })
 	case syntax.Pipe, syntax.PipeAll:
 		w.pipeDepth++
 		w.stmt(cmd.X, cond, false)
@@ -175,22 +194,57 @@ func (w *posixWalker) ifClause(cmd *syntax.IfClause, cond bool) {
 
 func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, pipeIn bool) {
 	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Span: span(cmd)}
-	exported := cmd.Variant != nil && (cmd.Variant.Value == "export" || cmd.Variant.Value == "declare")
+	// Only `export` (or declare/typeset -x) puts a variable in the environment of
+	// the commands that follow; a plain declare/local/readonly does not (round 8 E).
+	isExport := cmd.Variant != nil && cmd.Variant.Value == "export"
+	exported := isExport
+	unexport, attr, nameref := false, false, false
+	for _, a := range cmd.Args {
+		if a.Name == nil && a.Value != nil {
+			lit := a.Value.Lit()
+			if lit == "" || (lit[0] != '-' && lit[0] != '+') {
+				// an operand that is not a plain NAME[=value] (a quoted or computed
+				// name): what it declares is not known.
+				w.unknown(ReasonOpaqueCode, cmd)
+				continue
+			}
+			switch {
+			case strings.HasPrefix(lit, "+") && strings.Contains(lit, "x"):
+				unexport = true // declare +x / typeset +x
+			case strings.HasPrefix(lit, "-") && !strings.HasPrefix(lit, "--") && strings.Contains(lit, "x"):
+				exported = true
+			case isExport && strings.HasPrefix(lit, "-") && strings.Contains(lit, "n"):
+				unexport, exported = true, false // export -n NAME
+			}
+			if !isExport && strings.ContainsAny(lit[1:], "n") && lit[0] == '-' {
+				nameref = true
+			}
+			// any attribute other than export / global / readonly / print changes
+			// what the variable holds or is.
+			if strings.ContainsAny(lit[1:], "luciaAnftC") && (!isExport || lit != "-n") {
+				attr = true
+			}
+		}
+	}
 	for _, a := range cmd.Args {
 		if a.Name == nil {
 			continue
 		}
-		as := Assign{Name: a.Name.Value, Exported: exported}
+		if a.Index != nil || a.Array != nil {
+			w.unknown(ReasonOpaqueCode, cmd) // a subscript or array body is evaluated
+		}
+		as := Assign{Name: a.Name.Value, Exported: exported && !unexport, Unexport: unexport, Append: a.Append, Attr: attr, NameRef: nameref}
 		if a.Value != nil {
 			as.ValueWord = w.word(a.Value)
 			w.scanCmdSubsts(a.Value, c)
 		} else {
 			as.ValueWord = Word{Static: true}
+			as.NoValue = true
 		}
 		c.Assigns = append(c.Assigns, as)
 	}
 	w.redirs(st, c)
-	w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(cmd)})
+	w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, Span: span(cmd)})
 }
 
 func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pipeIn bool) {
@@ -200,7 +254,10 @@ func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pip
 			if a.Name == nil {
 				continue
 			}
-			as := Assign{Name: a.Name.Value}
+			if a.Index != nil || a.Array != nil {
+				w.unknown(ReasonOpaqueCode, st) // `a[$(x)]=v`, `a=($(x))`: the subscript / elements run
+			}
+			as := Assign{Name: a.Name.Value, Append: a.Append}
 			if a.Value != nil {
 				as.ValueWord = w.word(a.Value)
 				w.scanCmdSubsts(a.Value, c)
@@ -215,7 +272,7 @@ func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pip
 		}
 	}
 	w.redirs(st, c)
-	w.out.Stmts = append(w.out.Stmts, &Stmt{Cmds: []*Cmd{c}, Cond: cond, Background: st.Background, Span: span(st)})
+	w.add(&Stmt{Cmds: []*Cmd{c}, Cond: cond, Background: st.Background, Span: span(st)})
 }
 
 // scanCmdSubsts recursively collects every command substitution anywhere in a
@@ -276,7 +333,7 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 			red.Op = RedirHeredoc
 		case syntax.WordHdoc:
 			red.Op = RedirHereString
-		case syntax.ClbOut:
+		case syntax.RdrClob:
 			red.Op = RedirClobber
 			if red.FD < 0 {
 				red.FD = 1
@@ -303,6 +360,11 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		if r.Word != nil {
 			red.Target = w.word(r.Word)
 			w.scanCmdSubsts(r.Word, c)
+		}
+		// A here-string's text is the word after <<<; it is the body of that
+		// redirect (round 8 R: a shell fed `<<< "$(..)"` must not look empty).
+		if r.Op == syntax.WordHdoc && r.Word != nil {
+			red.Body, red.BodyExpands = heredocBody(r.Word)
 		}
 		if r.Hdoc != nil {
 			red.Body, red.BodyExpands = heredocBody(r.Hdoc)
@@ -373,7 +435,12 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 			} else {
 				dynamic(ReasonDynamicExpansion)
 			}
-		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ExtGlob:
+		case *syntax.ArithmExp:
+			// an arithmetic expansion evaluates variable values as expressions, and
+			// an expression can carry a subscript with a command substitution
+			w.unknown(ReasonOpaqueCode, p)
+			dynamic(ReasonDynamicExpansion)
+		case *syntax.CmdSubst, *syntax.ExtGlob:
 			dynamic(ReasonDynamicExpansion)
 		case *syntax.ProcSubst:
 			dynamic(ReasonUnparsedConstruct)
@@ -431,6 +498,15 @@ func heredocBody(w *syntax.Word) (string, bool) {
 			b.WriteString(p.Value)
 		case *syntax.SglQuoted:
 			b.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			// "plain text" is static; anything with an expansion inside is not.
+			for _, q := range p.Parts {
+				if l, ok := q.(*syntax.Lit); ok {
+					b.WriteString(l.Value)
+				} else {
+					expands = true
+				}
+			}
 		default:
 			expands = true
 		}

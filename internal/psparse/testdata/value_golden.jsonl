@@ -77,8 +77,8 @@
 {"i":76,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
 {"i":77,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"y"}]}]}
 {"i":78,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":79,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\x C:\\y"}]}]}
-{"i":80,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x C:\\y"}]}]}
+{"i":79,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":false,"v":"","l":[{"s":true,"v":"C:\\x"},{"s":true,"v":"C:\\y"}]}]}]}
+{"i":80,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\x"},{"s":true,"v":"C:\\y"}]}]}]}
 {"i":81,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"enc","c":null},{"s":true,"v":"ZQBjAGgAbwA="}]}]}
 {"i":82,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"nop","c":null},{"p":"noni","c":null},{"p":"w","c":null},{"s":true,"v":"Hidden"},{"p":"exec","c":null},{"s":true,"v":"Bypass"},{"p":"enc","c":null},{"s":true,"v":"ZQBjAGgAbwA="}]}]}
 {"i":83,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
@@ -108,7 +108,7 @@
 {"i":107,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[a]b"}]}]}
 {"i":108,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"%USERPROFILE%\\x"}]}]}
 {"i":109,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a=b"}]}]}
-{"i":110,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a b"}]}]}
+{"i":110,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}]}
 {"i":111,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
 {"i":112,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"!x"}]}]}
 {"i":113,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"~\\x"}]}]}
@@ -154,335 +154,645 @@
 {"i":153,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"name","c":{"s":true,"v":"x"}}]}]}
 {"i":154,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"name","c":{"s":false,"v":""}}]}]}
 {"i":155,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"name","c":{"s":false,"v":""}}]}]}
-{"i":156,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"name","c":{"s":true,"v":"a b"}}]}]}
-{"i":157,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"%#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":158,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"*#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":159,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":160,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":161,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":162,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"=#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":163,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"!#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":164,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":165,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\Windows"},{"p":"recurse","c":null}]}]}
-{"i":166,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"."},{"p":"recurse","c":null},{"p":"force","c":null}]}]}
-{"i":167,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":":x"},{"p":"force","c":null}]}]}
-{"i":168,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>"},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":169,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"recurse","c":{"s":false,"v":""}}]}]}
-{"i":170,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":{"s":false,"v":""}},{"s":true,"v":"C:\\x"}]}]}
-{"i":171,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":172,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":173,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":174,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":175,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":176,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\n-Recurse"}]}]}
-{"i":177,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"-Recurse"},"els":[]}]}
-{"i":178,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":false,"v":""}]}]}
-{"i":179,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":180,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":181,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":182,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":183,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
-{"i":184,"err":true,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
-{"i":185,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
-{"i":186,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
-{"i":187,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\a"},{"p":"path","c":null},{"s":true,"v":"C:\\b"}]}]}
-{"i":188,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":189,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[]}]}
-{"i":190,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"f","c":null}]}]}
-{"i":191,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"s":true,"v":"C:\\x"},{"p":"in","c":null},{"s":true,"v":"y"}]}]}
-{"i":192,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"},{"s":true,"v":"*"},{"s":true,"v":"c"}]}]}
-{"i":193,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"p":"join","c":null},{"s":true,"v":"b"}]}]}
-{"i":194,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":195,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":196,"err":false,"cmds":[{"name":{"s":true,"v":"-Value"},"els":[{"s":false,"v":""}]}]}
-{"i":197,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":198,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b c\\d"}]}]}
-{"i":199,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
-{"i":200,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"b"}]}]}
-{"i":201,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":202,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a$env:X\\b"}]}]}
-{"i":203,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"abcd"}]}]}
-{"i":204,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":205,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":156,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"name","c":{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}}]}]}
+{"i":157,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\tmp\\a"},{"s":true,"v":"C:\\Windows"}]}]}]}
+{"i":158,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":false,"v":"","l":[{"s":true,"v":"C:\\tmp\\a"},{"s":true,"v":"C:\\Windows"}]},{"p":"recurse","c":null}]}]}
+{"i":159,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":{"s":false,"v":"","l":[{"s":true,"v":"C:\\a"},{"s":true,"v":"C:\\b"}]}}]}]}
+{"i":160,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\tmp\\a"},{"s":true,"v":"C:\\Windows"}]}]}]}
+{"i":161,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\a"},{"s":true,"v":"C:\\b"},{"s":true,"v":"C:\\c"}]}]}]}
+{"i":162,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\a"},{"s":true,"v":"C:\\Windows\\System32\\x.dll"}]},{"s":true,"v":"C:\\dst"}]}]}
+{"i":163,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":164,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":165,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":166,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":167,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":168,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":169,"err":false,"cmds":[{"name":{"s":true,"v":"rm"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":170,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":171,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":172,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":173,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":174,"err":false,"cmds":[]}
+{"i":175,"err":false,"cmds":[]}
+{"i":176,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":177,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":178,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":179,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\Windows"}]}]}
+{"i":180,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":181,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\z"}]}]}
+{"i":182,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"-b"}]}]}]}
+{"i":183,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\a"},{"s":true,"v":"-Recurse"}]}]}]}
+{"i":184,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"%#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":185,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"*#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":186,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":187,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":188,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":189,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"=#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":190,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"!#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":191,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-#"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":192,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\Windows"},{"p":"recurse","c":null}]}]}
+{"i":193,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"."},{"p":"recurse","c":null},{"p":"force","c":null}]}]}
+{"i":194,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":":x"},{"p":"force","c":null}]}]}
+{"i":195,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>"},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":196,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"recurse","c":{"s":false,"v":""}}]}]}
+{"i":197,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":{"s":false,"v":""}},{"s":true,"v":"C:\\x"}]}]}
+{"i":198,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":199,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":200,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":201,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":202,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":203,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\n-Recurse"}]}]}
+{"i":204,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"-Recurse"},"els":[]}]}
+{"i":205,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":false,"v":""}]}]}
 {"i":206,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":207,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""},{"s":true,"v":"\\x"}]},{"name":{"s":true,"v":"Get-Location"},"els":[]}]}
-{"i":208,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x C:\\yz"}]}]}
-{"i":209,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\ab"}]}]}
-{"i":210,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":{"s":true,"v":"C:\\ab c"}}]}]}
-{"i":211,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"*.ps1"}]}]}
-{"i":212,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":".\\a b"}]}]}
-{"i":213,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"~\\a b\\c"}]}]}
-{"i":214,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\[ab]c"}]}]}
-{"i":215,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a[0]"}]}]}
-{"i":216,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"b"}]}]}
-{"i":217,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"z"}]}]}
-{"i":218,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":219,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--foo=barbaz"}]}]}
-{"i":220,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a bc"}]}]}
-{"i":221,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abcde"}]}]}
-{"i":222,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1-2-3"}]}]}
-{"i":223,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.2.3"}]}]}
-{"i":224,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1+2"}]}]}
-{"i":225,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1*2"}]}]}
-{"i":226,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1-2"}]}]}
-{"i":227,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0x10-1"}]}]}
-{"i":228,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\\[b]"}]}]}
-{"i":229,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[a]"}]}]}
-{"i":230,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[int]"}]}]}
-{"i":231,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\[a]\\b"}]}]}
-{"i":232,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]},{"name":{"s":true,"v":"b"},"els":[]}]}
-{"i":233,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":234,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":false,"v":""}]}]}
-{"i":235,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]}]}
-{"i":236,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"a"}]}]}
-{"i":237,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""},{"s":true,"v":"c"}]},{"name":{"s":true,"v":"b"},"els":[]}]}
-{"i":238,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@b"}]}]}
-{"i":239,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@"},{"s":false,"v":""}]}]}
-{"i":240,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"user@host:/path"}]}]}
-{"i":241,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a!b"}]}]}
-{"i":242,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":243,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":244,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":207,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":208,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":209,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":210,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
+{"i":211,"err":true,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\"}]}]}
+{"i":212,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
+{"i":213,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"\\y"}]}]}
+{"i":214,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\a"},{"p":"path","c":null},{"s":true,"v":"C:\\b"}]}]}
+{"i":215,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":216,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[]}]}
+{"i":217,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"p":"f","c":null}]}]}
+{"i":218,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"s":true,"v":"C:\\x"},{"p":"in","c":null},{"s":true,"v":"y"}]}]}
+{"i":219,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"},{"s":true,"v":"*"},{"s":true,"v":"c"}]}]}
+{"i":220,"err":false,"cmds":[{"name":{"s":true,"v":"Copy-Item"},"els":[{"s":true,"v":"a"},{"p":"join","c":null},{"s":true,"v":"b"}]}]}
+{"i":221,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":222,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":223,"err":false,"cmds":[{"name":{"s":true,"v":"-Value"},"els":[{"s":false,"v":""}]}]}
+{"i":224,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":225,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b c\\d"}]}]}
+{"i":226,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
+{"i":227,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"b"}]}]}
+{"i":228,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":229,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a$env:X\\b"}]}]}
+{"i":230,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"abcd"}]}]}
+{"i":231,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":232,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":233,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":234,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""},{"s":true,"v":"\\x"}]},{"name":{"s":true,"v":"Get-Location"},"els":[]}]}
+{"i":235,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"C:\\x"},{"s":true,"v":"C:\\yz"}]}]}]}
+{"i":236,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":null},{"s":true,"v":"C:\\ab"}]}]}
+{"i":237,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"path","c":{"s":true,"v":"C:\\ab c"}}]}]}
+{"i":238,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"*.ps1"}]}]}
+{"i":239,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":".\\a b"}]}]}
+{"i":240,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"~\\a b\\c"}]}]}
+{"i":241,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x\\[ab]c"}]}]}
+{"i":242,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a[0]"}]}]}
+{"i":243,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"b"}]}]}
+{"i":244,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"z"}]}]}
 {"i":245,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":246,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>b"}]}]}
-{"i":247,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
-{"i":248,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\'b"}]}]}
-{"i":249,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
-{"i":250,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":251,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":252,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":253,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":254,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":255,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a b"},{"s":true,"v":"c d"}]}]}
-{"i":256,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\*\\y"}]}]}
-{"i":257,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
-{"i":258,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
-{"i":259,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"a$x","c":null}]}]}
-{"i":260,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"'y"}]}]}
-{"i":261,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":".5x"}]}]}
-{"i":262,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5.x"}]}]}
-{"i":263,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":264,"err":false,"cmds":[{"name":{"s":true,"v":"R\u001bmo\u000b\u001b-I\t\u001bm"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":265,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":266,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":267,"err":false,"cmds":[{"name":{"s":true,"v":"i\u001bx"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":268,"err":false,"cmds":[{"name":{"s":true,"v":"I\nvoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":269,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":270,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":271,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":272,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":273,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b"}]}]}
-{"i":274,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\tb"}]}]}
-{"i":275,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0000b"}]}]}
-{"i":276,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0007b"}]}]}
-{"i":277,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\fb"}]}]}
-{"i":278,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u000bb"}]}]}
-{"i":279,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\rb"}]}]}
-{"i":280,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"A"}]}]}
-{"i":281,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"aAb"}]}]}
-{"i":282,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\u001b"}]}]}
-{"i":283,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$env:X"}]}]}
-{"i":284,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$"},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":285,"err":false,"cmds":[{"name":{"s":true,"v":"$"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":286,"err":false,"cmds":[{"name":{"s":true,"v":"$x"},"els":[]}]}
-{"i":287,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"@x"}]}]}
-{"i":288,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`b"}]}]}
-{"i":289,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a;b"}]}]}
-{"i":290,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a|b"}]}]}
-{"i":291,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a#b"}]}]}
-{"i":292,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-Recurse"}]}]}
-{"i":293,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"-Recurse"}]}]}
-{"i":294,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":295,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":296,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":297,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
-{"i":298,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
-{"i":299,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a�b"}]}]}
-{"i":300,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a😀b"}]}]}
-{"i":301,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"{a"}]}]}
-{"i":302,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"(1"}]}]}
-{"i":303,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`"}]}]}
-{"i":304,"err":false,"cmds":[{"name":{"s":true,"v":"rm"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":305,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$(Remove-Item C:\\x)"}]}]}
-{"i":306,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x,C:\\y"}]}]}
-{"i":307,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"'a"}]}]}
-{"i":308,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"`"}]}]}
-{"i":309,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
-{"i":310,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
-{"i":311,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":312,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
-{"i":313,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a‘b"}]}]}
-{"i":314,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":315,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":316,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":317,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":318,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":319,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a’b"}]}]}
-{"i":320,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
-{"i":321,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
-{"i":322,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":null},{"s":true,"v":"C:\\x"}]}]}
-{"i":323,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
-{"i":324,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
-{"i":325,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a–b"}]}]}
-{"i":326,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"p":"path","c":{"s":true,"v":"C:\\x"}}]}]}
-{"i":327,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":328,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"x"}]}]}
-{"i":329,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":330,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":331,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":332,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":333,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":334,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
-{"i":335,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
-{"i":336,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"ab c"}]}]}
-{"i":337,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5–3"}]}]}
-{"i":338,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"––x"}]}]}
-{"i":339,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"p":"path","c":null},{"p":"x","c":null}]}]}
-{"i":340,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a b"}]}]}
-{"i":341,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"\"a b\""}]}]}
-{"i":342,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":343,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a ; Remove-Item C:\\x"}]}]}
-{"i":344,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a \"|\" b"}]}]}
-{"i":345,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"%TEMP%"}]}]}
-{"i":346,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del %TEMP%\\x"}]}]}
-{"i":347,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"--%"},{"s":true,"v":"b"}]}]}
-{"i":348,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":""}]}]}
-{"i":349,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%a"}]}]}
-{"i":350,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
-{"i":351,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
-{"i":352,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"-","c":null},{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
-{"i":353,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":354,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":355,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a 2>&1"}]}]}
-{"i":356,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"'a "}]},{"name":{"s":true,"v":"b"},"els":[]}]}
-{"i":357,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":358,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ep","c":null},{"s":true,"v":"bypass"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":359,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":360,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
-{"i":361,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
-{"i":362,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"-"}]}]}
-{"i":363,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":364,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"p":"arg","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
-{"i":365,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel C:\\x"}]}]}
-{"i":366,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel"},{"s":true,"v":"C:\\x"}]}]}
-{"i":367,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d"},{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
-{"i":368,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"git"},{"s":true,"v":"log"},{"p":"n","c":null},{"s":true,"v":"1"}]}]}
-{"i":369,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":370,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":371,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":372,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":373,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":374,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":375,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":376,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":377,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":378,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":379,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":380,"err":false,"cmds":[]}
-{"i":381,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":382,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":383,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":384,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":385,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":386,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":387,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":388,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"y"}]}]}
-{"i":389,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\z"}]}]}
-{"i":390,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"b"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"c"}]}]}
-{"i":391,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":392,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":393,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":394,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":395,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":396,"err":true,"cmds":[{"name":{"s":true,"v":"Get-Random"},"els":[]}]}
-{"i":397,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
-{"i":398,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-2147483648"}]}]}
-{"i":399,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"12345678901234567"}]}]}
-{"i":400,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775808"}]}]}
-{"i":401,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1000000"}]}]}
-{"i":402,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1572864"}]}]}
-{"i":403,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.0"}]}]}
-{"i":404,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.50"}]}]}
-{"i":405,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":406,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":407,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
-{"i":408,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":409,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":410,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":411,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":412,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":413,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":414,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
-{"i":415,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E-05"}]}]}
-{"i":416,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+20"}]}]}
-{"i":417,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.5"}]}]}
-{"i":418,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
-{"i":419,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
-{"i":420,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"16"}]}]}
-{"i":421,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1099511627776"}]}]}
-{"i":422,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1125899906842624"}]}]}
-{"i":423,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Infinity"}]}]}
-{"i":424,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0"}]}]}
-{"i":425,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1kbx"}]}]}
-{"i":426,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1228800"}]}]}
-{"i":427,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"7"}]}]}
-{"i":428,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"+5"}]}]}
-{"i":429,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1..3"}]}]}
-{"i":430,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Process"},"els":[{"p":"id","c":null},{"s":true,"v":"16"}]}]}
-{"i":431,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
-{"i":432,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"4294967295"}]}]}
-{"i":433,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2147483648"}]}]}
-{"i":434,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+15"}]}]}
-{"i":435,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"123456789.123"}]}]}
-{"i":436,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.1"}]}]}
-{"i":437,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.5E-07"}]}]}
-{"i":438,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
-{"i":439,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775807"}]}]}
-{"i":440,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2"}]}]}
-{"i":441,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":442,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":443,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":444,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":445,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":446,"err":false,"cmds":[]}
-{"i":447,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
-{"i":448,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":449,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":450,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":451,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":452,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":453,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":454,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
-{"i":455,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\r\nb"}]}]}
-{"i":456,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
-{"i":457,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
-{"i":458,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
-{"i":459,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":460,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":461,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":462,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
-{"i":463,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
-{"i":464,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a'@b"}]}]}
-{"i":465,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc\""}]}]}
-{"i":466,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
-{"i":467,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$x"}]}]}
-{"i":468,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\"\"b"}]}]}
-{"i":469,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[]}]}
-{"i":470,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":471,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":472,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":473,"err":false,"cmds":[{"name":{"s":true,"v":"Out-String"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":474,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":475,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"C:\\x.ps1"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":476,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
-{"i":477,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[]}]}
-{"i":478,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
-{"i":479,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
-{"i":480,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
-{"i":481,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/V:ON"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":482,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/k"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":483,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":484,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":485,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\a b"}]}]}
-{"i":486,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/r"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
-{"i":487,"err":false,"cmds":[{"name":{"s":true,"v":"CMD"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"DEL"},{"s":true,"v":"C:\\x"}]}]}
+{"i":246,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--foo=barbaz"}]}]}
+{"i":247,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"bc"}]}]}]}
+{"i":248,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abcde"}]}]}
+{"i":249,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1-2-3"}]}]}
+{"i":250,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.2.3"}]}]}
+{"i":251,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1+2"}]}]}
+{"i":252,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1*2"}]}]}
+{"i":253,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1-2"}]}]}
+{"i":254,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0x10-1"}]}]}
+{"i":255,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\\[b]"}]}]}
+{"i":256,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[a]"}]}]}
+{"i":257,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"[int]"}]}]}
+{"i":258,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\[a]\\b"}]}]}
+{"i":259,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]},{"name":{"s":true,"v":"b"},"els":[]}]}
+{"i":260,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":261,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":false,"v":""}]}]}
+{"i":262,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""}]}]}
+{"i":263,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""},{"s":true,"v":"a"}]}]}
+{"i":264,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":false,"v":""},{"s":true,"v":"c"}]},{"name":{"s":true,"v":"b"},"els":[]}]}
+{"i":265,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@b"}]}]}
+{"i":266,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a@"},{"s":false,"v":""}]}]}
+{"i":267,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"user@host:/path"}]}]}
+{"i":268,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a!b"}]}]}
+{"i":269,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":270,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":271,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":272,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":273,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a<#c#>b"}]}]}
+{"i":274,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
+{"i":275,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\'b"}]}]}
+{"i":276,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
+{"i":277,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":278,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":279,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":280,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":281,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":282,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]},{"s":false,"v":"","l":[{"s":true,"v":"c"},{"s":true,"v":"d"}]}]}]}
+{"i":283,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"C:\\x\\*\\y"}]}]}
+{"i":284,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
+{"i":285,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-ab"}]}]}
+{"i":286,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"a$x","c":null}]}]}
+{"i":287,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"'y"}]}]}
+{"i":288,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":".5x"}]}]}
+{"i":289,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5.x"}]}]}
+{"i":290,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":291,"err":false,"cmds":[{"name":{"s":true,"v":"R\u001bmo\u000b\u001b-I\t\u001bm"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":292,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":293,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":294,"err":false,"cmds":[{"name":{"s":true,"v":"i\u001bx"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":295,"err":false,"cmds":[{"name":{"s":true,"v":"I\nvoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":296,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":297,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":298,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":299,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":300,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\\b"}]}]}
+{"i":301,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\tb"}]}]}
+{"i":302,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0000b"}]}]}
+{"i":303,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u0007b"}]}]}
+{"i":304,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\fb"}]}]}
+{"i":305,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\u000bb"}]}]}
+{"i":306,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a\rb"}]}]}
+{"i":307,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"A"}]}]}
+{"i":308,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"aAb"}]}]}
+{"i":309,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\u001b"}]}]}
+{"i":310,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$env:X"}]}]}
+{"i":311,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$"},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":312,"err":false,"cmds":[{"name":{"s":true,"v":"$"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":313,"err":false,"cmds":[{"name":{"s":true,"v":"$x"},"els":[]}]}
+{"i":314,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"@x"}]}]}
+{"i":315,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`b"}]}]}
+{"i":316,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a;b"}]}]}
+{"i":317,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a|b"}]}]}
+{"i":318,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a#b"}]}]}
+{"i":319,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-Recurse"}]}]}
+{"i":320,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"},{"s":true,"v":"-Recurse"}]}]}
+{"i":321,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":322,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":323,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":324,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
+{"i":325,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a￿b"}]}]}
+{"i":326,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a�b"}]}]}
+{"i":327,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a😀b"}]}]}
+{"i":328,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"{a"}]}]}
+{"i":329,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"(1"}]}]}
+{"i":330,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a`"}]}]}
+{"i":331,"err":false,"cmds":[{"name":{"s":true,"v":"rm"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":332,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$(Remove-Item C:\\x)"}]}]}
+{"i":333,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x,C:\\y"}]}]}
+{"i":334,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"'a"}]}]}
+{"i":335,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"`"}]}]}
+{"i":336,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
+{"i":337,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a b"}]}]}
+{"i":338,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":339,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\a"},{"s":true,"v":"\\b"}]}]}
+{"i":340,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a‘b"}]}]}
+{"i":341,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":342,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":343,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":344,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":345,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":346,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a’b"}]}]}
+{"i":347,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
+{"i":348,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a”b"}]}]}
+{"i":349,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"recurse","c":null},{"s":true,"v":"C:\\x"}]}]}
+{"i":350,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
+{"i":351,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"p":"force","c":null},{"s":true,"v":"C:\\x"}]}]}
+{"i":352,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a–b"}]}]}
+{"i":353,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[{"p":"path","c":{"s":true,"v":"C:\\x"}}]}]}
+{"i":354,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":355,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"x"}]}]}
+{"i":356,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":357,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":358,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":359,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":360,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":361,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"}]}]}
+{"i":362,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}
+{"i":363,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"ab c"}]}]}
+{"i":364,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5–3"}]}]}
+{"i":365,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"––x"}]}]}
+{"i":366,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"p":"path","c":null},{"p":"x","c":null}]}]}
+{"i":367,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a b"}]}]}
+{"i":368,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"\"a b\""}]}]}
+{"i":369,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":370,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a ; Remove-Item C:\\x"}]}]}
+{"i":371,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a \"|\" b"}]}]}
+{"i":372,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"%TEMP%"}]}]}
+{"i":373,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del %TEMP%\\x"}]}]}
+{"i":374,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a"},{"s":true,"v":"--%"},{"s":true,"v":"b"}]}]}
+{"i":375,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":""}]}]}
+{"i":376,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%a"}]}]}
+{"i":377,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
+{"i":378,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
+{"i":379,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"p":"-","c":null},{"s":true,"v":"--%"},{"s":true,"v":"a"}]}]}
+{"i":380,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":381,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":382,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a 2>&1"}]}]}
+{"i":383,"err":true,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"'a "}]},{"name":{"s":true,"v":"b"},"els":[]}]}
+{"i":384,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"a "}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":385,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ep","c":null},{"s":true,"v":"bypass"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":386,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":387,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":388,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":389,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"-"}]}]}
+{"i":390,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":391,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"},{"p":"arg","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":392,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel C:\\x"}]}]}
+{"i":393,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/cdel"},{"s":true,"v":"C:\\x"}]}]}
+{"i":394,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d"},{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":395,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"git"},{"s":true,"v":"log"},{"p":"n","c":null},{"s":true,"v":"1"}]}]}
+{"i":396,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":397,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":398,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":399,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":400,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":401,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":402,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":403,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":404,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":405,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":406,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":407,"err":false,"cmds":[]}
+{"i":408,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":409,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":410,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":411,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":412,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":413,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":414,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":415,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Get-Item"},"els":[{"s":true,"v":"y"}]}]}
+{"i":416,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\z"}]}]}
+{"i":417,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"b"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"c"}]}]}
+{"i":418,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":419,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":420,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":421,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":422,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":423,"err":true,"cmds":[{"name":{"s":true,"v":"Get-Random"},"els":[]}]}
+{"i":424,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
+{"i":425,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-2147483648"}]}]}
+{"i":426,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"12345678901234567"}]}]}
+{"i":427,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775808"}]}]}
+{"i":428,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1000000"}]}]}
+{"i":429,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1572864"}]}]}
+{"i":430,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.0"}]}]}
+{"i":431,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.50"}]}]}
+{"i":432,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":433,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":434,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
+{"i":435,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":436,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":437,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":438,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":439,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":440,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":441,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
+{"i":442,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E-05"}]}]}
+{"i":443,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+20"}]}]}
+{"i":444,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.5"}]}]}
+{"i":445,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"5"}]}]}
+{"i":446,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1"}]}]}
+{"i":447,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"16"}]}]}
+{"i":448,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1099511627776"}]}]}
+{"i":449,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1125899906842624"}]}]}
+{"i":450,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Infinity"}]}]}
+{"i":451,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0"}]}]}
+{"i":452,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1kbx"}]}]}
+{"i":453,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1228800"}]}]}
+{"i":454,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"7"}]}]}
+{"i":455,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"+5"}]}]}
+{"i":456,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1..3"}]}]}
+{"i":457,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Process"},"els":[{"p":"id","c":null},{"s":true,"v":"16"}]}]}
+{"i":458,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"-1"}]}]}
+{"i":459,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"4294967295"}]}]}
+{"i":460,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2147483648"}]}]}
+{"i":461,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1E+15"}]}]}
+{"i":462,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"123456789.123"}]}]}
+{"i":463,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"0.1"}]}]}
+{"i":464,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1.5E-07"}]}]}
+{"i":465,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"1024"}]}]}
+{"i":466,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"9223372036854775807"}]}]}
+{"i":467,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"2"}]}]}
+{"i":468,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":469,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":470,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":471,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":472,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":473,"err":false,"cmds":[]}
+{"i":474,"err":false,"cmds":[{"name":{"s":true,"v":"Get-ChildItem"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":false,"v":""}]}]}
+{"i":475,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":476,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":477,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":478,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":479,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":480,"err":false,"cmds":[{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":481,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]}]}
+{"i":482,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\r\nb"}]}]}
+{"i":483,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
+{"i":484,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":""}]}]}
+{"i":485,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":486,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":487,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":488,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":489,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
+{"i":490,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]}]}
+{"i":491,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a'@b"}]}]}
+{"i":492,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc\""}]}]}
+{"i":493,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"abc"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":494,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"$x"}]}]}
+{"i":495,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"a\"\"b"}]}]}
+{"i":496,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[]}]}
+{"i":497,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":498,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":499,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":500,"err":false,"cmds":[{"name":{"s":true,"v":"Out-String"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":501,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":502,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"C:\\x.ps1"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":503,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":504,"err":false,"cmds":[{"name":{"s":true,"v":"Microsoft.PowerShell.Utility\\Invoke-Expression"},"els":[]}]}
+{"i":505,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":506,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":507,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":508,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/V:ON"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":509,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/k"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":510,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":511,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":512,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\a b"}]}]}
+{"i":513,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/r"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":514,"err":false,"cmds":[{"name":{"s":true,"v":"CMD"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"DEL"},{"s":true,"v":"C:\\x"}]}]}
+{"i":515,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":516,"err":false,"cmds":[{"name":{"s":true,"v":"powershell.exe"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":517,"err":false,"cmds":[{"name":{"s":true,"v":"PowerShell.EXE"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":518,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":519,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":520,"err":false,"cmds":[{"name":{"s":true,"v":"powershell.exe"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":521,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Program Files\\PowerShell\\7\\pwsh.exe"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":522,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":523,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--command"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":524,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--c"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":525,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":526,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"/Command"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":527,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":528,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":529,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":530,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"co","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":531,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"comm","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":532,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"noni","c":null},{"p":"w","c":null},{"s":true,"v":"hidden"},{"p":"ep","c":null},{"s":true,"v":"bypass"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":533,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":534,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":535,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":536,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":537,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"cwa","c":null},{"s":true,"v":"Remove-Item $args[0]"},{"s":true,"v":"C:\\x"}]}]}
+{"i":538,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"commandwithargs","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":539,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"f","c":null},{"s":true,"v":"C:\\x.ps1"}]}]}
+{"i":540,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"C:\\x.ps1"}]}]}
+{"i":541,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"C:\\x.ps1"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\y"}]}]}
+{"i":542,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"},{"p":"nop","c":null}]}]}
+{"i":543,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":544,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":545,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":546,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":547,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":false,"v":""},{"p":"args","c":null},{"s":true,"v":"a"}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":548,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":549,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":550,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"version","c":null},{"s":true,"v":"5.1"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":551,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"version","c":null},{"s":true,"v":"2"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":552,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"wd","c":null},{"s":true,"v":"C:\\"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":553,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"workingdirectory","c":null},{"s":true,"v":"C:\\"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":554,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"o","c":null},{"s":true,"v":"xml"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":555,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"if","c":null},{"s":true,"v":"text"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":556,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"sta","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":557,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"login","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":558,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"l","c":null},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":559,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":{"s":true,"v":"Remove-Item C:\\x"}}]}]}
+{"i":560,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"command","c":{"s":true,"v":"Remove-Item C:\\x"}}]}]}
+{"i":561,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":{"s":false,"v":""}},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":562,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":563,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":564,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"},{"s":true,"v":"extra"}]}]}
+{"i":565,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":{"s":true,"v":"-"}}]}]}
+{"i":566,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":567,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":568,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-c -"}]}]}
+{"i":569,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-File -"}]}]}
+{"i":570,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":571,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":572,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":573,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":574,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"-"}]}]}
+{"i":575,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":""}]}]}
+{"i":576,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":" "}]}]}
+{"i":577,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null}]}]}
+{"i":578,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[]}]}
+{"i":579,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"; Remove-Item C:\\x"}]}]}
+{"i":580,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--%"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":581,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"\"a;Remove-Item C:\\x\""}]}]}
+{"i":582,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":false,"v":"","l":[{"s":true,"v":"a"},{"s":true,"v":"b"}]}]}]}
+{"i":583,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":"","l":[{"s":true,"v":"Write-Output"},{"s":true,"v":"a;Remove-Item C:\\x"}]}]}]}
+{"i":584,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":585,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":586,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":587,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item 'C:\\x'"}]}]}
+{"i":588,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":589,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":590,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Out-Null"},"els":[]}]}
+{"i":591,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":592,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Date"},"els":[]}]}
+{"i":593,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":594,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a"},{"s":true,"v":"b"},{"s":true,"v":"c;Remove-Item C:\\x"}]}]}
+{"i":595,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a#"},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":596,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output <#"},{"s":true,"v":"#> ; Remove-Item C:\\x"}]}]}
+{"i":597,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"'$(Remove-Item('C:\\Windows'))'"},{"s":true,"v":"a b\\"}]}]}
+{"i":598,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"$(Remove-Item('C:\\Windows'))"},{"s":true,"v":"a b\\"}]}]}
+{"i":599,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output a\\"},{"s":true,"v":"b"}]}]}
+{"i":600,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x\\"}]}]}
+{"i":601,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output C:\\a b\\\\"}]}]}
+{"i":602,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output x\\"},{"s":true,"v":"'$(Remove-Item('C:\\Windows'))'#"},{"s":true,"v":"a b\\"}]}]}
+{"i":603,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"echo x\\"},{"s":true,"v":"a b\\"}]}]}
+{"i":604,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":605,"err":false,"cmds":[{"name":{"s":true,"v":"cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":606,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/C"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":607,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/s"},{"s":true,"v":"/c"},{"s":true,"v":"del C:\\x"}]}]}
+{"i":608,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/q"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":609,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/v:on"},{"s":true,"v":"/c"},{"s":true,"v":"del !x!"}]}]}
+{"i":610,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/d/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":611,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c del C:\\x"}]}]}
+{"i":612,"err":false,"cmds":[{"name":{"s":true,"v":"C:\\Windows\\System32\\cmd.exe"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":613,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"start"},{"s":true,"v":"powershell"},{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"}]}]}
+{"i":614,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"powershell"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":615,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del %SystemRoot%\\x"}]}]}
+{"i":616,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"},{"s":true,"v":"^"}]},{"name":{"s":true,"v":"del"},"els":[{"s":true,"v":"C:\\y"}]}]}
+{"i":617,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"},{"s":true,"v":"&"},{"s":true,"v":"del"},{"s":true,"v":"C:\\y"}]}]}
+{"i":618,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"--%"},{"s":true,"v":"del C:\\x & del C:\\y"}]}]}
+{"i":619,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"del \"C:\\x\""}]}]}
+{"i":620,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/u"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":621,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/e:on"},{"s":true,"v":"/c"},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":622,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"}]}]}
+{"i":623,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[]}]}
+{"i":624,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":false,"v":""}]}]}
+{"i":625,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":false,"v":""}]}]}
+{"i":626,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":false,"v":""}]}]}
+{"i":627,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"c","c":null},{"s":true,"v":"del"},{"s":true,"v":"C:\\x"}]}]}
+{"i":628,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":629,"err":false,"cmds":[{"name":{"s":true,"v":"icm"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":630,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"computername","c":null},{"s":true,"v":"h"},{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":631,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"filepath","c":null},{"s":true,"v":"C:\\x.ps1"}]}]}
+{"i":632,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]}]}
+{"i":633,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Command"},"els":[{"s":false,"v":""}]}]}
+{"i":634,"err":false,"cmds":[]}
+{"i":635,"err":false,"cmds":[]}
+{"i":636,"err":false,"cmds":[]}
+{"i":637,"err":false,"cmds":[{"name":{"s":true,"v":"New-Object"},"els":[{"s":true,"v":"Diagnostics.Process"}]}]}
+{"i":638,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":639,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"p":"scriptblock","c":null},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":640,"err":false,"cmds":[{"name":{"s":true,"v":"Start-ThreadJob"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":641,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Job"},"els":[{"p":"initializationscript","c":null},{"s":false,"v":""},{"s":false,"v":""}]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":642,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-CimMethod"},"els":[{"p":"classname","c":null},{"s":true,"v":"Win32_Process"},{"p":"methodname","c":null},{"s":true,"v":"Create"},{"p":"arguments","c":null},{"s":false,"v":""}]}]}
+{"i":643,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-WmiMethod"},"els":[{"p":"class","c":null},{"s":true,"v":"Win32_Process"},{"p":"name","c":null},{"s":true,"v":"Create"},{"p":"argumentlist","c":null},{"s":true,"v":"cmd /c del C:\\x"}]}]}
+{"i":644,"err":false,"cmds":[]}
+{"i":645,"err":false,"cmds":[{"name":{"s":true,"v":"wmic"},"els":[{"s":true,"v":"process"},{"s":true,"v":"call"},{"s":true,"v":"create"},{"s":true,"v":"cmd /c del C:\\x"}]}]}
+{"i":646,"err":false,"cmds":[]}
+{"i":647,"err":false,"cmds":[]}
+{"i":648,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[]}]}
+{"i":649,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[]}]}
+{"i":650,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":651,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"command","c":{"s":true,"v":"Remove-Item C:\\x"}}]}]}
+{"i":652,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":false,"v":""}]}]}
+{"i":653,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":654,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":655,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"co","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":656,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"},{"p":"verbose","c":null}]}]}
+{"i":657,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"filepath","c":null},{"s":true,"v":"powershell"},{"p":"argumentlist","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":658,"err":false,"cmds":[{"name":{"s":true,"v":"start"},"els":[{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":659,"err":false,"cmds":[{"name":{"s":true,"v":"saps"},"els":[{"s":true,"v":"pwsh"},{"s":false,"v":"","l":[{"s":true,"v":"-c"},{"s":true,"v":"Remove-Item C:\\x"}]}]}]}
+{"i":660,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"verb","c":null},{"s":true,"v":"RunAs"},{"s":true,"v":"powershell"},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":661,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"wt"},{"s":true,"v":"powershell -c Remove-Item C:\\x"}]}]}
+{"i":662,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"conhost"},{"s":true,"v":"powershell -c Remove-Item C:\\x"}]}]}
+{"i":663,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"C:\\x.bat"}]}]}
+{"i":664,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":false,"v":""}]}]}
+{"i":665,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":false,"v":""},{"s":true,"v":"-c Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Command"},"els":[{"s":true,"v":"powershell"}]}]}
+{"i":666,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"powershell"}]}]}
+{"i":667,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"filepath","c":{"s":true,"v":"pwsh"}},{"p":"argumentlist","c":{"s":false,"v":"","l":[{"s":true,"v":"-c"},{"s":true,"v":"Remove-Item C:\\x"}]}}]}]}
+{"i":668,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"p":"fi","c":null},{"s":true,"v":"pwsh"},{"p":"ar","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":669,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"pwsh.exe"},{"p":"nonewwindow","c":null},{"p":"wait","c":null},{"p":"args","c":null},{"s":true,"v":"-c Remove-Item C:\\x"}]}]}
+{"i":670,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"gcm"},"els":[{"s":true,"v":"powershell"}]}]}
+{"i":671,"err":false,"cmds":[{"name":{"s":false,"v":""},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]},{"name":{"s":true,"v":"Get-Command"},"els":[{"s":true,"v":"pwsh"}]}]}
+{"i":672,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Item"},"els":[{"s":true,"v":"C:\\x.bat"}]}]}
+{"i":673,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":674,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":675,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":false,"v":""}]}]}
+{"i":676,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":false,"v":""}]}]}
+{"i":677,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":678,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"s":false,"v":""}]}]}
+{"i":679,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":false,"v":""}]}]}
+{"i":680,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":681,"err":false,"cmds":[{"name":{"s":true,"v":"Invoke-Expression"},"els":[{"s":false,"v":""}]}]}
+{"i":682,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":false,"v":""}]}]}
+{"i":683,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":false,"v":""},{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
+{"i":684,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":false,"v":""},{"s":true,"v":"x"}]}]}
+{"i":685,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":686,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":687,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":688,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output \"a;Remove-Item C:\\x\""}]}]}
+{"i":689,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":690,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":691,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":692,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"verbose","c":null}]}]}
+{"i":693,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]},{"name":{"s":true,"v":"Out-Null"},"els":[]}]}
+{"i":694,"err":false,"cmds":[{"name":{"s":true,"v":"Get-Content"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":695,"err":false,"cmds":[{"name":{"s":true,"v":"gc"},"els":[{"s":true,"v":"x"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":696,"err":false,"cmds":[{"name":{"s":true,"v":"Write-Output"},"els":[]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":697,"err":false,"cmds":[{"name":{"s":true,"v":"%"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":698,"err":false,"cmds":[{"name":{"s":true,"v":"ForEach-Object"},"els":[{"s":false,"v":""}]},{"name":{"s":true,"v":"iex"},"els":[{"s":false,"v":""}]}]}
+{"i":699,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":700,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":701,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":702,"err":false,"cmds":[{"name":{"s":true,"v":"IEX"},"els":[]}]}
+{"i":703,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":704,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":705,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":706,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]},{"name":{"s":true,"v":"Remove-Item"},"els":[{"s":true,"v":"C:\\x"}]}]}
+{"i":707,"err":false,"cmds":[{"name":{"s":true,"v":"Tee-Object"},"els":[{"p":"variable","c":null},{"s":true,"v":"t"}]},{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":708,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[]}]}
+{"i":709,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":710,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":"-"}]}]}
+{"i":711,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[]}]}
+{"i":712,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null}]}]}
+{"i":713,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[]}]}
+{"i":714,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/q"}]}]}
+{"i":715,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"-"}]}]}
+{"i":716,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
+{"i":717,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"$input | iex"}]}]}
+{"i":718,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":719,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":720,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"c","c":null},{"s":true,"v":"-"}]}]}
+{"i":721,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"s":true,"v":"Get-Date"}]}]}
+{"i":722,"err":false,"cmds":[{"name":{"s":true,"v":"iex"},"els":[{"p":"command","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":723,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":724,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"enc","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":725,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":726,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"en","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":727,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encod","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":728,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedcommand","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":729,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"enc","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":730,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"--encodedcommand"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":731,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"/e"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":732,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}}]}]}
+{"i":733,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedcommand","c":{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}}]}]}
+{"i":734,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":735,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"e","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":736,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABBAA=="},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":737,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABBAA=="},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\x"}]}]}
+{"i":738,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Get-Date"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":739,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"nop","c":null}]}]}
+{"i":740,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"s":true,"v":"extra"}]}]}
+{"i":741,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"w","c":null},{"s":true,"v":"hidden"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":742,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAAiAGEAOwBSAGUAbQBvAHYAZQAtAEkAdABlAG0AIABDADoAXAB4ACIA"}]}]}
+{"i":743,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeA"}]}]}
+{"i":744,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA"}]}]}
+{"i":745,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0A"},{"s":true,"v":"bwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":746,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UmVtb3ZlLUl0ZW0gQzpceA=="}]}]}
+{"i":747,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAAAADsAIABSAGUAbQBvAHYAZQAtAEkAdABlAG0AIABDADoAXAB5AA=="}]}]}
+{"i":748,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"aQBlAHgAIAAnAFIAZQBtAG8AdgBlAC0ASQB0AGUAbQAgAEMAOgBcAHgAJwA="}]}]}
+{"i":749,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"cABvAHcAZQByAHMAaABlAGwAbAAgAC0AYwAgACcAUgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAAnAA=="}]}]}
+{"i":750,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIAB4AFwA"},{"s":true,"v":"eQA="}]}]}
+{"i":751,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"c","c":null},{"s":true,"v":"Get-Date"}]}]}
+{"i":752,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"powershell"},{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":753,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ea","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="},{"p":"ec","c":null},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABhAA=="}]}]}
+{"i":754,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"encodedarguments","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":755,"err":false,"cmds":[{"name":{"s":true,"v":"Start-Process"},"els":[{"s":true,"v":"pwsh"},{"p":"argumentlist","c":null},{"s":false,"v":"","l":[{"s":true,"v":"-ec"},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}]}
+{"i":756,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
+{"i":757,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
+{"i":758,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":false,"v":""}]}]}
+{"i":759,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":760,"err":false,"cmds":[{"name":{"s":true,"v":"powershell.exe"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAeAA="}]}]}
+{"i":761,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAfgBcAHgA"}]}]}
+{"i":762,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"ec","c":null},{"s":true,"v":"UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAQwA6AFwAVwAqAA=="}]}]}
+{"i":763,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":""},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":764,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" "},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":765,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -c"},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":766,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"-c "},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":767,"err":false,"cmds":[{"name":{"s":true,"v":"powershell"},"els":[{"s":true,"v":""},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":768,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"s":true,"v":""},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":769,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -nop"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows -Recurse"}]}]}
+{"i":770,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -File"},{"s":true,"v":"-"}]}]}
+{"i":771,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -ec"},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABFAFYASQBMAA=="}]}]}
+{"i":772,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -enc"},{"s":true,"v":"VwByAGkAdABlAC0ATwB1AHQAcAB1AHQAIABFAFYASQBMAA=="}]}]}
+{"i":773,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":{"s":true,"v":"-"}}]}]}
+{"i":774,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"nop","c":null},{"p":"file","c":null},{"s":true,"v":"-"},{"p":"c","c":null},{"s":true,"v":"Remove-Item C:\\Windows"}]}]}
+{"i":775,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Remove-Item"},{"s":true,"v":"C:\\x"},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":776,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":777,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"- %DCV%"}]}]}
+{"i":778,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"%DCV%"}]}]}
+{"i":779,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"\"-\""}]}]}
+{"i":780,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"--%"},{"s":true,"v":"Write-Output -"}]}]}
+{"i":781,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -c"},{"s":true,"v":"Write-Output"},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":782,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":"- "}]}]}
+{"i":783,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"s":true,"v":" -"}]}]}
+{"i":784,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":{"s":true,"v":"Write-Output MARK"}}]}]}
+{"i":785,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"command","c":{"s":true,"v":"Write-Output MARK"}}]}]}
+{"i":786,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":true,"v":"C:/code"}}]}]}
+{"i":787,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":true,"v":"/c"}},{"s":true,"v":"ver"}]}]}
+{"i":788,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"c","c":null},{"s":true,"v":"--%"},{"s":true,"v":"-"}]}]}
+{"i":789,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":" /c"},{"s":true,"v":"rd /s /q C:\\Windows"}]}]}
+{"i":790,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c "},{"s":true,"v":"rd /s /q C:\\Windows"}]}]}
+{"i":791,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":" /k "},{"s":true,"v":"rd"},{"s":true,"v":"/s"},{"s":true,"v":"/q"},{"s":true,"v":"C:\\Windows"}]}]}
+{"i":792,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":true,"v":"/c rd /s /q C:\\Windows"}}]}]}
+{"i":793,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":false,"v":""}}]}]}
+{"i":794,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"p":"x","c":{"s":true,"v":"/c"}}]}]}
+{"i":795,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/c"},{"s":true,"v":"rd"},{"s":true,"v":"/s"},{"s":true,"v":"/q"},{"s":true,"v":"C:\\x"}]}]}
+{"i":796,"err":false,"cmds":[{"name":{"s":true,"v":"cmd"},"els":[{"s":true,"v":"/K"},{"s":true,"v":"rd"},{"s":true,"v":"/s"},{"s":true,"v":"/q"},{"s":true,"v":"C:\\Windows"}]}]}
+{"i":797,"err":false,"cmds":[{"name":{"s":true,"v":"pwsh"},"els":[{"p":"file","c":null},{"s":true,"v":"C:\\a\\b.ps1"}]}]}

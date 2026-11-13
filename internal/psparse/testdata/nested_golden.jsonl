@@ -11,12 +11,28 @@
 {"i":10,"ns":[{"kind":"cmd-c","text":"del C:\\x","static":true}]}
 {"i":11,"ns":[{"kind":"cmd-c","text":"del C:\\x","static":true}]}
 {"i":12,"ns":[{"kind":"cmd-c","text":"del %TEMP%\\x","static":true}]}
-{"i":13,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
-{"i":14,"ns":[{"kind":"cmd-c","text":"dir","static":true}]}
-{"i":15,"ns":[]}
-{"i":16,"ns":[{"kind":"powershell-command","text":"","static":false}]}
-{"i":17,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
-{"i":18,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
-{"i":19,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\y","static":true}]}
-{"i":20,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
-{"i":21,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":13,"ns":[{"kind":"cmd-c","text":"dir","static":true}]}
+{"i":14,"ns":[]}
+{"i":15,"ns":[{"kind":"powershell-command","text":"","static":false}]}
+{"i":16,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":17,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":18,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\y","static":true}]}
+{"i":19,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":20,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":21,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":22,"ns":[{"kind":"powershell-command","text":"Remove-Item C:\\x","static":true}]}
+{"i":23,"ns":[{"kind":"powershell-command","text":"Write-Output a","static":true}]}
+{"i":24,"ns":[{"kind":"powershell-command","text":"Get-Date","static":true}]}
+{"i":25,"ns":[{"kind":"powershell-command","text":"Get-Date","static":true}]}
+{"i":26,"ns":[{"kind":"powershell-command","text":"Write-Output a b","static":true}]}
+{"i":27,"ns":[{"kind":"encodedcommand","text":"echo hi","static":true}]}
+{"i":28,"ns":[{"kind":"powershell-command","text":"Get-Date","static":true}]}
+{"i":29,"ns":[{"kind":"powershell-command","text":"Get-Date","static":true}]}
+{"i":30,"ns":[{"kind":"cmd-c","text":"ver","static":true}]}
+{"i":31,"ns":[{"kind":"cmd-c","text":"ver","static":true}]}
+{"i":32,"ns":[{"kind":"cmd-c","text":"ver","static":true}]}
+{"i":33,"ns":[{"kind":"cmd-c","text":"ver","static":true}]}
+{"i":34,"ns":[{"kind":"cmd-c","text":"ver","static":true}]}
+{"i":35,"ns":[{"kind":"cmd-c","text":"ver","static":true}]}
+{"i":36,"ns":[{"kind":"powershell-command","text":"Get-Date","static":true}]}
+{"i":37,"ns":[{"kind":"powershell-command","text":"Get-Date","static":true}]}

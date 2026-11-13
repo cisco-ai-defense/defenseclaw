@@ -21,13 +21,6 @@ func TestRv4CwdState(t *testing.T) {
 		{"ps Push-Location no-arg", `c:\a\f`, winPS, `Set-Location C:\a; Push-Location; New-Item f`},
 	}
 	for _, c := range cases {
-		r := Extract(sh(c.cmd), c.o)
-		got := ""
-		for _, e := range r.Effects {
-			if (e.Kind == KindWrite) && e.Target.Type == TargetPath {
-				got = e.Target.Path + " ts=" + string(e.TargetState)
-			}
-		}
-		t.Logf("%-30s want=%-20s got=%s fullyKnown=%v", c.n, c.want, got, r.FullyKnown())
+		checkRow(t, c.n, c.o, sh(c.cmd), "")
 	}
 }

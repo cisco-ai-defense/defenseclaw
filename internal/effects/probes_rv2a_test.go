@@ -2,7 +2,6 @@ package effects
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -124,11 +123,6 @@ func TestReviewProbes3(t *testing.T) {
 	N("F8 commands array", "x", "execute_command", `{"commands":["rm -rf /etc/x"]}`)
 	N("F9 argv cmd.exe", "x", "shell", `{"command":["cmd.exe","/c","del C:\\Windows\\x"]}`)
 	for _, p := range cs {
-		r := Extract(p.c, p.o)
-		inv := ""
-		if len(r.Effects) == 0 && len(r.Unknowns) == 0 {
-			inv = "  !!! ZERO effects and ZERO reasons\n"
-		}
-		t.Logf("### %s :: %q surface=%s\n%s%s", p.n, p.c.Command+strings.Join(p.c.Argv, " ")+string(p.c.Args), p.c.Surface, inv, strings.TrimRight(fmtRes(r), "\n"))
+		checkRow(t, p.n, p.o, p.c, "")
 	}
 }

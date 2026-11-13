@@ -21,8 +21,10 @@ func TestExtractNestedScripts(t *testing.T) {
 		{`iex 'whoami'`, KindIEXLiteral, "powershell", "whoami", true},
 		{`Invoke-Expression "hostname"`, KindIEXLiteral, "powershell", "hostname", true},
 		{`[scriptblock]::Create('calc.exe')`, KindScriptBlockCreate, "powershell", "calc.exe", true},
-		{`cmd /c "dir C:\"`, KindCmdC, "cmd", `dir C:\`, true},
-		{`Start-Process powershell -ArgumentList '-Command','calc.exe'`, KindStartProcessArgs, "powershell", "calc.exe", true},
+		{`cmd /c "dir C:\"`, KindCmdC, "cmd", "", false}, // a payload word with a quote is NotStatic (review 9 R9-2)
+		{`cmd /c dir C:\`, KindCmdC, "cmd", `dir C:\`, true},
+		// review 5: Start-Process argv is not modelled -> always opaque (ps_child_argv)
+		{`Start-Process powershell -ArgumentList '-Command','calc.exe'`, KindStartProcessArgs, "powershell", "", false},
 	}
 	for _, c := range cases {
 		sc, _ := Parse(c.src, Options{})

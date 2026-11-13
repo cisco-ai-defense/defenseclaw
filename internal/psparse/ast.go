@@ -29,6 +29,12 @@ const (
 	ReasonDialectAmbiguous = "ps_dialect_ambiguous" // escape decodes differently under PS 5.1 vs 7
 	ReasonUnsafeLiteral    = "ps_unsafe_literal"    // static source has a rune outside the safe allowlist
 	ReasonHostOption       = "ps_host_option"       // a host CLI (powershell/pwsh) option outside the modeled set
+	ReasonChildArgv        = "ps_child_argv"        // a child process argv (Start-Process) we do not model
+	ReasonLegacyQuoting    = "ps_legacy_quoting"    // a nested payload whose quotes 5.1/legacy argv would drop
+	ReasonWildcard         = "ps_wildcard"          // a quoted path value with a wildcard metachar (* ? [ ])
+	ReasonHostShape        = "ps_host_shape"        // a host argv outside the tested shape table (see host_shapes.go)
+	ReasonStdin            = "ps_stdin"             // a host command value of exactly "-" (the script is read from stdin, not argv)
+	ReasonCmdArgv          = "ps_cmd_argv"          // a cmd payload psparse cannot locate (fused/combined /c|/k|/r, splat, or dynamic argv)
 )
 
 // Script is the root: an ordered list of statements plus the parameter block
@@ -113,6 +119,7 @@ type CommandElement interface {
 type Parameter struct {
 	span
 	Name     string // without the leading dash
+	Raw      string // the switch as written (dash character included, no trailing colon)
 	HasColon bool   // -Name: form
 	Colon    Expr   // inline value for -Name:value, else nil
 }

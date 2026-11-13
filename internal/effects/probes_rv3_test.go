@@ -2,7 +2,6 @@ package effects
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -327,11 +326,6 @@ func TestReviewProbesR3(t *testing.T) {
 	N("T14 MultiEdit", envOpts, "claudecode", "MultiEdit", `{"file_path":"/home/u/.zshrc","edits":[]}`)
 	N("T15 Bash with cd arg", envOpts, "claudecode", "Bash", `{"command":"cd ~/.ssh && echo k >> authorized_keys"}`)
 	for _, p := range cs {
-		r := Extract(p.c, p.o)
-		inv := ""
-		if len(r.Effects) == 0 && len(r.Unknowns) == 0 {
-			inv = "  !!! ZERO effects and ZERO reasons\n"
-		}
-		t.Logf("### %s :: %q\n%s%s", p.n, p.c.Command+strings.Join(p.c.Argv, " ")+string(p.c.Args), inv, strings.TrimRight(fmtRes(r), "\n"))
+		checkRow(t, p.n, p.o, p.c, "")
 	}
 }

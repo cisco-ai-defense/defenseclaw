@@ -28,8 +28,9 @@ type lexer struct {
 	// used to decide whether '-' / '.' / '@' start an operator or a word, and
 	// whether we are at a command-start position.
 	prevSignificant TokenKind
-	prevWasValue    bool // last token could end a value (for dash disambiguation)
-	atStart         bool // at a token boundary (for '#' comment vs bareword)
+	prevWasValue    bool   // last token could end a value (for dash disambiguation)
+	atStart         bool   // at a token boundary (for '#' comment vs bareword)
+	braceStack      []byte // 'h' for an open @{ hashtable, 'b' for a { scriptblock
 }
 
 func newLexer(src string) *lexer {
@@ -147,6 +148,7 @@ func (l *lexer) lex() []Token {
 			a := l.i
 			l.i += 2
 			l.emit(TokAtBrace, a, l.i)
+			l.braceStack = append(l.braceStack, 'h')
 		case r == '@' && isNameStart(l.peek(1)):
 			l.lexSplatVariable()
 		case r == '$':
@@ -161,9 +163,9 @@ func (l *lexer) lex() []Token {
 			a := l.i
 			l.i++ // consume the stream digit
 			l.scanRedirectFromHere(a, string(r))
-		case unicode.IsDigit(r):
+		case r >= '0' && r <= '9':
 			l.lexNumber()
-		case r == '.' && unicode.IsDigit(l.peek(1)) && l.atStart:
+		case r == '.' && l.peek(1) >= '0' && l.peek(1) <= '9' && l.atStart:
 			l.lexNumber()
 		default:
 			l.lexOperatorOrWord()
@@ -435,8 +437,21 @@ func (l *lexer) lexDash() {
 		a := l.i
 		l.i++ // dash
 		start := l.i
-		for l.i < len(l.runes) && isNameChar(l.cur()) {
-			l.i++
+		for l.i < len(l.runes) {
+			if isNameChar(l.cur()) {
+				l.i++
+				continue
+			}
+			if l.cur() == '`' && l.i+1 < len(l.runes) {
+				// a backtick escape inside a parameter name keeps the token
+				// whole (pwsh does), so -W`indowStyle is one parameter; the
+				// host parser then treats it as an unknown option and fails
+				// closed instead of reading its value as the script (review 4
+				// R4-5).
+				l.i += 2
+				continue
+			}
+			break
 		}
 		name := string(l.runes[start:l.i])
 		hasColon := false
@@ -478,7 +493,7 @@ func (l *lexer) lexNumber() {
 			l.i++
 		}
 	} else {
-		for l.i < len(l.runes) && (unicode.IsDigit(l.cur()) || l.cur() == '.') {
+		for l.i < len(l.runes) && ((l.cur() >= '0' && l.cur() <= '9') || l.cur() == '.') {
 			l.i++
 		}
 		if l.cur() == 'e' || l.cur() == 'E' {
@@ -486,7 +501,7 @@ func (l *lexer) lexNumber() {
 			if l.cur() == '+' || l.cur() == '-' {
 				l.i++
 			}
-			for l.i < len(l.runes) && unicode.IsDigit(l.cur()) {
+			for l.i < len(l.runes) && l.cur() >= '0' && l.cur() <= '9' {
 				l.i++
 			}
 		}
@@ -554,10 +569,14 @@ func (l *lexer) lexOperatorOrWord() {
 	case '{':
 		l.i++
 		l.emit(TokLBrace, a, l.i)
+		l.braceStack = append(l.braceStack, 'b')
 		return
 	case '}':
 		l.i++
 		l.emit(TokRBrace, a, l.i)
+		if len(l.braceStack) > 0 {
+			l.braceStack = l.braceStack[:len(l.braceStack)-1]
+		}
 		return
 	case '[':
 		l.i++
@@ -678,7 +697,7 @@ func (l *lexer) scanRedirectFromHere(a int, numPrefix string) {
 	}
 	if l.cur() == '&' {
 		l.i++
-		if unicode.IsDigit(l.cur()) {
+		if l.cur() >= '0' && l.cur() <= '9' {
 			merge = string(l.cur())
 			l.i++
 		}
@@ -697,6 +716,7 @@ func (l *lexer) lexBareword() {
 		r := l.cur()
 		if r == '`' {
 			if l.peek(1) == 'u' && l.peek(2) == '{' { // `u{hex} escape stays in the word
+				escBracket = true // `u{5B}/`u{5D} may be a bracket; keep the word whole
 				l.i += 3
 				for l.i < len(l.runes) && l.cur() != '}' {
 					l.i++
@@ -720,6 +740,12 @@ func (l *lexer) lexBareword() {
 			break
 		}
 		if (r == '[' || r == ']') && !escBracket {
+			break
+		}
+		if r == '=' && len(l.braceStack) > 0 && l.braceStack[len(l.braceStack)-1] == 'h' {
+			// inside @{ }, '=' separates a key from its value; end the key (and
+			// any bareword) here so the value's commands are parsed, not glued
+			// into the key token (review 4 R4-1).
 			break
 		}
 		if strings.ContainsRune(";,|&(){}", r) || isSingleQuote(r) || isDoubleQuote(r) {
@@ -759,21 +785,26 @@ func validNumberSuffix(s string) bool {
 		return true
 	}
 	s = strings.ToLower(s)
-	for _, m := range []string{"kb", "mb", "gb", "tb", "pb"} {
-		if strings.HasPrefix(s, m) {
-			s = s[2:]
+	// pwsh order is <type suffix><multiplier>: 1lkb = 1L then kb (valid);
+	// 1kbl = kb then l is not a number (a bareword). Strip an optional type
+	// suffix first, then an optional multiplier (review 4 R11).
+	for _, t := range []string{"ul", "lu", "uy", "us", "l", "u", "y", "s", "n", "d"} {
+		if strings.HasPrefix(s, t) {
+			s = s[len(t):]
 			break
 		}
 	}
-	switch s {
-	case "", "l", "u", "ul", "lu", "y", "uy", "s", "us", "n", "d":
-		return true
+	for _, m := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if s == m {
+			s = ""
+			break
+		}
 	}
-	return false
+	return s == ""
 }
 
 func isHex(r rune) bool {
-	return unicode.IsDigit(r) || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
 func isSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\r' || r == '\f' || r == 0xA0 }
 

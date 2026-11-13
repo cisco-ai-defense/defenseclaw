@@ -54,8 +54,12 @@ type Target struct {
 	// Physical and Link are filled only by the resolver step (package fsres).
 	Physical string    `json:"physical,omitempty"`
 	Link     LinkState `json:"link"`
-	Flavor   Flavor    `json:"flavor,omitempty"`
-	CaseFold bool      `json:"-"`
+	// Subtree: the effect covers every file below Path, not Path alone (a git
+	// clone or init into a directory). A matcher that compares exact files must
+	// treat a protected path below Path as hit.
+	Subtree  bool   `json:"subtree,omitempty"`
+	Flavor   Flavor `json:"flavor,omitempty"`
+	CaseFold bool   `json:"-"`
 }
 
 // Data is what an effect carries: the bytes a write lays down, the file an

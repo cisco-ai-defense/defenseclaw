@@ -307,7 +307,11 @@ func (p *parser) parseCommandName() Expr {
 
 func (p *parser) parseParameter() CommandElement {
 	t := p.advance()
-	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, HasColon: t.HasColon}
+	raw := t.Raw
+	if t.HasColon && len(raw) > 0 && raw[len(raw)-1] == ':' {
+		raw = raw[:len(raw)-1]
+	}
+	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, Raw: raw, HasColon: t.HasColon}
 	if t.HasColon {
 		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End
 		// -Name:value (adjacent) or -Name: value (the next value across
@@ -346,6 +350,17 @@ func (p *parser) parseCommandArg() CommandElement {
 		for p.at(TokComma) {
 			p.advance()
 			p.skipNewlines()
+			if p.at(TokParameter) {
+				// after a comma a -word is the next list element (an argument),
+				// not a parameter: Remove-Item a,-b -> ["a","-b"] (review 5 R5-10)
+				tk := p.advance()
+				name := "-" + tk.Value
+				if tk.HasColon {
+					name += ":"
+				}
+				arr.Elements = append(arr.Elements, &StringLit{span: span{tk.Start, tk.End}, Kind: StrBare, Value: name, Static: true, Bare: true, Raw: tk.Raw})
+				continue
+			}
 			if nxt := p.parseFusedArg(); nxt != nil {
 				arr.Elements = append(arr.Elements, nxt)
 			}
@@ -478,7 +493,7 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		if amb {
 			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
 		}
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end)}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end), Fused: true}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {
@@ -503,10 +518,8 @@ func (p *parser) parseRedirection() *Redirection {
 	if t.ColonArg != "" { // stream merge like 2>&1
 		return r
 	}
-	if t.Value == "<" {
-		// input redirection target
-	}
-	// target is the next argument expression
+	// "<" input redirection and > / >> / 2> ... all take the next argument
+	// expression (parsed below) as the target.
 	p.skipComments()
 	if !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) && !p.at(TokPipe) {
 		if a := p.parseCommandArg(); a != nil {

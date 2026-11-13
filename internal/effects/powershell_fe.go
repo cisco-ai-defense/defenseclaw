@@ -35,7 +35,28 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	for _, d := range sc.Diagnostics {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: psReason(d.Reason)})
 	}
-	lw := &psLower{out: s, o: o}
+	lw := &psLower{out: s, o: o, hosts: map[psparse.Node]*HostPayload{}}
+	var nested []psparse.NestedScript
+	if expandNested {
+		nested = psparse.ExtractNestedScripts(sc)
+		// psparse owns the reading of a host call (cmd / powershell / pwsh): its
+		// verdict is attached to the lowered command, which the walker unwraps in
+		// program order (right cwd and env) and only when the verdict is Static.
+		for _, ns := range nested {
+			cmd, ok := ns.Source.(*psparse.Command)
+			if !ok || !isHostName(psBaseNameOf(cmd)) {
+				continue
+			}
+			hp := &HostPayload{Opaque: true}
+			if ns.Static && !psHostUnsafe(cmd, ns) {
+				hp = &HostPayload{Text: ns.Text, Dialect: DialectPowerShell}
+				if ns.Dialect == "cmd" {
+					hp.Dialect = DialectCMD
+				}
+			}
+			lw.hosts[ns.Source] = hp
+		}
+	}
 	lw.statements(sc.Statements, false)
 	if expandNested {
 		// Start-Process launching powershell/pwsh/cmd: psparse joins/splits the
@@ -52,9 +73,20 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 		for range spShell {
 			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
 		}
-		for _, ns := range psparse.ExtractNestedScripts(sc) {
+		for _, ns := range nested {
 			if spShell[ns.Source] {
 				continue // never use a Start-Process-into-shell nested text (review 5 (a))
+			}
+			// A host call's verdict travels on its lowered command (above): the
+			// walker unwraps a Static one in place and keeps an opaque one opaque.
+			// The structure-level marker stays so a call psparse could not read is
+			// never fully known even where the command was not lowered (a hashtable
+			// key, an index), and psparse's own copy of the text is not walked twice.
+			if hp := lw.hosts[ns.Source]; hp != nil {
+				if hp.Opaque {
+					s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+				}
+				continue
 			}
 			// A powershell/pwsh host carrying -EncodedArguments: psparse decodes
 			// the CLIXML args blob as if it were the script (and misses the real
@@ -85,9 +117,7 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			} else {
 				inner = lowerPSScript(ns.Text, o, false)
 			}
-			for _, fn := range inner.Funcs {
-				s.Funcs = append(s.Funcs, fn)
-			}
+			s.Funcs = append(s.Funcs, inner.Funcs...)
 			s.Stmts = append(s.Stmts, inner.Stmts...)
 			s.Unknowns = append(s.Unknowns, inner.Unknowns...)
 		}
@@ -235,8 +265,9 @@ func psReason(code string) ReasonCode {
 }
 
 type psLower struct {
-	out *Script
-	o   Options
+	out   *Script
+	o     Options
+	hosts map[psparse.Node]*HostPayload
 }
 
 func (lw *psLower) statements(sts []psparse.Statement, cond bool) {
@@ -252,6 +283,15 @@ func (lw *psLower) statement(st psparse.Statement, cond bool) {
 	case *psparse.Assignment:
 		lw.assignment(v, cond)
 	case *psparse.Block:
+		// A function (or filter) defined here shadows a cmdlet of the same name for
+		// the rest of the script: the walker must not treat that name as the
+		// cmdlet (round 8 H, rv7-B48). Names are case-insensitive.
+		if v.Name != "" {
+			switch strings.ToLower(v.Keyword) {
+			case "function", "filter", "workflow":
+				lw.out.Funcs = append(lw.out.Funcs, strings.ToLower(v.Name))
+			}
+		}
 		lw.statements(v.Conditions, cond)
 		for _, b := range v.Bodies {
 			if b != nil {
@@ -311,7 +351,7 @@ func (lw *psLower) assignment(a *psparse.Assignment, cond bool) {
 }
 
 func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
-	out := &Cmd{Cond: cond, PipeIn: pipeIn}
+	out := &Cmd{Cond: cond, PipeIn: pipeIn, Host: lw.hosts[c]}
 	// program name
 	if name, ok := psparse.LiteralString(c.Name); ok && c.InvokeOp != "." {
 		out.Words = append(out.Words, Word{Value: name, Static: true, Segs: []WordSeg{{Lit: name}}})
@@ -478,4 +518,40 @@ func rhsExpr(st psparse.Statement) psparse.Expr {
 		}
 	}
 	return nil
+}
+
+// isHostName reports a program that runs a payload given in its arguments.
+func isHostName(leaf string) bool {
+	return leaf == "cmd" || leaf == "powershell" || leaf == "pwsh"
+}
+
+// psHostUnsafe reports a Static psparse payload that effects still does not
+// trust: a -EncodedArguments blob (psparse decodes the CLIXML as the script), a
+// -Command / -EncodedCommand text with a " (legacy native argument passing
+// re-splits it on 5.1) and -WorkingDirectory / -wd (the text runs somewhere
+// other than the caller's cwd, which a nested script cannot record).
+func psHostUnsafe(cmd *psparse.Command, ns psparse.NestedScript) bool {
+	if psHostHasEncodedArgs(cmd) || psHostHasWorkingDirectory(cmd) {
+		return true
+	}
+	return ns.Dialect == "powershell" &&
+		(ns.Kind == psparse.KindPowerShellCommand || ns.Kind == psparse.KindEncodedCommand) &&
+		strings.Contains(ns.Text, `"`)
+}
+
+func psHostHasWorkingDirectory(c *psparse.Command) bool {
+	if b := psBaseNameOf(c); b != "powershell" && b != "pwsh" {
+		return false
+	}
+	for _, el := range c.Elements {
+		p, ok := el.(*psparse.Parameter)
+		if !ok {
+			continue
+		}
+		n := strings.ToLower(p.Name)
+		if n == "wd" || (len(n) >= 2 && strings.HasPrefix("workingdirectory", n)) {
+			return true
+		}
+	}
+	return false
 }

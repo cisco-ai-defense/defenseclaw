@@ -42,6 +42,12 @@ func goldenCorpus() []string {
 	for _, s := range rev2Lines {
 		add(rev2Expand(s))
 	}
+	for _, s := range rev6Lines() {
+		add(rev2Expand(s))
+	}
+	for _, s := range rev7Lines() {
+		add(rev2Expand(s))
+	}
 	return out
 }
 
@@ -61,6 +67,8 @@ type goldenEl struct {
 	hasColon bool
 	val      string
 	ok       bool
+	isList   bool       // a comma/array argument (review 4 R4-2)
+	list     []goldenEl // its elements (val/ok each), compared element by element
 }
 
 func projectMine(c *Command) goldenProj {
@@ -76,14 +84,24 @@ func projectMine(c *Command) goldenProj {
 			}
 			g.els = append(g.els, ge)
 		case *Arg:
-			v, ok := LiteralString(e.Value)
-			g.els = append(g.els, goldenEl{val: v, ok: ok})
+			g.els = append(g.els, projMineArg(e.Value))
 		case Expr:
-			v, ok := LiteralString(e)
-			g.els = append(g.els, goldenEl{val: v, ok: ok})
+			g.els = append(g.els, projMineArg(e))
 		}
 	}
 	return g
+}
+
+func projMineArg(e Expr) goldenEl {
+	if items, ok := LiteralList(e); ok {
+		ge := goldenEl{isList: true}
+		for _, it := range items {
+			ge.list = append(ge.list, goldenEl{val: it.Text, ok: it.Static})
+		}
+		return ge
+	}
+	v, ok := LiteralString(e)
+	return goldenEl{val: v, ok: ok}
 }
 
 func projectOracle(c ovCmd) goldenProj {
@@ -94,6 +112,12 @@ func projectOracle(c ovCmd) goldenProj {
 			if e.C != nil {
 				ge.hasColon = true
 				ge.colon, ge.colonOK = e.C.V, e.C.S
+			}
+			g.els = append(g.els, ge)
+		} else if e.L != nil {
+			ge := goldenEl{isList: true}
+			for _, it := range e.L {
+				ge.list = append(ge.list, goldenEl{val: it.V, ok: it.S})
 			}
 			g.els = append(g.els, ge)
 		} else {
@@ -119,6 +143,24 @@ func cmpCommand(mine, oracle goldenProj) string {
 	}
 	for i := 0; i < n; i++ {
 		m, o := mine.els[i], oracle.els[i]
+		if m.isList || o.isList {
+			// a comma/array argument is compared element by element: a wrong
+			// static element fails, mine being non-static is safe, and a length
+			// or shape mismatch fails (review 4 R4-2).
+			if m.isList != o.isList {
+				return fmt.Sprintf("el%d list mine=%v oracle=%v", i, m.isList, o.isList)
+			}
+			if len(m.list) != len(o.list) {
+				return fmt.Sprintf("el%d list len mine=%d oracle=%d", i, len(m.list), len(o.list))
+			}
+			for j := range m.list {
+				mj, oj := m.list[j], o.list[j]
+				if mj.ok && (!oj.ok || mj.val != oj.val) {
+					return fmt.Sprintf("el%d[%d] list WRONG-STATIC mine=%q oracle=(%q,%v)", i, j, mj.val, oj.val, oj.ok)
+				}
+			}
+			continue
+		}
 		if m.param != o.param {
 			return fmt.Sprintf("el%d param mine=%q oracle=%q", i, m.param, o.param)
 		}
@@ -278,22 +320,13 @@ func classifyDiff(line, diff string) string {
 	case strings.Contains(line, "--%"):
 		return "representation-only: the -- before a --% stop-parsing marker is read as a parameter vs pwsh's positional; the verbatim --% tail is preserved"
 	case strings.Contains(line, " -- ") || strings.HasSuffix(line, " --") || strings.Contains(line, "-- -"):
-		return "under-static (R7, safe): a post-`--` token that pwsh keeps is read as a parameter / folded to a dynamic expression and not asserted as a value; the dropped token is never a command or path, and mine never asserts a wrong value"
+		return "R7 (safe, P3): mine asserts the -- end-of-parameters marker as a static positional \"--\" and reads the following dash-led token as a parameter, where pwsh keeps -- as a parameter named \"-\"; the only affected elements are dash-led relative targets (-x, -rf), never a command or a protected path, so effects never acts on a wrong path or program"
 	case strings.Contains(line, "-Path:") || strings.Contains(line, "-Name:") || strings.Contains(line, "-file:") || strings.Contains(line, "-File:"):
 		return "representation-only: colon-form parameter boundary (-Name:value binding); the command and filename are preserved"
 	case strings.Contains(diff, "param"):
 		return "representation-only (R7, P3): a dash-word glued to a value with no space; pwsh fuses it into one argument, mine splits it into a parameter plus value. Contrived; no command or path content, and no wrong static path or program"
 	}
 	return "representation-only: " + diff
-}
-
-func regexpDigitSuffix(s string) bool {
-	for i := 0; i+1 < len(s); i++ {
-		if s[i] >= '0' && s[i] <= '9' && (s[i+1] == 'l' || s[i+1] == 'u' || s[i+1] == 'n' || s[i+1] == 'y' || s[i+1] == 's' || s[i+1] == 'b') {
-			return true
-		}
-	}
-	return false
 }
 
 // TestGenValueAllow writes the allow-list of the gate's current clean-line
