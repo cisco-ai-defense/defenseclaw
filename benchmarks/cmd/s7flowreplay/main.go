@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/flow"
 )
@@ -115,10 +116,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	sf := config.DefaultConfig().Guardrail.SecretFlow
 	cfg := flow.Config{
-		Mode: "on", Credentials: true, Reencodings: true,
-		MaxLabeledPaths: 512, MaxValueDigests: 256,
-		SinkDefault: flow.ActionAlert, SinkStrict: flow.ActionBlock, SinkManaged: flow.ActionBlock,
+		Credentials:          sf.CredentialsEnabled(),
+		ExtraPathGlobs:       sf.LabelSets.ExtraPathGlobs,
+		ExtraSecretPatterns:  sf.LabelSets.ExtraSecretPatterns,
+		Reencodings:          sf.Reencodings,
+		MaxLabeledPaths:      sf.Memory.MaxLabeledPaths,
+		MaxValueDigests:      sf.Memory.MaxValueDigests,
+		DestinationAllowlist: sf.DestinationAllowlist,
+		SinkDefault:          flow.Action(sf.SinkActionFor(false, false)),
+		SinkStrict:           flow.Action(sf.SinkActionFor(true, false)),
+		SinkManaged:          flow.Action(sf.SinkActionFor(false, true)),
 	}
 	switch *modeName {
 	case "strict":
@@ -210,7 +219,7 @@ func main() {
 			}
 			totalCalls++
 			res := effects.Extract(ec, opts)
-			out := st.Step(res, cfg)
+			out := st.Step(res, c.command, cfg)
 			if out.Action == flow.ActionAllow || len(out.Hits) == 0 {
 				continue
 			}
