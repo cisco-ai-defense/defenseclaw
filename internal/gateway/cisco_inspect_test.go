@@ -96,6 +96,52 @@ func TestCiscoFindingCatalogCoversKnownRules(t *testing.T) {
 	}
 }
 
+func TestNormalizeCiscoResponsePreservesDistinctCustomRuleNames(t *testing.T) {
+	verdict := normalizeCiscoResponse(map[string]interface{}{
+		"action": "block",
+		"rules": []interface{}{
+			map[string]interface{}{"classification": "CUSTOM_POLICY_VIOLATION", "rule_name": "Limit JIRA actions"},
+			map[string]interface{}{"classification": "CUSTOM_POLICY_VIOLATION", "rule_name": "Require ticket approval"},
+			map[string]interface{}{"classification": "PII", "rule_name": "PII Detection"},
+		},
+		"classifications": []interface{}{"CUSTOM_POLICY_VIOLATION", "PII"},
+	})
+
+	if verdict == nil || len(verdict.Findings) != 3 || len(verdict.findingNames) != 3 {
+		t.Fatalf("verdict=%+v names=%v, want three aligned findings", verdict, verdict.findingNames)
+	}
+	if !strings.HasPrefix(verdict.Findings[0], ciscoCustomFindingPrefix) ||
+		!strings.HasPrefix(verdict.Findings[1], ciscoCustomFindingPrefix) ||
+		verdict.Findings[0] == verdict.Findings[1] {
+		t.Fatalf("custom finding IDs=%v, want two distinct hashed identities", verdict.Findings[:2])
+	}
+	if verdict.Findings[2] != "CISCO-PII" ||
+		!reflect.DeepEqual(verdict.findingNames, []string{"Limit JIRA actions", "Require ticket approval", "PII Detection"}) {
+		t.Fatalf("findings=%v names=%v", verdict.Findings, verdict.findingNames)
+	}
+	for _, id := range verdict.Findings {
+		if id == ciscoUnknownFindingID {
+			t.Fatalf("concrete custom response retained generic marker: %v", verdict.Findings)
+		}
+	}
+
+	id1, name1 := canonicalCiscoRuleFinding("  Limit   JIRA actions ")
+	id2, name2 := canonicalCiscoRuleFinding("Limit JIRA actions")
+	if id1 != id2 || name1 != name2 {
+		t.Fatalf("normalized custom identity mismatch: (%q,%q) vs (%q,%q)", id1, name1, id2, name2)
+	}
+}
+
+func TestNormalizeCiscoResponseKeepsMarkerWhenNoConcreteRuleExists(t *testing.T) {
+	verdict := normalizeCiscoResponse(map[string]interface{}{
+		"action": "block", "classifications": []interface{}{"CUSTOM_POLICY_VIOLATION"},
+	})
+	if !reflect.DeepEqual(verdict.Findings, []string{ciscoUnknownFindingID}) ||
+		!reflect.DeepEqual(verdict.findingNames, []string{"Custom Policy Violation"}) {
+		t.Fatalf("findings=%v names=%v", verdict.Findings, verdict.findingNames)
+	}
+}
+
 func TestRecordCiscoInspectV8PreservesCorrelationAndCanonicalDimensions(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	ctx, spanContext := ciscoCorrelatedContext(t)

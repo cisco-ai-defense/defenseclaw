@@ -41,6 +41,37 @@ type hookEvaluationContext struct {
 	// RuleIDs are the top detection rule_ids that drove this
 	// evaluation, capped so SIEM queries don't explode.
 	RuleIDs []string
+	// RuleNames are bounded display labels index-aligned with RuleIDs.
+	RuleNames []string
+}
+
+func topRuleIDsAndNames(findings []scanner.InspectFinding, n int) ([]string, []string) {
+	if n <= 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, n)
+	ids := make([]string, 0, n)
+	names := make([]string, 0, n)
+	for i := range findings {
+		id := strings.TrimSpace(findings[i].RuleID)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		name := strings.TrimSpace(findings[i].Title)
+		if name == "" {
+			name = id
+		}
+		ids = append(ids, id)
+		names = append(names, name)
+		if len(ids) == n {
+			break
+		}
+	}
+	return ids, names
 }
 
 // emitHookRuleFindings fans the verdict's DetailedFindings through the audit
@@ -126,10 +157,12 @@ func (a *APIServer) emitInspectVerdictFindings(
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
 		return hookEvaluationContext{}
 	}
+	ruleIDs, ruleNames := topRuleIDsAndNames(inspectFindings, 8)
 	return hookEvaluationContext{
 		EvaluationID: evalID,
 		ScanID:       scanID,
-		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
+		RuleIDs:      ruleIDs,
+		RuleNames:    ruleNames,
 	}
 }
 

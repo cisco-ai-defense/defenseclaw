@@ -585,6 +585,7 @@ type HookDecisionPayload struct {
 	Reason       string   `json:"reason,omitempty"`
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
+	RuleNames    []string `json:"rule_names,omitempty"`
 }
 
 // Finding matches the shape guardrail scanners emit. Keep the field

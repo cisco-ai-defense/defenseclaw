@@ -114,7 +114,8 @@ type claudeCodeHookResponse struct {
 	// RuleIDs are the top detection rule_ids that drove this
 	// verdict (capped at 8). Lets operators correlate a block
 	// without joining against scan_findings. Additive.
-	RuleIDs []string `json:"rule_ids,omitempty"`
+	RuleIDs   []string `json:"rule_ids,omitempty"`
+	RuleNames []string `json:"-"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
@@ -400,6 +401,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// both see them without a second pass.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
+	resp.RuleNames = hookResponseRuleNames(resp.RuleIDs, evalCtx)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"

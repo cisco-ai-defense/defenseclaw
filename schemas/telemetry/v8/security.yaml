@@ -486,6 +486,25 @@ attributes:
       max_items: 8
     notes: at most eight registered IDs
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.guardrail.rule_names
+  type: string[]
+  brief: Bounded display names aligned with matched rule IDs
+  examples:
+  - - Limit JIRA actions
+    - PII Detection
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 2048
+      max_item_utf8_bytes: 256
+      max_items: 8
+    notes: Index-aligned with defenseclaw.guardrail.rule_ids; display only, never an identity key
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.guardrail.finding_count
   type: int64
   brief: Finding count
@@ -2378,6 +2397,8 @@ groups:
   - ref: defenseclaw.evaluation.id
     requirement_level: recommended
   - ref: defenseclaw.guardrail.rule_ids
+    requirement_level: recommended
+  - ref: defenseclaw.guardrail.rule_names
     requirement_level: recommended
   - ref: defenseclaw.guardrail.judge_fallback
     requirement_level: recommended
