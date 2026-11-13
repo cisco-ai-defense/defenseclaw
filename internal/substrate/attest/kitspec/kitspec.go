@@ -187,6 +187,19 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	for _, d := range dl {
 		spec.Files = append(spec.Files, attest.LayerFile{Path: d, Mode: 0o755, Dir: true})
 	}
+	// The folders the overlay names: the image user's (UserDirs, e.g. the tool
+	// folders under the root-owned XDG config home of Devin) and root's
+	// (RootDirs, e.g. ~/.gemini and ~/.gemini/config of Antigravity, GAP-0117,
+	// and the XDG config home, GAP-0136). kitgen applies the same in its
+	// Dockerfile; without them the template build refused Antigravity (its
+	// hooks.json sat in a user-owned folder) and gave Devin no tool folders.
+	// A root folder wins over a user folder of the same path, as in kitgen.
+	for _, d := range ov.UserDirs {
+		spec.Files = append(spec.Files, attest.LayerFile{Path: d, Mode: 0o755, UID: o.UID, GID: o.GID, Dir: true})
+	}
+	for _, d := range ov.RootDirs {
+		spec.Files = append(spec.Files, attest.LayerFile{Path: d, Mode: 0o755, Dir: true})
+	}
 	for _, d := range []struct {
 		p    string
 		mode int64

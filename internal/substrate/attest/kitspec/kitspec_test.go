@@ -121,3 +121,36 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 		t.Fatal("missing binaries accepted")
 	}
 }
+
+// GAP-0117 on the template path: Antigravity's hooks.json registration lives in
+// ~/.gemini/config, which must be root-owned, and Devin's tool folders under
+// its root-owned XDG config home belong to the image user.
+func TestSpecOverlayFolders(t *testing.T) {
+	owner := func(files []attest.LayerFile, dir string) (uid int, found bool) {
+		for i := len(files) - 1; i >= 0; i-- {
+			if files[i].Dir && files[i].Path == dir {
+				return files[i].UID, true
+			}
+		}
+		return 0, false
+	}
+	spec, _, _, err := Spec(Options{Connector: "antigravity", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{Home + "/.gemini", Home + "/.gemini/config"} {
+		if uid, ok := owner(spec.Files, d); !ok || uid != 0 {
+			t.Errorf("antigravity %s: root-owned folder entry = %v, %v", d, uid, ok)
+		}
+	}
+	spec, _, _, err = Spec(Options{Connector: "devin", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid, ok := owner(spec.Files, kit.XDGConfigHome); !ok || uid != 0 {
+		t.Errorf("devin XDG config home: root-owned entry = %v, %v", uid, ok)
+	}
+	if uid, ok := owner(spec.Files, kit.XDGConfigHome+"/git"); !ok || uid != 1000 {
+		t.Errorf("devin %s/git: user-owned entry = %v, %v", kit.XDGConfigHome, uid, ok)
+	}
+}
