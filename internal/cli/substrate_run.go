@@ -275,6 +275,10 @@ func substrateFirst(v ...string) string {
 func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSession, t substrateRunTarget, f *substrateRunFlags, req api.CreateRequest, project string) (a api.Actor, err error) {
 	w := cmd.ErrOrStderr()
 	req.Profile, req.Template, req.Connector = t.profile, t.template, t.connName
+	// Substrate's egress caches an actor's identity token by name, so a new
+	// actor that reuses a name is refused until the old token expires
+	// (GAP-0133). Every actor gets a name nobody had before.
+	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
 	if f.clone != "" {
 		req.Workspace = api.Workspace{Clone: f.clone, Ref: f.ref}
@@ -559,6 +563,39 @@ func writeSubstrateJSONCompact(w io.Writer, v any) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s\n", b)
+	_, err = fmt.Fprintf(w, "%s\n", safetext.JSON(b))
 	return err
+}
+
+// uniqueSubstrateActorName returns label (or the agent's command when the
+// person gave none) with a random suffix. The launcher never reuses a name:
+// the label is only the readable part, and the full name is what list, connect
+// and delete show. The result is a DNS label of at most 63 characters.
+func uniqueSubstrateActorName(label, agent string) string {
+	clean := func(s string) string {
+		var b strings.Builder
+		dash := false
+		for _, r := range strings.ToLower(s) {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				b.WriteRune(r)
+				dash = false
+			case !dash && b.Len() > 0:
+				b.WriteByte('-')
+				dash = true
+			}
+		}
+		return strings.Trim(b.String(), "-")
+	}
+	base := clean(label)
+	if base == "" {
+		base = clean(agent)
+	}
+	if base == "" {
+		base = "agent"
+	}
+	if len(base) > 40 {
+		base = strings.Trim(base[:40], "-")
+	}
+	return base + "-" + newSubstrateID(4)
 }

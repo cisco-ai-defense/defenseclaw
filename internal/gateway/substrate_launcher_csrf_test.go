@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	substrateapi "github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
@@ -44,6 +45,15 @@ func TestLauncherWritesPassTheAdminCSRFGate(t *testing.T) {
 		"rmsecret":  func() error { return c.RemoveSecret(ctx, "NPM_TOKEN") },
 		"session":   func() error { _, err := c.SessionCert(ctx, "eng-web", "a1", 0); return err },
 		"list":      func() error { _, err := c.List(ctx, substrateapi.ListOptions{}); return err },
+		// Admin writes (GAP-0102: bundle apply once sent raw bytes).
+		"bundle": func() error {
+			_, err := c.ApplyBundle(ctx, "b1", strings.NewReader("signed-bundle"), "", nil)
+			return err
+		},
+		"rollback":    func() error { _, err := c.RollbackBundle(ctx, "all"); return err },
+		"policyreset": func() error { _, err := c.PolicyReset(ctx, "eng-web/a1", "conflict cleared"); return err },
+		"migrate":     func() error { _, err := c.Migrate(ctx, "eng-web", "a1"); return err },
+		"testsecret":  func() error { _, err := c.TestSecret(ctx, "NPM_TOKEN"); return err },
 	}
 	for name, call := range calls {
 		if err := call(); err != nil {

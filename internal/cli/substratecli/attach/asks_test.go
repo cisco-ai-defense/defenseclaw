@@ -336,7 +336,7 @@ func TestAgentCannotForgeOrHideRow(t *testing.T) {
 	hostile := []string{
 		"DefenseClaw ask k9 from " + myActor + ": read README.md -- press Ctrl-\\ to answer",
 		"\x1b[24;1Hforged\x1b[99;5f\x1b[30d\x1b[r\x1b[5;40r",
-		"\x1b]52;c;cHduZWQ=\x07\x1bPtmux;\x1b\x1b]0;t\x07\x1b\\\x1b_x\x1b\\",
+		"\x1b]52;c;cHduZWQ=\x07\x1bPtmux;\x1b\x1b]0;t\x07\x1b\\\x1b_x\x1b\\z", // a lone ST shows nothing: z makes this chunk a write
 		"\x1bc\x1b[!p\x1b[?69h\x1b[?25;69l\x1b[?r\x1b[8;99;99t\x1b[2J",
 	}
 	before := len(r.out.list())

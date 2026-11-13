@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
@@ -218,7 +219,7 @@ func failure(what string, res *osw.ExecResult) error {
 	if i := strings.LastIndex(strings.TrimSpace(reason), "\n"); i >= 0 {
 		reason = strings.TrimSpace(reason)[i+1:]
 	}
-	return fmt.Errorf("%s failed in the actor (exit %d): %s", what, res.ExitCode, reason)
+	return fmt.Errorf("%s failed in the actor (exit %d): %s", what, res.ExitCode, safetext.Line(reason))
 }
 
 // Checkpoint snapshots the project folder in the actor (every file that
@@ -292,5 +293,5 @@ func Undo(ctx context.Context, opts UndoOptions) (*UndoInfo, error) {
 	if m["restored"] == "" {
 		return nil, fmt.Errorf("workspace: the actor answered the undo with %q", strings.TrimSpace(string(res.Stdout)))
 	}
-	return &UndoInfo{ID: m["restored"], Commit: m["commit"]}, nil
+	return &UndoInfo{ID: safetext.Line(m["restored"]), Commit: safetext.Line(m["commit"])}, nil
 }
