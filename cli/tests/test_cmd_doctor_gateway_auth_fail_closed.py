@@ -132,13 +132,9 @@ def test_authenticated_runtime_matcher_accepts_exact_integer_pid(tmp_path) -> No
     assert detail == ""
 
 
-@pytest.mark.parametrize(
-    "stale_env_name",
-    [
-        "DEFENSECLAW_GATEWAY_TOKEN",
-        "OPENCLAW_GATEWAY_TOKEN",
-    ],
-)
+# OPENCLAW_GATEWAY_TOKEN is not a CLI token source any more (R-TOK): an export
+# of it cannot make normal CLI commands disagree with the daemon.
+@pytest.mark.parametrize("stale_env_name", ["DEFENSECLAW_GATEWAY_TOKEN"])
 def test_doctor_fails_actionably_when_cli_env_token_differs_from_daemon_dotenv(
     tmp_path,
     monkeypatch,
