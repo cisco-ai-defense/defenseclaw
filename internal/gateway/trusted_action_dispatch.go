@@ -353,6 +353,19 @@ func dispatchTrustedAction(
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
+	// Effect-model rule lane (S7). Compute once at the outermost dispatch.
+	// In ON the verdict participates; in shadow/off nothing is appended, so
+	// the live answer is unchanged. The benchmark measures shadow through
+	// EvaluateDeterministicAction, not here.
+	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
+		parent = octx
+		if mode := effectsRulesModeFor(); mode == effectRulesOn {
+			effectRequest := request
+			defer func() {
+				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode), mode)...)
+			}()
+		}
+	}
 	if ManagedEnterpriseActive() {
 		return nil
 	}
