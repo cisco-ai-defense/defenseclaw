@@ -16,7 +16,8 @@ import (
 )
 
 // DefenseClawDecisionModelKeyEnv is the canonical environment variable for
-// the decision model's bearer token, the way DEFENSECLAW_LLM_KEY is for the
+// the decision model's token (a bearer token, or the x-goog-api-key of
+// protocol gemini-decisions), the way DEFENSECLAW_LLM_KEY is for the
 // unified LLM. Local decision-model servers need no key.
 const DefenseClawDecisionModelKeyEnv = "DEFENSECLAW_DECISION_MODEL_KEY"
 
@@ -34,6 +35,15 @@ const (
 	DecisionModelEscalate = "escalate"
 	// DecisionModelDecide lets a confident block stand without the judge.
 	DecisionModelDecide = "decide"
+
+	// DecisionModelProtocolSystemOne is the System One wire protocol:
+	// POST {model, state, questions} with a Bearer token. The default.
+	DecisionModelProtocolSystemOne = "system-one"
+	// DecisionModelProtocolGeminiDecisions is Google's Decisions API
+	// (gemini-decision-1, POST .../v1beta/decisions): the same questions and
+	// answers, but the state goes in a labeled "input" string and the key in
+	// an x-goog-api-key header.
+	DecisionModelProtocolGeminiDecisions = "gemini-decisions"
 )
 
 // DecisionModelConfig is the unified decision model: a small, fast model
@@ -55,6 +65,10 @@ type DecisionModelConfig struct {
 	// http://127.0.0.1:8791/v1/systemone. https anywhere; plain http only to
 	// a loopback host.
 	BaseURL string `mapstructure:"base_url" yaml:"base_url,omitempty"`
+	// Protocol is the endpoint's wire protocol: system-one (the default:
+	// {model, state, questions}, Bearer token) or gemini-decisions (Google's
+	// Decisions API: {model, input, questions}, x-goog-api-key header).
+	Protocol string `mapstructure:"protocol" yaml:"protocol,omitempty"`
 	// APIKeyEnv names the variable that holds the bearer token. Empty uses
 	// DEFENSECLAW_DECISION_MODEL_KEY; an unset variable sends no token.
 	APIKeyEnv string `mapstructure:"api_key_env" yaml:"api_key_env,omitempty"`
@@ -139,6 +153,14 @@ func (d DecisionModelConfig) EffectiveOnConfidentBlock() string {
 	return DecisionModelEscalate
 }
 
+// EffectiveProtocol returns Protocol or system-one.
+func (d DecisionModelConfig) EffectiveProtocol() string {
+	if v := strings.ToLower(strings.TrimSpace(d.Protocol)); v != "" {
+		return v
+	}
+	return DecisionModelProtocolSystemOne
+}
+
 // EffectiveAPIKeyEnv returns APIKeyEnv or DEFENSECLAW_DECISION_MODEL_KEY.
 func (d DecisionModelConfig) EffectiveAPIKeyEnv() string {
 	if v := strings.TrimSpace(d.APIKeyEnv); v != "" {
@@ -166,6 +188,11 @@ func (d DecisionModelConfig) Validate() error {
 	case DecisionModelEscalate, DecisionModelDecide:
 	default:
 		return fmt.Errorf("on_confident_block must be %q or %q, got %q", DecisionModelEscalate, DecisionModelDecide, d.OnConfidentBlock)
+	}
+	switch d.EffectiveProtocol() {
+	case DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions:
+	default:
+		return fmt.Errorf("protocol must be %q or %q, got %q", DecisionModelProtocolSystemOne, DecisionModelProtocolGeminiDecisions, d.Protocol)
 	}
 	if strings.TrimSpace(d.BaseURL) != "" {
 		if err := ValidateDecisionModelURL(d.BaseURL); err != nil {

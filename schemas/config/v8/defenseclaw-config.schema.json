@@ -456,6 +456,10 @@
           "type": "string",
           "maxLength": 8192
         },
+        "protocol": {
+          "type": "string",
+          "enum": ["", "system-one", "gemini-decisions"]
+        },
         "api_key_env": {
           "$ref": "#/$defs/envNameOrEmpty"
         },

@@ -27,8 +27,11 @@ import (
 
 // The decision model is the guardrail's fast first pass in front of the
 // LLM judge on tool calls (GitHub issue #1389). It speaks the System One
-// protocol: POST {model, state, questions}; each answer carries calibrated
-// probabilities. Two-sided routing, as the System One benchmark measured
+// protocol (POST {model, state, questions}, a Bearer token) or, with
+// decision_model.protocol gemini-decisions, Google's Decisions API (POST
+// {model, input, questions}, the state as a labeled string, an
+// x-goog-api-key header); the questions and answers are the same, and each
+// answer carries calibrated probabilities. Two-sided routing, as the System One benchmark measured
 // it: a risk (1 - P(allow)) at or below allow_threshold is a confident
 // allow and skips the judge; a "block" answer at or above block_threshold
 // is a confident block; everything between goes to the judge. Rules run
@@ -114,6 +117,7 @@ type decisionResult struct {
 type decisionModel struct {
 	model        string
 	endpoint     string
+	protocol     string
 	apiKey       string
 	timeout      time.Duration
 	allowAt      float64
@@ -165,6 +169,7 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 	return &decisionModel{
 		model:        strings.TrimSpace(dm.Model),
 		endpoint:     strings.TrimSpace(dm.BaseURL),
+		protocol:     dm.EffectiveProtocol(),
 		apiKey:       key,
 		timeout:      timeout,
 		allowAt:      dm.EffectiveAllowThreshold(),
@@ -174,7 +179,7 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 			Transport: transport,
 			Timeout:   timeout,
 			// Never follow a redirect: it would carry the tool call and the
-			// bearer token to a host the operator did not configure.
+			// token to a host the operator did not configure.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
@@ -287,8 +292,13 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 	if err != nil {
 		res.failure = gatewaylog.JudgeFailureProvider
 		var perr decisionParseError
-		if errors.As(err, &perr) {
+		var rerr decisionRefusalError
+		switch {
+		case errors.As(err, &perr):
 			res.failure = gatewaylog.JudgeFailureOutputParse
+		case errors.As(err, &rerr):
+			// The model answered, but with no usable answer.
+			res.failure = gatewaylog.JudgeFailureEmptyResponse
 		}
 		res.failureCause = boundedJudgeHealthValue(err.Error(), 240)
 		return res
@@ -311,7 +321,7 @@ func (e decisionParseError) Error() string { return e.msg }
 func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, err error) {
 	usage := beginGatewayCallUsage(ctx, modelusage.RoleDecisionModel, "decision_model", d.model)
 	defer func() { usage.End(err) }()
-	body, err := json.Marshal(map[string]any{"model": d.model, "state": state, "questions": decisionModelQuestions})
+	body, err := decisionWireBody(d.protocol, d.model, state, decisionModelQuestions)
 	if err != nil {
 		return "", nil, decisionParseError{"encode request: " + err.Error()}
 	}
@@ -320,9 +330,7 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (cho
 		return "", nil, errors.New("decision model request could not be built")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if d.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+d.apiKey)
-	}
+	setDecisionWireAuth(req, d.protocol, d.apiKey)
 	resp, err := d.client.Do(req)
 	if err == nil {
 		usage.UpstreamHeader(resp.StatusCode, nil)
@@ -336,12 +344,97 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (cho
 		return "", nil, fmt.Errorf("decision model read failed: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("decision model returned HTTP %d", resp.StatusCode)
+		return "", nil, decisionHTTPError(d.protocol, resp.StatusCode, raw)
 	}
 	if len(raw) > maxDecisionModelResponseBytes {
 		return "", nil, decisionParseError{"decision model answer exceeds 64 KiB"}
 	}
 	return parseDecisionModelAnswer(raw)
+}
+
+// decisionModelInputLabel opens the input of a gemini-decisions request:
+// the API has no state field, so the state travels as text, marked as data.
+const decisionModelInputLabel = "STATE (untrusted JSON):\n"
+
+// decisionWireBody encodes one request in the endpoint's protocol. The
+// System One body is {model, state, questions}; the gemini-decisions body
+// is {model, input, questions}, where input is decisionModelInput(state).
+// Both are deterministic (encoding/json sorts map keys and keeps struct
+// field order), so the same call always sends the same bytes.
+func decisionWireBody(protocol, model string, state any, questions map[string]any) ([]byte, error) {
+	if protocol != config.DecisionModelProtocolGeminiDecisions {
+		return json.Marshal(map[string]any{"model": model, "state": state, "questions": questions})
+	}
+	input, err := decisionModelInput(state)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{"model": model, "input": input, "questions": questions})
+}
+
+// decisionModelInput renders state as the labeled input text: one-space
+// indented JSON, without HTML escaping, so a shell command reads as the
+// agent wrote it (2>&1, not 2\u003e\u00261).
+func decisionModelInput(state any) (string, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", " ")
+	if err := enc.Encode(state); err != nil {
+		return "", err
+	}
+	return decisionModelInputLabel + strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
+// setDecisionWireAuth sets the token header of the protocol: a Bearer
+// token for System One, x-goog-api-key for gemini-decisions. No token, no
+// header (a local server needs none).
+func setDecisionWireAuth(req *http.Request, protocol, key string) {
+	if key == "" {
+		return
+	}
+	if protocol == config.DecisionModelProtocolGeminiDecisions {
+		req.Header.Set("x-goog-api-key", key)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+}
+
+// decisionRefusalCodes are the error codes the Decisions API returns, with
+// HTTP 400, when its own safety filters decline the input.
+var decisionRefusalCodes = map[string]bool{
+	"safety": true, "prohibited_content": true, "blocklist": true, "image_safety": true, "content_blocked": true,
+}
+
+// decisionRefusalError is a model that declined to answer. It is not a
+// block and not an allow: the call escalates as for any unusable answer.
+type decisionRefusalError struct{ code string }
+
+func (e decisionRefusalError) Error() string {
+	return "decision model declined the input (" + e.code + ")"
+}
+
+// decisionHTTPError turns a non-200 answer into an error. A Decisions API
+// safety refusal (HTTP 400 with a known error code) is a decisionRefusalError;
+// anything else keeps only the status, never the body.
+func decisionHTTPError(protocol string, status int, raw []byte) error {
+	if protocol == config.DecisionModelProtocolGeminiDecisions && status == http.StatusBadRequest {
+		var body struct {
+			Error struct {
+				Code json.RawMessage `json:"code"`
+			} `json:"error"`
+		}
+		var code string
+		if json.Unmarshal(raw, &body) == nil && json.Unmarshal(body.Error.Code, &code) == nil {
+			if code = strings.ToLower(strings.TrimSpace(code)); decisionRefusalCodes[code] {
+				return decisionRefusalError{code}
+			}
+		}
+	}
+	if status == http.StatusTooManyRequests {
+		return errors.New("decision model returned HTTP 429 (rate limited)")
+	}
+	return fmt.Errorf("decision model returned HTTP %d", status)
 }
 
 // parseDecisionModelAnswer reads the disposition answer. Anything out of

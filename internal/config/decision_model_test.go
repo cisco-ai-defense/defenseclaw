@@ -35,7 +35,7 @@ func TestDecisionModelDefaultsOff(t *testing.T) {
 		}
 		if d.EffectiveAllowThreshold() != 0.30 || d.EffectiveBlockThreshold() != 0.75 ||
 			d.EffectiveTimeoutSeconds() != 1 || d.EffectiveOnConfidentBlock() != DecisionModelEscalate ||
-			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv {
+			d.EffectiveAPIKeyEnv() != DefenseClawDecisionModelKeyEnv || d.EffectiveProtocol() != DecisionModelProtocolSystemOne {
 			t.Fatalf("v%d: effective defaults = %+v", version, d)
 		}
 	}
@@ -70,6 +70,7 @@ func TestDecisionModelLoadRefusesBadBlock(t *testing.T) {
 		"inverted":        "decision_model:\n  allow_threshold: 0.8\n  block_threshold: 0.5\n",
 		"bad mode":        "decision_model:\n  on_confident_block: maybe\n",
 		"url credentials": "decision_model:\n  base_url: https://user:pw@dm.example/v1/systemone\n",
+		"bad protocol":    "decision_model:\n  protocol: openai\n",
 	}
 	for name, section := range cases {
 		if _, err := LoadFromFile(writeDecisionModelConfig(t, 9, section)); err == nil {
@@ -87,6 +88,38 @@ func TestDecisionModelSchema(t *testing.T) {
 	bad := "config_version: 9\ndecision_model:\n  api_key: literal\n"
 	if err := ValidateV8SchemaBytes("config.yaml", []byte(bad)); err == nil {
 		t.Fatal("schema accepted decision_model.api_key")
+	}
+}
+
+// TestDecisionModelProtocol: protocol is a closed set, case-folded, and an
+// existing block without it keeps speaking System One.
+func TestDecisionModelProtocol(t *testing.T) {
+	cfg, err := LoadFromFile(writeDecisionModelConfig(t, 9, `decision_model:
+  enabled: true
+  model: gemini-decision-1
+  base_url: https://generativelanguage.googleapis.com/v1beta/decisions
+  protocol: gemini-decisions
+  api_key_env: GEMINI_API_KEY
+`))
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if got := cfg.DecisionModel.EffectiveProtocol(); got != DecisionModelProtocolGeminiDecisions {
+		t.Fatalf("protocol = %q", got)
+	}
+	for _, p := range []string{"", "system-one", " SYSTEM-ONE ", "gemini-decisions"} {
+		if err := (DecisionModelConfig{Protocol: p}).Validate(); err != nil {
+			t.Errorf("protocol %q refused: %v", p, err)
+		}
+	}
+	for _, p := range []string{"gemini", "openai", "systemone"} {
+		if err := (DecisionModelConfig{Protocol: p}).Validate(); err == nil {
+			t.Errorf("protocol %q accepted", p)
+		}
+	}
+	good := "config_version: 9\ndecision_model:\n  protocol: gemini-decisions\n"
+	if err := ValidateV8SchemaBytes("config.yaml", []byte(good)); err != nil {
+		t.Fatalf("schema refused protocol: %v", err)
 	}
 }
 
