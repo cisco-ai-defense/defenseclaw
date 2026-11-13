@@ -1719,7 +1719,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		case hookSrv != nil:
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; the hook socket stays up while the API bind is retried: %v\n", a.addr, lnErr)
 		case isAPIPortHeldByAnotherAccount(lnErr):
-			fmt.Fprintf(os.Stderr, "[sidecar-api] another account holds the port of %s on its wildcard address; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
+			fmt.Fprintf(os.Stderr, "[sidecar-api] the bind of %s is refused (another account listens on the wildcard address, or the port is in an excluded range); hooks fail closed while the API bind is retried: %v\n", a.addr, lnErr)
 		default:
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %s is held by another process; hooks fail closed while the API bind is retried until the port is released: %v\n", a.addr, lnErr)
 		}

@@ -71,7 +71,7 @@ func procNetIP(h string) net.IP {
 func apiPortHolder(listeners []procNetListener, ip net.IP, port, self int) (int, bool) {
 	uid, found := 0, false
 	for _, l := range listeners {
-		if l.port != port || (!l.ip.Equal(ip) && !l.ip.IsUnspecified() && !ip.IsUnspecified()) {
+		if !apiBindBlockedBy(l.ip, l.port, ip, port) {
 			continue
 		}
 		if l.uid != self {
@@ -80,6 +80,13 @@ func apiPortHolder(listeners []procNetListener, ip net.IP, port, self int) (int,
 		uid, found = l.uid, true
 	}
 	return uid, found
+}
+
+// apiBindBlockedBy reports whether a listener on lip:lport blocks a bind of
+// ip:port: the same port, and the same address or a wildcard on either side
+// (net.IP.Equal also matches the IPv4-mapped form).
+func apiBindBlockedBy(lip net.IP, lport int, ip net.IP, port int) bool {
+	return lport == port && (lip.Equal(ip) || lip.IsUnspecified() || ip.IsUnspecified())
 }
 
 // apiBindIP is the address part of a bind address (localhost is

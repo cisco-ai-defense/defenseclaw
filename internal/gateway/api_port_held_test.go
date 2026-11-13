@@ -46,14 +46,21 @@ func TestListenWithRetryCallsOnHeldAtEveryConflict(t *testing.T) {
 	}
 }
 
-// OSS Windows: WSAEACCES proves another account holds the wildcard port
-// (it names none). The mark is written without a uid, audited, and the
-// route key is replaced once the gateway owns the port (S1 DESIGN 16.2).
-func TestNoteAPIPortHolderAccessDeniedMarksAnotherAccount(t *testing.T) {
-	errForeign := errors.New("bind: forbidden by its access permissions")
-	prev := apiPortHeldByAnotherAccount
-	apiPortHeldByAnotherAccount = func(err error) bool { return errors.Is(err, errForeign) }
-	t.Cleanup(func() { apiPortHeldByAnotherAccount = prev })
+func useAPIPortHolder(t *testing.T, info apiPortHolderInfo) {
+	t.Helper()
+	prev := apiPortHolderLookup
+	apiPortHolderLookup = func(string) (apiPortHolderInfo, error) { return info, nil }
+	t.Cleanup(func() { apiPortHolderLookup = prev })
+}
+
+// OSS Windows: the listener table names another account (its SID when the
+// token is readable) for a same-address or a wildcard listener alike. The
+// mark is written with the SID, audited, and the route key is replaced
+// once the gateway owns the port (S1 DESIGN 16.2, REVIEW-code-delta-d962
+// P2-1).
+func TestNoteAPIPortHolderMarksAnotherAccountListener(t *testing.T) {
+	errForeign := errors.New("bind: only one usage of each socket address")
+	useAPIPortHolder(t, apiPortHolderInfo{Found: true, Other: true, SID: "S-1-5-21-1-2-3-1001"})
 	store, logger := testStoreAndV8Logger(t)
 	dir := t.TempDir()
 	cfg := &config.Config{DataDir: dir}
@@ -76,7 +83,7 @@ func TestNoteAPIPortHolderAccessDeniedMarksAnotherAccount(t *testing.T) {
 		t.Fatalf("held-port mark: %v", err)
 	}
 	var mark routePortHeld
-	if json.Unmarshal(raw, &mark) != nil || mark.UID != nil || mark.Addr != "127.0.0.1:18970" {
+	if json.Unmarshal(raw, &mark) != nil || mark.UID != nil || mark.SID != "S-1-5-21-1-2-3-1001" || mark.Addr != "127.0.0.1:18970" {
 		t.Fatalf("mark: %s", raw)
 	}
 	if events, err := store.ListEvents(10); err != nil || len(events) != 1 || events[0].Severity != "HIGH" ||
@@ -91,11 +98,42 @@ func TestNoteAPIPortHolderAccessDeniedMarksAnotherAccount(t *testing.T) {
 	// Managed Windows rotates its route epoch instead: no mark.
 	b := &APIServer{addr: "127.0.0.1:18970", scannerCfg: &config.Config{DataDir: t.TempDir(), DeploymentMode: "managed_enterprise"}}
 	b.scannerCfg.Enterprise.Profile = "standalone"
-	if !b.noteAPIPortHolder(errForeign) {
+	if !b.noteAPIPortHolder() {
 		t.Fatal("managed: the holder is settled")
 	}
 	if _, err := os.Stat(filepath.Join(b.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
 		t.Fatalf("managed: no OSS mark: %v", err)
+	}
+}
+
+// A refused bind with no listener in the table is a Windows excluded port
+// range (or a holder already gone): no mark, no "another account" audit,
+// and the next conflict looks again (REVIEW-code-delta-d962 P2-2). The
+// gateway's own listener (a restart) is the same.
+func TestNoteAPIPortHolderNoListenerOrOwnAccountIsNoHijack(t *testing.T) {
+	for name, info := range map[string]apiPortHolderInfo{
+		"reserved range": {},
+		"own account":    {Found: true, SID: "S-1-5-21-1-2-3-1000"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			useAPIPortHolder(t, info)
+			store, logger := testStoreAndV8Logger(t)
+			cfg := &config.Config{DataDir: t.TempDir()}
+			cfg.Routing.Enabled = true
+			cfg.Routing.RouteOnly.Connectors = []string{"claudecode"}
+			a := &APIServer{addr: "127.0.0.1:18970", scannerCfg: cfg, logger: logger}
+			a.noteHeldAPIPort(syscall.Errno(10013))
+			a.noteHeldAPIPort(syscall.Errno(10013))
+			if a.apiPortHolderNoted.Load() {
+				t.Fatal("not settled: the next conflict looks again")
+			}
+			if _, err := os.Stat(filepath.Join(a.configDataDir(), "hooks", routePortHeldName)); !os.IsNotExist(err) {
+				t.Fatalf("no mark: %v", err)
+			}
+			if events, err := store.ListEvents(10); err != nil || len(events) != 0 {
+				t.Fatalf("no audit: %+v %v", events, err)
+			}
+		})
 	}
 }
 

@@ -294,10 +294,13 @@ def test_held_api_port_and_shared_mac(tmp_path: Path) -> None:
     rows = _by_label(dro.route_only_rows(cfg, None, platform="linux"))
     held = rows["Route-only API port"]
     assert held.tag == "fail" and "uid 4242" in held.detail and 'sudo ss -ltnp "sport = :18970"' in held.fix
-    # Windows names no uid (the bind error proves another account only).
+    # Windows names the SID when the gateway could read the holder token, else no account.
     mark.write_text(json.dumps({"addr": "127.0.0.1:18970"}), encoding="utf-8")
     held = _by_label(dro.route_only_rows(cfg, None, platform="win32"))["Route-only API port"]
     assert "another account held" in held.detail and "uid" not in held.detail and "Get-NetTCPConnection" in held.fix
+    mark.write_text(json.dumps({"addr": "127.0.0.1:18970", "sid": "S-1-5-21-1-2-3-1001"}), encoding="utf-8")
+    held = _by_label(dro.route_only_rows(cfg, None, platform="win32"))["Route-only API port"]
+    assert "another account (S-1-5-21-1-2-3-1001) held" in held.detail
     rows = _by_label(dro.route_only_rows(cfg, None, platform="darwin", accounts=["alice"]))
     assert "Route-only on a shared Mac" not in rows
     rows = _by_label(dro.route_only_rows(cfg, None, platform="darwin", accounts=["alice", "bob"]))

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -29,27 +30,40 @@ import (
 const routePortHeldName = ".route-port-held.json"
 
 type routePortHeld struct {
-	// UID is the account that held the port, from /proc/net on Linux. It
-	// is absent on Windows, where the bind error proves another account
-	// but does not name it.
-	UID  *int      `json:"uid,omitempty"`
+	// UID is the account that held the port, from /proc/net on Linux.
+	UID *int `json:"uid,omitempty"`
+	// SID is the account that held the port on Windows, when this account
+	// could read the holder process token (absent otherwise).
+	SID  string    `json:"sid,omitempty"`
 	Addr string    `json:"addr"`
 	At   time.Time `json:"at"`
 }
 
 func (m routePortHeld) holder() string {
-	if m.UID == nil {
-		return "another account"
+	switch {
+	case m.UID != nil:
+		return fmt.Sprintf("another account (uid %d)", *m.UID)
+	case m.SID != "":
+		return fmt.Sprintf("another account (%s)", m.SID)
 	}
-	return fmt.Sprintf("another account (uid %d)", *m.UID)
+	return "another account"
 }
 
-// apiPortSelfUID is the account this gateway runs as; replaceable in tests.
-var apiPortSelfUID = os.Getuid
+// apiPortHolderInfo is the listener that blocks the API bind, read from the
+// socket table of the OS (apiPortHolderOf: /proc/net on Linux, the owner TCP
+// listener table on Windows, nothing on macOS).
+type apiPortHolderInfo struct {
+	// Found: a listener blocks the bind address. On Windows no listener
+	// with a refused bind is a reserved (excluded) port range.
+	Found bool
+	// Other: that listener belongs to another account.
+	Other bool
+	UID   *int
+	SID   string
+}
 
-// apiPortHeldByAnotherAccount is isAPIPortHeldByAnotherAccount (Windows
-// WSAEACCES under another account wildcard listener); replaceable in tests.
-var apiPortHeldByAnotherAccount = isAPIPortHeldByAnotherAccount
+// apiPortHolderLookup is apiPortHolderOf; replaceable in tests.
+var apiPortHolderLookup = apiPortHolderOf
 
 // routeOnlyConnectorsOf lists the route-only connectors config.yaml routes.
 func routeOnlyConnectorsOf(cfg *config.Config) []string {
@@ -70,50 +84,48 @@ func ossRouteOnlyGateway(cfg *config.Config) bool {
 
 // noteHeldAPIPort is the onHeld of the API binds: it looks for the holder
 // at every bind conflict until one is noted (once per acquireAPIListener).
-func (a *APIServer) noteHeldAPIPort(bindErr error) {
+// The bind error is not used: on Windows neither WSAEADDRINUSE nor
+// WSAEACCES tells another account from this one or from a reserved port
+// range, so the socket table decides on every OS.
+func (a *APIServer) noteHeldAPIPort(error) {
 	if a.apiPortHolderNoted.Load() {
 		return
 	}
-	if a.noteAPIPortHolder(bindErr) {
+	if a.noteAPIPortHolder() {
 		a.apiPortHolderNoted.Store(true)
 	}
 }
 
 // noteAPIPortHolder runs at a bind of the API address that found it held
-// and reports whether the holder is settled. On Windows the bind error
-// proves another account (apiPortHeldByAnotherAccount; the account is not
-// named), on Linux /proc/net/tcp and tcp6 name its uid. No holder found, or
-// this account (its own gateway still exiting during a restart), returns
-// false so the next conflict looks again: another account can take the port
-// in the gap before the next attempt (S1 DESIGN 16.2, 17.1). Another
-// account is audited (gateway-degraded, HIGH) and named on stderr; with
-// route-only on an OSS gateway the mark is written. The route credential is
-// not rotated now: whoever holds the port would get the new one too. It is
-// replaced when this gateway owns the port again
+// and reports whether the holder is settled. The listener that blocks the
+// bind comes from the socket table (apiPortHolderLookup): /proc/net names
+// its uid on Linux, the owner TCP listener table its process (and SID) on
+// Windows, for a same-address (WSAEADDRINUSE) or a wildcard (WSAEACCES)
+// listener alike. No listener (a Windows excluded port range, or a holder
+// already gone) or this account (its own gateway still exiting during a
+// restart) returns false so the next conflict looks again: another account
+// can take the port in the gap before the next attempt (S1 DESIGN 16.2,
+// 17.1). Another account is audited (gateway-degraded, HIGH) and named on
+// stderr; with route-only on an OSS gateway the mark is written. The route
+// credential is not rotated now: whoever holds the port would get the new
+// one too. It is replaced when this gateway owns the port again
 // (rotateRouteKeyAfterHeldPort).
-func (a *APIServer) noteAPIPortHolder(bindErr error) bool {
+func (a *APIServer) noteAPIPortHolder() bool {
 	cfg := a.liveConfig()
-	held := routePortHeld{Addr: a.addr}
-	details := ""
-	if apiPortHeldByAnotherAccount(bindErr) {
-		if !ossRouteOnlyGateway(cfg) {
-			// Managed Windows starts a new route epoch instead (startRouteEpoch).
-			return true
-		}
-		details = fmt.Sprintf("api port %s held by another account (bind refused: access denied)", a.addr)
-	} else {
-		self := apiPortSelfUID()
-		uid, found, err := apiPortHolderUID(a.addr, self)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar-api] could not read which account holds %s: %v\n", a.addr, err)
-			return true
-		}
-		if !found || uid == self {
-			return false
-		}
-		held.UID = &uid
-		details = fmt.Sprintf("api port %s held by uid %d (gateway uid %d)", a.addr, uid, self)
+	if runtime.GOOS == "windows" && !ossRouteOnlyGateway(cfg) {
+		// Managed Windows starts a new route epoch instead (startRouteEpoch).
+		return true
 	}
+	h, err := apiPortHolderLookup(a.addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] could not read which account holds %s: %v\n", a.addr, err)
+		return true
+	}
+	if !h.Found || !h.Other {
+		return false
+	}
+	held := routePortHeld{Addr: a.addr, UID: h.UID, SID: h.SID}
+	details := fmt.Sprintf("api port %s held by %s", a.addr, held.holder())
 	routed := routeOnlyConnectorsOf(cfg)
 	fmt.Fprintf(os.Stderr, "[sidecar-api] WARNING: %s holds the API port of %s; while it does, it receives what agents and hooks send to this gateway\n", held.holder(), a.addr)
 	if len(routed) > 0 && ossRouteOnlyGateway(cfg) {

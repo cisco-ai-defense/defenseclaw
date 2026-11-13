@@ -20,14 +20,16 @@ var (
 )
 
 const (
+	tcpTableOwnerModuleListener    = 6 // TCP_TABLE_OWNER_MODULE_LISTENER
 	tcpTableOwnerModuleConnections = 7 // TCP_TABLE_OWNER_MODULE_CONNECTIONS
+	mibTCPStateListen              = 2 // MIB_TCP_STATE_LISTEN
 	afInet                         = 2
 	afInet6                        = 23
 )
 
-// readTCPOwnerTable returns the raw owner-module connection table of
-// family (rows carry the connection creation timestamp).
-func readTCPOwnerTable(family uint32) ([]byte, error) {
+// readTCPOwnerTable returns the raw owner-module table of family and class
+// (listeners or connections; rows carry the creation timestamp).
+func readTCPOwnerTable(family, class uint32) ([]byte, error) {
 	if err := procGetExtendedTCPTable.Find(); err != nil {
 		return nil, fmt.Errorf("peercred: GetExtendedTcpTable: %w", err)
 	}
@@ -39,7 +41,7 @@ func readTCPOwnerTable(family uint32) ([]byte, error) {
 			uintptr(unsafe.Pointer(&size)),
 			0, // unsorted
 			uintptr(family),
-			tcpTableOwnerModuleConnections,
+			uintptr(class),
 			0,
 		)
 		switch windows.Errno(ret) {
@@ -58,9 +60,14 @@ func readTCPOwnerTable(family uint32) ([]byte, error) {
 
 // tcpOwnerRows reads the IPv4 and IPv6 connection tables.
 func tcpOwnerRows() ([]tcpOwnerRow, error) {
+	return tcpOwnerTableRows(tcpTableOwnerModuleConnections)
+}
+
+// tcpOwnerTableRows reads the IPv4 and IPv6 owner-module tables of class.
+func tcpOwnerTableRows(class uint32) ([]tcpOwnerRow, error) {
 	var rows []tcpOwnerRow
 	for _, family := range []uint32{afInet, afInet6} {
-		buf, err := readTCPOwnerTable(family)
+		buf, err := readTCPOwnerTable(family, class)
 		if err != nil {
 			return nil, err
 		}
@@ -75,6 +82,59 @@ func tcpOwnerRows() ([]tcpOwnerRow, error) {
 		rows = append(rows, got...)
 	}
 	return rows, nil
+}
+
+// TCPListener is a listening TCP socket and the process that owns it.
+type TCPListener struct {
+	IP   net.IP
+	Port int
+	PID  uint32
+}
+
+// TCPListeners lists the IPv4 and IPv6 listeners on port with their owning
+// process (the held API port lookup of an OSS Windows gateway, S1 DESIGN
+// 16.2). The listener table is readable by any account.
+func TCPListeners(port int) ([]TCPListener, error) {
+	rows, err := tcpOwnerTableRows(tcpTableOwnerModuleListener)
+	if err != nil {
+		return nil, err
+	}
+	var out []TCPListener
+	for _, r := range rows {
+		if r.State == mibTCPStateListen && r.LocalPort == port {
+			out = append(out, TCPListener{IP: r.LocalIP, Port: r.LocalPort, PID: r.PID})
+		}
+	}
+	return out, nil
+}
+
+// ProcessSID is the token user SID of pid as this account can read it.
+// Another account's process, a service, a protected or an elevated process
+// is usually an error for a standard account.
+func ProcessSID(pid uint32) (string, error) {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return "", fmt.Errorf("peercred: open process %d: %w", pid, err)
+	}
+	p := windowsPeerProcess{handle: h}
+	defer p.Close()
+	id, err := p.Identity()
+	if err != nil {
+		return "", err
+	}
+	return id.SID, nil
+}
+
+// CurrentProcessSID is the token user SID of this process.
+func CurrentProcessSID() (string, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", fmt.Errorf("peercred: read this process token user: %w", err)
+	}
+	if user == nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
+		return "", errors.New("peercred: this process token has no valid user SID")
+	}
+	return user.User.Sid.String(), nil
 }
 
 // The owner-module table is readable by any account. Opening another
