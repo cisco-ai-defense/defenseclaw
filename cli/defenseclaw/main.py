@@ -288,7 +288,7 @@ def _is_audit_export(ctx: click.Context) -> bool:
         index = argv.index("audit")
     except ValueError:
         return False
-    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings", "compact"}
+    return index + 1 < len(argv) and argv[index + 1] in {"export", "findings", "compact", "rejected"}
 
 
 def _audit_logs_can_read_with_ide_scope_typo(ctx: click.Context, result: object) -> bool:

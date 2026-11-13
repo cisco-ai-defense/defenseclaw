@@ -128,6 +128,9 @@ type Runtime struct {
 	shutdownLossesCounted bool
 	carried               carriedShutdownLosses
 	localWriteLosses      *localWriteLossJournal
+	// rejected is the process-stable owner of the opt-in rejected-record
+	// store; its generations are inert while the key is off.
+	rejected *rejectedRecordFactory
 }
 
 // PendingLocalWriteLosses returns the log records whose mandatory SQLite
@@ -280,9 +283,14 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	if options.TelemetryProviderFactory != nil {
 		factories = append(factories, options.TelemetryProviderFactory)
 	}
+	rejectedFactory := &rejectedRecordFactory{
+		store: options.Store, engine: options.Engine,
+		log: options.RetentionController.log, secureClient: options.SecureClient,
+	}
 	factories = append(factories,
 		factory,
 		dispatchFactory,
+		rejectedFactory,
 	)
 	manager, err := runtimegraph.New(
 		ctx,
@@ -312,7 +320,7 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
 		destinationObserver: destinationObserver, secureClient: options.SecureClient,
-		localWriteLosses: lostWrites,
+		localWriteLosses: lostWrites, rejected: rejectedFactory,
 	}, nil
 }
 
