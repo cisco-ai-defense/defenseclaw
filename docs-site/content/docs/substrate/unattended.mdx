@@ -8,19 +8,27 @@ keywords:
   - CI agent runs
 ---
 
-{/* Flags checked against internal/cli/testdata/substrate_commands.json on sub/a6 (77468de3d5). TODO(substrate): each connector's headless flag comes from A10's table when it hands off; output blocks are examples until the usability pass. */}
-
-An agent doesn't need your terminal. Give it a task, leave, and read the result later. Every connector that has a headless mode can run this way, in its own actor.
+An agent doesn't need your terminal. Give it a task, leave, and read the result later. Every connector that has a headless mode can run this way, in its own actor. The headless command of each is in [Agents and features](/docs/substrate/agents#agents).
 
 ## One task
 
 ```bash
 defenseclaw substrate run codex --task "make the failing tests in pkg/parser pass" --detach
-defenseclaw substrate logs api-2c9e -f
-defenseclaw substrate status api-2c9e
+defenseclaw substrate logs codex-2c9e41a7 -f
+defenseclaw substrate status codex-2c9e41a7
 ```
 
-`--task` runs the connector's headless command (for Codex, `codex exec`) instead of the interactive program. `--detach` returns as soon as the agent is running. The task text is registered with the cluster when the actor is created, so the guardrails know the user's intent from the start, from a source the agent can't change.
+`--task` runs the connector's headless command (for Codex, `codex exec`) instead of the interactive program. `--detach` returns as soon as the agent is running; without it `run` waits and prints what the agent printed (`--timeout` stops waiting after a while, and the task keeps running). The task text is registered with the cluster when the actor is created, so the guardrails know the user's intent from the start, from a source the agent can't change.
+
+When the task ends, `run` says so, and `logs` shows what the agent printed and its exit code:
+
+```text
+The task finished. Bring changes home with: defenseclaw substrate pull codex-2c9e41a7
+```
+
+```text
+The task ended with exit code 1. Review it with: defenseclaw substrate logs codex-2c9e41a7; bring changes home with: defenseclaw substrate pull codex-2c9e41a7
+```
 
 ## A batch
 
@@ -34,14 +42,13 @@ tasks:
 ```
 
 ```bash
-defenseclaw substrate run claude --batch tasks.yaml --parallel 8 --clone git@github.com:example/app.git --ref 4f1c2ab
+defenseclaw substrate run claude --batch tasks.yaml --parallel 8 --clone https://git.example.test/team/app.git --ref 4f1c2ab
 defenseclaw substrate list --batch BATCH
 defenseclaw substrate status --batch BATCH
-defenseclaw substrate usage --batch BATCH
 defenseclaw substrate delete --batch BATCH
 ```
 
-The file is a list of tasks (a bare list works too). Each task may also name its own `agent`. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. Parallel creation is rate limited, so a big batch doesn't flood the Substrate API. `--clone` and `--ref` start every task from the same commit. The `status` and `usage` views show state, checks, blocks, tokens and cost for the batch.
+The file is a list of tasks, under `tasks:` or bare. A task is a line of text, or `name`, `task` and `agent` (a task may name its own agent). One batch takes at most 500 tasks. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. `--clone` and `--ref` start every task from the same commit; without them every task starts from a copy of the same folder. `status --batch` shows each agent's state. `usage --batch` is not available yet: see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost).
 
 ## From CI
 
@@ -61,11 +68,13 @@ defenseclaw substrate run claude --task "triage the open dependabot PRs" --detac
 | Situation | What happens |
 |---|---|
 | The gateway can't be reached | Hooks **fail closed**, always, whatever the interactive setting. A hook that waits retries first, then blocks |
-| The agent asks to reach a new site, or a tool needs approval | **Denied by default.** A profile can set `unattended_asks` to allow a wait for a person for up to `ask_timeout` (30 minutes by default). The agent's step pauses, the agent doesn't stop, and a person answers with `defenseclaw substrate approvals` and `approve` or `reject`. A timeout is a deny |
+| The agent asks to reach a new site, or a tool needs approval | **Denied by default.** A profile can set `unattended_asks: queue` to hold the ask for a person for up to `ask_timeout` (30 minutes by default). The agent's step pauses, the agent doesn't stop, and a person answers with `defenseclaw substrate approvals` and `approve` or `reject`. A timeout is a deny |
 | The agent has been quiet for a while | **No idle suspend** for `--task` runs unless the profile sets it, and never while an ask is pending. A silent long job isn't mistaken for an idle one: CPU use counts as activity |
-| A step crashes the actor | Pending asks close as `crashed`. The controller reverts to the last checkpoint and the connector resumes where it can (`claude --resume`, `codex exec resume`); otherwise the run restarts from the checkpoint's files |
-| You want to know it is alive | `status`, `logs -f` and the Agent 360 board show it. `checkpoint --every 1h` saves state on a schedule |
+| A step crashes the actor | The actor shows as `crashed`, and pending asks close. Substrate brings a crashed actor back only with a revert (`kubectl ate revert`); DefenseClaw doesn't do it for you |
+| You want to know it is alive | `status`, `list` (it has a `STATE` column) and `logs -f` show it. `checkpoint NAME --every 1h` saves a restore point on that schedule for as long as the command runs |
 | The result | Have the agent push a branch (the git credential is injected on the git host only), or `defenseclaw substrate pull` the changes |
+
+A queued ask shows `unattended` and the time left in the `RUN` column of `approvals`.
 
 ## Telemetry volume
 
@@ -73,6 +82,6 @@ A batch of hundreds of actors produces a lot of events. Set `substrate.unattende
 
 ## Limits
 
-- `--keep` keeps the agent after a finished `--task`; the default is that it stays until you delete it. A task runs as the connector's headless mode allows. A connector without one is interactive only, and `run --task` says so. See [Agents and features](/docs/substrate/agents).
-- The cluster's worker pools bound how many actors run at once. A full pool parks the request, then the launcher tells you the cluster is full and retries.
-- Budgets from the routing and tokenomics features apply: warn, downgrade or deny when a batch exceeds its limit.
+- A finished `--task` agent stays until you delete it. Pull its changes first: what is not pulled is gone when you `delete` it.
+- A task runs as the connector's headless mode allows. `run --task` for a connector that cannot run one says so. See [Agents and features](/docs/substrate/agents).
+- The cluster's worker pools bound how many actors run at once. A full pool answers that no worker is free, and `run` starts nothing. See [Troubleshooting](/docs/substrate/troubleshooting#no-free-worker-for-a-new-agent).
