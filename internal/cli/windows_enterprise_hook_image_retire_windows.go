@@ -259,12 +259,14 @@ func readWindowsHookImageConfigFile(file windowsHookImageConfigFile) ([]byte, er
 // (winpath.VerifyOpenedBelow). Any refusal is link_in_account_path. A
 // machine file is opened by name without following a final link
 // (FILE_FLAG_OPEN_REPARSE_POINT; its folders are SYSTEM's or the
-// administrators'); one held open without read sharing is retried, then
-// reported as machine_file_busy.
+// administrators'); one held open without read sharing, or with a byte-range lock
+// over it, is retried, then reported as machine_file_busy.
 func readWindowsHookImageConfigFileNow(file windowsHookImageConfigFile) ([]byte, error) {
 	if !file.User {
 		return readWindowsHookImageRetryingBusy(func() ([]byte, error) { return readWindowsHookImageMachineFile(file.Path) },
-			func(err error) bool { return errors.Is(err, windows.ERROR_SHARING_VIOLATION) }, time.Sleep)
+			func(err error) bool {
+				return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+			}, time.Sleep)
 	}
 	if strings.TrimSpace(file.Home) == "" {
 		return nil, errWindowsHookImageNoAccountHome

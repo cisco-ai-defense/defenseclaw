@@ -572,12 +572,18 @@ type fakeVendorFS struct {
 	admin    map[string]bool
 	children map[string][]fakeScanEntry
 	listErr  map[string]error
-	listed   []string
+	// inspectErr makes the owner of an element unreadable (access denied:
+	// SYSTEM is not the owner and has no READ_CONTROL on it).
+	inspectErr map[string]error
+	listed     []string
 }
 
 func (f *fakeVendorFS) vendor() windowsHookImageVendorFS {
 	return windowsHookImageVendorFS{
 		Inspect: func(root, path string) (winpath.BelowInfo, error) {
+			if err := f.inspectErr[strings.ToLower(path)]; err != nil {
+				return winpath.BelowInfo{}, err
+			}
 			mode, ok := f.modes[strings.ToLower(path)]
 			if !ok {
 				return winpath.BelowInfo{}, fs.ErrNotExist
@@ -811,5 +817,50 @@ func TestHookImageMachineFileHeldWithoutSharingIsRetriedThenBusy(t *testing.T) {
 		func(windowsHookImageConfigFile) ([]byte, error) { return nil, held })
 	if len(scan.Incomplete) != 1 || !strings.Contains(scan.Incomplete[0], `managed-settings.json: machine_file_busy: `) {
 		t.Fatalf("busy machine file: %+v", scan)
+	}
+}
+
+// Review 5 (second re-review): SYSTEM does not get READ_CONTROL on a folder
+// or file a standard user made and set the ACL of, so the owner read fails
+// with access denied. That must make the entry an account entry (skipped),
+// never a problem: a user who runs mkdir ProgramData\Cursor and removes
+// everyone else's access would otherwise keep every scan incomplete for good.
+func TestHookImageVendorEntryWithAnUnreadableOwnerIsAnAccountEntry(t *testing.T) {
+	programData := `C:\ProgramData`
+	denied := errors.New("Access is denied.")
+	// A user-made folder: the vendor folder itself.
+	cursor := &fakeVendorFS{
+		modes:      map[string]fs.FileMode{`c:\programdata\cursor`: fs.ModeDir, `c:\programdata\cursor\hooks.json`: 0},
+		children:   map[string][]fakeScanEntry{`c:\programdata\cursor`: {{"hooks.json", 0}}},
+		inspectErr: map[string]error{`c:\programdata\cursor`: denied},
+	}
+	files, problems := windowsHookImageVendorFiles(programData, programData+`\Cursor`, 0, cursor.vendor())
+	want := programData + `\Cursor\hooks.json|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor (owner unreadable)`
+	if got := vendorFileLines(files); got != want || len(problems) != 0 {
+		t.Fatalf("user-made folder: files =\n%s\nwant\n%s\nproblems %v", got, want, problems)
+	}
+	// A file a user dropped into an admin-owned vendor folder.
+	codex := &fakeVendorFS{
+		modes: map[string]fs.FileMode{
+			`c:\programdata\openai`:                         fs.ModeDir,
+			`c:\programdata\openai\codex`:                   fs.ModeDir,
+			`c:\programdata\openai\codex\requirements.toml`: 0,
+			`c:\programdata\openai\codex\planted.toml`:      0,
+		},
+		admin: map[string]bool{
+			`c:\programdata\openai`:                         true,
+			`c:\programdata\openai\codex`:                   true,
+			`c:\programdata\openai\codex\requirements.toml`: true,
+		},
+		children:   map[string][]fakeScanEntry{`c:\programdata\openai\codex`: {{"requirements.toml", 0}, {"planted.toml", 0}}},
+		inspectErr: map[string]error{`c:\programdata\openai\codex\planted.toml`: denied},
+	}
+	files, problems = windowsHookImageVendorFiles(programData, programData+`\OpenAI\Codex`, 0, codex.vendor())
+	want = strings.Join([]string{
+		programData + `\OpenAI\Codex\requirements.toml|false||`,
+		programData + `\OpenAI\Codex\planted.toml|true|` + programData + `|not_admin_owned: ` + programData + `\OpenAI\Codex\planted.toml (owner unreadable)`,
+	}, "\n")
+	if got := vendorFileLines(files); got != want || len(problems) != 0 {
+		t.Fatalf("planted file: files =\n%s\nwant\n%s\nproblems %v", got, want, problems)
 	}
 }

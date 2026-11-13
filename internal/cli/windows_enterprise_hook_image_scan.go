@@ -150,7 +150,11 @@ func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windows
 		case errors.Is(err, fs.ErrNotExist):
 			return "", "", true
 		case err != nil:
-			return "", fmt.Sprintf("%s: %v", path, err), false
+			// SYSTEM is not the owner of an object a standard user made and
+			// does not get READ_CONTROL on one whose ACL the user set, so an
+			// unreadable owner is an account entry, never a problem that
+			// would void the scan (review 5).
+			return "not_admin_owned: " + path + " (owner unreadable)", "", false
 		case !info.AdminOwned:
 			return "not_admin_owned: " + path, "", false
 		case info.Link:
