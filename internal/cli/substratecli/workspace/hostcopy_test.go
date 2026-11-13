@@ -1,6 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// The host copy runs on Linux and macOS (OpenShell sandboxes are not supported on Windows hosts); its tests use POSIX paths.
+//go:build unix
+
 package workspace
 
 import (

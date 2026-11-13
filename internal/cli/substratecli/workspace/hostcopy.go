@@ -807,7 +807,7 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	}
 	pr := rec.Pulled
 	if pr.Review.Sensitive() && !opts.AcceptSensitive && opts.Mode != ModePatch {
-		if !(opts.Mode == ModeBranch && len(pr.Review.SecretPaths()) == 0) {
+		if opts.Mode != ModeBranch || len(pr.Review.SecretPaths()) != 0 {
 			return nil, &SensitiveError{Files: flaggedPaths(pr)}
 		}
 	}
