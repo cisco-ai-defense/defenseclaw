@@ -605,6 +605,8 @@ func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 		return judged
 	}
 	out := *judged
+	// The floor raises the verdict above a lone review finding.
+	out.reviewOnly = false
 	out.Severity = floor.Severity
 	out.Action = strongerGuardrailAction(judged.Action, floor.Action)
 	out.Findings = append(append([]string(nil), judged.Findings...), floor.Findings...)

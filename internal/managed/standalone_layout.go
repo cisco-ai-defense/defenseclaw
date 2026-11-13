@@ -234,6 +234,28 @@ func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
 	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\` + productlayout.WindowsScannerRuntimeFolder
 }
 
+// StandaloneWindowsShippedRulePacksDirForRoot is where the standalone Windows
+// lifecycle keeps the strict and permissive rule packs the release ships
+// (#1445): its own administrator-owned root beside the state root, like the
+// scanner runtime, so the installer module's install-tree and state-root
+// checks never walk it. Each release writes its copy to a subfolder named
+// by its digest (policyassets.ShippedRulePackFolderName) and reads only
+// that one, so a rollback needs no file restored. Only LocalSystem and
+// Administrators write it; services read it.
+func StandaloneWindowsShippedRulePacksDirForRoot(programData string) string {
+	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\` + productlayout.WindowsRulePacksFolder
+}
+
+// StandaloneWindowsShippedRulePacksDir resolves that root from the trusted
+// ProgramData registration; off Windows there is none and it fails.
+func StandaloneWindowsShippedRulePacksDir() (string, error) {
+	_, programData, err := TrustedStandaloneWindowsRoots()
+	if err != nil {
+		return "", err
+	}
+	return StandaloneWindowsShippedRulePacksDirForRoot(programData), nil
+}
+
 // StandaloneWindowsHookRuntimeDirName is the Windows HookRuntimeDir folder name.
 const StandaloneWindowsHookRuntimeDirName = productlayout.WindowsHookRuntimeFolder
 

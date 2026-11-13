@@ -21,6 +21,7 @@ import (
 	"testing"
 	"testing/fstest"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -48,7 +49,16 @@ func TestStandaloneSetupConcurrentEnsureReportsBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime.LockOSThread()
-	handle, err := windows.CreateMutex(nil, true, name)
+	// Owned by Administrators, as Setup creates it: Setup ignores a mutex of
+	// that name another owner holds (the 1.0.10 T1 review), and the default
+	// owner of a hosted runner token is the runner account.
+	descriptor, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
+	if err != nil {
+		runtime.UnlockOSThread()
+		t.Fatal(err)
+	}
+	attrs := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor}
+	handle, err := windows.CreateMutex(attrs, true, name)
 	if err != nil {
 		runtime.UnlockOSThread()
 		t.Fatalf("hold the first ensure's mutex: %v", err)
