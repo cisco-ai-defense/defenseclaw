@@ -21,8 +21,12 @@ def _run(cfg) -> list[tuple]:
     return seen
 
 
-def _cfg(mode: str, models: list[dict]) -> SimpleNamespace:
-    return SimpleNamespace(deployment_mode=mode, routing=SimpleNamespace(enabled=True, models=models))
+def _cfg(mode: str, models: list[dict], *, enabled: bool = True, profile: str = "standalone") -> SimpleNamespace:
+    return SimpleNamespace(
+        deployment_mode=mode,
+        enterprise=SimpleNamespace(profile=profile),
+        routing=SimpleNamespace(enabled=enabled, models=models),
+    )
 
 
 def test_managed_api_key_env_warns() -> None:
@@ -34,3 +38,9 @@ def test_managed_api_key_env_warns() -> None:
 def test_credential_or_oss_does_not_warn() -> None:
     assert _run(_cfg("managed_enterprise", [{"name": "fast", "api_key_env": "K", "credential": "openai-org"}])) == []
     assert _run(_cfg("", [{"name": "fast", "api_key_env": "K"}])) == []
+
+
+def test_routing_off_or_secure_client_does_not_warn() -> None:
+    models = [{"name": "fast", "api_key_env": "K"}]
+    assert _run(_cfg("managed_enterprise", models, enabled=False)) == []
+    assert _run(_cfg("managed_enterprise", models, profile="secure_client")) == []

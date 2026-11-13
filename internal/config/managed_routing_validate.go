@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // routeOnlyBaseURLOS lists, per route-capable connector, the OSes whose
@@ -42,7 +43,7 @@ func validateManagedRouting(cfg *Config, goos string) error {
 			// after the upgrade (owner rule: the upgrade must work): the
 			// gateway still reads the named variable when no credential is
 			// set, and doctor asks for a protected credential instead.
-			fmt.Fprintf(managedRoutingWarnings, "warning: config routing.models[%d].api_key_env reads the gateway service environment on a managed host; store the key with enterprise secret set and name it in routing.models[%d].credential\n", i, i)
+			warnManagedRoutingOnce(fmt.Sprintf("warning: config routing.models[%d].api_key_env reads the gateway service environment on a managed host; store the key with enterprise secret set and name it in routing.models[%d].credential\n", i, i))
 		}
 		if err := managedBedrockEnvRefusal(fmt.Sprintf("routing.models[%d].bedrock", i), m.Bedrock); err != nil {
 			return err
@@ -75,9 +76,26 @@ func validateManagedRouting(cfg *Config, goos string) error {
 	return nil
 }
 
-// managedRoutingWarnings receives the notes of keys a managed host
-// ignores; replaceable in tests.
+// managedRoutingWarnings receives the managed routing notes; replaceable in
+// tests.
 var managedRoutingWarnings io.Writer = os.Stderr
+
+var (
+	managedRoutingWarnedMu sync.Mutex
+	managedRoutingWarned   = map[string]bool{}
+)
+
+// warnManagedRoutingOnce prints a note once per process (validation runs on
+// every ensure and reload); doctor keeps reporting it.
+func warnManagedRoutingOnce(msg string) {
+	managedRoutingWarnedMu.Lock()
+	defer managedRoutingWarnedMu.Unlock()
+	if managedRoutingWarned[msg] && managedRoutingWarnings == os.Stderr {
+		return
+	}
+	managedRoutingWarned[msg] = true
+	fmt.Fprint(managedRoutingWarnings, msg)
+}
 
 // managedBedrockEnvRefusal refuses the Bedrock keys new in 1.0.10 that
 // read the gateway service environment or its account files: every *_env
