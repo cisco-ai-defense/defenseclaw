@@ -41,14 +41,6 @@ func TestClaudeCodePerUserUnixSelectsNativeHook(t *testing.T) {
 	script := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
 	opts := SetupOpts{DataDir: dataDir, HookExecutable: native}
 	command, args := claudeCodeHookInvocation(opts, script)
-	if runtime.GOOS != "linux" {
-		// macOS keeps the shell hook until GAP-0559 is measured.
-		if !strings.HasPrefix(command, posixHookCommandWord(script)) || args != nil ||
-			strings.Contains(command, "defenseclaw-hook-user") {
-			t.Fatalf("%s registration = %q, %q; want the shell hook", runtime.GOOS, command, args)
-		}
-		return
-	}
 	wantArgs := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", dataDir}
 	if command != guard || !codexValueMatches(args, wantArgs) {
 		t.Fatalf("native command = %q, %q; want %q, %q", command, args, guard, wantArgs)

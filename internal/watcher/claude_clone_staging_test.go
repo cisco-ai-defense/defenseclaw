@@ -398,7 +398,7 @@ func TestClaudeLinkingVersionPluginIsAdmittedAfterGrace(t *testing.T) {
 	if got := pluginTargets(w); !slices.Equal(got, []string{plain}) {
 		t.Fatalf("rescan targets while written %v, want %s", got, plain)
 	}
-	if _, ok := w.stagingDeferred[linked]; !ok {
+	if _, ok := w.stagingDeferred[w.stagingKey(linked)]; !ok {
 		t.Fatalf("the rescan did not note %s for a re-check: %v", linked, w.stagingDeferred)
 	}
 	clock.advance(claudeStagingGrace + time.Minute)
@@ -451,7 +451,7 @@ func TestRecheckClaudeStagingQueuesSettledPaths(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("installs in flight handed to admission: %v", got)
 	}
-	if _, ok := w.stagingDeferred[gone]; ok {
+	if _, ok := w.stagingDeferred[w.stagingKey(gone)]; ok {
 		t.Error("a path gone is still deferred")
 	}
 	clock.advance(claudeStagingGrace + time.Minute)
@@ -499,7 +499,7 @@ func TestLiveWatcherAdmitsLinkingVersionAfterGraceAndStopForgets(t *testing.T) {
 	deferred := func(path string) bool {
 		w.stagingMu.Lock()
 		defer w.stagingMu.Unlock()
-		_, ok := w.stagingDeferred[path]
+		_, ok := w.stagingDeferred[w.stagingKey(path)]
 		return ok
 	}
 	waitFor := func(what string, cond func() bool) {

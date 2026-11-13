@@ -21,7 +21,6 @@ import (
 
 	"golang.org/x/time/rate"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -31,8 +30,8 @@ import (
 // Each class has its own limiter key per peer uid (hookCallerBudgetKey), so
 // a flood of relayed hooks from one sandbox never refuses the same user's
 // host hooks or a new sandbox's create, and a burst of daemon events never
-// takes the budget a relayed hook needs. The host key (<uid>, 60/s burst
-// 120, 32 in flight) and the OTLP key (<uid>|otlp) are unchanged; the
+// takes the budget a relayed hook needs. The host key (<uid>, 120/s burst
+// 240, 64 in flight) and the OTLP key (<uid>|otlp) are unchanged; the
 // gateway-wide in-flight cap stays shared by every key.
 //
 // Sizing: a daemon's per-binding limiter (sandboxauth.DefaultLimiterConfig,
@@ -42,8 +41,10 @@ import (
 // audit writes under one SQLite write lock, and four sandboxes at 10 calls a
 // second answer in about a second on the shared build box (p95 under 1 s),
 // while 96 calls a second did not answer in time in half the runs
-// (rel-1-0-6 GAP-0490). The budget is therefore 40 calls a second with a
-// burst of 100 (the burst one sandbox may itself send), and a call past it
+// (rel-1-0-6 GAP-0490). The budget was therefore 40 calls a second with a
+// burst of 100; since one call no longer waits for a dozen commits one
+// after the other (#1384) it is 100 calls a second with a burst of 200
+// (rel-1-0-6 GAP-0770), and a call past it
 // is refused at once with a 429 and a message that names the budget, instead
 // of waiting past the hook's window for an answer that comes too late. The
 // delivery receipt that confirms an allowed answer is a second post on the
@@ -63,22 +64,32 @@ const (
 	sandboxBudgetPending = "sandbox-pending"
 	sandboxBudgetPolicy  = "sandbox-policy"
 	sandboxBudgetEvents  = "sandbox-events"
-	sandboxUserHookRate  = 40
-	sandboxUserHookBurst = 100
+	// The account budget is 100 calls a second with a burst of 200
+	// (rel-1-0-6 GAP-0770): one hook call no longer waits for the commits of
+	// a dozen writes one after the other (#1384), so the managed gateway
+	// answers four sandboxes at 25 calls a second inside the hook window.
+	sandboxUserHookRate  = 100
+	sandboxUserHookBurst = 200
 )
 
 var sandboxUserHookInFlight, sandboxUserReceiptInFlight = managedSandboxInFlightLimits()
 
-// managedSandboxInFlightLimits uses one rendered ingress attempt's maximum
-// lifetime for hooks and the gateway's receipt window for acknowledgements.
-// These are separate HTTP requests with separate account rate buckets.
-func managedSandboxInFlightLimits() (hook, receipt int) {
-	first, retry := connector.SandboxHookAttemptBudgets()
-	return sandboxWindowCapacity(max(first, retry)), sandboxWindowCapacity(sandboxHookReceiptWindow)
-}
+// sandboxInFlightWindow sizes the per-uid in-flight bounds: the hook answer
+// window (3.5 s) and a little slack. A relayed call held past it no longer
+// gets an answer its sandbox hook can use, so the bound holds what the
+// account bucket admits over one answer window, plus its burst: 560 at
+// 100/s burst 200 (S8 DESIGN section 9, major 5). Sizing it by the 12 s
+// attempt and 15 s receipt lifetimes, as the 40/s budget did, would let a
+// stalled store pin 1400 and 1700 requests per account (S8 lead review
+// P2-1).
+const sandboxInFlightWindow = 3600 * time.Millisecond
 
-func sandboxWindowCapacity(window time.Duration) int {
-	return sandboxUserHookBurst + int((time.Duration(sandboxUserHookRate)*window+time.Second-1)/time.Second)
+// managedSandboxInFlightLimits sizes the hook and the receipt in-flight
+// bounds (separate HTTP requests with separate account rate buckets) by the
+// answer window.
+func managedSandboxInFlightLimits() (hook, receipt int) {
+	capacity := sandboxUserHookBurst + int((time.Duration(sandboxUserHookRate)*sandboxInFlightWindow+time.Second-1)/time.Second)
+	return capacity, capacity
 }
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per
