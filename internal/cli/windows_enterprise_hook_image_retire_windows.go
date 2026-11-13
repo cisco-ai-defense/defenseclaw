@@ -31,7 +31,8 @@ import (
 )
 
 func newWindowsHookImageRetireCommand() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	command := &cobra.Command{
 		Use:          "retire",
 		Short:        "Point every agent hook back at bin\\defenseclaw-hook.exe before an older release's Setup runs",
 		Hidden:       true,
@@ -39,9 +40,12 @@ func newWindowsHookImageRetireCommand() *cobra.Command {
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			report := runWindowsHookImageRetire()
-			return writeWindowsHookImageReport(cmd.OutOrStdout(), report, report.OK, report.Reason, report.Error)
+			summary := "every agent hook names the transition image again; the launch folders stay"
+			return writeWindowsHookImageReport(cmd.OutOrStdout(), jsonOutput, report, summary, report.OK, report.Reason, report.Error)
 		},
 	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "print the JSON report (otherwise one summary line)")
+	return command
 }
 
 func runWindowsHookImageRetire() windowsHookImageRetireReport {

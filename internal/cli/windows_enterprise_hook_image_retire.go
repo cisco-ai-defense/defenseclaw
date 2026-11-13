@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -125,7 +126,7 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 		}
 		if want == "" {
 			if item.artifact == "hook" {
-				return fail(windowsHookImageRetireRefused, "the deployment record has no hook digest; run this release's Setup /repair first")
+				return fail(windowsHookImageRetireRefused, "the deployment record has no hook digest; run `%s` of this release first. %s", managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 			}
 			continue
 		}
@@ -134,7 +135,7 @@ func retireWindowsHookImages(steps windowsHookImageRetireSteps) windowsHookImage
 			return fail(windowsHookImageRetireRefused, "read %s: %v", path, err)
 		}
 		if !strings.EqualFold(have, want) {
-			return fail(windowsHookImageRetireRefused, "%s has sha256 %s, not the recorded %s; run this release's Setup /repair first, then retire again", path, have, want)
+			return fail(windowsHookImageRetireRefused, "%s has sha256 %s, not the recorded %s; run `%s` of this release first, then retire again. %s", path, have, want, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 		}
 	}
 	before := steps.Scan()
