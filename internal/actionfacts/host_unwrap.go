@@ -84,12 +84,10 @@ func mayHoldHostScript(source string) bool {
 
 // hostUnwrap is the result of unwrapping the static host wrappers of one source.
 type hostUnwrap struct {
-	source   string
-	dialect  Dialect
-	wrappers []WrapperFact
-	// keepOpen: a launcher left its host running after the script (cmd /k,
-	// powershell -NoExit); what the host reads next is not in the call.
-	keepOpen bool
+	source  string
+	dialect Dialect
+	// layers is the number of launchers unwrapped.
+	layers int
 	// limit: another wrapper layer was left because the wrapper depth is spent.
 	limit bool
 }
@@ -106,13 +104,12 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 	for layer := 0; ; layer++ {
 		var next string
 		var nextDialect Dialect
-		var wrapper WrapperFact
-		var keepOpen, ok bool
+		var ok bool
 		switch result.dialect {
 		case DialectPowerShell:
-			next, nextDialect, wrapper, keepOpen, ok = unwrapPowerShellOnce(result.source)
+			next, nextDialect, ok = unwrapPowerShellOnce(result.source)
 		case DialectCMD:
-			next, nextDialect, wrapper, keepOpen, ok = unwrapCMDOnce(result.source)
+			next, nextDialect, ok = unwrapCMDOnce(result.source)
 		}
 		if !ok || strings.TrimSpace(next) == "" ||
 			len(next)*(depth+layer+2) > maxNestedCommandBytes {
@@ -123,56 +120,49 @@ func unwrapHostSource(source string, dialect Dialect, depth int) (hostUnwrap, bo
 			break
 		}
 		result.source, result.dialect = next, nextDialect
-		result.wrappers = append(result.wrappers, wrapper)
-		result.keepOpen = result.keepOpen || keepOpen
+		result.layers++
 	}
-	return result, len(result.wrappers) > 0 || result.limit
+	return result, result.layers > 0 || result.limit
 }
 
 // unwrapPowerShellOnce replaces the static host wrappers among the top-level
 // statements of a PowerShell source. A source that is one wrapper statement is
 // replaced whole (and may change grammar to cmd.exe's); wrappers among other
 // statements are replaced in place when their script is one simple line.
-func unwrapPowerShellOnce(source string) (string, Dialect, WrapperFact, bool, bool) {
+func unwrapPowerShellOnce(source string) (string, Dialect, bool) {
 	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
 	if script == nil || len(script.Diagnostics) != 0 || len(script.Statements) == 0 {
-		return "", DialectNone, WrapperFact{}, false, false
+		return "", DialectNone, false
 	}
 	type edit struct {
 		start, end int
 		body       string
 	}
 	var edits []edit
-	var first WrapperFact
-	keepOpen := false
 	whole := len(script.Statements) == 1
 	var wholeDialect Dialect
 	for _, statement := range script.Statements {
-		body, dialect, wrapper, start, end, open, ok := powerShellStatementWrapper(source, script, statement)
+		body, dialect, start, end, ok := powerShellStatementWrapper(source, script, statement)
 		if !ok {
 			continue
 		}
 		if !whole && (dialect != DialectPowerShell || !simpleHostBody(body)) {
 			continue
 		}
-		if len(edits) == 0 {
-			first = wrapper
-		}
 		edits = append(edits, edit{start: start, end: end, body: body})
 		wholeDialect = dialect
-		keepOpen = keepOpen || open
 	}
 	if len(edits) == 0 {
-		return "", DialectNone, WrapperFact{}, false, false
+		return "", DialectNone, false
 	}
 	if whole {
-		return edits[0].body, wholeDialect, first, keepOpen, true
+		return edits[0].body, wholeDialect, true
 	}
 	next := source
 	for i := len(edits) - 1; i >= 0; i-- {
 		next = next[:edits[i].start] + edits[i].body + next[edits[i].end:]
 	}
-	return next, DialectPowerShell, first, keepOpen, true
+	return next, DialectPowerShell, true
 }
 
 // simpleHostBody reports a script that can stand between other statements of
@@ -193,7 +183,7 @@ func powerShellStatementWrapper(
 	source string,
 	script *psparse.Script,
 	statement psparse.Statement,
-) (body string, dialect Dialect, wrapper WrapperFact, start, end int, keepOpen, ok bool) {
+) (body string, dialect Dialect, start, end int, ok bool) {
 	pipeline, isPipeline := statement.(*psparse.Pipeline)
 	if !isPipeline || pipeline.ChainRHS != nil || pipeline.ChainOp != "" ||
 		pipeline.Background || len(pipeline.Redirs) != 0 || len(pipeline.Elements) != 1 {
@@ -215,7 +205,7 @@ func powerShellStatementWrapper(
 			return
 		}
 		body = source[blockStart+1 : blockEnd-1]
-		return body, DialectPowerShell, WrapperFact{Executable: command.InvokeOp}, start, end, false, true
+		return body, DialectPowerShell, start, end, true
 	}
 	name, named := psparse.LiteralString(command.Name)
 	if !named {
@@ -245,7 +235,6 @@ func powerShellStatementWrapper(
 			!launcherWordsArePlain(command) {
 			return
 		}
-		keepOpen = commandKeepsHostOpen(command)
 		dialect = DialectPowerShell
 	case psparse.KindIEXLiteral:
 		dialect = DialectPowerShell
@@ -265,7 +254,7 @@ func powerShellStatementWrapper(
 	default:
 		return
 	}
-	return found.Text, dialect, WrapperFact{Executable: name}, start, end, keepOpen, true
+	return found.Text, dialect, start, end, true
 }
 
 // commandHasWorkingDirectoryOption reports a -WorkingDirectory switch (or an
@@ -386,45 +375,18 @@ func commandHasEmptyWord(command *psparse.Command) bool {
 	return false
 }
 
-// commandKeepsHostOpen reports -NoExit (or an abbreviation of it) among the
-// words of a launcher call.
-func commandKeepsHostOpen(command *psparse.Command) bool {
-	for _, element := range command.Elements {
-		switch typed := element.(type) {
-		case *psparse.Parameter:
-			if noExitWord("-" + typed.Name) {
-				return true
-			}
-		case *psparse.Arg:
-			if text, static := psparse.LiteralString(typed.Value); static && noExitWord(text) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func noExitWord(word string) bool {
-	name := strings.ToLower(strings.TrimSpace(word))
-	if !strings.HasPrefix(name, "-") && !strings.HasPrefix(name, "/") {
-		return false
-	}
-	name = strings.TrimLeft(name, "-/")
-	return len(name) >= 3 && strings.HasPrefix("noexit", name)
-}
-
 // unwrapCMDOnce unwraps a cmd.exe source that is one host launcher call.
-func unwrapCMDOnce(source string) (string, Dialect, WrapperFact, bool, bool) {
+func unwrapCMDOnce(source string) (string, Dialect, bool) {
 	argv, ok := soleCMDHostCall(source)
 	if !ok {
-		return "", DialectNone, WrapperFact{}, false, false
+		return "", DialectNone, false
 	}
 	program := commandProgramForDialect(argv[0], DialectCMD)
 	script, ok := hostFromArgv(program, argv)
 	if !ok {
-		return "", DialectNone, WrapperFact{}, false, false
+		return "", DialectNone, false
 	}
-	return script.body, script.dialect, WrapperFact{Executable: argv[0]}, script.keepOpen, true
+	return script.body, script.dialect, true
 }
 
 // soleCMDHostCall returns the argv of a cmd.exe source that is exactly one
@@ -471,29 +433,18 @@ func hostFromArgv(program string, argv []string) (hostScript, bool) {
 	switch program {
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
 		body, dialect, ok := powerShellHostBody(argv)
-		return hostScript{body: body, dialect: dialect, keepOpen: powerShellKeepsHostOpen(argv)}, ok
+		return hostScript{body: body, dialect: dialect}, ok
 	case "cmd", "cmd.exe":
-		body, dialect, keepOpen, ok := cmdHostBody(argv)
-		return hostScript{body: body, dialect: dialect, keepOpen: keepOpen}, ok
+		body, dialect, ok := cmdHostBody(argv)
+		return hostScript{body: body, dialect: dialect}, ok
 	}
 	return hostScript{}, false
 }
 
 // hostScript is the script a launcher argv runs.
 type hostScript struct {
-	body     string
-	dialect  Dialect
-	keepOpen bool
-}
-
-// powerShellKeepsHostOpen reports -NoExit (or an abbreviation of it).
-func powerShellKeepsHostOpen(argv []string) bool {
-	for _, word := range argv[1:] {
-		if noExitWord(word) {
-			return true
-		}
-	}
-	return false
+	body    string
+	dialect Dialect
 }
 
 // powerShellHostBody asks psparse what a powershell/pwsh argv runs. The argv
@@ -576,19 +527,18 @@ func powerShellSingleQuote(word string) string {
 // line as written; several words are joined as the launcher passes them, each
 // word with blanks re-quoted. Any other cmd.exe switch before /c, and /k, are
 // not modeled: the call stays opaque.
-func cmdHostBody(argv []string) (string, Dialect, bool, bool) {
+func cmdHostBody(argv []string) (string, Dialect, bool) {
 	for i := 1; i < len(argv); i++ {
-		lower := strings.ToLower(argv[i])
-		switch lower {
+		switch strings.ToLower(argv[i]) {
 		case "/c", "/k":
 			body, ok := cmdJoinPayload(argv[i+1:])
-			return body, DialectCMD, lower == "/k", ok
+			return body, DialectCMD, ok
 		case "/d", "/q", "/s", "/a", "/u":
 		default:
-			return "", DialectNone, false, false
+			return "", DialectNone, false
 		}
 	}
-	return "", DialectNone, false, false
+	return "", DialectNone, false
 }
 
 // soleHostCall recognizes a POSIX parse whose one top-level command is an
@@ -630,7 +580,7 @@ func posixSoleHostCallSource(source string) (string, Dialect, bool) {
 	}
 	out := parsePOSIX(source, 1, 0)
 	script, ok := soleHostCall(&out)
-	if !ok || script.keepOpen {
+	if !ok {
 		return "", DialectNone, false
 	}
 	return script.body, script.dialect, true
@@ -658,7 +608,7 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 	if len(input.Argv) == 0 && !mayHoldHostScript(shellCommandText(input)) {
 		return Input{}, false
 	}
-	source, dialect := shellCommandText(input), Dialect(DialectNone)
+	source, dialect := shellCommandText(input), DialectNone
 	layers := 0 // launchers already resolved from the argv or the POSIX call
 	switch {
 	case len(input.Argv) != 0:
