@@ -34,7 +34,8 @@ DATASET_BY_SRC = {
 #   SIDs (S-1-5-21-a-b-c[-rid]) -> S-1-5-21-<fixed>-<fixed>-<n>[-rid];  IPv4 -> 198.51.100.<n>;  IPv6 -> 2001:db8::<n>;  MAC -> 00:00:5E:00:53:<n>
 #   AWS instance and resource ids, 12-digit account ids, secrets, emails.
 # Placeholders are bare tokens (no angle brackets): < and > are shell redirection operators and would change how a command parses.
-# A real-values denylist (never committed; load_denylist) adds the values no pattern can know, such as an arbitrary NetBIOS name.
+# Real lab values (an arbitrary NetBIOS name, the owner's names, host aliases) are NEVER written in this repo: they come from a denylist file kept
+# outside git (load_denylist, mkdenylist.py). The build requires it; tests use synthetic values only.
 _IP = re.compile(r"(?<![\w.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?!\w|\.\d)")
 _IP6 = re.compile(r"(?<![\w:.])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?:%[\w.]+)?(?![\w:])")
 _MAC = re.compile(r"(?<![0-9A-Fa-f:-])(?:[0-9A-Fa-f]{2}([:-])){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:-])")
@@ -70,7 +71,6 @@ _DOMUSER = re.compile(r"(?<![\w\\./$:-])([A-Z][A-Z0-9-]{2,14})(\\{1,2})([a-z][a-
 _USERDIR = re.compile(r"(?i)((?:[A-Za-z]:|/[a-z]|/mnt/[a-z])?[\\/]+Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)")
 _USERDIR_BARE = re.compile(r"(?i)(?<![\w\\/.:-])(Users[\\/]+)(?!alice\b|Public\b|Default\b|All Users\b)([^\\/\s\"';:*?<>|]+)")
 _HOMEDIR = re.compile(r"(?<![\w.-])(/(?:home|usr/home)/)(?!alice\b|user\b|username\b|runner\b|[%$*{(\[<~.])([A-Za-z0-9._-]+)")
-_PERSON = re.compile(r"(?i)\b(?:vnarajal|vineethsai|vineeth|narajala)\b")
 # hosts / ids
 _HOST = re.compile(r"\b(?:dc-(?:[a-z0-9]+-)*?(?:win|ewin|rhel|mac|ubuntu|ent|float)[a-z0-9-]*|defenseclaw-(?:dev|balanced-dev))\b", re.I)
 _INSTID = re.compile(r"\bi-[0-9a-f]{8}(?:[0-9a-f]{9})?\b")
@@ -258,6 +258,8 @@ def _deny_sub(m: re.Match, ents: dict) -> str:
         return _user(u) + "@" + _dns(d)
     if cat == "labuser":
         return _user(raw)
+    if cat == "person":
+        return "alice"
     if cat == "ip":
         return f"198.51.100.{_n('ip4', raw) % 250 + 1}"
     if cat == "account":
@@ -292,7 +294,6 @@ def redact(t: str) -> str:
     t = _USERDIR.sub(lambda m: m.group(1) + "alice", t)
     t = _USERDIR_BARE.sub(lambda m: m.group(1) + "alice", t)
     t = _HOMEDIR.sub(lambda m: m.group(1) + "alice", t)
-    t = _PERSON.sub("alice", t)
     t = _INSTID.sub("i-0123456789abcdef0", t)
     t = _AWSRES.sub(_awsres, t)
     t = _ACCT.sub("000000000000", t)
@@ -316,7 +317,7 @@ LEAK_PATTERNS = {
     "ipv4": _IP, "ipv6": _IP6, "mac": _MAC, "sid": _SID, "computername": _EC2WIN, "ec2dns": _EC2DNS, "unc": _UNC, "compflag": _COMPFLAG,
     "email": re.compile(r"\b(?!git@)[\w.+-]+@(?!(?:[\w-]+\.)*example\.com\b)[\w-]+(?:\.[\w-]+)+\b"), "upn": _UPN, "idctx": _IDCTX,
     "domuser": _DOMUSER, "privfqdn": _PRIVFQDN, "labhost": _HOST,
-    "userdir": _USERDIR, "userdir_bare": _USERDIR_BARE, "homedir": _HOMEDIR, "person": _PERSON, "instance": _INSTID, "awsres": _AWSRES,
+    "userdir": _USERDIR, "userdir_bare": _USERDIR_BARE, "homedir": _HOMEDIR, "instance": _INSTID, "awsres": _AWSRES,
     "account": _ACCT, "secret": re.compile("|".join(r.pattern for r in _SECRETS[:9])),
 }
 
@@ -366,6 +367,16 @@ def _hit_ok(name: str, m: re.Match) -> bool:
     return False
 
 
+# Public dataset handles named in DATASET_BY_SRC are provenance, not identities: the repo scan ignores them.
+PUBLIC_DATASET_HANDLES = tuple(sorted({ds for ds, _, _ in DATASET_BY_SRC.values()}))
+
+
+def deny_hits(text: str) -> list[str]:
+    """Denylist categories whose real value occurs in `text` (one entry per occurrence; the value itself is never returned)."""
+    flat = re.sub(r"\\+", r"\\", text)
+    return [ents.get(m.group(0).lower(), "host") for rx, ents in _deny for m in rx.finditer(flat)]
+
+
 def leak_scan(text: str) -> list[str]:
     """Pattern categories that still hit `text` after redaction (one entry per category), plus 'denylist' when a real lab value survives."""
     hits = []
@@ -374,12 +385,8 @@ def leak_scan(text: str) -> list[str]:
             if not _hit_ok(name, m):
                 hits.append(name)
                 break
-    if _deny:
-        flat = re.sub(r"\\+", r"\\", text)
-        for rx, ents in _deny:
-            for m in rx.finditer(flat):
-                hits.append("denylist:" + ents.get(m.group(0).lower(), "host"))
-                break
+    for cat in sorted(set(deny_hits(text))):
+        hits.append("denylist:" + cat)
     return hits
 
 

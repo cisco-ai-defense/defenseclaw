@@ -10,7 +10,7 @@ Sources (see README.md):
                   corpus lane); deduplicated by command shape, stratified by command family, re-redacted for lab identities
   real-traces     real third-party Claude Code PowerShell / Git Bash calls on Windows (trace-commons/agent-traces rows of the shell corpus)
   real-stateful   Windows sequence windows from the owner's sessions
-  capture         replayable Windows tool calls found in round audit logs (rel-1-0-6 r109 dc-ent-win)
+  capture         replayable Windows tool calls found in round audit logs (rel-1-0-6 r109 enterprise Windows test host)
   fixture/variant the product's own tool-call TP/FP suite (internal/gateway/testdata/security_suite/toolcall/corpus.jsonl), Windows rows, plus
                   equivalence-preserving wrappers of each row (same action, other spelling; the label carries over)
   atomic          Atomic Red Team Windows tests of attack techniques (public, MITRE ATT&CK ids), a curated allowlist
@@ -176,7 +176,7 @@ def src_captures(path: str) -> list[dict]:
         cmd = L.redact(cmd) if cmd else None
         dialect = "powershell" if tool in ("Bash",) and cmd and re.search(r"(?i)powershell|Get-|Set-|Add-Content", cmd) else ("none" if tool != "Bash" else "powershell")
         cats = ["src:capture", "tool:" + tool, "protected-target-write" if attack else "control"]
-        out.append(L.mkcase("wsh/capture/" + L.sha(json.dumps(a, sort_keys=True) + conn)[:16], "capture", f"rel-1-0-6:r109:fcd7:dc-ent-win:MS:{conn}", tool, args, cmd, dialect, conn,
+        out.append(L.mkcase("wsh/capture/" + L.sha(json.dumps(a, sort_keys=True) + conn)[:16], "capture", f"rel-1-0-6:r109:fcd7:ent-win:MS:{conn}", tool, args, cmd, dialect, conn,
                             truth="malicious" if attack else "benign", cats=cats, label_source="ledger:rel-1-0-6:r109:fcd7:protected-target" if attack else "capture:control", conf="high" if attack else "medium",
                             actions=L.profile_actions("CRITICAL") if attack else None, hard_neg=not attack, cwd="C:\\Users\\alice"))
     return out
@@ -442,8 +442,7 @@ def src_authored() -> list[dict]:
 
 # --- driver ----------------------------------------------------------------------------------------------------------------
 def cmd_build(a):
-    if a.denylist:
-        print(f"denylist: {L.load_denylist(a.denylist)} real lab values loaded (not printed)")
+    print(f"denylist: {L.load_denylist(a.denylist)} real lab values loaded (not printed)")
     rows: list[dict] = []
     rows += src_real_owner(a.win_all, a.owner_target, a.seed)
     rows += src_real_stateful(a.win_all, a.stateful, a.seed)
@@ -489,6 +488,39 @@ def cmd_leakscan(a):
     for h, lst in sorted(ids.items()):
         print(f"  {h}: e.g. {lst}")
     return 0 if not cats else 1
+
+
+def cmd_leakscan_repo(a):
+    """The pre-READY gate: no real lab value in any tracked file under benchmarks/, none in the given corpus files. Exit 1 on any hit; prints file:line and the
+    category only. Corpus files get the pattern categories as well; --allow-cat names documented public-dataset categories (default: none)."""
+    import subprocess
+    print(f"denylist: {L.load_denylist(a.denylist)} real lab values loaded (not printed)")
+    root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True).stdout.strip()
+    files = subprocess.run(["git", "-C", root, "ls-files", "benchmarks/"], capture_output=True, text=True, check=True).stdout.split()
+    allow = set(a.allow_cat or [])
+    bad = 0
+    for f in files:
+        try:
+            with open(os.path.join(root, f), "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        if b"\0" in raw:
+            continue
+        for i, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
+            for h in L.PUBLIC_DATASET_HANDLES:
+                line = line.replace(h, "")
+            for cat in sorted(set(L.deny_hits(line)) - allow):
+                print(f"  {f}:{i}: denylist:{cat}")
+                bad += 1
+    for c in a.corpus or []:
+        for r in jl(c):
+            for h in L.scan_row(r):
+                if h.split(":")[-1] not in allow:
+                    print(f"  {c}: {r['id']}: {h}")
+                    bad += 1
+    print(f"scanned {len(files)} tracked files under benchmarks/ and {len(a.corpus or [])} corpus files; hits {bad}")
+    return 0 if not bad else 1
 
 
 def cmd_stats(a):
@@ -557,13 +589,17 @@ def main():
     b.add_argument("--gapreg", required=True)
     b.add_argument("--schema", required=True)
     b.add_argument("--out", required=True)
-    b.add_argument("--denylist", help="jsonl of real lab values ({cat, v}); never committed; redacted in the build and checked by the leak scan")
+    b.add_argument("--denylist", required=True, help="jsonl of real lab values ({cat, v}; see mkdenylist.py); kept outside git; redacted in the build and checked by the leak scan")
     b.add_argument("--owner-target", type=int, default=900)
     b.add_argument("--stateful", type=int, default=120)
     b.add_argument("--per-tech", type=int, default=12)
     b.add_argument("--seed", type=int, default=20261113)
     s = sub.add_parser("stats")
     s.add_argument("corpus")
+    g = sub.add_parser("leakscan-repo")
+    g.add_argument("--denylist", required=True)
+    g.add_argument("--corpus", action="append")
+    g.add_argument("--allow-cat", action="append")
     k = sub.add_parser("leakscan")
     k.add_argument("corpus")
     k.add_argument("--denylist")
@@ -574,7 +610,7 @@ def main():
     u.add_argument("--seed", type=int, default=20261114)
     u.add_argument("--width", type=int, default=240)
     a = ap.parse_args()
-    return {"build": cmd_build, "stats": cmd_stats, "audit-sample": cmd_audit_sample, "leakscan": cmd_leakscan}[a.cmd](a)
+    return {"build": cmd_build, "stats": cmd_stats, "audit-sample": cmd_audit_sample, "leakscan": cmd_leakscan, "leakscan-repo": cmd_leakscan_repo}[a.cmd](a)
 
 
 if __name__ == "__main__":

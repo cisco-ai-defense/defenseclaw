@@ -1,7 +1,7 @@
 # Windows shell corpus (windows-shell)
 
 Builder for the S7 Windows shell corpus (rel-1-0-10:GAP-0019). It produces `windows-shell.cases.jsonl` (case-v1), kept separate from every other corpus.
-The corpus data is not in git: it lives on dev at `~/dc-eh/evidence/rel-1-0-10/s7/corpus/windows-shell.cases.jsonl` and on dc-build-1 at
+The corpus data is not in git: it lives on dev at `~/dc-eh/evidence/rel-1-0-10/s7/corpus/windows-shell.cases.jsonl` and on the S7 benchmark boxes at
 `~/s7c/corpora/windows-shell.cases.jsonl`, and is registered in s7-gate's `corpora_all.json` / `corpora_full.json` as `windows-shell`.
 
 ```
@@ -11,6 +11,7 @@ python3 benchmarks/s7/wincorpus/build.py build --win-all <windows rows of the no
     --gapreg gap-regression.cases.jsonl --schema benchmarks/schema/case-v1.schema.json --denylist <real-lab-values.jsonl> --out windows-shell.cases.jsonl
 python3 benchmarks/s7/wincorpus/build.py stats windows-shell.cases.jsonl
 python3 benchmarks/s7/wincorpus/build.py leakscan windows-shell.cases.jsonl --denylist <real-lab-values.jsonl>     # exit 1 on any hit; prints categories and case ids only
+python3 benchmarks/s7/wincorpus/build.py leakscan-repo --denylist <real-lab-values.jsonl> --corpus windows-shell.cases.jsonl   # the pre-READY gate
 python3 benchmarks/s7/wincorpus/build.py audit-sample windows-shell.cases.jsonl --out audit20.tsv     # seeded 20% sample for the label audit
 python3 -m unittest benchmarks/s7/wincorpus/test_wincorpus.py
 s7-gate run <label> --worktree <rel head worktree> --only windows-shell
@@ -39,7 +40,7 @@ gets 1, the same value always gets the same placeholder inside one build, and a 
 | Windows computer names: `EC2AMAZ-*`, `WIN-*`, UNC `\\name\`, `-ComputerName`/`/s` operands | `LABPC<n>` (`LABPC<n>.labdomain<m>.example.com` for a FQDN) |
 | other host names: `dc-*` test aliases, `ip-*` / `ec2-*` EC2 names, private-TLD hosts | `labhost<n>` |
 | AD / DNS domains (private-TLD suffix, UPN suffix) and NetBIOS domains | `labdomain<n>.example.com`, `LABDOM<n>` (one number for both spellings of a domain) |
-| user names: `DOMAIN\user`, UPNs, `/user:` / `-User` / `/grant` operands, the owner's names | `labuser<n>` (built-ins such as Administrator and Guest are kept) |
+| user names: `DOMAIN\user`, UPNs, `/user:` / `-User` / `/grant` operands | `labuser<n>`; the owner's names (denylist) | `alice` (built-ins such as Administrator and Guest are kept) |
 | home paths with a user name: `C:\Users\x`, `C:/Users/x`, `/c/Users/x`, `/mnt/c/Users/x`, `/Users/x`, `/home/x` | `alice` |
 | SIDs `S-1-5-21-a-b-c[-rid]` | `S-1-5-21-1000000000-2000000000-<n>[-rid]` (the RID is kept) |
 | IPv4, IPv6 (with zone), MAC addresses | `198.51.100.<n>`, `2001:db8::<n>`, `00:00:5E:00:53:<n>` (documentation ranges; loopback and broadcast are kept) |
@@ -47,7 +48,15 @@ gets 1, the same value always gets the same placeholder inside one build, and a 
 
 The placeholders are bare tokens on purpose: `<host1>` would be a shell redirection to the guardrail's command parser and change what a rule sees.
 
-Patterns cannot know an arbitrary NetBIOS name or user name, so the build also takes `--denylist`, a jsonl file of the real lab values (`{"cat": ..., "v": ...}`,
-categories `computername hostalias labdomain netbios labuser domuser upn labfqdn ip account instance sid`). It is generated on the dev host from the host registry, the
-ssh config, the lab AD docs and the identities found in the previous corpus, kept outside git and never printed. The build redacts those values and the leak scan
+No real lab value is written anywhere in this repo (code, tests, docs). The builder reads real values only from the denylist file at run time, the file lives outside
+git, the build requires `--denylist`, and the tests use synthetic values only. Generate the file on the dev host with `mkdenylist.py OUT.jsonl --old-corpus <earlier corpus>
+--person <owner name> ...` (ssh config, `dc-hosts`, the AWS account id, the identities of an earlier unredacted corpus; mode 600, counts printed, never values).
+
+Patterns cannot know an arbitrary NetBIOS name, host alias or user name, so the build takes `--denylist`, a jsonl file of the real lab values (`{"cat": ..., "v": ...}`,
+categories `computername hostalias labdomain netbios labuser domuser upn labfqdn ip account instance sid person`). The build redacts those values and the leak scan
 (`scan_row`, over every string of every row except `source.dataset`) reports any survivor next to the pattern categories; a build with a leak-scan hit exits 1.
+
+**Gate before READY:** `build.py leakscan-repo --denylist <file> --corpus <built corpus>` scans every tracked file under `benchmarks/` (`git ls-files benchmarks/`) for denylist
+values, plus every row of the corpus file(s) for both pattern categories and denylist values. It exits 1 on any hit and prints `file:line` or the case id with the category,
+never the value. The public dataset handles named in `DATASET_BY_SRC` are provenance and are skipped in files; `--allow-cat` names any further documented public-dataset
+category (default: none).

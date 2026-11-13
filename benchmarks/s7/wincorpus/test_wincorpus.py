@@ -23,10 +23,10 @@ SCHEMA = HERE.parents[2] / "benchmarks" / "schema" / "case-v1.schema.json"
 
 class RedactionTests(unittest.TestCase):
     def test_lab_identities_are_replaced(self):
-        out = L.redact(r"copy x C:\Users\r109kz7\proj and ssh dc-fc-r103-a2-win hostname; Users\vnarajal")
-        self.assertNotIn("r109kz7", out)
-        self.assertNotIn("dc-fc-r103-a2-win", out)
-        self.assertNotIn("vnarajal", out)
+        out = L.redact(r"copy x C:\Users\bob2\proj and ssh dc-lab9-mac hostname; Users\carol2")
+        self.assertNotIn("bob2", out)
+        self.assertNotIn("dc-lab9-mac", out)
+        self.assertNotIn("carol2", out)
         self.assertIn(r"C:\Users\alice", out)
 
     def test_registry_and_drive_paths_are_untouched(self):
@@ -97,8 +97,8 @@ class RedactionCategoryTests(unittest.TestCase):
             self.assertEqual(L.redact(s), s, s)
 
     def test_user_names_and_upns(self):
-        out = L.redact(r"Add-LocalGroupMember -Group Administrators -Member jdoe@lab-corp.local; runas /user:LABCO\bsmith notepad; Get-Process -IncludeUserName -User LABCO\bsmith; whoami > C:\Users\carol\out.txt; Users\vnarajal")
-        self.assert_gone(out, "jdoe", "bsmith", "lab-corp", "LABCO", "carol", "vnarajal")
+        out = L.redact(r"Add-LocalGroupMember -Group Administrators -Member jdoe@lab-corp.local; runas /user:LABCO\bsmith notepad; Get-Process -IncludeUserName -User LABCO\bsmith; whoami > C:\Users\carol\out.txt; Users\dave3")
+        self.assert_gone(out, "jdoe", "bsmith", "lab-corp", "LABCO", "carol", "dave3")
         both = L.redact(r"a LABCO\bsmith b /user:LABCO\bsmith").split()
         self.assertEqual(both[1], both[3].split(":")[1])    # one user, one placeholder
         self.assertIn("Administrators", out)
@@ -117,9 +117,9 @@ class RedactionCategoryTests(unittest.TestCase):
             self.assertEqual(L.redact(keep), keep, keep)
 
     def test_hostnames(self):
-        out = L.redact("scp -q dc-fc-r103-a2-win:C:/x . ; ssh ec2-user@ip-10-0-1-2.ec2.internal; curl http://ec2-3-4-5-6.compute-1.amazonaws.com/x; ssh defenseclaw-dev ls; scp dc-ent-rhel:/y .")
-        self.assert_gone(out, "dc-fc-r103-a2-win", "ip-10-0-1-2", "ec2-3-4-5-6", "defenseclaw-dev", "dc-ent-rhel")
-        again = L.redact("dc-ent-rhel dc-ent-rhel").split()
+        out = L.redact("scp -q dc-lab9-mac:C:/x . ; ssh ec2-user@ip-10-0-1-2.ec2.internal; curl http://ec2-3-4-5-6.compute-1.amazonaws.com/x; ssh " + "defenseclaw-" + "dev ls; scp dc-lab9-rhel:/y .")
+        self.assert_gone(out, "dc-lab9-mac", "ip-10-0-1-2", "ec2-3-4-5-6", "defenseclaw-" + "dev", "dc-lab9-rhel")
+        again = L.redact("dc-lab9-rhel dc-lab9-rhel").split()
         self.assertEqual(again[0], again[1])        # the same host always gets the same placeholder
         self.assertIn(again[0], out)
         self.assertEqual(len(set(re.findall(r"labhost\d+", out))), 5)
@@ -155,10 +155,15 @@ class RedactionCategoryTests(unittest.TestCase):
         self.assertIn("00:00:5E:00:53:01", out)       # and the same address gets the same placeholder
 
     def test_owner_names(self):
-        self.assertEqual(L.redact("git -C /x log --author=vnarajal --author=Vineeth"), "git -C /x log --author=alice --author=alice")
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl") as f:     # the owner's names come from the denylist file, never from the repo
+            for v in ("zoltan9", "zoltansai"):
+                f.write(json.dumps({"cat": "person", "v": v}) + "\n")
+            f.flush()
+            L.load_denylist(f.name)
+        self.assertEqual(L.redact("git -C /x log --author=zoltan9 --author=Zoltansai"), "git -C /x log --author=alice --author=alice")
 
     def test_stable_and_idempotent(self):
-        text = (r"ssh -T dc-ent-win-1; net use \\FILESRV01\x /user:LABCO\bsmith; reg unload HKU\S-1-5-21-1111111111-2222222222-3333333333-1105; ping 10.1.2.3 2600:1f18::5; "
+        text = (r"ssh -T dc-lab9-win-1; net use \\FILESRV01\x /user:LABCO\bsmith; reg unload HKU\S-1-5-21-1111111111-2222222222-3333333333-1105; ping 10.1.2.3 2600:1f18::5; "
                 "EC2AMAZ-A1B2C3D.corp-lab.local 0a:1b:2c:3d:4e:5f i-0a1b2c3d4e5f60718 jdoe@corp-lab.local C:\\Users\\bob\\x")
         once = L.redact(text)
         self.assertEqual(L.redact(once), once)
@@ -182,8 +187,8 @@ class RedactionCategoryTests(unittest.TestCase):
         raw = {
             "ipv4": "ssh 10.1.2.3", "ipv6": "ping 2600:1f18::5", "mac": "mac 0a:1b:2c:3d:4e:5f", "sid": "S-1-5-21-1111111111-2222222222-3333333333-500", "computername": "EC2AMAZ-A1B2C3D",
             "ec2dns": "ip-10-0-1-2.ec2.internal", "unc": r"\\FILESRV01\share", "compflag": "Get-Service -ComputerName SRV02", "email": "mail bob@corp-mail.test", "upn": "jdoe@corp-lab.local",
-            "idctx": r"net use /user:LABCO\bsmith", "domuser": r"LABCO\bsmith", "privfqdn": "dc01.corp-lab.local", "labhost": "dc-ent-win-1", "userdir": r"C:\Users\bob\x",
-            "userdir_bare": r"copy Users\bob\x", "homedir": "/home/bob/x", "person": "vnarajal", "instance": "i-0a1b2c3d4e5f60718", "awsres": "sg-0a1b2c3d4e5f60718", "account": "token 123456789012",
+            "idctx": r"net use /user:LABCO\bsmith", "domuser": r"LABCO\bsmith", "privfqdn": "dc01.corp-lab.local", "labhost": "dc-lab9-win-1", "userdir": r"C:\Users\bob\x",
+            "userdir_bare": r"copy Users\bob\x", "homedir": "/home/bob/x", "instance": "i-0a1b2c3d4e5f60718", "awsres": "sg-0a1b2c3d4e5f60718", "account": "token 123456789012",
         }
         self.assertEqual(set(raw) - set(L.LEAK_PATTERNS), set())
         self.assertEqual(set(L.LEAK_PATTERNS) - set(raw) - {"secret"}, set(), "add a raw sample for the new category")
@@ -192,7 +197,7 @@ class RedactionCategoryTests(unittest.TestCase):
             self.assertEqual(L.leak_scan(L.redact(text)), [], cat)
 
     def test_row_pass_covers_payload_truth_and_original_id_but_not_provenance(self):
-        row = L.shell_case("wsh/t/1", "real-owner", r"orig dc-ent-win-1 C:\Users\bob\s.jsonl", r"ssh dc-ent-win-1 dir C:\Users\bob", truth="benign", cats=["x"], label_source="t")
+        row = L.shell_case("wsh/t/1", "real-owner", r"orig dc-lab9-win-1 C:\Users\bob\s.jsonl", r"ssh dc-lab9-win-1 dir C:\Users\bob", truth="benign", cats=["x"], label_source="t")
         row["truth"]["exclusion_reason"] = "host 10.1.2.3"
         self.assertNotEqual(L.scan_row(row), [])
         out = L.redact_row(row)
@@ -200,6 +205,42 @@ class RedactionCategoryTests(unittest.TestCase):
         self.assertEqual(out["id"], row["id"])
         self.assertEqual(out["source"]["dataset"], row["source"]["dataset"])
         self.assertEqual(out["strata"], row["strata"])
+
+
+class LeakScanRepoTests(unittest.TestCase):
+    """The pre-READY gate, run against a throwaway git repo with a synthetic denylist."""
+
+    def _run(self, tracked_text, corpus_text=None):
+        import subprocess
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True)
+            (Path(d) / "benchmarks").mkdir()
+            (Path(d) / "benchmarks" / "doc.md").write_text(tracked_text)
+            subprocess.run(["git", "-C", d, "add", "benchmarks"], check=True)
+            deny = Path(d) / "deny.jsonl"
+            deny.write_text(json.dumps({"cat": "hostalias", "v": "dc-zebra9-win"}) + "\n")
+            cmd = [sys.executable, str(HERE / "build.py"), "leakscan-repo", "--denylist", str(deny)]
+            if corpus_text is not None:
+                (Path(d) / "c.jsonl").write_text(corpus_text)
+                cmd += ["--corpus", str(Path(d) / "c.jsonl")]
+            return subprocess.run(cmd, cwd=d, capture_output=True, text=True)
+
+    def test_clean_repo_passes(self):
+        r = self._run("nothing here\nVisit " + "/".join(L.PUBLIC_DATASET_HANDLES[:1]) + "\n")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_a_denylist_value_in_a_tracked_file_fails_without_printing_it(self):
+        r = self._run("line1\nssh DC-ZEBRA9-WIN now\n")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("benchmarks/doc.md:2: denylist:hostalias", r.stdout)
+        self.assertNotIn("zebra9", r.stdout.lower())
+
+    def test_corpus_rows_are_scanned_too(self):
+        row = L.shell_case("wsh/t/1", "authored", "t", "ssh dc-zebra9-win dir", truth="benign", cats=["x"], label_source="t")
+        r = self._run("clean\n", json.dumps(row) + "\n")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("wsh/t/1", r.stdout)
+        self.assertNotIn("zebra9", r.stdout.lower())
 
 
 class WrapperTests(unittest.TestCase):
