@@ -56,7 +56,8 @@ var sandboxActorSecretName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,25
 
 // SandboxSubstrateOnlyKeys are the floor keys only Agent Substrate actors
 // read; openshell.admin refuses them.
-var SandboxSubstrateOnlyKeys = []string{"sandbox_class", "idle_suspend_after", "unattended_asks", "ask_timeout", "actor_secrets"}
+var SandboxSubstrateOnlyKeys = []string{"sandbox_class", "idle_suspend_after", "unattended_asks", "ask_timeout", "actor_secrets",
+	"ask_hosts", "url_rules"}
 
 // SandboxHostOnlyKeys are the floor keys only a sandbox on a computer
 // reads (mounts, host ports, the process tree, the KVM driver fallback and
@@ -143,6 +144,7 @@ func (a *SandboxAdminConfig) setSubstrateOnlyKeys() []string {
 	for key, set := range map[string]bool{
 		"sandbox_class": a.SandboxClass != "", "idle_suspend_after": a.IdleSuspendAfter != "",
 		"unattended_asks": a.UnattendedAsks != "", "ask_timeout": a.AskTimeout != "", "actor_secrets": a.ActorSecrets != nil,
+		"ask_hosts": a.AskHosts != nil, "url_rules": a.URLRules != nil,
 	} {
 		if set {
 			out = append(out, key)

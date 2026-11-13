@@ -44,7 +44,8 @@ refused here as for extproc.failure_mode (GAP-0063, GAP-0090). */ -}}
 {{- end -}}
 {{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}
 {{- /* One profile per launcher profile: its atespaces, the egress allow
-list, the unattended ask mode and the exposed values. The profile's
+list, the unattended ask mode, the exposed values, and the ask hosts and
+url rules. The profile's
 sandbox section (guardrail.profiles.<p>.sandbox) tightens substrate.admin as
 config.TightenSandboxAdmin does: unattended_asks deny wins (else the
 profile's, else substrate.unattended.asks), actor_secrets intersect. */ -}}
@@ -68,6 +69,21 @@ profile's, else substrate.unattended.asks), actor_secrets intersect. */ -}}
 {{- $sec = $floor.actor_secrets -}}
 {{- end -}}
 {{- if $sec }}{{ $_ := set $p "actor_secrets" $sec }}{{ end -}}
+{{- /* ask_hosts and url_rules (GAP-0171): substrate.admin's, then the
+profile's added (config.tightenAskKeys). The callout applies them to the
+hosts the actor's egress policy already allows. */ -}}
+{{- $askHosts := list -}}
+{{- range (concat ($floor.ask_hosts | default list) ($sb.ask_hosts | default list)) }}{{ if not (has . $askHosts) }}{{ $askHosts = append $askHosts . }}{{ end }}{{ end -}}
+{{- if $askHosts }}{{ $_ := set $p "ask_hosts" $askHosts }}{{ end -}}
+{{- $rules := list -}}
+{{- range (concat ($floor.url_rules | default list) ($sb.url_rules | default list)) -}}
+{{- $r := dict "hosts" .hosts "action" (lower .action) -}}
+{{- with .name }}{{ $_ := set $r "name" . }}{{ end -}}
+{{- with .methods }}{{ $_ := set $r "methods" . }}{{ end -}}
+{{- with .path_prefix }}{{ $_ := set $r "path_prefix" . }}{{ end -}}
+{{- if not (has $r $rules) }}{{ $rules = append $rules $r }}{{ end -}}
+{{- end -}}
+{{- if $rules }}{{ $_ := set $p "url_rules" $rules }}{{ end -}}
 {{- $profiles = append $profiles $p -}}
 {{- end -}}
 {{- if $profiles }}{{ $_ := set $c "profiles" $profiles }}{{ end -}}
