@@ -93,7 +93,12 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				if slices.ContainsFunc(out, func(x RuleFinding) bool { return x.RuleID == f.RuleID }) {
 					continue
 				}
-				if !hard {
+				// The role of an MCP effect is a guess, so outside the strict tier
+				// the finding is an alert at most. A finding the native tool
+				// leaves detection-only (a rule the pack does not let alert on a
+				// path) stays so: an MCP call is never judged harder than the
+				// native file tool on the same path.
+				if !hard && f.enforcement != findingEnforcementDetectionOnly {
 					f.enforcement, f.proof = findingEnforcementAlertOnly, findingProof{}
 				}
 				f.Title += " (path in MCP tool arguments)"
