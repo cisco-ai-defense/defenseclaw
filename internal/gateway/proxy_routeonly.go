@@ -684,11 +684,14 @@ func mustUnescape(p string) string {
 var routeOnlyDropHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Connection", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade",
 	"Host", "Content-Length", "X-Ai-Auth", "Origin", "Cookie",
+	// The client Accept-Encoding is not forwarded (GAP-0097): Go transport
+	// asks for gzip and decodes it, so the usage record reads the reply.
+	"Accept-Encoding",
 }
 
 // headers allowed across a credential boundary (a routed backend that is
 // not the agent own provider and origin).
-var routeOnlyBoundaryHeaders = []string{"Content-Type", "Accept", "Accept-Encoding", "User-Agent", "Anthropic-Version", "Anthropic-Beta", "Openai-Beta"}
+var routeOnlyBoundaryHeaders = []string{"Content-Type", "Accept", "User-Agent", "Anthropic-Version", "Anthropic-Beta", "Openai-Beta"}
 
 func connectionNamed(h http.Header) map[string]bool {
 	out := map[string]bool{}
@@ -888,6 +891,12 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response, call mode
 		}
 		if err != nil {
 			if !streaming && len(body) > 0 {
+				// The caller gets the bytes as they came; the usage record
+				// reads them decoded when the transport left an encoding
+				// (GAP-0097).
+				if decoded, ok := decodeReplyBody(resp.Header.Clone(), body); ok {
+					body = decoded
+				}
 				call.Body(body)
 			}
 			if errors.Is(err, io.EOF) {

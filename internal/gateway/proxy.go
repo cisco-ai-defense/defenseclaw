@@ -1290,6 +1290,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		Stream            bool            `json:"stream,omitempty"`
 	}
 	_ = json.Unmarshal(body, &partial)
+	if bedrockStreamingPath(r.URL.Path) {
+		// Bedrock names a stream by its path, not a body field (GAP-0098).
+		partial.Stream = true
+	}
 
 	p.rtMu.RLock()
 	mode := p.mode
@@ -1710,13 +1714,33 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Determine whether the upstream response is streaming (SSE).
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	// Bedrock InvokeModelWithResponseStream and ConverseStream answer in the
+	// binary AWS eventstream: streamed through like SSE, decoded frame by
+	// frame for inspection (GAP-0098).
+	var bedrockStream *bedrockEventStreamText
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
+		bedrockStream = newBedrockEventStreamText()
+	}
 
-	if !isSSE {
+	if !isSSE && bedrockStream == nil {
 		// --- Non-streaming: buffer response, inspect, then forward ---
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 		if readErr != nil {
 			writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
 			return
+		}
+		// An encoding the transport left (br, zstd, deflate, stacked) is
+		// decoded so inspection and the usage record read the reply; only
+		// one that cannot be decoded reaches the check below (GAP-0097).
+		if decoded, ok := decodeReplyBody(resp.Header, respBody); ok {
+			respBody = decoded
+		}
+		if enc := uninspectableEncoding(resp.Header); enc != "" {
+			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
 		}
 
 		// Extract assistant text from provider-native response format.
@@ -1779,6 +1803,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write(respBody)
 	} else {
 		// --- Streaming: buffer initial bytes for pre-scan, then forward with periodic scans ---
+		if enc := uninspectableEncoding(resp.Header); enc != "" {
+			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, true,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
+		}
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -1793,6 +1824,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		const scanInterval = 500
 		buf := make([]byte, 4096)
 		var lineBuf strings.Builder
+		bedrockStreamReported := false
 
 		streamBufferSize := 1024
 		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
@@ -1833,9 +1865,26 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if n > 0 {
 				chunk := buf[:n]
 
-				// Parse SSE text for inspection regardless of buffer state.
-				lineBuf.Write(chunk)
-				for {
+				// Parse SSE text (or eventstream frames) for inspection
+				// regardless of buffer state.
+				if bedrockStream != nil {
+					accumulated.WriteString(bedrockStream.Feed(chunk))
+					if streamResponseModel == "" {
+						streamResponseModel = bedrockStream.Model()
+					}
+					if bedrockStream.Broken() && !bedrockStreamReported {
+						bedrockStreamReported = true
+						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
+							// Nothing more reaches the caller; before the first
+							// flush, nothing at all.
+							preblocked = !initialFlushed
+							break
+						}
+					}
+				} else {
+					lineBuf.Write(chunk)
+				}
+				for bedrockStream == nil {
 					line, rest, found := strings.Cut(lineBuf.String(), "\n")
 					if !found {
 						break
@@ -2005,9 +2054,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 
 	case "bedrock":
 		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
-		// Bedrock InvokeModel responses are model-shaped and re-routed through
-		// the matching provider extractor (anthropic / cohere / etc.) by the
-		// caller, so this branch only handles the Converse envelope.
+		// InvokeModel answers in the model family's shape (bedrockInvokeText).
 		var bedrockResp struct {
 			Output struct {
 				Message struct {
@@ -2025,6 +2072,10 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			if sb.Len() > 0 {
 				return sb.String()
 			}
+		}
+		// InvokeModel answers in the model family's own shape (GAP-0098).
+		if t := bedrockInvokeText(body); t != "" {
+			return t
 		}
 
 	default:
@@ -2169,6 +2220,13 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 		if json.Unmarshal(body, &resp) == nil {
 			for _, c := range resp.Output.Message.Content {
 				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+		if len(calls) == 0 {
+			// InvokeModel for Claude answers with Anthropic tool_use blocks
+			// (GAP-0098).
+			if raw := extractPassthroughToolCalls(body, "anthropic"); raw != nil {
+				return raw
 			}
 		}
 	default:

@@ -95,6 +95,12 @@ var alwaysDeniedHeaders = map[string]struct{}{
 	// tenants (pre-existing).
 	"traceparent": {},
 	"tracestate":  {},
+	// Accept-Encoding: the proxy inspects response bodies. Go's transport
+	// asks for gzip and decodes it only when the caller did not set the
+	// header itself; a forwarded client value (undici and the AWS SDK send
+	// one) brings back a compressed body the inspectors cannot read
+	// (GAP-0097).
+	"accept-encoding": {},
 
 	// ── BEGIN: blocklist expansion — commented out to preserve the
 	// pre-refactor forwarding contract. Each entry below was added by
