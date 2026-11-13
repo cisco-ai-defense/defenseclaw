@@ -121,7 +121,9 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 // per-signal OpenTelemetry endpoints (which outrank the
 // OTEL_EXPORTER_OTLP_ENDPOINT the drop-in points at the ingress) and the
 // internal metrics, tracing and OTLP endpoints. A sandbox run sets none of
-// them, so the drop-in pins each one to "" (unset) and a repository's
+// them, so the drop-in pins each one to "" (unset); a per-signal OTLP
+// endpoint the native OTLP spec already points at the ingress keeps that
+// value, which pins it just as well. Either way a repository's
 // committed settings cannot send conversation content, credentials or
 // telemetry to a host of its choosing, or flip Claude's feature flags,
 // without a tool call. Measured on 2.1.311: its kns list (the service base
@@ -318,6 +320,9 @@ func claudeCodeSandboxManagedEnv(rt resolvedSandboxTarget) (map[string]string, e
 	}
 	for _, key := range claudeCodeSandboxServiceEndpointEnv {
 		if _, set := env[key]; set {
+			if claudeCodeOTLPEndpointKey(key) {
+				continue
+			}
 			return nil, fmt.Errorf("claudecode: the sandbox OTLP env already sets %s, which the drop-in pins unset", key)
 		}
 		env[key] = ""

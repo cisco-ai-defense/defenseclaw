@@ -493,8 +493,12 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 		"CLAUDE_CODE_API_BASE_URL", "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
 	}
 	for _, key := range append(provider, claudeCodeSandboxServiceEndpointEnv...) {
-		if value, ok := merged[key]; !ok || value != "" {
-			t.Errorf("merged managed env %s = %#v (present %v), want \"\"", key, value, ok)
+		value, ok := merged[key]
+		if s, _ := value.(string); ok && claudeCodeOTLPEndpointKey(key) && strings.HasPrefix(s, "http://host.openshell.internal:18971") {
+			continue // pinned to the ingress by the native OTLP spec
+		}
+		if !ok || value != "" {
+			t.Errorf("merged managed env %s = %#v (present %v), want \"\" or the ingress", key, value, ok)
 		}
 	}
 	if merged["ANTHROPIC_BASE_URL"] != run.Env["ANTHROPIC_BASE_URL"] {
