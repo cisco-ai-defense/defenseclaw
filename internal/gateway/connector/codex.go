@@ -328,7 +328,7 @@ func (c *CodexConnector) HookScriptNames(SetupOpts) []string {
 	return []string{"codex-hook.sh"}
 }
 func (c *CodexConnector) Description() string {
-	return "config.toml model_providers patch + versioned hook matrix (6-11 events, component scanning)"
+	return "config.toml hooks, otel and notify patch + versioned hook matrix (6-11 events, component scanning); optional route-only model_providers entry"
 }
 func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
@@ -534,6 +534,16 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			false,
 		)
 	}
+	// Route-only provider entry from config.yaml (removed when not routed).
+	if err := c.ApplyRouteOnly(opts, opts.RouteOnly); err != nil {
+		return c.rollbackSetupAfterSnapshot(
+			opts,
+			runtimeSnapshot,
+			fmt.Errorf("codex route-only: %w", err),
+			false,
+			false,
+		)
+	}
 	if !opts.sandboxNativeOTLP {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 			return fmt.Errorf("revoke obsolete Codex native OTLP credential: %w", err)
@@ -572,6 +582,11 @@ func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 }
 
 func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) error {
+	// The model provider goes back first: a dead route-only URL would break
+	// every Codex turn (DESIGN 7.4).
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		return fmt.Errorf("codex teardown: route-only: %w", err)
+	}
 	if err := c.restoreCodexConfig(opts); err != nil {
 		// Keep the scoped OTLP credential valid while config.toml may still
 		// reference it. Revoking first would strand a partially restored Codex

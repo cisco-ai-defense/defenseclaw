@@ -71,6 +71,9 @@ type ConnectorSignals struct {
 // SetupOpts is passed to Setup/Teardown during `defenseclaw setup`.
 type SetupOpts struct {
 	DataDir string // ~/.defenseclaw/
+	// RouteOnly is the route-only rendering of this connector (nil = not
+	// routed; an earlier render is removed).
+	RouteOnly *RouteOnlySetup
 	// pendingHookScriptDigests is scoped to one install read-back. It is never
 	// persisted or accepted by ordinary verification and gateway readers.
 	pendingHookScriptDigests map[string]string

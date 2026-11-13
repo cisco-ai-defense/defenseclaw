@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
@@ -214,6 +215,28 @@ func (s *bedrockEventStreamText) Broken() bool { return s.broken }
 
 // Model is the model the stream named (Anthropic message_start), if any.
 func (s *bedrockEventStreamText) Model() string { return s.model }
+
+// PartialLen is how many bytes at the end of what Feed took belong to a
+// frame that is not complete yet; a forwarder holds them back so the
+// receiver only ever gets whole frames.
+func (s *bedrockEventStreamText) PartialLen() int { return len(s.buf) }
+
+// Finish ends the tool calls still open when the stream ended (a stream cut
+// inside a call): they are handed to the tool-call rules like finished ones.
+// A stream the decoder could not frame has no reliable open calls.
+func (s *bedrockEventStreamText) Finish() {
+	if s.broken {
+		return
+	}
+	idx := make([]int, 0, len(s.tools))
+	for i := range s.tools {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+	for _, i := range idx {
+		s.toolStop(i)
+	}
+}
 
 // Feed takes the next bytes of the stream and returns the text of the
 // messages they complete.
