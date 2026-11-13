@@ -68,8 +68,16 @@ type UIDCache struct {
 const refreshFlightMax = 2 * time.Second
 
 // refusalReuse is how long a refresh's confirmation keeps a policy-stage
-// refusal without another lookup: the bound a registration miss has
-// (uidMissTTL). Nothing that would allow reuses one (GAP-0243).
+// refusal without another lookup, so a flood of refused requests costs the
+// leader about one lookup per name per refusalReuse (GAP-0243). Nothing that
+// would allow reuses one.
+//
+// Known, bounded residual (GAP-0237, lead decision 2026-11-13): an actor
+// deleted and created again under the same name within refusalReuse of
+// such a confirmation may be refused under its predecessor's policy for at
+// most refusalReuse (1 s). It is only ever a refusal, never an allow: a
+// request that would be allowed is checked by the leader under the live
+// incarnation. It is the bound a registration miss already has (uidMissTTL).
 const refusalReuse = uidMissTTL
 
 // refreshState is a name's last refresh: whether it is running, and what it

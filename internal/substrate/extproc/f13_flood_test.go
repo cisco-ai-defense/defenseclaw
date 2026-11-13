@@ -205,26 +205,69 @@ func TestARecreatedNameIsSeenRightAfterAConfirmedDelete(t *testing.T) {
 	}
 }
 
-// GAP-0237 (R8's TestR8cRecreatedProfileInsideRefreshWindow, refused under
-// eng for 15 s at 1d31b29b02): a refusal stands on a refresh for
-// refusalReuse (1 s) at most; then the recreated actor is decided under
-// its own profile.
-func TestARecreatedProfileIsSeenAfterTheRefusalReuse(t *testing.T) {
+// GAP-0237 (R8's TestR8cRecreatedProfileInsideRefreshWindow, bounded form;
+// refused under eng for 15 s at 1d31b29b02). A refresh confirmed the
+// predecessor (eng blocks the host); the name is created again under base
+// (allows it). Inside refusalReuse (1 s) the request may be refused under
+// eng, never allowed. Past it, the request is decided under base, and its
+// audit row names base and the new UID. The clock is injected.
+func TestRecreatedProfileInsideRefreshWindow(t *testing.T) {
 	var mu sync.Mutex
 	now := time.Date(2026, 11, 13, 19, 0, 0, 0, time.UTC)
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	advance := func(d time.Duration) { mu.Lock(); now = now.Add(d); mu.Unlock() }
 	l := &fakeLeader{live: "uid-1"}
+	h := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = l; o.Now = clock })
+	h.uids.profile = "eng"
+	ctx := context.Background()
+	decide := func(host string) Verdict {
+		r := req("ops", "GET", host, "/")
+		v := h.eng.DecideHeaders(ctx, r)
+		h.eng.Finish(r, v)
+		return v
+	}
+	decide("example.com")
+	if v := decide("blocked.example.net"); v.Allow || v.Profile != "eng" { // a refresh confirms uid-1
+		t.Fatalf("predecessor: %+v, want eng's refusal", v)
+	}
+	h.recreate(l, "uid-2", "")
+	for _, d := range []time.Duration{0, refusalReuse / 2, refusalReuse - time.Millisecond} {
+		mu.Lock()
+		now = time.Date(2026, 11, 13, 19, 0, 0, 0, time.UTC).Add(d)
+		mu.Unlock()
+		if v := decide("blocked.example.net"); v.Allow {
+			t.Fatalf("inside refusalReuse (+%v): %+v, never allowed", d, v)
+		}
+	}
+	advance(2 * time.Millisecond) // past refusalReuse
+	v := decide("blocked.example.net")
+	if !v.Allow || v.Profile != "base" {
+		t.Fatalf("past refusalReuse: %+v, want base's allow", v)
+	}
+	h.events.mu.Lock()
+	last := h.events.events[len(h.events.events)-1]
+	h.events.mu.Unlock()
+	if last.Profile != "base" || last.ActorUID != "uid-2" {
+		t.Fatalf("audit row %+v, want profile base and uid-2", last)
+	}
+}
+
+// GAP-0237: inside refusalReuse, a request the predecessor's profile allows
+// is not decided on the old registration: its chain check answers the old
+// UID stale, and the request is decided under the new incarnation.
+func TestRecreatedActorsAllowIsNeverDecidedOnThePredecessor(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 13, 19, 0, 0, 0, time.UTC)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	l := &fakeLeader{live: "uid-1", secretFor: map[string]bool{"uid-2": true}}
 	h := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = l; o.Now = clock })
 	h.uids.profile = "eng"
 	ctx := context.Background()
 	h.eng.DecideHeaders(ctx, req("ops", "GET", "example.com", "/"))
 	h.eng.DecideHeaders(ctx, req("ops", "GET", "blocked.example.net", "/")) // a refresh confirms uid-1
 	h.recreate(l, "uid-2", "")
-	mu.Lock()
-	now = now.Add(refusalReuse + time.Millisecond)
-	mu.Unlock()
-	if v := h.eng.DecideHeaders(ctx, req("ops", "GET", "blocked.example.net", "/")); !v.Allow || v.Profile != "base" {
-		t.Fatalf("recreated under base after refusalReuse: %+v, want base's allow", v)
+	if v := h.eng.DecideHeaders(ctx, req("ops", "POST", "example.com", "/")); v.Allow || v.Category != CategoryChainEgress {
+		t.Fatalf("inside refusalReuse, allowed host: %+v, want uid-2's chain refusal", v)
 	}
 }
 
