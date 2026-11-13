@@ -127,6 +127,11 @@ type Ask struct {
 	Reason   string    `json:"reason,omitempty"`
 	Severity string    `json:"severity,omitempty"`
 	Created  time.Time `json:"created,omitempty"`
+	// Expires is when a pending ask is denied if nobody answers.
+	Expires time.Time `json:"expires,omitempty"`
+	// Unattended marks an ask an unattended run (--task, --batch) queued
+	// for a person because its profile sets unattended_asks: queue (D12).
+	Unattended bool `json:"unattended,omitempty"`
 }
 
 // Create makes an actor (suspended, then resumed by the gateway).

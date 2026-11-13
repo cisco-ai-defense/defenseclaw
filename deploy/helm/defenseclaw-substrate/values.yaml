@@ -125,6 +125,12 @@ gateway:
   # (callout.judge.tokenSecret, shared with the callout).
   relaySessionSecret: defenseclaw-relay-session
   llmCredentialsSecret: defenseclaw-llm
+  # The chart's one cluster-wide grant: with no OIDC issuer (people sign in
+  # with Kubernetes credentials, not on a managed install), a
+  # ClusterRoleBinding of this ServiceAccount to system:auth-delegator, so the
+  # gateway can make TokenReviews. Never rendered with an OIDC issuer. Its
+  # name; "" is defenseclaw-auth-delegator-<namespace>-<release>.
+  authDelegatorBinding: ""
   args: []
   resources:
     requests: {cpu: 250m, memory: 256Mi}
@@ -202,7 +208,9 @@ callout:
   judge:
     tokenSecret: defenseclaw-callout-judge
   # A Secret whose keys are the exposed actor_secrets values (one file per
-  # name), for exact-value DLP on egress. Never mounted into actors.
+  # name), for exact-value DLP on egress (the callout) and on /llm (the
+  # gateway). Mounted read-only in those two only, never into actors or the
+  # leader; the chart sets config.substrate.extproc.actor_secrets_dir.
   actorSecrets:
     secretName: ""
   args: []

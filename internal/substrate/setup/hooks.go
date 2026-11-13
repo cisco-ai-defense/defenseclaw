@@ -344,6 +344,10 @@ func PreDelete(ctx context.Context, plan ChartPlan, api SubstrateAPI, kube KubeA
 			r.note("the credential provider grant stays: %v", err)
 		}
 	}
+	if plan.AuthDelegatorBinding != "" {
+		r.note("helm removes the cluster-wide ClusterRoleBinding %s (gateway ServiceAccount to system:auth-delegator, "+
+			"for the Kubernetes sign-in) with the release", plan.AuthDelegatorBinding)
+	}
 	r.Notes = append(r.Notes, PurgeSteps(plan)...)
 	if len(left) > 0 {
 		return r, restore(fmt.Errorf("%w on %d actor(s): %s. Delete them as an atespace editor "+
@@ -477,7 +481,7 @@ func PurgeSteps(plan ChartPlan) []string {
 	if spaces == "" {
 		spaces = "<atespace>"
 	}
-	return []string{
+	steps := []string{
 		"Snapshots stay in the Substrate snapshot bucket (storage.snapshotLocation): actor memory, disk and volumes, " +
 			"including anything an agent wrote. To purge them:",
 		"  1. Delete the actors you no longer need, which removes their snapshots: for a in " + spaces +
@@ -492,6 +496,11 @@ func PurgeSteps(plan ChartPlan) []string {
 			" out of the global policy and of the policies of " + strings.Join(orNone(plan.WritableAtespaces), ", ") +
 			" (kubectl ate get|update access-policy), so a later ServiceAccount of the same name gets nothing.",
 	}
+	if plan.AuthDelegatorBinding != "" {
+		steps = append(steps, "  6. After helm uninstall --no-hooks or a lost release, check the cluster-wide binding is gone: "+
+			"kubectl delete clusterrolebinding "+plan.AuthDelegatorBinding+" --ignore-not-found.")
+	}
+	return steps
 }
 
 func memberList(principals []string) []string {

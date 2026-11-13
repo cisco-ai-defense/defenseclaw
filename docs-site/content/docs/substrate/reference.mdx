@@ -27,7 +27,7 @@ keywords:
 | `undo <name> [--to ID]` | Return the actor to its last checkpoint, or to a given one |
 | `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots |
 | `migrate <name>` | Move an actor with an old kit to a rebuilt template |
-| `approvals`, `approve <id> [--always]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs |
+| `approvals`, `approve <id> [--always]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. An ask an unattended run queued shows `unattended` and the time left in the RUN column |
 | `usage [--batch ID]` | Your own usage and cost. Admins can read the fleet |
 | `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown |
 | `policy explain NAME`, `show`, `test NAME` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed |
@@ -60,7 +60,7 @@ Every read command has `--output text|json` and `--json`, and every command take
 
 ### Files
 
-`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service).
+`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). On macOS the key that seals them is an item only the DefenseClaw program may read without asking; macOS asks once after you install a new DefenseClaw build, and over SSH the keychain must be unlocked (`security unlock-keychain`).
 
 ## Configuration
 
@@ -87,7 +87,7 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits. Over budget answers `429` with `Retry-After` |
 | `substrate.extproc.enabled` | `true` | The egress callout |
 | `substrate.extproc.failure_mode` | `closed` | What the egress gateway does when the callout fails |
-| `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it |
+| `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it. `on` says it does; `off` checks headers only. In managed enterprise, `auto` refuses requests to listed MCP servers until the callout has received a body |
 | `substrate.extproc.body_max_bytes` | `1048576` | Largest body the callout reads |
 | `substrate.extproc.mcp_hosts` | `[]` | Hosts whose bodies are read as MCP calls |
 | `substrate.llm.providers` | all the gateway proxy serves | Providers actors may reach, only through the proxy |
@@ -122,6 +122,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `substrate.namespace`, `substrate.apiAddress` | Where Substrate runs |
 | `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway |
 | `leader.store.size`, `leader.store.keepOnUninstall` | The leader's volume |
+| `gateway.authDelegatorBinding` | Name of the ClusterRoleBinding of the gateway to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer). Default `defenseclaw-auth-delegator-<namespace>-<release>` |
 | `callout.judge.tokenSecret` | The callout's token for the MCP tool-rules route. Default `defenseclaw-callout-judge`, which the chart creates. `""` turns the route off: MCP tool calls then raise an alert, and a managed install refuses them |
 | `networkPolicy.adminFrom`, `adminIngress.*` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |

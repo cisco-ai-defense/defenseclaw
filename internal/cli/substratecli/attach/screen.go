@@ -164,14 +164,24 @@ func (s *screen) begin() {
 	}
 }
 
+// modesOff turns off what a full-screen agent turns on and leaves on when
+// the connection ends (the agent keeps running): mouse reporting, focus
+// events, bracketed paste, synchronized output, the kitty keyboard flags,
+// a hidden cursor and the alternate screen. Without it the shell the person
+// gets back reads mouse moves as typed text.
+const modesOff = "\x1b[0m\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l\x1b[?1004l\x1b[?2004l\x1b[?2026l\x1b[<u\x1b[?25h\x1b[?1049l"
+
 // end gives the whole terminal back: held output shown, scroll region reset,
-// the row cleared.
+// the row cleared, the agent modes off.
 func (s *screen) end() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b := s.held
 	if rows, _, ok := s.layout(); ok {
 		b = append(b, "\x1b7\x1b[r\x1b["+strconv.Itoa(rows)+";1H\x1b[0m\x1b[2K\x1b8"...)
+	}
+	if s.active {
+		b = append(b, modesOff...)
 	}
 	if len(b) > 0 {
 		_, _ = s.w.Write(b)

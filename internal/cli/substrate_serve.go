@@ -212,9 +212,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		substrateStartupChecks(cfg)
 		// A managed gateway in a pod has no laptop lifecycle: the chart's
-		// read-only mounted config is the activated one (GAP-0135).
+		// read-only mounted config is the activated one, or, in bundle
+		// mode, a verified signed Substrate bundle (GAP-0135).
 		if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
-			gateway.SetSubstrateClusterActivation(gateway.SubstrateMountedConfigActivation(gateway.SubstrateFileOwner))
+			sources := []func(string, []byte) error{gateway.SubstrateMountedConfigActivation(gateway.SubstrateFileOwner)}
+			if cfg.Substrate.Bundles.Enabled {
+				sources = append(sources, substrateBundleActivation(cfg))
+			}
+			gateway.SetSubstrateClusterActivation(gateway.SubstrateActivationSources(sources...))
 		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
@@ -497,6 +502,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 					substrateRouterCheck(ctx, router, routerErr)}
 			},
 			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
+			// PLAN 7.3: the profile sandbox_class picks the class at create.
+			SandboxClass: gateway.SubstrateSandboxClassFor(c),
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -652,6 +659,15 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 				return "", err
 			}
 			return reg.ParentUID, nil
+		},
+		// A delete purges only a registration the controller marked
+		// deleted (or an actor never registered) (GAP-0142).
+		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil {
+				return false, err
+			}
+			return !ok || reg.Deleted, nil
 		}})
 	if err != nil {
 		return err

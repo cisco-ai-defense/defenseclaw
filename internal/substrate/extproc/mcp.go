@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/calloutapi"
 )
@@ -42,9 +43,11 @@ type toolCallReq struct {
 
 // parseToolCalls returns the tools/call requests in an MCP JSON-RPC body (a
 // request or a batch). A body that is not JSON-RPC has none. Keys are
-// matched exactly and a repeated key is an error, so a body can't show the
-// callout one method and the server another (encoding/json would fold case
-// and keep the last duplicate).
+// matched without case, as MCP servers that decode with Go's encoding/json
+// match them ("Method", "METHOD"), and two keys that differ only in case,
+// or repeat, are an error, so a body can't show the callout one method or
+// tool and the server another (GAP-0156): those servers fold case and keep
+// the last duplicate, others keep the first.
 func parseToolCalls(body []byte) ([]toolCallReq, error) {
 	b := bytes.TrimSpace(body)
 	if len(b) == 0 {
@@ -75,10 +78,10 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 			continue
 		}
 		var method string
-		if raw, ok := obj["method"]; !ok || json.Unmarshal(raw, &method) != nil || method != "tools/call" {
+		if raw, ok := obj[foldKey("method")]; !ok || json.Unmarshal(raw, &method) != nil || method != "tools/call" {
 			continue
 		}
-		params, err := exactObject(obj["params"])
+		params, err := exactObject(obj[foldKey("params")])
 		if err != nil {
 			if errors.Is(err, errDuplicateKey) {
 				return nil, &jsonRPCError{msg: "tools/call params repeat a key", reason: "The tools/call params repeat a key, so they are ambiguous."}
@@ -86,10 +89,10 @@ func parseToolCalls(body []byte) ([]toolCallReq, error) {
 			return nil, &jsonRPCError{msg: "tools/call has no params object", reason: "The tools/call request has no params object."}
 		}
 		var name string
-		if raw, ok := params["name"]; !ok || json.Unmarshal(raw, &name) != nil || name == "" {
+		if raw, ok := params[foldKey("name")]; !ok || json.Unmarshal(raw, &name) != nil || name == "" {
 			return nil, &jsonRPCError{msg: "tools/call names no tool", reason: "The tools/call request names no tool."}
 		}
-		out = append(out, toolCallReq{name: name, args: params["arguments"]})
+		out = append(out, toolCallReq{name: name, args: params[foldKey("arguments")]})
 	}
 	return out, nil
 }
@@ -111,8 +114,27 @@ func refusalReason(err error) string {
 	return "The MCP request body could not be read as JSON-RPC."
 }
 
-// exactObject decodes a JSON object into its raw members, refusing a
-// repeated key.
+// foldKey is a key's case-folded form: every rune replaced by the smallest
+// rune of its Unicode simple-fold orbit, so "Method", "METHOD" and spellings
+// with the Kelvin sign or the long s fold like Go's case-insensitive
+// matching does (or wider, which only judges more).
+func foldKey(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		min := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f < min {
+				min = f
+			}
+		}
+		b.WriteRune(min)
+	}
+	return b.String()
+}
+
+// exactObject decodes a JSON object into its raw members keyed by
+// foldKey, refusing a key that repeats in any case.
 func exactObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
@@ -136,10 +158,11 @@ func exactObject(raw json.RawMessage) (map[string]json.RawMessage, error) {
 		if err := dec.Decode(&v); err != nil {
 			return nil, err
 		}
-		if _, dup := out[key]; dup {
+		k := foldKey(key)
+		if _, dup := out[k]; dup {
 			return nil, errDuplicateKey
 		}
-		out[key] = v
+		out[k] = v
 	}
 	return out, nil
 }
@@ -164,10 +187,20 @@ func NewVerdictClient(cfg JudgeConfig) (*VerdictClient, error) {
 	if !strings.HasPrefix(cfg.URL, "https://") && !strings.HasPrefix(cfg.URL, "http://") {
 		return nil, fmt.Errorf("%w: judge.url %q", ErrInvalidConfig, cfg.URL)
 	}
+	tr, err := calloutTransport(cfg.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	return &VerdictClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
+}
+
+// calloutTransport is the transport to the gateway's admin listener: no
+// proxy, and the judge.ca_file roots when set.
+func calloutTransport(caFile string) (*http.Transport, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
-	if cfg.CAFile != "" {
-		pem, err := os.ReadFile(cfg.CAFile)
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
 		if err != nil {
 			return nil, err
 		}
@@ -177,7 +210,7 @@ func NewVerdictClient(cfg JudgeConfig) (*VerdictClient, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 	}
-	return &VerdictClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
+	return tr, nil
 }
 
 // JudgeToolCall implements ToolJudge. Any answer but 200 with contract

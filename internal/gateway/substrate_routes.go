@@ -70,6 +70,9 @@ type SubstrateCreate struct {
 	Atespace string `json:"atespace,omitempty"`
 	// Owner is filled by the gateway (the verified person).
 	Owner registry.Person `json:"-"`
+	// SandboxClass is filled by the gateway from the profile (never from
+	// the request): the class the actor must run in (PLAN 7.3).
+	SandboxClass string `json:"-"`
 }
 
 // SubstrateWorkspace is what the actor starts with.
@@ -328,6 +331,9 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			}
 		}
 		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
+		if st.cfg.SandboxClass != nil {
+			req.SandboxClass = st.cfg.SandboxClass(profile)
+		}
 		// E9: a managed deployment refuses an agent that signs in to a
 		// vendor account, before any actor exists. The connector is now the
 		// template's whenever the template has one; it is checked again
@@ -396,7 +402,18 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				writeSubstrateJSONError(w, http.StatusForbidden, "actor_refused")
 				return
 			}
-			fmt.Fprintf(os.Stderr, "[substrate] resume failed: %v\n", err)
+			// GAP-0167: an actor that never ran holds nothing the person
+			// wants and would sit SUSPENDED in their list: remove it.
+			ctx := context.WithoutCancel(r.Context())
+			_ = st.cfg.Actions.Delete(ctx, created.Atespace, created.Name)
+			reg.Deleted = true
+			_ = st.cfg.Registrations.Put(ctx, reg)
+			fmt.Fprintf(os.Stderr, "[substrate] resume failed, actor %s/%s removed: %v\n", created.Atespace, created.Name, err)
+			if errors.Is(err, ErrSubstrateNoWorker) {
+				// No worker of the pool has room: the person can free one.
+				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "no_free_worker")
+				return
+			}
 			writeSubstrateJSONError(w, http.StatusBadGateway, "resume_failed")
 			return
 		}
@@ -439,7 +456,14 @@ func (a *APIServer) substrateListActors(st *substrateState) http.HandlerFunc {
 		}
 		out := make([]map[string]any, 0, len(regs))
 		for _, reg := range regs {
-			out = append(out, substrateActorView(reg))
+			v := substrateActorView(reg)
+			// GAP-0167: the person sees which agents hold a worker.
+			if st.cfg.Lookup != nil && !reg.Deleted {
+				if live, err := st.cfg.Lookup.LookupActor(r.Context(), reg.Atespace, reg.Name); err == nil && live.UID == reg.UID {
+					v["state"] = strings.ToLower(string(live.State))
+				}
+			}
+			out = append(out, v)
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"actors": out})
 	}

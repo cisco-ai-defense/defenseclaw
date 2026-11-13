@@ -126,9 +126,9 @@ func TestKubeVerifyEndpoint(t *testing.T) {
 		{name: "mismatch", fn: configMap("https://other.example.test"), wantErr: "publishes the launcher endpoint https://other.example.test:443, not " + adminNorm + ", so no Kubernetes credential is sent to " + adminNorm + "; use --admin-url https://other.example.test:443, or ask your administrator to fix the endpoint record"},
 		{name: "no record", fn: func(w http.ResponseWriter, r *http.Request) { http.Error(w, r.Header.Get("Authorization"), 404) }, wantErr: "the cluster at " + apiNorm + " has no launcher endpoint record (ConfigMap defenseclaw-launcher-endpoint in namespace defenseclaw-system), so no Kubernetes credential is sent to " + adminNorm + "; ask your administrator to publish the endpoint record"},
 		{name: "forbidden", fn: func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "forbidden "+r.Header.Get("Authorization"), 403)
+			http.Error(w, "forbidden "+r.Header.Get("Authorization"), http.StatusForbidden)
 		}, wantErr: `the kubeconfig user "alice" may not read the endpoint record (ConfigMap defenseclaw-launcher-endpoint in namespace defenseclaw-system) on ` + apiNorm + " (HTTP 403); check you may read ConfigMaps in that namespace"},
-		{name: "unauthorized", fn: func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", 401) }, wantErr: "did not accept the credential of the kubeconfig user \"alice\" (HTTP 401)"},
+		{name: "unauthorized", fn: func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", http.StatusUnauthorized) }, wantErr: "did not accept the credential of the kubeconfig user \"alice\" (HTTP 401)"},
 		{name: "redirect refused", fn: func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, admin.srv.URL+wantPath, http.StatusFound)
 		}, wantErr: "answered with a redirect (HTTP 302), which the launcher does not follow"},

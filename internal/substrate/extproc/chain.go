@@ -220,22 +220,28 @@ func (e *Engine) checkChain(ctx context.Context, step ChainStep) (ChainVerdict, 
 		v, err := e.checker.CheckEgress(ctx, step)
 		ch <- result{v: v, err: err, timedOut: errors.Is(ctx.Err(), context.DeadlineExceeded)}
 	}()
+	var r result
 	select {
-	case r := <-ch:
-		switch {
-		case r.panicked:
-			return ChainVerdict{}, chainUnchecked, uncheckedInternal
-		case r.err != nil && r.timedOut:
-			return ChainVerdict{}, chainUnchecked, uncheckedTimeout
-		case r.err != nil:
-			return ChainVerdict{}, chainUnchecked, uncheckedError
-		case r.v.Deny:
-			return r.v, chainHit, ""
-		}
-		return r.v, chainClear, ""
+	case r = <-ch:
 	case <-ctx.Done():
-		return ChainVerdict{}, chainUnchecked, uncheckedTimeout
+		// An answer that arrived with the deadline still counts.
+		select {
+		case r = <-ch:
+		default:
+			return ChainVerdict{}, chainUnchecked, uncheckedTimeout
+		}
 	}
+	switch {
+	case r.panicked:
+		return ChainVerdict{}, chainUnchecked, uncheckedInternal
+	case r.err != nil && r.timedOut:
+		return ChainVerdict{}, chainUnchecked, uncheckedTimeout
+	case r.err != nil:
+		return ChainVerdict{}, chainUnchecked, uncheckedError
+	case r.v.Deny:
+		return r.v, chainHit, ""
+	}
+	return r.v, chainClear, ""
 }
 
 // chainFailClosed reports whether an unchecked chain step refuses: always

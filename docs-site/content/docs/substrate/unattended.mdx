@@ -47,6 +47,8 @@ The file is a list of tasks (a bare list works too). Each task may also name its
 
 CI has no person to sign in. The launcher signs in with a **workload identity** instead: a GitHub Actions OIDC token or a Kubernetes service-account token. The cluster accepts the issuers you list in `substrate.identity.workload_oidc`. The "person" on every event is then the workload principal, and a profile picks the policy by its `match.substrate.workloads` entry.
 
+A `workload_oidc` `subject` and a `workloads` entry are exact or end in `:*` or `/*`, for example `repo:acme/web:*`. A raw prefix such as `repo:acme/web*` is refused, because it also matches `repo:acme/web-evil`, and so is a bare `*`.
+
 ```bash
 defenseclaw substrate login --workload --workload-token-file "$TOKEN_FILE" --admin-url ... --issuer ... --client-id ...
 defenseclaw substrate run claude --task "triage the open dependabot PRs" --detach --workload-token-file "$TOKEN_FILE"

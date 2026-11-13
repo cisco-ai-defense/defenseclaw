@@ -9,7 +9,7 @@
     "path": "substrate approvals",
     "use": "approvals",
     "short": "List what your agents are waiting for you to approve",
-    "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task) never waits:\nits asks are denied.",
+    "long": "Lists the questions your agents asked that nobody has answered yet. Answer with\n\"defenseclaw substrate approve ID\" or \"defenseclaw substrate reject ID\". An agent attached to your\nterminal shows the same question on its last line. An unattended run (--task, --batch)\ndenies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n\"unattended\" in the RUN column and is denied when its time runs out.",
     "flags": [
       {
         "name": "context",
@@ -965,7 +965,7 @@
       {
         "name": "profile",
         "type": "string",
-        "usage": "guard profile to run under (default: the one from login)",
+        "usage": "guard profile to run under (default: the one the cluster gives you)",
         "metavar": "NAME"
       },
       {

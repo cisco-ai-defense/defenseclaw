@@ -639,6 +639,10 @@ func AllAtespaces(ctx context.Context, c Client, pageSize int32) ([]*Atespace, e
 	return out, err
 }
 
+// IsResourceExhausted reports a RESOURCE_EXHAUSTED status: on resume, no
+// worker of the pool has room for the actor.
+func IsResourceExhausted(err error) bool { return status.Code(err) == codes.ResourceExhausted }
+
 // IsNotFound reports a NOT_FOUND status.
 func IsNotFound(err error) bool { return status.Code(err) == codes.NotFound }
 

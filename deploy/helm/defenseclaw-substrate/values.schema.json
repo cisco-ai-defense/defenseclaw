@@ -299,6 +299,10 @@
         "relaySessionSecret": {
           "type": "string"
         },
+        "authDelegatorBinding": {
+          "type": "string",
+          "maxLength": 63
+        },
         "llmCredentialsSecret": {
           "type": "string"
         }

@@ -19,6 +19,7 @@ package main
 import (
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,9 @@ func TestGatewayStartsWithSubstrateAndOpenShellAPIs(t *testing.T) {
 		t.Skip("builds the gateway")
 	}
 	bin := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	if runtime.GOOS == "windows" {
+		bin += ".exe" // Windows runs only a file with an executable extension
+	}
 	build := exec.Command("go", "build", "-o", bin, ".")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)

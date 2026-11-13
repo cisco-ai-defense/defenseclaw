@@ -26,6 +26,12 @@ internal/gateway/connector/testdata/bridge_host/** text eol=lf
 # Released per-user hook renders the upgrade tests run as they shipped.
 internal/gateway/connector/testdata/released-hooks/** text eol=lf
 
+# The Substrate goldens are compared byte for byte by Go tests that also run on Windows runners:
+# the rendered egress policies, the SubstrateInstall overlays, the access policy listing and the chart renders.
+internal/substrate/render/testdata/** text eol=lf
+internal/substrate/setup/testdata/** text eol=lf
+deploy/helm/defenseclaw-substrate/tests/** text eol=lf
+
 # Seeded guardrail rule packs are matched by SHA-256 of their exact bytes
 # (STOCK_PROFILE_DIGESTS); keep them LF on Windows checkouts too.
 policies/guardrail/** text eol=lf

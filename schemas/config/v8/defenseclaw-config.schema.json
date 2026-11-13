@@ -2090,7 +2090,8 @@
                 "items": {
                   "type": "string",
                   "minLength": 1,
-                  "maxLength": 512
+                  "maxLength": 512,
+                  "pattern": "^(?:[^*]+|[^*]+[:/]\\*)$"
                 }
               }
             }
@@ -6811,10 +6812,13 @@
                   },
                   "subject": {
                     "type": "string",
-                    "maxLength": 1024
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": "^(?:[^*]+|[^*]+[:/]\\*)$"
                   },
                   "claims": {
                     "type": "object",
+                    "minProperties": 1,
                     "maxProperties": 16,
                     "additionalProperties": {
                       "type": "string",

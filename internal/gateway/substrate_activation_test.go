@@ -6,8 +6,10 @@
 package gateway
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -71,5 +73,28 @@ func TestSubstrateClusterActivation(t *testing.T) {
 	// host rules).
 	if refusal := (&ConfigManager{path: link}).startupActivationRefusal(raw); refusal == nil {
 		t.Fatal("cluster mode admitted a symlinked config")
+	}
+}
+
+// GAP-0135 second source: the registered check tries the mounted file,
+// then a verified bundle; either activates the managed start, and a start
+// neither accepts stays refused with both reasons.
+func TestSubstrateActivationSources(t *testing.T) {
+	no := func(msg string) func(string, []byte) error {
+		return func(string, []byte) error { return errors.New(msg) }
+	}
+	yes := func(string, []byte) error { return nil }
+	if err := SubstrateActivationSources(no("not the mounted layout"), yes)("/c", nil); err != nil {
+		t.Fatalf("a verified bundle did not activate: %v", err)
+	}
+	if err := SubstrateActivationSources(yes, no("unused"))("/c", nil); err != nil {
+		t.Fatalf("the mounted file did not activate: %v", err)
+	}
+	err := SubstrateActivationSources(no("not the mounted layout"), no("no signed bundle is applied"))("/c", nil)
+	if err == nil || !strings.Contains(err.Error(), "not the mounted layout") || !strings.Contains(err.Error(), "no signed bundle") {
+		t.Fatalf("refusal: %v", err)
+	}
+	if SubstrateActivationSources()("/c", nil) == nil {
+		t.Fatal("no source activated")
 	}
 }

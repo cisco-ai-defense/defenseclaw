@@ -42,7 +42,7 @@ func TestClassify(t *testing.T) {
 		{"antigravity", nil, RouteSubscription},
 		// Devin offers no key: a placeholder named like one changes nothing.
 		{"devin", nil, RouteSubscription},
-		{"devin", []string{"DEVIN_API_KEY", "WINDSURF_API_KEY"}, RouteSubscription},
+		{"devin", []string{"DEVIN_API_KEY", "OTHER_API_KEY"}, RouteSubscription},
 		// An unknown connector is not this package's refusal to make.
 		{"notaconnector", nil, RouteGateway},
 	}

@@ -514,3 +514,32 @@ func TestRevokedBundleOSSFallsBackManagedDeniesOnly(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0135 second source: a verified active bundle activates a managed
+// gateway's start; none, a revoked key or a tampered state does not.
+func TestStoreActivated(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	if err := e.store.Activated(ctx); err == nil {
+		t.Fatal("no bundle applied counted as activated")
+	}
+	if _, err := e.store.Apply(ctx, buildBundle(t, e.key, 1, policyYAML("paste.example.com")), "canary", []string{"team-a"}, SourceCLI); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.Activated(ctx); err != nil {
+		t.Fatalf("a verified canary bundle: %v", err)
+	}
+	e.anchors = anchorsFor(t, 0, ks(e.key, eb.KeyRevoked))
+	if err := e.store.Activated(ctx); err == nil {
+		t.Fatal("a bundle signed by a revoked key counted as activated")
+	}
+	e.anchors = anchorsFor(t, 0, ks(e.key, eb.KeyActive))
+	cm, _ := e.cm.Get(ctx, StateConfigMap)
+	for k := range cm.BinaryData {
+		cm.BinaryData[k] = buildBundle(t, e.key, 1, policyYAML("evil.example.com"))
+	}
+	e.cm.Put(cm)
+	if err := e.store.Activated(ctx); err == nil {
+		t.Fatal("a tampered bundle state counted as activated")
+	}
+}

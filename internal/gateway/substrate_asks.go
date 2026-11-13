@@ -44,7 +44,9 @@ import (
 //	POST /api/v1/substrate/asks/{id} {decision, always?, reason?}
 //	GET  /api/v1/substrate/decisions[?actor=a/n][&limit=][&all=1]
 //	GET  /api/v1/substrate/policy/explain[?actor=a/n][&host=][&method=][&tool=]
-//	POST /api/v1/substrate/callout/ask   (callout token) {actor, host|tool, summary, reason, severity}
+//	POST /api/v1/substrate/callout/ask   (callout token) {actor, host|tool, summary, reason, severity, ask_id?}
+//	     ask_id reads that ask again (the callout's hold); a host already
+//	     approved for the actor answers approved.
 
 // SubstrateAskStore is the leader's ask and decision store (asks.Client).
 type SubstrateAskStore interface {
@@ -66,7 +68,7 @@ func askView(a asks.Ask) map[string]any {
 	return map[string]any{
 		"id": a.ID, "atespace": a.Atespace, "actor": a.Actor, "kind": a.Kind, "host": a.Host, "tool": a.Tool,
 		"summary": a.Summary, "reason": a.Reason, "severity": a.Severity, "created": a.Created, "expires": a.Expires,
-		"state": a.State, "unattended": a.Unattended,
+		"state": a.State, "unattended": a.Unattended, "note": a.Note,
 	}
 }
 
@@ -314,6 +316,7 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			Summary  string `json:"summary,omitempty"`
 			Reason   string `json:"reason,omitempty"`
 			Severity string `json:"severity,omitempty"`
+			AskID    string `json:"ask_id,omitempty"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
@@ -334,6 +337,34 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		ask := asks.Ask{
 			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(),
 			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
+		}
+		// The leader's store is the record of this actor's asks; the
+		// registration copy here is cached (registry.Remote) and can miss an
+		// approval for seconds, so an approved host is looked up in the store.
+		list, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, Atespace: reg.Atespace, Actor: reg.Name})
+		if err != nil {
+			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+			return
+		}
+		if in.AskID != "" {
+			// The callout holds the request and reads its ask again; only
+			// this actor incarnation's ask is answered.
+			for _, a := range list {
+				if a.ID == in.AskID && a.UID == reg.UID {
+					writeSubstrateJSON(w, http.StatusOK, askView(a))
+					return
+				}
+			}
+			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
+			return
+		}
+		if ask.Host != "" && (slices.Contains(reg.Approved, ask.Host) || slices.ContainsFunc(list, func(a asks.Ask) bool {
+			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved
+		})) {
+			// Approved earlier for this actor (the controller adds it to the
+			// policy on its next pass): not asked twice.
+			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
+			return
 		}
 		if reg.Unattended {
 			// D12: an unattended run's ask is a deny unless the profile's

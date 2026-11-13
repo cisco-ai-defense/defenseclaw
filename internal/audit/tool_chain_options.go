@@ -11,6 +11,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -333,6 +336,20 @@ const toolChainForkSource = "fork_parent"
 // ErrToolChainForkAlreadyStarted). A window the child already has is kept
 // and the parent's window of that key is skipped (reported in Skipped): the
 // child's own calls are never merged into or overwritten.
+// readOnlySQLiteURI is a file: URI that opens path read-only and never
+// creates it (SQLite URI filenames; the driver opens with SQLITE_OPEN_URI).
+func readOnlySQLiteURI(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs), RawQuery: "mode=ro"}
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path // Windows drive paths: file:///C:/...
+	}
+	return u.String()
+}
+
 func (s *Store) CopyToolChainFork(ctx context.Context, parentPath string, fork ToolChainForkCopy) (ToolChainForkResult, error) {
 	var result ToolChainForkResult
 	for _, id := range []ConnectorInstanceID{fork.ParentInstance, fork.ChildInstance} {
@@ -367,8 +384,10 @@ func (s *Store) CopyToolChainFork(ctx context.Context, parentPath string, fork T
 		return result, err
 	}
 	defer conn.Close()
-	// ATTACH cannot run inside a transaction. The parent is only read.
-	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS `+toolChainForkSource, parentPath); err != nil {
+	// ATTACH cannot run inside a transaction. The parent is only read, and
+	// opened read-only: a plain-path ATTACH of a missing file would create an
+	// empty parent store (substrate-1 GAP-0142).
+	if _, err := conn.ExecContext(ctx, `ATTACH DATABASE ? AS `+toolChainForkSource, readOnlySQLiteURI(parentPath)); err != nil {
 		return result, fmt.Errorf("audit: open the fork parent's store: %w", err)
 	}
 	defer conn.ExecContext(context.WithoutCancel(ctx), `DETACH DATABASE `+toolChainForkSource) //nolint:errcheck

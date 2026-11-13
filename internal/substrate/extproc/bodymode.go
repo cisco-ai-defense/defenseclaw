@@ -33,6 +33,14 @@ import "sync"
 // an alert (body_not_received:<signal>), and a body that arrives marks the
 // filter supported for the readiness check. On a stock filter set
 // body_inspection off (headers only, recorded on every MCP request).
+//
+// on and auto differ only in a managed enterprise callout that fails
+// closed (GAP-0146): on
+// says the admin knows the filter sends bodies (defenseclaw substrate setup
+// rendered the opt-in); auto does not know, so until a body has arrived an
+// MCP request to a listed MCP host is refused at its headers, because a
+// stock filter would forward its body unread. With failure mode open, auto
+// asks for the body and a body that never comes is an alert.
 
 // Stream end signals, recorded on the request's event.
 const (
@@ -59,6 +67,14 @@ func (b *bodyMode) arrived() {
 	b.mu.Lock()
 	b.received = true
 	b.mu.Unlock()
+}
+
+// confirmed reports whether a requested body has reached the callout: the
+// egress filter honours the body opt-in (#3817).
+func (b *bodyMode) confirmed() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.received
 }
 
 // status is off, supported (a body has arrived) or unknown, for the

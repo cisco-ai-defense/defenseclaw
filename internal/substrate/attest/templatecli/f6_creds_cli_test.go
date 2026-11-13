@@ -1,6 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// These tests render the sandbox artifacts of an image, which OpenShell does not do on Windows hosts.
+//go:build !windows
+
 package templatecli
 
 import (

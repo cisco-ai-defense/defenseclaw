@@ -86,6 +86,9 @@ func runSubstrateLogs(cmd *cobra.Command, out *substrateOutput, com *substrateCo
 			inner(e)
 		}
 	}
+	if follow {
+		defer substratePresence(cmd, a)()
+	}
 	code, err := attach.FollowTask(fctx, o, id, emit)
 	if err != nil && (!errors.Is(err, context.Canceled) || follow) {
 		return substrateFail(err)
@@ -155,7 +158,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	defer rel.Close()
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
-	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Timeout: f.timeout})
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout})
 	if err != nil {
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}
