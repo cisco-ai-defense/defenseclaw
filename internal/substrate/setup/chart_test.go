@@ -207,7 +207,7 @@ func checkChartInvariants(t *testing.T, name string, out []byte) {
 		if o.Kind == "Secret" {
 			t.Errorf("%s: the chart renders a Secret (%v); DefenseClaw's secrets are never chart values", name, o.Metadata["name"])
 		}
-		if (o.Kind == "ClusterRole" || o.Kind == "ClusterRoleBinding") && !(kubeSignIn && authDelegatorGrant(o)) {
+		if (o.Kind == "ClusterRole" || o.Kind == "ClusterRoleBinding") && (!kubeSignIn || !authDelegatorGrant(o)) {
 			// The one exception: the gateway bound to system:auth-delegator,
 			// and only when people sign in with Kubernetes (GAP-0153).
 			t.Errorf("%s: cluster-wide RBAC %v", name, o.Metadata["name"])
