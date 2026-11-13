@@ -43,6 +43,8 @@ type fakeAPI struct {
 	deleteErr map[ActorRef]error
 	// afterDelete runs after a successful delete (models a controller).
 	afterDelete func(ActorRef)
+	// listErr fails ListActors.
+	listErr error
 }
 
 func newFakeAPI() *fakeAPI {
@@ -76,6 +78,9 @@ func (f *fakeAPI) PutAccessPolicy(_ context.Context, p AccessPolicy) error {
 	return nil
 }
 func (f *fakeAPI) ListActors(_ context.Context, a string) ([]ActorRef, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
 	var out []ActorRef
 	for r := range f.egress {
 		if a == "" || r.Atespace == a {
@@ -109,6 +114,12 @@ type fakeKube struct {
 	scales   []string
 	// onScale runs after a scale (tests use it to model the controller).
 	onScale func(name string, n int32)
+	// scaleErr fails scale call i (0-based); applied says the scale took
+	// effect before the error. podsErr and pods override DeploymentPods.
+	scaleErr func(i int, n int32) (applied bool, err error)
+	podsErr  error
+	pods     func(name string) int32
+	calls    int
 }
 
 func newFakeKube() *fakeKube {
@@ -142,6 +153,16 @@ func (k *fakeKube) ScaleDeployment(_ context.Context, ns, name string, n int32) 
 	if !ok {
 		return 0, false, nil
 	}
+	i := k.calls
+	k.calls++
+	if k.scaleErr != nil {
+		if applied, err := k.scaleErr(i, n); err != nil {
+			if applied {
+				k.replicas[ns+"/"+name] = n
+			}
+			return prev, true, err
+		}
+	}
 	k.replicas[ns+"/"+name] = n
 	k.scales = append(k.scales, fmt.Sprintf("%s=%d", name, n))
 	if k.onScale != nil {
@@ -150,6 +171,12 @@ func (k *fakeKube) ScaleDeployment(_ context.Context, ns, name string, n int32) 
 	return prev, true, nil
 }
 func (k *fakeKube) DeploymentPods(_ context.Context, ns, name string) (int32, error) {
+	if k.podsErr != nil {
+		return 0, k.podsErr
+	}
+	if k.pods != nil {
+		return k.pods(name), nil
+	}
 	return k.replicas[ns+"/"+name], nil
 }
 func (k *fakeKube) DeleteSecret(_ context.Context, ns, name string) error {
