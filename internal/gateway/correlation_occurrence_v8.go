@@ -475,7 +475,8 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	for _, value := range dedupeCorrelationValues(req.CorrelationIdentifiers, req.CorrelationValues) {
 		digest := correlationValueDigest(instance.ConnectorInstanceID, value)
 		kind, ok := auditIdentifierKind(value)
-		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent {
+		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent ||
+			!correlationIdentifierStored(kind) {
 			continue
 		}
 		if _, err := tx.PutIdentifier(ctx, audit.CorrelationIdentifier{
@@ -973,7 +974,8 @@ func correlationIdentifiersForValues(
 	sourceDigest := ""
 	for _, value := range values {
 		kind, ok := auditIdentifierKind(value)
-		if !ok || value.Target == connector.CorrelationTargetSemanticEvent {
+		if !ok || value.Target == connector.CorrelationTargetSemanticEvent ||
+			!correlationIdentifierStored(kind) {
 			continue
 		}
 		digest := correlationValueDigest(instance, value)
@@ -1152,6 +1154,26 @@ func auditIdentifierKind(value connector.CorrelationValue) (audit.CorrelationIde
 		return audit.CorrelationIdentifierTool, true
 	default:
 		return "", false
+	}
+}
+
+// correlationIdentifierStored reports whether correlation_identifiers keeps
+// identifiers of kind, so whether the matcher looks them up. A turn (or
+// prompt) or agent identifier matched another event only as
+// scoped-native-membership: a belongs_to between two semantic events that
+// putCorrelationMatchRelationship drops, ranked below the session identifier
+// that every such event also carries. The turn and agent nodes of the graph
+// come from the occurrence (putHookIdentityRelationships, the native and LLM
+// rail edges) and the observation columns, not from these rows. The session
+// identifier stays: the tool chain partitions an event by it
+// (loadExactToolChainSession). Rows a 1.0.9 binary stored stay until
+// retention removes their event (S8 R5).
+func correlationIdentifierStored(kind audit.CorrelationIdentifierKind) bool {
+	switch kind {
+	case audit.CorrelationIdentifierTurn, audit.CorrelationIdentifierPrompt, audit.CorrelationIdentifierAgent:
+		return false
+	default:
+		return true
 	}
 }
 
