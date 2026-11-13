@@ -50,8 +50,8 @@ Every value is checked by `values.schema.json`. The main ones:
 | `bootstrap.ownerTokenSecret` | "" | a global owner's token Secret (key `token`) for the OpenFGA bootstrap |
 | `callout.judge.tokenSecret` | `defenseclaw-callout-judge` | the callout's token for the MCP tool verdict route on the admin Service; the chain-key hook creates this Secret when absent. `""` turns the route off (tools/call alerts on OSS, refused on managed) |
 | `gateway.extraArgs` | [] | flags appended to the gateway's serve flags |
-| `gateway.adminGroups` | [] | OIDC groups whose members are DefenseClaw administrators (`--admin-groups`) |
-| `gateway.oidcCA.configMap`, `gateway.oidcCA.key` | "", ca.crt | a private OIDC issuer's trust bundle: mounted read-only at `/etc/defenseclaw/oidc-ca/`, `--oidc-ca-file` set |
+| `gateway.adminGroups` | [] | groups whose members are DefenseClaw administrators (`--admin-groups`); `config.substrate.identity.admin_groups` is the same list as a config key, and the two add up |
+| `gateway.oidcCA.configMap` or `gateway.oidcCA.secret`, `gateway.oidcCA.key` | "", "", ca.crt | a private OIDC issuer's trust bundle from a ConfigMap or a Secret (the Secret wins): mounted read-only at `/etc/defenseclaw/oidc-ca/`, `--oidc-ca-file` set |
 | `gateway.extraEnv`, `gateway.extraVolumes`, `gateway.extraVolumeMounts` | [] | added to the gateway container and pod |
 | `gateway.args` | [] | replaces the whole container argument list (`serve --substrate ...` included); for an added flag use `gateway.extraArgs` |
 | `gateway.authDelegatorBinding` | "" | name of the one cluster-wide object: the gateway's ClusterRoleBinding to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer); "" is `defenseclaw-auth-delegator-<namespace>-<release>` |
@@ -62,6 +62,9 @@ Every value is checked by `values.schema.json`. The main ones:
 | `admin.url` | Ingress host, or the in-cluster admin Service | the https URL laptops use, published in ConfigMap `defenseclaw-launcher-endpoint` (key `admin_url`) that every authenticated user may read; `login --kube` sends a Kubernetes credential only to this URL. Required for `LoadBalancer`. |
 | `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
 | `controller.templateAnchorsSecret` | `defenseclaw-template-anchors` | admin-only Secret (key `anchors.pem`) with the template signing keys; without it every template is refused |
+| `controller.templateRegistrySecret` | "" | a `kubernetes.io/dockerconfigjson` Secret with logins for private template registries, mounted read-only in the controller and the gateway (both read attestations); sets `config.substrate.templates.registry_auth.docker_config`. "" reads registries anonymously. See "Private template registries" |
+| `config.substrate.templates.registry_auth.ecr_hosts` | [] | Amazon ECR registry hosts (`<account>.dkr.ecr.<region>.amazonaws.com`) the controller and the gateway log in to with `ecr:GetAuthorizationToken` through the AWS SDK default chain (IRSA or EKS Pod Identity); the token is renewed before it expires |
+| `serviceAccounts.annotations`, `serviceAccounts.componentAnnotations.<gateway\|controller\|callout>` | {} | annotations on every ServiceAccount, and on one (merged over the first), for example an IRSA `eks.amazonaws.com/role-arn` on `gateway` and `controller` only |
 | `substrate.podPorts` | `[443, 8443, 8445]` | container ports of the Substrate pods DefenseClaw calls (ate-api-server, the idp JWKS); NetworkPolicies match pod ports, so change them when a Substrate release moves a port |
 | `substrate.router.enabled` | `true` | the gateway's attach route (run, connect, pull, logs, checkpoint) reaches actor relays through the atenet router; needs `podCertificates.enabled`. The router admits the gateway only when its SPIFFE ID is in Substrate's cluster-global `ingressAllowedSPIFFEIDs`: `defenseclaw substrate setup` adds it, `defenseclaw substrate admin doctor` checks it |
 | `substrate.router.address` | `""` | router CONNECT-TLS `host:port`; empty is `atenet-router.<substrate.namespace>.svc:8444` |
@@ -73,6 +76,22 @@ Every value is checked by `values.schema.json`. The main ones:
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |
 | `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
+
+## Private template registries
+
+The controller and the gateway's create path read each template image's attestation from its registry (only hosts in
+`config.substrate.templates.allowed_images`). By default they read anonymously. For a private registry, give them a
+login. Each login is sent only to its own host, after that host asks for it, and never to another registry or to a
+token service it does not name:
+
+- **Amazon ECR (EKS):** list the registry in `config.substrate.templates.registry_auth.ecr_hosts`, and give the gateway
+  and controller ServiceAccounts an IAM role with `ecr:GetAuthorizationToken`, `ecr:BatchGetImage` and
+  `ecr:GetDownloadUrlForLayer` on the template repositories. Use IRSA
+  (`serviceAccounts.componentAnnotations.{gateway,controller}: {eks.amazonaws.com/role-arn: ...}`; it reaches STS on
+  443), or EKS Pod Identity (also add a `networkPolicy.egress.extra` rule to `169.254.170.23/32` port 80). No password
+  is stored, and the token is renewed before it expires.
+- **Any other registry:** `kubectl -n <ns> create secret docker-registry dc-template-registry --docker-server=<host> ...`
+  and `--set controller.templateRegistrySecret=dc-template-registry`. A Secret update applies within about a minute.
 
 ## Signed policy bundles
 

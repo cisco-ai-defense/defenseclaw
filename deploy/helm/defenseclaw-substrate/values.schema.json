@@ -326,6 +326,9 @@
             "key": {
               "type": "string",
               "minLength": 1
+            },
+            "secret": {
+              "type": "string"
             }
           }
         },
@@ -413,6 +416,9 @@
         },
         "templateAnchorsSecret": {
           "type": "string"
+        },
+        "templateRegistrySecret": {
+          "type": "string"
         }
       }
     },
@@ -488,6 +494,21 @@
         },
         "annotations": {
           "type": "object"
+        },
+        "componentAnnotations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "gateway": {
+              "type": "object"
+            },
+            "controller": {
+              "type": "object"
+            },
+            "callout": {
+              "type": "object"
+            }
+          }
         }
       }
     },

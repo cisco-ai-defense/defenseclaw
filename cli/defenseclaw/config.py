@@ -4410,6 +4410,8 @@ class SubstrateIdentityConfig:
     actor_cert_oid: str = ""
     oidc: SubstrateOIDCConfig = field(default_factory=SubstrateOIDCConfig)
     workload_oidc: list[SubstrateWorkloadOIDCConfig] = field(default_factory=list)
+    # Groups whose members are Substrate administrators (GAP-0191).
+    admin_groups: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -4510,6 +4512,16 @@ class SubstrateEgressConfig:
 
 
 @dataclass
+class SubstrateRegistryAuthConfig:
+    """``substrate.templates.registry_auth`` (mirrors Go
+    ``SubstrateRegistryAuthConfig``, GAP-0190): template registry logins,
+    each for exactly one host; unset is anonymous."""
+
+    docker_config: str = ""
+    ecr_hosts: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SubstrateTemplatesConfig:
     """``substrate.templates`` (mirrors Go ``SubstrateTemplatesConfig``):
     how the controller admits template images (trust anchors from an
@@ -4524,6 +4536,7 @@ class SubstrateTemplatesConfig:
     volume_images: list[str] = field(default_factory=list)
     plain_http_registries: list[str] = field(default_factory=list)
     revoked_digests: list[str] = field(default_factory=list)
+    registry_auth: SubstrateRegistryAuthConfig = field(default_factory=SubstrateRegistryAuthConfig)
 
 
 @dataclass
@@ -7859,6 +7872,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
                 )
                 for w in ident.get("workload_oidc") or []
             ],
+            admin_groups=_string_list(ident.get("admin_groups")),
         ),
         services=SubstrateServicesConfig(
             actor=str(services.get("actor", "") or ""),
@@ -7922,6 +7936,10 @@ def _merge_substrate_templates(raw: Any) -> SubstrateTemplatesConfig:
         volume_images=_string_list(t.get("volume_images")),
         plain_http_registries=_string_list(t.get("plain_http_registries")),
         revoked_digests=_string_list(t.get("revoked_digests")),
+        registry_auth=SubstrateRegistryAuthConfig(
+            docker_config=str(_mapping(t.get("registry_auth")).get("docker_config", "") or ""),
+            ecr_hosts=_string_list(_mapping(t.get("registry_auth")).get("ecr_hosts")),
+        ),
     )
 
 

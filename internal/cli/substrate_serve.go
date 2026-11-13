@@ -156,7 +156,7 @@ func init() {
 	f.StringVar(&serveFlags.bedrockRegion, "bedrock-region", "us-east-1", "Bedrock runtime region")
 	f.StringVar(&serveFlags.kubeTokenFile, "kube-token-file", leader.DefaultKubeTokenFile, "Kubernetes API token (leader Lease)")
 	f.StringVar(&serveFlags.kubeCAFile, "kube-ca-file", leader.DefaultKubeCAFile, "Kubernetes API CA (leader Lease)")
-	f.StringSliceVar(&serveFlags.adminGroups, "admin-groups", nil, "OIDC groups whose members are administrators")
+	f.StringSliceVar(&serveFlags.adminGroups, "admin-groups", nil, "groups whose members are administrators, added to substrate.identity.admin_groups")
 	f.BoolVar(&serveFlags.plainHTTP, "plain-http", false, "serve every listener and the leader RPC without TLS (tests outside a cluster only)")
 	f.StringVar(&serveFlags.oidcCAFile, "oidc-ca-file", "", "PEM trust bundle of the OIDC issuer (empty: the system roots)")
 	f.StringVar(&serveFlags.routerAddress, "router-address", "", "atenet router CONNECT-TLS host:port, for attach through the admin listener (empty: attach is off)")
@@ -380,6 +380,18 @@ func substrateKubePeople() *identity.KubeTokenVerifier {
 	return &identity.KubeTokenVerifier{Server: "https://" + net.JoinHostPort(host, port), TokenFile: serveFlags.kubeTokenFile, HTTP: hc}
 }
 
+// substrateAdminGroups are the administrator groups:
+// substrate.identity.admin_groups plus the --admin-groups flag (GAP-0191).
+func substrateAdminGroups(id config.SubstrateIdentityConfig, flag []string) []string {
+	var out []string
+	for _, g := range slices.Concat(id.AdminGroups, flag) {
+		if g = strings.TrimSpace(g); g != "" && !slices.Contains(out, g) {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 func substrateOIDCPeople(c *config.Config) (*identity.PersonVerifier, error) {
 	var issuers []identity.PersonIssuer
 	id := c.Substrate.Identity
@@ -527,7 +539,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				}
 			}
 			out.AdminAddr, out.AdminTLS, out.People = serveFlags.adminListen, adminTLS, people
-			admins := slices.Clone(serveFlags.adminGroups)
+			admins := substrateAdminGroups(c.Substrate.Identity, serveFlags.adminGroups)
 			out.IsAdmin = func(p identity.Person) bool {
 				for _, g := range p.Groups {
 					if slices.Contains(admins, g) {

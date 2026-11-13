@@ -108,6 +108,41 @@ type SubstrateTemplatesConfig struct {
 	// RevokedDigests are image digests (sha256:...) never admitted again,
 	// whatever their attestation says.
 	RevokedDigests []string `mapstructure:"revoked_digests" yaml:"revoked_digests,omitempty"`
+	// RegistryAuth is how the controller and the gateway's create path log
+	// in to the template registries to read images and attestations
+	// (GAP-0190). Unset: anonymous.
+	RegistryAuth SubstrateRegistryAuthConfig `mapstructure:"registry_auth" yaml:"registry_auth,omitempty"`
+}
+
+// SubstrateRegistryAuthConfig names the template registry logins. Each one
+// belongs to exactly one registry host and is sent only to that host, in
+// answer to its challenge (GAP-0052); every other host is read anonymously.
+type SubstrateRegistryAuthConfig struct {
+	// DockerConfig is a docker config.json (the chart mounts a
+	// kubernetes.io/dockerconfigjson Secret here). Each auths entry is for
+	// its own host. The file is re-read when it changes; a missing file is
+	// no logins.
+	DockerConfig string `mapstructure:"docker_config" yaml:"docker_config,omitempty"`
+	// ECRHosts are Amazon ECR registry hosts
+	// (<account>.dkr.ecr.<region>.amazonaws.com) logged in to with an
+	// ecr:GetAuthorizationToken token through the AWS SDK default
+	// credential chain (IRSA or EKS Pod Identity), refreshed before it
+	// expires.
+	ECRHosts []string `mapstructure:"ecr_hosts" yaml:"ecr_hosts,omitempty"`
+}
+
+// substrateECRHostRe is an Amazon ECR private registry host: account,
+// optional FIPS endpoint, region, and the partition's domain.
+var substrateECRHostRe = regexp.MustCompile(`^([0-9]{12})\.dkr\.ecr(-fips)?\.([a-z]{2}(?:-[a-z]+)+-[0-9]+)\.amazonaws\.com(?:\.cn)?$`)
+
+// ParseECRRegistryHost splits an Amazon ECR registry host into its account
+// and region; fips is true for a dkr.ecr-fips host.
+func ParseECRRegistryHost(host string) (account, region string, fips, ok bool) {
+	m := substrateECRHostRe.FindStringSubmatch(host)
+	if m == nil {
+		return "", "", false, false
+	}
+	return m[1], m[3], m[2] != "", true
 }
 
 // EffectiveTrustAnchors is TrustAnchors or the chart's Secret mount path.
@@ -145,6 +180,11 @@ type SubstrateIdentityConfig struct {
 	ActorCertOID string                        `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
 	OIDC         SubstrateOIDCConfig           `mapstructure:"oidc"           yaml:"oidc,omitempty"`
 	WorkloadOIDC []SubstrateWorkloadOIDCConfig `mapstructure:"workload_oidc" yaml:"workload_oidc,omitempty"`
+	// AdminGroups are the groups (OIDC groups claim, or Kubernetes groups
+	// with the Kubernetes sign-in) whose members are Substrate
+	// administrators on the admin listener. The gateway's --admin-groups
+	// flag adds to them.
+	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
@@ -539,6 +579,11 @@ func (s *SubstrateConfig) Validate() error {
 			bad("identity.oidc.client_id", "is required with identity.oidc.issuer")
 		}
 	}
+	for i, g := range id.AdminGroups {
+		if strings.TrimSpace(g) == "" || len(g) > 256 {
+			bad(fmt.Sprintf("identity.admin_groups[%d]", i), "must be a group name of 1 to 256 bytes")
+		}
+	}
 	for i, w := range id.WorkloadOIDC {
 		if !httpsURL(w.Issuer) {
 			bad(fmt.Sprintf("identity.workload_oidc[%d].issuer", i), "%q must be an https URL", w.Issuer)
@@ -779,6 +824,14 @@ func (s *SubstrateConfig) validateTemplates(bad func(key, format string, a ...an
 	for i, h := range t.PlainHTTPRegistries {
 		if host, port, err := net.SplitHostPort(h); err != nil || host == "" || port == "" {
 			bad(fmt.Sprintf("templates.plain_http_registries[%d]", i), "%q must be host:port", h)
+		}
+	}
+	if f := t.RegistryAuth.DockerConfig; f != "" && !path.IsAbs(f) {
+		bad("templates.registry_auth.docker_config", "%q must be an absolute path", f)
+	}
+	for i, h := range t.RegistryAuth.ECRHosts {
+		if _, _, _, ok := ParseECRRegistryHost(h); !ok {
+			bad(fmt.Sprintf("templates.registry_auth.ecr_hosts[%d]", i), "%q must be an Amazon ECR registry host (<account>.dkr.ecr.<region>.amazonaws.com)", h)
 		}
 	}
 }
