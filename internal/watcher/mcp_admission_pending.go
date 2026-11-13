@@ -769,12 +769,14 @@ func (w *InstallWatcher) mcpFailureAllowed(evt InstallEvent, baseline *audit.Sna
 }
 
 // mcpFingerprintFailed reports a scanner fingerprint that marks a failed
-// scan, a refused launcher, a server kept unverified or a policy refusal.
+// scan, a refused launcher, a server kept unverified, a policy refusal or an
+// admission the 1.0.10 upgrade found owed (mcp_noscan_heal.go).
 func mcpFingerprintFailed(fingerprint string) bool {
 	return strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
 		strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
 		strings.HasSuffix(fingerprint, unverifiedMCPMark) ||
-		strings.HasSuffix(fingerprint, mcpPolicyRefusedMark)
+		strings.HasSuffix(fingerprint, mcpPolicyRefusedMark) ||
+		strings.HasSuffix(fingerprint, mcpAdmissionOwedMark)
 }
 
 // mcpPolicyRefusalLapsed reports a baseline the admission policy refused
