@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -93,14 +94,27 @@ func TestGAP0490OpenLoopTwoSandboxes(t *testing.T) {
 	runGAP0490OpenLoop(t, 2, 22, 10*time.Second)
 }
 
-// The four-sandbox stream at the documented account budget (4 x 10 = 40 calls
-// a second, sandboxUserHookRate): the managed gateway
+// The four-sandbox stream at the 1.0.9 account budget (4 x 10 = 40 calls a
+// second): the managed gateway
 // answers it inside the hook window of 3.5 s (p95 under a second on the shared
 // build box). 96 calls a second (4 x 24) did not answer in time in half the
 // runs there: a rate above the budget is refused at once with a 429 that
 // names the budget (TestGAP0490RefusalNamesTheBudget), and raising the budget
 // is a 1.0.10 performance row (rel-1-0-6 GAP-0490).
 func TestGAP0490OpenLoopFourSandboxes(t *testing.T) {
+	runGAP0490OpenLoop(t, 4, 10, 10*time.Second)
+}
+
+// TestGAP0490OpenLoopFourSandboxesAtTheAccountBudget is the same stream at
+// the 1.0.10 account budget, 4 x 25 = 100 calls a second (rel-1-0-6
+// GAP-0770, bar H1). It is opt-in (DC_GAP0490_OPEN_LOOP_BUDGET=1) until the
+// one-record-per-decision change cuts the serialised write stage enough for
+// a shared runner (S8 RESULTS.md: utilisation 1.77 of the write stage on the
+// build box today).
+func TestGAP0490OpenLoopFourSandboxesAtTheAccountBudget(t *testing.T) {
+	if os.Getenv("DC_GAP0490_OPEN_LOOP_BUDGET") != "1" {
+		t.Skip("set DC_GAP0490_OPEN_LOOP_BUDGET=1 to drive 4 x 25 calls a second")
+	}
 	runGAP0490OpenLoop(t, 4, sandboxUserHookRate/4, 10*time.Second)
 }
 
