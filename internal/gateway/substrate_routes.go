@@ -72,6 +72,12 @@ type SubstrateCreate struct {
 	// SandboxClass is filled by the gateway from the profile (never from
 	// the request): the class the actor must run in (PLAN 7.3).
 	SandboxClass string `json:"-"`
+	// Kit is the template's attested kit as the create route read it, set
+	// when the Actions reads kits (SubstrateTemplateKitReader). Non-nil
+	// means the template was read already: Create uses it as is and reads
+	// no second attestation. A zero kit is a template the attestor did not
+	// positively attest (an open source create the route warned about).
+	Kit *SubstrateTemplateKit `json:"-"`
 }
 
 // SubstrateCreated is the actor the control API created, suspended.
@@ -306,7 +312,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		// template's own (its attested label); a named one must equal it;
 		// a template that carries no label (or an Actions that cannot read
 		// it) leaves the launcher's word, and no word is connector_required.
-		tmplConnector, err := st.cfg.templateConnector(r.Context(), atespace, req.Template)
+		tmplConnector, tmplKit, err := st.cfg.readTemplate(r.Context(), atespace, req.Template)
 		if errors.Is(err, ErrSubstrateTemplateNotFound) {
 			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
 			return
@@ -354,7 +360,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				return
 			}
 		}
-		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
+		req.Profile, req.Atespace, req.Owner, req.Kit = profile, atespace, ownerOf(c.person), tmplKit
 		if st.cfg.SandboxClass != nil {
 			req.SandboxClass = st.cfg.SandboxClass(profile)
 		}

@@ -133,6 +133,27 @@ func TestLifecycleClosesAsksOfACrashedActor(t *testing.T) {
 	}
 }
 
+// GAP-0142 residual: a delete the leader ignored (the registration is not
+// marked deleted) leaves the actor's open asks open.
+func TestLifecycleKeepsAsksWhenTheLeaderIgnoredTheEvent(t *testing.T) {
+	store := asks.NewMemory()
+	ctx := context.Background()
+	_, _ = store.OpenAsk(ctx, asks.Ask{Atespace: "eng-web", Actor: "a1", UID: wireUID1, OwnerID: "o", Host: "x.example.org"})
+	ignored := true
+	next := func(context.Context, chainstate.LifecycleEvent) (chainstate.LifecycleResult, error) {
+		return chainstate.LifecycleResult{Ignored: ignored}, nil
+	}
+	h := substrateLifecycleClosesAsks(next, store)
+	ev := chainstate.LifecycleEvent{Actor: chainstate.Actor{Atespace: "eng-web", UID: wireUID1}, Event: chainstate.LifecycleDeleted}
+	if _, err := h(ctx, ev); err != nil || len(store.Pending()) != 1 {
+		t.Fatalf("an ignored delete closed the ask: %v %v", err, store.Pending())
+	}
+	ignored = false
+	if _, err := h(ctx, ev); err != nil || len(store.Pending()) != 0 {
+		t.Fatalf("a delete the leader took did not close the ask: %v %v", err, store.Pending())
+	}
+}
+
 type failingAttestor struct{ err error }
 
 func (a failingAttestor) Attest(context.Context, *ateapi.ActorTemplate) (controller.Attestation, error) {

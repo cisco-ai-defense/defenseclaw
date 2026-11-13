@@ -87,9 +87,25 @@ func newRouterDialer(addr, serverName, caFile string, relayPort int, identity fu
 var errRouterRefusedIdentity = errors.New("the router refused the gateway's identity: its SPIFFE ID is not in Substrate's " +
 	"ingressAllowedSPIFFEIDs (run `defenseclaw substrate setup`, then ate-setup; `defenseclaw substrate doctor --cluster` checks it)")
 
+// routerIdentityAlerts are the TLS alerts a server sends for a client
+// certificate it does not accept. Another alert (protocol version, an
+// internal error, a bad router certificate seen from here) has another cause
+// and keeps its own text (GAP-0157 residual).
+var routerIdentityAlerts = []string{
+	"remote error: tls: bad certificate", "remote error: tls: certificate required",
+	"remote error: tls: access denied", "remote error: tls: unknown certificate",
+	"remote error: tls: expired certificate", "remote error: tls: revoked certificate",
+	"remote error: tls: unsupported certificate",
+}
+
 func routerTLSRefusal(err error) error {
-	if err != nil && strings.Contains(err.Error(), "remote error: tls:") {
-		return fmt.Errorf("%w (%v)", errRouterRefusedIdentity, err)
+	if err == nil {
+		return nil
+	}
+	for _, alert := range routerIdentityAlerts {
+		if strings.Contains(err.Error(), alert) {
+			return fmt.Errorf("%w (%v)", errRouterRefusedIdentity, err)
+		}
 	}
 	return err
 }

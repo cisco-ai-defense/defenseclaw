@@ -92,3 +92,27 @@ func TestAgentStartsInTheProjectFolder(t *testing.T) {
 		t.Errorf("agent dir %q, started in %q; want %q", dir, cmdDir, proj)
 	}
 }
+
+// GAP-0163 residual (R3b, P4): a folder inside the working directory that is
+// a link to a folder outside it is not "inside"; a link that stays inside is.
+func TestProjectDirSymlinkOutOfWorkdirIsRefused(t *testing.T) {
+	s, _, _ := testServer(t, []string{"sh"})
+	wd, _ := filepath.EvalSymlinks(t.TempDir())
+	out, _ := filepath.EvalSymlinks(t.TempDir())
+	if err := os.MkdirAll(filepath.Join(wd, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(out, filepath.Join(wd, "outside")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(wd, "real"), filepath.Join(wd, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	s.opts.Config.Relay.Workdir = wd
+	if d, err := s.projectDir("outside"); err == nil {
+		t.Fatalf("a link to %s, outside the workdir, was accepted as start folder %s", out, d)
+	}
+	if d, err := s.projectDir("inside"); err != nil || d != filepath.Join(wd, "inside") {
+		t.Fatalf("a link that stays inside the workdir: %q %v", d, err)
+	}
+}

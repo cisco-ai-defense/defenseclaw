@@ -78,7 +78,8 @@ type WorkloadBinding struct {
 	// Subject is the token subject, exact, or a prefix when it ends in
 	// ":*" or "/*" (for example "repo:acme/web:*"): the wildcard matches
 	// whole segments only, so "repo:acme/web*" (which trusted
-	// repo:acme/web-evil) and a bare "*" are refused (GAP-0043).
+	// repo:acme/web-evil), a bare "*" and a wildcard right after the first
+	// segment ("repo:*", every repository) are refused (GAP-0043).
 	Subject string
 	// Claims are top-level string claims the token must carry exactly
 	// (for example repository: acme/web).
@@ -86,8 +87,11 @@ type WorkloadBinding struct {
 }
 
 // WorkloadSubjectPattern is the subject rule (GAP-0043): exact, or a
-// prefix ending in ":*" or "/*" with something before the separator.
-var WorkloadSubjectPattern = regexp.MustCompile(`^(?:[^*]+|[^*]+[:/]\*)$`)
+// prefix ending in ":*" or "/*" that already holds a separator before the
+// last one, so a wildcard cannot sit right after the issuer's first segment:
+// repo:acme/* and repo:acme/web:* pass, repo:* and project_path:* are
+// refused (they trust every workload of a CI issuer, as a bare * does).
+var WorkloadSubjectPattern = regexp.MustCompile(`^(?:[^*]+|[^*]*[:/][^*]+[:/]\*)$`)
 
 // Empty reports a binding that names nothing, or names its subject in a
 // form that is refused (a raw prefix, a bare "*"): such a binding trusts

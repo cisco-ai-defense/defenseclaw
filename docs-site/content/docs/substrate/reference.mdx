@@ -55,7 +55,7 @@ There is no `--api`: the cluster checks come from `kubectl` with `--install-file
 | `template publish` | `SOURCE@DIGEST TARGET:TAG --anchors FILE`, `--template ATESPACE/NAME` creates the ActorTemplate, with `--class gvisor\|microvm`, `--cpu`, `--memory`, `--env K=V`, `--worker-label K=V`, `--dry-run`, and `--api-*` flags for the Substrate API. Exit 75 means the Substrate API can't be reached; run it again |
 | `template keygen` | `--out DIR` makes `attestation.key` (0600) and `attestation.pub` |
 
-All four registry commands take `--registry-user`, `--registry-password-file`, `--registry-auth-host`, `--insecure-registry`, `--config` and `--platform`.
+All four registry commands take `--registry-user`, `--registry-password-file`, `--registry-auth-host`, `--insecure-registry`, `--config` and `--platform`. The login goes only to the host named by `--registry-auth-host`; for a `--to` on Docker Hub that host is `auth.docker.io`.
 
 ### Exit codes
 

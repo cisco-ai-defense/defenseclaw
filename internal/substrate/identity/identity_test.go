@@ -662,3 +662,21 @@ func TestWorkloadBindingWildcardBoundaries(t *testing.T) {
 		t.Fatal("a raw prefix matched another repository")
 	}
 }
+
+// GAP-0043 residual (R3a): a wildcard right after the issuer's first segment
+// (repo:*, project_path:*) trusts every workload of a public CI issuer, the
+// same as the bare * that is refused. An organisation wildcard still passes.
+func TestWorkloadSubjectFirstSegmentWildcard(t *testing.T) {
+	for sub, ok := range map[string]bool{
+		"repo:*": false, "project_path:*": false, "repo/*": false, "*": false, "repo:acme*": false,
+		"repo:acme/*": true, "repo:acme/web:*": true, "repo:acme/web:ref:refs/heads/main": true,
+		"system:serviceaccount:ci:*": true, "https://spiffe.example/ns/*": true,
+	} {
+		if got := WorkloadSubjectPattern.MatchString(sub); got != ok {
+			t.Errorf("WorkloadSubjectPattern(%q) = %v, want %v", sub, got, ok)
+		}
+		if got := !(WorkloadBinding{Subject: sub}).Empty(); got != ok {
+			t.Errorf("binding %q usable = %v, want %v", sub, got, ok)
+		}
+	}
+}

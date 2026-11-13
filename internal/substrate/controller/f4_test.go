@@ -328,3 +328,38 @@ func TestDeleteTombstonesTheRegistrationFirst(t *testing.T) {
 		t.Fatalf("registration after delete = %+v (want a tombstone that keeps the person)", got)
 	}
 }
+
+// GAP-0145 residual (R3b): during the launcher grace the controller changed
+// no policy, so an actor made outside DefenseClaw in a launcher atespace kept
+// the egress policy its creator wrote until the grace ended. A policy that is
+// not DefenseClaw's goes at once; DefenseClaw's own stays.
+func TestForeignPolicyIsNotKeptDuringTheGrace(t *testing.T) {
+	r, _ := cachedRig(t, nil)
+	ctx := context.Background()
+	a := launcherCreate(r, "intruder-3")
+	ref := ateapi.RefOf(a.GetMetadata())
+	if err := r.api.ForeignSetPolicy(ref, []*ateapi.EgressRule{{Https: &ateapi.HttpsRule{Hostnames: []string{"exfil.example.test"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.api.SetState(ref, ateapi.ActorStateRunning); err != nil {
+		t.Fatal(err)
+	}
+	r.pass()
+	if hasHost(r.api.Policy(ref), "exfil.example.test") {
+		t.Fatal("an unregistered launcher-atespace actor keeps its creator's egress policy during the grace")
+	}
+	if len(r.sink.Events(controller.EventForeignActor)) != 0 {
+		t.Fatal("called foreign inside the grace")
+	}
+	// The create path's own policy is kept while the registration is read.
+	b := launcherCreate(r, "alice-4")
+	bref := ateapi.RefOf(b.GetMetadata())
+	register(r, b, "sub-alice")
+	if err := r.ctl.EnsurePolicy(ctx, bref); err != nil {
+		t.Fatal(err)
+	}
+	r.pass()
+	if r.api.Policy(bref) == nil {
+		t.Fatal("DefenseClaw's own policy was removed")
+	}
+}
