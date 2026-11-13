@@ -114,8 +114,19 @@ func (a *SandboxAdminConfig) validateAskKeys(prefix string) error {
 	if len(a.URLRules) > sandboxMaxURLRules {
 		bad("%s.url_rules: at most %d entries", prefix, sandboxMaxURLRules)
 	}
+	seenNames := map[string]int{}
 	for i, r := range a.URLRules {
 		p := fmt.Sprintf("%s.url_rules[%d]", prefix, i)
+		// An approval is keyed by the rule's name (the callout asks for
+		// "url_rules:<name>"), so two rules with one name would share one
+		// approval: an approval of the first would answer the second
+		// (GAP-0177).
+		if r.Name != "" {
+			if first, dup := seenNames[r.Name]; dup {
+				bad("%s.name %q is already the name of url_rules[%d]; names must be unique", p, r.Name, first)
+			}
+			seenNames[r.Name] = i
+		}
 		if r.Name != "" && !sandboxURLRuleName.MatchString(r.Name) {
 			bad(`%s.name %q must be letters, digits, ".", "_" and "-" (at most 64)`, p, r.Name)
 		}
@@ -157,6 +168,23 @@ func tightenAskKeys(out *SandboxAdminConfig, o SandboxAdminConfig) {
 			out.URLRules = append(out.URLRules, cloneURLRule(r))
 		}
 	}
+}
+
+// duplicateURLRuleName is the first name that two different rules share, or
+// "". A rule repeated word for word (a profile that repeats a rule of
+// substrate.admin) is one rule, not a duplicate.
+func duplicateURLRuleName(rules []SandboxURLRule) string {
+	seen := map[string]SandboxURLRule{}
+	for _, r := range rules {
+		if r.Name == "" {
+			continue
+		}
+		if first, ok := seen[r.Name]; ok && !first.equal(r) {
+			return r.Name
+		}
+		seen[r.Name] = r
+	}
+	return ""
 }
 
 func (r SandboxURLRule) equal(o SandboxURLRule) bool {

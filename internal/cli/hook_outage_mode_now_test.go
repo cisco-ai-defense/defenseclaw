@@ -34,6 +34,7 @@ func writeOutageNowConfig(t *testing.T, dir, body string) {
 // strict after the gateway stopped closes the outage, and a config this
 // release cannot load, a managed one or none closes it too.
 func TestHookOutageFailModeNowReadsTheConfigOnDisk(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, tc := range []struct {
 		name, config, connector, want string
 	}{
@@ -72,6 +73,7 @@ func TestHookOutageFailModeNowReadsTheConfigOnDisk(t *testing.T) {
 // closes; nor does it close one the runtime's default config opens. A config
 // whose data_dir is another folder is not the runtime's config.
 func TestHookOutageFailModeNowReadsOnlyTheRuntimesConfig(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, tc := range []struct {
 		name, runtime string
 		env           func(home, other string) map[string]string
@@ -138,6 +140,7 @@ func TestHookOutageFailModeNowReadsOnlyTheRuntimesConfig(t *testing.T) {
 // A host's managed installation marker is independent of a per-user-looking
 // config. A stale per-user hook cannot reopen a managed host's outage.
 func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
+	isolateHookOutageAccount(t)
 	home := t.TempDir()
 	writeOutageNowConfig(t, home, outageNowDefaultConfig)
 	marker := filepath.Join(t.TempDir(), "runtime-descriptor")
@@ -207,6 +210,7 @@ func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
 // record for its status, but the agent chose it, so nothing there can open an
 // outage: OutageFailModeNow stays unset and the outage closed.
 func TestPerUserNativeHookOnAnAgentChosenHomeNeverOpensAnOutage(t *testing.T) {
+	isolateHookOutageAccount(t)
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)
 	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(home, "config.yaml"))

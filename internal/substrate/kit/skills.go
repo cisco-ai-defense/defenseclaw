@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -500,6 +501,133 @@ func unlistedSkillFolders(root string, listed map[string]string) []string {
 	return out
 }
 
+// renameFolder and lockFolder are how a refused folder is taken out of the
+// agent's reach: a rename into the quarantine folder, else removing its
+// permissions. Variables for tests, which make both fail.
+var (
+	renameFolder = os.Rename
+	lockFolder   = os.Chmod
+)
+
+// skillsStillInReach is the folders a 2xx answer refused (substrate_quarantine)
+// that the agent can still reach after applySkillAnswer: named in the answer,
+// listed by this call, and neither moved out of the root, nor locked (no
+// permissions), nor gone. A quarantine that failed this way (a failed rename
+// and a failed lock) was silent, and nothing else denied the folder: the hook
+// refuses the call instead (GAP-0039).
+func skillsStillInReach(answer []byte, listed map[string]string) []string {
+	var a skillAnswer
+	if len(listed) == 0 || json.Unmarshal(answer, &a) != nil {
+		return nil
+	}
+	var stuck []string
+	seen := map[string]bool{}
+	for _, q := range a.Quarantine {
+		dir := filepath.Clean(q.Path)
+		fp, ok := listed[dir]
+		if !ok {
+			continue
+		}
+		dirs := []string{dir}
+		if fp == skillRootStandIn && filepath.Base(dir) != "plugins" {
+			dirs = unlistedSkillFolders(dir, listed)
+		}
+		for _, d := range dirs {
+			if !seen[d] && folderInReach(d) {
+				seen[d] = true
+				stuck = append(stuck, d)
+			}
+		}
+	}
+	sort.Strings(stuck)
+	return stuck
+}
+
+// skillStuckName is the kit's record of refused folders it could not take out
+// of reach, beside the receipt cache. A later PreToolUse call reads it
+// (stuckSkillsInReach) and is refused while any is still in reach, so the
+// refusal of the post that found the folder holds for the calls after it. The
+// agent can delete the record, but the next skill pass lists the folder
+// again and the gateway refuses it again.
+const skillStuckName = "skill-stuck.json"
+
+// maxStuckSkills bounds the record.
+const maxStuckSkills = 64
+
+// preToolEvents are the events that can deny a tool call before it runs.
+var preToolEvents = map[string]bool{
+	"PreToolUse": true, "preToolUse": true, "beforeShellExecution": true, "beforeMCPExecution": true,
+}
+
+func skillStuckPath(home string) string { return filepath.Join(home, ".defenseclaw", skillStuckName) }
+
+// recordStuckSkills adds dirs to the record.
+func recordStuckSkills(home string, dirs []string) {
+	if home == "" || len(dirs) == 0 {
+		return
+	}
+	all := append(readStuckSkills(home), dirs...)
+	sort.Strings(all)
+	all = slices.Compact(all)
+	if len(all) > maxStuckSkills {
+		all = all[:maxStuckSkills]
+	}
+	writeStuckSkills(home, all)
+}
+
+func readStuckSkills(home string) []string {
+	var dirs []string
+	if b, err := os.ReadFile(skillStuckPath(home)); err == nil && len(b) < 1<<20 {
+		_ = json.Unmarshal(b, &dirs)
+	}
+	return dirs
+}
+
+func writeStuckSkills(home string, dirs []string) {
+	p := skillStuckPath(home)
+	if len(dirs) == 0 {
+		_ = os.Remove(p)
+		return
+	}
+	b, err := json.Marshal(dirs)
+	if err != nil || os.MkdirAll(filepath.Dir(p), 0o700) != nil {
+		return
+	}
+	tmp := p + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) == nil {
+		_ = os.Rename(tmp, p)
+	}
+}
+
+// stuckSkillsInReach is the recorded folders the agent can still reach; the
+// record keeps only those.
+func stuckSkillsInReach(home string) []string {
+	if home == "" {
+		return nil
+	}
+	recorded := readStuckSkills(home)
+	var left []string
+	for _, d := range recorded {
+		if folderInReach(d) {
+			left = append(left, d)
+		}
+	}
+	if len(left) != len(recorded) {
+		writeStuckSkills(home, left)
+	}
+	return left
+}
+
+// folderInReach reports whether the agent can still use dir: it exists and is
+// not a folder with its permissions removed. A link counts as in reach.
+func folderInReach(dir string) bool {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir() || info.Mode().Perm() != 0
+}
+
 // quarantinePlugins moves a plugins folder the kit could not search whole
 // into <parent>/.defenseclaw-quarantine/ (managed and strict refuse what
 // they cannot scan).
@@ -512,7 +640,7 @@ func quarantinePlugins(dir string, now time.Time) bool {
 	if os.MkdirAll(qdir, 0o700) != nil {
 		return false
 	}
-	return os.Rename(dir, filepath.Join(qdir, fmt.Sprintf("plugins-%d", now.UnixNano()))) == nil
+	return renameFolder(dir, filepath.Join(qdir, fmt.Sprintf("plugins-%d", now.UnixNano()))) == nil
 }
 
 // quarantineSkillFolder moves one folder out of its skill root, into
@@ -530,7 +658,7 @@ func quarantineSkillFolder(dir string, now time.Time) bool {
 	qdir := filepath.Join(filepath.Dir(root), quarantineDirName)
 	if os.MkdirAll(qdir, 0o700) == nil {
 		dst := filepath.Join(qdir, fmt.Sprintf("%s-%d", filepath.Base(dir), now.UnixNano()))
-		if os.Rename(dir, dst) == nil {
+		if renameFolder(dir, dst) == nil {
 			return true
 		}
 	}
@@ -538,5 +666,5 @@ func quarantineSkillFolder(dir string, now time.Time) bool {
 	if err != nil || !info.IsDir() || info.Mode().Perm() == 0 {
 		return false
 	}
-	return os.Chmod(dir, 0) == nil
+	return lockFolder(dir, 0) == nil
 }

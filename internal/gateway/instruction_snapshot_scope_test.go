@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // Benign corpus (T12b review loop round 2, cache churn), with a
@@ -186,6 +187,7 @@ func TestInstructionBenignSessionStateIsScopedToTheVerifiedCaller(t *testing.T) 
 // the ones earlier builds used, so an upgrade keeps a running session's
 // record.
 func TestInstructionStartupKeyCarriesTheVerifiedCaller(t *testing.T) {
+	testenv.IsolateAccount(t)
 	base := t.Context()
 	a, _ := instructionStartupKey(withManagedHookPeer(base, managedHookPeer{UID: 1001}), "codex", "live")
 	b, _ := instructionStartupKey(withManagedHookPeer(base, managedHookPeer{UID: 1002}), "codex", "live")
