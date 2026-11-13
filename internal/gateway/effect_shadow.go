@@ -203,12 +203,19 @@ func appendUnique(a, b []string) []string {
 func effectTierAction(tier effectTier, kind string, sets []string, strictOrManaged bool) string {
 	switch tier {
 	case effectTierKnown:
-		// A known mutation of a protected target takes the protected-file
-		// family's severity path (block). A known read of credentials is a
-		// sensitive read (alert); reading one's own shell rc or config is not
-		// escalated.
+		// A known mutation takes today's protected-file family path. Only the
+		// families that block in the balanced default block here: SSH
+		// authorized-keys and control files, and DefenseClaw self-protection
+		// state. A shell-rc, agent-config or credential mutation alerts (as
+		// persistence.shell_profile_write does), so a benign ~/.bashrc PATH
+		// export or a config edit is not a false block. A known read of
+		// credentials is a sensitive read (alert); other reads are not escalated.
 		if mutatingEffectKind(kind) {
-			return guardrailActionBlock
+			if effectSetContains(sets, effectrules.SetSSHAuthorizedKeys) ||
+				effectSetContains(sets, effectrules.SetSelfProtection) {
+				return guardrailActionBlock
+			}
+			return guardrailActionAlert
 		}
 		if effectSetContains(sets, effectrules.SetCredentials) {
 			return guardrailActionAlert

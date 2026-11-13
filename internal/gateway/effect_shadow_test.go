@@ -66,6 +66,9 @@ func TestEffectTierAction(t *testing.T) {
 		want            string
 	}{
 		{"known mutation blocks", effectTierKnown, "write", []string{effectrules.SetSSHAuthorizedKeys}, false, guardrailActionBlock},
+		{"known self-protection mutation blocks", effectTierKnown, "delete", []string{effectrules.SetSelfProtection}, false, guardrailActionBlock},
+		{"known shell-rc mutation alerts (not block)", effectTierKnown, "append", []string{effectrules.SetShellRC}, false, guardrailActionAlert},
+		{"known agent-config mutation alerts", effectTierKnown, "write", []string{effectrules.SetAgentHookConfig}, false, guardrailActionAlert},
 		{"known credential read alerts", effectTierKnown, "read", []string{effectrules.SetCredentials}, false, guardrailActionAlert},
 		{"known shell-rc read is allowed", effectTierKnown, "read", []string{effectrules.SetShellRC}, false, guardrailActionAllow},
 		{"unknown alerts in OSS default", effectTierUnknown, "delete", []string{effectrules.SetSSHAuthorizedKeys}, false, guardrailActionAlert},
