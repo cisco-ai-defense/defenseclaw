@@ -309,7 +309,7 @@ func TestClaudeCodeSandboxDropInShape(t *testing.T) {
 	allowed := map[string]bool{
 		"allowManagedHooksOnly": true, "skipDangerousModePermissionPrompt": true, "otelHeadersHelper": true,
 		"hooks": true, "env": true, "sandbox": true,
-		"apiKeyHelper": true, "awsAuthRefresh": true, "awsCredentialExport": true, "gcpAuthRefresh": true,
+		"apiKeyHelper": true, "awsAuthRefresh": true, "awsCredentialExport": true, "gcpAuthRefresh": true, "inferenceCredentialHelper": true,
 	}
 	for key := range dropIn {
 		if !allowed[key] {

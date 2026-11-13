@@ -492,7 +492,23 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 		"ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
 		"CLAUDE_CODE_API_BASE_URL", "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
 	}
-	for _, key := range append(provider, claudeCodeSandboxServiceEndpointEnv...) {
+	// Hard-coded on purpose: deleting a name from the production list must
+	// fail here (measured on the 2.1.311 binary).
+	service := []string{
+		"ANT_CLAUDE_CODE_METRICS_ENDPOINT", "ANT_OTEL_EXPORTER_OTLP_ENDPOINT", "ANT_OTEL_EXPORTER_OTLP_HEADERS",
+		"BETA_TRACING_ENDPOINT", "CLAUDE_BRIDGE_BASE_URL", "CLAUDE_BRIDGE_SESSION_INGRESS_URL",
+		"CLAUDE_CODE_ARTIFACTS_API_BASE_URL", "CLAUDE_CODE_ARTIFACTS_API_TOKEN", "CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
+		"CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL", "CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL", "CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
+		"CLAUDE_CODE_GB_BASE_URL", "CLAUDE_CODE_MEMORY_API_BASE_URL", "CLAUDE_CODE_MEMORY_API_TOKEN",
+		"CLAUDE_CODE_MODEL_CATALOG_URL", "CLAUDE_REMOTE_TOOLS_BRIDGE_URL", "CLAUDE_RUNNER_API_BASE_URL",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "OTEL_EXPORTER_OTLP_PROFILES_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "SESSION_INGRESS_URL", "VOICE_STREAM_BASE_URL",
+		"CLAUDE_CODE_PLUGIN_DIRS",
+	}
+	if len(service) != 25 {
+		t.Fatalf("hard-coded list has %d names", len(service))
+	}
+	for _, key := range append(provider, service...) {
 		value, ok := merged[key]
 		if s, _ := value.(string); ok && claudeCodeOTLPEndpointKey(key) && strings.HasPrefix(s, "http://host.openshell.internal:18971") {
 			continue // pinned to the ingress by the native OTLP spec
@@ -510,6 +526,11 @@ func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
 	for _, key := range claudeCodeSandboxServiceEndpointEnv {
 		if slices.Contains(claudeCodeSandboxProviderEnv, key) || slices.Contains(claudeCodeSandboxModelEnv, key) {
 			t.Errorf("%s is both a static service pin and a per-run variable", key)
+		}
+	}
+	for _, helper := range []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "inferenceCredentialHelper"} {
+		if value, ok := source.settings[helper]; !ok || value != "" {
+			t.Errorf("merged managed %s = %#v (present %v), want \"\"", helper, value, ok)
 		}
 	}
 	if err := validateClaudeCodeRunSettingsSchema(runFiles[ClaudeCodeSandboxRunDropInPath]); err != nil {

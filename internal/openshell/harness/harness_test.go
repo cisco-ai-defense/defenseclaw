@@ -531,9 +531,12 @@ func TestBinaryPinnedInstallChecksDigests(t *testing.T) {
 }
 
 // TestBinaryPinRunRefusesBadDownloads runs the rendered install step with
-// stub curl and uname: a download whose sha256 is not the pin, a failed
-// download and an unpinned architecture all exit non-zero, say what the
-// build needs, leave nothing at the install path and clean up the download.
+// stub curl, uname and install: a download whose sha256 is not the pin, a
+// failed download and an unpinned architecture all exit non-zero before
+// install runs, say what the build needs, leave nothing at the install path
+// and clean up the download. A download that matches its pin (a test pin)
+// installs, so the refusals are the digest check's and not a failing
+// install -o root.
 func TestBinaryPinRunRefusesBadDownloads(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the install step is a POSIX shell step of a Linux image")
@@ -542,19 +545,24 @@ func TestBinaryPinRunRefusesBadDownloads(t *testing.T) {
 	if err != nil {
 		t.Skip("no sh")
 	}
-	for _, tool := range []string{"sha256sum", "mktemp", "cut", "dirname", "install", "rm"} {
+	for _, tool := range []string{"sha256sum", "mktemp", "cut", "dirname", "rm", "cp", "mkdir"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("no %s", tool)
 		}
 	}
+	goodSum := sha256.Sum256([]byte("good"))
+	matching := binaryPin{Version: claudeCodePin.Version, DigestSource: "test",
+		Binaries: map[string]tarballArchive{"x86_64": {URL: claudeCodePin.Binaries["x86_64"].URL, SHA256: hex.EncodeToString(goodSum[:])}}}
 	for _, tc := range []struct {
 		name, arch, curlFail string
+		pin                  binaryPin
 		want                 []string
-		curlRuns             bool
+		curlRuns, installs   bool
 	}{
-		{"hash-mismatch", "x86_64", "", []string{"is not the pinned " + claudeCodePin.Binaries["x86_64"].SHA256, "image builds need https to downloads.claude.ai"}, true},
-		{"download-fails", "aarch64", "1", []string{"could not download " + claudeCodePin.Binaries["aarch64"].URL, "image builds need https to downloads.claude.ai"}, true},
-		{"unpinned-arch", "riscv64", "", []string{"has no pinned binary for riscv64"}, false},
+		{"hash-mismatch", "x86_64", "", claudeCodePin, []string{"is not the pinned " + claudeCodePin.Binaries["x86_64"].SHA256, "image builds need https to downloads.claude.ai"}, true, false},
+		{"download-fails", "aarch64", "1", claudeCodePin, []string{"could not download " + claudeCodePin.Binaries["aarch64"].URL, "image builds need https to downloads.claude.ai"}, true, false},
+		{"unpinned-arch", "riscv64", "", claudeCodePin, []string{"has no pinned binary for riscv64"}, false, false},
+		{"matching-digest-installs", "x86_64", "", matching, nil, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -564,12 +572,16 @@ func TestBinaryPinRunRefusesBadDownloads(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			args := filepath.Join(dir, "curl.args")
+			args, installArgs := filepath.Join(dir, "curl.args"), filepath.Join(dir, "install.args")
 			stub := map[string]string{
 				"uname": "#!/bin/sh\necho " + tc.arch + "\n",
+				// install ignores -o/-g (the test is not root) and records each call.
+				"install": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(installArgs) + "\n" +
+					"last=; prev=; for a in \"$@\"; do prev=$last; last=$a; done\n" +
+					"if [ \"$1\" = -d ]; then mkdir -p \"$last\"; else cp \"$prev\" \"$last\"; fi\n",
 				"curl": "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(args) + "\n" +
 					"[ -n \"${CURL_FAIL:-}\" ] && exit 22\n" +
-					"while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; printf tampered > \"$1\"; fi; shift; done\n",
+					"while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; printf '%s' \"${CURL_BODY:-tampered}\" > \"$1\"; fi; shift; done\n",
 			}
 			for name, body := range stub {
 				if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
@@ -577,15 +589,30 @@ func TestBinaryPinRunRefusesBadDownloads(t *testing.T) {
 				}
 			}
 			dest := filepath.Join(dir, "opt", "claudecode", "bin", "claude")
-			run, err := claudeCodePin.installRun(dest, claudeCodePin.Version)
+			run, err := tc.pin.installRun(dest, claudeCodePin.Version)
 			if err != nil {
 				t.Fatal(err)
 			}
+			body := "tampered"
+			if tc.installs {
+				body = "good"
+			}
 			cmd := exec.Command(sh, "-c", run)
-			cmd.Env = []string{"PATH=" + stubs + string(os.PathListSeparator) + os.Getenv("PATH"), "TMPDIR=" + tmp, "CURL_FAIL=" + tc.curlFail}
+			cmd.Env = []string{"PATH=" + stubs + string(os.PathListSeparator) + os.Getenv("PATH"), "TMPDIR=" + tmp, "CURL_FAIL=" + tc.curlFail, "CURL_BODY=" + body}
 			out, err := cmd.CombinedOutput()
+			installed, _ := os.ReadFile(installArgs)
+			if tc.installs {
+				got, readErr := os.ReadFile(dest)
+				if err != nil || readErr != nil || string(got) != "good" || !strings.Contains(string(installed), "-o root -g root -m 0755") {
+					t.Fatalf("matching download not installed (err %v, read %v, got %q, install calls %q):\n%s", err, readErr, got, installed, out)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatalf("install step succeeded:\n%s", out)
+			}
+			if len(installed) != 0 {
+				t.Fatalf("install ran before the refusal (%q):\n%s", installed, out)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(string(out), want) {

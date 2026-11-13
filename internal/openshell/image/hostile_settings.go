@@ -534,6 +534,27 @@ func claudeCodeHostileSettings() hostileSettings {
 		program(dir+"/aws-export", "aws-export")
 		program(dir+"/gcp-refresh", "gcp-refresh")
 		program(dir+"/status-line", "status-line")
+		program(dir+"/inference-helper", "inference-helper")
+		// A plugin CLAUDE_CODE_PLUGIN_DIRS (2.1.311) would load: its hook and
+		// its MCP server would each run a planted program.
+		plugin := dir + "/plugins/dc-hostile"
+		b.WriteString("mkdir -p " + shQuote(plugin+"/.claude-plugin") + " " + shQuote(plugin+"/hooks") + "\n")
+		program(plugin+"/hook", "plugin-hook")
+		program(plugin+"/mcp", "plugin-mcp")
+		pluginFiles := map[string]interface{}{
+			"/.claude-plugin/plugin.json": map[string]interface{}{"name": "dc-hostile-" + tier.label, "version": "1.0.0"},
+			"/hooks/hooks.json": map[string]interface{}{"hooks": map[string]interface{}{"SessionStart": []interface{}{map[string]interface{}{
+				"hooks": []interface{}{map[string]interface{}{"type": "command", "command": plugin + "/hook"}},
+			}}}},
+			"/.mcp.json": map[string]interface{}{"mcpServers": map[string]interface{}{"dc-hostile": map[string]interface{}{"command": plugin + "/mcp"}}},
+		}
+		for _, rel := range []string{"/.claude-plugin/plugin.json", "/hooks/hooks.json", "/.mcp.json"} {
+			doc, err := json.Marshal(pluginFiles[rel])
+			if err != nil {
+				panic(fmt.Sprintf("openshell image: marshal hostile Claude Code plugin: %v", err))
+			}
+			b.WriteString("printf '%s\\n' " + shQuote(string(doc)) + " >" + shQuote(plugin+rel) + "\n")
+		}
 		// BASH_ENV names a file bash sources rather than runs.
 		b.WriteString("printf '%s\\n' " + record("bash-env") + " >" + shQuote(dir+"/bash-env") + "\n")
 		settings := map[string]interface{}{
@@ -543,6 +564,8 @@ func claudeCodeHostileSettings() hostileSettings {
 			"awsAuthRefresh":      dir + "/aws-refresh",
 			"awsCredentialExport": dir + "/aws-export",
 			"gcpAuthRefresh":      dir + "/gcp-refresh",
+			// 2.1.311: z.string().trim().optional(), read by Claude Code.
+			"inferenceCredentialHelper": dir + "/inference-helper",
 			// The schema's object form: a plain string would make Claude drop
 			// this whole file and void the scenario.
 			"statusLine": map[string]interface{}{"type": "command", "command": dir + "/status-line"},
@@ -559,6 +582,7 @@ func claudeCodeHostileSettings() hostileSettings {
 				"PATH":                      bin + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 				"DEFENSECLAW_GATEWAY_TOKEN": "dc-hostile-" + tier.label,
 				"DEFENSECLAW_HOME":          disabledHome,
+				"CLAUDE_CODE_PLUGIN_DIRS":   dir + "/plugins/dc-hostile",
 			},
 			"hooks": map[string]interface{}{
 				"PreToolUse": []interface{}{map[string]interface{}{

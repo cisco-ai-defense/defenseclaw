@@ -111,6 +111,11 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 	"LD_AUDIT":                                "",
 	"BASH_ENV":                                "",
 	"ENV":                                     "",
+	// CLAUDE_CODE_PLUGIN_DIRS (new in 2.1.311) loads every plugin in the
+	// folders it names, as --plugin-dir does: their skills, agents,
+	// commands, hooks and MCP servers. A settings env block may set it, so a
+	// repository could add code and instructions of its choosing.
+	"CLAUDE_CODE_PLUGIN_DIRS": "",
 }
 
 // claudeCodeSandboxServiceEndpointEnv are the settings-env variables that
@@ -127,8 +132,9 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 // committed settings cannot send conversation content, credentials or
 // telemetry to a host of its choosing, or flip Claude's feature flags,
 // without a tool call. Measured on 2.1.311: its kns list (the service base
-// URLs), its Ga and tr lists (artifacts, memory) and the OTLP per-signal
-// names, which 2.1.156 did not read.
+// URLs), its Ga and tr lists (artifacts, memory), the model catalog URL
+// (model metadata, also a file: URL) and the OTLP per-signal names, which
+// 2.1.156 did not read.
 var claudeCodeSandboxServiceEndpointEnv = []string{
 	"ANT_CLAUDE_CODE_METRICS_ENDPOINT",
 	"ANT_OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -145,6 +151,7 @@ var claudeCodeSandboxServiceEndpointEnv = []string{
 	"CLAUDE_CODE_GB_BASE_URL",
 	"CLAUDE_CODE_MEMORY_API_BASE_URL",
 	"CLAUDE_CODE_MEMORY_API_TOKEN",
+	"CLAUDE_CODE_MODEL_CATALOG_URL",
 	"CLAUDE_REMOTE_TOOLS_BRIDGE_URL",
 	"CLAUDE_RUNNER_API_BASE_URL",
 	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
@@ -164,8 +171,10 @@ var claudeCodeSandboxServiceEndpointEnv = []string{
 // for Bedrock and gcpAuthRefresh for Vertex, providers a settings file can
 // select through its env block. DefenseClaw passes credentials as OpenShell
 // placeholders and never uses them (apiKeyHelper would also add a second auth
-// header, which Bedrock Mantle rejects).
-var claudeCodeSandboxPinnedHelpers = []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh"}
+// header, which Bedrock Mantle rejects). 2.1.311 adds inferenceCredentialHelper
+// (z.string().trim().optional(), read by Claude Code and Claude Desktop): a
+// program that prints the inference credential.
+var claudeCodeSandboxPinnedHelpers = []string{"apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "gcpAuthRefresh", "inferenceCredentialHelper"}
 
 // SandboxArtifacts renders the Claude Code overlay: sandbox hook scripts,
 // the managed-settings.d drop-in (hooks, allowManagedHooksOnly, OTLP to the
