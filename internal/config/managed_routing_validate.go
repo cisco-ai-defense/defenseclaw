@@ -36,15 +36,13 @@ func RouteOnlyCapableOn(connector, goos string) bool {
 func validateManagedRouting(cfg *Config, goos string) error {
 	r := cfg.Routing
 	for i, m := range r.Models {
-		if strings.TrimSpace(m.APIKeyEnv) != "" {
-			// 1.0.9 managed configs may carry api_key_env models with
-			// routing off (the vllm_sr era); the gateway ignores the name on
-			// a managed host (credential refs only), so only a config that
-			// turns routing on is refused (S1 REVIEW-code-slice4 P2-1).
-			if r.Enabled {
-				return fmt.Errorf("config routing.models[%d].api_key_env is not allowed on a managed host with routing.enabled: name a protected credential in routing.models[%d].credential", i, i)
-			}
-			fmt.Fprintf(managedRoutingWarnings, "warning: config routing.models[%d].api_key_env is ignored on a managed host; name a protected credential in routing.models[%d].credential before turning routing on\n", i, i)
+		if strings.TrimSpace(m.APIKeyEnv) != "" && strings.TrimSpace(m.Credential) == "" {
+			// 1.0.9 and 1.0.8 managed configs carry api_key_env models (the
+			// vllm_sr era), with routing on or off. They keep their meaning
+			// after the upgrade (owner rule: the upgrade must work): the
+			// gateway still reads the named variable when no credential is
+			// set, and doctor asks for a protected credential instead.
+			fmt.Fprintf(managedRoutingWarnings, "warning: config routing.models[%d].api_key_env reads the gateway service environment on a managed host; store the key with enterprise secret set and name it in routing.models[%d].credential\n", i, i)
 		}
 		if err := managedBedrockEnvRefusal(fmt.Sprintf("routing.models[%d].bedrock", i), m.Bedrock); err != nil {
 			return err

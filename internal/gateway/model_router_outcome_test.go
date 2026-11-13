@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
 func engineRouterTestConfig() *config.Config {
@@ -141,4 +142,32 @@ func TestEngineRouterVLLMWithoutContainerIsInactive(t *testing.T) {
 	if newEngineRouter(cfg, nil, "").RouterActive(context.Background()) {
 		t.Fatal("vllm_sr without a started container must leave routing off, as in 1.0.9")
 	}
+}
+
+// Lead item 1: a 1.0.9 managed config names the routed key by api_key_env;
+// after the upgrade the key still resolves on the managed host (doctor
+// warns to move it to a protected credential).
+func TestEngineRouterManagedAPIKeyEnvKeepsWorking(t *testing.T) {
+	t.Setenv("ROUTING_MANAGED_LEGACY_KEY_7731", "k-legacy")
+	cfg := engineRouterTestConfig()
+	cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	cfg.Enterprise.Profile = "standalone"
+	if !cfg.StandaloneEnterprise() {
+		t.Skip("fixture is not standalone on this build")
+	}
+	cfg.Routing.Models[1].APIKeyEnv = "ROUTING_MANAGED_LEGACY_KEY_7731"
+	r := newEngineRouter(cfg, nil, "")
+	b, _ := mustRouterEngine(t, r).Backend("paid")
+	if got := r.backendKey(cfg, b); got != "k-legacy" {
+		t.Fatalf("managed api_key_env key = %q", got)
+	}
+}
+
+func mustRouterEngine(t *testing.T, r *engineRouter) *engine.Engine {
+	t.Helper()
+	eng, _ := r.engineFor(context.Background())
+	if eng == nil {
+		t.Fatal("no engine")
+	}
+	return eng
 }
