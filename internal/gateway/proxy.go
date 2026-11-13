@@ -1798,6 +1798,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		for k, vs := range resp.Header {
+			if bedrockStream != nil && http.CanonicalHeaderKey(k) == "Content-Length" {
+				// A refused Bedrock stream ends with block frames of its
+				// own, so the upstream length no longer holds.
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
@@ -1812,6 +1817,14 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		buf := make([]byte, 4096)
 		var lineBuf strings.Builder
 		bedrockStreamReported := false
+		// bedrockBlockMsg is set when a Bedrock stream is refused; the agent
+		// then reads it as a block. bedrockHeld holds the bytes of an open
+		// tool call until the tool-call rules decide (GAP-0098).
+		bedrockBlockMsg := ""
+		var bedrockHeld []byte
+		bedrockHolding := func() bool {
+			return bedrockStream != nil && mode == "action" && bedrockStream.Holding()
+		}
 
 		streamBufferSize := 1024
 		if p.cfg != nil && p.cfg.StreamBufferBytes > 0 {
@@ -1862,10 +1875,26 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					if bedrockStream.Broken() && !bedrockStreamReported {
 						bedrockStreamReported = true
 						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
-							// Nothing more reaches the caller; before the first
-							// flush, nothing at all.
-							preblocked = !initialFlushed
+							// Nothing more of the upstream reaches the caller;
+							// a block it can show takes its place.
+							bedrockBlockMsg = blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected")
 							break
+						}
+					}
+					// Tool calls in the stream (GAP-0098): each finished call
+					// goes through the tool-call rules before its bytes reach
+					// the agent, as on the non-streaming path (F-1188).
+					if calls := bedrockStream.TakeToolCalls(); calls != nil {
+						if v := p.inspectToolCalls(r.Context(), calls); v != nil {
+							refuse := v.Action == "block" && mode == "action"
+							p.recordTelemetry(r.Context(), "tool-call", label, v, 0, mode, refuse)
+							if refuse {
+								fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TOOL-BLOCK severity=%s %s\n",
+									v.Severity, redaction.Reason(v.Reason))
+								p.enqueueBlockNotification(v, "tool_call", partial.Model)
+								bedrockBlockMsg = blockMessage(customBlockMsg, "tool_call", v.Reason)
+								break
+							}
 						}
 					}
 				} else {
@@ -1898,16 +1927,24 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 				if !initialFlushed {
 					initialBuf = append(initialBuf, chunk...)
-					shouldFlush := accumulated.Len() >= streamBufferSize ||
-						readErr != nil ||
-						len(initialBuf) > maxInitialBufBytes
+					// An open tool call keeps the buffer (its size is
+					// bounded by bedrockStreamToolMax).
+					shouldFlush := (accumulated.Len() >= streamBufferSize ||
+						len(initialBuf) > maxInitialBufBytes) && !bedrockHolding() ||
+						readErr != nil
 
 					if shouldFlush {
 						if !flushInitialBuf() {
 							break
 						}
 					}
+				} else if bedrockHolding() {
+					bedrockHeld = append(bedrockHeld, chunk...)
 				} else {
+					if len(bedrockHeld) > 0 {
+						_, _ = w.Write(bedrockHeld)
+						bedrockHeld = nil
+					}
 					_, _ = w.Write(chunk)
 					if flusher != nil {
 						flusher.Flush()
@@ -1921,6 +1958,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 							fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client)\n",
 								midVerdict.Severity, redaction.Reason(midVerdict.Reason), lastScanLen+len(chunk))
 							p.recordTelemetry(r.Context(), "completion", label, midVerdict, 0, mode, true)
+							if bedrockStream != nil {
+								bedrockBlockMsg = blockMessage(customBlockMsg, "completion", midVerdict.Reason)
+							}
 							break
 						}
 						lastScanLen = accumulated.Len()
@@ -1931,12 +1971,34 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				break
 			}
 		}
+		if bedrockBlockMsg == "" && !preblocked && !initialFlushed && len(initialBuf) > 0 {
+			flushInitialBuf()
+		}
+		if preblocked && bedrockStream != nil && bedrockBlockMsg == "" {
+			bedrockBlockMsg = blockMessage(customBlockMsg, "completion", "the reply was blocked")
+		}
+		if bedrockBlockMsg != "" {
+			// A refused Bedrock stream ends with a block the agent can show:
+			// the whole block reply when nothing was sent yet, else the
+			// block as the last text block of the message under way. An
+			// empty or cut eventstream left Claude Code with no answer
+			// (GAP-0098, GAP-0149). Held tool-call bytes are dropped.
+			hw := &headersSentWriter{ResponseWriter: w}
+			if !initialFlushed {
+				p.writeBlockedPassthrough(hw, r.URL.Path, provider, partial.Model, true, bedrockBlockMsg)
+				return
+			}
+			bedrockStream.writeBlockTail(hw, bedrockBlockMsg)
+			hw.Flush()
+			bedrockHeld = nil
+		}
 		if preblocked {
 			return
 		}
-		if !initialFlushed && len(initialBuf) > 0 {
-			if !flushInitialBuf() {
-				return
+		if len(bedrockHeld) > 0 {
+			_, _ = w.Write(bedrockHeld)
+			if flusher != nil {
+				flusher.Flush()
 			}
 		}
 

@@ -4326,7 +4326,8 @@ class SubstrateWorkloadOIDCConfig:
     issuer: str = ""
     audience: str = ""
     # Bind the entry to the workloads it trusts (GAP-0043): subject exact or
-    # prefix with a trailing "*", claims compared exactly.
+    # a prefix ending in ":*" or "/*" (whole segments only; a raw prefix or a
+    # bare "*" is refused), claims compared exactly.
     subject: str = ""
     claims: dict[str, str] = field(default_factory=dict)
 

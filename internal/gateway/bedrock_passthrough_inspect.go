@@ -21,6 +21,8 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
@@ -82,6 +84,125 @@ type bedrockEventStreamText struct {
 	dec    *eventstream.Decoder
 	broken bool
 	model  string
+	// Tool calls (GAP-0098): open blocks by content index, assembled from
+	// the stream's input deltas, and the finished calls not yet taken.
+	tools    map[int]*bedrockStreamTool
+	done     []bedrockStreamTool
+	converse bool // a ConverseStream (else InvokeModelWithResponseStream)
+	maxIndex int
+}
+
+// bedrockStreamTool is one tool call of a stream.
+type bedrockStreamTool struct {
+	Name string
+	Args strings.Builder
+}
+
+// bedrockStreamToolMax bounds one tool call's assembled input; a larger one
+// cannot be inspected and makes the stream uninspectable.
+const bedrockStreamToolMax = 1 << 20
+
+// Holding reports a tool call that is still open or not yet inspected: its
+// bytes must not reach the agent before the tool-call rules decide.
+func (s *bedrockEventStreamText) Holding() bool { return len(s.tools) > 0 || len(s.done) > 0 }
+
+// TakeToolCalls returns the finished tool calls in the shape
+// inspectToolCalls reads (nil for none) and forgets them.
+func (s *bedrockEventStreamText) TakeToolCalls() json.RawMessage {
+	if len(s.done) == 0 {
+		return nil
+	}
+	type fn struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type call struct {
+		Type     string `json:"type"`
+		Function fn     `json:"function"`
+	}
+	out := make([]call, 0, len(s.done))
+	for i := range s.done {
+		args := strings.TrimSpace(s.done[i].Args.String())
+		if args == "" {
+			args = "{}"
+		}
+		out = append(out, call{Type: "function", Function: fn{Name: s.done[i].Name, Arguments: args}})
+	}
+	s.done = nil
+	raw, _ := json.Marshal(out)
+	return raw
+}
+
+func (s *bedrockEventStreamText) toolStart(index int, name, initial string) {
+	if index > s.maxIndex {
+		s.maxIndex = index
+	}
+	if name == "" {
+		return
+	}
+	if s.tools == nil {
+		s.tools = map[int]*bedrockStreamTool{}
+	}
+	t := &bedrockStreamTool{Name: name}
+	if initial = strings.TrimSpace(initial); initial != "" && initial != "{}" {
+		t.Args.WriteString(initial)
+	}
+	s.tools[index] = t
+}
+
+func (s *bedrockEventStreamText) toolDelta(index int, part string) {
+	t, ok := s.tools[index]
+	if !ok {
+		return
+	}
+	if t.Args.Len()+len(part) > bedrockStreamToolMax {
+		s.broken, s.buf = true, nil
+		return
+	}
+	t.Args.WriteString(part)
+}
+
+func (s *bedrockEventStreamText) toolStop(index int) {
+	if t, ok := s.tools[index]; ok {
+		s.done = append(s.done, bedrockStreamTool{Name: t.Name})
+		s.done[len(s.done)-1].Args.WriteString(t.Args.String())
+		delete(s.tools, index)
+	}
+}
+
+// anthropicStreamToolEvent reads the tool-call parts of one Anthropic
+// stream event.
+func (s *bedrockEventStreamText) anthropicStreamToolEvent(inner []byte) {
+	var ev struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock struct {
+			Type  string          `json:"type"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content_block"`
+		Delta struct {
+			Type        string `json:"type"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
+	}
+	if json.Unmarshal(inner, &ev) != nil {
+		return
+	}
+	switch ev.Type {
+	case "content_block_start":
+		if ev.ContentBlock.Type == "tool_use" || ev.ContentBlock.Type == "server_tool_use" {
+			s.toolStart(ev.Index, ev.ContentBlock.Name, string(ev.ContentBlock.Input))
+		} else if ev.Index > s.maxIndex {
+			s.maxIndex = ev.Index
+		}
+	case "content_block_delta":
+		if ev.Delta.Type == "input_json_delta" {
+			s.toolDelta(ev.Index, ev.Delta.PartialJSON)
+		}
+	case "content_block_stop":
+		s.toolStop(ev.Index)
+	}
 }
 
 func newBedrockEventStreamText() *bedrockEventStreamText {
@@ -162,6 +283,7 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 				s.model = start.Message.Model
 			}
 		}
+		s.anthropicStreamToolEvent(inner)
 		if t := extractSSEChunkText(string(inner), "anthropic"); t != "" {
 			return t
 		}
@@ -173,17 +295,108 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		if json.Unmarshal(inner, &other) == nil {
 			return other.Generation + other.OutputText + other.Completion
 		}
+	case "contentBlockStart":
+		// ConverseStream tool call: {"contentBlockIndex":n,"start":
+		// {"toolUse":{"toolUseId","name"}}}.
+		s.converse = true
+		var st struct {
+			Index int `json:"contentBlockIndex"`
+			Start struct {
+				ToolUse struct {
+					Name string `json:"name"`
+				} `json:"toolUse"`
+			} `json:"start"`
+		}
+		if json.Unmarshal(msg.Payload, &st) == nil {
+			s.toolStart(st.Index, st.Start.ToolUse.Name, "")
+		}
 	case "contentBlockDelta":
 		// ConverseStream: the event type names the frame, the payload is
-		// {"contentBlockIndex":0,"delta":{"text":"..."}}.
+		// {"contentBlockIndex":0,"delta":{"text":"..."}} or a toolUse
+		// input part {"delta":{"toolUse":{"input":"..."}}}.
+		s.converse = true
 		var d struct {
+			Index int `json:"contentBlockIndex"`
 			Delta struct {
-				Text string `json:"text"`
+				Text    string `json:"text"`
+				ToolUse struct {
+					Input string `json:"input"`
+				} `json:"toolUse"`
 			} `json:"delta"`
 		}
 		if json.Unmarshal(msg.Payload, &d) == nil {
+			if d.Index > s.maxIndex {
+				s.maxIndex = d.Index
+			}
+			if d.Delta.ToolUse.Input != "" {
+				s.toolDelta(d.Index, d.Delta.ToolUse.Input)
+			}
 			return d.Delta.Text
+		}
+	case "contentBlockStop":
+		s.converse = true
+		var st struct {
+			Index int `json:"contentBlockIndex"`
+		}
+		if json.Unmarshal(msg.Payload, &st) == nil {
+			s.toolStop(st.Index)
 		}
 	}
 	return ""
+}
+
+// headersSentWriter is w after the reply headers went out: header writes
+// and a second WriteHeader are dropped, body writes and flushes pass, so a
+// block writer can add its frames to a stream already open.
+type headersSentWriter struct {
+	http.ResponseWriter
+	h http.Header
+}
+
+func (w *headersSentWriter) Header() http.Header {
+	if w.h == nil {
+		w.h = http.Header{}
+	}
+	return w.h
+}
+func (w *headersSentWriter) WriteHeader(int) {}
+func (w *headersSentWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// writeBlockTail ends a Bedrock stream the agent already received part of
+// with the block message as one more text block of the same message (the
+// message then ends normally), so the agent shows it instead of a cut
+// stream.
+func (s *bedrockEventStreamText) writeBlockTail(w io.Writer, msg string) {
+	idx := s.maxIndex + 1
+	if s.converse {
+		for _, f := range []struct {
+			t string
+			p map[string]any
+		}{
+			{"contentBlockDelta", map[string]any{"contentBlockIndex": idx, "delta": map[string]any{"text": msg}, "p": ""}},
+			{"contentBlockStop", map[string]any{"contentBlockIndex": idx, "p": ""}},
+			{"messageStop", map[string]any{"stopReason": bedrockBlockStopReason, "defenseclaw_blocked": true, "p": ""}},
+		} {
+			if writeBedrockEventStreamFrame(w, f.t, f.p) != nil {
+				return
+			}
+		}
+		return
+	}
+	for _, ev := range []map[string]any{
+		{"type": "content_block_start", "index": idx, "content_block": map[string]any{"type": "text", "text": ""}},
+		{"type": "content_block_delta", "index": idx, "delta": map[string]any{"type": "text_delta", "text": msg}},
+		{"type": "content_block_stop", "index": idx},
+		{"type": "message_delta", "delta": map[string]any{"stop_reason": bedrockBlockStopReason, "stop_sequence": nil}, "usage": map[string]int{"output_tokens": 1}},
+		{"type": "message_stop"},
+	} {
+		raw, _ := json.Marshal(ev)
+		if writeBedrockEventStreamFrame(w, "chunk", map[string]any{"bytes": base64.StdEncoding.EncodeToString(raw)}) != nil {
+			return
+		}
+	}
 }
