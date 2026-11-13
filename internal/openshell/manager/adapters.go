@@ -234,6 +234,35 @@ func GatewayVMDiskFree(dir string) func() (string, uint64, error) {
 	}
 }
 
+// GatewayVMOverlayTemplate is Options.VMOverlayTemplate for the local
+// gateway's configuration in dir (as GatewayVMDiskFree reads it): the
+// template of its overlay size in the MicroVM driver's image cache, for
+// the driver's template layout of release, formatted with the e2fsprogs
+// in the folder tools finds. Nothing is done for a release whose layout
+// DefenseClaw does not know.
+func GatewayVMOverlayTemplate(dir string, tools func() (string, error)) func(context.Context, string) error {
+	return func(ctx context.Context, release string) error {
+		layout := openshell.VMOverlayTemplateLayout(release)
+		if layout == "" {
+			return nil
+		}
+		var vm openshell.VMConfig
+		if st, err := (&openshell.GatewayConfigurator{Dir: dir}).Read(); err == nil && st != nil {
+			vm = st.VM
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = ""
+		}
+		cache := openshell.VMImageCache(vm.StateDir, home)
+		if cache == "" {
+			return fmt.Errorf("%w: the MicroVM driver's image cache is unknown (no home directory)", openshell.ErrVMOverlayTemplate)
+		}
+		_, err = openshell.VMOverlayTemplate{Cache: cache, Layout: layout, OverlayDiskMiB: vm.Resources().OverlayDiskMiB, Tools: tools}.Ensure(ctx)
+		return err
+	}
+}
+
 // imageSizer is an Images that reports the size of an image in Docker
 // (BuilderImages), which the disk the vm driver prepares from it takes
 // about.

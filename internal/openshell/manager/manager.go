@@ -181,6 +181,13 @@ type Options struct {
 	// disk prepared yet is refused when the room for one is missing
 	// (openshell.VMDiskShortage). Nil, or an error, skips that check.
 	VMDiskFree func() (dir string, free uint64, err error)
+	// VMOverlayTemplate makes the MicroVM driver's overlay template, from
+	// which it clones every sandbox's writable disk, root-owned before a
+	// create on the vm driver of OpenShell release (GatewayVMOverlayTemplate,
+	// openshell.VMOverlayTemplate). The driver of a gateway that does not run
+	// as root gives the guest's / to the gateway's account, which the
+	// workload check refuses (GAP-0007, GAP-0570). Nil skips it.
+	VMOverlayTemplate func(ctx context.Context, release string) error
 	// SettleDelay waits for the first settings poll after a start
 	// (DefaultSettleDelay); negative skips it.
 	SettleDelay       time.Duration

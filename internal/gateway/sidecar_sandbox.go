@@ -273,6 +273,25 @@ type sandboxRuntimeDeps struct {
 	egressRefresh func(context.Context, egress.Principal) *egress.Decision
 }
 
+// sandboxVMDriverE2fsprogs finds the e2fsprogs the daemon formats the
+// MicroVM overlay template with: the folder the account's MicroVM driver
+// uses (openshell.VMDriverE2fsprogs), on a managed Mac by the managed rule
+// over the administrator's enterprise.openshell.e2fsprogs_dir from the
+// managed gateway's settings.
+func sandboxVMDriverE2fsprogs(opts RuntimeOptions) func() (string, error) {
+	return func() (string, error) {
+		adminDir := ""
+		if opts.Settings != nil {
+			adminDir = opts.Settings.Enterprise.E2fsprogsDir
+		}
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = ""
+		}
+		return openshell.VMDriverE2fsprogs(runtime.GOOS, opts.Managed, adminDir, home, nil)
+	}
+}
+
 // buildSandboxRuntime prepares the hook ingress, the egress proxy and the
 // manager. RuntimeOptions{} is the per-user gateway's runtime; Managed is a
 // managed host's per-user daemon, whose ingress forwards every call to the
@@ -349,6 +368,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		DefenseClawVersion: manager.ImageVersion(),
 		GatewayResources:   manager.GatewayConfigResources(""),
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
+		VMOverlayTemplate:  manager.GatewayVMOverlayTemplate("", sandboxVMDriverE2fsprogs(opts)),
 		StartLock:          func() (func(), error) { return openshell.LockSandboxStart("") },
 		MigrateBootstrap:   dockerBootstrapMigrator(opts.Managed),
 		OnGateway:          rt.gatewayState,

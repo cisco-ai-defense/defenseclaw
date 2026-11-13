@@ -24,8 +24,10 @@ import (
 	"io/fs"
 	"os"
 	"os/user"
+	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
@@ -92,6 +94,58 @@ func sandboxDevicePathAccess(path string, uid int, checkACL bool) sandboxDeviceA
 		access.Group = sandboxGroupName(int(st.Gid))
 	}
 	return access
+}
+
+// sandboxDockerDesktopSocket is where Docker Desktop keeps its socket in
+// the home of the account it runs for.
+const sandboxDockerDesktopSocket = "/.docker/run/docker.sock"
+
+// sandboxLstat and sandboxReadlink read a link; sandboxOwnerOf is the
+// owner of what sandboxLstat found. Tests replace them.
+var (
+	sandboxLstat    = os.Lstat
+	sandboxReadlink = os.Readlink
+	sandboxOwnerOf  = func(info fs.FileInfo) (int, bool) {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return 0, false
+		}
+		return int(st.Uid), true
+	}
+)
+
+// sandboxDockerDesktopLinkOf tells whether path is Docker Desktop's link
+// (a symlink of root's, which Docker Desktop's privileged helper writes,
+// to HOME/.docker/run/docker.sock) and whose home HOME is, from the owner
+// of the home folder itself: nothing under the home is opened or listed.
+func sandboxDockerDesktopLinkOf(path string, uid int) sandboxDockerDesktopLink {
+	link, err := sandboxLstat(path)
+	if err != nil || link.Mode()&fs.ModeSymlink == 0 {
+		return sandboxDockerDesktopNone
+	}
+	if owner, ok := sandboxOwnerOf(link); !ok || owner != 0 {
+		return sandboxDockerDesktopNone
+	}
+	target, err := sandboxReadlink(path)
+	if err != nil || !filepath.IsAbs(target) || filepath.Clean(target) != target {
+		return sandboxDockerDesktopNone
+	}
+	home, ok := strings.CutSuffix(target, sandboxDockerDesktopSocket)
+	if !ok || !filepath.IsAbs(home) || home == "/" {
+		return sandboxDockerDesktopNone
+	}
+	info, err := sandboxLstat(home)
+	if err != nil || !info.IsDir() {
+		return sandboxDockerDesktopNone
+	}
+	owner, ok := sandboxOwnerOf(info)
+	switch {
+	case !ok:
+		return sandboxDockerDesktopNone
+	case owner == uid:
+		return sandboxDockerDesktopOwn
+	}
+	return sandboxDockerDesktopOther
 }
 
 // sandboxRecordTrusted reports a lifecycle record the gateway may believe:

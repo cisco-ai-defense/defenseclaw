@@ -26,6 +26,11 @@ func sandboxPathAccess(string, int) sandboxDeviceAccess {
 	return sandboxDeviceAccess{State: sandboxDeviceDenied}
 }
 
+// sandboxDockerDesktopLinkOf is never consulted on Windows either.
+func sandboxDockerDesktopLinkOf(string, int) sandboxDockerDesktopLink {
+	return sandboxDockerDesktopNone
+}
+
 // sandboxRecordTrusted is never consulted on Windows either; it trusts
 // nothing.
 var sandboxRecordTrusted = func(fs.FileInfo) bool { return false }

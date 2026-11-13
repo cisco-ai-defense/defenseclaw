@@ -528,6 +528,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err := m.vmDiskRoom(ctx, gw.Driver, gw.Version, img, rec.RunImageID); err != nil {
 		return nil, err
 	}
+	if err := m.vmOverlayTemplate(ctx, gw.Driver, gw.Version); err != nil {
+		return nil, err
+	}
 
 	// Policy: the workload runs as the identity the image was built for.
 	pin := policy.Input{
@@ -687,6 +690,22 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, release st
 	free, inFlight := image.FreeAfterStaging(dir, free, size, m.now())
 	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"+image.UnderWay(inFlight)); err != nil {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error()}
+	}
+	return nil
+}
+
+// vmOverlayTemplate makes the vm driver's overlay template root-owned
+// (Options.VMOverlayTemplate) before a create, so the new MicroVM's / is
+// root's and the workload check can trust its localhost resolver. A
+// template that cannot be made is refused here, before the image is
+// exported and the disk prepared, with why: the create would otherwise
+// be deleted after them.
+func (m *Manager) vmOverlayTemplate(ctx context.Context, d openshell.Driver, release string) error {
+	if d.Name != openshell.DriverVM || m.opts.VMOverlayTemplate == nil {
+		return nil
+	}
+	if err := m.opts.VMOverlayTemplate(ctx, release); err != nil {
+		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error() + "; nothing was created"}
 	}
 	return nil
 }

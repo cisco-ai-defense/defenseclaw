@@ -71,15 +71,21 @@ type sandboxAvailability struct {
 
 // Reasons a sandbox can't run for an account.
 const (
-	sandboxUnavailableWindows       = "sandboxes don't run on Windows"
-	sandboxUnavailablePlatform      = "OpenShell sandboxes don't run on this operating system"
-	sandboxUnavailableAppleSilicon  = "OpenShell sandboxes need a Mac with Apple silicon"
-	sandboxUnavailableOff           = "sandboxes are turned off on this computer"
-	sandboxUnavailableRoot          = "sandboxes don't run as root"
-	sandboxUnavailableAccount       = "your account could not be verified"
-	sandboxUnavailableNoDocker      = "Docker is not running"
-	sandboxUnavailableDockerAccess  = "the Docker socket isn't read-write for your account"
-	sandboxUnavailableUnknownDriver = "the organization's sandbox driver isn't supported here"
+	sandboxUnavailableWindows      = "sandboxes don't run on Windows"
+	sandboxUnavailablePlatform     = "OpenShell sandboxes don't run on this operating system"
+	sandboxUnavailableAppleSilicon = "OpenShell sandboxes need a Mac with Apple silicon"
+	sandboxUnavailableOff          = "sandboxes are turned off on this computer"
+	sandboxUnavailableRoot         = "sandboxes don't run as root"
+	sandboxUnavailableAccount      = "your account could not be verified"
+	sandboxUnavailableNoDocker     = "Docker is not running"
+	sandboxUnavailableDockerAccess = "the Docker socket isn't read-write for your account"
+	// A Mac's Docker Desktop (sandboxDockerDesktopLinkOf, GAP-0007): its
+	// Linux VM has no Landlock, so the docker driver can't run a sandbox
+	// there, and another account's Docker Desktop is not the caller's.
+	sandboxUnavailableDockerDesktop = "your organization's sandbox driver is docker, and Docker Desktop's Linux VM has no Landlock, which sandboxes need; " +
+		"on a Mac sandboxes run in OpenShell MicroVMs (ask IT to set enterprise.openshell.driver to vm)"
+	sandboxUnavailableDockerElsewhere = "Docker Desktop is not running in your account: /var/run/docker.sock leads to another account's Docker Desktop"
+	sandboxUnavailableUnknownDriver   = "the organization's sandbox driver isn't supported here"
 	// KVM that does not work for the account is sandboxVMRequired's (codes
 	// no_kvm, no_kvm_access) under driver_fallback: none; otherwise the
 	// docker fallback runs.
@@ -98,15 +104,17 @@ const (
 // (log.sandbox.host_run_unavailable) of the reasons; a reason without one
 // is a missing prerequisite.
 var sandboxUnavailableCodes = map[string]string{
-	sandboxUnavailableWindows:       "os_unsupported",
-	sandboxUnavailablePlatform:      "os_unsupported",
-	sandboxUnavailableAppleSilicon:  "os_unsupported",
-	sandboxUnavailableOff:           "sandboxes_off",
-	sandboxUnavailableRoot:          "root_account",
-	sandboxUnavailableAccount:       "account_unverified",
-	sandboxUnavailableNoDocker:      "no_docker",
-	sandboxUnavailableDockerAccess:  "no_docker_access",
-	sandboxUnavailableUnknownDriver: "driver_unsupported",
+	sandboxUnavailableWindows:         "os_unsupported",
+	sandboxUnavailablePlatform:        "os_unsupported",
+	sandboxUnavailableAppleSilicon:    "os_unsupported",
+	sandboxUnavailableOff:             "sandboxes_off",
+	sandboxUnavailableRoot:            "root_account",
+	sandboxUnavailableAccount:         "account_unverified",
+	sandboxUnavailableNoDocker:        "no_docker",
+	sandboxUnavailableDockerAccess:    "no_docker_access",
+	sandboxUnavailableDockerDesktop:   "driver_unsupported",
+	sandboxUnavailableDockerElsewhere: "no_docker",
+	sandboxUnavailableUnknownDriver:   "driver_unsupported",
 }
 
 // The codes of an account outside the group a device grants read-write
@@ -157,6 +165,23 @@ const (
 	// groups, which could not be looked up (the directory is unreachable).
 	// The probe then answers provisionally that a sandbox may run.
 	sandboxDeviceGroupsUnknown
+)
+
+// sandboxDockerDesktopLink is what /var/run/docker.sock is on a Mac, as
+// the gateway can tell without entering an account's home
+// (sandboxDockerDesktopLinkOf).
+type sandboxDockerDesktopLink uint8
+
+const (
+	// sandboxDockerDesktopNone: not Docker Desktop's link; the socket is
+	// judged by its modes (Colima, OrbStack, a socket of root's).
+	sandboxDockerDesktopNone sandboxDockerDesktopLink = iota
+	// sandboxDockerDesktopOwn: Docker Desktop's link into the caller's
+	// own home.
+	sandboxDockerDesktopOwn
+	// sandboxDockerDesktopOther: Docker Desktop's link into another
+	// account's home.
+	sandboxDockerDesktopOther
 )
 
 // sandboxDeviceAccess is the probe's look at one device for one account:
@@ -214,6 +239,10 @@ type sandboxAvailabilityProbe struct {
 	// access judges whether uid may read and write path by its owner,
 	// group and mode and the uid's groups (sandboxPathAccess).
 	access func(path string, uid int) sandboxDeviceAccess
+	// dockerDesktop tells, on a Mac, whether the docker socket is Docker
+	// Desktop's link into uid's home or another account's
+	// (sandboxDockerDesktopLinkOf); nil judges it by access alone.
+	dockerDesktop func(path string, uid int) sandboxDockerDesktopLink
 	// cpuInfoPath is read for the CPU's virtualization flags (Linux
 	// MicroVM driver); an unreadable file skips that check.
 	cpuInfoPath string
@@ -228,12 +257,13 @@ type sandboxAvailabilityProbe struct {
 
 func newSandboxAvailabilityProbe() *sandboxAvailabilityProbe {
 	return &sandboxAvailabilityProbe{
-		goos:         runtime.GOOS,
-		goarch:       runtime.GOARCH,
-		access:       sandboxPathAccess,
-		cpuInfoPath:  sandboxCPUInfoPath,
-		prerequisite: sandboxOpenShellPrerequisite,
-		now:          time.Now,
+		goos:          runtime.GOOS,
+		goarch:        runtime.GOARCH,
+		access:        sandboxPathAccess,
+		dockerDesktop: sandboxDockerDesktopLinkOf,
+		cpuInfoPath:   sandboxCPUInfoPath,
+		prerequisite:  sandboxOpenShellPrerequisite,
+		now:           time.Now,
 	}
 }
 
@@ -692,6 +722,22 @@ func sandboxDockerAccessCode(code string) bool {
 // directory outage, and the daemon finds out at sandbox start whether the
 // account can use Docker (GAP-0507).
 func (p *sandboxAvailabilityProbe) judgeDocker(cfg *config.Config, uid int, reason string) sandboxAvailability {
+	// On a Mac /var/run/docker.sock is Docker Desktop's link to the socket
+	// in the home of the account whose Docker Desktop started last, under
+	// its 0700 ~/.docker: the gateway's service account cannot examine it,
+	// by design, and is not let in (no group, no ACL on the home). It
+	// judges the link instead: the caller's own Docker Desktop cannot run a
+	// docker-driver sandbox (its Linux VM has no Landlock; the run refuses
+	// it too, dockerDesktopRefusal), and another account's is not the
+	// caller's (GAP-0007).
+	if p.goos == "darwin" && p.dockerDesktop != nil {
+		switch p.dockerDesktop(sandboxDockerSocketPath, uid) {
+		case sandboxDockerDesktopOwn:
+			return sandboxUnavailable(sandboxUnavailableDockerDesktop)
+		case sandboxDockerDesktopOther:
+			return sandboxUnavailable(sandboxUnavailableDockerElsewhere)
+		}
+	}
 	access := p.access(sandboxDockerSocketPath, uid)
 	switch access.State {
 	case sandboxDeviceMissing:
