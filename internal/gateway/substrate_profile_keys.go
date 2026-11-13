@@ -48,6 +48,24 @@ func substrateActorFloor(cfg *config.Config, profile string) (config.SandboxAdmi
 	return config.TightenSandboxAdmin(cfg.Substrate.Admin, overlay)
 }
 
+// SubstrateSandboxClassFor is the isolation class an actor of profile runs
+// in: the floor's sandbox_class (substrate.admin tightened by the profile),
+// never weaker than substrate.default_sandbox_class (D7). A floor that cannot
+// be computed gives the cluster default; the controller refuses the actor.
+func SubstrateSandboxClassFor(cfg *config.Config) func(profile string) string {
+	if cfg == nil {
+		return nil
+	}
+	return func(profile string) string {
+		def := cfg.Substrate.EffectiveSandboxClass()
+		floor, err := substrateActorFloor(cfg, profile)
+		if err != nil {
+			return def
+		}
+		return floor.EffectiveSandboxClass(def)
+	}
+}
+
 // SubstrateUnattendedAsk is what an ask of an unattended (--task, --batch)
 // actor does (D12): Queue false denies it at once; Queue true holds it for
 // a person, and when Timeout passes the ask is denied.

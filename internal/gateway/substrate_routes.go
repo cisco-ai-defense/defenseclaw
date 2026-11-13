@@ -70,6 +70,9 @@ type SubstrateCreate struct {
 	Atespace string `json:"atespace,omitempty"`
 	// Owner is filled by the gateway (the verified person).
 	Owner registry.Person `json:"-"`
+	// SandboxClass is filled by the gateway from the profile (never from
+	// the request): the class the actor must run in (PLAN 7.3).
+	SandboxClass string `json:"-"`
 }
 
 // SubstrateWorkspace is what the actor starts with.
@@ -301,6 +304,9 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			return
 		}
 		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
+		if st.cfg.SandboxClass != nil {
+			req.SandboxClass = st.cfg.SandboxClass(profile)
+		}
 		// E9: a managed deployment refuses an agent that signs in to a
 		// vendor account. The launcher names the connector, so this
 		// refuses before an actor exists; the template's connector is

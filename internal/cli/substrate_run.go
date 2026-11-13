@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -158,8 +159,24 @@ func runSubstrateConnect(cmd *cobra.Command, f *substrateAttachFlags, ref string
 	return substrateAttachAndReport(ctx, cmd, o, a)
 }
 
+// substratePresence records this launcher for AI discovery while it is
+// attached (E26: discovery labels it the Agent Substrate launcher; process
+// snapshots keep no command line). The record holds the command, the
+// connector and the context name only. It returns the cleanup.
+func substratePresence(cmd *cobra.Command, a api.Actor) func() {
+	ctxName := ""
+	if name, _, err := auth.ResolveContext(""); err == nil {
+		ctxName = name
+	}
+	remove, _ := launcherpresence.Write(auth.StateDir(), launcherpresence.Record{
+		Command: cmd.Name(), Connector: strings.ToLower(a.Connector), Context: strings.ToLower(ctxName),
+	})
+	return remove
+}
+
 // substrateAttachAndReport attaches and says how the session ended.
 func substrateAttachAndReport(ctx context.Context, cmd *cobra.Command, o attach.Options, a api.Actor) error {
+	defer substratePresence(cmd, a)()
 	res, err := attach.Attach(ctx, o)
 	w := cmd.ErrOrStderr()
 	if err != nil {

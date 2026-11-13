@@ -159,6 +159,12 @@ type SubstrateConfig struct {
 	SkillReceiptKey []byte
 	// Asks is the leader's ask and decision store (nil: 501).
 	Asks SubstrateAskStore
+	// SandboxClass is the isolation class an actor of profile must run in
+	// (SubstrateSandboxClassFor: the profile floor's sandbox_class, never
+	// weaker than substrate.default_sandbox_class). Create puts it on the
+	// actor's worker selector when the template's class does not meet it.
+	// nil: the template decides.
+	SandboxClass func(profile string) string
 	// UnattendedAsk is what an unattended actor's ask does for its profile
 	// (SubstrateUnattendedAskFor; nil: deny, D12).
 	UnattendedAsk func(profile string) SubstrateUnattendedAsk

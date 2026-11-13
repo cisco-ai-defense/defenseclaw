@@ -25,7 +25,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 )
 
 // The launcher create flow over the Substrate control API (PLAN 5.3
@@ -75,7 +77,8 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		return SubstrateCreated{}, ErrSubstrateTemplateNotFound
 	}
 	tref := ateapi.Ref(tmplSpace, tmplName)
-	if _, err := s.Client.GetActorTemplate(ctx, tref); err != nil {
+	tmpl, err := s.Client.GetActorTemplate(ctx, tref)
+	if err != nil {
 		if ateapi.IsNotFound(err) {
 			return SubstrateCreated{}, ErrSubstrateTemplateNotFound
 		}
@@ -89,8 +92,9 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		return SubstrateCreated{}, fmt.Errorf("%w: %q is not a valid actor name", ErrSubstrateActorExists, name)
 	}
 	a, err := s.Client.CreateActor(ctx, &ateapi.Actor{
-		Metadata:      &ateapi.ResourceMetadata{Atespace: req.Atespace, Name: name},
-		ActorTemplate: tref,
+		Metadata:       &ateapi.ResourceMetadata{Atespace: req.Atespace, Name: name},
+		ActorTemplate:  tref,
+		WorkerSelector: substrateClassSelector(tmpl, req.SandboxClass),
 	})
 	if ateapi.IsAlreadyExists(err) {
 		return SubstrateCreated{}, ErrSubstrateActorExists
@@ -102,6 +106,29 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		Atespace: req.Atespace, Name: name, UID: a.GetMetadata().GetUid(),
 		Template: ateapi.Key(tref), Connector: req.Connector,
 	}, nil
+}
+
+// substrateClassSelector is the worker selector an actor needs to run in
+// class: nil when the template already meets it (its own selector applies),
+// else the template's labels with the class label set (PLAN 7.3,
+// controller.SandboxClassLabel), so the actor lands on a pool of that class
+// and the controller's class check passes.
+func substrateClassSelector(tmpl *ateapi.ActorTemplate, class string) *ateapi.Selector {
+	class = strings.ToLower(strings.TrimSpace(class))
+	labels := tmpl.GetWorkerSelector().GetMatchLabels()
+	have := strings.ToLower(labels[controller.SandboxClassLabel])
+	if have == "" {
+		have = config.SubstrateSandboxGVisor // every actor is at least gVisor (D7), as the controller counts it
+	}
+	if class == "" || config.SandboxClassSatisfies(have, class) {
+		return nil
+	}
+	out := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		out[k] = v
+	}
+	out[controller.SandboxClassLabel] = class
+	return &ateapi.Selector{MatchLabels: out}
 }
 
 // Resume writes the policy, then resumes. It runs after the registration
