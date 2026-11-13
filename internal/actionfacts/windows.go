@@ -4898,7 +4898,7 @@ func windowsClassifyWeb(
 		// PowerShell's unqualified wget alias owns Invoke-WebRequest
 		// parameters such as -InFile. Only a literal real wget executable argv
 		// can inherit the independently closed GNU Wget grammar.
-		if !windowsNativeWebArgvUncertain(command) &&
+		if !windowsPowerShellNativeArgvUncertain(command) &&
 			windowsExactNativeWebArgv(command, args) {
 			parsed := parseWgetArgv(command.Argv)
 			if parsed.ConfigDisabled &&
@@ -5083,7 +5083,7 @@ func windowsClassifyCurl(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
-	if windowsNativeWebArgvUncertain(command) {
+	if windowsPowerShellNativeArgvUncertain(command) {
 		// Windows PowerShell 5.1 reserializes native argv through a legacy
 		// quoting layer. Literal double quotes, standalone empty arguments,
 		// and unquoted expression delimiters can therefore change the argv
@@ -5103,7 +5103,11 @@ func windowsClassifyCurl(
 	windowsClassifyCurlRecovery(command, args, builder)
 }
 
-func windowsNativeWebArgvUncertain(command *CommandFact) bool {
+// windowsPowerShellNativeArgvUncertain reports a PowerShell native-command argv
+// that Windows PowerShell 5.1 can reserialize: a literal double quote, a quoted
+// empty argument, or an unquoted expression delimiter. The argv the native
+// child receives is then not the one the lexer saw.
+func windowsPowerShellNativeArgvUncertain(command *CommandFact) bool {
 	if command == nil || command.Dialect != DialectPowerShell {
 		return false
 	}
@@ -5773,8 +5777,15 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 // cmd the same closed recognizers as the POSIX classifier
 // (rel-1-0-10:GAP-0051): an NTDS dump, or a complete statically credentialed
 // domain-service call, adds a credential-read operation; anything else stays
-// partial.
+// partial. So does a PowerShell argv that 5.1 can reserialize (a literal
+// double quote, as in `-x powershell -Command ...`): the parse claims no
+// authority it does not have, so the Windows hook does not pick PowerShell for
+// it and the remote-command recognizers still judge the -x body.
 func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
+	if windowsPowerShellNativeArgvUncertain(command) {
+		builder.out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
 	if _, ok := exactDirectoryCredentialCommand(*command); ok ||
 		ExactNetExecDomainServiceAuth(*command) {
 		windowsAddOperation(command, OperationCredentialRead)

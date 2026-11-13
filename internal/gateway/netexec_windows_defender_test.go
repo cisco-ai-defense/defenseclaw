@@ -6,7 +6,9 @@
 package gateway
 
 import (
+	"context"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -62,6 +64,42 @@ func TestNetExecWindowsDefenderMultiControlProfilePosture(t *testing.T) {
 					"tamper.windows_defender_multi_control_disable",
 				) {
 				t.Fatalf("response=%+v want %s/%s", response, profile.action, profile.severity)
+			}
+		})
+	}
+}
+
+// TestNetExecWindowsDefenderMultiControlWindowsDialectSelection runs the
+// Windows hook's dialect choice on every OS. The -x body carries a literal
+// double quote, which Windows PowerShell 5.1 can reserialize, so the PowerShell
+// parse must not be authoritative: the hook then keeps the default dialect, and
+// the NetExec remote-command recognizer still proves the Defender tamper next
+// to the credentialed-NetExec rule in every pack. (The AD pack's PowerShell
+// NetExec classifier once made this parse complete, the hook picked
+// PowerShell, and the Defender finding was lost on Windows only.)
+func TestNetExecWindowsDefenderMultiControlWindowsDialectSelection(t *testing.T) {
+	input := actionfacts.Input{Tool: "shell", Command: netExecDefenderCommand, CWD: `C:\repo`}
+	powerShell := input
+	powerShell.DialectHint = actionfacts.DialectPowerShell
+	if facts := actionfacts.Analyze(powerShell); facts.Authoritative() {
+		t.Fatalf("PowerShell parse is authoritative for a reserializable native argv: parse=%+v", facts.Parse)
+	}
+	input.DialectHint = selectWindowsShellDialect("shell", netExecDefenderCommand, input)
+	if input.DialectHint == actionfacts.DialectPowerShell {
+		t.Fatalf("Windows hook selected PowerShell for a reserializable NetExec argv")
+	}
+	for _, base := range []string{"default", "permissive", "strict"} {
+		t.Run(base, func(t *testing.T) {
+			got := EvaluateDeterministicAction(context.Background(), input, netExecDefenderCommand, "benchmark-"+base, base)
+			wantAction := "alert"
+			if base == "strict" {
+				wantAction = "block"
+			}
+			if got.Action != wantAction ||
+				!slices.Contains(got.RuleIDs, "tamper.windows_defender_multi_control_disable") ||
+				!slices.Contains(got.RuleIDs, "credential.directory_ticket_request") {
+				t.Fatalf("action=%q rules=%v parse=%q, want %s with the Defender and NetExec credential rules",
+					got.Action, got.RuleIDs, got.ParseStatus, wantAction)
 			}
 		})
 	}

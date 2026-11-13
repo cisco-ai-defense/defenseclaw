@@ -77,7 +77,8 @@ func TestExactNetExecDomainServiceAuth(t *testing.T) {
 // TestExactNetExecDomainServiceAuthWindows runs the same recognizer on the argv
 // from the PowerShell and cmd parsers (rel-1-0-10:GAP-0051 N2): bare nxc,
 // nxc.exe and a path-qualified binary are recognized and keep the parse
-// complete; a dynamic credential, a help call and a non-credentialed call stay
+// complete; a dynamic credential, a help call, a non-credentialed call and a
+// PowerShell argv that 5.1 can reserialize (a literal double quote) stay
 // partial.
 func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 	cases := []struct {
@@ -98,6 +99,8 @@ func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 		{"cmd help", "nxc.exe smb 198.51.100.10 -h", DialectCMD, false},
 		{"powershell no credential", "nxc smb 198.51.100.10 --shares", DialectPowerShell, false},
 		{"cmd path-qualified no credential", `C:\Tools\nxc.exe smb 198.51.100.10 --shares`, DialectCMD, false},
+		{"powershell literal double quote in -x", `nxc smb 198.51.100.10 -u svc -p S3cretP4ss -x 'whoami "/all"'`, DialectPowerShell, false},
+		{"powershell literal double quote in password", `nxc smb 198.51.100.10 -u svc -p 'S3cret"P4ss'`, DialectPowerShell, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
