@@ -11,6 +11,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // The fixture keeps the real connector's setup-time artifact declaration but
@@ -36,6 +37,7 @@ func (c setupRemoveFilesConnector) ManagedPluginArtifacts(opts connector.SetupOp
 }
 
 func TestSetupRemoveClearsWrittenHookFilesForEveryBuiltin(t *testing.T) {
+	testenv.IsolateAccount(t)
 	builtins := connector.NewDefaultRegistry()
 	for _, name := range builtins.Names() {
 		t.Run(name, func(t *testing.T) {
@@ -83,6 +85,7 @@ func TestSetupRemoveClearsWrittenHookFilesForEveryBuiltin(t *testing.T) {
 }
 
 func TestSetupRemovePreservesSharedHookFilesForConfiguredPeer(t *testing.T) {
+	testenv.IsolateAccount(t)
 	builtins := connector.NewDefaultRegistry()
 	removed, _ := builtins.Get("devin")
 	peer, _ := builtins.Get("kiro")
@@ -112,6 +115,7 @@ func TestSetupRemovePreservesSharedHookFilesForConfiguredPeer(t *testing.T) {
 }
 
 func TestSetupRemoveKeepsHookScriptNamedByConfiguredPeer(t *testing.T) {
+	testenv.IsolateAccount(t)
 	builtins := connector.NewDefaultRegistry()
 	removed, _ := builtins.Get("devin")
 	peer, _ := builtins.Get("kiro")
@@ -134,6 +138,7 @@ func TestSetupRemoveKeepsHookScriptNamedByConfiguredPeer(t *testing.T) {
 }
 
 func TestSetupRemoveTransactionalTeardownClearsWrittenHookFile(t *testing.T) {
+	testenv.IsolateAccount(t)
 	builtins := connector.NewDefaultRegistry()
 	original, _ := builtins.Get("devin")
 	probe := setupRemoveFilesConnector{Connector: original}
