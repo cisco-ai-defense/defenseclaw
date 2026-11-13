@@ -26,6 +26,8 @@ When the task ends, `run` says so, and `logs` shows what the agent printed and i
 The task finished. Bring changes home with: defenseclaw substrate pull codex-2c9e41a7
 ```
 
+![defenseclaw substrate run claude --task finishing in the terminal: Started dc-ops/nightly-528031bf (Claude Code, profile ops), Copying this folder into the agent, the agent's Bash step and its report of three tries (403, 403, then 200), and the closing line The task finished with the defenseclaw substrate pull command to bring changes home](/images/substrate/oss/run-task-finished.png)
+
 ```text
 The task ended with exit code 1. Review it with: defenseclaw substrate logs codex-2c9e41a7; bring changes home with: defenseclaw substrate pull codex-2c9e41a7
 ```
@@ -77,6 +79,8 @@ defenseclaw substrate run claude --task "triage the open dependabot PRs" --detac
 | The result | Have the agent push a branch (the git credential is injected on the git host only), or `defenseclaw substrate pull` the changes |
 
 A queued ask shows `unattended` and the time left in the `RUN` column of `approvals`.
+
+![defenseclaw substrate approvals listing one ask waiting: ID ask-4c49616b8f92eb8c85c8fc2b, agent nightly-528031bf, what GET example.com, age 7s, run unattended with 4m left, and the line with the approve and reject commands; then defenseclaw substrate approve for that ID prints Approved](/images/substrate/oss/approvals.png)
 
 ## Telemetry volume
 

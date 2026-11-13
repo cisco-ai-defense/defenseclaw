@@ -169,6 +169,8 @@ UserPromptSubmit operation blocked by hook:
   Need an exception? Contact your IT help desk
 ```
 
+![Claude Code on a Linux computer, blocked at its first prompt: UserPromptSubmit operation blocked by hook, Blocked by your organization's DefenseClaw policy because Claude Code can't run on this computer (profile contractors) and your organization runs it on Agent Substrate, the command to start it there from the project folder, the IT help desk line and the original prompt](/images/substrate/enterprise/managed-claude-refused.png)
+
 `defenseclaw sandbox run claude` is refused the same way, once OpenShell is on, and `defenseclaw sandbox policy explain` says where the agent runs:
 
 ```text
@@ -178,6 +180,8 @@ Blocked by your organization's DefenseClaw policy: Claude Code runs on Agent Sub
 ```text
 Required  claude run only on Agent Substrate, not on this computer: start one with defenseclaw substrate run claude
 ```
+
+![defenseclaw sandbox run claude on the same computer: the copy-mode notices, then a red Blocked by your organization's DefenseClaw policy that Claude Code runs on Agent Substrate under the profile contractors and not in a sandbox on this computer, with defenseclaw substrate run claude to start it there; below it defenseclaw sandbox policy explain shows the organization profile contractors and the Required line](/images/substrate/enterprise/managed-sandbox-refused.png)
 
 With OpenShell off, `sandbox run` says that sandboxes are turned off by your organization, without the pointer. The launcher itself is exempt: it starts no agent on the laptop. Engineering, whose profile doesn't require it, can still run locally or in an OpenShell sandbox.
 
@@ -219,6 +223,8 @@ Signed in as alice@example.test on default.
 Next: start a coding agent in a project folder with: defenseclaw substrate run claude
 ```
 
+![PowerShell on a Windows laptop: defenseclaw substrate login prints the sign-in page and device code ABCD-EFGH and ends with Signed in as alice on default, then defenseclaw substrate whoami and doctor show the group engineering and the sign-in kept in Windows DPAPI for the current user, ok for every check, skip for attach and ready for agents](/images/substrate/enterprise/windows-laptop-login.png)
+
 </Step>
 
 <Step>
@@ -243,6 +249,8 @@ Ctrl-] detaches; the agent keeps running.
 ```
 
 The rest of the session is the same as the [open-source walkthrough](/docs/substrate/open-source): asks, detach, `connect`, `pull`.
+
+![defenseclaw substrate run claude --clone in PowerShell on a Windows laptop: Claude Code's own screen inside the agent where a curl to the instance metadata address is not run (permission denied, PreToolUse:Bash hook error, DefenseClaw rule C2-METADATA-AWS), Claude lists the empty /work folder and explains the block, then Detached with the command to come back with defenseclaw substrate connect](/images/substrate/enterprise/windows-laptop-claude.png)
 
 A DefenseClaw administrator can pick any profile for their own agents with `--profile`. Everyone else gets exactly their mapped profile, and naming another one fails:
 

@@ -35,6 +35,8 @@ Upstream documents `kind` and GKE. This page lists what to do differently on EKS
 
 Then deploy `ate-system` with `--sandbox-classes gvisor`. It takes about 80 seconds. Upstream publishes no `ate-setup` binary, so build it from the same tag as the manifests.
 
+![defenseclaw substrate verify --install-file install.yaml --namespace dc on an EKS cluster named my-cluster: substrate_version, issuer_unique, actor_keys, snapshot_bucket (s3://my-cluster-snapshots-3f9a1c is encrypted, private, expiring and in the cluster's region), openfga_grants, callout_registered, actor_service_routes and api_access_label all pass, ingress_clients warns that 1 other router client can reach every actor, and the run ends with cluster verified](/images/substrate/oss/verify-eks-passing.png)
+
 For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the assets with `ate-setup deploy sandboxconfig --sandbox-classes gvisor,microvm` (it fails at the last step; that is expected), upload each file to `s3://BUCKET/microvm-assets/amd64/<sha256>`, render the microVM template with `BUCKET_SCHEME=s3 ASSET_BUCKET_NAME=BUCKET`, and apply it (`stage-assets.sh` does the last two steps). **Keep the assets outside the snapshot prefix**: the plugin refuses URLs under it.
 
 ## Storage and images
@@ -48,6 +50,8 @@ For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the a
 ## Attested templates in a private registry
 
 By default the controller and the gateway read attestations without a login. Against a private registry that gets HTTP 401, and create is refused as `sandbox.template_unverified`. Give them a login. Each login is sent only to its own registry host, after that host asks for it, and never to another registry or to a token service the login does not name.
+
+![defenseclaw substrate run claude refused by the cluster: Error, the cluster refused to start this agent because the template dc-eng/claude is not attested, the registry answered HTTP 401 authentication required when it read the attestation (sandbox.template unverified), nothing was started, and the agent id to give your administrator](/images/substrate/enterprise/attestation-refused.png)
 
 **Amazon ECR.** No password is stored, and the token is renewed before it expires.
 

@@ -83,6 +83,8 @@ defenseclaw substrate verify --install-file install.yaml
 
 `verify` reads the cluster with `kubectl` and checks that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster and the gateway can read the keys that sign actor tokens, that DefenseClaw holds the access it needs, that the egress callout is registered, that the actor Service serves only actor routes, and that nobody else can reach agents through the router. It also reads the snapshot bucket named in the install file's `storage.snapshotLocation` with your own `aws` or `gcloud` CLI and checks that it is encrypted, blocks public access, expires old snapshots and is in the cluster's region. A failed check names the fix. `verify` changes nothing, but it needs more than read access to the release namespace (`kubectl` can create a ServiceAccount token and a port-forward, and your cloud identity can read the bucket's settings): see [what `verify` needs](/docs/substrate/reference#what-verify-needs). A check that cannot read what it needs warns and says why; see [Troubleshooting](/docs/substrate/troubleshooting#verify-cannot-read-the-snapshot-bucket). If the chart's `managedAtespaces` lists atespaces, add `--managed-atespaces A,B` so `verify` also checks DefenseClaw's editor grant there.
 
+![defenseclaw substrate verify --install-file install.yaml --namespace dc on an EKS cluster named my-cluster: substrate_version, issuer_unique, actor_keys, snapshot_bucket (s3://my-cluster-snapshots-3f9a1c is encrypted, private, expiring and in the cluster's region), openfga_grants, callout_registered, actor_service_routes and api_access_label all pass, ingress_clients warns that 1 other router client can reach every actor, and the run ends with cluster verified](/images/substrate/oss/verify-eks-passing.png)
+
 </Step>
 
 <Step>
@@ -126,7 +128,11 @@ Signed in as alice on default.
 Next: start a coding agent in a project folder with: defenseclaw substrate run claude
 ```
 
+![defenseclaw substrate login --admin-url https://defenseclaw-admin.example.com on a laptop: This cluster signs you in with https://sso.example.com/realms/corp, the page to open in a browser with the device code ABCD-EFGH in its address, the line to check that the page shows the same code, the 15-minute expiry and the wait for the sign-in, then Signed in as alice on my-cluster and the Next line that names defenseclaw substrate run claude](/images/substrate/oss/login-device-code.png)
+
 The first time, `--admin-url` is all you need: the cluster tells the launcher which sign-in server and application ID to use. `--issuer` and `--client-id` override them. A browser opens on your provider's page (`--no-browser` only prints the address and code). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. Managed installs always require OIDC.
+
+![The three browser pages of the device sign-in: the company sign-in form with the user name alice and a hidden password, the Grant Access to defenseclaw-launcher page that lists user roles, user profile and email address with Yes and No buttons, and the Device Login Successful page that says you may close the browser window and go back to your device](/images/substrate/oss/browser-signin.png)
 
 ```bash
 defenseclaw substrate whoami
@@ -140,6 +146,8 @@ Token:    renews itself; the current one lasts until Fri, 13 Nov 2026 03:48:37 G
 ```
 
 `doctor` checks this computer and your sign-in: the cluster's admin address answers over TLS, the cluster accepts your sign-in, the sign-in server matches, a terminal can attach through the gateway, and the sign-in can be kept safely. It ends with `ready for agents`, or with `not ready` and one fix line per failed check. Administrators add `--install-file install.yaml` (the SubstrateInstall file you gave `ate-setup`) for the cluster's own checks, the same ones `verify` runs; `--cluster` without it says what is missing.
+
+![defenseclaw substrate whoami printing Signed in as alice (person) on my-cluster with the group engineering and when the token lasts until, then defenseclaw substrate doctor: ok for context, token_store, admin_address, sign_in and sign_in_server, skip for attach until there is an agent, ending with ready for agents](/images/substrate/oss/whoami-doctor.png)
 
 Over SSH, or on Linux with no keyring, there is no keychain to ask: set `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file` to keep the tokens in a file only you can read. The sign-in itself needs a browser on some machine: use `--no-browser` and open the address elsewhere.
 
@@ -162,6 +170,8 @@ defenseclaw substrate template build --connector claudecode \
 ```
 
 `template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). A skill or MCP server with a finding at HIGH or above stops the build. If a finding is a known false positive, `--accept-finding RULE-ID --reason "..."` lets the build pass and records the rule and the reason in the attestation. `--connector` takes `claudecode` or `codex`. The kits for the other agents come from the same kit generator in the repository (`deploy/images/actor-kit/kitgen`); see [Agents and features](/docs/substrate/agents). `template scan IMAGE` scans an image without changing it. The relay in the image accepts only session tokens signed with that key by the gateway. For an install in another namespace, add `--session-issuer https://defenseclaw-admin.NAMESPACE.svc.cluster.local`. Run `defenseclaw substrate template build --help` for every flag.
+
+![defenseclaw substrate template build stopped by the build scan: BLOCKED, the build scan blocked the image because of the MCP server notes in /work/.mcp.json (a template build blocks HIGH findings), the counts of 1 skill and 1 MCP server scanned with 1 high finding, a CLEAN line for the github skill, and the note that the hook files are root-owned](/images/substrate/oss/mcp-build-refused.png)
 
 Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
 
@@ -208,6 +218,8 @@ Ctrl-] detaches; the agent keeps running.
 
 Claude Code starts below the banner, in `/work/myapp`. The first start takes about 30 to 40 seconds, because the actor is created, your folder is copied and the actor is resumed from its template snapshot. Claude Code asks whether you trust the folder, in each new agent.
 
+![defenseclaw substrate run claude in Terminal on a Mac: Started dc-eng/claude-955e765b (Claude Code, profile eng), Copying this folder into the agent, Held back from the copy: .env (1 file) with the --unmask hint, the DefenseClaw agent banner with the profile eng, the notes that asks appear on the bottom line (Ctrl-\ answers) and Ctrl-) detaches, then Claude Code's own first screen in /work/myapp asking whether you trust the folder](/images/substrate/oss/run-banner-macos.png)
+
 Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.example.test/me/myapp.git --ref agent/fix-tests` clones inside the agent. The clone goes through the cluster's network rules, so the git host must be one your profile allows. The credential is added by the cluster's egress gateway on that host only, so the agent never holds it. Put no user name or token in the address. See [Secrets](/docs/substrate/secrets).
 
 </Step>
@@ -221,6 +233,10 @@ Claude Code behaves as it does on your machine. DefenseClaw checks every tool ca
 ```text
 Reason: PreToolUse:Bash hook error: DefenseClaw policy blocked this action (rule C2-METADATA-AWS: AWS metadata endpoint (SSRF)). Do not retry it in another form.
 ```
+
+![Claude Code (Haiku 5.5 on Amazon Bedrock) inside the agent after the prompt What is 2+2 and the answer 4: asked to run curl on the instance metadata address, the shell command is Not run with permission denied, Reason PreToolUse:Bash hook error: DefenseClaw policy blocked this action (rule C2-METADATA-AWS: AWS metadata endpoint (SSRF)), and Claude explains that it will not retry it in another form](/images/substrate/oss/hook-deny-metadata.png)
+
+![Codex 0.146.0 on a Bedrock model inside the agent: a first prompt answered Luna is here, then a request to run curl against the metadata address written as a decimal number ends with PreToolUse hook (blocked), feedback DefenseClaw policy blocked this action (rule C2-METADATA-AWS: AWS metadata endpoint (SSRF)), and Codex saying the command was blocked and produced no output](/images/substrate/oss/codex-bedrock.png)
 
 When a profile asks before an action, the question appears on the last line of your terminal:
 
@@ -274,6 +290,8 @@ Write these changes into this folder? [y/N] y
 applied 1 changes to /home/alice/code/myapp
 your previous working tree is kept at refs/defenseclaw/copy/sub-55cccd5ce016/pre-apply
 ```
+
+![defenseclaw substrate pull claude-ab0eb3ec --diff: Reading the agent's work, 1 file changed (+1 -0) with notes.txt (added), the full diff that adds the line written inside the actor, the question Write these changes into this folder? answered y, and applied 1 changes to the project folder](/images/substrate/oss/pull-applied.png)
 
 As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell config). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, the agent can push a branch instead, and `pull` has no copy to compare.
 
