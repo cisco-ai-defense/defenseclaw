@@ -218,6 +218,51 @@ spec:
     requests:
       storage: 10Gi
 ---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+# The Kubernetes sign-in (no OIDC issuer, not managed): the gateway asks the
+# API server who a person's token belongs to with a TokenReview (GAP-0153).
+# Only tokenreviews create, not the whole system:auth-delegator role (which
+# also grants subjectaccessreviews). Cluster-scoped, so the name carries the
+# namespace and release.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: defenseclaw-tokenreview-defenseclaw-system-dc
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [authentication.k8s.io]
+  resources: [tokenreviews]
+  verbs: [create]
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: defenseclaw-tokenreview-defenseclaw-system-dc
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: defenseclaw-tokenreview-defenseclaw-system-dc
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: defenseclaw-system
+---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
