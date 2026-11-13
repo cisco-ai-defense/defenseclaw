@@ -10,6 +10,25 @@ import (
 	"testing"
 )
 
+// gap0403Rows are the GAP-0403 rows: an ordinary write after a protected name went dead.
+var gap0403Rows = []struct{ name, command string }{
+	{"fourth-statement", `f=keylink; f=a.txt; echo m >> "$f"; echo done`},
+	{"printf", `f=keylink; f=a.txt; printf m >> "$f"`},
+	{"cat", `f=keylink; f=a.txt; cat b.txt >> "$f"`},
+	{"echo-param", `f=keylink; f=a.txt; echo "$f" >> "$f"`},
+	{"dot-suffix", `f=keylink; f=a.txt; echo m >> "$f.log"`},
+	{"extra-assignment", `f=keylink; f=a.txt; g=b.txt; echo m >> "$f"`},
+	{"for-prefix", `for f in keylink; do :; done; f=a.txt; echo m >> "$f"`},
+	{"install", `f=keylink; f=a.txt; install -m 644 b.txt "$f"`},
+	{"rsync", `f=keylink; f=a.txt; rsync b.txt "$f"`},
+	{"leading-cd", `cd ~/project && f=keylink; f=a.txt; echo m >> "$f"`},
+	{"if-writer", `f=keylink; f=a.txt; if true; then echo m >> "$f"; fi`},
+	{"append-assign", `f=keylink; f+=x; echo m >> "$f"`},
+	{"echo-cmdsub", `f=keylink; f=a.txt; echo $(echo m) >> "$f"`},
+	{"two-words", `f=$(echo keylink x); echo m >> "$f"`},
+	{"if-noop", `f=keylink; if [ -n "$X" ]; then :; fi; f=a.txt; echo m >> "$f"`},
+}
+
 // rel-1-0-6:GAP-0403: each command is an ordinary write. The earlier
 // protected name is dead at the write target. Per-user blocks on these rows
 // precede this branch; the regression was carrying them into managed cells.
@@ -20,23 +39,7 @@ func TestGAP0403DeadValuesStayAllowedWithProtectHome(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	rows := []struct{ name, command string }{
-		{"fourth-statement", `f=keylink; f=a.txt; echo m >> "$f"; echo done`},
-		{"printf", `f=keylink; f=a.txt; printf m >> "$f"`},
-		{"cat", `f=keylink; f=a.txt; cat b.txt >> "$f"`},
-		{"echo-param", `f=keylink; f=a.txt; echo "$f" >> "$f"`},
-		{"dot-suffix", `f=keylink; f=a.txt; echo m >> "$f.log"`},
-		{"extra-assignment", `f=keylink; f=a.txt; g=b.txt; echo m >> "$f"`},
-		{"for-prefix", `for f in keylink; do :; done; f=a.txt; echo m >> "$f"`},
-		{"install", `f=keylink; f=a.txt; install -m 644 b.txt "$f"`},
-		{"rsync", `f=keylink; f=a.txt; rsync b.txt "$f"`},
-		{"leading-cd", `cd ~/project && f=keylink; f=a.txt; echo m >> "$f"`},
-		{"if-writer", `f=keylink; f=a.txt; if true; then echo m >> "$f"; fi`},
-		{"append-assign", `f=keylink; f+=x; echo m >> "$f"`},
-		{"echo-cmdsub", `f=keylink; f=a.txt; echo $(echo m) >> "$f"`},
-		{"two-words", `f=$(echo keylink x); echo m >> "$f"`},
-		{"if-noop", `f=keylink; if [ -n "$X" ]; then :; fi; f=a.txt; echo m >> "$f"`},
-	}
+	rows := gap0403Rows
 	for _, row := range rows {
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)

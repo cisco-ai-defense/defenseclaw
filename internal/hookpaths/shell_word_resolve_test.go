@@ -101,8 +101,8 @@ func TestResolveShellWordGlobRules(t *testing.T) {
 		{"star-skips-dot", ".hid*", shellGlobOptions{}, []string{".hid1"}, nil},
 		{"dotglob-star", "*1", shellGlobOptions{dotGlob: true}, []string{".hid1"}, nil},
 		{"nodot-star", "*1", shellGlobOptions{}, nil, []string{".hid1"}},
-		{"nocaseglob", "ALIAS[[]1]", shellGlobOptions{noCaseGlob: true}, []string{f.names.HardBracket}, nil},
-		{"case-sensitive", "ALIAS[[]1]", shellGlobOptions{}, nil, []string{f.names.HardBracket}},
+		{"nocaseglob", "ALIAS?1?", shellGlobOptions{noCaseGlob: true}, []string{f.names.HardBracket}, nil},
+		{"case-sensitive", "ALIAS?1?", shellGlobOptions{}, nil, []string{f.names.HardBracket}},
 		{"noglob-literal", "alias[[]1]", shellGlobOptions{noGlob: true}, []string{"alias[[]1]"}, nil},
 	} {
 		t.Run(tc.id, func(t *testing.T) {

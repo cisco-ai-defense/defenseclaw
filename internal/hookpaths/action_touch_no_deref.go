@@ -19,7 +19,7 @@ import (
 // changes link entries. Its operands must have one fixed expansion, or one
 // fixed pattern supplied by a preceding assignment.
 func NoDereferenceTouchShape(command, cwd, home string) bool {
-	_, ok := noDereferenceTouchOperands(command, cwd, home, false)
+	_, ok := noDereferenceTouchOperands(command, cwd, home, false, ShellStartup{})
 	return ok
 }
 
@@ -61,7 +61,7 @@ func noDereferenceTouchStatusIn(command, cwd, home string, startup ShellStartup)
 		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
 		return false, false
 	}
-	operands, ok := noDereferenceTouchOperands(command, cwd, home, true)
+	operands, ok := noDereferenceTouchOperands(command, cwd, home, true, startup)
 	if !ok {
 		return false, false
 	}
@@ -147,7 +147,7 @@ func entryOnlyStatement(command, cwd, home string) (*syntax.CallExpr, actionValu
 	return call, values, true
 }
 
-func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) ([]string, bool) {
+func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool, startup ShellStartup) ([]string, bool) {
 	if !filepath.IsAbs(cwd) || home == "" ||
 		!strings.Contains(command, "touch") ||
 		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
@@ -197,7 +197,7 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 				if actionWindowsHome(home) && shellWordNeedsResolver(word) {
 					return nil, false
 				}
-				resolved := resolveShellWord(word, values, cwd, shellGlobOptionsFromEnv(os.Getenv))
+				resolved := resolveShellWord(word, values, cwd, shellGlobOptionsForCall(command, startup))
 				if resolved.uncertain != "" {
 					return nil, false
 				}

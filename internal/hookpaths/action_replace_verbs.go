@@ -47,7 +47,7 @@ func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 	if !ok || startup.mayChange(name) {
 		return false
 	}
-	options := shellGlobOptionsFromEnv(os.Getenv)
+	options := shellGlobOptionsForCall(command, startup)
 	var operands []string
 	for _, word := range words {
 		if !noDereferenceTouchLiteralWord(word) && (len(word.Parts) != 1 || actionSoleParameter(word) == "") {
@@ -169,6 +169,11 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 						return nil, false
 					}
 					i++
+					// The script must be fixed text that is read in full and
+					// holds no command that writes or runs (GAP-0377).
+					if script, fixed := static(args[i]); !fixed || !sedScriptReplaceOnly(script) {
+						return nil, false
+					}
 					haveScript = true
 				case strings.HasPrefix(text, "-i"):
 					inPlace = true
@@ -180,6 +185,9 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 				continue
 			}
 			if !haveScript {
+				if script, fixed := static(word); !fixed || !sedScriptReplaceOnly(script) {
+					return nil, false
+				}
 				haveScript = true
 				continue
 			}

@@ -234,7 +234,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		posixWords := !spelledWindows && !actionPosixWindowsHome(home)
-		globOptions := shellGlobOptionsFromEnv(os.Getenv)
+		globOptions := shellGlobOptionsForCall(command, memo.shellStartup())
 		checkWord := func(word *syntax.Word) bool {
 			resolverWord := posixWords && !stateOnly && shellWordNeedsResolver(word)
 			value, known := actionWordValue(word, values, effectiveCWD, home)
@@ -245,10 +245,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			if resolverWord {
 				// The resolver reads this word: its escaped pattern is the
 				// one recorded and judged, not the flattened value.
-				for _, target := range resolverWordTargets(word) {
-					if pattern, active := resolverWordPattern(target, values, effectiveCWD); active && check(pattern, false, effectiveCWD) {
-						return true
-					}
+				// A pattern the resolver does not model exactly is never
+				// recorded: the client's glob answer would claim a walk that
+				// bash does not make.
+				if pattern, active := resolverWordPattern(word, values, effectiveCWD); active &&
+					!globOptions.unmodeled() && resolverPatternModeled(pattern) && check(pattern, false, effectiveCWD) {
+					return true
 				}
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
 				// A parsed value has had its shell tilde expanded already;
@@ -267,17 +269,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// through the one resolver, and every candidate it names is
 			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
 			if resolverWord {
-				settled := true
-				for _, target := range resolverWordTargets(word) {
-					resolved := resolveShellWord(target, values, effectiveCWD, globOptions)
-					for _, candidate := range resolved.candidates {
-						if checkAs(candidate, false, effectiveCWD, true) {
-							return true
-						}
+				resolved := resolveWriteWord(word, values, effectiveCWD, globOptions)
+				for _, candidate := range resolved.candidates {
+					if checkAs(candidate, false, effectiveCWD, true) {
+						return true
 					}
-					settled = settled && resolved.uncertain == ""
 				}
-				if settled {
+				if resolved.uncertain == "" {
 					return false
 				}
 			} else if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {

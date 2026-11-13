@@ -71,6 +71,14 @@ func (f b36ManagedHookFixture) clientHeaders(t *testing.T, payloads [][]byte) []
 // a large table costs about its rows divided by the processors.
 func (f b36ManagedHookFixture) answerAll(t *testing.T, calls []*hookCall) {
 	t.Helper()
+	f.answerCells(t, calls)
+	managedAtLeastPerUser(t, calls)
+}
+
+// answerCells answers every call in its cell without judging the managed
+// answers against the per-user ones.
+func (f b36ManagedHookFixture) answerCells(t *testing.T, calls []*hookCall) {
+	t.Helper()
 	defer os.Chmod(f.homes, 0o700)
 	for _, managed := range []bool{false, true} {
 		mode := os.FileMode(0o700)
@@ -88,7 +96,6 @@ func (f b36ManagedHookFixture) answerAll(t *testing.T, calls []*hookCall) {
 		}
 		eachConcurrently(len(group), func(i int) { group[i].verdict, group[i].body = f.serve(group[i]) })
 	}
-	managedAtLeastPerUser(t, calls)
 }
 
 // managedAtLeastPerUser holds every managed call to at least the verdict

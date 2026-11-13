@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
@@ -14,9 +15,11 @@ import (
 )
 
 // Uncertain classes of a shell word the resolver cannot settle. Each is an
-// UnprovenReasonKey class: the call takes the pack's unknown tier, never a
-// plain allow (rel-1-0-10 GAP-0293 review, one property: an operand is
-// proven to name no protected file, or it is uncertain).
+// UnprovenReasonKey class (unprovenReasonTitles): the call takes the pack's
+// unknown tier, never a plain allow (rel-1-0-10 GAP-0293 review, one
+// property: an operand is PROVEN to name no protected file, or it is
+// UNCERTAIN). A word the resolver does not model EXACTLY is uncertain; it is
+// never approximated.
 const (
 	wordUncertainDynamic   = "dynamic-argument"
 	wordUncertainUnread    = UnprovenTargetUnresolved
@@ -27,16 +30,27 @@ const (
 // it is uncertain, not cut short.
 const maxResolvedCandidates = 256
 
-// shellGlobOptions are the bash options that change pathname expansion.
+// shellGlobOptions are the bash options that change pathname expansion. The
+// first group the resolver models exactly (dotGlob, noCaseGlob, nullGlob,
+// failGlob, noGlob); the second group it does not, so a word with an active
+// glob character is uncertain whenever one of them may be on (globStar,
+// extGlob, globIgnore), or may have been changed by the command itself
+// (unknown).
 type shellGlobOptions struct {
-	dotGlob, noCaseGlob, nullGlob, failGlob, extGlob, noGlob bool
+	dotGlob, noCaseGlob, nullGlob, failGlob, noGlob bool
+	globStar, extGlob, globIgnore, unknown          bool
+}
+
+// unmodeled reports an option state the resolver cannot expand exactly.
+func (o shellGlobOptions) unmodeled() bool {
+	return o.globStar || o.extGlob || o.globIgnore || o.unknown
 }
 
 // shellGlobOptionsFromEnv reads the options a non-interactive bash imports
 // from the call's environment: BASHOPTS (dotglob, nocaseglob, nullglob,
-// failglob, extglob), SHELLOPTS (noglob) and GLOBIGNORE (which turns dotglob
-// on). An option a startup file sets is the startup's business
-// (noDereferenceTouchStartupUnknown).
+// failglob, extglob, globstar), SHELLOPTS (noglob) and GLOBIGNORE (a filter
+// the resolver does not model). An option a startup file sets is the
+// startup's business (ShellStartup).
 func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 	var o shellGlobOptions
 	for _, name := range strings.Split(getenv("BASHOPTS"), ":") {
@@ -51,6 +65,8 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 			o.failGlob = true
 		case "extglob":
 			o.extGlob = true
+		case "globstar":
+			o.globStar = true
 		}
 	}
 	for _, name := range strings.Split(getenv("SHELLOPTS"), ":") {
@@ -58,8 +74,28 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 			o.noGlob = true
 		}
 	}
-	if getenv("GLOBIGNORE") != "" {
-		o.dotGlob = true // read as dotglob: it only widens the candidates
+	o.globIgnore = getenv("GLOBIGNORE") != ""
+	return o
+}
+
+// globOptionsChangeText is the text that can change the glob options inside
+// one call: shopt, set with an option, an assignment of GLOBIGNORE,
+// BASHOPTS or SHELLOPTS, eval and source (they run text the scan does not
+// read), a nested bash with -O or -o. Read as text on purpose: every later
+// glob word of such a call is uncertain.
+var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+]|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
+
+// globOptionsMayChange reports a command whose glob options the scan cannot
+// know at a later word.
+func globOptionsMayChange(command string) bool { return globOptionsChangeText.MatchString(command) }
+
+// shellGlobOptionsForCall is the options a call's glob words are expanded
+// with: the agent's environment (the client's header for a per-user gateway,
+// startup.glob), and unknown when the call itself may change them.
+func shellGlobOptionsForCall(command string, startup ShellStartup) shellGlobOptions {
+	o := startup.glob
+	if globOptionsMayChange(command) {
+		o.unknown = true
 	}
 	return o
 }
@@ -83,9 +119,14 @@ type resolvedWord struct {
 //     that matches nothing is the LITERAL word (nullglob off), when the
 //     directory it names exists.
 //
-// A command substitution, an unknown parameter, a brace or extended glob
-// part, a directory the walk cannot read or a result past the bound is
-// uncertain. The caller judges every candidate by identity.
+// Step 3 is exact only for the glob subset that Go's matcher reads as bash
+// does: * and ?, a bracket set of literal members, and a digit range. Any
+// other form (a negated or class bracket expression, extglob, **), any
+// option the resolver does not model (opts.unmodeled) and any command that
+// may change the options before the word is UNCERTAIN, as are a command
+// substitution, an unknown parameter, a brace part, a directory the walk
+// cannot read and a result past the bound. The caller judges every
+// candidate by identity.
 func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
 	if word == nil || !filepath.IsAbs(cwd) || !resolverWordKnown(word, values) {
 		return resolvedWord{uncertain: wordUncertainDynamic}
@@ -103,8 +144,16 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 		return resolvedWord{uncertain: wordUncertainDynamic}
 	}
 	literalText := fields[0]
-	if opts.noGlob || !resolverPatternActive(pattern) {
+	if !resolverPatternActive(pattern) {
 		return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, false)}
+	}
+	switch {
+	case opts.unmodeled():
+		return resolvedWord{uncertain: wordUncertainDynamic}
+	case opts.noGlob:
+		return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, false)}
+	case !resolverPatternModeled(pattern):
+		return resolvedWord{uncertain: wordUncertainDynamic}
 	}
 	base := ""
 	if !filepath.IsAbs(pattern) {
@@ -128,6 +177,59 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	// when its directory exists; a name under one that is not there names
 	// nothing.
 	return resolvedWord{candidates: resolverCandidates([]string{literalText}, cwd, true)}
+}
+
+// resolveWriteWord is resolveShellWord for an operand of a write verb. Bash
+// globs the WHOLE word, so a word with an attached value (dd of=PATH,
+// --output=PATH) is read as bash reads it: when its pattern part matches
+// nothing, the program receives the literal word and writes the value after
+// the equals sign; when it matches a file whose name is "name=value" in the
+// working directory, the program receives that name and writes its value.
+// Any other match is uncertain. Without a glob character the value after the
+// equals sign is the operand too.
+func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
+	whole := resolveShellWord(word, values, cwd, opts)
+	tail, name, attached := resolverAttachedValue(word)
+	if !attached {
+		return whole
+	}
+	if _, active := resolverWordPattern(word, values, cwd); !active {
+		value := resolveShellWord(tail, values, cwd, opts)
+		whole.candidates = append(whole.candidates, value.candidates...)
+		if whole.uncertain == "" {
+			whole.uncertain = value.uncertain
+		}
+		return whole
+	}
+	if whole.uncertain != "" {
+		return whole
+	}
+	fields, err := expand.Fields(resolverConfig(values, cwd), tail)
+	if err != nil || len(fields) != 1 {
+		whole.uncertain = wordUncertainDynamic
+		return whole
+	}
+	literalWhole, err := expand.Fields(resolverConfig(values, cwd), word)
+	if err != nil || len(literalWhole) != 1 {
+		whole.uncertain = wordUncertainDynamic
+		return whole
+	}
+	literalPath := OperandPath(literalWhole[0], cwd)
+	var values2 []string
+	for _, candidate := range whole.candidates {
+		base := filepath.Base(candidate)
+		switch {
+		case candidate == literalPath:
+			values2 = append(values2, OperandPath(fields[0], cwd))
+		case filepath.Dir(candidate) == filepath.Clean(cwd) && strings.HasPrefix(base, name+"="):
+			values2 = append(values2, OperandPath(strings.TrimPrefix(base, name+"="), cwd))
+		default:
+			whole.uncertain = wordUncertainDynamic
+			return whole
+		}
+	}
+	whole.candidates = values2
+	return whole
 }
 
 // resolverConfig is the quote-removal environment: known values only, no
@@ -243,21 +345,73 @@ func resolverPatternActive(pattern string) bool {
 	return false
 }
 
-// resolverWordTargets are the words a shell word may name a file with: the
-// word itself, and for an attached option value (dd of=PATH, --output=PATH)
-// the text after the first equals sign of its leading literal.
-func resolverWordTargets(word *syntax.Word) []*syntax.Word {
-	targets := []*syntax.Word{word}
+// resolverPatternModeled reports a glob pattern in the subset whose match
+// Go's matcher and bash agree on exactly: * and ? (no **, and none of the
+// extglob openers ?( *( +( @( !( ), and a bracket set of literal members
+// with an optional digit range. A negated set ([! or [^), a class or
+// collating form ([: [= [.), an escape inside the set, a set that starts
+// with ] or has no closing ], and a letter range (the order of letters
+// follows the locale in bash) are not.
+func resolverPatternModeled(pattern string) bool {
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '\\':
+			i++
+		case '*':
+			if i+1 < len(pattern) && (pattern[i+1] == '*' || pattern[i+1] == '(') {
+				return false
+			}
+		case '?', '+', '@', '!':
+			if i+1 < len(pattern) && pattern[i+1] == '(' {
+				return false
+			}
+		case '[':
+			j := i + 1
+			if j >= len(pattern) || pattern[j] == '!' || pattern[j] == '^' || pattern[j] == ']' {
+				return false
+			}
+			closed := false
+			for ; j < len(pattern); j++ {
+				ch := pattern[j]
+				if ch == ']' {
+					closed = true
+					break
+				}
+				if ch == '[' || ch == '\\' {
+					return false
+				}
+				if ch == '-' {
+					if j == i+1 || j+1 >= len(pattern) || !isASCIIDigit(pattern[j-1]) || !isASCIIDigit(pattern[j+1]) || pattern[j-1] > pattern[j+1] {
+						return false
+					}
+				}
+			}
+			if !closed {
+				return false
+			}
+			i = j
+		}
+	}
+	return true
+}
+
+func isASCIIDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// resolverAttachedValue is the word after the equals sign of an attached
+// option value (dd of=PATH, --output=PATH) and the text before it: the text
+// after the first equals sign of the word's leading literal and the rest of
+// the word.
+func resolverAttachedValue(word *syntax.Word) (*syntax.Word, string, bool) {
 	if word == nil || len(word.Parts) == 0 {
-		return targets
+		return nil, "", false
 	}
 	lit, ok := word.Parts[0].(*syntax.Lit)
 	if !ok {
-		return targets
+		return nil, "", false
 	}
 	name, rest, found := strings.Cut(lit.Value, "=")
 	if !found || name == "" || strings.ContainsAny(name, "*?[\\/ ") {
-		return targets
+		return nil, "", false
 	}
 	parts := make([]syntax.WordPart, 0, len(word.Parts))
 	if rest != "" {
@@ -265,9 +419,9 @@ func resolverWordTargets(word *syntax.Word) []*syntax.Word {
 	}
 	parts = append(parts, word.Parts[1:]...)
 	if len(parts) == 0 {
-		return targets
+		return nil, "", false
 	}
-	return append(targets, &syntax.Word{Parts: parts})
+	return &syntax.Word{Parts: parts}, name, true
 }
 
 // shellWordNeedsResolver is the cheap syntactic test for a word whose
