@@ -53,9 +53,7 @@ def _required(*, changed: str, changes: str = "success", license_headers: str = 
         "LICENSE_HEADERS_RESULT": license_headers,
         "BUILD_AND_TEST_RESULT": build,
     }
-    return subprocess.run(
-        ["bash", "-e", "-c", script], env=env, capture_output=True, text=True, check=False
-    )
+    return subprocess.run(["bash", "-e", "-c", script], env=env, capture_output=True, text=True, check=False)
 
 
 def test_detect_job_only_writes_values_the_required_job_handles() -> None:
