@@ -112,8 +112,12 @@ func TestVerifyReadsTheSnapshotBucket(t *testing.T) {
 	})
 	t.Run("s3 access denied is a warning that says so", func(t *testing.T) {
 		fakeKubectl(t, nil)
-		awsAnswers(t, map[string]string{"s3api get-bucket-location": "ERR An error occurred (AccessDenied) when calling the GetBucketLocation operation"})
-		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckBucket], fleet.Warn, "could not be read from here (An error occurred (AccessDenied)")
+		awsAnswers(t, map[string]string{"s3api get-bucket-location": "ERR aws: [ERROR]: An error occurred (AccessDenied) when calling the GetBucketLocation operation: User: arn:aws:sts::123456789012:assumed-role/admin-role/i-0abc is not authorized"})
+		c := verifyChecks(t, fleetInstallOK)[fleet.CheckBucket]
+		wantCheck(t, c, fleet.Warn, "could not be read from here (AccessDenied on GetBucketLocation for your AWS identity)")
+		if strings.Contains(c.Message, "arn:") || strings.Contains(c.Message, "123456789012") {
+			t.Errorf("the message names the caller: %q", c.Message)
+		}
 	})
 	t.Run("a missing bucket fails", func(t *testing.T) {
 		fakeKubectl(t, nil)
@@ -225,5 +229,12 @@ func TestSubstrateAPITarget(t *testing.T) {
 	}
 	if _, err := substrateAPITarget("api.example.com:443", "", ""); err == nil {
 		t.Error("a host outside the cluster must not be port-forwarded")
+	}
+}
+
+func TestCloudErrWordsNamesNoIdentity(t *testing.T) {
+	got := cloudErrWords(errors.New("ERROR: (gcloud.storage.buckets.describe) HTTPError 403: ops@proj-1.iam.gserviceaccount.com does not have storage.buckets.get access"))
+	if strings.Contains(got, "@") || !strings.Contains(got, "[identity]") || !strings.Contains(got, "HTTPError 403") {
+		t.Errorf("gcloud words = %q", got)
 	}
 }

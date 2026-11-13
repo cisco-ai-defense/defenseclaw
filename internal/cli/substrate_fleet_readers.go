@@ -36,6 +36,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -390,6 +391,26 @@ func s3api(ctx context.Context, args ...string) ([]byte, error) {
 	return substrateCloudCLI(ctx, "aws", append(append([]string{"s3api"}, args...), "--output", "json")...)
 }
 
+// awsErrShape is the AWS CLI's error line: the code and the operation.
+var awsErrShape = regexp.MustCompile(`An error occurred \(([A-Za-z0-9.]+)\) when calling the ([A-Za-z0-9]+) operation`)
+
+// cloudIdentity matches what names the caller in a cloud error: ARNs,
+// account numbers, emails and service account names.
+var cloudIdentity = regexp.MustCompile(`arn:[^\s"']+|\b[0-9]{12}\b|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[a-z]{2,}`)
+
+// cloudErrWords is a cloud CLI error for a check message: the status
+// document leaves the cluster, so it never names the caller's identity.
+func cloudErrWords(err error) string {
+	if m := awsErrShape.FindStringSubmatch(err.Error()); m != nil {
+		return m[1] + " on " + m[2] + " for your AWS identity"
+	}
+	s := cloudIdentity.ReplaceAllString(firstLineOf(err.Error()), "[identity]")
+	if len(s) > 160 {
+		s = s[:160] + "..."
+	}
+	return s
+}
+
 func errHas(err error, words ...string) bool {
 	for _, w := range words {
 		if strings.Contains(err.Error(), w) {
@@ -406,7 +427,7 @@ func readS3Bucket(ctx context.Context, b *fleet.Bucket, bucket, prefix string) {
 			b.Missing = true
 			return
 		}
-		b.Err = err.Error()
+		b.Err = cloudErrWords(err)
 		return
 	}
 	var loc struct {
@@ -522,7 +543,7 @@ func readGCSBucket(ctx context.Context, b *fleet.Bucket, bucket, prefix string) 
 			b.Missing = true
 			return
 		}
-		b.Err = err.Error()
+		b.Err = cloudErrWords(err)
 		return
 	}
 	var d struct {
