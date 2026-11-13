@@ -54,14 +54,31 @@ func hookV8Substrate(ctx context.Context) hookV8SubstrateFields {
 	return f
 }
 
+// hookActorAuditExtra is the identity every hook audit row of a request
+// carries: the sandbox binding's and the verified Substrate actor's. A path
+// that builds an envelope outside hookRequestAuditExtra (the recovered-panic
+// finalization) takes it from here, so no row names less than the others.
+func hookActorAuditExtra(ctx context.Context) map[string]string {
+	return mergeHookEnvelopeExtra(sandboxHookAuditExtra(ctx), substrateHookAuditExtra(ctx))
+}
+
 // substrateHookAuditExtra is the same identity on the hook's audit row.
 func substrateHookAuditExtra(ctx context.Context) map[string]string {
-	if _, ok := substrateActorFrom(ctx); !ok {
+	actor, ok := substrateActorFrom(ctx)
+	if !ok {
 		return nil
 	}
 	reg, ok := substrateRegistrationFrom(ctx)
 	if !ok {
-		return nil
+		// The actor the gateway verified names itself: atespace, name and
+		// UID are the token's claims it already checked (no new input). The
+		// person and run mode need the registration.
+		return map[string]string{
+			"sandbox_runtime":     "substrate",
+			"substrate_atespace":  actor.Atespace,
+			"substrate_actor":     actor.Name,
+			"substrate_actor_uid": actor.UID,
+		}
 	}
 	extra := map[string]string{
 		"sandbox_runtime":       "substrate",
