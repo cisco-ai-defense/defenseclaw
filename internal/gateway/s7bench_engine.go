@@ -106,6 +106,13 @@ func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (
 	return e, nil
 }
 
+// S7SetSessionStartArrival sets how long a call of a session whose start this process has not seen waits for that start to arrive
+// (the product default is one second). The corpora replay recorded calls and hold no SessionStart event, so under the product wait
+// the first call of every case sat in sessionStartGate.await for the arrival window (about 0.6 s once the hook answer bound is
+// applied) before judging the start in its place: a constant that dominated the latency columns (rel-1-0-10:GAP-0261). The harness
+// runs with zero; a longer value reproduces the product wait. Call it before the first hook.
+func S7SetSessionStartArrival(d time.Duration) { sessionStartArrivalWait = d }
+
 // Hook answers one hook payload through the connector's handler. headers
 // (name, value pairs) are set on the request, e.g. the hook's answer wait.
 func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (int, []byte) {

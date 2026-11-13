@@ -246,6 +246,7 @@ func main() {
 	scratch := flag.String("scratch-dir", "", "parent directory of the run's scratch dir (default: the system temp dir)")
 	scratchCapMB := flag.Int("scratch-cap-mb", 2048, "fail the run loudly when its scratch dir (audit.db + WAL) passes this many MiB")
 	walGuard := flag.Bool("wal-guard", true, "run the product audit WAL guard pass every 500 ms (false reproduces the unbounded WAL growth; measurement only, keep -scratch-cap-mb low)")
+	startArrivalMS := flag.Int("session-start-arrival-ms", 0, "how long the first call of a session waits for its SessionStart to arrive before judging the start in its place (product default 1000). The corpora hold no SessionStart event, so any wait is a constant added to every case: 0 measures the hook work (rel-1-0-10:GAP-0261)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the /llm proxy GuardrailInspector, direction prompt; the connector UserPromptSubmit answer goes to extra) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
@@ -372,6 +373,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
+	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
 	var err2 error
 	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)
 	err = err2
