@@ -174,30 +174,29 @@ func TestClaudePluginInstallsInFlightAreNotPlugins(t *testing.T) {
 	}
 }
 
-// A staging or linking folder still there after the window is scanned, git's
-// files in a staging clone included, so a folder named like one is no scan
-// hole.
+// A staging or linking folder still there after the window is scanned, so
+// a folder named like one is no scan hole. git's files in an unregistered
+// staging clone are not: Claude Code never loads them, and each .git
+// folder raised its own MANIFEST-MISSING finding.
 func TestClaudePluginStaleStagingIsScanned(t *testing.T) {
 	f := newClaudeCacheFixture(t, time.Now())
 	w := claudeWatcher(t, f.cache)
 	w.stagingClock = func() time.Time { return time.Now().Add(2 * time.Hour) }
 
-	want := slices.Clone(f.plugins)
-	for _, dir := range []string{"hooks", "objects", "refs", "info", "logs"} {
-		want = append(want, filepath.Join(f.clone, ".git", dir))
-	}
-	want = sorted(append(want,
+	want := sorted(append(slices.Clone(f.plugins),
 		filepath.Join(f.clone, "plugins", "sample"),
-		filepath.Join(f.github, ".git", "objects"),
 		filepath.Join(f.github, "skills", "foo"),
 		f.linking)...)
 	if got := pluginTargets(w); !slices.Equal(got, want) {
 		t.Fatalf("rescan targets\n%v\nwant\n%v", got, want)
 	}
-	for _, path := range []string{filepath.Join(f.github, "skills"), filepath.Join(f.clone, ".git", "hooks"), f.linking} {
+	for _, path := range []string{filepath.Join(f.github, "skills"), f.linking} {
 		if w.inClaudePluginStaging(path, 0) {
 			t.Errorf("stale %s is left alone", path)
 		}
+	}
+	if !w.inClaudePluginStaging(filepath.Join(f.clone, ".git", "hooks"), 0) {
+		t.Error("git's files in an abandoned staging clone are read as a plugin")
 	}
 }
 
@@ -248,9 +247,16 @@ func TestCodexPluginCacheIgnoresClaudeStagingNames(t *testing.T) {
 	own := filepath.Join(cache, ".dclaw-stage-x-ab12", "p", "1.0.0")
 	mkdirs(t, staging, own)
 	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	clock := &stagingTestClock{}
+	w.stagingClock = clock.now
 	if w.inClaudePluginStaging(staging, 0) || !w.inClaudePluginStaging(own, 0) {
 		t.Fatal("codex cache staging rules changed")
 	}
+	clock.advance(claudeStagingCap)
+	if w.inClaudePluginStaging(own, 0) {
+		t.Fatal("a .dclaw-stage- folder is left alone past the cap")
+	}
+	clock.advance(-claudeStagingCap)
 	if got := pluginTargets(w); !slices.Equal(got, []string{staging}) {
 		t.Fatalf("rescan targets %v, want %s", got, staging)
 	}
@@ -367,9 +373,10 @@ func TestLiveWatcherLeavesClaudePluginUpdateCloneAlone(t *testing.T) {
 
 // A real plugin whose version ends in .linking-<n> (1.0.0-x.linking-1;
 // Claude Code keeps a .linking-<pid> folder while its pid lives, pid 1
-// always) is left alone only while it is written. Then the rescan admits it
-// (scan, verdict, block/quarantine) like a new plugin; it used to record
-// only a baseline, so nothing it held was enforced.
+// always) is left alone only while it is written. Then the rescan hands it
+// to the live install admission (scan, verdict, block/quarantine) like a new
+// plugin; it used to record only a baseline, so nothing it held was
+// enforced. The re-check and the rescan do not both queue it.
 func TestClaudeLinkingVersionPluginIsAdmittedAfterGrace(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Guardrail.Connector = "claudecode"
@@ -396,19 +403,34 @@ func TestClaudeLinkingVersionPluginIsAdmittedAfterGrace(t *testing.T) {
 	}
 	clock.advance(claudeStagingGrace + time.Minute)
 	ctx := context.Background()
-	for _, evt := range w.enumerateTargets() {
-		if evt.Type == InstallPlugin {
-			w.rescanTarget(ctx, evt, nil)
+	rescan := func() {
+		for _, evt := range w.enumerateTargets() {
+			if evt.Type == InstallPlugin && sameWatcherPath(evt.Path, linked) {
+				w.rescanTarget(ctx, evt, nil)
+			}
 		}
 	}
+	rescan()
+	if _, ok := w.pending[linked]; !ok {
+		t.Fatalf("the rescan did not hand %s to install admission: %v", linked, w.pending)
+	}
+	// The re-check finds it settled too, and while it is queued or being
+	// admitted neither hands it on again: one admission, one alert.
+	w.admitClaudeStaging(ctx, linked, 3)
+	delete(w.pending, linked)
+	w.inFlight[linked] = true
+	rescan()
+	w.admitClaudeStaging(ctx, linked, 3)
+	if _, ok := w.pending[linked]; ok {
+		t.Fatal("a plugin being admitted was queued again")
+	}
+	delete(w.inFlight, linked)
 	mu.Lock()
 	defer mu.Unlock()
-	if admitted[linked] != 1 {
-		t.Fatalf("the .linking- version plugin was admitted %d times, want 1: %v", admitted[linked], admitted)
+	if len(admitted) != 0 {
+		t.Fatalf("the rescan admitted on its own: %v", admitted)
 	}
-	if admitted[plain] != 0 {
-		t.Fatalf("a plain plugin was admitted by a rescan without startup roots: %v", admitted)
-	}
+
 }
 
 // The live watcher looks again at what it left alone: a path still there
@@ -445,7 +467,7 @@ func TestRecheckClaudeStagingQueuesSettledPaths(t *testing.T) {
 	ctx := context.Background()
 	w.admitClaudeStaging(ctx, f.linking, 3)
 	w.admitClaudeStaging(ctx, f.github, 1)
-	want := sorted(f.linking, filepath.Join(f.github, ".git", "objects"), filepath.Join(f.github, "skills", "foo"))
+	want := sorted(f.linking, filepath.Join(f.github, "skills", "foo"))
 	if got := pendingPaths(w); !slices.Equal(got, want) {
 		t.Fatalf("queued\n%v\nwant\n%v", got, want)
 	}

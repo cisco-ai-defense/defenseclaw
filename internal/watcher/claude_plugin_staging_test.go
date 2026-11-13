@@ -36,11 +36,11 @@ func TestClassifyClaudeCacheParts(t *testing.T) {
 		{`temp_archive_` + ts + `_1/a/b`, claudeCacheStaging},
 		{`temp_command_` + ts + `_q1w2e3/a/b`, claudeCacheStaging},
 		{`temp_unknown_` + ts + `_x9/a/b`, claudeCacheStaging},
-		// git's files in a staging clone are in it too.
-		{`temp_subdir_` + ts + `_t2ymk0.clone/.git`, claudeCacheStaging},
-		{`temp_subdir_` + ts + `_t2ymk0.clone/.git/hooks`, claudeCacheStaging},
-		{`temp_subdir_` + ts + `_t2ymk0.clone\.git\objects`, claudeCacheStaging},
-		{`temp_github_` + ts + `_ab12/.git/refs`, claudeCacheStaging},
+		// git's files in a staging clone.
+		{`temp_subdir_` + ts + `_t2ymk0.clone/.git`, claudeCacheStagingGit},
+		{`temp_subdir_` + ts + `_t2ymk0.clone/.git/hooks`, claudeCacheStagingGit},
+		{`temp_subdir_` + ts + `_t2ymk0.clone\.git\objects`, claudeCacheStagingGit},
+		{`temp_github_` + ts + `_ab12/.git/refs`, claudeCacheStagingGit},
 		// A version folder being linked.
 		{`mkt/plugin/1.0.0.linking-4242`, claudeCacheLinking},
 		{`mkt\plugin\1.0.0.linking-4242\skills`, claudeCacheLinking},
@@ -86,7 +86,7 @@ func (c *stagingTestClock) advance(d time.Duration) { c.offset.Add(int64(d)) }
 // A staging folder is in flight while it was written (name stamp, newest
 // modification time in it) in the last claudeStagingGrace, for
 // claudeStagingCap at most: a slow clone is not quarantined mid-clone, and
-// nothing stays unscanned past the cap. git's files in it count the same.
+// nothing stays unscanned past the cap.
 func TestClaudeInFlightWindow(t *testing.T) {
 	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
 	w := claudeWatcher(t, cache)
@@ -108,7 +108,7 @@ func TestClaudeInFlightWindow(t *testing.T) {
 
 	slow := stamped(clock.now())
 	pack := filepath.Join(slow, ".git", "objects", "pack", "tmp_pack_1")
-	mkdirs(t, filepath.Dir(pack))
+	mkdirs(t, filepath.Dir(pack), filepath.Join(slow, "plugins", "x"))
 	if err := os.WriteFile(pack, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestClaudeInFlightWindow(t *testing.T) {
 		if err := os.Chtimes(pack, now, now); err != nil {
 			t.Fatal(err)
 		}
-		if !w.inClaudePluginStaging(filepath.Join(slow, ".git", "objects"), 0) {
+		if !w.inClaudePluginStaging(filepath.Join(slow, "plugins", "x"), 0) {
 			t.Fatalf("a clone still being written left flight after %s", clock.now().Sub(began))
 		}
 		clock.advance(14 * time.Minute)
@@ -127,17 +127,109 @@ func TestClaudeInFlightWindow(t *testing.T) {
 	if err := os.Chtimes(pack, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if w.inClaudePluginStaging(filepath.Join(slow, ".git", "objects"), 0) {
+	if w.inClaudePluginStaging(filepath.Join(slow, "plugins", "x"), 0) {
 		t.Fatal("a clone still being written stays in flight past the cap")
 	}
 
+	ahead := stamped(clock.now().Add(5 * time.Hour))
+	mkdirs(t, filepath.Join(ahead, "a", "b"))
+	if !w.inClaudePluginStaging(filepath.Join(ahead, "a", "b"), 0) {
+		t.Error("a stamp within the clock skew Claude Code allows (6 h) is not in flight")
+	}
 	for name, folder := range map[string]string{
-		"a stamp ahead of the clock":              stamped(clock.now().Add(10 * time.Minute)),
+		"a stamp beyond the clock skew":           stamped(clock.now().Add(7 * time.Hour)),
 		"a stamp older than the cap, fresh write": stamped(clock.now().Add(-2 * time.Hour)),
 	} {
 		mkdirs(t, filepath.Join(folder, "a", "b"))
 		if w.inClaudePluginStaging(filepath.Join(folder, "a", "b"), 0) {
 			t.Errorf("%s is in flight", name)
+		}
+	}
+	// git's files in an unregistered clone are never a plugin, however old.
+	if !w.inClaudePluginStaging(filepath.Join(slow, ".git", "objects"), 0) {
+		t.Error("git's files in an abandoned staging clone are read as a plugin")
+	}
+}
+
+// One look at a staging folder serves every plugin path below it for a
+// pass: a rescan or re-check of a clone holding many plugins walks it once.
+func TestClaudeStagingOneWalkPerFolderPerPass(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	clock := &stagingTestClock{}
+	clone := filepath.Join(cache, "temp_subdir_"+strconv.FormatInt(clock.now().UnixMilli(), 10)+"_ab12.clone")
+	for i := range 50 {
+		mkdirs(t, filepath.Join(clone, "plugins", "p"+strconv.Itoa(i)))
+	}
+	w := claudeWatcher(t, cache)
+	w.stagingClock = clock.now
+	if got := pluginTargets(w); len(got) != 0 {
+		t.Fatalf("rescan targets %v, want none", got)
+	}
+	if walks := w.stagingWalks.Load(); walks != 1 {
+		t.Fatalf("one rescan walked the clone %d times, want 1", walks)
+	}
+	w.recheckClaudeStaging(func(path string, _ int) { t.Errorf("admitted %s in flight", path) })
+	if walks := w.stagingWalks.Load(); walks != 1 {
+		t.Fatalf("the re-check in the same pass walked again: %d", walks)
+	}
+	clock.advance(claudeStagingRecheck + time.Second)
+	w.recheckClaudeStaging(func(path string, _ int) { t.Errorf("admitted %s in flight", path) })
+	if walks := w.stagingWalks.Load(); walks != 2 {
+		t.Fatalf("the next re-check walked the clone %d times in all, want 2", walks)
+	}
+}
+
+// The walk for a staging folder's newest write reads a bounded number of
+// entries.
+func TestNewestModTimeStopsAtWalkLimit(t *testing.T) {
+	folder := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for i := range 10 {
+		path := filepath.Join(folder, "a"+strconv.Itoa(i))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newest := filepath.Join(folder, "z")
+	if err := os.WriteFile(newest, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(folder, old, old); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(newest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &InstallWatcher{}
+	if got := w.newestModTime(folder, time.Time{}); !got.Equal(info.ModTime()) {
+		t.Fatalf("newest write %v, want %v", got, info.ModTime())
+	}
+	w.stagingWalkLimit = 5
+	if got := w.newestModTime(folder, time.Time{}); !got.Before(info.ModTime()) {
+		t.Fatalf("a walk limited to 5 entries read the 12th: %v", got)
+	}
+}
+
+// An install path Claude Code wrote with backslashes or another case
+// (Windows, macOS) is read the same.
+func TestClaudeRegistryInstallPathSeparatorsAndCase(t *testing.T) {
+	registry := claudePluginRegistry{installPaths: []string{
+		`C:\Users\u\.claude\plugins\cache\temp_subdir_1793946491108_ab12.clone\plugins\sample`,
+		`/Users/U/.claude/plugins/cache/mkt/p/1.0.0.linking-7/`,
+	}}
+	for folder, want := range map[string]bool{
+		`C:\Users\u\.claude\plugins\cache\temp_subdir_1793946491108_ab12.clone`:  true,
+		`c:/users/u/.claude/plugins/cache/temp_subdir_1793946491108_ab12.clone`:  true,
+		`C:\Users\u\.claude\plugins\cache\temp_subdir_1793946491108_ab12.clone2`: false,
+		`/Users/u/.claude/plugins/cache/mkt/p/1.0.0.linking-7`:                   true,
+		`/Users/u/.claude/plugins/cache/mkt/p/1.0.0.linking-70`:                  false,
+	} {
+		if got := registry.installedAtOrBelow(folder); got != want {
+			t.Errorf("installedAtOrBelow(%q) = %v, want %v", folder, got, want)
 		}
 	}
 }

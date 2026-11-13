@@ -222,13 +222,18 @@ type InstallWatcher struct {
 	// stagingMu guards the Claude Code installs in flight the watcher
 	// left alone and looks at again (claude_plugin_staging.go):
 	// stagingSeen is when each folder was first seen, stagingDeferred the
-	// paths to re-check with their cache depth. stagingClock is a test
-	// clock (nil: time.Now).
+	// paths to re-check, stagingMemo and registryMemo one answer per
+	// folder and registry for a pass. stagingClock, stagingWalkLimit and
+	// stagingWalks are for tests (nil/0: time.Now, the default limit).
 	stagingMu        sync.Mutex
 	stagingSeen      map[string]time.Time
-	stagingDeferred  map[string]int
+	stagingDeferred  map[string]stagingDeferral
+	stagingMemo      map[string]stagingAnswer
+	registryMemo     map[string]registryAnswer
 	stagingNextCheck time.Time
 	stagingClock     func() time.Time
+	stagingWalkLimit int
+	stagingWalks     atomic.Int64
 
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
 	// (empty or category folders, GAP-2449) and skill folders without a
@@ -1653,6 +1658,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	ticker := time.NewTicker(w.debounce)
 	defer ticker.Stop()
+	// Every return drops the installs in flight left to re-check.
+	defer w.forgetClaudeStaging()
 
 	for {
 		select {
@@ -1663,7 +1670,6 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			stopLoops()
 			w.loops.Wait()
 			w.admissions.Wait()
-			w.forgetClaudeStaging()
 			w.state.reset()
 			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")
 			return ctx.Err()

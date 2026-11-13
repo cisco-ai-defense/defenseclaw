@@ -1100,6 +1100,14 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if w.admitsAfterStaging(evt) {
+				// A Claude Code staging or linking folder the watcher left
+				// alone as an install in flight: the live watcher's install
+				// admission takes it, the one the re-check hands it to, so it
+				// is admitted and alerted on once (issue #1428 review).
+				w.queueStagingAdmission(ctx, evt.Path)
+				return rescanSkipped
+			}
 			upgraded := w.configuredBeforeUpgrade(evt)
 			if evt.Type == InstallMCP && w.admitNewMCP && !upgraded && (w.startupRescanDone || !w.secureClientActive()) {
 				// A server added to an enrolled user's agent after the
@@ -1117,13 +1125,11 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				}
 				return rescanScanned
 			}
-			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) || w.admitsAfterStaging(evt) {
+			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
 				// The same under a root watched closely: its first scan
 				// enforces the verdict, whichever rescan found it (GAP-0905).
-				// The same for a Claude Code staging or linking folder left
-				// alone as an install in flight (issue #1428 review).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
