@@ -537,7 +537,7 @@ data:
     judge:
       ca_file: /var/run/ate/ca.crt
       token_file: /var/run/secrets/defenseclaw-callout-judge/token
-      url: https://defenseclaw-admin.defenseclaw-system.svc.cluster.local/api/v1/substrate/callout/verdict
+      url: https://defenseclaw-admin.defenseclaw-system.svc/api/v1/substrate/callout/verdict
     mcp_hosts:
     - mcp.example.com=tickets
     profiles:
@@ -1101,7 +1101,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 92b4faa95b0e992f008b0560755f27bd41f56c2b78aa1252cd406a6d724fd492
-        checksum/callout: a21a3ef606970d09bc35c6dd48d408de615e18c0542f7434ebc863c6761f0b37
+        checksum/callout: 2481d52c889551e2a6f507a67f39ed015cc4cf95f003b0ad43327ccd1d5fd68b
     spec:
       
       serviceAccountName: defenseclaw-callout

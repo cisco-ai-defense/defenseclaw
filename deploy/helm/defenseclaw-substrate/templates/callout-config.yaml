@@ -31,7 +31,7 @@ refused here as for extproc.failure_mode (GAP-0063, GAP-0090). */ -}}
 {{- end -}}
 {{- if not (hasKey $c "egress_peers") }}{{ $_ := set $c "egress_peers" (list .Values.substrate.egressSpiffeId) }}{{ end -}}
 {{- if and .Values.callout.judge.tokenSecret (not (hasKey $c "judge")) -}}
-{{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/verdict" $admin) "token_file" "/var/run/secrets/defenseclaw-callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
+{{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/verdict" (include "dc.adminTLSHost" .)) "token_file" "/var/run/secrets/defenseclaw-callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
 {{- end -}}
 {{- if and .Values.callout.actorSecrets.secretName (not (hasKey $c "actor_secrets_dir")) -}}
 {{- $_ := set $c "actor_secrets_dir" (include "dc.actorSecretsDir" .) -}}

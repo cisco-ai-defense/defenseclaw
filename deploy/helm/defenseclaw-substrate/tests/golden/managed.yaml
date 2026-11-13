@@ -486,7 +486,7 @@ data:
     judge:
       ca_file: /var/run/ate/ca.crt
       token_file: /var/run/secrets/defenseclaw-callout-judge/token
-      url: https://defenseclaw-admin.defenseclaw-system.svc.cluster.local/api/v1/substrate/callout/verdict
+      url: https://defenseclaw-admin.defenseclaw-system.svc/api/v1/substrate/callout/verdict
     profiles:
     - atespaces:
       - eng-web
@@ -562,7 +562,7 @@ metadata:
     helm.sh/chart: defenseclaw-substrate-1.0.10
     app.kubernetes.io/component: gateway
 data:
-  admin_url: "https://defenseclaw-admin.defenseclaw-system.svc.cluster.local"
+  admin_url: "https://defenseclaw-admin.defenseclaw-system.svc"
 ---
 # Source: defenseclaw-substrate/templates/leader.yaml
 apiVersion: v1
@@ -935,7 +935,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 65f038e5ddec77d32ae672859921165f74c628c10b8bd0ba012fe3d968e43229
-        checksum/callout: ec4c5e49d183e9ebdd8ef8591228536321190657a4434a760242f98472b7797a
+        checksum/callout: d93f4c38546df9690a61583f43ab9bd8e7bb3b8b37bff8e8b582307a7fd54e75
     spec:
       
       serviceAccountName: defenseclaw-callout
