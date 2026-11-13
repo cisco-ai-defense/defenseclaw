@@ -37,8 +37,31 @@ func extractFileTool(call Call, o Options) Result {
 		content := firstString(m, "content", "new_string", "newString", "contents", "text", "file_text")
 		e.Data = &Data{Kind: DataLiteral, Bytes: len(content), Text: cap8k(content)}
 	}
+	// Schema accounting (review R5-1): an argument key the file-tool schema does
+	// not expect means the call is not fully understood -> not fully known.
+	for k := range m {
+		if !fileToolArgKey(k) {
+			e.addReason(ReasonUnknownTool, ScopeRole)
+			break
+		}
+	}
 	res.Effects = append(res.Effects, e)
 	return res
+}
+
+// fileToolArgKey reports whether a file-tool argument key is in the expected
+// schema (path, content, edit, and the common benign metadata connectors add).
+func fileToolArgKey(k string) bool {
+	switch k {
+	case "file_path", "path", "filePath", "filename", "file", "target", "notebook_path",
+		"content", "contents", "text", "file_text", "new_string", "newString", "new_str",
+		"old_string", "oldString", "old_str", "replace_all", "replaceAll", "cell_id", "cell_number",
+		"edits", "changes", "line", "lineNumber", "range", "offset", "limit", "encoding",
+		"description", "explanation", "instructions", "language", "mode", "create", "overwrite",
+		"display_description", "blocking", "empty_file":
+		return true
+	}
+	return false
 }
 
 func fileToolKind(tool string) Kind {

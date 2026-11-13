@@ -344,7 +344,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// Variables a for-loop rebinds are dropped via its own Unbind statement.
 
 	// 2. Strip wrappers.
-	inner, wrappers, foreign, fromInput := w.stripWrappers(words)
+	inner, wrappers, foreign, fromInput, wrapperUA := w.stripWrappers(words)
 	if len(inner) == 0 {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
@@ -419,6 +419,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	prevPrim := w.lastPrim
 	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
+	unaccounted := wrapperUA
+	nestedStart := -1
+	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
+	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
+	// every effect this command emitted (excluding nested substitutions) is
+	// then demoted to not-fully-known.
+	defer func() {
+		if !unaccounted {
+			return
+		}
+		end := len(w.res.Effects)
+		if nestedStart >= 0 {
+			end = nestedStart
+		}
+		for i := cmdStart; i < end; i++ {
+			w.res.Effects[i].addReason(ReasonUnknownFlag, ScopeRole)
+		}
+	}()
 	baseIdx := w.emit(base)
 	w.lastPrim = baseIdx
 
@@ -483,6 +501,9 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// tar: mode-dependent create/extract effects, never a silent KNOWN (N7).
 	if entry.TarStyle {
+		if tarHasUnknownFlag(inner[1:]) {
+			unaccounted = true
+		}
 		w.tarEffects(inner[1:], origin, cond, depth)
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
@@ -525,7 +546,10 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 
 	// 7. Operands.
-	ops, execCmds, unaccounted := w.classifyOperands(inner[1:], entry, dialect)
+	ops, execCmds, opsUA := w.classifyOperands(inner[1:], entry, dialect)
+	if opsUA {
+		unaccounted = true
+	}
 	// find/xargs -exec inner commands run with the matched paths; walk each so
 	// its effects (incl. an inner sh -c) appear (review N4). The roots stay as
 	// read operands below.
@@ -585,15 +609,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// 8. Redirections.
 	w.handleRedirs(c, dialect, cmdNo, depth, cond, readIdx)
 
-	// Choke point (review N4-1): an unaccounted argv token makes every effect
-	// this command emitted not fully known.
-	if unaccounted {
-		for i := cmdStart; i < len(w.res.Effects); i++ {
-			w.res.Effects[i].addReason(ReasonUnknownFlag, ScopeRole)
-		}
-	}
-
-	// 9. Nested command substitutions.
+	// 9. Nested command substitutions (their own accounting; excluded above).
+	nestedStart = len(w.res.Effects)
 	for _, sub := range c.Nested {
 		s := w.saveScope()
 		w.walkScript(sub, depth)
@@ -874,6 +891,11 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			}
 		}
 		i++
+	}
+	// A PosNone program with operands it does not model leaves them unaccounted,
+	// unless its entry declares the operands inert data (review R5-2).
+	if p.Pos == PosNone && len(positionals) > 0 && !p.InertOperands {
+		unknownFlag = true
 	}
 	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir})...)
 	return out, inner, unknownFlag
@@ -2015,4 +2037,43 @@ func posModeRole(p PosMode) Role {
 		return RolePerm
 	}
 	return RoleNone
+}
+
+// tarHasUnknownFlag reports a tar flag the model does not account for, so the
+// command is not fully known (review R5-1).
+func tarHasUnknownFlag(args []Word) bool {
+	known := map[string]bool{
+		"--directory": true, "--file": true, "--files-from": true, "--to-command": true,
+		"--checkpoint-action": true, "--exclude": true, "--exclude-from": true, "--strip-components": true,
+		"--gzip": true, "--gunzip": true, "--bzip2": true, "--xz": true, "--zstd": true, "--lzma": true,
+		"--verbose": true, "--extract": true, "--create": true, "--list": true, "--get": true,
+		"--preserve-permissions": true, "--same-owner": true, "--no-same-owner": true, "--overwrite": true,
+		"--owner": true, "--group": true, "--mode": true, "--transform": true, "--wildcards": true,
+		"--no-recursion": true, "--one-file-system": true, "--dereference": true, "--keep-old-files": true,
+		"--absolute-names": true, "--numeric-owner": true, "--no-same-permissions": true,
+	}
+	for _, a := range args {
+		if !a.Static {
+			continue
+		}
+		v := a.Value
+		if strings.HasPrefix(v, "--") {
+			k := v
+			if eq := strings.IndexByte(v, '='); eq >= 0 {
+				k = v[:eq]
+			}
+			if !known[k] {
+				return true
+			}
+			continue
+		}
+		if strings.HasPrefix(v, "-") || isTarModeBundle(v) {
+			for _, ch := range strings.TrimPrefix(v, "-") {
+				if !strings.ContainsRune("cxtfzjJvphakmrunwOWCT", ch) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

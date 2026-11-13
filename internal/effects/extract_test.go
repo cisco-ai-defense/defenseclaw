@@ -237,10 +237,10 @@ func TestWindowsPathNormalization(t *testing.T) {
 	if !ok || got != `c:\other\x.txt` {
 		t.Errorf("dotdot normalize: got %q ok=%v", got, ok)
 	}
-	// trailing dot/space on the final element is trimmed.
-	got, _, _ = placePath(`C:\a\b.txt. `, o)
-	if got != `c:\a\b.txt` {
-		t.Errorf("trailing dot/space trim: got %q", got)
+	// a trailing dot/space on the final element is non-canonical (review R5-5):
+	// it maps to the base file on Windows, so it is unknown here.
+	if _, ok, reason := placePath(`C:\a\b.txt. `, o); ok || reason != ReasonNonCanonicalPath {
+		t.Errorf("trailing dot/space should be non_canonical_path; ok=%v reason=%s", ok, reason)
 	}
 	// C:foo (drive-relative) cannot be placed.
 	if _, ok, reason := placePath(`C:foo`, o); ok || reason != ReasonDynamicCWD {

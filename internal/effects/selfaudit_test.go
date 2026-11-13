@@ -5,6 +5,7 @@
 package effects
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -88,13 +89,43 @@ func TestSelfAuditPOSIXCanonical(t *testing.T) {
 // TestSelfAuditMutationUnlistedFlag injects an unlisted flag into known-good
 // commands and requires each to stop being fully known (review N4-6).
 func TestSelfAuditMutationUnlistedFlag(t *testing.T) {
-	good := []string{`cp a.txt dir/`, `rm /tmp/x`, `cat /home/u/.bashrc`, `chmod 644 /home/u/x`, `grep foo /home/u/.netrc`}
-	for _, g := range good {
-		parts := strings.SplitN(g, " ", 2)
-		mutated := parts[0] + " --s7-unlisted-flag " + parts[1]
-		r := Extract(Call{Surface: SurfaceShell, Command: mutated}, envOpts)
+	// For each dialect, inject an unlisted token into a known-good command and
+	// require it to stop being fully known (review R5-4).
+	type mc struct {
+		o       Options
+		mutated string
+	}
+	cases := []mc{
+		// POSIX: long, lone short, combined short, wrapper flag.
+		{envOpts, `cp --s7-bogus a.txt dir/`},
+		{envOpts, `rm -Q /tmp/x`},
+		{envOpts, `rm -rQf /tmp/x`},
+		{envOpts, `cat --s7-bogus /home/u/.bashrc`},
+		{envOpts, `sudo --s7-bogus rm /etc/x`},
+		{envOpts, `env --s7-bogus rm /etc/x`},
+		// cmd /X switch.
+		{winCmd, `del /S7BOGUS C:\x`},
+		{winCmd, `copy /S7BOGUS a b`},
+		// PowerShell -Param.
+		{winPS, `Remove-Item -S7Bogus C:\x`},
+		{winPS, `Set-Content -S7Bogus -Path C:\x -Value y`},
+		// launcher: tar unlisted flag.
+		{envOpts, `tar --s7-bogus -xzf a.tgz -C /etc`},
+	}
+	for _, c := range cases {
+		r := Extract(Call{Surface: SurfaceShell, Command: c.mutated}, c.o)
 		if r.FullyKnown() {
-			t.Errorf("mutation kept the command fully known: %q", mutated)
+			t.Errorf("mutation kept the command fully known: %q", c.mutated)
 		}
+	}
+	// file-tool: an unexpected argument key.
+	fr := Extract(Normalize("x", "write", json.RawMessage(`{"file_path":"/home/u/x","content":"y","s7_bogus_key":1}`)), envOpts)
+	if fr.FullyKnown() {
+		t.Error("file-tool with an unexpected arg key is fully known")
+	}
+	// MCP is always role-guessed (never fully known) by construction.
+	mr := Extract(Normalize("x", "mcp_tool", json.RawMessage(`{"path":"/home/u/x"}`)), envOpts)
+	if mr.FullyKnown() {
+		t.Error("MCP effect should never be fully known (role guessed)")
 	}
 }

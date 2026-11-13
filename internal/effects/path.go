@@ -47,6 +47,10 @@ func canonicalIssue(s string, flavor Flavor) ReasonCode {
 			return ReasonNonCanonicalPath
 		case hasShortNameSegment(w):
 			return ReasonNonCanonicalPath
+		case hasTrailingDotOrSpaceSegment(w):
+			return ReasonNonCanonicalPath // "x.exe ." / "x." name the base file (review R5-5)
+		case hasADSStream(w):
+			return ReasonNonCanonicalPath // an alternate data stream name
 		}
 		// a non-FileSystem PowerShell drive (Env:, HKLM:, Variable:, Cert:)
 		if i := strings.IndexByte(s, ':'); i > 1 {
@@ -258,6 +262,11 @@ func (t Target) Key() string {
 	if t.Flavor == FlavorWindows {
 		return strings.ToLower(strings.ReplaceAll(v, "/", `\`))
 	}
+	// A case-insensitive POSIX filesystem (macOS default) folds the key so two
+	// spellings of one protected file match (review R5-5).
+	if t.CaseFold {
+		return strings.ToLower(v)
+	}
 	return v
 }
 
@@ -281,4 +290,40 @@ func looksGlob(s string) bool {
 // non-canonical over the corpus -- review N4-6).
 func KnownPathCanonical(spelling string, flavor Flavor) bool {
 	return canonicalIssue(spelling, flavor) == ""
+}
+
+// hasTrailingDotOrSpaceSegment reports a Windows path segment ending in '.' or
+// ' ', which Windows silently maps to the base name -- not canonical (R5-5).
+func hasTrailingDotOrSpaceSegment(w string) bool {
+	for _, seg := range strings.Split(w, `\`) {
+		if len(seg) >= 2 && seg[1] == ':' && len(seg) == 2 {
+			continue // drive letter
+		}
+		if seg != "" && (strings.HasSuffix(seg, ".") || strings.HasSuffix(seg, " ")) &&
+			seg != "." && seg != ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// hasADSStream reports a Windows alternate-data-stream suffix (file:stream) in a
+// non-drive segment -- not canonical (R5-5).
+func hasADSStream(w string) bool {
+	for _, seg := range strings.Split(w, `\`) {
+		c := strings.IndexByte(seg, ':')
+		if c < 0 {
+			continue
+		}
+		if c == 1 && len(seg) >= 2 && isDriveLetter(seg[0]) {
+			// drive-letter colon is fine only when it's the leading segment's
+			// drive; a second colon in the same segment is a stream.
+			if strings.IndexByte(seg[2:], ':') >= 0 {
+				return true
+			}
+			continue
+		}
+		return true
+	}
+	return false
 }

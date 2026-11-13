@@ -113,6 +113,7 @@ type Program struct {
 	PSLaunch       bool   // powershell/pwsh: decode -enc and unwrap its command as PowerShell
 	TarStyle       bool   // tar: mode-dependent create/extract effects (review N7)
 	DownloadRemote bool   // curl -O / wget: writes a URL-named file into the output dir/cwd (review R3-3)
+	InertOperands  bool   // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
 }
 
 var (
@@ -273,8 +274,20 @@ func buildPOSIXTable() {
 			"-p", "-P", "-v", "-h", "--paginate", "--no-pager", "--bare", "--version", "--help", "--no-replace-objects", "--literal-pathspecs", "--no-optional-locks", "--html-path", "--info-path", "--man-path")})
 	add(Program{Names: []string{"go"}, Pos: PosNone,
 		Flags: map[string]Flag{"-exec": {Value: true, Role: RoleExecCode}, "-toolexec": {Value: true, Role: RoleExecCode}}})
-	add(Program{Names: []string{"echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "test", "[", "alias", "ps", "df", "du", "env", "date", "whoami", "id", "uname", "hostname", "which", "basename", "dirname", "wc", "sort", "uniq", "cut", "tr", "sleep", "kill", "jobs", "wait", "clear", "stat", "file", "readlink", "realpath"}, Pos: PosNone,
+	// Inert-operand programs: their positionals are messages, names or option
+	// values, not files they act on (review R5-2 InertOperands).
+	add(Program{Names: []string{"echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
 		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
+	// Programs that read their file operands.
+	add(Program{Names: []string{"wc", "cut", "uniq", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "xxd", "od", "hexdump", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "du", "df", "stat", "file", "readlink", "realpath", "diff", "cmp", "look", "split", "csplit", "shasum"}, Pos: PosAllRead,
+		Flags: fl(map[string]Flag{"-o": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}, "--output": {Value: true, Role: RoleIgnore}},
+			"-l", "-m", "-L", "-h", "-a", "-b", "-s", "-k", "-v", "-i", "-r", "-u", "-z", "-x", "-p", "-g", "-H", "-P", "-A", "-B", "-C", "-D", "-q", "-y", "-e")})
+	add(Program{Names: []string{"tr"}, Pos: PosNone, InertOperands: true, Flags: fl(nil, "-d", "-s", "-c", "-t", "-C")})
+	// sort reads its inputs and writes the file named by -o (review R5-2).
+	add(Program{Names: []string{"sort"}, Pos: PosAllRead,
+		Flags: fl(map[string]Flag{"-o": {Value: true, Role: RoleWrite}, "--output": {Value: true, Role: RoleWrite},
+			"-k": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-T": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}},
+			"-n", "-r", "-u", "-b", "-c", "-C", "-m", "-h", "-g", "-M", "-R", "-V", "-s", "-z", "-d", "-i", "--numeric-sort", "--reverse", "--unique", "--check", "--merge", "--human-numeric-sort", "--stable", "--ignore-case")})
 	// ls: a very common read-only lister; its switches are benign (no path
 	// effect is modeled, but it must not be flagged for a normal -la).
 	add(Program{Names: []string{"ls", "ll", "la", "dir", "vdir", "exa", "eza", "lsd"}, Pos: PosNone,
