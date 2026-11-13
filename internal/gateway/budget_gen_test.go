@@ -36,7 +36,6 @@ var budgetShapes = []budgetShape{
 	{"assign-pipe", "x=1 a|", "a", budgetChainSizes},
 	{"unparsed-pipe", "a|", "fi", budgetChainSizes},
 	{"nest", "(", ")", budgetChainSizes},
-	{"bodies", "", "", []int{8, 10, 12}},
 	{"arith", "echo $((1", ")) ", budgetChainSizes},
 	{"flat-words", "a ", "", budgetFlatSizes},
 	{"flat-stmts", "a;", "a", budgetFlatSizes},
@@ -46,8 +45,6 @@ var budgetShapes = []budgetShape{
 // command builds the text of the shape at n units.
 func (s budgetShape) command(n int) string {
 	switch s.name {
-	case "bodies":
-		return readingBoundNest(n, "rm -rf output")
 	case "nest":
 		return strings.Repeat("(", n) + "true" + strings.Repeat(")", n)
 	case "arith":

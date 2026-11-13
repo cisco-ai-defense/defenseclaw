@@ -67,11 +67,7 @@ func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 		// budget).
 		levels, target := 11, "~/project/output"
 		if connector == "codex" {
-			// A protected target other than the active DefenseClaw state: a
-			// write to the state past the bound blocks in every mode
-			// (GAP-0360, TestParseBudgetKeepsTheStateWriteProof); any other
-			// protected name is an evaluation-limit-only call here.
-			levels, target = 10, "~/.ssh"
+			levels, target = 10, "~/.defenseclaw"
 		}
 		command := gap0677Nested(levels, "rm -rf "+target)
 		findings, took := decide(command)

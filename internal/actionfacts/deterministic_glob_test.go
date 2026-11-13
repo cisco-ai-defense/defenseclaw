@@ -18,6 +18,9 @@ import (
 // listed and names examined), never at a deadline: the same call gets the
 // same twin in each of 50 runs with every CPU busy, whatever the load.
 func TestStateGlobTwinCountsWorkNotTime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the pattern is read under a POSIX home (a Git Bash drive home has its own twin test)")
+	}
 	home := t.TempDir()
 	state := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(state, 0o700); err != nil {
