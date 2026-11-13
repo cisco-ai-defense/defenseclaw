@@ -402,7 +402,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
-	gateway.S7SetDecisionRouting(*dmBlockRiskScore, *dmRuleFlagEscalates)
+	gateway.S7SetDecisionRouting(*dmBlockRiskScore, *dmRuleFlagEscalates, *dmCacheDir != "" && *dmCacheOnly)
 	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
 	var err2 error
 	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)

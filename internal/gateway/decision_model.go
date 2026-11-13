@@ -92,6 +92,9 @@ var decisionModelQuestions = map[string]any{
 var decisionBenchRouting struct {
 	blockRiskScore    float64
 	ruleFlagEscalates bool
+	// noBreaker: an offline replay counts each cache miss once instead of
+	// pausing the model for 30 s after three of them.
+	noBreaker bool
 }
 
 // decisionRoute is what the guardrail does with one decision-model answer.
@@ -241,6 +244,9 @@ func (d *decisionModel) budget(ctx context.Context) time.Duration {
 func (d *decisionModel) breakerOpen(now time.Time) bool {
 	d.breakerMu.Lock()
 	defer d.breakerMu.Unlock()
+	if decisionBenchRouting.noBreaker {
+		return false
+	}
 	if now.Before(d.openUntil) {
 		d.skippedWhileOpen++
 		return true

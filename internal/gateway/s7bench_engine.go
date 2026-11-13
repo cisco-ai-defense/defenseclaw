@@ -206,7 +206,8 @@ func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName
 
 // S7SetDecisionRouting sets the benchmark routing variants (see
 // decisionBenchRouting). Bench only.
-func S7SetDecisionRouting(blockRiskScore float64, ruleFlagEscalates bool) {
+func S7SetDecisionRouting(blockRiskScore float64, ruleFlagEscalates, noBreaker bool) {
+	decisionBenchRouting.noBreaker = noBreaker
 	decisionBenchRouting.blockRiskScore = blockRiskScore
 	decisionBenchRouting.ruleFlagEscalates = ruleFlagEscalates
 }
