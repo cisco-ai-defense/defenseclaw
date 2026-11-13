@@ -550,8 +550,8 @@ var windowsHookImageSelfTestArgs = []string{"hook", "--connector", "claudecode",
 // JSON answer) or exit 2 with a reason (one JSON answer on stdout or text on
 // stderr); a guard or cmd.exe message that the hook or guard could not
 // start, any other status, more than one answer or a bare exit 2 fail. The
-// managed hook may write one audit line for this call (a SYSTEM-attributed
-// row in the audit store and the SIEM export, tool Read of
+// managed hook may write one audit line for this call (a row in the audit
+// store and the SIEM export, tool Read of
 // defenseclaw-hook-image-self-test.txt), attributed to SYSTEM (or the
 // administrator who ran Setup), the account behind the filtered token.
 var windowsHookImageSelfTestInput = []byte(`{"session_id":"defenseclaw-hook-image-self-test",` +

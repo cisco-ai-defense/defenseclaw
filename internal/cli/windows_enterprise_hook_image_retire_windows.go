@@ -173,10 +173,12 @@ func reconcileWindowsCodexRequirementsForHookImage() error {
 // scanWindowsHookImageConfigs reads every file DefenseClaw writes that can
 // name a hook image of bin (windowsHookImageConfigFiles): machine files make
 // the scan incomplete when they cannot be read, account files are skipped
-// (windowsHookImageConfigScan).
+// (windowsHookImageConfigScan). An account path with a link at or below its
+// home is skipped (link_in_account_path) before it is listed or opened.
 func scanWindowsHookImageConfigs(roots winpath.EnterpriseRoots, bin string) windowsHookImageConfigScan {
 	entries, problems := windowsHookImageConfigFiles(roots)
-	files, incomplete, skipped := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir)
+	files, incomplete, skipped := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
+		windowsHookImageAccountPathCheck(winpath.RejectReparseBelow))
 	scan := scanWindowsHookImageConfigFiles(files, bin, readWindowsHookImageConfigFile)
 	scan.Incomplete = append(append(problems, incomplete...), scan.Incomplete...)
 	scan.Skipped = append(skipped, scan.Skipped...)
@@ -197,14 +199,14 @@ const windowsHookImageScanFileTimeout = 5 * time.Second
 
 var errWindowsHookImageScanTimeout = fmt.Errorf("did not answer within %s; not read", windowsHookImageScanFileTimeout)
 
-func readWindowsHookImageConfigFile(path string) ([]byte, error) {
+func readWindowsHookImageConfigFile(file windowsHookImageConfigFile) ([]byte, error) {
 	type result struct {
 		body []byte
 		err  error
 	}
 	done := make(chan result, 1)
 	go func() {
-		body, err := readWindowsHookImageConfigFileNow(path)
+		body, err := readWindowsHookImageConfigFileNow(file)
 		done <- result{body, err}
 	}()
 	timer := time.NewTimer(windowsHookImageScanFileTimeout)
@@ -217,10 +219,21 @@ func readWindowsHookImageConfigFile(path string) ([]byte, error) {
 	}
 }
 
-// readWindowsHookImageConfigFileNow opens path without following a final
+// readWindowsHookImageConfigFileNow opens the file without following a final
 // link (FILE_FLAG_OPEN_REPARSE_POINT) and reads it only when the opened
 // object is a regular file: a link, a junction or a folder is never read.
-func readWindowsHookImageConfigFileNow(path string) ([]byte, error) {
+// An account file is opened only when no link lies from its home down to it
+// (winpath.RejectReparseBelow), and read only when the opened handle's final
+// path is still the home's plus the file's own elements
+// (winpath.VerifyOpenedBelow): a link swapped in after the walk is caught on
+// the handle that is read. Either refusal is link_in_account_path.
+func readWindowsHookImageConfigFileNow(file windowsHookImageConfigFile) ([]byte, error) {
+	path := file.Path
+	if file.User {
+		if err := windowsHookImageAccountPathCheck(winpath.RejectReparseBelow)(file.Home, path); err != nil {
+			return nil, err
+		}
+	}
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -237,8 +250,8 @@ func readWindowsHookImageConfigFileNow(path string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	file := os.NewFile(uintptr(handle), path)
-	defer file.Close()
+	opened := os.NewFile(uintptr(handle), path)
+	defer opened.Close()
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		return nil, err
@@ -246,10 +259,15 @@ func readWindowsHookImageConfigFileNow(path string) ([]byte, error) {
 	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_DEVICE) != 0 {
 		return nil, errWindowsHookImageScanUnsafe
 	}
+	if file.User {
+		if err := windowsHookImageAccountPathError(winpath.VerifyOpenedBelow(handle, file.Home, path)); err != nil {
+			return nil, err
+		}
+	}
 	if size := int64(info.FileSizeHigh)<<32 | int64(info.FileSizeLow); size > windowsHookImageScanMaxBytes {
 		return nil, fmt.Errorf("larger than %d bytes; not read", windowsHookImageScanMaxBytes)
 	}
-	body, err := io.ReadAll(io.LimitReader(file, windowsHookImageScanMaxBytes+1))
+	body, err := io.ReadAll(io.LimitReader(opened, windowsHookImageScanMaxBytes+1))
 	if err != nil {
 		return nil, err
 	}
@@ -268,8 +286,11 @@ func readWindowsHookImageConfigFileNow(path string) ([]byte, error) {
 // machine policy state), the Codex requirements ownership record in the
 // state root and, for every enrolled account of targets.yaml, the agent
 // config paths its connector's hooks live in (account files; a watched
-// folder is expanded by expandWindowsHookImageConfigFiles). Problems are the
-// folders or targets that could not be listed; they make the scan
+// folder is expanded by expandWindowsHookImageConfigFiles). The files of the
+// ProgramData vendor folders a standard user can create (OpenAI\Codex,
+// Cursor) are account files unless they and their folders are owned by
+// SYSTEM or Administrators (windowsHookImageVendorFiles). Problems are the
+// machine folders or targets that could not be listed; they make the scan
 // incomplete.
 func windowsHookImageConfigFiles(roots winpath.EnterpriseRoots) ([]windowsHookImageConfigFile, []string) {
 	var files []windowsHookImageConfigFile
@@ -286,18 +307,32 @@ func windowsHookImageConfigFiles(roots winpath.EnterpriseRoots) ([]windowsHookIm
 		files = append(files, windowsHookImageConfigFile{Path: path})
 	}
 	list := func(dir string, depth int, skip ...string) {
-		more, problem := listWindowsHookImageConfigDir(dir, depth, skip)
+		more, failures := listWindowsHookImageConfigDir(dir, depth, skip)
 		for _, path := range more {
 			machine(path)
 		}
-		if problem != "" {
-			problems = append(problems, problem)
+		for _, failure := range failures {
+			problems = append(problems, failure.String())
+		}
+	}
+	vendor := func(dir string, depth int) {
+		more, failures := listWindowsHookImageConfigDir(dir, depth, nil)
+		files = append(files, windowsHookImageVendorFiles(programData, more, winpath.OwnedByAdministratorsOrSystem)...)
+		for _, failure := range failures {
+			// A folder an account owns that SYSTEM cannot list is that
+			// account's: it goes to the scan as an account path (skipped
+			// there); one owned by SYSTEM or Administrators voids the scan.
+			if entry := windowsHookImageVendorFiles(programData, []string{failure.Dir}, winpath.OwnedByAdministratorsOrSystem)[0]; entry.User {
+				files = append(files, entry)
+				continue
+			}
+			problems = append(problems, failure.String())
 		}
 	}
 	machine(filepath.Join(programFiles, "ClaudeCode", "managed-settings.json"))
 	list(filepath.Join(programFiles, "ClaudeCode", "managed-settings.d"), 0)
-	list(filepath.Join(programData, "OpenAI", "Codex"), 0)
-	list(filepath.Join(programData, "Cursor"), 1)
+	vendor(filepath.Join(programData, "OpenAI", "Codex"), 0)
+	vendor(filepath.Join(programData, "Cursor"), 1)
 	list(filepath.Join(programData, "Cisco", managed.StandaloneWindowsHookRuntimeDirName), 1)
 	// The transaction snapshots keep preimages of earlier configs; they are
 	// not configs and are deleted when the transaction retires.
@@ -308,24 +343,37 @@ func windowsHookImageConfigFiles(roots winpath.EnterpriseRoots) ([]windowsHookIm
 	accountFiles, accountProblems := enterprisehooks.WindowsManagedHookConfigFiles(
 		filepath.Join(roots.StateRoot, "hook-guardian", "targets.yaml"))
 	for _, file := range accountFiles {
-		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User})
+		files = append(files, windowsHookImageConfigFile{Path: file.Path, User: file.User, Home: file.Home})
 	}
 	problems = append(problems, accountProblems...)
 	return files, problems
 }
 
+// windowsHookImageListFailure is a folder listWindowsHookImageConfigDir could
+// not list.
+type windowsHookImageListFailure struct {
+	Dir string
+	Err error
+}
+
+func (f windowsHookImageListFailure) String() string { return fmt.Sprintf("%s: %v", f.Dir, f.Err) }
+
 // listWindowsHookImageConfigDir lists the regular files of dir and, to depth,
 // of its plain subfolders. Lock files and temporaries are left out: Setup
 // and the writers hold them open without sharing and they never name a hook.
-func listWindowsHookImageConfigDir(dir string, depth int, skip []string) ([]string, string) {
+// A subfolder that cannot be listed is returned as a failure and the listing
+// goes on with its siblings, so one folder an account made unreadable cannot
+// hide the other files.
+func listWindowsHookImageConfigDir(dir string, depth int, skip []string) ([]string, []windowsHookImageListFailure) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, ""
+		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Sprintf("%s: %v", dir, err)
+		return nil, []windowsHookImageListFailure{{Dir: dir, Err: err}}
 	}
 	var files []string
+	var failures []windowsHookImageListFailure
 	for _, entry := range entries {
 		name := entry.Name()
 		lower := strings.ToLower(name)
@@ -337,18 +385,16 @@ func listWindowsHookImageConfigDir(dir string, depth int, skip []string) ([]stri
 			if depth <= 0 || containsFoldString(skip, name) {
 				continue
 			}
-			more, problem := listWindowsHookImageConfigDir(path, depth-1, nil)
+			more, failed := listWindowsHookImageConfigDir(path, depth-1, nil)
 			files = append(files, more...)
-			if problem != "" {
-				return files, problem
-			}
+			failures = append(failures, failed...)
 		case strings.HasSuffix(lower, ".lock") || strings.Contains(lower, ".tmp"):
 			continue
 		default:
 			files = append(files, path)
 		}
 	}
-	return files, ""
+	return files, failures
 }
 
 func containsFoldString(values []string, want string) bool {

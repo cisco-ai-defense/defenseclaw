@@ -27,12 +27,97 @@ import (
 // Windows file list is windowsHookImageConfigFiles.
 
 // windowsHookImageConfigFile is one file (or, before expansion, one path the
-// connector watches, which can be a folder) the scan reads. User marks a
-// file in an enrolled account's home: that account can write it, so it can
-// keep a folder (a live session's hook) but never stop prune or retire.
+// connector watches, which can be a folder) the scan reads. User marks an
+// account file: one an account can write (in an enrolled account's home, or
+// in a ProgramData vendor folder that is not owned by SYSTEM or
+// Administrators), so it can keep a folder (a live session's hook) but never
+// stop prune or retire.
 type windowsHookImageConfigFile struct {
 	Path string
 	User bool
+	// Home is the folder an account file is read below: the enrolled
+	// account's home, or ProgramData for a vendor folder file. The file is
+	// read only when no link lies at or below Home on its path
+	// (link_in_account_path otherwise: skipped, never read).
+	Home string
+	// Note says why a file outside an account's home is an account file
+	// ("not_admin_owned: <element>"); it is shown with a skipped line.
+	Note string
+}
+
+// line is the Incomplete or Skipped line of file for err.
+func (f windowsHookImageConfigFile) line(err error) string {
+	if f.Note != "" {
+		return fmt.Sprintf("%s (%s): %v", f.Path, f.Note, err)
+	}
+	return fmt.Sprintf("%s: %v", f.Path, err)
+}
+
+// windowsHookImageLinkInAccountPath starts the skipped line of an account
+// file whose path has a link at or below the account home.
+const windowsHookImageLinkInAccountPath = "link_in_account_path"
+
+var errWindowsHookImageNoAccountHome = errors.New("account file without an account home; not read")
+
+// windowsHookImageAccountPathError marks a winpath.ErrLinkBelowRoot error as
+// link_in_account_path; other errors pass unchanged.
+func windowsHookImageAccountPathError(err error) error {
+	if err != nil && errors.Is(err, winpath.ErrLinkBelowRoot) {
+		return fmt.Errorf("%s: %w; not read", windowsHookImageLinkInAccountPath, err)
+	}
+	return err
+}
+
+// windowsHookImageAccountPathCheck is the check run before an account path
+// is opened or listed: walk (winpath.RejectReparseBelow on Windows) must find
+// no link from the account home down to the path. SYSTEM resolves every
+// folder of that path with its own rights, so a folder the account replaced
+// with a junction would point SYSTEM's open anywhere the account chooses.
+func windowsHookImageAccountPathCheck(walk func(root, path string) error) func(home, path string) error {
+	return func(home, path string) error {
+		if strings.TrimSpace(home) == "" {
+			return errWindowsHookImageNoAccountHome
+		}
+		return windowsHookImageAccountPathError(walk(home, path))
+	}
+}
+
+// windowsHookImageVendorFiles classifies the files listed in a ProgramData
+// vendor folder that a standard user can create when it is absent
+// (ProgramData\OpenAI\Codex, ProgramData\Cursor): a file is a machine file
+// only when it and every folder from ProgramData down to it is owned by
+// SYSTEM or Administrators (adminOwned); otherwise it is an account file read
+// below ProgramData, so one the user made unreadable is skipped and never
+// voids the scan (which would keep every folder and leave retire pending).
+func windowsHookImageVendorFiles(programData string, paths []string, adminOwned func(string) (bool, error)) []windowsHookImageConfigFile {
+	owned := map[string]bool{}
+	isOwned := func(path string) bool {
+		key := strings.ToLower(path)
+		if value, ok := owned[key]; ok {
+			return value
+		}
+		ok, err := adminOwned(path)
+		owned[key] = err == nil && ok
+		return owned[key]
+	}
+	files := make([]windowsHookImageConfigFile, 0, len(paths))
+	for _, path := range paths {
+		file := windowsHookImageConfigFile{Path: path}
+		elements, err := winpath.ElementsBelow(programData, path)
+		if err != nil {
+			file.User, file.Home, file.Note = true, programData, "not_admin_owned: "+err.Error()
+			files = append(files, file)
+			continue
+		}
+		for _, element := range elements[1:] {
+			if !isOwned(element) {
+				file.User, file.Home, file.Note = true, programData, "not_admin_owned: "+element
+				break
+			}
+		}
+		files = append(files, file)
+	}
+	return files
 }
 
 // windowsHookImageConfigScan is the result of one scan.
@@ -48,7 +133,8 @@ type windowsHookImageConfigScan struct {
 	// and retire stays pending.
 	Incomplete []string
 	// Skipped lists "<file>: <error>" for each account file that was a
-	// link, not a regular file, too large, unreadable or did not answer in
+	// link, had a link at or below its account home (link_in_account_path),
+	// was not a regular file, too large, unreadable or did not answer in
 	// time. It is reported (skipped_unsafe) and does not void the scan: a
 	// folder it might name is still kept while it is current, the replaced
 	// one or replaced less than hookImageRetainAfterSupersede ago.
@@ -76,18 +162,21 @@ var errWindowsHookImageScanUnsafe = errors.New("not a regular file (a link, a fo
 // expandWindowsHookImageConfigFiles turns the watched paths into the regular
 // files to read: a folder (Claude Code's managed-settings.d) becomes its
 // regular files, a missing path is dropped, a link or other non-regular entry
-// is refused (machine: incomplete; account: skipped). Lock files and
-// temporaries are left out: writers hold them without sharing and they never
-// name a hook.
+// is refused (machine: incomplete; account: skipped). An account path is
+// first checked with checkAccount (windowsHookImageAccountPathCheck): one
+// with a link at or below its home is skipped and never listed or read. Lock
+// files and temporaries are left out: writers hold them without sharing and
+// they never name a hook.
 func expandWindowsHookImageConfigFiles(
 	entries []windowsHookImageConfigFile,
 	lstat func(string) (fs.FileInfo, error),
 	readDir func(string) ([]fs.DirEntry, error),
+	checkAccount func(home, path string) error,
 ) ([]windowsHookImageConfigFile, []string, []string) {
 	var files []windowsHookImageConfigFile
 	var incomplete, skipped []string
 	refuse := func(entry windowsHookImageConfigFile, err error) {
-		line := fmt.Sprintf("%s: %v", entry.Path, err)
+		line := entry.line(err)
 		if entry.User {
 			skipped = append(skipped, line)
 		} else {
@@ -110,6 +199,14 @@ func expandWindowsHookImageConfigFiles(
 			continue
 		}
 		expanded[entryKey] = true
+		if entry.User {
+			if err := checkAccount(entry.Home, entry.Path); errors.Is(err, fs.ErrNotExist) {
+				continue
+			} else if err != nil {
+				refuse(entry, err)
+				continue
+			}
+		}
 		info, err := lstat(entry.Path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -137,19 +234,19 @@ func expandWindowsHookImageConfigFiles(
 			refuse(entry, err)
 			continue
 		}
-		for _, child := range children {
-			path := windowsHookImageJoin(entry.Path, child.Name())
-			switch {
-			case child.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0:
-				refuse(windowsHookImageConfigFile{Path: path, User: entry.User}, errWindowsHookImageScanUnsafe)
-			case child.IsDir() || !child.Type().IsRegular():
+		for _, dirEntry := range children {
+			child := windowsHookImageConfigFile{Path: windowsHookImageJoin(entry.Path, dirEntry.Name()), User: entry.User, Home: entry.Home, Note: entry.Note}
+			switch mode := dirEntry.Type(); {
+			case mode&(fs.ModeSymlink|fs.ModeIrregular) != 0:
+				refuse(child, errWindowsHookImageScanUnsafe)
+			case dirEntry.IsDir() || !mode.IsRegular():
 				// One level: a folder the connector watches holds its files
 				// directly (managed-settings.d\*.json).
 				continue
-			case windowsHookImageScanSkipsName(path):
+			case windowsHookImageScanSkipsName(child.Path):
 				continue
 			default:
-				add(windowsHookImageConfigFile{Path: path, User: entry.User})
+				add(child)
 			}
 		}
 	}
@@ -164,8 +261,9 @@ func windowsHookImageScanSkipsName(path string) bool {
 // scanWindowsHookImageConfigFiles reads each regular file (a missing one is
 // skipped) and records the launch folders of bin it names. A machine file
 // that cannot be read makes the scan incomplete; an account file that
-// cannot be read is skipped (see windowsHookImageConfigScan).
-func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin string, read func(string) ([]byte, error)) windowsHookImageConfigScan {
+// cannot be read is skipped (see windowsHookImageConfigScan). read gets the
+// whole entry: an account file is read only below its Home.
+func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin string, read func(windowsHookImageConfigFile) ([]byte, error)) windowsHookImageConfigScan {
 	scan := windowsHookImageConfigScan{Named: map[string][]string{}, UserFiles: map[string]bool{}}
 	seen := map[string]bool{}
 	for _, file := range files {
@@ -174,12 +272,12 @@ func scanWindowsHookImageConfigFiles(files []windowsHookImageConfigFile, bin str
 			continue
 		}
 		seen[key] = true
-		body, err := read(file.Path)
+		body, err := read(file)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			line := fmt.Sprintf("%s: %v", file.Path, err)
+			line := file.line(err)
 			if file.User {
 				scan.Skipped = append(scan.Skipped, line)
 			} else {

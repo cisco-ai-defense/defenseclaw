@@ -146,8 +146,8 @@ C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	if got != "0123456789abcdef,fedcba9876543210" {
 		t.Fatalf("folders named = %s", got)
 	}
-	read := func(path string) ([]byte, error) {
-		switch path {
+	read := func(file windowsHookImageConfigFile) ([]byte, error) {
+		switch file.Path {
 		case `C:\a.json`, `C:\Users\u\.cursor\hooks.json`:
 			return []byte(body), nil
 		case `C:\held.json`, `C:\Users\u\.codex\hooks.json`:
@@ -157,7 +157,7 @@ C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	}
 	scan := scanWindowsHookImageConfigFiles([]windowsHookImageConfigFile{
 		{Path: `C:\a.json`}, {Path: `C:\gone.json`}, {Path: `C:\held.json`}, {Path: `C:\A.JSON`},
-		{Path: `C:\Users\u\.cursor\hooks.json`, User: true}, {Path: `C:\Users\u\.codex\hooks.json`, User: true},
+		{Path: `C:\Users\u\.cursor\hooks.json`, User: true, Home: `C:\Users\u`}, {Path: `C:\Users\u\.codex\hooks.json`, User: true, Home: `C:\Users\u`},
 	}, hookImageTestBin, read)
 	// A machine file that cannot be read voids the scan; an account file
 	// that cannot be read is skipped and voids nothing.
@@ -224,13 +224,13 @@ func TestHookImageScanExpandsAWatchedFolder(t *testing.T) {
 	}
 	files, incomplete, skipped := expandWindowsHookImageConfigFiles([]windowsHookImageConfigFile{
 		{Path: dropIns},
-		{Path: `C:\Users\u\.claude\settings.json`, User: true},
-		{Path: `C:\Users\u\.claude\link.json`, User: true},
-		{Path: `C:\Users\u\.claude\missing.json`, User: true},
+		{Path: `C:\Users\u\.claude\settings.json`, User: true, Home: `C:\Users\u`},
+		{Path: `C:\Users\u\.claude\link.json`, User: true, Home: `C:\Users\u`},
+		{Path: `C:\Users\u\.claude\missing.json`, User: true, Home: `C:\Users\u`},
 		{Path: `C:\ProgramData\Cursor\hooks.json`},
 		{Path: `C:\ProgramData\Cursor\reparse.json`},
 		{Path: dropIns},
-	}, lstat, readDir)
+	}, lstat, readDir, func(string, string) error { return nil })
 	var got []string
 	for _, file := range files {
 		got = append(got, fmt.Sprintf("%s|%v", file.Path, file.User))
@@ -429,5 +429,176 @@ func TestHookImageRetireReportsAWriterError(t *testing.T) {
 	report = retireWindowsHookImages(steps)
 	if report.OK || report.Reason != windowsHookImageRetirePending || !strings.Contains(report.Error, "guardian restart") {
 		t.Fatalf("pending retire = %+v", report)
+	}
+}
+
+// fakeAccountPaths is the account path check over a table of elements and
+// their reparse flags (winpath.CheckNoReparseBelow with a fake lister), the
+// decision the Windows scan makes with winpath.RejectReparseBelow.
+func fakeAccountPaths(reparse map[string]bool) func(home, path string) error {
+	return windowsHookImageAccountPathCheck(func(root, path string) error {
+		return winpath.CheckNoReparseBelow(root, path, func(element string) (bool, error) {
+			value, ok := reparse[strings.ToLower(element)]
+			if !ok {
+				return false, fs.ErrNotExist
+			}
+			return value, nil
+		})
+	})
+}
+
+// GAP-0265: SYSTEM resolves every folder between an account's home and an
+// account file with its own rights, so a junction the account made in the
+// middle (C:\Users\u\.codex -> anywhere) would point SYSTEM's read outside
+// the home. Such a file is skipped (link_in_account_path), before it is
+// listed or read, and never makes the scan incomplete; the plain account
+// file and the machine files are still read.
+func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
+	home := `C:\Users\u`
+	check := fakeAccountPaths(map[string]bool{
+		`c:\users\u`:                        false,
+		`c:\users\u\.claude`:                false,
+		`c:\users\u\.claude\settings.json`:  false,
+		`c:\users\u\.codex`:                 true,
+		`c:\users\u\.codex\hooks.json`:      false,
+		`c:\users\u\.claude\managed`:        true,
+		`c:\users\u\.claude\managed\a.json`: false,
+	})
+	lstat := func(path string) (fs.FileInfo, error) {
+		switch strings.ToLower(path) {
+		case `c:\users\u\.claude\settings.json`, `c:\users\u\.codex\hooks.json`, `c:\program files\claudecode\managed-settings.json`:
+			return fakeScanInfo{name: path}, nil
+		case `c:\users\u\.claude\managed`:
+			return fakeScanInfo{name: path, mode: fs.ModeDir}, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	readDir := func(path string) ([]fs.DirEntry, error) {
+		return nil, errors.New("listed " + path + " behind a link")
+	}
+	files, incomplete, skipped := expandWindowsHookImageConfigFiles([]windowsHookImageConfigFile{
+		{Path: `C:\Program Files\ClaudeCode\managed-settings.json`},
+		{Path: home + `\.claude\settings.json`, User: true, Home: home},
+		{Path: home + `\.codex\hooks.json`, User: true, Home: home},
+		{Path: home + `\.claude\managed`, User: true, Home: home},
+		{Path: home + `\.cursor\hooks.json`, User: true, Home: home},
+		{Path: `C:\Users\v\.claude\settings.json`, User: true},
+	}, lstat, readDir, check)
+	if len(files) != 2 || files[0].Path != `C:\Program Files\ClaudeCode\managed-settings.json` || files[1].Path != home+`\.claude\settings.json` {
+		t.Fatalf("files = %+v", files)
+	}
+	if len(incomplete) != 0 {
+		t.Fatalf("an account link made the scan incomplete: %v", incomplete)
+	}
+	joined := strings.Join(skipped, "\n")
+	if len(skipped) != 3 || !strings.Contains(skipped[0], `.codex\hooks.json: link_in_account_path: `) ||
+		!strings.Contains(skipped[1], `.claude\managed: link_in_account_path: `) || !strings.Contains(joined, "without an account home") {
+		t.Fatalf("skipped = %v", skipped)
+	}
+	// The reader makes the same decision (the Windows reader then checks the
+	// opened handle's final path as well): a link found at read time, after
+	// the expansion, is skipped too.
+	body := []byte(`{"command":"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\hooks\\0123456789abcdef\\defenseclaw-hook.exe"}`)
+	afterSwap := fakeAccountPaths(map[string]bool{`c:\users\u`: false, `c:\users\u\.claude`: true})
+	read := func(file windowsHookImageConfigFile) ([]byte, error) {
+		if file.User {
+			if err := afterSwap(file.Home, file.Path); err != nil {
+				return nil, err
+			}
+		}
+		return body, nil
+	}
+	scan := scanWindowsHookImageConfigFiles(files, hookImageTestBin, read)
+	if len(scan.Incomplete) != 0 || len(scan.Skipped) != 1 || !strings.Contains(scan.Skipped[0], "link_in_account_path") {
+		t.Fatalf("scan = %+v", scan)
+	}
+	if got := scan.Named["0123456789abcdef"]; len(got) != 1 || got[0] != `C:\Program Files\ClaudeCode\managed-settings.json` {
+		t.Fatalf("named = %v", scan.Named)
+	}
+}
+
+// A skipped account file never blocks retire: the report notes it
+// (skipped_unsafe: ... link_in_account_path) and retire ends ok when no
+// machine file names a folder.
+func TestHookImageRetireReportsAnAccountFileBehindALink(t *testing.T) {
+	r := newRetireFixture(t)
+	r.named = []map[string][]string{{}}
+	steps := r.steps()
+	scan := steps.Scan
+	steps.Scan = func() windowsHookImageConfigScan {
+		got := scan()
+		got.Skipped = []string{`C:\Users\u\.codex\hooks.json: link_in_account_path: a link (reparse point) lies at or below the root: C:\Users\u\.codex; not read`}
+		return got
+	}
+	report := retireWindowsHookImages(steps)
+	if !report.OK || !strings.Contains(strings.Join(report.Notes, "\n"), `skipped_unsafe: C:\Users\u\.codex\hooks.json: link_in_account_path: `) {
+		t.Fatalf("retire = %+v", report)
+	}
+}
+
+// GAP-0265 P3-a: a standard user can create ProgramData\OpenAI\Codex or
+// ProgramData\Cursor when they are absent. A file there is a machine file
+// only when it and every folder from ProgramData down to it is owned by
+// SYSTEM or Administrators; otherwise it is an account file (read below
+// ProgramData), so one the user made unreadable is skipped and does not
+// void the scan.
+func TestHookImageVendorFilesInAUserOwnedFolderAreAccountFiles(t *testing.T) {
+	programData := `C:\ProgramData`
+	owners := map[string]bool{
+		`c:\programdata\openai`:                         true,
+		`c:\programdata\openai\codex`:                   true,
+		`c:\programdata\openai\codex\requirements.toml`: true,
+		`c:\programdata\openai\codex\planted.toml`:      false,
+		`c:\programdata\cursor`:                         false,
+		`c:\programdata\cursor\hooks.json`:              true,
+	}
+	asked := 0
+	adminOwned := func(path string) (bool, error) {
+		asked++
+		value, ok := owners[strings.ToLower(path)]
+		if !ok {
+			return false, errors.New("no owner")
+		}
+		return value, nil
+	}
+	files := windowsHookImageVendorFiles(programData, []string{
+		programData + `\OpenAI\Codex\requirements.toml`,
+		programData + `\OpenAI\Codex\planted.toml`,
+		programData + `\Cursor\hooks.json`,
+		programData + `\Cursor\sub\unknown.json`,
+	}, adminOwned)
+	var got []string
+	for _, file := range files {
+		got = append(got, fmt.Sprintf("%s|%v|%s|%s", file.Path, file.User, file.Home, file.Note))
+	}
+	want := []string{
+		programData + `\OpenAI\Codex\requirements.toml|false||`,
+		programData + `\OpenAI\Codex\planted.toml|true|` + programData + `|not_admin_owned: ` + programData + `\OpenAI\Codex\planted.toml`,
+		programData + `\Cursor\hooks.json|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor`,
+		programData + `\Cursor\sub\unknown.json|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor`,
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("files =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Each folder's owner is read once.
+	if asked != 5 {
+		t.Fatalf("owners read %d times, want 5", asked)
+	}
+	read := func(file windowsHookImageConfigFile) ([]byte, error) {
+		if strings.HasSuffix(file.Path, "requirements.toml") {
+			return []byte("[hooks]\n"), nil
+		}
+		return nil, errors.New("Access is denied.")
+	}
+	scan := scanWindowsHookImageConfigFiles(files, hookImageTestBin, read)
+	if len(scan.Incomplete) != 0 || len(scan.Skipped) != 3 || !strings.Contains(scan.Skipped[1], `hooks.json (not_admin_owned: C:\ProgramData\Cursor): Access is denied.`) {
+		t.Fatalf("scan = %+v", scan)
+	}
+	// An admin-owned vendor file that cannot be read still voids the scan.
+	machine := scanWindowsHookImageConfigFiles(files[:1], hookImageTestBin, func(windowsHookImageConfigFile) ([]byte, error) {
+		return nil, errors.New("Access is denied.")
+	})
+	if len(machine.Incomplete) != 1 {
+		t.Fatalf("machine scan = %+v", machine)
 	}
 }

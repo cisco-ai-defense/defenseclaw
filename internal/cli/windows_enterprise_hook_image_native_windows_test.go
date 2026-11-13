@@ -392,8 +392,11 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 			t.Cleanup(func() { _ = os.RemoveAll(created) })
 		}
 	}
+	// The probe is an empty settings object: on a managed machine it cannot
+	// change the managed hooks, and a run killed before its cleanup leaves
+	// only "{}" (no hooks key) behind.
 	probe := filepath.Join(dropIns, "zz-defenseclaw-hookimg-native-test.json")
-	if err := os.WriteFile(probe, []byte(`{"hooks":{}}`), 0o600); err != nil {
+	if err := os.WriteFile(probe, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Remove(probe) })
@@ -420,7 +423,100 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 			t.Fatalf("the scan opened the managed-settings.d folder as a file: %s", line)
 		}
 	}
-	if _, err := readWindowsHookImageConfigFile(home); err == nil {
+	if _, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: home}); err == nil {
 		t.Fatal("the reader read a folder")
+	}
+}
+
+// GAP-0265: an account file is read as SYSTEM only when no link lies from
+// the account home down to it. A junction in the middle of the path (or a
+// home that is itself a junction) is skipped as link_in_account_path and
+// never read, also in the real scan (Skipped, never Incomplete); the plain
+// path is read, with the temp folder's 8.3 spelling (RUNNER~1) above the home.
+// VerifyOpenedBelow, the check on the opened handle, refuses a file opened
+// through the junction.
+func TestWindowsHookImageNativeAccountFileBehindAJunction(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	body := []byte(`{"hooks":{}}`)
+	plain := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(plain), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "hooks.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	junction := func(link, target string) {
+		t.Helper()
+		if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Fatalf("mklink /J %s: %v\n%s", link, err, out)
+		}
+		t.Cleanup(func() { _ = os.Remove(link) })
+	}
+	junction(filepath.Join(home, ".codex"), outside)
+	behind := filepath.Join(home, ".codex", "hooks.json")
+
+	got, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: plain, User: true, Home: home})
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("plain account file: %q, %v", got, err)
+	}
+	if _, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: behind, User: true, Home: home}); err == nil ||
+		!strings.Contains(err.Error(), windowsHookImageLinkInAccountPath) {
+		t.Fatalf("account file behind a junction: %v", err)
+	}
+	// The same path as a machine file is read: only account paths are walked.
+	if _, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: behind}); err != nil {
+		t.Fatalf("machine read through the junction: %v", err)
+	}
+	// A home that is itself a junction.
+	linkedHome := filepath.Join(t.TempDir(), "home-link")
+	junction(linkedHome, home)
+	if _, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: filepath.Join(linkedHome, ".claude", "settings.json"), User: true, Home: linkedHome}); err == nil ||
+		!strings.Contains(err.Error(), windowsHookImageLinkInAccountPath) {
+		t.Fatalf("account file under a linked home: %v", err)
+	}
+
+	// The handle check alone (the walk raced): a handle opened through the
+	// junction does not end below the home; one opened on the plain path does.
+	for _, item := range []struct {
+		path string
+		ok   bool
+	}{{plain, true}, {behind, false}} {
+		file, err := os.Open(item.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = winpath.VerifyOpenedBelow(windows.Handle(file.Fd()), home, item.path)
+		_ = file.Close()
+		if item.ok != (err == nil) {
+			t.Fatalf("VerifyOpenedBelow(%s) = %v", item.path, err)
+		}
+	}
+
+	// The real expansion and scan: the file behind the junction is skipped,
+	// the scan stays complete.
+	entries := []windowsHookImageConfigFile{
+		{Path: plain, User: true, Home: home},
+		{Path: behind, User: true, Home: home},
+		{Path: filepath.Join(home, ".codex"), User: true, Home: home},
+	}
+	files, incomplete, skipped := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
+		windowsHookImageAccountPathCheck(winpath.RejectReparseBelow))
+	scan := scanWindowsHookImageConfigFiles(files, `C:\Program Files\Cisco\DefenseClaw\bin`, readWindowsHookImageConfigFile)
+	incomplete = append(incomplete, scan.Incomplete...)
+	skipped = append(skipped, scan.Skipped...)
+	if len(incomplete) != 0 {
+		t.Fatalf("an account junction made the scan incomplete: %v", incomplete)
+	}
+	if len(files) != 1 || !strings.EqualFold(files[0].Path, plain) || len(skipped) != 2 {
+		t.Fatalf("files %+v, skipped %v", files, skipped)
+	}
+	for _, line := range skipped {
+		if !strings.Contains(line, windowsHookImageLinkInAccountPath) {
+			t.Fatalf("skipped line without link_in_account_path: %s", line)
+		}
 	}
 }

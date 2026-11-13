@@ -24,12 +24,14 @@ import (
 
 // WindowsHookConfigFile is one path WindowsManagedHookConfigFiles lists.
 // User is true for a path inside the enrolled account's home (the account
-// can write it); a machine path a connector also watches (Claude Code's
-// managed-settings.d) is not an account's. A path can be a folder: the
-// caller expands it to its regular files.
+// can write it), and Home is then that home: the caller reads the path only
+// when no link lies from Home down to it. A machine path a connector also
+// watches (Claude Code's managed-settings.d) is not an account's. A path can
+// be a folder: the caller expands it to its regular files.
 type WindowsHookConfigFile struct {
 	Path string
 	User bool
+	Home string
 }
 
 // WindowsManagedHookConfigFiles lists, for every enabled target of the
@@ -81,7 +83,11 @@ func WindowsManagedHookConfigFiles(manifestPath string) ([]WindowsHookConfigFile
 			continue
 		}
 		for _, path := range paths {
-			files = append(files, WindowsHookConfigFile{Path: path, User: windowsPathWithin(home, path)})
+			file := WindowsHookConfigFile{Path: path}
+			if windowsPathWithin(home, path) {
+				file.User, file.Home = true, home
+			}
+			files = append(files, file)
 		}
 	}
 	return files, problems
