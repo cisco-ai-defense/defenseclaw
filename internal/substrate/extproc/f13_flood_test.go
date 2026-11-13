@@ -5,6 +5,7 @@ package extproc
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -125,10 +126,10 @@ func TestADeletedUIDUnderASlowLeaderIsNeverAllowed(t *testing.T) {
 	}
 }
 
-// GAP-0243: a name is refreshed once per uid.cache_ttl/4. A refresh that
-// confirmed the cached registration serves the next refusals without a
-// lookup; past the interval the name is looked up again.
-func TestRefreshIsRateLimitedPerName(t *testing.T) {
+// GAP-0243: a refresh that confirmed the cached registration keeps the
+// next policy-stage refusals for refusalReuse (1 s) without a lookup; past
+// it the name is looked up again.
+func TestARefusalReusesAConfirmationBriefly(t *testing.T) {
 	var mu sync.Mutex
 	now := time.Date(2026, 11, 13, 19, 0, 0, 0, time.UTC)
 	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
@@ -142,13 +143,115 @@ func TestRefreshIsRateLimitedPerName(t *testing.T) {
 	}
 	for range 5 {
 		if v := blocked(); v.Allow || u.calls.Load() != 2 {
-			t.Fatalf("refusal within the interval: %+v after %d lookups, want 2", v, u.calls.Load())
+			t.Fatalf("refusal within refusalReuse: %+v after %d lookups, want 2", v, u.calls.Load())
 		}
 	}
 	mu.Lock()
-	now = now.Add(16 * time.Second) // past 60 s / 4, still within the cache TTL
+	now = now.Add(refusalReuse + time.Millisecond)
 	mu.Unlock()
 	if v := blocked(); v.Allow || u.calls.Load() != 3 {
-		t.Fatalf("refusal past the interval: %+v after %d lookups, want 3", v, u.calls.Load())
+		t.Fatalf("refusal past refusalReuse: %+v after %d lookups, want 3", v, u.calls.Load())
+	}
+}
+
+// toggledChain answers clear, or waits out its budget (a slow leader).
+func toggledChain(slow *atomic.Bool) checkerFunc {
+	return checkerFunc(func(ctx context.Context, _ ChainStep) (ChainVerdict, error) {
+		if slow.Load() {
+			<-ctx.Done()
+			return ChainVerdict{}, ctx.Err()
+		}
+		return ChainVerdict{}, nil
+	})
+}
+
+// GAP-0234 (R8's TestR8cDeletedWithinRefreshWindowSlowLeader, allowed with
+// an alert at 1d31b29b02): a name a refresh confirmed just now is deleted;
+// the leader is then too slow for the chain check, on an attended OSS
+// install. The unchecked step does not stand on the earlier refresh: it is
+// refused.
+func TestADeletedUIDJustAfterARefreshIsNotAllowed(t *testing.T) {
+	var slow atomic.Bool
+	h := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = toggledChain(&slow) })
+	h.uids.profile = "eng" // eng blocks blocked.example.net
+	ctx := context.Background()
+	h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "blocked.example.net", "/")); v.Allow {
+		t.Fatal("blocked host allowed")
+	}
+	h.uids.mu.Lock()
+	h.uids.live = false
+	h.uids.mu.Unlock()
+	slow.Store(true)
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "POST", "example.com", "/")); v.Allow {
+		t.Fatalf("deleted UID just after a refresh, slow leader, attended OSS: %+v, want a refusal", v)
+	}
+}
+
+// GAP-0243 (R8's TestR8cRecreatedAfterConfirmedDeleteNotStuck, refused
+// actor_not_live at 1d31b29b02): a cached delete looks the name up at once,
+// so a name created again right after a confirmed delete is allowed.
+func TestARecreatedNameIsSeenRightAfterAConfirmedDelete(t *testing.T) {
+	h := newHarness(t, nil)
+	ctx := context.Background()
+	h.uids.live = false
+	h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+	h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+	h.uids.mu.Lock()
+	h.uids.live, h.uids.uid = true, "uid-2"
+	h.uids.mu.Unlock()
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/")); !v.Allow {
+		t.Fatalf("recreated right after a confirmed delete: %+v, want allow", v)
+	}
+}
+
+// GAP-0237 (R8's TestR8cRecreatedProfileInsideRefreshWindow, refused under
+// eng for 15 s at 1d31b29b02): a refusal stands on a refresh for
+// refusalReuse (1 s) at most; then the recreated actor is decided under
+// its own profile.
+func TestARecreatedProfileIsSeenAfterTheRefusalReuse(t *testing.T) {
+	var mu sync.Mutex
+	now := time.Date(2026, 11, 13, 19, 0, 0, 0, time.UTC)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	l := &fakeLeader{live: "uid-1"}
+	h := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = l; o.Now = clock })
+	h.uids.profile = "eng"
+	ctx := context.Background()
+	h.eng.DecideHeaders(ctx, req("ops", "GET", "example.com", "/"))
+	h.eng.DecideHeaders(ctx, req("ops", "GET", "blocked.example.net", "/")) // a refresh confirms uid-1
+	h.recreate(l, "uid-2", "")
+	mu.Lock()
+	now = now.Add(refusalReuse + time.Millisecond)
+	mu.Unlock()
+	if v := h.eng.DecideHeaders(ctx, req("ops", "GET", "blocked.example.net", "/")); !v.Allow || v.Profile != "base" {
+		t.Fatalf("recreated under base after refusalReuse: %+v, want base's allow", v)
+	}
+}
+
+// GAP-0243 (R8's TestR8cFloodBoundedNoLeak): 2,000 concurrent refusals
+// while a lookup takes 1.5 s make one lookup, each returns within its
+// budget, and no goroutine is left once the flight ends.
+func TestARefusalFloodOf2000IsBounded(t *testing.T) {
+	u := &slowUIDs{rec: ActorRecord{UID: "uid-1", Profile: "eng"}, live: true}
+	h := newHarness(t, func(_ *Config, o *Options) { o.UIDs = u; o.ChainChecker = &fakeLeader{live: "uid-1"} })
+	h.eng.DecideHeaders(context.Background(), req("ops", "GET", "example.com", "/"))
+	u.set(ActorRecord{UID: "uid-1", Profile: "eng"}, true, 1500*time.Millisecond)
+	runtime.GC()
+	before := runtime.NumGoroutine()
+	start := time.Now()
+	vs := flood(h.eng, 2000, func() *Request { return req("ops", "GET", "blocked.example.net", "/") })
+	took := time.Since(start) // the slowest request, at most
+	for i, v := range vs {
+		if v.Allow {
+			t.Fatalf("request %d allowed", i)
+		}
+	}
+	lookups := u.calls.Load() - 1
+	time.Sleep(2 * time.Second)
+	runtime.GC()
+	after := runtime.NumGoroutine()
+	t.Logf("2000 concurrent refusals: %d lookups, all answered in %v, goroutines %d -> %d", lookups, took, before, after)
+	if lookups > 1 || after > before+5 || took > 500*time.Millisecond {
+		t.Fatalf("flood not bounded: %d lookups, all answered in %v, goroutines %d -> %d", lookups, took, before, after)
 	}
 }

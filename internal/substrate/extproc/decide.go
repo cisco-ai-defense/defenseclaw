@@ -291,6 +291,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
 		}
 	}()
+	begin := e.now()
 	var p pass
 	v = e.decideHeaders(ctx, req, &p)
 	switch {
@@ -299,7 +300,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		p = pass{last: true}
 		v = e.decideHeaders(ctx, req, &p)
 	case !p.confirmed:
-		switch e.uids.Refresh(ctx, req.Actor) {
+		switch e.uids.Refresh(ctx, req.Actor, policyRefusal(v), begin) {
 		case RefreshChanged:
 			p = pass{last: true, refreshed: true}
 			v = e.decideHeaders(ctx, req, &p)
@@ -307,7 +308,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			p.confirmed = true
 		}
 	}
-	if !p.confirmed && (v.Allow || v.Category == CategoryChainUnchecked || v.Category == CategoryActorNotLive) {
+	if !p.confirmed && !policyRefusal(v) {
 		// Not even a refusal of the policy stages to stand on: an unchecked
 		// step or a cached delete, and the leader did not confirm the
 		// incarnation in time. Never chain.failure_mode's allow (GAP-0243).
@@ -316,6 +317,12 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		v.Retryable = true
 	}
 	return v
+}
+
+// policyRefusal is a refusal that does not need the incarnation confirmed
+// to stand: not an allow, an unchecked step or a delete (GAP-0243).
+func policyRefusal(v Verdict) bool {
+	return !v.Allow && v.Category != CategoryChainUnchecked && v.Category != CategoryActorNotLive
 }
 
 // pass is one decideHeaders pass over a request.
@@ -333,11 +340,13 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 // again. So a recreated actor is decided under its own profile and UID,
 // never its predecessor's (GAP-0237). The last pass decides as it is.
 //
-// A refresh is bounded (GAP-0243): a request waits for it a short budget,
-// and a name is looked up once per interval. Unconfirmed, a refusal of the
-// policy stages stands (it is a refusal); an unchecked step or a cached
-// delete is refused, retryable (registration_unconfirmed), never left to
-// chain.failure_mode, which decides only a leader that cannot be reached.
+// A refresh is bounded (GAP-0243): one lookup per name in flight, and a
+// request waits a short budget for it. Unconfirmed, a refusal of the policy
+// stages stands (it is a refusal), and only such a refusal may stand on a
+// refresh made within refusalReuse; an unchecked step or a cached delete
+// needs a lookup answered now, else it is refused, retryable
+// (registration_unconfirmed), never left to chain.failure_mode, which
+// decides only a leader that cannot be reached.
 type pass struct {
 	last bool
 	// refreshed: the entry was resolved by Refresh for this request.

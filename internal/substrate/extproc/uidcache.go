@@ -53,10 +53,9 @@ type UIDCache struct {
 	ttl      time.Duration
 	staleMax time.Duration
 	now      func() time.Time
-	// refreshBudget bounds how long a request waits for a Refresh, and
-	// refreshEvery how often a name is refreshed (GAP-0243).
+	// refreshBudget bounds how long a request waits for a Refresh
+	// (GAP-0243).
 	refreshBudget time.Duration
-	refreshEvery  time.Duration
 
 	mu      sync.Mutex
 	m       map[string]uidEntry
@@ -68,13 +67,21 @@ type UIDCache struct {
 // at most; the lookup goes on, so its answer fills the cache for the next.
 const refreshFlightMax = 2 * time.Second
 
-// refreshState is a name's last refresh: when it started, whether it is
-// still running, and what it confirmed (GAP-0243).
+// refusalReuse is how long a refresh's confirmation keeps a policy-stage
+// refusal without another lookup: the bound a registration miss has
+// (uidMissTTL). Nothing that would allow reuses one (GAP-0243).
+const refusalReuse = uidMissTTL
+
+// refreshState is a name's last refresh: whether it is running, and what it
+// confirmed when (GAP-0243).
 type refreshState struct {
-	started   time.Time
-	running   bool
-	confirmed time.Time
-	entry     uidEntry
+	running bool
+	// started is when the running lookup started; confirmed and
+	// confirmedStart when the last answered one answered and started.
+	started        time.Time
+	confirmed      time.Time
+	confirmedStart time.Time
+	entry          uidEntry
 }
 
 // RefreshResult is what a Refresh learned.
@@ -86,9 +93,7 @@ const (
 	RefreshSame RefreshResult = iota
 	// RefreshChanged: another UID, profile or attendance, or deleted.
 	RefreshChanged
-	// RefreshUnconfirmed: no answer within the budget, an outage, or a
-	// name refreshed within refreshEvery whose last refresh confirmed
-	// nothing.
+	// RefreshUnconfirmed: no answer within the budget, or an outage.
 	RefreshUnconfirmed
 )
 
@@ -109,7 +114,7 @@ func (e uidEntry) fresh(now time.Time, ttl time.Duration) bool {
 // no registration (a callout without a leader).
 func NewUIDCache(r UIDResolver, ttl, staleMax time.Duration) *UIDCache {
 	return &UIDCache{r: r, ttl: ttl, staleMax: staleMax, now: time.Now, m: map[string]uidEntry{},
-		refresh: map[string]*refreshState{}, refreshBudget: defaultRefreshBudget, refreshEvery: ttl / 4}
+		refresh: map[string]*refreshState{}, refreshBudget: defaultRefreshBudget}
 }
 
 // Where Resolve's answer came from.
@@ -180,13 +185,17 @@ func (c *UIDCache) load(ctx context.Context, a ActorRef) (uidEntry, error) {
 const defaultRefreshBudget = 20 * time.Millisecond
 
 // Refresh resolves a again past its cached entry and reports whether the
-// registration changed (GAP-0237). It bounds what a flood of refused
-// requests costs the leader and the requests (GAP-0243): one lookup per
-// name at a time (its own singleflight, never forgotten while it runs), at
-// most one started per refreshEvery, and a request waits refreshBudget for
-// it. A name a refresh confirmed within refreshEvery, still cached as it
-// was, is the same without a lookup.
-func (c *UIDCache) Refresh(ctx context.Context, a ActorRef) RefreshResult {
+// registration changed (GAP-0237). It bounds what a flood costs the leader
+// and the requests (GAP-0243): one lookup per name in flight (its own
+// singleflight, never forgotten while it runs), which concurrent refreshes
+// join, and a request waits refreshBudget for it.
+//
+// Anything that would allow, and a cached delete, needs a lookup made
+// during this request (one started after since, the request's start): the
+// one it starts or joins, or one that started and answered after since. Only
+// a policy-stage refusal (refusal) may also stand on an earlier lookup: one
+// that confirmed the cached registration within refusalReuse.
+func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since time.Time) RefreshResult {
 	if c == nil || c.r == nil {
 		return RefreshSame
 	}
@@ -206,17 +215,24 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef) RefreshResult {
 		st = &refreshState{}
 		c.refresh[key] = st
 	}
+	cachedAsConfirmed := ok && !st.confirmed.IsZero() && prev.live == st.entry.live && prev.rec == st.entry.rec
 	switch {
-	case st.running:
-		// Join the lookup that is running.
-	case !st.confirmed.IsZero() && now.Sub(st.confirmed) < c.refreshEvery && ok && prev.live == st.entry.live && prev.rec == st.entry.rec:
+	case cachedAsConfirmed && st.confirmedStart.After(since):
+		// A lookup made during this request confirmed the entry.
 		c.mu.Unlock()
 		return RefreshSame
-	case !st.started.IsZero() && now.Sub(st.started) < c.refreshEvery:
+	case refusal && cachedAsConfirmed && now.Sub(st.confirmed) < refusalReuse:
+		c.mu.Unlock()
+		return RefreshSame
+	case st.running && (refusal || st.started.After(since)):
+		// Join the running lookup: one in flight per name.
+	case st.running:
+		// The running lookup started before this request, and only one
+		// runs per name.
 		c.mu.Unlock()
 		return RefreshUnconfirmed
 	default:
-		st.started, st.running = now, true
+		st.running, st.started = true, now
 	}
 	c.mu.Unlock()
 	ch := c.sf.DoChan("refresh\x00"+key, func() (any, error) {
@@ -230,7 +246,7 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef) RefreshResult {
 			return nil, err
 		}
 		ne := uidEntry{rec: rec, live: live, at: c.now()}
-		st.confirmed, st.entry = ne.at, ne
+		st.confirmed, st.confirmedStart, st.entry = ne.at, st.started, ne
 		c.storeLocked(key, ne)
 		return ne, nil
 	})
