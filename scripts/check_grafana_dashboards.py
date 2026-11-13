@@ -78,6 +78,7 @@ PROMETHEUS_RESOURCE_LABELS_BY_METRIC = {
     f"defenseclaw_sandbox_managed_{name}_total": MANAGED_SANDBOX_RESOURCE_LABELS
     for name in ("refusals", "asks", "foreign_items", "provisional", "drift")
 }
+MODEL_USAGE_LABELS = {"connector", "provider", "model", "route_decision", "call_role", "profile"}
 PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_approval_count_total": {"result", "auto", "dangerous"},
     "defenseclaw_approval_lifecycle_total": {"connector", "result", "surface"},
@@ -107,11 +108,18 @@ PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_sandbox_managed_foreign_items_total": {"kind", "action", "profile", "driver", "connector"},
     "defenseclaw_sandbox_managed_provisional_total": {"result", "profile", "driver", "connector"},
     "defenseclaw_sandbox_managed_drift_total": {"field", "profile", "driver", "connector"},
+    # Tokenomics (item 10): label_projections of metric.defenseclaw.model.cost,
+    # metric.defenseclaw.model.tokens and metric.defenseclaw.tokenomics.dropped
+    # in schemas/telemetry/v8/genai.yaml. There is no user or group label by design.
+    "defenseclaw_model_cost_USD_total": MODEL_USAGE_LABELS,
+    "defenseclaw_model_tokens_total": MODEL_USAGE_LABELS | {"kind"},
+    "defenseclaw_tokenomics_dropped_total": set(),
     "defenseclaw_stream_bytes_sent_bucket": {"le", "outcome"},
     "defenseclaw_stream_duration_ms_milliseconds_bucket": {"le", "outcome"},
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
 }
 PROMETHEUS_EXACT_LABEL_VALUES = {
+    ("defenseclaw_model_tokens_total", "kind"): {"input", "cache_read", "cache_creation", "output", "reasoning"},
     ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_ai"): {"false", "true"},
     ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_enabled"): {
         "client_side_unknown", "disabled", "enabled", "unknown",
@@ -199,6 +207,9 @@ VARIABLES = {
     "$vendor": ".*",
     "$category": ".*",
     "$state": ".*",
+    "$model": ".*",
+    "$profile": ".*",
+    "$route_decision": ".*",
     "$source": ".*",
     "$scanner": ".*",
     "$severity": ".*",

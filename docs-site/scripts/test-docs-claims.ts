@@ -1030,7 +1030,7 @@ describe('1.0.4 operator routes and limits', () => {
     assert.match(api, /\| Hook, notify and inspect \| 25\/s \| 100 \| 32 \|\s*\| Delivery receipts \| 25\/s \| 100 \| 32 \|/);
     assert.match(api, /Receipts have the budget of their own above, so a tool\s+call counts once against the hook budget/);
     const managed = page('enterprise/sandboxes.mdx');
-    assert.match(managed, /per-user budget \(40 per second, burst 100 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
+    assert.match(managed, /per-user budget \(100 per second, burst 200 for all of the user's sandboxes together: the rate the managed gateway answers inside the hook's 3\.5 second window\)\. The refusal is immediate and its message names the budget/);
     assert.match(managed, /Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
   });
 
@@ -1896,8 +1896,8 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0633", page: "reference/env-vars.mdx", has: ["exported in a shell is dropped when the", "The writers keep writing as usual"], lacks: ["where the profile is standalone, the Linux default"] },
   { gap: "GAP-0669", page: "stories/cursor-secret-exfil.mdx", has: ["defenseclaw setup cursor --yes --mode action --rule-pack default --no-human-approval --restart", "`--yes` re-applies hooks when Cursor is already configured and skips the optional LLM judge prompt", "✓ cursor mode=action"] },
   { gap: "GAP-0520", page: "guardrail/index.mdx", has: ["**Select action connector(s) for LLM judge.**"] },
-  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["18 DefenseClaw dashboards (19 with the Fleet assets)"] },
-  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 18 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
+  { gap: "GAP-0388", page: "observability/local-observability.mdx", has: ["19 DefenseClaw dashboards (20 with the Fleet assets)"] },
+  { gap: "GAP-0388", page: "observability/grafana-dashboards.mdx", has: ["DefenseClaw provisions 19 Grafana dashboards", "it is not in the installed package and is added with the separate Fleet assets"] },
   { gap: "GAP-1716", page: "get-started/windows/install-lifecycle.mdx", section: "Upgrade", has: ["exit code 0 means the installer started, not that it finished", "-Rollback -Yes`, which waits and sets the exit code"] },
   { gap: "GAP-1716", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["**Windows upgrade and rollback return before the installer finishes:**"] },
   { gap: "GAP-0922, GAP-0923", page: "support-matrix.mdx", section: "Upgrade and policy limits", has: ["macOS has no setting that stops a user's sandbox profile", "DefenseClaw does not see or audit its tool calls"], lacks: ["unshare -Urm"] },

@@ -182,9 +182,10 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 	capDir := t.TempDir()
 	dropListener, acceptDrop := false, false
 	for _, entry := range extraEnv {
-		if entry == "DC_COLD_DROP_LISTENER=1" {
+		switch entry {
+		case "DC_COLD_DROP_LISTENER=1":
 			dropListener = true
-		} else if entry == "DC_COLD_ACCEPT_DROP=1" {
+		case "DC_COLD_ACCEPT_DROP=1":
 			acceptDrop = true
 		}
 	}

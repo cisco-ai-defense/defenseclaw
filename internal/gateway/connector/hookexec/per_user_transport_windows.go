@@ -100,6 +100,7 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 // Connect can complete before GetExtendedTcpTable exposes the accepted row.
 // Keep the connection held and retry only an absent exact reverse tuple.
 func awaitPerUserWindowsSocket(ctx context.Context, inspect func() (uint32, error), owned func(uint32) error) error {
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return errConnectedSocketNotFound
@@ -114,7 +115,7 @@ func awaitPerUserWindowsSocket(ctx context.Context, inspect func() (uint32, erro
 		select {
 		case <-ctx.Done():
 			return errConnectedSocketNotFound
-		case <-time.After(20 * time.Millisecond):
+		case <-time.After(nextConnectedPollPause(&attempt)):
 		}
 	}
 }

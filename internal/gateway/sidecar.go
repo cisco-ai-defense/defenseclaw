@@ -107,6 +107,10 @@ type Sidecar struct {
 	// gateway report, which its install watcher admits (GAP-2591).
 	hookMCP hookReportedMCPServers
 
+	// modelUsageRT is the model usage engine and its local store (inert until
+	// observability.tokenomics turns them on); see sidecar_modelusage.go.
+	modelUsageRT atomic.Pointer[modelUsageRuntime]
+
 	startedAt  time.Time
 	cfg        *config.Config
 	cfgCurrent atomic.Pointer[config.Config]
@@ -167,9 +171,12 @@ type Sidecar struct {
 	// enrolledWatchRoots are the enrolled user folders the previous
 	// watcher of this process watched (runWatcher only); nil before the
 	// first.
-	enrolledWatchRoots       map[string]struct{}
-	guardrailRestartCh       chan struct{}
-	aiRestartCh              chan struct{}
+	enrolledWatchRoots map[string]struct{}
+	guardrailRestartCh chan struct{}
+	aiRestartCh        chan struct{}
+	// endpointHealthReloadCh asks the endpoint health reporter for a
+	// config_reload report after a committed reload.
+	endpointHealthReloadCh   chan struct{}
 	aiRuntimeRestartCh       chan struct{}
 	runCancelMu              sync.Mutex
 	runCancel                context.CancelFunc
@@ -588,6 +595,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		watcherRestartCh:        make(chan struct{}, 1),
 		guardrailRestartCh:      make(chan struct{}, 1),
 		aiRestartCh:             make(chan struct{}, 1),
+		endpointHealthReloadCh:  make(chan struct{}, 1),
 		aiRuntimeRestartCh:      make(chan struct{}, 1),
 		alertCtx:                alertCtx,
 		alertCancel:             alertCancel,
@@ -1026,6 +1034,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// The API starts independently of connector setup. Mark every per-user
 	// connector pending before it can answer a retained native hook.
 	s.beginPerUserConnectorHookSetup()
+	s.applyModelUsage(s.cfg)
+	defer s.stopModelUsage()
 	s.carryObservabilityV8ShutdownDrops()
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
@@ -1426,6 +1436,17 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			errCh <- err
 		}
 	}()
+
+	// Goroutine 5c: endpoint health reports to Cisco AI Defense. Only a
+	// managed Secure Client deployment has the destination; elsewhere no
+	// goroutine or timer is started.
+	if endpointHealthReporterEnabled(s.currentConfig()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.runEndpointHealthReporter(runCtx)
+		}()
+	}
 
 	// Goroutine 6: local UDS gRPC IPC server for AVC (opt-in via
 	// managed.enabled or deployment_mode=managed_enterprise). No-op
@@ -2540,6 +2561,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		proxy.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
 		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 	}
+	s.applyModelUsage(appliedCfg)
 
 	if aiRestart {
 		if nextAIDiscovery != nil {
@@ -2645,6 +2667,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if aiRestart {
 		signalRestart(s.aiRestartCh)
 		signalRestart(s.aiRuntimeRestartCh)
+	}
+	if endpointHealthReporterEnabled(s.currentConfig()) {
+		signalRestart(s.endpointHealthReloadCh)
 	}
 	preparedCommitted = true
 	return nil
@@ -2936,6 +2961,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
+		api.SetModelUsageQuerier(s.modelUsage().store)
 		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api
@@ -4709,6 +4735,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		s.enrolledMCPRefresh.Store(refresher)
 		defer s.enrolledMCPRefresh.CompareAndSwap(refresher, nil)
 	}
+	// Before the hooks see this watcher (gas-ux-r2:GAP-0088 upgrade pass).
+	w.PrepareMCPAdmissions()
 	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
 	s.installWatcher.CompareAndSwap(w, nil)

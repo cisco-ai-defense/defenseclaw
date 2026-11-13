@@ -3384,6 +3384,12 @@
         "connectors": {
           "$ref": "#/$defs/connectorObservabilityMap"
         },
+        "tokenomics": {
+          "$ref": "#/$defs/tokenomics"
+        },
+        "pricing": {
+          "$ref": "#/$defs/pricing"
+        },
         "local": {
           "$ref": "#/$defs/localStore"
         },
@@ -3762,6 +3768,239 @@
         }
       }
     },
+    "tokenomics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-call model usage records, cost and the local usage aggregate. Off by default; an absent block is the pre-1.0.10 behaviour.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. Off: no usage record, no store, no goroutine."
+        },
+        "record_routing_provenance": {
+          "type": "boolean",
+          "default": true,
+          "description": "Put requested and selected model, route decision and profile on each usage record."
+        },
+        "roles": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "agent",
+              "judge",
+              "decision_model",
+              "ai_defense",
+              "router_classifier"
+            ]
+          },
+          "description": "Call roles to record. Empty or absent: all."
+        },
+        "native_otel_import": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "claudecode": {
+              "type": "boolean",
+              "default": true,
+              "description": "Import per-call usage from the Claude Code OTLP stream (cross-check only while the proxy carries the connector)."
+            },
+            "codex": {
+              "type": "boolean",
+              "default": true,
+              "description": "Import per-call usage from the Codex OTLP stream (cross-check only while the proxy carries the connector)."
+            }
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "compute": {
+              "type": "boolean",
+              "default": true,
+              "description": "Compute cost from observability.pricing."
+            },
+            "currency": {
+              "const": "USD",
+              "default": "USD"
+            },
+            "keep_reported": {
+              "type": "boolean",
+              "default": true,
+              "description": "Keep a per-call provider or agent reported cost and mark its basis as reported."
+            }
+          }
+        },
+        "local_store": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status."
+            },
+            "retention_days": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650,
+              "default": 30
+            },
+            "granularity": {
+              "const": "hour",
+              "default": "hour"
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "labels": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "connector",
+                  "provider",
+                  "model",
+                  "route_decision",
+                  "call_role",
+                  "profile"
+                ]
+              },
+              "description": "Labels on defenseclaw.model.cost and defenseclaw.model.tokens. A closed set: identity labels are refused."
+            }
+          }
+        }
+      }
+    },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Versioned price table. The gateway prices only from this table; no price is compiled into a binary. Managed hosts take it from the admin config in the signed bundle.",
+      "properties": {
+        "version": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "Table version stamped on every record. Required when models are listed."
+        },
+        "models": {
+          "type": "array",
+          "maxItems": 2000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider",
+              "model",
+              "input_per_mtok",
+              "output_per_mtok"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "description": "Exact model id, or a prefix ending in * (longest prefix wins)."
+              },
+              "input_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million input tokens (uncached)."
+              },
+              "output_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million output tokens (reasoning included unless reasoning_per_mtok is set)."
+              },
+              "cache_read_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million cache-read input tokens. Absent: priced at input_per_mtok."
+              },
+              "cache_write_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million cache-creation input tokens. Absent: priced at input_per_mtok."
+              },
+              "reasoning_per_mtok": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000,
+                "description": "USD per million reasoning output tokens. Absent: priced at output_per_mtok."
+              }
+            }
+          }
+        },
+        "ai_defense": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "per_call_usd": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          }
+        },
+        "unknown_model": {
+          "enum": [
+            "omit",
+            "fallback"
+          ],
+          "default": "omit",
+          "description": "omit: a model without a price entry has no cost. fallback: price it with fallback."
+        },
+        "fallback": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "input_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million input tokens (uncached)."
+            },
+            "output_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million output tokens (reasoning included unless reasoning_per_mtok is set)."
+            },
+            "cache_read_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million cache-read input tokens. Absent: priced at input_per_mtok."
+            },
+            "cache_write_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million cache-creation input tokens. Absent: priced at input_per_mtok."
+            },
+            "reasoning_per_mtok": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000,
+              "description": "USD per million reasoning output tokens. Absent: priced at output_per_mtok."
+            }
+          }
+        }
+      }
+    },
     "localStore": {
       "type": "object",
       "additionalProperties": false,
@@ -3787,6 +4026,18 @@
           "maximum": 1048576,
           "default": 0,
           "description": "Opt-in size cap for the audit database in MiB. 0 (the default) keeps retention by days only. A value from 64 to 1048576 (1 to 63 are refused) makes each retention run also delete the oldest history, through the same path as retention_days, until the used pages of the audit database are under the cap; the newest hour is always kept. Releases before 1.0.6 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration)."
+        },
+        "keep_rejected_records": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt-in. When true, each record the v8 schema gate refuses (a field value outside its family contract) is also kept in the rejected_records table of the audit database: time, signal, family, event name, reason code, the failing field and a copy of its fields redacted with, per field class, the stricter of the sensitive profile and the local profile of the record's bucket (at most 16 KiB per record; larger copies keep only the field names). Until the gateway redacts it, the copy is held in its memory only. The gateway writes them off the producer path through a bounded queue that drops and counts when full; each run of the store (from turning it on, or a reload that keeps it on, to the next) keeps at most rejected_records_max_rows rows. retention_days and max_store_mb prune the table with the other history. false (the default) only counts refused records and starts no writer. Read them with defenseclaw audit rejected. Not used on Secure Client. Releases before 1.0.10 refuse this key: remove it before going back with defenseclaw upgrade --version (defenseclaw rollback restores the previous configuration). Those releases also neither prune nor show the table, while their max_store_mb pass counts its pages: before going back, keep the store on with rejected_records_max_rows: 100 until the gateway has applied it (it trims the table at once), then remove both keys (or, with the gateway stopped, delete the rows with sqlite3 audit.db 'DELETE FROM rejected_records')."
+        },
+        "rejected_records_max_rows": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 1000000,
+          "default": 10000,
+          "description": "Row cap of the rejected-record store (keep_rejected_records): the writer deletes the oldest rows past it in small batches, at once when a reload lowers it, and one run of the store queues at most this many rows. Ignored while keep_rejected_records is false. Releases before 1.0.10 refuse this key."
         }
       },
       "x-defenseclaw-semantic-constraint": "The two database paths must be distinct from each other and every other configured file after lexical, real-path, symlink, hard-link, and inode checks."

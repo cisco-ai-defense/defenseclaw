@@ -1383,7 +1383,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 					// Keep stderr redacted, but retain the source reason for the v8
 					// route-specific redaction boundary.
 					fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
-						tool, verdict.Severity, redaction.Reason(verdict.Reason))
+						tool, verdict.Severity, logDisplayReason(verdict.Reason))
 					r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
 						fmt.Sprintf("severity=%s findings=%d reason=%s",
 							verdict.Severity, len(verdict.Findings),
@@ -1531,7 +1531,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	// same treatment.
 	scrubbedFindings := make([]string, len(verdict.Findings))
 	for i, f := range verdict.Findings {
-		scrubbedFindings[i] = redaction.Reason(f)
+		scrubbedFindings[i] = logDisplayReason(f)
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
 		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
