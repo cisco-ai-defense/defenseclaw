@@ -10,6 +10,39 @@ keywords:
 
 {/* Service names and ports checked against the chart README (sub/a8) and the A2 handoff. */}
 
+## The whole picture
+
+```text
+  Laptop or CI
+  defenseclaw substrate  login | run | connect | pull | approvals
+        |   HTTPS, signed in with OIDC (Keycloak, Active Directory, ...)
+        |   or your Kubernetes identity
+        v
+ +- defenseclaw-system namespace ---------------------------------------------+
+ |  GATEWAY  admin listener   create agents, attach the terminal, approvals   |
+ |  GATEWAY  actor listener   tool-call hooks, model proxy (/llm), asks       |
+ |  CALLOUT                   checks every other web request                  |
+ |  CONTROLLER                allow lists, template admission, idle, drift    |
+ |  LEADER                    tool chains, intent, asks, registrations        |
+ +------^---------------^---------------^------------------------+-----------+
+        | terminal      | hooks and     | "may this request      | network allow list
+        | (via router)  | model calls   |  go out?"              | (EgressPolicy), templates
+ +- Agent Substrate (ate-system) ----------------------------------v-----------+
+ |  router  -------->  ACTOR  sandbox (gVisor or microVM)                     |
+ |                     coding agent + DefenseClaw kit (hook, terminal relay)  |
+ |                     no keys, no secrets, no network of its own             |
+ |                          |  every request                                  |
+ |                          v                                                 |
+ |  egress gateway   default deny; adds the actor's signed identity;          |
+ |                   swaps secret placeholders, on bound hosts only           |
+ +--------------------------+-------------------------------------------------+
+                            v
+   allowed hosts: git, packages, APIs       model providers: only through the gateway
+   events to OTLP, Splunk, Grafana, each tagged with the agent, actor UID and person
+```
+
+Read it from the top: you start an agent from your laptop, the gateway creates it in Substrate, and from then on everything the agent does leaves its sandbox through Substrate's egress gateway. Hooks and model calls go to the DefenseClaw gateway, and every other request is checked by the callout first. The controller decides, before the agent first runs, which hosts it may reach at all. The sections below follow each path.
+
 ## Where DefenseClaw runs
 
 DefenseClaw doesn't run inside the agent's sandbox. It runs next to Substrate in the cluster, in its own namespace. The agent reaches it the only way an actor can reach anything: through Substrate's egress gateway. This mirrors OpenShell, where DefenseClaw stays on the host and the sandbox calls out to it.
