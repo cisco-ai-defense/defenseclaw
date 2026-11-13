@@ -430,24 +430,46 @@ func mergeToolInspectVerdicts(base, extra *ToolInspectVerdict) *ToolInspectVerdi
 	if out.Action != base.Action || strings.TrimSpace(base.Reason) == "" {
 		out.Reason = extra.Reason
 	}
-	// A rule both checks matched is listed once, with the page check's
-	// finding (the generic scan of the arguments rates it lower).
-	again := map[string]bool{}
+	// A rule both checks matched is listed once, with the higher-rated of its
+	// two findings (the later check's on a tie): the generic scan of a call's
+	// arguments rates a rule lower than the page check does, and the routing
+	// lane of a message rates it lower than the text lane.
+	baseRank, extraRank := map[string]int{}, map[string]int{}
+	for _, finding := range base.DetailedFindings {
+		baseRank[finding.RuleID] = guardrailSeverityRank(finding.Severity)
+	}
 	for _, finding := range extra.DetailedFindings {
-		again[finding.RuleID] = true
+		extraRank[finding.RuleID] = guardrailSeverityRank(finding.Severity)
+	}
+	extraWins := func(id string) bool {
+		er, inExtra := extraRank[id]
+		br, inBase := baseRank[id]
+		return inExtra && (!inBase || er >= br)
+	}
+	baseWins := func(id string) bool {
+		_, inBase := baseRank[id]
+		return inBase && !extraWins(id)
 	}
 	out.Findings, out.DetailedFindings = nil, nil
 	for _, finding := range base.Findings {
-		if id, _, _ := strings.Cut(finding, ":"); !again[id] {
+		if id, _, _ := strings.Cut(finding, ":"); !extraWins(id) {
 			out.Findings = append(out.Findings, finding)
 		}
 	}
 	for _, finding := range base.DetailedFindings {
-		if !again[finding.RuleID] {
+		if !extraWins(finding.RuleID) {
 			out.DetailedFindings = append(out.DetailedFindings, finding)
 		}
 	}
-	out.Findings = append(out.Findings, extra.Findings...)
-	out.DetailedFindings = append(out.DetailedFindings, extra.DetailedFindings...)
+	for _, finding := range extra.Findings {
+		if id, _, _ := strings.Cut(finding, ":"); !baseWins(id) {
+			out.Findings = append(out.Findings, finding)
+		}
+	}
+	for _, finding := range extra.DetailedFindings {
+		if !baseWins(finding.RuleID) {
+			out.DetailedFindings = append(out.DetailedFindings, finding)
+		}
+	}
 	return &out
 }

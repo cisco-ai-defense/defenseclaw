@@ -19,11 +19,13 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -64,10 +66,16 @@ const (
 	// recipients costs a bounded amount; a 700-row table is within it.
 	messageTextMaxNodes = 4096
 	// messagePayloadMinBytes is the length from which a base64 value of an
-	// attachment field is a payload, not text.
+	// attachment field is read as a payload, not as text.
 	messagePayloadMinBytes = 1024
-	// messagePayloadProbeBytes is how much of a value the base64 check reads.
-	messagePayloadProbeBytes = 4096
+	// messagePayloadMaxChars is the longest base64 payload decoded and read in
+	// full (8 MiB). A longer one is undecided: the call is truncated, never
+	// skipped.
+	messagePayloadMaxChars = 8 << 20
+	// messageRunMinBytes is the shortest run of text bytes read out of a
+	// decoded attachment. Random binary data has such a run about once in 10^7
+	// bytes, so a photo yields none.
+	messageRunMinBytes = 16
 )
 
 // Key names are matched with asciiLowerPreservingBytes on both sides: a full
@@ -100,9 +108,10 @@ var messageRoutingKeys = map[string]bool{
 type messageExtract struct {
 	// Text is every string outside the routing values, joined by newlines.
 	Text string
-	// Truncated holds the read limits the call hit: more values than the node
-	// limit (nodes), a value below the depth limit (depth) or a text past the
-	// size limit (bytes).
+	// Truncated holds the read limits the call hit with text left unread: a
+	// value past the node limit (nodes), a value below the depth limit (depth),
+	// a text past the size limit (bytes), or an attachment too long to decode
+	// (bytes). A limit that drops nothing but empty containers is not a hit.
 	Truncated bounded.Truncated
 	// Routing holds the strings under routing keys, by dotted key path.
 	Routing map[string]interface{}
@@ -126,8 +135,7 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 	if _, err := dec.Token(); err != io.EOF {
 		return out
 	}
-	w := messageWalk{routing: map[string]interface{}{}, routingSeen: map[string]int{},
-		nodes: bounded.NewCounter(bounded.Nodes, messageTextMaxNodes)}
+	w := messageWalk{routing: map[string]interface{}{}, routingSeen: map[string]int{}}
 	w.walk(value, 0, "")
 	text := strings.Join(w.parts, "\n")
 	if len(text) > messageTextMaxBytes {
@@ -153,7 +161,7 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 
 type messageWalk struct {
 	parts       []string
-	nodes       bounded.Counter
+	nodes       int
 	trunc       bounded.Truncated
 	routing     map[string]interface{}
 	routingSeen map[string]int
@@ -161,30 +169,83 @@ type messageWalk struct {
 
 // leaf adds a string or number value to the text.
 func (w *messageWalk) leaf(s string) {
-	if strings.TrimSpace(s) == "" {
+	if messageBlank(s) {
 		return
 	}
 	w.parts = append(w.parts, s)
 }
 
+// messageBlank reports a string of ASCII white space only: the one blank test
+// both sides share (the Unicode white-space classes of Go and of JavaScript
+// differ at U+0085 and U+FEFF).
+func messageBlank(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r', '\f', '\v':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// messageHasText reports a value with a non-blank string or a number anywhere
+// inside. The cap that drops a value is a hit only when it holds text.
+func messageHasText(value interface{}) bool {
+	stack := []interface{}{value}
+	for len(stack) > 0 {
+		last := len(stack) - 1
+		switch v := stack[last].(type) {
+		case string:
+			if !messageBlank(v) {
+				return true
+			}
+			stack = stack[:last]
+		case json.Number:
+			return true
+		case []interface{}:
+			stack = append(stack[:last], v...)
+		case map[string]interface{}:
+			stack = stack[:last]
+			for _, item := range v {
+				stack = append(stack, item)
+			}
+		default:
+			stack = stack[:last]
+		}
+	}
+	return false
+}
+
+// drop records the cap that dropped value, when it held text.
+func (w *messageWalk) drop(c bounded.Cap, value interface{}) {
+	if messageHasText(value) {
+		w.trunc.Hit(c)
+	}
+}
+
 func (w *messageWalk) walk(value interface{}, depth int, path string) {
-	if !w.nodes.Take(&w.trunc) {
+	if w.nodes >= messageTextMaxNodes {
+		w.drop(bounded.Nodes, value)
 		return
 	}
+	w.nodes++
 	switch v := value.(type) {
 	case string:
 		w.leaf(v)
 	case json.Number:
 		w.leaf(v.String())
 	case []interface{}:
-		if !w.trunc.Within(bounded.Depth, depth, messageTextMaxDepth) {
+		if depth > messageTextMaxDepth {
+			w.drop(bounded.Depth, v)
 			return
 		}
 		for _, item := range v {
 			w.walk(item, depth+1, path)
 		}
 	case map[string]interface{}:
-		if !w.trunc.Within(bounded.Depth, depth, messageTextMaxDepth) {
+		if depth > messageTextMaxDepth {
+			w.drop(bounded.Depth, v)
 			return
 		}
 		keys := make([]string, 0, len(v))
@@ -215,10 +276,7 @@ func (w *messageWalk) walk(value interface{}, depth int, path string) {
 			if messageRoutingKeys[asciiLowerPreservingBytes(k)] && w.routingValue(child, v[k]) {
 				continue
 			}
-			if s, ok := v[k].(string); ok && messageBinaryPayload(k, s) {
-				// An attachment's bytes are not message text and do not spend
-				// the text budget.
-				w.nodes.Take(&w.trunc)
+			if s, ok := v[k].(string); ok && messageAttachmentField(k) && w.attachment(s) {
 				continue
 			}
 			w.walk(v[k], depth+1, child)
@@ -245,26 +303,37 @@ func (w *messageWalk) routingValue(path string, value interface{}) bool {
 			}
 		}
 		for _, item := range v {
-			if s, ok := item.(string); ok {
-				w.fileRouting(path, s)
+			switch it := item.(type) {
+			case string:
+				w.fileRouting(path, it)
+			case json.Number:
+				w.fileRouting(path, it.String())
 			}
 		}
 		return true
 	case map[string]interface{}:
 		return false
+	case json.Number:
+		w.fileRouting(path, v.String())
+		return true
 	default:
-		// A number or a flag under a routing key is a control value.
+		// A flag or a null under a routing key is a control value.
 		return true
 	}
 }
 
 // fileRouting files a routing string under its path (a repeat gets #2, #3 ...).
 // Each string spends one node of the budget, so a large array of recipients is
-// bounded like any other walk.
+// bounded like any other walk, and the naming is one counter per path.
 func (w *messageWalk) fileRouting(path, s string) {
-	if strings.TrimSpace(s) == "" || !w.nodes.Take(&w.trunc) {
+	if messageBlank(s) {
 		return
 	}
+	if w.nodes >= messageTextMaxNodes {
+		w.trunc.Hit(bounded.Nodes)
+		return
+	}
+	w.nodes++
 	n := w.routingSeen[path] + 1
 	w.routingSeen[path] = n
 	if n == 1 {
@@ -274,10 +343,28 @@ func (w *messageWalk) fileRouting(path, s string) {
 	w.routing[path+"#"+strconv.Itoa(n)] = s
 }
 
-// messageBinaryPayload reports an attachment's bytes: a long base64 value in
-// the buffer field (OpenClaw's "Base64/data-URL attachment") or a base64 data
-// URL anywhere. It is no message text; a value that does not read as base64 is.
-func messageBinaryPayload(key, s string) bool {
+// messageAttachmentField names the fields that carry an attachment: buffer
+// ("Base64/data-URL attachment" in OpenClaw's schema) and media, at any depth
+// (an attachments[] entry names its own). A text field (message, text,
+// caption, content, body ...) is always text, whatever it holds.
+func messageAttachmentField(key string) bool {
+	switch asciiLowerPreservingBytes(key) {
+	case "buffer", "media":
+		return true
+	}
+	return false
+}
+
+// attachment reads a long value of an attachment field that is base64 all
+// through (a data URL or the bare payload) and reports whether it did. The
+// whole payload is decoded and the whole of it is read for text: a run of
+// text bytes anywhere in it (a message sent as a file, text behind a binary
+// header) is message text, and only a payload with no such run is binary and
+// skipped, spending no text budget. The declared media type decides nothing;
+// the bytes do. A payload too long to decode is undecided: the call is
+// truncated, never skipped. A value with anything but base64 in it is not a
+// payload and is read as text by the caller.
+func (w *messageWalk) attachment(s string) bool {
 	if len(s) < messagePayloadMinBytes {
 		return false
 	}
@@ -289,18 +376,80 @@ func messageBinaryPayload(key, s string) bool {
 			return false
 		}
 		payload = s[i+len(";base64,"):]
-	} else if asciiLowerPreservingBytes(key) != "buffer" {
+	}
+	if len(payload) < messagePayloadMinBytes || !messageAllBase64(payload) {
 		return false
 	}
-	probe := payload[:min(len(payload), messagePayloadProbeBytes)]
-	for i := 0; i < len(probe); i++ {
-		c := probe[i]
+	if w.nodes >= messageTextMaxNodes {
+		w.trunc.Hit(bounded.Nodes)
+		return true
+	}
+	w.nodes++
+	if len(payload) > messagePayloadMaxChars {
+		w.trunc.Hit(bounded.Bytes)
+		return true
+	}
+	decoded, ok := messageDecodeBase64(payload)
+	if !ok {
+		return false
+	}
+	if text := messageTextRuns(decoded); text != "" {
+		w.leaf(text)
+	}
+	return true
+}
+
+// messageAllBase64 reports a value made only of base64 characters (either
+// alphabet, padding and line breaks), all through.
+func messageAllBase64(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
 			c == '+' || c == '/' || c == '-' || c == '_' || c == '=' || c == '\r' || c == '\n') {
 			return false
 		}
 	}
-	return len(payload) >= messagePayloadMinBytes
+	return true
+}
+
+// messageDecodeBase64 decodes a base64 payload of either alphabet, padded or
+// not.
+func messageDecodeBase64(s string) ([]byte, bool) {
+	s = strings.NewReplacer("\r", "", "\n", "").Replace(s)
+	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
+		if b, err := enc.DecodeString(s); err == nil {
+			return b, true
+		}
+	}
+	return nil, false
+}
+
+// messageTextRuns returns the runs of at least messageRunMinBytes text bytes
+// (printable characters and white space of valid UTF-8) of decoded data,
+// joined by newlines: all of a text file, the text of a binary file.
+func messageTextRuns(b []byte) string {
+	var out []string
+	start := -1
+	flush := func(end int) {
+		if start >= 0 && end-start >= messageRunMinBytes {
+			out = append(out, string(b[start:end]))
+		}
+		start = -1
+	}
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size == 1 || !(unicode.IsPrint(r) || r == '\n' || r == '\r' || r == '\t') {
+			flush(i)
+			i += size
+			continue
+		}
+		if start < 0 {
+			start = i
+		}
+		i += size
+	}
+	flush(len(b))
+	return strings.Join(out, "\n")
 }
 
 // messageRoutingArgs is the args the tool-policy lane reads for a message
@@ -330,8 +479,10 @@ func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequ
 	// has the text) is read from its content.
 	ex := extractMessageArgs(req.Args)
 	text := ex.Text
-	if text == "" {
-		text = req.Content
+	if req.Content != "" && !strings.Contains(text, req.Content) {
+		// Text the caller read and the gateway did not (two keys that fold to
+		// one when decoded) is scanned too.
+		text = strings.TrimPrefix(text+"\n"+req.Content, "\n")
 	}
 	if text == "" && !ex.Truncated.Any() {
 		if args := strings.TrimSpace(string(req.Args)); args == "" || args == "null" || args == "{}" || args == "[]" {
@@ -344,7 +495,7 @@ func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequ
 	textReq := *req
 	textReq.Content = text
 	verdict := a.inspectMessageContent(ctx, &textReq)
-	if routing := messageRoutingArgs(ex.Routing); routing != nil && !a.managedAIDOnly() {
+	if routing := messageRoutingArgs(ex.Routing); routing != nil {
 		// The routing values are not text, but they are not skipped: a secret
 		// in a recipient field or a destination the rules name is found by
 		// the same lane that reads the destination of any other send tool.

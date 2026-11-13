@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -35,15 +37,18 @@ import (
 // plugin and the gateway read a message call's params the same way
 // (GAP-0177, GAP-0290..0292).
 type parityCase struct {
-	Name    string                 `json:"name"`
-	Params  json.RawMessage        `json:"params"`
-	Gen     map[string]int         `json:"gen"`
-	Text    *string                `json:"text"`
-	TextLen *int                   `json:"text_len"`
-	OverCap bool                   `json:"over_cap"`
-	Routing map[string]interface{} `json:"routing"`
-	Head    string                 `json:"head"`
-	Tail    string                 `json:"tail"`
+	Name    string          `json:"name"`
+	Params  json.RawMessage `json:"params"`
+	Gen     map[string]int  `json:"gen"`
+	Text    *string         `json:"text"`
+	TextLen *int            `json:"text_len"`
+	OverCap bool            `json:"over_cap"`
+	// Routing is asserted only for a row that lists it.
+	Routing *map[string]interface{} `json:"routing"`
+	Head    string                  `json:"head"`
+	Tail    string                  `json:"tail"`
+	// GoOnly rows are not run by the plugin, which never decodes an attachment.
+	GoOnly bool `json:"go_only"`
 	// ValidUTF8 asserts the text has no cut character.
 	ValidUTF8 bool `json:"valid_utf8"`
 }
@@ -82,9 +87,28 @@ func (c parityCase) paramsOf(t *testing.T) json.RawMessage {
 		}
 		v = map[string]interface{}{"presentation": map[string]interface{}{"blocks": []interface{}{map[string]interface{}{"type": "table", "rows": rows}}}}
 	case c.Gen["payload_buffer"] > 0:
-		v = map[string]string{"message": "hi", "buffer": strings.Repeat("QUJD", c.Gen["payload_buffer"]/4)}
+		v = map[string]string{"message": "hi", "buffer": strings.Repeat("AAEC", c.Gen["payload_buffer"]/4)}
 	case c.Gen["payload_dataurl"] > 0:
-		v = map[string]string{"message": "hi", "media": "data:image/png;base64," + strings.Repeat("QUJD", c.Gen["payload_dataurl"]/4)}
+		v = map[string]string{"message": "hi", "media": "data:image/png;base64," + strings.Repeat("AAEC", c.Gen["payload_dataurl"]/4)}
+	case c.Gen["payload_then_text"] > 0:
+		v = map[string]string{"buffer": strings.Repeat("AAEC", c.Gen["payload_then_text"]/4) + " tail words"}
+	case c.Gen["dataurl_message"] > 0:
+		v = map[string]string{"message": "data:image/png;base64," + strings.Repeat("AAEC", c.Gen["dataurl_message"])}
+	case c.Gen["nested_buffer"] > 0:
+		v = map[string]any{"attachments": []any{map[string]string{"Buffer": strings.Repeat("AAEC", c.Gen["nested_buffer"])}}}
+	case c.Gen["nodes_empty"] > 0:
+		items := make([]interface{}, c.Gen["nodes_empty"])
+		for i := range items {
+			items[i] = map[string]interface{}{}
+		}
+		v = map[string]interface{}{"items": items}
+	case c.Gen["payload_hidden"] > 0:
+		raw := append(bytes.Repeat([]byte{0, 1, 2}, 3000), []byte("key words here and more text")...)
+		v = map[string]string{"message": "hi", "buffer": base64.StdEncoding.EncodeToString(raw)}
+	case c.Gen["payload_text"] > 0:
+		v = map[string]string{"message": "hi", "buffer": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("abc ", c.Gen["payload_text"])))}
+	case c.Gen["payload_text_dataurl"] > 0:
+		v = map[string]string{"message": "hi", "media": "data:text/plain;base64," + base64.StdEncoding.EncodeToString([]byte(strings.Repeat("abc ", c.Gen["payload_text_dataurl"])))}
 	case c.Gen["plainbuf"] > 0:
 		v = map[string]string{"buffer": strings.Repeat("word ", c.Gen["plainbuf"])}
 	case c.Gen["routing_strings"] > 0:
@@ -143,16 +167,14 @@ func TestExtractMessageArgsParity(t *testing.T) {
 			if got.Truncated.Any() != tc.OverCap {
 				t.Errorf("over_cap = %v, want %v", got.Truncated.Any(), tc.OverCap)
 			}
-			want := tc.Routing
-			if want == nil {
-				want = map[string]interface{}{}
-			}
-			gotRouting := got.Routing
-			if gotRouting == nil {
-				gotRouting = map[string]interface{}{}
-			}
-			if !reflect.DeepEqual(gotRouting, want) {
-				t.Errorf("routing = %v, want %v", gotRouting, want)
+			if tc.Routing != nil {
+				gotRouting := got.Routing
+				if gotRouting == nil {
+					gotRouting = map[string]interface{}{}
+				}
+				if !reflect.DeepEqual(gotRouting, *tc.Routing) {
+					t.Errorf("routing = %v, want %v", gotRouting, *tc.Routing)
+				}
 			}
 		})
 	}
@@ -327,11 +349,15 @@ func init() {
 			})},
 		boundedLaneCap{lane: "openclaw message nodes", cap: bounded.Nodes, limit: messageTextMaxNodes, adopted: true,
 			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
-				items := make([]any, size-2)
+				items := make([]any, size-3, size-2)
 				for i := range items {
 					items[i] = map[string]any{}
 				}
-				return map[string]any{"items": items}
+				return map[string]any{"items": append(items, "late")}
+			})},
+		boundedLaneCap{lane: "openclaw message routing values", cap: bounded.Nodes, limit: messageTextMaxNodes, adopted: true,
+			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+				return map[string]any{"text": "x", "to": slices.Repeat([]any{"r"}, size-2)}
 			})},
 		boundedLaneCap{lane: "openclaw message bytes", cap: bounded.Bytes, limit: messageTextMaxBytes, adopted: true,
 			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
@@ -406,5 +432,79 @@ func TestToolBlockListVerdict(t *testing.T) {
 		if v != nil && (v.Action != "block" || !containsString(v.Findings, "STATIC-BLOCK")) {
 			t.Errorf("%s/%s: verdict = %+v, want a STATIC-BLOCK block", tc.tool, tc.connector, v)
 		}
+	}
+}
+
+// The walk is linear in the call: 16000 recipients (80 KB) are read in well
+// under a second, and over the node budget the call is truncated, not walked
+// for seconds (GAP-0322).
+func TestExtractMessageArgsRoutingCost(t *testing.T) {
+	raw, err := json.Marshal(map[string]any{"text": "hi", "to": slices.Repeat([]string{"+1"}, 16000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	got := extractMessageArgs(raw)
+	if took := time.Since(start); took > 2*time.Second {
+		t.Errorf("reading 16000 recipients took %v", took)
+	}
+	if !got.Truncated.Has(bounded.Nodes) || got.Text != "hi" {
+		t.Errorf("truncated nodes = %v, text = %q, want nodes hit and the text read", got.Truncated.Has(bounded.Nodes), got.Text)
+	}
+	if len(got.Routing) != messageTextMaxNodes-2 {
+		t.Errorf("filed %d routing values, want the %d the budget allows", len(got.Routing), messageTextMaxNodes-2)
+	}
+}
+
+// An attachment too long to decode is undecided: the call is truncated, never
+// skipped (GAP-0328).
+func TestExtractMessageArgsLongAttachmentIsUndecided(t *testing.T) {
+	raw, _ := json.Marshal(map[string]string{"buffer": strings.Repeat("AAEC", messagePayloadMaxChars/4+1)})
+	got := extractMessageArgs(raw)
+	if !got.Truncated.Has(bounded.Bytes) || got.Text != "" {
+		t.Errorf("a %d-character buffer: truncated bytes = %v, text %q, want undecided", messagePayloadMaxChars+4, got.Truncated.Has(bounded.Bytes), got.Text)
+	}
+}
+
+// A secret hidden behind a binary header in a buffer, or after a base64 prefix,
+// is found (GAP-0328): the attachment is skipped only when none of it is text.
+func TestInspectToolMessageAttachmentsHideNoText(t *testing.T) {
+	hidden := base64.StdEncoding.EncodeToString(append(bytes.Repeat([]byte{0, 1, 2}, 3000), []byte("key: "+messageTestSecret)...))
+	afterPrefix := strings.Repeat("AAEC", 1024) + " key: " + messageTestSecret
+	for name, args := range map[string]string{
+		"buffer, binary header then text": `{"buffer":"` + hidden + `"}`,
+		"buffer, base64 then words":       `{"buffer":"` + afterPrefix + `"}`,
+		"caption is always text":          `{"caption":"` + afterPrefix + `"}`,
+		"Buffer nested, any case":         `{"attachments":[{"Buffer":"` + hidden + `"}]}`,
+		"data URL in message":             `{"message":"data:image/png;base64,` + afterPrefix + `"}`,
+		"text data URL":                   `{"media":"data:text/plain;base64,` + hidden + `"}`,
+	} {
+		api := testAPIServerWithConfig(t, "action")
+		_, verdict := postInspect(t, api, `{"tool":"message","args":`+args+`,"direction":"outbound"}`)
+		if verdict.Action != "block" {
+			t.Errorf("%s: action = %q findings = %v, want block", name, verdict.Action, verdict.Findings)
+		}
+	}
+	// A binary attachment alone is no text, no cap hit and no finding.
+	api := testAPIServerWithConfig(t, "action")
+	photo := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0, 1, 2, 255, 254}, 80000))
+	_, verdict := postInspect(t, api, `{"tool":"message","args":{"message":"here is the photo","buffer":"`+photo+`","filename":"a.png"},"direction":"outbound"}`)
+	if verdict.Action != "allow" || len(verdict.Findings) != 0 {
+		t.Errorf("300 KB binary attachment: action = %q findings = %v, want a plain allow", verdict.Action, verdict.Findings)
+	}
+}
+
+// On a managed AI Defense-only install the routing values still reach AI
+// Defense through the tool lane (the P3 of the GAP-0177 re-check): the message
+// lane no longer leaves them out. The tool lane, not the text lane, decides
+// them there, so the call's routing args are what that lane is asked about.
+func TestMessageRoutingArgs(t *testing.T) {
+	got := messageRoutingArgs(map[string]interface{}{"to": "+1", "target.id": "u1"})
+	var round map[string]string
+	if err := json.Unmarshal(got, &round); err != nil || round["to"] != "+1" || round["target.id"] != "u1" {
+		t.Errorf("routing args = %s (%v)", got, err)
+	}
+	if messageRoutingArgs(nil) != nil {
+		t.Error("no routing values must give no routing call")
 	}
 }

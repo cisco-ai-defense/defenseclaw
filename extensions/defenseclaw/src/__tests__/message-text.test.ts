@@ -31,6 +31,7 @@ interface ParityCase {
   head?: string;
   tail?: string;
   valid_utf8?: boolean;
+  go_only?: boolean;
 }
 
 // The cases the gateway runs too (internal/gateway/message_text_test.go): the
@@ -47,10 +48,13 @@ function paramsOf(c: ParityCase): unknown {
     const rows = Array.from({ length: gen.table }, () => ["a", "b"]);
     return { presentation: { blocks: [{ type: "table", rows }] } };
   }
-  if (gen.payload_buffer) return { message: "hi", buffer: "QUJD".repeat(gen.payload_buffer / 4) };
+  if (gen.payload_buffer) return { message: "hi", buffer: "AAEC".repeat(gen.payload_buffer / 4) };
   if (gen.payload_dataurl) {
-    return { message: "hi", media: `data:image/png;base64,${"QUJD".repeat(gen.payload_dataurl / 4)}` };
+    return { message: "hi", media: `data:image/png;base64,${"AAEC".repeat(gen.payload_dataurl / 4)}` };
   }
+  if (gen.payload_then_text) return { buffer: `${"AAEC".repeat(gen.payload_then_text / 4)} tail words` };
+  if (gen.dataurl_message) return { message: `data:image/png;base64,${"AAEC".repeat(gen.dataurl_message)}` };
+  if (gen.nested_buffer) return { attachments: [{ Buffer: "AAEC".repeat(gen.nested_buffer) }] };
   if (gen.plainbuf) return { buffer: "word ".repeat(gen.plainbuf) };
   if (gen.routing_strings) return { text: "x", to: Array.from({ length: gen.routing_strings }, () => "r") };
   if (gen.depth || gen.depth_empty) {
@@ -58,6 +62,7 @@ function paramsOf(c: ParityCase): unknown {
     for (let i = 0; i < (gen.depth ?? gen.depth_empty); i++) v = { x: v };
     return v;
   }
+  if (gen.nodes_empty) return { items: Array.from({ length: gen.nodes_empty }, () => ({})) };
   if (gen.nodes) return { items: [...Array.from({ length: gen.nodes }, () => ({})), "late"] };
   if (gen.multibyte) return { text: "é".repeat(gen.multibyte) };
   if (gen.pad) return { body: "a".repeat(gen.pad), text: "z".repeat(gen.pad) };
@@ -69,7 +74,7 @@ describe("extractMessage", () => {
     expect(MESSAGE_TEXT_MAX_BYTES).toBe(256 * 1024);
   });
 
-  it.each(fixture.cases.map((c) => [c.name, c] as const))("%s", (_name, c) => {
+  it.each(fixture.cases.filter((c) => !c.go_only).map((c) => [c.name, c] as const))("%s", (_name, c) => {
     const got = extractMessage(paramsOf(c));
     if (c.text !== undefined) expect(got.text).toBe(c.text);
     if (c.text_len !== undefined) expect(new TextEncoder().encode(got.text).length).toBe(c.text_len);
@@ -79,8 +84,21 @@ describe("extractMessage", () => {
     expect(got.overCap).toBe(c.over_cap ?? false);
   });
 
+  it("reads 16000 recipients in linear time and flags the budget (GAP-0322)", () => {
+    const params = { text: "hi", to: Array.from({ length: 16000 }, () => "+1") };
+    const start = performance.now();
+    const got = extractMessage(params);
+    expect(performance.now() - start).toBeLessThan(500);
+    expect(got).toEqual({ text: "hi", overCap: true });
+  });
+
+  it("folds lone surrogates in keys as the gateway does", () => {
+    const got = extractMessage({ "\ud800a": "one", "\ufffda": "two" });
+    expect(got.text.split("\n").sort()).toEqual(["one", "two"]);
+  });
+
   it("reads no params", () => {
-    expect(extractMessage(undefined)).toEqual({ text: "", overCap: false, routing: {} });
+    expect(extractMessage(undefined)).toEqual({ text: "", overCap: false });
   });
 
   it("survives a cyclic params object", () => {
