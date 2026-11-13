@@ -326,7 +326,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		return v
 	}
 
-	askRule := ""
+	askRule, askPrefix := "", ""
 	// URL rules match the canonical path (GAP-0046): an equivalent
 	// spelling (/./admin, /%61dmin, //admin) matches like the plain one, and
 	// a path an origin could read another way is refused where a path rule
@@ -351,7 +351,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			return deny(v, CategoryURLRule, sourceProfile, r.name,
 				"This actor's profile does not allow "+req.Method+" requests to this path on "+req.Host+".")
 		case "ask":
-			askRule = "url_rules:" + r.name
+			askRule, askPrefix = "url_rules:"+r.name, r.pathPrefix
 		}
 		break
 	}
@@ -395,7 +395,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		}
 	}
 	if askRule != "" {
-		v = e.ask(ctx, v, req, pol, askRule)
+		v = e.ask(ctx, v, req, pol, askRule, askPrefix)
 		if !v.Allow {
 			return v
 		}
@@ -452,7 +452,7 @@ func (e *Engine) uninspected(v Verdict, why string) Verdict {
 	return v
 }
 
-func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, rule string) Verdict {
+func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, rule, pathPrefix string) Verdict {
 	if e.asks == nil {
 		// No approvals service yet: an unanswerable ask is a denial (D12).
 		return deny(v, CategoryAskDenied, sourceAsk, rule, "This host needs an approval, and no approvals service is configured.")
@@ -460,7 +460,7 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 	actx, cancel := context.WithTimeout(ctx, e.cfg.Ask.Hold)
 	defer cancel()
 	res, err := e.asks.Ask(actx, AskRequest{Actor: req.Actor, Profile: pol.Name, Host: req.Host, Method: req.Method,
-		Rule: rule, UnattendedAsks: pol.UnattendedAsks})
+		Rule: rule, PathPrefix: pathPrefix, UnattendedAsks: pol.UnattendedAsks})
 	v.AskID = res.ID
 	switch {
 	case err != nil && !errors.Is(err, context.DeadlineExceeded):
