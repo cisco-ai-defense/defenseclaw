@@ -195,8 +195,9 @@ type actorState struct {
 	// forkQueued and inventoried make the once-per-incarnation fork event
 	// and inventory event survive a failed first pass.
 	forkQueued, inventoried bool
-	// runGen is the snapshot generation last seen while RUNNING.
-	runGen  int32
+	// rid is the snapshot identity seen on the last pass; a revert is told
+	// from how it changed (GAP-0141).
+	rid     restoreID
 	written bool
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
@@ -540,20 +541,23 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	st.lastState = state
 	base := Event{Atespace: md.GetAtespace(), Actor: md.GetName(), ActorUID: md.GetUid()}
 	self := chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()}
-	gen := a.GetStatus().GetLastAssignedGeneration()
-	if ev := lifecycleOf(prev, state); !first {
-		if revertedUnseen(prev, state, gen, st.runGen) {
-			// REVERTING fell between two passes: a revert must still put
-			// the mutation barrier in the actor's chains (GAP-0141).
-			ev = chainstate.LifecycleReverted
+	rid := restoreIDOf(a.GetStatus())
+	if !first {
+		evs := []string{lifecycleOf(prev, state)}
+		if revertSeen(prev, state, st.rid, rid) {
+			// Told from the snapshot identity, so a revert whose REVERTING
+			// fell between two passes, a revert of a SUSPENDED actor and a
+			// suspend plus revert inside one poll still put the mutation
+			// barrier in the actor's chains (GAP-0141).
+			evs = append(evs, chainstate.LifecycleReverted)
 		}
-		if ev != "" {
-			st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
+		for _, ev := range evs {
+			if ev != "" {
+				st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
+			}
 		}
 	}
-	if state == ateapi.ActorStateRunning {
-		st.runGen = gen
-	}
+	st.rid = rid
 	c.flushLifecycle(ctx, st, base)
 
 	_, launcher := c.o.LauncherAtespaces[md.GetAtespace()]
@@ -1198,14 +1202,17 @@ func (c *Controller) SetLifecycle(l LifecycleSink) { c.o.Lifecycle = l }
 // controller time it gets).
 const maxPendingLifecycle = 64
 
-// lifecycleOf is the lifecycle event of a state change, "" for none.
+// lifecycleOf is the lifecycle event of a state change, "" for none. Every
+// way into SUSPENDED is suspended: the leader pauses the actor's running
+// time only on that event (a revert or a crash ends SUSPENDED too).
 func lifecycleOf(prev, cur ateapi.ActorState) string {
 	if prev == cur {
 		return ""
 	}
 	switch cur {
 	case ateapi.ActorStateSuspended:
-		if prev == ateapi.ActorStateRunning || prev == ateapi.ActorStateSuspending || prev == ateapi.ActorStateResuming {
+		switch prev {
+		case ateapi.ActorStateRunning, ateapi.ActorStateSuspending, ateapi.ActorStateResuming, ateapi.ActorStateReverting, ateapi.ActorStateCrashed:
 			return chainstate.LifecycleSuspended
 		}
 	case ateapi.ActorStateRunning:
@@ -1220,20 +1227,73 @@ func lifecycleOf(prev, cur ateapi.ActorState) string {
 	return ""
 }
 
-// revertedUnseen reports a revert the controller saw only as its outcome:
-// SUSPENDED straight from CRASHED (only a revert does that), or SUSPENDED
-// from RUNNING with no new snapshot generation since the actor ran (a
-// suspend assigns one, a revert goes back to the durable snapshot and
-// assigns none; ateapi ActorStatus.last_assigned_generation).
-func revertedUnseen(prev, cur ateapi.ActorState, gen, runGen int32) bool {
-	if cur != ateapi.ActorStateSuspended {
-		return false
+// restoreID is an actor's snapshot identity in one pass: the fields a revert
+// changes even when the controller never sees REVERTING. Measured on a real
+// cluster (E1, substrate-1 f8): a suspend assigns last_assigned_generation
+// to a new newest snapshot whose files stay on the node (locality); a resume
+// keeps them; a revert assigns no generation and either drops a newest
+// snapshot not yet uploaded (it goes stale) or clears the newest snapshot's
+// locality; a running actor comes back on another worker process.
+type restoreID struct {
+	lastGen  int32 // last_assigned_generation
+	headGen  int32 // newest snapshot generation, 0 for none
+	headUUID string
+	local    bool   // the newest snapshot's files are on a node
+	worker   string // worker pod UID and epoch while placed
+}
+
+func restoreIDOf(s *ateapi.ActorStatus) restoreID {
+	id := restoreID{lastGen: s.GetLastAssignedGeneration()}
+	for _, sn := range s.GetSnapshots() {
+		if sn.GetGeneration() > id.headGen {
+			id.headGen, id.headUUID, id.local = sn.GetGeneration(), sn.GetUuid(), sn.GetLocality() != ""
+		}
 	}
-	switch prev {
-	case ateapi.ActorStateCrashed:
-		return true
-	case ateapi.ActorStateRunning:
-		return gen <= runGen
+	if w := s.GetWorkerAssignment(); w.GetWorkerEpoch() != 0 {
+		id.worker = w.GetWorkerPodUid() + "/" + strconv.FormatInt(w.GetWorkerEpoch(), 10)
+	}
+	return id
+}
+
+// freshSuspend reports the state a suspend leaves: the newest snapshot is
+// the last assigned generation and its files are still on the node.
+func (id restoreID) freshSuspend() bool { return id.headGen == id.lastGen && id.local }
+
+// revertSeen reports a revert between the last pass (prev, was) and this
+// one (cur, now) that the state change alone does not show (a REVERTING
+// state seen in a pass is sent by lifecycleOf). A detach (no public call;
+// it also clears locality) reads as a revert: an extra mutation barrier is
+// the safe side.
+func revertSeen(prev, cur ateapi.ActorState, was, now restoreID) bool {
+	suspendedSince := now.lastGen > was.lastGen // a suspend ran since the last pass
+	switch {
+	case prev == ateapi.ActorStateSuspended && cur == ateapi.ActorStateSuspended:
+		if suspendedSince { // resumed and suspended again inside one poll
+			return !now.freshSuspend()
+		}
+		// The node-local snapshot a SUSPENDED actor holds is gone.
+		return was.local && (!now.local || now.headUUID != was.headUUID)
+	case prev == ateapi.ActorStateRunning && cur == ateapi.ActorStateRunning:
+		if suspendedSince { // suspended and resumed inside one poll
+			return now.headGen < now.lastGen
+		}
+		// Reverted and resumed inside one poll: the files left the node or
+		// the actor runs under another worker process.
+		return (was.local && !now.local) || (was.worker != "" && now.worker != "" && now.worker != was.worker)
+	case cur == ateapi.ActorStateSuspended:
+		switch prev {
+		case ateapi.ActorStateReverting:
+			return false // sent when REVERTING was seen
+		case ateapi.ActorStateCrashed:
+			return true // only a revert brings a crashed actor back
+		case ateapi.ActorStateRunning:
+			if !suspendedSince {
+				return true // a revert of the running actor: no new generation
+			}
+		}
+		// A suspend ran; anything but its fresh snapshot means a revert
+		// followed it inside one poll.
+		return !now.freshSuspend()
 	}
 	return false
 }
