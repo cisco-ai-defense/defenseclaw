@@ -351,7 +351,7 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 		return nil, err
 	}
 	rep.User = user
-	if note := userScopePluginNote(claudePlugins, workdir); note != "" {
+	if note := personalSkillsPluginNote(claudePlugins, workdir); note != "" {
 		sum.Notes = append(sum.Notes, note)
 	}
 	rep.Hooks = checkHooks(fsys, env, user, o)
@@ -370,26 +370,30 @@ func ScanImage(ctx context.Context, fsys *ImageFS, cfg *ConfigDoc, o ScanOptions
 	return rep, nil
 }
 
-// userPluginRoot is the folder of a Claude Code plugin that was installed at
-// user scope: the personal config folder of the image user.
-const userPluginRoot = "/.claude/plugins/"
+// personalSkillsSuffix ends the path of a personal skills folder (the image
+// user's ~/.claude/skills).
+const personalSkillsSuffix = "/.claude/skills"
 
-// userScopePluginNote is the note for a template that carries Claude Code
-// plugins in a personal folder (~/.claude/plugins). An actor starts Claude
+// personalSkillsPluginNote is the note for a template that carries a Claude
+// Code plugin folder directly in a personal skills folder
+// (~/.claude/skills/NAME/.claude-plugin/plugin.json). An actor starts Claude
 // Code with CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1, which keeps the
-// workload's own files from starting code outside the hook (a
-// processWrapper launcher, plugin folders), so Claude loads no user-scope
-// plugin there. The plugins are still scanned and admitted. A plugin in the
-// project folder (workdir) or under /etc (managed config) is not user scope.
-// It is a note and not a finding: it never changes a verdict (GAP-0279).
-// Empty when no plugin is in a personal folder.
-func userScopePluginNote(dirs []string, workdir string) string {
+// workload's own files from starting code outside the hook, and with it
+// Claude Code does not load such a folder as a plugin: it loads as skills
+// only (measured on 2.1.311: "[skill-as-plugin] not loading plugins from N
+// folder(s) in your own skills directory"). Plugins installed from a
+// marketplace (~/.claude/plugins/cache, whichever settings file enables them)
+// do load, so they get no note, and nor does a plugin in the project folder
+// (workdir) or under /etc (managed config). It is a note and not a finding:
+// the plugin is still scanned and admitted, and no verdict changes (GAP-0279).
+// Empty when no plugin sits in a personal skills folder.
+func personalSkillsPluginNote(dirs []string, workdir string) string {
 	var names []string
 	for _, dir := range dirs {
 		if workdir != "" && (dir == workdir || strings.HasPrefix(dir, strings.TrimRight(workdir, "/")+"/")) {
 			continue
 		}
-		if strings.HasPrefix(dir, "/etc/") || !strings.Contains(dir+"/", userPluginRoot) {
+		if strings.HasPrefix(dir, "/etc/") || !strings.HasSuffix(path.Dir(dir), personalSkillsSuffix) {
 			continue
 		}
 		names = append(names, path.Base(dir))
@@ -398,9 +402,9 @@ func userScopePluginNote(dirs []string, workdir string) string {
 		return ""
 	}
 	sort.Strings(names)
-	return "user-scope plugins do not load in Substrate actors, because personal config is restricted " +
-		"(CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1); use project or managed scope instead. " +
-		"Plugins in a personal folder: " + strings.Join(dedupe(names), ", ")
+	return "a plugin folder in a personal skills folder (~/.claude/skills) does not load as a plugin in Substrate actors, " +
+		"because personal config is restricted (CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1): Claude Code loads it as skills only. " +
+		"Install it as a marketplace plugin enabled at project or managed scope instead. Affected: " + strings.Join(dedupe(names), ", ")
 }
 
 func dedupe(sorted []string) []string {

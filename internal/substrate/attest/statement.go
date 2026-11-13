@@ -154,8 +154,9 @@ type ScanSummary struct {
 	Verdict string     `json:"verdict"`
 	Items   []ScanItem `json:"items,omitempty"`
 	// Notes are plain statements about what the scan saw that the verdict
-	// does not carry (no finding, no block): for example that a user-scope
-	// Claude Code plugin does not load in an actor (rel-1-0-10 GAP-0279).
+	// does not carry (no finding, no block): for example that a plugin folder
+	// in a personal skills folder does not load as a plugin in an actor
+	// (rel-1-0-10 GAP-0279).
 	Notes []string `json:"notes,omitempty"`
 	// Accepted are the admin's audited acceptances of findings that the
 	// build floor would have blocked (template build --accept-finding).
