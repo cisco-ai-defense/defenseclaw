@@ -108,6 +108,15 @@ func TestVerifiedRouteCallerWindowsRules(t *testing.T) {
 		{"connector disabled", func(in *routeCallerInputs) { in.Disabled = true }, false, routeCallerConnectorDisabled},
 		{"proxy: enrolled SID", func(in *routeCallerInputs) { in.RequireCredential, in.CredentialIdentity = false, "" }, true, ""},
 		{"proxy: unenrolled SID", func(in *routeCallerInputs) { in.RequireCredential, in.CredentialIdentity, in.PeerSID = false, "", bob }, false, routeCallerNotEnrolled},
+		{"gMSA or computer account SID", func(in *routeCallerInputs) {
+			in.PersonAccount = func(string) (bool, bool) { return false, true }
+		}, false, routeCallerServiceAccount},
+		{"account type unknown (lookup failed)", func(in *routeCallerInputs) {
+			in.PersonAccount = func(string) (bool, bool) { return false, false }
+		}, true, ""},
+		{"user account", func(in *routeCallerInputs) {
+			in.PersonAccount = func(string) (bool, bool) { return true, true }
+		}, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -88,6 +88,9 @@ type routeCallerInputs struct {
 	// Exempt reports whether enterprise.enrollment.exempt_users names the
 	// account.
 	Exempt func(identity string) bool
+	// PersonAccount reports whether the SID names a person (not a computer,
+	// gMSA or other service account); known false = the lookup gave nothing.
+	PersonAccount func(sid string) (person, known bool)
 }
 
 func unverifiedRoute(reason string) routeCaller { return routeCaller{Reason: reason} }
@@ -193,6 +196,13 @@ func decideWindowsRouteCaller(in routeCallerInputs) routeCaller {
 	if windowsServiceSID(sid) {
 		return unverifiedRoute(routeCallerServiceAccount)
 	}
+	// A S-1-5-21 SID can still be a gMSA, a managed service account or a
+	// computer account; refused when the account lookup says so (P3-8).
+	if in.PersonAccount != nil {
+		if person, known := in.PersonAccount(sid); known && !person {
+			return unverifiedRoute(routeCallerServiceAccount)
+		}
+	}
 	if in.RequireCredential && in.CredentialIdentity != sid {
 		return unverifiedRoute(routeCallerPeerMismatch)
 	}
@@ -223,7 +233,8 @@ func firstNonEmptyRouteReason(values ...string) string {
 // windowsServiceSID reports SYSTEM, LocalService, NetworkService and the
 // service, virtual machine, window manager, font driver and other
 // NT AUTHORITY non-user SIDs: only S-1-5-21 domain or local accounts (and
-// S-1-12-1 Entra accounts) are people.
+// S-1-12-1 Entra accounts) are people. A S-1-5-21 SID may still be a gMSA
+// or computer account: PersonAccount checks the account type.
 func windowsServiceSID(sid string) bool {
 	sid = strings.ToUpper(strings.TrimSpace(sid))
 	return !strings.HasPrefix(sid, "S-1-5-21-") && !strings.HasPrefix(sid, "S-1-12-1-")
@@ -286,6 +297,7 @@ func (a *APIServer) verifiedRouteCaller(r *http.Request, connectorName string, r
 		in.Enrolled = func(identity string) bool { return store.enrolledFor(identity, name) }
 		exempt := a.scannerCfg.Enterprise.Enrollment.ExemptUsers
 		in.Exempt = func(identity string) bool { return windowsExemptListed(exempt, identity) }
+		in.PersonAccount = windowsSIDPersonAccount
 	} else {
 		in.Authz = a.managedHookAuthz.Load()
 		in.PeerUID, in.PeerUIDErr = acpLoopbackPeerUID(r)
