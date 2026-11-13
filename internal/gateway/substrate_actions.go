@@ -59,6 +59,57 @@ var ErrSubstrateActorRefused = errors.New("the controller refused the actor")
 // launcher's connector (GAP-0181).
 var ErrSubstrateTemplateAttestation = errors.New("template attestation could not be read")
 
+// SubstrateTemplateAttestation is a template the attestor did not positively
+// attest with a connector label (GAP-0181): it refused the template (Reason;
+// Retryable when the cause may pass, such as a registry or log outage), or
+// attested it without a label (Unlabeled). It wraps
+// ErrSubstrateTemplateAttestation: a managed create refuses it, an open
+// source one warns and goes on with the launcher's connector.
+type SubstrateTemplateAttestation struct {
+	Reason    string
+	Retryable bool
+	Unlabeled bool
+}
+
+func (e *SubstrateTemplateAttestation) Error() string {
+	code, msg, _, _ := substrateAttestationRefusal(e)
+	if e.Reason == "" {
+		return code + ": " + msg
+	}
+	return code + ": " + msg + ": " + e.Reason
+}
+
+func (e *SubstrateTemplateAttestation) Unwrap() error { return ErrSubstrateTemplateAttestation }
+
+// substrateAttestationRefusal is the create answer for a template that is
+// not positively attested with a label: the reason code, the message (it
+// says "retryable" when the cause may pass), a short detail and whether a
+// retry may succeed.
+func substrateAttestationRefusal(err error) (code, message, detail string, retryable bool) {
+	var e *SubstrateTemplateAttestation
+	if !errors.As(err, &e) {
+		return "template_attestation_unreadable", "template attestation could not be read", "", false
+	}
+	detail = substrateAttestationDetail(e.Reason)
+	switch {
+	case e.Unlabeled:
+		return "template_connector_unlabeled", "the template attestation names no connector", detail, false
+	case e.Retryable:
+		return "template_attestation_unreadable", "template attestation could not be checked now (retryable)", detail, true
+	default:
+		return "template_not_attested", "the template is not attested", detail, false
+	}
+}
+
+// substrateAttestationDetail keeps the attestor's reason to one short line.
+func substrateAttestationDetail(s string) string {
+	s = strings.Join(strings.FieldsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }), " ")
+	if r := []rune(strings.TrimSpace(s)); len(r) > 240 {
+		return string(r[:240]) + "..."
+	}
+	return strings.TrimSpace(s)
+}
+
 // SubstratePolicyEnsurer writes an actor's egress policy before its first
 // resume (controller.Controller.EnsurePolicy). An error wrapping
 // ErrSubstrateActorRefused means the actor gets no policy.
@@ -69,9 +120,11 @@ type SubstrateATEActions struct {
 	Client ateapi.Client
 	Ensure SubstratePolicyEnsurer
 	// ConnectorOf reads the connector a template was built for (its attested
-	// label, GAP-0160). Nil, or "" for an unattested template, means the
-	// template names none; an attestation that could not be read is an
-	// error wrapping ErrSubstrateTemplateAttestation, never "".
+	// label, GAP-0160). It answers a label only for a template positively
+	// attested with one; anything else (an attestor error, a refusal,
+	// retryable or not, an attestation without a label) is an error wrapping
+	// ErrSubstrateTemplateAttestation (*SubstrateTemplateAttestation), never
+	// "" (GAP-0181). Nil reads no label: a managed create refuses then.
 	ConnectorOf func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error)
 }
 

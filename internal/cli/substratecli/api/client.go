@@ -146,6 +146,9 @@ type Error struct {
 	// Message is the gateway's explanation, sent with a sign-in refusal
 	// (subscription_signin_refused, agent_hook_tamper_refused), one line.
 	Message string
+	// Retryable marks a refusal whose cause may pass (a template
+	// attestation that could not be checked now, GAP-0181).
+	Retryable bool
 }
 
 func (e *Error) Error() string {
@@ -225,10 +228,11 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 			Actor    string `json:"actor"`
 			ActorUID string `json:"actor_uid"`
 			Message  string `json:"message"`
+			Retry    bool   `json:"retryable"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
-			e.Refusal, e.Detail, e.Actor, e.ActorUID = d.Refusal, d.Detail, d.Actor, d.ActorUID
+			e.Refusal, e.Detail, e.Actor, e.ActorUID, e.Retryable = d.Refusal, d.Detail, d.Actor, d.ActorUID, d.Retry
 			e.Message = safetext.Line(d.Message)
 		}
 		return e

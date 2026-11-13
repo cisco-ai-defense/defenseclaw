@@ -196,6 +196,19 @@ func (a *APIServer) newSubstrateAdminHandler(st *substrateState) http.Handler {
 	})
 }
 
+// writeSubstrateAttestationRefusal answers a managed create of a template
+// that is not positively attested with a label (GAP-0181).
+func writeSubstrateAttestationRefusal(w http.ResponseWriter, code, message, detail string, retryable bool) {
+	body := map[string]any{"error": http.StatusText(http.StatusForbidden), "reason": code, "message": message}
+	if detail != "" {
+		body["detail"] = detail
+	}
+	if retryable {
+		body["retryable"] = true
+	}
+	writeSubstrateJSON(w, http.StatusForbidden, body)
+}
+
 func writeSubstrateJSONError(w http.ResponseWriter, status int, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -301,20 +314,27 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		var createWarnings []string
 		if errors.Is(err, ErrSubstrateTemplateAttestation) {
 			fmt.Fprintf(os.Stderr, "[substrate] template %s/%s: %v\n", atespace, req.Template, err)
+			code, msg, detail, retryable := substrateAttestationRefusal(err)
 			if st.cfg.Managed {
 				// Fail closed (GAP-0181): the connector, and so the sign-in
-				// check, comes from the attestation, never from the
+				// check, comes from a positive attestation, never from the
 				// launcher's word alone.
-				writeSubstrateJSON(w, http.StatusForbidden, map[string]any{"error": "Forbidden",
-					"reason": "template_attestation_unreadable", "message": "template attestation could not be read"})
+				writeSubstrateAttestationRefusal(w, code, msg, detail, retryable)
 				return
 			}
-			createWarnings = append(createWarnings, "template attestation could not be read; the connector you named decides the sign-in check")
+			createWarnings = append(createWarnings, msg+"; the connector you named decides the sign-in check")
 			err = nil
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] template lookup failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
+			return
+		}
+		if st.cfg.Managed && tmplConnector == "" {
+			// Managed creates only from a positively attested, labelled
+			// template (GAP-0181): an Actions that reads no label, or a
+			// reader that answers none, is refused too.
+			writeSubstrateAttestationRefusal(w, "template_connector_unlabeled", "the template attestation names no connector", "", false)
 			return
 		}
 		named := strings.TrimSpace(req.Connector)

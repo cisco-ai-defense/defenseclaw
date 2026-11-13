@@ -467,7 +467,7 @@ func nextContent(in map[string]any, target string, limit int64) (content []byte,
 		oldS, okOld := e["old_string"].(string)
 		newS, okNew := e["new_string"].(string)
 		if !okOld && !okNew {
-			oldS, okOld = e["oldString"].(string)
+			oldS, _ = e["oldString"].(string)
 			newS, okNew = e["newString"].(string)
 		}
 		if !okNew {

@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
@@ -192,7 +193,14 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 		call.setAuth(req)
 
 		start := time.Now()
+		usage := beginGatewayCallUsage(ctx, modelusage.RoleAIDefense, "ai_defense", "inspect")
 		resp, err := call.client.Do(req)
+		if err != nil {
+			usage.End(err)
+		} else {
+			usage.UpstreamHeader(resp.StatusCode, nil)
+			usage.End(nil)
+		}
 		if err != nil {
 			fmt.Fprintf(defaultLogWriter, "  [cisco-ai-defense] error: %v\n", err)
 			outcome := observability.OutcomeFailed

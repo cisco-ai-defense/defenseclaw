@@ -2857,6 +2857,55 @@ class PerConnectorObservability:
     webhooks: list[WebhookConfig] | None = None
 
 
+TOKENOMICS_ROLES = ("agent", "judge", "decision_model", "ai_defense", "router_classifier")
+TOKENOMICS_METRIC_LABELS = ("connector", "provider", "model", "route_decision", "call_role", "profile")
+
+
+@dataclass
+class PriceRates:
+    """Per-million-token USD rates. ``None`` is absent (never 0)."""
+
+    input_per_mtok: float | None = None
+    output_per_mtok: float | None = None
+    cache_read_per_mtok: float | None = None
+    cache_write_per_mtok: float | None = None
+    reasoning_per_mtok: float | None = None
+
+
+@dataclass
+class PriceEntry(PriceRates):
+    provider: str = ""
+    model: str = ""
+
+
+@dataclass
+class PricingConfig:
+    """``observability.pricing`` (mirrors ``config.PricingConfig``)."""
+
+    version: str = ""
+    models: list[PriceEntry] = field(default_factory=list)
+    ai_defense_per_call_usd: float | None = None
+    unknown_model: str = "omit"
+    fallback: PriceRates = field(default_factory=PriceRates)
+
+
+@dataclass
+class TokenomicsConfig:
+    """``observability.tokenomics`` (mirrors ``config.TokenomicsConfig``). Off by default."""
+
+    enabled: bool = False
+    record_routing_provenance: bool = True
+    roles: list[str] = field(default_factory=list)
+    native_claudecode: bool = True
+    native_codex: bool = True
+    cost_compute: bool = True
+    cost_currency: str = "USD"
+    cost_keep_reported: bool = True
+    local_store_enabled: bool = False
+    local_store_retention_days: int = 30
+    metric_labels: list[str] = field(default_factory=lambda: list(TOKENOMICS_METRIC_LABELS))
+
+
 @dataclass
 class ObservabilityConfig:
     """Notification-only connector compatibility inside ``observability``.
@@ -2868,6 +2917,8 @@ class ObservabilityConfig:
     """
 
     connectors: dict[str, PerConnectorObservability] = field(default_factory=dict)
+    tokenomics: TokenomicsConfig = field(default_factory=TokenomicsConfig)
+    pricing: PricingConfig = field(default_factory=PricingConfig)
 
     def _connector_override(self, connector: str) -> PerConnectorObservability | None:
         """Return the override block for ``connector`` if configured.
@@ -8168,6 +8219,70 @@ def _merge_observability(raw: Any) -> ObservabilityConfig:
         return ObservabilityConfig()
     return ObservabilityConfig(
         connectors=_merge_observability_connectors(raw.get("connectors")),
+        tokenomics=_merge_tokenomics(raw.get("tokenomics")),
+        pricing=_merge_pricing(raw.get("pricing")),
+    )
+
+def _opt_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _merge_rates(raw: Any, rates: type[PriceRates] = PriceRates, **extra: Any) -> Any:
+    raw = raw if isinstance(raw, dict) else {}
+    return rates(
+        input_per_mtok=_opt_float(raw.get("input_per_mtok")),
+        output_per_mtok=_opt_float(raw.get("output_per_mtok")),
+        cache_read_per_mtok=_opt_float(raw.get("cache_read_per_mtok")),
+        cache_write_per_mtok=_opt_float(raw.get("cache_write_per_mtok")),
+        reasoning_per_mtok=_opt_float(raw.get("reasoning_per_mtok")),
+        **extra,
+    )
+
+
+def _merge_pricing(raw: Any) -> PricingConfig:
+    """Parse ``observability.pricing``. Absent keys stay absent; no price is invented."""
+    if not isinstance(raw, dict):
+        return PricingConfig()
+    models = [
+        _merge_rates(entry, PriceEntry, provider=str(entry.get("provider", "")), model=str(entry.get("model", "")))
+        for entry in (raw.get("models") or [])
+        if isinstance(entry, dict)
+    ]
+    ai_defense = raw.get("ai_defense")
+    return PricingConfig(
+        version=str(raw.get("version", "") or ""),
+        models=models,
+        ai_defense_per_call_usd=_opt_float(ai_defense.get("per_call_usd")) if isinstance(ai_defense, dict) else None,
+        unknown_model=str(raw.get("unknown_model", "") or "omit"),
+        fallback=_merge_rates(raw.get("fallback")),
+    )
+
+
+def _merge_tokenomics(raw: Any) -> TokenomicsConfig:
+    """Parse ``observability.tokenomics``. Off unless ``enabled: true``."""
+    if not isinstance(raw, dict):
+        return TokenomicsConfig()
+
+    def child(key: str) -> dict[str, Any]:
+        value = raw.get(key)
+        return value if isinstance(value, dict) else {}
+
+    native, cost, store, metrics = child("native_otel_import"), child("cost"), child("local_store"), child("metrics")
+    labels = metrics.get("labels")
+    return TokenomicsConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        record_routing_provenance=_coerce_bool(raw.get("record_routing_provenance", True), default=True),
+        roles=[str(r) for r in (raw.get("roles") or [])],
+        native_claudecode=_coerce_bool(native.get("claudecode", True), default=True),
+        native_codex=_coerce_bool(native.get("codex", True), default=True),
+        cost_compute=_coerce_bool(cost.get("compute", True), default=True),
+        cost_currency=str(cost.get("currency", "USD") or "USD"),
+        cost_keep_reported=_coerce_bool(cost.get("keep_reported", True), default=True),
+        local_store_enabled=_coerce_bool(store.get("enabled", False)),
+        local_store_retention_days=int(store.get("retention_days", 30) or 30),
+        metric_labels=[str(x) for x in labels] if isinstance(labels, list) and labels else list(TOKENOMICS_METRIC_LABELS),
     )
 
 
