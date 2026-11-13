@@ -702,6 +702,38 @@ Omissions compile to an explicit effective policy; inspect it with `defenseclaw 
 - Destinations are independent fan-out legs; one failing does not stop another. For advanced routes the first matching route wins per destination and signal, and an unmatched record is not delivered. Selectors AND across fields and OR within one: `buckets`, `sources`, `connectors`, `actions`, `event_names`, `min_severity`. Collection happens first, so routing cannot recreate a disabled signal.
 - Exactly one generated local SQLite destination is mandatory. It is configured only through `observability.local`, cannot be disabled or filtered, and keeps `retention_days` (default 7; `0` retains forever and warns about capacity). The same window bounds AI discovery history in `<data_dir>/inventory.db`. `max_store_mb` (default `0`, off) is an opt-in size cap for `audit.db` in MiB, 64 or more.
 
+### Tokenomics and pricing
+
+`observability.tokenomics` records what every model call used and cost. `observability.pricing` is the price table it reads. Both are off or absent by default, and an absent block behaves exactly as before 1.0.10. See [Tokenomics](/docs/observability/tokenomics) for what a usage record holds and how cost is computed.
+
+Prices are never compiled into DefenseClaw. The gateway prices a call only from `observability.pricing` in `config.yaml`. A model with no entry has no cost, not a zero cost. On a managed host both blocks come from the admin `config.yaml` in the signed bundle.
+
+Both blocks reload with the rest of `config.yaml`: a change applies without a restart.
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `observability.tokenomics.enabled` | `false` | Master switch. Off: no usage record, no metric, no local store, no extra goroutine. |
+| `observability.tokenomics.record_routing_provenance` | `true` | Put the requested and selected model, the route decision and the profile on each usage record. |
+| `observability.tokenomics.roles` | empty (all roles) | Call roles to record: `agent`, `judge`, `decision_model`, `ai_defense`, `router_classifier`. Unknown or repeated roles are refused. |
+| `observability.tokenomics.native_otel_import.claudecode`, `.codex` | `true`, `true` | Import per-call usage from the OTLP stream the agent sends. Applies only while `enabled` is true. While the proxy carries the connector, the import is a cross-check and is not counted twice. |
+| `observability.tokenomics.cost.compute` | `true` | Compute cost from `observability.pricing`. |
+| `observability.tokenomics.cost.currency` | `USD` | USD is the only value. There is no currency conversion. |
+| `observability.tokenomics.cost.keep_reported` | `true` | Keep a per-call cost that the provider or the agent reported, and mark its basis `reported`. A reported cost wins over the computed one. Running session totals are never used. |
+| `observability.tokenomics.local_store.enabled` | `false` | Keep an hourly usage aggregate in `<data_dir>/model_usage/model_usage.db`. |
+| `observability.tokenomics.local_store.retention_days` | `30` | Days the aggregate is kept. `1` to `3650`. |
+| `observability.tokenomics.local_store.granularity` | `hour` | `hour` is the only value. |
+| `observability.tokenomics.metrics.labels` | `connector`, `provider`, `model`, `route_decision`, `call_role`, `profile` | Labels on `defenseclaw.model.cost` and `defenseclaw.model.tokens`. A closed set: list a subset to drop labels. Identity names (user, group, session, device, host and similar) are refused. |
+| `observability.pricing.version` | empty | Table version, up to 64 characters, stamped on every usage record. Required when `models` is not empty. Change it when you change a price. |
+| `observability.pricing.models[].provider`, `.model` | required | The provider and model the entry prices. Matching ignores case. `model` is an exact id, or a prefix that ends in `*`; the longest prefix wins and an exact id beats any prefix. A provider of `*` matches every provider after provider-specific entries. Bedrock region and inference-profile prefixes (`us.`, `eu.`, `global.` and similar) and inference-profile ARNs are reduced to the model id before matching. A provider and model listed twice is refused. At most 2,000 entries. |
+| `observability.pricing.models[].input_per_mtok`, `.output_per_mtok` | required | USD per million input tokens (uncached) and output tokens. `0` to `100000`. |
+| `observability.pricing.models[].cache_read_per_mtok`, `.cache_write_per_mtok` | input rate | USD per million cache-read and cache-creation input tokens. Absent: the call prices those tokens at `input_per_mtok`. |
+| `observability.pricing.models[].reasoning_per_mtok` | output rate | USD per million reasoning output tokens. Absent: priced at `output_per_mtok`. |
+| `observability.pricing.ai_defense.per_call_usd` | absent | Flat USD price of one Cisco AI Defense inspection call. Absent: those calls have no cost. |
+| `observability.pricing.unknown_model` | `omit` | `omit`: a model with no entry has no cost. `fallback`: price it with `observability.pricing.fallback`. |
+| `observability.pricing.fallback.input_per_mtok`, `.output_per_mtok` | absent | Rates for `unknown_model: fallback`; both are required then. `cache_read_per_mtok`, `cache_write_per_mtok` and `reasoning_per_mtok` are optional, with the same defaults as a model entry. |
+
+A value outside these bounds, a missing `version` on a non-empty table, an unknown role and an identity label are refused with a message that names the key, on `defenseclaw config set` and on a reload. The gateway keeps the previous settings when a reload is refused.
+
 ### Destination transport and queue limits
 
 | Limit | Value |
@@ -1088,6 +1120,6 @@ Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway resta
 | `fleet.enabled`, `fleet.mqtt_broker_url`, `fleet.mqtt_require_tls`, `fleet.ota_key_env`, `fleet.emergency_key_env`, `fleet.device_key_env`, `fleet.mqtt_user_env`, `fleet.mqtt_pass_env` | MQTT connections and signing keys |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
-Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`, `quarantine_dir`, `observability.destinations` and `update`. The effective policy digest is stamped on `/health`, `/status` and every decision event; `defenseclaw-gateway policy digest` computes it from the file on disk, and the **Policy** row of `defenseclaw doctor` compares it with what the gateway applied ([Policy generation and digest](/docs/reference/cli#policy-generation-and-digest)).
+Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`, `quarantine_dir`, `observability.destinations`, `observability.tokenomics`, `observability.pricing` and `update`. The effective policy digest is stamped on `/health`, `/status` and every decision event; `defenseclaw-gateway policy digest` computes it from the file on disk, and the **Policy** row of `defenseclaw doctor` compares it with what the gateway applied ([Policy generation and digest](/docs/reference/cli#policy-generation-and-digest)).
 
 `defenseclaw-gateway policy reload` asks the running gateway to rebuild the generation now, for scripts and for assets the watcher may not see. Connector wiring (hook scripts, agent files) is not re-applied by a reload: run `defenseclaw-gateway restart` or `defenseclaw setup <connector>`. Both commands belong to the Go gateway binary; the Python CLI has no `gateway` group.
