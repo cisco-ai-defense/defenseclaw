@@ -46,6 +46,8 @@ Check the seeded prices against your contract before you rely on the cost. A mod
 
 On a managed host both blocks come from the admin `config.yaml` in the signed bundle. A user cannot set them.
 
+A bundle that sets `observability.tokenomics` or `observability.pricing` needs `--min-product-version 1.0.10` when it is signed, and signing refuses it with `config_invalid` otherwise. The key counts whatever its value, so `tokenomics: {enabled: false}` needs 1.0.10 too. A device on 1.0.9 or earlier refuses the whole admin `config.yaml` for either block, because its schema is closed. A device group that stays on an older build gets a `config.yaml` without both blocks.
+
 ## What a usage record holds
 
 Each finished model call writes one `log.model.usage` record in the `model.io` bucket. It holds:
