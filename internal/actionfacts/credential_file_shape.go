@@ -74,8 +74,8 @@ type credentialFileShape struct {
 // (substrate-1:GAP-0210).
 var credentialFileShapes = [...]credentialFileShape{
 	{class: CredentialFileEnvironment, base: ".env"},
-	// .env.<stage> and other variants; credentialFileTemplateSuffixes
-	// below are not environment files.
+	// .env.<stage> and other variants (a template is not one, see
+	// credentialFileTemplateSuffixes).
 	{class: CredentialFileEnvironment, basePrefix: ".env."},
 
 	{class: CredentialFileSSHPrivateKey, base: "id_rsa", strongUpload: true},
@@ -133,9 +133,15 @@ var credentialFileShapes = [...]credentialFileShape{
 	},
 }
 
-// credentialFileTemplateSuffixes are the last dot-suffixes of a .env.<x>
-// name that mark a template a repository ships, not an environment file:
-// .env.example, .env.sample, .env.template, .env.dist and the like.
+// credentialFileTemplateSuffixes are the last dot-suffixes of a file name
+// that mark a template or a sample a repository ships, not a credentials
+// file: .env.example, .env.local.sample, .aws/credentials.template,
+// .ssh/id_rsa.sample and the like. They apply to every row: a name the
+// table matches exactly (.npmrc, .netrc) or by its key suffix (.key, .pem)
+// never ends in one, so in practice they cut the name variants
+// (.env.<x>, .aws/credentials.<x>, .ssh/id_<x>). A copy kept beside the
+// real file (.bak, .old, .orig) stays a credentials file. The list comes
+// from the owner traces (substrate-1:GAP-0210).
 var credentialFileTemplateSuffixes = map[string]struct{}{
 	"example": {}, "examples": {}, "sample": {}, "samples": {},
 	"template": {}, "templates": {}, "tpl": {}, "tmpl": {}, "dist": {},
@@ -146,7 +152,8 @@ var credentialFileTemplateSuffixes = map[string]struct{}{
 // MatchCredentialFileShape returns the credentials-file table entry for a
 // path (any spelling: absolute, relative, home-prefixed or a drive path; it
 // is compared lower-case with forward slashes). A public key (*.pub) and a
-// repository's .env template are never credentials files. It says nothing
+// template or sample a repository ships (credentialFileTemplateSuffixes) are
+// never credentials files. It says nothing
 // about where the file is; see CredentialFileShape.Relative.
 func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
@@ -155,7 +162,8 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 	}
 	value = path.Clean(value)
 	base := path.Base(value)
-	if base == "" || base == "." || base == "/" || strings.HasSuffix(base, ".pub") {
+	if base == "" || base == "." || base == "/" || strings.HasSuffix(base, ".pub") ||
+		credentialFileTemplateName(base) {
 		return CredentialFileShape{}, false
 	}
 	parent := ""
@@ -203,9 +211,6 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 		default:
 			continue
 		}
-		if row.class == CredentialFileEnvironment && credentialEnvironmentTemplate(base) {
-			return CredentialFileShape{}, false
-		}
 		return CredentialFileShape{
 			Class:        row.class,
 			Relative:     relative,
@@ -238,14 +243,15 @@ func containsAny(value string, words []string) bool {
 	return false
 }
 
-func credentialEnvironmentTemplate(base string) bool {
-	suffix, ok := strings.CutPrefix(base, ".env.")
-	if !ok {
+// credentialFileTemplateName reports a file name whose last dot-suffix
+// marks a template or a sample (credentialFileTemplateSuffixes). A leading
+// dot is part of the name, not a suffix (.env is not a template of "env").
+func credentialFileTemplateName(base string) bool {
+	name := strings.TrimPrefix(base, ".")
+	index := strings.LastIndexByte(name, '.')
+	if index < 0 {
 		return false
 	}
-	if index := strings.LastIndexByte(suffix, '.'); index >= 0 {
-		suffix = suffix[index+1:]
-	}
-	_, template := credentialFileTemplateSuffixes[suffix]
+	_, template := credentialFileTemplateSuffixes[name[index+1:]]
 	return template
 }

@@ -56,6 +56,11 @@ var gap0210BenignCredentialShapes = []struct {
 	{"env example", "cat /work/f5proj/.env.example"},
 	{"env sample", "cat .env.sample"},
 	{"env template", "head /work/f5proj/.env.template"},
+	{"aws example", "cat /work/f5proj/.aws/credentials.example"},
+	{"ssh key sample", "cat /work/f5proj/.ssh/id_rsa.sample"},
+	{"docs aws", "cat /work/f5proj/docs/.aws/credentials"},
+	{"examples env", "cat /work/f5proj/examples/app/.env"},
+	{"site-packages key", "cat /opt/venv/lib/python3.12/site-packages/certifi/tests/server.key"},
 	{"testdata env", "cat /work/f5proj/testdata/.env"},
 	{"fixtures aws", "cat /work/f5proj/fixtures/.aws/credentials"},
 	{"jest tests env", "cat /work/f5proj/__tests__/.env"},
@@ -123,6 +128,8 @@ func TestWindowsProjectCredentialFileReadStartsSecretReadChainGAP0210(t *testing
 		{"ssh", `type C:\work\f5proj\.ssh\id_ed25519`, true},
 		{"netrc", `Get-Content C:\work\f5proj\_netrc`, true},
 		{"env example", `Get-Content C:\work\f5proj\.env.example`, false},
+		{"aws sample", `Get-Content C:\work\f5proj\.aws\credentials.sample`, false},
+		{"fixture env", `Get-Content C:\work\f5proj\testdata\.env`, false},
 		{"public key", `Get-Content C:\work\f5proj\.ssh\id_ed25519.pub`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

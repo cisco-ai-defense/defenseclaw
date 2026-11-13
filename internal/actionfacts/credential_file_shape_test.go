@@ -30,6 +30,8 @@ func TestMatchCredentialFileShapeTable(t *testing.T) {
 		{path: ".aws/credentials", class: CredentialFileAWS, relative: ".aws/credentials", strong: true},
 		{path: "/home/alice/.aws/credentials", class: CredentialFileAWS, relative: ".aws/credentials", strong: true},
 		{path: "/home/alice/.aws/credentials.bak", class: CredentialFileAWS, relative: ".aws/credentials.bak"},
+		{path: "/home/alice/.aws/credentials.orig", class: CredentialFileAWS, relative: ".aws/credentials.orig"},
+		{path: "~/.ssh/id_rsa.old", class: CredentialFileSSHPrivateKey, relative: ".ssh/id_rsa.old", strong: true},
 		{path: `C:\Users\alice\.aws\credentials`, class: CredentialFileAWS, relative: ".aws/credentials", strong: true},
 		// Kubernetes, registries, developer tokens, cloud CLI tokens.
 		{path: "/work/p/.kube/config", class: CredentialFileKubeconfig, relative: ".kube/config", strong: true},
@@ -69,6 +71,10 @@ func TestMatchCredentialFileShapeExclusions(t *testing.T) {
 		"/work/p/.env.example", "/work/p/.env.sample", "/work/p/.env.template",
 		"/work/p/.env.dist", "/work/p/.env.local.example", "/work/p/.env.defaults",
 		"/work/p/.env.tpl", "/work/p/.env.md",
+		// Templates and samples of the other name variants.
+		"/work/p/.aws/credentials.example", "/work/p/.aws/credentials.template",
+		"/work/p/.ssh/id_rsa.sample", "~/.ssh/id_ed25519.tpl",
+		`C:\work\p\.aws\credentials.sample`,
 		// Certificates, chains and public keys in PEM.
 		"/work/p/certs/ca.pem", "/work/p/fullchain.pem", "/work/p/cert.pem",
 		"/work/p/pubkey.pem", "/work/p/public.key", "/work/p/server.crt",
