@@ -59,7 +59,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
@@ -3985,10 +3984,10 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 
 	// The local stderr diagnostic remains redacted. Canonical telemetry keeps
 	// the source reason until the central per-destination redaction stage.
-	redactedReason := redaction.Reason(req.Reason)
+	redactedReason := logDisplayReason(req.Reason)
 	redactedFindings := make([]string, len(req.Findings))
 	for i, f := range req.Findings {
-		redactedFindings[i] = redaction.Reason(f)
+		redactedFindings[i] = logDisplayReason(f)
 	}
 	switch req.Action {
 	case "block":
@@ -4109,7 +4108,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 
 	fmt.Fprintf(os.Stderr, "[guardrail] evaluate <<< action=%s severity=%s sources=%v reason=%q\n",
 		out.Action, out.Severity, out.ScannerSources,
-		redaction.Reason(truncate(out.Reason, 120)))
+		logDisplayReason(truncate(out.Reason, 120)))
 
 	runtime, ok := a.observabilityV8RuntimeEmitter().(apiGuardrailEvaluateV8Runtime)
 	if !ok || runtime == nil {
