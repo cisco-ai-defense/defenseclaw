@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -138,6 +139,19 @@ type Service struct {
 	// maxGone; past it, Egress still asks Current while it holds the entry.
 	gone     map[string]bool
 	goneList []string
+	// diskHook, set by tests only, runs before every disk operation on an
+	// actor's files: a store open or access (storeOf), a state file write
+	// and a purge's removals. A test blocks it to stand for a disk that does
+	// not answer, so any call that touches the disk hangs (GAP-0179,
+	// GAP-0247). Nil in production.
+	diskHook atomic.Pointer[func(op string)]
+}
+
+// disk runs the test disk hook before a disk operation.
+func (s *Service) disk(op string) {
+	if f := s.diskHook.Load(); f != nil {
+		(*f)(op)
+	}
 }
 
 // maxGone bounds Service.gone.
@@ -555,6 +569,7 @@ func (s *Service) runPurges() {
 	s.purges = nil
 	s.mu.Unlock()
 	for _, j := range jobs {
+		s.disk("purge")
 		if j.store != nil {
 			_ = j.store.Close()
 		}
@@ -578,6 +593,7 @@ func (s *Service) runPurges() {
 // the store is not kept and the call answers unavailable, so the caller's
 // fail mode applies and the next call tries the link again.
 func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, audit.ConnectorInstanceID, error) {
+	s.disk("store")
 	instance, err := audit.ToolChainSubstrateInstanceID(e.actor.Atespace, e.actor.UID)
 	if err != nil {
 		return nil, "", bad(err)
@@ -821,6 +837,7 @@ func (s *Service) writeState(e *actorEntry) error {
 		return nil
 	}
 	st.Egress = e.memo.snapshot()
+	s.disk("state")
 	return writeFileAtomic(s.statePath(e.actor), mustJSON(st))
 }
 
