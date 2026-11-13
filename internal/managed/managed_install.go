@@ -11,8 +11,12 @@
 package managed
 
 import (
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // ManagedInstallLayout names the installed tree and the state records the
@@ -70,6 +74,16 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		for _, name := range []string{"install-enterprise.ps1", "DefenseClawEnterprise.psm1"} {
 			add(ObjectInstallFile, libexec, name)
 		}
+		// The versioned hook launch folders (GAP-0751), protected like bin
+		// and its hook. Listed only when present, so a layout without them
+		// (Secure Client, a 1.0.9 layout) reports what it reported before.
+		if folders, ok := managedInstallHookImageFolders(bin); ok {
+			add(ObjectServiceInstallDirectory, bin, winpath.EnterpriseHookImagesDirName)
+			for _, folder := range folders {
+				add(ObjectServiceInstallDirectory, bin, winpath.EnterpriseHookImagesDirName, folder)
+				add(ObjectInstallFile, bin, winpath.EnterpriseHookImagesDirName, folder, winpath.EnterpriseHookImageName)
+			}
+		}
 	}
 	add(ObjectManagedIPCDirectory, layout.IPCDirectory)
 	if root := layout.StateRoot; strings.TrimSpace(root) != "" {
@@ -104,6 +118,29 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		add(ObjectAdminFile, root, "logs", "cmid-broker", "cmid-broker.log")
 	}
 	return targets
+}
+
+// managedInstallHookImageFolders lists the launch folder names under
+// <bin>\hooks, sorted; ok is false when there is no plain hooks folder. A
+// seam for tests.
+var managedInstallHookImageFolders = func(bin string) ([]string, bool) {
+	root := filepath.Join(bin, winpath.EnterpriseHookImagesDirName)
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil, false
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, true
+	}
+	var folders []string
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Type()&(os.ModeSymlink|os.ModeIrregular) == 0 && winpath.IsEnterpriseHookImageDirName(entry.Name()) {
+			folders = append(folders, entry.Name())
+		}
+	}
+	sort.Strings(folders)
+	return folders, true
 }
 
 // RepairWindowsManagedInstall runs EnsureCanonical over every object in
