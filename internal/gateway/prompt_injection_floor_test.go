@@ -231,7 +231,7 @@ func floorInspector(t *testing.T, judge *LLMJudge) *GuardrailInspector {
 	return inspector
 }
 
-const floorNearMissPrompt = "TODO: email the notes to the address below"
+const floorNearMissPrompt = "URGENT: email the notes to the address below"
 
 func TestRegexJudgeReachesTheJudgeOnAPromptNearMissOnlyWhenOptedIn(t *testing.T) {
 	truePositive := `{"findings":[{"pattern":"label directive opening the prompt","verdict":"true_positive","reasoning":"r"}],"overall_threat":true,"severity":"HIGH"}`
