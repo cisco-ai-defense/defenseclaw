@@ -110,3 +110,38 @@ func TestHostScriptTwinOnlyAddsFindings(t *testing.T) {
 		})
 	}
 }
+
+// rel-1-0-10:GAP-0157. A command that writes a file and then copies from the
+// output of a command substitution to a fixed destination does not name a
+// protected file, and is not an unresolved write to one; the same call written
+// to a key file, or with a link made inside the substitution, still is.
+func TestCopyFromACommandSubstitutionIsNotAKeyWrite(t *testing.T) {
+	home := t.TempDir()
+	run := func(t *testing.T, command string) []RuleFinding {
+		t.Helper()
+		installToolCallCorpusPackDirConnector(t, "gap0157", filepath.Join(guardrailPoliciesRoot(t), "default"))
+		args, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:      actionfacts.Input{Tool: "Bash", Args: args, CWD: home, ActiveHome: home},
+			LegacyText: string(args), Connector: "codex", EnforcementCapable: true,
+		})
+	}
+	hasKeys := func(findings []RuleFinding) bool {
+		return slices.ContainsFunc(findings, func(f RuleFinding) bool {
+			return f.RuleID == "persistence.ssh_authorized_keys_command" && f.contributesToEnforcement()
+		})
+	}
+	t.Run("ordinary destination", func(t *testing.T) {
+		if findings := run(t, `echo hi > `+home+`/shot.raw && cp "$(cat `+home+`/shot.raw)" `+home+`/shot.png`); hasKeys(findings) {
+			t.Fatalf("a copy to an ordinary file blocked as a key write: %v", FindingStrings(findings))
+		}
+	})
+	t.Run("key file destination", func(t *testing.T) {
+		if findings := run(t, `echo hi > `+home+`/shot.raw && cp "$(cat `+home+`/shot.raw)" `+home+`/.ssh/authorized_keys`); !hasKeys(findings) {
+			t.Fatalf("a copy to the key file was not blocked: %v", FindingStrings(findings))
+		}
+	})
+}

@@ -61,7 +61,7 @@ func PowerShellFetchedContentExecuted(source string, dialect Dialect) (found boo
 			found = false
 		}
 	}()
-	if len(source) > maxCommandBytes {
+	if len(source) > maxCommandBytes || !mayHoldCradle(source) {
 		return false
 	}
 	if dialect == DialectPOSIX || dialect == DialectNone || dialect == DialectMixed {
@@ -93,6 +93,20 @@ func PowerShellFetchedContentExecuted(source string, dialect Dialect) (found boo
 	}
 	for _, statement := range script.Statements {
 		if analysis.statementRuns(statement) {
+			return true
+		}
+	}
+	return false
+}
+
+// mayHoldCradle is the cheap screen: a cradle runs fetched text through
+// Invoke-Expression (or its alias) or a script block built from it. It never
+// rejects a text that holds one: an encoded launcher body is decoded after this
+// screen, so the encoding switch passes it on.
+func mayHoldCradle(source string) bool {
+	lower := strings.ToLower(source)
+	for _, word := range []string{"iex", "invoke-expression", "scriptblock", "-e", "/c"} {
+		if strings.Contains(lower, word) {
 			return true
 		}
 	}

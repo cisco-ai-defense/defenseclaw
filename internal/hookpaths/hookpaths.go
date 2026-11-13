@@ -5767,9 +5767,12 @@ func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option
 	return option, dynamic
 }
 
-// quotedDynamicCopySource accepts only a single scalar shell parameter.
-// Double quoting makes its expansion one argv word, including when its value
-// contains spaces or starts with a dash.
+// quotedDynamicCopySource accepts only a single scalar shell parameter or a
+// single command substitution, alone in double quotes. Double quoting makes
+// its expansion one argv word, including when its value contains spaces or
+// starts with a dash. A substitution runs its own commands, and the walk that
+// reads the call reads them as calls of their own (a link made inside it is a
+// link of the command); only the word they produce is the source.
 func quotedDynamicCopySource(word *syntax.Word) bool {
 	if word == nil || len(word.Parts) != 1 {
 		return false
@@ -5777,6 +5780,9 @@ func quotedDynamicCopySource(word *syntax.Word) bool {
 	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
 	if !ok || len(quoted.Parts) != 1 {
 		return false
+	}
+	if _, substitution := quoted.Parts[0].(*syntax.CmdSubst); substitution {
+		return true
 	}
 	param, ok := quoted.Parts[0].(*syntax.ParamExp)
 	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||

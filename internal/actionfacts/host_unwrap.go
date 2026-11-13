@@ -44,6 +44,44 @@ import (
 // stop-parse tail, quotes the legacy argument passing rewrites, a working
 // directory, an empty or colon-glued word) has no reading at all.
 
+// withoutUnreachableStatements cuts a PowerShell script after its first
+// top-level exit or return: the statements after it never run, so a rule must
+// not judge them (the tokenizer's own wrapper reading does the same,
+// POSIXPowerShellCommandFacts).
+func withoutUnreachableStatements(source string) string {
+	script, _ := psparse.Parse(source, psparse.Options{Dialect: psparse.DialectUnknown})
+	if script == nil || len(script.Diagnostics) != 0 {
+		return source
+	}
+	for _, statement := range script.Statements {
+		flow, isFlow := statement.(*psparse.Block)
+		if !isFlow || (flow.Keyword != "exit" && flow.Keyword != "return") {
+			continue
+		}
+		if _, end := flow.Span(); end > 0 && end <= len(source) {
+			return source[:end]
+		}
+		return source
+	}
+	return source
+}
+
+// mayHoldHostScript is the cheap screen of HostScriptTwin: a text with none of
+// the words a launcher, an Invoke-Expression or a call block needs has no
+// script reading. It never rejects a text that has one.
+func mayHoldHostScript(source string) bool {
+	if source == "" || len(source) > maxCommandBytes {
+		return false
+	}
+	lower := strings.ToLower(source)
+	for _, word := range []string{"powershell", "pwsh", "cmd", "iex", "invoke-expression", "{"} {
+		if strings.Contains(lower, word) {
+			return true
+		}
+	}
+	return false
+}
+
 // hostUnwrap is the result of unwrapping the static host wrappers of one source.
 type hostUnwrap struct {
 	source   string
@@ -585,6 +623,11 @@ func soleHostCall(out *parseOutput) (hostScript, bool) {
 // posixSoleHostCallSource is the script text of a POSIX source that is one
 // static launcher call.
 func posixSoleHostCallSource(source string) (string, Dialect, bool) {
+	lower := strings.ToLower(source)
+	if !strings.Contains(lower, "powershell") && !strings.Contains(lower, "pwsh") &&
+		!strings.Contains(lower, "cmd") {
+		return "", DialectNone, false
+	}
 	out := parsePOSIX(source, 1, 0)
 	script, ok := soleHostCall(&out)
 	if !ok || script.keepOpen {
@@ -607,6 +650,12 @@ func posixSoleHostCallSource(source string) (string, Dialect, bool) {
 // no reading at all (the call stays as unknown as it was).
 func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 	if facts.Parse.Status == StatusLimitExceeded {
+		return Input{}, false
+	}
+	// Hook calls run this on every tool call: most have no launcher, call
+	// block or Invoke-Expression, and a substring screen says so before any
+	// parse.
+	if len(input.Argv) == 0 && !mayHoldHostScript(shellCommandText(input)) {
 		return Input{}, false
 	}
 	source, dialect := shellCommandText(input), Dialect(DialectNone)
@@ -641,6 +690,9 @@ func HostScriptTwin(input Input, facts Facts) (Input, bool) {
 	twin := input
 	twin.Args, twin.Argv = nil, nil
 	twin.Command = unwrapped.source
+	if unwrapped.dialect == DialectPowerShell {
+		twin.Command = withoutUnreachableStatements(unwrapped.source)
+	}
 	twin.DialectHint = unwrapped.dialect
 	return twin, true
 }

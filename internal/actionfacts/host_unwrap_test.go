@@ -60,7 +60,7 @@ func TestHostScriptTwinIsTheScriptTheCallRuns(t *testing.T) {
 		name, tool, command string
 	}{
 		{"powershell without profile switch", "PowerShell", `powershell -Command "Get-Content C:\tmp\a.txt"`},
-		{"powershell abbreviations", "PowerShell", `powershell.exe -nop -NonInteractive -ExecutionPolicy Bypass -c "Get-Content C:\tmp\a.txt"`},
+		{"powershell abbreviations", "PowerShell", `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -c "Get-Content C:\tmp\a.txt"`},
 		{"pwsh single quoted", "PowerShell", `pwsh -c 'Get-Content C:\tmp\a.txt'`},
 		{"pwsh joins words", "PowerShell", `pwsh -Command Get-Content C:\tmp\a.txt`},
 		{"encoded command", "PowerShell", `powershell -EncodedCommand ` + encodedPowerShell(bare)},
@@ -225,5 +225,29 @@ func TestHostScriptTwinNeverChangesTheFactsOfTheCallAsWritten(t *testing.T) {
 		if _, ok := HostScriptTwin(input, facts); ok || facts.Authoritative() {
 			t.Fatalf("an unresolved launcher %q was read or completed: %#v", command, facts.Parse)
 		}
+	}
+}
+
+// Statements after a top-level exit never run, so the script reading drops them.
+func TestHostScriptTwinDropsStatementsAfterExit(t *testing.T) {
+	for _, test := range []struct {
+		name, command string
+		keeps, drops  string
+	}{
+		{"exit first", `pwsh -c "exit; Get-Content C:\tmp\a.txt"`, "exit", "Get-Content"},
+		{"exit after a statement", `pwsh -c "Get-Date; exit; Remove-Item C:\tmp\a.txt"`, "Get-Date", "Remove-Item"},
+		{"conditional exit keeps the rest", `pwsh -c 'if ($x) { exit }; Get-Content C:\tmp\a.txt'`, "Get-Content", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := hookShellInput(t, "PowerShell", test.command)
+			twin, ok := HostScriptTwin(input, Analyze(input))
+			if !ok {
+				t.Fatal("no script reading")
+			}
+			if !strings.Contains(twin.Command, test.keeps) ||
+				test.drops != "" && strings.Contains(twin.Command, test.drops) {
+				t.Fatalf("script reading = %q", twin.Command)
+			}
+		})
 	}
 }

@@ -5605,15 +5605,15 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 	},
 	"CMD-WIN-IWR-IEX": {
+		// The pipe form (iwr | iex) and every other spelling of a download
+		// cradle (actionfacts.PowerShellFetchedContentExecution) are one
+		// action. The finding enforces on a complete parse only; a cradle
+		// that is spelled with parentheses or a variable leaves the tokenizer's
+		// parse partial, and the filter below keeps it in shadow (see
+		// powerShellCradleShadowOnly).
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			return powerShellDownloadExecPrerequisite(facts) ||
 				actionfacts.PowerShellFetchedContentExecution(input)
-		},
-		// A cradle statement is proven on its own tree even when the rest of
-		// the script (a cd prefix, a trailer, a list) leaves the outer parse
-		// partial.
-		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
-			return actionfacts.PowerShellFetchedContentExecution(input)
 		},
 	},
 	"CMD-PIPE-WGET": {
@@ -6315,6 +6315,17 @@ func commandByID(
 	return actionfacts.CommandFact{}, false
 }
 
+// powerShellCradleShadowOnly reports a download cradle (psparse's reading of
+// the script: Invoke-Expression of fetched content, in a spelling the tokenizer
+// cannot prove) in a call whose parse is partial. It adds the download-execute
+// finding in shadow: recorded, never enforced. The pipe form keeps the product's
+// rule (a partial parse raises nothing), so a call whose tokenizer facts already
+// hold the pipe form is not read again here.
+func powerShellCradleShadowOnly(input actionfacts.Input, facts actionfacts.Facts) bool {
+	return !powerShellDownloadExecPrerequisite(facts) &&
+		actionfacts.PowerShellFetchedContentExecution(input)
+}
+
 func filterExactFallbackFindings(
 	findings []RuleFinding,
 	input actionfacts.Input,
@@ -6371,7 +6382,7 @@ func filterExactFallbackFindings(
 		if finding.RuleID == "CMD-WIN-IWR-IEX" &&
 			(!facts.Authoritative() ||
 				facts.Parse.Status != actionfacts.StatusComplete) &&
-			!actionfacts.PowerShellFetchedContentExecution(input) {
+			!powerShellCradleShadowOnly(input, facts) {
 			continue
 		}
 		if hasTag(finding.Tags, trustedParserUncertaintyTag) {
@@ -7725,6 +7736,12 @@ func trustedLegacyCommandRuleMatches(
 			trustedRuleHasActionProof(ruleID, input, facts) {
 			matchesByID[ruleID] = struct{}{}
 		}
+	}
+	// A download cradle is one command word (iex) over an argument that
+	// fetches: no pipeline text holds it, so psparse's reading of the chain
+	// (actionfacts.PowerShellFetchedContentExecution) is the match.
+	if actionfacts.PowerShellFetchedContentExecution(input) {
+		matchesByID["CMD-WIN-IWR-IEX"] = struct{}{}
 	}
 	for ruleID := range semanticOwners {
 		if trustedLegacyRuleCategory(generation, ruleID) == "command" &&
