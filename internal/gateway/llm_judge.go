@@ -2519,10 +2519,7 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 	if jc := j.rp.ToolInjectionJudge(); jc != nil && jc.SystemPrompt != "" {
 		basePrompt = jc.SystemPrompt
 	}
-	systemPrompt := fmt.Sprintf(basePrompt, sanitizedTool)
-	if nonce := toolJudgeSampleNonce(sample); nonce != "" {
-		systemPrompt += "\n\n" + toolJudgeNonceLine(nonce)
-	}
+	systemPrompt := withToolJudgeNonceLine(fmt.Sprintf(basePrompt, sanitizedTool), toolJudgeSampleNonce(sample))
 
 	const kind = "tool_injection"
 	maxTok := 512

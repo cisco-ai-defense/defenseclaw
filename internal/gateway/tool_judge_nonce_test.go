@@ -166,3 +166,19 @@ func TestToolJudgeSampleCostOfHugeArguments(t *testing.T) {
 		}
 	}
 }
+
+// A pack prompt places the nonce line with the placeholder; without one the
+// line is appended; without a nonce the placeholder is removed.
+func TestWithToolJudgeNonceLine(t *testing.T) {
+	const n = "0123456789abcdef"
+	placed := withToolJudgeNonceLine("rules\n"+toolJudgeNoncePlaceholder+"\nRespond ONLY with JSON", n)
+	if !strings.Contains(placed, "rules\n"+toolJudgeNonceLine(n)+"\nRespond ONLY with JSON") || strings.Contains(placed, toolJudgeNoncePlaceholder) {
+		t.Fatalf("placeholder not replaced: %q", placed)
+	}
+	if got := withToolJudgeNonceLine("rules", n); got != "rules\n\n"+toolJudgeNonceLine(n) {
+		t.Fatalf("appended form: %q", got)
+	}
+	if got := withToolJudgeNonceLine("a "+toolJudgeNoncePlaceholder+" b", ""); strings.Contains(got, "{{") {
+		t.Fatalf("placeholder kept without a nonce: %q", got)
+	}
+}

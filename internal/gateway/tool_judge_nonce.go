@@ -75,6 +75,26 @@ func writeToolJudgeSection(b *strings.Builder, nonce, name, attrs, body string) 
 	fmt.Fprintf(b, " nonce=%q>\n", nonce)
 }
 
+// toolJudgeNoncePlaceholder marks where a pack prompt wants the nonce line
+// (tool-injection.yaml). A prompt without it gets the line at the end.
+const toolJudgeNoncePlaceholder = "{{SECTION_NONCE_LINE}}"
+
+// withToolJudgeNonceLine puts the nonce line where the prompt's placeholder is,
+// or after the prompt. With no nonce the placeholder is removed.
+func withToolJudgeNonceLine(prompt, nonce string) string {
+	line := ""
+	if nonce != "" {
+		line = toolJudgeNonceLine(nonce)
+	}
+	if strings.Contains(prompt, toolJudgeNoncePlaceholder) {
+		return strings.Replace(prompt, toolJudgeNoncePlaceholder, line, 1)
+	}
+	if line == "" {
+		return prompt
+	}
+	return prompt + "\n\n" + line
+}
+
 var toolJudgeNonceRe = regexp.MustCompile(`nonce="([0-9a-f]{16})"`)
 
 // toolJudgeSampleNonce returns the nonce of a prepared sample: the first one in
