@@ -17,10 +17,12 @@
 package gateway
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/paymentcard/testcorpus"
@@ -158,4 +160,22 @@ func TestLogDisplayReasonKeepsRulePackTitles(t *testing.T) {
 			t.Errorf("logDisplayReason(%q) kept non-rule text", reason)
 		}
 	}
+}
+
+// Review of GAP-0159: a log that repeats one address on every line makes
+// every address a list candidate; each candidate reads a bounded window.
+func TestEmailListBoundedOnLargeRepeatedLog(t *testing.T) {
+	rule := alertFatigueRule(t, "strict", "PII-EMAIL-LIST")
+	var b strings.Builder
+	for i := 0; b.Len() < 512<<10; i++ {
+		fmt.Fprintf(&b, "2026-11-13T00:00:%02dZ INFO login ok user=dana.reyes@contoso-mail.net req=%d\n", i%60, i)
+	}
+	began := time.Now()
+	if firstAcceptedRuleMatch(rule, b.String()) != nil {
+		t.Error("one repeated address matched the list rule")
+	}
+	if elapsed := time.Since(began); elapsed > 20*time.Second {
+		t.Errorf("list rule took %s on a 512 KiB log", elapsed)
+	}
+	t.Logf("512 KiB repeated-address log: %s", time.Since(began))
 }

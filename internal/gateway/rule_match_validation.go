@@ -250,17 +250,23 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
 	case "ENT-EMAIL-BULK", "PII-EMAIL-FIELD":
+		// The labeled forms (PII-EMAIL-FIELD, and ENT-EMAIL-BULK in
+		// privacy-high-assurance) skip git's own identity key: git config
+		// --list prints user.email=..., setup rather than a record field.
 		return func(text, match string, start, end int) bool {
-			return credibleEmailContext(text, match, start, end)
+			return !gitUserEmailKeyAt(text, start) && credibleEmailContext(text, match, start, end)
 		}
 	case "PII-EMAIL-LIST":
 		// One address is ENT-EMAIL-BULK (LOW): a vendor no-reply address in
 		// an agent's own instructions must not block (substrate-1:GAP-0149).
 		// Five or more distinct addresses together (a CSV, a list, mailto
 		// links) is a bulk disclosure (substrate-1:GAP-0159).
-		return func(text, match string, start, end int) bool {
-			return emailListMember(text, start, end) && credibleEmailContext(text, match, start, end) &&
-				emailListAt(text, start)
+		// Only per-address checks apply: the count already keeps a single
+		// vendor address out, and the whole-text phrases of
+		// credibleEmailContext ("ssh", "bcc to") must not hide a bulk dump.
+		// The bounded window check runs before anything else.
+		return func(text, _ string, start, end int) bool {
+			return emailListMember(text, start, end) && emailListAt(text, start)
 		}
 	case "ENT-PHONE-E164":
 		return func(text, match string, start, _ int) bool {
@@ -509,21 +515,27 @@ const (
 	// emailListWindow bounds, in bytes from the first address, where the
 	// other addresses of one list must be.
 	emailListWindow = 4096
+	// emailListMaxScan bounds the addresses read per candidate, so a large
+	// log that repeats one address costs a bounded scan per match.
+	emailListMaxScan = 16
 )
 
 var emailAddressPattern = lazyregexp.New(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
 
-// gitIdentityLinePattern opens a line that names a commit identity: git log
-// and show headers and commit trailers. A git log of a busy repository lists
+// gitIdentityLinePattern is the text from the start of a line up to the
+// first address of a commit identity: git log and show headers, commit
+// trailers and git shortlog -e rows. A git log of a busy repository lists
 // many authors; that is project history, not a disclosure of addresses.
-var gitIdentityLinePattern = lazyregexp.New(`(?i)^[\s>*-]*(?:author|commit|committer|co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by|helped-by|cc)\s*:`)
+// Only the first address after the label is the identity, so a label line
+// cannot carry a list (no '@' may sit between the label and the address).
+var gitIdentityLinePattern = lazyregexp.New(`(?i)^(?:[\s>*-]*(?:author|commit|committer|co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|reported-by|suggested-by|helped-by)\s*:|\s*\d+\t)[^@\n]*$`)
 
 // emailListAt reports emailListMinDistinct or more distinct list members in
 // the window that starts at the address at start.
 func emailListAt(text string, start int) bool {
 	end := min(len(text), start+emailListWindow)
 	seen := make(map[string]struct{}, emailListMinDistinct)
-	for _, loc := range emailAddressPattern.Regexp().FindAllStringIndex(text[start:end], -1) {
+	for _, loc := range emailAddressPattern.Regexp().FindAllStringIndex(text[start:end], emailListMaxScan) {
 		s, e := start+loc[0], start+loc[1]
 		if !emailListMember(text, s, e) {
 			continue
@@ -534,6 +546,12 @@ func emailListAt(text string, start int) bool {
 		}
 	}
 	return false
+}
+
+// gitUserEmailKeyAt reports a labeled-field match that is git's user.email
+// key (git config --list, .gitconfig).
+func gitUserEmailKeyAt(text string, start int) bool {
+	return start >= 5 && strings.EqualFold(text[start-5:start], "user.")
 }
 
 // emailListMember applies the per-address checks of credibleEmailContext

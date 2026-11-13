@@ -2554,7 +2554,7 @@
                 },
                 {
                   "id": "PII-EMAIL-FIELD",
-                  "pattern": "(?i)\\b(?:e-?mail)(?:[\\s_-]+address)?[\"'\\s*_:#=-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
                   "title": "Email address in a labeled field",
                   "severity": "MEDIUM",
                   "confidence": 0.7,
@@ -6552,7 +6552,7 @@
                 },
                 {
                   "id": "PII-EMAIL-FIELD",
-                  "pattern": "(?i)\\b(?:e-?mail)(?:[\\s_-]+address)?[\"'\\s*_:#=-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
                   "title": "Email address in a labeled field",
                   "severity": "MEDIUM",
                   "confidence": 0.7,
@@ -7524,7 +7524,7 @@
                 "Email Address": {
                   "finding_id": "JUDGE-PII-EMAIL",
                   "severity_default": "HIGH",
-                  "severity_prompt": "HIGH",
+                  "severity_prompt": "LOW",
                   "severity_completion": "CRITICAL",
                   "enabled": true
                 },
@@ -10293,7 +10293,7 @@
                 },
                 {
                   "id": "PII-EMAIL-FIELD",
-                  "pattern": "(?i)\\b(?:e-?mail)(?:[\\s_-]+address)?[\"'\\s*_:#=-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+                  "pattern": "(?i)(?:\\b|_)e-?mails?(?:[\\s_-]*address(?:es)?)?[\"'\\s*_:#=\\[-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
                   "title": "Email address in a labeled field",
                   "severity": "MEDIUM",
                   "confidence": 0.7,

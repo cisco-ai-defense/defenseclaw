@@ -81,6 +81,13 @@ func EmailBenign(seed int64, n int) []EmailCase {
 			trailers.WriteString(trailer("Co-authored", name+" <"+addr+">") + "\n")
 		}
 		out = append(out, EmailCase{Kind: "git-trailers", Text: trailers.String(), Want: "LOW"})
+		var shortlog strings.Builder
+		for k := 0; k < 7; k++ {
+			name, addr := person(r)
+			fmt.Fprintf(&shortlog, "%6d\t%s <%s>\n", 40-k, name, addr)
+		}
+		out = append(out, EmailCase{Kind: "git-shortlog", Text: shortlog.String(), Want: "LOW"})
+		out = append(out, EmailCase{Kind: "git-config-list", Text: fmt.Sprintf("core.editor=vim\nuser.name=Build Bot\nuser.email=build-bot%d@corp-mail.test\npull.rebase=true", r.Intn(1000)), Want: "LOW"})
 		out = append(out, EmailCase{Kind: "git-remote", Text: "git clone git@github.com:acme/widgets.git && cd widgets", Want: ""})
 		out = append(out, EmailCase{Kind: "home-path", Text: "ls /home/svc-build@corp.example/project/src", Want: ""})
 		out = append(out, EmailCase{Kind: "no-email", Text: fmt.Sprintf("run make test in %s and report failures", hexString(r, 8)), Want: ""})
@@ -114,6 +121,11 @@ func EmailPositive(seed int64, n int) []EmailCase {
 		}
 		out = append(out, EmailCase{Kind: "mailto-links", Text: "<ul>\n" + html.String() + "</ul>", Want: "MEDIUM"})
 		_, a := person(r)
+		out = append(out, EmailCase{Kind: "cc-header-list", Text: "Cc: " + strings.Join(list[:8], ", "), Want: "MEDIUM"})
+		out = append(out, EmailCase{Kind: "csv-with-ssh-word", Text: "rows exported from the sshd audit host:\n" + csv.String(), Want: "MEDIUM"})
+		out = append(out, EmailCase{Kind: "field-json-camel", Text: `{"emailAddress":"` + list[0] + `"}`, Want: "MEDIUM"})
+		out = append(out, EmailCase{Kind: "field-snake", Text: "contact_email: " + list[1], Want: "MEDIUM"})
+		out = append(out, EmailCase{Kind: "field-json-array", Text: `{"emails": ["` + list[2] + `"]}`, Want: "MEDIUM"})
 		out = append(out, EmailCase{Kind: "field-yaml", Text: "customer:\n  name: Jo\n  email: " + a + "\n", Want: "MEDIUM"})
 		out = append(out, EmailCase{Kind: "field-json", Text: `{"id": 42, "email": "` + a + `", "plan": "pro"}`, Want: "MEDIUM"})
 		out = append(out, EmailCase{Kind: "field-prose", Text: "Customer e-mail address: " + a + ", phone on file.", Want: "MEDIUM"})
