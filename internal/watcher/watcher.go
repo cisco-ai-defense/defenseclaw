@@ -5006,9 +5006,7 @@ func (w *InstallWatcher) settleAdmissionIssue(evt InstallEvent, res AdmissionRes
 // could not fully quarantine. Publication can precede a source-cleanup
 // failure, so the audit must not claim either location's current state.
 func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallEvent, err error) {
-	// A removal the hook guardian deferred to the user's next sign-in is the
-	// guardian's to finish; status reports it from the guardian's list.
-	if w != nil && !w.secureClientActive() && !errors.Is(err, enforce.ErrQuarantineRemovalDeferred) {
+	if w != nil && !w.secureClientActive() {
 		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
 	}
 	// A rejected asset with a link inside is not moved, because quarantine does
