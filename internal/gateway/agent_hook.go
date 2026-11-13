@@ -147,6 +147,10 @@ type agentHookRequest struct {
 	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
 	// the payload carries no tool-argument object.
 	ToolArgsAreHookEnvelope bool
+	// PromptField is the text of a declared prompt field of the payload
+	// (prompt, user_prompt, userPrompt, initial_prompt, initialPrompt): what the
+	// user typed, as opposed to the fallback fields Content may come from.
+	PromptField string
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -3349,6 +3353,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		content = stringifyHookValue(firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
 	}
 
+	promptField := firstString(payload, "prompt", "user_prompt", "userPrompt", "initial_prompt", "initialPrompt")
 	direction := "tool_call"
 	switch {
 	case isPromptLikeEvent(event):
@@ -3367,6 +3372,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		AgentID:       agentID, AgentName: agentName, AgentType: agentType,
 		RootAgentID: rootAgentID, ParentAgentID: parentAgentID, ChildAgentID: childAgentID,
 		HookEventName:   event,
+		PromptField:     promptField,
 		SemanticEventID: correlationValue(connector.CorrelationTargetSemanticEvent),
 		SessionID:       sessionID, TurnID: turnID, MessageID: correlationValue(connector.CorrelationTargetMessage),
 		ThreadID:      correlationValue(connector.CorrelationTargetThread),
@@ -3605,13 +3611,18 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Content)
-			}
-			a.observeUserDownloadRequest(ctx, req.Content)
-		}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName)
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		if intentEvent {
+			// Only a declared prompt field names scope targets: the generic
+			// fallback also reads descriptions, tool responses and results, and
+			// Hermes and OpenClaw "user" text can come from a remote chat party.
+			scopeText := req.PromptField
+			if req.ConnectorName == "hermes" || req.ConnectorName == "openclaw" {
+				scopeText = ""
+			}
+			a.observeUserTurn(ctx, req.Content, scopeText, verdict)
+		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a

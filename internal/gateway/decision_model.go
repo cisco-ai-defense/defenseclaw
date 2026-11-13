@@ -404,26 +404,44 @@ const maxPendingDecisionStates = 1024
 
 // keepDecisionState records the decision-model state of a call under the
 // lock that recorded the call in its session, so concurrent calls of one
-// session cannot swap histories. It is keyed by the judge sample, which
-// renders the same content.
+// session cannot swap histories. It is keyed by the digest of the judge sample
+// (unique per call: it carries the call's nonce); at the cap the oldest
+// pending state goes, not all of them.
 func (j *LLMJudge) keepDecisionState(sample string, state decisionModelState) {
 	j.decisionStatesMu.Lock()
 	defer j.decisionStatesMu.Unlock()
-	if j.decisionStates == nil || len(j.decisionStates) >= maxPendingDecisionStates {
-		j.decisionStates = make(map[string]decisionModelState)
+	if j.decisionStates == nil {
+		j.decisionStates = make(map[[sha256.Size]byte]decisionStateEntry)
 	}
-	j.decisionStates[sample] = state
+	for len(j.decisionStates) >= maxPendingDecisionStates {
+		var oldest [sha256.Size]byte
+		oldestSeq := uint64(1<<63 - 1)
+		for key, e := range j.decisionStates {
+			if e.seq < oldestSeq {
+				oldest, oldestSeq = key, e.seq
+			}
+		}
+		delete(j.decisionStates, oldest)
+	}
+	j.decisionStateSeq++
+	j.decisionStates[sha256.Sum256([]byte(sample))] = decisionStateEntry{state: state, seq: j.decisionStateSeq}
+}
+
+type decisionStateEntry struct {
+	state decisionModelState
+	seq   uint64
 }
 
 // takeDecisionState returns the state kept for sample, or the current call
 // alone when none was kept (a call without a session).
 func (j *LLMJudge) takeDecisionState(sample, toolName, args string) decisionModelState {
 	j.decisionStatesMu.Lock()
-	state, ok := j.decisionStates[sample]
-	delete(j.decisionStates, sample)
+	key := sha256.Sum256([]byte(sample))
+	e, ok := j.decisionStates[key]
+	delete(j.decisionStates, key)
 	j.decisionStatesMu.Unlock()
 	if ok {
-		return state
+		return e.state
 	}
 	return decisionModelState{CurrentToolCall: decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: boundToolJudgeArguments(args)}}
 }
@@ -431,6 +449,12 @@ func (j *LLMJudge) takeDecisionState(sample, toolName, args string) decisionMode
 // runToolDecision is the tool-call judge with the decision model in front.
 // It returns the verdict the judge lane uses.
 func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample string) *ScanVerdict {
+	floor := j.takeScopeFloor(sample)
+	return applyIntentScopeFloor(j.runToolDecisionVerdict(ctx, toolName, args, sample), floor)
+}
+
+// runToolDecisionVerdict is runToolDecision before the task-scope floor.
+func (j *LLMJudge) runToolDecisionVerdict(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
 	if j.decisionOnly {
 		return j.runDecisionAlone(ctx, toolName, args, sample)

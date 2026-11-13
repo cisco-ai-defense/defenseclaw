@@ -29,6 +29,21 @@ function page(name: string): string {
   return readFileSync(join(site, 'content/docs', name), 'utf8').split(/\s+/).join(' ');
 }
 
+describe('Tool judge task scope', () => {
+  const text = () => page('guardrail/index.mdx').split('### Which connectors give the judge your task')[1].split('### Let tool calls go first')[0];
+  it('lists the connectors that keep the task and documents the scope finding', () => {
+    const section = text();
+    assert.match(section, /\*\*Kept:\*\*[^*]*Claude Code[^*]*Devin\./);
+    assert.match(section, /\*\*Kept, but names no destination:\*\* Hermes/);
+    assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
+    assert.match(section, /`INTENT-SCOPE-SEND`/);
+    assert.match(section, /`alert_at`/);
+    assert.match(section, /Naming a mailbox covers that address only, and naming only a domain covers no mailbox at it/);
+    assert.match(section, /default pack it raises an alert and never blocks on its own; the permissive pack records the finding without an alert; the strict pack, or `block_at: medium`, blocks it/);
+    assert.match(section, /too large to read in full counts as outside the task and, as for any input past a limit, is at least an alert in the default and permissive packs and a block in the strict pack/);
+  });
+});
+
 describe('Rollback gateway state', () => {
   it('qualifies automatic startup and names the command for a stopped gateway', () => {
     const text = page('get-started/upgrade.mdx').split('## Rollback')[1].split('## Update notices')[0];

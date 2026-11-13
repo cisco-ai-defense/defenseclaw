@@ -810,12 +810,18 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	}
 	g := r.policyGeneration()
 	judge := judgeOf(g, r.judge)
-	if judge != nil {
-		judge.ObserveSessionPrompt(ContextWithSessionID(context.Background(), sessionKey), content)
-	}
 	start := time.Now()
 
 	verdict := scanLocalPatternsWithActivation("prompt", content, ruleGenerationOf(g, ""), localPatternsOf(g))
+	if judge != nil {
+		// A prompt the local scan blocks is not a task; an OpenClaw chat
+		// message is not known to be the owner's, so it names no scope target.
+		task := content
+		if verdict != nil && normalizedGuardrailAction(verdict.Action) == guardrailActionBlock {
+			task = ""
+		}
+		judge.ObserveSessionPromptScope(ContextWithSessionID(context.Background(), sessionKey), task, "")
+	}
 
 	runJudge := judge != nil && verdict != nil && verdict.Severity == "HIGH"
 	if runJudge {
@@ -827,6 +833,10 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 				defer cancel()
 				if jv := judge.RunJudges(jctx, "prompt", content, ""); jv != nil {
 					verdict = mergeWithJudge(verdict, jv)
+					if guardrailSeverityRank(jv.Severity) >= guardrailSeverityRank("HIGH") {
+						// The prompt judge rates it HIGH: it is not a task either.
+						judge.ClearSessionTask(ContextWithSessionID(context.Background(), sessionKey))
+					}
 				}
 			}()
 		default:

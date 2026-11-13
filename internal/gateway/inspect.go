@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1933,10 +1934,15 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		// tiers of a per-user install) keeps the rule verdict with the
 		// fallback warning and metric below. Secure Client never escalates.
 		defer func() {
-			if out == nil {
+			if out == nil || out.judgeFailedUnderFloor {
 				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
 					connector, strategyDirection)
-				out = escalatedJudgeFailClosedVerdict()
+				refusal := escalatedJudgeFailClosedVerdict()
+				if out != nil {
+					// The task-scope alert stands next to the refusal.
+					refusal.Findings = append(refusal.Findings, out.Findings...)
+				}
+				out = refusal
 			}
 		}()
 	}
@@ -2081,16 +2087,23 @@ func hookJudgeSkipsNoEffectCall(connector, toolName string, current *ToolInspect
 // whose effect the parser did not prove) left the judge out of exactly the
 // calls the rules flag but cannot decide, and they ran. Secure Client keeps
 // the verdict severity (issue #1092).
+//
+// Nor is the evaluation-limit finding the profile maps by tier (an input read
+// up to a cap, a reader failure): it is a floor, not a verdict. Where it only
+// alerts (the default and permissive packs) the judge still decides where it
+// is configured, and the floor stands when the judge fails or answers lower;
+// where it blocks (strict) the verdict already blocks (rel-1-0-10:GAP-0320).
 func regexJudgeLocalVerdictDecisive(cfg *config.Config, current *ToolInspectVerdict) bool {
 	if current == nil {
 		return false
 	}
-	if strings.EqualFold(current.Action, guardrailActionBlock) {
+	if strings.EqualFold(strings.TrimSpace(current.Action), guardrailActionBlock) {
 		return true
 	}
 	severity := current.Severity
 	if len(current.DetailedFindings) > 0 && (cfg == nil || !cfg.SecureClientIntegration()) {
-		severity = HighestSeverity(enforceableRuleFindings(current.DetailedFindings))
+		rest, _ := withoutEnforcingEvaluationLimit(enforceableRuleFindings(current.DetailedFindings))
+		severity = HighestSeverity(rest)
 	}
 	return severityRank[strings.ToUpper(severity)] >= severityRank["CRITICAL"]
 }
@@ -2099,11 +2112,22 @@ func regexJudgeLocalVerdictDecisive(cfg *config.Config, current *ToolInspectVerd
 // regex_judge only because its CRITICAL findings cannot enforce
 // (regexJudgeLocalVerdictDecisive): before that rule the call was decisive
 // and skipped the judge.
+//
+// The evaluation-limit finding that can enforce or alerts is not such a
+// finding: it is the floor of a truncated call, which stands when the judge
+// gives no verdict, so a judge outage under hook_fail_mode closed does not
+// raise it to a refusal (rel-1-0-10:GAP-0320).
 func regexJudgeEscalatedCritical(cfg *config.Config, current *ToolInspectVerdict) bool {
 	if current == nil || (cfg != nil && cfg.SecureClientIntegration()) || regexJudgeLocalVerdictDecisive(cfg, current) {
 		return false
 	}
-	return severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]
+	severity := current.Severity
+	if len(current.DetailedFindings) > 0 {
+		severity = HighestSeverity(slices.DeleteFunc(slices.Clone(current.DetailedFindings), func(finding RuleFinding) bool {
+			return profileMappedLimitFinding(finding) && (finding.contributesToEnforcement() || finding.contributesToAlertOnly())
+		}))
+	}
+	return severityRank[strings.ToUpper(severity)] >= severityRank["CRITICAL"]
 }
 
 // escalatedJudgeUnavailableFinding names the refusal of an escalated call
@@ -2204,7 +2228,16 @@ func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool
 // the judge gave none (the caller keeps the regex/AID verdict), else v with
 // its action set by the connector block_at / alert_at.
 func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection string, v *ScanVerdict) *ScanVerdict {
-	if v == nil || v.JudgeFailed {
+	if v != nil && v.JudgeFailed && v.judgeFailedUnderFloor {
+		// The tool judge failed and the task-scope alert stands in for its
+		// verdict. The failure was counted where the judge ran
+		// (hookJudgeCallFallback); the alert goes on through block_at/alert_at.
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge unavailable (connector=%s direction=%s scanner=%q); the task-scope alert stands\n",
+			connector, strategyDirection, v.Scanner)
+		kept := *v
+		kept.JudgeFailed = false
+		v = &kept
+	} else if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather
 		// than mistaking the absence of a judge finding for a clean
