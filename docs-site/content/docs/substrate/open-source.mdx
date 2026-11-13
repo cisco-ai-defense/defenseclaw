@@ -10,6 +10,14 @@ keywords:
 
 This page follows one developer, on their own cluster, from install to a finished session. You own the cluster, the config file and the decisions. The output blocks are real, taken from runs on a test cluster. Names, addresses and users are replaced with examples.
 
+## See it run
+
+<Video
+  src="substrate-oss"
+  aspect="16/9"
+  caption="Open source quickstart, recorded live: the chart and verify, a browser sign-in, Claude Code on Amazon Bedrock in a sandbox, a tool call allowed and one denied by the hook, an approval, a refused network call after a secret read, then run --task and pull. Names and addresses are replaced with examples, and waits are shortened."
+/>
+
 ## What you need
 
 - A Kubernetes cluster, version 1.34 or later, with [Agent Substrate](https://ate.dev) `1.0.x` installed. For a first try, a Linux machine with Docker and the upstream `kind` [quickstart](https://ate.dev/docs/get-started/quickstart/) is enough. For EKS, follow the [EKS guide](/docs/substrate/eks). GKE works with the upstream guide. `kind` and ordinary cloud nodes run the `gvisor` sandbox. The `microvm` sandbox needs nodes with KVM.
