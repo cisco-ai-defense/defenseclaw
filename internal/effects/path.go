@@ -140,10 +140,19 @@ func cleanPOSIX(p string) string {
 }
 
 func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
-	// MSYS / Git Bash drive mount: /c/Users -> C:\Users (review N17).
-	if len(spelling) >= 2 && spelling[0] == '/' && isDriveLetter(spelling[1]) &&
-		(len(spelling) == 2 || spelling[2] == '/') {
-		spelling = string(spelling[1]) + ":" + spelling[2:]
+	// A POSIX-dialect shell on Windows (Git Bash, Cygwin) uses POSIX-absolute
+	// spellings: only a /<drive>/ MSYS mount and /cygdrive/<drive>/ are known;
+	// every other absolute POSIX path is a virtual root with no known Windows
+	// target (review R5F-1). cmd and PowerShell instead treat a leading / as a
+	// drive-root-relative path, handled below.
+	if o.Dialect == DialectPOSIX && strings.HasPrefix(spelling, "/") {
+		if len(spelling) >= 2 && isDriveLetter(spelling[1]) && (len(spelling) == 2 || spelling[2] == '/') {
+			spelling = string(spelling[1]) + ":" + spelling[2:]
+		} else if m, ok := cygdriveMount(spelling); ok {
+			spelling = m
+		} else {
+			return "", false, ReasonVirtualRoot
+		}
 	}
 	s := strings.ReplaceAll(spelling, "/", `\`)
 	// UNC and device/extended-length prefixes are kept verbatim after cleaning
@@ -326,4 +335,19 @@ func hasADSStream(w string) bool {
 		return true
 	}
 	return false
+}
+
+// cygdriveMount maps a Cygwin /cygdrive/<drive>/rest to <drive>:\rest. ok is
+// false for anything else (incl. /proc/cygdrive/... which is not this form).
+func cygdriveMount(s string) (string, bool) {
+	const p = "/cygdrive/"
+	if !strings.HasPrefix(s, p) || len(s) < len(p)+1 {
+		return "", false
+	}
+	d := s[len(p)]
+	rest := s[len(p)+1:]
+	if !isDriveLetter(d) || (rest != "" && rest[0] != '/') {
+		return "", false
+	}
+	return string(d) + ":" + rest, true
 }

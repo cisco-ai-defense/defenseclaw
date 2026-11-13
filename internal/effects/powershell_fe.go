@@ -23,7 +23,11 @@ func parsePowerShell(command string, o Options) *Script {
 
 func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}
-	sc, err := psparse.Parse(command, psparse.Options{})
+	// The PowerShell edition is unknown unless the connector proves it, so a
+	// dialect-divergent escape (backtick-e, \u{}) is not treated as static
+	// (psparse review 3 / R4). A future caller that knows the host edition can
+	// pass DialectPwsh7 / DialectWindowsPS51.
+	sc, err := psparse.Parse(command, psparse.Options{Dialect: psparse.DialectUnknown})
 	if err != nil || sc == nil {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s

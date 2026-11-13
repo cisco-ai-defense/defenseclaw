@@ -120,8 +120,11 @@ func mapEvent(ev event, platform string) (effects.Call, effects.Options) {
 	if strings.EqualFold(platform, "windows") {
 		flavor = effects.FlavorWindows
 	}
+	// Windows and macOS have case-insensitive filesystems by default (R5F-2).
+	caseInsensitive := flavor == effects.FlavorWindows ||
+		strings.EqualFold(platform, "macos") || strings.EqualFold(platform, "darwin") || strings.EqualFold(platform, "mac")
 	opts := effects.Options{Flavor: flavor, Home: homeFor(flavor), CWD: cwdFor(ev.CWD, flavor),
-		CaseInsensitive: flavor == effects.FlavorWindows}
+		CaseInsensitive: caseInsensitive}
 	switch ev.Dialect {
 	case "powershell":
 		opts.Dialect = effects.DialectPowerShell

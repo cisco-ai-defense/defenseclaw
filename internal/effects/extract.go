@@ -40,6 +40,11 @@ func Extract(call Call, o Options) (result Result) {
 		if result.Effects[i].Target.Link == "" {
 			result.Effects[i].Target.Link = LinkNotChecked
 		}
+		// Case-fold the key on a case-insensitive filesystem (macOS, Windows):
+		// one place so no target builder can forget it (review R5F-2).
+		if o.CaseInsensitive && result.Effects[i].Target.Type == TargetPath {
+			result.Effects[i].Target.CaseFold = true
+		}
 	}
 	// Invariant (review HN-1 / §4): non-empty executable input must yield at
 	// least one effect or one structural unknown with a reason. Nothing is
@@ -794,6 +799,8 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	del := false
 	hasExpr := false
 	destDir := ""
+	var srcFlags []Word
+	var destFlag Word
 	endOpts := false
 	for i < len(words) {
 		wd := words[i]
@@ -879,18 +886,36 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			continue
 		}
 		if hasInline {
+			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
+				i++
+				continue
+			}
 			out = append(out, operandValue(fl, Word{Value: inlineVal, Static: true}, p))
 			i++
 			continue
 		}
 		if fl.Value {
 			if i+1 < len(words) {
+				if routeSourcesDestFlag(p, fl, words[i+1], &srcFlags, &destFlag) {
+					i += 2
+					continue
+				}
 				out = append(out, operandValue(fl, words[i+1], p))
 				i += 2
 				continue
 			}
 		}
 		i++
+	}
+	// Copy-Item/Move-Item etc. take their source and destination as -Path /
+	// -Destination flags, not positionals: fold them into the sources/dest list
+	// so the directory-destination join applies (review R5F-3).
+	if p.Pos == PosSourcesDest && (len(srcFlags) > 0 || destFlag.Static) {
+		combined := append(srcFlags, positionals...)
+		if destFlag.Static {
+			combined = append(combined, destFlag)
+		}
+		positionals = combined
 	}
 	// A PosNone program with operands it does not model leaves them unaccounted,
 	// unless its entry declares the operands inert data (review R5-2).
@@ -1042,17 +1067,32 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 	case PosGit:
 		out = append(out, gitOperands(ps)...)
 	case PosRobocopy:
-		for i, wd := range ps {
-			switch i {
-			case 0:
-				out = append(out, mk(wd, RoleRead))
-			case 1:
-				op := mk(wd, RoleWrite)
-				if wd.Static && isRemoteOperand(wd.Value) {
+		// robocopy SRC DST [files...]: DST is a directory; each file copies to
+		// DST/basename(file); with no files the whole SRC tree copies into DST
+		// (review R5F-3).
+		if len(ps) >= 2 {
+			out = append(out, mk(ps[0], RoleRead))
+			dst := ps[1]
+			files := ps[2:]
+			if len(files) == 0 {
+				op := mk(dst, RoleWrite)
+				if dst.Static && isRemoteOperand(dst.Value) {
 					op.remote = true
+				} else {
+					op.destMaybeDir = true
 				}
 				out = append(out, op)
+			} else {
+				for _, f := range files {
+					if dst.Static && f.Static && !f.Glob {
+						out = append(out, operand{value: joinDir(dst.Value, baseName2(f.Value)), static: true, role: RoleWrite})
+					} else {
+						out = append(out, operand{role: RoleWrite})
+					}
+				}
 			}
+		} else if len(ps) == 1 {
+			out = append(out, mk(ps[0], RoleRead))
 		}
 	case PosURLArgs:
 		for _, wd := range ps {
@@ -1086,7 +1126,17 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 	case PosLinkTargetLink:
 		if len(ps) == 2 {
 			out = append(out, mk(ps[0], RoleLinkTarget))
-			out = append(out, mk(ps[1], RoleLink))
+			// ln -s T dir/ puts the link at dir/basename(T) (review R5F-3).
+			link := ps[1]
+			if link.Static && ps[0].Static && looksDir(link) {
+				link = Word{Value: joinDir(link.Value, baseName2(ps[0].Value)), Static: true}
+			}
+			lo := mk(link, RoleLink)
+			if link.Static && !looksDir(ps[1]) && ps[1].Static {
+				// a bare link dest may itself be a directory
+				lo.destMaybeDir = true
+			}
+			out = append(out, lo)
 		} else {
 			for _, wd := range ps {
 				out = append(out, mk(wd, RoleLink))
@@ -2074,6 +2124,25 @@ func tarHasUnknownFlag(args []Word) bool {
 				}
 			}
 		}
+	}
+	return false
+}
+
+// routeSourcesDestFlag collects a PosSourcesDest program's -Path (read) and
+// -Destination (write) flag values as sources and dest instead of emitting them
+// directly, so the directory-destination join applies (review R5F-3). It
+// returns true when it consumed the value.
+func routeSourcesDestFlag(p Program, fl Flag, v Word, srcFlags *[]Word, destFlag *Word) bool {
+	if p.Pos != PosSourcesDest {
+		return false
+	}
+	switch fl.Role {
+	case RoleRead:
+		*srcFlags = append(*srcFlags, v)
+		return true
+	case RoleWrite:
+		*destFlag = v
+		return true
 	}
 	return false
 }

@@ -114,6 +114,7 @@ const (
 	ReasonOpaqueArchive      ReasonCode = "opaque_archive"
 	ReasonNonCanonicalPath   ReasonCode = "non_canonical_path"
 	ReasonDestMayBeDir       ReasonCode = "dest_may_be_dir"
+	ReasonVirtualRoot        ReasonCode = "virtual_root"
 )
 
 // reasonPrecedence orders reasons so a composite unknown reports the most
@@ -140,6 +141,7 @@ var reasonPrecedence = map[ReasonCode]int{
 	ReasonOpaqueArchive:      9,
 	ReasonNonCanonicalPath:   11,
 	ReasonDestMayBeDir:       12,
+	ReasonVirtualRoot:        10,
 }
 
 // Reason is one closed reason with its scope.
