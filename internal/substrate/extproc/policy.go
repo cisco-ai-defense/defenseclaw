@@ -46,16 +46,48 @@ type urlRule struct {
 	hosts      *hostMatcher
 	methods    map[string]bool
 	pathPrefix string
-	action     string
+	// foldedPrefix is pathPrefix in lower case, for deny and ask rules.
+	foldedPrefix string
+	action       string
 }
 
-// appliesTo reports whether the rule covers the host and method; its path
-// prefix is matched separately, on the canonical path.
-func (r urlRule) appliesTo(host, method string) bool {
+// appliesTo reports whether the rule covers the host and the request's
+// methods (its method and any override header, GAP-0046); its path prefix
+// is matched separately, on the canonical path. A deny or ask rule applies
+// when any of the methods is listed; an allow rule only when all are, so an
+// override header can neither dodge a refusal nor borrow an allowance.
+func (r urlRule) appliesTo(host string, methods []string) bool {
 	if _, ok := r.hosts.match(host); !ok {
 		return false
 	}
-	return len(r.methods) == 0 || r.methods[method]
+	if len(r.methods) == 0 {
+		return true
+	}
+	if r.action == "allow" {
+		for _, m := range methods {
+			if !r.methods[m] {
+				return false
+			}
+		}
+		return true
+	}
+	for _, m := range methods {
+		if r.methods[m] {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesPath matches the canonical path. Deny and ask rules ignore case,
+// since some origins do (/ADMIN is /admin there); an allow rule matches
+// the exact case, so a case variant can't borrow its allowance on an
+// origin that tells them apart (GAP-0046).
+func (r urlRule) matchesPath(canonical string) bool {
+	if r.action == "allow" {
+		return pathHasPrefix(canonical, r.pathPrefix)
+	}
+	return pathHasPrefix(strings.ToLower(canonical), r.foldedPrefix)
 }
 
 // compilePolicy builds a Policy. The Decider runs in open mode: the
@@ -96,11 +128,11 @@ func compilePolicy(cfg *Config, p ProfileConfig, blocklists []*egress.Feed) (*Po
 				return nil, fmt.Errorf("profile %s: url rule %q: path_prefix %q is ambiguous", p.Name, r.Name, r.PathPrefix)
 			}
 		}
-		ur := urlRule{name: r.Name, hosts: hm, pathPrefix: prefix, action: r.Action}
+		ur := urlRule{name: r.Name, hosts: hm, pathPrefix: prefix, foldedPrefix: strings.ToLower(prefix), action: r.Action}
 		if len(r.Methods) > 0 {
 			ur.methods = map[string]bool{}
 			for _, m := range r.Methods {
-				ur.methods[m] = true
+				ur.methods[strings.ToUpper(strings.TrimSpace(m))] = true
 			}
 		}
 		if ur.name == "" {

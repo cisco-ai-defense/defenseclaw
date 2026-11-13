@@ -46,10 +46,39 @@ func TestCanonicalPath(t *testing.T) {
 			t.Errorf("canonicalPath(%q) = %q, %v; want %q", c.in, got, err, c.want)
 		}
 	}
-	for _, in := range []string{"/admin%2Fx", "/admin%2fx", "/a%5Cb", "/a\\b", "/a%00", "/a%252e", "/a%zz", "/a%2", "/a\x01b", "relative", "http://x/admin"} {
+	for _, in := range []string{"/admin%2Fx", "/admin%2fx", "/a%5Cb", "/a\\b", "/a%00", "/a%252e", "/a%zz", "/a%2", "/a\x01b", "relative", "http://x/admin",
+		// GAP-0046: a dot segment hidden behind parameters, and an encoded ';'.
+		"/admin/..;/public/x", "/admin/..;x=1/public", "/admin/.;/x", "/admin/;x/y", "/admin/%2e%2e;/x", "/admin%3Bx/", "/admin%3b/"} {
 		if got, err := canonicalPath(in); !errors.Is(err, errAmbiguousPath) {
 			t.Errorf("canonicalPath(%q) = %q, %v; want errAmbiguousPath", in, got, err)
 		}
+	}
+}
+
+// TestURLAllowRuleExactGAP0046: an allow rule matches the exact case and
+// every method, so a case variant or an override header falls through to
+// the deny rule after it.
+func TestURLAllowRuleExactGAP0046(t *testing.T) {
+	h := newHarness(t, func(c *Config, _ *Options) {
+		c.Profiles[0].URLRules = []URLRuleCfg{
+			{Name: "public-read", Hosts: []string{"api.example.net"}, Methods: []string{"get"}, PathPrefix: "/public/", Action: "allow"},
+			{Name: "nothing-else", Hosts: []string{"api.example.net"}, PathPrefix: "/", Action: "deny"},
+		}
+	})
+	ctx := context.Background()
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "api.example.net", "/public/x")); !v.Allow {
+		t.Fatalf("allowed path: %+v", v)
+	}
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/PUBLIC/x"},
+		{"POST", "/public/x"},
+	} {
+		if v := h.eng.DecideHeaders(ctx, req("eng-web", c.method, "api.example.net", c.path)); v.Allow || v.Rule != "nothing-else" {
+			t.Errorf("%s %s: %+v", c.method, c.path, v)
+		}
+	}
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "api.example.net", "/public/x", "x-http-method-override", "DELETE")); v.Allow || v.Rule != "nothing-else" {
+		t.Errorf("GET with override DELETE: %+v", v)
 	}
 }
 
@@ -100,6 +129,22 @@ func TestURLRulesCanonicalPath(t *testing.T) {
 	// Segment boundary: /administrator is not under /admin/.
 	if v := h.eng.DecideHeaders(ctx, req("eng-web", "POST", "api.github.com", "/administrator")); !v.Allow {
 		t.Errorf("/administrator: %+v", v)
+	}
+	// GAP-0046: '..;' is not read as '..' (refused as ambiguous, not
+	// allowed as /public/x), and a deny rule ignores case.
+	if v := h.eng.DecideHeaders(ctx, req("eng-web", "POST", "api.github.com", "/admin/..;/public/x")); v.Allow || v.Category != CategoryPathAmbiguous {
+		t.Errorf("/admin/..;/public/x: %+v", v)
+	}
+	for _, p := range []string{"/ADMIN/", "/Admin/x", "/%41DMIN/"} {
+		if v := h.eng.DecideHeaders(ctx, req("eng-web", "POST", "api.github.com", p)); v.Allow || v.Category != CategoryURLRule {
+			t.Errorf("%s: %+v", p, v)
+		}
+	}
+	// A method override header can't dodge a method rule.
+	for _, hdr := range []string{"x-http-method-override", "x-http-method", "x-method-override"} {
+		if v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "api.github.com", "/admin/", hdr, "post")); v.Allow || v.Category != CategoryURLRule {
+			t.Errorf("GET with %s POST: %+v", hdr, v)
+		}
 	}
 	// A rule's own prefix is canonicalized at load; an ambiguous one fails.
 	cfg, err := ParseConfig([]byte(testConfig))

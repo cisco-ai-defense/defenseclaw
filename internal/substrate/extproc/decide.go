@@ -293,16 +293,17 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	// a path an origin could read another way is refused where a path rule
 	// applies.
 	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
+	methods := requestMethods(req)
 	for _, r := range pol.urlRules {
-		if !r.appliesTo(req.Host, req.Method) {
+		if !r.appliesTo(req.Host, methods) {
 			continue
 		}
 		if r.pathPrefix != "" {
 			if pathErr != nil {
 				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
-					"The request path uses an ambiguous encoding (an encoded slash, backslash, percent sign or control character), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
+					"The request path uses an ambiguous encoding (an encoded slash, backslash, semicolon, percent sign or control character, or a dot segment with parameters), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
 			}
-			if !pathHasPrefix(reqPath, r.pathPrefix) {
+			if !r.matchesPath(reqPath) {
 				continue
 			}
 		}
