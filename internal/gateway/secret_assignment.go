@@ -52,13 +52,42 @@ var secretAssignmentKeyPrefixes = map[string]bool{
 	"next": true, "page": true,
 }
 
-// secretAssignmentPlaceholderWords mark a value as a stand-in a person wrote
-// on purpose. A leaked credential does not announce itself.
-var secretAssignmentPlaceholderWords = []string{
-	"example", "sample", "placeholder", "changeme", "change_me", "replace", "dummy", "fake", "mock",
-	"redacted", "your_", "yourtoken", "yoursecret", "xxxx", "todo", "fixme", "insert", "enter_",
-	"notreal", "not_real", "not-real", "testtest", "foobar", "lorem", "password123", "secret123",
-	"abc123", "qwerty", "letmein", "hunter2",
+// secretAssignmentPlaceholderTokens mark a value as a stand-in a person wrote
+// on purpose. A leaked credential does not announce itself. A word counts
+// only as a whole token of the value (split at _ - .), with or without digits
+// around it, or as most of a longer token (examplekey); never as a few letters
+// inside a random run.
+var secretAssignmentPlaceholderTokens = map[string]bool{
+	"example": true, "sample": true, "placeholder": true, "changeme": true, "replace": true, "dummy": true,
+	"fake": true, "mock": true, "redacted": true, "your": true, "yourtoken": true, "yoursecret": true,
+	"todo": true, "fixme": true, "insert": true, "enter": true, "notreal": true, "testtest": true,
+	"foobar": true, "lorem": true, "password123": true, "secret123": true, "abc123": true, "qwerty": true,
+	"letmein": true, "hunter2": true,
+}
+
+// secretAssignmentPlaceholderValue reports a value that is a stand-in.
+func secretAssignmentPlaceholderValue(value string) bool {
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "xxxx") {
+		return true
+	}
+	tokens := strings.FieldsFunc(lower, func(r rune) bool { return r == '_' || r == '-' || r == '.' })
+	candidates := make([]string, 0, 2*len(tokens))
+	candidates = append(candidates, tokens...)
+	for i := 0; i+1 < len(tokens); i++ {
+		candidates = append(candidates, tokens[i]+tokens[i+1]) // change_me, not_real
+	}
+	for _, token := range candidates {
+		if secretAssignmentPlaceholderTokens[token] || secretAssignmentPlaceholderTokens[strings.Trim(token, "0123456789")] {
+			return true
+		}
+		for word := range secretAssignmentPlaceholderTokens {
+			if len(word) >= 5 && strings.Contains(token, word) && len(word)*10 >= len(token)*6 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var (
@@ -111,11 +140,8 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 	if secretAssignmentVarRef.MatchString(value) || secretAssignmentCodeRef.MatchString(value) {
 		return false
 	}
-	lower := strings.ToLower(value)
-	for _, word := range secretAssignmentPlaceholderWords {
-		if strings.Contains(lower, word) {
-			return false
-		}
+	if secretAssignmentPlaceholderValue(value) {
+		return false
 	}
 	if obviousCredentialPlaceholder(value) {
 		return false
@@ -200,4 +226,46 @@ func secretAssignmentIdentifier(value string) bool {
 		}
 	}
 	return true
+}
+
+// secretAssignmentWholeReference matches a value that is one reference to a
+// variable or a template slot and nothing else: ${DB_PASSWORD}, $DB_PASSWORD,
+// %DB_PASSWORD%, {{ db_password }}, <password>, $(vault read x). A reference
+// in front of literal characters (${X} followed by a password) is a password,
+// not a slot.
+var secretAssignmentWholeReference = regexp.MustCompile(
+	`^(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Z_][A-Z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%|\{\{[^{}]*\}\}|<[A-Za-z_][A-Za-z0-9_-]*>|\$\([^()]*\))$`)
+
+// jsonStringDecoded undoes the JSON string escapes that decide where a line
+// starts or a quote closes (backslash n, r, t, quote, backslash, slash), so
+// text taken from the arguments of a call reads as the person or the tool
+// wrote it. A rule that anchors on a word boundary (SEC-SECRET-ASSIGN) cannot
+// see a key that follows the two characters backslash and n.
+func jsonStringDecoded(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 == len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case '"', '\\', '/':
+			b.WriteByte(s[i+1])
+		default:
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+	}
+	return b.String()
 }

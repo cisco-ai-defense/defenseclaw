@@ -46,7 +46,8 @@ func TestAcceptedCredentialMatch_PaddedSyntheticTokensStillReport(t *testing.T) 
 	}
 }
 
-// A connection string whose password is a variable slot carries no password.
+// A connection string whose password is one variable slot carries no password.
+// A reference in front of literal characters is a password.
 func TestConnectionStringWithAVariablePasswordIsNotACredential(t *testing.T) {
 	for _, match := range []string{
 		"postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}/db",
@@ -58,7 +59,17 @@ func TestConnectionStringWithAVariablePasswordIsNotACredential(t *testing.T) {
 			t.Errorf("acceptedCredentialMatch(SEC-CONNSTR, %q) = true, want false", match)
 		}
 	}
-	if !acceptedCredentialMatch("SEC-CONNSTR", "postgres://app:changeme123@db.internal/app") {
-		t.Error("a literal weak password must still be a credential")
+	literal := runtimeDetectorSignature("Kj7mNp2Q", "r9sVw4xYz6")
+	for _, match := range []string{
+		"postgres://app:changeme123@db.internal/app",
+		"postgres://app:${DB_HOME}" + literal + "@db.internal/app",
+		"postgres://app:<x>" + literal + "@db.internal/app",
+		"postgres://app:$(x)" + literal + "@db.internal/app",
+		"postgres://app:{{x}}" + literal + "@db.internal/app",
+		"postgres://app:" + literal + "${X}@db.internal/app",
+	} {
+		if !acceptedCredentialMatch("SEC-CONNSTR", match) {
+			t.Errorf("acceptedCredentialMatch(SEC-CONNSTR, %q) = false, want true: a literal password", match)
+		}
 	}
 }

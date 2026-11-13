@@ -1142,10 +1142,10 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	// A URI with user-info has already proved a credential-bearing structure.
 	// Never hide weak/default passwords based on their spelling.
 	if ruleID == "SEC-CONNSTR" {
-		// A password that is a reference to a variable (${DB_PASSWORD},
-		// $DB_PASS, {{ db_password }}, <password>) is a template slot, not a
-		// password: nothing is exposed.
-		return !secretAssignmentVarRef.MatchString(strings.TrimSpace(candidate))
+		// A password that is one reference to a variable (${DB_PASSWORD},
+		// $DB_PASS, <password>) is a template slot, not a password: nothing is
+		// exposed. A reference in front of literal characters is a password.
+		return !secretAssignmentWholeReference.MatchString(strings.TrimSpace(candidate))
 	}
 	if knownPublicCredentialExample(ruleID, candidate) {
 		return false
@@ -1276,14 +1276,24 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	return repeatedShortCredentialUnit(compact)
 }
 
+// awsDocumentedSecretKey is the example secret access key of the AWS documentation.
+const awsDocumentedSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+
 func knownPublicCredentialExample(ruleID, candidate string) bool {
 	switch ruleID {
 	case "SEC-AWS-KEY":
 		return strings.EqualFold(candidate, "IOSFODNN7EXAMPLE")
 	case "SEC-AWS-SECRET":
-		// AWS documents its example secret key by name; a shell-normalized
-		// copy of it loses the slashes and may run into the text after it.
-		return strings.Contains(strings.ToUpper(candidate), "EXAMPLEKEY")
+		// Only the pair AWS documents. The raw text carries it exactly. Shell
+		// normalization drops its slashes and may run the escaped newlines
+		// after it into the value, so there the slash-free documented value
+		// followed by a few characters is the same pair; a longer remainder
+		// is another secret.
+		if candidate == awsDocumentedSecretKey {
+			return true
+		}
+		rest, ok := strings.CutPrefix(candidate, strings.ReplaceAll(awsDocumentedSecretKey, "/", ""))
+		return ok && len(rest) <= 12
 	default:
 		return false
 	}
