@@ -16,21 +16,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// postSelfProtectionCell sends command to the hook route in one cell:
+// postSelfProtectionPackCell sends command to the hook route in one cell:
 // per-user, managed with the hook client evidence, or managed with a home
-// the gateway cannot read once the client evidence is built (blind), in
-// the default or the strict rule pack.
-func postSelfProtectionCell(t *testing.T, home, project, connector string, managed, blind, strict bool, command string) string {
-	t.Helper()
-	pack := ""
-	if strict {
-		pack = "strict"
-	}
-	return postSelfProtectionPackCell(t, home, project, connector, pack, managed, blind, command)
-}
-
-// postSelfProtectionPackCell is postSelfProtectionCell with the rule pack
-// named ("" is the default pack).
+// the gateway cannot read once the client evidence is built (blind), under
+// the rule pack named ("" is the default pack).
 func postSelfProtectionPackCell(t *testing.T, home, project, connector, pack string, managed, blind bool, command string) string {
 	t.Helper()
 	cfg := &config.Config{}
@@ -63,6 +52,141 @@ func postSelfProtectionPackCell(t *testing.T, home, project, connector, pack str
 	return recorder.Body.String()
 }
 
+// g235bCell is one cell of a G235b rotation: the connector, the rule pack
+// ("" is the default pack) and the route (per-user, managed with the hook
+// client evidence, or blind managed: a home the gateway cannot read).
+type g235bCell struct {
+	connector, pack string
+	managed, blind  bool
+}
+
+func (c g235bCell) String() string {
+	return fmt.Sprintf("%s/pack=%s/managed=%t/blind=%t", c.connector, c.pack, c.managed, c.blind)
+}
+
+// g235bRow is one command of a G235b rotation: a protected row writes
+// DefenseClaw state and blocks, an ordinary row stays allowed.
+type g235bRow struct {
+	name, command string
+	protected     bool
+}
+
+// g235bRotate judges rows in a rotation over the cells (both connectors,
+// packs, per-user and managed, and blind managed when blind is set) instead
+// of the rows x cells product (owner TEST BUDGET 2026-11-10: one hook call
+// costs about 100 ms under -race, and the products ran 2 to 5 minutes).
+//
+// Every row is judged twice, once per-user and once managed, and the two
+// calls use different connectors, so every row meets both connectors and
+// both routes. A protected row has one of its two calls in the strict pack
+// (per-user and managed in turn) and the other in a non-strict pack in
+// turn. An ordinary row is never judged strict (the products skipped it
+// there too) and shares the non-strict cell of the protected row with its
+// index, so an attack and its benign twin meet in the same cell. With blind,
+// every second row is also judged blind managed, packs and connectors in
+// turn. The plan check fails the test when a row misses a route or a strict
+// call, when a cell has no protected row, or when a non-strict cell has no
+// ordinary row, so the rotation cannot leave a cell or a row unjudged.
+func g235bRotate(t *testing.T, rows []g235bRow, packs []string, blind bool, judge func(t *testing.T, cell g235bCell, row g235bRow)) {
+	t.Helper()
+	connectors := []string{"claudecode", "codex"}
+	var nonStrict []string
+	hasStrict := false
+	for _, pack := range packs {
+		if pack == "strict" {
+			hasStrict = true
+		} else {
+			nonStrict = append(nonStrict, pack)
+		}
+	}
+	n := len(nonStrict)
+	if n == 0 {
+		t.Fatal("g235bRotate needs a non-strict pack")
+	}
+	plan := map[g235bCell][]g235bRow{}
+	add := func(cell g235bCell, row g235bRow) { plan[cell] = append(plan[cell], row) }
+	protected, ordinary := 0, 0
+	for _, row := range rows {
+		k := ordinary
+		if row.protected {
+			k = protected
+			protected++
+		} else {
+			ordinary++
+		}
+		strictPerUser := k%2 == 0
+		pack := nonStrict[(k/2)%n]
+		other := nonStrict[(k/2+1)%n]
+		perUser := g235bCell{connector: connectors[(k/(2*n))%2]}
+		managed := g235bCell{connector: connectors[1-(k/(2*n))%2], managed: true}
+		switch {
+		case row.protected && hasStrict && strictPerUser:
+			perUser.pack, managed.pack = "strict", pack
+		case row.protected && hasStrict:
+			perUser.pack, managed.pack = pack, "strict"
+		case strictPerUser:
+			perUser.pack, managed.pack = other, pack
+		default:
+			perUser.pack, managed.pack = pack, other
+		}
+		add(perUser, row)
+		add(managed, row)
+		if blind && k%2 == 0 {
+			cell := g235bCell{connector: connectors[(k/(2*len(packs)))%2], pack: packs[(k/2)%len(packs)], managed: true, blind: true}
+			if !row.protected && cell.pack == "strict" {
+				cell.pack = nonStrict[(k/2)%n]
+			}
+			add(cell, row)
+		}
+	}
+	// The plan check: every row on both routes (and in strict when it is
+	// protected), every cell with an attack, every non-strict cell with a
+	// benign row.
+	routes := map[string]map[string]bool{}
+	for cell, judged := range plan {
+		for _, row := range judged {
+			if routes[row.command] == nil {
+				routes[row.command] = map[string]bool{}
+			}
+			routes[row.command][fmt.Sprintf("managed=%t", cell.managed && !cell.blind)] = true
+			routes[row.command]["pack="+cell.pack] = true
+		}
+	}
+	for _, row := range rows {
+		seen := routes[row.command]
+		if !seen["managed=false"] || !seen["managed=true"] || row.protected && hasStrict && !seen["pack=strict"] {
+			t.Fatalf("rotation plan leaves %s (%s) unjudged in a route or in strict: %v", row.name, row.command, seen)
+		}
+	}
+	var cells []g235bCell
+	for _, connector := range connectors {
+		for _, pack := range packs {
+			for _, route := range []struct{ managed, blind bool }{{false, false}, {true, false}, {true, true}} {
+				if route.blind && !blind {
+					continue
+				}
+				cell := g235bCell{connector, pack, route.managed, route.blind}
+				attack, benign := false, false
+				for _, row := range plan[cell] {
+					attack = attack || row.protected
+					benign = benign || !row.protected
+				}
+				if !attack || pack != "strict" && !benign {
+					t.Fatalf("rotation plan leaves cell %s without an attack or a benign row (%d rows)", cell, len(plan[cell]))
+				}
+				cells = append(cells, cell)
+			}
+		}
+	}
+	for _, cell := range cells {
+		t.Run(cell.String(), func(t *testing.T) {
+			for _, row := range plan[cell] {
+				judge(t, cell, row)
+			}
+		})
+	}
+}
+
 // rel-1-0-6:GAP-0630, GAP-0601: a managed gateway proves a redirect onto
 // the DefenseClaw state from the targets its own reader names and finds the
 // file each one opens in the hook client map. The client lists the targets
@@ -70,6 +194,12 @@ func postSelfProtectionPackCell(t *testing.T, home, project, connector, pack str
 // path stays a protected write target in every cell and profile, whatever
 // an unknown printf format, printf -v, %n or read does to the values the
 // other readers track. The same forms into a project file stay allowed.
+//
+// Every form is judged with a spelling in turn (form i takes spelling i mod
+// 8, so each spelling meets two or three forms), and each form that binds
+// a name ({V}: %n, printf -v, read) is judged with a HOME, a USER and a
+// LOGNAME spelling, each with its project-file twin; g235bRotate spreads
+// the rows over the cells.
 func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 	home, project := dynamicWordParityProject(t)
 	t.Setenv("USER", filepath.Base(home))
@@ -109,45 +239,34 @@ func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 		`bash -c 'printf "$X"; echo x > {T}'`,
 		`zsh -c 'printf "$X"; echo x > {T}'`,
 	}
-	type row struct {
-		name, command string
-		protected     bool
-	}
-	var rows []row
-	for _, spelling := range spellings {
-		for _, form := range forms {
+	var rows []g235bRow
+	for i, form := range forms {
+		picks := []int{i % len(spellings)}
+		if strings.Contains(form, "{V}") {
+			// One spelling of each name: HOME (0-2), USER (3-5), LOGNAME (6-7).
+			picks = []int{i % 3, 3 + i%3, 6 + i%2}
+		}
+		for _, pick := range picks {
+			spelling := spellings[pick]
 			command := strings.ReplaceAll(form, "{V}", spelling.name)
 			rows = append(rows,
-				row{spelling.prefix + "|" + form, strings.ReplaceAll(command, "{T}", spelling.prefix+"/.defenseclaw/config.yaml"), true},
-				row{spelling.prefix + "|" + form + "|ordinary", strings.ReplaceAll(command, "{T}", spelling.prefix+"/proj/build.log"), false})
+				g235bRow{spelling.prefix + "|" + form, strings.ReplaceAll(command, "{T}", spelling.prefix+"/.defenseclaw/config.yaml"), true},
+				g235bRow{spelling.prefix + "|" + form + "|ordinary", strings.ReplaceAll(command, "{T}", spelling.prefix+"/proj/build.log"), false})
 		}
 	}
-	for _, connector := range []string{"claudecode", "codex"} {
-		for _, cell := range []struct{ managed, blind, strict bool }{
-			{false, false, false}, {false, false, true},
-			{true, false, false}, {true, false, true},
-			{true, true, false}, {true, true, true},
-		} {
-			t.Run(fmt.Sprintf("%s/managed=%t/blind=%t/strict=%t", connector, cell.managed, cell.blind, cell.strict), func(t *testing.T) {
-				for _, row := range rows {
-					if !row.protected && cell.strict {
-						continue
-					}
-					got := postSelfProtectionCell(t, home, project, connector, cell.managed, cell.blind, cell.strict, row.command)
-					if row.protected {
-						// A gateway that cannot read the home at all blocks
-						// the state write under its own rule.
-						if !strings.HasPrefix(got, `{"action":"block"`) ||
-							!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
-							t.Errorf("%s: %s = %.200s, want block tamper.detector_state_write", row.name, row.command, got)
-						}
-					} else if !strings.HasPrefix(got, `{"action":"allow"`) {
-						t.Errorf("%s: %s = %.200s, want allow", row.name, row.command, got)
-					}
-				}
-			})
+	g235bRotate(t, rows, []string{"", "strict"}, true, func(t *testing.T, cell g235bCell, row g235bRow) {
+		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, cell.blind, row.command)
+		if row.protected {
+			// A gateway that cannot read the home at all blocks the state
+			// write under its own rule.
+			if !strings.HasPrefix(got, `{"action":"block"`) ||
+				!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
+				t.Errorf("%s: %s = %.200s, want block tamper.detector_state_write", row.name, row.command, got)
+			}
+		} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Errorf("%s: %s = %.200s, want allow", row.name, row.command, got)
 		}
-	}
+	})
 }
 
 // rel-1-0-6:GAP-0681, GAP-0630 review 1: a write to DefenseClaw state named
@@ -157,6 +276,11 @@ func TestG235bPrintfKeepsKnownHomeSpellingsForSelfProtection(t *testing.T) {
 // per-user, managed and blind managed cells and in the default, strict and
 // permissive packs. The same forms onto a project file, and through a link
 // to a project file, stay allowed.
+//
+// Editor form i takes spelling i mod 8 (every spelling meets an editor);
+// redirect form j takes spelling 3j+1 mod 8 (each of HOME, USER and LOGNAME
+// meets a redirect through a link), each with its project twin;
+// g235bRotate spreads the rows over the cells.
 func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 	home, project := dynamicWordParityProject(t)
 	t.Setenv("USER", filepath.Base(home))
@@ -199,45 +323,30 @@ func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 		`printf "$X" a; echo x > {L}`,
 		`bash -c "echo x > {L}"`,
 	}
-	type row struct {
-		command   string
-		protected bool
+	var rows []g235bRow
+	for i, form := range edits {
+		spelling := spellings[i%len(spellings)]
+		rows = append(rows,
+			g235bRow{spelling + "|" + form, strings.ReplaceAll(form, "{T}", spelling+"/.defenseclaw/config.yaml"), true},
+			g235bRow{spelling + "|" + form + "|ordinary", strings.ReplaceAll(form, "{T}", spelling+"/proj/build.log"), false})
 	}
-	var rows []row
-	for _, spelling := range spellings {
-		for _, form := range edits {
-			rows = append(rows,
-				row{strings.ReplaceAll(form, "{T}", spelling+"/.defenseclaw/config.yaml"), true},
-				row{strings.ReplaceAll(form, "{T}", spelling+"/proj/build.log"), false})
-		}
-		for _, form := range redirects {
-			rows = append(rows,
-				row{strings.ReplaceAll(form, "{L}", spelling+"/statealias"), true},
-				row{strings.ReplaceAll(form, "{L}", spelling+"/projectalias"), false})
-		}
+	for j, form := range redirects {
+		spelling := spellings[(3*j+1)%len(spellings)]
+		rows = append(rows,
+			g235bRow{spelling + "|" + form, strings.ReplaceAll(form, "{L}", spelling+"/statealias"), true},
+			g235bRow{spelling + "|" + form + "|ordinary", strings.ReplaceAll(form, "{L}", spelling+"/projectalias"), false})
 	}
-	for _, connector := range []string{"claudecode", "codex"} {
-		for _, pack := range []string{"", "strict", "permissive"} {
-			for _, cell := range []struct{ managed, blind bool }{{false, false}, {true, false}, {true, true}} {
-				t.Run(fmt.Sprintf("%s/pack=%s/managed=%t/blind=%t", connector, pack, cell.managed, cell.blind), func(t *testing.T) {
-					for _, row := range rows {
-						if !row.protected && pack == "strict" {
-							continue
-						}
-						got := postSelfProtectionPackCell(t, home, project, connector, pack, cell.managed, cell.blind, row.command)
-						if row.protected {
-							if !strings.HasPrefix(got, `{"action":"block"`) ||
-								!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
-								t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
-							}
-						} else if !strings.HasPrefix(got, `{"action":"allow"`) {
-							t.Errorf("%s = %.200s, want allow", row.command, got)
-						}
-					}
-				})
+	g235bRotate(t, rows, []string{"", "strict", "permissive"}, true, func(t *testing.T, cell g235bCell, row g235bRow) {
+		got := postSelfProtectionPackCell(t, home, project, cell.connector, cell.pack, cell.managed, cell.blind, row.command)
+		if row.protected {
+			if !strings.HasPrefix(got, `{"action":"block"`) ||
+				!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
+				t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
 			}
+		} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+			t.Errorf("%s = %.200s, want allow", row.command, got)
 		}
-	}
+	})
 }
 
 // rel-1-0-6:GAP-0681, GAP-0630, GAP-0601 review 2: an in-place editor entry

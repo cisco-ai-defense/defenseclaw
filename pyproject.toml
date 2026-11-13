@@ -188,6 +188,7 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/lookups/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
     "_data/llm/*.json",
+    "_data/pricing/*.json",
     "_data/config/v8/*.json",
     "_data/config/v8/*.yaml",
     "_data/config/v8/*.md",

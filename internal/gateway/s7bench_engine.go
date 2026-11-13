@@ -16,13 +16,18 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -35,13 +40,28 @@ type S7Engine struct {
 	sc        *Sidecar
 	api       *APIServer
 	hook      http.HandlerFunc
+	hooks     map[string]http.HandlerFunc
 	connector string
 	profile   string
+	judgeRec  *s7RecordingProvider
+	store     *audit.Store
+	stopGuard context.CancelFunc
+	guardDone chan struct{}
+	passes    atomic.Int64
+	peakWAL   atomic.Int64
+	inspOnce  sync.Once
+	insp      *GuardrailInspector
 }
 
 // S7NewEngine boots the sidecar generation for cfg and returns the
 // connector's hook handler.
 func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
+	return S7NewEngineMulti(cfg, connectorName, nil)
+}
+
+// S7NewEngineMulti boots one generation with the hook handlers of connectorName and of every name in more, so a corpus can
+// send each case to the handler of its own connector.
+func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (*S7Engine, error) {
 	store, err := audit.NewStore(filepath.Join(cfg.DataDir, "audit.db"))
 	if err != nil {
 		return nil, fmt.Errorf("audit store: %w", err)
@@ -69,33 +89,58 @@ func S7NewEngine(cfg *config.Config, connectorName string) (*S7Engine, error) {
 	if g := currentGeneration(); g != nil {
 		api.SetHookDecisionJudge(g.decisionJudge)
 	}
-	// The harness has no real user home to follow links through, so the
-	// effect lane uses a lexical resolver: a path resolves to itself. Member
-	// names are still matched lexically (writing ~/.ssh/authorized_keys is
-	// known regardless). Real symlink-through-link attacks are not exercised
-	// here; that is a documented harness limit.
-	effectResolverOverride = func(path string) (string, bool) { return path, true }
-	// The harness reads the effect verdict per case from Deterministic (the
-	// same effectShadowRun core); the hook's async live run is not needed.
-	effectShadowLiveOff = true
-	return &S7Engine{
+	hooks := map[string]http.HandlerFunc{connectorName: api.handleUnifiedConnectorHook(connectorName)}
+	for _, name := range more {
+		if _, ok := hooks[name]; !ok {
+			hooks[name] = api.handleUnifiedConnectorHook(name)
+		}
+	}
+	e := &S7Engine{
 		sc: sc, api: api, connector: connectorName,
-		hook:    api.handleUnifiedConnectorHook(connectorName),
+		hook:    hooks[connectorName],
+		hooks:   hooks,
 		profile: cfg.Guardrail.RulePack,
-	}, nil
+		store:   store,
+	}
+	e.startWALGuard()
+	return e, nil
 }
 
-// Hook answers one hook payload through the connector's handler.
-func (e *S7Engine) Hook(ctx context.Context, body []byte) (code int, out []byte) {
-	defer func() {
-		if r := recover(); r != nil {
-			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
-		}
-	}()
+// Hook answers one hook payload through the connector's handler. headers
+// (name, value pairs) are set on the request, e.g. the hook's answer wait.
+func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (int, []byte) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.connector, bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
 	rec := httptest.NewRecorder()
 	e.hook(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// HookFor answers one hook payload through the named connector's handler.
+func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (int, []byte) {
+	h, ok := e.hooks[connectorName]
+	if !ok {
+		h, connectorName = e.hook, e.connector
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+connectorName, bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	if connectorName == "codex" {
+		// Codex hooks are installer-bound: the hook command passes the event and the protected contract id out of band.
+		var probe struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		req.Header.Set("X-DefenseClaw-Hook-Event", probe.Event)
+		req.Header.Set("X-DefenseClaw-Hook-Contract", e.api.hookProfileForRequest(ctx, "codex").ContractID)
+	}
+	rec := httptest.NewRecorder()
+	h(rec, req)
 	return rec.Code, rec.Body.Bytes()
 }
 
@@ -128,34 +173,27 @@ type S7Det struct {
 	Eligible   bool        `json:"eligible"`
 	Findings   []S7Finding `json:"findings,omitempty"`
 	IssueCodes []string    `json:"issues,omitempty"`
-	// Effect is the effect-model rule lane verdict (guardrail.effects_rules
-	// shadow or on), computed beside today's answer for the disagreement
-	// measurement. Nil when the lane is off.
-	Effect     *EffectShadowResult `json:"effect,omitempty"`
-	EffectFull *EffectShadowResult `json:"effect_full,omitempty"`
 }
 
 // Deterministic evaluates the call the way evaluateAgentHook projects it.
-func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json.RawMessage, cwd string) (det S7Det) {
-	defer func() {
-		if r := recover(); r != nil {
-			det = S7Det{Tool: toolName, Parse: "panic"}
-		}
-	}()
-	actionTool := agentHookTrustedActionTool(e.connector, toolName, runtime.GOOS)
-	trusted, toolCWD := agentHookTrustedActionArgs(e.connector, toolName, args)
+func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json.RawMessage, cwd string) S7Det {
+	return e.DeterministicFor(ctx, e.connector, toolName, args, cwd)
+}
+
+// DeterministicFor is Deterministic for the named connector.
+func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName string, args json.RawMessage, cwd string) S7Det {
+	actionTool := agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS)
+	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, args)
 	if toolCWD == "" {
 		toolCWD = cwd
 	}
-	in := actionfacts.Input{Tool: actionTool, Args: trusted, CWD: toolCWD, ActiveHome: benchActiveHome(toolCWD)}
-	r := EvaluateDeterministicAction(ctx, in, string(args), e.connector, e.profile)
+	in := actionfacts.Input{Tool: actionTool, Args: trusted, CWD: toolCWD}
+	r := EvaluateDeterministicAction(ctx, in, string(args), connectorName, e.profile)
 	out := S7Det{Tool: actionTool, Parse: r.ParseStatus, Dialect: r.Dialect, Severity: r.Severity,
 		EnforceSev: r.EnforceableSeverity, Action: r.Action, Eligible: r.EnforcementEligible, IssueCodes: r.IssueCodes}
 	for _, f := range r.Findings {
 		out.Findings = append(out.Findings, S7Finding{RuleID: f.RuleID, Severity: f.Severity, Confidence: f.Confidence, Disposition: f.Disposition, Route: f.Route})
 	}
-	out.Effect = r.EffectShadow
-	out.EffectFull = r.EffectShadowFull
 	return out
 }
 
@@ -230,16 +268,95 @@ func (e *S7Engine) Layers(ctx context.Context, sessionID, toolName, args string,
 	return dm, jv
 }
 
-// benchActiveHome derives the session home from a tool working directory so
-// the effect lane roots its protected sets correctly in the harness. It is
-// the first two path components (/home/<user>), else the cwd, else a default.
-func benchActiveHome(cwd string) string {
-	if cwd == "" {
-		return "/home/bench"
+// startWALGuard runs the product's own audit WAL guard pass (auditWALGuardPass, the one runAuditWALGuard calls every 2 s in a running
+// gateway) in a goroutine. The harness never calls Sidecar.Run, so without this nothing checkpoints and the audit WAL grows without
+// bound under a sustained hook load (7-24 GB per run seen on dc-build-1). The pass runs every 500 ms here because the harness
+// drives far more calls per second than a host does.
+func (e *S7Engine) startWALGuard() {
+	ctx, cancel := context.WithCancel(context.Background())
+	e.stopGuard = cancel
+	e.guardDone = make(chan struct{})
+	go func() {
+		defer close(e.guardDone)
+		var alarm auditWALAlarm
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			auditWALGuardPass(ctx, e.store, &alarm, time.Now(), io.Discard)
+			e.passes.Add(1)
+			if st, err := os.Stat(e.store.DatabasePath() + "-wal"); err == nil && st.Size() > e.peakWAL.Load() {
+				e.peakWAL.Store(st.Size())
+			}
+		}
+	}()
+}
+
+// Close stops the WAL guard.
+func (e *S7Engine) Close() {
+	if e.stopGuard != nil {
+		e.stopGuard()
+		<-e.guardDone
 	}
-	parts := strings.Split(strings.TrimPrefix(cwd, "/"), "/")
-	if len(parts) >= 2 && parts[0] == "home" {
-		return "/home/" + parts[1]
+}
+
+// S7Stats is the audit store's size and checkpoint settings at the end of a run.
+type S7Stats struct {
+	DBBytes           int64             `json:"audit_db_bytes"`
+	WALBytesFinal     int64             `json:"audit_wal_bytes_final"`
+	WALBytesPeakSeen  int64             `json:"audit_wal_bytes_peak_seen"`
+	GuardPasses       int64             `json:"wal_guard_passes"`
+	Pragmas           map[string]string `json:"pragmas_in_effect_new_connection"`
+	StoreDSNPragmas   string            `json:"store_dsn_pragmas_note"`
+	WALJournalLimit   int64             `json:"journal_size_limit_bytes"`
+	WALHardLimitBytes int64             `json:"wal_hard_limit_bytes"`
+}
+
+// Stats reports the audit database and WAL sizes and the SQLite settings (journal_mode, wal_autocheckpoint, synchronous, journal_size_limit)
+// as a fresh connection sees them; the store's own connection sets journal_mode(WAL) and the pragmas listed in audit.openSQLiteWithPragmas.
+func (e *S7Engine) Stats(ctx context.Context) S7Stats {
+	out := S7Stats{Pragmas: map[string]string{}, GuardPasses: e.passes.Load(), WALBytesPeakSeen: e.peakWAL.Load(), WALJournalLimit: 64 << 20, WALHardLimitBytes: audit.WALHardLimitBytes,
+		StoreDSNPragmas: "journal_mode(WAL) + audit-tier pragmas from audit.openSQLiteWithPragmas; main pool 1 connection; wal_autocheckpoint left at the SQLite default (1000 pages) on the store connection"}
+	path := e.store.DatabasePath()
+	if st, err := os.Stat(path); err == nil {
+		out.DBBytes = st.Size()
 	}
-	return cwd
+	if st, err := os.Stat(path + "-wal"); err == nil {
+		out.WALBytesFinal = st.Size()
+	}
+	if db, err := sql.Open("sqlite", "file:"+path+"?mode=ro"); err == nil {
+		defer db.Close()
+		for _, pr := range []string{"journal_mode", "wal_autocheckpoint", "synchronous", "journal_size_limit"} {
+			var v string
+			if err := db.QueryRowContext(ctx, "PRAGMA "+pr).Scan(&v); err == nil {
+				out.Pragmas[pr] = v
+			}
+		}
+	}
+	return out
+}
+
+// InspectText runs one text through the /llm proxy's guardrail inspector (direction prompt or completion) with this
+// generation's rule pack, posture thresholds, detection strategy and judge, as handleChatCompletion does for a user turn.
+func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *ScanVerdict {
+	e.inspOnce.Do(func() {
+		cfg := e.sc.currentConfig()
+		g := NewGuardrailInspector("local", nil, e.sc.sharedJudge())
+		g.SetPosture(e.profile)
+		gr := cfg.Guardrail
+		g.SetDetectionStrategy(gr.DetectionStrategy, gr.DetectionStrategyPrompt, gr.DetectionStrategyCompletion, gr.DetectionStrategyToolCall, gr.JudgeSweep)
+		e.insp = g
+	})
+	// Pin the generation as the proxy does for every request (proxy.go withPinnedGeneration), so the content rules and
+	// thresholds come from the pack under test, not the process-wide rule set.
+	ctx = withPinnedGeneration(ctx, e.sc.Generation())
+	v := e.insp.Inspect(ctx, direction, text, []ChatMessage{{Role: "user", Content: text}}, "s7bench", "action")
+	if v == nil {
+		v = &ScanVerdict{Action: "allow", Severity: "NONE"}
+	}
+	return v
 }

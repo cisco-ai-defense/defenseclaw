@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 )
 
 // The decision model is the guardrail's fast first pass in front of the
@@ -307,7 +308,9 @@ type decisionParseError struct{ msg string }
 
 func (e decisionParseError) Error() string { return e.msg }
 
-func (d *decisionModel) call(ctx context.Context, state decisionModelState) (string, map[string]float64, error) {
+func (d *decisionModel) call(ctx context.Context, state decisionModelState) (choice string, probs map[string]float64, err error) {
+	usage := beginGatewayCallUsage(ctx, modelusage.RoleDecisionModel, "decision_model", d.model)
+	defer func() { usage.End(err) }()
 	body, err := json.Marshal(map[string]any{"model": d.model, "state": state, "questions": decisionModelQuestions})
 	if err != nil {
 		return "", nil, decisionParseError{"encode request: " + err.Error()}
@@ -321,6 +324,9 @@ func (d *decisionModel) call(ctx context.Context, state decisionModelState) (str
 		req.Header.Set("Authorization", "Bearer "+d.apiKey)
 	}
 	resp, err := d.client.Do(req)
+	if err == nil {
+		usage.UpstreamHeader(resp.StatusCode, nil)
+	}
 	if err != nil {
 		return "", nil, fmt.Errorf("decision model unreachable: %s", redactDecisionModelError(err))
 	}
@@ -605,6 +611,8 @@ func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 		return judged
 	}
 	out := *judged
+	// The floor raises the verdict above a lone review finding.
+	out.reviewOnly = false
 	out.Severity = floor.Severity
 	out.Action = strongerGuardrailAction(judged.Action, floor.Action)
 	out.Findings = append(append([]string(nil), judged.Findings...), floor.Findings...)

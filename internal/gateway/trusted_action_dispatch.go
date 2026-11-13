@@ -439,13 +439,13 @@ func dispatchTrustedAction(
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	bound := trustedActionCommandBound(request.Input)
-	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies {
+	if bound == shellReadingTooDeep || bound == shellReadingNestedBodies || bound == shellReadingNodeBudget {
 		// Past the reading bounds: no reader below parses it, and the call
 		// takes the over-limit path, which the profile decides (GAP-2537,
-		// GAP-0677). It is decided before the recovered-parse reading
-		// below, which would read the same bodies again for the same
-		// finding.
-		return trustedActionLimitFindings(request.EnforcementCapable)
+		// GAP-0677, GAP-0254, GAP-0255). It is decided before the
+		// recovered-parse reading below, which would read the same bodies
+		// again for the same finding.
+		return trustedActionBudgetFindings(request.EnforcementCapable)
 	}
 	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)
@@ -9641,6 +9641,24 @@ func trustedActionLimitFindings(enforcementCapable bool) []RuleFinding {
 	return applyTrustedActionProofBoundary([]RuleFinding{failure}, enforcementCapable)
 }
 
+// parseBudgetExceededReason is the evidence of the over-limit finding of a
+// call past the reading budget (shellparse.BudgetExceeded): the call is
+// opaque to the readers, not a finding about its text. The profile decides
+// as for any evaluation limit (guardrailActionForProfile): an alert outside
+// the strict profile, a block in strict, managed strict included, and an
+// alert for managed outside strict (rel-1-0-6:GAP-0675).
+const parseBudgetExceededReason = "parse_budget_exceeded"
+
+// trustedActionBudgetFindings is trustedActionLimitFindings for a call past
+// the reading budget, with the reason parse_budget_exceeded.
+func trustedActionBudgetFindings(enforcementCapable bool) []RuleFinding {
+	findings := trustedActionLimitFindings(enforcementCapable)
+	for index := range findings {
+		findings[index].Evidence = parseBudgetExceededReason
+	}
+	return findings
+}
+
 // parseFailureRuleID is the finding of a call the reader failed on
 // internally (a recovered panic in the per-command reading or in Analyze).
 // Like the evaluation limit it carries no target: it alerts outside the
@@ -9682,6 +9700,10 @@ const (
 	// shellparse.MaxNestedBodyProofBytes; the readers read it but do not
 	// prove its protected targets.
 	shellReadingNestedProof
+	// shellReadingNodeBudget: it has more than shellparse.MaxParsedNodes
+	// nodes (GAP-0254: a flat or chained command read for seconds and
+	// held gigabytes). Not parsed past the bound.
+	shellReadingNodeBudget
 )
 
 // trustedActionCommandBound reports the reading bound the command of the
@@ -9702,7 +9724,14 @@ func trustedActionCommandBound(input actionfacts.Input) shellReadingBound {
 			command = field
 		}
 	}
-	if shellparse.TooDeep(command) {
+	// One input budget for every reader: nesting, brace expansion, chain
+	// operators and (for a large command) nodes, all measured before any
+	// recursive reader runs (shellparse.BudgetExceeded).
+	switch shellparse.BudgetExceeded(command) {
+	case "":
+	case shellparse.BudgetNodes:
+		return shellReadingNodeBudget
+	default:
 		return shellReadingTooDeep
 	}
 	switch weight := shellparse.NestedBodyWeight(command); {

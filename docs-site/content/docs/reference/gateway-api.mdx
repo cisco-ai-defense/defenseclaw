@@ -471,6 +471,12 @@ writing the audit database's `actions` table, as they did before version 9.
 A write that cannot take the config lock answers `503`, and one that loses a
 race with another writer answers `409`.
 
+### Model usage
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/usage` | Hourly model usage and cost from the local store, rolled up by `by=model\|connector\|route\|profile\|role\|provider\|user\|group\|hour` over `since=24h\|7d\|<n>d` (`limit` up to 1000). Answers `{enabled, by, scope, from, to, rows}`; `scope` is `own` or `all`, and each row has `calls`, token counts, `cost_usd` (absent when no call in the bucket had a known cost) and `cost_calls`. With tokenomics or the local store off it answers `{"enabled": false}`. A per-user install returns its own rows. On a managed host an administrator reads all rows; any other account reads only the rows of the identity the gateway verified, and gets `403` when it verified none. `by=group` is administrator-only (`403` otherwise). Group names are never exported. On managed Windows a standard account reads its last 24 hours from the own-status answer (`usage`). See [Tokenomics](/docs/observability/tokenomics). |
+
 ### Audit
 
 | Method | Path | Purpose |
