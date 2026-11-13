@@ -4,7 +4,9 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -103,5 +105,60 @@ func TestSubstrateAttachThroughTheAdminListener(t *testing.T) {
 	_ = ws.Close()
 	if len(d.calls) == 0 || d.calls[0] != "eng-web/alice-1" {
 		t.Fatalf("dials %v", d.calls)
+	}
+}
+
+// GAP-0134: attach and workspace traffic is not held to the admin JSON
+// gate and its 1 MiB cap: a large tar upload streams up to the workspace
+// cap, with the client tag and the person check unchanged; every other
+// admin route keeps the JSON gate.
+func TestSubstrateAttachRoutesHaveTheirOwnLimits(t *testing.T) {
+	var got int64
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.WorkspaceMaxBytes = 3 << 20 })
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := io.Copy(io.Discard, r.Body)
+		got = n
+		w.WriteHeader(200)
+	}))
+	defer relay.Close()
+	f.api.substrateState().cfg.Relays = &dialRelay{addr: strings.TrimPrefix(relay.URL, "http://")}
+	put := func(size int, ctype, client string) int {
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/substrate/actors/eng-web/alice-1/attach/files", bytes.NewReader(make([]byte, size)))
+		req.Header.Set("Authorization", "Bearer p-alice")
+		if ctype != "" {
+			req.Header.Set("Content-Type", ctype)
+		}
+		if client != "" {
+			req.Header.Set("X-DefenseClaw-Client", client)
+		}
+		rec := httptest.NewRecorder()
+		f.admin.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if c := put(2<<20, "application/x-tar", "dc-launcher/1"); c != 200 || got != 2<<20 {
+		t.Fatalf("2 MiB tar upload: %d, relay read %d", c, got)
+	}
+	if c := put(5<<20, "application/x-tar", "dc-launcher/1"); c == 200 && got == 5<<20 {
+		t.Fatalf("an upload over the workspace cap reached the relay whole")
+	}
+	if c := put(1024, "application/x-tar", ""); c != http.StatusForbidden {
+		t.Fatalf("upload without the client tag: %d", c)
+	}
+	// The person check still applies.
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/substrate/actors/eng-web/alice-1/attach/files", bytes.NewReader([]byte("x")))
+	req.Header.Set("Authorization", "Bearer p-bob")
+	req.Header.Set("X-DefenseClaw-Client", "dc-launcher/1")
+	rec := httptest.NewRecorder()
+	f.admin.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("bob uploads to alice's actor: %d", rec.Code)
+	}
+	// Other admin routes keep the JSON gate and the 1 MiB cap.
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{}`, "Content-Type", "application/x-tar"); rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-JSON create: %d", rec.Code)
+	}
+	big := `{"template":"cc","connector":"claudecode","task":"` + strings.Repeat("a", 2<<20) + `"}`
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", big); rec.Code == http.StatusCreated {
+		t.Fatalf("2 MiB create body accepted: %d", rec.Code)
 	}
 }

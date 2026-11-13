@@ -90,3 +90,46 @@ func TestSubstrateHookNamesBlockedSkillFolders(t *testing.T) {
 		t.Fatalf("scanner down: %+v", q)
 	}
 }
+
+// A5's contract: a fingerprinted folder that is neither attached nor
+// scanned counts as not scanned; once scanned, the same fingerprint is
+// quiet, and a changed one is named again.
+func TestSubstrateUnscannedSkillFingerprints(t *testing.T) {
+	scan := &fakeSkillScanner{}
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.Skills = scan })
+	post := func(skills []map[string]any, files []map[string]any) map[string]json.RawMessage {
+		p, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": "s1", "tool_name": "Bash",
+			"tool_input": map[string]any{"command": "ls"}, "cwd": "/work"})
+		b, _ := json.Marshal(map[string]any{"v": substrateEnvelopeVersion, "connector": "claudecode", "event": "PostToolUse",
+			"mode": "interactive", "kit_version": "0.1.0", "payload": json.RawMessage(p),
+			"facts": map[string]any{"files": files, "skills": skills}})
+		rec := f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice", string(b))
+		var out map[string]json.RawMessage
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out
+	}
+	dir := "/home/agent/.claude/skills/fmt"
+	file := []map[string]any{{"role": "skill_file", "path": dir + "/SKILL.md", "size": 10, "sha256": "x", "content": []byte("format code")}}
+	// Not attached, never scanned: named.
+	out := post([]map[string]any{{"path": dir, "fp": "fp1"}}, nil)
+	var un []SubstrateUnscanned
+	_ = json.Unmarshal(out[substrateUnscannedField], &un)
+	if len(un) != 1 || un[0].Path != dir || un[0].FP != "fp1" {
+		t.Fatalf("unscanned %s", out[substrateUnscannedField])
+	}
+	// Attached and scanned: quiet now and later with the same fingerprint.
+	out = post([]map[string]any{{"path": dir, "fp": "fp1", "attached": true}}, file)
+	if _, ok := out[substrateUnscannedField]; ok {
+		t.Fatalf("attached folder named unscanned: %s", out[substrateUnscannedField])
+	}
+	if out = post([]map[string]any{{"path": dir, "fp": "fp1"}}, nil); out[substrateUnscannedField] != nil {
+		t.Fatalf("scanned fingerprint named again: %s", out[substrateUnscannedField])
+	}
+	// The folder changed (new fingerprint), not attached: named again.
+	out = post([]map[string]any{{"path": dir, "fp": "fp2"}}, nil)
+	un = nil
+	_ = json.Unmarshal(out[substrateUnscannedField], &un)
+	if len(un) != 1 || un[0].FP != "fp2" {
+		t.Fatalf("changed folder %s", out[substrateUnscannedField])
+	}
+}
