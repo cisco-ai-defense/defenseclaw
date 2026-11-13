@@ -29,6 +29,88 @@ message Facts {
   repeated DataFlowFact data_flows = 8;
   repeated ArtifactFact artifacts = 9;
   repeated ArchiveArtifactLineage archive_lineages = 10;
+  // effects is the effect-model projection of the call (internal/effects,
+  // internal/effectrules). It is filled only for the effect rules; the
+  // ActionFacts rules never see it populated.
+  repeated EffectFact effects = 11;
+}
+
+// EffectFact is one effect of the call: what it reads, writes, deletes,
+// links, runs, sends or fetches, on which target, and how sure the model is.
+// Every enum-like field is a closed lower-case string (effects.Kind and
+// friends) so the projection is JSON-stable across releases.
+message EffectFact {
+  // index is the 1-based position of the effect in the call.
+  int64 index = 1;
+  // kind: read write append delete link exec network_send network_fetch
+  // permission_change opaque.
+  string kind = 2;
+  EffectTarget target = 3;
+  // target_state: known unknown. role_state: known guessed unknown.
+  string target_state = 4;
+  string role_state = 5;
+  // reasons are the closed reason codes, highest precedence first, each as
+  // "<scope>:<code>" (scope target, role or structure). reason is the first
+  // code alone, "" when the effect is fully known.
+  repeated string reasons = 6;
+  string reason = 7;
+  // data_kind: none literal heredoc here_string patch_text file stdin pipe
+  // argument code command_output ("" when the effect carries no data).
+  string data_kind = 8;
+  repeated EffectSource sources = 9;
+  EffectOrigin origin = 10;
+  // cond is true when the effect runs only on some paths.
+  bool cond = 11;
+}
+
+message EffectTarget {
+  // type: none path url host process remote.
+  string type = 1;
+  string path = 2;
+  string glob = 3;
+  string url = 4;
+  string scheme = 5;
+  string host = 6;
+  int64 port = 7;
+  string scope = 8;
+  // link: not_checked none followed unresolved.
+  string link = 9;
+  // key is effects.Target.Key(): the canonical join key.
+  string key = 10;
+  string flavor = 11;
+  // protected lists the protected sets this target matches or may match.
+  // Read it through protected(target) and protected(target, set).
+  repeated ProtectedMatch protected = 12;
+  // agent_created is true when an earlier call of the same session wrote
+  // this target (the agent made the file).
+  bool agent_created = 13;
+}
+
+// ProtectedMatch is one protected set the target touches. state is known (the
+// target is a member) or unknown (it may be one: a glob, a dynamic part, or a
+// link that was never checked). A set the target cannot touch is absent.
+message ProtectedMatch {
+  string set = 1;
+  string state = 2;
+  string reason = 3;
+}
+
+message EffectSource {
+  // kind: effect path variable stdin.
+  string kind = 1;
+  int64 effect = 2;
+  string path = 3;
+  string variable = 4;
+}
+
+message EffectOrigin {
+  // surface: shell file_tool patch mcp argv. dialect: posix powershell cmd none.
+  string surface = 1;
+  string dialect = 2;
+  int64 command = 3;
+  string program = 4;
+  repeated string wrappers = 5;
+  int64 depth = 6;
 }
 
 message ParseResult {

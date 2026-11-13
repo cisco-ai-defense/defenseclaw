@@ -42,6 +42,7 @@ type parseCacheEntry struct {
 	key  parseCacheKey
 	file *syntax.File // the tree as parsed, never handed out
 	ok   bool
+	over bool // parsed, but past MaxParsedNodes (file is nil)
 	at   time.Time
 }
 
@@ -51,7 +52,7 @@ var parseCache struct {
 }
 
 // cachedParse returns a private copy of the kept tree of command.
-func cachedParse(key parseCacheKey) (file *syntax.File, ok, hit bool) {
+func cachedParse(key parseCacheKey) (file *syntax.File, ok, over, hit bool) {
 	parseCache.Lock()
 	defer parseCache.Unlock()
 	now := time.Now()
@@ -64,15 +65,23 @@ func cachedParse(key parseCacheKey) (file *syntax.File, ok, hit bool) {
 	parseCache.entries = kept
 	for _, entry := range kept {
 		if entry.key == key {
-			return cloneFile(entry.file), entry.ok, true
+			if copied, cloned := cloneFile(entry.file); cloned {
+				return copied, entry.ok, entry.over, true
+			}
+			return nil, false, false, false
 		}
 	}
-	return nil, false, false
+	return nil, false, false, false
 }
 
 // storeParse keeps a private copy of file; the caller goes on to use file.
-func storeParse(key parseCacheKey, file *syntax.File, ok bool) {
-	entry := parseCacheEntry{key: key, file: cloneFile(file), ok: ok, at: time.Now()}
+func storeParse(key parseCacheKey, file *syntax.File, ok, over bool) {
+	kept, cloned := cloneFile(file)
+	if !cloned {
+		// A tree too deep to copy within the clone bound is not kept.
+		return
+	}
+	entry := parseCacheEntry{key: key, file: kept, ok: ok, over: over, at: time.Now()}
 	parseCache.Lock()
 	defer parseCache.Unlock()
 	if len(parseCache.entries) >= parseCacheEntries {
@@ -86,70 +95,107 @@ func storeParse(key parseCacheKey, file *syntax.File, ok bool) {
 var tooDeepMemo struct {
 	sync.Mutex
 	command string
-	deep    bool
+	reason  string
 	set     bool
 }
 
-func tooDeepLarge(command string) bool {
+func tooDeepRemembered(command string) string {
 	tooDeepMemo.Lock()
 	if tooDeepMemo.set && tooDeepMemo.command == command {
-		deep := tooDeepMemo.deep
+		reason := tooDeepMemo.reason
 		tooDeepMemo.Unlock()
-		return deep
+		return reason
 	}
 	tooDeepMemo.Unlock()
-	deep := tooDeepScan(command)
+	reason, measure := tooDeepScan(command)
+	if reason == "" && measure && chainTreeOver(command) {
+		reason = BudgetChain
+	}
 	tooDeepMemo.Lock()
-	tooDeepMemo.command, tooDeepMemo.deep, tooDeepMemo.set = command, deep, true
+	tooDeepMemo.command, tooDeepMemo.reason, tooDeepMemo.set = command, reason, true
 	tooDeepMemo.Unlock()
-	return deep
+	return reason
 }
 
-// cloneFile returns a copy of file that shares no node with it. The syntax
-// nodes hold pointers, slices and interfaces of nodes, strings, and positions
-// (a struct of unexported integers, copied by value); nothing else.
-func cloneFile(file *syntax.File) *syntax.File {
+// maxCloneDepth bounds the reflection depth of cloneValue (every pointer,
+// interface, slice element and struct field it descends through counts
+// one). A tree that passes the reading budget (MaxNestingDepth nesting and
+// MaxChainOperators operators in a chain) is far below it; it is the stop
+// for a tree that did not, so the copy returns an error instead of
+// overflowing the goroutine stack, which is a fatal error no recover
+// catches (GAP-0255: a 500 KB left-deep || list killed the gateway).
+const maxCloneDepth = 1 << 17
+
+// cloneFile returns a copy of file that shares no node with it, and false
+// when the tree is deeper than maxCloneDepth. The syntax nodes hold
+// pointers, slices and interfaces of nodes, strings, and positions (a
+// struct of unexported integers, copied by value); nothing else.
+func cloneFile(file *syntax.File) (*syntax.File, bool) {
 	if file == nil {
-		return nil
+		return nil, true
 	}
-	return cloneValue(reflect.ValueOf(file)).Interface().(*syntax.File)
+	copied, ok := cloneValue(reflect.ValueOf(file), 0)
+	if !ok {
+		return nil, false
+	}
+	return copied.Interface().(*syntax.File), true
 }
 
-func cloneValue(src reflect.Value) reflect.Value {
+func cloneValue(src reflect.Value, depth int) (reflect.Value, bool) {
+	if depth > maxCloneDepth {
+		return reflect.Value{}, false
+	}
+	depth++
 	switch src.Kind() {
 	case reflect.Pointer:
 		if src.IsNil() {
-			return src
+			return src, true
+		}
+		inner, ok := cloneValue(src.Elem(), depth)
+		if !ok {
+			return reflect.Value{}, false
 		}
 		dst := reflect.New(src.Type().Elem())
-		dst.Elem().Set(cloneValue(src.Elem()))
-		return dst
+		dst.Elem().Set(inner)
+		return dst, true
 	case reflect.Interface:
 		if src.IsNil() {
-			return src
+			return src, true
+		}
+		inner, ok := cloneValue(src.Elem(), depth)
+		if !ok {
+			return reflect.Value{}, false
 		}
 		dst := reflect.New(src.Type()).Elem()
-		dst.Set(cloneValue(src.Elem()))
-		return dst
+		dst.Set(inner)
+		return dst, true
 	case reflect.Slice:
 		if src.IsNil() {
-			return src
+			return src, true
 		}
 		dst := reflect.MakeSlice(src.Type(), src.Len(), src.Len())
 		for i := range src.Len() {
-			dst.Index(i).Set(cloneValue(src.Index(i)))
+			inner, ok := cloneValue(src.Index(i), depth)
+			if !ok {
+				return reflect.Value{}, false
+			}
+			dst.Index(i).Set(inner)
 		}
-		return dst
+		return dst, true
 	case reflect.Struct:
 		dst := reflect.New(src.Type()).Elem()
 		dst.Set(src)
 		for i := range src.NumField() {
 			if src.Type().Field(i).IsExported() {
-				dst.Field(i).Set(cloneValue(src.Field(i)))
+				inner, ok := cloneValue(src.Field(i), depth)
+				if !ok {
+					return reflect.Value{}, false
+				}
+				dst.Field(i).Set(inner)
 			}
 		}
-		return dst
+		return dst, true
 	default:
-		return src
+		return src, true
 	}
 }
