@@ -125,8 +125,8 @@ func TestSourcedWriterIsJudgedWhereverItSitsInTheCommand(t *testing.T) {
 // judged at link count x mod 3 by connector x mod 2 (x = launcher index +
 // row kind), so each link count and each connector judges every row kind,
 // and every launcher meets all three kinds. One fixture serves each link
-// count; the rows only read it. The check at the end shows that every link
-// count and connector judged all three kinds.
+// count; the rows only read it. The check at the end shows that every
+// launcher row and every connector and row kind was judged.
 func TestSourcedWriterBehindLinksIsBlockedUnderAnyShellLauncher(t *testing.T) {
 	launchers := []string{
 		`bash -c`, `bash -l -c`, `bash -lc`, `bash --login -c`, `bash -i -c`, `bash -ec`, `bash -lec`,
@@ -147,30 +147,51 @@ func TestSourcedWriterBehindLinksIsBlockedUnderAnyShellLauncher(t *testing.T) {
 			return r106Reader2Row{launcher + " ordinary through links", "project", launcher + ` ". ./c/ok.sh"`, "allow"}
 		},
 	}
-	judged := map[[3]int]bool{}
-	for li, links := range linkCounts {
+	// The link counts run from the longest chain down. A host that cannot
+	// make a chain that long (the subtest skips: a Windows runner refused the
+	// 9 and 62 link chains, Windows Native CI 43342767808 gw7) hands its rows
+	// to the next shorter count, so every launcher row is still judged
+	// wherever any chain can be made.
+	type pendingRow struct{ launcher, kind, connector int }
+	judged := map[[2]int]bool{} // {launcher, kind}
+	kindsJudged := map[[2]int]bool{}
+	var pending []pendingRow
+	ran := 0
+	for li := len(linkCounts) - 1; li >= 0; li-- {
+		links := linkCounts[li]
+		for j := range launchers {
+			for kind := range kinds {
+				if x := j + kind; x%len(linkCounts) == li {
+					pending = append(pending, pendingRow{j, kind, x % len(connectors)})
+				}
+			}
+		}
 		t.Run(fmt.Sprintf("%d links", links), func(t *testing.T) {
 			f := newB36ManagedHookFixture(t)
 			linkedScriptFolder(t, f, links)
-			for j, launcher := range launchers {
-				for kind, row := range kinds {
-					x := j + kind
-					if x%len(linkCounts) != li {
-						continue
-					}
-					ci := x % len(connectors)
-					judged[[3]int{li, ci, kind}] = true
-					sourcedWriterLauncherCheck(t, f, connectors[ci], row(launcher))
-				}
+			ran++
+			for _, row := range pending {
+				judged[[2]int{row.launcher, row.kind}] = true
+				kindsJudged[[2]int{row.connector, row.kind}] = true
+				sourcedWriterLauncherCheck(t, f, connectors[row.connector], kinds[row.kind](launchers[row.launcher]))
 			}
+			pending = nil
 		})
 	}
-	for li, links := range linkCounts {
-		for ci, connector := range connectors {
-			for kind := range kinds {
-				if !judged[[3]int{li, ci, kind}] {
-					t.Errorf("%d links, %s: row kind %d never judged; the rotation must cover it", links, connector, kind)
-				}
+	if ran == 0 {
+		t.Fatal("no link chain could be made on this host, so no launcher row was judged")
+	}
+	for j, launcher := range launchers {
+		for kind := range kinds {
+			if !judged[[2]int{j, kind}] {
+				t.Errorf("%s, row kind %d never judged; the rotation must cover it", launcher, kind)
+			}
+		}
+	}
+	for ci, connector := range connectors {
+		for kind := range kinds {
+			if !kindsJudged[[2]int{ci, kind}] {
+				t.Errorf("%s: row kind %d never judged; the rotation must cover it", connector, kind)
 			}
 		}
 	}
