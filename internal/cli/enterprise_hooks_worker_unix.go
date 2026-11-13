@@ -585,7 +585,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		// deadline. Give discovery its own deadline so the private-home
 		// walk can return an incomplete result while there is still time
 		// to write the response.
-		scanCtx, cancel := context.WithTimeout(ctx, workerTimeout(request)*3/4)
+		scanCtx, cancel := context.WithTimeout(ctx, enterpriseHookWorkerScanTimeout(workerTimeout(request)))
 		defer cancel()
 		return respond(enterpriseHookWorkerDiscoverWithin(scanCtx, request), 0)
 	case enterpriseHookWorkerOpForeignCleanup:
@@ -2075,6 +2075,12 @@ var errEnterpriseHookWorkerNoResult = errors.New("worker returned no result for 
 // enterpriseHookWorkerScanGrace is how long a discover worker waits, after
 // its scan deadline, for a scan that observes the deadline to return.
 var enterpriseHookWorkerScanGrace = 2 * time.Second
+
+// enterpriseHookWorkerScanTimeout is the scan deadline of a discover worker
+// whose limit is timeout: three quarters of it, so the worker can still answer
+// after a scan that did not return, within enterpriseHookWorkerScanGrace.
+// The test worker replaces it so that a blocked scan does not take seconds.
+var enterpriseHookWorkerScanTimeout = func(timeout time.Duration) time.Duration { return timeout * 3 / 4 }
 
 // enterpriseHookWorkerDiscovery is what one discover worker has found so far.
 type enterpriseHookWorkerDiscovery struct {
