@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/signin"
 )
 
 // Exit codes of the substrate commands, besides 0 (done) and 1 (failed):
@@ -242,6 +243,9 @@ func substrateAPIMessage(e *api.Error) string {
 	case e.Status == 403 && e.Reason == "actor_refused":
 		return "the cluster refused to start this agent: " + orWord(e.Detail, "it got no network policy") + " (" + orWord(e.Refusal, "refused") +
 			"). Nothing was started. If this is unexpected, give your administrator the agent id " + orWord(e.ActorUID, "(none)") + " (" + orWord(e.Actor, "unknown") + ")"
+	case e.Status == 403 && signin.IsRefusalCode(e.Reason):
+		// E9 in a managed deployment: the gateway says why and what to ask for.
+		return orWord(e.Message, "a managed cluster does not run an agent that signs in to a vendor account") + " Nothing was started (" + e.Reason + ")"
 	case e.Status == 403 && e.Reason == "template_attestation_unreadable":
 		return "the cluster could not read the template's attestation, so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify"
 	case e.Status == 403:

@@ -26,9 +26,9 @@ keywords:
 | OpenCode | `opencode run` | DefenseClaw gateway | Same as Copilot CLI. `defenseclaw substrate run opencode` starts it: its plugin sends its hook events through the actor kit |
 | Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `KIRO_API_KEY` |
 | Antigravity CLI | `agy -p` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `GEMINI_API_KEY` |
-| Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | Hook path proven. **No model run.** `run` refuses it ("not verified yet") |
-| Amp | `amp -x` | Vendor key (`AMP_API_KEY`) | Works against its API on a key, but **can't run**: it speaks WebSocket only, which Substrate's egress refuses (see below). `run` refuses it |
-| Devin CLI | `devin -p` | Vendor sign-in only | Hook path proven. **No model run.** `run` refuses it |
+| Cursor Agent CLI | `cursor-agent -p` | Vendor key (`CURSOR_API_KEY`) | Hook path proven. **No model run.** `run` starts it, with the sign-in rules below |
+| Amp | `amp -x` | Vendor key (`AMP_API_KEY`) | Works against its API on a key, but **can't run**: it speaks WebSocket only, which Substrate's egress refuses (see below). `run` starts it in open source, with that note and the sign-in warning |
+| Devin CLI | `devin -p` | Vendor sign-in only | Hook path proven. **No model run.** `run` starts it, with the sign-in rules below |
 | OpenClaw, ZeptoClaw | No | No | Not in this release |
 | Claude desktop and Cowork, Cursor, Kiro and Antigravity editors, Copilot in VS Code | No | No | Desktop apps need a screen |
 
