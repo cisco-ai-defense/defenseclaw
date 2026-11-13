@@ -25,6 +25,10 @@ from defenseclaw import codex_toml
 from defenseclaw.connector_paths import claude_config_dir, codex_home
 
 ROUTE_ONLY_CONNECTORS = ("claudecode", "codex")
+# The route credential header and the Codex provider the gateway renders
+# (internal/gateway/connector RouteOnlyHeader, codexRouteProviderID).
+ROUTE_HEADER = "X-DC-Route-Auth"
+CODEX_ROUTE_PROVIDER = "defenseclaw_route"
 _SUPPORTED = ", ".join(ROUTE_ONLY_CONNECTORS)
 _ROUTE_PREFIX = "/r/"
 
@@ -166,20 +170,13 @@ def detect_upstream(connector: str) -> Upstream | None:
             return None
         return Upstream(base.rstrip("/") or "https://api.anthropic.com", "messages")
     if connector == "codex":
-        path = os.path.join(codex_home(), "config.toml")
-        try:
-            with open(path, "rb") as fh:
-                doc = codex_toml.loads(fh.read())
-        except FileNotFoundError:
-            doc = {}
-        except (OSError, ValueError) as exc:
-            raise RouteOnlyError(f"cannot read {path}: {exc}") from exc
+        doc = codex_config()
         profile = doc.get("profile")
         profiles = doc.get("profiles") or {}
         if profile and isinstance(profiles.get(profile), dict) and profiles[profile].get("model_provider"):
             raise RouteOnlyError(f"the active Codex profile {profile!r} sets its own model_provider; route-only routes the top-level provider only")
         provider = str(doc.get("model_provider") or "openai")
-        if provider == "defenseclaw_route":
+        if provider == CODEX_ROUTE_PROVIDER:
             return None
         if provider == "openai":
             if _codex_chatgpt_login():
@@ -194,6 +191,18 @@ def detect_upstream(connector: str) -> Upstream | None:
     raise RouteOnlyError(f"{connector} has no route-only support (supported: {_SUPPORTED})")
 
 
+def codex_config() -> dict[str, Any]:
+    """The Codex config.toml ({} when there is none)."""
+    path = os.path.join(codex_home(), "config.toml")
+    try:
+        with open(path, "rb") as fh:
+            return codex_toml.loads(fh.read())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        raise RouteOnlyError(f"cannot read {path}: {exc}") from exc
+
+
 def _codex_chatgpt_login() -> bool:
     try:
         with open(os.path.join(codex_home(), "auth.json"), encoding="utf-8") as fh:
@@ -206,7 +215,15 @@ def _codex_chatgpt_login() -> bool:
 def _check_host(cfg: Any) -> None:
     mode = str(getattr(cfg, "deployment_mode", "") or "").strip()
     if mode == "managed_enterprise":
-        raise RouteOnlyError("route-only on managed hosts comes from the signed policy bundle and is not available in this build")
+        # Managed hosts are configured by the bundle; the gateway validation
+        # refuses a managed macOS bundle whose route-only upstream has no
+        # gateway credential (custody, every call would answer 503) and
+        # doctor fails such a host.
+        raise RouteOnlyError(
+            "route-only on managed hosts comes from the signed policy bundle (routing.route_only); "
+            "on managed macOS the bundle also needs a gateway credential (routing.models[].credential) "
+            "for each routed upstream, because the agent credential is not forwarded there"
+        )
 
 
 def _route_only(cfg: Any) -> tuple[list[str], dict[str, Any]]:

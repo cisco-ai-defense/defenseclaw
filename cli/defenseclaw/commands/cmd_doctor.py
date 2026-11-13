@@ -13280,6 +13280,22 @@ def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None =
         )
 
 
+def _check_route_only(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
+    """Route-only rows per connector (S1 DESIGN 7.2, 7.4, 17.1): readiness the
+    gateway reports in /health (custody without a gateway key fails), the
+    agent config, gateway Bedrock signing, a held API port, a shared Mac."""
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+    from defenseclaw.doctor_route_only import route_only_rows
+
+    try:
+        rows = route_only_rows(cfg, live_health, profile=_enterprise_profile(cfg))
+    except Exception as exc:  # a broken agent file must not stop doctor
+        _emit("warn", "Route-only", f"could not check route-only: {single_line(str(exc))[:200]}", r=r)
+        return
+    for row in rows:
+        _emit(row.tag, row.label, row.detail, r=r, remediation=row.fix)
+
+
 # Connectors that enforce in-process via an agent-native lifecycle surface
 # (hook bus or a native policy API) and talk directly to their
 # upstream provider. They do NOT bind the guardrail proxy listener on port
@@ -16349,6 +16365,7 @@ def doctor(
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)
     _check_semantic_routing(cfg, r, live_health=sidecar_health)
+    _check_route_only(cfg, r, live_health=sidecar_health)
     _check_gateway_token_env_alignment(cfg, r)
     if not _check_windows_gateway_diagnostics(cfg, r):
         # Preserve the established Linux/macOS evidence collectors. Windows
