@@ -28,11 +28,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/maximhq/bifrost/core/schemas"
-	"golang.org/x/text/unicode/norm"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
@@ -2045,7 +2043,6 @@ func toolJudgeArgumentExcerpt(args string, maxBytes int) string {
 }
 
 func toolJudgeUserIntentExcerpt(content string) string {
-	content = neutralizeToolJudgeDelimiters(content)
 	if len(content) <= maxToolJudgeUserIntentBytes {
 		return content
 	}
@@ -2056,7 +2053,6 @@ func toolJudgeUserIntentExcerpt(content string) string {
 }
 
 func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker string) string {
-	value = neutralizeToolJudgeDelimiters(value)
 	if len(value) <= maxBytes {
 		return value
 	}
@@ -2071,61 +2067,6 @@ func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker strin
 	tail := utf8SafeSuffix(value, tailBudget)
 	middle := toolJudgeSecurityMiddleExcerpt(value, len(head), len(value)-len(tail), middleBudget)
 	return head + truncationMarker + middle + toolJudgeMiddleExcerptMarker + tail
-}
-
-// neutralizeToolJudgeDelimiters prevents untrusted arguments, tool names or user
-// intent from forging the structural tags that separate context blocks: the
-// opening bracket of every tag-shaped name becomes '‹'. The text after a bracket
-// is folded first (NFKC, format characters dropped, case folded, spaces, hyphens
-// and underscores one separator), so full-width letters, zero-width and soft
-// hyphen splits and "session user intent" read as the tag they look like. It
-// leaves ordinary shell redirection and source-code comparison operators alone.
-func neutralizeToolJudgeDelimiters(value string) string {
-	if !strings.ContainsAny(value, "<\uFF1C\uFE64") {
-		return value
-	}
-	runes := []rune(value)
-	var out strings.Builder
-	out.Grow(len(value))
-	for i, r := range runes {
-		if (r == '<' || r == '\uFF1C' || r == '\uFE64') && looksLikeToolJudgeTag(runes[i+1:]) {
-			out.WriteRune('‹')
-			continue
-		}
-		out.WriteRune(r)
-	}
-	return out.String()
-}
-
-var toolJudgeTagNames = []string{"session_user_intent", "recent_tool_call", "current_tool_call"}
-
-func looksLikeToolJudgeTag(rest []rune) bool {
-	if len(rest) > 96 {
-		rest = rest[:96]
-	}
-	var folded strings.Builder
-	separated := false
-	for _, r := range norm.NFKC.String(string(rest)) {
-		switch {
-		case unicode.Is(unicode.Cf, r):
-			continue
-		case unicode.IsSpace(r) || r == '_' || r == '-' || r == '/':
-			if !separated {
-				folded.WriteByte('_')
-				separated = true
-			}
-		default:
-			folded.WriteRune(unicode.ToLower(r))
-			separated = false
-		}
-	}
-	text := strings.TrimLeft(folded.String(), "_")
-	for _, name := range toolJudgeTagNames {
-		if strings.HasPrefix(text, name) {
-			return true
-		}
-	}
-	return false
 }
 
 func utf8SafePrefix(value string, maxBytes int) string {
@@ -2240,8 +2181,11 @@ func asciiLowerPreservingBytes(value string) string {
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {
 	current := boundToolJudgeArguments(args)
 	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
+	nonce := newToolJudgeNonce()
 	if j == nil || sessionID == "" {
-		return current
+		var only strings.Builder
+		writeToolJudgeSection(&only, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
+		return strings.TrimSuffix(only.String(), "\n")
 	}
 
 	now := time.Now()
@@ -2274,19 +2218,18 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		if named := mergeScopeTargets(entry.scopeTargets, entry.userIntent); len(named) > 0 {
 			targets = strings.Join(named, ", ")
 		}
-		fmt.Fprintf(&sample, "<SESSION_USER_INTENT untrusted=\"true\" named_targets=%q>\n", targets)
-		sample.WriteString(entry.userIntent)
-		sample.WriteString("\n</SESSION_USER_INTENT>\n")
+		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets), entry.userIntent)
 	}
 	if len(prior) > 0 {
 		sample.WriteString("RECENT TOOL CALLS FROM THE SAME SESSION (oldest first):\n")
 		for index, event := range prior {
-			fmt.Fprintf(&sample, "<RECENT_TOOL_CALL index=%d tool=%q>\n%s\n</RECENT_TOOL_CALL>\n", index+1, event.toolName, event.args)
+			writeToolJudgeSection(&sample, nonce, "RECENT_TOOL_CALL", fmt.Sprintf("index=%d tool=%q", index+1, event.toolName), event.args)
 		}
 	}
-	fmt.Fprintf(&sample, "<CURRENT_TOOL_CALL tool=%q>\n%s\n</CURRENT_TOOL_CALL>", sanitizeToolName(toolName), current)
+	writeToolJudgeSection(&sample, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
+	sampleText := strings.TrimSuffix(sample.String(), "\n")
 	if reason := intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args); reason != "" {
-		j.keepScopeFloor(sample.String(), reason)
+		j.keepScopeFloor(sampleText, reason)
 	}
 	if j.decision != nil {
 		state := decisionModelState{
@@ -2296,9 +2239,9 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		for _, event := range prior {
 			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.toolName, Arguments: event.args})
 		}
-		j.keepDecisionState(sample.String(), state)
+		j.keepDecisionState(sampleText, state)
 	}
-	return sample.String()
+	return sampleText
 }
 
 func (j *LLMJudge) pruneToolJudgeContextLocked(now time.Time) {
@@ -2462,6 +2405,9 @@ func (j *LLMJudge) runToolJudgeLLM(ctx context.Context, toolName, args, sample s
 		basePrompt = jc.SystemPrompt
 	}
 	systemPrompt := fmt.Sprintf(basePrompt, sanitizedTool)
+	if nonce := toolJudgeSampleNonce(sample); nonce != "" {
+		systemPrompt += "\n\n" + toolJudgeNonceLine(nonce)
+	}
 
 	const kind = "tool_injection"
 	maxTok := 512
@@ -2729,7 +2675,6 @@ func toolSignalStrengthRank(strength string) int {
 // sanitizeToolName strips control characters and truncates the tool name to
 // prevent prompt injection via crafted tool names in the judge system prompt.
 func sanitizeToolName(name string) string {
-	name = neutralizeToolJudgeDelimiters(name)
 	var sb strings.Builder
 	count := 0
 	for _, r := range name {
