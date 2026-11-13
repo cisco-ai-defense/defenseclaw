@@ -66,6 +66,19 @@ type Cmd struct {
 	Async    bool
 	Cond     bool
 	Span     [2]int
+	// Host is psparse's verdict on a cmd / powershell / pwsh host call that the
+	// PowerShell frontend lowered, nil when psparse gave none. The walker unwraps
+	// the payload only from a Static verdict, with psparse's text; a NotStatic
+	// verdict is opaque and is never unwrapped by the walker's own parsing
+	// (psparse review 9 R9-3, GAP-0193).
+	Host *HostPayload
+}
+
+// HostPayload is psparse's reading of one host call's payload.
+type HostPayload struct {
+	Opaque  bool    // not static, or unsafe to trust: no unwrap
+	Text    string  // the payload text when !Opaque
+	Dialect Dialect // the payload's grammar when !Opaque
 }
 
 // WordSeg is one piece of a word: a literal run (Lit) or a simple variable
@@ -115,6 +128,13 @@ type Assign struct {
 	NoValue bool
 	// Unexport removes the export attribute (`export -n`, `declare +x`).
 	Unexport bool
+	// Append is `NAME+=value`: the value is concatenated (or added), not assigned.
+	Append bool
+	// Attr marks a declaration with an attribute that transforms the value or the
+	// variable's type (-l -u -c -i -a -A): the value is no longer what was written.
+	Attr bool
+	// NameRef marks `declare -n`: the name is a reference to another variable.
+	NameRef bool
 }
 
 // RedirOp is the kind of a redirection.

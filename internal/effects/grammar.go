@@ -177,12 +177,22 @@ func sedScriptOK(s string) bool {
 			if !p.translit() {
 				return false
 			}
-		case 'b', 't', 'T':
+		case 'b', 't', 'T', ':':
+			// GNU ends a label at whitespace or ';' and goes on parsing commands, so
+			// anything after the label other than the end of the command is a command
+			// we have not read (`b a w FILE`): reject unless it ends right there.
 			p.skip(" \t")
-			p.upTo(";\n}")
-		case ':':
-			p.skip(" \t")
-			if p.upTo(";\n") == "" {
+			start := p.i
+			for !p.eof() && strings.IndexByte(" \t;\n", p.s[p.i]) < 0 {
+				if p.s[p.i] == '}' {
+					return false // `b}` / `:a}` differ between sed implementations
+				}
+				p.i++
+			}
+			if c == ':' && p.i == start {
+				return false
+			}
+			if !p.endOfCommand() {
 				return false
 			}
 		case 'a', 'i', 'c':
@@ -220,14 +230,6 @@ func (p *sedParser) digits() int {
 		n++
 	}
 	return n
-}
-
-func (p *sedParser) upTo(set string) string {
-	start := p.i
-	for !p.eof() && strings.IndexByte(set, p.s[p.i]) < 0 {
-		p.i++
-	}
-	return strings.TrimSpace(p.s[start:p.i])
 }
 
 // endOfCommand consumes the spaces after a command and requires a separator, a

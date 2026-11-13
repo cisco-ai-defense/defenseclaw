@@ -123,6 +123,7 @@ type Program struct {
 	PSLaunch       bool     // powershell/pwsh: decode -enc and unwrap its command as PowerShell
 	TarStyle       bool     // tar: mode-dependent create/extract effects (review N7)
 	DownloadRemote bool     // curl -O / wget: writes a URL-named file into the output dir/cwd (review R3-3)
+	MovesSources   bool     // the sources are removed from where they were (mv, move, ren, Move-Item): each is also a delete
 	AppendFlag     string   // switch that turns the file operands into appends (tee -a)
 	InertOperands  bool     // a PosNone program whose positionals are inert data (echo, true) -- else a positional is unaccounted (review R5-2)
 }
@@ -198,7 +199,7 @@ func buildPOSIXTable() {
 			"-m": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "-g": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}},
 			"-r", "-R", "-f", "-v", "-p", "-a", "-n", "-i", "-u", "-L", "-P", "-H", "-d", "-l", "-s", "-x", "-b", "-T", "-D",
 			"--recursive", "--force", "--preserve", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--update", "--symbolic-link", "--link", "--interactive")})
-	add(Program{Names: []string{"mv"}, Pos: PosSourcesDest,
+	add(Program{Names: []string{"mv"}, Pos: PosSourcesDest, MovesSources: true,
 		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
 			"-f", "-i", "-n", "-v", "-u", "-b", "-T", "--force", "--no-clobber", "--verbose", "--update", "--backup", "--interactive")})
 	add(Program{Names: []string{"rm", "unlink", "shred"}, Pos: PosAllDelete, Strict: true,
@@ -220,7 +221,7 @@ func buildPOSIXTable() {
 		Flags: fl(map[string]Flag{"-e": {Value: true, Text: TextSed}, "--expression": {Value: true, Text: TextSed}, "-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "--file": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-l": {Value: true, Role: RoleIgnore}},
 			"-i", "-n", "-r", "-E", "-s", "-u", "-z", "--in-place", "--regexp-extended", "--quiet", "--silent", "--separate", "--null-data")})
 	add(Program{Names: []string{"awk"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextAwk,
-		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-v": {Value: true}, "-F": {Value: true}}, "-W")})
+		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead, Text: TextScriptFile}, "-v": {Value: true}, "-F": {Value: true}})})
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
 	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: fl(map[string]Flag{"-d": {Value: true, Role: RoleIgnore}}, "-o", "-q", "-l", "-v", "-n", "-j", "-x", "-P")})
 	add(Program{Names: []string{"zip"}, Pos: PosZip,
@@ -231,8 +232,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs, DownloadRemote: true,
 		Flags: fl(map[string]Flag{
 			"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
-			"--output-dir": {Value: true, Role: RoleIgnore},
-			"-T":           {Value: true, Role: RoleUploadFile}, "--upload-file": {Value: true, Role: RoleUploadFile},
+			"-T": {Value: true, Role: RoleUploadFile}, "--upload-file": {Value: true, Role: RoleUploadFile},
 			"-F": {Value: true, Role: RoleSendData}, "--form": {Value: true, Role: RoleSendData}, "--form-string": {Value: true, Role: RoleSendData},
 			"-d": {Value: true, Role: RoleSendData}, "--data": {Value: true, Role: RoleSendData},
 			"--data-binary": {Value: true, Role: RoleSendData}, "--data-raw": {Value: true, Role: RoleSendData}, "--data-urlencode": {Value: true, Role: RoleSendData},
@@ -267,16 +267,20 @@ func buildPOSIXTable() {
 			"-inum": {Value: true, Role: RoleIgnore}, "-links": {Value: true, Role: RoleIgnore}, "-used": {Value: true, Role: RoleIgnore}, "-fstype": {Value: true, Role: RoleIgnore}, "-printf": {Value: true, Role: RoleIgnore}, "-D": {Value: true, Role: RoleIgnore}},
 			"-delete", "-print", "-print0", "-ls", "-depth", "-follow", "-xdev", "-mount", "-nouser", "-nogroup", "-empty", "-prune", "-readable", "-writable", "-executable",
 			"-false", "-true", "-quit", "-not", "-a", "-o", "-and", "-or", "-ignore_readdir_race", "-noleaf", "-daystart", "-H", "-L", "-P", "-O1", "-O2", "-O3")})
-	add(Program{Names: []string{"grep", "egrep", "fgrep", "ag"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextRegex,
+	add(Program{Names: []string{"grep", "egrep", "fgrep"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextRegex,
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-e": {Value: true, Role: RoleIgnore}, "--regexp": {Value: true, Role: RoleIgnore},
 			"-m": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "--color": {Value: true, Role: RoleIgnore}, "--colour": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "--include": {Value: true, Role: RoleIgnore}, "--exclude": {Value: true, Role: RoleIgnore}},
 			"-r", "-R", "-n", "-i", "-v", "-l", "-L", "-c", "-w", "-x", "-E", "-F", "-G", "-P", "-o", "-H", "-h", "-q", "-s", "-a", "-I", "-z", "-U", "-b", "-T",
 			"--recursive", "--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--extended-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
+	// rg has its own flags (ripgrep's arities differ from grep's: -r, -E and -d take
+	// values). Reviewed in testdata/flagspec.tsv.
 	add(Program{Names: []string{"rg"}, Pos: PosAllRead, FirstPosIgnore: true, FirstPosText: TextRegex,
 		Flags: fl(map[string]Flag{"--pre": {Value: true, Role: RoleExecCode}, "-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-e": {Value: true, Role: RoleIgnore}, "--regexp": {Value: true, Role: RoleIgnore},
-			"-m": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "--color": {Value: true, Role: RoleIgnore}, "--colour": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "--include": {Value: true, Role: RoleIgnore}, "--exclude": {Value: true, Role: RoleIgnore}},
-			"-r", "-R", "-n", "-i", "-v", "-l", "-L", "-c", "-w", "-x", "-E", "-F", "-G", "-P", "-o", "-H", "-h", "-q", "-s", "-a", "-I", "-z", "-U", "-b", "-T",
-			"--recursive", "--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--extended-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
+			"-m": {Value: true, Role: RoleIgnore}, "--max-count": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore},
+			"--color": {Value: true, Role: RoleIgnore}, "--colour": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "--max-depth": {Value: true, Role: RoleIgnore},
+			"-r": {Value: true, Role: RoleIgnore}, "--replace": {Value: true, Role: RoleIgnore}, "-E": {Value: true, Role: RoleIgnore}, "--encoding": {Value: true, Role: RoleIgnore}},
+			"-n", "-i", "-v", "-l", "-L", "-c", "-w", "-x", "-F", "-P", "-o", "-H", "-I", "-q", "-s", "-a", "-z", "-U", "-b",
+			"--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
 	add(Program{Names: []string{"fd"}, Pos: PosAllRead, Pattern: true,
 		Flags: map[string]Flag{"-x": {Role: RoleExecProgram}, "-X": {Role: RoleExecProgram}, "--exec": {Role: RoleExecProgram}}})
 	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true,
@@ -355,7 +359,7 @@ func buildWindowsTable() {
 	}
 	add(Program{Names: []string{"copy", "xcopy"}, Pos: PosSourcesDest})
 	add(Program{Names: []string{"robocopy"}, Pos: PosRobocopy})
-	add(Program{Names: []string{"move", "ren", "rename"}, Pos: PosSourcesDest})
+	add(Program{Names: []string{"move", "ren", "rename"}, Pos: PosSourcesDest, MovesSources: true})
 	add(Program{Names: []string{"del", "erase", "rd", "rmdir"}, Pos: PosAllDelete, Strict: true})
 	add(Program{Names: []string{"type"}, Pos: PosAllRead})
 	add(Program{Names: []string{"mklink"}, Pos: PosReverseLink})
@@ -373,7 +377,7 @@ func buildWindowsTable() {
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}}})
 	add(Program{Names: []string{"copy-item", "cpi"}, Pos: PosSourcesDest,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}, "-destination": {Value: true, Role: RoleWrite}}})
-	add(Program{Names: []string{"move-item", "mi"}, Pos: PosSourcesDest,
+	add(Program{Names: []string{"move-item", "mi"}, Pos: PosSourcesDest, MovesSources: true,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleRead}, "-literalpath": {Value: true, Role: RoleRead}, "-destination": {Value: true, Role: RoleWrite}}})
 	add(Program{Names: []string{"remove-item", "ri", "rmdir"}, Pos: PosAllDelete, Strict: true, PipeRole: RoleDelete,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleDelete}, "-literalpath": {Value: true, Role: RoleDelete}, "-recurse": {}, "-force": {}}})

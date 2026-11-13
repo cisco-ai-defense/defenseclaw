@@ -4,7 +4,10 @@
 
 package psparse
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // rev7Case is one delta-review-7 probe (ids from PSPARSE-DELTA-REVIEW7.md,
 // probes in jobs/s7-pwsh-review7/probes/). Expected results are the same under
@@ -28,22 +31,39 @@ var rev7Cases = []rev7Case{
 	// command is rejected by pwsh 7 and dropped by 5.1, so it is opaque.
 	{"N01", `pwsh '' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N02", `pwsh ' ' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N03", `pwsh ' -c' '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
-	{"N04", `pwsh '-c ' '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
+	{"N03", `pwsh ' -c' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"N04", `pwsh '-c ' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N05", `powershell '' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N06", `pwsh -nop '' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N07", `pwsh ' -nop' -c '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
+	{"N07", `pwsh ' -nop' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N08", `pwsh ' -File' -`, KindPowerShellCommand, false, "", ReasonStdin},
 	// -ec is outside the modeled abbreviations (R6-8), so the padded N09 is opaque like the unpadded form;
 	// N09e is the same shape with the modeled -enc, which must decode.
 	{"N09", `pwsh ' -ec' ` + rev7B64, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N09e", `pwsh ' -enc' ` + rev7B64, KindEncodedCommand, true, "Write-Output EVIL", ""},
+	{"N09e", `pwsh ' -enc' ` + rev7B64, KindEncodedCommand, false, "", ReasonHostOption},
 	// R7-3: forms pwsh rejects are opaque with a host-option reason, not stdin.
 	{"A06", `pwsh -c:-`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B03", `pwsh -File:-`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B05", `pwsh -File - extra`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B13", `pwsh -nop -File - -c 'Remove-Item C:\Windows'`, KindPowerShellCommand, false, "", ReasonStdin},
-	{"C11", `pwsh -c Remove-Item C:\x --% -`, KindPowerShellCommand, true, `Remove-Item C:\x -`, ""},
+	// R8-1 (GAP-0168): any --% tail on a pwsh/powershell host is non-static; the
+	// caller expands %NAME% in it. C11 was static in round 8.
+	{"C11", `pwsh -c Remove-Item C:\x --% -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S01", `pwsh -c Write-Output --% -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S03", `pwsh -c Write-Output --% - %DCV%`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S04", `pwsh -c Write-Output --% %DCV%`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S07", `pwsh -c Write-Output --% "-"`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S09", `pwsh -c --% Write-Output -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S12", `pwsh ' -c' Write-Output --% -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	// R8-2: a padded lone dash is opaque.
+	{"A14", `pwsh '- '`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"A13", `pwsh ' -'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	// R8-3: -Command:<text> is rejected by pwsh 7.
+	{"COLC", `pwsh -c:'Write-Output MARK'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"COLC2", `pwsh -Command:'Write-Output MARK'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	// R8-4: a /c inside a non-switch value is not a run switch.
+	{"K01", `cmd -x:C:/code`, "", false, "", ""},
+	{"K04", `cmd -x:/c ver`, KindCmdC, false, "", ReasonCmdArgv},
 	// still stdin (R6-1 / PS-FILE-STDIN / PS-STOPPARSE-DASH hold)
 	{"A01", `pwsh -c -`, KindPowerShellCommand, false, "", ReasonStdin},
 	{"B01", `pwsh -File -`, KindPowerShellCommand, false, "", ReasonStdin},
@@ -93,6 +113,109 @@ func TestRev7Cases(t *testing.T) {
 			if n.Kind != c.kind || n.Static != c.static || (c.static && n.Text != c.text) || (!c.static && n.Reason != c.reason) {
 				t.Errorf("%s d=%d %q:\n got  kind=%s static=%v text=%q reason=%q\n want kind=%s static=%v text=%q reason=%q",
 					c.id, d, c.src, n.Kind, n.Static, n.Text, n.Reason, c.kind, c.static, c.text, c.reason)
+			}
+		}
+	}
+}
+
+// rev12Case is a review-10 probe whose result depends on the dialect: Windows
+// PowerShell 5.1 drops an empty native argument (GAP-0208), pwsh 7 passes it.
+var rev12Cases = []struct {
+	id        string
+	src       string
+	pwsh7Text string // Static text under DialectPwsh7
+}{
+	{"WP03", `powershell -c Write-Output '' x`, "Write-Output  x"},
+	{"WP10", `powershell -c "Write-Output 'a" '' "b'"`, "Write-Output 'a  b'"},
+	{"WP11", `powershell -nop -c Write-Output '' '' x`, "Write-Output   x"},
+	{"WP12", `pwsh -c "Write-Output 'a" '' "b'"`, "Write-Output 'a  b'"},
+	{"WP13", `powershell -c "Write-Output 'a" "" "b'"`, "Write-Output 'a  b'"},
+	{"g22-1377", `pwsh.exe -command '' -nop`, " -nop"},
+	{"g21-953", `& 'powershell.exe' '-Command' 'b' '' 'Write-Output a'`, "b  Write-Output a"},
+}
+
+func TestRev12EmptyWordLegacy(t *testing.T) {
+	for _, c := range rev12Cases {
+		for _, d := range []Dialect{DialectUnknown, DialectWindowsPS51} {
+			ns, ok := firstHostNested(c.src, d)
+			if !ok || ns.Static || ns.Reason != ReasonLegacyQuoting {
+				t.Errorf("%s d=%d %q: got %+v; want NotStatic ps_legacy_quoting", c.id, d, c.src, ns)
+			}
+		}
+		ns, ok := firstHostNested(c.src, DialectPwsh7)
+		if !ok || !ns.Static || ns.Text != c.pwsh7Text {
+			t.Errorf("%s d=0 %q: got %+v; want Static %q", c.id, c.src, ns, c.pwsh7Text)
+		}
+	}
+}
+
+// cmdWindowsData is the command line a Windows PowerShell 5.1 and a pwsh 7 caller
+// really handed cmd.exe on dc-win2 (review 10, shim logging GetCommandLineW),
+// after the shim path. cmdEffective applies cmd's documented quote rule to it.
+var cmdWindowsData = []struct {
+	id     string
+	src    string
+	cl     string // recorded command line after the program name
+	static bool   // expected from psparse
+}{
+	{"WQ01", `cmd /c "echo a & echo b"`, `/c "echo a & echo b"`, true},
+	{"WQ04", `cmd /c "echo a>nul"`, `/c "echo a>nul"`, true},
+	{"WQ05", `cmd /s /c "echo a b"`, `/s /c "echo a b"`, true},
+	{"WQ02", `cmd /c 'echo a b'`, `/c "echo a b"`, false}, // the executable-file exception may apply
+	{"WQ03", `cmd /c "ver"`, `/c ver`, true},
+	{"WQ06", `cmd /d /c "cd"`, `/d /c cd`, true},
+	{"WC18", `cmd /c echo a 'b c'`, `/c echo a "b c"`, false},
+	{"rv7-B87", `cmd /c "cd /d C:\Users\u\.ssh & echo k>>authorized_keys"`, `/c "cd /d C:\Users\u\.ssh & echo k>>authorized_keys"`, true},
+	{"rv8-X13", `cmd /c "echo k>> C:\Users\u\.ssh\authorized_keys"`, `/c "echo k>> C:\Users\u\.ssh\authorized_keys"`, true},
+}
+
+// cmdEffective returns what cmd.exe runs for a recorded command line, and
+// whether the executable-file exception to quote stripping can still apply
+// (decided by the file system, so psparse must not be Static then).
+func cmdEffective(cl string) (line string, exceptionPossible bool) {
+	sSwitch := false
+	rest := cl
+	for {
+		rest = strings.TrimLeft(rest, " ")
+		tok := rest
+		if i := strings.IndexByte(rest, ' '); i >= 0 {
+			tok = rest[:i]
+		}
+		l := strings.ToLower(tok)
+		if l == "/c" || l == "/k" || l == "/r" {
+			rest = strings.TrimLeft(rest[len(tok):], " ")
+			break
+		}
+		if l == "/s" {
+			sSwitch = true
+		}
+		if tok == "" {
+			return "", false
+		}
+		rest = rest[len(tok):]
+	}
+	if !strings.HasPrefix(rest, `"`) {
+		return rest, false
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(rest, `"`), `"`)
+	exception := !sSwitch && strings.Count(rest, `"`) == 2 && !strings.ContainsAny(inner, "&<>()@^|") && strings.Contains(inner, " ")
+	return inner, exception
+}
+
+func TestCmdQuotedPayloadWindowsData(t *testing.T) {
+	for _, c := range cmdWindowsData {
+		eff, exc := cmdEffective(c.cl)
+		for _, d := range []Dialect{DialectUnknown, DialectWindowsPS51, DialectPwsh7} {
+			ns, ok := firstHostNested(c.src, d)
+			if !ok {
+				t.Errorf("%s d=%d: no nested script", c.id, d)
+				continue
+			}
+			if ns.Static != c.static {
+				t.Errorf("%s d=%d %q: static=%v want %v (reason %q)", c.id, d, c.src, ns.Static, c.static, ns.Reason)
+			}
+			if ns.Static && (ns.Text != eff || exc) {
+				t.Errorf("%s d=%d %q: Static text %q, cmd runs %q (exception possible %v)", c.id, d, c.src, ns.Text, eff, exc)
 			}
 		}
 	}

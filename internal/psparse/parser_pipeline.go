@@ -307,7 +307,11 @@ func (p *parser) parseCommandName() Expr {
 
 func (p *parser) parseParameter() CommandElement {
 	t := p.advance()
-	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, HasColon: t.HasColon}
+	raw := t.Raw
+	if t.HasColon && len(raw) > 0 && raw[len(raw)-1] == ':' {
+		raw = raw[:len(raw)-1]
+	}
+	par := &Parameter{span: span{t.Start, t.End}, Name: t.Value, Raw: raw, HasColon: t.HasColon}
 	if t.HasColon {
 		adjacent := !p.at(TokNewline) && !p.at(TokEOF) && p.cur().Start == t.End
 		// -Name:value (adjacent) or -Name: value (the next value across
@@ -489,7 +493,7 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		if amb {
 			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
 		}
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end)}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end), Fused: true}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {

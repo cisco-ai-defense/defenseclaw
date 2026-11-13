@@ -196,18 +196,33 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 	c := &Cmd{Cond: cond, PipeIn: pipeIn, Pipeline: w.pipeDepth > 0, Span: span(cmd)}
 	// Only `export` (or declare/typeset -x) puts a variable in the environment of
 	// the commands that follow; a plain declare/local/readonly does not (round 8 E).
-	exported := cmd.Variant != nil && cmd.Variant.Value == "export"
-	unexport := false
+	isExport := cmd.Variant != nil && cmd.Variant.Value == "export"
+	exported := isExport
+	unexport, attr, nameref := false, false, false
 	for _, a := range cmd.Args {
 		if a.Name == nil && a.Value != nil {
 			lit := a.Value.Lit()
+			if lit == "" || (lit[0] != '-' && lit[0] != '+') {
+				// an operand that is not a plain NAME[=value] (a quoted or computed
+				// name): what it declares is not known.
+				w.unknown(ReasonOpaqueCode, cmd)
+				continue
+			}
 			switch {
 			case strings.HasPrefix(lit, "+") && strings.Contains(lit, "x"):
 				unexport = true // declare +x / typeset +x
 			case strings.HasPrefix(lit, "-") && !strings.HasPrefix(lit, "--") && strings.Contains(lit, "x"):
 				exported = true
-			case cmd.Variant != nil && cmd.Variant.Value == "export" && strings.HasPrefix(lit, "-") && strings.Contains(lit, "n"):
+			case isExport && strings.HasPrefix(lit, "-") && strings.Contains(lit, "n"):
 				unexport, exported = true, false // export -n NAME
+			}
+			if !isExport && strings.ContainsAny(lit[1:], "n") && lit[0] == '-' {
+				nameref = true
+			}
+			// any attribute other than export / global / readonly / print changes
+			// what the variable holds or is.
+			if strings.ContainsAny(lit[1:], "luciaAnftC") && (!isExport || lit != "-n") {
+				attr = true
 			}
 		}
 	}
@@ -215,7 +230,10 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 		if a.Name == nil {
 			continue
 		}
-		as := Assign{Name: a.Name.Value, Exported: exported && !unexport, Unexport: unexport}
+		if a.Index != nil || a.Array != nil {
+			w.unknown(ReasonOpaqueCode, cmd) // a subscript or array body is evaluated
+		}
+		as := Assign{Name: a.Name.Value, Exported: exported && !unexport, Unexport: unexport, Append: a.Append, Attr: attr, NameRef: nameref}
 		if a.Value != nil {
 			as.ValueWord = w.word(a.Value)
 			w.scanCmdSubsts(a.Value, c)
@@ -236,7 +254,10 @@ func (w *posixWalker) emitCall(st *syntax.Stmt, call *syntax.CallExpr, cond, pip
 			if a.Name == nil {
 				continue
 			}
-			as := Assign{Name: a.Name.Value}
+			if a.Index != nil || a.Array != nil {
+				w.unknown(ReasonOpaqueCode, st) // `a[$(x)]=v`, `a=($(x))`: the subscript / elements run
+			}
+			as := Assign{Name: a.Name.Value, Append: a.Append}
 			if a.Value != nil {
 				as.ValueWord = w.word(a.Value)
 				w.scanCmdSubsts(a.Value, c)
@@ -414,7 +435,12 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 			} else {
 				dynamic(ReasonDynamicExpansion)
 			}
-		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ExtGlob:
+		case *syntax.ArithmExp:
+			// an arithmetic expansion evaluates variable values as expressions, and
+			// an expression can carry a subscript with a command substitution
+			w.unknown(ReasonOpaqueCode, p)
+			dynamic(ReasonDynamicExpansion)
+		case *syntax.CmdSubst, *syntax.ExtGlob:
 			dynamic(ReasonDynamicExpansion)
 		case *syntax.ProcSubst:
 			dynamic(ReasonUnparsedConstruct)
