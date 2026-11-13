@@ -7,8 +7,10 @@ package gateway
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -41,6 +43,7 @@ func TestOverLimitPatchFillerLineKeepsContentRuleVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	usedSize, usedLayout, usedTwin := map[int]bool{}, map[[2]int]bool{}, map[[2]int]bool{}
+	var subtests []overLimitSubtest
 	for ci, c := range []struct {
 		name, target, attack, benign, rule string
 	}{
@@ -90,30 +93,31 @@ func TestOverLimitPatchFillerLineKeepsContentRuleVerdict(t *testing.T) {
 			if filler == ordinaryAt {
 				usedTwin[[2]int{1, fillerRegion(filler)}] = true
 			}
-			t.Run(fmt.Sprintf("%s/filler %d/%s", c.name, filler, layout), func(t *testing.T) {
-				got := overLimitPatchVerdict(t, home, project, betweenLimitsPatchCall(c.target, lines(c.attack)...))
-				if overLimitHookAction(t, got) != "block" || !strings.Contains(got, c.rule) {
-					t.Fatalf("not blocked by %s: %.600s", c.rule, got)
-				}
-				if strings.Contains(got, overLimitElidedContentTitle) {
-					t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got)
-				}
-				if filler == benignAt {
-					benign := overLimitPatchVerdict(t, home, project, betweenLimitsPatchCall(c.target, lines(c.benign)...))
-					if overLimitHookAction(t, benign) == "block" {
+			calls := map[string]nativeWriteCall{"attack": betweenLimitsPatchCall(c.target, lines(c.attack)...)}
+			if filler == benignAt {
+				calls["benign"] = betweenLimitsPatchCall(c.target, lines(c.benign)...)
+			}
+			if filler == ordinaryAt {
+				calls["ordinary"] = betweenLimitsPatchCall(filepath.Join(project, "notes.txt"), lines(c.attack)...)
+			}
+			subtests = append(subtests, overLimitSubtest{name: fmt.Sprintf("%s/filler %d/%s", c.name, filler, layout), calls: calls,
+				check: func(t *testing.T, got map[string]string) {
+					if overLimitHookAction(t, got["attack"]) != "block" || !strings.Contains(got["attack"], c.rule) {
+						t.Fatalf("not blocked by %s: %.600s", c.rule, got["attack"])
+					}
+					if strings.Contains(got["attack"], overLimitElidedContentTitle) {
+						t.Fatalf("padding takes the conservative finding, not the rule verdict: %.600s", got["attack"])
+					}
+					if benign, ok := got["benign"]; ok && overLimitHookAction(t, benign) == "block" {
 						t.Fatalf("benign text of %s blocked: %.600s", c.target, benign)
 					}
-				}
-				if filler == ordinaryAt {
-					ordinary := overLimitPatchVerdict(t, home, project,
-						betweenLimitsPatchCall(filepath.Join(project, "notes.txt"), lines(c.attack)...))
-					if overLimitHookAction(t, ordinary) == "block" {
+					if ordinary, ok := got["ordinary"]; ok && overLimitHookAction(t, ordinary) == "block" {
 						t.Fatalf("the same text in an ordinary file blocked: %.600s", ordinary)
 					}
-				}
-			})
+				}})
 		}
 	}
+	runOverLimitSubtests(t, home, project, subtests)
 	for _, size := range []int{0, 65536, 100000, 200000, 262000, 270000, 300000} {
 		if !usedSize[size] {
 			t.Errorf("filler size %d never judged", size)
@@ -191,5 +195,45 @@ func TestOverLimitPatchTextBetweenLimitsFailsClosedForItsTargetOnly(t *testing.T
 				t.Fatalf("conservative finding on a call that needs none: %.600s", got)
 			}
 		})
+	}
+}
+
+// overLimitSubtest is one subtest of the over-limit patch tests: its hook
+// calls by role, and the check of their verdicts.
+type overLimitSubtest struct {
+	name  string
+	calls map[string]nativeWriteCall
+	check func(t *testing.T, got map[string]string)
+}
+
+// runOverLimitSubtests judges the calls of every subtest on every CPU (each
+// call builds its own gateway and only reads the fixture, as concurrent
+// hooks do; their cost follows their bytes), then runs the subtests in
+// order on the verdicts.
+func runOverLimitSubtests(t *testing.T, home, project string, subtests []overLimitSubtest) {
+	t.Helper()
+	type job struct {
+		subtest int
+		role    string
+	}
+	var jobs []job
+	for i, subtest := range subtests {
+		for _, role := range slices.Sorted(maps.Keys(subtest.calls)) {
+			jobs = append(jobs, job{i, role})
+		}
+	}
+	verdicts := make([]string, len(jobs))
+	forEachOnEveryCPU(len(jobs), func(i int) {
+		verdicts[i] = overLimitPatchVerdict(t, home, project, subtests[jobs[i].subtest].calls[jobs[i].role])
+	})
+	got := make([]map[string]string, len(subtests))
+	for i, j := range jobs {
+		if got[j.subtest] == nil {
+			got[j.subtest] = map[string]string{}
+		}
+		got[j.subtest][j.role] = verdicts[i]
+	}
+	for i, subtest := range subtests {
+		t.Run(subtest.name, func(t *testing.T) { subtest.check(t, got[i]) })
 	}
 }
