@@ -254,7 +254,17 @@ func (osWindowsHookImageFS) ReplaceImage(source, destination string) error {
 	return copyWindowsManagedFile(source, destination, windowsInstallFileSDDL, true, true)
 }
 
+// Rename moves a folder to a name that does not exist. A folder that holds a
+// file a program runs, or has open for writing, is refused first (GAP-0751,
+// Windows Server 2025 native proof): older Windows refused the rename itself
+// while an image ran, but Server 2025 (build 26100) renames the folder under a
+// running image, so the refusal the publish retry and prune rely on is made
+// here, by opening each file of the folder for writing without sharing, which
+// no running image or other open handle allows.
 func (osWindowsHookImageFS) Rename(from, to string) error {
+	if err := windowsHookImageFolderBusy(from); err != nil {
+		return err
+	}
 	source, err := windows.UTF16PtrFromString(from)
 	if err != nil {
 		return err
@@ -264,6 +274,34 @@ func (osWindowsHookImageFS) Rename(from, to string) error {
 		return err
 	}
 	return windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH)
+}
+
+// windowsHookImageFolderBusy returns the sharing violation or access denial
+// of the first file under folder that cannot be opened for writing with no
+// sharing (a running image, or a scanner's handle), and nil when every file
+// opens or the folder does not exist (the rename then reports that itself).
+func windowsHookImageFolderBusy(folder string) error {
+	var busy error
+	_ = filepath.WalkDir(folder, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || entry.Type()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			return nil
+		}
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return nil
+		}
+		handle, err := windows.CreateFile(name, windows.FILE_WRITE_DATA, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			if errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+				busy = err
+				return filepath.SkipAll
+			}
+			return nil
+		}
+		_ = windows.CloseHandle(handle)
+		return nil
+	})
+	return busy
 }
 
 func (osWindowsHookImageFS) RandomHex(n int) (string, error) {
@@ -291,6 +329,11 @@ func (osWindowsHookImageStarter) Start(req windowsHookImageStart) (windowsHookIm
 	defer cancel()
 	cmd := processutil.CommandContext(ctx, req.Path, req.Args...)
 	cmd.Dir = filepath.Dir(req.Path)
+	// CREATE_NO_WINDOW makes the child allocate a hidden console, which fails
+	// with STATUS_DLL_INIT_FAILED (0xC0000142) under a token whose
+	// Administrators group is deny-only (GAP-0751 native proof). The check
+	// needs no console: its streams are pipes, so it starts detached.
+	cmd.SysProcAttr.CreationFlags = cmd.SysProcAttr.CreationFlags&^windows.CREATE_NO_WINDOW | windows.DETACHED_PROCESS
 	if req.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
