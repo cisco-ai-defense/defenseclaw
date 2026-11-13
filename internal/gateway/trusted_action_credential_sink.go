@@ -159,28 +159,42 @@ func trustedActionDiscardTarget(target string) bool {
 	return false
 }
 
-// trustedActionFixtureTarget reports a path that holds test, fixture, example
-// or template content, where a credential-shaped value is sample data.
+// trustedActionFixtureDirs are directory names that hold test code and its
+// sample data.
+var trustedActionFixtureDirs = map[string]bool{
+	"test": true, "tests": true, "__tests__": true, "spec": true, "specs": true, "fixtures": true,
+	"fixture": true, "testdata": true, "mocks": true, "__mocks__": true, "examples": true,
+	"example": true, "samples": true, "sample": true, "testing": true, "e2e": true, "cypress": true,
+}
+
+// trustedActionFixtureTarget reports a path that holds test code or its
+// sample data, where a credential-shaped value is a sample by design. The
+// match is on whole path segments and on the shape of the file name
+// (test_x.py, x_test.go, x.test.js, x.spec.ts, conftest.py), never on a
+// substring of a name: latest_creds.env, resample.py and
+// ~/.aws/credentials_template are not test files. A template or an example
+// file is not exempt: a placeholder or a reference in it never raises a
+// finding, so a credential literal in one is a real one.
 func trustedActionFixtureTarget(p string) bool {
 	p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
-	for _, dir := range []string{
-		"/test/", "/tests/", "/__tests__/", "/spec/", "/specs/", "/fixtures/", "/fixture/",
-		"/testdata/", "/mocks/", "/__mocks__/", "/examples/", "/example/", "/samples/", "/sample/",
-		"/testing/", "/e2e/", "/cypress/",
-	} {
-		if strings.Contains(p, dir) || strings.HasPrefix(p, dir[1:]) {
+	segments := strings.Split(p, "/")
+	for _, segment := range segments[:len(segments)-1] {
+		if trustedActionFixtureDirs[segment] {
 			return true
 		}
 	}
-	base := path.Base(p)
-	for _, marker := range []string{
-		"_test.", ".test.", ".spec.", "test_", "conftest", ".example", ".sample", "template",
-		".dist", "example.", "sample.", "fixture",
-		".j2", ".jinja", ".tmpl", ".tpl", ".erb", ".mustache", ".hbs",
-	} {
-		if strings.Contains(base, marker) {
-			return true
-		}
+	base := segments[len(segments)-1]
+	stem := base
+	if dot := strings.LastIndexByte(base, '.'); dot > 0 {
+		stem = base[:dot]
+	}
+	switch {
+	case base == "conftest.py":
+		return true
+	case strings.HasPrefix(base, "test_") && strings.Contains(base, "."):
+		return true
+	case strings.HasSuffix(stem, "_test"), strings.HasSuffix(stem, ".test"), strings.HasSuffix(stem, ".spec"):
+		return true
 	}
 	return false
 }
