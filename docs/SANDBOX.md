@@ -1755,9 +1755,18 @@ modes and owners are set in the tar headers) and streams it to
    has `curl` but not `jq`, so every build still runs `apt-get update` and
    installs the archive's current `jq` there.)
 2. Installs the harness at a version whose Linux hook contract is known. Any
-   other version fails before the build starts. Claude Code 2.1.156 is
-   relocated from the digest-pinned base image, and no other Claude Code
-   version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
+   other version fails before the build starts. Claude Code 2.1.311 replaces
+   the digest-pinned base image's 2.1.156: Amazon Bedrock serves its newer
+   Claude models, such as Opus 5.5 on Mantle, only to Claude Code 2.1.280
+   and newer (the floor `harness.ClaudeCodeBedrockFloor`). Bedrock Mantle
+   does not serve Claude Haiku 5.5, so a sandbox cannot run it yet
+   (GAP-0169). The image is about 290 MB larger, because the base image's
+   copy stays in its layer. The build downloads Anthropic's native
+   executable for its architecture from `downloads.claude.ai` over https
+   only and installs it only when its sha256 is the one pinned from the
+   release's signed `manifest.json` (checked with the release key
+   DefenseClaw pins), so the build needs https to `downloads.claude.ai`. No
+   other Claude Code version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
    outside every reviewed contract. An npm-installed harness (Codex,
    OpenCode, Copilot CLI, Amp) is downloaded once with `npm pack`, installed
    from that tarball only after its SHA-512 matches the pinned registry
@@ -1831,9 +1840,10 @@ For both harnesses the allowed run is repeated with hostile user and project
 settings planted: every known way to switch the managed hooks off or divert
 them. The hooks must still fire, and none of the planted programs may run.
 `HookFireOptions.RunFiles` mounts a sandbox's per-run files into every probe
-container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
-`test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
-configuration below against the real harnesses.
+container. `TestLiveClaudeCodeRunConfig` (tag `openshell_integration`, in
+`internal/openshell/image`) and, for Codex, `TestLiveRunConfig` (on branch
+`test/openshell-live`) use it to prove the per-run configuration below
+against the real harnesses; see [Testing](#testing).
 
 The normal hook-fire probe checks the image's hook contract for either
 driver. A vm image additionally passes the exported-filesystem resolver
@@ -2085,11 +2095,26 @@ settings a hostile settings file could use to bypass the hooks:
 `CLAUDE_CODE_SIMPLE=0` keeps the hooks (all but `SessionStart`) on in bare
 mode, the hook-command prefix and shell overrides are emptied, `SHELL` is
 `/bin/bash`, the Stop and SessionEnd hook limits keep Claude's defaults, and
-loader and shell-startup variables are cleared. Startup variables that must
-apply before the managed `env` does (`DISABLE_AUTOUPDATER=1`,
-`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
-`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`) travel through
-`sandbox create --env`. A pre-seeded `/sandbox/.claude.json` skips onboarding
+loader and shell-startup variables are cleared. It also empties the
+2.1.311 variables a user settings file could use to start code without a
+tool call: `CLAUDE_CODE_PLUGIN_DIRS` (each folder is loaded as a plugin,
+with its skills, hooks and MCP servers), `CLAUDE_CODE_PROCESS_WRAPPER` (a
+launcher for background sessions) and `CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER`
+(which would run the settings' `proxyAuthHelper` for the sandbox's
+`HTTPS_PROXY`), and the service endpoints 2.1.311 reads (artifacts, memory,
+Remote Control bridge, feature flags, voice, runner, model catalog, internal
+metrics and tracing, per-signal OTLP endpoints other than the ingress).
+Startup variables that must apply before the managed `env` does
+(`DISABLE_AUTOUPDATER=1`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+`CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1`,
+`CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG=1`) travel through
+`sandbox create --env`. `CLAUDE_CODE_RESTRICT_PERSONAL_CONFIG` makes
+Claude treat the workload-writable `~/.claude` as untrusted: a
+`processWrapper` there no longer launches background sessions (an empty
+managed value does not outrank it), user-scope plugins do not load, the
+user's own skills and commands cannot pre-approve tools, and Claude refuses
+every prompt while `~/.claude/settings.json` has errors, naming the file.
+Managed settings, the hooks and the OTLP export are unchanged. A pre-seeded `/sandbox/.claude.json` skips onboarding
 and trusts `/work`, and the launcher re-approves the API key placeholder on
 every start. Skip-permissions runs pass `--dangerously-skip-permissions`.
 
@@ -2180,7 +2205,7 @@ start compares the render with the image's digest instead of rewriting.
   imported servers, putting Claude in its exclusive MCP mode. With `allow`
   the servers go to `/usr/local/lib/defenseclaw/run/claude-mcp-servers.json`
   instead, which the launcher merges into `~/.claude.json`. Every key is
-  checked against the 2.1.156 settings schema, and the merge with the
+  checked against the 2.1.311 settings schema, and the merge with the
   image's drop-in must keep the hook contract.
 - **Codex:** Codex reads one `managed_config.toml` and one
   `requirements.toml`, so both are the image's documents with run keys
@@ -2304,7 +2329,7 @@ images stay unverified, so they are never selected for a sandbox.
 
 | Connector | Pinned harness | Hook registration in the image | Tier | Yolo flag | Credential profiles | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | 2.1.156 (the base image's copy) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
+| Claude Code | 2.1.311 (Anthropic release, native sha256 pinned; Bedrock's newer models need 2.1.280+) | `/etc/claude-code/managed-settings.d/50-defenseclaw.json` | managed | `--dangerously-skip-permissions` | Anthropic API key, `CLAUDE_CODE_OAUTH_TOKEN`, Bedrock Mantle | verified |
 | Codex | 0.146.0 (npm, native sha256 pinned) | `/etc/codex/requirements.toml` | managed | `--dangerously-bypass-approvals-and-sandbox` | OpenAI API key, Bedrock Mantle | verified |
 | OpenCode | 2.1.4 (@opencode/cli, native sha256 pinned) | Root-owned plugin `/usr/local/lib/defenseclaw/opencode/defenseclaw.js`, registered in `/etc/opencode/opencode.json`; the launcher refuses to start beside any other plugin | user | `--auto` | Anthropic API key, OpenAI API key, Bedrock Mantle | unverified (fresh V2 OpenShell run required) |
 | GitHub Copilot CLI | 1.0.88 (npm, native sha256 pinned) | `/etc/github-copilot/policy.d/50-defenseclaw.json`, with `allowManagedHooksOnly` in `/etc/github-copilot/managed-settings.json` | managed | `--yolo` | GitHub token (endpoints unverified), bring-your-own Anthropic key or Bedrock Mantle | verified |
@@ -3331,9 +3356,23 @@ until that is fixed.
 Policy, provider-profile, sandbox-artifact and hook golden files are
 regenerated with `DEFENSECLAW_UPDATE_GOLDEN=1`; review the diff.
 
-Live tests need a real OpenShell 0.1.x gateway (with bind mounts enabled for
-the workspace tests) and Docker, so CI cannot run them. They are kept for dev
-hosts on branch `test/openshell-live`, one commit on top of this branch: the
+The live run-config probe for Claude Code needs Docker but no OpenShell
+gateway. It builds (or reuses) the Claude Code overlay image, runs the
+hook-fire probe with the per-run files mounted, and proves each pin against a
+hostile setting with a control run that drops the pin: the provider pins,
+MCP block and allow, safe mode, and the user-settings `processWrapper`,
+`proxyAuthHelper` and `CLAUDE_CODE_PLUGIN_DIRS`:
+
+```bash
+DEFENSECLAW_E2E_DATA_DIR=$(mktemp -d) \
+  go test -tags openshell_integration ./internal/openshell/image/ \
+  -run TestLiveClaudeCodeRunConfig -v -timeout 60m
+```
+
+The other live tests need a real OpenShell 0.1.x gateway (with bind mounts
+enabled for the workspace tests) and Docker, so CI cannot run them. They are
+kept for dev hosts on branch `test/openshell-live`, one commit on top of
+this branch: the
 `openshell_integration` Go tests in `internal/openshell/`,
 `internal/openshell/image/`, `internal/openshell/workspace/`,
 `internal/openshell/sandboxcli/` and `internal/gateway/`, the end-to-end

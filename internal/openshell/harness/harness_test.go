@@ -30,6 +30,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -158,9 +159,12 @@ func TestInstallStepsPinContract(t *testing.T) {
 		want    []string // nil: the steps must not render
 		wantErr error
 	}{
-		{"claude-base-relocate", ClaudeCode, "", []string{"readlink -f /usr/local/bin/claude"}, nil},
-		// Inside the contract, but only the base image's release is pinned.
+		{"claude-pin", ClaudeCode, "", []string{"https://downloads.claude.ai/claude-code-releases/2.1.311/linux-x64/claude",
+			"ln -sfn '/opt/defenseclaw-harness/claudecode/bin/claude' /usr/local/bin/claude"}, nil},
+		// Inside the contract, but only claudeCodePin's release has digests;
+		// the base image's 2.1.156 is no longer installed.
 		{"claude-unpinned-digest", ClaudeCode, "2.1.160", nil, nil},
+		{"claude-base-2.1.156", ClaudeCode, "2.1.156", nil, nil},
 		{"claude-below-contract", ClaudeCode, "2.1.100", nil, ErrUnknownContract},
 		{"codex-pin", Codex, "", []string{"@openai/codex@0.146.0"}, nil},
 		{"codex-base-0.117", Codex, "0.117.0", nil, ErrUnknownContract},
@@ -430,6 +434,209 @@ func TestTarballPinnedInstallChecksDigests(t *testing.T) {
 	}
 	if _, err := kiroPin.installRun("/opt/x", "2.23.0"); err == nil {
 		t.Fatal("a release without pinned archives rendered")
+	}
+}
+
+// TestClaudeCodePinMeetsBedrockFloor: Amazon Bedrock refuses Claude Haiku
+// 5.5 to Claude Code older than 2.1.280 (GAP-0024), so the pinned release
+// must not be older, must be the harness default, and must sit inside a
+// reviewed Linux sandbox hook contract.
+func TestClaudeCodePinMeetsBedrockFloor(t *testing.T) {
+	if ClaudeCode.DefaultVersion != claudeCodePin.Version {
+		t.Fatalf("ClaudeCode.DefaultVersion = %q, want the pin %q", ClaudeCode.DefaultVersion, claudeCodePin.Version)
+	}
+	if !semverAtLeast(t, claudeCodePin.Version, ClaudeCodeBedrockFloor) {
+		t.Fatalf("pinned Claude Code %s is older than the Bedrock floor %s", claudeCodePin.Version, ClaudeCodeBedrockFloor)
+	}
+	res := connector.ResolveSandboxHookContract(ClaudeCode.Name, claudeCodePin.Version)
+	if res.Status != connector.HookCompatibilityKnown || res.UntestedVersion {
+		t.Fatalf("pinned Claude Code %s has no reviewed sandbox hook contract: %+v", claudeCodePin.Version, res)
+	}
+	if err := claudeCodePin.validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, arch := range []string{"aarch64", "x86_64"} {
+		if _, ok := claudeCodePin.Binaries[arch]; !ok {
+			t.Errorf("no pinned Claude Code binary for %s", arch)
+		}
+	}
+}
+
+func semverAtLeast(t *testing.T, a, b string) bool {
+	t.Helper()
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	if len(pa) != 3 || len(pb) != 3 {
+		t.Fatalf("not x.y.z: %q %q", a, b)
+	}
+	for i := range pa {
+		x, errX := strconv.Atoi(pa[i])
+		y, errY := strconv.Atoi(pb[i])
+		if errX != nil || errY != nil {
+			t.Fatalf("not x.y.z: %q %q", a, b)
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return true
+}
+
+// TestBinaryPinnedInstallChecksDigests: the single-executable pin downloads
+// over https only (redirects too), checks the sha256 before anything is
+// installed, and installs root-owned.
+func TestBinaryPinnedInstallChecksDigests(t *testing.T) {
+	steps, err := ClaudeCode.InstallSteps("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := steps[0].Run
+	wants := []string{"curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2", `got="$(sha256sum "$tmp/bin" | cut -d' ' -f1)"`,
+		`install -o root -g root -m 0755 "$tmp/bin" "$dest"`, pinVersionCheck("Claude Code", claudeCodePin.Version)}
+	for _, arch := range []string{"aarch64", "x86_64"} {
+		bin := claudeCodePin.Binaries[arch]
+		wants = append(wants, arch+") url="+shellQuote(bin.URL)+"; want="+shellQuote(bin.SHA256))
+	}
+	for _, want := range wants {
+		if !strings.Contains(run, want) {
+			t.Errorf("install step lacks %q:\n%s", want, run)
+		}
+	}
+	if check := strings.Index(run, `[ "$got" = "$want" ] || {`); check < 0 || check > strings.Index(run, `install -o root`) {
+		t.Error("the binary is installed before its digest is checked")
+	}
+	shParses(t, "install step", run)
+	good := tarballArchive{URL: "https://example.com/r/1.2.3/linux-x64/tool", SHA256: strings.Repeat("a", 64)}
+	for name, pin := range map[string]binaryPin{
+		"plain-http":     {Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64": {URL: "http://example.com/r/1.2.3/linux-x64/tool", SHA256: good.SHA256}}, DigestSource: "x"},
+		"short-digest":   {Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64": {URL: good.URL, SHA256: "abc"}}, DigestSource: "x"},
+		"other-release":  {Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64": {URL: "https://example.com/r/9.9.9/linux-x64/tool", SHA256: good.SHA256}}, DigestSource: "x"},
+		"no-digest-note": {Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64": good}},
+		"no-binaries":    {Version: "1.2.3", DigestSource: "x"},
+		"quote-in-url":   {Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64": {URL: "https://example.com/r/1.2.3/x'$(id)", SHA256: good.SHA256}}, DigestSource: "x"},
+		"bad-arch":       {Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64;id": good}, DigestSource: "x"},
+	} {
+		if err := pin.validate(); err == nil {
+			t.Errorf("%s: invalid binary pin accepted", name)
+		}
+	}
+	ok := binaryPin{Version: "1.2.3", Binaries: map[string]tarballArchive{"x86_64": good}, DigestSource: "x"}
+	for _, dest := range []string{"relative/bin", "/opt/../etc/x", "/opt/x y"} {
+		if _, err := ok.installRun(dest, "1.2.3"); err == nil {
+			t.Errorf("install path %q accepted", dest)
+		}
+	}
+	if _, err := ok.installRun("/opt/x", "1.2.4"); err == nil {
+		t.Fatal("a release without pinned binaries rendered")
+	}
+}
+
+// TestBinaryPinRunRefusesBadDownloads runs the rendered install step with
+// stub curl, uname and install: a download whose sha256 is not the pin, a
+// failed download and an unpinned architecture all exit non-zero before
+// install runs, say what the build needs, leave nothing at the install path
+// and clean up the download. A download that matches its pin (a test pin)
+// installs, so the refusals are the digest check's and not a failing
+// install -o root.
+func TestBinaryPinRunRefusesBadDownloads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the install step is a POSIX shell step of a Linux image")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	for _, tool := range []string{"sha256sum", "mktemp", "cut", "dirname", "rm", "cp", "mkdir"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("no %s", tool)
+		}
+	}
+	goodSum := sha256.Sum256([]byte("good"))
+	matching := binaryPin{Version: claudeCodePin.Version, DigestSource: "test",
+		Binaries: map[string]tarballArchive{"x86_64": {URL: claudeCodePin.Binaries["x86_64"].URL, SHA256: hex.EncodeToString(goodSum[:])}}}
+	for _, tc := range []struct {
+		name, arch, curlFail string
+		pin                  binaryPin
+		want                 []string
+		curlRuns, installs   bool
+	}{
+		{"hash-mismatch", "x86_64", "", claudeCodePin, []string{"is not the pinned " + claudeCodePin.Binaries["x86_64"].SHA256, "image builds need https to downloads.claude.ai"}, true, false},
+		{"download-fails", "aarch64", "1", claudeCodePin, []string{"could not download " + claudeCodePin.Binaries["aarch64"].URL, "image builds need https to downloads.claude.ai"}, true, false},
+		{"unpinned-arch", "riscv64", "", claudeCodePin, []string{"has no pinned binary for riscv64"}, false, false},
+		{"matching-digest-installs", "x86_64", "", matching, nil, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stubs, tmp := filepath.Join(dir, "bin"), filepath.Join(dir, "tmp")
+			for _, d := range []string{stubs, tmp} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args, installArgs := filepath.Join(dir, "curl.args"), filepath.Join(dir, "install.args")
+			stub := map[string]string{
+				"uname": "#!/bin/sh\necho " + tc.arch + "\n",
+				// install ignores -o/-g (the test is not root) and records each call.
+				"install": "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(installArgs) + "\n" +
+					"last=; prev=; for a in \"$@\"; do prev=$last; last=$a; done\n" +
+					"if [ \"$1\" = -d ]; then mkdir -p \"$last\"; else cp \"$prev\" \"$last\"; fi\n",
+				"curl": "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(args) + "\n" +
+					"[ -n \"${CURL_FAIL:-}\" ] && exit 22\n" +
+					"while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; printf '%s' \"${CURL_BODY:-tampered}\" > \"$1\"; fi; shift; done\n",
+			}
+			for name, body := range stub {
+				if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dest := filepath.Join(dir, "opt", "claudecode", "bin", "claude")
+			run, err := tc.pin.installRun(dest, claudeCodePin.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := "tampered"
+			if tc.installs {
+				body = "good"
+			}
+			cmd := exec.Command(sh, "-c", run)
+			cmd.Env = []string{"PATH=" + stubs + string(os.PathListSeparator) + os.Getenv("PATH"), "TMPDIR=" + tmp, "CURL_FAIL=" + tc.curlFail, "CURL_BODY=" + body}
+			out, err := cmd.CombinedOutput()
+			installed, _ := os.ReadFile(installArgs)
+			if tc.installs {
+				got, readErr := os.ReadFile(dest)
+				if err != nil || readErr != nil || string(got) != "good" || !strings.Contains(string(installed), "-o root -g root -m 0755") {
+					t.Fatalf("matching download not installed (err %v, read %v, got %q, install calls %q):\n%s", err, readErr, got, installed, out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("install step succeeded:\n%s", out)
+			}
+			if len(installed) != 0 {
+				t.Fatalf("install ran before the refusal (%q):\n%s", installed, out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			if _, err := os.Stat(dest); !os.IsNotExist(err) {
+				t.Errorf("something was installed at %s (%v)", dest, err)
+			}
+			if left, _ := os.ReadDir(tmp); len(left) != 0 {
+				t.Errorf("the download was left behind: %v", left)
+			}
+			called, _ := os.ReadFile(args)
+			if tc.curlRuns != (len(called) > 0) {
+				t.Fatalf("curl ran = %t, want %t", len(called) > 0, tc.curlRuns)
+			}
+			if tc.curlRuns {
+				for _, want := range []string{"--proto\n=https\n--proto-redir\n=https\n--tlsv1.2", claudeCodePin.Binaries[tc.arch].URL} {
+					if !strings.Contains(string(called), want) {
+						t.Errorf("curl args lack %q:\n%s", want, called)
+					}
+				}
+			}
+		})
 	}
 }
 
