@@ -2146,7 +2146,7 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 512,
-                  "pattern": "^(?:[^*]+|[^*]+[:/]\\*)$"
+                  "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
                 }
               }
             }
@@ -7127,7 +7127,7 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 1024,
-                    "pattern": "^(?:[^*]+|[^*]+[:/]\\*)$"
+                    "pattern": "^(?:[^*]+|[^*]*[:/][^*]+[:/]\\*)$"
                   },
                   "claims": {
                     "type": "object",
