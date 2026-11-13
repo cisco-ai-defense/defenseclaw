@@ -210,7 +210,7 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"awk"}, Pos: PosAllRead, FirstPosIgnore: true,
 		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead}, "-v": {Value: true}, "-F": {Value: true}}, "-W")})
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
-	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: map[string]Flag{"-d": {Value: true, Role: RoleWrite}}})
+	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: fl(map[string]Flag{"-d": {Value: true, Role: RoleIgnore}}, "-o", "-q", "-l", "-v", "-n", "-j", "-x", "-P")})
 	add(Program{Names: []string{"zip", "gzip", "gunzip", "bzip2", "xz"}, Pos: PosAllRead})
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs, DownloadRemote: true,
 		Flags: fl(map[string]Flag{

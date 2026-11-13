@@ -504,6 +504,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if entry.DownloadRemote {
 		w.downloadRemoteWrite(program, inner[1:], origin, cond)
 	}
+	// unzip extracts unknown files into -d dir or the cwd (review R3-3 Z06).
+	if program == "unzip" {
+		dir := ""
+		for i, a := range inner[1:] {
+			if a.Static && a.Value == "-d" && i+1 < len(inner[1:]) && inner[1:][i+1].Static {
+				dir = inner[1:][i+1].Value
+			}
+		}
+		e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+		if dir != "" {
+			e.Target.Spelling = cap4k(dir)
+		} else if w.curCWD != "" {
+			e.Target.Spelling = cap4k(w.curCWD)
+		}
+		e.addReason(ReasonOpaqueArchive, ScopeTarget)
+		w.emit(e)
+	}
 
 	// 7. Operands.
 	ops, execCmds := w.classifyOperands(inner[1:], entry, dialect)
