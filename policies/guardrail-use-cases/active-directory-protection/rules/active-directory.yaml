@@ -2,12 +2,13 @@ version: 1
 category: active-directory-protection
 rules:
   # Kerberos service-ticket (Kerberoasting) and AS-REP roasting requests.
-  # The built-in default pack ships this rule at HIGH and now ASKS the user
-  # (rel-1-0-10:GAP-0017); strict blocks it. This opt-in pack raises it to
-  # CRITICAL so a managed Windows domain blocks the request outright. The
-  # code-owned prerequisite (ExactDirectoryCredentialTicketRequest) still gates
-  # it, and credential.returned_kerberos_tgs still observes a returned ticket,
-  # so no shipped detection is lost.
+  # The built-in default pack ships this rule at HIGH, so default alerts and
+  # strict blocks (a per-mode ASK is a separate change owned by stream S8,
+  # rel-1-0-10:GAP-0017). This opt-in pack raises it to CRITICAL so a managed
+  # Windows domain blocks the request in every profile. The code-owned
+  # prerequisite (ExactDirectoryCredentialTicketRequest) gates it. Blocking the
+  # request trades the credential.returned_kerberos_tgs detection for
+  # prevention: a blocked request returns no ticket to observe.
   - id: credential.directory_ticket_request
     tool_call_only: true
     expression: >-

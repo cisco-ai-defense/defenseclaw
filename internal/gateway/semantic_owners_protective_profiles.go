@@ -427,6 +427,10 @@ func directoryBulkCollectionPrerequisite(facts actionfacts.Facts) bool {
 }
 
 func directoryPasswordSprayPrerequisite(facts actionfacts.Facts) bool {
+	isWordlist := func(value string) bool {
+		value = strings.ToLower(value)
+		return strings.HasSuffix(value, ".txt") || strings.HasSuffix(value, ".lst")
+	}
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
@@ -435,10 +439,27 @@ func directoryPasswordSprayPrerequisite(facts actionfacts.Facts) bool {
 		if !actionfacts.ExactNetExecDomainServiceAuth(command) {
 			continue
 		}
-		for _, arg := range command.Argv {
+		// Spray means the username or password operand IS a wordlist file; a
+		// log, put-file or other operand that happens to end .txt/.lst is not
+		// (rel-1-0-10:GAP-0054 P3-1). Any firing still blocks via the broader
+		// credential-use rule; this only keeps the spray label honest.
+		argv := command.Argv
+		for i := 0; i < len(argv); i++ {
+			arg := argv[i]
 			lower := strings.ToLower(arg)
-			if strings.HasSuffix(lower, ".txt") || strings.HasSuffix(lower, ".lst") {
-				return true
+			switch {
+			case strings.HasPrefix(lower, "--username=") || strings.HasPrefix(lower, "--password="):
+				if _, value, ok := strings.Cut(arg, "="); ok && isWordlist(value) {
+					return true
+				}
+			case len(arg) > 2 && arg[0] == '-' && (arg[1] == 'u' || arg[1] == 'p'):
+				if isWordlist(arg[2:]) {
+					return true
+				}
+			case arg == "-u" || arg == "-p" || lower == "--username" || lower == "--password":
+				if i+1 < len(argv) && isWordlist(argv[i+1]) {
+					return true
+				}
 			}
 		}
 	}
