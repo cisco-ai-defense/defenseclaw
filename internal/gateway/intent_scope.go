@@ -207,15 +207,41 @@ func scopeNamed(host string, named []string) bool {
 	return false
 }
 
+// scopeToolVerb reads what a tool does from its name: the verb is the last word
+// of a namespaced name (email.exists, http.post) or the first of a verb_noun
+// name (browse_website, send_email); a name whose ends are neither falls back
+// to any word in it. "email" is a noun in email.exists and a verb in
+// email.send, so a send word anywhere is not enough.
+func scopeToolVerb(toolName string) (sends, reads bool) {
+	segs := toolNameSegments(toolName)
+	if len(segs) == 0 {
+		return false, false
+	}
+	for _, s := range []string{segs[len(segs)-1], segs[0]} {
+		if scopeReadSegments[s] {
+			return false, true
+		}
+		if scopeSendSegments[s] {
+			return true, false
+		}
+	}
+	for _, s := range segs {
+		if scopeSendSegments[s] {
+			return true, false
+		}
+	}
+	for _, s := range segs {
+		if scopeReadSegments[s] {
+			return false, true
+		}
+	}
+	return false, false
+}
+
 // callSendDestinations returns the hosts and mail domains a sending call goes
 // to; nil for a call that does not send.
 func callSendDestinations(toolName, args string) []string {
-	segs := toolNameSegments(toolName)
-	toolSends, toolReads := false, false
-	for _, s := range segs {
-		toolSends = toolSends || scopeSendSegments[s]
-		toolReads = toolReads || scopeReadSegments[s]
-	}
+	toolSends, toolReads := scopeToolVerb(toolName)
 	values := scopeStrings(args)
 	var texts []string
 	shell := false
