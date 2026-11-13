@@ -132,31 +132,6 @@ func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byt
 	return rec.Code, rec.Body.Bytes()
 }
 
-// HookFor answers one hook payload through the named connector's handler.
-func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (int, []byte) {
-	h, ok := e.hooks[connectorName]
-	if !ok {
-		h, connectorName = e.hook, e.connector
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+connectorName, bytes.NewReader(body)).WithContext(ctx)
-	req.Header.Set("Content-Type", "application/json")
-	for i := 0; i+1 < len(headers); i += 2 {
-		req.Header.Set(headers[i], headers[i+1])
-	}
-	if connectorName == "codex" {
-		// Codex hooks are installer-bound: the hook command passes the event and the protected contract id out of band.
-		var probe struct {
-			Event string `json:"hook_event_name"`
-		}
-		_ = json.Unmarshal(body, &probe)
-		req.Header.Set("X-DefenseClaw-Hook-Event", probe.Event)
-		req.Header.Set("X-DefenseClaw-Hook-Contract", e.api.hookProfileForRequest(ctx, "codex").ContractID)
-	}
-	rec := httptest.NewRecorder()
-	h(rec, req)
-	return rec.Code, rec.Body.Bytes()
-}
-
 // HasJudge reports whether the generation wired a hook judge, and whether it
 // carries a decision model.
 func (e *S7Engine) HasJudge() (bool, bool) {
