@@ -102,6 +102,28 @@ func TestExactWindowsSecurityControlMutationsStructuredArgv(t *testing.T) {
 	}
 }
 
+// A static launcher or Invoke-Expression literal runs the script it names, so
+// the exact mutation of that script is the mutation of the call (host_unwrap.go).
+func TestExactWindowsSecurityControlMutationThroughHostWrappers(t *testing.T) {
+	for _, test := range []struct {
+		name, command string
+		dialect       Dialect
+		operation     WindowsSecurityControlMutation
+	}{
+		{"Invoke-Expression literal", `Invoke-Expression 'Add-MpPreference -ExclusionExtension ".exe" -Force'`, DialectPowerShell, "defender_executable_extension_exclusion"},
+		{"cmd launcher", `cmd.exe /c "auditpol /set /option:FullPrivilegeAuditing /value:disable"`, DialectCMD, "audit_full_privilege_disable"},
+		{"powershell launcher", `powershell -Command "Add-MpPreference -ExclusionExtension '.exe' -Force"`, DialectPowerShell, "defender_executable_extension_exclusion"},
+		{"call block", `& { Add-MpPreference -ExclusionExtension ".exe" -Force }`, DialectPowerShell, "defender_executable_extension_exclusion"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "shell", Command: test.command, CWD: `C:\repo`, DialectHint: test.dialect})
+			if !ExactWindowsSecurityControlMutation(facts, test.operation) {
+				t.Fatalf("operation %q missing: parse=%+v commands=%+v", test.operation, facts.Parse, facts.Commands)
+			}
+		})
+	}
+}
+
 func TestExactWindowsSecurityControlMutationNearNegatives(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -118,7 +140,7 @@ func TestExactWindowsSecurityControlMutationNearNegatives(t *testing.T) {
 		{"Defender variable extension", `Add-MpPreference -ExclusionExtension $extension -Force`, DialectPowerShell},
 		{"Defender variable path", `Set-MpPreference -ExclusionPath $drive -Force`, DialectPowerShell},
 		{"Defender splatting", `Add-MpPreference @params`, DialectPowerShell},
-		{"Defender dynamic wrapper", `Invoke-Expression 'Add-MpPreference -ExclusionExtension ".exe" -Force'`, DialectPowerShell},
+		{"Defender dynamic invocation", `Invoke-Expression $command`, DialectPowerShell},
 		{"Defender invocation operator", `& Add-MpPreference -ExclusionExtension ".exe" -Force`, DialectPowerShell},
 		{"Defender nested PowerShell", `powershell -Command 'Add-MpPreference -ExclusionExtension ".exe" -Force'`, DialectPowerShell},
 		{"audit read", `auditpol /get /category:*`, DialectCMD},
@@ -127,7 +149,7 @@ func TestExactWindowsSecurityControlMutationNearNegatives(t *testing.T) {
 		{"audit other subcategory", `auditpol /set /subcategory:{0CCE9210-69AE-11D9-BED3-505054503030} /success:disable`, DialectCMD},
 		{"audit variable category", `auditpol /set /category:%CATEGORY% /failure:disable`, DialectCMD},
 		{"audit PowerShell variable", `auditpol /set /category:$category /failure:disable`, DialectPowerShell},
-		{"audit dynamic wrapper", `cmd.exe /c "auditpol /set /option:FullPrivilegeAuditing /value:disable"`, DialectCMD},
+		{"audit dynamic wrapper", `cmd.exe /c "auditpol /set /option:FullPrivilegeAuditing /value:%STATE%"`, DialectCMD},
 		{"firewall inspection", `netsh advfirewall show allprofiles`, DialectCMD},
 	}
 	for _, test := range tests {

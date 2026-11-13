@@ -44,8 +44,8 @@ func TestAnalyzeClosedShellToolMetadata(t *testing.T) {
 		Tool: "PowerShell",
 		Args: json.RawMessage(`{"command":["powershell.exe","-Command","Remove-Item -Recurse -Force C:\\Temp\\fixture"]}`),
 	})
-	if len(argv.Commands) == 0 || argv.Commands[0].Program != "powershell.exe" ||
-		!equalStrings(argv.Commands[0].Argv, []string{"powershell.exe", "-Command", `Remove-Item -Recurse -Force C:\Temp\fixture`}) {
+	if len(argv.Commands) != 1 || argv.Commands[0].Program != "remove-item" ||
+		len(argv.HostWrappers) != 1 || argv.HostWrappers[0].Executable != "powershell.exe" {
 		t.Fatalf("structured argv facts=%+v", argv)
 	}
 
@@ -1092,8 +1092,8 @@ func TestAnalyzeRawPOSIXCommandFindsNestedWindowsAction(t *testing.T) {
 			}
 			if !facts.Authoritative() ||
 				facts.Parse.Status != StatusComplete ||
-				facts.Parse.Dialect != DialectMixed {
-				t.Fatalf("parse = %#v, want complete mixed nested grammar", facts.Parse)
+				facts.Parse.Dialect == DialectMixed {
+				t.Fatalf("parse = %#v, want complete nested grammar only", facts.Parse)
 			}
 		})
 	}
@@ -1732,18 +1732,45 @@ func TestAnalyzeDownloadFileAcceptsHTTPSURLSource(t *testing.T) {
 	}
 }
 
+// PowerShell joins every argument after -Command into the script, so trailing
+// argv words are command material of that script, analyzed with it.
+func TestAnalyzeStructuredPowerShellLauncherJoinsTrailingArgv(t *testing.T) {
+	facts := Analyze(Input{Tool: "shell", Argv: []string{
+		"powershell", "-Command", "Write-Output safe", `; Remove-Item -Recurse C:\victim`,
+	}})
+	if !hasExecutable(facts.Commands, "write-output") || !hasExecutable(facts.Commands, "remove-item") ||
+		len(facts.HostWrappers) != 1 {
+		t.Fatalf("joined launcher script facts = %#v", facts)
+	}
+}
+
+// A switch after the script is one more word of the script (PowerShell and
+// cmd.exe both join what follows), so it is analyzed with it: here as an
+// operand the cmdlet or built-in does not model, which keeps the call partial.
+func TestAnalyzeStaticLauncherSwitchAfterScriptJoinsTheScript(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		argv    []string
+		child   string
+		partial bool
+	}{
+		{"PowerShell", []string{"pwsh", "-Command", `Remove-Item C:\victim`, "-NoProfile"}, "remove-item", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if test.partial && (facts.Authoritative() || facts.Parse.Status != StatusPartial) ||
+				!hasExecutable(facts.Commands, test.child) || len(facts.HostWrappers) != 1 {
+				t.Fatalf("facts = %#v", facts)
+			}
+		})
+	}
+}
+
 func TestAnalyzeStructuredWrappersRejectOpaqueModesAndTrailingArgv(t *testing.T) {
 	tests := []struct {
 		name string
 		argv []string
 	}{
-		{
-			name: "PowerShell trailing command material",
-			argv: []string{
-				"powershell", "-Command", "Write-Output safe",
-				`; Remove-Item -Recurse C:\victim`,
-			},
-		},
 		{
 			name: "PowerShell abbreviated command mode",
 			argv: []string{"powershell", "-co", `Remove-Item -Recurse C:\victim`},
@@ -1780,7 +1807,12 @@ func TestAnalyzeStructuredWrappersRejectOpaqueModesAndTrailingArgv(t *testing.T)
 	}
 }
 
-func TestAnalyzeWindowsWrappersRequireDisabledStartupState(t *testing.T) {
+// A static launcher runs its script whatever startup state the host has: the
+// ambient profile or AutoRun is the same state any other call of the session
+// runs under, so a launcher without -NoProfile or /d is unwrapped like the
+// rest (host_unwrap.go). Forms psparse cannot resolve to one static script
+// (a joined or malformed switch) stay opaque.
+func TestAnalyzeWindowsStaticLauncherWrappersAreUnwrapped(t *testing.T) {
 	const (
 		powerShellBody = `Remove-Item C:\victim`
 		cmdBody        = `del C:\victim`
@@ -1814,12 +1846,18 @@ func TestAnalyzeWindowsWrappersRequireDisabledStartupState(t *testing.T) {
 			authoritative: true,
 		},
 		{
-			name: "PowerShell missing control",
-			argv: []string{"pwsh", "-Command", powerShellBody},
+			name:          "PowerShell missing control",
+			argv:          []string{"pwsh", "-Command", powerShellBody},
+			wantDialect:   DialectPowerShell,
+			wantChild:     "remove-item",
+			authoritative: true,
 		},
 		{
-			name: "PowerShell duplicate control",
-			argv: []string{"pwsh", "-NoProfile", "-NoProfile", "-Command", powerShellBody},
+			name:          "PowerShell duplicate control",
+			argv:          []string{"pwsh", "-NoProfile", "-NoProfile", "-Command", powerShellBody},
+			wantDialect:   DialectPowerShell,
+			wantChild:     "remove-item",
+			authoritative: true,
 		},
 		{
 			name: "PowerShell joined control",
@@ -1828,10 +1866,6 @@ func TestAnalyzeWindowsWrappersRequireDisabledStartupState(t *testing.T) {
 		{
 			name: "PowerShell malformed control",
 			argv: []string{"pwsh", "-NoProfile=", "-Command", powerShellBody},
-		},
-		{
-			name: "PowerShell control after command",
-			argv: []string{"pwsh", "-Command", powerShellBody, "-NoProfile"},
 		},
 		{
 			name:          "cmd exact control",
@@ -1848,12 +1882,18 @@ func TestAnalyzeWindowsWrappersRequireDisabledStartupState(t *testing.T) {
 			authoritative: true,
 		},
 		{
-			name: "cmd missing control",
-			argv: []string{"cmd.exe", "/c", cmdBody},
+			name:          "cmd missing control",
+			argv:          []string{"cmd.exe", "/c", cmdBody},
+			wantDialect:   DialectCMD,
+			wantChild:     "del",
+			authoritative: true,
 		},
 		{
-			name: "cmd duplicate control",
-			argv: []string{"cmd.exe", "/d", "/d", "/c", cmdBody},
+			name:          "cmd duplicate control",
+			argv:          []string{"cmd.exe", "/d", "/d", "/c", cmdBody},
+			wantDialect:   DialectCMD,
+			wantChild:     "del",
+			authoritative: true,
 		},
 		{
 			name: "cmd joined control",
@@ -1862,10 +1902,6 @@ func TestAnalyzeWindowsWrappersRequireDisabledStartupState(t *testing.T) {
 		{
 			name: "cmd malformed control",
 			argv: []string{"cmd.exe", "/disable", "/c", cmdBody},
-		},
-		{
-			name: "cmd control after command",
-			argv: []string{"cmd.exe", "/c", cmdBody, "/d"},
 		},
 	}
 	for _, test := range tests {
@@ -1929,10 +1965,11 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 			authoritative: true,
 		},
 		{
-			name:  "PowerShell unsupported MTA",
-			raw:   `pwsh.exe -NoProfile -Mta -Command "Remove-Item C:\victim"`,
-			argv:  []string{"pwsh.exe", "-NoProfile", "-Mta", "-Command", `Remove-Item C:\victim`},
-			child: "remove-item",
+			name:          "PowerShell unsupported MTA",
+			raw:           `pwsh.exe -NoProfile -Mta -Command "Remove-Item C:\victim"`,
+			argv:          []string{"pwsh.exe", "-NoProfile", "-Mta", "-Command", `Remove-Item C:\victim`},
+			child:         "remove-item",
+			authoritative: true,
 		},
 		{
 			name: "PowerShell unsupported input format",
@@ -1942,7 +1979,8 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 				"pwsh.exe", "-NoProfile", "-InputFormat", "Text",
 				"-Command", `Remove-Item C:\victim`,
 			},
-			child: "remove-item",
+			child:         "remove-item",
+			authoritative: true,
 		},
 		{
 			name: "PowerShell unsupported output format",
@@ -1952,7 +1990,8 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 				"pwsh.exe", "-NoProfile", "-OutputFormat", "Text",
 				"-Command", `Remove-Item C:\victim`,
 			},
-			child: "remove-item",
+			child:         "remove-item",
+			authoritative: true,
 		},
 		{
 			name: "PowerShell unsupported window style",
@@ -1962,19 +2001,22 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 				"pwsh.exe", "-NoProfile", "-WindowStyle", "Hidden",
 				"-Command", `Remove-Item C:\victim`,
 			},
-			child: "remove-item",
+			child:         "remove-item",
+			authoritative: true,
 		},
 		{
-			name:  "PowerShell missing control",
-			raw:   `pwsh.exe -Command "Remove-Item C:\victim"`,
-			argv:  []string{"pwsh.exe", "-Command", `Remove-Item C:\victim`},
-			child: "remove-item",
+			name:          "PowerShell missing control",
+			raw:           `pwsh.exe -Command "Remove-Item C:\victim"`,
+			argv:          []string{"pwsh.exe", "-Command", `Remove-Item C:\victim`},
+			child:         "remove-item",
+			authoritative: true,
 		},
 		{
-			name:  "PowerShell duplicate control",
-			raw:   `pwsh.exe -NoProfile -NoProfile -Command "Remove-Item C:\victim"`,
-			argv:  []string{"pwsh.exe", "-NoProfile", "-NoProfile", "-Command", `Remove-Item C:\victim`},
-			child: "remove-item",
+			name:          "PowerShell duplicate control",
+			raw:           `pwsh.exe -NoProfile -NoProfile -Command "Remove-Item C:\victim"`,
+			argv:          []string{"pwsh.exe", "-NoProfile", "-NoProfile", "-Command", `Remove-Item C:\victim`},
+			child:         "remove-item",
+			authoritative: true,
 		},
 		{
 			name:  "PowerShell joined control",
@@ -1986,12 +2028,6 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 			name:  "PowerShell malformed control",
 			raw:   `pwsh.exe -NoProfile= -Command "Remove-Item C:\victim"`,
 			argv:  []string{"pwsh.exe", "-NoProfile=", "-Command", `Remove-Item C:\victim`},
-			child: "remove-item",
-		},
-		{
-			name:  "PowerShell control after command",
-			raw:   `pwsh.exe -Command "Remove-Item C:\victim" -NoProfile`,
-			argv:  []string{"pwsh.exe", "-Command", `Remove-Item C:\victim`, "-NoProfile"},
 			child: "remove-item",
 		},
 		{
@@ -2009,16 +2045,18 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 			authoritative: true,
 		},
 		{
-			name:  "cmd missing control",
-			raw:   `cmd.exe /c "del C:\victim"`,
-			argv:  []string{"cmd.exe", "/c", `del C:\victim`},
-			child: "del",
+			name:          "cmd missing control",
+			raw:           `cmd.exe /c "del C:\victim"`,
+			argv:          []string{"cmd.exe", "/c", `del C:\victim`},
+			child:         "del",
+			authoritative: true,
 		},
 		{
-			name:  "cmd duplicate control",
-			raw:   `cmd.exe /d /d /c "del C:\victim"`,
-			argv:  []string{"cmd.exe", "/d", "/d", "/c", `del C:\victim`},
-			child: "del",
+			name:          "cmd duplicate control",
+			raw:           `cmd.exe /d /d /c "del C:\victim"`,
+			argv:          []string{"cmd.exe", "/d", "/d", "/c", `del C:\victim`},
+			child:         "del",
+			authoritative: true,
 		},
 		{
 			name:  "cmd joined control",
@@ -2030,12 +2068,6 @@ func TestAnalyzeRawWindowsWrappersMatchStructuredStartupControlBoundary(t *testi
 			name:  "cmd malformed control",
 			raw:   `cmd.exe /disable /c "del C:\victim"`,
 			argv:  []string{"cmd.exe", "/disable", "/c", `del C:\victim`},
-			child: "del",
-		},
-		{
-			name:  "cmd control after command",
-			raw:   `cmd.exe /c "del C:\victim" /d`,
-			argv:  []string{"cmd.exe", "/c", `del C:\victim`, "/d"},
 			child: "del",
 		},
 	}

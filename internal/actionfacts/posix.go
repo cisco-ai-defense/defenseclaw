@@ -121,6 +121,9 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	})
 
 	addPOSIXStructuralFlows(&out)
+	if reduced, ok := soleHostCallReduction(&out, wrapperDepth); ok {
+		return reduced
+	}
 	expandStaticPOSIXWrappers(&out, wrapperDepth)
 	if posixMayRebindHome(parsedSource) {
 		for i := range out.commands {

@@ -27,8 +27,8 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 		{"switch t colour", `cmd.exe /t:0A /c echo dccert-block-marker > marker.txt`, true},
 		{"switch t one digit", `cmd.exe /t:f /c echo dccert-block-marker > marker.txt`, true},
 		{"several static switches", `CMD.EXE /D /S /Q /E:ON /V:OFF /F:ON /T:0A /C echo dccert-block-marker > marker.txt`, true},
-		{"cmd /d one-word body", `cmd /d /c dccert-block-marker`, true},
-		{"cmd /c one-word body", `cmd /c dccert-block-marker`, true},
+		{"cmd /d one-word body is the unwrapped script", `cmd /d /c dccert-block-marker`, false},
+		{"cmd /c one-word body is the unwrapped script", `cmd /c dccert-block-marker`, false},
 		{"PowerShell call operator", `& cmd.exe /c echo dccert-block-marker > marker.txt`, true},
 		{"quoted body is already complete", `cmd.exe /c "echo dccert-block-marker > marker.txt"`, false},
 		{"keep-open switch", `cmd.exe /k echo dccert-block-marker > marker.txt`, false},
@@ -45,7 +45,7 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 		{"quoted body in list", `cmd.exe /c "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
 		{"r quoted body in list", `cmd.exe /r "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
 		{"joined switches quoted body in list", `cmd.exe /d/c "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
-		{"quoted body contains cmd list", `cmd.exe /c "echo dccert-block-marker > marker.txt && type marker.txt"`, true},
+		{"quoted body contains cmd list is the unwrapped script", `cmd.exe /c "echo dccert-block-marker > marker.txt && type marker.txt"`, false},
 		{"no cmd wrapper", `Set-Content marker.txt dccert-block-marker`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,11 +94,11 @@ func TestOpaqueCMDWrapperArgvReductionReadsCMDAndWindowsPOSIXGrammar(t *testing.
 		hint                Dialect
 		want                bool
 	}{
-		{"CMD sole quoted body", `cmd.exe /c "echo fc-block-marker-1727 > f.txt"`, `C:\Users\Alice`, DialectCMD, true},
-		{"CMD quoted body list", `cmd.exe /c "echo fc-block-marker-1727 > x.txt && type x.txt"`, `C:\Users\Alice`, DialectCMD, true},
-		{"CMD quoted body no redirect", `cmd /c "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, true},
-		{"Windows POSIX unquoted", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, `C:\Users\Alice`, "", true},
-		{"Windows POSIX d switch", `cmd.exe /d /c echo fc-block-marker-1727`, `C:\Users\Alice`, "", true},
+		{"CMD sole quoted body is the unwrapped script", `cmd.exe /c "echo fc-block-marker-1727 > f.txt"`, `C:\Users\Alice`, DialectCMD, false},
+		{"CMD quoted body list is the unwrapped script", `cmd.exe /c "echo fc-block-marker-1727 > x.txt && type x.txt"`, `C:\Users\Alice`, DialectCMD, false},
+		{"CMD quoted body no redirect is the unwrapped script", `cmd /c "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, false},
+		{"Windows POSIX unquoted is the unwrapped script", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, `C:\Users\Alice`, "", false},
+		{"Windows POSIX d switch is the unwrapped script", `cmd.exe /d /c echo fc-block-marker-1727`, `C:\Users\Alice`, "", false},
 		{"POSIX home unquoted", `cmd.exe /c echo fc-block-marker-1727 > f.txt`, "/home/alice", "", false},
 		{"CMD keep-open switch", `cmd.exe /k "echo fc-block-marker-1727"`, `C:\Users\Alice`, DialectCMD, false},
 		{"CMD dynamic body", `cmd.exe /c "echo %MARKER% > f.txt"`, `C:\Users\Alice`, DialectCMD, false},

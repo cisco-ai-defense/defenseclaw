@@ -29,6 +29,9 @@ type parseOutput struct {
 	artifacts        []ArtifactFact
 	nextID           int64
 	curlCapabilities []CurlCapability
+	// hostWrappers is the evidence of the powershell, pwsh and cmd launchers
+	// that were unwrapped to the script they run (host_unwrap.go).
+	hostWrappers []WrapperFact
 	// redirectTargets is set only by a top-level POSIX parse.
 	redirectTargets redirectTargetCapture
 	// shortCircuitLists maps the head statement of a && / || list to the
@@ -186,6 +189,7 @@ func (o *parseOutput) merge(other parseOutput) {
 	for _, issue := range other.issues {
 		o.addIssue(issue)
 	}
+	o.hostWrappers = append(o.hostWrappers, other.hostWrappers...)
 	for _, command := range other.commands {
 		if !o.appendCommand(command) {
 			break
@@ -320,6 +324,8 @@ func (o parseOutput) factsWithWindowsShellCWD(tool, cwd, activeHome string, wind
 		Network:    network,
 		DataFlows:  cloneSlice(o.dataFlows),
 		Artifacts:  artifacts,
+
+		HostWrappers: cloneWrapperFacts(o.hostWrappers),
 	}
 }
 

@@ -152,6 +152,11 @@ type Facts struct {
 	Paths                                    []PathFact
 	Network                                  []NetworkFact
 	DataFlows                                []DataFlowFact
+	// HostWrappers is the evidence of the powershell, pwsh and cmd launchers
+	// whose static script was analyzed as if it had been typed directly
+	// (host_unwrap.go). It is value-free: the launcher and its switches, never
+	// the script.
+	HostWrappers []WrapperFact `json:"-"`
 	// SensitiveEgressArtifactWrites contains only exact local artifact paths.
 	// An entry proves that a closed structured-write schema created source text
 	// containing both a protected credential/secret path and a non-local literal

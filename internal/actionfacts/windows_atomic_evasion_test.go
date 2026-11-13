@@ -28,7 +28,7 @@ func TestExactWindowsTelemetryDisable(t *testing.T) {
 		{name: "wrong value type", command: `REG ADD HKCU\Environment /v COMPlus_ETWEnabled /t REG_DWORD /d 0 /f`, dialect: DialectCMD},
 		{name: "nearby provider path", command: `reg add "HKLM\System\CurrentControlSet\Control\WMI\Autologger\EventLog-System" /v Start /t REG_DWORD /d 0 /f`, dialect: DialectCMD},
 		{name: "dynamic value", command: `REG ADD HKCU\Environment /v COMPlus_ETWEnabled /t REG_SZ /d %STATE% /f`, dialect: DialectCMD},
-		{name: "wrapper", command: `cmd /c "REG ADD HKCU\Environment /v COMPlus_ETWEnabled /t REG_SZ /d 0 /f"`, dialect: DialectCMD},
+		{name: "wrapper is the wrapped script", command: `cmd /c "REG ADD HKCU\Environment /v COMPlus_ETWEnabled /t REG_SZ /d 0 /f"`, dialect: DialectCMD, want: true},
 		{name: "redirect", command: `REG ADD HKCU\Environment /v COMPlus_ETWEnabled /t REG_SZ /d 0 /f >NUL`, dialect: DialectCMD},
 		{name: "extra command", command: "REG ADD HKCU\\Environment /v COMPlus_ETWEnabled /t REG_SZ /d 0 /f\nwhoami", dialect: DialectCMD},
 	} {
@@ -60,7 +60,7 @@ func TestExactWindowsCredentialProtectionWeakening(t *testing.T) {
 		{name: "dynamic password", command: "reg add \"HKLM\\Software\\Policies\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v AutoAdminLogon /t REG_DWORD /d 1 /f\nreg add \"HKLM\\Software\\Policies\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v DefaultPassword /t REG_SZ /d %PASSWORD% /f", dialect: DialectCMD},
 		{name: "different Winlogon path", command: "reg add \"HKLM\\Software\\Policies\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v AutoAdminLogon /t REG_DWORD /d 1 /f\nreg add \"HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v DefaultPassword /t REG_SZ /d password1 /f", dialect: DialectCMD},
 		{name: "extra command", command: "reg add \"HKLM\\Software\\Policies\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v AutoAdminLogon /t REG_DWORD /d 1 /f\nreg add \"HKLM\\Software\\Policies\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v DefaultPassword /t REG_SZ /d password1 /f\nwhoami", dialect: DialectCMD},
-		{name: "wrapped WDigest", command: `cmd /c "reg add HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest /v UseLogonCredential /t REG_DWORD /d 1 /f"`, dialect: DialectCMD},
+		{name: "wrapped WDigest is the wrapped script", command: `cmd /c "reg add HKLM\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest /v UseLogonCredential /t REG_DWORD /d 1 /f"`, dialect: DialectCMD, want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "shell", Command: test.command, CWD: `C:\repo`, DialectHint: test.dialect})

@@ -1965,7 +1965,7 @@ func TestParsePOSIXExactWindowsWrapperIsAuthoritative(t *testing.T) {
 		t.Run(test.source, func(t *testing.T) {
 			out := parsePOSIX(test.source, 1, 0)
 			classifyOutput(&out)
-			if out.status != StatusComplete || out.dialect != DialectMixed {
+			if out.status != StatusComplete || out.dialect == DialectMixed {
 				t.Fatalf("parse = status=%q dialect=%q issues=%v", out.status, out.dialect, out.issues)
 			}
 			if !outputHasPath(out, PathAccessRead, test.path) {
