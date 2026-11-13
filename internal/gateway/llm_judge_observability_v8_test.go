@@ -29,7 +29,7 @@ func TestLocalJudgeGeneratedSpanAllCallPaths(t *testing.T) {
 	}{
 		{
 			name: "injection", kind: "injection", direction: "input", response: allFalseInjectionJSON,
-			run: func(judge *LLMJudge) { judge.runInjectionJudge(t.Context(), strings.Repeat("i", 40)) },
+			run: func(judge *LLMJudge) { judge.runInjectionJudge(t.Context(), strings.Repeat("i", 40), false) },
 		},
 		{
 			name: "pii", kind: "pii", direction: "output", response: allCleanPIIJSON,
@@ -184,7 +184,7 @@ func TestLocalJudgeGeneratedSpanFailureFacts(t *testing.T) {
 			}
 			// Generated tracing must complete through the bound v8 runtime.
 			judge.bindJudgeTraceV8(runtime)
-			judge.runInjectionJudge(t.Context(), strings.Repeat("i", 40))
+			judge.runInjectionJudge(t.Context(), strings.Repeat("i", 40), false)
 
 			spans := capture.snapshot()
 			if len(spans) != 1 {
@@ -344,7 +344,7 @@ func TestJudgeGeneratedMetricsSurviveTraceSampling(t *testing.T) {
 		rp: &guardrail.RulePack{},
 	}
 	judge.bindJudgeTraceV8(runtime)
-	judge.runInjectionJudge(t.Context(), strings.Repeat("i", 40))
+	judge.runInjectionJudge(t.Context(), strings.Repeat("i", 40), false)
 
 	if spans := capture.snapshot(); len(spans) != 0 {
 		t.Fatalf("always-off judge emitted %d spans", len(spans))
@@ -417,7 +417,7 @@ func TestJudgeGeneratedRuntimeBindingFollowsSidecarLifecycle(t *testing.T) {
 		t.Fatalf("detached judge runtimes/authority hook=%T/%t proxy=%T/%t", hookRuntime, hookAuthority, proxyRuntime, proxyAuthority)
 	}
 
-	hookJudge.runInjectionJudge(t.Context(), strings.Repeat("i", 40))
+	hookJudge.runInjectionJudge(t.Context(), strings.Repeat("i", 40), false)
 	if got := len(capture.snapshot()); got != 0 {
 		t.Fatalf("detached v8 authority emitted %d generated judge spans", got)
 	}

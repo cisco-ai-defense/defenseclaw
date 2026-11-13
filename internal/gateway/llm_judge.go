@@ -428,7 +428,7 @@ func (j *LLMJudge) RunJudges(ctx context.Context, direction, content, toolName s
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			v := j.runInjectionJudgeFor(ctx, content, toolResult)
+			v := j.runInjectionJudge(ctx, content, toolResult)
 			results <- judgeResult{verdict: v}
 		}()
 	}
@@ -682,13 +682,9 @@ func filterHallucinatedEntities(data map[string]interface{}, content string) int
 	return dropped
 }
 
-func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanVerdict {
-	return j.runInjectionJudgeFor(ctx, content, false)
-}
-
-// runInjectionJudgeFor runs the injection judge on a user prompt, or with
+// runInjectionJudge runs the injection judge on a user prompt, or with
 // toolResult on a tool's output (toolResultInjectionSystemPrompt).
-func (j *LLMJudge) runInjectionJudgeFor(ctx context.Context, content string, toolResult bool) *ScanVerdict {
+func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string, toolResult bool) *ScanVerdict {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" || len(trimmed) < minJudgeContentLen {
 		return allowVerdict("llm-judge-injection")
