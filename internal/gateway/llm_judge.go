@@ -804,7 +804,7 @@ func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind str
 		Messages:       messages,
 		MaxTokens:      intPtr(maxTok),
 		Temperature:    temperature,
-		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
+		ResponseFormat: judgeResponseFormatBounded(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model), judgeBoundsFreeText(j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
 		ExtraParams:    extraParams,
 	}
@@ -915,6 +915,64 @@ func toolSafeJudgeSchema(schema map[string]interface{}) map[string]interface{} {
 }
 
 func judgeResponseFormatFor(kind string, toolSafeKeys bool) json.RawMessage {
+	return judgeResponseFormatBounded(kind, toolSafeKeys, false)
+}
+
+// judgeBoundsFreeText reports whether the judge schema gets length bounds on
+// its free-text fields for model. Gemma 4 on an OpenAI-compatible endpoint,
+// decoding at temperature 0, falls into a repetition loop inside the
+// unbounded "reasoning" string (or the "entities" list) of the prompt-lane
+// judges and writes until max_tokens: the JSON is cut, no verdict is parsed and
+// the hook keeps the rule verdict (the failure the S7 intent benchmark measured
+// on 10-15% of judged prompts; the tool judge, whose schema has no free text,
+// had none). Other models keep the exact schema their benchmarks pin, because
+// OpenAI strict mode rejects some of these keywords.
+func judgeBoundsFreeText(model string) bool {
+	return strings.Contains(strings.ToLower(model), "gemma")
+}
+
+const (
+	judgeBoundReasoningChars = 200
+	judgeBoundEntityItems    = 16
+	judgeBoundEntityChars    = 64
+	judgeBoundFindingItems   = 16
+	judgeBoundPatternChars   = 120
+)
+
+// boundJudgeFreeText limits every free-text field of a judge schema in place.
+func boundJudgeFreeText(node interface{}) {
+	m, ok := node.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if props, ok := m["properties"].(map[string]interface{}); ok {
+		for key, child := range props {
+			cm, ok := child.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch {
+			case key == "reasoning" && cm["type"] == "string":
+				cm["maxLength"] = judgeBoundReasoningChars
+			case key == "pattern" && cm["type"] == "string":
+				cm["maxLength"] = judgeBoundPatternChars
+			case key == "entities" && cm["type"] == "array":
+				cm["maxItems"] = judgeBoundEntityItems
+				if items, ok := cm["items"].(map[string]interface{}); ok && items["type"] == "string" {
+					items["maxLength"] = judgeBoundEntityChars
+				}
+			case key == "findings" && cm["type"] == "array":
+				cm["maxItems"] = judgeBoundFindingItems
+			}
+			boundJudgeFreeText(cm)
+			if items, ok := cm["items"]; ok {
+				boundJudgeFreeText(items)
+			}
+		}
+	}
+}
+
+func judgeResponseFormatBounded(kind string, toolSafeKeys, boundFreeText bool) json.RawMessage {
 	var name string
 	var schema map[string]interface{}
 	switch kind {
@@ -981,6 +1039,9 @@ func judgeResponseFormatFor(kind string, toolSafeKeys bool) json.RawMessage {
 	default:
 		name = "defenseclaw_judge_injection"
 		schema = judgeCategoryObjectSchema(sortedJudgeCategoryNames(injectionCategories), judgeLabelSchema(true))
+	}
+	if boundFreeText {
+		boundJudgeFreeText(schema)
 	}
 	if toolSafeKeys {
 		schema = toolSafeJudgeSchema(schema)
