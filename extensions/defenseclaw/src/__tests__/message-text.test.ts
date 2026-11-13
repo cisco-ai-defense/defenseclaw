@@ -42,7 +42,17 @@ const fixture = JSON.parse(
 
 function paramsOf(c: ParityCase): unknown {
   const gen = c.gen ?? {};
-  if (gen.leaves) return { blocks: Array.from({ length: gen.leaves }, () => "s") };
+  if (gen.strings) return { blocks: Array.from({ length: gen.strings }, () => "s") };
+  if (gen.table) {
+    const rows = Array.from({ length: gen.table }, () => ["a", "b"]);
+    return { presentation: { blocks: [{ type: "table", rows }] } };
+  }
+  if (gen.payload_buffer) return { message: "hi", buffer: "QUJD".repeat(gen.payload_buffer / 4) };
+  if (gen.payload_dataurl) {
+    return { message: "hi", media: `data:image/png;base64,${"QUJD".repeat(gen.payload_dataurl / 4)}` };
+  }
+  if (gen.plainbuf) return { buffer: "word ".repeat(gen.plainbuf) };
+  if (gen.routing_strings) return { text: "x", to: Array.from({ length: gen.routing_strings }, () => "r") };
   if (gen.depth || gen.depth_empty) {
     let v: unknown = gen.depth ? "deep" : [];
     for (let i = 0; i < (gen.depth ?? gen.depth_empty); i++) v = { x: v };
@@ -67,7 +77,6 @@ describe("extractMessage", () => {
     if (c.head) expect(got.text.startsWith(c.head)).toBe(true);
     if (c.tail) expect(got.text.endsWith(c.tail)).toBe(true);
     expect(got.overCap).toBe(c.over_cap ?? false);
-    expect(got.routing).toEqual(c.routing ?? {});
   });
 
   it("reads no params", () => {

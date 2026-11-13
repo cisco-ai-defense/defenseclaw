@@ -20,11 +20,14 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // parityCase is one row of testdata/message_text_parity.json. The OpenClaw
@@ -66,12 +69,26 @@ func (c parityCase) paramsOf(t *testing.T) json.RawMessage {
 	t.Helper()
 	var v interface{}
 	switch {
-	case c.Gen["leaves"] > 0:
-		items := make([]string, c.Gen["leaves"])
+	case c.Gen["strings"] > 0:
+		items := make([]string, c.Gen["strings"])
 		for i := range items {
 			items[i] = "s"
 		}
 		v = map[string]interface{}{"blocks": items}
+	case c.Gen["table"] > 0:
+		rows := make([]interface{}, c.Gen["table"])
+		for i := range rows {
+			rows[i] = []interface{}{"a", "b"}
+		}
+		v = map[string]interface{}{"presentation": map[string]interface{}{"blocks": []interface{}{map[string]interface{}{"type": "table", "rows": rows}}}}
+	case c.Gen["payload_buffer"] > 0:
+		v = map[string]string{"message": "hi", "buffer": strings.Repeat("QUJD", c.Gen["payload_buffer"]/4)}
+	case c.Gen["payload_dataurl"] > 0:
+		v = map[string]string{"message": "hi", "media": "data:image/png;base64," + strings.Repeat("QUJD", c.Gen["payload_dataurl"]/4)}
+	case c.Gen["plainbuf"] > 0:
+		v = map[string]string{"buffer": strings.Repeat("word ", c.Gen["plainbuf"])}
+	case c.Gen["routing_strings"] > 0:
+		v = map[string]interface{}{"text": "x", "to": slices.Repeat([]string{"r"}, c.Gen["routing_strings"])}
 	case c.Gen["depth"] > 0 || c.Gen["depth_empty"] > 0:
 		v = interface{}("deep")
 		n := c.Gen["depth"]
@@ -123,8 +140,8 @@ func TestExtractMessageArgsParity(t *testing.T) {
 			if tc.Tail != "" && !strings.HasSuffix(got.Text, tc.Tail) {
 				t.Errorf("text does not end with %q", tc.Tail)
 			}
-			if got.OverCap != tc.OverCap {
-				t.Errorf("over_cap = %v, want %v", got.OverCap, tc.OverCap)
+			if got.Truncated.Any() != tc.OverCap {
+				t.Errorf("over_cap = %v, want %v", got.Truncated.Any(), tc.OverCap)
 			}
 			want := tc.Routing
 			if want == nil {
@@ -143,7 +160,7 @@ func TestExtractMessageArgsParity(t *testing.T) {
 
 func TestExtractMessageArgsRejectsNonJSON(t *testing.T) {
 	for _, raw := range []string{``, `not json`} {
-		if got := extractMessageArgs(json.RawMessage(raw)); got.Text != "" || got.OverCap || got.Routing != nil {
+		if got := extractMessageArgs(json.RawMessage(raw)); got.Text != "" || got.Truncated.Any() || got.Routing != nil {
 			t.Errorf("extractMessageArgs(%q) = %+v, want nothing", raw, got)
 		}
 	}
@@ -243,28 +260,33 @@ func TestInspectToolMessageNumbersAreScanned(t *testing.T) {
 	}
 }
 
-// Text past the read limits is unknown, never clean (GAP-0290): the call
-// alerts in action mode and is recorded (raw_action alert) in observe mode,
-// with or without the caller's own copy of the text.
-func TestInspectToolMessageOverCapAlerts(t *testing.T) {
-	items := make([]string, messageTextMaxLeaves+30)
+// Text past the read limits is unknown (GAP-0290), judged by the bound rule:
+// the call alerts in the default pack and blocks in strict, with or without
+// the caller's own copy of the text; the gateway reads the args itself.
+func TestInspectToolMessageOverCapIsUnknown(t *testing.T) {
+	items := make([]string, messageTextMaxNodes+30)
 	for i := range items {
 		items[i] = `"ok"`
 	}
-	leaves := `{"blocks":[` + strings.Join(items, ",") + `]}`
+	nodes := `{"blocks":[` + strings.Join(items, ",") + `]}`
 	pad := strings.Repeat("a", 140*1024)
 	size := `{"body":"` + pad + `","text":"` + pad + `"}`
 	deep := `{"x":{"x":{"x":{"x":{"x":{"x":{"x":{"x":{"x":{"x":"text"}}}}}}}}}}`
-	for name, args := range map[string]string{"leaves": leaves, "size": size, "depth": deep} {
+	hasLimit := func(findings []string, cap string) bool {
+		return slices.ContainsFunc(findings, func(f string) bool {
+			return strings.HasPrefix(f, evaluationLimitRuleID) && strings.Contains(f, "bounded_truncated cap="+cap)
+		})
+	}
+	for name, tc := range map[string]struct{ args, cap string }{"nodes": {nodes, "nodes"}, "size": {size, "bytes"}, "depth": {deep, "depth"}} {
 		for _, withContent := range []bool{false, true} {
 			api := testAPIServerWithConfig(t, "action")
-			body := `{"tool":"message","args":` + args + `,"direction":"outbound"`
+			body := `{"tool":"message","args":` + tc.args + `,"direction":"outbound"`
 			if withContent {
 				body += `,"content":"ok"`
 			}
 			_, verdict := postInspect(t, api, body+`}`)
-			if verdict.Action != "alert" || !containsString(verdict.Findings, messageTextOverCapRuleID) {
-				t.Errorf("%s (content %v): action = %q findings = %v, want an alert on %s", name, withContent, verdict.Action, verdict.Findings, messageTextOverCapRuleID)
+			if verdict.Action != "alert" || !hasLimit(verdict.Findings, tc.cap) {
+				t.Errorf("%s (content %v): action = %q findings = %v, want an alert naming cap %s", name, withContent, verdict.Action, verdict.Findings, tc.cap)
 			}
 			observe := testAPIServerWithConfig(t, "observe")
 			_, verdict = postInspect(t, observe, body+`}`)
@@ -273,19 +295,72 @@ func TestInspectToolMessageOverCapAlerts(t *testing.T) {
 			}
 		}
 	}
-	// A secret in the part that was read still blocks; the over-cap alert
-	// never lowers it.
-	secret := "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2"
+	// A secret in the part that was read still blocks; the floor never lowers it.
 	api := testAPIServerWithConfig(t, "action")
-	_, verdict := postInspect(t, api, `{"tool":"message","args":{"content":"`+secret+`","blocks":[`+strings.Join(items, ",")+`]},"direction":"outbound"}`)
+	_, verdict := postInspect(t, api, `{"tool":"message","args":{"content":"`+messageTestSecret+`","blocks":[`+strings.Join(items, ",")+`]},"direction":"outbound"}`)
 	if verdict.Action != "block" {
 		t.Errorf("secret plus over-cap text: action = %q, want block", verdict.Action)
 	}
 	// Under the limits there is no alert.
 	_, verdict = postInspect(t, api, `{"tool":"message","args":{"text":"hello"},"direction":"outbound"}`)
-	if verdict.Action != "allow" {
-		t.Errorf("small clean call: action = %q, want allow", verdict.Action)
+	if verdict.Action != "allow" || len(verdict.Findings) != 0 {
+		t.Errorf("small clean call: action = %q findings = %v, want a plain allow", verdict.Action, verdict.Findings)
 	}
+}
+
+// messageTestSecret is a synthetic Anthropic-shaped key the message tests use.
+const messageTestSecret = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2"
+
+// The message lane's caps under the bound rule's property test
+// (TestBoundRuleEveryLaneCap): at the cap the call is not truncated, past it
+// the action is at least the unknown tier of each of the five tiers and names
+// the cap.
+func init() {
+	registerBoundedLane(
+		boundedLaneCap{lane: "openclaw message depth", cap: bounded.Depth, limit: messageTextMaxDepth, adopted: true,
+			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+				var v any = "text"
+				for range size + 1 {
+					v = map[string]any{"x": v}
+				}
+				return v.(map[string]any)
+			})},
+		boundedLaneCap{lane: "openclaw message nodes", cap: bounded.Nodes, limit: messageTextMaxNodes, adopted: true,
+			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+				items := make([]any, size-2)
+				for i := range items {
+					items[i] = map[string]any{}
+				}
+				return map[string]any{"items": items}
+			})},
+		boundedLaneCap{lane: "openclaw message bytes", cap: bounded.Bytes, limit: messageTextMaxBytes, adopted: true,
+			decide: boundedDecideOpenClawMessage, gen: boundedMessageCall(func(size int) map[string]any {
+				return map[string]any{"text": strings.Repeat("a", size)}
+			})},
+	)
+}
+
+// boundedMessageCall is a message call of the params fill(size) builds, after
+// the lane's seen element (a key in the message field, which blocks in every
+// tier) when the shape asks for it.
+func boundedMessageCall(fill func(size int) map[string]any) func(int, boundedShape) boundedLaneCall {
+	return func(size int, shape boundedShape) boundedLaneCall {
+		params := fill(size)
+		if shape.seen {
+			params["message"] = "key: " + messageTestSecret
+		}
+		return boundedLaneCall{tool: "message", input: params}
+	}
+}
+
+// boundedDecideOpenClawMessage sends one message call to /inspect/tool as the
+// OpenClaw plugin does, in the tier the api is set up for.
+func boundedDecideOpenClawMessage(t *testing.T, api *APIServer, _ boundedEnv, call boundedLaneCall) (string, []string) {
+	t.Helper()
+	api.inspectToolScanTimeout = 30 * time.Second
+	_, verdict := postInspectForConnector(t, api, "openclaw",
+		string(mustJSON(t, map[string]any{"tool": call.tool, "args": call.input, "direction": "outbound"})))
+	return verdict.Action, verdict.Findings
 }
 
 // The tool block list decides a message call before any of its text is read
@@ -294,7 +369,7 @@ func TestInspectToolMessageStaticBlockRunsFirst(t *testing.T) {
 	for name, args := range map[string]string{
 		"with text":    `{"to":"+1","text":"hello there"}`,
 		"routing only": `{"to":"+1","action":"send"}`,
-		"over the cap": `{"blocks":[` + strings.Repeat(`"x",`, messageTextMaxLeaves+5) + `"x"]}`,
+		"over the cap": `{"blocks":[` + strings.Repeat(`"x",`, messageTextMaxNodes+5) + `"x"]}`,
 	} {
 		api := testAPIServerWithConfig(t, "action")
 		api.scannerCfg.AssetPolicy.Tool.Denied = []config.AssetPolicyToolRule{{Name: "message"}}

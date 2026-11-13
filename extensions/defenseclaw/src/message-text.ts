@@ -36,10 +36,16 @@
 export const MESSAGE_TEXT_MAX_BYTES = 256 * 1024;
 /** Nesting depth below the params object. */
 const MAX_DEPTH = 8;
-/** String and number values read in one call. */
-const MAX_LEAVES = 512;
-/** Values of any kind walked in one call. */
+/**
+ * Values of any kind walked in one call (a string, a number, an object, an
+ * array, a routing string). It bounds the walk and the join; a 700-row table
+ * is within it.
+ */
 const MAX_NODES = 4096;
+/** The length from which a base64 value of an attachment field is a payload. */
+const PAYLOAD_MIN_CHARS = 1024;
+/** How much of a value the base64 check reads. */
+const PAYLOAD_PROBE_CHARS = 4096;
 
 /** Fields that usually hold the message text. They are read first, in order. */
 const TEXT_KEYS = [
@@ -67,13 +73,12 @@ export interface MessageExtract {
   /** Every string outside the routing values, joined by newlines. */
   text: string;
   /**
-   * Text the read limits dropped: more strings than the leaf limit, more
-   * values than the node limit, a string below the depth limit, or a text
-   * past the size limit. Over the limits is unknown, never clean.
+   * A read limit was hit: more values than the node limit, a value below the
+   * depth limit, or a text past the size limit. Over the limits is unknown,
+   * never clean (the gateway floors the call at the unknown tier of its
+   * policy; it reads the params itself, routing values included).
    */
   overCap: boolean;
-  /** The strings under routing keys, by dotted key path (a repeat gets #2, #3). */
-  routing: Record<string, string>;
 }
 
 /**
@@ -81,7 +86,7 @@ export interface MessageExtract {
  * count the message states), read as String(n).
  */
 export function extractMessage(params: unknown): MessageExtract {
-  const state: WalkState = { parts: [], leaves: 0, nodes: 0, overCap: false, routing: {} };
+  const state: WalkState = { parts: [], nodes: 0, overCap: false };
   walk(params, 0, "", state);
   let text = state.parts.join("\n");
   // A character is at most 3 UTF-8 bytes per UTF-16 unit, so a short text
@@ -100,15 +105,13 @@ export function extractMessage(params: unknown): MessageExtract {
       state.overCap = true;
     }
   }
-  return { text, overCap: state.overCap, routing: state.routing };
+  return { text, overCap: state.overCap };
 }
 
 interface WalkState {
   parts: string[];
-  leaves: number;
   nodes: number;
   overCap: boolean;
-  routing: Record<string, string>;
 }
 
 /** Lowercases the ASCII letters only, as the gateway does: key names match on it. */
@@ -128,18 +131,12 @@ function compareCodePoints(a: string, b: string): number {
 }
 
 function leaf(text: string, state: WalkState): void {
-  if (text.trim() === "") return;
-  if (state.leaves >= MAX_LEAVES) {
-    state.overCap = true;
-    return;
-  }
-  state.leaves++;
-  state.parts.push(text);
+  if (text.trim() !== "") state.parts.push(text);
 }
 
 function walk(value: unknown, depth: number, path: string, state: WalkState): void {
   if (state.nodes >= MAX_NODES) {
-    state.overCap = state.overCap || hasText(value, 0);
+    state.overCap = true;
     return;
   }
   state.nodes++;
@@ -153,7 +150,7 @@ function walk(value: unknown, depth: number, path: string, state: WalkState): vo
   }
   if (value === null || typeof value !== "object") return;
   if (depth > MAX_DEPTH) {
-    state.overCap = state.overCap || hasText(value, 0);
+    state.overCap = true;
     return;
   }
   if (Array.isArray(value)) {
@@ -169,43 +166,64 @@ function walk(value: unknown, depth: number, path: string, state: WalkState): vo
   keys.sort((a, b) => rank(a) - rank(b) || compareCodePoints(a, b));
   for (const key of keys) {
     const child = path === "" ? key : `${path}.${key}`;
-    if (ROUTING_KEYS.has(asciiLower(key)) && routingValue(child, record[key], state)) continue;
-    walk(record[key], depth + 1, child, state);
+    if (ROUTING_KEYS.has(asciiLower(key)) && routingValue(record[key], state)) continue;
+    const field = record[key];
+    if (typeof field === "string" && binaryPayload(key, field)) {
+      // An attachment's bytes are not message text and do not spend the text budget.
+      state.nodes++;
+      continue;
+    }
+    walk(field, depth + 1, child, state);
   }
 }
 
 /**
- * Files the strings of a routing key's value and reports whether the value
+ * Counts the strings of a routing key's value against the node budget (the
+ * gateway reads them through the tool policy) and reports whether the value
  * held nothing else. A routing key that holds an object (a target with its own
  * text) is read like any other: its strings are text and the routing keys
- * inside it file their own.
+ * inside it count their own.
  */
-function routingValue(path: string, value: unknown, state: WalkState): boolean {
+function routingValue(value: unknown, state: WalkState): boolean {
   if (typeof value === "string") {
-    if (value.trim() !== "") fileRouting(path, value, state);
+    countRouting(value, state);
     return true;
   }
   if (Array.isArray(value)) {
     if (value.some((item) => item !== null && typeof item === "object")) return false;
     for (const item of value) {
-      if (typeof item === "string" && item.trim() !== "") fileRouting(path, item, state);
+      if (typeof item === "string") countRouting(item, state);
     }
     return true;
   }
   return value === null || typeof value !== "object";
 }
 
-function fileRouting(path: string, value: string, state: WalkState): void {
-  let key = path;
-  for (let n = 2; key in state.routing; n++) key = `${path}#${n}`;
-  state.routing[key] = value;
+function countRouting(value: string, state: WalkState): void {
+  if (value.trim() === "") return;
+  if (state.nodes >= MAX_NODES) {
+    state.overCap = true;
+    return;
+  }
+  state.nodes++;
 }
 
-/** True when the value holds a non-blank string or a number. Bounded, so a cyclic object ends. */
-function hasText(value: unknown, depth: number): boolean {
-  if (typeof value === "string") return value.trim() !== "";
-  if (typeof value === "number") return Number.isFinite(value);
-  if (value === null || typeof value !== "object" || depth > 64) return false;
-  const items = Array.isArray(value) ? value : Object.values(value as Record<string, unknown>);
-  return items.some((item) => hasText(item, depth + 1));
+const BASE64_CHARS = /^[A-Za-z0-9+/_=\r\n-]*$/;
+
+/**
+ * An attachment's bytes: a long base64 value in the buffer field (OpenClaw's
+ * "Base64/data-URL attachment") or a base64 data URL anywhere. It is no
+ * message text; a value that does not read as base64 is.
+ */
+function binaryPayload(key: string, value: string): boolean {
+  if (value.length < PAYLOAD_MIN_CHARS) return false;
+  let payload = value;
+  if (value.startsWith("data:")) {
+    const i = value.slice(0, 256).indexOf(";base64,");
+    if (i < 0) return false;
+    payload = value.slice(i + ";base64,".length);
+  } else if (asciiLower(key) !== "buffer") {
+    return false;
+  }
+  return payload.length >= PAYLOAD_MIN_CHARS && BASE64_CHARS.test(payload.slice(0, PAYLOAD_PROBE_CHARS));
 }

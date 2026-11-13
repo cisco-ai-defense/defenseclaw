@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // The "message" tool call of OpenClaw (GAP-0177, GAP-0290..0292).
@@ -47,7 +49,8 @@ import (
 //  3. its routing values (the recipient, target, channel ...), through the
 //     tool-policy lane like the destination of any other send tool.
 //
-// Text past the read limits is unknown, never clean: the call alerts.
+// Text past the read limits is unknown, never clean (the bound rule,
+// internal/guardrail/bounded): the call is judged at least at the unknown tier.
 
 const (
 	// messageTextMaxBytes bounds the text returned. A longer text keeps its
@@ -55,19 +58,17 @@ const (
 	messageTextMaxBytes = 256 * 1024
 	// messageTextMaxDepth is the nesting depth below the args object.
 	messageTextMaxDepth = 8
-	// messageTextMaxLeaves is the number of string and number values read in
-	// one call.
-	messageTextMaxLeaves = 512
 	// messageTextMaxNodes is the number of values of any kind walked in one
-	// call, so a large array of empty objects costs a bounded walk.
+	// call (a string, a number, an object, an array, a routing string). It
+	// bounds the walk and the join, so a large array of empty objects or of
+	// recipients costs a bounded amount; a 700-row table is within it.
 	messageTextMaxNodes = 4096
+	// messagePayloadMinBytes is the length from which a base64 value of an
+	// attachment field is a payload, not text.
+	messagePayloadMinBytes = 1024
+	// messagePayloadProbeBytes is how much of a value the base64 check reads.
+	messagePayloadProbeBytes = 4096
 )
-
-// messageTextOverCapRuleID is the finding of a message call whose text went
-// past the read limits: the part that was not read is unknown.
-const messageTextOverCapRuleID = "OPENCLAW-MESSAGE-TEXT-OVER-CAP"
-
-const messageTextOverCapReason = "message text past DefenseClaw's read limits: only part of it was inspected"
 
 // Key names are matched with asciiLowerPreservingBytes on both sides: a full
 // Unicode lowercase would read a key like "İd" as "id" in Go and not in
@@ -99,9 +100,10 @@ var messageRoutingKeys = map[string]bool{
 type messageExtract struct {
 	// Text is every string outside the routing values, joined by newlines.
 	Text string
-	// OverCap reports text the read limits dropped: more strings than the leaf
-	// limit, a string below the depth limit, or a text past the size limit.
-	OverCap bool
+	// Truncated holds the read limits the call hit: more values than the node
+	// limit (nodes), a value below the depth limit (depth) or a text past the
+	// size limit (bytes).
+	Truncated bounded.Truncated
 	// Routing holds the strings under routing keys, by dotted key path.
 	Routing map[string]interface{}
 }
@@ -124,7 +126,8 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 	if _, err := dec.Token(); err != io.EOF {
 		return out
 	}
-	w := messageWalk{routing: map[string]interface{}{}}
+	w := messageWalk{routing: map[string]interface{}{}, routingSeen: map[string]int{},
+		nodes: bounded.NewCounter(bounded.Nodes, messageTextMaxNodes)}
 	w.walk(value, 0, "")
 	text := strings.Join(w.parts, "\n")
 	if len(text) > messageTextMaxBytes {
@@ -139,9 +142,9 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 			tail++
 		}
 		text = text[:head] + "\n" + text[tail:]
-		w.overCap = true
+		w.trunc.Hit(bounded.Bytes)
 	}
-	out.Text, out.OverCap = text, w.overCap
+	out.Text, out.Truncated = text, w.trunc
 	if len(w.routing) > 0 {
 		out.Routing = w.routing
 	}
@@ -149,11 +152,11 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 }
 
 type messageWalk struct {
-	parts   []string
-	leaves  int
-	nodes   int
-	overCap bool
-	routing map[string]interface{}
+	parts       []string
+	nodes       bounded.Counter
+	trunc       bounded.Truncated
+	routing     map[string]interface{}
+	routingSeen map[string]int
 }
 
 // leaf adds a string or number value to the text.
@@ -161,36 +164,27 @@ func (w *messageWalk) leaf(s string) {
 	if strings.TrimSpace(s) == "" {
 		return
 	}
-	if w.leaves >= messageTextMaxLeaves {
-		w.overCap = true
-		return
-	}
-	w.leaves++
 	w.parts = append(w.parts, s)
 }
 
 func (w *messageWalk) walk(value interface{}, depth int, path string) {
-	if w.nodes >= messageTextMaxNodes {
-		w.overCap = w.overCap || messageHasText(value)
+	if !w.nodes.Take(&w.trunc) {
 		return
 	}
-	w.nodes++
 	switch v := value.(type) {
 	case string:
 		w.leaf(v)
 	case json.Number:
 		w.leaf(v.String())
 	case []interface{}:
-		if depth > messageTextMaxDepth {
-			w.overCap = w.overCap || messageHasText(v)
+		if !w.trunc.Within(bounded.Depth, depth, messageTextMaxDepth) {
 			return
 		}
 		for _, item := range v {
 			w.walk(item, depth+1, path)
 		}
 	case map[string]interface{}:
-		if depth > messageTextMaxDepth {
-			w.overCap = w.overCap || messageHasText(v)
+		if !w.trunc.Within(bounded.Depth, depth, messageTextMaxDepth) {
 			return
 		}
 		keys := make([]string, 0, len(v))
@@ -221,6 +215,12 @@ func (w *messageWalk) walk(value interface{}, depth int, path string) {
 			if messageRoutingKeys[asciiLowerPreservingBytes(k)] && w.routingValue(child, v[k]) {
 				continue
 			}
+			if s, ok := v[k].(string); ok && messageBinaryPayload(k, s) {
+				// An attachment's bytes are not message text and do not spend
+				// the text budget.
+				w.nodes.Take(&w.trunc)
+				continue
+			}
 			w.walk(v[k], depth+1, child)
 		}
 	}
@@ -233,9 +233,7 @@ func (w *messageWalk) walk(value interface{}, depth int, path string) {
 func (w *messageWalk) routingValue(path string, value interface{}) bool {
 	switch v := value.(type) {
 	case string:
-		if strings.TrimSpace(v) != "" {
-			w.fileRouting(path, v)
-		}
+		w.fileRouting(path, v)
 		return true
 	case []interface{}:
 		for _, item := range v {
@@ -247,7 +245,7 @@ func (w *messageWalk) routingValue(path string, value interface{}) bool {
 			}
 		}
 		for _, item := range v {
-			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+			if s, ok := item.(string); ok {
 				w.fileRouting(path, s)
 			}
 		}
@@ -260,38 +258,49 @@ func (w *messageWalk) routingValue(path string, value interface{}) bool {
 	}
 }
 
-// messageHasText reports a value that holds a non-blank string or a number anywhere.
-func messageHasText(value interface{}) bool {
-	switch v := value.(type) {
-	case string:
-		return strings.TrimSpace(v) != ""
-	case json.Number:
-		return true
-	case []interface{}:
-		for _, item := range v {
-			if messageHasText(item) {
-				return true
-			}
-		}
-	case map[string]interface{}:
-		for _, item := range v {
-			if messageHasText(item) {
-				return true
-			}
-		}
+// fileRouting files a routing string under its path (a repeat gets #2, #3 ...).
+// Each string spends one node of the budget, so a large array of recipients is
+// bounded like any other walk.
+func (w *messageWalk) fileRouting(path, s string) {
+	if strings.TrimSpace(s) == "" || !w.nodes.Take(&w.trunc) {
+		return
 	}
-	return false
+	n := w.routingSeen[path] + 1
+	w.routingSeen[path] = n
+	if n == 1 {
+		w.routing[path] = s
+		return
+	}
+	w.routing[path+"#"+strconv.Itoa(n)] = s
 }
 
-func (w *messageWalk) fileRouting(path, s string) {
-	key := path
-	for n := 2; ; n++ {
-		if _, taken := w.routing[key]; !taken {
-			break
-		}
-		key = path + "#" + strconv.Itoa(n)
+// messageBinaryPayload reports an attachment's bytes: a long base64 value in
+// the buffer field (OpenClaw's "Base64/data-URL attachment") or a base64 data
+// URL anywhere. It is no message text; a value that does not read as base64 is.
+func messageBinaryPayload(key, s string) bool {
+	if len(s) < messagePayloadMinBytes {
+		return false
 	}
-	w.routing[key] = s
+	payload := s
+	if strings.HasPrefix(s, "data:") {
+		head := s[:min(len(s), 256)]
+		i := strings.Index(head, ";base64,")
+		if i < 0 {
+			return false
+		}
+		payload = s[i+len(";base64,"):]
+	} else if asciiLowerPreservingBytes(key) != "buffer" {
+		return false
+	}
+	probe := payload[:min(len(payload), messagePayloadProbeBytes)]
+	for i := 0; i < len(probe); i++ {
+		c := probe[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' ||
+			c == '+' || c == '/' || c == '-' || c == '_' || c == '=' || c == '\r' || c == '\n') {
+			return false
+		}
+	}
+	return len(payload) >= messagePayloadMinBytes
 }
 
 // messageRoutingArgs is the args the tool-policy lane reads for a message
@@ -309,22 +318,6 @@ func messageRoutingArgs(routing map[string]interface{}) json.RawMessage {
 	return b
 }
 
-// messageTextOverCapVerdict is the verdict of text the read limits dropped.
-// The part that was not read is unknown, so the call alerts whatever the read
-// part held; a stronger verdict from the lanes stands.
-func messageTextOverCapVerdict() *ToolInspectVerdict {
-	finding := RuleFinding{
-		RuleID: messageTextOverCapRuleID, Title: "message text past the read limits",
-		Severity: "MEDIUM", Confidence: 1.0, Tags: []string{"message-text", "unknown"},
-	}
-	return &ToolInspectVerdict{
-		Action: "alert", Severity: "MEDIUM", Confidence: 1.0,
-		Reason:           messageTextOverCapReason,
-		Findings:         []string{messageTextOverCapRuleID},
-		DetailedFindings: []RuleFinding{finding},
-	}
-}
-
 // inspectMessageCall decides a message tool call that reached /inspect/tool.
 // The args are parsed once; the text and the routing values come from them.
 func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
@@ -340,7 +333,7 @@ func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequ
 	if text == "" {
 		text = req.Content
 	}
-	if text == "" && !ex.OverCap {
+	if text == "" && !ex.Truncated.Any() {
 		if args := strings.TrimSpace(string(req.Args)); args == "" || args == "null" || args == "{}" || args == "[]" {
 			// Nothing to inspect: an empty call.
 			return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
@@ -359,8 +352,8 @@ func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequ
 		routeReq.Args, routeReq.Content, routeReq.skipJudge = routing, "", true
 		verdict = mergeToolInspectVerdicts(verdict, a.inspectToolPolicyCtx(ctx, &routeReq))
 	}
-	if ex.OverCap {
-		verdict = mergeToolInspectVerdicts(verdict, messageTextOverCapVerdict())
-	}
+	// Text the read limits dropped is unknown: the verdict of the part read
+	// stands, and the call is at least at the unknown tier of the policy.
+	verdict.floorBoundedTruncated(ex.Truncated, a.boundedTier(ctx, req.Connector))
 	return verdict
 }

@@ -1,5 +1,5 @@
 {
- "comment": "Cases shared by internal/gateway/message_text_test.go and extensions/defenseclaw/src/__tests__/message-text.test.ts: the plugin and the gateway read a message call's params the same way (GAP-0177, GAP-0290..0292). gen builds a large input: leaves N strings in blocks, depth N nested objects around one string, depth_empty N nested objects around an empty array, body of N a's and text of N z's. Routing keys are dotted paths; a repeated path gets #2, #3. Synthetic values only. Also gen: nodes N empty objects in one array followed by one string; multibyte N two-byte characters in text. text_len counts UTF-8 bytes. valid_utf8 asserts no cut character. Numbers are text, read as their JSON literal in Go and String(n) in the plugin, so the fixture holds integers and short decimals only.",
+ "comment": "Cases shared by internal/gateway/message_text_test.go and extensions/defenseclaw/src/__tests__/message-text.test.ts: the plugin and the gateway read a message call's params the same way (GAP-0177, GAP-0290..0292). gen builds a large input: leaves N strings in blocks, depth N nested objects around one string, depth_empty N nested objects around an empty array (a limit hit counts whatever the value holds), body of N a's and text of N z's. Routing keys are dotted paths; a repeated path gets #2, #3. Synthetic values only. Also gen: nodes N empty objects in one array followed by one string; multibyte N two-byte characters in text. text_len counts UTF-8 bytes. valid_utf8 asserts no cut character. Numbers are text, read as their JSON literal in Go and String(n) in the plugin, so the fixture holds integers and short decimals only. Also gen: strings N short strings in blocks; table N rows of two cells; payload_buffer N base64 characters under buffer, payload_dataurl N behind a data:...;base64, prefix under media (message hi beside each); plainbuf N repeats of five-character words under buffer; routing_strings N recipients in to beside text x. Routing is Go-only (the plugin does not build it): the plugin test ignores it.",
  "cases": [
   {
    "name": "content",
@@ -187,14 +187,6 @@
    "text": "seen"
   },
   {
-   "name": "more strings than the leaf limit",
-   "gen": {
-    "leaves": 600
-   },
-   "text_len": 1023,
-   "over_cap": true
-  },
-  {
    "name": "a string below the depth limit",
    "gen": {
     "depth": 12
@@ -203,11 +195,12 @@
    "over_cap": true
   },
   {
-   "name": "an empty container below the depth limit is nothing",
+   "name": "an empty container below the depth limit still hits the limit",
    "gen": {
     "depth_empty": 12
    },
-   "text_len": 0
+   "text_len": 0,
+   "over_cap": true
   },
   {
    "name": "text past the size limit keeps head and tail",
@@ -371,6 +364,64 @@
    "text_len": 262145,
    "over_cap": true,
    "valid_utf8": true
+  },
+  {
+   "name": "600 short strings are under the node limit",
+   "gen": {
+    "strings": 600
+   },
+   "text_len": 1199
+  },
+  {
+   "name": "a 700-row table is text, not a cap hit",
+   "gen": {
+    "table": 700
+   },
+   "text_len": 2799
+  },
+  {
+   "name": "a 300 KB base64 buffer is an attachment, not text",
+   "gen": {
+    "payload_buffer": 300000
+   },
+   "text": "hi"
+  },
+  {
+   "name": "a base64 data URL in any field is an attachment",
+   "gen": {
+    "payload_dataurl": 300000
+   },
+   "text": "hi"
+  },
+  {
+   "name": "a plain-text buffer over the byte limit is text",
+   "gen": {
+    "plainbuf": 60000
+   },
+   "text_len": 262145,
+   "over_cap": true
+  },
+  {
+   "name": "a short base64 buffer is text",
+   "params": {
+    "buffer": "QUJD"
+   },
+   "text": "QUJD"
+  },
+  {
+   "name": "a data URL that is not base64 is text",
+   "params": {
+    "media": "data:text/plain,hello"
+   },
+   "text": "data:text/plain,hello"
+  },
+  {
+   "name": "routing strings spend the node budget",
+   "gen": {
+    "routing_strings": 5000
+   },
+   "text": "x",
+   "over_cap": true
   }
  ]
 }
