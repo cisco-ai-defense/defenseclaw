@@ -26,6 +26,16 @@ import (
 
 const correlationReceiptTTL = 7 * 24 * time.Hour
 
+// correlationSettledReceiptTTL is how long the receipt of a PreToolUse
+// still suppresses a replay of it once its PostToolUse settled the call
+// (audit SettleReceipt). A replay suppressed in that time is not a second
+// decision of the call: no second pending operation or chain pending action,
+// audit row or chain step. The hour is twice the longest tool chain window
+// (guardrail.ToolChainMaxHorizon), so a replay that comes later can no
+// longer join the steps of the call it repeats; it is recorded again, as
+// one past correlationReceiptTTL always was (S8 R5).
+const correlationSettledReceiptTTL = time.Hour
+
 // correlateHookOccurrence is the hook-side occurrence transaction boundary.
 // Policy evaluation still runs for an exact transport replay, but the replay
 // receipt suppresses duplicate telemetry/audit emission after incrementing its
@@ -569,11 +579,16 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 			!errors.Is(resolveErr, audit.ErrCorrelationNotFound) {
 			return ctx, req, resolveErr
 		}
-		// The end settled the call it resolved: the start's replay receipt
-		// has done its job (DeleteSettledReceipts).
+		// The end settled the call it resolved: its start's own hook receipt
+		// (the key the PreToolUse claimed) expires soon (SettleReceipt).
 		if resolveErr == nil && settledStart != "" {
-			if err := tx.DeleteSettledReceipts(ctx, settledStart); err != nil {
-				return ctx, req, err
+			if startReceipt := correlationReceiptForHook(spec, instance.ConnectorInstanceID,
+				hookReceiptCaller(ctx), reviewedHookToolRetryDigest(spec, instance.ConnectorInstanceID, req,
+					connector.CorrelationLifecycleToolStart), fingerprintHex, now); startReceipt != nil {
+				if err := tx.SettleReceipt(ctx, instance.ConnectorInstanceID, startReceipt.SourceKeyDigest,
+					settledStart, now.Add(correlationSettledReceiptTTL)); err != nil {
+					return ctx, req, err
+				}
 			}
 		}
 	}

@@ -1381,35 +1381,53 @@ func (repo *CorrelationRepository) markReceiptCanonicalPersisted(
 	return nil
 }
 
-// correlationReceiptSettleSQL is DeleteSettledReceipts' statement; it seeks
-// idx_correlation_receipts_event.
-const correlationReceiptSettleSQL = `DELETE FROM correlation_receipts
-	WHERE semantic_event_id=? AND accepted_time_unix_nano IS NOT NULL`
+// correlationReceiptSettleSQL is SettleReceipt's statement; it seeks the
+// receipts' primary key by its two leading columns or
+// idx_correlation_receipts_event, never reads the table whole.
+const correlationReceiptSettleSQL = `UPDATE correlation_receipts
+	SET expires_time_unix_nano=MAX(last_received_time_unix_nano, MIN(expires_time_unix_nano, ?))
+	WHERE connector_instance_id=? AND source_key_digest=? AND semantic_event_id=?`
 
-// DeleteSettledReceipts deletes the accepted delivery receipts of the start
-// of a tool call that its end has just settled. A receipt suppresses a
-// replay of the start: the agent sending the same PreToolUse again while it
-// waits for the answer. Once the call's PostToolUse came, the agent has
-// moved on, and the receipt only held bytes (and its event) for its week
-// of TTL. A replay that still comes after this is evaluated and recorded
-// again, as one past the TTL is: a duplicate record, never a missed check.
-// A receipt not yet accepted stays, so the start's acceptance mark, which
-// can still be on its way, finds it (finalizeHookCorrelationReceiptBounded);
-// retention removes it when it expires. A Secure Client store keeps
-// main's receipts (S8 R5).
-func (tx *CorrelationTx) DeleteSettledReceipts(ctx context.Context, start SemanticEventID) error {
+// SettleReceipt shortens the delivery receipt of one settled occurrence,
+// named by its own source key, to expire at expiresAt. The hook path calls
+// it for the PreToolUse of a tool call whose PostToolUse has just come
+// (correlationSettledReceiptTTL): the receipt still suppresses the agent
+// sending that PreToolUse again for as long as a replay could still make a
+// second decision of the call count, and retention then removes it instead
+// of keeping it, and its event, for the whole receipt TTL. Only the receipt
+// of that key changes: another rail's receipt of the same event (a native
+// leaf that reported the event's semantic ID) keeps its own expiry. A
+// replay that comes later is recorded again, as one past the TTL always
+// was. A Secure Client store keeps main's receipts (S8 R5).
+func (tx *CorrelationTx) SettleReceipt(
+	ctx context.Context,
+	instance ConnectorInstanceID,
+	sourceKeyDigest string,
+	semantic SemanticEventID,
+	expiresAt time.Time,
+) error {
 	if err := tx.usable(ctx); err != nil {
 		return err
 	}
-	if err := validateUUIDv7("settled start semantic event id", string(start)); err != nil {
+	if err := validateUUIDv7("connector instance id", string(instance)); err != nil {
 		return err
+	}
+	if err := validateSHA256("receipt source key digest", sourceKeyDigest, true); err != nil {
+		return err
+	}
+	if err := validateUUIDv7("settled semantic event id", string(semantic)); err != nil {
+		return err
+	}
+	if expiresAt.IsZero() {
+		return errors.New("audit: settled receipt expiry is required")
 	}
 	if tx.repo.store.secureClientSchema {
 		return nil
 	}
 	if _, err := txExecContextObserved(ctx, tx.tx, "correlation_receipt_settle",
-		tx.repo.store.sqliteBusyObservabilityV8(), correlationReceiptSettleSQL, string(start)); err != nil {
-		return fmt.Errorf("audit: delete settled correlation receipts: %w", err)
+		tx.repo.store.sqliteBusyObservabilityV8(), correlationReceiptSettleSQL,
+		unixNano(expiresAt), string(instance), sourceKeyDigest, string(semantic)); err != nil {
+		return fmt.Errorf("audit: settle correlation receipt: %w", err)
 	}
 	return nil
 }

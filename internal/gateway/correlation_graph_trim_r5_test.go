@@ -84,9 +84,8 @@ func TestMembershipIdentifierMatchesAreDroppedSoTheyAreNotStored(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		digest := sha256.Sum256([]byte(kind))
 		identifier := audit.CorrelationMatchIdentifier{
-			Namespace: "claudecode/" + string(kind), Kind: kind, ValueDigest: hex.EncodeToString(digest[:]),
+			Namespace: "claudecode/" + string(kind), Kind: kind, ValueDigest: digestHexForTest(string(kind)),
 		}
 		if _, err := tx.PutIdentifier(ctx, audit.CorrelationIdentifier{
 			SemanticEventID: semantic, ConnectorInstanceID: instance.ConnectorInstanceID,
@@ -316,38 +315,96 @@ func waitForCorrelationRowsForTest(t *testing.T, path string, want int, query st
 	}
 }
 
-// TestSettledClaudeToolCallReleasesItsReplayReceipt: a PreToolUse sent
-// again before its PostToolUse is still suppressed as a replay; the
-// PostToolUse deletes the start's accepted receipt; a PreToolUse sent again
-// after it is evaluated and recorded again, never dropped (S8 R5).
-func TestSettledClaudeToolCallReleasesItsReplayReceipt(t *testing.T) {
+func digestHexForTest(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+// TestSettledClaudeToolCallShortensOnlyItsOwnReplayReceipt: a PreToolUse
+// sent again before or after its PostToolUse is suppressed as a replay; the
+// PostToolUse cuts the start's own hook receipt to
+// correlationSettledReceiptTTL; another rail's receipt on the same event (a
+// native leaf that reported the start's semantic ID) keeps its expiry, and
+// that leaf sent again after the PostToolUse is still a suppressed replay
+// (S8 R5).
+func TestSettledClaudeToolCallShortensOnlyItsOwnReplayReceipt(t *testing.T) {
 	fixture := newAuditFailureHookFixture(t, "open")
 	cwd := t.TempDir()
 	const accepted = `SELECT COUNT(*) FROM correlation_receipts WHERE accepted_time_unix_nano IS NOT NULL`
+	const occurrences = `SELECT COUNT(*) FROM correlation_events`
 	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_settle")
 	waitForCorrelationRowsForTest(t, fixture.path, 1, accepted)
-	events := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`)
-
+	var start audit.SemanticEventID
+	var instance audit.ConnectorInstanceID
+	if err := openCorrelationDB(t, fixture.path).QueryRow(`SELECT semantic_event_id, connector_instance_id
+		FROM correlation_receipts`).Scan(&start, &instance); err != nil {
+		t.Fatal(err)
+	}
+	events := countCorrelationRowsForTest(t, fixture.path, occurrences)
 	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_settle")
-	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`); got != events {
+	if got := countCorrelationRowsForTest(t, fixture.path, occurrences); got != events {
 		t.Fatalf("a replay before the PostToolUse added %d occurrences", got-events)
 	}
-	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_receipts
-		WHERE delivery_count=2`); got != 1 {
-		t.Fatalf("the replay before the PostToolUse was not counted on its receipt (%d)", got)
+
+	// A native leaf of the same call, attached to the start by its
+	// semantic ID, holds a receipt of its own on the start's event.
+	repo, err := fixture.api.store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	native := audit.CorrelationReceiptClaim{
+		SourceKeyDigest: digestHexForTest("native-leaf"), FingerprintSHA256: digestHexForTest("native-bytes"),
+		ReceivedAt: now, ExpiresAt: now.Add(correlationReceiptTTL),
+	}
+	attach := func() audit.CorrelationOccurrenceResult {
+		t.Helper()
+		tx, _, result, err := repo.BeginExistingOccurrenceWithReceipt(t.Context(), start, native)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if result := attach(); result.Status != audit.CorrelationOccurrenceExisting || result.Receipt == nil {
+		t.Fatalf("native attach = %+v", result)
+	} else if err := repo.MarkOccurrenceCanonicalPersisted(t.Context(), *result.Receipt, time.Now().UTC()); err != nil {
+		t.Fatal(err)
 	}
 
 	sendClaudeToolHookForTest(t, fixture, cwd, "PostToolUse", "toolu_r5_settle")
-	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_receipts`); got != 0 {
-		t.Fatalf("the settled call kept %d receipts, want 0", got)
+	expiry := func(source string) time.Time {
+		t.Helper()
+		var nanos int64
+		if err := openCorrelationDB(t, fixture.path).QueryRow(`SELECT expires_time_unix_nano FROM correlation_receipts
+			WHERE semantic_event_id=? AND connector_instance_id=? AND source_key_digest=?`,
+			string(start), string(instance), source).Scan(&nanos); err != nil {
+			t.Fatal(err)
+		}
+		return time.Unix(0, nanos).UTC()
 	}
-	events = countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`)
+	var hookSource string
+	if err := openCorrelationDB(t, fixture.path).QueryRow(`SELECT source_key_digest FROM correlation_receipts
+		WHERE semantic_event_id=? AND source_key_digest<>?`, string(start), native.SourceKeyDigest).Scan(&hookSource); err != nil {
+		t.Fatal(err)
+	}
+	if got := expiry(hookSource); got.After(time.Now().Add(correlationSettledReceiptTTL)) {
+		t.Fatalf("the settled start's receipt expires at %v, after the settled TTL", got)
+	}
+	if got := expiry(native.SourceKeyDigest); got.Before(now.Add(correlationReceiptTTL - time.Minute)) {
+		t.Fatalf("the native receipt on the start's event was cut to %v", got)
+	}
+	if result := attach(); result.Status != audit.CorrelationOccurrenceReplay || !result.SuppressEmission {
+		t.Fatalf("the native leaf sent again after the PostToolUse = %+v, want a suppressed replay", result)
+	}
 
+	events = countCorrelationRowsForTest(t, fixture.path, occurrences)
 	sendClaudeToolHookForTest(t, fixture, cwd, "PreToolUse", "toolu_r5_settle")
-	if got := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events`); got != events+1 {
-		t.Fatalf("a replay after the PostToolUse recorded %d occurrences, want 1", got-events)
+	if got := countCorrelationRowsForTest(t, fixture.path, occurrences); got != events {
+		t.Fatalf("a replay after the PostToolUse added %d occurrences, want none", got-events)
 	}
-	waitForCorrelationRowsForTest(t, fixture.path, 1, accepted)
 }
 
 // TestSettledClaudeToolCallLeavesNoChainPendingAction: the tool chain's
@@ -364,5 +421,32 @@ func TestSettledClaudeToolCallLeavesNoChainPendingAction(t *testing.T) {
 	sendClaudeToolHookForTest(t, fixture, cwd, "PostToolUse", "toolu_r5_chain")
 	if got := countCorrelationRowsForTest(t, fixture.path, actions); got != 0 {
 		t.Fatalf("a settled call left %d chain pending actions, want 0", got)
+	}
+}
+
+// requireActivePendingStartForTest requires want pending operations, all
+// active, started by start in the store at path.
+func requireActivePendingStartForTest(t *testing.T, path, start string, want int) {
+	t.Helper()
+	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_pending_operations
+		WHERE start_semantic_event_id=?`, start); got != want {
+		t.Fatalf("pending operations started by %s = %d, want %d", start, got, want)
+	}
+	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_pending_operations
+		WHERE start_semantic_event_id=? AND status='active'`, start); got != want {
+		t.Fatalf("active pending operations started by %s = %d, want %d", start, got, want)
+	}
+}
+
+// requireToolEdgeForTest requires the tool membership edge of event.
+func requireToolEdgeForTest(t *testing.T, path, event, toolID string) {
+	t.Helper()
+	if toolID == "" {
+		t.Fatal("no tool invocation ID")
+	}
+	if got := countCorrelationRowsForTest(t, path, `SELECT COUNT(*) FROM correlation_relationships
+		WHERE from_kind='semantic_event' AND from_id=? AND to_kind='tool_invocation' AND to_id=?
+		AND status='active'`, event, toolID); got != 1 {
+		t.Fatalf("tool edge of %s to %s: %d rows, want 1", event, toolID, got)
 	}
 }
