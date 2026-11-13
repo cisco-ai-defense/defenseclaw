@@ -9,6 +9,7 @@ package gateway
 import (
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -33,7 +34,6 @@ import (
 const (
 	outboundPIICardRuleID     = "PII-CARD-LABELED"
 	outboundPIIPassportRuleID = "PII-PASSPORT-LABELED"
-	outboundPIIMaxBytes       = 1 << 16
 )
 
 var outboundPIIPassport = regexp.MustCompile(
@@ -90,65 +90,60 @@ func outboundPIIRulePattern(data []byte, ruleID string) string {
 	return ""
 }
 
-// trustedActionSendToolName reports a tool whose name says it sends a message
-// out: send_email, post_message, slack.publish, forward. A name that also
-// says read, get, list or search is a lookup.
+// trustedActionSendToolName reports a tool whose name says it hands a message
+// to someone: a send verb in the name (send, post, publish, forward, reply,
+// share, notify, broadcast, tweet, dm, email, mail) and no read verb before
+// it. The name is cut into words (sendEmail, chat_postMessage), and a noun
+// alone (message, email, history) decides nothing: message_history is a
+// lookup, get_email is a lookup, mail_send is not.
 func trustedActionSendToolName(tool string) bool {
-	leaf := strings.ToLower(tool)
-	if i := strings.LastIndex(leaf, "__"); i >= 0 {
-		leaf = leaf[i+2:]
-	} else if i := strings.LastIndexByte(leaf, '.'); i >= 0 {
-		leaf = leaf[i+1:]
-	}
-	send := false
-	for _, word := range strings.FieldsFunc(leaf, func(r rune) bool {
-		return r == '_' || r == '-' || r == '.' || r == ' ' || r == '/'
-	}) {
+	for _, word := range toolLeafWords(tool) {
 		switch word {
 		case "read", "get", "list", "search", "find", "fetch", "view", "describe", "show", "query",
-			"draft", "drafts", "inbox", "unread", "count", "check":
+			"draft", "drafts", "inbox", "unread", "count", "check", "history", "log", "logs", "lookup",
+			"status", "summary", "retrieve", "load", "open":
 			return false
-		case "send", "email", "mail", "forward", "publish", "notify", "post", "reply", "share",
-			"message", "dm", "tweet":
-			send = true
+		case "send", "post", "publish", "forward", "reply", "share", "notify", "broadcast", "tweet", "dm",
+			"email", "mail":
+			return true
 		}
 	}
-	return send
+	return false
 }
 
-// outboundPIIText joins the string values of a tool call's arguments.
-func outboundPIIText(raw json.RawMessage) string {
+// outboundPIIStrings returns the string values of a tool call's arguments in
+// a fixed order (object keys sorted, arrays in order), so the same call is
+// judged the same way every time. Nothing is cut: each string is scanned
+// whole, and RE2 is linear in its length, so the request body limit is the
+// only bound and there is no cap that could hide what comes after it.
+func outboundPIIStrings(raw json.RawMessage) []string {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
-		return ""
+		return nil
 	}
-	var parts []string
-	size := 0
+	var out []string
 	var walk func(any)
 	walk = func(v any) {
-		if size > outboundPIIMaxBytes {
-			return
-		}
 		switch typed := v.(type) {
 		case string:
-			parts = append(parts, typed)
-			size += len(typed)
+			out = append(out, typed)
 		case []any:
 			for _, item := range typed {
 				walk(item)
 			}
 		case map[string]any:
-			for _, item := range typed {
-				walk(item)
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				walk(typed[key])
 			}
 		}
 	}
 	walk(value)
-	text := strings.Join(parts, "\n")
-	if len(text) > outboundPIIMaxBytes {
-		text = text[:outboundPIIMaxBytes]
-	}
-	return text
+	return out
 }
 
 // outboundPIIQuotes turns the quote characters of a dict or JSON rendering
@@ -163,11 +158,10 @@ func outboundPIIFindings(request trustedActionRequest, findings []RuleFinding) [
 		len(request.Input.Args) == 0 {
 		return findings
 	}
-	text := outboundPIIText(request.Input.Args)
-	if text == "" {
+	strs := outboundPIIStrings(request.Input.Args)
+	if len(strs) == 0 {
 		return findings
 	}
-	text = outboundPIIQuotes.Replace(text)
 	add := func(ruleID, title string) {
 		for _, existing := range findings {
 			if existing.RuleID == ruleID {
@@ -181,25 +175,29 @@ func outboundPIIFindings(request trustedActionRequest, findings []RuleFinding) [
 			enforcement: findingEnforcementAlertOnly,
 		})
 	}
-	if card := outboundPIICardPattern(); card != nil {
-		for _, loc := range card.FindAllStringIndex(text, 8) {
-			if paymentcard.LabeledRunAt(text, loc[0], loc[1]) {
-				add(outboundPIICardRuleID, "Labelled payment card number in a message the tool sends")
+	card := outboundPIICardPattern()
+	for _, text := range strs {
+		text = outboundPIIQuotes.Replace(text)
+		if card != nil {
+			for _, loc := range card.FindAllStringIndex(text, 8) {
+				if paymentcard.LabeledRunAt(text, loc[0], loc[1]) {
+					add(outboundPIICardRuleID, "Labelled payment card number in a message the tool sends")
+					break
+				}
+			}
+		}
+		for _, m := range outboundPIIPassport.FindAllStringSubmatchIndex(text, 8) {
+			value := text[m[2]:m[3]]
+			digits := 0
+			for _, r := range value {
+				if r >= '0' && r <= '9' {
+					digits++
+				}
+			}
+			if digits >= 5 {
+				add(outboundPIIPassportRuleID, "Labelled passport number in a message the tool sends")
 				break
 			}
-		}
-	}
-	for _, m := range outboundPIIPassport.FindAllStringSubmatchIndex(text, 8) {
-		value := text[m[2]:m[3]]
-		digits := 0
-		for _, r := range value {
-			if r >= '0' && r <= '9' {
-				digits++
-			}
-		}
-		if digits >= 5 {
-			add(outboundPIIPassportRuleID, "Labelled passport number in a message the tool sends")
-			break
 		}
 	}
 	return findings
