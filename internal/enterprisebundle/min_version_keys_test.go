@@ -299,3 +299,28 @@ func TestComposeRequiresProductFloorForAccountJoin(t *testing.T) {
 		}
 	}
 }
+
+func TestComposeRequiresProductFloorForRoutingAdmin(t *testing.T) {
+	config := bundleConfig(t) + "routing:\n  enabled: false\n  classifier: rules\n  models:\n    - name: fast\n      provider: openai\n      model: gpt-4.1-mini\n  admin:\n    allowed_aliases: [fast]\n"
+	for _, tc := range []struct {
+		min    string
+		refuse bool
+	}{{"", true}, {"1.0.9", true}, {"1.0.10", false}} {
+		root, b := writeBundle(t, config)
+		in := enterprisebundle.ComposeInput{
+			Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
+			Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
+			MinProductVersion: tc.min, ProductVersion: "1.0.10", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+		}
+		_, _, err := enterprisebundle.Compose(context.Background(), in)
+		if tc.refuse {
+			if enterprisebundle.CodeOf(err) != enterprisebundle.CodeConfigInvalid || !strings.Contains(errString(err), "routing.admin") {
+				t.Errorf("min %q: got %v, want config_invalid naming routing.admin", tc.min, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("min %q: %v", tc.min, err)
+		}
+	}
+}

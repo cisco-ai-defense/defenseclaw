@@ -18716,16 +18716,20 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
             try:
                 from defenseclaw.fail_mode import (
                     connector_fail_mode_report,
+                    failure_outcomes_summary,
                     managed_windows_verify_command,
                     rendered_fail_mode,
                     report_renders_fail_mode,
                 )
 
                 fail_mode = connector_fail_mode_report(cfg, connector)
+                # What each kind of hook failure does (#1441).
+                outcomes = failure_outcomes_summary(fail_mode.get("on_failure"))
                 rendered = rendered_fail_mode(fail_mode)
                 renders = report_renders_fail_mode(fail_mode)
             except Exception:  # noqa: BLE001 - doctor must still report partial state.
                 fail_mode = {"effective": "unknown", "provenance": "unavailable"}
+                outcomes = ""
                 rendered = None
                 renders = False
             if mode in {"observe", "action"}:
@@ -18734,6 +18738,8 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
                     f"{mode}; fail-mode={fail_mode['effective']}{fail_mode_note}; "
                     f"provenance={fail_mode['provenance']}"
                 )
+                if outcomes:
+                    detail += f"; on failure: {outcomes}"
                 desired = fail_mode.get("desired")
                 # Check the installed render against the desired policy;
                 # neither doctor's nor the agent's environment changes it.

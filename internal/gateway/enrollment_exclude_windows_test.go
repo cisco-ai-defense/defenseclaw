@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"os/user"
 	"strings"
 	"testing"
 
@@ -14,11 +15,17 @@ import (
 
 // GAP-1111: on Windows the LSA decides. A local account the host has is
 // not listed; a bare name and an AzureAD\ name it maps to no account are,
-// by position, without their text.
+// by position, without their text. The known account is the one running the
+// test: a hosted runner has no account called Administrator (the Windows
+// Native CI run 43323839711 listed it as unknown).
 func TestWindowsStandaloneStatusNamesExcludeEntriesThatMatchNoAccount(t *testing.T) {
+	current, err := user.Current()
+	if err != nil || current.Username == "" {
+		t.Fatalf("no current account to use as the known entry: %v", err)
+	}
 	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = "standalone"
-	cfg.Enterprise.Enrollment.ExcludeUsers = []string{`BUILTIN\Administrators`, "Administrator", "r106fxe8-nosuch-acct", `AzureAD\r106fxe8-nobody`}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{`BUILTIN\Administrators`, current.Username, "r106fxe8-nosuch-acct", `AzureAD\r106fxe8-nobody`}
 	var got []string
 	for _, warning := range standaloneProfileWarnings(nil, cfg) {
 		if strings.Contains(warning, "exclude_users") {
