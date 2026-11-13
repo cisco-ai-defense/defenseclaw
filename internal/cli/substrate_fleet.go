@@ -44,11 +44,9 @@ import (
 // later, there is no document.
 const substrateExitUnreachable = 75
 
-// substrateClusterFlags say where an administrator reads the cluster from.
-// By default the cluster is read with kubectl; --api reads the documents the
-// DefenseClaw gateway builds itself (administrators only).
+// substrateClusterFlags say how an administrator reads the cluster: with
+// kubectl, the SubstrateInstall file and their own cloud credentials.
 type substrateClusterFlags struct {
-	api         bool
 	kubeconfig  string
 	kubeContext string
 	namespace   string
@@ -58,13 +56,6 @@ type substrateClusterFlags struct {
 	// managedAtespaces is the chart's managedAtespaces (openfga_grants).
 	managedAtespaces []string
 	timeout          time.Duration
-	com              substrateCommon
-}
-
-func (f *substrateClusterFlags) add(cmd *cobra.Command) {
-	cmd.Flags().BoolVar(&f.api, "api", false, "read the document from the DefenseClaw gateway (needs an administrator sign-in) instead of with kubectl")
-	f.addKube(cmd)
-	f.com.add(cmd)
 }
 
 // addKube adds the flags that say how to read the cluster with kubectl.
@@ -162,7 +153,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	var o fleet.Observed
 	var r fleet.Report
 	if f.installFile == "" {
-		return o, r, withExitCode(errors.New("give the SubstrateInstall file you gave ate-setup with --install-file FILE: the callout and router settings are read from it (or use --api as an administrator)"), 2)
+		return o, r, withExitCode(errors.New("give the SubstrateInstall file you gave ate-setup with --install-file FILE: the callout and router settings are read from it"), 2)
 	}
 	install, err := os.ReadFile(f.installFile)
 	if err != nil {
@@ -431,19 +422,19 @@ func newSubstrateVerifyCmd() *cobra.Command {
 		Long: `For administrators. Checks that the cluster is set up as DefenseClaw needs it: Substrate's version is
 one DefenseClaw is tested on, the cluster has its own sign-in issuer, the snapshot bucket is private and
 encrypted, DefenseClaw holds the right access grants, the egress callout is registered and nobody else
-can reach agents through the router. By default it reads the cluster with kubectl; --api reads the same
-checks from the DefenseClaw gateway.
+can reach agents through the router. It reads the cluster with kubectl and the snapshot bucket with your
+own aws or gcloud CLI.
 
 Exit 0: every check passed or warned. Exit 1: a check failed. Exit 2: wrong arguments. Exit 75: the cluster
 could not be reached; there is no document, retry later. With --json it prints the verify document.`,
-		Example: "defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --api --json",
+		Example: "defenseclaw substrate verify --install-file install.yaml\ndefenseclaw substrate verify --install-file install.yaml --json",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runSubstrateFleet(cmd, "verify", &out, &cf)
 		},
 	}
 	out.add(cmd)
-	cf.add(cmd)
+	cf.addKube(cmd)
 	return cmd
 }
 
@@ -459,40 +450,20 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 	var checks []fleet.Check
 	var ok = true
 	var header string
-	if cf.api {
-		s, err := substrateOpen(cmd, &cf.com)
-		if err != nil {
-			return err
+	o, r, err := collectFleet(ctx, cf)
+	if err != nil {
+		var un *errClusterUnreachable
+		if errors.As(err, &un) {
+			return withExitCode(err, substrateExitUnreachable)
 		}
-		if kind == "verify" {
-			d, err := s.Client.FleetVerifyDocument(ctx)
-			if err != nil {
-				return substrateFleetAPIFail(err)
-			}
-			doc, checks, ok, header = d, d.Checks, d.OK, d.Cluster.Name
-		} else {
-			d, err := s.Client.FleetStatusDocument(ctx)
-			if err != nil {
-				return substrateFleetAPIFail(err)
-			}
-			doc, checks, header = d, d.Checks, d.Cluster.Name
-		}
+		return err
+	}
+	if kind == "verify" {
+		d := fleet.BuildVerify(o, r.ProductVersion, r.Now)
+		doc, checks, ok, header = d, d.Checks, d.OK, d.Cluster.Name
 	} else {
-		o, r, err := collectFleet(ctx, cf)
-		if err != nil {
-			var un *errClusterUnreachable
-			if errors.As(err, &un) {
-				return withExitCode(err, substrateExitUnreachable)
-			}
-			return err
-		}
-		if kind == "verify" {
-			d := fleet.BuildVerify(o, r.ProductVersion, r.Now)
-			doc, checks, ok, header = d, d.Checks, d.OK, d.Cluster.Name
-		} else {
-			d := fleet.BuildStatus(o, r)
-			doc, checks, header = d, d.Checks, d.Cluster.Name
-		}
+		d := fleet.BuildStatus(o, r)
+		doc, checks, header = d, d.Checks, d.Cluster.Name
 	}
 	w := cmd.OutOrStdout()
 	if asJSON {
@@ -506,14 +477,6 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 		return withExitCode(errors.New("a cluster check failed"), 1)
 	}
 	return nil
-}
-
-func substrateFleetAPIFail(err error) error {
-	if strings.Contains(err.Error(), "cannot reach") || strings.Contains(err.Error(), "nothing answers") ||
-		strings.Contains(err.Error(), "did not answer in time") {
-		return withExitCode(err, substrateExitUnreachable)
-	}
-	return substrateFail(err)
 }
 
 func printSubstrateFleet(w io.Writer, kind, cluster string, doc any, checks []fleet.Check, ok bool) {
