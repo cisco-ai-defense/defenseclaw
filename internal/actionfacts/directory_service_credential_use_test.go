@@ -50,6 +50,9 @@ func TestExactNetExecDomainServiceAuth(t *testing.T) {
 		{"global value options before protocol", "nxc -t 4 --timeout=5 --log run.log smb 198.51.100.10 -u svc -p S3cretP4ss", true, true},
 		{"unknown option before protocol stays partial", "nxc --frobnicate smb 198.51.100.10 -u svc -p S3cretP4ss", false, false},
 		{"global option missing its value", "nxc --timeout", false, false},
+		{"joined short global value", "nxc -t4 smb 198.51.100.10 -u svc -p S3cretP4ss", true, true},
+		{"short global value with equals", "nxc -t=4 smb 198.51.100.10 -u svc -p S3cretP4ss", true, true},
+		{"double dash before protocol", "nxc --verbose -- smb 198.51.100.10 -u svc -p S3cretP4ss", true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +124,18 @@ func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 // TestNetExecNTDSDumpAfterGlobalOptions keeps the NTDS dump owned by the dump
 // grammar when a global option precedes the protocol, in POSIX and cmd.
 func TestNetExecNTDSDumpAfterGlobalOptions(t *testing.T) {
+	for _, command := range []string{
+		"nxc smb 198.51.100.10 -u administrator -H aa:bb --ntds",
+		"nxc smb 198.51.100.10 -u administrator -p S3cretP4ss -M ntdsutil",
+	} {
+		facts := Analyze(adpBashInput(command))
+		if len(facts.Commands) != 1 || !ExactNetExecNTDSDump(facts.Commands[0]) {
+			t.Fatalf("command=%q is not an ExactNetExecNTDSDump", command)
+		}
+	}
+	if facts := Analyze(adpBashInput("nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares")); ExactNetExecNTDSDump(facts.Commands[0]) {
+		t.Fatal("a credentialed --shares call was taken for an NTDS dump")
+	}
 	for _, in := range []Input{
 		adpBashInput("nxc --verbose smb 198.51.100.10 -u administrator -H aa:bb --ntds"),
 		{Tool: "shell", Command: "nxc.exe smb 198.51.100.10 -u administrator -H aa:bb --ntds", DialectHint: DialectCMD, CWD: `C:\repo`},

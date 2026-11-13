@@ -114,10 +114,9 @@ Example:
 }
 
 var (
-	rulePackValidateDir         string
-	rulePackValidateJSON        bool
-	rulePackValidateProtections string
-	rulePackValidateLayersJSON  string
+	rulePackValidateDir        string
+	rulePackValidateJSON       bool
+	rulePackValidateLayersJSON string
 
 	// rulePackServiceReadProblemFn is replaced by tests.
 	rulePackServiceReadProblemFn = rulePackServiceReadProblem
@@ -137,18 +136,11 @@ func init() {
 		"emit a versioned machine-readable result",
 	)
 	rulePackValidateCmd.Flags().StringVar(
-		&rulePackValidateProtections,
-		"protections",
-		"",
-		"comma-separated opt-in protection packs to compose over the pack before validating",
-	)
-	rulePackValidateCmd.Flags().StringVar(
 		&rulePackValidateLayersJSON,
 		"layers-json",
 		"",
 		"JSON array of guardrail.rules layers, widest scope first (protections, enable, disable, "+
-			"severity_overrides), to compose over the pack before validating, as the gateway does on reload; "+
-			"--protections is applied after them",
+			"severity_overrides), to compose over the pack before validating, as the gateway does on reload",
 	)
 	rulePackCmd.AddCommand(rulePackValidateCmd)
 	rootCmd.AddCommand(rulePackCmd)
@@ -195,7 +187,7 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
 	}
 
-	layers, err := rulePackValidateCustomizations(rulePackValidateLayersJSON, rulePackValidateProtections)
+	layers, err := rulePackValidateCustomizations(rulePackValidateLayersJSON)
 	if err != nil {
 		return err
 	}
@@ -436,7 +428,7 @@ func rulePackSecureClient() bool {
 }
 
 // cliProtectionPackSource serves the embedded opt-in protection packs for the
-// --protections compose check, mirroring the gateway's own source.
+// --layers-json compose check, mirroring the gateway's own source.
 func cliProtectionPackSource(name string) ([]guardrail.ProtectionRuleFile, error) {
 	files, err := policyassets.ProtectionPackRules(name)
 	if err != nil {
@@ -460,10 +452,9 @@ type rulePackValidateLayer struct {
 	SeverityOverrides map[string]string `json:"severity_overrides"`
 }
 
-// rulePackValidateCustomizations turns --layers-json and --protections into
-// the guardrail.Compose layers, in order: the JSON layers widest scope first,
-// then --protections as one more layer.
-func rulePackValidateCustomizations(layersJSON, protections string) ([]guardrail.Customization, error) {
+// rulePackValidateCustomizations turns --layers-json into the guardrail.Compose
+// layers, widest scope first.
+func rulePackValidateCustomizations(layersJSON string) ([]guardrail.Customization, error) {
 	var out []guardrail.Customization
 	if strings.TrimSpace(layersJSON) != "" {
 		decoder := json.NewDecoder(strings.NewReader(layersJSON))
@@ -487,20 +478,5 @@ func rulePackValidateCustomizations(layersJSON, protections string) ([]guardrail
 			}
 		}
 	}
-	if list := parseRulePackProtections(protections); len(list) > 0 {
-		out = append(out, guardrail.Customization{Protections: list})
-	}
 	return out, nil
-}
-
-// parseRulePackProtections splits a comma-separated protection-pack list,
-// trimming blanks.
-func parseRulePackProtections(value string) []string {
-	var out []string
-	for _, part := range strings.Split(value, ",") {
-		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
-		}
-	}
-	return out
 }

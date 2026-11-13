@@ -136,3 +136,26 @@ func TestCredentialedNetExecBuiltInAndPackAcrossShells(t *testing.T) {
 		}
 	}
 }
+
+// TestNetExecNTDSDumpOwnsOnlyTheDumpRule keeps both NTDS dump spellings on
+// credential.directory_credential_acquisition alone: neither the built-in HIGH
+// rule nor the pack's credential-use rule also claims them.
+func TestNetExecNTDSDumpOwnsOnlyTheDumpRule(t *testing.T) {
+	for _, base := range []string{"default", "strict"} {
+		pack := adPackConnector(t, base)
+		for _, command := range []string{
+			"nxc smb 198.51.100.10 -u administrator -H aa:bb --ntds",
+			"nxc smb 198.51.100.10 -u administrator -p S3cretP4ss -M ntdsutil",
+		} {
+			for _, connector := range []string{"benchmark-" + base, pack} {
+				got := EvaluateDeterministicAction(context.Background(),
+					actionfacts.Input{Tool: "shell", Command: command}, command, connector, base)
+				if got.Action != "block" || !slices.Contains(got.RuleIDs, "credential.directory_credential_acquisition") ||
+					slices.Contains(got.RuleIDs, "credential.directory_ticket_request") ||
+					slices.Contains(got.RuleIDs, "credential.directory_service_credential_use") {
+					t.Fatalf("base=%s connector=%s command=%q action=%q rules=%v", base, connector, command, got.Action, got.RuleIDs)
+				}
+			}
+		}
+	}
+}

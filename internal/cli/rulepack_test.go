@@ -365,16 +365,15 @@ func TestRulePackValidateJSONBoundsItsWarnings(t *testing.T) {
 // different scopes add up and a bad override fails (rel-1-0-10:GAP-0050).
 func TestRulePackValidateComposesLayersJSON(t *testing.T) {
 	previousDir, previousJSON := rulePackValidateDir, rulePackValidateJSON
-	previousLayers, previousProtections := rulePackValidateLayersJSON, rulePackValidateProtections
+	previousLayers := rulePackValidateLayersJSON
 	previousOutput := rulePackValidateCmd.OutOrStdout()
 	t.Cleanup(func() {
 		rulePackValidateDir, rulePackValidateJSON = previousDir, previousJSON
-		rulePackValidateLayersJSON, rulePackValidateProtections = previousLayers, previousProtections
+		rulePackValidateLayersJSON = previousLayers
 		rulePackValidateCmd.SetOut(previousOutput)
 	})
 	rulePackValidateDir = shippedRulePackForCLITest(t, "strict")
 	rulePackValidateJSON = true
-	rulePackValidateProtections = ""
 	run := func(layers string) (rulePackWireResponse, error) {
 		t.Helper()
 		rulePackValidateLayersJSON = layers

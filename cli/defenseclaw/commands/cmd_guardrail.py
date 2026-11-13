@@ -5149,8 +5149,9 @@ def _validate_composed_protections(
     shapes the scope -- global, connector, profile and profile connector, widest
     first, each with its protections, enable, disable and severity overrides --
     with this scope's ``protections`` replaced by *desired*. That is the compose
-    the gateway runs on reload, so packs enabled at different scopes add up
-    here as they do there. It runs through the authoritative Go loader and fails
+    the gateway runs on reload for this scope, so packs enabled here and at the
+    wider scopes add up as they do there. Narrower scopes and the
+    application_protection layers are not re-checked here. It runs through the authoritative Go loader and fails
     on a definitive invalid result -- most importantly the semantic rule-cost
     limit on a large base such as strict (rel-1-0-10:GAP-0050). A missing or
     incompatible helper is best-effort: the check is skipped rather than block a

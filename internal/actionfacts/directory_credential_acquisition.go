@@ -715,13 +715,21 @@ var netExecGlobalFlags = map[string]struct{}{
 }
 
 // NetExecProtocolIndex returns the argv index of the NetExec protocol
-// subcommand, skipping the known global options that may precede it. It fails
-// closed: an unknown option, or a global option without its value, before the
-// protocol is not a recognized NetExec call. It does not check the protocol
-// name itself.
+// subcommand, skipping the known global options that may precede it, in the
+// spellings argparse accepts: `-t 4`, `-t4`, `-t=4`, `--timeout 5`,
+// `--timeout=5`, and `--` before the protocol. Anything else before the
+// protocol (an unknown or abbreviated option, a global option without its
+// value) is not recognized: the parse stays partial, which means no
+// credential-use finding. It does not check the protocol name itself.
 func NetExecProtocolIndex(argv []string) (int, bool) {
 	for index := 1; index < len(argv); index++ {
 		arg := argv[index]
+		if arg == "--" {
+			if index+1 < len(argv) {
+				return index + 1, true
+			}
+			return 0, false
+		}
 		if !strings.HasPrefix(arg, "-") {
 			return index, true
 		}
@@ -735,14 +743,30 @@ func NetExecProtocolIndex(argv []string) (int, bool) {
 			index++
 			continue
 		}
-		if name, _, joined := strings.Cut(arg, "="); joined && strings.HasPrefix(name, "--") {
+		if name, value, joined := strings.Cut(arg, "="); joined && value != "" {
 			if _, ok := netExecGlobalValueOptions[name]; ok {
+				continue
+			}
+		}
+		if len(arg) > 2 && arg[1] != '-' {
+			if _, ok := netExecGlobalValueOptions[arg[:2]]; ok {
 				continue
 			}
 		}
 		return 0, false
 	}
 	return 0, false
+}
+
+// ExactNetExecNTDSDump reports whether command is a NetExec / CrackMapExec
+// NTDS secrets dump (--ntds or -M ntdsutil), the form owned by
+// credential.directory_credential_acquisition.
+func ExactNetExecNTDSDump(command CommandFact) bool {
+	if _, ok := netExecDirectoryPrograms[strings.ToLower(command.Program)]; !ok {
+		return false
+	}
+	operation, ok := exactDirectoryCredentialCommand(command)
+	return ok && operation == DirectoryCredentialSecretsDump
 }
 
 // ExactNetExecDomainServiceAuth reports whether command is a statically

@@ -397,9 +397,10 @@ func directoryServiceCredentialUsePrerequisite(facts actionfacts.Facts) bool {
 			!oneOfFold(command.Program, "nxc", "netexec", "crackmapexec") {
 			continue
 		}
-		if hasAnyArgFold(command.Argv, "--ntds") {
-			// The NTDS secrets dump is owned by the built-in default rule
-			// credential.directory_credential_acquisition, which blocks it.
+		if actionfacts.ExactNetExecNTDSDump(command) {
+			// The NTDS secrets dump (--ntds or -M ntdsutil) is owned by the
+			// built-in default rule credential.directory_credential_acquisition,
+			// which blocks it.
 			continue
 		}
 		if actionfacts.ExactNetExecDomainServiceAuth(command) {
