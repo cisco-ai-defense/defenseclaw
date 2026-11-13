@@ -85,12 +85,28 @@ func (a *APIServer) writeHookDecisionRowOfRecord(
 	if !built {
 		return ctx, nil, nil, false
 	}
-	decisionCtx, decisionOutcome = audit.WithCallWriteOutcome(observability.WithExportAfterCallCommit(ctx))
-	if a.emitHookDecisionLogV8(decisionCtx, req, resp, env, false, meta, connectorName) != hookDecisionLogPersisted {
-		audit.AbandonCallWrites(decisionCtx, errHookDecisionNotRowOfRecord)
+	attemptCtx, attemptOutcome := audit.WithCallWriteOutcome(observability.WithExportAfterCallCommit(ctx))
+	handedBack := false
+	defer func() {
+		if handedBack {
+			return
+		}
+		if recovered := recover(); recovered != nil {
+			// A panic after the record was queued and before the audit
+			// section holds it: drop it here, since the section's own guard
+			// does not know of it yet (S8 R4 review P1).
+			audit.AbandonCallWrites(attemptCtx, errHookAuditSectionPanicked)
+			panic(recovered)
+		}
+	}()
+	if a.emitHookDecisionLogV8(attemptCtx, req, resp, env, false, meta, connectorName) != hookDecisionLogPersisted {
+		audit.AbandonCallWrites(attemptCtx, errHookDecisionNotRowOfRecord)
+		handedBack = true
 		return ctx, nil, nil, false
 	}
-	return observability.WithExportOnlyInCall(decisionCtx), decisionCtx, decisionOutcome, true
+	hookStageForTest(ctx, "finalize_audit_row_queued")
+	handedBack = true
+	return observability.WithExportOnlyInCall(attemptCtx), attemptCtx, attemptOutcome, true
 }
 
 // hookLogsCollectedRuntime reports whether the active plan collects the

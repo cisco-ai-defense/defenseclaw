@@ -84,17 +84,24 @@ func assertOnlyTheFailModeDecision(t *testing.T, f auditFailureHookFixture, remo
 // before the connector-hook record: the queued allow is abandoned, so the
 // fail-mode block of the strict tier is the call's only decision record,
 // stored and exported (S8 R4 review P1).
+//
+// finalize_audit_row_queued panics inside writeHookDecisionRowOfRecord, after
+// the record was queued and before the audit section knows of it.
 func TestRowOfRecordPanicBeforeItsFlushLeavesOnlyTheFailModeDecision(t *testing.T) {
-	injectStagePanic(t, everyCallAt("finalize_audit_row_of_record"))
-	remote := newHookRemoteRecorder()
-	f := newPerUserHookFixtureExportingTo(t, remote)
-	f.api.scannerCfg.Guardrail.RulePack = "strict"
-	out := postRowOfRecordHook(t, f.api, map[string]any{"hook_event_name": "PreToolUse", "session_id": "s-row-panic",
-		"cwd": t.TempDir(), "tool_name": "Bash", "tool_use_id": "toolu_row_panic", "tool_input": map[string]any{"command": "git status"}})
-	if out["action"] != "block" {
-		t.Fatalf("answer %v, want the strict fail-mode block", out)
+	for _, stage := range []string{"finalize_audit_row_queued", "finalize_audit_row_of_record"} {
+		t.Run(stage, func(t *testing.T) {
+			injectStagePanic(t, everyCallAt(stage))
+			remote := newHookRemoteRecorder()
+			f := newPerUserHookFixtureExportingTo(t, remote)
+			f.api.scannerCfg.Guardrail.RulePack = "strict"
+			out := postRowOfRecordHook(t, f.api, map[string]any{"hook_event_name": "PreToolUse", "session_id": "s-row-panic",
+				"cwd": t.TempDir(), "tool_name": "Bash", "tool_use_id": "toolu_row_panic", "tool_input": map[string]any{"command": "git status"}})
+			if out["action"] != "block" {
+				t.Fatalf("answer %v, want the strict fail-mode block", out)
+			}
+			assertOnlyTheFailModeDecision(t, f, remote)
+		})
 	}
-	assertOnlyTheFailModeDecision(t, f, remote)
 }
 
 // The store refuses the row of record when it commits: the verdict is the
