@@ -38,13 +38,40 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	lw := &psLower{out: s, o: o}
 	lw.statements(sc.Statements, false)
 	if expandNested {
+		// Start-Process launching powershell/pwsh/cmd: psparse joins/splits the
+		// -ArgumentList wrongly (quotes, prefixes, dynamic elements), so the
+		// extracted nested text is never trusted -- the child runs opaque code
+		// (psparse delta review 5 (a)). Collect those host commands so we can both
+		// drop their nested expansion and record the opacity.
+		spShell := map[psparse.Node]bool{}
+		collectPSCommands(sc.Statements, 0, func(c *psparse.Command) {
+			if psStartProcessShellTarget(c) {
+				spShell[c] = true
+			}
+		})
+		for range spShell {
+			s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+		}
 		for _, ns := range psparse.ExtractNestedScripts(sc) {
+			if spShell[ns.Source] {
+				continue // never use a Start-Process-into-shell nested text (review 5 (a))
+			}
 			// A powershell/pwsh host carrying -EncodedArguments: psparse decodes
 			// the CLIXML args blob as if it were the script (and misses the real
 			// -EncodedCommand), so never re-parse it. The payload is opaque; the
 			// walker also emits an opaque exec for the host (psparse delta review
 			// 4 (c)).
 			if cmd, ok := ns.Source.(*psparse.Command); ok && psHostHasEncodedArgs(cmd) {
+				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+				continue
+			}
+			// A -Command / -EncodedCommand payload whose source carries a " is not
+			// trusted under DialectUnknown / 5.1: the child drops the quotes (legacy
+			// native argument passing), so the static parse can miss a command
+			// inside the quoted span (psparse delta review 5 (b)).
+			if ns.Static && ns.Dialect == "powershell" &&
+				(ns.Kind == psparse.KindPowerShellCommand || ns.Kind == psparse.KindEncodedCommand) &&
+				strings.Contains(ns.Text, `"`) {
 				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
 				continue
 			}
@@ -68,20 +95,117 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	return s
 }
 
-// psHostHasEncodedArgs reports a powershell/pwsh host command that carries an
-// -EncodedArguments (/-encodeda/-ea) parameter, so its nested payload must not
-// be re-parsed (psparse delta review 4 (c)).
-func psHostHasEncodedArgs(c *psparse.Command) bool {
-	name, ok := psparse.LiteralString(c.Name)
-	if !ok {
-		return false
-	}
+// psLeaf lower-cases a command/file name and strips its directory and a trailing
+// .exe, so "C:\\WINDOWS\\System32\\cmd.exe" and "cmd" compare equal.
+func psLeaf(name string) string {
 	b := strings.ToLower(name)
 	if i := strings.LastIndexAny(b, `\/`); i >= 0 {
 		b = b[i+1:]
 	}
-	b = strings.TrimSuffix(b, ".exe")
-	if b != "powershell" && b != "pwsh" {
+	return strings.TrimSuffix(b, ".exe")
+}
+
+// isShellName reports a program that runs code from its arguments: powershell,
+// pwsh or cmd.
+func isShellName(name string) bool {
+	switch psLeaf(name) {
+	case "powershell", "pwsh", "cmd":
+		return true
+	}
+	return false
+}
+
+// psStartProcessShellTarget reports a Start-Process (saps) command whose child
+// is powershell/pwsh/cmd in any argument form -- the child's -ArgumentList is
+// run as code we cannot reconstruct, so it is opaque (psparse delta review 5
+// (a)). The child is the -FilePath value, else the first positional argument.
+func psStartProcessShellTarget(c *psparse.Command) bool {
+	if n := psBaseNameOf(c); n != "start-process" && n != "saps" {
+		return false
+	}
+	var target, firstPos psparse.Expr
+	els := c.Elements
+	for i := 0; i < len(els); i++ {
+		switch e := els[i].(type) {
+		case *psparse.Parameter:
+			n := strings.ToLower(e.Name)
+			if n != "" && strings.HasPrefix("filepath", n) { // -F.. -> -FilePath (unique prefix)
+				if e.HasColon && e.Colon != nil {
+					target = e.Colon
+				} else if i+1 < len(els) {
+					if a, ok := els[i+1].(*psparse.Arg); ok {
+						target = a.Value
+						i++
+					}
+				}
+			}
+		case *psparse.Arg:
+			if firstPos == nil {
+				firstPos = e.Value
+			}
+		}
+	}
+	if target == nil {
+		target = firstPos
+	}
+	if target == nil {
+		return false
+	}
+	s, ok := psparse.LiteralString(target)
+	// A shell child, or a launcher (wt/conhost/start) that itself starts a shell,
+	// runs an opaque payload (psparse delta review 5 (a) / review 6 (c)).
+	return ok && (isShellName(s) || isLauncherName(s))
+}
+
+// psBaseNameOf returns the leaf name of a command, or "" when it is not a literal.
+func psBaseNameOf(c *psparse.Command) string {
+	if name, ok := psparse.LiteralString(c.Name); ok {
+		return psLeaf(name)
+	}
+	return ""
+}
+
+// collectPSCommands calls fn for every command in the statements, descending one
+// level into script-block arguments and block bodies, bounded by depth.
+func collectPSCommands(sts []psparse.Statement, depth int, fn func(*psparse.Command)) {
+	if depth > maxNestedDepth {
+		return
+	}
+	for _, st := range sts {
+		switch v := st.(type) {
+		case *psparse.Pipeline:
+			for seg := v; seg != nil; seg = seg.ChainRHS {
+				for _, el := range seg.Elements {
+					c, ok := el.(*psparse.Command)
+					if !ok {
+						continue
+					}
+					fn(c)
+					for _, ce := range c.Elements {
+						if a, ok := ce.(*psparse.Arg); ok {
+							if sb, ok := a.Value.(*psparse.ScriptBlockExpr); ok {
+								collectPSCommands(sb.Statements, depth+1, fn)
+							}
+						}
+					}
+				}
+			}
+		case *psparse.Block:
+			collectPSCommands(v.Conditions, depth+1, fn)
+			for _, b := range v.Bodies {
+				if b != nil {
+					collectPSCommands(b.Statements, depth+1, fn)
+				}
+			}
+		}
+	}
+}
+
+// psHostHasEncodedArgs reports a powershell/pwsh host command that carries an
+// -EncodedArguments (/-encodeda/-ea) parameter, so its nested payload must not
+// be re-parsed (psparse delta review 4 (c)).
+func psHostHasEncodedArgs(c *psparse.Command) bool {
+	if b := psBaseNameOf(c); b != "powershell" && b != "pwsh" {
 		return false
 	}
 	for _, el := range c.Elements {

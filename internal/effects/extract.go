@@ -142,6 +142,15 @@ type walker struct {
 	// is DialectNone when the top-level dialect was only guessed, so a guessed
 	// Windows dialect never fabricates a drive path from a POSIX-absolute path.
 	pathDialect Dialect
+	// cdpathMaybeSet is sticky once CDPATH is assigned anywhere in the call (a
+	// bare/prefix/exported assignment, or an env-wrapper CDPATH=): a relative
+	// cd/pushd is then dynamic, because CDPATH can resolve it elsewhere (review 6
+	// B).
+	cdpathMaybeSet bool
+	// cmdHome carries a prefix HOME= assignment to the cd builtin of the current
+	// command (POSIX only); cmdHomeSet is reset per command (review 6 C).
+	cmdHome    string
+	cmdHomeSet bool
 }
 
 const walkWorkBudget = 20000
@@ -322,12 +331,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if prefix && len(c.Assigns) > 0 {
 		childEnv = cloneEnv(w.env)
 	}
+	w.cmdHomeSet = false // a prefix HOME= applies only to this command's cd (review 6 C)
 	for _, a := range c.Assigns {
 		rv := w.resolveWord(a.ValueWord)
 		if role, ok := envRoles[a.Name]; ok && role == EnvCode {
 			w.envCodeEffect(a.Name, dialect, cmdNo, depth, cond, c.Span)
 		}
+		// Any CDPATH assignment (bare, prefix or exported) means a relative cd can
+		// resolve elsewhere, so cd/pushd goes dynamic (review 6 B).
+		if a.Name == "CDPATH" {
+			w.cdpathMaybeSet = true
+		}
 		if prefix {
+			// A prefix HOME= applies to the cd builtin of this command (POSIX): a
+			// bare cd then follows it (review 6 C, W5/W6).
+			if a.Name == "HOME" && dialect == DialectPOSIX {
+				w.cmdHomeSet = true
+				w.cmdHome = w.placedHome(rv)
+			}
 			if rv.Static {
 				childEnv[a.Name] = rv.Value
 			} else {
@@ -337,14 +358,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 		if rv.Static {
 			w.env[a.Name] = rv.Value
-			// POSIX `~` follows HOME; PowerShell's `~` is fixed at session start
-			// and a later $env:USERPROFILE must not rebind it (review R3-9).
-			if a.Name == "HOME" && w.o.flavor() == FlavorPOSIX {
-				w.curHome = rv.Value
+			// A reassigned HOME re-roots `~` and a bare cd under POSIX shell
+			// semantics, on every flavor incl. Git Bash (review 6 C). PowerShell's
+			// `~` is fixed at session start, so $env:USERPROFILE must not rebind it
+			// (review R3-9) -- hence the dialect, not the flavor, gates this.
+			if a.Name == "HOME" && dialect == DialectPOSIX {
+				w.curHome = w.placedHome(rv)
 			}
 		} else {
 			delete(w.env, a.Name)
-			if a.Name == "HOME" && w.o.flavor() == FlavorPOSIX {
+			if a.Name == "HOME" && dialect == DialectPOSIX {
 				w.curHome = "" // a dynamic home makes ~ dynamic (review N3 E2)
 			}
 		}
@@ -476,6 +499,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 	}
 
+	// A launcher (wt, conhost, cmd's start, ...) with an argument tail runs a
+	// shell with a payload we cannot reconstruct -> opaque (psparse delta review
+	// 6 (c) / R6-4). Runs before the unmodeled-program return so the opacity is
+	// explicit, not just unmodeled_program.
+	if isLauncherName(program) && len(inner) > 1 {
+		w.opaqueExec(origin, cond)
+	}
+
 	if !known {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
@@ -505,11 +536,19 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 				}
 				if allStatic && len(parts) > 0 {
 					w.unwrapCode(strings.Join(parts, " "), true, DialectCMD, depth, cond, origin)
+				} else if len(rest[j+1:]) > 0 {
+					// a /c payload with a dynamic part (a %VAR% / !VAR! delayed
+					// expansion) is code we cannot resolve -> opaque, never dropped
+					// (review D K15c).
+					w.opaqueExec(origin, cond)
 				}
 				break
 			}
 		}
-		if !found && c.PipeIn {
+		// A cmd invocation with arguments but no recognized /c|/k payload (a splat,
+		// a fused /crd, /d/c, or a quoted "/c ...") runs a command we did not
+		// extract: unknown, never fully known (psparse delta review 6 (b)).
+		if !found && len(rest) > 0 {
 			w.opaqueExec(origin, cond)
 		}
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
@@ -528,6 +567,24 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			return
 		}
 		if code, ok := powershellLaunchCode(inner[1:]); ok {
+			// A -Command / positional value of exactly "-" reads the script from
+			// stdin, which we never see; the piped-in text does not change that
+			// (psparse delta review 6 (a)).
+			if strings.TrimSpace(code) == "-" {
+				w.opaqueExec(origin, cond)
+				w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+				return
+			}
+			// A -Command payload whose source carries a " is not trusted: effects
+			// never knows the child's edition, and under Windows PowerShell 5.1 /
+			// legacy native argument passing the child drops the quotes, so a
+			// command hidden inside the quoted span would be missed. Treat the
+			// launch as opaque (psparse delta review 5 (b)).
+			if strings.Contains(code, `"`) {
+				w.opaqueExec(origin, cond)
+				w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+				return
+			}
 			w.unwrapCode(code, true, DialectPowerShell, depth, cond, origin)
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 			return
@@ -561,6 +618,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// worktree (review R3-4).
 	if program == "git" {
 		w.gitWorktreeEffects(inner[1:], origin, cond)
+	}
+	// certutil -decode / -encode write the output file; -urlcache -f URL file
+	// downloads to the file (review D K36/K37).
+	if program == "certutil" {
+		w.certutilEffects(inner[1:], origin, cond)
 	}
 	// curl -O / wget write a URL-named file into the output dir or cwd; the
 	// basename is unknown (review R3-3).
@@ -678,6 +740,18 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 }
 
+// placedHome resolves a HOME= value to the absolute path a bare cd / ~ should
+// use, or "" (dynamic) when the value is non-literal or cannot be placed.
+func (w *walker) placedHome(rv Word) string {
+	if !rv.Static {
+		return ""
+	}
+	if abs, ok, _ := placePath(rv.Value, w.opts()); ok {
+		return abs
+	}
+	return ""
+}
+
 // applyCWDChange updates the running cwd for cd/pushd/popd/Set-Location, and
 // returns true when the command is purely a directory change (no other effect).
 func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, cond bool) bool {
@@ -735,14 +809,18 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 	}
 	switch {
 	case !found:
-		// bare cd -> the home directory.
-		w.curCWD = w.curHome
+		// bare cd -> the home directory; a prefix HOME= on this command wins (W5/W6).
+		if w.cmdHomeSet {
+			w.curCWD = w.cmdHome
+		} else {
+			w.curCWD = w.curHome
+		}
 	case !dir.Static || dir.Value == "-":
 		w.curCWD = "" // cd - or a dynamic directory
 	default:
 		rel := !strings.HasPrefix(dir.Value, "/") && !strings.HasPrefix(dir.Value, "./") && !strings.HasPrefix(dir.Value, "../") && !strings.HasPrefix(dir.Value, "~")
-		if w.env["CDPATH"] != "" && rel && !(len(dir.Value) >= 2 && isDriveLetter(dir.Value[0]) && dir.Value[1] == 58) {
-			w.curCWD = "" // CDPATH may resolve a bare name elsewhere (review R3-6)
+		if (w.env["CDPATH"] != "" || w.cdpathMaybeSet) && rel && !(len(dir.Value) >= 2 && isDriveLetter(dir.Value[0]) && dir.Value[1] == 58) {
+			w.curCWD = "" // CDPATH may resolve a bare name elsewhere (review R3-6 / review 6 B)
 		} else if abs, ok, _ := placePath(dir.Value, w.opts()); ok {
 			w.curCWD = abs
 		} else {
@@ -1379,7 +1457,11 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 		return e
 	}
-	if op.glob || (op.pattern && !op.quoted) || (op.pattern && op.quoted && w.o.flavor() == FlavorWindows) {
+	// PowerShell expands * ? [ ] inside quotes too, on every platform, so a
+	// wildcard metachar in a PowerShell path argument is a glob regardless of
+	// flavor or quoting (psparse delta review 5 (c)).
+	if op.glob || (op.pattern && !op.quoted) || (op.pattern && op.quoted && w.o.flavor() == FlavorWindows) ||
+		(dialect == DialectPowerShell && looksGlob(op.value)) {
 		e.Target.Type = TargetPath
 		e.Target.Glob = cap4k(op.value)
 		e.addReason(ReasonGlob, ScopeTarget)
@@ -1482,6 +1564,18 @@ func (w *walker) finishNetworkSends(start int, pipeIn bool, prevPrim int) {
 			}
 		}
 	}
+}
+
+// isLauncherName reports a process launcher whose argument tail runs another
+// program (often a shell) with a payload we cannot reconstruct: Windows Terminal
+// (wt), the console host (conhost) and cmd's start verb (psparse delta review 6
+// (c) / R6-4).
+func isLauncherName(program string) bool {
+	switch strings.ToLower(program) {
+	case "wt", "conhost", "start", "wt.exe", "conhost.exe":
+		return true
+	}
+	return false
 }
 
 // isHTTPUploader reports a program whose body/upload flags send to a URL that
@@ -1854,10 +1948,12 @@ func powershellLaunchCode(args []Word) (string, bool) {
 			}
 			return v, true
 		}
-		if strings.HasPrefix(a.Value, "-") {
+		if strings.HasPrefix(a.Value, "-") && a.Value != "-" {
 			continue // another switch (-NoProfile, -File handled as a read elsewhere)
 		}
-		// a bare positional: the rest is a PowerShell command (review N8 K5/S5).
+		// a bare positional (incl. a lone "-" = read script from stdin, handled as
+		// opaque by the caller): the rest is a PowerShell command (review N8 K5/S5,
+		// psparse delta review 6 (a)).
 		var parts []string
 		for _, w := range args[i:] {
 			if !w.Static {
@@ -1898,14 +1994,31 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 			continue
 		}
 		v := a.Value
+		// Long options may carry their value inline as --name=value (review D A33).
+		long, inlineVal, hasInline := v, "", false
+		if strings.HasPrefix(v, "--") {
+			if eq := strings.IndexByte(v, '='); eq >= 0 {
+				long, inlineVal, hasInline = v[:eq], v[eq+1:], true
+			}
+		}
 		switch {
-		case v == "-C" || v == "--directory":
-			if i+1 < len(args) && args[i+1].Static {
+		case long == "--extract" || long == "--get":
+			mode = 'x'
+		case long == "--create":
+			mode = 'c'
+		case long == "--list":
+			mode = 't'
+		case v == "-C" || long == "--directory":
+			if hasInline {
+				cdir = inlineVal
+			} else if i+1 < len(args) && args[i+1].Static {
 				cdir = args[i+1].Value
 				i++
 			}
-		case v == "-f" || v == "--file":
-			if i+1 < len(args) && args[i+1].Static {
+		case v == "-f" || long == "--file":
+			if hasInline {
+				archive = inlineVal
+			} else if i+1 < len(args) && args[i+1].Static {
 				archive = args[i+1].Value
 				i++
 			}
@@ -2252,8 +2365,8 @@ func (w *walker) gitWorktreeEffects(args []Word, origin Origin, cond bool) {
 	kind := KindWrite
 	switch sub {
 	case "checkout", "switch", "restore", "reset", "apply", "am", "stash",
-		"merge", "rebase", "cherry-pick", "revert", "worktree", "mv":
-		kind = KindWrite
+		"merge", "rebase", "cherry-pick", "revert", "worktree", "mv", "pull":
+		kind = KindWrite // pull merges fetched objects into the working tree (review D Z15)
 	case "clean", "rm":
 		kind = KindDelete
 	default:
@@ -2266,6 +2379,78 @@ func (w *walker) gitWorktreeEffects(args []Word, origin Origin, cond bool) {
 	}
 	e.addReason(ReasonDynamicExpansion, ScopeTarget) // the exact files are not statically known
 	w.emit(e)
+}
+
+// certutilEffects models certutil's file-writing verbs (review D K36/K37):
+//   - -decode / -decodehex / -encode / -encodehex IN OUT: OUT is written, IN read.
+//   - -urlcache [-split] -f URL FILE: FILE is written (the URL fetch is modeled
+//     by PosURLArgs). The last non-flag, non-URL positional is the output.
+func (w *walker) certutilEffects(args []Word, origin Origin, cond bool) {
+	decode := false
+	urlcache := false
+	var pos []Word
+	for _, a := range args {
+		if a.Static && strings.HasPrefix(a.Value, "-") {
+			switch strings.ToLower(a.Value) {
+			case "-decode", "-decodehex", "-encode", "-encodehex":
+				decode = true
+			case "-urlcache":
+				urlcache = true
+			}
+			continue
+		}
+		pos = append(pos, a)
+	}
+	writeTgt := func(wd Word) {
+		e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
+			Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}, Origin: origin}
+		if !wd.Static {
+			e.addReason(ReasonDynamicExpansion, ScopeTarget)
+		} else {
+			e.Target.Spelling = cap4k(wd.Value)
+			if abs, ok, r := placePath(wd.Value, w.opts()); ok {
+				e.Target.Path = abs
+			} else {
+				e.addReason(r, ScopeTarget)
+			}
+		}
+		if idx := w.emit(e); idx != 0 {
+			if k := e.Target.Key(); k != "" {
+				w.writeByKey[k] = idx
+			}
+		}
+	}
+	switch {
+	case decode && len(pos) >= 2:
+		w.emit(Effect{Kind: KindRead, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
+			Target: w.operandTarget(pos[0]), Origin: origin})
+		writeTgt(pos[len(pos)-1])
+	case decode && len(pos) == 1:
+		writeTgt(pos[0]) // in-place / single argument
+	case urlcache:
+		// the cache output is the last positional that is not the source URL.
+		for i := len(pos) - 1; i >= 0; i-- {
+			if pos[i].Static {
+				if _, isURL := urlHost(pos[i].Value); isURL || strings.Contains(pos[i].Value, "://") {
+					continue
+				}
+			}
+			writeTgt(pos[i])
+			break
+		}
+	}
+}
+
+// operandTarget builds a path target for a static/dynamic operand word.
+func (w *walker) operandTarget(wd Word) Target {
+	t := Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked, CaseFold: w.o.CaseInsensitive}
+	if wd.Static {
+		t.Spelling = cap4k(wd.Value)
+		if abs, ok, _ := placePath(wd.Value, w.opts()); ok {
+			t.Path = abs
+		}
+	}
+	return t
 }
 
 // downloadRemoteWrite emits the file a URL download writes: curl only with a

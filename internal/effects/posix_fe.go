@@ -306,6 +306,11 @@ func (w *posixWalker) redirs(st *syntax.Stmt, c *Cmd) {
 		}
 		if r.Hdoc != nil {
 			red.Body, red.BodyExpands = heredocBody(r.Hdoc)
+			// A command substitution in an expanding heredoc body runs (review D
+			// PX-3: C40/C41/V22). An unquoted-delimiter heredoc with $( ) / `` is
+			// walked; a quoted-delimiter body has no CmdSubst node, so nothing is
+			// added.
+			w.scanCmdSubsts(r.Hdoc, c)
 		}
 		c.Redirs = append(c.Redirs, red)
 	}

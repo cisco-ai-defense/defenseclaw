@@ -80,6 +80,11 @@ func (w *walker) stripWrappers(words []Word) (inner []Word, wrappers []string, f
 				break
 			}
 			if spec.envAssign && strings.Contains(v, "=") && !strings.HasPrefix(v, "-") {
+				// env CDPATH=... sets CDPATH for the wrapped command, so a relative
+				// cd inside it can resolve elsewhere -> dynamic (review 6 B, V4).
+				if strings.HasPrefix(v, "CDPATH=") {
+					w.cdpathMaybeSet = true
+				}
 				i++
 				continue
 			}
