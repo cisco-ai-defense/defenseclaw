@@ -45,7 +45,7 @@ routing:
 ```
 
 - `on_exceed` is `warn`, `deny` (managed devices only) or `downgrade:<model>[,<model>]`.
-- Budgets count the computed cost of agent calls: tokens times `observability.pricing`. A cost the agent reports is never counted. Judge and decision-model calls are not counted.
+- Budgets count the cost of agent calls: the computed cost (tokens times `observability.pricing`), else the cost the provider reported. Judge and decision-model calls are not counted.
 - Budgets need `observability.tokenomics.enabled: true` with cost computed and the agent role recorded. On a managed device also set `observability.pricing.unknown_model: fallback`, so every model has a price.
 - Calls already running when a limit is reached still finish.
 
@@ -146,7 +146,7 @@ More:
 - Devices behind one NAT address share a high request limit (20 times `rate_limit_per_minute`); a busy host on that address can push them to per-device counting for a minute.
 - After a gateway restart, a user's spend on other devices is read within seconds; calls made in those seconds see only this device's spend.
 - The TLS key must be owned by the account that runs the store and readable only by it. It may be a link, for example into `/etc/letsencrypt/live`, when the file it points to meets that rule.
-- A stream the user stops after the answer started has no final token count: the user's own budget reads as unknown for 10 minutes (a deny budget then refuses on a managed device).
+- A stream that the user stops, or that the upstream breaks, after the answer started has no final token count: the user's own budget reads as unknown for 10 minutes (a deny budget then refuses on a managed device).
 
 ## Check it
 

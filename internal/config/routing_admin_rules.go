@@ -139,9 +139,10 @@ func (r RoutingAdminRule) IsDeny() bool {
 	return r.Action == RoutingRuleActionDeny
 }
 
-// RoutingBudget is one entry of routing.admin.budgets. Spend is counted per
-// device from the computed cost of agent calls (the price table in
-// observability.pricing); reported cost is never counted.
+// RoutingBudget is one entry of routing.admin.budgets. Spend is the cost of
+// agent calls: computed from observability.pricing, else the reported cost
+// (modelusage.ChargedUSD). Each device counts its own; the opt-in
+// routing.admin.budget_store adds up every device's spend.
 type RoutingBudget struct {
 	ID string `mapstructure:"id" yaml:"id"`
 	// Scope is user, group or connector.
