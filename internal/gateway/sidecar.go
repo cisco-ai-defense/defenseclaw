@@ -2942,7 +2942,7 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 	if api != nil {
 		s.bindAPIServerObservabilityV8Locked(api)
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
-		api.SetModelUsage(s.modelUsage().store)
+		api.SetModelUsageQuerier(s.modelUsage().store)
 		api.protectedFiles = s.protectedFiles
 	}
 	s.apiServer = api

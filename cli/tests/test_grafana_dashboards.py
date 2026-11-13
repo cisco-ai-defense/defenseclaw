@@ -4229,6 +4229,10 @@ def test_tokenomics_dashboard_has_the_requested_panels() -> None:
         "Routed vs requested model",
         "Top users by cost",
         "Dropped usage records",
+        "Cost by provider",
+        "Tokens by connector (range)",
+        "Calls with unknown cost (count)",
+        "Own usage and all usage",
     } <= titles
     assert dashboard["uid"] == "defenseclaw-tokenomics"
     assert {variable["name"] for variable in dashboard["templating"]["list"]} == {
