@@ -3,15 +3,16 @@
 
 // Package bounded is the one bound rule of the guardrail readers: a walk,
 // extraction or parse that hits a cap (items, depth, paths, effects, bytes,
-// locations, nodes, time) reports Truncated, and a truncated input is never
-// judged below the unknown tier of the active policy nor below the verdict
-// of the part read before the cap (rel-1-0-10:GAP-0301, GAP-0290, GAP-0296,
-// GAP-0284, GAP-0285, GAP-0258).
+// locations, nodes, time) reports it, and a truncated input is never judged
+// below the unknown tier of the active pack nor below the verdict of the part
+// read before the cap (rel-1-0-10:GAP-0301, GAP-0290, GAP-0296, GAP-0284,
+// GAP-0285, GAP-0258).
 //
-// Everything here is a small value type with no allocation, because it runs
-// on the hook hot path. A reader keeps one Truncated per call, marks each cap
-// it hits, and keeps judging what it read; the caller turns the result into
-// the verdict floor with Floor.
+// A reader keeps one Truncated per call (never copied, never shared between
+// goroutines: go vet's copylocks check flags a copy), counts with Counters
+// bound to it, keeps judging what it read, and returns the CapSet of the caps
+// it hit (Truncated.Set). The caller turns that CapSet into the verdict floor
+// with Floor. Nothing here allocates on the hot path.
 package bounded
 
 import "time"
@@ -21,7 +22,7 @@ type Cap uint8
 
 // The cap kinds. Each reader names the kind its bound measures.
 const (
-	// Items counts entries of a list, map or statement sequence.
+	// Items counts entries of a list, map, statement sequence or operands.
 	Items Cap = iota + 1
 	// Depth counts nesting levels.
 	Depth
@@ -35,10 +36,15 @@ const (
 	Locations
 	// Nodes counts values of any kind walked (JSON or syntax tree nodes).
 	Nodes
-	// Time is a work or wall-clock budget.
+	// Time is a work budget (counted in work units, see Counter) or a
+	// wall-clock deadline (Truncated.Before).
 	Time
 	capEnd
 )
+
+// CapSet holds one bit per cap kind: a new kind past bit 15 must not compile
+// (it would shift to nothing and record no hit).
+var _ [16 - capEnd]struct{}
 
 var capNames = [capEnd]string{"", "items", "depth", "paths", "effects", "bytes", "locations", "nodes", "time"}
 
@@ -55,16 +61,79 @@ func Caps() []Cap {
 	return []Cap{Items, Depth, Paths, Effects, Bytes, Locations, Nodes, Time}
 }
 
-// Truncated is the set of caps a reader hit. The zero value hit none.
-type Truncated struct{ caps uint16 }
+// CapSet is the set of caps a reading hit: a plain value a reader returns in
+// its result. The zero value hit none.
+type CapSet struct{ bits uint16 }
+
+// Of is the CapSet of the given caps. A cap with no kind (0 or out of range)
+// counts as Items: a reader that names no kind is still truncated.
+func Of(caps ...Cap) CapSet {
+	var s CapSet
+	for _, c := range caps {
+		s = s.with(c)
+	}
+	return s
+}
+
+func (s CapSet) with(c Cap) CapSet {
+	if c == 0 || c >= capEnd {
+		c = Items
+	}
+	s.bits |= 1 << c
+	return s
+}
+
+// Union is the caps of s and o.
+func (s CapSet) Union(o CapSet) CapSet { return CapSet{s.bits | o.bits} }
+
+// Any reports that some cap was hit.
+func (s CapSet) Any() bool { return s.bits != 0 }
+
+// Has reports that cap c was hit.
+func (s CapSet) Has(c Cap) bool { return c != 0 && c < capEnd && s.bits&(1<<c) != 0 }
+
+// ReasonCode is the audit reason code of every truncated input.
+const ReasonCode = "bounded_truncated"
+
+// Reason is the audit reason of s: "bounded_truncated cap=paths,depth" (cap
+// kinds in their declared order), or "" when no cap was hit. It allocates;
+// call it only for a truncated input.
+func (s CapSet) Reason() string {
+	if !s.Any() {
+		return ""
+	}
+	buf := make([]byte, 0, len(ReasonCode)+32)
+	buf = append(buf, ReasonCode...)
+	buf = append(buf, " cap="...)
+	first := true
+	for c := Items; c < capEnd; c++ {
+		if s.Has(c) {
+			if !first {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, capNames[c]...)
+			first = false
+		}
+	}
+	return string(buf)
+}
+
+// noCopy makes go vet (copylocks) flag a copy of the struct holding it.
+type noCopy struct{}
+
+func (*noCopy) Lock()   {}
+func (*noCopy) Unlock() {}
+
+// Truncated records the caps one reading hit. Keep one per call, pass it by
+// pointer, and do not share it between goroutines: a copy loses the hits
+// made through it (go vet flags copies). The zero value hit none.
+type Truncated struct {
+	_   noCopy
+	set CapSet
+}
 
 // Hit records that cap c cut the reading short.
-func (t *Truncated) Hit(c Cap) {
-	if c == 0 || c >= capEnd {
-		c = Items // a reader that names no kind is still truncated
-	}
-	t.caps |= 1 << c
-}
+func (t *Truncated) Hit(c Cap) { t.set = t.set.with(c) }
 
 // Within reports n <= max; past max it records cap c. A reader calls it with
 // the count it is about to reach and stops reading that branch when it is
@@ -80,83 +149,63 @@ func (t *Truncated) Within(c Cap, n, max int) bool {
 }
 
 // Before reports that now is before deadline; at or after it records Time.
-// A zero deadline never expires.
+// A zero deadline is a reader that never set one: it records Time too, so a
+// forgotten deadline shows as a truncated input instead of a cap that never
+// trips. A reader with no time bound does not call Before.
 func (t *Truncated) Before(now, deadline time.Time) bool {
-	if deadline.IsZero() || now.Before(deadline) {
+	if !deadline.IsZero() && now.Before(deadline) {
 		return true
 	}
 	t.Hit(Time)
 	return false
 }
 
-// Merge adds the caps of o (a nested reader's result).
-func (t *Truncated) Merge(o Truncated) { t.caps |= o.caps }
+// Merge adds the caps of a nested reading.
+func (t *Truncated) Merge(s CapSet) { t.set = t.set.Union(s) }
 
 // Any reports that some cap was hit.
-func (t Truncated) Any() bool { return t.caps != 0 }
+func (t *Truncated) Any() bool { return t.set.Any() }
 
-// Has reports that cap c was hit.
-func (t Truncated) Has(c Cap) bool { return c != 0 && c < capEnd && t.caps&(1<<c) != 0 }
+// Set is the caps hit so far, the value a reader returns.
+func (t *Truncated) Set() CapSet { return t.set }
 
-// Of returns a Truncated with the given caps hit.
-func Of(caps ...Cap) Truncated {
-	var t Truncated
-	for _, c := range caps {
-		t.Hit(c)
-	}
-	return t
-}
-
-// ReasonCode is the audit reason code of every truncated input.
-const ReasonCode = "bounded_truncated"
-
-// Reason is the audit reason of t: "bounded_truncated cap=paths,depth" (cap
-// kinds in their declared order), or "" when no cap was hit. It allocates;
-// call it only for a truncated input.
-func (t Truncated) Reason() string {
-	if !t.Any() {
-		return ""
-	}
-	buf := make([]byte, 0, len(ReasonCode)+32)
-	buf = append(buf, ReasonCode...)
-	buf = append(buf, " cap="...)
-	first := true
-	for c := Items; c < capEnd; c++ {
-		if t.Has(c) {
-			if !first {
-				buf = append(buf, ',')
-			}
-			buf = append(buf, capNames[c]...)
-			first = false
-		}
-	}
-	return string(buf)
-}
-
-// Counter counts one cap kind across a walk:
+// Counter counts one cap kind across a walk and records its hit in the
+// Truncated it was made for. Like Truncated it is used by pointer and never
+// copied (a copy restarts the count, so the cap would never trip):
 //
-//	paths := bounded.NewCounter(bounded.Paths, maxPaths)
-//	if !paths.Take(&trunc) { break }
+//	paths := bounded.NewCounter(&trunc, bounded.Paths, maxPaths)
+//	if !paths.Take() { break }
+//
+// A Time cap counted in work units (one per node, statement or effect the
+// reader visits) trips on the same input on every host; prefer it to a
+// wall-clock deadline.
 type Counter struct {
+	_      noCopy
+	t      *Truncated
 	n, max int
 	cap    Cap
 }
 
-// NewCounter is a counter of cap c that allows max takes.
-func NewCounter(c Cap, max int) Counter { return Counter{max: max, cap: c} }
-
-// Take counts one item. It is false once the count is past max, and then
-// records the cap in t.
-func (k *Counter) Take(t *Truncated) bool { return k.TakeN(1, t) }
-
-// TakeN counts n items (bytes of a string, for example).
-func (k *Counter) TakeN(n int, t *Truncated) bool {
-	k.n += n
-	return t.Within(k.cap, k.n, k.max)
+// NewCounter is a counter of cap c that allows max takes and records its hit
+// in t. Assign it once (a field of the reader, or a local) and use it there.
+func NewCounter(t *Truncated, c Cap, max int) Counter {
+	return Counter{t: t, max: max, cap: c}
 }
 
-// Count is the number taken so far.
-func (k Counter) Count() int { return k.n }
+// Take counts one item. It is false once the count is past max, and then
+// records the cap.
+func (k *Counter) Take() bool { return k.TakeN(1) }
+
+// TakeN counts n items (the bytes of a string, for example). A negative n is
+// a reader error, never a refund: it records the cap and is false.
+func (k *Counter) TakeN(n int) bool {
+	if n < 0 {
+		k.t.Hit(k.cap)
+		return false
+	}
+	k.n += n
+	return k.t.Within(k.cap, k.n, k.max)
+}
 
 // Action is a guardrail verdict, ordered from the weakest to the strictest.
 type Action uint8
@@ -178,14 +227,46 @@ func (a Action) String() string {
 	return "block"
 }
 
-// ParseAction reads a gateway action name; an unknown name is Allow.
-func ParseAction(s string) Action {
+// ParseAction reads a gateway action name, in any case and with surrounding
+// space. "ask" is Confirm. An empty name is Allow. Any other name is Block
+// and known false: a verdict the floor cannot read is never lowered.
+func ParseAction(s string) (a Action, known bool) {
+	start, end := 0, len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	s = s[start:end]
+	if s == "" {
+		return Allow, true
+	}
+	if equalFoldASCII(s, "ask") {
+		return Confirm, true
+	}
 	for i, name := range actionNames {
-		if s == name {
-			return Action(i)
+		if equalFoldASCII(s, name) {
+			return Action(i), true
 		}
 	}
-	return Allow
+	return Block, false
+}
+
+func equalFoldASCII(s, lower string) bool {
+	if len(s) != len(lower) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lower[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Stricter is the stricter of a and b.
@@ -233,8 +314,8 @@ func Unknown(tier Tier) Action {
 // Floor is the verdict of an input read up to a cap: base (the verdict of
 // what was read before the cap) when no cap was hit, else the stricter of
 // base and the unknown tier.
-func Floor(base Action, t Truncated, tier Tier) Action {
-	if !t.Any() {
+func Floor(base Action, s CapSet, tier Tier) Action {
+	if !s.Any() {
 		return base
 	}
 	return Stricter(base, Unknown(tier))
