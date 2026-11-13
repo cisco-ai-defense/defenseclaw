@@ -6617,7 +6617,11 @@ def _check_connector_version_supported_for_setup(
         from defenseclaw.connector_contracts import OPENCLAW_NATIVE_HOOKS_SINCE, openclaw_lacks_native_hooks
         from defenseclaw.platform_support import uses_guardrail_proxy
 
-        if connector == "openclaw" and not uses_guardrail_proxy("openclaw") and openclaw_lacks_native_hooks(raw_version):
+        if (
+            connector == "openclaw"
+            and not uses_guardrail_proxy("openclaw")
+            and openclaw_lacks_native_hooks(raw_version)
+        ):
             # Windows has no guardrail proxy: OpenClaw needs its native plugin
             # hooks. Refuse before anything is saved (rel-1-0-10 GAP-0066).
             if emit:
@@ -6644,7 +6648,11 @@ def _check_connector_version_supported_for_setup(
             return False
         if emit:
             ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
-            if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version) and not _openclaw_native_here(connector):
+            if (
+                connector == "openclaw"
+                and openclaw_needs_interception_advisory(raw_version)
+                and not _openclaw_native_here(connector)
+            ):
                 ux.warn(
                     f"{label} {normalize_agent_version(raw_version)} is in the ≥2026.6.8 transport range. "
                     "A live guardrail proxy port is not proof that agent LLM traffic is intercepted — "
@@ -16057,7 +16065,8 @@ def execute_guardrail_setup(
         for c in actives:
             m = _CONNECTOR_META.get(c, {})
             if m:
-                ux.ok(f"  [{c}] tool inspection: {_tool_display(m)}; subprocess policy: {_subprocess_policy_display(c, m)}")
+                policy = _subprocess_policy_display(c, m)
+                ux.ok(f"  [{c}] tool inspection: {_tool_display(m)}; subprocess policy: {policy}")
             else:
                 ux.ok(f"  [{c}] plugin connector")
     else:

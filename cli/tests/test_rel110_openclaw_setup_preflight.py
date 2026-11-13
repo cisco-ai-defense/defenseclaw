@@ -23,9 +23,9 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from click.testing import CliRunner
-
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import setup as setup_group
+
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -38,9 +38,7 @@ def test_setup_openclaw_refuses_a_failing_preflight_before_saving():
             patch.object(cmd_setup, "_agent_settings_refusal", return_value=refusal) as check,
             patch.object(cmd_setup, "execute_guardrail_setup") as execute,
         ):
-            result = CliRunner().invoke(
-                setup_group, ["openclaw", "--non-interactive", "--no-restart"], obj=app
-            )
+            result = CliRunner().invoke(setup_group, ["openclaw", "--non-interactive", "--no-restart"], obj=app)
         assert result.exit_code == 1, result.output
         assert refusal in result.output
         assert check.call_args.args[1] == "openclaw"
