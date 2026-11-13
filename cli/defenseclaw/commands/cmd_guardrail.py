@@ -6784,7 +6784,9 @@ def _secret_flow_write(app: AppContext, change, reason: str) -> None:
     result = _write_guardrail_config(app, [change], reason, _fail)
     if result is not None:
         ux.ok(reason)
-        _note_running_agent_restart()
+        click.echo(
+            "  " + ux.dim("The running gateway applies this on its next reload; no restart needed.")
+        )
 
 
 @secret_flow_group.command("enable")

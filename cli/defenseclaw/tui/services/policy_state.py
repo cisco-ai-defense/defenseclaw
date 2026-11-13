@@ -59,13 +59,12 @@ POLICY_VIEWS: tuple[str, ...] = (
     "policies",
     "packs",
     "sandbox_packs",
-    "secret_flow",
 )
+
 VIEW_TITLES = {
     "posture": "Posture",
     "optin": "Opt-in packs",
     "chains": "Chains",
-    "secret_flow": "Secret flow",
     "families": "Rule families",
     "policies": "Policies",
     "packs": "Rule packs",
@@ -76,7 +75,6 @@ VIEW_SHORT_TITLES = {
     "posture": "Posture",
     "optin": "Opt-in",
     "chains": "Chains",
-    "secret_flow": "Secret flow",
     "families": "Families",
     "policies": "Policies",
     "packs": "Packs",
@@ -900,8 +898,6 @@ def policies_keys_hint(view: str, *, sandbox_supported: bool = True) -> str:
         return f"KEYS  Space turn on/off | s scope | i details | r refresh | {views}"
     if view == "chains":
         return f"KEYS  j/k move | i details | r refresh | {views} | read-only"
-    if view == "secret_flow":
-        return f"KEYS  {views} | r refresh | read-only: secret flow tracking"
     if view == "families":
         return f"KEYS  s scope | i details | r refresh | {views}"
     if view == "packs":
@@ -1077,7 +1073,7 @@ class PoliciesPanelModel:
             for h in self.secret_flow_hits:
                 sets = ", ".join(h.get("sets") or []) or "-"
                 when = str(h.get("time", ""))[11:19] or str(h.get("time", ""))
-                line = f"{when} {h.get('action', '')} {h.get('kind', '')} {h.get('program', '?')}->{h.get('host', '?')} [{sets}]"
+                line = f"{when} {h.get('action', '')} {h.get('kind', '')} {h.get('program', '?')}->{h.get('host', '?')} ({sets})"
                 rows.append(("hit", line.strip()))
         return tuple(rows)
 
@@ -1355,8 +1351,19 @@ class PoliciesPanelModel:
             return None
         return rows[self.cursors["families"]]
 
+
     def chain_rows(self) -> tuple[tuple[str, Any | None], ...]:
-        return chain_display_rows(self.chains)
+        # The Chains view also carries the Secret flow tracking summary as
+        # leading, non-selectable (None) rows: it is the read-only view of the
+        # correlation/flow behaviors, and Secret flow replaces the
+        # credential-read -> egress chain. (Folded here, not a separate view,
+        # to keep the 80-column one-line view switcher within budget.)
+        info: list[tuple[str, Any | None]] = []
+        if self.secret_flow_cfg:
+            info.append(("Secret flow tracking", None))
+            for label, value in self.secret_flow_rows():
+                info.append((f"{label}: {value}", None))
+        return tuple(info) + chain_display_rows(self.chains)
 
     def blocking_chains(self) -> int:
         return sum(1 for chain in self.chains if _attr(chain, "can_block", False))
@@ -1381,8 +1388,6 @@ class PoliciesPanelModel:
             return len(self.pack_rows())
         if view == "sandbox_packs":
             return len(self.sandbox_packs)
-        if view == "secret_flow":
-            return len(self.secret_flow_rows())
         return len(self.policies)
 
     def selected_policy(self) -> Any | None:
@@ -1423,7 +1428,7 @@ class PoliciesPanelModel:
         self.set_view(view)
         if view == "sandbox_packs" and not self.sandbox_loaded:
             return PolicyPanelAction("load_sandbox_packs")
-        if view == "secret_flow" and not self.secret_flow_loaded:
+        if view == "chains" and not self.secret_flow_loaded:
             return PolicyPanelAction("load_secret_flow")
         return PolicyPanelAction("render")
 
@@ -1604,17 +1609,13 @@ class PoliciesPanelModel:
             return f"Scope: {scope} ▾  ·  {pack} pack"
         if view == "chains":
             blocking = self.blocking_chains()
+            flow = ""
+            if self.secret_flow_cfg:
+                flow = " · secret flow " + str(self.secret_flow_cfg.get("effective", "shadow"))
             return (
                 f"{len(self.chains)} bounded chains · ✓ {blocking} can block · "
-                f"◐ {len(self.chains) - blocking} alert only · built in, read-only"
+                f"◐ {len(self.chains) - blocking} alert only · read-only" + flow
             )
-        if view == "secret_flow":
-            cfg = self.secret_flow_cfg
-            if not cfg:
-                return "Secret flow tracking is unavailable on this config."
-            eff = cfg.get("effective", "shadow")
-            note = {"off": "off", "shadow": "shadow: records hits, never changes the answer", "on": "on: alerts (default) or blocks (strict/managed)"}.get(eff, eff)
-            return f"Secret flow tracking · {note}"
         active = self.active_policy()
         policy = f"active policy {active.name}" if active is not None else "no policy activated yet"
         pack = self.global_pack.pack if self.global_pack is not None else "?"
@@ -1642,8 +1643,6 @@ class PoliciesPanelModel:
             return "The scope's rule pack has no rule files."
         if view == "chains":
             return "The chain catalog was not found in this install."
-        if view == "secret_flow":
-            return "Secret flow tracking is unavailable on this config."
         return "No named policies found. Create one with: defenseclaw policy create NAME"
 
     def view_switcher(self) -> tuple[tuple[str, str, bool], ...]:
@@ -1658,7 +1657,6 @@ class PoliciesPanelModel:
             "posture": str(len(self.postures)) if self.postures else "",
             "optin": f"{len(self.protection_in_use())}/{self.protection_total()}" if self.protection_total() else "",
             "chains": str(len(self.chains)) if self.chains else "",
-            "secret_flow": (self.secret_flow_cfg.get("effective", "") if self.secret_flow_cfg else ""),
             "families": str(len(self.scope_families())) if self.scope_families() else "",
             "policies": str(len(self.policies)) if self.policies else "",
             "packs": str(len(self.pack_rows())) if self.pack_rows() else "",
@@ -1693,8 +1691,6 @@ class PoliciesPanelModel:
             return self._pack_table(width)
         if view == "sandbox_packs":
             return self._sandbox_table(width)
-        if view == "secret_flow":
-            return self._secret_flow_table(width)
         return self._policy_table(width)
 
     def _posture_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
@@ -1841,29 +1837,6 @@ class PoliciesPanelModel:
             columns = ("", "Pack", "Kind")
         return columns, tuple(rows)
 
-    def _secret_flow_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
-        rows = []
-        label_w = 16 if width >= 50 else 12
-        val_w = max(10, width - label_w - 3)
-        for label, value in self.secret_flow_rows():
-            rows.append((fit(label, label_w), fit(value, val_w)))
-        return ("Setting", "Value"), tuple(rows)
-
-    def _secret_flow_aside(self) -> tuple[str, tuple[str, ...]]:
-        cfg = self.secret_flow_cfg
-        if not cfg:
-            return "Secret flow", ("Unavailable on this config.",)
-        lines = [
-            "Labels the secrets a session reads and alerts (default) or blocks",
-            "(strict/managed) when a labeled secret reaches an external sink.",
-            "",
-            f"Rollout: guardrail.effects_rules = {cfg.get('effects_rules', '?')}",
-            f"Feature: guardrail.secret_flow.mode = {cfg.get('mode', '?')}  (effective {cfg.get('effective', '?')})",
-            "",
-            "Change it: defenseclaw guardrail secret-flow set KEY VALUE",
-            "Why a hit fired: defenseclaw guardrail secret-flow explain SESSION",
-        ]
-        return "Secret flow tracking", tuple(lines)
 
     def _policy_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         rows = []
@@ -1934,8 +1907,6 @@ class PoliciesPanelModel:
             return self._pack_aside()
         if view == "sandbox_packs":
             return self._sandbox_aside()
-        if view == "secret_flow":
-            return self._secret_flow_aside()
         return self._policy_aside()
 
     def detail_text(self) -> str:

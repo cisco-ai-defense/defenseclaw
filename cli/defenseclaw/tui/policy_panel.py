@@ -446,7 +446,7 @@ class PolicyPanelMixin:
             model.error
             or (model.view == "packs" and model.pack_error)
             or (model.view == "sandbox_packs" and model.sandbox_error)
-            or (model.view == "secret_flow" and model.secret_flow_error)
+            or (model.view == "chains" and model.secret_flow_error)
             or (model.view in {"posture", "optin", "chains", "families"} and model.posture_error)
         )
         empty = model.empty_state()

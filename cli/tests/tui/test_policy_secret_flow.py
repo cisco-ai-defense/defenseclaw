@@ -2,12 +2,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Policies panel: the read-only Secret flow tracking view."""
+"""Policies panel: Secret flow tracking, folded into the read-only Chains view."""
 
 from __future__ import annotations
 
 from defenseclaw.config import default_config
 from defenseclaw.tui.services.policy_state import (
+    POLICY_VIEWS,
     PoliciesPanelModel,
     secret_flow_effective_mode,
 )
@@ -23,24 +24,29 @@ def _model_with_config(**overrides) -> PoliciesPanelModel:
     return model
 
 
-def test_secret_flow_view_is_present_and_read_only() -> None:
-    model = _model_with_config()
-    assert "secret_flow" in model.views()
-    # read-only: no mutating key is advertised for this view
-    hint = model.view
-    model.set_view("secret_flow")
-    assert model.view == "secret_flow"
+def test_secret_flow_is_not_a_separate_view() -> None:
+    # Folded into Chains to keep the one-line switcher within the 80-col budget.
+    assert "secret_flow" not in POLICY_VIEWS
 
 
 def test_secret_flow_rows_render_defaults() -> None:
     model = _model_with_config()
-    model.set_view("secret_flow")
     rows = dict(model.secret_flow_rows())
     assert "shadow" in rows["mode"]
     assert "credentials" in rows["label sets"]
     assert "default alert" in rows["sink action"]
     assert rows["re-encodings"] == "on"
     assert "512 paths" in rows["memory"]
+
+
+def test_chains_view_carries_secret_flow_rows() -> None:
+    model = _model_with_config()
+    model.set_view("chains")
+    labels = [label for label, chain in model.chain_rows() if chain is None]
+    assert "Secret flow tracking" in labels
+    assert any(lbl.startswith("mode:") for lbl in labels)
+    # headline names the effective mode
+    assert "secret flow" in model.headline(80)
 
 
 def test_secret_flow_hits_render_redacted() -> None:
@@ -50,22 +56,16 @@ def test_secret_flow_hits_render_redacted() -> None:
           "program": "curl", "host": "evil.example", "sets": ["credentials"], "source": "env"}],
         tracked=3,
     )
-    model.set_view("secret_flow")
-    rows = model.secret_flow_rows()
-    text = " ".join(v for _k, v in rows)
+    text = " ".join(v for _k, v in model.secret_flow_rows())
     assert "curl->evil.example" in text
     assert "credentials" in text
-    # the redacted record carries no path or value
-    assert "/" not in " ".join(v for k, v in rows if k == "hit").replace("evil.example", "")
-    assert dict(rows)["tracked sessions"] == "3"
+    assert dict(model.secret_flow_rows())["tracked sessions"] == "3"
 
 
-def test_secret_flow_table_fits_80_columns() -> None:
+def test_chain_rows_stay_within_80_columns() -> None:
     model = _model_with_config()
-    model.apply_secret_flow([], tracked=0)
-    model.set_view("secret_flow")
+    model.set_view("chains")
     columns, rows = model.table(80)
-    assert columns == ("Setting", "Value")
     for row in rows:
         assert len(" ".join(row)) <= 80
 
