@@ -150,6 +150,17 @@ func ExtractNestedScripts(sc *Script) []NestedScript {
 	if sc != nil {
 		walkStmts(sc.Statements)
 	}
+	// Invariant: a nested script with no resolved text is never Static=true
+	// (an empty payload from a dropped --% tail or an unresolved value must
+	// escalate, never be trusted as "an empty script"). See N2.
+	for i := range out {
+		if out[i].Static && out[i].Text == "" {
+			out[i].Static = false
+			if out[i].Reason == "" {
+				out[i].Reason = ReasonStopParsing
+			}
+		}
+	}
 	return out
 }
 
@@ -266,8 +277,10 @@ func powerShellHostScripts(src Node, words []hostWord) []NestedScript {
 				}
 			}
 			if dashLed(w.text) {
-				// an unknown -parameter: do not guess a positional script
-				return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonNonLiteral}}
+				// an unknown -parameter: the host CLI has an option outside the
+				// modeled set, so we cannot know whether it takes a value or
+				// where the payload begins. Fail closed (review 3 R3).
+				return []NestedScript{{Kind: KindPowerShellCommand, Dialect: "powershell", Source: src, Reason: ReasonHostOption}}
 			}
 		}
 		// a positional word before any -Command/-File: pwsh/powershell runs it
@@ -287,6 +300,9 @@ func joinRest(words []hostWord, kind, dialect string, src Node) NestedScript {
 			ns.Static = false
 			ns.Reason = ReasonNonLiteral
 			break
+		}
+		if w.text == "--%" { // the stop-parse token is consumed, not part of the payload
+			continue
 		}
 		parts = append(parts, w.text)
 	}
@@ -351,7 +367,7 @@ var psParams = []struct {
 	{"settingsfile", true},
 	{"login", false}, {"mta", false}, {"sta", false}, {"noexit", false},
 	{"nologo", false}, {"noninteractive", false}, {"noprofile", false},
-	{"noprofileloadtime", false}, {"interactive", false}, {"version", false},
+	{"noprofileloadtime", false}, {"interactive", false}, {"version", true},
 	{"help", false}, {"sshservermode", false},
 }
 
@@ -432,6 +448,9 @@ func cmdCScript(c *Command) (NestedScript, bool) {
 					ns.Static = false
 					ns.Reason = ReasonNonLiteral
 					break
+				}
+				if v == "--%" { // stop-parse token consumed, not part of the payload
+					continue
 				}
 				parts = append(parts, v)
 			}

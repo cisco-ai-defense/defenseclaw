@@ -23,7 +23,11 @@ func parsePowerShell(command string, o Options) *Script {
 
 func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	s := &Script{Dialect: DialectPowerShell}
-	sc, err := psparse.Parse(command, psparse.Options{})
+	// The PowerShell edition is unknown unless the connector proves it, so a
+	// dialect-divergent escape (backtick-e, \u{}) is not treated as static
+	// (psparse review 3 / R4). A future caller that knows the host edition can
+	// pass DialectPwsh7 / DialectWindowsPS51.
+	sc, err := psparse.Parse(command, psparse.Options{Dialect: psparse.DialectUnknown})
 	if err != nil || sc == nil {
 		s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonInvalidSyntax})
 		return s
@@ -35,6 +39,15 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 	lw.statements(sc.Statements, false)
 	if expandNested {
 		for _, ns := range psparse.ExtractNestedScripts(sc) {
+			// A powershell/pwsh host carrying -EncodedArguments: psparse decodes
+			// the CLIXML args blob as if it were the script (and misses the real
+			// -EncodedCommand), so never re-parse it. The payload is opaque; the
+			// walker also emits an opaque exec for the host (psparse delta review
+			// 4 (c)).
+			if cmd, ok := ns.Source.(*psparse.Command); ok && psHostHasEncodedArgs(cmd) {
+				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+				continue
+			}
 			if !ns.Static {
 				s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
 				continue
@@ -53,6 +66,35 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 		}
 	}
 	return s
+}
+
+// psHostHasEncodedArgs reports a powershell/pwsh host command that carries an
+// -EncodedArguments (/-encodeda/-ea) parameter, so its nested payload must not
+// be re-parsed (psparse delta review 4 (c)).
+func psHostHasEncodedArgs(c *psparse.Command) bool {
+	name, ok := psparse.LiteralString(c.Name)
+	if !ok {
+		return false
+	}
+	b := strings.ToLower(name)
+	if i := strings.LastIndexAny(b, `\/`); i >= 0 {
+		b = b[i+1:]
+	}
+	b = strings.TrimSuffix(b, ".exe")
+	if b != "powershell" && b != "pwsh" {
+		return false
+	}
+	for _, el := range c.Elements {
+		p, ok := el.(*psparse.Parameter)
+		if !ok {
+			continue
+		}
+		n := strings.ToLower(p.Name)
+		if n == "ea" || (strings.HasPrefix(n, "encodeda") && strings.HasPrefix("encodedarguments", n)) {
+			return true
+		}
+	}
+	return false
 }
 
 func psReason(code string) ReasonCode {
@@ -157,17 +199,21 @@ func (lw *psLower) command(c *psparse.Command, cond, pipeIn bool) *Cmd {
 		case *psparse.Parameter:
 			out.Words = append(out.Words, Word{Value: "-" + e.Name, Static: true, Segs: []WordSeg{{Lit: "-" + e.Name}}})
 			if e.HasColon && e.Colon != nil {
-				out.Words = append(out.Words, lw.exprWord(e.Colon))
+				// -Path:a,b,c : a comma list is several operands, never one path.
+				out.Words = append(out.Words, lw.argWords(e.Colon)...)
 				lw.exprCommands(e.Colon, true)
 			}
 		case *psparse.Arg:
-			out.Words = append(out.Words, lw.exprWord(e.Value))
+			// A comma list / @( ) argument is several operands, one per element
+			// (each static element its own, a non-static element UNKNOWN); it is
+			// never collapsed into one path (psparse delta review 4 (a)).
+			out.Words = append(out.Words, lw.argWords(e.Value)...)
 			// a script-block / sub-expression argument (& { ... },
 			// Invoke-Command -ScriptBlock { ... }) runs its inner commands
 			// (review N20 H1/H2).
 			lw.exprCommands(e.Value, true)
 		case psparse.Expr:
-			out.Words = append(out.Words, lw.exprWord(e))
+			out.Words = append(out.Words, lw.argWords(e)...)
 			lw.exprCommands(e, true)
 		}
 	}
@@ -195,6 +241,40 @@ func (lw *psLower) addRedir(c *Cmd, r *psparse.Redirection) {
 		red.Op = RedirWrite
 	}
 	c.Redirs = append(c.Redirs, red)
+}
+
+// argWords lowers a command argument to one or more Words. A comma list
+// (ArrayLit a,b,c) or an array sub-expression (@( ... )) becomes one Word per
+// element, so the extractor never treats a multi-element argument as a single
+// path; a non-literal element stays dynamic (UNKNOWN). A scalar lowers to one
+// Word, unchanged (psparse delta review 4 (a)).
+func (lw *psLower) argWords(e psparse.Expr) []Word {
+	switch v := e.(type) {
+	case *psparse.ArrayLit:
+		var ws []Word
+		for _, el := range v.Elements {
+			ws = append(ws, lw.argWords(el)...)
+		}
+		if len(ws) == 0 {
+			return []Word{{Reason: ReasonDynamicExpansion}}
+		}
+		return ws
+	case *psparse.ArrayExpr:
+		var ws []Word
+		for _, st := range v.Statements {
+			if es, ok := st.(*psparse.ExprStatement); ok {
+				ws = append(ws, lw.argWords(es.Expr)...)
+			} else {
+				ws = append(ws, Word{Reason: ReasonDynamicExpansion})
+			}
+		}
+		if len(ws) == 0 {
+			return []Word{{Reason: ReasonDynamicExpansion}}
+		}
+		return ws
+	default:
+		return []Word{lw.exprWord(e)}
+	}
 }
 
 // exprWord lowers a PowerShell expression to a Word: a static literal, an

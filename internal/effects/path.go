@@ -140,10 +140,32 @@ func cleanPOSIX(p string) string {
 }
 
 func placeWindows(spelling string, o Options) (string, bool, ReasonCode) {
-	// MSYS / Git Bash drive mount: /c/Users -> C:\Users (review N17).
-	if len(spelling) >= 2 && spelling[0] == '/' && isDriveLetter(spelling[1]) &&
-		(len(spelling) == 2 || spelling[2] == '/') {
-		spelling = string(spelling[1]) + ":" + spelling[2:]
+	// A leading / on Windows depends on the dialect of the frontend walking the
+	// text (review 6 #1): Git Bash / Cygwin (POSIX) use POSIX-absolute spellings
+	// where only a /<drive>/ MSYS mount and /cygdrive/<drive>/ are known and
+	// every other absolute path is a virtual root; cmd and PowerShell treat a
+	// leading / as drive-root-relative (handled below); and when the dialect is
+	// unknown or only guessed, a POSIX-absolute path has no known Windows target.
+	if strings.HasPrefix(spelling, "/") {
+		switch o.Dialect {
+		case DialectCMD, DialectPowerShell:
+			// drive-root-relative; handled by the \x branch below.
+		case DialectPOSIX:
+			if len(spelling) >= 2 && isDriveLetter(spelling[1]) && (len(spelling) == 2 || spelling[2] == '/') {
+				rest := spelling[2:]
+				if rest == "" {
+					rest = "/" // bare /c is the drive root C:\, not drive-relative C: (review 6 #2)
+				}
+				spelling = string(spelling[1]) + ":" + rest
+			} else if m, ok := cygdriveMount(spelling); ok {
+				spelling = m
+			} else {
+				return "", false, ReasonVirtualRoot
+			}
+		default:
+			// Windows flavor, dialect unknown or guessed: no known POSIX root.
+			return "", false, ReasonVirtualRoot
+		}
 	}
 	s := strings.ReplaceAll(spelling, "/", `\`)
 	// UNC and device/extended-length prefixes are kept verbatim after cleaning
@@ -326,4 +348,22 @@ func hasADSStream(w string) bool {
 		return true
 	}
 	return false
+}
+
+// cygdriveMount maps a Cygwin /cygdrive/<drive>/rest to <drive>:\rest. ok is
+// false for anything else (incl. /proc/cygdrive/... which is not this form).
+func cygdriveMount(s string) (string, bool) {
+	const p = "/cygdrive/"
+	if !strings.HasPrefix(s, p) || len(s) < len(p)+1 {
+		return "", false
+	}
+	d := s[len(p)]
+	rest := s[len(p)+1:]
+	if !isDriveLetter(d) || (rest != "" && rest[0] != '/') {
+		return "", false
+	}
+	if rest == "" {
+		rest = "/" // /cygdrive/c is the drive root C:\, not drive-relative C: (review 6 #2)
+	}
+	return string(d) + ":" + rest, true
 }

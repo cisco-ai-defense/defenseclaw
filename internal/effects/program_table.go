@@ -23,7 +23,8 @@ const (
 	RoleExecProgram Role = "exec_prog"
 	RoleExecCode    Role = "exec_code"
 	RoleURL         Role = "url"
-	RoleUploadFile  Role = "upload"
+	RoleUploadFile  Role = "upload"    // the flag value is always a local file path (-T, --post-file, -InFile)
+	RoleSendData    Role = "send_data" // request body: literal text, or @file / stdin (-d, --data*, -F, --post-data, -Body)
 	RoleURLUpload   Role = "url_upload"
 	RoleOutput      Role = "output"
 	RolePerm        Role = "perm"
@@ -46,7 +47,7 @@ func (r Role) kind() Kind {
 		return KindExec
 	case RoleURL:
 		return KindNetworkFetch
-	case RoleUploadFile, RoleURLUpload:
+	case RoleUploadFile, RoleSendData, RoleURLUpload:
 		return KindNetworkSend
 	case RolePerm:
 		return KindPermissionChange
@@ -218,9 +219,9 @@ func buildPOSIXTable() {
 			"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
 			"--output-dir": {Value: true, Role: RoleIgnore},
 			"-T":           {Value: true, Role: RoleUploadFile}, "--upload-file": {Value: true, Role: RoleUploadFile},
-			"-F": {Value: true, Role: RoleUploadFile}, "--form": {Value: true, Role: RoleUploadFile},
-			"-d": {Value: true, Role: RoleUploadFile}, "--data": {Value: true, Role: RoleUploadFile},
-			"--data-binary": {Value: true, Role: RoleUploadFile}, "--data-raw": {Value: true, Role: RoleIgnore}, "--data-urlencode": {Value: true, Role: RoleIgnore},
+			"-F": {Value: true, Role: RoleSendData}, "--form": {Value: true, Role: RoleSendData}, "--form-string": {Value: true, Role: RoleSendData},
+			"-d": {Value: true, Role: RoleSendData}, "--data": {Value: true, Role: RoleSendData},
+			"--data-binary": {Value: true, Role: RoleSendData}, "--data-raw": {Value: true, Role: RoleSendData}, "--data-urlencode": {Value: true, Role: RoleSendData},
 			"-H": {Value: true, Role: RoleIgnore}, "-X": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore},
 			"-e": {Value: true, Role: RoleIgnore}, "-b": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleOutput}, "--cookie-jar": {Value: true, Role: RoleOutput},
 			"-x": {Value: true, Role: RoleIgnore}, "-u": {Value: true, Role: RoleIgnore}, "--url": {Value: true, Role: RoleURL},
@@ -232,7 +233,7 @@ func buildPOSIXTable() {
 		Flags: fl(map[string]Flag{
 			"-O": {Value: true, Role: RoleOutput}, "--output-document": {Value: true, Role: RoleOutput},
 			"-P": {Value: true, Role: RoleIgnore}, "--directory-prefix": {Value: true, Role: RoleIgnore},
-			"--post-file": {Value: true, Role: RoleUploadFile}, "--post-data": {Value: true, Role: RoleIgnore}, "-i": {Value: true, Role: RoleRead}, "--input-file": {Value: true, Role: RoleRead},
+			"--post-file": {Value: true, Role: RoleUploadFile}, "--post-data": {Value: true, Role: RoleSendData}, "--body-file": {Value: true, Role: RoleUploadFile}, "--body-data": {Value: true, Role: RoleSendData}, "-i": {Value: true, Role: RoleRead}, "--input-file": {Value: true, Role: RoleRead},
 			"-U": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-T": {Value: true, Role: RoleIgnore}, "--header": {Value: true, Role: RoleIgnore}, "--tries": {Value: true, Role: RoleIgnore}, "--timeout": {Value: true, Role: RoleIgnore}},
 			"-q", "-v", "-nv", "-c", "-N", "-r", "-np", "-nc", "-k", "-p", "-E", "--quiet", "--no-check-certificate", "--continue", "--recursive", "--mirror", "--no-verbose", "--no-clobber")})
 	add(Program{Names: []string{"scp"}, Pos: PosSourcesDest, Remote: true})
@@ -270,8 +271,19 @@ func buildPOSIXTable() {
 			"-c": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore},
 			"--output": {Value: true, Role: RoleOutput}, "--upload-pack": {Value: true, Role: RoleExecCode},
 			"--exec-path": {Value: true, Role: RoleIgnore}, "--git-dir": {Value: true, Role: RoleIgnore},
-			"--work-tree": {Value: true, Role: RoleIgnore}, "--namespace": {Value: true, Role: RoleIgnore}},
-			"-p", "-P", "-v", "-h", "--paginate", "--no-pager", "--bare", "--version", "--help", "--no-replace-objects", "--literal-pathspecs", "--no-optional-locks", "--html-path", "--info-path", "--man-path")})
+			"--work-tree": {Value: true, Role: RoleIgnore}, "--namespace": {Value: true, Role: RoleIgnore},
+			// common subcommand flags, so git add/push/commit stay fully accounted
+			// (their effects are modeled in gitOperands / gitNetworkStage).
+			"-m": {Value: true, Role: RoleIgnore}, "--message": {Value: true, Role: RoleIgnore},
+			"--chmod": {Value: true, Role: RoleIgnore}, "--pathspec-from-file": {Value: true, Role: RoleIgnore},
+			"--repo": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "--push-option": {Value: true, Role: RoleIgnore}},
+			"-p", "-P", "-v", "-h", "--paginate", "--no-pager", "--bare", "--version", "--help", "--no-replace-objects", "--literal-pathspecs", "--no-optional-locks", "--html-path", "--info-path", "--man-path",
+			// git add
+			"-A", "--all", "-u", "--update", "--patch", "-n", "--dry-run", "-f", "--force", "-i", "--interactive",
+			"-e", "--edit", "-N", "--intent-to-add", "--ignore-removal", "--ignore-errors", "--renormalize", "--refresh", "--no-all",
+			// git push
+			"--set-upstream", "--tags", "--force-with-lease", "--follow-tags", "--mirror", "--prune", "--delete", "-d",
+			"--atomic", "-q", "--quiet", "--progress", "--no-verify", "--thin", "--no-thin", "--verify")})
 	add(Program{Names: []string{"go"}, Pos: PosNone,
 		Flags: map[string]Flag{"-exec": {Value: true, Role: RoleExecCode}, "-toolexec": {Value: true, Role: RoleExecCode}}})
 	// Inert-operand programs: their positionals are messages, names or option
@@ -279,9 +291,12 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"echo", "printf", "true", "false", "pwd", "cd", "pushd", "popd", "export", "set", "unset", "test", "[", "alias", "unalias", "ps", "env", "date", "whoami", "id", "uname", "hostname", "which", "command", "type", "basename", "dirname", "sleep", "kill", "killall", "pkill", "jobs", "wait", "clear", "umask", "ulimit", "hash", "getconf", "tty", "tput", "seq", "yes", "expr", "let", "read", "printenv", "logname", "groups", "nproc", "arch"}, Pos: PosNone, InertOperands: true,
 		Flags: fl(nil, "-n", "-e", "-E", "-l", "-a", "-h", "-c", "-v", "-f", "-r", "-s", "-t", "-u", "-p", "-i", "-w", "-x", "-z", "-d", "-k", "-m", "-b", "-o", "-g", "-L", "-P", "-H", "-9", "-1")})
 	// Programs that read their file operands.
-	add(Program{Names: []string{"wc", "cut", "uniq", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "xxd", "od", "hexdump", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "du", "df", "stat", "file", "readlink", "realpath", "diff", "cmp", "look", "split", "csplit", "shasum"}, Pos: PosAllRead,
+	add(Program{Names: []string{"wc", "cut", "uniq", "comm", "join", "paste", "fold", "fmt", "rev", "column", "expand", "unexpand", "strings", "xxd", "od", "hexdump", "md5sum", "sha1sum", "sha256sum", "sha512sum", "cksum", "b2sum", "du", "df", "stat", "file", "readlink", "realpath", "diff", "cmp", "look", "shasum"}, Pos: PosAllRead,
 		Flags: fl(map[string]Flag{"-o": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-w": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}, "--output": {Value: true, Role: RoleIgnore}},
 			"-l", "-m", "-L", "-h", "-a", "-b", "-s", "-k", "-v", "-i", "-r", "-u", "-z", "-x", "-p", "-g", "-H", "-P", "-A", "-B", "-C", "-D", "-q", "-y", "-e")})
+	add(Program{Names: []string{"split", "csplit"}, Pos: PosSourcesDest,
+		Flags: fl(map[string]Flag{"-b": {Value: true, Role: RoleIgnore}, "-n": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "-l": {Value: true, Role: RoleIgnore}, "-a": {Value: true, Role: RoleIgnore}, "--additional-suffix": {Value: true, Role: RoleIgnore}, "-f": {Value: true, Role: RoleIgnore}, "--suffix-length": {Value: true, Role: RoleIgnore}, "-k": {Value: true, Role: RoleIgnore}},
+			"-d", "-u", "-z", "-e", "-s", "-x", "--numeric-suffixes", "--elide-empty-files")})
 	add(Program{Names: []string{"tr"}, Pos: PosNone, InertOperands: true, Flags: fl(nil, "-d", "-s", "-c", "-t", "-C")})
 	// sort reads its inputs and writes the file named by -o (review R5-2).
 	add(Program{Names: []string{"sort"}, Pos: PosAllRead,
@@ -327,7 +342,7 @@ func buildWindowsTable() {
 	add(Program{Names: []string{"new-item", "ni"}, Pos: PosAllWrite,
 		Flags: map[string]Flag{"-path": {Value: true, Role: RoleWrite}, "-literalpath": {Value: true, Role: RoleWrite}, "-itemtype": {Value: true, Role: RoleIgnore}, "-value": {Value: true, Role: RoleIgnore}, "-target": {Value: true, Role: RoleLinkTarget}}})
 	add(Program{Names: []string{"invoke-webrequest", "invoke-restmethod", "iwr", "irm"}, Pos: PosURLArgs,
-		Flags: map[string]Flag{"-uri": {Value: true, Role: RoleURL}, "-outfile": {Value: true, Role: RoleOutput}, "-infile": {Value: true, Role: RoleUploadFile}, "-body": {Value: true, Role: RoleIgnore}, "-method": {Value: true, Role: RoleIgnore}}})
+		Flags: map[string]Flag{"-uri": {Value: true, Role: RoleURL}, "-outfile": {Value: true, Role: RoleOutput}, "-infile": {Value: true, Role: RoleUploadFile}, "-body": {Value: true, Role: RoleSendData}, "-method": {Value: true, Role: RoleIgnore}, "-headers": {Value: true, Role: RoleIgnore}, "-contenttype": {Value: true, Role: RoleIgnore}}})
 	add(Program{Names: []string{"invoke-expression", "iex"}, Pos: PosFirstCode})
 	add(Program{Names: []string{"start-process", "saps"}, Pos: PosFirstExec,
 		Flags: map[string]Flag{"-filepath": {Value: true, Role: RoleExecProgram}, "-argumentlist": {Value: true, Role: RoleIgnore}}})
@@ -336,5 +351,9 @@ func buildWindowsTable() {
 	add(Program{Names: []string{"powershell", "pwsh"}, Pos: PosNone, PSLaunch: true,
 		Flags: map[string]Flag{"-command": {Value: true, Role: RoleExecCode}, "-c": {Value: true, Role: RoleExecCode}, "-encodedcommand": {Value: true, Role: RoleExecCode}, "-enc": {Value: true, Role: RoleExecCode}, "-ec": {Value: true, Role: RoleExecCode}, "-e": {Value: true, Role: RoleExecCode}, "-file": {Value: true, Role: RoleExecCode}}})
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs,
-		Flags: map[string]Flag{"-o": {Value: true, Role: RoleOutput}, "-T": {Value: true, Role: RoleUploadFile}, "-F": {Value: true, Role: RoleUploadFile}, "-d": {Value: true, Role: RoleUploadFile}}})
+		Flags: map[string]Flag{"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
+			"-T": {Value: true, Role: RoleUploadFile}, "--upload-file": {Value: true, Role: RoleUploadFile},
+			"-F": {Value: true, Role: RoleSendData}, "--form": {Value: true, Role: RoleSendData},
+			"-d": {Value: true, Role: RoleSendData}, "--data": {Value: true, Role: RoleSendData},
+			"--data-binary": {Value: true, Role: RoleSendData}, "--data-raw": {Value: true, Role: RoleSendData}, "--data-urlencode": {Value: true, Role: RoleSendData}}})
 }
