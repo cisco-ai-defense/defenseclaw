@@ -197,7 +197,9 @@ jobs:
           # prune relies on is refused while an image runs, the launch folder
           # DACL, and the start check (timeout, no inherited handles, filtered
           # token, the self test of the built hook, the real config scan of a
-          # claudecode target, an account file behind a junction is skipped).
+          # claudecode target, an account file behind a junction is skipped,
+          # the handle-relative open refuses a swapped junction and a folder,
+          # the vendor folders are listed from the ProgramData handle).
           # Every test must PASS here, none may SKIP.
           $hookImage = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsHookImageNative', './internal/cli'
@@ -210,7 +212,9 @@ jobs:
             'TestWindowsHookImageNativeStarterUsesTheFilteredToken',
             'TestWindowsHookImageNativeSelfTestRunsTheBuiltHook',
             'TestWindowsHookImageNativeScanWithAClaudeTarget',
-            'TestWindowsHookImageNativeAccountFileBehindAJunction'
+            'TestWindowsHookImageNativeAccountFileBehindAJunction',
+            'TestWindowsHookImageNativeOpenBelowRefusesASwappedJunction',
+            'TestWindowsHookImageNativeVendorFolders'
           )) {
             if ([string]$hookImage.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($hookImageTest)) ") {
               throw "$hookImageTest did not complete with PASS on the native Windows runner"

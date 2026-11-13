@@ -44,37 +44,13 @@ func ElementsBelow(root, path string) ([]string, error) {
 	return elements, nil
 }
 
-// CheckNoReparseBelow walks root and then every element of path below it,
-// top down, and returns ErrLinkBelowRoot (wrapped, naming the element) for
-// the first one isReparse reports as a reparse point; nothing below it is
-// inspected. The folders above root are not checked: they belong to whoever
-// placed root (a redirected profile folder may be a junction). An error of
-// isReparse (fs.ErrNotExist for a missing element) ends the walk and is
-// returned as it is.
-func CheckNoReparseBelow(root, path string, isReparse func(element string) (bool, error)) error {
-	elements, err := ElementsBelow(root, path)
-	if err != nil {
-		return err
-	}
-	for _, element := range elements {
-		reparse, err := isReparse(element)
-		if err != nil {
-			return err
-		}
-		if reparse {
-			return fmt.Errorf("%w: %s", ErrLinkBelowRoot, element)
-		}
-	}
-	return nil
-}
-
 // ExpectedFinalPathBelow is the final path (GetFinalPathNameByHandle) a file
 // at path has when nothing between root and it is a link: the final path of
-// root followed by path's own elements below root. longRoot and longPath are
-// root and path with long names (GetLongPathName), so an 8.3 spelling of an
-// element compares equal to its long name.
-func ExpectedFinalPathBelow(finalRoot, longRoot, longPath string) (string, error) {
-	rest, err := windowsRelativeBelow(plainWindowsPath(longRoot), plainWindowsPath(longPath))
+// root followed by path's own elements below root. path is spelled below root
+// (the same spelling of root as a prefix); the root's final path may differ
+// from its spelling (a redirected profile, an 8.3 name, the \\?\ prefix).
+func ExpectedFinalPathBelow(finalRoot, root, path string) (string, error) {
+	rest, err := windowsRelativeBelow(plainWindowsPath(root), plainWindowsPath(path))
 	if err != nil {
 		return "", err
 	}

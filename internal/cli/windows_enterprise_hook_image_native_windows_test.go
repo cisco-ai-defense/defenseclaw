@@ -11,8 +11,10 @@ package cli
 // .github/workflows/windows-native.yml requires each to PASS.
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -432,7 +434,7 @@ func TestWindowsHookImageNativeScanWithAClaudeTarget(t *testing.T) {
 // the account home down to it. A junction in the middle of the path (or a
 // home that is itself a junction) is skipped as link_in_account_path and
 // never read, also in the real scan (Skipped, never Incomplete); the plain
-// path is read, with the temp folder's 8.3 spelling (RUNNER~1) above the home.
+// path is read, with the temp folder's 8.3 spelling (RUNNER~1) in the home.
 // VerifyOpenedBelow, the check on the opened handle, refuses a file opened
 // through the junction.
 func TestWindowsHookImageNativeAccountFileBehindAJunction(t *testing.T) {
@@ -504,7 +506,7 @@ func TestWindowsHookImageNativeAccountFileBehindAJunction(t *testing.T) {
 		{Path: filepath.Join(home, ".codex"), User: true, Home: home},
 	}
 	files, incomplete, skipped := expandWindowsHookImageConfigFiles(entries, os.Lstat, os.ReadDir,
-		windowsHookImageAccountPathCheck(winpath.RejectReparseBelow))
+		windowsHookImageAccountView(viewWindowsHookImageAccountPath))
 	scan := scanWindowsHookImageConfigFiles(files, `C:\Program Files\Cisco\DefenseClaw\bin`, readWindowsHookImageConfigFile)
 	incomplete = append(incomplete, scan.Incomplete...)
 	skipped = append(skipped, scan.Skipped...)
@@ -518,5 +520,213 @@ func TestWindowsHookImageNativeAccountFileBehindAJunction(t *testing.T) {
 		if !strings.Contains(line, windowsHookImageLinkInAccountPath) {
 			t.Fatalf("skipped line without link_in_account_path: %s", line)
 		}
+	}
+}
+
+// windowsHookImageNativeJunction makes link a junction to target (removed at
+// cleanup).
+func windowsHookImageNativeJunction(t *testing.T, link, target string) {
+	t.Helper()
+	if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J %s: %v\n%s", link, err, out)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+}
+
+// Review 5 P2: an account file is opened from the home's handle, one element
+// at a time (winpath.OpenBelow), so a folder the account swaps for a junction
+// fails inside the open: SYSTEM never opens (or connects to) what the
+// junction points to. A plain path is read, a folder where a file is expected
+// is refused, and a folder is listed through its handle.
+func TestWindowsHookImageNativeOpenBelowRefusesASwappedJunction(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	body := []byte(`{"hooks":{}}`)
+	codex := filepath.Join(home, ".codex")
+	file := filepath.Join(codex, "hooks.json")
+	if err := os.MkdirAll(codex, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{file, filepath.Join(outside, "hooks.json")} {
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: file, User: true, Home: home})
+	if err != nil || string(got) != string(body) {
+		t.Fatalf("plain account file: %q, %v", got, err)
+	}
+	opened, err := winpath.OpenBelow(home, codex, winpath.BelowDirectory)
+	if err != nil {
+		t.Fatalf("open the plain folder below the home: %v", err)
+	}
+	names, err := opened.Readdirnames(-1)
+	_ = opened.Close()
+	if err != nil || len(names) != 1 || names[0] != "hooks.json" {
+		t.Fatalf("listing through the handle: %v %v", names, err)
+	}
+
+	// The account swaps the plain folder for a junction to another folder.
+	if err := os.Rename(codex, codex+".aside"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(codex + ".aside") })
+	windowsHookImageNativeJunction(t, codex, outside)
+	for _, kind := range []winpath.BelowKind{winpath.BelowFile, winpath.BelowAny} {
+		if opened, err := winpath.OpenBelow(home, file, kind); err == nil {
+			_ = opened.Close()
+			t.Fatalf("OpenBelow (kind %d) opened a file behind the swapped junction", kind)
+		} else if !errors.Is(err, winpath.ErrLinkBelowRoot) {
+			t.Fatalf("OpenBelow (kind %d) behind the junction: %v, want ErrLinkBelowRoot", kind, err)
+		}
+	}
+	if opened, err := winpath.OpenBelow(home, codex, winpath.BelowDirectory); err == nil {
+		_ = opened.Close()
+		t.Fatal("OpenBelow listed the swapped junction")
+	}
+	if _, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: file, User: true, Home: home}); err == nil ||
+		!strings.Contains(err.Error(), windowsHookImageLinkInAccountPath) {
+		t.Fatalf("account file behind the swapped junction: %v", err)
+	}
+	if info, err := winpath.InspectBelow(home, codex); err != nil || !info.Link {
+		t.Fatalf("InspectBelow of the junction: %+v %v", info, err)
+	}
+
+	// A folder where a file is expected is never read.
+	folder := filepath.Join(home, "settings.json")
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if opened, err := winpath.OpenBelow(home, folder, winpath.BelowFile); err == nil {
+		_ = opened.Close()
+		t.Fatal("OpenBelow opened a folder as a file")
+	} else if !errors.Is(err, winpath.ErrNotRegularBelow) {
+		t.Fatalf("folder as a file: %v, want ErrNotRegularBelow", err)
+	}
+	if _, err := readWindowsHookImageConfigFile(windowsHookImageConfigFile{Path: folder, User: true, Home: home}); !errors.Is(err, errWindowsHookImageScanUnsafe) {
+		t.Fatalf("reader on a folder: %v", err)
+	}
+	if err := winpath.RejectReparseBelow(home, file); !errors.Is(err, winpath.ErrLinkBelowRoot) {
+		t.Fatalf("RejectReparseBelow behind the junction: %v", err)
+	}
+	if _, err := winpath.OpenBelow(home, filepath.Join(home, "gone", "a.json"), winpath.BelowFile); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing: %v", err)
+	}
+}
+
+// windowsHookImageNativeSetOwner sets the owner of path itself (a link is
+// not followed).
+func windowsHookImageNativeSetOwner(t *testing.T, path string, owner *windows.SID) {
+	t.Helper()
+	ptr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(ptr, windows.WRITE_OWNER|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatalf("open %s to set its owner: %v", path, err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+		t.Fatalf("set the owner of %s: %v", path, err)
+	}
+}
+
+// Review 5 P3-1/P3-4: a vendor folder is listed and inspected from the
+// ProgramData handle (a temporary folder stands in for ProgramData here).
+// One subfolder SYSTEM's caller cannot list does not hide its siblings (an
+// administrator-owned one makes the scan incomplete); the files of a
+// subfolder an account owns are account files; a junction at the vendor
+// folder is never followed: an account's is an account entry (skipped), an
+// administrator-owned one is link_at_machine_folder.
+func TestWindowsHookImageNativeVendorFolders(t *testing.T) {
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := tokenUser.User.Sid
+	if user.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Fatal("the test needs an administrator account that is not LocalSystem (its own SID stands for a standard user)")
+	}
+	programData := t.TempDir()
+	vendor := filepath.Join(programData, "Cursor")
+	mk := func(path string, owner *windows.SID, body []byte) {
+		t.Helper()
+		if body == nil {
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		windowsHookImageNativeSetOwner(t, path, owner)
+	}
+	mk(vendor, admins, nil)
+	mk(filepath.Join(vendor, "a"), admins, nil)
+	mk(filepath.Join(vendor, "c"), admins, nil)
+	mk(filepath.Join(vendor, "c", "hooks.json"), admins, []byte(`{}`))
+	mk(filepath.Join(vendor, "d"), user, nil)
+	mk(filepath.Join(vendor, "d", "x.json"), user, []byte(`{}`))
+	// a: only LocalSystem may list it (the owner keeps WRITE_DAC to undo it).
+	locked := filepath.Join(vendor, "a")
+	setDACL := func(sddl string) {
+		t.Helper()
+		descriptor, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(locked, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setDACL("D:P(A;OICI;FA;;;SY)")
+	t.Cleanup(func() { setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)") })
+
+	vfs := windowsHookImageVendorFS{Inspect: winpath.InspectBelow, List: listWindowsHookImageBelow}
+	files, problems := windowsHookImageVendorFiles(programData, vendor, 1, vfs)
+	var got []string
+	for _, file := range files {
+		rel, _ := filepath.Rel(programData, file.Path)
+		got = append(got, fmt.Sprintf("%s|%v", rel, file.User))
+	}
+	want := []string{`Cursor\c\hooks.json|false`, `Cursor\d\x.json|true`}
+	if strings.Join(got, ";") != strings.Join(want, ";") {
+		t.Fatalf("files %v, want %v", got, want)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], `Cursor\a`) {
+		t.Fatalf("problems %v, want the one unlistable machine folder", problems)
+	}
+
+	// A junction at the vendor folder.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "hooks.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(programData, "LinkedVendor")
+	windowsHookImageNativeJunction(t, link, outside)
+	windowsHookImageNativeSetOwner(t, link, user)
+	files, problems = windowsHookImageVendorFiles(programData, link, 1, vfs)
+	if len(problems) != 0 || len(files) != 1 || !files[0].User || !strings.EqualFold(files[0].Path, link) {
+		t.Fatalf("an account's junction: files %+v problems %v", files, problems)
+	}
+	_, incomplete, skipped := expandWindowsHookImageConfigFiles(files, os.Lstat, os.ReadDir, windowsHookImageAccountView(viewWindowsHookImageAccountPath))
+	if len(incomplete) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], windowsHookImageLinkInAccountPath) {
+		t.Fatalf("an account's junction expanded: incomplete %v skipped %v", incomplete, skipped)
+	}
+	windowsHookImageNativeSetOwner(t, link, admins)
+	files, problems = windowsHookImageVendorFiles(programData, link, 1, vfs)
+	if len(files) != 0 || len(problems) != 1 || !strings.Contains(problems[0], windowsHookImageLinkAtMachineFolder) {
+		t.Fatalf("an administrator-owned junction: files %+v problems %v", files, problems)
 	}
 }

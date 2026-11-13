@@ -230,7 +230,10 @@ func TestHookImageScanExpandsAWatchedFolder(t *testing.T) {
 		{Path: `C:\ProgramData\Cursor\hooks.json`},
 		{Path: `C:\ProgramData\Cursor\reparse.json`},
 		{Path: dropIns},
-	}, lstat, readDir, func(string, string) error { return nil })
+	}, lstat, readDir, windowsHookImageAccountView(func(_, path string) (fs.FileInfo, []fs.DirEntry, error) {
+		info, err := lstat(path)
+		return info, nil, err
+	}))
 	var got []string
 	for _, file := range files {
 		got = append(got, fmt.Sprintf("%s|%v", file.Path, file.User))
@@ -432,18 +435,43 @@ func TestHookImageRetireReportsAWriterError(t *testing.T) {
 	}
 }
 
-// fakeAccountPaths is the account path check over a table of elements and
-// their reparse flags (winpath.CheckNoReparseBelow with a fake lister), the
-// decision the Windows scan makes with winpath.RejectReparseBelow.
-func fakeAccountPaths(reparse map[string]bool) func(home, path string) error {
-	return windowsHookImageAccountPathCheck(func(root, path string) error {
-		return winpath.CheckNoReparseBelow(root, path, func(element string) (bool, error) {
+// fakeAccountLinks is the decision the Windows account opener makes
+// (winpath.OpenBelow's walk from the home's handle) over a table of elements
+// and their reparse flags: the first link from the home down is
+// winpath.ErrLinkBelowRoot naming it, a missing element fs.ErrNotExist.
+func fakeAccountLinks(reparse map[string]bool) func(home, path string) error {
+	return func(home, path string) error {
+		elements, err := winpath.ElementsBelow(home, path)
+		if err != nil {
+			return err
+		}
+		for _, element := range elements {
 			value, ok := reparse[strings.ToLower(element)]
 			if !ok {
-				return false, fs.ErrNotExist
+				return fs.ErrNotExist
 			}
-			return value, nil
-		})
+			if value {
+				return fmt.Errorf("%w: %s", winpath.ErrLinkBelowRoot, element)
+			}
+		}
+		return nil
+	}
+}
+
+// fakeAccountView is viewWindowsHookImageAccountPath over fakes: links
+// decides first, then lstat and (for a folder) readDir answer through the
+// opened handle.
+func fakeAccountView(links func(home, path string) error, lstat func(string) (fs.FileInfo, error), readDir func(string) ([]fs.DirEntry, error)) func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
+	return windowsHookImageAccountView(func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
+		if err := links(home, path); err != nil {
+			return nil, nil, err
+		}
+		info, err := lstat(path)
+		if err != nil || !info.IsDir() {
+			return info, nil, err
+		}
+		children, err := readDir(path)
+		return info, children, err
 	})
 }
 
@@ -455,7 +483,7 @@ func fakeAccountPaths(reparse map[string]bool) func(home, path string) error {
 // file and the machine files are still read.
 func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
 	home := `C:\Users\u`
-	check := fakeAccountPaths(map[string]bool{
+	check := fakeAccountLinks(map[string]bool{
 		`c:\users\u`:                        false,
 		`c:\users\u\.claude`:                false,
 		`c:\users\u\.claude\settings.json`:  false,
@@ -483,7 +511,7 @@ func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
 		{Path: home + `\.claude\managed`, User: true, Home: home},
 		{Path: home + `\.cursor\hooks.json`, User: true, Home: home},
 		{Path: `C:\Users\v\.claude\settings.json`, User: true},
-	}, lstat, readDir, check)
+	}, lstat, readDir, fakeAccountView(check, lstat, readDir))
 	if len(files) != 2 || files[0].Path != `C:\Program Files\ClaudeCode\managed-settings.json` || files[1].Path != home+`\.claude\settings.json` {
 		t.Fatalf("files = %+v", files)
 	}
@@ -495,14 +523,14 @@ func TestHookImageScanSkipsAnAccountFileBehindALink(t *testing.T) {
 		!strings.Contains(skipped[1], `.claude\managed: link_in_account_path: `) || !strings.Contains(joined, "without an account home") {
 		t.Fatalf("skipped = %v", skipped)
 	}
-	// The reader makes the same decision (the Windows reader then checks the
-	// opened handle's final path as well): a link found at read time, after
-	// the expansion, is skipped too.
+	// The reader makes the same decision (the Windows reader opens the file
+	// from the home's handle, so a link swapped in after the expansion fails
+	// inside the open): it is skipped too.
 	body := []byte(`{"command":"C:\\Program Files\\Cisco\\DefenseClaw\\bin\\hooks\\0123456789abcdef\\defenseclaw-hook.exe"}`)
-	afterSwap := fakeAccountPaths(map[string]bool{`c:\users\u`: false, `c:\users\u\.claude`: true})
+	afterSwap := fakeAccountLinks(map[string]bool{`c:\users\u`: false, `c:\users\u\.claude`: true})
 	read := func(file windowsHookImageConfigFile) ([]byte, error) {
 		if file.User {
-			if err := afterSwap(file.Home, file.Path); err != nil {
+			if err := windowsHookImageAccountPathError(afterSwap(file.Home, file.Path)); err != nil {
 				return nil, err
 			}
 		}
@@ -536,69 +564,252 @@ func TestHookImageRetireReportsAnAccountFileBehindALink(t *testing.T) {
 	}
 }
 
+// fakeVendorFS is a ProgramData vendor tree: each element (lower case) has
+// a mode, an owner flag and, for a folder, its entries; listErr makes a
+// folder unlistable. It records each folder listed.
+type fakeVendorFS struct {
+	modes    map[string]fs.FileMode
+	admin    map[string]bool
+	children map[string][]fakeScanEntry
+	listErr  map[string]error
+	listed   []string
+}
+
+func (f *fakeVendorFS) vendor() windowsHookImageVendorFS {
+	return windowsHookImageVendorFS{
+		Inspect: func(root, path string) (winpath.BelowInfo, error) {
+			mode, ok := f.modes[strings.ToLower(path)]
+			if !ok {
+				return winpath.BelowInfo{}, fs.ErrNotExist
+			}
+			return winpath.BelowInfo{Link: mode&fs.ModeSymlink != 0, Directory: mode.IsDir(), AdminOwned: f.admin[strings.ToLower(path)]}, nil
+		},
+		List: func(root, path string) ([]fs.DirEntry, error) {
+			key := strings.ToLower(path)
+			f.listed = append(f.listed, path)
+			if err := f.listErr[key]; err != nil {
+				return nil, err
+			}
+			if f.modes[key]&fs.ModeSymlink != 0 {
+				return nil, fmt.Errorf("%w: %s", winpath.ErrLinkBelowRoot, path)
+			}
+			var out []fs.DirEntry
+			for _, child := range f.children[key] {
+				out = append(out, child)
+			}
+			return out, nil
+		},
+	}
+}
+
+func vendorFileLines(files []windowsHookImageConfigFile) string {
+	var got []string
+	for _, file := range files {
+		got = append(got, fmt.Sprintf("%s|%v|%s|%s", file.Path, file.User, file.Home, file.Note))
+	}
+	return strings.Join(got, "\n")
+}
+
 // GAP-0265 P3-a: a standard user can create ProgramData\OpenAI\Codex or
 // ProgramData\Cursor when they are absent. A file there is a machine file
 // only when it and every folder from ProgramData down to it is owned by
 // SYSTEM or Administrators; otherwise it is an account file (read below
 // ProgramData), so one the user made unreadable is skipped and does not
-// void the scan.
+// void the scan. Review 5: the folders are listed and inspected from
+// ProgramData's handle (never by name), and a junction the user made at
+// ProgramData\Cursor is not followed.
 func TestHookImageVendorFilesInAUserOwnedFolderAreAccountFiles(t *testing.T) {
 	programData := `C:\ProgramData`
-	owners := map[string]bool{
-		`c:\programdata\openai`:                         true,
-		`c:\programdata\openai\codex`:                   true,
-		`c:\programdata\openai\codex\requirements.toml`: true,
-		`c:\programdata\openai\codex\planted.toml`:      false,
-		`c:\programdata\cursor`:                         false,
-		`c:\programdata\cursor\hooks.json`:              true,
+	codex := &fakeVendorFS{
+		modes: map[string]fs.FileMode{
+			`c:\programdata\openai`:                         fs.ModeDir,
+			`c:\programdata\openai\codex`:                   fs.ModeDir,
+			`c:\programdata\openai\codex\requirements.toml`: 0,
+			`c:\programdata\openai\codex\planted.toml`:      0,
+			`c:\programdata\openai\codex\x.lock`:            0,
+		},
+		admin: map[string]bool{
+			`c:\programdata\openai`:                         true,
+			`c:\programdata\openai\codex`:                   true,
+			`c:\programdata\openai\codex\requirements.toml`: true,
+			`c:\programdata\openai\codex\x.lock`:            true,
+		},
+		children: map[string][]fakeScanEntry{
+			`c:\programdata\openai\codex`: {{"requirements.toml", 0}, {"planted.toml", 0}, {"x.lock", 0}},
+		},
 	}
-	asked := 0
-	adminOwned := func(path string) (bool, error) {
-		asked++
-		value, ok := owners[strings.ToLower(path)]
-		if !ok {
-			return false, errors.New("no owner")
-		}
-		return value, nil
-	}
-	files := windowsHookImageVendorFiles(programData, []string{
-		programData + `\OpenAI\Codex\requirements.toml`,
-		programData + `\OpenAI\Codex\planted.toml`,
-		programData + `\Cursor\hooks.json`,
-		programData + `\Cursor\sub\unknown.json`,
-	}, adminOwned)
-	var got []string
-	for _, file := range files {
-		got = append(got, fmt.Sprintf("%s|%v|%s|%s", file.Path, file.User, file.Home, file.Note))
-	}
-	want := []string{
+	files, problems := windowsHookImageVendorFiles(programData, programData+`\OpenAI\Codex`, 0, codex.vendor())
+	want := strings.Join([]string{
 		programData + `\OpenAI\Codex\requirements.toml|false||`,
 		programData + `\OpenAI\Codex\planted.toml|true|` + programData + `|not_admin_owned: ` + programData + `\OpenAI\Codex\planted.toml`,
-		programData + `\Cursor\hooks.json|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor`,
-		programData + `\Cursor\sub\unknown.json|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor`,
+	}, "\n")
+	if got := vendorFileLines(files); got != want || len(problems) != 0 {
+		t.Fatalf("codex files =\n%s\nwant\n%s\nproblems %v", got, want, problems)
 	}
-	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Fatalf("files =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+
+	// A user-made ProgramData\Cursor: everything below it is the account's.
+	cursor := &fakeVendorFS{
+		modes: map[string]fs.FileMode{
+			`c:\programdata\cursor`:                  fs.ModeDir,
+			`c:\programdata\cursor\hooks.json`:       0,
+			`c:\programdata\cursor\sub`:              fs.ModeDir,
+			`c:\programdata\cursor\sub\unknown.json`: 0,
+			`c:\programdata\cursor\link.json`:        fs.ModeSymlink,
+		},
+		admin: map[string]bool{`c:\programdata\cursor\hooks.json`: true},
+		children: map[string][]fakeScanEntry{
+			`c:\programdata\cursor`:     {{"hooks.json", 0}, {"sub", fs.ModeDir}, {"link.json", fs.ModeSymlink}},
+			`c:\programdata\cursor\sub`: {{"unknown.json", 0}},
+		},
 	}
-	// Each folder's owner is read once.
-	if asked != 5 {
-		t.Fatalf("owners read %d times, want 5", asked)
+	files, problems = windowsHookImageVendorFiles(programData, programData+`\Cursor`, 1, cursor.vendor())
+	note := `|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor`
+	want = strings.Join([]string{
+		programData + `\Cursor\hooks.json` + note,
+		programData + `\Cursor\sub\unknown.json` + note,
+		programData + `\Cursor\link.json` + note,
+	}, "\n")
+	if got := vendorFileLines(files); got != want || len(problems) != 0 {
+		t.Fatalf("cursor files =\n%s\nwant\n%s\nproblems %v", got, want, problems)
 	}
-	read := func(file windowsHookImageConfigFile) ([]byte, error) {
-		if strings.HasSuffix(file.Path, "requirements.toml") {
-			return []byte("[hooks]\n"), nil
-		}
+	read := func(windowsHookImageConfigFile) ([]byte, error) {
 		return nil, errors.New("Access is denied.")
 	}
 	scan := scanWindowsHookImageConfigFiles(files, hookImageTestBin, read)
-	if len(scan.Incomplete) != 0 || len(scan.Skipped) != 3 || !strings.Contains(scan.Skipped[1], `hooks.json (not_admin_owned: C:\ProgramData\Cursor): Access is denied.`) {
+	if len(scan.Incomplete) != 0 || len(scan.Skipped) != 3 || !strings.Contains(scan.Skipped[0], `hooks.json (not_admin_owned: C:\ProgramData\Cursor): Access is denied.`) {
 		t.Fatalf("scan = %+v", scan)
 	}
 	// An admin-owned vendor file that cannot be read still voids the scan.
-	machine := scanWindowsHookImageConfigFiles(files[:1], hookImageTestBin, func(windowsHookImageConfigFile) ([]byte, error) {
-		return nil, errors.New("Access is denied.")
-	})
+	machine := scanWindowsHookImageConfigFiles([]windowsHookImageConfigFile{{Path: programData + `\OpenAI\Codex\requirements.toml`}}, hookImageTestBin, read)
 	if len(machine.Incomplete) != 1 {
 		t.Fatalf("machine scan = %+v", machine)
+	}
+	// Missing vendor folders list nothing and are not a problem.
+	if files, problems := windowsHookImageVendorFiles(programData, programData+`\Cursor`, 1, (&fakeVendorFS{}).vendor()); len(files) != 0 || len(problems) != 0 {
+		t.Fatalf("missing vendor folder: %v %v", files, problems)
+	}
+}
+
+// Review 5 P3-1: a junction at ProgramData\Cursor is never listed or
+// followed. A user-made one is an account entry (the scan skips it as
+// link_in_account_path, never incomplete); one owned by SYSTEM or
+// Administrators makes the scan incomplete (link_at_machine_folder): only an
+// administrator can make it, and what it points to is not known.
+func TestHookImageVendorFolderThatIsALink(t *testing.T) {
+	programData := `C:\ProgramData`
+	user := &fakeVendorFS{modes: map[string]fs.FileMode{`c:\programdata\cursor`: fs.ModeDir | fs.ModeSymlink}}
+	files, problems := windowsHookImageVendorFiles(programData, programData+`\Cursor`, 1, user.vendor())
+	if len(problems) != 0 || len(files) != 1 || !files[0].User || files[0].Home != programData || files[0].Path != programData+`\Cursor` {
+		t.Fatalf("user link: files %+v problems %v", files, problems)
+	}
+	// The scan then looks at it as an account path and skips it.
+	view := windowsHookImageAccountView(func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
+		return nil, nil, fmt.Errorf("%w: %s", winpath.ErrLinkBelowRoot, path)
+	})
+	_, incomplete, skipped := expandWindowsHookImageConfigFiles(files, nil, nil, view)
+	if len(incomplete) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], windowsHookImageLinkInAccountPath) {
+		t.Fatalf("user link expanded: incomplete %v skipped %v", incomplete, skipped)
+	}
+	admin := &fakeVendorFS{
+		modes: map[string]fs.FileMode{`c:\programdata\cursor`: fs.ModeDir | fs.ModeSymlink},
+		admin: map[string]bool{`c:\programdata\cursor`: true},
+	}
+	files, problems = windowsHookImageVendorFiles(programData, programData+`\Cursor`, 1, admin.vendor())
+	if len(files) != 0 || len(problems) != 1 || !strings.Contains(problems[0], windowsHookImageLinkAtMachineFolder) {
+		t.Fatalf("admin link: files %+v problems %v", files, problems)
+	}
+	// The admin link is never opened for listing; the user link only by
+	// the handle-relative opener, which refuses it inside the open.
+	if len(admin.listed) != 0 {
+		t.Fatalf("an admin link was listed: %v", admin.listed)
+	}
+}
+
+// One subfolder that cannot be listed does not hide its siblings: a machine
+// one is a problem (the scan is incomplete), an account one becomes an
+// account entry (skipped); the other folders are still listed and read.
+func TestHookImageVendorListingGoesOnPastAnUnlistableFolder(t *testing.T) {
+	programData := `C:\ProgramData`
+	denied := errors.New("Access is denied.")
+	vfs := &fakeVendorFS{
+		modes: map[string]fs.FileMode{
+			`c:\programdata\cursor`:              fs.ModeDir,
+			`c:\programdata\cursor\a`:            fs.ModeDir,
+			`c:\programdata\cursor\b`:            fs.ModeDir,
+			`c:\programdata\cursor\c`:            fs.ModeDir,
+			`c:\programdata\cursor\c\hooks.json`: 0,
+			`c:\programdata\cursor\d`:            fs.ModeDir,
+			`c:\programdata\cursor\d\x.json`:     0,
+		},
+		admin: map[string]bool{
+			`c:\programdata\cursor`:              true,
+			`c:\programdata\cursor\a`:            true,
+			`c:\programdata\cursor\c`:            true,
+			`c:\programdata\cursor\c\hooks.json`: true,
+		},
+		children: map[string][]fakeScanEntry{
+			`c:\programdata\cursor`:   {{"a", fs.ModeDir}, {"b", fs.ModeDir}, {"c", fs.ModeDir}, {"d", fs.ModeDir}},
+			`c:\programdata\cursor\c`: {{"hooks.json", 0}},
+			`c:\programdata\cursor\d`: {{"x.json", 0}},
+		},
+		listErr: map[string]error{`c:\programdata\cursor\a`: denied, `c:\programdata\cursor\b`: denied},
+	}
+	files, problems := windowsHookImageVendorFiles(programData, programData+`\Cursor`, 1, vfs.vendor())
+	want := strings.Join([]string{
+		programData + `\Cursor\b|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor\b`,
+		programData + `\Cursor\c\hooks.json|false||`,
+		programData + `\Cursor\d\x.json|true|` + programData + `|not_admin_owned: ` + programData + `\Cursor\d`,
+	}, "\n")
+	if got := vendorFileLines(files); got != want {
+		t.Fatalf("files =\n%s\nwant\n%s", got, want)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], `Cursor\a: Access is denied.`) {
+		t.Fatalf("problems = %v", problems)
+	}
+}
+
+// Review 5 P3-2: an account that can read a machine file can hold it open
+// without read sharing. The read is retried, then reported as
+// machine_file_busy (the scan is incomplete: nothing is pruned, retire stays
+// pending until it is run again).
+func TestHookImageMachineFileHeldWithoutSharingIsRetriedThenBusy(t *testing.T) {
+	busy := errors.New("The process cannot access the file because it is being used by another process.")
+	isBusy := func(err error) bool { return errors.Is(err, busy) }
+	var waited []time.Duration
+	sleep := func(d time.Duration) { waited = append(waited, d) }
+	tries := 0
+	body, err := readWindowsHookImageRetryingBusy(func() ([]byte, error) {
+		tries++
+		if tries < 3 {
+			return nil, busy
+		}
+		return []byte("ok"), nil
+	}, isBusy, sleep)
+	if err != nil || string(body) != "ok" || tries != 3 || len(waited) != 2 {
+		t.Fatalf("released after two tries: %q %v tries %d waited %v", body, err, tries, waited)
+	}
+	tries, waited = 0, nil
+	_, err = readWindowsHookImageRetryingBusy(func() ([]byte, error) { tries++; return nil, busy }, isBusy, sleep)
+	if err == nil || !errors.Is(err, busy) || !strings.HasPrefix(err.Error(), windowsHookImageMachineFileBusy+": ") || tries != len(windowsHookImageBusyRetries)+1 {
+		t.Fatalf("held: %v after %d tries", err, tries)
+	}
+	// 1.5 s of waits in all: inside the 5 s per-file timeout of the reader.
+	var total time.Duration
+	for _, d := range waited {
+		total += d
+	}
+	if total != 1500*time.Millisecond {
+		t.Fatalf("retries wait %s, want 1.5s", total)
+	}
+	// Another error is not retried.
+	tries = 0
+	if _, err := readWindowsHookImageRetryingBusy(func() ([]byte, error) { tries++; return nil, errors.New("Access is denied.") }, isBusy, sleep); err == nil || tries != 1 {
+		t.Fatalf("access denied retried: %v %d", err, tries)
+	}
+	_, held := readWindowsHookImageRetryingBusy(func() ([]byte, error) { return nil, busy }, isBusy, func(time.Duration) {})
+	scan := scanWindowsHookImageConfigFiles([]windowsHookImageConfigFile{{Path: `C:\Program Files\ClaudeCode\managed-settings.json`}}, hookImageTestBin,
+		func(windowsHookImageConfigFile) ([]byte, error) { return nil, held })
+	if len(scan.Incomplete) != 1 || !strings.Contains(scan.Incomplete[0], `managed-settings.json: machine_file_busy: `) {
+		t.Fatalf("busy machine file: %+v", scan)
 	}
 }

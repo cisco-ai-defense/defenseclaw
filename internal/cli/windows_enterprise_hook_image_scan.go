@@ -42,6 +42,7 @@ type windowsHookImageConfigFile struct {
 	Home string
 	// Note says why a file outside an account's home is an account file
 	// ("not_admin_owned: <element>"); it is shown with a skipped line.
+	// Home is then ProgramData: the file is opened from ProgramData's handle.
 	Note string
 }
 
@@ -60,64 +61,166 @@ const windowsHookImageLinkInAccountPath = "link_in_account_path"
 var errWindowsHookImageNoAccountHome = errors.New("account file without an account home; not read")
 
 // windowsHookImageAccountPathError marks a winpath.ErrLinkBelowRoot error as
-// link_in_account_path; other errors pass unchanged.
+// link_in_account_path and a winpath.ErrNotRegularBelow one (a folder or a
+// device opened as a file) as errWindowsHookImageScanUnsafe; other errors
+// pass unchanged.
 func windowsHookImageAccountPathError(err error) error {
-	if err != nil && errors.Is(err, winpath.ErrLinkBelowRoot) {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, winpath.ErrLinkBelowRoot):
 		return fmt.Errorf("%s: %w; not read", windowsHookImageLinkInAccountPath, err)
+	case errors.Is(err, winpath.ErrNotRegularBelow):
+		return errWindowsHookImageScanUnsafe
 	}
 	return err
 }
 
-// windowsHookImageAccountPathCheck is the check run before an account path
-// is opened or listed: walk (winpath.RejectReparseBelow on Windows) must find
-// no link from the account home down to the path. SYSTEM resolves every
-// folder of that path with its own rights, so a folder the account replaced
+// windowsHookImageAccountView is how an account path is looked at before it
+// is listed or read: view (viewWindowsHookImageAccountPath on Windows) opens
+// it from the account home's handle with no link followed anywhere from the
+// home down, and returns what it is and, for a folder, its entries listed
+// through that handle. SYSTEM would resolve every folder of the path with its
+// own rights if it opened the path by name, so a folder the account replaced
 // with a junction would point SYSTEM's open anywhere the account chooses.
-func windowsHookImageAccountPathCheck(walk func(root, path string) error) func(home, path string) error {
-	return func(home, path string) error {
+func windowsHookImageAccountView(view func(home, path string) (fs.FileInfo, []fs.DirEntry, error)) func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
+	return func(home, path string) (fs.FileInfo, []fs.DirEntry, error) {
 		if strings.TrimSpace(home) == "" {
-			return errWindowsHookImageNoAccountHome
+			return nil, nil, errWindowsHookImageNoAccountHome
 		}
-		return windowsHookImageAccountPathError(walk(home, path))
+		info, children, err := view(home, path)
+		if err != nil {
+			return nil, nil, windowsHookImageAccountPathError(err)
+		}
+		return info, children, nil
 	}
 }
 
-// windowsHookImageVendorFiles classifies the files listed in a ProgramData
-// vendor folder that a standard user can create when it is absent
-// (ProgramData\OpenAI\Codex, ProgramData\Cursor): a file is a machine file
-// only when it and every folder from ProgramData down to it is owned by
-// SYSTEM or Administrators (adminOwned); otherwise it is an account file read
-// below ProgramData, so one the user made unreadable is skipped and never
-// voids the scan (which would keep every folder and leave retire pending).
-func windowsHookImageVendorFiles(programData string, paths []string, adminOwned func(string) (bool, error)) []windowsHookImageConfigFile {
-	owned := map[string]bool{}
-	isOwned := func(path string) bool {
-		key := strings.ToLower(path)
-		if value, ok := owned[key]; ok {
-			return value
+// windowsHookImageLinkAtMachineFolder starts the incomplete line of a link
+// (reparse point) owned by SYSTEM or Administrators in a ProgramData vendor
+// folder: it is not followed, and the scan cannot vouch for what it points
+// to.
+const windowsHookImageLinkAtMachineFolder = "link_at_machine_folder"
+
+// windowsHookImageVendorFS reads a ProgramData vendor folder through
+// handles opened from ProgramData's (winpath.InspectBelow and a listing
+// through winpath.OpenBelow on Windows), so no folder of it is ever resolved
+// by name.
+type windowsHookImageVendorFS struct {
+	// Inspect opens path below root without following a link (a link at
+	// the last element is opened itself) and reports what it is and who
+	// owns it, read on the opened handle.
+	Inspect func(root, path string) (winpath.BelowInfo, error)
+	// List lists the folder path below root through its handle; a link
+	// anywhere from root down fails the open.
+	List func(root, path string) ([]fs.DirEntry, error)
+}
+
+// windowsHookImageVendorFiles lists the files of a ProgramData vendor folder
+// that a standard user can create when it is absent (ProgramData\OpenAI\Codex,
+// ProgramData\Cursor) to depth below dir, and classifies them. A file is a
+// machine file only when it and every folder from ProgramData down to it is
+// owned by SYSTEM or Administrators; from the first element that is not, the
+// rest is account files read below ProgramData (Note not_admin_owned:
+// <element>), so one the user made unreadable, or a link the user made, is
+// skipped and never voids the scan (which would keep every folder and leave
+// retire pending). A link owned by SYSTEM or Administrators is not followed
+// either: it makes the scan incomplete (link_at_machine_folder), since only
+// an administrator can make it and what it points to is not known. A folder
+// SYSTEM cannot list is a problem (the scan is incomplete) when it is a
+// machine folder and an account entry (skipped by the scan) otherwise; the
+// listing goes on with its siblings, so one unreadable folder cannot hide
+// the other files. A missing vendor folder lists nothing. Owners do not
+// change under the scan: a standard user cannot make a folder of theirs
+// owned by SYSTEM or Administrators, nor replace one that is.
+func windowsHookImageVendorFiles(programData, dir string, depth int, vfs windowsHookImageVendorFS) ([]windowsHookImageConfigFile, []string) {
+	var files []windowsHookImageConfigFile
+	var problems []string
+	entry := func(path, note string) windowsHookImageConfigFile {
+		if note == "" {
+			return windowsHookImageConfigFile{Path: path}
 		}
-		ok, err := adminOwned(path)
-		owned[key] = err == nil && ok
-		return owned[key]
+		return windowsHookImageConfigFile{Path: path, User: true, Home: programData, Note: note}
 	}
-	files := make([]windowsHookImageConfigFile, 0, len(paths))
-	for _, path := range paths {
-		file := windowsHookImageConfigFile{Path: path}
-		elements, err := winpath.ElementsBelow(programData, path)
-		if err != nil {
-			file.User, file.Home, file.Note = true, programData, "not_admin_owned: "+err.Error()
-			files = append(files, file)
-			continue
+	// classify returns the account note of path ("" for a machine element)
+	// or the problem that voids the scan; missing is a path that is gone.
+	classify := func(path string) (note, problem string, missing bool) {
+		info, err := vfs.Inspect(programData, path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return "", "", true
+		case err != nil:
+			return "", fmt.Sprintf("%s: %v", path, err), false
+		case !info.AdminOwned:
+			return "not_admin_owned: " + path, "", false
+		case info.Link:
+			return "", fmt.Sprintf("%s: %s: a link (reparse point) owned by SYSTEM or Administrators is not followed; replace it with a plain folder", path, windowsHookImageLinkAtMachineFolder), false
 		}
-		for _, element := range elements[1:] {
-			if !isOwned(element) {
-				file.User, file.Home, file.Note = true, programData, "not_admin_owned: "+element
-				break
+		return "", "", false
+	}
+	elements, err := winpath.ElementsBelow(programData, dir)
+	if err != nil {
+		return nil, []string{fmt.Sprintf("%s: %v", dir, err)}
+	}
+	note := ""
+	for _, element := range elements[1:] {
+		elementNote, problem, missing := classify(element)
+		switch {
+		case missing:
+			return nil, nil
+		case problem != "":
+			return nil, []string{problem}
+		}
+		if elementNote != "" {
+			note = elementNote
+			break
+		}
+	}
+	var walk func(dir string, depth int, note string)
+	walk = func(dir string, depth int, note string) {
+		children, err := vfs.List(programData, dir)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return
+		case err != nil && note != "":
+			// The scan looks at it again as an account path and skips it.
+			files = append(files, entry(dir, note))
+			return
+		case err != nil:
+			problems = append(problems, fmt.Sprintf("%s: %v", dir, err))
+			return
+		}
+		for _, child := range children {
+			path := windowsHookImageJoin(dir, child.Name())
+			childNote := note
+			if childNote == "" {
+				elementNote, problem, missing := classify(path)
+				switch {
+				case missing:
+					continue
+				case problem != "":
+					problems = append(problems, problem)
+					continue
+				}
+				childNote = elementNote
+			}
+			switch mode := child.Type(); {
+			case mode&(fs.ModeSymlink|fs.ModeIrregular) != 0:
+				// Refused when it is opened (link_in_account_path or
+				// not a regular file).
+				files = append(files, entry(path, childNote))
+			case child.IsDir():
+				if depth > 0 {
+					walk(path, depth-1, childNote)
+				}
+			case windowsHookImageScanSkipsName(path):
+			default:
+				files = append(files, entry(path, childNote))
 			}
 		}
-		files = append(files, file)
 	}
-	return files
+	walk(dir, depth, note)
+	return files, problems
 }
 
 // windowsHookImageConfigScan is the result of one scan.
@@ -159,19 +262,51 @@ func (s windowsHookImageConfigScan) NamedBySystem() map[string][]string {
 // or another non-regular file: it is never read.
 var errWindowsHookImageScanUnsafe = errors.New("not a regular file (a link, a folder or a device); not read")
 
+// windowsHookImageMachineFileBusy starts the incomplete line of a machine
+// file another process still held open without read sharing after the
+// retries: any account that can read a machine file (Claude Code's
+// managed-settings.json, an admin-owned vendor file) can hold it that way.
+// The scan is then incomplete (prune removes nothing, retire stays pending)
+// until the holder lets go; the line says so, and retire or prune can be run
+// again.
+const windowsHookImageMachineFileBusy = "machine_file_busy"
+
+// windowsHookImageBusyRetries are the waits between reads of a machine file
+// held open without read sharing: 1.5 s in all, inside the per-file timeout.
+var windowsHookImageBusyRetries = []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond}
+
+// readWindowsHookImageRetryingBusy runs read again while busy reports its
+// error as a sharing violation, waiting windowsHookImageBusyRetries between
+// tries, and then reports machine_file_busy.
+func readWindowsHookImageRetryingBusy(read func() ([]byte, error), busy func(error) bool, sleep func(time.Duration)) ([]byte, error) {
+	for attempt := 0; ; attempt++ {
+		body, err := read()
+		if err == nil || !busy(err) {
+			return body, err
+		}
+		if attempt == len(windowsHookImageBusyRetries) {
+			return nil, fmt.Errorf("%s: another process holds the file open without read sharing (%d tries): %w; run again once it is closed",
+				windowsHookImageMachineFileBusy, attempt+1, err)
+		}
+		sleep(windowsHookImageBusyRetries[attempt])
+	}
+}
+
 // expandWindowsHookImageConfigFiles turns the watched paths into the regular
 // files to read: a folder (Claude Code's managed-settings.d) becomes its
 // regular files, a missing path is dropped, a link or other non-regular entry
-// is refused (machine: incomplete; account: skipped). An account path is
-// first checked with checkAccount (windowsHookImageAccountPathCheck): one
-// with a link at or below its home is skipped and never listed or read. Lock
-// files and temporaries are left out: writers hold them without sharing and
-// they never name a hook.
+// is refused (machine: incomplete; account: skipped). A machine path is
+// looked at with lstat and readDir; an account path only through viewAccount
+// (windowsHookImageAccountView): one with a link at or below its home is
+// skipped (link_in_account_path) and never listed or read, and a watched
+// account folder is listed through the handle the view opened. Lock files
+// and temporaries are left out: writers hold them without sharing and they
+// never name a hook.
 func expandWindowsHookImageConfigFiles(
 	entries []windowsHookImageConfigFile,
 	lstat func(string) (fs.FileInfo, error),
 	readDir func(string) ([]fs.DirEntry, error),
-	checkAccount func(home, path string) error,
+	viewAccount func(home, path string) (fs.FileInfo, []fs.DirEntry, error),
 ) ([]windowsHookImageConfigFile, []string, []string) {
 	var files []windowsHookImageConfigFile
 	var incomplete, skipped []string
@@ -199,15 +334,14 @@ func expandWindowsHookImageConfigFiles(
 			continue
 		}
 		expanded[entryKey] = true
+		var info fs.FileInfo
+		var children []fs.DirEntry
+		var err error
 		if entry.User {
-			if err := checkAccount(entry.Home, entry.Path); errors.Is(err, fs.ErrNotExist) {
-				continue
-			} else if err != nil {
-				refuse(entry, err)
-				continue
-			}
+			info, children, err = viewAccount(entry.Home, entry.Path)
+		} else {
+			info, err = lstat(entry.Path)
 		}
-		info, err := lstat(entry.Path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			continue
@@ -226,13 +360,15 @@ func expandWindowsHookImageConfigFiles(
 			refuse(entry, errWindowsHookImageScanUnsafe)
 			continue
 		}
-		children, err := readDir(entry.Path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			refuse(entry, err)
-			continue
+		if !entry.User {
+			children, err = readDir(entry.Path)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				refuse(entry, err)
+				continue
+			}
 		}
 		for _, dirEntry := range children {
 			child := windowsHookImageConfigFile{Path: windowsHookImageJoin(entry.Path, dirEntry.Name()), User: entry.User, Home: entry.Home, Note: entry.Note}
