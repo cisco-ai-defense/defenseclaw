@@ -16,60 +16,69 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { MESSAGE_TEXT_MAX_CHARS, extractMessageText } from "../message-text.js";
+import { MESSAGE_TEXT_MAX_BYTES, extractMessage } from "../message-text.js";
 
-// The message tool's text can sit in any string field of its params (GAP-0177).
-describe("extractMessageText", () => {
-  it.each([
-    ["content", { content: "one" }, "one"],
-    ["body", { body: "two" }, "two"],
-    ["text", { text: "three" }, "three"],
-    ["message", { message: "four" }, "four"],
-    ["caption", { media: "x", caption: "five" }, "five\nx"],
-    ["known keys first, then the rest sorted", { zz: "last", aa: "mid", content: "first" }, "first\nmid\nlast"],
-    [
-      "nested blocks and attachments",
-      {
-        blocks: [{ type: "text", text: "b1" }, { type: "text", text: "b2" }],
-        attachments: [{ title: "a1" }],
-      },
-      "b1\nb2\na1",
-    ],
-    ["routing keys are not text", { action: "send", channel: "sms", to: "+15551230000", accountId: "acct" }, ""],
-    ["routing keys inside blocks are not text", { blocks: [{ type: "text", id: "blk", text: "hello" }] }, "hello"],
-    ["blank strings are not text", { text: "   ", body: "" }, ""],
-    ["non-string values are not text", { text: 42, flag: true, n: null, items: [1, 2] }, ""],
-    ["empty params", {}, ""],
-    ["no params", undefined, ""],
-    ["a bare string", "hello", "hello"],
-  ])("%s", (_name, params, want) => {
-    expect(extractMessageText(params)).toBe(want);
+interface ParityCase {
+  name: string;
+  params?: unknown;
+  gen?: Record<string, number>;
+  text?: string;
+  text_len?: number;
+  over_cap?: boolean;
+  routing?: Record<string, string>;
+  head?: string;
+  tail?: string;
+  valid_utf8?: boolean;
+}
+
+// The cases the gateway runs too (internal/gateway/message_text_test.go): the
+// plugin and the gateway read a message call's params the same way (GAP-0177,
+// GAP-0290..0292).
+const fixture = JSON.parse(
+  readFileSync(new URL("../../../../internal/gateway/testdata/message_text_parity.json", import.meta.url), "utf8"),
+) as { cases: ParityCase[] };
+
+function paramsOf(c: ParityCase): unknown {
+  const gen = c.gen ?? {};
+  if (gen.leaves) return { blocks: Array.from({ length: gen.leaves }, () => "s") };
+  if (gen.depth || gen.depth_empty) {
+    let v: unknown = gen.depth ? "deep" : [];
+    for (let i = 0; i < (gen.depth ?? gen.depth_empty); i++) v = { x: v };
+    return v;
+  }
+  if (gen.nodes) return { items: [...Array.from({ length: gen.nodes }, () => ({})), "late"] };
+  if (gen.multibyte) return { text: "é".repeat(gen.multibyte) };
+  if (gen.pad) return { body: "a".repeat(gen.pad), text: "z".repeat(gen.pad) };
+  return c.params;
+}
+
+describe("extractMessage", () => {
+  it("has the gateway's limits", () => {
+    expect(MESSAGE_TEXT_MAX_BYTES).toBe(256 * 1024);
   });
 
-  it("stops below the depth limit", () => {
-    let deep: unknown = "deep";
-    for (let i = 0; i < 12; i++) deep = { x: deep };
-    expect(extractMessageText(deep)).toBe("");
-    expect(extractMessageText({ a: { b: { c: "seen" } } })).toBe("seen");
+  it.each(fixture.cases.map((c) => [c.name, c] as const))("%s", (_name, c) => {
+    const got = extractMessage(paramsOf(c));
+    if (c.text !== undefined) expect(got.text).toBe(c.text);
+    if (c.text_len !== undefined) expect(new TextEncoder().encode(got.text).length).toBe(c.text_len);
+    if (c.valid_utf8) expect(got.text).not.toContain("\uFFFD");
+    if (c.head) expect(got.text.startsWith(c.head)).toBe(true);
+    if (c.tail) expect(got.text.endsWith(c.tail)).toBe(true);
+    expect(got.overCap).toBe(c.over_cap ?? false);
+    expect(got.routing).toEqual(c.routing ?? {});
   });
 
-  it("reads at most 512 strings", () => {
-    const blocks = Array.from({ length: 562 }, () => "s");
-    expect(extractMessageText({ blocks }).split("\n")).toHaveLength(512);
-  });
-
-  it("keeps the head and the tail of an oversized text", () => {
-    const long = "a".repeat(MESSAGE_TEXT_MAX_CHARS) + "m".repeat(1000) + "z".repeat(MESSAGE_TEXT_MAX_CHARS);
-    const out = extractMessageText({ text: long, body: long });
-    expect(out.length).toBeLessThanOrEqual(MESSAGE_TEXT_MAX_CHARS + 1);
-    expect(out.startsWith("a")).toBe(true);
-    expect(out.endsWith("z")).toBe(true);
+  it("reads no params", () => {
+    expect(extractMessage(undefined)).toEqual({ text: "", overCap: false, routing: {} });
   });
 
   it("survives a cyclic params object", () => {
     const params: Record<string, unknown> = { text: "loop" };
     params.self = params;
-    expect(extractMessageText(params)).toBe("loop\nloop\nloop\nloop\nloop\nloop\nloop\nloop\nloop");
+    const got = extractMessage(params);
+    expect(got.text.startsWith("loop\nloop")).toBe(true);
+    expect(got.overCap).toBe(true);
   });
 });

@@ -265,7 +265,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				record:                        toolChainRecorderFromContext(ctx),
 			}, command, commandTool)
 		}
-		verdict = mergeCoworkPageContentVerdict(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
+		verdict = mergeToolInspectVerdicts(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
 		// Cowork's own workspace shell and fetch are no MCP server the user
 		// configured: no MCP admission or server policy applies to them.
 		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {

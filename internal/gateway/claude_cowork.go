@@ -21,7 +21,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -222,35 +221,14 @@ const coworkWorkspaceServerName = "workspace"
 // block, asset_policy.mcp), the account's own MCP block, and a static block
 // of mcp__workspace__bash or mcp__workspace__web_fetch. A deny wins; the
 // allow list applies to the Bash or WebFetch name the call is judged under.
-// nil when nothing denies it. The managed AID-only path has no static lists.
+// nil when nothing denies it (toolBlockListVerdict; the managed AID-only path has no static lists).
 // callerCWD is the call's working folder, so a project-scoped MCP admission
 // matches as in inspectTrustedToolPolicyCtx.
 func (a *APIServer) claudeCodeCoworkNativeDeny(ctx context.Context, nativeTool, callerCWD string) *ToolInspectVerdict {
-	if a.managedAIDOnly() {
-		return nil
-	}
-	cfg := a.decisionConfig(ctx)
-	pe := enforce.NewPolicyEngine(a.store).WithConfig(func() *config.Config { return cfg })
-	if deny, _, reason := mcpServerRuntimeBlock(pe, nativeTool, "claudecode", coworkWorkspaceServerName); deny {
-		return &ToolInspectVerdict{Action: "block", Severity: "HIGH", Confidence: 1.0, Reason: reason, Findings: []string{"MCP-BLOCK"}}
-	}
-	if deny, reason := a.mcpAccountRuntimeBlock(ctx, pe, &ToolInspectRequest{
-		Tool: nativeTool, Connector: "claudecode", MCPServerName: coworkWorkspaceServerName, Direction: "tool_call",
-		callerCWD: callerCWD,
-	}); deny {
-		return &ToolInspectVerdict{Action: "block", Severity: "HIGH", Confidence: 1.0, Reason: reason, Findings: []string{"MCP-BLOCK"}}
-	}
-	blocked, err := pe.IsToolBlockedForConnector(nativeTool, "claudecode")
-	if err != nil {
-		return toolPolicyLookupErrorVerdict("inspect", "block-list", nativeTool, "claudecode", err)
-	}
-	if blocked {
-		return &ToolInspectVerdict{
-			Action: "block", Severity: "HIGH", Confidence: 1.0,
-			Reason: fmt.Sprintf("tool %q is on the static block list", nativeTool), Findings: []string{"STATIC-BLOCK"},
-		}
-	}
-	return nil
+	return a.toolBlockListVerdict(ctx, &ToolInspectRequest{
+		Tool: nativeTool, Connector: "claudecode", MCPServerName: coworkWorkspaceServerName,
+		Direction: "tool_call", callerCWD: callerCWD,
+	}, nil)
 }
 
 // claudeCodeCoworkNativeTool reports a call of the engine's own workspace
@@ -434,9 +412,10 @@ func (a *APIServer) inspectClaudeCodeCoworkPageContent(ctx context.Context, req 
 	}
 }
 
-// mergeCoworkPageContentVerdict adds the page-content check to the call's
-// verdict: the stronger action and severity win and the findings add up.
-func mergeCoworkPageContentVerdict(base, extra *ToolInspectVerdict) *ToolInspectVerdict {
+// mergeToolInspectVerdicts adds another lane's verdict to the call's (the
+// Cowork page-content check, a message call's routing values): the stronger
+// action and severity win and the findings add up.
+func mergeToolInspectVerdicts(base, extra *ToolInspectVerdict) *ToolInspectVerdict {
 	if extra == nil {
 		return base
 	}

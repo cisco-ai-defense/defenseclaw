@@ -1,0 +1,376 @@
+{
+ "comment": "Cases shared by internal/gateway/message_text_test.go and extensions/defenseclaw/src/__tests__/message-text.test.ts: the plugin and the gateway read a message call's params the same way (GAP-0177, GAP-0290..0292). gen builds a large input: leaves N strings in blocks, depth N nested objects around one string, depth_empty N nested objects around an empty array, body of N a's and text of N z's. Routing keys are dotted paths; a repeated path gets #2, #3. Synthetic values only. Also gen: nodes N empty objects in one array followed by one string; multibyte N two-byte characters in text. text_len counts UTF-8 bytes. valid_utf8 asserts no cut character. Numbers are text, read as their JSON literal in Go and String(n) in the plugin, so the fixture holds integers and short decimals only.",
+ "cases": [
+  {
+   "name": "content",
+   "params": {
+    "content": "one"
+   },
+   "text": "one"
+  },
+  {
+   "name": "body",
+   "params": {
+    "body": "two"
+   },
+   "text": "two"
+  },
+  {
+   "name": "text",
+   "params": {
+    "text": "three"
+   },
+   "text": "three"
+  },
+  {
+   "name": "message",
+   "params": {
+    "message": "four"
+   },
+   "text": "four"
+  },
+  {
+   "name": "caption and media",
+   "params": {
+    "media": "x",
+    "caption": "five"
+   },
+   "text": "five\nx"
+  },
+  {
+   "name": "known keys first then the rest sorted",
+   "params": {
+    "zz": "last",
+    "aa": "mid",
+    "content": "first"
+   },
+   "text": "first\nmid\nlast"
+  },
+  {
+   "name": "nested blocks and attachments",
+   "params": {
+    "blocks": [
+     {
+      "type": "text",
+      "text": "b1"
+     },
+     {
+      "type": "text",
+      "text": "b2"
+     }
+    ],
+    "attachments": [
+     {
+      "title": "a1"
+     }
+    ]
+   },
+   "text": "b1\nb2\na1",
+   "routing": {
+    "blocks.type": "text",
+    "blocks.type#2": "text"
+   }
+  },
+  {
+   "name": "routing keys alone are no text",
+   "params": {
+    "action": "send",
+    "channel": "sms",
+    "to": "+15551230000",
+    "accountId": "acct"
+   },
+   "text": "",
+   "routing": {
+    "action": "send",
+    "channel": "sms",
+    "to": "+15551230000",
+    "accountId": "acct"
+   }
+  },
+  {
+   "name": "routing keys inside blocks",
+   "params": {
+    "blocks": [
+     {
+      "type": "text",
+      "id": "blk",
+      "text": "hello"
+     }
+    ]
+   },
+   "text": "hello",
+   "routing": {
+    "blocks.type": "text",
+    "blocks.id": "blk"
+   }
+  },
+  {
+   "name": "a target object holds text and its own routing",
+   "params": {
+    "to": "+1",
+    "target": {
+     "id": "u1",
+     "text": "hello"
+    }
+   },
+   "text": "hello",
+   "routing": {
+    "to": "+1",
+    "target.id": "u1"
+   }
+  },
+  {
+   "name": "a routing array of strings",
+   "params": {
+    "targets": [
+     "a",
+     "b"
+    ],
+    "text": "hi"
+   },
+   "text": "hi",
+   "routing": {
+    "targets": "a",
+    "targets#2": "b"
+   }
+  },
+  {
+   "name": "a routing array of objects is read as text",
+   "params": {
+    "recipients": [
+     {
+      "name": "n1"
+     }
+    ]
+   },
+   "text": "n1"
+  },
+  {
+   "name": "a mixed routing array is read as text",
+   "params": {
+    "recipients": [
+     "a",
+     {
+      "x": "y"
+     }
+    ]
+   },
+   "text": "a\ny"
+  },
+  {
+   "name": "blank strings are not text",
+   "params": {
+    "text": "   ",
+    "body": ""
+   },
+   "text": ""
+  },
+  {
+   "name": "empty object",
+   "params": {},
+   "text": ""
+  },
+  {
+   "name": "a bare string",
+   "params": "plain",
+   "text": "plain"
+  },
+  {
+   "name": "shallow nesting",
+   "params": {
+    "a": {
+     "b": {
+      "c": "seen"
+     }
+    }
+   },
+   "text": "seen"
+  },
+  {
+   "name": "more strings than the leaf limit",
+   "gen": {
+    "leaves": 600
+   },
+   "text_len": 1023,
+   "over_cap": true
+  },
+  {
+   "name": "a string below the depth limit",
+   "gen": {
+    "depth": 12
+   },
+   "text_len": 0,
+   "over_cap": true
+  },
+  {
+   "name": "an empty container below the depth limit is nothing",
+   "gen": {
+    "depth_empty": 12
+   },
+   "text_len": 0
+  },
+  {
+   "name": "text past the size limit keeps head and tail",
+   "gen": {
+    "pad": 140000
+   },
+   "text_len": 262145,
+   "over_cap": true,
+   "head": "aaa",
+   "tail": "zzz"
+  },
+  {
+   "name": "text under the size limit",
+   "gen": {
+    "pad": 100000
+   },
+   "text_len": 200001
+  },
+  {
+   "name": "non-string values: numbers are text, flags and nulls are not",
+   "params": {
+    "text": 42,
+    "b": true,
+    "n": null,
+    "a": [
+     1.5
+    ]
+   },
+   "text": "42\n1.5"
+  },
+  {
+   "name": "a number beside a message",
+   "params": {
+    "message": "hi",
+    "n": 1234567,
+    "price": 19.5,
+    "flag": true
+   },
+   "text": "hi\n1234567\n19.5"
+  },
+  {
+   "name": "a number under a routing key is a control value",
+   "params": {
+    "to": 15551230000,
+    "text": "x",
+    "timeoutMs": 5000
+   },
+   "text": "x"
+  },
+  {
+   "name": "priority then sorted",
+   "params": {
+    "zz": "last",
+    "aa": "mid",
+    "content": "first",
+    "caption": "cap"
+   },
+   "text": "first\ncap\nmid\nlast"
+  },
+  {
+   "name": "nested arrays in blocks",
+   "params": {
+    "to": "+1",
+    "blocks": [
+     {
+      "type": "text",
+      "id": "b",
+      "text": "b1"
+     },
+     [
+      "x",
+      [
+       "y"
+      ]
+     ]
+    ]
+   },
+   "text": "b1\nx\ny",
+   "routing": {
+    "to": "+1",
+    "blocks.type": "text",
+    "blocks.id": "b"
+   }
+  },
+  {
+   "name": "routing keys in any case",
+   "params": {
+    "To": "a",
+    "CHANNEL": "b",
+    "accountId": "c"
+   },
+   "text": "",
+   "routing": {
+    "To": "a",
+    "CHANNEL": "b",
+    "accountId": "c"
+   }
+  },
+  {
+   "name": "mixed-case duplicates are both read",
+   "params": {
+    "Text": "x",
+    "text": "y"
+   },
+   "text": "x\ny"
+  },
+  {
+   "name": "non-ASCII keys sort by code point",
+   "params": {
+    "～": "fullwidth",
+    "😀": "emoji"
+   },
+   "text": "fullwidth\nemoji"
+  },
+  {
+   "name": "a dotted capital I is not an ASCII id key",
+   "params": {
+    "İd": "dotted"
+   },
+   "text": "dotted"
+  },
+  {
+   "name": "OpenClaw send fields rank after the generic ones",
+   "params": {
+    "voiceText": "v",
+    "quoteText": "q",
+    "presentation": {
+     "title": "t",
+     "blocks": [
+      {
+       "text": "p"
+      }
+     ]
+    },
+    "message": "m"
+   },
+   "text": "m\nv\nq\nt\np",
+   "routing": {}
+  },
+  {
+   "name": "a text past the node limit is dropped and flagged",
+   "gen": {
+    "nodes": 5000
+   },
+   "text_len": 0,
+   "over_cap": true
+  },
+  {
+   "name": "multibyte text under the byte limit is whole",
+   "gen": {
+    "multibyte": 100000
+   },
+   "text_len": 200000,
+   "valid_utf8": true
+  },
+  {
+   "name": "multibyte text over the byte limit is cut on a character",
+   "gen": {
+    "multibyte": 140000
+   },
+   "text_len": 262145,
+   "over_cap": true,
+   "valid_utf8": true
+  }
+ ]
+}

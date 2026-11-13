@@ -225,7 +225,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
     it("sends a call with no text to the generic inspection instead of skipping it", async () => {
       mockDaemonClient.postRaw.mockResolvedValue(allow());
-      const params = { action: "send", to: "+1", media: 42 };
+      const params = { action: "send", to: "+1", silent: true, count: null };
       await listeners.before_tool_call({ toolName: "message", toolCallId: "call_9", params }, ctx);
       expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
       const body = sent();

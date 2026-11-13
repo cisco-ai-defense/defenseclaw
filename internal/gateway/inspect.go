@@ -978,6 +978,70 @@ func trustedShimArgvTool(tool string) bool {
 	}
 }
 
+// toolPolicyEngine is the policy engine a tool call's static lists are read
+// through: the request snapshot, or the live config on a Secure Client install
+// (issue #1092).
+func (a *APIServer) toolPolicyEngine(ctx context.Context) *enforce.PolicyEngine {
+	policyConfig := a.decisionConfig(ctx)
+	policySource := func() *config.Config { return policyConfig }
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		policySource = a.liveConfig
+	}
+	return enforce.NewPolicyEngine(a.store).WithConfig(policySource)
+}
+
+// toolBlockListVerdict is the verdict of the deny checks that decide a tool
+// call before any of its content is read: the runtime block of an MCP server
+// (which denies all of its tools, whatever a per-tool allow says), an enrolled
+// account's own admission verdict (GAP-0216) and the static block list. Nil
+// when none denies the call, and on the managed AI Defense path, which has no
+// static lists. Every lane that reads a tool call's text runs it first
+// (GAP-0292); pe nil reads the request snapshot.
+func (a *APIServer) toolBlockListVerdict(ctx context.Context, req *ToolInspectRequest, pe *enforce.PolicyEngine) *ToolInspectVerdict {
+	if a.managedAIDOnly() {
+		return nil
+	}
+	if pe == nil {
+		pe = a.toolPolicyEngine(ctx)
+	}
+	// MCP-server runtime block: the Go-side runtime enforcement of
+	// `defenseclaw mcp block <server>` (global or --connector scoped). It is
+	// checked before the per-tool block so a server-level block wins, and it
+	// fails closed + loud on a store lookup error.
+	if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     reason,
+			Findings:   []string{"MCP-BLOCK"},
+		}
+	}
+	if deny, reason := a.mcpAccountRuntimeBlock(ctx, pe, req); deny {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     reason,
+			Findings:   []string{"MCP-BLOCK"},
+		}
+	}
+	blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
+	if err != nil {
+		return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
+	}
+	if blocked {
+		return &ToolInspectVerdict{
+			Action:     "block",
+			Severity:   "HIGH",
+			Confidence: 1.0,
+			Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
+			Findings:   []string{"STATIC-BLOCK"},
+		}
+	}
+	return nil
+}
+
 func (a *APIServer) inspectTrustedToolPolicyCtx(
 	ctx context.Context,
 	req *ToolInspectRequest,
@@ -1010,49 +1074,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// The lists are config.yaml asset_policy (tool and mcp).
 	// Keep all static checks in this decision on the request snapshot. The
 	// Secure Client path keeps its pre-1.0 live policy source (issue #1092).
-	policyConfig := a.decisionConfig(ctx)
-	policySource := func() *config.Config { return policyConfig }
-	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
-		policySource = a.liveConfig
-	}
-	pe := enforce.NewPolicyEngine(a.store).WithConfig(policySource)
-	// MCP-server runtime block: a blocked MCP server denies ALL of its
-	// tools, regardless of any per-tool allow. This is the Go-side runtime
-	// enforcement of `defenseclaw mcp block <server>` (global or
-	// --connector scoped); it is checked before the per-tool block/allow so
-	// a server-level block wins over a tool-level allow, and it fails closed
-	// + loud on a store lookup error.
-	if deny, _, reason := mcpServerRuntimeBlock(pe, req.Tool, req.Connector, req.MCPServerName); deny {
-		return &ToolInspectVerdict{
-			Action:     "block",
-			Severity:   "HIGH",
-			Confidence: 1.0,
-			Reason:     reason,
-			Findings:   []string{"MCP-BLOCK"},
-		}
-	}
-	// An enrolled account's own admission verdict (GAP-0216).
-	if deny, reason := a.mcpAccountRuntimeBlock(ctx, pe, req); deny {
-		return &ToolInspectVerdict{
-			Action:     "block",
-			Severity:   "HIGH",
-			Confidence: 1.0,
-			Reason:     reason,
-			Findings:   []string{"MCP-BLOCK"},
-		}
-	}
-	blocked, err := pe.IsToolBlockedForConnector(req.Tool, req.Connector)
-	if err != nil {
-		return toolPolicyLookupErrorVerdict("inspect", "block-list", req.Tool, req.Connector, err)
-	}
-	if blocked {
-		return &ToolInspectVerdict{
-			Action:     "block",
-			Severity:   "HIGH",
-			Confidence: 1.0,
-			Reason:     fmt.Sprintf("tool %q is on the static block list", req.Tool),
-			Findings:   []string{"STATIC-BLOCK"},
-		}
+	pe := a.toolPolicyEngine(ctx)
+	if v := a.toolBlockListVerdict(ctx, req, pe); v != nil {
+		return v
 	}
 	// An explicit allow skips ordinary rule/pattern/AID/judge scanning. A
 	// resolved high-severity write is still inspected: allowing the tool name
@@ -1220,7 +1244,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// default (regex_only) returns nil and no LLM round-trip happens. Runs
 	// after the regex/AID lanes so regex_judge can skip the round-trip when
 	// the local lanes already condemned the call.
-	if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
+	if req.skipJudge {
+		// The caller judges this call's content in another lane (the routing
+		// values of a message call, inspectMessageCall).
+	} else if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	return verdict
@@ -1551,9 +1578,6 @@ const minEchoedBlockMessageLen = 16
 // and data exfiltration patterns. Uses the same rule engine.
 func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	content := req.Content
-	if content == "" {
-		content = messageTextFromArgs(req.Args)
-	}
 
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip the connector regex packs and the judge lane; AID inspects the
@@ -2290,12 +2314,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 				defer workerDone()
 			}
 			var v *ToolInspectVerdict
-			if strings.EqualFold(req.Tool, "message") && !messageCallHasNoText(&req) {
-				v = a.inspectMessageContent(workerCtx, &req)
+			if strings.EqualFold(req.Tool, "message") {
+				// The block list, the text and the routing values, in that
+				// order (inspectMessageCall).
+				v = a.inspectMessageCall(workerCtx, &req)
 			} else {
-				// A message call with no text in its args (GAP-0177) is not
-				// allowed unread: it takes the tool policy like any tool
-				// without a known shape.
 				// Pass the 200ms-capped ctx so the tool-call judge lane's
 				// deadline guard short-circuits on this generic endpoint
 				// (mirroring the message lane); native hook callers go
