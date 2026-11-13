@@ -68,6 +68,9 @@ func TestGAP0104ShellReadsOfProtectedFilesStayAllowed(t *testing.T) {
 		{name: "sudo cp out of state", command: `sudo mkdir -p /var/tmp/gap0104; sudo cp ~/.defenseclaw/config.yaml /var/tmp/gap0104/config.yaml; sudo chmod 600 /var/tmp/gap0104/*`, strict: "alert-or-allow"},
 		{name: "tar create from configs", command: `s=/tmp/gap0104-bak; tar -C ~ -cpf "$s/pre.tar" .defenseclaw/config.yaml .claude/settings.json .codex/config.toml; chmod 600 "$s/pre.tar"`},
 		{name: "tar extract to stdout", command: `tar -xOf /tmp/gap0104.tar .codex/config.toml | sha256sum`},
+		{name: "tar extract a project member into the home", command: `tar -xf /tmp/gap0104.tar -C ~ proj/notes.txt`},
+		{name: "tar extract a state member to stdout", command: `tar -xOf /tmp/gap0104.tar -C ~ .defenseclaw/config.yaml | sha256sum`},
+		{name: "unzip list a state member", command: `unzip -l /tmp/gap0104.zip .defenseclaw/config.yaml -d ~`},
 		{name: "tar list", command: `tar tf /tmp/gap0104.tar .codex/config.toml > /tmp/gap0104-list`},
 		{name: "sudo rsync dry run onto hooks", command: `sudo rsync -anrc --delete /tmp/gap0104-src/ ~/.defenseclaw/hooks/`, strict: "alert-or-allow"},
 		{name: "rsync dry run onto state root", command: `rsync -naci --delete /tmp/gap0104-src/ ~/.defenseclaw/ | head -70 > /tmp/gap0104-diff.raw`},
@@ -103,6 +106,10 @@ func TestGAP0104ShellReadsOfProtectedFilesStayAllowed(t *testing.T) {
 		{name: "mv state away", command: `mv ~/.defenseclaw/config.yaml /tmp/gap0104-c.yaml`, defaults: "block", strict: "block", rule: state},
 		{name: "ln over state", command: `ln -sf /tmp/gap0104-evil ~/.defenseclaw/config.yaml`, defaults: "block", strict: "block", rule: state},
 		{name: "find exec shell body truncates hooks", command: `find ~/.defenseclaw/hooks -type f -exec sh -c 'for f do : > "$f"; done' sh {} +`, defaults: "block", strict: "block", rule: state},
+		// rel-1-0-10:GAP-0142: an extraction that names a state member.
+		{name: "tar extract a named state member into the home", command: `tar -xf /tmp/gap0104.tar -C ~ .defenseclaw/config.yaml`, defaults: "block", strict: "block", rule: state},
+		{name: "old-style tar extract a named hooks member", command: `tar xf /tmp/gap0104.tar -C ~ .defenseclaw/hooks/codex-hook.sh`, defaults: "block", strict: "block", rule: state},
+		{name: "unzip a named state member into the home", command: `unzip -o /tmp/gap0104.zip .defenseclaw/config.yaml -d ~`, defaults: "block", strict: "block", rule: state},
 		{name: "find exec python writes state", command: `find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`, defaults: "block", strict: "block", rule: state},
 	}
 	for _, profile := range []string{"default", "strict"} {

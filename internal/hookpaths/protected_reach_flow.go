@@ -59,8 +59,11 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	}
 	// A name counts only where it can reach a write (registrationReachTexts):
 	// sha256sum CONFIG; echo done > log names CONFIG in a reader and writes
-	// only log (rel-1-0-10:GAP-0104). The parent folder of a base name may
-	// be named anywhere (cd ~/.claude; ... > settings.json).
+	// only log (rel-1-0-10:GAP-0104). A base name counts with its folder
+	// named where a write can reach too (ln -sf "$src" "$dest"/ lands by the
+	// source's name), and spelled relative with the folder named anywhere
+	// (cd ~/.claude; ... > settings.json); /var/tmp/b/settings.json in a
+	// copy out of ~/.claude/settings.json is neither.
 	text := registrationHomeText(command, home)
 	reachTexts, words, blanket := registrationReachTexts(file, command, home)
 	reach := text
@@ -78,8 +81,9 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 		switch {
 		case registrationMentions(reach, path, false):
 			named[index] = true
-		case registrationMentionsRelative(reach, base) &&
-			(cwd == parent || registrationMentions(text, parent, false)):
+		case registrationMentions(reach, base, true) &&
+			(cwd == parent || registrationMentions(reach, parent, false)),
+			registrationMentionsRelative(reach, base) && registrationMentions(text, parent, false):
 			named[index] = true
 		default:
 			// A word that is a link the hook resolves.

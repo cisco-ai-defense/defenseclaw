@@ -32,6 +32,26 @@ var pythonWriteCalls = map[string]bool{
 	"breakpoint": true,
 }
 
+// pythonImport matches an import statement: import a, b.c as d / from a.b
+// import c.
+var pythonImport = regexp.MustCompile(`(?m)(?:^|;)\s*(?:from\s+([A-Za-z_][\w.]*)\s+import\b|import\s+([^;\n#]+))`)
+
+// pythonReadModules are standard-library modules a read-only script uses.
+// python -c and python - put the working directory first on sys.path, so a
+// module the standard library does not have may be a file planted there
+// that runs anything; one it does have is not looked up there first for
+// the ones Python loads at startup, and the rest are judged as their names.
+var pythonReadModules = map[string]bool{
+	"os": true, "sys": true, "json": true, "pathlib": true, "hashlib": true, "re": true, "io": true,
+	"codecs": true, "collections": true, "itertools": true, "functools": true, "base64": true,
+	"binascii": true, "string": true, "textwrap": true, "datetime": true, "time": true, "math": true,
+	"statistics": true, "pprint": true, "tomllib": true, "configparser": true, "csv": true,
+	"glob": true, "fnmatch": true, "stat": true, "platform": true, "getpass": true, "copy": true,
+	"typing": true, "dataclasses": true, "enum": true, "operator": true, "difflib": true,
+	"struct": true, "zlib": true, "gzip": true, "bz2": true, "lzma": true, "unicodedata": true,
+	"shlex": true, "locale": true, "plistlib": true, "uuid": true, "ast": true, "pwd": true, "grp": true,
+}
+
 // pythonWritePrefixes are name prefixes of more such calls (copyfile,
 // copytree, execv, spawnl, symlink_to, to_csv, check_output, writeFile).
 var pythonWritePrefixes = []string{"copy", "exec", "spawn", "symlink", "to_", "check_", "write"}
@@ -49,6 +69,22 @@ func PythonCodeOnlyReads(code string) bool {
 	if code == "" || strings.Contains(code, "ctypes") || strings.Contains(code, "__builtins__") ||
 		strings.Contains(code, "globals()") || strings.Contains(code, "os.environ[") && strings.Contains(code, "PYTHON") {
 		return false
+	}
+	for _, match := range pythonImport.FindAllStringSubmatch(code, -1) {
+		names := []string{match[1]}
+		if match[1] == "" {
+			names = nil
+			for _, part := range strings.Split(match[2], ",") {
+				if fields := strings.Fields(part); len(fields) > 0 {
+					names = append(names, fields[0])
+				}
+			}
+		}
+		for _, name := range names {
+			if top, _, _ := strings.Cut(strings.Trim(name, "()"), "."); !pythonReadModules[top] {
+				return false
+			}
+		}
 	}
 	for _, match := range pythonCallee.FindAllStringSubmatchIndex(code, -1) {
 		callee := strings.Join(strings.Fields(strings.ReplaceAll(code[match[2]:match[3]], ".", " . ")), "")

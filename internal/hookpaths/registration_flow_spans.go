@@ -29,6 +29,7 @@ import (
 type registrationFlowSpans struct {
 	home    string
 	depth   int
+	bound   map[string]bool
 	texts   []string
 	words   []string
 	blanket bool
@@ -37,9 +38,52 @@ type registrationFlowSpans struct {
 // registrationReachTexts returns the texts and the static words of command
 // in which a mention counts, or blanket when every mention does.
 func registrationReachTexts(file *syntax.File, command, home string) (texts, words []string, blanket bool) {
-	spans := registrationFlowSpans{home: home}
+	spans := registrationFlowSpans{home: home, bound: registrationBoundNames(file)}
 	spans.statements(command, file.Stmts, false)
 	return spans.texts, spans.words, spans.blanket
+}
+
+// registrationBoundNames are the variables the command assigns or loops
+// over, with HOME, PWD, USER and LOGNAME: a write operand that expands only
+// these spells a value the command itself names.
+func registrationBoundNames(file *syntax.File) map[string]bool {
+	bound := map[string]bool{"HOME": true, "PWD": true, "OLDPWD": true, "USER": true, "LOGNAME": true}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			if node.Name != nil {
+				bound[node.Name.Value] = true
+			}
+		case *syntax.WordIter:
+			if node.Name != nil {
+				bound[node.Name.Value] = true
+			}
+		}
+		return true
+	})
+	return bound
+}
+
+// writeTarget adds a write operand. One that expands a value the command
+// does not bind (an environment variable, a positional parameter, a command
+// substitution) may name any file: every mention counts (find "$root"
+// -delete; cat FILE).
+func (s *registrationFlowSpans) writeTarget(src string, node syntax.Node) {
+	unknown := false
+	syntax.Walk(node, func(child syntax.Node) bool {
+		switch child := child.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			unknown = true
+		case *syntax.ParamExp:
+			unknown = unknown || child.Param == nil || !s.bound[child.Param.Value]
+		}
+		return !unknown
+	})
+	if unknown {
+		s.blanket = true
+		return
+	}
+	s.add(src, node)
 }
 
 func (s *registrationFlowSpans) add(src string, node syntax.Node) {
@@ -104,13 +148,13 @@ func (s *registrationFlowSpans) statement(src string, stmt *syntax.Stmt, piped b
 			if value, fixed := StaticWord(redir.Word, s.home); fixed && value == "/dev/null" {
 				continue
 			}
-			s.add(src, redir.Word)
+			s.writeTarget(src, redir.Word)
 			capable = true
 		case syntax.DplOut:
 			if value, fixed := StaticWord(redir.Word, s.home); fixed && (value == "-" || value != "" && strings.Trim(value, "0123456789") == "") {
 				continue
 			}
-			s.add(src, redir.Word)
+			s.writeTarget(src, redir.Word)
 			capable = true
 		case syntax.Hdoc, syntax.DashHdoc:
 			if consumer {
@@ -263,7 +307,7 @@ func (s *registrationFlowSpans) call(src string, stmt *syntax.Stmt, call *syntax
 			}
 			if writes, handled := registrationOperandRoleWrites(program, static, fixed); handled {
 				for _, index := range writes {
-					s.add(src, words[index])
+					s.writeTarget(src, words[index])
 				}
 				s.nested(src, call)
 				return len(writes) > 0, program == "tar" || program == "rsync"
@@ -271,7 +315,7 @@ func (s *registrationFlowSpans) call(src string, stmt *syntax.Stmt, call *syntax
 		}
 	}
 	if registrationEditsInPlace(call, s.home) || registrationCallWrites(call, s.home) {
-		s.add(src, call)
+		s.writeTarget(src, call)
 		program := ""
 		if known && len(words) > 0 {
 			if value, fixed := StaticWord(words[0], s.home); fixed {
@@ -301,7 +345,10 @@ func (s *registrationFlowSpans) shellBody(src string, call *syntax.CallExpr, pro
 	if !parsed {
 		return false, false, false
 	}
-	inner := registrationFlowSpans{home: s.home, depth: s.depth + 1}
+	inner := registrationFlowSpans{home: s.home, depth: s.depth + 1, bound: registrationBoundNames(body)}
+	for name := range s.bound {
+		inner.bound[name] = true
+	}
 	capable, consumer = inner.statements(static[index], body.Stmts, false)
 	if inner.blanket {
 		s.add(src, call)
@@ -309,7 +356,8 @@ func (s *registrationFlowSpans) shellBody(src string, call *syntax.CallExpr, pro
 	}
 	s.texts = append(s.texts, inner.texts...)
 	s.words = append(s.words, inner.words...)
-	for _, argument := range words[min(index+2, len(words)):] {
+	// $0 and the arguments: the body may expand them.
+	for _, argument := range words[min(index+1, len(words)):] {
 		s.add(src, argument)
 	}
 	return capable, consumer, true

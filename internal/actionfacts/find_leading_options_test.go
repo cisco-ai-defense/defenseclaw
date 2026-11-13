@@ -149,7 +149,12 @@ func TestFindHandedEntriesReadsCopyOuts(t *testing.T) {
 		{[]string{"awk", `{print | "sh"}`, "{}"}, true, nil},
 		{[]string{"python3", "-m", "json.tool", "{}"}, false, nil},
 		{[]string{"python3", "-m", "json.tool", "{}", "/tmp/o.json"}, false, []string{"/tmp/o.json"}},
-		{[]string{"python3", "-c", "import os", "{}"}, true, nil},
+		// python -c code that writes may change the entry; code that only
+		// reads does not (rel-1-0-10:GAP-0104); a module that is not in the
+		// standard library may be planted in the working directory.
+		{[]string{"python3", "-c", "import os, sys; os.remove(sys.argv[1])", "{}"}, true, nil},
+		{[]string{"python3", "-c", "import helper", "{}"}, true, nil},
+		{[]string{"python3", "-c", "import sys; print(open(sys.argv[1]).read())", "{}"}, false, nil},
 		{[]string{"cp", "{}", "/tmp/b/"}, false, []string{"/tmp/b/"}},
 		{[]string{"cp", "-t", "/tmp/b", "{}"}, false, []string{"/tmp/b"}},
 		{[]string{"cp", "--target-directory={}", "/tmp/x"}, true, nil},

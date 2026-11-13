@@ -27,7 +27,10 @@ func TestGAP0104PythonCodeOnlyReads(t *testing.T) {
 		`exec("open('/h/c','w')")`:                                                       false,
 		`import os; os.chmod("/h/c", 0o777)`:                                             false,
 		`with Path("/h/c").open("w") as f: f.write("")`:                                  false,
-		`import ctypes`:     false,
+		`import ctypes`:                         false,
+		`import helper; helper.show()`:          false,
+		`from mylib import load; print(load())`: false,
+		"import json\nfrom pathlib import Path\nprint(Path('/h/c').read_text())": true,
 		`print(open("/h/c"`: false,
 	} {
 		if got := PythonCodeOnlyReads(code); got != reads {
