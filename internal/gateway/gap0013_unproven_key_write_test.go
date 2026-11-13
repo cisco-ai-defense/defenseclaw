@@ -56,7 +56,15 @@ func gap0013EveryCell(t *testing.T, connectorName string) {
 		{"link then move to a semicolon name", cwd, fmt.Sprintf("ln %s /tmp/gap13l && mv /tmp/gap13l '%s/file;with;semicolon.dat'", a, data), allow},
 		{"link then move, escaped star", cwd, fmt.Sprintf(`ln %s /tmp/gap13l && mv /tmp/gap13l %s/file\*star.dat`, a, data), allow},
 		{"absolute link then move, no cwd", "", fmt.Sprintf("ln %s /tmp/gap13l && mv /tmp/gap13l %s", a, b), allow},
-		{"interpreter link to a runtime target then write, outside the home", data, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, warn},
+		{"interpreter link to a runtime target then write, outside the home", data, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, block},
+		// Review F1 probes: a link the call makes to a target built at run
+		// time, written through a name outside the home, blocks everywhere.
+		{"review P3 python symlink to a built key path", cwd, `python3 -c "import os; os.symlink(os.path.join(os.path.expanduser(chr(126)),'.ss'+'h','authorized_'+'keys'),'/tmp/gap13p3')"; echo marker >> /tmp/gap13p3`, block},
+		{"review P6 ln to a printf-built .ssh", cwd, `ln -s "$(cd;pwd)/$(printf '\x2e\x73\x73\x68')" /tmp/gap13p6 && echo marker >> /tmp/gap13p6/authorized_''keys`, block},
+		{"review P7 ln to the home by cd;pwd", cwd, `ln -s "$(cd;pwd)" /tmp/gap13p7 && echo marker >> /tmp/gap13p7/.ssh/authorized_''keys`, block},
+		{"review P10 ln to DefenseClaw state", cwd, `ln -s "$(cd;pwd)/.defense''claw/config.yaml" /tmp/gap13p10 && echo marker >> /tmp/gap13p10`, block},
+		{"review P11 ln to the Claude hook config", cwd, `ln -s "$(cd;pwd)/.claude/settings.json" /tmp/gap13p11 && echo marker > /tmp/gap13p11`, block},
+		{"review P12 python symlink from HOME, cwd outside the home", data, `python3 -c "import os,sys; os.symlink(os.environ['HOME']+'/.ssh/authorized_'+'keys', 'gap13p12')"; echo marker >> gap13p12`, block},
 		{"interpreter link to a runtime target then write, in the home", cwd, `python3 -c "import os,sys; os.symlink(sys.argv[1], 'gap13lnk')" "$T"; echo marker >> gap13lnk`, block},
 		{"archive extract before a write", cwd, fmt.Sprintf("tar -xf %s/missing.tar -C %s && echo marker >> %s/ledger.db", data, data, data), warn},
 		{"keys: symbolic link then append", cwd, "ln -s ~/.ssh/authorized_keys /tmp/gap13k && echo marker >> /tmp/gap13k", block},

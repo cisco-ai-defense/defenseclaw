@@ -305,7 +305,17 @@ type trustedSimpleMemo struct {
 // commands returns actionfacts.SimpleCommands(input, facts): the split the memo
 // holds when input and facts are the ones it was made for, a fresh one
 // otherwise. The first split asked of an empty memo is kept.
-func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.SimpleCommand {
+func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) (simples []actionfacts.SimpleCommand) {
+	if trustedSimpleCommandsFaultHook != nil {
+		// Test-only seam (like hookEvaluatorPanicHook): a reader failure on
+		// the hook route is judged as SimpleCommands answers it.
+		defer func() {
+			if recover() != nil {
+				simples = []actionfacts.SimpleCommand{{EvaluationFailure: actionfacts.EvaluationFailureInternal}}
+			}
+		}()
+		trustedSimpleCommandsFaultHook()
+	}
 	if memo == nil {
 		return actionfacts.SimpleCommands(input, facts)
 	}
@@ -321,6 +331,11 @@ func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfac
 	memo.simples = actionfacts.SimpleCommands(input, facts)
 	return slices.Clone(memo.simples)
 }
+
+// trustedSimpleCommandsFaultHook is a test-only seam: when non-nil it runs
+// before the per-command split, so a route test can make the reader fail.
+// Production never sets it.
+var trustedSimpleCommandsFaultHook func()
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
 // carries counts only: raw shell text, argv, matched rule IDs, paths, and
@@ -660,7 +675,7 @@ func dispatchTrustedActionWith(
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureInternal {
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
-						break
+						continue
 					}
 					if simple.EvaluationFailure != "limit" {
 						// A parser gap is already represented by the whole-action

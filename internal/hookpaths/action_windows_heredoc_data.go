@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -37,13 +38,15 @@ func actionWindowsBlankHereDocData(command string) string {
 		return command
 	}
 	var spans [][2]int
-	for _, stmt := range actionHereDocListStatements(file.Stmts) {
+	statements := actionHereDocListStatements(file.Stmts)
+	for index, stmt := range statements {
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || stmt.Background || stmt.Coprocess || len(call.Args) == 0 || len(call.Assigns) > 0 {
 			continue
 		}
 		program, ok := plainLiteralWord(call.Args[0])
-		if !ok || !actionHereDocDataPrograms[programBase(program)] || !actionHereDocOutputsRunNothing(call, stmt) {
+		if !ok || !actionHereDocDataPrograms[programBase(program)] || !actionHereDocOutputsRunNothing(call, stmt) ||
+			actionHereDocOutputRunLater(command, stmt, statements[index+1:]) {
 			continue
 		}
 		for _, redirect := range stmt.Redirs {
@@ -147,6 +150,66 @@ func actionHereDocOutputsRunNothing(call *syntax.CallExpr, stmt *syntax.Stmt) bo
 		}
 	}
 	return true
+}
+
+// actionHereDocOutputRunLater reports a here-document statement whose output
+// file a later statement of the list may run: a later statement that is not
+// itself a data or print program and names the file, or any later statement
+// that runs a shell, an interpreter or a path (./x, sh x, source x). The body
+// is then code, not data (T7 review F5).
+func actionHereDocOutputRunLater(command string, stmt *syntax.Stmt, later []*syntax.Stmt) bool {
+	var outputs []string
+	for _, redirect := range stmt.Redirs {
+		if redirect.Op == syntax.Hdoc || redirect.Op == syntax.DashHdoc || redirect.Word == nil {
+			continue
+		}
+		if value, ok := plainLiteralWord(redirect.Word); ok {
+			outputs = append(outputs, filepath.Base(value))
+		} else {
+			return true
+		}
+	}
+	if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 1 {
+		if program, ok := plainLiteralWord(call.Args[0]); ok && programBase(program) == "tee" {
+			for _, arg := range call.Args[1:] {
+				if value, ok := plainLiteralWord(arg); ok && !strings.HasPrefix(value, "-") {
+					outputs = append(outputs, filepath.Base(value))
+				}
+			}
+		}
+		for _, arg := range call.Args[1:] {
+			if value, ok := plainLiteralWord(arg); ok && strings.HasPrefix(value, "--compress-program") {
+				return true
+			}
+		}
+	}
+	if len(outputs) == 0 {
+		return false
+	}
+	for _, next := range later {
+		start, end := int(next.Pos().Offset()), int(next.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			return true
+		}
+		text := command[start:end]
+		call, ok := next.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		program, ok := plainLiteralWord(call.Args[0])
+		if !ok {
+			return true
+		}
+		base := programBase(program)
+		if strings.Contains(program, "/") || !actionHereDocDataPrograms[base] && base != "echo" && base != "printf" {
+			for _, output := range outputs {
+				if strings.Contains(text, output) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func actionHereDocSeparator(c byte) bool {

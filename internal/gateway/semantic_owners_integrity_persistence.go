@@ -1647,7 +1647,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // proof found protected blocks in every tier. The confirm ("ask") ceiling
 // for these calls belongs to the hook answer path (S8), so they alert.
 //
-// The held write must also be away from every protected file: its operand
+// The call must make no link itself (hookpaths.CommandMayMakeLink): only an
+// operand it cannot resolve, or an archive or copy scope it cannot read,
+// is lowered (the archive-before-write class the owner ruled a balanced
+// warning on rel-1-0-6:GAP-0675). The held write must also be away from
+// every protected file: its operand
 // is outside the active home (where the key files, DefenseClaw state and the
 // agent hook configs live) and outside sshd's ProgramData folder, and the
 // command names no home spelling (~, $HOME, %USERPROFILE%, the home path,
@@ -1663,11 +1667,24 @@ func unprovenKeyWriteMayWarn(request trustedActionRequest, commandText, home str
 		unprovenOperandNearProtected(held.operand, home) {
 		return false
 	}
-	lower := strings.ToLower(commandText)
+	command, _ := trustedBashCommandInput(request.Input)
+	if command == "" {
+		command = request.Input.Command
+	}
+	if hookpaths.CommandMayMakeLink(command) {
+		// The unknown may be where a link the call makes points, not where
+		// its name sits: a target built at run time reaches the home from
+		// /tmp as easily (review F1: python os.symlink, ln -s "$(cd;pwd)").
+		return false
+	}
+	// Quote and escape characters split a word without changing it
+	// (authorized_''keys), so the spellings are read without them.
+	lower := strings.NewReplacer("'", "", "\"", "", "\\", "", "`", "").Replace(strings.ToLower(commandText))
 	for _, spelling := range []string{
 		"authorized_k", "administrators_authorized", "base64", "~", "$home", "${home", "%userprofile%",
-		"$env:userprofile", "$env:home", "oldpwd", "programdata", strings.ToLower(filepath.ToSlash(home)),
-		strings.ToLower(home),
+		"%homepath%", "%homedrive%", "$env:userprofile", "${env:userprofile", "$env:home", "${env:home",
+		"getfolderpath", "oldpwd", "programdata", ".ssh", ".defenseclaw", ".claude", ".codex", ".cursor",
+		strings.ToLower(filepath.ToSlash(home)), strings.ToLower(home),
 	} {
 		if strings.Contains(lower, spelling) {
 			return false

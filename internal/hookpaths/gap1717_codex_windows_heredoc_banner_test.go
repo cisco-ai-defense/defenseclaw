@@ -57,6 +57,10 @@ func TestWindowsHereDocBodyStillScannedWhenItCanRun(t *testing.T) {
 			"tee >(bash) <<EOT\n*** Begin Patch\n*** End Patch\nEOT",
 			"cat <<EOT | sh\n*** Begin Patch\nEOT",
 			"cat <<EOT > $(echo out)\n*** Begin Patch\nEOT",
+			"cat <<EOT > run.sh\n*** Begin Patch\nEOT\nbash run.sh",
+			"cat <<EOT > run.sh && ./run.sh\n*** Begin Patch\nEOT",
+			"tee run.sh <<EOT; sh run.sh\n*** Begin Patch\nEOT",
+			"sort --compress-program=sh <<EOT\n*** Begin Patch\nEOT",
 		} {
 			if got := ActionCommandDecisionWithDialectAndGlobFacts(command, home, home, d, nil); got == "" {
 				t.Errorf("dialect %q %q = %q, want protected-target", d, command, got)
