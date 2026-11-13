@@ -530,6 +530,89 @@ func TestBinaryPinnedInstallChecksDigests(t *testing.T) {
 	}
 }
 
+// TestBinaryPinRunRefusesBadDownloads runs the rendered install step with
+// stub curl and uname: a download whose sha256 is not the pin, a failed
+// download and an unpinned architecture all exit non-zero, say what the
+// build needs, leave nothing at the install path and clean up the download.
+func TestBinaryPinRunRefusesBadDownloads(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the install step is a POSIX shell step of a Linux image")
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	for _, tool := range []string{"sha256sum", "mktemp", "cut", "dirname", "install", "rm"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("no %s", tool)
+		}
+	}
+	for _, tc := range []struct {
+		name, arch, curlFail string
+		want                 []string
+		curlRuns             bool
+	}{
+		{"hash-mismatch", "x86_64", "", []string{"is not the pinned " + claudeCodePin.Binaries["x86_64"].SHA256, "image builds need https to downloads.claude.ai"}, true},
+		{"download-fails", "aarch64", "1", []string{"could not download " + claudeCodePin.Binaries["aarch64"].URL, "image builds need https to downloads.claude.ai"}, true},
+		{"unpinned-arch", "riscv64", "", []string{"has no pinned binary for riscv64"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stubs, tmp := filepath.Join(dir, "bin"), filepath.Join(dir, "tmp")
+			for _, d := range []string{stubs, tmp} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := filepath.Join(dir, "curl.args")
+			stub := map[string]string{
+				"uname": "#!/bin/sh\necho " + tc.arch + "\n",
+				"curl": "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shellQuote(args) + "\n" +
+					"[ -n \"${CURL_FAIL:-}\" ] && exit 22\n" +
+					"while [ $# -gt 0 ]; do if [ \"$1\" = -o ]; then shift; printf tampered > \"$1\"; fi; shift; done\n",
+			}
+			for name, body := range stub {
+				if err := os.WriteFile(filepath.Join(stubs, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dest := filepath.Join(dir, "opt", "claudecode", "bin", "claude")
+			run, err := claudeCodePin.installRun(dest, claudeCodePin.Version)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(sh, "-c", run)
+			cmd.Env = []string{"PATH=" + stubs + string(os.PathListSeparator) + os.Getenv("PATH"), "TMPDIR=" + tmp, "CURL_FAIL=" + tc.curlFail}
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("install step succeeded:\n%s", out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("output lacks %q:\n%s", want, out)
+				}
+			}
+			if _, err := os.Stat(dest); !os.IsNotExist(err) {
+				t.Errorf("something was installed at %s (%v)", dest, err)
+			}
+			if left, _ := os.ReadDir(tmp); len(left) != 0 {
+				t.Errorf("the download was left behind: %v", left)
+			}
+			called, _ := os.ReadFile(args)
+			if tc.curlRuns != (len(called) > 0) {
+				t.Fatalf("curl ran = %t, want %t", len(called) > 0, tc.curlRuns)
+			}
+			if tc.curlRuns {
+				for _, want := range []string{"--proto\n=https\n--proto-redir\n=https\n--tlsv1.2", claudeCodePin.Binaries[tc.arch].URL} {
+					if !strings.Contains(string(called), want) {
+						t.Errorf("curl args lack %q:\n%s", want, called)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestLaunchArgv(t *testing.T) {
 	for _, tc := range []struct {
 		name string

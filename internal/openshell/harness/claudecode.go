@@ -26,16 +26,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 )
 
-// ClaudeCodeBedrockFloor is the oldest Claude Code Amazon Bedrock serves
-// Claude Haiku 5.5 to (it answers older releases "version 2.1.280 or newer
-// is required"). The pinned release must not be older.
+// ClaudeCodeBedrockFloor is the oldest Claude Code Amazon Bedrock serves its
+// newer Claude models to (Opus 5.5 on Mantle, Haiku 5.5 on bedrock-runtime;
+// it answers older releases "version 2.1.280 or newer is required"). The
+// pinned release must not be older. Bedrock Mantle, the sandbox's Bedrock
+// route, does not serve Haiku 5.5 at all (GAP-0169).
 const ClaudeCodeBedrockFloor = "2.1.280"
 
 // claudeCodePin is the only Claude Code release the images install: the
 // vendor's stable channel at the time of pinning, at or above
 // ClaudeCodeBedrockFloor, and inside the claudecode-hooks-v2 contract. The
 // community base image ships Claude Code 2.1.156, which Bedrock refuses for
-// Claude Haiku 5.5 (GAP-0024), so the pin replaces it.
+// its newer models (GAP-0024), so the pin replaces it.
 var claudeCodePin = binaryPin{
 	Version: "2.1.311",
 	Binaries: map[string]tarballArchive{

@@ -460,3 +460,55 @@ func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeCodeSandboxPinsEndpointsNewIn2311: Claude Code 2.1.311 reads
+// provider and service endpoints 2.1.156 did not (the Anthropic-on-Google
+// Cloud provider, the first-party base URL override, the host gateway
+// hand-off, the artifacts, memory, bridge, feature-flag, voice and runner
+// services, per-signal OTLP endpoints). The managed tier the image and run
+// drop-ins merge into must pin every one, so a repository's committed
+// settings cannot move model traffic, credentials or telemetry off the run's
+// endpoint without a tool call.
+func TestClaudeCodeSandboxPinsEndpointsNewIn2311(t *testing.T) {
+	target := SandboxRenderTarget{IngressPort: 18971, AgentVersion: "2.1.311"}
+	run := SandboxRunConfig{
+		Env:         map[string]string{"ANTHROPIC_BASE_URL": "https://bedrock-mantle.us-east-1.api.aws/anthropic"},
+		Credentials: []string{"ANTHROPIC_API_KEY"},
+	}
+	files, err := NewClaudeCodeConnector().SandboxRunFiles(target, run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFiles := runFileMap(t, files)
+	source, err := stageClaudeCodeManagedSettings(map[string][]byte{
+		claudeCodeSandboxDropInName:    runFiles[ClaudeCodeSandboxDropInPath],
+		claudeCodeSandboxRunDropInName: runFiles[ClaudeCodeSandboxRunDropInPath],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged, _ := source.settings["env"].(map[string]interface{})
+	provider := []string{
+		"ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
+		"CLAUDE_CODE_API_BASE_URL", "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+	}
+	for _, key := range append(provider, claudeCodeSandboxServiceEndpointEnv...) {
+		if value, ok := merged[key]; !ok || value != "" {
+			t.Errorf("merged managed env %s = %#v (present %v), want \"\"", key, value, ok)
+		}
+	}
+	if merged["ANTHROPIC_BASE_URL"] != run.Env["ANTHROPIC_BASE_URL"] {
+		t.Errorf("the run's provider was not kept: ANTHROPIC_BASE_URL = %#v", merged["ANTHROPIC_BASE_URL"])
+	}
+	if endpoint, _ := merged["OTEL_EXPORTER_OTLP_ENDPOINT"].(string); !strings.HasPrefix(endpoint, "http://host.openshell.internal:18971") {
+		t.Errorf("OTLP no longer goes to the ingress: %#v", merged["OTEL_EXPORTER_OTLP_ENDPOINT"])
+	}
+	for _, key := range claudeCodeSandboxServiceEndpointEnv {
+		if slices.Contains(claudeCodeSandboxProviderEnv, key) || slices.Contains(claudeCodeSandboxModelEnv, key) {
+			t.Errorf("%s is both a static service pin and a per-run variable", key)
+		}
+	}
+	if err := validateClaudeCodeRunSettingsSchema(runFiles[ClaudeCodeSandboxRunDropInPath]); err != nil {
+		t.Fatal(err)
+	}
+}

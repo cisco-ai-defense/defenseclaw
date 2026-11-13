@@ -113,9 +113,49 @@ var claudeCodeSandboxPinnedEnv = map[string]string{
 	"ENV":                                     "",
 }
 
+// claudeCodeSandboxServiceEndpointEnv are the settings-env variables that
+// move one of Claude Code's own non-model services to another host: the
+// artifacts and memory APIs (and their tokens), the Remote Control bridge,
+// the remote tools bridge and session ingress, the feature-flag server
+// (CLAUDE_CODE_GB_BASE_URL), voice streaming, the remote runner API, the
+// per-signal OpenTelemetry endpoints (which outrank the
+// OTEL_EXPORTER_OTLP_ENDPOINT the drop-in points at the ingress) and the
+// internal metrics, tracing and OTLP endpoints. A sandbox run sets none of
+// them, so the drop-in pins each one to "" (unset) and a repository's
+// committed settings cannot send conversation content, credentials or
+// telemetry to a host of its choosing, or flip Claude's feature flags,
+// without a tool call. Measured on 2.1.311: its kns list (the service base
+// URLs), its Ga and tr lists (artifacts, memory) and the OTLP per-signal
+// names, which 2.1.156 did not read.
+var claudeCodeSandboxServiceEndpointEnv = []string{
+	"ANT_CLAUDE_CODE_METRICS_ENDPOINT",
+	"ANT_OTEL_EXPORTER_OTLP_ENDPOINT",
+	"ANT_OTEL_EXPORTER_OTLP_HEADERS",
+	"BETA_TRACING_ENDPOINT",
+	"CLAUDE_BRIDGE_BASE_URL",
+	"CLAUDE_BRIDGE_SESSION_INGRESS_URL",
+	"CLAUDE_CODE_ARTIFACTS_API_BASE_URL",
+	"CLAUDE_CODE_ARTIFACTS_API_TOKEN",
+	"CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
+	"CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL",
+	"CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL",
+	"CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
+	"CLAUDE_CODE_GB_BASE_URL",
+	"CLAUDE_CODE_MEMORY_API_BASE_URL",
+	"CLAUDE_CODE_MEMORY_API_TOKEN",
+	"CLAUDE_REMOTE_TOOLS_BRIDGE_URL",
+	"CLAUDE_RUNNER_API_BASE_URL",
+	"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_PROFILES_ENDPOINT",
+	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+	"SESSION_INGRESS_URL",
+	"VOICE_STREAM_BASE_URL",
+}
+
 // claudeCodeSandboxPinnedHelpers name programs Claude runs by itself, outside
 // any tool call and so unseen by PreToolUse, when a settings file sets them;
-// the drop-in pins each to "" (p2-render-4). In the 2.1.156 settings schema
+// the drop-in pins each to "" (p2-render-4). In the 2.1.311 settings schema
 // each is an optional string, read from the merged settings, where the
 // managed tier outranks user and project values, and run only when non-empty:
 // apiKeyHelper prints the API key, awsCredentialExport and awsAuthRefresh run
@@ -177,7 +217,7 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 // and the image build's hook-fire probe proves the hooks actually run.
 //
 // Claude's own bubblewrap sandbox is pinned off (sandbox.enabled, a boolean
-// in the 2.1.156 settings schema): it cannot nest inside OpenShell, and a
+// in the 2.1.311 settings schema): it cannot nest inside OpenShell, and a
 // project or user setting that enabled it, with sandbox.failIfUnavailable,
 // would stop the harness at startup. The hook-fire probe plants exactly
 // that in its hostile user and project settings.
@@ -275,6 +315,12 @@ func claudeCodeSandboxManagedEnv(rt resolvedSandboxTarget) (map[string]string, e
 	}
 	for key, value := range claudeCodeSandboxPinnedEnv {
 		env[key] = value
+	}
+	for _, key := range claudeCodeSandboxServiceEndpointEnv {
+		if _, set := env[key]; set {
+			return nil, fmt.Errorf("claudecode: the sandbox OTLP env already sets %s, which the drop-in pins unset", key)
+		}
+		env[key] = ""
 	}
 	return env, nil
 }

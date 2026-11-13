@@ -36,10 +36,12 @@ import (
 // settings nor the workload-writable user settings can override them.
 //
 // The files are schema-checked here against the harness versions DefenseClaw
-// reviewed (Claude Code 2.1.156, Codex 0.146.0): Claude Code silently drops a
+// reviewed (Claude Code 2.1.311, Codex 0.146.0): Claude Code silently drops a
 // whole settings file that carries one schema-invalid field, and Codex
 // refuses to start on a malformed requirements file. The live proof is the
-// image package's run-config probe (TestLiveRunConfig).
+// run-config probe (TestLiveRunConfig, build tag openshell_integration),
+// which is kept off this branch with the other live OpenShell tests (see
+// docs/SANDBOX.md, Testing).
 
 // SandboxRunConfig is the per-run input of SandboxRunFiles.
 type SandboxRunConfig struct {

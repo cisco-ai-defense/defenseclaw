@@ -18,6 +18,7 @@ package harness
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,6 +157,20 @@ func (p binaryPin) installRun(dest, version string) (string, error) {
 	if !strings.HasPrefix(dest, "/") || !npmPathRE.MatchString(dest) || strings.Contains(dest, "..") {
 		return "", fmt.Errorf("harness: invalid binary install path %q", dest)
 	}
+	hosts := map[string]bool{}
+	for _, bin := range p.Binaries {
+		u, err := url.Parse(bin.URL)
+		if err != nil || u.Hostname() == "" {
+			return "", fmt.Errorf("harness: invalid binary URL %q", bin.URL)
+		}
+		hosts[u.Hostname()] = true
+	}
+	names := make([]string, 0, len(hosts))
+	for h := range hosts {
+		names = append(names, h)
+	}
+	sort.Strings(names)
+	need := "image builds need https to " + strings.Join(names, " and ")
 	var b strings.Builder
 	b.WriteString("set -eu; dest=" + shellQuote(dest) + "; ")
 	b.WriteString(`case "$(uname -m)" in `)
@@ -170,9 +185,9 @@ func (p binaryPin) installRun(dest, version string) (string, error) {
 	}
 	b.WriteString(`*) echo "release ` + p.Version + ` has no pinned binary for $(uname -m)" >&2; exit 1 ;; esac; `)
 	b.WriteString(`tmp="$(mktemp -d)"; `)
-	b.WriteString(`curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$tmp/bin" "$url"; `)
+	b.WriteString(`curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 -o "$tmp/bin" "$url" || { rm -rf "$tmp"; echo "could not download $url (` + need + `)" >&2; exit 1; }; `)
 	b.WriteString(`got="$(sha256sum "$tmp/bin" | cut -d' ' -f1)"; `)
-	b.WriteString(`[ "$got" = "$want" ] || { echo "$url sha256 $got is not the pinned $want" >&2; exit 1; }; `)
+	b.WriteString(`[ "$got" = "$want" ] || { rm -rf "$tmp"; echo "$url sha256 $got is not the pinned $want: refused (a proxy or mirror that rewrites the download fails here; ` + need + `)" >&2; exit 1; }; `)
 	b.WriteString(`install -d -o root -g root -m 0755 "$(dirname "$dest")"; `)
 	b.WriteString(`install -o root -g root -m 0755 "$tmp/bin" "$dest"; rm -rf "$tmp"`)
 	return b.String(), nil
