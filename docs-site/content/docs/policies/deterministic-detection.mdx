@@ -70,14 +70,14 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 244 enabled balanced/default rules are generated from
+The 245 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
 | `command` | 131 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
-| `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
+| `secret` | 24 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and secret assignments (a credential-named key with a random-looking value) |
 | `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
 | `enterprise-data` | 13 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
@@ -85,6 +85,29 @@ The 244 enabled balanced/default rules are generated from
 
 The generated Go catalog is checked against the YAML in CI. Edit the YAML
 sources, not `internal/gateway/rules_catalog_generated.go`.
+
+### Credential literals in a tool call
+
+A secret rule matches the text of a tool call, so the same literal can be a
+live credential on its way into a file or something the agent only reads. The
+disposition follows what the call does with it:
+
+| The call | Disposition |
+| --- | --- |
+| Writes the literal into a file (`Write`, `Edit`, patch tools), a memory entity or a database row (an MCP tool whose name says write, create, add, insert, update, set, store or run), or runs a shell command that is not a plain reader (`echo ... > file`, `export TOKEN=... && make`) | Alert in every profile. Never a block. |
+| Sends the literal to an external host (`curl -H "Authorization: ..."` to a public URL) or writes it to a sensitive path | Enforceable, as before |
+| Only looks at it: `grep`, `cat`, `Read`, `Grep`, a read-only MCP tool, an `echo` without a redirect | Audit telemetry (LOW, no alert) |
+| Writes it into a test, fixture, example or template file | Audit telemetry |
+
+`SEC-SECRET-ASSIGN` finds the credentials that carry no provider prefix: a
+credential-named key (`password`, `secret`, `token`, `api_key`, `client_secret`
+and their prefixed forms such as `DB_PASSWORD`) followed by `:`, `=`, `,` or
+`is`, and a value of 12 to 128 characters that mixes letters and digits and
+passes an entropy floor. Placeholders (`changeme`, `YOUR_API_KEY`, `example`),
+variable and code references (`${TOKEN}`, `process.env.X`), paths, host names,
+identifiers and keys that name a setting (`max_tokens`, `token_name`,
+`password_field`) are not findings. The rule is MEDIUM, so it alerts in the
+default and strict profiles and stays silent in permissive.
 
 ### Download piped into a shell
 

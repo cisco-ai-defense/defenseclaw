@@ -281,6 +281,9 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 	case "exec.remote_ip_download_execute_same_artifact":
 		return func(_, match string, _, _ int) bool { return acceptedPublicIPv4Download(match) }
 	}
+	if ruleID == secretAssignmentRuleID {
+		return func(_, match string, _, _ int) bool { return acceptedSecretAssignment(match) }
+	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }
 	}

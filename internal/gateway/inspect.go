@@ -1114,6 +1114,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	}
 	ruleFindings := inspectDispatchTrustedAction(ctx, action)
 	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
+	ruleFindings = outboundPIIFindings(action, ruleFindings)
 	// A Secure Client install keeps its own tool policy (GAP-0048 adds no
 	// finding there).
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
