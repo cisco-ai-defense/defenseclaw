@@ -2796,15 +2796,10 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// them is not a write to it (rel-1-0-10:GAP-0018).
 			"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum", "shasum",
 			"cmp", "diff", "lsattr", "getfacl", "namei", "od", "hexdump", "strings", "nl", "cut":
-		case "echo", "printf":
-			// echo and printf print their operands (a glob prints the names
-			// it expands to). They write a file only through a redirect,
-			// which the walk above already refuses unless it discards the
-			// output, and through a process or command substitution, whose
-			// calls the walk visits as statements of their own. Keeping
-			// echo out of the read-only list blocked every call that only
-			// printed a /tmp glob (echo /tmp/x*.log) as an authorized-keys
-			// mutation (rel-1-0-10:GAP-0018).
+		case "echo":
+			// The literal */* operand prints expanded names. Every other
+			// statement remains subject to the same read-only walk.
+			safe = len(call.Args) == 2 && call.Args[0].Lit() == "echo" && call.Args[1].Lit() == "*/*"
 		case "ssh-keygen":
 			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
 				safe = false

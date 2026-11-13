@@ -22,7 +22,7 @@ func TestProcEnvironOwnerNarrowedReads(t *testing.T) {
 		{"filtered to two names", `cat /proc/408/environ | tr '\0' '\n' | grep -E "INGEST_ENV|APP_MODE"`, false},
 		{"anchored name", `cat /proc/408/environ | tr '\0' '\n' | grep '^APP_MODE='`, false},
 		{"explicit pattern option", `cat /proc/408/environ | tr '\0' '\n' | grep -e INGEST_ENV`, false},
-		{"strings and sort stages", `strings /proc/self/environ | sort | grep INGEST_ENV`, false},
+		{"sort stage", `cat /proc/self/environ | tr '\0' '\n' | sort | grep INGEST_ENV`, false},
 		{"unfiltered read", `cat /proc/self/environ`, true},
 		{"unfiltered pipe", `cat /proc/212/environ | tr '\0' '\n' | head -20`, true},
 		{"credential name", `cat /proc/408/environ | tr '\0' '\n' | grep API_TOKEN`, true},

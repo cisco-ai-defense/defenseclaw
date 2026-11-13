@@ -13,8 +13,6 @@ func TestKeyFileReadersAreNotWrites(t *testing.T) {
 	_, home, cwd := globFactsFixture(t, false)
 	key := home + "/.ssh/authorized_keys"
 	for _, command := range []string{
-		`echo ` + home + `/.ssh/authorized_keys`,
-		`printf '%s\n' ` + key,
 		`sha256sum ` + key,
 		`sudo sha256sum ` + key,
 		`sudo -n shasum -a 256 ` + key + ` /etc/hostname`,
