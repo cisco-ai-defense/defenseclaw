@@ -686,8 +686,13 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 					continue
 				}
 			}
-			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
-				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
+			for _, plugin := range enumerateClaudeWatcherPlugins(dir,
+				connector == "claudecode" && !w.secureClientActive()) {
+				if w.isOwnPlugin(plugin) {
+					continue
+				}
+				if w.inClaudePluginStaging(plugin, claudeStagingGrace) {
+					w.deferClaudeStaging(plugin, 3)
 					continue
 				}
 				targets = append(targets, InstallEvent{
@@ -953,7 +958,12 @@ func claudeWatcherPluginIdentity(root, path string) string {
 	return filepath.Base(path)
 }
 
-func enumerateClaudeWatcherPlugins(root string) []string {
+// enumerateClaudeWatcherPlugins lists the plugin folders of a Claude Code
+// plugin root (plugins/skills or plugins/cache) or a Codex cache. hidden
+// also walks hidden marketplace and plugin folders: Claude Code allows a
+// marketplace named ".git", and its plugins were never scanned (issue
+// #1428 review). Installs in flight are left out by the caller.
+func enumerateClaudeWatcherPlugins(root string, hidden bool) []string {
 	root = filepath.Clean(root)
 	if strings.EqualFold(filepath.Base(root), "skills") {
 		var out []string
@@ -1017,7 +1027,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 			}
 			return filepath.SkipDir
 		}
-		if entry.Name() != "." && strings.HasPrefix(entry.Name(), ".") {
+		if !hidden && entry.Name() != "." && strings.HasPrefix(entry.Name(), ".") {
 			return filepath.SkipDir
 		}
 		switch strings.ToLower(entry.Name()) {
@@ -1090,6 +1100,14 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	}
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			if w.admitsAfterStaging(evt) {
+				// A Claude Code staging or linking folder the watcher left
+				// alone as an install in flight: the live watcher's install
+				// admission takes it, the one the re-check hands it to, so it
+				// is admitted and alerted on once (issue #1428 review).
+				w.queueStagingAdmission(ctx, evt.Path)
+				return rescanSkipped
+			}
 			upgraded := w.configuredBeforeUpgrade(evt)
 			if evt.Type == InstallMCP && w.admitNewMCP && !upgraded && (w.startupRescanDone || !w.secureClientActive()) {
 				// A server added to an enrolled user's agent after the
