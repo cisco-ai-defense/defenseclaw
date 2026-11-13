@@ -178,8 +178,9 @@ func pythonIdentifier(text string) bool {
 		return false
 	}
 	for index, char := range text {
-		if char != '_' && !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') &&
-			!(index > 0 && char >= '0' && char <= '9') {
+		letter := char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+		digit := index > 0 && char >= '0' && char <= '9'
+		if !letter && !digit {
 			return false
 		}
 	}

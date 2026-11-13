@@ -183,13 +183,20 @@ func registrationMentionsRelative(text, name string) bool {
 		if start > 0 && registrationPathChar(text[start-1]) {
 			continue
 		}
-		if start > 0 && text[start-1] == '/' &&
-			!(start >= 2 && text[start-2] == '.' && (start == 2 || !registrationPathChar(text[start-3]) && text[start-3] != '/')) {
+		if start > 0 && text[start-1] == '/' && !registrationDotSlashAt(text, start-2) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// registrationDotSlashAt reports a "./" that starts a word at dot.
+func registrationDotSlashAt(text string, dot int) bool {
+	if dot < 0 || text[dot] != '.' {
+		return false
+	}
+	return dot == 0 || !registrationPathChar(text[dot-1]) && text[dot-1] != '/'
 }
 
 // registrationStaticWords lists the literal words of the command.
