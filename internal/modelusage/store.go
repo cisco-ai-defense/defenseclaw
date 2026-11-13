@@ -30,7 +30,7 @@ const (
 	storeBusyMillis    = 5000
 	// storeMaxRows bounds model_usage rows on disk. Past it a flush only
 	// updates rows that already exist.
-	storeMaxRows = 100000
+	storeMaxRowsDefault = 100000
 	// storeReadFlushGap is the freshest a read is guaranteed to be: a read
 	// flushes the pending aggregate unless one happened this recently.
 	storeReadFlushGap = 2 * time.Second
@@ -66,6 +66,7 @@ type Store struct {
 	// cannot drive back-to-back write transactions.
 	readFlushGap time.Duration
 	lastFlush    time.Time
+	maxRows      int
 }
 
 type usageKey struct {
@@ -90,7 +91,7 @@ type usageAgg struct {
 // NewStore returns a closed store for path. Nothing is created until
 // Configure(true).
 func NewStore(path string) *Store {
-	return &Store{path: path, now: time.Now, flushDur: storeFlushInterval, readFlushGap: storeReadFlushGap}
+	return &Store{path: path, now: time.Now, flushDur: storeFlushInterval, readFlushGap: storeReadFlushGap, maxRows: storeMaxRowsDefault}
 }
 
 // Configure turns the store on or off and sets the retention window. It is
@@ -404,7 +405,7 @@ func (s *Store) flushLocked() error {
 		if a.costCalls > 0 {
 			cost = a.costSum
 		}
-		if rows >= storeMaxRows && !s.rowExists(tx, k) {
+		if rows >= s.maxRows && !s.rowExists(tx, k) {
 			s.rowCap++
 			continue
 		}
