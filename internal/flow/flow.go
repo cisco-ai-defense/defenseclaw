@@ -30,7 +30,11 @@
 // from PostToolUse tool results through AddResultValues.
 package flow
 
-import "github.com/defenseclaw/defenseclaw/internal/effects"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/effects"
+)
 
 // Disposition is the finding disposition this step exposes. Stream S8 maps it
 // to a native "ask" where a connector supports one; until then default is a
@@ -118,6 +122,15 @@ func (s *State) Step(res effects.Result, scanText string, cfg Config) Result {
 			if k := e.Target.Key(); k != "" {
 				s.labelPath(k, lbl, sets, basename(e.Target))
 			}
+			// git add stages a labeled path for the next push.
+			if e.Origin.Program == "git" {
+				s.derived = true
+			}
+			if e.Origin.Surface == effects.SurfaceShell || e.Origin.Surface == effects.SurfaceArgv {
+				if !modeledLabelConsumer(strings.ToLower(e.Origin.Program)) {
+					s.opaque = true
+				}
+			}
 		}
 	}
 
@@ -128,11 +141,23 @@ func (s *State) Step(res effects.Result, scanText string, cfg Config) Result {
 		switch e.Kind {
 		case effects.KindWrite, effects.KindAppend, effects.KindLink:
 			if lbl, sets, src, ok := s.writeLabel(e, res.Effects, readLabel, cfg); ok {
+				s.derived = true
 				if k := e.Target.Key(); k != "" {
 					s.labelPath(k, lbl, sets, src)
 				}
 				if e.Kind == effects.KindLink && e.Target.Physical != "" {
 					s.labelPath(physicalKey(e.Target), lbl, sets, src)
+				}
+			} else if e.Data != nil && e.Data.Text != "" {
+				// A write whose literal data carries a seen secret value (an
+				// echo or printf, the Write tool's content, even re-encoded)
+				// labels its target: a later upload of that file sends the
+				// value (rel-1-0-10 GAP-0130).
+				if tag, sets, ok := s.scanValuesLocked(e.Data.Text, cfg.Reencodings); ok {
+					if k := e.Target.Key(); k != "" {
+						s.labelPath(k, Label{Audience: AudienceSelf}, sets, tag)
+						s.derived = true
+					}
 				}
 			}
 		}
@@ -148,12 +173,29 @@ func (s *State) Step(res effects.Result, scanText string, cfg Config) Result {
 		// upload effect (it is on the sibling fetch of the same command);
 		// resolve it here.
 		host := sinkHost(e, res.Effects)
+		if host == "" && e.Origin.Surface == effects.SurfaceMCP {
+			host = mcpServerOf(e.Origin.Program)
+		}
 		if cfg.isAllowlistedHost(host) {
 			continue
 		}
 		if h, ok := s.sinkHit(e, host, scanText, res.Effects, readLabel, cfg); ok {
 			h.EffectIndex = i + 1
 			out.Hits = append(out.Hits, h)
+		}
+	}
+
+	// An MCP call leaves the machine to the server it names, whatever effect the
+	// extractor could place for its arguments (a fetch-style tool with a query
+	// argument is opaque to it). The value lane reads the raw arguments of every
+	// MCP call (rel-1-0-10 GAP-0131).
+	if res.Surface == effects.SurfaceMCP && len(out.Hits) == 0 && len(res.Effects) > 0 {
+		prog := res.Effects[0].Origin.Program
+		server := mcpServerOf(prog)
+		if !cfg.isAllowlistedHost(server) {
+			if tag, sets, ok := s.scanValuesLocked(scanText, cfg.Reencodings); ok {
+				out.Hits = append(out.Hits, Hit{Kind: HitValueMatch, Program: prog, Host: server, Sets: sets, Source: tag, EffectIndex: 1})
+			}
 		}
 	}
 
@@ -183,6 +225,17 @@ func sinkHost(e *effects.Effect, all []effects.Effect) string {
 		}
 	}
 	return ""
+}
+
+// mcpServerOf returns the server name of an MCP tool (mcp__server__tool), or
+// the tool name itself when it follows no such convention.
+func mcpServerOf(tool string) string {
+	if rest, ok := strings.CutPrefix(tool, "mcp__"); ok {
+		if i := strings.Index(rest, "__"); i > 0 {
+			return rest[:i]
+		}
+	}
+	return tool
 }
 
 // isSink reports whether an effect is an external network sink the step checks.

@@ -1856,8 +1856,8 @@ type GuardrailConfig struct {
 	// beside today's, never changing the answer) or "on" (effect verdicts
 	// decide). Ships "shadow"; the lead flips it to "on" once the corpus
 	// numbers hold.
-	EffectsRules                string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
-	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+	EffectsRules string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
+	JudgeSweep   bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
 	// persisted to the local SQLite audit store for later forensics.

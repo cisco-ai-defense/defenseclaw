@@ -214,6 +214,19 @@ func buildPOSIXTable() {
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
 	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: fl(map[string]Flag{"-d": {Value: true, Role: RoleIgnore}}, "-o", "-q", "-l", "-v", "-n", "-j", "-x", "-P")})
 	add(Program{Names: []string{"zip", "gzip", "gunzip", "bzip2", "xz"}, Pos: PosAllRead})
+	// DNS lookup tools resolve a name through the network: the name is a
+	// destination, and a label built from data leaves the machine in the query
+	// (rel-1-0-10 GAP-0128). A literal name with a dot is a fetch of that host; a
+	// substituted or expanded name is a fetch with an unknown host.
+	add(Program{Names: []string{"nslookup", "dig", "host"}, Pos: PosURLArgs})
+	// base64 prints the bytes of the files it reads (the reader row above covers
+	// the dumpers): a pipe or a command substitution that carries its output
+	// carries those bytes. -o writes its output file (macOS).
+	add(Program{Names: []string{"base64"}, Pos: PosAllRead,
+		Flags: fl(map[string]Flag{"-w": {Value: true, Role: RoleIgnore}, "--wrap": {Value: true, Role: RoleIgnore},
+			"-i": {Value: true, Role: RoleRead}, "--input": {Value: true, Role: RoleRead},
+			"-o": {Value: true, Role: RoleWrite}, "--output": {Value: true, Role: RoleWrite}},
+			"-d", "-D", "--decode", "--ignore-garbage")})
 	add(Program{Names: []string{"curl"}, Pos: PosURLArgs, DownloadRemote: true,
 		Flags: fl(map[string]Flag{
 			"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
@@ -236,7 +249,16 @@ func buildPOSIXTable() {
 			"--post-file": {Value: true, Role: RoleUploadFile}, "--post-data": {Value: true, Role: RoleSendData}, "--body-file": {Value: true, Role: RoleUploadFile}, "--body-data": {Value: true, Role: RoleSendData}, "-i": {Value: true, Role: RoleRead}, "--input-file": {Value: true, Role: RoleRead},
 			"-U": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-T": {Value: true, Role: RoleIgnore}, "--header": {Value: true, Role: RoleIgnore}, "--tries": {Value: true, Role: RoleIgnore}, "--timeout": {Value: true, Role: RoleIgnore}},
 			"-q", "-v", "-nv", "-c", "-N", "-r", "-np", "-nc", "-k", "-p", "-E", "--quiet", "--no-check-certificate", "--continue", "--recursive", "--mirror", "--no-verbose", "--no-clobber")})
-	add(Program{Names: []string{"scp"}, Pos: PosSourcesDest, Remote: true})
+	// scp options that name how to connect, not what to copy: an identity file or
+	// config is used to authenticate (it is never part of the data sent), the
+	// rest tune the transfer. -r stays unmodeled: a directory copy sends files the
+	// call does not name (rel-1-0-10 GAP-0127).
+	add(Program{Names: []string{"scp"}, Pos: PosSourcesDest, Remote: true,
+		Flags: fl(map[string]Flag{
+			"-i": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "-P": {Value: true, Role: RoleIgnore},
+			"-F": {Value: true, Role: RoleIgnore}, "-J": {Value: true, Role: RoleIgnore}, "-l": {Value: true, Role: RoleIgnore},
+			"-c": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}},
+			"-q", "-p", "-C", "-B", "-v", "-3", "-4", "-6", "-T", "-O")})
 	add(Program{Names: []string{"rsync"}, Pos: PosSourcesDest, Remote: true,
 		Flags: map[string]Flag{"-e": {Value: true, Role: RoleExecCode}, "--rsh": {Value: true, Role: RoleExecCode}}})
 	add(Program{Names: []string{"find"}, Pos: PosAllRead, DeleteFlag: "-delete",

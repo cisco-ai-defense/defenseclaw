@@ -110,6 +110,8 @@ func main() {
 	modeName := flag.String("mode", "default", "default|strict|managed")
 	examples := flag.Int("examples", 8, "redacted examples to print per hit kind")
 	asJSON := flag.Bool("json", false, "print the report as JSON")
+	explainCtx := flag.Int("explain-ctx", 0, "print up to N session_context hits with the sink effect's data shape (no paths or values)")
+	synth := flag.Bool("synth-results", false, "after a call that reads a labeled credential file, feed the session a synthetic secret value as that call's result (the best case: the connector delivers every result and every value is indexable)")
 	flag.Parse()
 	if *corpus == "" {
 		fmt.Fprintln(os.Stderr, "need -corpus")
@@ -212,6 +214,7 @@ func main() {
 		totalSessions++
 		st := flow.NewState(cfg.MaxLabeledPaths, cfg.MaxValueDigests)
 		sessionHit := false
+		synthN := 0
 		for _, c := range calls {
 			ec, opts, ok := buildCall(c)
 			if !ok {
@@ -220,11 +223,40 @@ func main() {
 			totalCalls++
 			res := effects.Extract(ec, opts)
 			out := st.Step(res, c.command, cfg)
+			if *synth {
+				for i := range res.Effects {
+					e := &res.Effects[i]
+					if e.Kind != effects.KindRead {
+						continue
+					}
+					if _, _, ok := cfg.LabelForTarget(e.Target); ok {
+						synthN++
+						st.AddResultValues([]byte(fmt.Sprintf("API_KEY=synthetic_%d_0123456789abcdefghijklmnop\n", synthN)), "synthetic", cfg)
+						break
+					}
+				}
+			}
 			if out.Action == flow.ActionAllow || len(out.Hits) == 0 {
 				continue
 			}
 			sessionHit = true
 			for _, h := range out.Hits {
+				if *explainCtx > 0 && h.Kind == flow.HitSessionContext && h.EffectIndex >= 1 && h.EffectIndex <= len(res.Effects) {
+					*explainCtx--
+					se := res.Effects[h.EffectIndex-1]
+					dk, srcs := "", ""
+					if se.Data != nil {
+						dk = string(se.Data.Kind)
+						for _, s := range se.Data.Sources {
+							srcs += string(s.Kind) + ","
+						}
+					}
+					rs := ""
+					for _, r := range se.Reasons {
+						rs += string(r.Code) + ","
+					}
+					fmt.Fprintf(os.Stderr, "CTX prog=%s kind=%s target=%s data=%q sources=%q digests=%d state=%s/%s reasons=%s\n", h.Program, se.Kind, se.Target.Type, dk, srcs, st.ValueDigests(), se.TargetState, se.RoleState, rs)
+				}
 				totalHits++
 				byKind[string(h.Kind)]++
 				for _, s := range h.Sets {

@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -62,6 +63,18 @@ type State struct {
 	// result flooded with secret-shaped values can shed a real one (a
 	// documented limit). Surfaced in status.
 	valueEvictions int
+	// derived is set once the session holds a labeled artifact it made itself
+	// (a copy, an archive, a literal written from a seen secret, a labeled path
+	// staged with git add). A bare push of the repository can then carry it.
+	derived bool
+	// shortSecret is set when a labeled result held a secret-looking value too
+	// short to index. The value lane cannot clear a send then, so the session
+	// context lane keeps judging it.
+	shortSecret bool
+	// opaque is set once a labeled file was read by a program whose output the
+	// effect model does not follow into a file (an archiver, an interpreter): a
+	// later file may hold the secret with no label on it.
+	opaque bool
 }
 
 // NewState makes a session state with a fresh random HMAC key. maxPaths and
@@ -175,10 +188,10 @@ func (s *State) sinkHit(e *effects.Effect, host, scanText string, all []effects.
 		if lbl, sets, src, ok := s.writeLabel(e, all, readLabel, cfg); ok && lbl.labeled() {
 			return Hit{Kind: HitLabeledFile, Program: prog, Host: rh, Sets: sets, Source: src}, true
 		}
-		if tag, sets, ok := s.scanValuesLocked(scanText); ok {
+		if tag, sets, ok := s.scanValuesLocked(scanText, cfg.Reencodings); ok {
 			return Hit{Kind: HitValueMatch, Program: prog, Host: rh, Sets: sets, Source: tag}, true
 		}
-		if s.Label.labeled() {
+		if s.Label.labeled() && !s.clearedRemoteCopy(e) {
 			return Hit{Kind: HitSessionContext, Program: prog, Host: rh, Sets: []string{"session:" + s.Label.String()}, Source: s.Label.String()}, true
 		}
 		return Hit{}, false
@@ -214,15 +227,134 @@ func (s *State) sinkHit(e *effects.Effect, host, scanText string, all []effects.
 	// Value lane: a keyed-hash match of a secret value anywhere the call sends
 	// bytes: the effect's literal Data, the full URL, or the raw argv/argument
 	// text (headers, MCP values).
-	if tag, sets, ok := s.scanValuesLocked(outboundText(e) + "\n" + scanText); ok {
+	if tag, sets, ok := s.scanValuesLocked(outboundText(e)+"\n"+scanText, cfg.Reencodings); ok {
 		return Hit{Kind: HitValueMatch, Program: prog, Host: host, Sets: sets, Source: tag}, true
 	}
 	// Context lane: a labeled session that actually SENDS (not a plain GET)
-	// reaching an external sink, with no data proof.
-	if s.Label.labeled() && sendsData(e) {
+	// reaching an external sink, with no data proof. It is the weak signal, so
+	// it stays quiet where the value lane has already seen every byte the call
+	// sends (rel-1-0-10 GAP-0127).
+	if s.Label.labeled() && sendsData(e) && !s.clearedByValueLane(e) && !s.plainRepoPush(e) {
 		return Hit{Kind: HitSessionContext, Program: prog, Host: host, Sets: []string{"session:" + s.Label.String()}, Source: s.Label.String()}, true
 	}
 	return Hit{}, false
+}
+
+// clearedByValueLane reports that the call's outbound bytes are fully visible
+// (a literal body or a static URL, no file, stdin or expansion behind them),
+// the session holds indexed secret values to compare them with, and no token
+// in them is an opaque blob the lane could not read through. The value lane
+// compared every token and found no indexed secret, so "this session read a
+// credential" adds nothing about these bytes. Callers hold s.mu.
+func (s *State) clearedByValueLane(e *effects.Effect) bool {
+	if len(s.values) == 0 || s.shortSecret {
+		return false
+	}
+	visible := false
+	switch e.Kind {
+	case effects.KindNetworkSend:
+		visible = e.Data != nil && e.Data.Kind == effects.DataLiteral && len(e.Data.Sources) == 0
+	case effects.KindNetworkFetch:
+		visible = e.Data == nil && e.Target.URL != ""
+	}
+	if !visible {
+		return false
+	}
+	for _, tok := range candidateSinkTokens(outboundText(e)) {
+		if looksBlob(tok) {
+			return false
+		}
+	}
+	return true
+}
+
+// looksBlob reports a token that could be a re-encoded secret rather than
+// ordinary request text: at least the indexing length, only the base64/hex/
+// identifier alphabet (no dot, so a host or a file name is not one), a letter
+// and a digit, and not a canonical UUID. A host, a path of words or a short id
+// is not a blob.
+func looksBlob(tok string) bool {
+	if len(tok) < minSecretTokenLen || len(tok) > maxSecretTokenLen {
+		return false
+	}
+	letters, digits := 0, 0
+	for _, r := range tok {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			letters++
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '-' || r == '_' || r == '/' || r == '+' || r == '=':
+		default:
+			return false
+		}
+	}
+	if letters == 0 || digits == 0 {
+		return false
+	}
+	return !isUUID(tok)
+}
+
+// isUUID reports the canonical 8-4-4-4-12 hexadecimal form.
+func isUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// clearedRemoteCopy reports a remote copy (scp, rsync) whose data is only the
+// named files, none of them labeled, from a session in which the value lane has
+// values to compare and no labeled file has gone through a program the effect
+// model cannot follow: the bytes sent are those files, and every file the
+// session derived from a labeled one carries the label. Callers hold s.mu.
+func (s *State) clearedRemoteCopy(e *effects.Effect) bool {
+	if len(s.values) == 0 || s.shortSecret || s.opaque || e.Data == nil || len(e.Data.Sources) == 0 {
+		return false
+	}
+	for _, src := range e.Data.Sources {
+		if src.Kind != effects.SourcePath && src.Kind != effects.SourceEffect {
+			return false
+		}
+	}
+	return true
+}
+
+// modeledLabelConsumer reports a program (or tool) whose handling of a labeled
+// file the effect model follows: it prints or filters it, copies it with a
+// modeled destination, or is a file tool. The name is lower case.
+func modeledLabelConsumer(program string) bool {
+	switch program {
+	case "cat", "head", "tail", "less", "more", "nl", "tac", "grep", "egrep", "fgrep", "rg", "sed", "awk", "cut",
+		"sort", "uniq", "wc", "file", "stat", "ls", "diff", "cmp", "base64", "xxd", "od", "hexdump", "strings",
+		"cp", "mv", "install", "rsync", "scp", "sftp", "ssh", "ssh-add", "dd", "tee", "tar", "ln", "git", "curl", "wget", "source", ".",
+		"read", "grep_search", "glob", "read_file", "view", "open", "type", "get-content", "gc", "select-string":
+		return true
+	}
+	return false
+}
+
+// plainRepoPush reports a git push to a named remote (no host on the effect, no
+// data behind it) from a session that has made no labeled artifact: the push
+// carries the repository, and nothing the session labeled is in it. A push
+// after the session copied, archived or staged a labeled file keeps the context
+// lane. Callers hold s.mu.
+func (s *State) plainRepoPush(e *effects.Effect) bool {
+	return e.Kind == effects.KindNetworkSend && e.Origin.Program == "git" &&
+		e.Target.Host == "" && e.Data == nil && !s.derived
 }
 
 // sendsData reports whether an effect carries outbound bytes (as opposed to a
@@ -249,6 +381,9 @@ func (s *State) AddResultValues(result []byte, srcTag string, cfg Config) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	added := 0
+	if hasShortSecretValue(result) {
+		s.shortSecret = true
+	}
 	for _, tok := range candidateSecretTokens(result) {
 		d := s.digest(tok)
 		if _, seen := s.values[d]; seen {
@@ -269,14 +404,26 @@ func (s *State) AddResultValues(result []byte, srcTag string, cfg Config) int {
 
 // scanValuesLocked checks whether any token in the outbound text (or a common
 // decoding of it) matches a stored secret digest. Callers hold s.mu.
-func (s *State) scanValuesLocked(text string) (string, []string, bool) {
+func (s *State) scanValuesLocked(text string, reencodings bool) (string, []string, bool) {
 	if !s.haveKey || text == "" || len(s.values) == 0 {
 		return "", nil, false
 	}
-	for _, tok := range candidateSinkTokens(text) {
-		for _, cand := range decodeCandidates(tok) {
-			if tag, ok := s.values[s.digest(cand)]; ok {
-				return tag, []string{"value"}, true
+	// The text is also read once with JSON string escapes undone: a value inside
+	// a JSON string argument (an MCP argument, a nested payload) is escaped.
+	texts := []string{text}
+	if un, changed := jsonUnescapeOnce(text); changed {
+		texts = append(texts, un)
+	}
+	for _, t := range texts {
+		for _, tok := range candidateSinkTokens(t) {
+			cands := []string{tok}
+			if reencodings {
+				cands = decodeCandidates(tok)
+			}
+			for _, cand := range cands {
+				if tag, ok := s.values[s.digest(cand)]; ok {
+					return tag, []string{"value"}, true
+				}
 			}
 		}
 	}
@@ -316,10 +463,6 @@ func (s *State) LabelString() string {
 	return s.Label.String()
 }
 
-// ValueLaneActive reports whether the value lane is usable: it is off only when
-// the per-session random key could not be read at creation.
-func (s *State) ValueLaneActive() bool { return s.haveKey }
-
 // --- token extraction ---
 
 // candidateSecretTokens pulls secret-shaped tokens from a tool result: the
@@ -348,6 +491,7 @@ func extractTokens(s string, resultMode bool) []string {
 	add := func(t string) {
 		t = strings.TrimSpace(t)
 		t = strings.Trim(t, `"',;)(`)
+		t = strings.TrimRight(t, ".!?")
 		if len(t) < minSecretTokenLen || len(t) > maxSecretTokenLen || seen[t] {
 			return
 		}
@@ -362,7 +506,17 @@ func extractTokens(s string, resultMode bool) []string {
 		if c := strings.IndexByte(line, ':'); c > 0 && !strings.Contains(line[:c], " ") {
 			add(strings.TrimSpace(line[c+1:]))
 		}
-		for _, f := range strings.FieldsFunc(line, sepRune) {
+		if resultMode {
+			// user:password@host in a URL (a credentials file, a remote line).
+			if ui := urlUserinfoPassword(line); len(ui) >= minSecretTokenLen {
+				add(ui)
+			}
+		}
+		sep := sepRune
+		if !resultMode {
+			sep = sinkSepRune
+		}
+		for _, f := range strings.FieldsFunc(line, sep) {
 			if resultMode {
 				if looksOpaqueToken(f) {
 					add(f)
@@ -402,9 +556,130 @@ func sepRune(r rune) bool {
 	return false
 }
 
+// urlUserinfoPassword returns the password part of a scheme://user:password@host
+// URL in a line, or "".
+func urlUserinfoPassword(line string) string {
+	i := strings.Index(line, "://")
+	if i < 0 {
+		return ""
+	}
+	rest := line[i+3:]
+	end := strings.IndexAny(rest, "/ \t")
+	if end < 0 {
+		end = len(rest)
+	}
+	auth := rest[:end]
+	at := strings.LastIndexByte(auth, '@')
+	if at < 0 {
+		return ""
+	}
+	user := auth[:at]
+	if c := strings.IndexByte(user, ':'); c >= 0 {
+		return user[c+1:]
+	}
+	return ""
+}
+
+// sinkSepRune splits outbound text more finely than a result: a value rides
+// glued to a key (name=value, X-Header:value), to a type or filename parameter
+// (value;type=...), to userinfo (user:value@host) or behind an escape, and any
+// of those characters separates it (rel-1-0-10 GAP-0129).
+func sinkSepRune(r rune) bool {
+	switch r {
+	case '=', ':', '@', '\\', '\n', '\r':
+		return true
+	}
+	return sepRune(r)
+}
+
+// jsonUnescapeOnce undoes JSON string escapes (\", \\, \/, \n, \r, \t,
+// \uXXXX) one level, so a value written inside a JSON string argument is read
+// as the value. changed is false when the text holds no escape.
+func jsonUnescapeOnce(t string) (string, bool) {
+	if !strings.ContainsRune(t, '\\') {
+		return t, false
+	}
+	var sb strings.Builder
+	sb.Grow(len(t))
+	changed := false
+	for i := 0; i < len(t); i++ {
+		c := t[i]
+		if c != '\\' || i+1 >= len(t) {
+			sb.WriteByte(c)
+			continue
+		}
+		n := t[i+1]
+		switch n {
+		case '"', '\\', '/':
+			sb.WriteByte(n)
+		case 'n':
+			sb.WriteByte('\n')
+		case 'r':
+			sb.WriteByte('\r')
+		case 't':
+			sb.WriteByte('\t')
+		case 'u':
+			if i+5 < len(t) {
+				if v, err := strconv.ParseUint(t[i+2:i+6], 16, 32); err == nil {
+					sb.WriteRune(rune(v))
+					i += 5
+					changed = true
+					continue
+				}
+			}
+			sb.WriteByte(c)
+			continue
+		default:
+			sb.WriteByte(c)
+			continue
+		}
+		i++
+		changed = true
+	}
+	return sb.String(), changed
+}
+
+// hasShortSecretValue reports a secret-looking assignment in a result whose
+// value is below the indexing length: a password-like key with a short value.
+// The value lane cannot match what it did not index.
+func hasShortSecretValue(b []byte) bool {
+	if len(b) > 1<<20 {
+		b = b[:1<<20]
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(line[:eq]))
+		val := strings.Trim(strings.TrimSpace(line[eq+1:]), `"'`)
+		if len(val) < 6 || len(val) >= minSecretTokenLen {
+			continue
+		}
+		for _, k := range []string{"secret", "token", "password", "passwd", "pwd", "credential", "auth", "api_key", "apikey", "private"} {
+			if strings.Contains(key, k) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // decodeCandidates returns the token plus its base64/hex/URL-decoded forms, so
 // a value sent after re-encoding matches the one stored raw digest.
 func decodeCandidates(tok string) []string {
+	out := decodeForms(tok)
+	// echo and base64 of a file end the encoded bytes with a line break; the
+	// stored value has none (rel-1-0-10 GAP-0129).
+	for _, o := range out[1:] {
+		if t := strings.TrimRight(o, "\r\n"); t != o && len(t) >= minSecretTokenLen {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func decodeForms(tok string) []string {
 	out := []string{tok}
 	if b, err := base64.StdEncoding.DecodeString(tok); err == nil && len(b) >= minSecretTokenLen {
 		out = append(out, string(b))

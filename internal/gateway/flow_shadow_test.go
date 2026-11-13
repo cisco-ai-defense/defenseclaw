@@ -102,10 +102,10 @@ func withSecretFlowGeneration(t *testing.T, effectsRules, mode string) {
 // action matches the mode. Session-less state (`:anon`) is never created.
 func TestS7FRGatewayShadowVerdict(t *testing.T) {
 	cases := []struct {
-		name, effects, mode     string
-		strict, managed         bool
-		wantFindings            bool
-		wantAlertOnly, wantEnf  bool
+		name, effects, mode    string
+		strict, managed        bool
+		wantFindings           bool
+		wantAlertOnly, wantEnf bool
 	}{
 		{name: "shadow-default", effects: "shadow", mode: "shadow"},
 		{name: "shadow-strict", effects: "shadow", mode: "shadow", strict: true},

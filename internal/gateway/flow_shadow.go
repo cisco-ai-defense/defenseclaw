@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -40,6 +41,10 @@ const (
 	flowLaneOn     flowLaneMode = "on"
 )
 
+// secretFlowPanics counts panics the lane recovered from (it never changes an
+// answer by failing).
+var secretFlowPanics atomic.Int64
+
 // maxFlowSessions bounds the number of live per-session states the gateway
 // holds. A session is a cheap struct; the real memory is inside each state,
 // itself bounded by guardrail.secret_flow.memory.
@@ -61,6 +66,9 @@ type flowSessionEntry struct {
 	// path or secret value, only the redacted fields the finding already
 	// carries (kind, program, host, label sets, a basename or set tag).
 	hits []FlowHitRecord
+	// dialect is the shell dialect the session's last shell call reported, so a
+	// tool result is read with the grammar and path flavor that call ran under.
+	dialect actionfacts.Dialect
 }
 
 // FlowHitRecord is one redacted recent hit for the explain view.
@@ -79,12 +87,15 @@ const maxFlowHitRing = 16
 
 // FlowSessionView is the read-only explain payload for one session.
 type FlowSessionView struct {
-	Session      string          `json:"session"`
-	Found        bool            `json:"found"`
-	Label        string          `json:"label"`
-	LabeledPaths int             `json:"labeled_paths"`
-	ValueDigests int             `json:"value_digests"`
-	Hits         []FlowHitRecord `json:"hits"`
+	Session      string `json:"session"`
+	Found        bool   `json:"found"`
+	Label        string `json:"label"`
+	LabeledPaths int    `json:"labeled_paths"`
+	ValueDigests int    `json:"value_digests"`
+	// ValueEvictions counts secret-value digests the bound has dropped: a
+	// non-zero count means a result flooded the set and a real value may be shed.
+	ValueEvictions int             `json:"value_evictions"`
+	Hits           []FlowHitRecord `json:"hits"`
 }
 
 type flowSessionStore struct {
@@ -173,13 +184,36 @@ func (s *flowSessionStore) view(id string) FlowSessionView {
 	}
 	hits := append([]FlowHitRecord(nil), e.hits...)
 	return FlowSessionView{
-		Session:      id,
-		Found:        true,
-		Label:        e.st.Label.String(),
-		LabeledPaths: e.st.LabeledPaths(),
-		ValueDigests: e.st.ValueDigests(),
-		Hits:         hits,
+		Session:        id,
+		Found:          true,
+		Label:          e.st.LabelString(),
+		LabeledPaths:   e.st.LabeledPaths(),
+		ValueDigests:   e.st.ValueDigests(),
+		ValueEvictions: e.st.ValueEvictions(),
+		Hits:           hits,
 	}
+}
+
+// noteDialect remembers the shell dialect a session's shell call reported.
+func (s *flowSessionStore) noteDialect(id string, d actionfacts.Dialect) {
+	if d == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.m[id]; ok {
+		e.dialect = d
+	}
+}
+
+// dialectOf returns the dialect noted for a session, or "".
+func (s *flowSessionStore) dialectOf(id string) actionfacts.Dialect {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.m[id]; ok {
+		return e.dialect
+	}
+	return ""
 }
 
 // recentHits returns up to n of the most recent redacted hits across all live
@@ -265,9 +299,16 @@ func secretFlowLaneMode(g config.GuardrailConfig) flowLaneMode {
 }
 
 // runSecretFlowShadow runs the flow step for one call and returns findings.
-// In shadow the findings are detection-only; in on an egress finding may
-// participate. It is called once at the outermost trusted-action dispatch.
-func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) []RuleFinding {
+// Shadow records the hit only; in on an egress finding may participate. It is called once at the outermost trusted-action dispatch.
+func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) (findings []RuleFinding) {
+	// The lane must never change an answer by failing: a panic inside it is
+	// counted and the call proceeds as if the lane were off.
+	defer func() {
+		if r := recover(); r != nil {
+			secretFlowPanics.Add(1)
+			findings = nil
+		}
+	}()
 	cfg, mode, ok := secretFlowConfig(ctx, request)
 	if !ok {
 		return nil
@@ -285,6 +326,7 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) []Ru
 		return nil
 	}
 	opts.Flavor = cfg.Flavor
+	opts.CaseInsensitive = secretFlowCaseInsensitive(cfg.Flavor)
 	res := effects.Extract(call, opts)
 	// scanText is the call's raw command / argument text, scanned at a sink for
 	// secret values the effect model does not surface as Data (headers, MCP
@@ -294,6 +336,7 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) []Ru
 		scanText = string(request.Input.Args)
 	}
 	st := secretFlowSessions.session(sid, cfg)
+	secretFlowSessions.noteDialect(sid, request.Input.DialectHint)
 	out := st.Step(res, scanText, cfg)
 	if len(out.Hits) > 0 {
 		now := time.Now().UTC().Format(time.RFC3339)
@@ -327,15 +370,11 @@ func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
 	}
 	sets := map[string]bool{}
 	kinds := map[string]bool{}
-	var host string
 	for _, h := range out.Hits {
 		for _, s := range h.Sets {
 			sets[s] = true
 		}
 		kinds[string(h.Kind)] = true
-		if host == "" {
-			host = h.Host
-		}
 	}
 	tags := []string{"secret_flow", string(mode)}
 	for s := range sets {
@@ -361,72 +400,6 @@ func flowShadowFindings(out flow.Result, mode flowLaneMode) []RuleFinding {
 		f.enforcement = findingEnforcementInherit
 	}
 	return []RuleFinding{f}
-}
-
-// addSecretFlowResultValues feeds the secret-shaped values of a successful
-// sensitive-read tool result into the session so a later outbound call that
-// sends the value (even re-encoded) is caught by the value lane. It runs on
-// PostToolUse. It stores only keyed digests, never the raw value. It is a
-// no-op when the lane is off or no state exists for the session yet.
-func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
-	if req.SessionID == "" {
-		return
-	}
-	g := currentGeneration()
-	if g == nil || g.Config == nil || secretFlowLaneMode(g.Config.Guardrail) == flowLaneOff {
-		return
-	}
-	if canonicalEvent(req.HookEventName) != "posttooluse" {
-		return
-	}
-	result := stringifyHookValue(firstValue(req.Payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result"))
-	if strings.TrimSpace(result) == "" {
-		return
-	}
-	// Index the result only when the flow label set labels the read target
-	// (one classifier, same as the file labeler). Indexing every tool output
-	// would waste the digest budget.
-	sf := g.Config.Guardrail.SecretFlow
-	home := hookActiveHome(ctx)
-	fcfg := flow.Config{
-		Credentials:         sf.CredentialsEnabled(),
-		ExtraPathGlobs:      sf.LabelSets.ExtraPathGlobs,
-		ExtraSecretPatterns: sf.LabelSets.ExtraSecretPatterns,
-		Reencodings:         sf.Reencodings,
-		MaxValueDigests:     sf.Memory.MaxValueDigests,
-		Home:                home,
-		Flavor:              effects.FlavorPOSIX,
-	}
-	call, opts, has := effectCall(req.ConnectorName, actionfacts.Input{
-		Tool: req.ToolName, Args: req.ToolArgs, CWD: req.CWD, ActiveHome: home,
-	})
-	if !has {
-		return
-	}
-	res := effects.Extract(call, opts)
-	labeled := false
-	for i := range res.Effects {
-		e := &res.Effects[i]
-		if e.Kind != effects.KindRead {
-			continue
-		}
-		if _, _, ok := fcfg.LabelForTarget(e.Target); ok {
-			labeled = true
-			break
-		}
-	}
-	if !labeled {
-		return
-	}
-	st, ok := secretFlowSessions.lookup(req.SessionID)
-	if !ok {
-		st = secretFlowSessions.session(req.SessionID, flow.Config{
-			MaxLabeledPaths: sf.Memory.MaxLabeledPaths,
-			MaxValueDigests: sf.Memory.MaxValueDigests,
-		})
-	}
-	st.AddResultValues([]byte(result), "tool_result", fcfg)
-
 }
 
 // redactHost reduces a destination host to its registrable-ish tail (the last
@@ -488,5 +461,6 @@ func (a *APIServer) handleSecretFlow(w http.ResponseWriter, r *http.Request) {
 	resp["tracked_sessions"] = len(secretFlowSessions.m)
 	secretFlowSessions.mu.Unlock()
 	resp["recent_hits"] = secretFlowSessions.recentHits(maxFlowHitRing)
+	resp["lane_panics"] = secretFlowPanics.Load()
 	a.writeJSON(w, http.StatusOK, resp)
 }

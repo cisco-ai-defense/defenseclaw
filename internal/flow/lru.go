@@ -13,10 +13,10 @@ import (
 // least-recently-used eviction. It caps the per-session labeled-path memory so
 // a long session cannot grow it without bound (brief step 1).
 type lruLabels struct {
-	mu   sync.Mutex
-	max  int
-	ll   *list.List
-	m    map[string]*list.Element
+	mu  sync.Mutex
+	max int
+	ll  *list.List
+	m   map[string]*list.Element
 }
 
 type lruEntry struct {

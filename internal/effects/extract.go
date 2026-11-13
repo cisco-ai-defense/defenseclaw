@@ -130,13 +130,23 @@ type walker struct {
 	writeByKey map[string]int    // path key -> 1-based effect index that wrote it
 	pathShadow bool
 
-	env        map[string]string
-	curCWD     string
-	curHome    string
-	cwdStack   []string
-	lastPrim   int // 1-based index of the previous stage's primary effect (pipe join)
-	work       int // remaining work budget; 0 -> stop and emit a limit unknown (R3-1)
-	overBudget bool
+	env      map[string]string
+	curCWD   string
+	curHome  string
+	cwdStack []string
+	lastPrim int // 1-based index of the previous stage's primary effect (pipe join)
+	// stageIn is what the current command reads on stdin from the previous
+	// pipeline stage; stageOut is what the last finished stage passes on. Each
+	// names the reads whose bytes the stage may print and a literal it was fed
+	// (echo/printf). They tie a pipe or a redirect to the data behind it, so a
+	// secret read upstream is a source of the send or write downstream (s7-flow,
+	// rel-1-0-10 GAP-0128/GAP-0130). literalOut is the literal the current
+	// command prints; redirOut the 1-based indices of its stdout redirects.
+	stageIn, stageOut stageData
+	literalOut        string
+	redirOut          []int
+	work              int // remaining work budget; 0 -> stop and emit a limit unknown (R3-1)
+	overBudget        bool
 	// pathDialect is the dialect of the frontend currently walking the text,
 	// used only to decide how a leading / is placed on Windows (review 6 #1). It
 	// is DialectNone when the top-level dialect was only guessed, so a guessed
@@ -203,7 +213,7 @@ func (w *walker) walkScript(s *Script, depth int) {
 	}
 	for _, st := range s.Stmts {
 		for _, c := range st.Cmds {
-			w.command(c, s.Dialect, depth, st.Cond || c.Cond)
+			w.commandStage(c, s.Dialect, depth, st.Cond || c.Cond)
 		}
 	}
 }
@@ -295,6 +305,150 @@ func (w *walker) resolveWords(in []Word) []Word {
 		out[i] = w.resolveWord(wd)
 	}
 	return out
+}
+
+// stageData is what one pipeline stage passes on to the next: the 1-based
+// indices of the reads whose bytes it may print, and a literal it was fed.
+type stageData struct {
+	reads   []int
+	literal string
+}
+
+// maxStageSources bounds the sources one stage carries, so a long pipeline of
+// many reads stays O(1) per effect.
+const maxStageSources = 32
+
+// commandStage walks one command or pipeline stage and records what it passes
+// on: a stage's stdout carries what it read, what it was piped and what it
+// printed (s7-flow, rel-1-0-10 GAP-0128/GAP-0130). It also links a command
+// substitution's reads to the dynamic data the command sends or writes.
+func (w *walker) commandStage(c *Cmd, dialect Dialect, depth int, cond bool) {
+	savedIn, savedLit, savedRedir := w.stageIn, w.literalOut, w.redirOut
+	in := stageData{}
+	if c.PipeIn {
+		in = w.stageOut
+	}
+	w.stageIn, w.literalOut, w.redirOut = in, "", nil
+	start, own := len(w.res.Effects), w.cmdNo+1
+	w.command(c, dialect, depth, cond)
+	out := stageData{literal: w.literalOut}
+	if out.literal == "" {
+		out.literal = in.literal
+	}
+	out.reads = appendCapped(out.reads, in.reads...)
+	var nested []int
+	for i := start; i < len(w.res.Effects); i++ {
+		e := &w.res.Effects[i]
+		if e.Kind != KindRead {
+			continue
+		}
+		out.reads = appendCapped(out.reads, i+1)
+		if e.Origin.Command != own {
+			nested = appendCapped(nested, i+1)
+		}
+	}
+	if len(c.Nested) > 0 && len(nested) > 0 {
+		w.linkSubstitutionData(start, own, nested)
+	}
+	w.stageOut = out
+	w.stageIn, w.literalOut, w.redirOut = savedIn, savedLit, savedRedir
+}
+
+// linkSubstitutionData records that the data a command sends or writes, when
+// the frontend could not resolve it, is the output of a command substitution
+// in its arguments (a dynamic body, URL or redirected echo argument).
+// (s7-flow, rel-1-0-10 GAP-0128). A static operand is never linked.
+func (w *walker) linkSubstitutionData(start, own int, reads []int) {
+	redir := map[int]bool{}
+	for _, idx := range w.redirOut {
+		redir[idx] = true
+	}
+	for i := start; i < len(w.res.Effects); i++ {
+		e := &w.res.Effects[i]
+		if e.Origin.Command != own {
+			continue
+		}
+		switch {
+		case e.Kind == KindNetworkSend && e.Data != nil && e.Data.Kind == DataArgument && len(e.Data.Sources) == 0:
+		case (e.Kind == KindNetworkSend || e.Kind == KindNetworkFetch) && e.Target.Type == TargetURL && e.Target.URL == "" && e.Data == nil:
+			// The URL itself is built from the substitution: its bytes leave.
+			e.Data = &Data{Kind: DataArgument}
+		case redir[i+1] && (e.Data == nil || len(e.Data.Sources) == 0) && (e.Data == nil || e.Data.Text == ""):
+			if e.Data == nil {
+				e.Data = &Data{Kind: DataArgument}
+			}
+		default:
+			continue
+		}
+		e.Data.Sources = appendStageSources(e.Data.Sources, reads, 0)
+	}
+}
+
+func appendCapped(dst []int, vs ...int) []int {
+	for _, v := range vs {
+		if len(dst) >= maxStageSources {
+			return dst
+		}
+		dst = append(dst, v)
+	}
+	return dst
+}
+
+// appendStageSources adds each read index as an effect source, skipping skip
+// and any index already present.
+func appendStageSources(dst []Source, reads []int, skip int) []Source {
+	for _, r := range reads {
+		if r == skip || len(dst) >= maxStageSources {
+			continue
+		}
+		dup := false
+		for _, s := range dst {
+			if s.Kind == SourceEffect && s.Effect == r {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			dst = append(dst, Source{Kind: SourceEffect, Effect: r})
+		}
+	}
+	return dst
+}
+
+// literalPrinted returns what echo/printf (Write-Output in PowerShell) print
+// when every argument is static: the bytes a redirect or a pipe then carries
+// (s7-flow, rel-1-0-10 GAP-0130). Leading echo switches are dropped; a printf
+// format and its arguments are kept as words, so each value is still a token.
+func literalPrinted(program string, args []Word, dialect Dialect) string {
+	switch {
+	case program == "echo" || program == "printf":
+	case dialect == DialectPowerShell && program == "write-output":
+	default:
+		return ""
+	}
+	parts := make([]string, 0, len(args))
+	for _, a := range args {
+		if !a.Static {
+			return ""
+		}
+		if program == "echo" && len(parts) == 0 && isEchoSwitch(a.Value) {
+			continue
+		}
+		parts = append(parts, a.Value)
+	}
+	return cap8k(strings.Join(parts, " "))
+}
+
+func isEchoSwitch(v string) bool {
+	if len(v) < 2 || v[0] != '-' {
+		return false
+	}
+	for _, r := range v[1:] {
+		if r != 'n' && r != 'e' && r != 'E' {
+			return false
+		}
+	}
+	return true
 }
 
 // command processes one simple command / pipeline stage.
@@ -403,6 +557,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	program := programBasename(prog.Value, w.o.flavor())
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
+	w.literalOut = literalPrinted(program, inner[1:], dialect)
 
 	// Calling a user-defined function (including one that shadows cd) may change
 	// the cwd unobservably: mark it dynamic (review R3-6 C06/C07).
@@ -488,7 +643,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// A command that prints a secret to stdout (gh auth token, vault kv get, ...):
 	// emit a read whose data is secret_output and make it this stage's primary,
-	// so a pipe into a sender (curl -d @-) joins it (s7-flow). This runs even for
+	// stages, not only the previous stage's own output (case ids in
+	// secretflow_stage_test.go).
 	// a program the table does not model, since the base exec stays unknown.
 	if secretStdoutCommand(program, inner[1:]) {
 		e := Effect{Kind: KindRead, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
@@ -624,7 +780,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if program == "certutil" {
 		w.certutilEffects(inner[1:], origin, cond)
 	}
-	// curl -O / wget write a URL-named file into the output dir or cwd; the
+	// (see the stage-link cases in secretflow_stage_test.go).
 	// basename is unknown (review R3-3).
 	if entry.DownloadRemote {
 		w.downloadRemoteWrite(program, inner[1:], origin, cond)
@@ -656,9 +812,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// find/xargs -exec inner commands run with the matched paths; walk each so
 	// its effects (incl. an inner sh -c) appear (review N4). The roots stay as
 	// read operands below.
+	printed := w.literalOut
 	for _, argv := range execCmds {
 		w.command(&Cmd{Words: argv, Cond: cond}, dialect, depth, cond)
 	}
+	w.literalOut = printed // an -exec child must not lend its literal to this command's redirect
 	readIdx := []int{}
 	readByKeyLocal := map[string]int{} // source path key -> read index, for the copy-label join
 	emittedTargetEffect := false
@@ -702,7 +860,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
 		}
 	}
-	// curl/wget/iwr: attach the destination host to the send and join an @- body
+	// (see the stage-link cases in secretflow_stage_test.go).
 	// to the pipe (s7-flow).
 	if isHTTPUploader(program) {
 		w.finishNetworkSends(cmdStart, c.PipeIn, prevPrim)
@@ -1506,7 +1664,7 @@ func (w *walker) fillURL(e *Effect, op operand) {
 	}
 }
 
-// fillSendBody sets the Data of a network_send from a curl/wget/iwr body or
+// (see the stage-link cases in secretflow_stage_test.go).
 // upload operand: a file read (joined to a prior write of the same path), stdin
 // (joined to the piped producer by finishNetworkSends), or literal text. The URL
 // host is attached to the send by finishNetworkSends (s7-flow).
@@ -1527,7 +1685,7 @@ func (w *walker) fillSendBody(e *Effect, op operand, isFile bool) {
 	e.Data = &Data{Kind: DataLiteral, Bytes: len(op.value), Text: cap8k(op.value)}
 }
 
-// finishNetworkSends puts the destination host of a curl/wget/iwr call on its
+// (see the stage-link cases in secretflow_stage_test.go).
 // network_send effects (not only on the sibling fetch), and joins a stdin body
 // (@- / -) to the piped producer (s7-flow). It runs only for HTTP uploader
 // programs so a git push (its own unknown-host send) is untouched.
@@ -1555,6 +1713,12 @@ func (w *walker) finishNetworkSends(start int, pipeIn bool, prevPrim int) {
 		}
 		if e.Data != nil && e.Data.Kind == DataStdin && len(e.Data.Sources) == 0 && pipeIn && prevPrim > 0 {
 			e.Data.Sources = []Source{{Kind: SourceEffect, Effect: prevPrim}}
+			// The piped bytes also carry what the upstream stages read or were
+			// fed, not only the previous stage's own output.
+			e.Data.Sources = appendStageSources(e.Data.Sources, w.stageIn.reads, prevPrim)
+			if e.Data.Text == "" && w.stageIn.literal != "" {
+				e.Data.Text, e.Data.Bytes = w.stageIn.literal, len(w.stageIn.literal)
+			}
 		}
 		if e.Target.Type == TargetURL && e.Target.Host == "" {
 			if single {
@@ -1624,15 +1788,42 @@ func (w *walker) handleRedirs(c *Cmd, dialect Dialect, cmdNo, depth int, cond bo
 				e.Kind = KindAppend
 			}
 			w.fillRedirTarget(&e, w.resolveWord(r.Target))
-			if (r.FD == 1 || r.FD < 0) && len(readIdx) > 0 {
+			stdout := r.FD == 1 || r.FD < 0
+			if stdout {
 				for _, idx := range readIdx {
 					e.Data = appendSource(e.Data, Source{Kind: SourceEffect, Effect: idx})
+				}
+				if len(readIdx) == 0 && c.PipeIn {
+					// A filter's redirect carries what was piped into it (s7-flow
+					// GAP-0130).
+					for _, idx := range w.stageIn.reads {
+						e.Data = appendSource(e.Data, Source{Kind: SourceEffect, Effect: idx})
+					}
+				}
+				switch {
+				case w.literalOut != "":
+					// echo/printf with static arguments: the write lays down this
+					// literal (s7-flow GAP-0130).
+					if e.Data == nil {
+						e.Data = &Data{Kind: DataLiteral}
+					}
+					e.Data.Text, e.Data.Bytes = w.literalOut, len(w.literalOut)
+				case c.PipeIn && w.stageIn.literal != "":
+					// The literal fed into this filter, before its transform; the
+					// value lane decodes common re-encodings.
+					if e.Data == nil {
+						e.Data = &Data{Kind: DataPipe}
+					}
+					e.Data.Text, e.Data.Bytes = w.stageIn.literal, len(w.stageIn.literal)
 				}
 			}
 			idx := w.emit(e)
 			if idx != 0 {
 				if k := e.Target.Key(); k != "" {
 					w.writeByKey[k] = idx
+				}
+				if stdout {
+					w.redirOut = append(w.redirOut, idx)
 				}
 			}
 		case RedirRead:
@@ -2453,7 +2644,7 @@ func (w *walker) operandTarget(wd Word) Target {
 	return t
 }
 
-// downloadRemoteWrite emits the file a URL download writes: curl only with a
+// (see the stage-link cases in secretflow_stage_test.go).
 // -O/-J/--remote-name form (an -o output is already modeled), wget whenever no
 // -O is given. The basename comes from the URL, so the target is unknown; the
 // directory is --output-dir / -P, else cwd (review R3-3).

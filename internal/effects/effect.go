@@ -66,8 +66,10 @@ type Data struct {
 	// data is a literal or argument with no upstream producer.
 	Sources []Source `json:"sources,omitempty"`
 	Bytes   int      `json:"bytes,omitempty"`
-	// Text is bounded in-process content (write body, decoded code). It is
-	// excluded from JSON so the harness never logs call content.
+	// Text is bounded in-process content (write body, decoded code; for a
+	// piped write or send, the literal an upstream echo/printf fed it, before
+	// any transform). It is excluded from JSON so the harness never logs call
+	// content.
 	Text string `json:"-"`
 }
 
