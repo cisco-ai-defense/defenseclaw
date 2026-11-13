@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -223,7 +224,6 @@ func secretFlowConfig(ctx context.Context, request trustedActionRequest) (flow.C
 	}
 	strictOrManaged := request.StrictPolicy || request.ManagedInstall
 	cfg := flow.Config{
-		Mode:                 string(mode),
 		Credentials:          sf.CredentialsEnabled(),
 		ExtraPathGlobs:       sf.LabelSets.ExtraPathGlobs,
 		ExtraSecretPatterns:  sf.LabelSets.ExtraSecretPatterns,
@@ -272,30 +272,48 @@ func runSecretFlowShadow(ctx context.Context, request trustedActionRequest) []Ru
 	if !ok {
 		return nil
 	}
+	sid := SessionIDFromContext(ctx)
+	if sid == "" {
+		// No session continuity: this is a twin, a benchmark/evaluate call, a
+		// proxy or a background dispatch (context.Background). The lane keeps
+		// per-session state, so a session-less call must not create or mutate
+		// a shared state. Skip it (recorded by its absence from the store).
+		return nil
+	}
 	call, opts, has := effectCall(request.Connector, request.Input)
 	if !has {
 		return nil
 	}
 	opts.Flavor = cfg.Flavor
 	res := effects.Extract(call, opts)
-	sid := SessionIDFromContext(ctx)
-	if sid == "" {
-		sid = request.Connector + ":anon"
+	// scanText is the call's raw command / argument text, scanned at a sink for
+	// secret values the effect model does not surface as Data (headers, MCP
+	// argument values).
+	scanText := request.Input.Command
+	if scanText == "" && len(request.Input.Args) > 0 {
+		scanText = string(request.Input.Args)
 	}
 	st := secretFlowSessions.session(sid, cfg)
-	out := st.Step(res, cfg)
+	out := st.Step(res, scanText, cfg)
 	if len(out.Hits) > 0 {
 		now := time.Now().UTC().Format(time.RFC3339)
 		recs := make([]FlowHitRecord, 0, len(out.Hits))
 		for _, h := range out.Hits {
 			recs = append(recs, FlowHitRecord{
 				Time: now, Kind: string(h.Kind), Program: h.Program,
-				Host: h.Host, Sets: h.Sets, Source: h.Source, Action: string(out.Action),
+				Host: redactHost(h.Host), Sets: h.Sets, Source: h.Source, Action: string(out.Action),
 			})
 		}
 		secretFlowSessions.recordHits(sid, recs)
 	}
-	return flowShadowFindings(out, mode)
+	// P1-1: shadow is record-only (the hit is kept in the explain ring above,
+	// never in the live findings). Only the ON lane contributes a finding, and
+	// it passes through the same proof boundary as every enforcing finding so
+	// a non-enforcement-capable connector is demoted to detection-only.
+	if mode != flowLaneOn {
+		return nil
+	}
+	return applyTrustedActionProofBoundary(flowShadowFindings(out, mode), request.EnforcementCapable)
 }
 
 // flowShadowFindings turns a flow verdict into findings. A clean or allow
@@ -365,31 +383,74 @@ func addSecretFlowResultValues(ctx context.Context, req agentHookRequest) {
 	if strings.TrimSpace(result) == "" {
 		return
 	}
-	// Only index the result of a read of a credential source: the flow step
-	// labels credentials, and indexing every tool output would waste the
-	// digest budget. Reuse the sensitive-read classifier the value-lineage
-	// chain uses.
-	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool:       req.ToolName,
-		Args:       req.ToolArgs,
-		CWD:        req.CWD,
-		ActiveHome: hookActiveHome(ctx),
+	// Index the result only when the flow label set labels the read target
+	// (one classifier, same as the file labeler). Indexing every tool output
+	// would waste the digest budget.
+	sf := g.Config.Guardrail.SecretFlow
+	home := hookActiveHome(ctx)
+	fcfg := flow.Config{
+		Credentials:         sf.CredentialsEnabled(),
+		ExtraPathGlobs:      sf.LabelSets.ExtraPathGlobs,
+		ExtraSecretPatterns: sf.LabelSets.ExtraSecretPatterns,
+		Reencodings:         sf.Reencodings,
+		MaxValueDigests:     sf.Memory.MaxValueDigests,
+		Home:                home,
+		Flavor:              effects.FlavorPOSIX,
+	}
+	call, opts, has := effectCall(req.ConnectorName, actionfacts.Input{
+		Tool: req.ToolName, Args: req.ToolArgs, CWD: req.CWD, ActiveHome: home,
 	})
-	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); !supported {
+	if !has {
 		return
 	}
-	sf := g.Config.Guardrail.SecretFlow
-	cfg := flow.Config{Reencodings: sf.Reencodings, MaxValueDigests: sf.Memory.MaxValueDigests}
+	res := effects.Extract(call, opts)
+	labeled := false
+	for i := range res.Effects {
+		e := &res.Effects[i]
+		if e.Kind != effects.KindRead {
+			continue
+		}
+		if _, _, ok := fcfg.LabelForTarget(e.Target); ok {
+			labeled = true
+			break
+		}
+	}
+	if !labeled {
+		return
+	}
 	st, ok := secretFlowSessions.lookup(req.SessionID)
 	if !ok {
-		// Create the session so a read result before any PreToolUse still
-		// seeds the value set.
 		st = secretFlowSessions.session(req.SessionID, flow.Config{
 			MaxLabeledPaths: sf.Memory.MaxLabeledPaths,
 			MaxValueDigests: sf.Memory.MaxValueDigests,
 		})
 	}
-	st.AddResultValues([]byte(result), "tool_result", cfg)
+	st.AddResultValues([]byte(result), "tool_result", fcfg)
+
+}
+
+// redactHost reduces a destination host to its registrable-ish tail (the last
+// two dotted labels) so a model-built host that smuggles data in a long
+// subdomain label is not echoed whole into the ring, endpoint or explain.
+// An IP literal and a short host pass through.
+func redactHost(h string) string {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return ""
+	}
+	if net.ParseIP(strings.Trim(h, "[]")) != nil {
+		return h
+	}
+	host := h
+	port := ""
+	if i := strings.LastIndexByte(host, ':'); i >= 0 && strings.IndexByte(host, ':') == i {
+		host, port = host[:i], host[i:]
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) > 2 {
+		host = strings.Join(labels[len(labels)-2:], ".")
+	}
+	return host + port
 }
 
 // handleSecretFlow serves the Secret flow tracking read-only view at
