@@ -262,7 +262,20 @@ func joinByToolID(t *testing.T, store *audit.Store) map[string][]string {
 		t.Fatal(err)
 	}
 	outcomes := map[string][]string{}
+	// A benign per-user allow keeps only its hook_decision row (#1384): it
+	// is the call's row when no connector-hook row names the call.
+	hookRowOf := map[string]bool{}
 	for _, row := range rows {
+		if row.ToolID != "" && row.Action == string(audit.ActionConnectorHook) {
+			hookRowOf[row.ToolID] = true
+		}
+	}
+	for _, row := range rows {
+		if row.ToolID != "" && row.Action == "hook_decision" && !hookRowOf[row.ToolID] {
+			action, _ := row.Structured["defenseclaw.guardrail.effective_action"].(string)
+			outcomes[row.ToolID] = append(outcomes[row.ToolID], action)
+			continue
+		}
 		if row.ToolID == "" || (row.Action != string(audit.ActionConnectorHook) && row.Action != string(audit.ActionGuardrailBlock)) {
 			continue
 		}

@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,7 +45,9 @@ func TestToolCallAnsweredWhileTheAuditWriteFailedGetsItsRowFromTheFailureLog(t *
 			}
 
 			f.emitter.fail = true
+			lift := refuseHookRows(t, f.path)
 			f.preToolUse(t, "toolu_gap")
+			lift()
 			f.emitter.fail = false
 			raw, err := os.ReadFile(logPath)
 			if err != nil {
@@ -83,8 +86,31 @@ func serveAuditFaultCall(t *testing.T, f auditFailureHookFixture, body string, c
 		request = request.WithContext(gone)
 	}
 	f.emitter.fail = true
+	lift := refuseHookRows(t, f.path)
 	f.api.handleAgentHook("claudecode").ServeHTTP(httptest.NewRecorder(), request)
+	lift()
 	f.emitter.fail = false
+}
+
+// refuseHookRows makes the store refuse every hook row, as a full disk does:
+// the row of record of a benign per-user allow is its hook_decision row
+// (#1384), so a failed audit write fails it too. lift removes the refusal.
+func refuseHookRows(t *testing.T, path string) (lift func()) {
+	t.Helper()
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`CREATE TRIGGER zz_refuse_hook_rows BEFORE INSERT ON audit_events
+		WHEN NEW.action IN ('connector-hook', 'hook_decision') BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		defer database.Close()
+		if _, err := database.Exec(`DROP TRIGGER zz_refuse_hook_rows`); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // GAP-1028 and GAP-1031 together: a script call whose client left cannot show

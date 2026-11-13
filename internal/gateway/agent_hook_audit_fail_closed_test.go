@@ -155,8 +155,10 @@ func TestHookAuditWriteFailureFollowsPolicyTier(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer database.Close()
+		// The row of record of a benign per-user allow is its hook_decision
+		// row (#1384); a full disk refuses either kind.
 		if _, err := database.Exec(`CREATE TRIGGER zz_audit_disk_full BEFORE INSERT ON audit_events
-			WHEN NEW.action = 'connector-hook' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
+			WHEN NEW.action IN ('connector-hook', 'hook_decision') BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
 			t.Fatal(err)
 		}
 		out := fixture.preToolUse(t, "toolu-full")

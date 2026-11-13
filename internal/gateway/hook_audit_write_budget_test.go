@@ -55,10 +55,12 @@ func walCommits(before, after []byte) (commits, frames int, ok bool) {
 // TestClaudeCodePreToolUseAuditCommitBudget drives the real Claude Code hook
 // handler, audit store and v8 runtime, and counts the audit.db commits and
 // rows of each PreToolUse from the store's write-ahead log. The rows pin that
-// batching lost no record: every call writes its 5 audit rows and 19
-// correlation observations (5 logs, 13 metrics, 1 span). The 2 relationship
-// change records it also exports are kept in correlation_relationships, not
-// again as audit rows (#1384).
+// batching lost no record and that a benign per-user allow keeps one local
+// hook row: every call writes 2 audit rows (its hook_decision row of record
+// and its scan row) and 3 correlation observations. The connector-hook,
+// tool_start and tool.invocation.requested records are exported only, the
+// metrics write no observation rows, and the 2 relationship change records
+// are kept in correlation_relationships, not again as audit rows (#1384).
 func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
@@ -110,6 +112,10 @@ func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 	}
 	const measured = 10
 	auditRows, observationRows := rows("audit_events"), rows("correlation_observations")
+	var lastRowID int64
+	if err := reader.QueryRow("SELECT COALESCE(MAX(rowid),0) FROM audit_events").Scan(&lastRowID); err != nil {
+		t.Fatal(err)
+	}
 	totalCommits, totalFrames := 0, 0
 	for index := 10; index < 10+measured; index++ {
 		before, err := os.ReadFile(fixture.path + "-wal")
@@ -132,16 +138,37 @@ func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 		totalFrames += frames
 	}
 	t.Logf("per PreToolUse: %.1f commits, %.1f WAL frames", float64(totalCommits)/measured, float64(totalFrames)/measured)
-	// 4, not 5: the requested tool call is in the hook_decision row and is
-	// exported only (S8 R3a, #1384).
-	if got := (rows("audit_events") - auditRows) / measured; got != 4 {
-		t.Fatalf("audit rows per call = %d, want 4", got)
+	perAction := map[string]int{}
+	actions, err := reader.Query("SELECT action, COUNT(*) FROM audit_events WHERE rowid > ? GROUP BY action", lastRowID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 5, not 19: the metrics of the call write no observation row of their
-	// own (S8 R1) and the requested tool call no row at all (S8 R3a, #1384);
-	// the other log records keep theirs.
-	if got := (rows("correlation_observations") - observationRows) / measured; got != 5 {
-		t.Fatalf("correlation observations per call = %d, want 5", got)
+	for actions.Next() {
+		var action string
+		var count int
+		if err := actions.Scan(&action, &count); err != nil {
+			t.Fatal(err)
+		}
+		perAction[action] = count
+	}
+	if err := actions.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("audit rows of %d calls by action: %v", measured, perAction)
+	// One local hook row per benign per-user allow: its hook_decision row.
+	// The connector-hook record (S8 R4), tool_start (S8 R4) and the requested
+	// tool call (S8 R3a) are exported only (#1384).
+	if perAction["hook_decision"] != measured || perAction["connector-hook"] != 0 || perAction["tool_invocation"] != 0 {
+		t.Fatalf("audit rows by action = %v, want %d hook_decision and no connector-hook or tool rows", perAction, measured)
+	}
+	if got := (rows("audit_events") - auditRows) / measured; got != 2 {
+		t.Fatalf("audit rows per call = %d, want 2", got)
+	}
+	// 3, not 19: the metrics of the call write no observation row of their
+	// own (S8 R1) and the export-only records none (S8 R3a, R4, #1384); the
+	// other log records keep theirs.
+	if got := (rows("correlation_observations") - observationRows) / measured; got != 3 {
+		t.Fatalf("correlation observations per call = %d, want 3", got)
 	}
 	// rel-1-0-3 GAP-0320: the unique keys a hook call writes are time
 	// ordered, so each lands at the end of its index instead of on a random
