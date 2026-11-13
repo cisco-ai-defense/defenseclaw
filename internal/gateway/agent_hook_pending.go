@@ -145,7 +145,7 @@ func (p *pendingHookOccurrence) request() agentHookRequest {
 		AgentID: r.AgentID, AgentName: r.AgentName, AgentType: r.AgentType,
 		ToolInvocationID: r.ToolInvocationID, ToolName: r.ToolName,
 		CorrelationUnavailable: r.CorrelationUnavailable,
-		pendingOccurrenceID:    p.ID, pendingBodyBytes: p.BodyBytes, pendingRecovery: true,
+		pendingOccurrenceID:    p.ID, pendingBodyBytes: p.BodyBytes, pendingRecovery: true, pendingJournaled: true,
 		pendingProvenance: &p.Provenance,
 	}
 }
@@ -502,7 +502,8 @@ func truncatePendingHookText(s string, text int) string {
 // carry. On an error the answer must not be offered. The IDs are set even
 // then: if the row landed anyway, recovery completes the records the caller
 // writes instead of auditing the call a second time. The caller ends with
-// settlePendingHook.
+// settlePendingHook. A gateway that runs no recovery writes no row: the call
+// keeps its IDs and provenance, and the occurrence is unjournaled.
 func (a *APIServer) journalHookDelivery(
 	ctx context.Context, req *agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
@@ -537,13 +538,15 @@ func (a *APIServer) journalHookDelivery(
 	if a.store == nil {
 		return p, errors.New("hook audit store is unavailable")
 	}
-	if p.SandboxReceipt == nil && !a.journalsHookDeliveries() {
-		// Only recovery reads a journal row, and only a standalone managed
-		// gateway runs it. Two durable fsyncs per call held per-user
+	if !a.journalsHookDeliveries() {
+		// Only recovery and the sandbox receipt read a journal row, and
+		// only a standalone managed gateway runs them (a sandbox receipt
+		// is wanted only there). Two durable fsyncs per call held per-user
 		// answers on a disk that is slow to flush (rel-1-0-10 GAP-0088).
 		p.unjournaled = true
 		return p, nil
 	}
+	req.pendingJournaled = true
 	data, err := encodePendingHookOccurrence(p)
 	if err != nil {
 		return p, err
