@@ -74,11 +74,10 @@ func TestExactNetExecDomainServiceAuth(t *testing.T) {
 	}
 }
 
-// TestExactNetExecDomainServiceAuthWindows runs the same recognizer on the argv
-// from the PowerShell and cmd parsers (rel-1-0-10:GAP-0051 N2): bare nxc,
-// nxc.exe and a path-qualified binary are recognized and keep the parse
-// complete; a dynamic credential, a help call and a non-credentialed call stay
-// partial.
+// TestExactNetExecDomainServiceAuthWindows keeps the built-in PowerShell and
+// cmd parsers at their 1.0.9 behaviour (s7/ad-pack-revert-builtin): NetExec
+// under a Windows shell parses partial and gets no credential-read operation,
+// so the Windows hook keeps the default reading of the call.
 func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -86,13 +85,13 @@ func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 		dialect Dialect
 		want    bool
 	}{
-		{"powershell nxc", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", DialectPowerShell, true},
-		{"cmd nxc", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", DialectCMD, true},
-		{"cmd nxc.exe", "nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss", DialectCMD, true},
-		{"powershell netexec.exe hash", "netexec.exe ldap 198.51.100.10 -u svc -H 00112233445566778899aabbccddeeff --users", DialectPowerShell, true},
-		{"cmd path-qualified nxc.exe", `C:\Tools\nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss`, DialectCMD, true},
-		{"powershell call operator path", `& 'C:\Users\alice\.local\bin\nxc.exe' smb 198.51.100.10 -u svc -p S3cretP4ss`, DialectPowerShell, true},
-		{"powershell global option", "nxc --verbose smb 198.51.100.10 -u svc -p S3cretP4ss", DialectPowerShell, true},
+		{"powershell nxc", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", DialectPowerShell, false},
+		{"cmd nxc", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", DialectCMD, false},
+		{"cmd nxc.exe", "nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss", DialectCMD, false},
+		{"powershell netexec.exe hash", "netexec.exe ldap 198.51.100.10 -u svc -H 00112233445566778899aabbccddeeff --users", DialectPowerShell, false},
+		{"cmd path-qualified nxc.exe", `C:\Tools\nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss`, DialectCMD, false},
+		{"powershell call operator path", `& 'C:\Users\alice\.local\bin\nxc.exe' smb 198.51.100.10 -u svc -p S3cretP4ss`, DialectPowerShell, false},
+		{"powershell global option", "nxc --verbose smb 198.51.100.10 -u svc -p S3cretP4ss", DialectPowerShell, false},
 		{"powershell dynamic password", "nxc smb 198.51.100.10 -u svc -p $env:P", DialectPowerShell, false},
 		{"cmd dynamic password", "nxc smb 198.51.100.10 -u svc -p %P%", DialectCMD, false},
 		{"cmd help", "nxc.exe smb 198.51.100.10 -h", DialectCMD, false},
@@ -122,7 +121,7 @@ func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 }
 
 // TestNetExecNTDSDumpAfterGlobalOptions keeps the NTDS dump owned by the dump
-// grammar when a global option precedes the protocol, in POSIX and cmd.
+// grammar when a global option precedes the protocol.
 func TestNetExecNTDSDumpAfterGlobalOptions(t *testing.T) {
 	for _, command := range []string{
 		"nxc smb 198.51.100.10 -u administrator -H aa:bb --ntds",
@@ -138,7 +137,6 @@ func TestNetExecNTDSDumpAfterGlobalOptions(t *testing.T) {
 	}
 	for _, in := range []Input{
 		adpBashInput("nxc --verbose smb 198.51.100.10 -u administrator -H aa:bb --ntds"),
-		{Tool: "shell", Command: "nxc.exe smb 198.51.100.10 -u administrator -H aa:bb --ntds", DialectHint: DialectCMD, CWD: `C:\repo`},
 	} {
 		facts := Analyze(in)
 		if !ExactDirectoryCredentialCompromise(facts) {

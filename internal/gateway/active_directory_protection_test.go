@@ -106,9 +106,6 @@ func TestCredentialedNetExecBuiltInAndPackAcrossShells(t *testing.T) {
 	}{
 		{"posix", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", ""},
 		{"posix global option", "nxc --verbose smb 198.51.100.10 -u svc -p S3cretP4ss", ""},
-		{"powershell", "nxc smb 198.51.100.10 -u svc -p S3cretP4ss --shares", actionfacts.DialectPowerShell},
-		{"cmd nxc.exe", "nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss --shares", actionfacts.DialectCMD},
-		{"cmd path-qualified", `C:\Tools\nxc.exe smb 198.51.100.10 -u svc -p S3cretP4ss`, actionfacts.DialectCMD},
 	}
 	for _, base := range []string{"default", "strict", "permissive"} {
 		pack := adPackConnector(t, base)

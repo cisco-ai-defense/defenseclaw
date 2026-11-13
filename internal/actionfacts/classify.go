@@ -984,10 +984,10 @@ func commandProgramForDialect(executable string, dialect Dialect) string {
 	family := strings.TrimSuffix(program, suffix)
 	switch family {
 	case "aws", "az", "autossh", "base64", "certutil", "chisel",
-		"claude", "cloudflared", "cmd", "cmdkey", "codex", "crackmapexec", "curl", "dd",
+		"claude", "cloudflared", "cmd", "cmdkey", "codex", "curl", "dd",
 		"docker", "fping", "gcloud", "gemini", "git", "icacls", "kubectl",
-		"masscan", "naabu", "nc", "ncat", "net", "net1", "netcat", "netexec", "nerdctl",
-		"ngrok", "nmap", "nxc", "oc", "opencode", "openssl", "op", "pass", "podman",
+		"masscan", "naabu", "nc", "ncat", "net", "net1", "netcat", "nerdctl",
+		"ngrok", "nmap", "oc", "opencode", "openssl", "op", "pass", "podman",
 		"powershell", "pwsh", "scp", "schtasks", "sftp", "socat", "ssh",
 		"takeown", "taskkill", "vault", "wget", "where":
 		return family
