@@ -190,6 +190,11 @@ type InstallWatcher struct {
 	// whose MCP servers the startup rescan baselines instead of admitting;
 	// empty when there is none or a cycle already did (rescan goroutine only).
 	mcpUpgradeBaseline string
+	// mcpNoScanHeal is the one-time pass of this data directory that admits
+	// again every MCP server a stored baseline records as plain without a
+	// scan (mcp_noscan_heal.go); nil when it is done or does not apply
+	// (rescan goroutine only).
+	mcpNoScanHeal *mcpNoScanHealPass
 	// startupAdmitRoots are the skill and plugin roots that already held
 	// baselines when the startup rescan began (rescan goroutine only).
 	startupAdmitRoots map[InstallType][]string

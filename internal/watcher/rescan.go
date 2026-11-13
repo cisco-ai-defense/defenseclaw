@@ -218,6 +218,8 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		defer func() { w.startupAdmitRoots = nil }()
 		w.mcpUpgradeBaseline = w.pendingMCPUpgradeBaseline()
 	}
+	w.mcpNoScanHeal = w.pendingMCPNoScanHeal()
+	defer func() { w.mcpNoScanHeal = nil }()
 	targets := w.enumerateTargets()
 	if !w.startupRescanDone {
 		w.recordStartupMCP(targets)
@@ -225,6 +227,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	if len(targets) == 0 {
 		w.markWatchRoots()
 		w.markMCPUpgradeBaseline()
+		w.finishMCPNoScanHeal(ctx)
 		return
 	}
 
@@ -311,6 +314,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 	w.markWatchRoots()
 	w.markMCPUpgradeBaseline()
+	w.finishMCPNoScanHeal(ctx)
 
 	fmt.Fprintf(os.Stderr, "[rescan] cycle complete: targets=%d scanned=%d skipped=%d\n",
 		len(targets), scanned, skipped)
@@ -1192,6 +1196,15 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 			// same install-rejected row every cycle.
 			return rescanSkipped
 		}
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
+	}
+
+	// A plain baseline without a scan that a release before the GAP-0088 fix
+	// wrote (its drift scan failed and dropped the mark of an admission
+	// without a scan, or a policy refusal was recorded plain) reads as a
+	// decided admission. The one-time pass of 1.0.10 admits it again under
+	// the current policy (mcp_noscan_heal.go).
+	if w.healsMCPNoScanBaseline(evt, baseline) {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
 	}
 
