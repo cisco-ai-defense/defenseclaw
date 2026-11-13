@@ -33,10 +33,12 @@ import { createHash } from "node:crypto";
 
 /** Request body budget: under the gateway's 1 MiB limit, with room for the envelope. */
 export const INSPECT_BODY_BUDGET_BYTES = 768 * 1024;
-/** Characters of a long string kept at each end. */
-const KEEP_CHARS = 16 * 1024;
-/** Strings shorter than this are not worth cutting. */
-const MIN_CUT_CHARS = 4 * KEEP_CHARS / 2;
+/** Cut strings never go below this (characters). */
+const MIN_CUT_CHARS = 128;
+/** Room for the "not sent" marker inside a cut string (characters). */
+const MARKER_CHARS = 64;
+/** Share of the room left for the strings that the cut aims at, for the JSON escapes it cannot foresee. */
+const CUT_SAFETY = 0.95;
 /** An attachment field's value this long is replaced by its descriptor. */
 const ATTACHMENT_MIN_CHARS = 4096;
 
@@ -80,12 +82,38 @@ function collect(value: unknown, out: Slot[], seen: Set<unknown>, depth: number)
   }
 }
 
+/** A string of at most `limit` characters: its head and its tail around a marker. */
+function cutString(value: string, limit: number): string {
+  const keep = Math.max(16, (limit - MARKER_CHARS) >> 1);
+  return `${value.slice(0, keep)}\n[... ${value.length - 2 * keep} not sent ...]\n${value.slice(-keep)}`;
+}
+
+const BASE64_ALL = /^[A-Za-z0-9+/_=\r\n-]*$/;
+
+/** True for a long base64 value, bare or behind a base64 data URL header. */
+function isBase64Payload(value: string): boolean {
+  let payload = value;
+  if (value.startsWith("data:")) {
+    const i = value.slice(0, 256).indexOf(";base64,");
+    if (i < 0) return false;
+    payload = value.slice(i + ";base64,".length);
+  }
+  return BASE64_ALL.test(payload);
+}
+
 /**
  * Returns the payload to send. `args` and `content` are the fields that carry
  * the call; the payload is copied before it is cut.
+ *
+ * Only a message call is cut: any other tool keeps the answer an oversize call
+ * has always had (the gateway refuses it and the check fails closed), as the
+ * shell hooks do. The work is bounded and every string is cut at most once: the
+ * attachments are replaced by their descriptors, then every long string is cut
+ * once to its share of the room left (proportional to its length), and a call
+ * that still does not fit is sent as a note.
  */
 export function fitInspectBody(payload: Record<string, unknown>, budget = INSPECT_BODY_BUDGET_BYTES): FittedPayload {
-  if (size(payload) <= budget) return { payload, partial: false };
+  if (payload.tool !== "message" || size(payload) <= budget) return { payload, partial: false };
   const out: Record<string, unknown> = { ...payload };
   const slots: Slot[] = [];
   if (out.args !== null && typeof out.args === "object") {
@@ -98,23 +126,38 @@ export function fitInspectBody(payload: Record<string, unknown>, budget = INSPEC
     (s.container as Record<string, unknown>)[s.key as string] = v;
     s.length = v.length;
   };
-  // First the attachments: their bytes are no text anyone reads.
+  // First the attachments: their bytes are no text anyone reads. A value in an
+  // attachment field that is not base64 is text and is cut like any other.
   for (const slot of slots) {
     const value = read(slot);
-    if (typeof slot.key === "string" && ATTACHMENT_KEYS.has(slot.key.toLowerCase()) && value.length >= ATTACHMENT_MIN_CHARS) {
+    if (
+      typeof slot.key === "string" && ATTACHMENT_KEYS.has(slot.key.toLowerCase()) &&
+      value.length >= ATTACHMENT_MIN_CHARS && isBase64Payload(value)
+    ) {
       write(slot, describeAttachment(value));
     }
   }
-  // Then the longest strings, each to its head and its tail, until the call fits.
-  while (size(out) > budget) {
-    const longest = slots.reduce((a, b) => (b.length > a.length ? b : a), slots[0]);
-    if (!longest || longest.length < MIN_CUT_CHARS) break;
-    const value = read(longest);
-    write(longest, `${value.slice(0, KEEP_CHARS)}\n[... ${value.length - 2 * KEEP_CHARS} characters not sent ...]\n${value.slice(-KEEP_CHARS)}`);
+  // Then every string over the minimum is cut once, to its share of the room
+  // left: its share of the bytes the strings take now, scaled to what fits.
+  if (size(out) > budget) {
+    const cuttable = slots.filter((s) => s.length > MIN_CUT_CHARS);
+    const bytes = cuttable.map((s) => Buffer.byteLength(JSON.stringify(read(s))));
+    const total = bytes.reduce((a, b) => a + b, 0);
+    const room = budget - (size(out) - total);
+    if (room > 0 && total > 0) {
+      const ratio = Math.min(1, (room / total) * CUT_SAFETY);
+      for (const slot of cuttable) {
+        const limit = Math.max(MIN_CUT_CHARS, Math.floor(slot.length * ratio));
+        if (limit < slot.length) write(slot, cutString(read(slot), limit));
+      }
+    }
   }
   // A call that still does not fit (a huge number of small values) is sent as
   // a note: nothing of it is read, and the gateway judges it as unknown.
-  if (size(out) > budget) out.args = { note: "call too large to send" }, delete out.content;
+  if (size(out) > budget) {
+    out.args = { note: "call too large to send" };
+    delete out.content;
+  }
   out.args_partial = true;
   return { payload: out, partial: true };
 }

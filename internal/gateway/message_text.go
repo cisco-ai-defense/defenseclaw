@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -26,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -385,15 +387,18 @@ func (w *messageWalk) attachment(s string) bool {
 	if len(payload) < messagePayloadMinBytes {
 		return false
 	}
+	// Base64 all through, the whole value (a byte scan, about 2 ms per MB): a
+	// value that is not is text, whatever its first part looks like.
+	enc, ok := messageBase64Encoding(payload)
+	if !ok {
+		return false
+	}
 	// The part inside the budget (whole groups of four characters).
 	read := payload
 	if left := messagePayloadMaxChars - w.payloadUsed; len(payload) > left {
 		read = payload[:max(left, 0)&^3]
 		w.trunc.Hit(bounded.Bytes)
-	}
-	enc, ok := messageBase64Encoding(read, len(read) == len(payload))
-	if !ok {
-		return false
+		enc = enc.WithPadding(base64.NoPadding)
 	}
 	if w.nodes >= messageTextMaxNodes {
 		w.trunc.Hit(bounded.Nodes)
@@ -414,7 +419,7 @@ func (w *messageWalk) attachment(s string) bool {
 // messageBase64Encoding is the alphabet and padding of a base64 value, which
 // must be base64 characters all through (either alphabet, padding and line
 // breaks, not both alphabets).
-func messageBase64Encoding(s string, whole bool) (*base64.Encoding, bool) {
+func messageBase64Encoding(s string) (*base64.Encoding, bool) {
 	std, url := false, false
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -434,7 +439,7 @@ func messageBase64Encoding(s string, whole bool) (*base64.Encoding, bool) {
 	if url {
 		enc = base64.URLEncoding
 	}
-	if !whole || !strings.HasSuffix(strings.TrimRight(s, "\r\n"), "=") {
+	if !strings.HasSuffix(strings.TrimRight(s, "\r\n"), "=") {
 		enc = enc.WithPadding(base64.NoPadding)
 	}
 	return enc, true
@@ -446,6 +451,16 @@ func messageBase64Encoding(s string, whole bool) (*base64.Encoding, bool) {
 // file. It reports false when the stream is not valid base64. The text
 // returned is bounded by messageTextMaxBytes, past it the reading stops.
 func messageStreamTextRuns(r io.Reader) (string, bool) {
+	// UTF-16 text (a byte order mark, or a NUL beside every other byte, as
+	// Windows "Unicode" files are) is converted to UTF-8 first: its NULs would
+	// break every run.
+	br := bufio.NewReaderSize(r, messagePayloadChunk)
+	head, _ := br.Peek(messageUTF16ProbeBytes)
+	if be, skipBOM, ok := messageUTF16(head); ok {
+		r = &messageUTF16Reader{r: br, be: be, bom: skipBOM, buf: make([]byte, messagePayloadChunk)}
+	} else {
+		r = br
+	}
 	var out []string
 	var run []byte
 	total := 0
@@ -505,6 +520,98 @@ func messageStreamTextRuns(r io.Reader) (string, bool) {
 	}
 	flush()
 	return strings.Join(out, "\n"), true
+}
+
+// messageUTF16ProbeBytes is how much of a decoded attachment is looked at to
+// tell UTF-16 text.
+const messageUTF16ProbeBytes = 4096
+
+// messageUTF16 reports UTF-16 text and its byte order: a byte order mark, or
+// bytes where at least three in ten of one parity are NUL and almost none of
+// the other (ASCII text in either order).
+func messageUTF16(head []byte) (be, bom, ok bool) {
+	if len(head) >= 2 {
+		switch {
+		case head[0] == 0xff && head[1] == 0xfe:
+			return false, true, true
+		case head[0] == 0xfe && head[1] == 0xff:
+			return true, true, true
+		}
+	}
+	pairs := len(head) / 2
+	if pairs < 16 {
+		return false, false, false
+	}
+	even, odd := 0, 0
+	for i := 0; i+1 < len(head); i += 2 {
+		if head[i] == 0 {
+			even++
+		}
+		if head[i+1] == 0 {
+			odd++
+		}
+	}
+	switch {
+	case odd*10 >= pairs*3 && even*50 <= pairs:
+		return false, false, true
+	case even*10 >= pairs*3 && odd*50 <= pairs:
+		return true, false, true
+	}
+	return false, false, false
+}
+
+// messageUTF16Reader converts a UTF-16 stream to UTF-8.
+type messageUTF16Reader struct {
+	r    io.Reader
+	be   bool
+	bom  bool // a leading byte order mark is dropped
+	buf  []byte
+	raw  []byte // bytes read and not yet converted: an odd byte, a high surrogate
+	out  []byte // converted, not yet returned
+	done bool
+	err  error
+}
+
+func (u *messageUTF16Reader) Read(p []byte) (int, error) {
+	for len(u.out) == 0 {
+		if u.err != nil {
+			return 0, u.err
+		}
+		n, err := u.r.Read(u.buf)
+		u.err = err
+		u.raw = append(u.raw, u.buf[:n]...)
+		units := len(u.raw) / 2
+		words := make([]uint16, units)
+		for i := range words {
+			if u.be {
+				words[i] = uint16(u.raw[2*i])<<8 | uint16(u.raw[2*i+1])
+			} else {
+				words[i] = uint16(u.raw[2*i+1])<<8 | uint16(u.raw[2*i])
+			}
+		}
+		consumed := units
+		if units > 0 && err == nil && words[units-1] >= 0xd800 && words[units-1] < 0xdc00 {
+			// A high surrogate waits for its pair.
+			consumed--
+		}
+		words = words[:consumed]
+		if u.bom && !u.done && len(words) > 0 {
+			if words[0] == 0xfeff {
+				words = words[1:]
+			}
+			u.done = true
+		}
+		for _, r := range utf16.Decode(words) {
+			u.out = utf8.AppendRune(u.out, r)
+		}
+		u.raw = append(u.raw[:0], u.raw[2*consumed:]...)
+		if err != nil && len(u.out) == 0 {
+			return 0, err
+		}
+	}
+	n := copy(p, u.out)
+	u.out = u.out[n:]
+	return n, nil
 }
 
 // messagePrintableASCII marks the ASCII bytes of a text run: printable

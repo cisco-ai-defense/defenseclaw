@@ -95,9 +95,9 @@ type ToolInspectRequest struct {
 	// ArgsPartial is set by a caller that cut the call down to fit the request
 	// body limit (the OpenClaw plugin replaces an attachment's bytes with its
 	// size and hash, and shortens a very long text to its head and tail): the
-	// part that was not sent is unread, so the call is truncated and judged at
-	// least at the unknown tier of the policy (rel-1-0-10:GAP-0356). It can
-	// only make a verdict stricter.
+	// part that was not sent is unread. A message is judged at least at the
+	// unknown tier of the policy, any other tool is blocked as an oversize call
+	// is (rel-1-0-10:GAP-0356). It can only make a verdict stricter.
 	ArgsPartial bool `json:"args_partial,omitempty"`
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
@@ -2378,10 +2378,21 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		if req.BoundedPrefixReview {
 			verdict.markOversizeUninspected()
 		}
-		if req.ArgsPartial && !slices.ContainsFunc(verdict.Findings, func(f string) bool {
-			return strings.HasPrefix(f, evaluationLimitRuleID) && strings.Contains(f, bounded.ReasonCode)
-		}) {
-			verdict.floorBoundedTruncated(bounded.Of(bounded.Bytes), a.boundedTier(r.Context(), serverConnector))
+		if req.ArgsPartial {
+			// The caller cut the call to fit the body limit. A message (its
+			// text, its attachments) is judged at the unknown tier of the pack;
+			// any other tool keeps the answer an oversize call has always had,
+			// a block in every pack, as the shell hooks give it: its base
+			// verdict was never weaker (rel-1-0-10:GAP-0356).
+			if strings.EqualFold(req.Tool, "message") {
+				if !slices.ContainsFunc(verdict.Findings, func(f string) bool {
+					return strings.HasPrefix(f, evaluationLimitRuleID) && strings.Contains(f, bounded.ReasonCode)
+				}) {
+					verdict.floorBoundedTruncated(bounded.Of(bounded.Bytes), a.boundedTier(r.Context(), serverConnector))
+				}
+			} else {
+				verdict.markOversizeUninspected()
+			}
 		}
 		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)

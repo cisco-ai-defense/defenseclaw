@@ -598,3 +598,95 @@ func TestInspectToolArgsPartialIsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// The cut of a call to fit the body limit keeps the answer of its tool class:
+// a message gets the unknown tier of the pack, any other tool is blocked in
+// every pack as an oversize call is (GAP-0356).
+func TestInspectToolArgsPartialKeepsTheToolClass(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		api.inspectToolScanTimeout = 5 * time.Second
+		for _, tc := range []struct {
+			class, body, want string
+		}{
+			{"message", `{"tool":"message","args":{"message":"photo"},"direction":"outbound","args_partial":true}`, bounded.Unknown(tier.tier).String()},
+			{"shell", `{"tool":"exec","args":{"command":"echo hi"},"args_partial":true}`, "block"},
+			{"file write", `{"tool":"write_file","args":{"path":"/tmp/x","content":"hi"},"args_partial":true}`, "block"},
+			{"other tool", `{"tool":"read_file","args":{"path":"/tmp/x"},"args_partial":true}`, "block"},
+		} {
+			_, got := postInspectForConnector(t, api, "openclaw", tc.body)
+			if got.Action != tc.want {
+				t.Errorf("%s %s: action = %q findings = %v, want %s", tier.name, tc.class, got.Action, got.Findings, tc.want)
+			}
+		}
+	}
+}
+
+// A UTF-16 text file in an attachment is read as text, with or without a byte
+// order mark, in either byte order; binary data stays binary (the review of
+// GAP-0328).
+func TestInspectToolMessageUTF16Attachment(t *testing.T) {
+	text := "key: " + messageTestSecret + " and some more words around it"
+	utf16le := func(bom bool) []byte {
+		var b []byte
+		if bom {
+			b = append(b, 0xff, 0xfe)
+		}
+		for _, r := range text {
+			b = append(b, byte(r), byte(r>>8))
+		}
+		return b
+	}
+	utf16be := func(bom bool) []byte {
+		var b []byte
+		if bom {
+			b = append(b, 0xfe, 0xff)
+		}
+		for _, r := range text {
+			b = append(b, byte(r>>8), byte(r))
+		}
+		return b
+	}
+	pad := func(b []byte) []byte { // long enough to be read as a payload
+		for len(b) < 1200 {
+			b = append(b, b[len(b)-2:]...)
+		}
+		return b[:len(b)&^1]
+	}
+	for name, raw := range map[string][]byte{
+		"LE with BOM": pad(utf16le(true)), "LE no BOM": pad(utf16le(false)),
+		"BE with BOM": pad(utf16be(true)), "BE no BOM": pad(utf16be(false)),
+	} {
+		args := `{"buffer":"` + base64.StdEncoding.EncodeToString(raw) + `"}`
+		got := extractMessageArgs(json.RawMessage(args))
+		if !strings.Contains(got.Text, messageTestSecret) {
+			t.Errorf("%s: the text was not read: %.60q", name, got.Text)
+		}
+		api := testAPIServerWithConfig(t, "action")
+		_, verdict := postInspect(t, api, `{"tool":"message","args":`+args+`,"direction":"outbound"}`)
+		if verdict.Action != "block" {
+			t.Errorf("%s: action = %q, want block", name, verdict.Action)
+		}
+	}
+	// Binary with NULs in the same places is not UTF-16 text.
+	binary := bytes.Repeat([]byte{0, 1, 2, 3, 0, 5}, 400)
+	if got := extractMessageArgs(json.RawMessage(`{"buffer":"` + base64.StdEncoding.EncodeToString(binary) + `"}`)); got.Text != "" || got.Truncated.Any() {
+		t.Errorf("binary read as text: %q %v", got.Text, got.Truncated.Any())
+	}
+}
+
+// An attachment field whose value is not base64 all the way through is text,
+// even past the budget: only a real payload spends the budget (the review of
+// GAP-0338).
+func TestExtractMessageArgsAttachmentTailIsChecked(t *testing.T) {
+	raw, _ := json.Marshal(map[string]string{"buffer": strings.Repeat("AAEC", messagePayloadMaxChars/4+1000) + " key: " + messageTestSecret})
+	got := extractMessageArgs(raw)
+	if !strings.Contains(got.Text, messageTestSecret) {
+		t.Errorf("a plain-text tail after 2 MiB of base64 was not read as text: %.60q (truncated %v)", got.Text, got.Truncated.Any())
+	}
+}

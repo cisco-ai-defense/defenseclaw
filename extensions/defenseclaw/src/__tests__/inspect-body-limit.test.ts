@@ -56,7 +56,75 @@ describe("fitInspectBody", () => {
     const kept = (got.payload.args as Record<string, string>).text;
     expect(kept.startsWith("HEAD")).toBe(true);
     expect(kept.endsWith("TAIL")).toBe(true);
-    expect(kept).toContain("characters not sent");
+    expect(kept).toMatch(/\[\.\.\. \d+ not sent \.\.\.\]/);
+  });
+
+  it("fits 1000 values of 32 KiB and a 16 MB attachment in bounded time (GAP-0361)", () => {
+    const args: Record<string, unknown> = { buffer: `data:image/png;base64,${"AAEC".repeat((16 << 20) / 4)}` };
+    for (let i = 0; i < 1000; i++) args[`field${i}`] = `${i}:${"z".repeat(32 * 1024)}`;
+    const start = performance.now();
+    const got = fitInspectBody({ tool: "message", args, content: "hi" });
+    expect(performance.now() - start).toBeLessThan(5000);
+    expect(got.partial).toBe(true);
+    expect(got.payload.args_partial).toBe(true);
+    expect(bodyBytes(got.payload)).toBeLessThan(INSPECT_BODY_BUDGET_BYTES);
+  });
+
+  // A fixed-seed fuzz: random shapes of long and short strings, nested, never
+  // loop and always end under the budget or as a note.
+  it.each([1, 2, 3, 5, 8, 13, 21, 34, 55, 89])("terminates and fits for fuzz seed %i", (seed) => {
+    let state = seed * 2654435761 >>> 0;
+    const next = (n: number) => {
+      state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+      return state % n;
+    };
+    const value = (depth: number): unknown => {
+      const kind = next(depth > 3 ? 2 : 4);
+      if (kind === 0) return "s".repeat(next(4) === 0 ? 1000 + next(100_000) : next(200));
+      if (kind === 1) return next(1000);
+      if (kind === 2) return Array.from({ length: next(40) }, () => value(depth + 1));
+      return Object.fromEntries(Array.from({ length: next(40) }, (_, i) => [`k${i}`, value(depth + 1)]));
+    };
+    const payload = { tool: "message", args: { items: Array.from({ length: 30 + next(120) }, () => value(0)) }, content: "x".repeat(next(3) ? 10 : 900_000) };
+    const start = performance.now();
+    const got = fitInspectBody(payload);
+    expect(performance.now() - start).toBeLessThan(8000);
+    expect(bodyBytes(got.payload)).toBeLessThan(INSPECT_BODY_BUDGET_BYTES);
+    expect(got.partial).toBe(bodyBytes(payload) > INSPECT_BODY_BUDGET_BYTES);
+  });
+
+  it.each([
+    ["24 x 40,000", 24, 40_000],
+    ["30 x 40,000", 30, 40_000],
+    ["60 x 33,000", 60, 33_000],
+    ["500 x 40,000", 500, 40_000],
+  ])("fits %s characters of filler in bounded time (GAP-0361)", (_name, count, chars) => {
+    const args = Object.fromEntries(Array.from({ length: count }, (_, i) => [`f${i}`, "x".repeat(chars)]));
+    const start = performance.now();
+    const got = fitInspectBody({ tool: "message", args });
+    expect(performance.now() - start).toBeLessThan(3000);
+    expect(got.partial).toBe(true);
+    expect(got.payload.args_partial).toBe(true);
+    expect(bodyBytes(got.payload)).toBeLessThan(INSPECT_BODY_BUDGET_BYTES);
+  });
+
+  it("cuts only a message: any other tool is sent as it is and the gateway refuses it as before", () => {
+    const args = { command: "x".repeat(2 << 20) };
+    for (const tool of ["exec", "write", "bash"]) {
+      const payload = { tool, args };
+      const got = fitInspectBody(payload);
+      expect(got.partial).toBe(false);
+      expect(got.payload).toBe(payload);
+    }
+  });
+
+  it("describes only an attachment that is base64: other text in a buffer field is cut as text", () => {
+    const words = "word ".repeat(200_000);
+    const got = fitInspectBody({ tool: "message", args: { buffer: words, message: "hi" } });
+    const buffer = (got.payload.args as Record<string, string>).buffer;
+    expect(buffer.startsWith("word word")).toBe(true);
+    expect(buffer).toContain("not sent");
+    expect(buffer).not.toContain("attachment bytes not sent");
   });
 
   it("sends a note for a call too large to cut", () => {
