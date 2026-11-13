@@ -73,3 +73,18 @@ func TestRemoteRunnerURL(t *testing.T) {
 		})
 	}
 }
+
+// Every prefix of code that mixes the quote, comment, template and escape forms
+// of every language must scan without panicking: the scan runs on the hook path
+// over text an agent wrote, cut anywhere.
+func TestScanInlineCodeHandlesEveryPrefix(t *testing.T) {
+	const tricky = "a = \"x\\\"y\" + z # c\n/* b */ // d\n`t${ {k:`n`} } \\`` \"\"\"q\"\"\" [[l]] --[[m]] `id` \\"
+	for name, row := range inlineCapabilityTable {
+		for end := 0; end <= len(tricky); end++ {
+			scan := scanInlineCode(tricky[:end], row.syntax)
+			if len(scan.code) > len(tricky)*2 {
+				t.Fatalf("%s: scan of %d bytes produced %d", name, end, len(scan.code))
+			}
+		}
+	}
+}
