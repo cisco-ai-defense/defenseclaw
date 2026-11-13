@@ -163,9 +163,9 @@ func (l *lexer) lex() []Token {
 			a := l.i
 			l.i++ // consume the stream digit
 			l.scanRedirectFromHere(a, string(r))
-		case unicode.IsDigit(r):
+		case r >= '0' && r <= '9':
 			l.lexNumber()
-		case r == '.' && unicode.IsDigit(l.peek(1)) && l.atStart:
+		case r == '.' && l.peek(1) >= '0' && l.peek(1) <= '9' && l.atStart:
 			l.lexNumber()
 		default:
 			l.lexOperatorOrWord()
@@ -493,7 +493,7 @@ func (l *lexer) lexNumber() {
 			l.i++
 		}
 	} else {
-		for l.i < len(l.runes) && (unicode.IsDigit(l.cur()) || l.cur() == '.') {
+		for l.i < len(l.runes) && ((l.cur() >= '0' && l.cur() <= '9') || l.cur() == '.') {
 			l.i++
 		}
 		if l.cur() == 'e' || l.cur() == 'E' {
@@ -501,7 +501,7 @@ func (l *lexer) lexNumber() {
 			if l.cur() == '+' || l.cur() == '-' {
 				l.i++
 			}
-			for l.i < len(l.runes) && unicode.IsDigit(l.cur()) {
+			for l.i < len(l.runes) && l.cur() >= '0' && l.cur() <= '9' {
 				l.i++
 			}
 		}
@@ -697,7 +697,7 @@ func (l *lexer) scanRedirectFromHere(a int, numPrefix string) {
 	}
 	if l.cur() == '&' {
 		l.i++
-		if unicode.IsDigit(l.cur()) {
+		if l.cur() >= '0' && l.cur() <= '9' {
 			merge = string(l.cur())
 			l.i++
 		}
@@ -804,7 +804,7 @@ func validNumberSuffix(s string) bool {
 }
 
 func isHex(r rune) bool {
-	return unicode.IsDigit(r) || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
 }
 func isSpace(r rune) bool { return r == ' ' || r == '\t' || r == '\r' || r == '\f' || r == 0xA0 }
 

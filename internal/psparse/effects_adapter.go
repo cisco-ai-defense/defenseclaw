@@ -176,8 +176,10 @@ func LiteralString(e Expr) (string, bool) {
 		return "", false
 	case *Number:
 		// the pwsh-formatted value computed in numberLit (0x10 -> "16",
-		// 1.0d -> "1.0", a too-big integer keeps its exact digits).
-		if v.OK {
+		// 1.0d -> "1.0", a too-big integer keeps its exact digits). Gate the
+		// display on the strict class too, so a non-ASCII "digit" that slipped
+		// through can never resolve static (review 4 invariant fuzzer).
+		if v.OK && safeStaticLiteral(v.Display) {
 			return v.Display, true
 		}
 		return "", false
