@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -75,7 +76,7 @@ func fakeKubectl(t *testing.T, fail error) {
 		case strings.HasPrefix(joined, "get leases.coordination.k8s.io"):
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"holderIdentity":"pod-1"}}]}`), nil
 		case strings.HasPrefix(joined, "get configmaps -n defenseclaw-system"):
-			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n  launcher_atespaces:\n    eng: [eng-web]\n"}}]}`), nil
+			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-store-state"},"data":{"schema_version":"1"}},{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n  launcher_atespaces:\n    eng: [eng-web]\n"}}]}`), nil
 		case strings.HasPrefix(joined, "get nodes -l topology.kubernetes.io/region"):
 			return []byte(`{"items":[{"metadata":{"name":"n1","labels":{"topology.kubernetes.io/region":"us-east-1"}}}]}`), nil
 		// The idp Service through the API server's Service proxy
@@ -183,11 +184,96 @@ func TestSubstrateStatusClusterPrintsTheHealthDocument(t *testing.T) {
 	if doc.Command != "status" || h.Gateway.Ready != 2 || !h.Leader.LeaseHeld || h.Callout.Desired != 2 || !h.Callout.Registered {
 		t.Fatalf("health = %+v", h)
 	}
-	if doc.Atespaces == nil || doc.Batches == nil || doc.Checks == nil {
+	if doc.Atespaces == nil || doc.Checks == nil {
 		t.Errorf("lists must not be null: %s", out)
 	}
 	if _, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "somename"); err == nil || commandExitCode(err) != 2 {
 		t.Errorf("--cluster with a name must be a usage error, got %v", err)
+	}
+}
+
+// TestSubstrateStatusClusterCountsTheActors is GAP-0216: status --cluster
+// shows the actors it read, or says why there is no count.
+func TestSubstrateStatusClusterCountsTheActors(t *testing.T) {
+	install := writeInstall(t, fleetInstallOK)
+	t.Run("read", func(t *testing.T) {
+		fakeKubectl(t, nil)
+		out, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "--install-file", install, "--managed-atespaces", "data-team", "--json")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc fleet.StatusDocument
+		if err := json.Unmarshal([]byte(out), &doc); err != nil {
+			t.Fatal(err)
+		}
+		inv := doc.Inventory
+		if inv == nil || inv.Actors != 5 || inv.Templates != 2 || inv.States["running"] != 3 || inv.States["suspended"] != 1 || inv.States["crashed"] != 1 {
+			t.Fatalf("inventory = %+v", inv)
+		}
+		want := []fleet.Atespace{
+			{Name: "data-team", Actors: 1, States: map[string]int{"running": 1}},
+			{Name: "eng-web", Launcher: true, Actors: 3, States: map[string]int{"running": 2, "suspended": 1}},
+		}
+		if !reflect.DeepEqual(doc.Atespaces, want) {
+			t.Fatalf("atespaces = %+v, want %+v", doc.Atespaces, want)
+		}
+		text, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "--install-file", install, "--managed-atespaces", "data-team")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range []string{
+			"Agents:      5 in the cluster (3 running, 1 suspended, 1 crashed)\n",
+			"Templates:   2\n",
+			"  data-team                managed  1 (1 running)\n",
+			"  eng-web                  launcher 3 (2 running, 1 suspended)\n",
+		} {
+			if !strings.Contains(text, line) {
+				t.Errorf("text lacks %q:\n%s", line, text)
+			}
+		}
+	})
+	for name, reader := range map[string]func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error){
+		"the gateway may not list actors": func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
+			return deniedReader{}, nil
+		},
+		"no connection to the API server": func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
+			return nil, errors.New("no port-forward to the API server: pods is forbidden")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fakeKubectl(t, nil)
+			substrateClusterAPI = reader
+			out, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "--install-file", install, "--json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(out, `"inventory"`) || !strings.Contains(out, `"atespaces": []`) {
+				t.Errorf("an unread inventory must be absent, with no atespaces: %s", out)
+			}
+			text, _, err := runSubstrate(t, newSubstrateStatusCmd(), "--cluster", "--install-file", install)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(text, "Agents:      not read: ") || strings.Contains(text, "Templates:") || strings.Contains(text, "Agents:      0") {
+				t.Errorf("text = %s", text)
+			}
+			if name == "the gateway may not list actors" && !strings.Contains(text, "the actors: the gateway's ServiceAccount may not read it") {
+				t.Errorf("text does not say why: %s", text)
+			}
+		})
+	}
+}
+
+func TestActorStateCounts(t *testing.T) {
+	for want, in := range map[string]map[string]int{
+		"":             nil,
+		" (1 running)": {"running": 1},
+		" (2 running, 1 suspended, 1 crashed, 3 resuming)": {"resuming": 3, "crashed": 1, "suspended": 1, "running": 2},
+		" (1 deleting)": {"deleting": 1},
+	} {
+		if got := actorStateCounts(in); got != want {
+			t.Errorf("actorStateCounts(%v) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -219,8 +305,8 @@ func TestSubstrateDoctorReadsClusterChecksWithKubectl(t *testing.T) {
 // CLI (an encrypted, private, expiring bucket in the cluster's region).
 func fakeFleetReaders(t *testing.T, fail error) {
 	t.Helper()
-	oldPF, oldAP, oldCLI := substratePortForward, substrateAccessPolicies, substrateCloudCLI
-	t.Cleanup(func() { substratePortForward, substrateAccessPolicies, substrateCloudCLI = oldPF, oldAP, oldCLI })
+	oldPF, oldAP, oldCLI := substratePortForward, substrateClusterAPI, substrateCloudCLI
+	t.Cleanup(func() { substratePortForward, substrateClusterAPI, substrateCloudCLI = oldPF, oldAP, oldCLI })
 	actor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if fleet.ActorRouteAllowed(r.RequestURI) {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -239,7 +325,7 @@ func fakeFleetReaders(t *testing.T, fail error) {
 		return strings.TrimPrefix(actor.URL, "http://"), func() {}, nil
 	}
 	policies := fleetHealthyPolicies("defenseclaw-system", "eng-web")
-	substrateAccessPolicies = func(context.Context, *substrateClusterFlags, apiTarget) (accessPolicyReader, error) {
+	substrateClusterAPI = func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
 		if fail != nil {
 			return nil, fail
 		}
@@ -271,7 +357,17 @@ type fakePolicyReader map[string]*setup.AccessPolicy
 func (f fakePolicyReader) GetAccessPolicy(_ context.Context, atespace string) (*setup.AccessPolicy, error) {
 	return f[atespace], nil
 }
-func (fakePolicyReader) Close() error { return nil }
+func (fakePolicyReader) Actors(context.Context) ([]fleetActor, error) { return fleetHealthyActors, nil }
+func (fakePolicyReader) Templates(context.Context) (int, error)       { return 2, nil }
+func (fakePolicyReader) Close() error                                 { return nil }
+
+// fleetHealthyActors are the cluster's actors: three in the launcher
+// atespace eng-web, one in data-team, one in an atespace DefenseClaw does
+// not write in.
+var fleetHealthyActors = []fleetActor{
+	{"eng-web", "running"}, {"eng-web", "running"}, {"eng-web", "suspended"},
+	{"data-team", "running"}, {"other-team", "crashed"},
+}
 
 // fleetHealthyPolicies are the grants the chart bootstrap writes.
 func fleetHealthyPolicies(ns string, launcher ...string) map[string]*setup.AccessPolicy {

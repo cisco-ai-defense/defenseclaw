@@ -19,6 +19,7 @@ package cli
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -102,4 +103,99 @@ func sampleValue(t reflect.Type) reflect.Value {
 		v.SetMapIndex(sampleValue(t.Key()), sampleValue(t.Elem()))
 	}
 	return v
+}
+
+// statusMayBeZero are the status document members (dotted paths, "[]" for
+// every element of a list) that the collector rightly leaves zero on a
+// healthy cluster: a zero is a reading there, not a missing one.
+var statusMayBeZero = map[string]string{
+	"Cluster.IssuerDefault": "the cluster has its own issuer, so it is not the default one",
+}
+
+// TestEveryPrintedStatusMemberHasAProducer is the class test of GAP-0216: a
+// status line shows a reading or is not printed. Every member of the status
+// document `status --cluster` prints must be set by collectFleet on a
+// cluster that has everything, or be listed in statusMayBeZero with the
+// reason a zero is a reading. A member of a list counts as set when one
+// element sets it.
+func TestEveryPrintedStatusMemberHasAProducer(t *testing.T) {
+	fakeKubectl(t, nil)
+	oldVersion := appVersion
+	appVersion = "1.0.10" // a release build sets it
+	t.Cleanup(func() { appVersion = oldVersion })
+	f := &substrateClusterFlags{installFile: writeInstall(t, fleetInstallOK), namespace: "defenseclaw-system",
+		substrateNS: "ate-system", timeout: 10 * time.Second, managedAtespaces: []string{"data-team"}}
+	o, r, err := collectFleet(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range zeroMembers(reflect.ValueOf(fleet.BuildStatus(o, r)), "") {
+		if why, ok := statusMayBeZero[path]; ok {
+			t.Logf("%s: zero is a reading (%s)", path, why)
+			continue
+		}
+		t.Errorf("status prints %s, but collectFleet never set it: the line shows a state nobody measured. "+
+			"Read it from the cluster, or stop printing it", path)
+	}
+}
+
+// zeroMembers lists the leaf members of v that are zero: a zero scalar, a
+// nil pointer, an empty list or map. Structs and list elements are walked;
+// a list member is zero only when it is zero in every element.
+func zeroMembers(v reflect.Value, path string) []string {
+	join := func(name string) string {
+		if path == "" {
+			return name
+		}
+		return path + "." + name
+	}
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return []string{path}
+		}
+		return zeroMembers(v.Elem(), path)
+	case reflect.Struct:
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			if v.IsZero() {
+				return []string{path}
+			}
+			return nil
+		}
+		var out []string
+		for i := range v.NumField() {
+			out = append(out, zeroMembers(v.Field(i), join(v.Type().Field(i).Name))...)
+		}
+		return out
+	case reflect.Map:
+		if v.Len() == 0 {
+			return []string{path}
+		}
+		return nil
+	case reflect.Slice:
+		if v.Len() == 0 {
+			return []string{path}
+		}
+		if v.Type().Elem().Kind() != reflect.Struct {
+			return nil
+		}
+		count := map[string]int{}
+		for i := range v.Len() {
+			for _, p := range zeroMembers(v.Index(i), path+"[]") {
+				count[p]++
+			}
+		}
+		var out []string
+		for p, n := range count {
+			if n == v.Len() {
+				out = append(out, p)
+			}
+		}
+		slices.Sort(out)
+		return out
+	}
+	if v.IsZero() {
+		return []string{path}
+	}
+	return nil
 }

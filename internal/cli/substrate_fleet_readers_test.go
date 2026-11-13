@@ -161,21 +161,21 @@ func TestVerifyReadsTheAccessPolicies(t *testing.T) {
 		fakeKubectl(t, nil)
 		p := fleetHealthyPolicies("defenseclaw-system", "eng-web")
 		p["eng-web"].Bindings = append(p["eng-web"].Bindings, setup.Binding{Role: setup.RoleEditor, Members: []string{"user:mallory"}})
-		substrateAccessPolicies = func(context.Context, *substrateClusterFlags, apiTarget) (accessPolicyReader, error) {
+		substrateClusterAPI = func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
 			return fakePolicyReader(p), nil
 		}
 		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckGrants], fleet.Fail, "1 other editor or owner")
 	})
 	t.Run("the gateway may not read them", func(t *testing.T) {
 		fakeKubectl(t, nil)
-		substrateAccessPolicies = func(context.Context, *substrateClusterFlags, apiTarget) (accessPolicyReader, error) {
+		substrateClusterAPI = func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
 			return deniedReader{}, nil
 		}
 		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckGrants], fleet.Warn, "it needs the global viewer grant")
 	})
 	t.Run("no token or no port-forward is a warning with the reason", func(t *testing.T) {
 		fakeKubectl(t, nil)
-		substrateAccessPolicies = func(context.Context, *substrateClusterFlags, apiTarget) (accessPolicyReader, error) {
+		substrateClusterAPI = func(context.Context, *substrateClusterFlags, apiTarget) (clusterAPIReader, error) {
 			return nil, errors.New("no token for the gateway ServiceAccount: serviceaccounts \"defenseclaw-gateway\" is forbidden")
 		}
 		wantCheck(t, verifyChecks(t, fleetInstallOK)[fleet.CheckGrants], fleet.Warn, "no token for the gateway ServiceAccount")
@@ -186,6 +186,12 @@ type deniedReader struct{}
 
 func (deniedReader) GetAccessPolicy(context.Context, string) (*setup.AccessPolicy, error) {
 	return nil, status.Error(codes.PermissionDenied, "not a viewer")
+}
+func (deniedReader) Actors(context.Context) ([]fleetActor, error) {
+	return nil, status.Error(codes.PermissionDenied, "not a viewer")
+}
+func (deniedReader) Templates(context.Context) (int, error) {
+	return 0, status.Error(codes.PermissionDenied, "not a viewer")
 }
 func (deniedReader) Close() error { return nil }
 

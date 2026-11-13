@@ -797,8 +797,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "\n"
             "For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and "
             "callout,\n"
-            "the agents in the cluster and the setup checks. It reads the cluster with kubectl (give "
-            "--install-file).\n"
+            "the agents and templates in the cluster (agents by state, also per launcher and managed atespace) "
+            "and the setup\n"
+            "checks. It reads the cluster with kubectl (give --install-file).\n"
             "Exit 75 means the cluster could not be reached; there is no document."
         ),
         args=(_Arg("name", required=False),),

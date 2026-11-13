@@ -309,11 +309,18 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			}
 		}
 	}
-	// The snapshot bucket, the access policies and the actor listener's
-	// routes (substrate_fleet_readers.go).
+	// The snapshot bucket, the access policies, the actors and the actor
+	// listener's routes (substrate_fleet_readers.go).
 	readSnapshotBucket(cctx, f, &o, settings[setup.KeySnapshotLocation])
 	api, apiErr := substrateAPITarget(keysCfg.API.Address, keysCfg.API.ServerName, f.substrateNS)
-	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), api, apiErr)
+	var cluster clusterAPIReader
+	if apiErr == nil {
+		if cluster, apiErr = substrateClusterAPI(cctx, f, api); apiErr == nil {
+			defer cluster.Close()
+		}
+	}
+	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), cluster, apiErr)
+	readInventory(cctx, &r, o.LauncherAtespaces, o.WritableAtespaces, cluster, apiErr)
 	readActorRoutes(cctx, f, &o, keysCfg.Services.Actor)
 	r.ProductVersion = appVersion
 	r.Now = time.Now()
@@ -401,6 +408,33 @@ func launcherAtespaceList(byProfile map[string][]string) []string {
 	return out
 }
 
+// actorStateCounts is " (2 running, 1 suspended, 1 crashed)": running and
+// suspended first, then the other states by name; "" with no actors.
+func actorStateCounts(states map[string]int) string {
+	order := func(s string) string {
+		switch s {
+		case "running":
+			return "0"
+		case "suspended":
+			return "1"
+		}
+		return "2" + s
+	}
+	names := make([]string, 0, len(states))
+	for s := range states {
+		names = append(names, s)
+	}
+	slices.SortFunc(names, func(a, b string) int { return strings.Compare(order(a), order(b)) })
+	parts := make([]string, 0, len(names))
+	for _, s := range names {
+		parts = append(parts, strconv.Itoa(states[s])+" "+s)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
 func imageTag(image string) string {
 	if i := strings.IndexByte(image, '@'); i >= 0 {
 		image = image[:i]
@@ -471,7 +505,7 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 			return err
 		}
 	} else {
-		printSubstrateFleet(w, kind, header, doc, checks, ok)
+		printSubstrateFleet(w, kind, header, doc, checks, ok, r.InventoryNote)
 	}
 	if kind == "verify" && !ok {
 		return withExitCode(errors.New("a cluster check failed"), 1)
@@ -479,7 +513,10 @@ func runSubstrateFleet(cmd *cobra.Command, kind string, out *substrateOutput, cf
 	return nil
 }
 
-func printSubstrateFleet(w io.Writer, kind, cluster string, doc any, checks []fleet.Check, ok bool) {
+// printSubstrateFleet prints the document as text. Every line shows a
+// reading (GAP-0216): when the actors could not be read, the Agents line
+// says why and no count is printed.
+func printSubstrateFleet(w io.Writer, kind, cluster string, doc any, checks []fleet.Check, ok bool, inventoryNote string) {
 	fmt.Fprintf(w, "Cluster %s\n", substrateDash(cluster))
 	if st, isStatus := doc.(fleet.StatusDocument); isStatus {
 		h := st.Health
@@ -488,7 +525,19 @@ func printSubstrateFleet(w io.Writer, kind, cluster string, doc any, checks []fl
 		fmt.Fprintf(w, "Leader:      ready=%t lease held=%t\n", h.Leader.Ready, h.Leader.LeaseHeld)
 		fmt.Fprintf(w, "Controller:  %d of %d ready\n", h.Controller.Ready, h.Controller.Desired)
 		fmt.Fprintf(w, "Callout:     %d of %d ready, registered=%t, %s\n", h.Callout.Ready, h.Callout.Desired, h.Callout.Registered, h.Callout.BodyMode)
-		fmt.Fprintf(w, "Agents:      %d (%d running, %d suspended)\n", st.Inventory.Actors, st.Inventory.Running, st.Inventory.Suspended)
+		if inv := st.Inventory; inv == nil {
+			fmt.Fprintf(w, "Agents:      not read: %s\n", substrateDash(inventoryNote))
+		} else {
+			fmt.Fprintf(w, "Agents:      %d in the cluster%s\n", inv.Actors, actorStateCounts(inv.States))
+			fmt.Fprintf(w, "Templates:   %d\n", inv.Templates)
+			for _, a := range st.Atespaces {
+				role := "managed"
+				if a.Launcher {
+					role = "launcher"
+				}
+				fmt.Fprintf(w, "  %-24s %-8s %d%s\n", a.Name, role, a.Actors, actorStateCounts(a.States))
+			}
+		}
 		fmt.Fprintln(w)
 	}
 	failed := 0

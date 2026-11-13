@@ -205,7 +205,8 @@ With a name, shows that agent: where it runs, which profile guards it and its ba
 With --batch, shows every agent of a batch run.
 
 For administrators, --cluster shows the health of the whole setup: gateway, leader, controller and callout,
-the agents in the cluster and the setup checks. It reads the cluster with kubectl (give --install-file).
+the agents and templates in the cluster (agents by state, also per launcher and managed atespace) and the setup
+checks. It reads the cluster with kubectl (give --install-file).
 Exit 75 means the cluster could not be reached; there is no document.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
