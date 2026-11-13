@@ -112,6 +112,7 @@ type Program struct {
 	PipeRole       Role   // effect kind for pipeline-bound input with no path operand (PS cmdlets)
 	PSLaunch       bool   // powershell/pwsh: decode -enc and unwrap its command as PowerShell
 	TarStyle       bool   // tar: mode-dependent create/extract effects (review N7)
+	DownloadRemote bool   // curl -O / wget: writes a URL-named file into the output dir/cwd (review R3-3)
 }
 
 var (
@@ -152,59 +153,109 @@ const (
 	wrapInput
 )
 
+// fl builds a flag set: valued maps a flag to its value role; the remaining
+// args are switch flags (no value, no effect) that the program accepts. Under
+// the KNOWN-is-an-allowlist rule (round 3) a program must list every flag its
+// normal usage carries, or the call becomes not-fully-known.
+func fl(valued map[string]Flag, switches ...string) map[string]Flag {
+	m := map[string]Flag{}
+	for k, v := range valued {
+		m[k] = v
+	}
+	for _, s := range switches {
+		if _, ok := m[s]; !ok {
+			m[s] = Flag{}
+		}
+	}
+	return m
+}
+
 func buildPOSIXTable() {
 	add := func(p Program) {
 		for _, n := range p.Names {
 			posixTable[n] = p
 		}
 	}
-	add(Program{Names: []string{"cat", "head", "tail", "less", "more", "bat"}, Pos: PosAllRead})
+	add(Program{Names: []string{"cat", "tac", "less", "more", "bat", "nl"}, Pos: PosAllRead,
+		Flags: fl(nil, "-n", "-b", "-E", "-s", "-v", "-A", "-T", "-e", "-t", "-u", "-r", "--number", "--show-ends")})
+	add(Program{Names: []string{"head", "tail"}, Pos: PosAllRead,
+		Flags: fl(map[string]Flag{"-n": {Value: true}, "-c": {Value: true}, "--lines": {Value: true}, "--bytes": {Value: true}},
+			"-q", "-v", "-z", "-f", "-F", "-s", "--quiet", "--verbose", "--silent", "--follow")})
 	add(Program{Names: []string{"cp", "install"}, Pos: PosSourcesDest,
-		Flags: map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}}})
+		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite},
+			"-m": {Value: true, Role: RoleIgnore}, "-o": {Value: true, Role: RoleIgnore}, "-g": {Value: true, Role: RoleIgnore}, "-S": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}},
+			"-r", "-R", "-f", "-v", "-p", "-a", "-n", "-i", "-u", "-L", "-P", "-H", "-d", "-l", "-s", "-x", "-b", "-T", "-D",
+			"--recursive", "--force", "--preserve", "--no-clobber", "--archive", "--parents", "--no-dereference", "--dereference", "--verbose", "--update", "--symbolic-link", "--link", "--interactive")})
 	add(Program{Names: []string{"mv"}, Pos: PosSourcesDest,
-		Flags: map[string]Flag{"-t": {Value: true, Role: RoleWrite}}})
-	add(Program{Names: []string{"rm", "unlink", "shred"}, Pos: PosAllDelete, Strict: true})
+		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleWrite}, "--target-directory": {Value: true, Role: RoleWrite}, "-S": {Value: true, Role: RoleIgnore}},
+			"-f", "-i", "-n", "-v", "-u", "-b", "-T", "--force", "--no-clobber", "--verbose", "--update", "--backup", "--interactive")})
+	add(Program{Names: []string{"rm", "unlink", "shred"}, Pos: PosAllDelete, Strict: true,
+		Flags: fl(nil, "-r", "-R", "-f", "-v", "-i", "-I", "-d", "-u", "-z", "-n", "--recursive", "--force", "--verbose", "--preserve-root", "--no-preserve-root", "--one-file-system", "--interactive", "--dir")})
 	add(Program{Names: []string{"ln"}, Pos: PosLinkTargetLink,
-		Flags: map[string]Flag{"-t": {Value: true, Role: RoleLink}}})
-	add(Program{Names: []string{"touch", "mkdir", "mkfifo", "mknod"}, Pos: PosAllWrite})
+		Flags: fl(map[string]Flag{"-t": {Value: true, Role: RoleLink}, "-S": {Value: true, Role: RoleIgnore}},
+			"-s", "-f", "-n", "-v", "-r", "-T", "-i", "-b", "-d", "-P", "-L", "--symbolic", "--force", "--relative", "--no-dereference", "--verbose")})
+	add(Program{Names: []string{"mkdir"}, Pos: PosAllWrite, Flags: fl(map[string]Flag{"-m": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}}, "-p", "-v", "-Z", "--parents", "--verbose")})
+	add(Program{Names: []string{"touch"}, Pos: PosAllWrite, Flags: fl(map[string]Flag{"-r": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "--date": {Value: true, Role: RoleIgnore}, "--reference": {Value: true, Role: RoleIgnore}}, "-a", "-m", "-c", "-h", "--no-create")})
+	add(Program{Names: []string{"mkfifo", "mknod"}, Pos: PosAllWrite, Flags: fl(map[string]Flag{"-m": {Value: true, Role: RoleIgnore}, "--mode": {Value: true, Role: RoleIgnore}}, "-Z")})
 	add(Program{Names: []string{"chmod", "chown", "chgrp", "setfacl"}, Pos: PosAllPerm, Strict: true,
-		Flags: map[string]Flag{"--reference": {Value: true, Role: RoleRead}, "-R": {}, "--recursive": {}}})
+		Flags: fl(map[string]Flag{"--reference": {Value: true, Role: RoleRead}, "-m": {Value: true, Role: RoleIgnore}, "-x": {Value: true, Role: RoleIgnore}},
+			"-R", "-v", "-c", "-f", "-H", "-L", "-P", "-h", "-b", "-k", "-d", "-n", "--recursive", "--verbose", "--changes", "--silent", "--quiet", "--preserve-root", "--no-preserve-root", "--dereference", "--no-dereference")})
 	add(Program{Names: []string{"dd"}, Pos: PosNone,
 		Flags: map[string]Flag{"if": {Value: true, Role: RoleRead}, "of": {Value: true, Role: RoleWrite}}})
-	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, Flags: map[string]Flag{"-a": {Role: RoleNone}}})
+	add(Program{Names: []string{"tee"}, Pos: PosAllWrite, Flags: fl(nil, "-a", "-i", "-p", "--append", "--ignore-interrupts")})
 	add(Program{Names: []string{"truncate"}, Pos: PosAllWrite, Flags: map[string]Flag{"-s": {Value: true}}})
 	add(Program{Names: []string{"sed"}, Pos: PosAllRead, FirstPosIgnore: true, InPlace: "-i",
-		Flags: map[string]Flag{"-e": {Value: true}, "-f": {Value: true, Role: RoleRead}, "-i": {Role: RoleNone}}})
+		Flags: fl(map[string]Flag{"-e": {Value: true}, "--expression": {Value: true}, "-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-l": {Value: true, Role: RoleIgnore}},
+			"-i", "-n", "-r", "-E", "-s", "-u", "-z", "--in-place", "--regexp-extended", "--quiet", "--silent", "--separate", "--null-data")})
 	add(Program{Names: []string{"awk"}, Pos: PosAllRead, FirstPosIgnore: true,
-		Flags: map[string]Flag{"-f": {Value: true, Role: RoleRead}, "-v": {Value: true}}})
+		Flags: fl(map[string]Flag{"-f": {Value: true, Role: RoleRead}, "-v": {Value: true}, "-F": {Value: true}}, "-W")})
 	add(Program{Names: []string{"tar"}, Pos: PosNone, TarStyle: true})
 	add(Program{Names: []string{"unzip"}, Pos: PosAllRead, Flags: map[string]Flag{"-d": {Value: true, Role: RoleWrite}}})
 	add(Program{Names: []string{"zip", "gzip", "gunzip", "bzip2", "xz"}, Pos: PosAllRead})
-	add(Program{Names: []string{"curl"}, Pos: PosURLArgs,
-		Flags: map[string]Flag{
+	add(Program{Names: []string{"curl"}, Pos: PosURLArgs, DownloadRemote: true,
+		Flags: fl(map[string]Flag{
 			"-o": {Value: true, Role: RoleOutput}, "--output": {Value: true, Role: RoleOutput},
-			"-O": {Role: RoleNone}, "--remote-name": {Role: RoleNone},
-			"-T": {Value: true, Role: RoleUploadFile}, "--upload-file": {Value: true, Role: RoleUploadFile},
+			"--output-dir": {Value: true, Role: RoleIgnore},
+			"-T":           {Value: true, Role: RoleUploadFile}, "--upload-file": {Value: true, Role: RoleUploadFile},
 			"-F": {Value: true, Role: RoleUploadFile}, "--form": {Value: true, Role: RoleUploadFile},
 			"-d": {Value: true, Role: RoleUploadFile}, "--data": {Value: true, Role: RoleUploadFile},
-			"--data-binary": {Value: true, Role: RoleUploadFile},
-			"-H":            {Value: true, Role: RoleIgnore}, "-X": {Value: true, Role: RoleIgnore},
-			"-x": {Value: true, Role: RoleIgnore}, "-u": {Value: true, Role: RoleIgnore}, "--url": {Value: true, Role: RoleURL}}})
-	add(Program{Names: []string{"wget"}, Pos: PosURLArgs,
-		Flags: map[string]Flag{
+			"--data-binary": {Value: true, Role: RoleUploadFile}, "--data-raw": {Value: true, Role: RoleIgnore}, "--data-urlencode": {Value: true, Role: RoleIgnore},
+			"-H": {Value: true, Role: RoleIgnore}, "-X": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore},
+			"-e": {Value: true, Role: RoleIgnore}, "-b": {Value: true, Role: RoleIgnore}, "-c": {Value: true, Role: RoleOutput}, "--cookie-jar": {Value: true, Role: RoleOutput},
+			"-x": {Value: true, Role: RoleIgnore}, "-u": {Value: true, Role: RoleIgnore}, "--url": {Value: true, Role: RoleURL},
+			"-m": {Value: true, Role: RoleIgnore}, "--max-time": {Value: true, Role: RoleIgnore}, "--retry": {Value: true, Role: RoleIgnore},
+			"-w": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "-K": {Value: true, Role: RoleRead}, "--connect-timeout": {Value: true, Role: RoleIgnore}, "--resolve": {Value: true, Role: RoleIgnore}, "-y": {Value: true, Role: RoleIgnore}, "-Y": {Value: true, Role: RoleIgnore}},
+			"-O", "-J", "-OJ", "--remote-name", "--remote-header-name", "-s", "-S", "-L", "-k", "-v", "-f", "-i", "-I", "-g", "-#", "-G", "-a", "-q", "-R", "-n",
+			"--silent", "--show-error", "--location", "--insecure", "--fail", "--include", "--head", "--compressed", "--create-dirs", "--globoff", "--get", "--progress-bar", "--no-progress-meter")})
+	add(Program{Names: []string{"wget"}, Pos: PosURLArgs, DownloadRemote: true,
+		Flags: fl(map[string]Flag{
 			"-O": {Value: true, Role: RoleOutput}, "--output-document": {Value: true, Role: RoleOutput},
-			"--post-file": {Value: true, Role: RoleUploadFile}, "-i": {Value: true, Role: RoleRead}}})
+			"-P": {Value: true, Role: RoleIgnore}, "--directory-prefix": {Value: true, Role: RoleIgnore},
+			"--post-file": {Value: true, Role: RoleUploadFile}, "--post-data": {Value: true, Role: RoleIgnore}, "-i": {Value: true, Role: RoleRead}, "--input-file": {Value: true, Role: RoleRead},
+			"-U": {Value: true, Role: RoleIgnore}, "-t": {Value: true, Role: RoleIgnore}, "-T": {Value: true, Role: RoleIgnore}, "--header": {Value: true, Role: RoleIgnore}, "--tries": {Value: true, Role: RoleIgnore}, "--timeout": {Value: true, Role: RoleIgnore}},
+			"-q", "-v", "-nv", "-c", "-N", "-r", "-np", "-nc", "-k", "-p", "-E", "--quiet", "--no-check-certificate", "--continue", "--recursive", "--mirror", "--no-verbose", "--no-clobber")})
 	add(Program{Names: []string{"scp"}, Pos: PosSourcesDest, Remote: true})
 	add(Program{Names: []string{"rsync"}, Pos: PosSourcesDest, Remote: true,
 		Flags: map[string]Flag{"-e": {Value: true, Role: RoleExecCode}, "--rsh": {Value: true, Role: RoleExecCode}}})
 	add(Program{Names: []string{"find"}, Pos: PosAllRead, DeleteFlag: "-delete",
-		Flags: map[string]Flag{
-			"-exec": {Role: RoleExecProgram}, "-execdir": {Role: RoleExecProgram}, "-ok": {Role: RoleExecProgram},
-			"-name": {Value: true, Role: RoleIgnore}, "-iname": {Value: true, Role: RoleIgnore},
-			"-path": {Value: true, Role: RoleIgnore}, "-type": {Value: true, Role: RoleIgnore},
-			"-maxdepth": {Value: true, Role: RoleIgnore}, "-mtime": {Value: true, Role: RoleIgnore}, "-delete": {Role: RoleNone}}})
+		Flags: fl(map[string]Flag{
+			"-exec": {Role: RoleExecProgram}, "-execdir": {Role: RoleExecProgram}, "-ok": {Role: RoleExecProgram}, "-okdir": {Role: RoleExecProgram},
+			"-fprint": {Value: true, Role: RoleWrite}, "-fprintf": {Value: true, Role: RoleWrite}, "-fls": {Value: true, Role: RoleWrite},
+			"-name": {Value: true, Role: RoleIgnore}, "-iname": {Value: true, Role: RoleIgnore}, "-path": {Value: true, Role: RoleIgnore}, "-ipath": {Value: true, Role: RoleIgnore},
+			"-wholename": {Value: true, Role: RoleIgnore}, "-iwholename": {Value: true, Role: RoleIgnore}, "-lname": {Value: true, Role: RoleIgnore}, "-ilname": {Value: true, Role: RoleIgnore},
+			"-type": {Value: true, Role: RoleIgnore}, "-xtype": {Value: true, Role: RoleIgnore}, "-regex": {Value: true, Role: RoleIgnore}, "-iregex": {Value: true, Role: RoleIgnore}, "-regextype": {Value: true, Role: RoleIgnore},
+			"-maxdepth": {Value: true, Role: RoleIgnore}, "-mindepth": {Value: true, Role: RoleIgnore},
+			"-mtime": {Value: true, Role: RoleIgnore}, "-atime": {Value: true, Role: RoleIgnore}, "-ctime": {Value: true, Role: RoleIgnore}, "-mmin": {Value: true, Role: RoleIgnore}, "-amin": {Value: true, Role: RoleIgnore}, "-cmin": {Value: true, Role: RoleIgnore},
+			"-newer": {Value: true, Role: RoleIgnore}, "-anewer": {Value: true, Role: RoleIgnore}, "-cnewer": {Value: true, Role: RoleIgnore}, "-samefile": {Value: true, Role: RoleIgnore}, "-size": {Value: true, Role: RoleIgnore},
+			"-perm": {Value: true, Role: RoleIgnore}, "-user": {Value: true, Role: RoleIgnore}, "-group": {Value: true, Role: RoleIgnore}, "-uid": {Value: true, Role: RoleIgnore}, "-gid": {Value: true, Role: RoleIgnore},
+			"-inum": {Value: true, Role: RoleIgnore}, "-links": {Value: true, Role: RoleIgnore}, "-used": {Value: true, Role: RoleIgnore}, "-fstype": {Value: true, Role: RoleIgnore}, "-printf": {Value: true, Role: RoleIgnore}, "-D": {Value: true, Role: RoleIgnore}},
+			"-delete", "-print", "-print0", "-ls", "-depth", "-follow", "-xdev", "-mount", "-nouser", "-nogroup", "-empty", "-prune", "-readable", "-writable", "-executable",
+			"-false", "-true", "-quit", "-not", "-a", "-o", "-and", "-or", "-ignore_readdir_race", "-noleaf", "-daystart", "-H", "-L", "-P", "-O1", "-O2", "-O3")})
 	add(Program{Names: []string{"grep", "egrep", "fgrep", "rg", "ag"}, Pos: PosAllRead, FirstPosIgnore: true,
-		Flags: map[string]Flag{"--pre": {Value: true, Role: RoleExecCode}, "-f": {Value: true, Role: RoleRead}, "-e": {Value: true, Role: RoleIgnore}}})
+		Flags: fl(map[string]Flag{"--pre": {Value: true, Role: RoleExecCode}, "-f": {Value: true, Role: RoleRead}, "--file": {Value: true, Role: RoleRead}, "-e": {Value: true, Role: RoleIgnore}, "--regexp": {Value: true, Role: RoleIgnore},
+			"-m": {Value: true, Role: RoleIgnore}, "-A": {Value: true, Role: RoleIgnore}, "-B": {Value: true, Role: RoleIgnore}, "-C": {Value: true, Role: RoleIgnore}, "--color": {Value: true, Role: RoleIgnore}, "--colour": {Value: true, Role: RoleIgnore}, "-d": {Value: true, Role: RoleIgnore}, "--include": {Value: true, Role: RoleIgnore}, "--exclude": {Value: true, Role: RoleIgnore}},
+			"-r", "-R", "-n", "-i", "-v", "-l", "-L", "-c", "-w", "-x", "-E", "-F", "-G", "-P", "-o", "-H", "-h", "-q", "-s", "-a", "-I", "-z", "-U", "-b", "-T",
+			"--recursive", "--ignore-case", "--invert-match", "--line-number", "--files-with-matches", "--count", "--word-regexp", "--extended-regexp", "--fixed-strings", "--only-matching", "--quiet", "--no-messages", "--with-filename", "--no-filename", "--null")})
 	add(Program{Names: []string{"fd"}, Pos: PosAllRead, Pattern: true,
 		Flags: map[string]Flag{"-x": {Role: RoleExecProgram}, "-X": {Role: RoleExecProgram}, "--exec": {Role: RoleExecProgram}}})
 	add(Program{Names: []string{"bash", "sh", "zsh", "dash", "ksh"}, Pos: PosFirstCode, ShellCode: true,

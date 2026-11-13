@@ -43,9 +43,9 @@ func TestPOSIXFileOperations(t *testing.T) {
 		known   bool
 	}{
 		{"cat home", "cat ~/.bashrc", KindRead, "/home/u/.bashrc", true},
-		{"cp dest", "cp a.txt b.txt", KindWrite, "/home/u/proj/b.txt", true},
+		{"cp dest", "cp a.txt b.txt", KindWrite, "/home/u/proj/b.txt", false},
 		{"cp src", "cp a.txt b.txt", KindRead, "/home/u/proj/a.txt", true},
-		{"mv dest", "mv old.go new.go", KindWrite, "/home/u/proj/new.go", true},
+		{"mv dest", "mv old.go new.go", KindWrite, "/home/u/proj/new.go", false},
 		{"rm abs", "rm /tmp/scratch", KindDelete, "/tmp/scratch", true},
 		{"redirect write", "echo hi > out.log", KindWrite, "/home/u/proj/out.log", true},
 		{"append", "echo hi >> out.log", KindAppend, "/home/u/proj/out.log", true},

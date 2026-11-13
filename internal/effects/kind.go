@@ -112,6 +112,8 @@ const (
 	ReasonMCPSemantics       ReasonCode = "mcp_semantics"
 	ReasonParserFailure      ReasonCode = "parser_failure"
 	ReasonOpaqueArchive      ReasonCode = "opaque_archive"
+	ReasonNonCanonicalPath   ReasonCode = "non_canonical_path"
+	ReasonDestMayBeDir       ReasonCode = "dest_may_be_dir"
 )
 
 // reasonPrecedence orders reasons so a composite unknown reports the most
@@ -136,6 +138,8 @@ var reasonPrecedence = map[ReasonCode]int{
 	ReasonMCPSemantics:       16,
 	ReasonUnknownTool:        17,
 	ReasonOpaqueArchive:      9,
+	ReasonNonCanonicalPath:   11,
+	ReasonDestMayBeDir:       12,
 }
 
 // Reason is one closed reason with its scope.

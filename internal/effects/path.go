@@ -17,10 +17,61 @@ func placePath(spelling string, o Options) (abs string, ok bool, reason ReasonCo
 	if spelling == "" {
 		return "", false, ReasonDynamicExpansion
 	}
+	// A path is KNOWN only in canonical form for its dialect; any other spelling
+	// is unknown so it never produces a different KNOWN key (review R3-7).
+	if r := canonicalIssue(spelling, o.flavor()); r != "" {
+		return "", false, r
+	}
 	if o.flavor() == FlavorWindows {
 		return placeWindows(spelling, o)
 	}
 	return placePOSIX(spelling, o)
+}
+
+// canonicalIssue reports a non-canonical path spelling that must not be placed
+// to a KNOWN key (review R3-7): 8.3 short names, \\.\ device and admin-share
+// UNC, PowerShell provider prefixes and non-FileSystem drives, cmd %~/%N/%%
+// tokens, and MSYS roots other than a drive mount.
+func canonicalIssue(s string, flavor Flavor) ReasonCode {
+	if flavor == FlavorWindows {
+		w := strings.ReplaceAll(s, "/", `\`)
+		lw := strings.ToLower(w)
+		switch {
+		case strings.HasPrefix(w, `\\.\`), strings.HasPrefix(w, `\\?\`):
+			return ReasonNonCanonicalPath
+		case strings.HasPrefix(w, `\\`): // UNC / admin share (incl. localhost, 127.0.0.1)
+			return ReasonNonCanonicalPath
+		case strings.Contains(s, "::"): // provider-qualified path (FileSystem::, Env:\)
+			return ReasonNonCanonicalPath
+		case strings.Contains(w, "%"): // %VAR% left unexpanded, %~dp0, %1, %%P%%
+			return ReasonNonCanonicalPath
+		case hasShortNameSegment(w):
+			return ReasonNonCanonicalPath
+		}
+		// a non-FileSystem PowerShell drive (Env:, HKLM:, Variable:, Cert:)
+		if i := strings.IndexByte(s, ':'); i > 1 {
+			drive := strings.ToLower(s[:i])
+			switch drive {
+			case "env", "hklm", "hkcu", "variable", "cert", "function", "alias", "wsman":
+				return ReasonNonCanonicalPath
+			}
+		}
+		_ = lw
+		return ""
+	}
+	// POSIX: an MSYS/Cygwin virtual root other than a drive mount (/proc, /dev,
+	// /cygdrive handled by the Git Bash mapping) stays canonical here; ANSI-C
+	// quoting is caught at the word level.
+	return ""
+}
+
+func hasShortNameSegment(w string) bool {
+	for _, seg := range strings.Split(w, `\`) {
+		if i := strings.IndexByte(seg, '~'); i > 0 && i+1 < len(seg) && seg[i+1] >= '0' && seg[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func placePOSIX(spelling string, o Options) (string, bool, ReasonCode) {

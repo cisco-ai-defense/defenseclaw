@@ -215,11 +215,51 @@ func (lw *psLower) exprWord(e psparse.Expr) Word {
 
 // exprCommands recurses into an expression for nested commands (script blocks,
 // sub-expressions) so their effects are seen.
+// exprCommands recurses into the sub-statements of an expression (script
+// blocks, sub-expressions, arrays, parens, hashtable values) exactly once, so
+// a nested $( ) / & { } is linear, not exponential (review R3-1). It does NOT
+// use WalkCommands, which re-walks each command's whole subtree.
 func (lw *psLower) exprCommands(e psparse.Expr, cond bool) {
-	psparse.WalkCommands(&psparse.Script{Statements: []psparse.Statement{&psparse.ExprStatement{Expr: e}}}, func(c *psparse.Command) {
-		cmd := lw.command(c, true, false)
-		lw.out.Stmts = append(lw.out.Stmts, &Stmt{Cmds: []*Cmd{cmd}, Cond: true})
-	})
+	switch v := e.(type) {
+	case nil:
+	case *psparse.ScriptBlockExpr:
+		lw.statements(v.Statements, true)
+	case *psparse.SubExpr:
+		lw.statements(v.Statements, true)
+	case *psparse.ArrayExpr:
+		lw.statements(v.Statements, true)
+	case *psparse.Paren:
+		lw.statement(v.Inner, true)
+	case *psparse.Hashtable:
+		for _, val := range v.Values {
+			lw.exprCommands(val, cond)
+		}
+	case *psparse.ArrayLit:
+		for _, el := range v.Elements {
+			lw.exprCommands(el, cond)
+		}
+	case *psparse.Index:
+		lw.exprCommands(v.Target, cond)
+		lw.exprCommands(v.Index, cond)
+	case *psparse.Member:
+		lw.exprCommands(v.Target, cond)
+	case *psparse.Invoke:
+		lw.exprCommands(v.Target, cond)
+		for _, a := range v.Args {
+			lw.exprCommands(a, cond)
+		}
+	case *psparse.Binary:
+		lw.exprCommands(v.LHS, cond)
+		lw.exprCommands(v.RHS, cond)
+	case *psparse.Unary:
+		lw.exprCommands(v.Operand, cond)
+	case *psparse.Convert:
+		lw.exprCommands(v.Operand, cond)
+	case *psparse.StringLit:
+		for _, pt := range v.Parts {
+			lw.exprCommands(pt.Expr, cond)
+		}
+	}
 }
 
 func rhsExpr(st psparse.Statement) psparse.Expr {

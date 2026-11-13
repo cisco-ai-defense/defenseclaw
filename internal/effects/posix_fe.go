@@ -239,6 +239,10 @@ func (w *posixWalker) scanCmdSubsts(word *syntax.Word, c *Cmd) {
 				nw.stmt(inner, true, false)
 			}
 			c.Nested = append(c.Nested, sub)
+			// Do not descend again: the nested walker already handled every
+			// substitution inside this one. Returning true here re-walks them,
+			// which is O(4^depth) (review R3-1 / J7).
+			return false
 		}
 		return true
 	})
@@ -334,6 +338,12 @@ func (w *posixWalker) word(word *syntax.Word) Word {
 			// (review PX-6, Q5).
 			addLit(unescapePOSIX(p.Value, false), false, hasUnescapedMeta(p.Value))
 		case *syntax.SglQuoted:
+			if p.Dollar {
+				// ANSI-C quoting $'...\x72...': the escapes are not decoded, so
+				// the value is not a canonical path (review R3-7).
+				dynamic(ReasonNonCanonicalPath)
+				continue
+			}
 			addLit(p.Value, true, false)
 			out.Quoted = true
 		case *syntax.DblQuoted:

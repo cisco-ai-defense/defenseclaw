@@ -79,6 +79,7 @@ func extractShell(call Call, o Options) Result {
 		script = parsePOSIX(call.Command, o)
 	}
 	w := newWalker(&res, o)
+	w.applyWorkdir(call.Workdir)
 	w.walkScript(script, 0)
 	return res
 }
@@ -97,6 +98,7 @@ func extractArgv(call Call, o Options) Result {
 	}
 	s := &Script{Dialect: DialectPOSIX, Stmts: []*Stmt{{Cmds: []*Cmd{c}}}}
 	w := newWalker(&res, o)
+	w.applyWorkdir(call.Workdir)
 	w.walkScript(s, 0)
 	return res
 }
@@ -114,12 +116,16 @@ type walker struct {
 	writeByKey map[string]int    // path key -> 1-based effect index that wrote it
 	pathShadow bool
 
-	env      map[string]string
-	curCWD   string
-	curHome  string
-	cwdStack []string
-	lastPrim int // 1-based index of the previous stage's primary effect (pipe join)
+	env        map[string]string
+	curCWD     string
+	curHome    string
+	cwdStack   []string
+	lastPrim   int // 1-based index of the previous stage's primary effect (pipe join)
+	work       int // remaining work budget; 0 -> stop and emit a limit unknown (R3-1)
+	overBudget bool
 }
+
+const walkWorkBudget = 20000
 
 func newWalker(res *Result, o Options) *walker {
 	env := map[string]string{}
@@ -128,7 +134,23 @@ func newWalker(res *Result, o Options) *walker {
 	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
-		env: env, curCWD: o.CWD, curHome: o.Home}
+		env: env, curCWD: o.CWD, curHome: o.Home, work: walkWorkBudget}
+}
+
+// spend consumes one unit of the per-call work budget. It returns false once
+// the budget is exhausted, after recording a single limit unknown; callers stop
+// walking and never return a partial result as fully known (review R3-1).
+func (w *walker) spend() bool {
+	if w.overBudget {
+		return false
+	}
+	w.work--
+	if w.work <= 0 {
+		w.overBudget = true
+		w.res.addUnknown(ReasonLimit)
+		return false
+	}
+	return true
 }
 
 // opts returns the Options with the running cwd/home/env, for path placement.
@@ -248,6 +270,9 @@ func (w *walker) resolveWords(in []Word) []Word {
 
 // command processes one simple command / pipeline stage.
 func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
+	if !w.spend() {
+		return
+	}
 	// Subshell: runs in a child shell; save/restore cwd/home/env.
 	if c.Sub != nil {
 		saved := w.saveScope()
@@ -292,12 +317,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		}
 		if rv.Static {
 			w.env[a.Name] = rv.Value
-			if a.Name == "HOME" || a.Name == "USERPROFILE" {
+			// POSIX `~` follows HOME; PowerShell's `~` is fixed at session start
+			// and a later $env:USERPROFILE must not rebind it (review R3-9).
+			if a.Name == "HOME" && w.o.flavor() == FlavorPOSIX {
 				w.curHome = rv.Value
 			}
 		} else {
 			delete(w.env, a.Name)
-			if a.Name == "HOME" || a.Name == "USERPROFILE" {
+			if a.Name == "HOME" && w.o.flavor() == FlavorPOSIX {
 				w.curHome = "" // a dynamic home makes ~ dynamic (review N3 E2)
 			}
 		}
@@ -334,8 +361,12 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	program := programBasename(prog.Value, w.o.flavor())
 	origin := Origin{Surface: w.res.Surface, Dialect: dialect, Command: cmdNo, Program: program, Wrappers: wrappers, Depth: depth, Span: c.Span}
 
-	// 3. cwd changes (review PX-1).
-	if w.applyCWDChange(program, inner[1:], dialect, cond) {
+	// Calling a user-defined function (including one that shadows cd) may change
+	// the cwd unobservably: mark it dynamic (review R3-6 C06/C07).
+	if w.funcs[program] {
+		w.curCWD = ""
+	} else if w.applyCWDChange(program, inner[1:], dialect, cond) {
+		// 3. cwd changes (review PX-1/N2).
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
 	}
@@ -463,6 +494,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	if codeRunsOpaque(program, inner[1:]) {
 		w.opaqueExec(origin, cond)
 	}
+	// git worktree-writing subcommands write/delete an unknown path in the
+	// worktree (review R3-4).
+	if program == "git" {
+		w.gitWorktreeEffects(inner[1:], origin, cond)
+	}
+	// curl -O / wget write a URL-named file into the output dir or cwd; the
+	// basename is unknown (review R3-3).
+	if entry.DownloadRemote {
+		w.downloadRemoteWrite(program, inner[1:], origin, cond)
+	}
 
 	// 7. Operands.
 	ops, execCmds := w.classifyOperands(inner[1:], entry, dialect)
@@ -497,7 +538,8 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.recordLink(op, ops)
 		}
 		if op.role == RoleExecCode && op.static && entry.ShellCode {
-			w.unwrapCode(op.value, op.static, dialect, depth, cond, origin)
+			childScope := !(program == "eval" || program == "source" || program == ".")
+			w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
 		}
 	}
 
@@ -562,7 +604,10 @@ func (w *walker) applyCWDChange(program string, args []Word, dialect Dialect, co
 	case !dir.Static || dir.Value == "-":
 		w.curCWD = "" // cd - or a dynamic directory
 	default:
-		if abs, ok, _ := placePath(dir.Value, w.opts()); ok {
+		rel := !strings.HasPrefix(dir.Value, "/") && !strings.HasPrefix(dir.Value, "./") && !strings.HasPrefix(dir.Value, "../") && !strings.HasPrefix(dir.Value, "~")
+		if w.env["CDPATH"] != "" && rel && !(len(dir.Value) >= 2 && isDriveLetter(dir.Value[0]) && dir.Value[1] == 58) {
+			w.curCWD = "" // CDPATH may resolve a bare name elsewhere (review R3-6)
+		} else if abs, ok, _ := placePath(dir.Value, w.opts()); ok {
 			w.curCWD = abs
 		} else {
 			w.curCWD = ""
@@ -652,6 +697,7 @@ type operand struct {
 	pattern       bool
 	remote        bool
 	roleUncertain bool
+	destMaybeDir  bool
 }
 
 // classifyOperands walks flags and positionals of a command against a table row.
@@ -664,6 +710,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 	inPlace := false
 	del := false
 	hasExpr := false
+	destDir := ""
 	endOpts := false
 	for i < len(words) {
 		wd := words[i]
@@ -711,11 +758,23 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			i++
 			continue
 		}
-		if p.InPlace != "" && fname == p.InPlace {
+		if p.InPlace != "" && (fname == p.InPlace || fname == "--in-place" || strings.HasPrefix(fname, "--in-place=")) {
 			inPlace = true
 		}
 		if p.DeleteFlag != "" && fname == p.DeleteFlag {
 			del = true
+		}
+		if (p.Pos == PosSourcesDest) && (fname == "-t" || fname == "--target-directory" || strings.HasPrefix(fname, "--target-directory=")) {
+			if v, iv, has := splitInlineFlagValue(name, dialect); has {
+				destDir = iv
+				_ = v
+			} else if i+1 < len(words) && words[i+1].Static {
+				destDir = words[i+1].Value
+				i += 2
+				continue
+			}
+			i++
+			continue
 		}
 		if p.FirstPosIgnore && (fname == "-e" || fname == "-f" || fname == "--expression" || fname == "--file") {
 			hasExpr = true
@@ -748,7 +807,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		i++
 	}
-	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr})...)
+	out = append(out, w.positionalOperands(positionals, p, posCtx{unknownFlag: unknownFlag, inPlace: inPlace, del: del, hasExpr: hasExpr, destDir: destDir})...)
 	return out, inner
 }
 
@@ -811,7 +870,8 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 		}
 		fl, ok := flagLookup(p, fn, DialectPOSIX)
 		if !ok {
-			continue // unknown short flag: treat as a mode flag
+			unknownFlag = true // an unlisted short flag -> not fully modeled (round 3)
+			continue
 		}
 		if fl.Role == RoleExecProgram {
 			rest := collectExecArgv(words[*i+1:])
@@ -837,7 +897,7 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 		}
 	}
 	*i++
-	return true, false
+	return true, unknownFlag
 }
 
 func operandValue(fl Flag, v Word, p Program) operand {
@@ -861,10 +921,14 @@ type posCtx struct {
 	inPlace     bool
 	del         bool
 	hasExpr     bool
+	destDir     string
 }
 
 func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand {
-	taint := ctx.unknownFlag && p.Strict
+	// KNOWN is an allowlist (review round 3): ANY unlisted flag the call used
+	// means the operand roles are not fully modeled, so each operand effect
+	// carries an unknown_flag role reason (it is no longer fully known).
+	taint := ctx.unknownFlag
 	mk := func(wd Word, role Role) operand {
 		return operand{value: wd.Value, static: wd.Static, quoted: wd.Quoted,
 			glob: wd.Glob || (p.Pattern && !wd.Quoted), role: role, pattern: p.Pattern}
@@ -928,19 +992,7 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 			out = append(out, mk(wd, RolePerm))
 		}
 	case PosSourcesDest:
-		for i, wd := range ps {
-			role := RoleRead
-			if i == len(ps)-1 && len(ps) > 1 {
-				role = RoleWrite
-			}
-			op := mk(wd, role)
-			if p.Remote && wd.Static {
-				if isRemoteOperand(wd.Value) {
-					op.remote = true
-				}
-			}
-			out = append(out, op)
-		}
+		out = append(out, sourcesDestOperands(ps, ctx.destDir, p)...)
 	case PosLinkTargetLink:
 		if len(ps) == 2 {
 			out = append(out, mk(ps[0], RoleLinkTarget))
@@ -1118,6 +1170,11 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 	} else {
 		e.addReason(reason, ScopeTarget)
 	}
+	// a destination that may be a directory: the real target is dir/basename,
+	// so the known path alone is not trusted (review R3-2).
+	if op.destMaybeDir {
+		e.addReason(ReasonDestMayBeDir, ScopeTarget)
+	}
 	return e
 }
 
@@ -1254,6 +1311,14 @@ func (w *walker) envCodeEffect(name string, dialect Dialect, cmdNo, depth int, c
 // unwrapCode parses one nested level of shell code (bash -c, eval of a literal,
 // a static heredoc shell body).
 func (w *walker) unwrapCode(code string, static bool, dialect Dialect, depth int, cond bool, origin Origin) {
+	w.unwrapCodeScoped(code, static, dialect, depth, cond, origin, true)
+}
+
+// unwrapCodeScoped parses one nested level of code. childScope=true runs it in a
+// child shell (bash -c, su -c, cmd /c: cwd/env restored afterwards);
+// childScope=false runs it in the current shell (eval, source, .), so its
+// cd/env changes persist (review R3-6 C08).
+func (w *walker) unwrapCodeScoped(code string, static bool, dialect Dialect, depth int, cond bool, origin Origin, childScope bool) {
 	if !static {
 		return
 	}
@@ -1270,7 +1335,10 @@ func (w *walker) unwrapCode(code string, static bool, dialect Dialect, depth int
 	default:
 		sub = parsePOSIX(code, w.o)
 	}
-	// unwrapped code runs in a child shell: scope cwd/env (review N2 V5).
+	if !childScope {
+		w.walkScript(sub, depth+1)
+		return
+	}
 	s := w.saveScope()
 	w.env = cloneEnv(w.env)
 	w.walkScript(sub, depth+1)
@@ -1664,4 +1732,203 @@ func codeRunsOpaque(program string, args []Word) bool {
 		}
 	}
 	return false
+}
+
+// sourcesDestOperands models cp/mv/scp/rsync/copy-item/move-item: the sources
+// are reads, the destination a write. A directory destination (trailing
+// separator, ., ~, .., a -t/--target-directory dir, or more than one source)
+// writes <dir>/<basename(source)>; a bare destination that could be a directory
+// is unknown (dest_may_be_dir) so the resolver can decide (review R3-2/R3-8).
+func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
+	var out []operand
+	var sources []Word
+	var dest Word
+	haveDest := false
+	if destDir != "" {
+		dest = Word{Value: destDir, Static: true}
+		haveDest = true
+		sources = ps
+	} else if len(ps) >= 2 {
+		dest = ps[len(ps)-1]
+		sources = ps[:len(ps)-1]
+		haveDest = true
+	} else {
+		sources = ps // a single operand with no dest: a read
+	}
+	remoteOf := func(wd Word) bool { return p.Remote && wd.Static && isRemoteOperand(wd.Value) }
+	for _, s := range sources {
+		op := operand{value: s.Value, static: s.Static, quoted: s.Quoted, glob: s.Glob, role: RoleRead}
+		if remoteOf(s) {
+			op.remote = true
+		}
+		out = append(out, op)
+	}
+	if !haveDest {
+		return out
+	}
+	if remoteOf(dest) {
+		out = append(out, operand{value: dest.Value, static: dest.Static, role: RoleWrite, remote: true})
+		return out
+	}
+	dirDest := destDir != "" || len(sources) > 1 || looksDir(dest)
+	if !dest.Static {
+		out = append(out, operand{role: RoleWrite}) // dynamic dest
+		return out
+	}
+	if dirDest {
+		for _, s := range sources {
+			if !s.Static {
+				out = append(out, operand{role: RoleWrite})
+				continue
+			}
+			out = append(out, operand{value: joinDir(dest.Value, baseName2(s.Value)), static: true, role: RoleWrite})
+		}
+		if len(sources) == 0 {
+			out = append(out, operand{value: dest.Value, static: true, role: RoleWrite})
+		}
+		return out
+	}
+	// a single source into a bare destination: a rename to a new file, or a
+	// write into a directory of that name -- unknown until the resolver knows.
+	out = append(out, operand{value: dest.Value, static: true, role: RoleWrite, destMaybeDir: true})
+	return out
+}
+
+// looksDir reports a destination spelling that is certainly a directory.
+func looksDir(wd Word) bool {
+	if !wd.Static {
+		return false
+	}
+	v := wd.Value
+	if v == "." || v == ".." || v == "~" {
+		return true
+	}
+	if strings.HasSuffix(v, "/") || strings.HasSuffix(v, `\`) ||
+		strings.HasSuffix(v, "/.") || strings.HasSuffix(v, "/..") || strings.HasSuffix(v, `\.`) || strings.HasSuffix(v, `\..`) {
+		return true
+	}
+	return false
+}
+
+func baseName2(p string) string {
+	p = strings.TrimRight(p, `/\`)
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+func joinDir(dir, base string) string {
+	sep := "/"
+	if strings.Contains(dir, `\`) && !strings.Contains(dir, "/") {
+		sep = `\`
+	}
+	return strings.TrimRight(dir, `/\`) + sep + base
+}
+
+// gitWorktreeEffects emits a write (or delete) with an unknown target scoped to
+// the worktree for a git subcommand that modifies the working tree (review
+// R3-4). Read-only subcommands produce nothing here.
+func (w *walker) gitWorktreeEffects(args []Word, origin Origin, cond bool) {
+	sub := ""
+	worktree := w.curCWD
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			continue
+		}
+		if (a.Value == "-C" || a.Value == "--work-tree") && i+1 < len(args) && args[i+1].Static {
+			if abs, ok, _ := placePath(args[i+1].Value, w.opts()); ok {
+				worktree = abs
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(a.Value, "--work-tree=") {
+			if abs, ok, _ := placePath(a.Value[len("--work-tree="):], w.opts()); ok {
+				worktree = abs
+			}
+			continue
+		}
+		if sub == "" && !strings.HasPrefix(a.Value, "-") {
+			sub = a.Value
+		}
+	}
+	kind := KindWrite
+	switch sub {
+	case "checkout", "switch", "restore", "reset", "apply", "am", "stash",
+		"merge", "rebase", "cherry-pick", "revert", "worktree", "mv":
+		kind = KindWrite
+	case "clean", "rm":
+		kind = KindDelete
+	default:
+		return // read-only or non-worktree subcommand
+	}
+	e := Effect{Kind: kind, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
+		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+	if worktree != "" {
+		e.Target.Spelling = cap4k(worktree)
+	}
+	e.addReason(ReasonDynamicExpansion, ScopeTarget) // the exact files are not statically known
+	w.emit(e)
+}
+
+// downloadRemoteWrite emits the file a URL download writes: curl only with a
+// -O/-J/--remote-name form (an -o output is already modeled), wget whenever no
+// -O is given. The basename comes from the URL, so the target is unknown; the
+// directory is --output-dir / -P, else cwd (review R3-3).
+func (w *walker) downloadRemoteWrite(program string, args []Word, origin Origin, cond bool) {
+	dir := ""
+	remoteName := program == "wget" // wget writes by default
+	hasOutput := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !a.Static {
+			continue
+		}
+		switch {
+		case a.Value == "--output-dir" || a.Value == "-P" || a.Value == "--directory-prefix":
+			if i+1 < len(args) && args[i+1].Static {
+				dir = args[i+1].Value
+				i++
+			}
+		case a.Value == "-O" || a.Value == "-J" || a.Value == "-OJ" || a.Value == "--remote-name" || a.Value == "--remote-header-name":
+			remoteName = true
+		case a.Value == "-o" || a.Value == "--output" || a.Value == "--output-document":
+			hasOutput = true
+			if i+1 < len(args) {
+				i++
+			}
+		case program == "curl" && strings.HasPrefix(a.Value, "-O"):
+			remoteName = true
+		}
+	}
+	if program == "wget" && hasOutput {
+		return // -O gives an explicit output (already modeled)
+	}
+	if !remoteName {
+		return
+	}
+	e := Effect{Kind: KindWrite, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateUnknown,
+		Target: Target{Type: TargetPath, Flavor: w.o.flavor(), Link: LinkNotChecked}, Origin: origin}
+	if dir != "" {
+		e.Target.Spelling = cap4k(dir)
+	} else if w.curCWD != "" {
+		e.Target.Spelling = cap4k(w.curCWD)
+	}
+	e.addReason(ReasonDynamicExpansion, ScopeTarget) // basename from the URL
+	w.emit(e)
+}
+
+// applyWorkdir sets the running cwd from the connector-supplied per-call
+// working directory, resolved against the session cwd (review R3-10).
+func (w *walker) applyWorkdir(workdir string) {
+	if workdir == "" {
+		return
+	}
+	if abs, ok, _ := placePath(workdir, w.opts()); ok {
+		w.curCWD = abs
+	} else {
+		w.curCWD = workdir
+	}
 }
