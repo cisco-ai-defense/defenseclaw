@@ -32,7 +32,11 @@ const (
 // stops once the conversation (messages, or input on the Responses API) and
 // tools are read. A body that is not valid JSON up to that point, or whose
 // messages are not a list of objects with string roles, gives no text, as
-// the full decode it replaces did.
+// the full decode it replaces did. Two documented differences, both from
+// stopping early and both limited to classifier input from a cooperative
+// agent: with a repeated conversation key after tools the first one is read
+// (the full decode kept the last), and bytes that are invalid after the
+// conversation and tools no longer drop the text.
 func routeOnlyHumanText(family string, body []byte) (text string, hasTools, toolTurn, images bool) {
 	s := humanTextScan{responses: family == config.RoutingAPIResponses}
 	s.dec = json.NewDecoder(bytes.NewReader(body))
