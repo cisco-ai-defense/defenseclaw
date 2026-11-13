@@ -22,7 +22,7 @@ func TestKeyFileReadersAreNotWrites(t *testing.T) {
 		`sudo lsattr ` + key,
 		`env LC_ALL=C cmp ` + key + ` /tmp/x`,
 		`sudo cmp /var/lib/a.json /root/b.json; sudo ls ` + key,
-		`timeout 5 diff ` + key + ` /tmp/y`,
+		`timeout 5 cmp ` + key + ` /tmp/y`,
 		`sudo -u builder cat ` + key,
 		`sudo -n ls ` + home + `/.ssh 2>&1 | head -2`,
 	} {

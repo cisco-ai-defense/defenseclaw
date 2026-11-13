@@ -2793,9 +2793,11 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// Checksum, compare and attribute readers print or compare what
 			// they read and have no output file (sha256sum FILE, cmp A B,
 			// lsattr FILE): a call that only names a protected file to one of
-			// them is not a write to it (rel-1-0-10:GAP-0018).
+			// them is not a write to it (rel-1-0-10:GAP-0018). diff is not on
+			// the list: TestHomeSpelledAuthorizedKeysWriteBlocks pins a diff of
+			// the keys file as a block.
 			"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum", "shasum",
-			"cmp", "diff", "lsattr", "getfacl", "namei", "od", "hexdump", "strings", "nl", "cut":
+			"cmp", "lsattr", "getfacl", "namei", "od", "hexdump", "strings", "nl", "cut":
 		case "echo":
 			// The literal */* operand prints expanded names. Every other
 			// statement remains subject to the same read-only walk.
