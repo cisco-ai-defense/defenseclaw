@@ -111,7 +111,7 @@ func emitModelUsageLogV8(ctx context.Context, emitter sidecarRuntimeEmitter, rec
 	if emitter == nil {
 		return nil
 	}
-	producerKey := observability.ProducerKey(gatewaylog.EventLLMResponse)
+	producerKey := observability.ProducerKey(gatewaylog.EventModelUsage)
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		producerKey,
