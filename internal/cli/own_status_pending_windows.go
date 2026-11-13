@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // ownStatusRuntimeResolve is the check the standalone hook makes for the
@@ -28,7 +29,9 @@ func ownStatusPendingFor(connector string) bool {
 	if err != nil {
 		return false
 	}
-	_, err = ownStatusRuntimeResolve(filepath.Join(filepath.Dir(executable), "defenseclaw-hook.exe"), connector)
+	// The hook the account's agents start: the launch image of this bin once
+	// Setup staged it (GAP-0751), else the transition image.
+	_, err = ownStatusRuntimeResolve(filepath.Clean(winpath.EnterpriseHookLaunchPath(filepath.Dir(executable))), connector)
 	if !errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) {
 		return false
 	}
