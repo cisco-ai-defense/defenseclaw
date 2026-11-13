@@ -495,11 +495,15 @@ func TestReviewRound2Mapping(t *testing.T) {
 	if m := mapOf(t, "mcp__x__read_file", deep); !m.Truncated.Has(bounded.Depth) {
 		t.Errorf("nested JSON strings past the bound: %v", m.Truncated)
 	}
-	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/x oops}"}`); !m.Truncated.Any() {
-		t.Errorf("unparseable JSON document: %v", m.Truncated)
+	// A Python-literal document is read; one no parser reads is text.
+	if m := mapOf(t, "mcp__x__do", `{"arguments":"{'path': '/home/u/.ssh/id_rsa', 'ok': True}"}`); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("python literal: %+v", m.Effects)
+	}
+	if m := mapOf(t, "mcp__x__do", `{"arguments":"{\"path\": /home/u/x oops}"}`); m.Truncated.Any() {
+		t.Errorf("unparseable text marked truncated: %v", m.Truncated)
 	}
 	// Prose that starts with a bracket is text.
-	for _, v := range []string{"[INFO] done", "{{name}} said hi", "[1] see below"} {
+	for _, v := range []string{"[INFO] done", "{{name}} said hi", "[1] see below", "[formatted HTML content]", "[{'entityName': 'AI', 'text': 'x'}]"} {
 		b, _ := json.Marshal(map[string]string{"note": v})
 		if m := mapOf(t, "mcp__x__post_comment", string(b)); m.Truncated.Any() {
 			t.Errorf("%q marked truncated", v)
@@ -587,5 +591,23 @@ func TestSQLDialectReadings(t *testing.T) {
 	}
 	if _, over := ClassifySQL(strings.Repeat("SELECT 1; ", maxSQL/8)); !over {
 		t.Error("a text past the SQL bound is recorded")
+	}
+}
+
+func TestAddressListsAndVisibleCopies(t *testing.T) {
+	m := mapOf(t, "mcp__mail__send", `{"to":"A <a@x.com>, b@y.com; c@z.com","cc":"d@x.com","bcc":"e@w.com, f@v.com"}`)
+	var prim, red []string
+	for _, e := range m.Effects {
+		if e.Role == RolePrimary {
+			prim = append(prim, e.Host)
+		}
+		if e.Role == RoleRedirect {
+			red = append(red, e.Host)
+		}
+	}
+	slices.Sort(prim)
+	slices.Sort(red)
+	if !slices.Equal(prim, []string{"x.com", "x.com", "y.com", "z.com"}) || !slices.Equal(red, []string{"v.com", "w.com"}) {
+		t.Errorf("primary %v redirect %v", prim, red)
 	}
 }

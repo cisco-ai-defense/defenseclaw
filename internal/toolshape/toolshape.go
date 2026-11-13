@@ -519,8 +519,14 @@ func (w *walker) str(key, val string) {
 			w.nested--
 			return
 		}
-		w.trunc.Hit(bounded.Nodes)
-		return
+		if inner, ok := decodeLenient([]byte(pythonLiteralToJSON(val))); ok {
+			w.nested++
+			w.value(key, inner, 0)
+			w.nested--
+			return
+		}
+		// Not a document any parser reads: it is text, like prose that starts
+		// with a bracket.
 	}
 	switch p, kind := fileURIPath(val); kind {
 	case fileURIPlaced:
@@ -540,10 +546,17 @@ func (w *walker) str(key, val string) {
 			w.m.Senders = append(w.m.Senders, h)
 		}
 		return
-	case t.redirectKey[key]:
-		w.destination(key, val, RoleRedirect)
-	case t.recipientKey[key] && (looksAddress(val) || looksURL(val)):
-		w.destination(key, val, RolePrimary)
+	case t.redirectKey[key] || t.recipientKey[key]:
+		role := RolePrimary
+		if t.redirectKey[key] {
+			role = RoleRedirect
+		}
+		// "a@x.com, b@y.com": a list of addresses in one string.
+		for _, part := range addressList(val) {
+			if looksAddress(part) || looksURL(part) {
+				w.destination(key, part, role)
+			}
+		}
 	case t.urlKey[key] && looksURL(val):
 		w.destination(key, val, RoleURL)
 	}
@@ -573,6 +586,48 @@ func (w *walker) str(key, val string) {
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
 		w.path(w.pathKind(), key, val)
 	}
+}
+
+// addressList splits an address field on commas and semicolons (at most 64
+// parts) and drops a display name ("Ann <ann@x.com>").
+func addressList(v string) []string {
+	if !strings.ContainsAny(v, ",; <") {
+		return []string{v}
+	}
+	var out []string
+	for _, part := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' }) {
+		part = strings.TrimSpace(part)
+		if i := strings.LastIndex(part, "<"); i >= 0 && strings.HasSuffix(part, ">") {
+			part = part[i+1 : len(part)-1]
+		}
+		if part != "" {
+			out = append(out, part)
+		}
+		if len(out) >= 64 {
+			break
+		}
+	}
+	return out
+}
+
+var rePyWord = regexp.MustCompile(`\b(True|False|None)\b`)
+
+// pythonLiteralToJSON reads a Python-literal document (single-quoted strings,
+// True/False/None), as tool servers written in Python print them.
+func pythonLiteralToJSON(v string) string {
+	if strings.Contains(v, `"`) {
+		return v
+	}
+	v = strings.ReplaceAll(v, "'", `"`)
+	return rePyWord.ReplaceAllStringFunc(v, func(w string) string {
+		switch w {
+		case "True":
+			return "true"
+		case "False":
+			return "false"
+		}
+		return "null"
+	})
 }
 
 // path adds a path effect. A path past maxPath is still judged (the native
@@ -717,7 +772,7 @@ func replaceNonFinite(raw []byte) []byte {
 	return out
 }
 
-var reJSONDoc = regexp.MustCompile(`(?s)^\s*(?:\{\s*(?:"|\})|\[\s*(?:["\[{\]\-0-9tfn]))`)
+var reJSONDoc = regexp.MustCompile(`(?s)^\s*(?:\{\s*(?:["']|\})|\[\s*(?:["'\[{\]]))`)
 
 // jsonDocument reports a string that is a JSON object or array: it starts like
 // one and ends like one. Prose that merely starts with a bracket is not.
