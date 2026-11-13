@@ -1567,7 +1567,7 @@ attributes:
       min: 0
       max: 9223372036854775807
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.usage.cache_creation_tokens
   type: int64
   brief: "Input tokens written to the provider prompt cache (a subset of input tokens)"
@@ -1584,7 +1584,7 @@ attributes:
       min: 0
       max: 9223372036854775807
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.usage.reasoning_tokens
   type: int64
   brief: "Output tokens spent on reasoning (a subset of output tokens)"
@@ -1601,7 +1601,7 @@ attributes:
       min: 0
       max: 9223372036854775807
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.cost.usd
   type: double
   brief: "Cost of one model call in USD; absent when unknown, never 0 for unknown"
@@ -1618,7 +1618,7 @@ attributes:
       min: 0.0
       max: 1000000000000.0
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.cost.computed_usd
   type: double
   brief: "Cost computed from the price table, kept next to a reported cost"
@@ -1635,7 +1635,7 @@ attributes:
       min: 0.0
       max: 1000000000000.0
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.cost.reported_usd
   type: double
   brief: "Per-call cost the provider or agent reported"
@@ -1652,7 +1652,7 @@ attributes:
       min: 0.0
       max: 1000000000000.0
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.model.total_ms
   type: double
   brief: "Total model call duration in milliseconds"
@@ -1669,7 +1669,7 @@ attributes:
       min: 0.0
       max: 1000000000000.0
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.usage.source
   type: string
   brief: "Where the token counts came from: provider, stream_final, header or native_otel"
@@ -1683,7 +1683,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.usage.partial
   type: string
   brief: "Billing feature the flat price table cannot price, when present"
@@ -1697,7 +1697,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.api.family
   type: string
   brief: "Wire API of the model call: chat, messages, responses, converse, invoke, gemini, ollama or other"
@@ -1711,7 +1711,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.call.role
   type: string
   brief: "Who made the model call: agent, judge, decision_model, ai_defense or router_classifier"
@@ -1725,7 +1725,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.decision
   type: string
   brief: "Routing outcome: applied, fallback, denied, none or passthrough"
@@ -1739,7 +1739,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.source
   type: string
   brief: "What picked the route: rules, systemone, vllm_sr, profile_default or admin_default"
@@ -1753,7 +1753,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.category
   type: string
   brief: "Bounded classifier label for the route"
@@ -1767,7 +1767,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.rule_id
   type: string
   brief: "Routing rule that picked the model"
@@ -1781,7 +1781,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.provider.requested
   type: string
   brief: "Provider the client asked for before routing"
@@ -1795,7 +1795,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.cost.basis
   type: string
   brief: "How the cost was obtained: computed, reported or none"
@@ -1809,7 +1809,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.cost.price_entry
   type: string
   brief: "Price table entry that priced the call"
@@ -1823,7 +1823,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.pricing.version
   type: string
   brief: "Version of the price table in config.yaml"
@@ -1837,7 +1837,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.pricing.digest
   type: string
   brief: "sha256 of the canonical price table in config.yaml"
@@ -1851,7 +1851,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.usage.token_kind
   type: string
   brief: "Disjoint token kind on defenseclaw.model.tokens: input, cache_read, cache_creation, output or reasoning"
@@ -1865,7 +1865,7 @@ attributes:
   normalization:
     id: bounded-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.model.selected
   type: string
   brief: "Model the call was routed to (the requested model is gen_ai.request.model)"
@@ -1879,7 +1879,7 @@ attributes:
   normalization:
     id: identifier-v1
     notes: typed and bounded
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
 - id: defenseclaw.tool.provider
   type: string
   brief: Tool provider class
@@ -3168,7 +3168,7 @@ groups:
   type: attribute_group
   brief: Per-call model usage, routing provenance and cost. Identity joins stay on correlation.identity; groups never appear here.
   stability: stable
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
   extends: []
   attributes:
   - ref: defenseclaw.usage.cache_read_tokens
@@ -3328,7 +3328,7 @@ groups:
   type: body_group
   brief: Model usage body with tokens, routing provenance and cost, and no prompt or response content.
   stability: stable
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
   extends:
   - correlation.interaction
   - correlation.agent
@@ -3878,7 +3878,7 @@ groups:
   type: log
   brief: Canonical model.usage log identity.
   stability: stable
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
   extends:
   - body.model.usage
   attributes: []
@@ -4776,7 +4776,7 @@ groups:
   type: metric
   brief: "USD cost of model calls; calls with no known cost add nothing"
   stability: stable
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
   extends: []
   attributes:
   - ref: defenseclaw.connector.source
@@ -4825,7 +4825,7 @@ groups:
   type: metric
   brief: "Disjoint token counts of model calls by kind (input uncached, cache_read, cache_creation, output without reasoning, reasoning)"
   stability: stable
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
   extends: []
   attributes:
   - ref: defenseclaw.connector.source
@@ -4876,9 +4876,9 @@ groups:
     legacy_bindings: []
 - id: metric.defenseclaw.tokenomics.dropped
   type: metric
-  brief: "Usage records dropped because the bounded queue was full"
+  brief: "Usage records lost before they were counted: the bounded queue was full, or the local store reached its bucket or row cap"
   stability: stable
-  introduced_in: telemetry-registry-v3
+  introduced_in: telemetry-registry-v4
   extends: []
   attributes:
   body_fields: []
@@ -4887,7 +4887,7 @@ groups:
     instrument_type: counter
     value_type: int64
     unit: "{record}"
-    description: "Usage records dropped because the bounded queue was full"
+    description: "Usage records lost before they were counted: the bounded queue was full, or the local store reached its bucket or row cap"
     temporality: delta
     empty_labels_reason: The counter has no instrument-specific attributes; OTel resource attributes may still be attached by the provider.
   x-defenseclaw:

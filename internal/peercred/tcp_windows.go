@@ -77,36 +77,29 @@ func tcpOwnerRows() ([]tcpOwnerRow, error) {
 	return rows, nil
 }
 
-// loopbackTCPOwnerSID maps the client end of the connection to the user SID
-// of its owning process (ownerSIDLookup: creation-time PID reuse check and
-// a second table read with the process open).
-//
-// Access: the managed Windows gateway runs as LocalSystem with a
-// write-restricted service SID (sc sidtype restricted, privileges
-// SeChangeNotifyPrivilege only; DefenseClawEnterprise.psm1
-// Get-DefenseClawGatewayServiceAccount). A write-restricted token is
-// checked against its restricting SIDs for write access only, and
-// OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION), GetProcessTimes and
-// OpenProcessToken(TOKEN_QUERY) are read access that the default DACL of a
-// user process and its token grants SYSTEM, so this in-process lookup works
-// for every user without SeDebugPrivilege or a broker. A gateway still on
-// the legacy NT SERVICE account gets ERROR_ACCESS_DENIED for other users,
-// which is unverified (fails closed). One live probe on the managed
-// Windows host confirms it before release (CERT-110, S1 slice 4).
-func loopbackTCPOwnerSID(local, remote *net.TCPAddr) (string, error) {
-	return ownerSIDLookup{rows: tcpOwnerRows, open: openPeerProcess}.lookup(local, remote)
+// The owner-module table is readable by any account. Opening another
+// account process and its token is not: only the guardian peer broker
+// (LocalSystem, internal/managed/peerbroker) calls verifyLoopbackTCPPeer;
+// the managed gateway reads only the client row (loopbackTCPClientOwner)
+// and asks the broker (S1 Q7 lead ruling: no SeDebugPrivilege for the
+// gateway, no in-process fallback).
+func loopbackTCPClientOwner(local, remote *net.TCPAddr) (TCPConnOwner, error) {
+	return ownerSIDLookup{rows: tcpOwnerRows}.clientOwner(local, remote)
 }
 
-// windowsPeerProcess is an opened client process; self is this process
-// (its pseudo handle is never closed).
+func verifyLoopbackTCPPeer(local, remote *net.TCPAddr, serverPID uint32, want TCPConnOwner) (PeerIdentity, error) {
+	return ownerSIDLookup{rows: tcpOwnerRows, open: openPeerProcess}.verify(local, remote, serverPID, want)
+}
+
+// windowsPeerProcess is an opened client process.
 type windowsPeerProcess struct {
 	handle windows.Handle
-	self   bool
 }
 
 func openPeerProcess(pid uint32) (peerProcess, error) {
 	if pid == windows.GetCurrentProcessId() {
-		return windowsPeerProcess{handle: windows.CurrentProcess(), self: true}, nil
+		// The broker never answers for itself.
+		return nil, errors.New("peercred: the loopback client is the asking process")
 	}
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
@@ -123,31 +116,27 @@ func (p windowsPeerProcess) CreationTime() (uint64, error) {
 	return uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime), nil
 }
 
-func (p windowsPeerProcess) UserSID() (string, error) {
-	if p.self {
-		return processUserSIDOfToken(windows.GetCurrentProcessToken())
-	}
+func (p windowsPeerProcess) Identity() (PeerIdentity, error) {
 	var token windows.Token
 	if err := windows.OpenProcessToken(p.handle, windows.TOKEN_QUERY, &token); err != nil {
-		return "", fmt.Errorf("peercred: open the client process token: %w", err)
+		return PeerIdentity{}, fmt.Errorf("peercred: open the client process token: %w", err)
 	}
 	defer token.Close()
-	return processUserSIDOfToken(token)
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return PeerIdentity{}, fmt.Errorf("peercred: read the client token user: %w", err)
+	}
+	if user == nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
+		return PeerIdentity{}, errors.New("peercred: the client token has no valid user SID")
+	}
+	var session uint32
+	var n uint32
+	if err := windows.GetTokenInformation(token, windows.TokenSessionId, (*byte)(unsafe.Pointer(&session)), uint32(unsafe.Sizeof(session)), &n); err != nil {
+		return PeerIdentity{}, fmt.Errorf("peercred: read the client token session: %w", err)
+	}
+	return PeerIdentity{SID: user.User.Sid.String(), SessionID: session}, nil
 }
 
 func (p windowsPeerProcess) Close() {
-	if !p.self {
-		_ = windows.CloseHandle(p.handle)
-	}
-}
-
-func processUserSIDOfToken(token windows.Token) (string, error) {
-	user, err := token.GetTokenUser()
-	if err != nil {
-		return "", fmt.Errorf("peercred: read the client token user: %w", err)
-	}
-	if user == nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
-		return "", errors.New("peercred: the client token has no valid user SID")
-	}
-	return user.User.Sid.String(), nil
+	_ = windows.CloseHandle(p.handle)
 }

@@ -684,7 +684,7 @@ Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0
 | `routing.sensitive` | `aliases` plus `severity_at_least` and/or `signals` (keyword signal names): at or above that guardrail severity, or when a listed signal matches, only these aliases are used. Best effort: regex and keyword checks miss personal data written in prose; for regulated groups give their profile an `allowed_aliases` list of local models only | none |
 | `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none |
 | `routing.models[].apis` | `chat`, `messages`, `responses`, `converse`, `invoke`: API families the backend serves without translation | the provider default |
-| `routing.models[].credential` | protected credential name on a managed host (`api_key_env` is for per-user installs) | none |
+| `routing.models[].credential` | protected credential name on a managed host; the gateway reads only it when it is set. A managed model with only `api_key_env` (1.0.9 configs) still reads the gateway service environment, and doctor warns to move the key to a credential | none |
 | `routing.models[].bedrock` | `region`, `auth` (`passthrough`, `profile`, `instance_role`, `iam_credentials`) and the key names for gateway signing | none |
 | `routing.decisions[].conditions[].type` | `keyword`, plus `connector`, `api_family` and `request` (`has_tools`, `tool_turn`, `has_images`, `long_context`) with the `rules` or `systemone` classifier | `keyword` only |
 | `routing.route_only.connectors` | `claudecode`, `codex`: hook connectors whose model calls go through the gateway for routing and usage only | none |
@@ -719,7 +719,7 @@ Both blocks reload with the rest of `config.yaml`: a change applies without a re
 | `observability.tokenomics.cost.compute` | `true` | Compute cost from `observability.pricing`. |
 | `observability.tokenomics.cost.currency` | `USD` | USD is the only value. There is no currency conversion. |
 | `observability.tokenomics.cost.keep_reported` | `true` | Keep a per-call cost that the provider or the agent reported, and mark its basis `reported`. A reported cost wins over the computed one. Running session totals are never used. |
-| `observability.tokenomics.local_store.enabled` | `false` | Keep an hourly usage aggregate in `<data_dir>/model_usage.db`. |
+| `observability.tokenomics.local_store.enabled` | `false` | Keep an hourly usage aggregate in `<data_dir>/model_usage/model_usage.db`. |
 | `observability.tokenomics.local_store.retention_days` | `30` | Days the aggregate is kept. `1` to `3650`. |
 | `observability.tokenomics.local_store.granularity` | `hour` | `hour` is the only value. |
 | `observability.tokenomics.metrics.labels` | `connector`, `provider`, `model`, `route_decision`, `call_role`, `profile` | Labels on `defenseclaw.model.cost` and `defenseclaw.model.tokens`. A closed set: list a subset to drop labels. Identity names (user, group, session, device, host and similar) are refused. |

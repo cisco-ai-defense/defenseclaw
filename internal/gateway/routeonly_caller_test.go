@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed/peerbroker"
 )
 
 func routeCallerTestAuthz(enrollment config.EnterpriseEnrollmentConfig, ledger *managedHookLedger, ledgerErr error) *managedHookAuthorizer {
@@ -99,6 +100,8 @@ func TestVerifiedRouteCallerWindowsRules(t *testing.T) {
 		{"SID case does not matter", func(in *routeCallerInputs) { in.PeerSID = "s-1-5-21-100-200-300-1001" }, true, ""},
 		{"no route credential", func(in *routeCallerInputs) { in.CredentialIdentity = "" }, false, routeCallerCredentialInvalid},
 		{"peer SID unreadable (no fallback to the credential)", func(in *routeCallerInputs) { in.PeerSID, in.PeerSIDErr = "", errors.New("access denied") }, false, routeCallerPeerUnverified},
+		{"guardian peer broker unavailable (no in-process fallback)", func(in *routeCallerInputs) { in.PeerSID, in.PeerSIDErr = "", peerbroker.ErrUnavailable }, false, routeCallerPeerBrokerUnavailable},
+		{"guardian peer broker refused", func(in *routeCallerInputs) { in.PeerSID, in.PeerSIDErr = "", peerbroker.ErrRefused }, false, routeCallerPeerUnverified},
 		{"replayed credential from another account", func(in *routeCallerInputs) { in.PeerSID = bob }, false, routeCallerPeerMismatch},
 		{"SYSTEM", func(in *routeCallerInputs) { in.PeerSID = "S-1-5-18" }, false, routeCallerServiceAccount},
 		{"NetworkService", func(in *routeCallerInputs) { in.PeerSID = "S-1-5-20" }, false, routeCallerServiceAccount},
@@ -300,6 +303,18 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 	}
 	if !valid(bobSecond) {
 		t.Fatal("another account credential must not change with that bump")
+	}
+	// A failed apply (the row stays, OK false) and its recovery are not an
+	// enrollment gap: the rendered credential stays (REVIEW-code-slice4 P3-2).
+	failed := aliceRow
+	failed.OK = false
+	ledger.set(failed, bobRow)
+	if valid(third) {
+		t.Fatal("a target whose apply failed must not authenticate")
+	}
+	ledger.set(aliceRow, bobRow)
+	if !valid(third) || token(alice) != third {
+		t.Fatal("a failed apply and its recovery must keep the route credential")
 	}
 }
 

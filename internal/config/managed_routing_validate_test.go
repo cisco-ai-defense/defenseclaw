@@ -25,7 +25,6 @@ func TestValidateManagedRoutingRefusals(t *testing.T) {
 	}{
 		{"credential refs on linux", "linux", nil, ""},
 		{"macOS", "darwin", nil, ""},
-		{"models api_key_env", "linux", func(c *Config) { c.Routing.Models[0].APIKeyEnv = "ANTHROPIC_API_KEY" }, "models[0].api_key_env"},
 		{"models bedrock env", "linux", func(c *Config) {
 			c.Routing.Models[0].Bedrock = &RoutingBedrockAuthConfig{AccessKeyEnv: "AWS_ACCESS_KEY_ID"}
 		}, "models[0].bedrock.access_key_env"},
@@ -33,7 +32,10 @@ func TestValidateManagedRoutingRefusals(t *testing.T) {
 			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "converse", Bedrock: &RoutingBedrockAuthConfig{SessionTokenEnv: "AWS_SESSION_TOKEN"}}
 		}, "upstreams.claudecode.bedrock.session_token_env"},
 		{"systemone api_key_env", "linux", func(c *Config) { c.Routing.SystemOne = &RoutingSystemOneConfig{APIKeyEnv: "S1_KEY"} }, "systemone.api_key_env"},
-		{"managed Windows route-only (interim)", "windows", nil, "windows_no_peer_factor"},
+		{"managed Windows route-only (guardian peer broker)", "windows", nil, ""},
+		{"managed Windows route-only bedrock env", "windows", func(c *Config) {
+			c.Routing.RouteOnly.Upstreams["claudecode"] = RoutingUpstreamConfig{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", API: "converse", Bedrock: &RoutingBedrockAuthConfig{AccessKeyEnv: "AWS_ACCESS_KEY_ID"}}
+		}, "upstreams.claudecode.bedrock.access_key_env"},
 		{"managed Windows without route-only", "windows", func(c *Config) { c.Routing.RouteOnly = RoutingRouteOnlyConfig{} }, ""},
 		{"connector without base_url capability", "linux", func(c *Config) { c.Routing.RouteOnly.Connectors = []string{"cursor"} }, "no routing base_url capability"},
 		{"bedrock auth profile on a route-only upstream", "darwin", func(c *Config) {
@@ -88,17 +90,21 @@ func TestValidateManagedRoutingAccepts109ManagedShape(t *testing.T) {
 			{Name: "local", Provider: "ollama", Model: "llama3.1", BaseURL: "http://127.0.0.1:11434"},
 		},
 	}
-	for _, goos := range []string{"linux", "darwin", "windows"} {
-		warned.Reset()
-		if err := validateManagedRouting(c, goos); err != nil {
-			t.Fatalf("%s: a 1.0.9 managed config is refused after upgrade: %v", goos, err)
-		}
-		if !strings.Contains(warned.String(), "routing.models[0].api_key_env is ignored") {
-			t.Fatalf("%s: no warning for the ignored name: %q", goos, warned.String())
+	for _, enabled := range []bool{false, true} {
+		c.Routing.Enabled = enabled
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			warned.Reset()
+			if err := validateManagedRouting(c, goos); err != nil {
+				t.Fatalf("%s routing %v: a 1.0.9 managed config is refused after upgrade: %v", goos, enabled, err)
+			}
+			if !strings.Contains(warned.String(), "routing.models[0].api_key_env reads the gateway service environment") {
+				t.Fatalf("%s: no warning for the api_key_env model: %q", goos, warned.String())
+			}
 		}
 	}
-	c.Routing.Enabled = true
-	if err := validateManagedRouting(c, "linux"); err == nil || !strings.Contains(err.Error(), "models[0].api_key_env") {
-		t.Fatalf("routing on with api_key_env = %v, want a refusal", err)
+	c.Routing.Models[0].Credential = "openai-org"
+	warned.Reset()
+	if err := validateManagedRouting(c, "linux"); err != nil || warned.Len() != 0 {
+		t.Fatalf("a model with a credential = %v, warning %q", err, warned.String())
 	}
 }

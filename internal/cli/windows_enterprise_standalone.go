@@ -2002,6 +2002,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseInstalledConfigWarnings(result)
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
+			applyWindowsEnterpriseShippedRulePacks(result)
 			applyWindowsEnterpriseHookRuntimeAccess(result)
 			applyWindowsEnterpriseGuardianTargets(result)
 			applyWindowsEnterpriseUserCleanupFailures(result)
@@ -3813,6 +3814,7 @@ func finishWindowsEnterpriseStandalone(
 		result.Noop, result.NoopReason = false, ""
 	}
 	applyWindowsStandaloneScannerRuntime(result, opts)
+	applyWindowsStandaloneShippedRulePacksUninstall(result, opts)
 	addWindowsEnterpriseMigrationChange(result, opts)
 	addWindowsEnterpriseMissingCredentialWarnings(result)
 	applyWindowsEnterpriseAgentSessions(result, opts)
@@ -4827,6 +4829,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				coworkReason, coworkDetail = windowsEnterpriseCoworkEnsureDrift()
 			}
 			if !pending && coworkReason == "" {
+				// A shipped rule pack the config selects that is missing or
+				// changed: PowerShell verify does not check it (#1445).
+				coworkReason, coworkDetail = windowsEnterpriseShippedRulePacksEnsureDrift()
+			}
+			if !pending && coworkReason == "" {
 				// The module can set ok:false for security_incomplete with no
 				// failed check. Keep its warning, without turning that into a
 				// synthetic not_ready error during result translation.
@@ -4907,6 +4914,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		coworkReason, coworkDetail := "", ""
 		if verified && !cursorRepairPending {
 			coworkReason, coworkDetail = windowsEnterpriseCoworkEnsureDrift()
+			if coworkReason == "" {
+				// A shipped rule pack the config selects that is missing or
+				// changed: PowerShell verify does not check it (#1445).
+				coworkReason, coworkDetail = windowsEnterpriseShippedRulePacksEnsureDrift()
+			}
 		}
 		switch {
 		case verified && cursorRepairPending:
