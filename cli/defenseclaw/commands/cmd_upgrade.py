@@ -74,6 +74,10 @@ def upgrade(target_version: str | None, yes: bool, recover_corrupt_audit: bool) 
 def rollback(yes: bool) -> None:
     """Restore the install that the last upgrade replaced."""
     _refuse_on_managed_host("rollback")
+    from defenseclaw.routing_route_only import restore_agent_config
     from defenseclaw.upgrade_shim import run
 
+    # The release rolled back to may not know route-only: put the agent model
+    # settings back before its binaries return (DESIGN 15.9).
+    restore_agent_config(None)
     raise SystemExit(run(["rollback"] + (["--yes"] if yes else [])))

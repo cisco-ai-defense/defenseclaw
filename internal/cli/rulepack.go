@@ -114,8 +114,9 @@ Example:
 }
 
 var (
-	rulePackValidateDir  string
-	rulePackValidateJSON bool
+	rulePackValidateDir        string
+	rulePackValidateJSON       bool
+	rulePackValidateLayersJSON string
 
 	// rulePackServiceReadProblemFn is replaced by tests.
 	rulePackServiceReadProblemFn = rulePackServiceReadProblem
@@ -133,6 +134,13 @@ func init() {
 		"json",
 		false,
 		"emit a versioned machine-readable result",
+	)
+	rulePackValidateCmd.Flags().StringVar(
+		&rulePackValidateLayersJSON,
+		"layers-json",
+		"",
+		"JSON array of guardrail.rules layers, widest scope first (protections, enable, disable, "+
+			"severity_overrides), to compose over the pack before validating, as the gateway does on reload",
 	)
 	rulePackCmd.AddCommand(rulePackValidateCmd)
 	rootCmd.AddCommand(rulePackCmd)
@@ -177,6 +185,28 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("rule-pack validation failed [%s]: check --dir %s (omit --dir to validate the embedded default pack)", diagnostic.Code, rulePackValidateDir)
 		}
 		return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
+	}
+
+	layers, err := rulePackValidateCustomizations(rulePackValidateLayersJSON)
+	if err != nil {
+		return err
+	}
+	if len(layers) > 0 {
+		composed, composeErr := guardrail.Compose(rp, cliProtectionPackSource, layers...)
+		if composeErr != nil {
+			diagnostic := rulePackDiagnostic(composeErr)
+			response := rulePackWireResponse{
+				WireVersion: rulePackWireVersion,
+				Kind:        "validation_error",
+				Valid:       false,
+				Error:       &diagnostic,
+			}
+			if writeErr := writeRulePackValidation(cmd.OutOrStdout(), response, rulePackValidateJSON); writeErr != nil {
+				return errors.New("rule-pack validation failed and its safe diagnostic could not be written")
+			}
+			return fmt.Errorf("rule-pack validation failed [%s]", diagnostic.Code)
+		}
+		rp = composed
 	}
 
 	summary := rp.Summary()
@@ -395,4 +425,58 @@ func shippedDefaultRulePackDir() (string, func(), error) {
 func rulePackSecureClient() bool {
 	raw, err := os.ReadFile(config.ConfigPath())
 	return err == nil && config.SecureClientSource(raw)
+}
+
+// cliProtectionPackSource serves the embedded opt-in protection packs for the
+// --layers-json compose check, mirroring the gateway's own source.
+func cliProtectionPackSource(name string) ([]guardrail.ProtectionRuleFile, error) {
+	files, err := policyassets.ProtectionPackRules(name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]guardrail.ProtectionRuleFile, 0, len(files))
+	for _, file := range files {
+		out = append(out, guardrail.ProtectionRuleFile{Name: file.Path, Data: file.Data})
+	}
+	return out, nil
+}
+
+// rulePackValidateLayer is one guardrail.rules layer of --layers-json: the
+// fields that change which rules are on and at what severity, so the composed
+// pack is checked against the same limits the gateway applies on reload
+// (rel-1-0-10:GAP-0050 N6).
+type rulePackValidateLayer struct {
+	Protections       []string          `json:"protections"`
+	Enable            []string          `json:"enable"`
+	Disable           []string          `json:"disable"`
+	SeverityOverrides map[string]string `json:"severity_overrides"`
+}
+
+// rulePackValidateCustomizations turns --layers-json into the guardrail.Compose
+// layers, widest scope first.
+func rulePackValidateCustomizations(layersJSON string) ([]guardrail.Customization, error) {
+	var out []guardrail.Customization
+	if strings.TrimSpace(layersJSON) != "" {
+		decoder := json.NewDecoder(strings.NewReader(layersJSON))
+		decoder.DisallowUnknownFields()
+		var layers []rulePackValidateLayer
+		if err := decoder.Decode(&layers); err != nil {
+			return nil, fmt.Errorf("--layers-json is not a JSON array of rules layers: %w", err)
+		}
+		if decoder.More() {
+			return nil, errors.New("--layers-json has trailing data after the JSON array")
+		}
+		for _, layer := range layers {
+			c := guardrail.Customization{
+				Protections:       layer.Protections,
+				Enable:            layer.Enable,
+				Disable:           layer.Disable,
+				SeverityOverrides: layer.SeverityOverrides,
+			}
+			if !c.IsZero() {
+				out = append(out, c)
+			}
+		}
+	}
+	return out, nil
 }

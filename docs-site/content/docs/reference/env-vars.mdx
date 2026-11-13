@@ -348,7 +348,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 152 test-only variables">
+<Accordion title="Show the 153 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -369,6 +369,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_CONTRACT_ALLOW_REAL_PROFILE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | 1 says the account is disposable, so the Windows install harness may run outside a GitHub-hosted runner.<br/>**Read by:** `scripts/live-connector-e2e/run-windows-install.ps1`, `cli/tests/test_windows_connector_contract.py` |
 | `DEFENSECLAW_DELEGATION_ENV_SENTINEL`<br/>Default: `unset`<br/>Values: `test-defined value`, `unset`<br/>Managed host: `ignore` | Carries an inherited environment sentinel through the isolated stable-hook delegation fixture.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_E2E_CODEX_POLICY_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the bounded Codex app-server fixture used by native connector lifecycle E2E tests.<br/>**Read by:** `test/e2e/codex_policy_fixture_windows_test.go` |
+| `DEFENSECLAW_E2E_DATA_DIR`<br/>Default: `unset`<br/>Values: `test-defined absolute path`, `unset`<br/>Managed host: `ignore` | Opts into the live Claude Code run-config probe (Docker, no OpenShell gateway) and names the data directory whose sandboxes/images.json it writes; the test is skipped when it is unset.<br/>**Read by:** `internal/openshell/image/claudecode_runconfig_integration_test.go` |
 | `DEFENSECLAW_E2E_HARNESS`<br/>Default: `unset`<br/>Values: `hermes`, `antigravity`, `unset`<br/>Managed host: `ignore` | Names the hook-only harness the live hook-only sandbox test drives (hermes or antigravity); the test is skipped when it is unset.<br/>**Read by:** `test/e2e/openshell/hookonly_e2e_test.go` |
 | `DEFENSECLAW_ENV_CONFIG_SKIP_TRUST`<br/>Impact: **medium**<br/>Default: `unset` (trust check enforced)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Skip the on-disk trust check LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json: root ownership and no group/world write on Unix, administrator ownership across the ancestor chain on Windows.<br/>**Security:** Bypassing the env_config file trust check lets a file at the canonical path that untrusted principals can write retarget bearer-authenticated inspection POSTs. Test-only.<br/>**Read by:** `internal/config/env_config.go`, `internal/config/env_config_windows.go` |
 | `DEFENSECLAW_FAKE_CLAUDE_LIST`<br/>Default: `unset`<br/>Values: `comma-separated mock responses`, `unset`<br/>Managed host: `ignore` | Test-only stub: comma-separated list of responses the fake claude CLI returns.<br/>**Read by:** `internal/gateway/connector/codeguard_native_test.go` |

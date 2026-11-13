@@ -178,6 +178,11 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := c.patchClaudeCodeHooks(opts, hookScript); err != nil {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
+	// Route-only keys come from config.yaml on every setup, repair and
+	// upgrade; a connector no longer routed gets its values back.
+	if err := c.ApplyRouteOnly(opts, opts.RouteOnly); err != nil {
+		return err
+	}
 
 	// Host installs disable native exporters and remove endpoints that an
 	// earlier setup wrote. Native exporters cannot verify who owns a replaced
@@ -275,6 +280,12 @@ func jsonErrorPosition(data []byte, err error) string {
 
 func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	var errs []string
+
+	// The model base URL goes back first: a dead route-only URL would break
+	// every agent turn (DESIGN 7.4).
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		errs = append(errs, fmt.Sprintf("route-only: %v", err))
+	}
 
 	if err := c.restoreClaudeCodeHooks(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("restore hooks: %v", err))
