@@ -233,9 +233,27 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 // never take the first-match shortcut.
 func ruleMatchValidator(ruleID string) func(text, match string, start, end int) bool {
 	switch ruleID {
-	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
+	case "ENT-BULK-SSN":
 		return func(text, match string, start, end int) bool {
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
+		}
+	case "ENT-BULK-SSN-NOHYPHEN":
+		// Nine bare digits are an order number, a numeric id or the fraction
+		// of a timestamp far more often than an SSN, and two of them side by
+		// side are just two numbers: the list path (hasDistinctValidSSNList)
+		// is the hyphenated form's evidence, not this one's. A bare run needs
+		// its label or an aligned column header (rel-1-0-10 GAP-0171: every
+		// one of 346 strict benign DTap tool-output hits was an unlabelled
+		// list of table cells or timestamp fractions).
+		return func(text, match string, start, _ int) bool {
+			return validUSSSN(match) && credibleLabeledSSNContext(text, start)
+		}
+	case "ENT-DL-CA":
+		// One letter and seven digits is the shape of most ids and status
+		// codes; as a driver's licence number it needs its label (GAP-0171:
+		// 170 strict benign DTap tool-output hits, none labelled).
+		return func(text, _ string, start, _ int) bool {
+			return labeledDriverLicenceContext(text, start)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
 		return func(text, match string, start, end int) bool {
@@ -752,6 +770,13 @@ func credibleSSNContext(text string, start, end int) bool {
 	if hasDistinctValidSSNList(text, start, end) {
 		return true
 	}
+	return credibleLabeledSSNContext(text, start)
+}
+
+// credibleLabeledSSNContext is the SSN evidence that does not rest on the
+// shape of neighbouring numbers: an aligned column header or a label just
+// before the candidate.
+func credibleLabeledSSNContext(text string, start int) bool {
 	// Wide CSV/TSV exports can place the column header hundreds of bytes
 	// before the first value. Preserve that record context by requiring the
 	// candidate's exact column to align with a recognized header on the
@@ -789,6 +814,23 @@ func credibleSSNContext(text string, start, end int) bool {
 }
 
 const maxDelimitedSSNContextBytes = 64 * 1024
+
+// labeledDriverLicenceContext reports a driver's licence label in the 80
+// bytes before a candidate ("driver", "licence"/"license", or a standalone
+// DL token such as "DL:" or "dl_number").
+func labeledDriverLicenceContext(text string, start int) bool {
+	windowStart := start - 80
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	prefix := strings.ToLower(text[windowStart:start])
+	if strings.Contains(prefix, "driver") || strings.Contains(prefix, "licence") || strings.Contains(prefix, "license") {
+		return true
+	}
+	return driverLicenceTokenPattern.MatchString(prefix)
+}
+
+var driverLicenceTokenPattern = lazyregexp.New(`(?:^|[^a-z0-9])dl(?:[^a-z0-9]|$)`)
 
 func hasDelimitedSSNColumnHeader(text string, candidateStart int) bool {
 	if candidateStart <= 0 || candidateStart > len(text) {
