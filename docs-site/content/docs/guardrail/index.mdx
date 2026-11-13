@@ -367,6 +367,27 @@ Use `defenseclaw config get guardrail.judge.extra_body` to inspect it and
 `defenseclaw config validate` to check the saved configuration. It affects
 only the judge's OpenAI-compatible chat requests.
 
+Open models on Amazon Bedrock run on the `bedrock-mantle` endpoint, and the
+path depends on the model: Gemma 4 (`google.gemma-4-31b`) is served only under
+`/openai/v1`, while the gpt-oss models (for example
+`openai.gpt-oss-safeguard-20b`) and Gemma 3 are served under `/v1`. Each model
+refuses the other path with "isn't supported on this route". Put the model's
+path in `base_url`; the key is a Bedrock API key:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      provider: openai-compatible
+      model: google.gemma-4-31b
+      base_url: https://bedrock-mantle.us-east-1.api.aws/openai/v1
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+Gemma 4 is In-Region only (us-east-1, us-east-2, us-west-2, eu-central-1)
+and is not available through Converse or InvokeModel.
+
 A judge on a local model (Ollama, vLLM or LM Studio on your own machine)
 answers one call at a time, so judge calls queue behind each other. With the
 judge on, a prompt can start up to three judge calls (prompt injection,

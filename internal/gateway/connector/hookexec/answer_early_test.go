@@ -6,6 +6,7 @@ package hookexec
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -214,13 +215,25 @@ func TestEarlyAnswerWatchdogOnlyForToolCalls(t *testing.T) {
 // the answer deadline to the progress ceiling, never further: a judge that
 // answers later is not waited for, the managed call is blocked (whatever its
 // fail mode) and the process ends at the ceiling.
+//
+// The test budget leaves the call room to reach the gateway and read its
+// 102 before the budget ends: at 200 ms a hosted Windows runner took longer
+// than that to start the managed call and connect, so the call ended at the
+// budget (280 ms, Windows Native CI 43337174810, rel-1-0-10 GAP-0070) and the
+// test saw no progress at all. The judge (2 s) still answers after the
+// ceiling plus its tolerance; a failure names when the request arrived.
 func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
-	const budget, ceiling = 200 * time.Millisecond, 700 * time.Millisecond
+	const budget, ceiling = 500 * time.Millisecond, 1200 * time.Millisecond
 	shortAnswerBudget(t, budget)
 	shortProgressCeiling(t, ceiling)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
+	var arrivedMu sync.Mutex
+	var arrived []time.Time
 	addr := gatewayAt(t, func(w http.ResponseWriter, r *http.Request) {
+		arrivedMu.Lock()
+		arrived = append(arrived, time.Now())
+		arrivedMu.Unlock()
 		w.WriteHeader(HookProgressStatus)
 		select {
 		case <-release:
@@ -229,11 +242,18 @@ func TestProgressReportWaitsNoLongerThanTheCeiling(t *testing.T) {
 		}
 		_, _ = w.Write([]byte(`{"action":"allow"}`))
 	})
+	callStart := time.Now()
 	result, elapsed := runAgainstGateway(t, "codex", addr, func(opts *Options) {
 		managedCodex(opts)
 	})
 	if elapsed < ceiling-100*time.Millisecond || elapsed > ceiling+500*time.Millisecond {
-		t.Fatalf("the call ended after %s, want at the %s ceiling (not the %s budget, not the judge)", elapsed, ceiling, budget)
+		arrivedMu.Lock()
+		defer arrivedMu.Unlock()
+		reached := "never"
+		if len(arrived) > 0 {
+			reached = arrived[0].Sub(callStart).String()
+		}
+		t.Fatalf("the call ended after %s, want at the %s ceiling (not the %s budget, not the judge); the request reached the gateway after %s", elapsed, ceiling, budget, reached)
 	}
 	if !blocked(result) || !strings.Contains(result.stdout+result.stderr, managedGatewayNoAnswerReason) {
 		t.Fatalf("code=%d stdout=%q stderr=%q, want the managed no-answer block", result.code, result.stdout, result.stderr)
