@@ -94,7 +94,8 @@ profiles. Select them by their repository name; each runs with the balanced
 
 Supported names are `cloud-production-protection`,
 `database-destruction-protection`, `infrastructure-destruction-protection`,
-`kubernetes-production-protection`, and `privacy-high-assurance`. The output
+`kubernetes-production-protection`, `privacy-high-assurance`, and
+`active-directory-protection`. The output
 environment records each lane's policy digest, policy root, and action posture.
 Standard `default`, `permissive`, and `strict` runs are unchanged when
 `--opt-in-packs` is omitted.

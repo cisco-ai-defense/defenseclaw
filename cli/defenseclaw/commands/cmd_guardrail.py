@@ -5135,6 +5135,76 @@ def protection_disable_cmd(
     _change_protection(app, name, connector, profile, enable=False, json_out=json_out)
 
 
+def _validate_composed_protections(
+    app: AppContext,
+    connector_key: str | None,
+    profile: str | None,
+    desired: tuple[str, ...],
+    where: str,
+    _fail,
+) -> None:
+    """Refuse an opt-in protection pack a running gateway would reject.
+
+    Composes the scope's base rule pack with every ``guardrail.rules`` layer that
+    shapes the scope -- global, connector, profile and profile connector, widest
+    first, each with its protections, enable, disable and severity overrides --
+    with this scope's ``protections`` replaced by *desired*. That is the compose
+    the gateway runs on reload for this scope, so packs enabled here and at the
+    wider scopes add up as they do there. Narrower scopes and the
+    application_protection layers are not re-checked here. It runs through the authoritative Go loader and fails
+    on a definitive invalid result -- most importantly the semantic rule-cost
+    limit on a large base such as strict (rel-1-0-10:GAP-0050). A missing or
+    incompatible helper is best-effort: the check is skipped rather than block a
+    legitimate change.
+    """
+    from defenseclaw import policy_catalog, rulepack_validation
+
+    blocks = _scope_blocks(app.cfg, connector_key, profile)
+    target = _scope_block(app.cfg, connector_key, profile)
+
+    def _layer(rules) -> dict:
+        if rules is None:
+            return {}
+        layer: dict = {}
+        for key in ("protections", "enable", "disable"):
+            values = [str(v) for v in (getattr(rules, key, None) or [])]
+            if values:
+                layer[key] = values
+        overrides = {str(k): str(v) for k, v in (getattr(rules, "severity_overrides", None) or {}).items()}
+        if overrides:
+            layer["severity_overrides"] = overrides
+        return layer
+
+    layers = [layer for block in blocks if block is not target and (layer := _layer(getattr(block, "rules", None)))]
+    own = _layer(getattr(target, "rules", None) if target is not None else None)
+    own["protections"] = list(desired)
+    layers.append(own)
+    pack_dir = ""
+    for block in reversed(blocks):
+        pack_dir = policy_catalog.configured_pack_dir(app.cfg, block)
+        if pack_dir:
+            break
+    if not pack_dir:
+        pack_dir = policy_catalog.preset_pack_dir(app.cfg, "default")
+    if not pack_dir:
+        return
+    try:
+        result = rulepack_validation.validate_rule_pack(pack_dir, layers=layers)
+    except rulepack_validation.RulePackValidationBridgeError:
+        return
+    if getattr(result, "valid", True):
+        return
+    reason = ""
+    issue = getattr(result, "error", None)
+    if issue is not None:
+        reason = f" ({issue.code}: {issue.reason})" if getattr(issue, "reason", "") else f" ({issue.code})"
+    _fail(
+        1,
+        f"Turning on these protection packs for {where} would make a rule pack the gateway "
+        f"cannot load{reason}. Nothing was changed.",
+    )
+
+
 def _change_protection(
     app: AppContext,
     name: str,
@@ -5237,6 +5307,8 @@ def _change_protection(
         wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
         order = {p.name: index for index, p in enumerate(packs)}
         desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
+        if enable and desired:
+            _validate_composed_protections(app, connector_key, profile_name, tuple(desired), where, _fail)
         change = (
             config_writer.Change(path, desired)
             if desired else config_writer.Change(
