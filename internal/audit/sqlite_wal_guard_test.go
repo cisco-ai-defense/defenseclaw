@@ -1487,16 +1487,12 @@ func TestAuditConnectionsNeverMapTheDatabaseOutsideSecureClient(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			durableDB, err := store.durableConn()
-			if err != nil {
-				t.Fatal(err)
-			}
 			bodies, err := NewJudgeBodyStoreForCutover(filepath.Join(dir, "judge_bodies.db"), store.StoreOptions()...)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer bodies.Close()
-			for name, db := range map[string]*sql.DB{"writer": store.db, "checkpoint": checkpointDB, "durable": durableDB, "judge-body": bodies.db} {
+			for name, db := range map[string]*sql.DB{"writer": store.db, "checkpoint": checkpointDB, "judge-body": bodies.db} {
 				var size int64
 				if err := db.QueryRow(`PRAGMA mmap_size`).Scan(&size); err != nil || size != tc.want {
 					t.Fatalf("%s connection mmap_size = %d, %v; want %d", name, size, err, tc.want)

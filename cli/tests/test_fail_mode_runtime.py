@@ -3052,8 +3052,8 @@ def test_doctor_claude_hooks_checks_each_required_event(
     if form == "native":
         full = _claude_contract_hooks(_claude_golden_hooks(home))
     else:
-        # macOS (and managed) installs keep the shell hook (GAP-0559).
-        monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: False)
+        # A platform without the native launcher keeps the shell hook.
+        monkeypatch.setattr(fail_mode_runtime, "_claude_native_per_user_os", lambda: False)
         full = _claude_shell_contract_hooks(cfg.data_dir)
     # The lock records claudecode-hooks-v1, which has no DirectoryAdded.
     assert fail_mode_runtime.claude_required_events(cfg) == _CLAUDE_CONTRACT_EVENTS["claudecode-hooks-v1"]
@@ -3127,15 +3127,29 @@ def test_doctor_claude_hooks_fails_a_native_event_without_its_companion(
 @pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_shell_form_is_current_where_setup_writes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _claude_native_layout(monkeypatch, tmp_path)
-    for platform_linux, managed in ((False, ""), (True, "managed_enterprise")):
-        # macOS and managed installs keep the shell hook (GAP-0559), so the
-        # native handlers are not what Setup wrote there.
-        monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda value=platform_linux: value)
+    for native_os, managed in ((False, ""), (True, "managed_enterprise")):
+        # A platform without the native launcher and managed installs keep
+        # the shell hook, so the native handlers are not what Setup wrote there.
+        monkeypatch.setattr(fail_mode_runtime, "_claude_native_per_user_os", lambda value=native_os: value)
         cfg.deployment_mode = managed
         _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
         _write_claude_hooks(home, _claude_golden_hooks(home))
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_macos_per_user_uses_the_native_launcher(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # 1.0.10 registers the native launcher on per-user macOS too (#1384), so
+    # status and doctor must read it as current there (lead review P1-1).
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    monkeypatch.setattr(fail_mode_runtime.sys, "platform", "darwin")
+    assert fail_mode_runtime._claude_native_per_user_os()
+    assert fail_mode_runtime._claude_per_user_native_registration(cfg) is not None
+    _write_claude_hooks(home, _claude_golden_hooks(home))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
