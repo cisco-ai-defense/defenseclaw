@@ -148,9 +148,9 @@ func resolveContext(flagName string, env func(string) string) (string, Context, 
 				name = "default"
 			}
 		case name == "":
-			return "", Context{}, fmt.Errorf("no substrate context is set up; %s --admin-url URL --issuer URL --client-id ID (or --admin-url URL --kube on a cluster without an OIDC provider)", loginHint)
+			return "", Context{}, fmt.Errorf("you have not signed in to a cluster yet; %s --admin-url https://HOST:PORT (your administrator has the address)", loginHint)
 		default:
-			return "", Context{}, fmt.Errorf("substrate context %q (from %s) does not exist; %s --context %s --admin-url URL --issuer URL --client-id ID", name, from, loginHint, name)
+			return "", Context{}, fmt.Errorf("there is no cluster named %q (from %s); sign in to it with: defenseclaw substrate login --name %s --admin-url https://HOST:PORT", name, from, name)
 		}
 	}
 	if err := ValidName(name); err != nil {

@@ -85,7 +85,7 @@ var (
 	substrateDoctorAlertWait = 300 * time.Millisecond
 )
 
-const substrateLoginFix = "defenseclaw substrate login --admin-url https://HOST:PORT --issuer URL --client-id ID (your administrator has these)"
+const substrateLoginFix = "defenseclaw substrate login --admin-url https://HOST:PORT (your administrator has the address)"
 
 func newSubstrateDoctorCmd() *cobra.Command {
 	var (

@@ -58,8 +58,8 @@ func newSubstrateRunCmd() *cobra.Command {
 		Long: `Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret
 files such as .env and keys are held back), and puts the agent on your terminal. The agent is claude,
 codex, copilot, opencode, kiro, hermes or antigravity (amp, cursor-agent and devin are not verified yet, so
-they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. Questions the
-guard asks appear on the last line: [o]nce [a]lways [d]eny.
+they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. When the
+guard asks before a step, the question appears on the last line: press Ctrl-\ to answer once, always or deny.
 
 Press Ctrl-] to detach; the agent keeps running and suspends when idle. Come back from any machine with
 "defenseclaw substrate connect NAME". Bring the changes home with "defenseclaw substrate pull NAME".
@@ -126,8 +126,9 @@ func newSubstrateConnectCmd() *cobra.Command {
 		Short: "Come back to an agent and put it on this terminal",
 		Long: `Attaches your terminal to a running or suspended agent from any machine you are signed in on.
 A suspended agent wakes in about a fifth of a second and shows the screen as you left it. Press Ctrl-]
-to detach again. If the connection drops, it reconnects by itself.`,
-		Example: "defenseclaw substrate connect fix-tests-7f3a",
+to detach again. If the connection drops, it reconnects by itself. NAME is the name "defenseclaw substrate list"
+shows, or the --name you gave run when only one agent has it.`,
+		Example: "defenseclaw substrate connect fix-tests-7f3a\ndefenseclaw substrate connect fix-tests",
 		Args:    cobra.ExactArgs(1),
 		RunE:    func(cmd *cobra.Command, args []string) error { return runSubstrateConnect(cmd, &f, args[0]) },
 	}

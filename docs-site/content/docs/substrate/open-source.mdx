@@ -89,11 +89,10 @@ defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example
 With an OIDC provider, sign in with the device flow instead:
 
 ```bash
-defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test \
-  --issuer https://idp.example.test/realms/defenseclaw --client-id defenseclaw-launcher
+defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test
 ```
 
-A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
+The cluster tells the launcher which sign-in server to use; `--issuer` and `--client-id` override it. A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
 
 </Step>
 

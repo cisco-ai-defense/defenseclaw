@@ -53,6 +53,15 @@ func resolveSubstrateActor(ctx context.Context, cl *api.Client, ref string) (api
 			hits = append(hits, a)
 		}
 	}
+	// run gives every agent a fresh suffix (GAP-0133), so the --name a
+	// person chose is a prefix: it names the one agent that has it.
+	if len(hits) == 0 && !strings.Contains(ref, "/") {
+		for _, a := range actors {
+			if rest, ok := strings.CutPrefix(a.Name, ref+"-"); ok && !a.Deleted && substrateIsSuffix(rest) {
+				hits = append(hits, a)
+			}
+		}
+	}
 	switch len(hits) {
 	case 0:
 		return api.Actor{}, fmt.Errorf("you have no agent named %q; list yours with: defenseclaw substrate list", ref)
@@ -64,6 +73,20 @@ func resolveSubstrateActor(ctx context.Context, cl *api.Client, ref string) (api
 		names = append(names, a.Atespace+"/"+a.Name)
 	}
 	return api.Actor{}, fmt.Errorf("%q matches more than one agent (%s); name it as ATESPACE/NAME", ref, strings.Join(names, ", "))
+}
+
+// substrateIsSuffix reports the random suffix run puts after a name
+// (newSubstrateID(4): eight hex digits).
+func substrateIsSuffix(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func substrateAge(t time.Time, now time.Time) string {

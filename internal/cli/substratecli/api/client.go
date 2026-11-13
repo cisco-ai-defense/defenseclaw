@@ -226,6 +226,29 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	return nil
 }
 
+// noTokenKey marks a call that is made before anyone is signed in.
+type noTokenKey struct{}
+
+// Info is the answer of GET /info: how the cluster signs people in. The
+// route takes no sign-in.
+type Info struct {
+	// SignIn is oidc, kubernetes or none.
+	SignIn   string `json:"sign_in"`
+	Issuer   string `json:"issuer,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
+	// Attach reports that the cluster can attach launchers to agents.
+	Attach bool `json:"attach"`
+}
+
+// Info asks the cluster how people sign in to it. It sends no token.
+func (c *Client) Info(ctx context.Context) (Info, error) {
+	var in Info
+	err := c.do(context.WithValue(ctx, noTokenKey{}, true), http.MethodGet, "info", nil, nil, &in)
+	in.SignIn = strings.ToLower(strings.TrimSpace(in.SignIn))
+	in.Issuer, in.ClientID = strings.TrimSpace(in.Issuer), strings.TrimSpace(in.ClientID)
+	return in, err
+}
+
 // redactErr keeps a token out of a transport error text.
 func redactErr(err error, tok string) error {
 	if tok != "" && strings.Contains(err.Error(), tok) {
