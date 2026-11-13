@@ -158,6 +158,7 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. `0` uses the default. |
 | `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is confident. `0` uses the default. |
 | `decision_model.on_confident_block` | `escalate` | Cascade 3 only: `escalate` or `decide`. |
+| `decision_model.call_effects` | `false` | Also send the call's typed effects (what it reads, writes, deletes, runs and sends) as `state.call_effects` version 1, worked out locally in at most 50 ms and only for calls sent to the model. More than 16 effects, or a call the extractor cannot finish, is marked `truncated`; a confident allow on a truncated list is not trusted (the judge runs, or the call is confirmed). |
 
 In the TUI, open **0 Setup**, press `c` for the config editor and pick the **Decision Model** section.
 

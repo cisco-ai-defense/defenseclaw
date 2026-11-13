@@ -713,3 +713,11 @@ def test_system_one_protocol_against_the_decisions_api_fails(gemini, tmp_path):
     dm = DecisionModelConfig(enabled=True, model="gemini-decision-1", base_url=gemini)
     result = dmod.ping(dm, str(tmp_path))
     assert not result.ok and result.detail == "HTTP 400"
+
+
+def test_call_effects_round_trips_and_defaults_off(home):
+    assert DecisionModelConfig().call_effects is False
+    (home / "config.yaml").write_text("config_version: 9\ndecision_model:\n  call_effects: true\n")
+    cfg = config_module.load()
+    assert cfg.decision_model.call_effects is True
+    assert dict(dmod.summary_rows(cfg))["decision_model.call_effects"] == "true"

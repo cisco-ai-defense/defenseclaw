@@ -1806,6 +1806,8 @@ class DecisionModelConfig:
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
     hook_connectors: list[str] = field(default_factory=list)
+    # Adds state.call_effects (v1), the typed effects of the call. Off by default.
+    call_effects: bool = False
 
     def active(self) -> bool:
         return bool(self.enabled and self.base_url.strip() and self.model.strip())
@@ -1915,6 +1917,7 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
+        call_effects=raw.get("call_effects") is True or str(raw.get("call_effects", "")).strip().lower() == "true",
     )
 
 

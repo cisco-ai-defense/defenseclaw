@@ -366,6 +366,7 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
         ("decision_model.on_confident_block", dm.effective_on_confident_block()),
         ("decision_model.hook_connectors", ", ".join(dm.hook_connectors) or "(none: only in front of the LLM judge)"),
+        ("decision_model.call_effects", "true" if dm.call_effects else "false"),
     ]
     return rows
 
