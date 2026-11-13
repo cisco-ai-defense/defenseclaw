@@ -234,6 +234,9 @@ func newWalker(res *Result, o Options) *walker {
 	for k := range o.Env {
 		exported[k] = true // the caller's trusted environment is the process environment
 	}
+	if o.Home != "" {
+		exported["HOME"] = true // the shell's HOME is inherited from the process
+	}
 	return &walker{res: res, o: o, funcs: map[string]bool{}, aliases: map[string]string{},
 		links: map[string]string{}, writeByKey: map[string]int{},
 		env: env, exported: exported, varsOwned: true, spec: &childSpec{},
@@ -270,9 +273,12 @@ func (w *walker) walkScript(s *Script, depth int) {
 	if s == nil {
 		return
 	}
-	prevDialect := w.curDialect
-	w.curDialect = s.Dialect
-	defer func() { w.curDialect = prevDialect }()
+	// The narrowing state belongs to the frame that set it: an eval / source /
+	// nested body walked inside a linked statement must neither consume nor reset
+	// the enclosing statement's narrowing (round 9, GAP-0183).
+	prevDialect, prevNarrowed, prevChain := w.curDialect, w.narrowed, w.cdChain
+	w.curDialect, w.narrowed, w.cdChain = s.Dialect, nil, nil
+	defer func() { w.curDialect, w.narrowed, w.cdChain = prevDialect, prevNarrowed, prevChain }()
 	for _, fn := range s.Funcs {
 		w.funcs[funcKey(fn, s.Dialect)] = true
 	}
@@ -527,6 +533,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.ownVars()
 			w.exported[a.Name] = true
 		}
+		if a.Unexport {
+			w.ownVars()
+			delete(w.exported, a.Name) // declare +x / export -n: the child no longer inherits it
+		}
+		if a.NoValue {
+			continue // an attribute change only: the value is untouched
+		}
 		if rv.Static {
 			w.ownVars()
 			w.env[a.Name] = rv.Value
@@ -594,6 +607,10 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		return
 	}
 	w.unbindReader(program, inner)
+	declUA := false
+	if dialect == DialectPOSIX && isDeclBuiltin(program) && len(inner) > 1 {
+		declUA = !w.declWords(program, inner[1:])
+	}
 
 	// A per-command working directory from env -C / git -C / make -C / tar -C
 	// (review N2): applied to this command's placements only, then restored.
@@ -659,7 +676,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	}
 	prevPrim := w.lastPrim
 	cmdStart := len(w.res.Effects) // first effect index (0-based) of this command
-	unaccounted := wrapperUA
+	unaccounted := wrapperUA || declUA
 	nestedStart := -1
 	// Single choke point (review N4-1 / R5-1): any step that leaves an argv
 	// token unaccounted (wrapper, launcher, tar, operands) sets unaccounted;
@@ -983,11 +1000,31 @@ func (w *walker) placedHome(rv Word) string {
 	return w.placeHomeValue(rv.Value)
 }
 
+// placeHomeValue places a HOME value. Only an absolute value is placed: a shell
+// uses a relative HOME literally, relative to the cwd at the moment `~` or a
+// bare cd is evaluated, so a relative value is dynamic (round 9, GAP-0184).
 func (w *walker) placeHomeValue(v string) string {
+	if !absoluteSpelling(v, w.o.flavor()) {
+		return ""
+	}
 	if abs, ok, _ := placePath(v, w.opts()); ok {
 		return abs
 	}
 	return ""
+}
+
+// absoluteSpelling reports a path spelling that does not depend on the cwd.
+func absoluteSpelling(v string, flavor Flavor) bool {
+	if strings.HasPrefix(v, "/") {
+		return true
+	}
+	if flavor == FlavorWindows {
+		if strings.HasPrefix(v, `\`) {
+			return true
+		}
+		return len(v) >= 3 && isDriveLetter(v[0]) && v[1] == ':' && (v[2] == '\\' || v[2] == '/')
+	}
+	return false
 }
 
 // applyCWDChange updates the running cwd for cd/pushd/popd/Set-Location, and
@@ -1429,7 +1466,7 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			// POSIX combined short flags (-xzf, -sSLo): the split marks the
 			// token unaccounted if any component is unlisted.
 			if dialect == DialectPOSIX && len(name) > 2 && name[0] == '-' && name[1] != '-' {
-				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace)
+				_, uf := w.splitShortFlags(name, words, &i, p, &out, &inPlace, &destDir)
 				if uf {
 					unknownFlag = true
 				}
@@ -1479,6 +1516,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			}
 			continue
 		}
+		if hasInline && textBad(fl.Text, Word{Value: inlineVal, Static: true}) {
+			unknownFlag = true // a script / format / config the closed grammar does not accept
+		}
 		if hasInline {
 			if routeSourcesDestFlag(p, fl, Word{Value: inlineVal, Static: true}, &srcFlags, &destFlag) {
 				if fl.Role == RoleWrite {
@@ -1493,6 +1533,9 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 		}
 		if fl.Value {
 			if i+1 < len(words) {
+				if textBad(fl.Text, words[i+1]) {
+					unknownFlag = true
+				}
 				if routeSourcesDestFlag(p, fl, words[i+1], &srcFlags, &destFlag) {
 					if fl.Role == RoleWrite {
 						destFlagSet = true
@@ -1518,6 +1561,11 @@ func (w *walker) classifyOperands(words []Word, p Program, dialect Dialect) ([]o
 			combined = append(combined, destFlag)
 		}
 		positionals = combined
+	}
+	// The script / pattern positional a FirstPosIgnore program takes is accounted
+	// only if its closed grammar accepts it (sed script, awk program).
+	if p.FirstPosIgnore && !hasExpr && len(positionals) > 0 && textBad(p.FirstPosText, positionals[0]) {
+		unknownFlag = true
 	}
 	// A PosNone program with operands it does not model leaves them unaccounted,
 	// unless its entry declares the operands inert data (review R5-2).
@@ -1580,7 +1628,7 @@ func splitInlineFlagValue(name string, dialect Dialect) (flag, value string, has
 // splitShortFlags expands a combined POSIX short-flag token (-xzf, -sSLo). A
 // known value-taking short flag binds the rest of the token or the next arg;
 // unknown single chars are harmless mode flags (no strict taint).
-func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, out *[]operand, inPlace *bool) (consumed bool, unknownFlag bool) {
+func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, out *[]operand, inPlace *bool, destDir *string) (consumed bool, unknownFlag bool) {
 	body := name[1:]
 	for j := 0; j < len(body); j++ {
 		fn := "-" + string(body[j])
@@ -1603,12 +1651,34 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 			return true, unknownFlag
 		}
 		if fl.Value {
+			// cp -tDIR / mv -tDIR: the fused value is the target directory, so each
+			// source is written at DIR/name, not at DIR (round 9, GAP-0186).
+			if p.Pos == PosSourcesDest && fn == "-t" {
+				if j+1 < len(body) {
+					*destDir = body[j+1:]
+					*i++
+					return true, unknownFlag
+				}
+				if *i+1 < len(words) && words[*i+1].Static {
+					*destDir = words[*i+1].Value
+					*i += 2
+					return true, unknownFlag
+				}
+				*i++
+				return true, true // a dynamic target directory is not accounted
+			}
 			if j+1 < len(body) {
+				if textBad(fl.Text, Word{Value: body[j+1:], Static: true}) {
+					unknownFlag = true
+				}
 				*out = append(*out, operandValue(fl, Word{Value: body[j+1:], Static: true}, p))
 				*i++
 				return true, unknownFlag
 			}
 			if *i+1 < len(words) {
+				if textBad(fl.Text, words[*i+1]) {
+					unknownFlag = true
+				}
 				*out = append(*out, operandValue(fl, words[*i+1], p))
 				*i += 2
 				return true, unknownFlag
@@ -1689,6 +1759,20 @@ func (w *walker) positionalOperands(ps []Word, p Program, ctx posCtx) []operand 
 			out = append(out, mk(wd, role))
 			if ctx.del { // find -delete: the roots are also deleted
 				out = append(out, mk(wd, RoleDelete))
+			}
+		}
+	case PosInOut:
+		// uniq / xxd [INPUT [OUTPUT]]: the second operand is the file written; "-"
+		// is standard input / output; more than two operands is not accounted.
+		for i, wd := range ps {
+			switch {
+			case wd.Static && wd.Value == "-":
+			case i == 0:
+				out = append(out, mk(wd, RoleRead))
+			case i == 1:
+				out = append(out, mk(wd, RoleWrite))
+			default:
+				out = append(out, operand{role: RoleWrite, roleUncertain: true})
 			}
 		}
 	case PosGit:
@@ -2294,8 +2378,15 @@ func (w *walker) childEnvironment(childDialect Dialect) (env map[string]string, 
 	}
 	env = map[string]string{}
 	exp = map[string]bool{}
-	home = w.curHome
 	posixParent := w.curDialect == DialectPOSIX
+	// The child's HOME comes from the child's exported environment: when the
+	// shell's HOME is not exported (declare +x, export -n, unset then assigned)
+	// the child's `~` is the passwd home and a bare cd does not follow the
+	// shell's value (round 9, GAP-0184).
+	home = w.curHome
+	if posixParent && !w.exported["HOME"] {
+		home = ""
+	}
 	if spec.clear {
 		home = ""
 	} else {
@@ -2517,6 +2608,7 @@ func cloneBools(in map[string]bool) map[string]bool {
 func (w *walker) unsetVar(name string) {
 	w.ownVars()
 	delete(w.env, name)
+	delete(w.exported, name) // an unset variable is not exported; a later assignment makes a plain one
 	switch name {
 	case "HOME":
 		if w.curDialect == DialectPOSIX {
@@ -3599,4 +3691,74 @@ func (w *walker) noteShellOptions(program string, args []Word) {
 			}
 		}
 	}
+}
+
+// isDeclBuiltin reports a builtin that assigns variables by name when it is
+// reached as a program word (after command / builtin / exec): the frontend
+// lowers the direct form to assignments, but `command export HOME=x` arrives as
+// words (round 9, GAP-0184).
+func isDeclBuiltin(program string) bool {
+	switch program {
+	case "export", "declare", "typeset", "local", "readonly":
+		return true
+	}
+	return false
+}
+
+// declWords applies a declaration builtin given as words: NAME=value assigns,
+// NAME alone changes attributes only, -x / export put the name in the
+// environment, +x / export -n take it out. It returns false when an operand
+// could not be understood (a name or value that is not literal): the call is
+// then unaccounted and HOME and CDPATH are uncertain.
+func (w *walker) declWords(program string, args []Word) bool {
+	exported := program == "export"
+	unexport := false
+	ok := true
+	var operands []Word
+	for _, a := range args {
+		if a.Static && len(a.Value) > 1 && (a.Value[0] == '-' || a.Value[0] == '+') && !strings.Contains(a.Value, "=") {
+			switch {
+			case a.Value[0] == '+' && strings.Contains(a.Value, "x"):
+				unexport = true
+			case a.Value[0] == '-' && strings.Contains(a.Value, "x"):
+				exported = true
+			case a.Value[0] == '-' && program == "export" && strings.Contains(a.Value, "n"):
+				unexport, exported = true, false
+			case a.Value == "-p" || a.Value == "-f" || a.Value == "-F":
+				ok = false // listing / function mode: names are not variables
+			}
+			continue
+		}
+		operands = append(operands, a)
+	}
+	for _, a := range operands {
+		if !a.Static {
+			ok = false
+			w.unsetVar("HOME")
+			w.unsetVar("CDPATH")
+			continue
+		}
+		name, val, hasVal := a.Value, "", false
+		if eq := strings.IndexByte(a.Value, '='); eq > 0 {
+			name, val, hasVal = a.Value[:eq], a.Value[eq+1:], true
+		}
+		w.ownVars()
+		if exported && !unexport {
+			w.exported[name] = true
+		}
+		if unexport {
+			delete(w.exported, name)
+		}
+		if name == "CDPATH" {
+			w.cdpathMaybeSet = true
+		}
+		if !hasVal {
+			continue
+		}
+		w.env[name] = val
+		if name == "HOME" && w.curDialect == DialectPOSIX {
+			w.curHome = w.placeHomeValue(val)
+		}
+	}
+	return ok
 }

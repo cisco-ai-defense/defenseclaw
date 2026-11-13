@@ -72,7 +72,7 @@ B08 unset HOME then ~	U|
 B09 HOME empty then ~	U|
 B10 local HOME in func	U|write:/home/u/.bashrc
 B11 declare HOME	K|write:/tmp/h/.bashrc
-B12 readonly/export -n	U|
+B12 readonly/export -n	K|write:/home/u/.bashrc
 B13 ${HOME:-/tmp}	U|
 B14 ${X:-~}	U|
 B15 $PWD	U|
@@ -746,7 +746,7 @@ V26a ls|xargs rm	U|
 V26b find|xargs rm -rf	U|
 V27a sed -i -e	K|write:/home/u/.bashrc
 V27b grep -e	K|
-V27c awk -f	K|
+V27c awk -f	U|
 V27d sed --in-place	K|write:/home/u/.bashrc
 V28a tar old-style x -C	U|
 V28b tar -czf create	K|write:/tmp/o.tgz
@@ -1250,4 +1250,131 @@ rv7-S6 ps .NET relative uses process cwd	U|
 rv7-S7 ps function cd	U|
 rv7-S8 ps dot-source block cd	U|
 rv7-S9 ps if block cd	U|
+rv8-C01 overflow	U|
+rv8-C02 cd || subshell	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C03 cd || cmdsubst	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C04 cd && subshell	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C05 cd || true	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C06 cd && w || w	K|append:/home/u/.bashrc,append:/t/none/.bashrc,append:/t/none/x
+rv8-C07 cd || func	U|
+rv8-C08 cd || eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C09 cd || bash -c	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C10 cd || source	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C11 cmd paren group cd	U|append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys
+rv8-C12 cmd failed cd /d then cd	U|append:c:\t\none\.ssh\authorized_keys,append:c:\t\none\authorized_keys,append:c:\users\u\.ssh\authorized_keys,append:c:\users\u\authorized_keys
+rv8-C13 cmd cd || write	U|append:c:\users\u\.ssh\authorized_keys
+rv8-C14 if cd then	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C15 while cd	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C16 cd || cmdsubst in arg	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C17 cd || heredoc	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C18 cd || procsubst	U|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C19 cd || background	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C20 cd || pipeline	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C21 ps sl ||	U|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys
+rv8-C22 ps sl && sub	U|write:c:\users\u\.ssh\authorized_keys,write:c:\users\u\authorized_keys
+rv8-C23 cd && eval	U|append:/home/u/.bashrc,append:/t/none/.bashrc
+rv8-C24 cd || command eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-C25 cd || builtin eval	K|append:/home/u/.ssh/authorized_keys,append:/home/u/authorized_keys
+rv8-E01 ps env HOME into bash	U|
+rv8-E02 cmd set HOME into bash	U|
+rv8-E03 ps env HOME into sh bare cd	U|
+rv8-E04 export -n HOME	U|
+rv8-E05 declare +x HOME	U|
+rv8-E06 exec -c	U|
+rv8-E07 relative HOME child cd	U|
+rv8-E08 relative HOME parent	U|
+rv8-E09 relative HOME bare cd	U|
+rv8-E10 command export HOME	K|append:/home/u/.ssh/authorized_keys
+rv8-E11 builtin export HOME	K|append:/home/u/.ssh/authorized_keys
+rv8-E12 command declare HOME	U|append:/home/u/.ssh/authorized_keys
+rv8-E13 command export D (control)	K|append:/home/u/.ssh/authorized_keys
+rv8-E14 set -a (control)	U|
+rv8-E15 env -u HOME (control)	U|
+rv8-E16 typeset +x HOME bare cd	U|
+rv8-E17 unset then assign HOME	U|
+rv8-E18 command eval HOME	K|append:/home/u/.ssh/authorized_keys
+rv8-E19 builtin readonly HOME	U|append:/home/u/.ssh/authorized_keys
+rv8-E20 command export CDPATH	U|
+rv8-P01 iex Set-Location then write	U|write:c:\work\authorized_keys
+rv8-P02 Invoke-Expression -Command	U|write:c:\work\authorized_keys
+rv8-P03 iex then cmd /c	U|append:c:\work\authorized_keys
+rv8-S01 sh -s with pipe	U|
+rv8-S02 bash /dev/stdin	U|
+rv8-S03 sh -	U|
+rv8-S04 cmd fd 0 dup	U|
+rv8-S05 bash -i pipe	U|
+rv8-T01 uniq IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T02 sed w	U|
+rv8-T03 sed s///w	U|
+rv8-T04 sed -e w	U|
+rv8-T05 awk print >>	U|
+rv8-T06 awk -f	U|
+rv8-T07 sed -f	U|
+rv8-T08 xxd -r IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T09 xxd IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T10 curl -w output	U|
+rv8-T11 curl -K	U|
+rv8-T12 git -C pull	U|
+rv8-T13 git --work-tree pull	U|
+rv8-T14 git --work-tree checkout	U|
+rv8-T15 git -C clone	K|write:/home/u/.ssh/k/**
+rv8-T16 git -C init	K|write:/home/u/.ssh/**
+rv8-T17 sort -o fused	K|write:/home/u/.ssh/authorized_keys
+rv8-T18 sort --output=	K|write:/home/u/.ssh/authorized_keys
+rv8-T19 cp -t fused	K|write:/home/u/.ssh/authorized_keys
+rv8-T20 install -m fused	U|
+rv8-T21 uniq -c IN OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-T22 tee -p (control)	K|write:/home/u/.ssh/authorized_keys
+rv8-T24 xxd -r stdin OUT	K|write:/home/u/.ssh/authorized_keys
+rv8-W01 sudo -e	U|
+rv8-W02 sudo -e -u	U|
+rv8-W03 env -S	U|
+rv8-W04 nice nohup env -C	K|append:/home/u/.ssh/authorized_keys
+rv8-W05 failed cd then env -C rel	K|append:/home/u/.ssh/authorized_keys,append:/t/none/.ssh/authorized_keys
+rv8-W06 failed cd then sudo -D rel	K|append:/home/u/.ssh/authorized_keys,append:/t/none/.ssh/authorized_keys
+rv8-W07 timeout env --chdir	K|append:/home/u/.ssh/authorized_keys
+rv8-W08 exec -a env -C	K|append:/home/u/.ssh/authorized_keys
+rv8-W09 setsid env -C fused	K|append:/home/u/.ssh/authorized_keys
+rv8-W10 env -C --	K|append:/home/u/.ssh/authorized_keys
+rv8-W11 env -C twice	U|
+rv8-W12 sudo -D then env -C	U|
+rv8-W13 env -C sh -c cd ..	U|
+rv8-W14 env -C bash -c	K|append:/home/u/.ssh/authorized_keys
+rv8-W15 env -C then nested env -C abs	K|append:/home/u/.ssh/authorized_keys
+rv8-W16 command -p tee (control)	K|append:/home/u/.ssh/authorized_keys
+rv8-W17 cd .ssh then env -C ..	U|
+rv8-W18 failed cd, cd, env -C ..	U|
+rv8-X01 ps LHS index cmd	U|
+rv8-X02 ps hash key cmd	U|
+rv8-X03 ps hash value & cmd	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-X04 ps hash value bare cmd	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-X05 ps member LHS cmd	U|
+rv8-X06 ps legacy quote split	U|
+rv8-X07 ps legacy quote cmd.exe	U|
+rv8-X08 ps legacy quote & cmd	U|
+rv8-X09 ps legacy quote full path	U|
+rv8-X10 ps legacy backtick quote	U|
+rv8-X11 ps plain cmd del (control)	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-X12 ps legacy quote assign	U|
+rv8-X13 ps cmd quoted payload (control)	U|append:c:\users\u\.ssh\authorized_keys
+rv8-X14 ps legacy quote piped	U|
+rv8-X15 ps legacy quote in foreach	U|
+rv8-X16 ps legacy quote CMD upper	U|
+rv8-X17 ps legacy quote /k	U|
+rv8-X18 ps legacy quote cd	U|
+rv8-X19 ps cmd /r	U|
+rv8-X20 ps cmd padded /c	U|
+rv8-X21 ps cmd /c colon param	U|delete:c:\t,delete:c:\users\u\.ssh\authorized_keys
+rv8-X22 ps cmd /c env var arg	U|
+rv8-X23 ps cmd stop-parse tail	U|
+rv8-X24 ps cmd /c then stop-parse	U|
+rv8-Y01 ps LHS index Remove-Item	U|
+rv8-Y02 ps hash key Remove-Item	U|
+rv8-Y03 ps hash value & Remove-Item	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-Y04 ps hash value bare Remove-Item	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-Y05 ps member LHS Remove-Item	U|
+rv8-Y06 ps void & Remove-Item (control)	K|delete:c:\users\u\.ssh\authorized_keys
+rv8-Y07 ps hash value & powershell	K|delete:c:\users\u\.ssh\authorized_keys,delete:c:\users\u\.ssh\authorized_keys
+rv8-Y08 ps LHS index Set-Content	U|
+rv8-Y09 ps hash value & Add-Content	K|write:c:\users\u\.ssh\authorized_keys
 tee single unlisted	U|write:/tmp/x

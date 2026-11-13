@@ -110,6 +110,11 @@ type Assign struct {
 	// Unbind marks a name a for-loop rebinds: the walker drops it so later
 	// commands do not read a stale static value (review N3).
 	Unbind bool
+	// NoValue marks a declaration that names the variable without giving it a
+	// value (`export X`, `declare +x X`): only its attributes change.
+	NoValue bool
+	// Unexport removes the export attribute (`export -n`, `declare +x`).
+	Unexport bool
 }
 
 // RedirOp is the kind of a redirection.

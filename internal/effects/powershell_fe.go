@@ -61,6 +61,12 @@ func lowerPSScript(command string, o Options, expandNested bool) *Script {
 			// cannot place opaque), so psparse's copy of the same text would walk the
 			// payload twice (round 8 merge with psparse 27b3aa1f3b).
 			if cmd, ok := ns.Source.(*psparse.Command); ok && ns.Dialect == "cmd" && psBaseNameOf(cmd) == "cmd" {
+				// psparse's verdict is kept when it is not static (a payload it could
+				// not read, legacy quoting): the walker's own unwrap must not be the
+				// only thing standing between that and a fully known result.
+				if !ns.Static {
+					s.Unknowns = append(s.Unknowns, UnknownNode{Reason: ReasonOpaqueCode})
+				}
 				continue
 			}
 			// A powershell/pwsh host carrying -EncodedArguments: psparse decodes

@@ -206,6 +206,8 @@ func (w *walker) wrapperFlag(wrapper, fn, v string, spec wrapperSpec, unaccounte
 		switch {
 		case wrapper == "env" && ch == 'i':
 			w.spec.clear = true
+		case wrapper == "exec" && ch == 'c':
+			w.spec.clear = true // exec -c runs the program with an empty environment
 		case wrapper == "sudo":
 			w.sudoFlag("-" + string(ch))
 		}

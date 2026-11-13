@@ -197,10 +197,17 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 	// Only `export` (or declare/typeset -x) puts a variable in the environment of
 	// the commands that follow; a plain declare/local/readonly does not (round 8 E).
 	exported := cmd.Variant != nil && cmd.Variant.Value == "export"
+	unexport := false
 	for _, a := range cmd.Args {
 		if a.Name == nil && a.Value != nil {
-			if lit := a.Value.Lit(); strings.HasPrefix(lit, "-") && !strings.HasPrefix(lit, "--") && strings.Contains(lit, "x") {
+			lit := a.Value.Lit()
+			switch {
+			case strings.HasPrefix(lit, "+") && strings.Contains(lit, "x"):
+				unexport = true // declare +x / typeset +x
+			case strings.HasPrefix(lit, "-") && !strings.HasPrefix(lit, "--") && strings.Contains(lit, "x"):
 				exported = true
+			case cmd.Variant != nil && cmd.Variant.Value == "export" && strings.HasPrefix(lit, "-") && strings.Contains(lit, "n"):
+				unexport, exported = true, false // export -n NAME
 			}
 		}
 	}
@@ -208,12 +215,13 @@ func (w *posixWalker) declClause(st *syntax.Stmt, cmd *syntax.DeclClause, cond, 
 		if a.Name == nil {
 			continue
 		}
-		as := Assign{Name: a.Name.Value, Exported: exported}
+		as := Assign{Name: a.Name.Value, Exported: exported && !unexport, Unexport: unexport}
 		if a.Value != nil {
 			as.ValueWord = w.word(a.Value)
 			w.scanCmdSubsts(a.Value, c)
 		} else {
 			as.ValueWord = Word{Static: true}
+			as.NoValue = true
 		}
 		c.Assigns = append(c.Assigns, as)
 	}
