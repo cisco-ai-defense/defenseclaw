@@ -1856,13 +1856,13 @@ type GuardrailConfig struct {
 	// beside today's, never changing the answer) or "on" (effect verdicts
 	// decide). Ships "shadow"; the lead flips it to "on" once the corpus
 	// numbers hold.
-	EffectsRules                string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
+	EffectsRules string `mapstructure:"effects_rules"                 yaml:"effects_rules,omitempty"`
 	// EffectsRulesTier selects how far the effect lane may block: "restricted"
 	// (a listed command on an exact canonical known protected target) or
 	// "full" (any known mutation of a known protected target). Ships
 	// "restricted". It only matters while effects_rules is shadow or on.
-	EffectsRulesTier            string `mapstructure:"effects_rules_tier"            yaml:"effects_rules_tier,omitempty"`
-	JudgeSweep                  bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
+	EffectsRulesTier string `mapstructure:"effects_rules_tier"            yaml:"effects_rules_tier,omitempty"`
+	JudgeSweep       bool   `mapstructure:"judge_sweep"                  yaml:"judge_sweep,omitempty"`
 
 	// RetainJudgeBodies controls whether raw LLM-judge responses are
 	// persisted to the local SQLite audit store for later forensics.

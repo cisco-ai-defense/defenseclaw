@@ -19,8 +19,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/effectrules"
+	"github.com/defenseclaw/defenseclaw/internal/effects"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 )
 
