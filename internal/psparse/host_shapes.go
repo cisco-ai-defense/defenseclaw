@@ -53,6 +53,29 @@ var psHostOpts = map[string]bool{
 	"-outputformat": true, "-of": true,
 }
 
+// psOptValues are the values pwsh accepts for the value options above, by
+// lower-case spelling. pwsh 7.7 rejects any other value and runs nothing, so a
+// call with another value is outside the table (review 9 R9-5); the Linux
+// oracle checks every entry (TestHostOptionValuesOracle) except the Windows-only
+// window styles.
+var psOptValues = func() map[string]map[string]bool {
+	set := func(vs ...string) map[string]bool {
+		m := map[string]bool{}
+		for _, v := range vs {
+			m[v] = true
+		}
+		return m
+	}
+	policy := set("bypass", "unrestricted", "remotesigned", "allsigned", "restricted", "default", "undefined")
+	format := set("text", "xml")
+	style := set("normal", "minimized", "maximized", "hidden")
+	return map[string]map[string]bool{
+		"-executionpolicy": policy, "-ep": policy, "-exec": policy,
+		"-inputformat": format, "-if": format, "-outputformat": format, "-of": format,
+		"-windowstyle": style, "-w": style,
+	}
+}()
+
 var psCommandSwitches = map[string]bool{"-c": true, "-command": true}
 
 var psEncodedSwitches = map[string]bool{"-e": true, "-ec": true, "-enc": true, "-encodedcommand": true}
@@ -93,7 +116,7 @@ func matchPSHostShape(c *Command, words []hostWord) (shape string, idx int, reas
 				return "", 0, ReasonHostShape
 			}
 			v := words[i+1].text
-			if v == "" || v != strings.TrimSpace(v) || dashLed(v) {
+			if v == "" || v != strings.TrimSpace(v) || dashLed(v) || !psOptValues[lw][strings.ToLower(v)] {
 				return "", 0, ReasonHostOption
 			}
 			i += 2
