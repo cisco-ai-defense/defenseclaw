@@ -149,8 +149,6 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
 		})
 	}
-	// routing: a standard account reads its own routing on the own-status pipe.
-	addManagedWindowsRoutingCommand(root, where)
 	// Every other per-user command gets the managed answer too (GAP-0795).
 	addManagedWindowsPerUserAnswers(root, where)
 }

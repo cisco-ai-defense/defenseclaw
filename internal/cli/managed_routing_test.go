@@ -14,28 +14,28 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// REVIEW-s13-p1-merge F1: a standard account on a managed Windows computer
-// (no per-user CLI there) reads its own routing through the installed binary;
+// REVIEW-s13-p1-merge F1: a standard account on a managed computer (no
+// per-user CLI there) reads its own routing through the installed binary;
 // every routing write gets the managed answer and reaches no gateway.
-func TestManagedWindowsRoutingServesOwnReadsOnly(t *testing.T) {
+func TestManagedRoutingServesOwnReadsOnly(t *testing.T) {
 	var asked []string
 	status, body := http.StatusOK, `{"profile":"dev","recent":[]}`
-	old := managedWindowsRoutingRead
-	managedWindowsRoutingRead = func(_ context.Context, path string) (int, []byte, error) {
+	old := managedRoutingRead
+	managedRoutingRead = func(_ context.Context, path string) (int, []byte, error) {
 		asked = append(asked, path)
 		return status, []byte(body), nil
 	}
-	t.Cleanup(func() { managedWindowsRoutingRead = old })
+	t.Cleanup(func() { managedRoutingRead = old })
 
-	run := func(args ...string) (string, error) {
+	run := func(args ...string) (string, *cobra.Command, error) {
 		root := &cobra.Command{Use: "defenseclaw"}
 		var out strings.Builder
 		root.SetOut(&out)
 		root.SetErr(io.Discard)
-		addManagedWindowsRoutingCommand(root, "standalone")
+		root.AddCommand(newManagedRoutingCmd())
 		root.SetArgs(args)
 		err := root.Execute()
-		return out.String(), err
+		return out.String(), root, err
 	}
 
 	for _, tc := range []struct {
@@ -47,7 +47,7 @@ func TestManagedWindowsRoutingServesOwnReadsOnly(t *testing.T) {
 		{[]string{"routing", "explain", "req-1"}, "/api/v1/routing/explain/req-1"},
 	} {
 		asked = nil
-		out, err := run(tc.args...)
+		out, _, err := run(tc.args...)
 		if err != nil || len(asked) != 1 || asked[0] != tc.path || !strings.Contains(out, `"profile": "dev"`) {
 			t.Fatalf("%v: err %v asked %v out %q", tc.args, err, asked, out)
 		}
@@ -55,12 +55,7 @@ func TestManagedWindowsRoutingServesOwnReadsOnly(t *testing.T) {
 
 	for _, args := range [][]string{{"routing"}, {"routing", "enable"}, {"routing", "budgets", "add", "b1"}, {"routing", "test", "hi"}} {
 		asked = nil
-		root := &cobra.Command{Use: "defenseclaw"}
-		root.SetOut(io.Discard)
-		root.SetErr(io.Discard)
-		addManagedWindowsRoutingCommand(root, "standalone")
-		root.SetArgs(args)
-		err := root.Execute()
+		_, root, err := run(args...)
 		if err == nil || !strings.Contains(err.Error(), "set by your administrator") || !strings.Contains(err.Error(), "Nothing was changed.") {
 			t.Fatalf("%v: %v", args, err)
 		}
@@ -73,9 +68,23 @@ func TestManagedWindowsRoutingServesOwnReadsOnly(t *testing.T) {
 	}
 
 	status, body = http.StatusForbidden, `{"error":"routing reads are for administrators here"}`
-	_, err := run("routing", "status")
+	_, _, err := run("routing", "status")
 	var refused *routingReadError
 	if !errors.As(err, &refused) || refused.status != http.StatusForbidden || !strings.Contains(err.Error(), "for administrators") {
 		t.Fatalf("users_see none refusal: %v", err)
+	}
+}
+
+// The launcher (Linux, macOS) runs the three reads and nothing else of routing.
+func TestLauncherOffersOnlyTheRoutingReads(t *testing.T) {
+	for _, args := range [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain", "x"}} {
+		if !launcherOffers(args) {
+			t.Errorf("the launcher refuses %v", args)
+		}
+	}
+	for _, args := range [][]string{{"routing"}, {"routing", "enable"}, {"routing", "budgets", "add", "b"}, {"routing", "test", "hi"}} {
+		if launcherOffers(args) {
+			t.Errorf("the launcher runs %v", args)
+		}
 	}
 }

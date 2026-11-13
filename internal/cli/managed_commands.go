@@ -109,6 +109,17 @@ var managedCommands = []managedCommand{
 		Note: "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment.",
 	},
 	{
+		Command: "defenseclaw routing status, routing budgets list, routing explain",
+		Launcher: []launcherPattern{
+			{words: []string{"routing", "status"}}, {words: []string{"routing", "budgets", "list"}},
+			{words: []string{"routing", "explain"}},
+		},
+		Windows: managedOffered,
+		Probes:  [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain"}},
+		PerUser: perUserEverywhere, PerUserPath: []string{"routing", "status"},
+		Note: "Shows your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config.",
+	},
+	{
 		Command:  "defenseclaw sandbox ...",
 		Launcher: []launcherPattern{{words: []string{"sandbox"}}},
 		Windows:  managedUnsupported,
