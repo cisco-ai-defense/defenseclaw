@@ -50,7 +50,7 @@ cannot change either tree.
 | Authorization ledger | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state` |
 | Service logs | `C:\ProgramData\Cisco\DefenseClaw\logs` |
 | Scanner runtime | `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`: `defenseclaw-scanners.exe` and the Python runtime it unpacks. The gateway can only read and run it |
-| Shipped rule packs | `C:\ProgramData\Cisco\DefenseClaw-RulePacks\<release id>\strict` and `\permissive`, one folder per release. Only SYSTEM and Administrators can change them; services can read them ([Strict and permissive rule packs](#strict-and-permissive-rule-packs)) |
+| Shipped rule packs | `C:\ProgramData\Cisco\DefenseClaw-RulePacks\<digest>\strict` and `\permissive`, one folder per version of the packs. Only SYSTEM and Administrators can change them; services can read them ([Strict and permissive rule packs](#strict-and-permissive-rule-packs)) |
 | Hook runtime | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, readable by users: the enrollment lists, runtime selectors and `machine-policy.json` |
 | Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and `mdm-wrapper.log`. Only Administrators and Event Log Readers can read them |
 
@@ -236,11 +236,11 @@ these permissions ([Custom rule pack app](/docs/enterprise/mdm/intune-windows#cu
 #### Strict and permissive rule packs
 
 Setup ships all three built-in rule packs. `default` is built into the binaries. Setup
-writes `strict` and `permissive` to
-`C:\ProgramData\Cisco\DefenseClaw-RulePacks\<release id>`, where the release id is
-the first 16 digits of the packs' digest. Each release reads only its own folder, so a
-rollback keeps working, and only SYSTEM and Administrators can change it. Select a pack
-with no other setting:
+writes `strict` and `permissive` to `C:\ProgramData\Cisco\DefenseClaw-RulePacks\<digest>`,
+where `<digest>` is the first 16 hex digits of a digest of the packs' files, so a release
+whose packs did not change uses the same folder. A release reads only the folder of its own
+packs, so a rollback keeps working, and only SYSTEM and Administrators can change it. Select
+a pack with no other setting:
 
 ```yaml title="config.yaml (excerpt)"
 guardrail:
@@ -249,16 +249,26 @@ guardrail:
 
 Run `/ensure` to switch, and again with `rule_pack: default` to switch back. A repeated
 `/ensure` changes nothing. The gateway refuses a shipped pack folder whose files are not
-the ones its release ships. `status` and `verify` then report `rule_pack_shipped_invalid`,
-and `/repair` or `/ensure` writes the folder again.
+the ones its release ships. `status` and `verify` (the Go checks that Setup `/verify` and
+MDM detection run; the PowerShell verify step does not look at the folder) then report
+`rule_pack_shipped_invalid`, and `/repair` or `/ensure` writes the folder again.
+
+If Setup cannot write the folders while the config uses the default pack, the run still
+succeeds with a warning, and the first run whose config selects `strict` or `permissive`
+writes them (and fails if it cannot).
 
 A `policy_dir` that holds `guardrail\strict` (or `guardrail\permissive`) still takes
 precedence, and that copy is yours to change. This is how 1.0.9 brought the pack, so
-such a config keeps working after the upgrade. To move to the shipped pack, remove
-that folder from `policy_dir` and run `/ensure`. A `policy_dir` without the folder uses
-the shipped pack. To keep a pack under your own name with a digest pin, use
-`guardrail.custom_packs` as described above. Uninstall removes the shipped packs once
-no deployment is left.
+such a config keeps working after the upgrade. To move to the shipped pack, remove that
+folder from `policy_dir` and run Setup `/repair`: an unchanged config makes `/ensure`
+change nothing, and `/repair` restarts the gateway on the shipped pack. A `policy_dir`
+without the folder uses the shipped pack. To keep a pack under your own name with a
+digest pin, use `guardrail.custom_packs` as described above.
+
+Setup does not remove the folders of older packs on upgrade (about 150 KB each, one per
+release whose packs changed), so a rollback finds its own. A failed upgrade from 1.0.9 that
+rolled back leaves the new release's folder; the next upgrade uses it. Uninstall removes all
+of them once no deployment is left.
 
 ### 3. Run Setup
 
