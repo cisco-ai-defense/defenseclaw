@@ -327,12 +327,24 @@ def openclaw_plugin_evidence(cfg: object, health: object) -> tuple[str, str, boo
     age = None
     if last:
         try:
-            age = (datetime.now(timezone.utc) - datetime.fromisoformat(last.replace("Z", "+00:00"))).total_seconds()
-        except ValueError:
+            stamp = datetime.fromisoformat(last.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - stamp).total_seconds()
+        except (TypeError, ValueError):
             age = None
     if age is not None and age <= OPENCLAW_PLUGIN_SEEN_FRESH_S:
         mode = str(seen.get("hook_mode") or "") or expected
         return mode, openclaw_hook_mode_detail(mode), True
+    uptime_ms = health.get("uptime_ms")
+    if age is None and isinstance(uptime_ms, (int, float)) and 0 <= uptime_ms < OPENCLAW_PLUGIN_SEEN_FRESH_S * 1000 / 2:
+        # The plugin calls in within a minute of a gateway start (REVIEW-5 N4).
+        started = int(uptime_ms // 1000)
+        detail = (
+            f"expected {expected}; the gateway started {started} s ago and the OpenClaw plugin calls in "
+            "within a minute"
+        )
+        return "unverified", detail, False
     step = "restart the OpenClaw gateway so it loads the DefenseClaw plugin"
     if str(_openclaw_connector_block().get("plugin_account") or "").strip():
         merge = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "openclaw-merge.json")

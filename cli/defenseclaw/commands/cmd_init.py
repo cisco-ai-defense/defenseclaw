@@ -3831,7 +3831,8 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
         click.echo("  You can enable it later with 'defenseclaw setup guardrail'.")
         return False
 
-    if str(gc.connector or "").strip().lower() == "openclaw":
+    actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else []
+    if "openclaw" in {str(gc.connector or "").strip().lower(), *actives}:
         # The OpenClaw preflight (plugin bytes and owners, OpenClaw files, the
         # native floor) runs before init configures anything, as in setup
         # openclaw (rel-1-0-10 GAP-0075, REVIEW-4 P2-6).

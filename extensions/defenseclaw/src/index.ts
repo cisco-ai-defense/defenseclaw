@@ -804,7 +804,14 @@ export default function (api: DefenseClawPluginHost) {
       // Until the gateway first answers, ask it once more: in the
       // separate-user layout openclaw.json has no promptGate key and the
       // gate is only in GET /api/v1/openclaw/runtime (rel-1-0-10 GAP-0138).
-      if (hookMode !== "native" && getRuntimeSettings().inspectTimeoutMs <= 0) await refreshRuntime(RUNTIME_PROMPT_WAIT_MS);
+      if (hookMode !== "native" && getRuntimeSettings().inspectTimeoutMs <= 0) {
+        // A refresh already in flight may use the long default timeout; the
+        // prompt waits at most RUNTIME_PROMPT_WAIT_MS for it (REVIEW-5 N2).
+        await Promise.race([
+          refreshRuntime(RUNTIME_PROMPT_WAIT_MS),
+          new Promise<void>((resolve) => setTimeout(resolve, RUNTIME_PROMPT_WAIT_MS).unref?.()),
+        ]);
+      }
       if (!promptGateOn()) return;
       const prompt = typeof event?.prompt === "string" ? event.prompt : "";
       if (!prompt) return;

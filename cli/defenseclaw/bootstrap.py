@@ -2206,6 +2206,16 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             _adopt_openclaw_gateway_port(app)
         if app.cfg.gateway.port != port_before:
             port_note = f", OpenClaw gateway port {app.cfg.gateway.port} from openclaw.json"
+    if "openclaw" in {connector, *(app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [])}:
+        # The OpenClaw preflight runs before quickstart saves, as in setup
+        # openclaw and init (rel-1-0-10 GAP-0075, REVIEW-5 N1).
+        from defenseclaw.commands.cmd_setup import _agent_settings_refusal
+
+        if refusal := _agent_settings_refusal(
+            app.cfg, "openclaw", workspace_dir="", will_restart=True,
+            changed="Quickstart saved no guardrail settings", rerun="command",
+        ):
+            return StepResult("Guardrail", "fail", refusal, "defenseclaw setup openclaw")
     try:
         with sink:
             ok, warnings = execute_guardrail_setup(

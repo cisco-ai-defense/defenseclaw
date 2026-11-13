@@ -166,3 +166,16 @@ class OpenClawPluginEvidenceTest(unittest.TestCase):
         self.assertEqual(self._evidence(fresh)[:1] + (self._evidence(fresh)[2],), ("hybrid", True))
         stale = {"openclaw_plugin": {"last_seen_at": (now - timedelta(minutes=10)).isoformat(), "hook_mode": "hybrid"}}
         self.assertEqual(self._evidence(stale)[0], "unverified")
+
+
+class OpenClawPluginEvidenceEdgeTest(OpenClawPluginEvidenceTest):
+    # REVIEW-5 N4/N5: right after a gateway start the detail says so; a naive
+    # timestamp does not crash.
+    def test_fresh_gateway_and_naive_timestamp(self):
+        from datetime import datetime
+
+        mode, detail, _ = self._evidence({"uptime_ms": 5000})
+        self.assertEqual(mode, "unverified")
+        self.assertIn("started 5 s ago", detail)
+        naive = {"openclaw_plugin": {"last_seen_at": datetime.utcnow().replace(microsecond=0).isoformat()}}
+        self.assertEqual(self._evidence(naive)[0], "hybrid")
