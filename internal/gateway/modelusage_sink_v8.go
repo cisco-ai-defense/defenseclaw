@@ -120,7 +120,11 @@ func emitModelUsageLogV8(ctx context.Context, emitter sidecarRuntimeEmitter, rec
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		meta := llmEventMeta{Source: connector, RequestID: f.RequestID}
+		meta := llmEventMeta{
+			Source: connector, RequestID: f.RequestID,
+			SessionID: f.SessionID, TurnID: f.TurnID, AgentID: f.AgentID,
+			PromptID: f.ModelRequestID, ResponseID: f.ModelResponseID,
+		}
 		envelope := hookModelLogEnvelope(ctx, snapshot, meta, connector, observability.TelemetryEventModelUsage)
 		envelope.Provenance.Producer = modelUsageV8Producer
 		record, buildErr := builder.BuildLogModelUsage(buildModelUsageLogInput(envelope, rec))
