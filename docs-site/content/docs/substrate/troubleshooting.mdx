@@ -8,7 +8,7 @@ keywords:
   - no free worker
 ---
 
-Start with `defenseclaw substrate doctor`. It checks your computer and your sign-in and says how to fix each failure. Administrators add `--cluster` (or run `verify`) for the cluster's own checks. Exit codes are in the [reference](/docs/substrate/reference#exit-codes). The quoted messages below are what the launcher and gateway print; `run` and `connect` show them after `Error:`.
+Start with `defenseclaw substrate doctor`. It checks your computer and your sign-in and says how to fix each failure. Administrators add `--install-file FILE` (the SubstrateInstall file given to `ate-setup`) for the cluster's own checks, the same ones `verify` runs; `--cluster` without it says what is missing. Exit codes are in the [reference](/docs/substrate/reference#exit-codes). The quoted messages below are what the launcher and gateway print; `run` and `connect` show them after `Error:`.
 
 ## Symptoms
 
@@ -63,7 +63,7 @@ On a managed cluster, DefenseClaw starts an agent only from a template whose att
 
 An actor with no allow list has no network. The usual causes:
 
-- **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match, or its signing key was revoked. `doctor --cluster` lists it with the reason (the events say `untrusted_signer` or `no_attestation`, and `sandbox.template_unverified`). Rebuild it with `defenseclaw substrate template build`, or `template verify`.
+- **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match, or its signing key was revoked. The controller's events say `untrusted_signer` or `no_attestation`, and the create path refuses with `sandbox.template_unverified`. Rebuild it with `defenseclaw substrate template build`, or `template verify`.
 - **The template is attested but its registry is private.** The controller and the gateway read the attestation from the registry and get HTTP 401, so the template is refused as `sandbox.template_unverified`. Give them a registry login: see [Attested templates in a private registry](/docs/substrate/eks#attested-templates-in-a-private-registry).
 - **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
 - **The profile has no matching assignment.** You get `default_profile`. `policy explain NAME` shows which one.
@@ -101,29 +101,27 @@ The default actor-token issuer is the same on every cluster. Give each cluster i
 
 The launcher prints `The task did not run: the cluster gateway refused its tool and model calls (keyset_unavailable: ...)` and exits with code 1. The gateway can't check agent tokens, and that holds for every agent on the cluster. The reason in brackets says why:
 
-- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate doctor --cluster` (administrators) shows the `substrate.actor_keys` row from the gateway.
+- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate verify --install-file install.yaml` (administrators) shows the `actor_keys` check.
 - `issuer`: Substrate signs with another issuer than `substrate.identity.issuer`. Use the same value in `setup --issuer` (then `ate-setup deploy`) and in the configuration.
 - `verifier_unavailable`: the gateway can't reach the Substrate control API.
 
 Ask your administrator to run `defenseclaw substrate verify` and look at `actor_keys`.
 
-### `verify` skips the snapshot bucket
+### `verify` cannot read the snapshot bucket
 
-`verify` lists the `snapshot_bucket` check as `skipped` with "no object-storage snapshot location to check". It does not read the bucket yet, on any object store. Snapshots hold everything an actor held, so check yourself that the bucket is encrypted, private, in the cluster's region and has a retention rule. `delete` removes an agent's snapshots.
+`snapshot_bucket` is `skipped` only when the install file names no `s3://` or `gs://` snapshot location. It warns "could not be read from here" when the `aws` or `gcloud` CLI is missing, has no credentials, or your identity may not read the bucket's settings (the permissions are in [the reference](/docs/substrate/reference#what-verify-needs)). Run `verify` again with an identity that can. "does not exist" is a failure: Substrate cannot store snapshots there. On Cloud Storage, a bucket whose public access prevention is inherited gets a warning, because `verify` does not read the organization policy. Snapshots hold everything an actor held, so fix a failure before you run agents. `delete` removes an agent's snapshots.
 
 ### Sign-in fails with a timeout to the OIDC issuer
 
 The cluster uses a private OIDC issuer (`substrate.identity.oidc.issuer`), and the gateway can't reach it: the launcher can't finish signing in, or the cluster refuses the sign-in right after, and the gateway log shows a timeout to the issuer's address. The chart's default NetworkPolicy lets the gateway reach DNS, the Kubernetes and Substrate APIs, its own Services, OTLP and model providers on 443, and nothing else. Add the issuer's address and port to `networkPolicy.egress.extra` (an example is on [the EKS page](/docs/substrate/eks#attested-templates-in-a-private-registry)), and check that the issuer's security group admits the node and pod subnets. A private CA also needs `gateway.oidcCA`.
 
-### `verify` ends with warnings on a fresh install
+### `verify` cannot read the access policies or the actor routes
 
-On a fresh install, `verify` reports these, and they are expected:
+`openfga_grants` and `actor_service_routes` warn with the reason when `kubectl` may not create the gateway's token or port-forward (see [what `verify` needs](/docs/substrate/reference#what-verify-needs)). With the access they pass or fail on what they read: `openfga_grants` fails when someone else edits or owns a launcher atespace, when DefenseClaw is not an editor in a managed atespace you named with `--managed-atespaces`, or when it is not a global viewer. `actor_service_routes` fails when the actor Service answers any route that is not a hook, notify, inspect, model, OTLP or relay check route.
 
-- `snapshot_bucket` is `skipped`: `verify` does not read the bucket yet.
-- `openfga_grants` warns `could not read the access policies; run doctor as a global viewer`, and `actor_service_routes` warns `could not read the actor listener's routes`. No identity or Role clears them: the kubectl-based `verify` does not read the access policies or the listener's routes at all, so they warn for a cluster administrator too. They are not failures; the exit code stays 0.
-- `ingress_clients` warns `N other router client(s) can reach every actor`. That is real: another client in `ingressAllowedSPIFFEIDs` of the SubstrateInstall file can reach every actor without DefenseClaw. Remove the clients you don't need, then run `ate-setup deploy` again.
+### `verify` warns that other router clients can reach every actor
 
-A `fail` is not expected. `actor_keys` and `issuer_unique` should pass.
+`ingress_clients` warns `N other router client(s) can reach every actor`. That is real: another client in `ingressAllowedSPIFFEIDs` of the SubstrateInstall file can reach every actor without DefenseClaw. Remove the clients you don't need, then run `ate-setup deploy` again. On a fresh install, with the access in the reference, every other check passes: a `fail` is real, and `actor_keys` and `issuer_unique` should pass.
 
 ### Model calls to Bedrock fail through a VPC endpoint
 
