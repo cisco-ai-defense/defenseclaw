@@ -39,14 +39,15 @@ func meetOfTwoAssignments(t *testing.T, mode string, profiles map[string]config.
 	return set, withGuardrailProfile(ctx, set, scope)
 }
 
-// The shipped default and strict packs both define ENT-EMAIL-BULK, at LOW
-// and MEDIUM. The meet of two proven profiles that block at MEDIUM with
-// them flags an e-mail address at MEDIUM, as the strict profile alone
-// does, whichever profile's name sorts first.
+// The shipped default and strict packs both define ENT-BULK-SSN, at HIGH
+// and CRITICAL. The meet of two proven profiles that block at MEDIUM with
+// them flags a Social Security number at CRITICAL, as the strict profile
+// alone does, whichever profile's name sorts first. (ENT-EMAIL-BULK was the
+// shared rule of this test until GAP-0149 made it LOW in both packs.)
 func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 	stubProfileSources(t)
 	root := guardrailPoliciesRoot(t)
-	const text = "send the quarterly report to dana.reyes@contoso-mail.net today"
+	const text = "employee record, ssn=" + "123" + "-45-6789" + ", needs review"
 	for _, order := range [][2]string{{"a-default", "b-strict"}, {"b-default", "a-strict"}} {
 		t.Run(order[0], func(t *testing.T) {
 			// A request scan without a pinned generation can read another
@@ -61,7 +62,7 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 				if generation == nil {
 					t.Fatal("fixture: no profile rule generation")
 				}
-				return strongestMeetFinding(scanContentRuleCategoryWithGeneration(generation, text, "message", ruleContentScopeUntrusted, ""), "ENT-EMAIL-BULK")
+				return strongestMeetFinding(scanContentRuleCategoryWithGeneration(generation, text, "message", ruleContentScopeUntrusted, ""), "ENT-BULK-SSN")
 			}
 			profiles := map[string]config.GuardrailProfile{
 				order[0]: {Mode: "action", BlockAt: "MEDIUM", RulePackDir: filepath.Join(root, "default")},
@@ -72,8 +73,8 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 				t.Fatalf("strict-only decision %q", name)
 			}
 			want := scan(strictCtx)
-			if want == nil || want.Severity != "MEDIUM" {
-				t.Fatalf("strict profile alone: ENT-EMAIL-BULK %+v; want MEDIUM", want)
+			if want == nil || want.Severity != "CRITICAL" {
+				t.Fatalf("strict profile alone: ENT-BULK-SSN %+v; want CRITICAL", want)
 			}
 			_, ctx := meetOfTwoAssignments(t, "observe", profiles, order[0], order[1], "codex")
 			decision := resolvedGuardrailProfileFrom(ctx).decision
@@ -81,8 +82,8 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 				t.Fatalf("decision %+v; want the meet of both profiles", decision)
 			}
 			got := scan(ctx)
-			if got == nil || got.Severity != "MEDIUM" {
-				t.Fatalf("meet: ENT-EMAIL-BULK %+v; want the strict pack's MEDIUM", got)
+			if got == nil || got.Severity != "CRITICAL" {
+				t.Fatalf("meet: ENT-BULK-SSN %+v; want the strict pack's CRITICAL", got)
 			}
 		})
 	}

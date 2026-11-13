@@ -131,6 +131,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "9f54aa385dffab92b7c08180ea2e37142d4fcf6ce3a53a29d9c0fc63374e0ff9",
             "a30346773809eb3571e1e44508e343cfc72ac70ed605b9837d0dcd663f2375e0",
             "b700765caa6ca379ad3a65456a467c586b0fc8cd7b846b827a90b6d1b97c04f8",
+            "ba2618936b9b464d34590500a5c36bb9e23a965b8b21b147576d38c78dfaad32",
             "ba9afe634aff068a0d79ff219c4d9d8eb99cc32fd955ab6b8607bae3835f7623",
             "c31e5e90da9c3a6521c328adb9ac7883555d1acd7ad287cc43e5fa56237bfa35",
             "c78061e9d90d91005913add8b0c046b05ecf921648494e7b035b6a4bf37956c1",

@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // Exit codes of the substrate commands, besides 0 (done) and 1 (failed):
@@ -147,10 +148,10 @@ func substrateWorkloadFromEnv(cmd *cobra.Command) *auth.WorkloadOptions {
 		file = f.Value.String()
 	}
 	if file == "" {
-		file = os.Getenv("DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE")
+		file = envvars.Getenv("DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE")
 	}
 	if file != "" || (os.Getenv("ACTIONS_ID_TOKEN_REQUEST_URL") != "" && os.Getenv("ACTIONS_ID_TOKEN_REQUEST_TOKEN") != "") ||
-		os.Getenv("DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE") != "" {
+		envvars.Getenv("DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE") != "" {
 		return &auth.WorkloadOptions{TokenFile: file}
 	}
 	return nil
