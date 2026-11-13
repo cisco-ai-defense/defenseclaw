@@ -112,6 +112,10 @@ func (s *Server) end(st *streamState, signal string) {
 		st.awaitingBody = false
 		st.verdict.Alert = true
 		st.verdict.Findings = append(st.verdict.Findings, "body_not_received:"+signal)
+		if st.verdict.formRules {
+			// Its body may have named a method a url rule refuses (GAP-0046).
+			st.verdict.Findings = append(st.verdict.Findings, "method_override_unchecked:"+whyNoBody)
+		}
 		s.finish(st)
 	}
 }

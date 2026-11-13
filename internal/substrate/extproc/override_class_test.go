@@ -34,6 +34,9 @@ func TestMethodOverrideClassGAP0046(t *testing.T) {
 		return r, []byte(body)
 	}
 	h := newHarness(t, nil)
+	// The egress filter has sent a body before (#3817 body mode); see
+	// TestMethodOverrideTableGAP0046 for a filter that never does.
+	h.eng.body.arrived()
 	for _, body := range []string{"_method=DELETE", "a=1&_method=delete", "_METHOD=DELETE", "%5Fmethod=DELETE", "_method=GET%2CDELETE", "x=%zz&_method=DELETE"} {
 		r, b := form(body)
 		v := h.eng.DecideHeaders(ctx, r)
