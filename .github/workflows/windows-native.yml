@@ -176,6 +176,21 @@ jobs:
           if ([string]$record.StdOut -notmatch "(?m)^--- PASS: $escapedRecordTest ") {
             throw "$recordTest did not complete with PASS on the native Windows runner (a SKIP leaves the real-ACL guard unexercised)"
           }
+          # The shipped strict and permissive rule packs under the real trust
+          # check (#1445): every test must PASS here, none may SKIP.
+          $shipped = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsShippedRulePacks', './internal/cli'
+          ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-shipped-rule-packs-test.log')
+          foreach ($shippedTest in @(
+            'TestWindowsShippedRulePacksConverges',
+            'TestWindowsShippedRulePacksRealTrustMovesAnUntrustedRootAside',
+            'TestWindowsShippedRulePacksRealTrustRewritesALinkInside',
+            'TestWindowsShippedRulePacksRealTrustRewritesAUserOwnedChild'
+          )) {
+            if ([string]$shipped.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($shippedTest)) ") {
+              throw "$shippedTest did not complete with PASS on the native Windows runner"
+            }
+          }
       - name: Run native Windows enterprise Setup recovery and mutex tests
         if: ${{ matrix.kind == 'checks' }}
         run: |
