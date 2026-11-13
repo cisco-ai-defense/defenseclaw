@@ -5,6 +5,7 @@ package extproc
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -296,5 +297,58 @@ func TestARefusalFloodOf2000IsBounded(t *testing.T) {
 	t.Logf("2000 concurrent refusals: %d lookups, all answered in %v, goroutines %d -> %d", lookups, took, before, after)
 	if lookups > 1 || after > before+5 || took > 500*time.Millisecond {
 		t.Fatalf("flood not bounded: %d lookups, all answered in %v, goroutines %d -> %d", lookups, took, before, after)
+	}
+}
+
+// GAP-0245: an unreachable leader has one rule. Its chain check and its
+// lookups get no answer (a transport error), on a fresh cache entry: from
+// the first request, chain.failure_mode decides, as after the entry ages
+// out (attended OSS: allowed with an alert; managed or unattended:
+// refused). A leader that answers, but slowly, is not unreachable: the
+// deleted-UID guarantee holds (TestADeletedUIDUnderASlowLeaderIsNeverAllowed).
+func TestAnUnreachableLeaderIsDecidedByTheFailureMode(t *testing.T) {
+	down := errors.New("leader unreachable")
+	for _, tc := range []struct {
+		name                string
+		managed, unattended bool
+		mode                string
+		allow               bool
+	}{
+		{"oss attended auto", false, false, "", true},
+		{"oss attended open", false, false, FailureOpen, true},
+		{"oss unattended auto", false, true, "", false},
+		{"managed auto", true, false, "", false},
+		{"oss attended closed", false, false, FailureClosed, false},
+	} {
+		var out atomic.Bool
+		ck := checkerFunc(func(context.Context, ChainStep) (ChainVerdict, error) {
+			if out.Load() {
+				return ChainVerdict{}, down
+			}
+			return ChainVerdict{}, nil
+		})
+		h := newHarness(t, func(c *Config, o *Options) {
+			o.ChainChecker = ck
+			c.Managed = tc.managed
+			if tc.mode != "" {
+				c.Chain.FailureMode = tc.mode
+			}
+		})
+		h.uids.unattended = tc.unattended
+		ctx := context.Background()
+		h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+		out.Store(true)
+		h.uids.mu.Lock()
+		h.uids.err = down
+		h.uids.mu.Unlock()
+		for i := range 3 {
+			v := h.eng.DecideHeaders(ctx, req("eng-web", "GET", "example.com", "/"))
+			if v.Allow != tc.allow || v.Rule == uncheckedUnconfirmed {
+				t.Fatalf("%s, request %d of the outage: %+v, want allow=%v by chain.failure_mode", tc.name, i, v, tc.allow)
+			}
+			if v.Allow && !v.Alert {
+				t.Fatalf("%s: allowed without an alert: %+v", tc.name, v)
+			}
+		}
 	}
 }

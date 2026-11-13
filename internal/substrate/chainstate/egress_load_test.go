@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -182,60 +181,86 @@ func TestEgressCheckSkipsAPurgeOnTheVolumeGAP0179(t *testing.T) {
 	}
 }
 
-// TestEgressCheckLoadSlowDiskGAP0179 is the load test: 50 checks a second
-// for 4 s across five actors, through the real leader transport, with the
-// worker's store writes slowed to 200 ms each. p99 of the check stays
-// within the callout's 20 ms budget, and nothing blocks behind the writes.
-func TestEgressCheckLoadSlowDiskGAP0179(t *testing.T) {
-	if testing.Short() {
-		t.Skip("load test")
-	}
+// GAP-0179: the egress check never waits on the disk. The worker's store
+// write blocks (a disk that does not answer) until the test lets it go.
+// With the worker stuck in it, checks over the transport and more checks
+// than the worker queue holds all return, answered from the memo: a secret
+// read still refuses, other actors are allowed. The signal is the blocked
+// write itself (entered, release), not a latency percentile on a shared
+// host; the 10 s guard only stops a hang.
+func TestEgressCheckNeverWaitsOnABlockedDiskGAP0179(t *testing.T) {
 	h := newHarness(t, t.TempDir(), Options{})
-	// A slow disk: every store write the worker makes takes 200 ms more.
-	const writeDelay = 200 * time.Millisecond
+	secret, other := actorA, actorB
+	h.hook(secret, "s1", secretRead(t))
+	h.hook(other, "s1", projection(t, reverseShell, 1))
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock) // before the harness closes the service, which drains the worker
 	h.svc.egress.stop()
 	h.svc.startEgressWorkerWith(func(ctx context.Context, in EgressRequest) error {
-		time.Sleep(writeDelay)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
 		return h.svc.recordEgress(ctx, in)
 	})
-	actors := make([]Actor, 5)
-	for i := range actors {
-		actors[i] = Actor{Atespace: "eng-web", UID: fmt.Sprintf("2e8d6260-7d31-4e56-b416-%012d", i+1)}
-		// Some actors have windows (a hook), so the worker really writes.
-		if i%2 == 0 {
-			h.hook(actors[i], "s1", projection(t, reverseShell, 1))
+	const guard = 10 * time.Second
+	check := func(a Actor, transport bool) EgressVerdict {
+		t.Helper()
+		type res struct {
+			v   EgressVerdict
+			err error
+		}
+		ch := make(chan res, 1)
+		go func() {
+			in := EgressRequest{Actor: a, Host: "registry.npmjs.org", Method: "GET"}
+			if transport {
+				v, err := h.client.CheckEgress(context.Background(), in)
+				ch <- res{v, err}
+				return
+			}
+			v, err := h.svc.Egress(context.Background(), in)
+			ch <- res{v, err}
+		}()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("check of %s: %v", a.UID, r.err)
+			}
+			return r.v
+		case <-time.After(guard):
+			t.Fatal("an egress check waited on the blocked disk")
+		}
+		return EgressVerdict{}
+	}
+	// An allowed check hands its step to the worker, which blocks in the write.
+	if v := check(other, true); v.Deny {
+		t.Fatalf("other actor: %+v", v)
+	}
+	select {
+	case <-entered:
+	case <-time.After(guard):
+		t.Fatal("the worker never reached the store write")
+	}
+	// The disk is blocked now. Checks still answer, from the memo.
+	for range 20 {
+		if v := check(secret, true); !v.Deny {
+			t.Fatalf("secret read, disk blocked: %+v, want deny", v)
+		}
+		if v := check(other, true); v.Deny {
+			t.Fatalf("other actor, disk blocked: %+v", v)
 		}
 	}
-	const rate, seconds = 50, 4
-	var mu sync.Mutex
-	var lat []time.Duration
-	var wg sync.WaitGroup
-	tick := time.NewTicker(time.Second / rate)
-	defer tick.Stop()
-	for n := 0; n < rate*seconds; n++ {
-		<-tick.C
-		wg.Add(1)
-		go func(a Actor) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			start := time.Now()
-			_, err := h.client.CheckEgress(ctx, EgressRequest{Actor: a, Host: "registry.npmjs.org", Method: "GET"})
-			d := time.Since(start)
-			if err != nil {
-				t.Errorf("check: %v", err)
-			}
-			mu.Lock()
-			lat = append(lat, d)
-			mu.Unlock()
-		}(actors[n%len(actors)])
+	// More checks than the worker queue holds: the full queue drops the
+	// step (counted) and the check still answers.
+	for range egressQueueSize + 16 {
+		check(other, false)
 	}
-	wg.Wait()
-	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
-	p50, p99 := lat[len(lat)/2], lat[len(lat)*99/100]
-	t.Logf("%d checks at %d/s, worker writes %s each: p50 %s, p99 %s, max %s, dropped %d",
-		len(lat), rate, writeDelay, p50, p99, lat[len(lat)-1], h.svc.EgressDropped())
-	if p99 > calloutBudget {
-		t.Fatalf("p99 %s over the callout budget %s", p99, calloutBudget)
+	if h.svc.EgressDropped() == 0 {
+		t.Fatal("the full queue dropped nothing: a check would have waited for room")
 	}
+	unblock()
 }

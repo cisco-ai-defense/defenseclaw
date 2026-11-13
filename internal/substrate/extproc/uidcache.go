@@ -90,6 +90,9 @@ type refreshState struct {
 	confirmed      time.Time
 	confirmedStart time.Time
 	entry          uidEntry
+	// failed: the last lookup that ended got no answer from the leader
+	// (a transport error or its own timeout).
+	failed bool
 }
 
 // RefreshResult is what a Refresh learned.
@@ -101,8 +104,13 @@ const (
 	RefreshSame RefreshResult = iota
 	// RefreshChanged: another UID, profile or attendance, or deleted.
 	RefreshChanged
-	// RefreshUnconfirmed: no answer within the budget, or an outage.
+	// RefreshUnconfirmed: the leader is reachable (its last lookup for
+	// the name answered) but did not answer within this request's budget.
 	RefreshUnconfirmed
+	// RefreshUnreachable: the lookup got no answer from the leader (a
+	// transport error or a timeout), now or on the name's last lookup while
+	// this one waits: the leader can't be reached (GAP-0245).
+	RefreshUnreachable
 )
 
 type uidEntry struct {
@@ -237,7 +245,11 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 	case st.running:
 		// The running lookup started before this request, and only one
 		// runs per name.
+		failed := st.failed
 		c.mu.Unlock()
+		if failed {
+			return RefreshUnreachable
+		}
 		return RefreshUnconfirmed
 	default:
 		st.running, st.started = true, now
@@ -250,6 +262,7 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		st.running = false
+		st.failed = err != nil
 		if err != nil {
 			return nil, err
 		}
@@ -260,10 +273,18 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 	})
 	t := time.NewTimer(c.refreshBudget)
 	defer t.Stop()
+	unanswered := func() RefreshResult {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if st.failed {
+			return RefreshUnreachable
+		}
+		return RefreshUnconfirmed
+	}
 	select {
 	case r := <-ch:
 		if r.Err != nil {
-			return RefreshUnconfirmed
+			return RefreshUnreachable
 		}
 		ne := r.Val.(uidEntry)
 		if !ok || ne.live != prev.live || ne.rec != prev.rec {
@@ -271,9 +292,9 @@ func (c *UIDCache) Refresh(ctx context.Context, a ActorRef, refusal bool, since 
 		}
 		return RefreshSame
 	case <-t.C:
-		return RefreshUnconfirmed
+		return unanswered()
 	case <-ctx.Done():
-		return RefreshUnconfirmed
+		return unanswered()
 	}
 }
 

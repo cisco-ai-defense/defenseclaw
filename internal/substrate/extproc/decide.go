@@ -306,6 +306,16 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			v = e.decideHeaders(ctx, req, &p)
 		case RefreshSame:
 			p.confirmed = true
+		case RefreshUnreachable:
+			// The leader can't be reached: nobody can say the actor was
+			// deleted or recreated, the same limit as a lookup outage. The
+			// pass stands as chain.failure_mode decided it (GAP-0090,
+			// GAP-0188, GAP-0245).
+			p.confirmed = true
+			if v.Allow {
+				v.Alert = true
+				v.Findings = append(v.Findings, "registration_unavailable")
+			}
 		}
 	}
 	if !p.confirmed && !policyRefusal(v) {
@@ -343,10 +353,17 @@ func policyRefusal(v Verdict) bool {
 // A refresh is bounded (GAP-0243): one lookup per name in flight, and a
 // request waits a short budget for it. Unconfirmed, a refusal of the policy
 // stages stands (it is a refusal), and only such a refusal may stand on a
-// refresh made within refusalReuse; an unchecked step or a cached delete
-// needs a lookup answered now, else it is refused, retryable
-// (registration_unconfirmed), never left to chain.failure_mode, which
-// decides only a leader that cannot be reached.
+// refresh made within refusalReuse.
+//
+// An unreachable leader has one rule (GAP-0245): when the lookup gets no
+// answer from the leader (a transport error or a timeout), nobody can say
+// the actor was deleted, so chain.failure_mode decides, from the first
+// request of the outage, as it does once the entry ages out (an alert on an
+// attended OSS install; refused on a managed install or for an unattended
+// actor). While the leader is reachable, an unchecked step or a cached
+// delete needs its answer: one that misses this request's budget is
+// refused, retryable (registration_unconfirmed), and a stale or not-live
+// answer refuses.
 type pass struct {
 	last bool
 	// refreshed: the entry was resolved by Refresh for this request.
