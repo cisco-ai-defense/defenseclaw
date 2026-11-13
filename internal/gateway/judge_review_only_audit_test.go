@@ -83,7 +83,7 @@ func TestJudgeReviewOnlyAuditOnlyInTheDefaultPack(t *testing.T) {
 // a MEDIUM on a call a rule flagged (an unprovable CRITICAL pattern finding),
 // and a HIGH.
 func TestHookJudgeLoneReviewFindingByPack(t *testing.T) {
-	const plain = "ls -la ./fixtures/reports"
+	const plain = "make -C ./fixtures/reports"
 	flagged := pythonWrapped("cat ~/.ssh/id_rsa")
 	for _, tc := range []struct {
 		pack, answer, command string
