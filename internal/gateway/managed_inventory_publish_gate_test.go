@@ -19,6 +19,8 @@ package gateway
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -488,13 +490,14 @@ func TestEmitEndpointInventoryGateDoesNotRecordFailedOrDegradedPublishes(t *test
 func TestEmitEndpointInventoryGateEmptyPerConnectorMCPStillPublishes(t *testing.T) {
 	withManagedEnterprise(t, true)
 	gate := managedPublishTestState(t)
+	t.Setenv("HOME", t.TempDir())
 	// An empty registry with no active connectors leaves the per-connector MCP
 	// fanout nothing to enumerate. Asserted rather than assumed so this test
 	// fails loudly if the fixture ever stops being empty.
 	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("codex")}}
 	registry := connector.NewRegistry()
-	if entries := perConnectorMCPEntries(cfg, registry); len(entries) != 0 {
-		t.Fatalf("fixture is not empty: %d per-connector MCP entries", len(entries))
+	if entries, partial := perConnectorMCPEntriesWithStatus(cfg, registry); partial || len(entries) != 0 {
+		t.Fatalf("fixture is not empty: %d per-connector MCP entries, partial=%t", len(entries), partial)
 	}
 
 	// Both cycles carry a complete report: only such a cycle stamps the bundle
@@ -581,16 +584,24 @@ func TestEmitEndpointInventoryGateManagedProjectionFailureStoresNoDigest(t *test
 // TestEmitEndpointInventoryGatePartialReportCannotStampBundle: internal/inventory
 // stamps Summary.Result "partial" whenever a scan recorded any error, and a
 // detector that errored contributes none of its signals — so the collections
-// derived from that report are truncated. Such a cycle must still publish (that
-// is today's behavior and it self-corrects), but it must not be allowed to
-// satisfy the daily complete-bundle guarantee with a partial copy.
+// derived from that report are truncated. They must be local diagnostics until
+// a complete scan can replace the last managed digest.
 func TestEmitEndpointInventoryGatePartialReportCannotStampBundle(t *testing.T) {
 	withManagedEnterprise(t, true)
 	gate := managedPublishTestState(t)
 	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("codex")}}
 	registry := connector.NewDefaultRegistry()
+	baseline := managedGateReport("scan-baseline", "alpha")
+	if err := emitEndpointInventory(t.Context(), cfg, registry, &endpointInventoryCapture{}, false, &baseline, gate); err != nil {
+		t.Fatal(err)
+	}
+	before, ok := managedPublishStoredRecord(t, gate, "endpoint_skill_inventory")
+	if !ok || before.Digest == "" {
+		t.Fatal("baseline did not store a skill inventory digest")
+	}
+	baselineBundle := managedPublishReadFile(t, gate).FullBundleAt
 
-	partial := managedGateReport("scan-partial", "alpha")
+	partial := managedGateReport("scan-partial", "bravo")
 	partial.Summary.Result = "partial"
 	partial.Summary.Errors = 1
 	degraded := &endpointInventoryCapture{}
@@ -600,21 +611,128 @@ func TestEmitEndpointInventoryGatePartialReportCannotStampBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(degraded.snapshot()) == 0 {
-		t.Fatal("partial report published nothing; it must publish, just not anchor the bundle")
+		t.Fatal("partial report published no local diagnostic")
 	}
-	if got := managedPublishReadFile(t, gate).FullBundleAt; !got.IsZero() {
-		t.Fatalf("partial report stamped the bundle clock: %s", got)
+	assertPartialInventoryDiagnostic(t, degraded.snapshot(), "endpoint_skill_inventory")
+	assertPartialInventoryDiagnostic(t, degraded.snapshot(), "endpoint_discovered_mcp_inventory")
+	assertPartialInventoryDiagnostic(t, degraded.snapshot(), "endpoint_plugin_inventory")
+	after, ok := managedPublishStoredRecord(t, gate, "endpoint_skill_inventory")
+	if !ok || after.Digest != before.Digest {
+		t.Fatalf("partial scan replaced last complete digest: before=%+v after=%+v", before, after)
+	}
+	if got := managedPublishReadFile(t, gate).FullBundleAt; !got.Equal(baselineBundle) {
+		t.Fatalf("partial report advanced the bundle clock: before=%s after=%s", baselineBundle, got)
 	}
 
-	// The bundle is therefore still due, and the next complete scan takes it.
-	complete := managedGateReport("scan-complete", "alpha")
+	// The complete retry can now publish the changed inventory.
+	complete := managedGateReport("scan-complete", "bravo")
 	if err := emitEndpointInventory(
 		t.Context(), cfg, registry, &endpointInventoryCapture{}, false, &complete, gate,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if managedPublishReadFile(t, gate).FullBundleAt.IsZero() {
-		t.Fatal("complete report after a partial one did not stamp the bundle clock")
+	final, ok := managedPublishStoredRecord(t, gate, "endpoint_skill_inventory")
+	if !ok || final.Digest == before.Digest {
+		t.Fatal("complete retry did not replace the skill digest")
+	}
+}
+
+func TestEmitEndpointInventoryUnreadableConnectorKeepsManagedDigest(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Setenv("HOME", t.TempDir())
+	gate := managedPublishTestState(t)
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("[mcp_servers.alpha]\ncommand = 'alpha-mcp'\n")
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Guardrail:   config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {}}},
+	}
+	registry := connector.NewRegistry()
+	report := managedGateReport("scan-1")
+	if err := emitEndpointInventory(t.Context(), cfg, registry, &endpointInventoryCapture{}, false, &report, gate); err != nil {
+		t.Fatal(err)
+	}
+	const source = "endpoint_per_connector_mcp_inventory"
+	before, ok := managedPublishStoredRecord(t, gate, source)
+	if !ok || before.Digest == "" {
+		t.Fatal("baseline did not store a per-connector digest")
+	}
+
+	write("[mcp_servers.alpha\n")
+	degraded := &endpointInventoryCapture{}
+	report = managedGateReport("scan-2")
+	if err := emitEndpointInventory(t.Context(), cfg, registry, degraded, false, &report, gate); err != nil {
+		t.Fatal(err)
+	}
+	assertPartialInventoryDiagnostic(t, degraded.snapshot(), source)
+	after, ok := managedPublishStoredRecord(t, gate, source)
+	if !ok || after.Digest != before.Digest {
+		t.Fatalf("unreadable config replaced last complete digest: before=%+v after=%+v", before, after)
+	}
+
+	write("[mcp_servers.bravo]\ncommand = 'bravo-mcp'\n")
+	retry := &endpointInventoryCapture{}
+	report = managedGateReport("scan-3")
+	if err := emitEndpointInventory(t.Context(), cfg, registry, retry, false, &report, gate); err != nil {
+		t.Fatal(err)
+	}
+	final, ok := managedPublishStoredRecord(t, gate, source)
+	if !ok || final.Digest == before.Digest {
+		t.Fatal("valid replacement config did not advance the managed digest")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	cleared := &endpointInventoryCapture{}
+	report = managedGateReport("scan-4")
+	if err := emitEndpointInventory(t.Context(), cfg, registry, cleared, false, &report, gate); err != nil {
+		t.Fatal(err)
+	}
+	empty, ok := managedPublishStoredRecord(t, gate, source)
+	if !ok || empty.Digest == final.Digest {
+		t.Fatalf("clean removal did not advance the managed digest: before=%s after=%s", final.Digest, empty.Digest)
+	}
+	for _, record := range cleared.snapshot() {
+		if canonicalBody(t, record)[observability.TelemetryAttributeDefenseClawAIDiscoverySource] == source &&
+			record.Action() != string(config.ObservabilityV8ManagedMCPInventoryAction) {
+			t.Fatalf("clean removal used %q instead of the managed MCP action", record.Action())
+		}
+	}
+}
+
+func assertPartialInventoryDiagnostic(t *testing.T, records []observability.Record, source string) {
+	t.Helper()
+	foundSummary := false
+	for _, record := range records {
+		body := canonicalBody(t, record)
+		if body[observability.TelemetryAttributeDefenseClawAIDiscoverySource] != source {
+			continue
+		}
+		if record.Action() != string(config.ObservabilityV8LocalInventoryDiagnosticAction) {
+			t.Fatalf("%s action = %q, want local diagnostic", source, record.Action())
+		}
+		if record.EventName() == "ai.discovery.completed" {
+			foundSummary = true
+			if record.Outcome() != observability.OutcomePartial {
+				t.Fatalf("%s summary outcome = %q, want partial", source, record.Outcome())
+			}
+			if _, present := body[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers]; present {
+				t.Fatalf("%s diagnostic summary exposed MCP identifiers", source)
+			}
+		}
+	}
+	if !foundSummary {
+		t.Fatalf("no partial diagnostic summary for %s", source)
 	}
 }
 

@@ -1039,6 +1039,66 @@ agent inventory received through agent discovery uses the same per-item model.
 Incomplete, overflowed, or otherwise non-authoritative collections are retained
 as local diagnostics instead of being exported as authoritative snapshots.
 
+Managed MCP inventory treats an unreadable connector configuration, a malformed
+server entry in otherwise valid JSON, an invalid Codex or Amp configuration,
+or an incomplete discovery scan as a partial observation. Valid entries from
+other sources remain in the local diagnostic. The gateway emits a local,
+redacted inventory diagnostic and keeps the last complete managed snapshot;
+it does not report the missing entries as removals. A complete scan can publish
+a genuinely empty inventory when servers have been removed. The partial
+summary contains a source and counts; any observed component rows stay on the
+local diagnostic route and are not exported as managed inventory.
+On Windows, a LocalSystem gateway cannot read configured user-profile MCP
+files. That collection remains partial until a per-user source provides them;
+the gateway does not replace the last complete cloud snapshot with an empty one.
+
+Local MCP component records include the safe server name, safe command basename,
+transport, connector, native configuration scope when known, and the discovery
+source. For command-based entries, when the gateway has its installation token,
+it also exports separate keyed HMAC fingerprints of the full command and ordered arguments. The token
+never leaves the gateway through these fields; raw command paths, arguments,
+environment variables, headers, and OAuth material are not exported. A gateway
+token rotation changes these fingerprints. A local MCP component ID derives
+from the command and ordered-argument fingerprints, so rotating the token also
+changes that ID. Renaming a server without changing its command or arguments
+preserves its ID when no other alias in that connector and user scope has the
+same command and arguments; the connector and user scope still distinguish separate
+installations on one endpoint. If two aliases in the same connector and scope
+use identical commands and ordered arguments, the alias distinguishes their
+IDs so both configured rows remain visible.
+
+Remote MCP component records also include the configured server endpoint URL.
+The exported value keeps the HTTP(S) scheme, host, port, and escaped path, but
+omits userinfo, query parameters, and fragments. DefenseClaw does not probe
+the endpoint to collect this value; it comes from native connector
+configuration. Operators should keep credentials out of URL paths because the
+path is part of the exported server identity. Renaming a remote server alias
+does not change its component ID; changing the sanitized endpoint URL does.
+
+When a local or remote MCP admission scan completes, DefenseClaw preserves the bounded tool
+names returned by its existing `tools/list` request even if the scanner reports
+zero findings. Authenticated agent hooks also record the names of MCP tools
+called at runtime. Managed local and remote inventory emit these as `mcp_tool` components with
+the current parent server component ID, `advertised` or `observed` source, and
+the UTC observation time. It exports names only: tool descriptions, input
+schemas, call arguments, and results are excluded. A completed empty listing
+clears previously advertised names in the gateway's process memory; an
+incomplete listing produces a local partial diagnostic. An ambiguous server
+alias across user profiles is not attributed to either profile. Tool evidence
+is process-local until the next gateway inventory publication, and this flow
+does not reconcile a central principal catalog. Remote tool lineage follows the
+sanitized URL-based server ID. DefenseClaw reuses the scanner's existing remote
+`tools/list` request and does not start an additional endpoint probe. If an
+older scanner omits the tool-list field, the gateway marks the listing unknown
+and keeps the last complete managed snapshot. Only managed enterprise mode
+records this tool inventory; parent identities refresh with inventory
+publication. After a gateway restart, tool collections stay partial until
+each configured server has completed a listing, including an empty listing.
+An observed call alone does not mark a listing complete.
+The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing
+from export submission using fixed outcome and reason labels; it never uses a
+tool name, server URL, scan error text, or call argument as a label.
+
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI

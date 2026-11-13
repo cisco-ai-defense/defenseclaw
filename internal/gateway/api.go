@@ -105,7 +105,8 @@ type APIServer struct {
 	rootCoverage func() []watcher.RootCoverageIssue
 	// hookMCP are the MCP servers the managed Linux and macOS hooks report,
 	// which the install watcher admits (GAP-2591); nil elsewhere.
-	hookMCP *hookReportedMCPServers
+	hookMCP  *hookReportedMCPServers
+	mcpTools *mcpToolInventory
 	// mcpResolved are the MCP server definitions the hook calls resolved, so
 	// a server removed from the agent config mid-session is still judged on
 	// where it points (GAP-0861).
