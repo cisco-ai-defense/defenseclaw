@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -34,6 +35,14 @@ func TestSubstrateLoginKubeIsPinnedToTheClustersEndpointRecord(t *testing.T) {
 	var sawBearer atomic.Value
 	kapi := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawBearer.Store(r.Header.Get("Authorization"))
+		// No --kube-namespace: the launcher finds the record (GAP-0192).
+		if r.URL.Path == "/api/v1/configmaps" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{map[string]any{
+				"metadata": map[string]any{"name": "defenseclaw-launcher-endpoint", "namespace": "defenseclaw-system"},
+				"data":     map[string]string{"admin_url": record}}}})
+			return
+		}
 		if !strings.HasSuffix(r.URL.Path, "/namespaces/defenseclaw-system/configmaps/defenseclaw-launcher-endpoint") {
 			http.NotFound(w, r)
 			return
@@ -68,9 +77,9 @@ contexts:
 	}
 	t.Setenv("DEFENSECLAW_HOME", dir)
 
-	run := func(adminURL string) (string, error) {
-		out, _, err := runSubstrate(t, newSubstrateLoginCmd(), "--name", "k", "--admin-url", adminURL, "--admin-ca-file", adminCA,
-			"--kube", "--kubeconfig", kubeconfig)
+	run := func(adminURL string, extra ...string) (string, error) {
+		out, _, err := runSubstrate(t, newSubstrateLoginCmd(), append([]string{"--name", "k", "--admin-url", adminURL, "--admin-ca-file", adminCA,
+			"--kube", "--kubeconfig", kubeconfig}, extra...)...)
 		return out, err
 	}
 	// An admin address the record does not name gets no credential at all.
@@ -80,8 +89,22 @@ contexts:
 	if adminHits.Load() != 0 {
 		t.Fatal("the admin listener was contacted before the record was checked")
 	}
-	// The record's own address works, and the bearer went to the API server.
-	out, err := run(record)
+	// No --kube-namespace: login names the namespace, with the command to
+	// run, and signs in to nothing (GAP-0192, R5).
+	if _, err := run(record); err == nil || !strings.Contains(err.Error(), "is in namespace defenseclaw-system") ||
+		!strings.Contains(err.Error(), "run: defenseclaw substrate login --admin-ca-file") || !strings.Contains(err.Error(), "--kube --kubeconfig") ||
+		!strings.HasSuffix(err.Error(), "--kube-namespace defenseclaw-system") || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("login without --kube-namespace: %v", err)
+	}
+	if adminHits.Load() != 0 {
+		t.Fatal("the admin listener was contacted by a login without --kube-namespace")
+	}
+	if cf, err := auth.LoadContexts(); err == nil && cf.Contexts["k"].KubePinAdminURL != "" {
+		t.Fatal("a login without --kube-namespace pinned the context")
+	}
+	// The record's own address with its namespace works, and the bearer
+	// went to the API server.
+	out, err := run(record, "--kube-namespace", "defenseclaw-system")
 	if err != nil || !strings.Contains(out, "Signed in as dev-user") {
 		t.Fatalf("login = %q, %v", out, err)
 	}
@@ -104,5 +127,17 @@ contexts:
 	t.Setenv("DEFENSECLAW_SUBSTRATE_ADMIN_URL", "https://127.0.0.1:1")
 	if _, _, err := runSubstrate(t, newSubstrateListCmd(), "--context", "k"); err == nil || !strings.Contains(err.Error(), "run: defenseclaw substrate login --kube again") {
 		t.Errorf("the override must be refused, got %v", err)
+	}
+}
+
+// Live on bm (GAP-0192): doctor said a Kubernetes sign-in signs in "with a
+// workload token only".
+func TestSubstrateDoctorSignInServerNamesAKubeSignIn(t *testing.T) {
+	got := doctorSignInServer(context.Background(), auth.Context{Kube: true})
+	if got.Status != doctorSkip || !strings.Contains(got.Summary, "Kubernetes credentials") {
+		t.Fatalf("kube context: %+v", got)
+	}
+	if got := doctorSignInServer(context.Background(), auth.Context{}); !strings.Contains(got.Summary, "workload token") {
+		t.Fatalf("workload context: %+v", got)
 	}
 }

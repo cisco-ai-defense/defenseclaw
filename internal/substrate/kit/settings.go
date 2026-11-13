@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,8 +73,9 @@ type OverlayOptions struct {
 	// Workdir is the image WORKDIR.
 	Workdir string
 	// Provider selects the model route: "bedrock" or "anthropic" for Claude
-	// Code, "openai" or "bedrock-mantle" for Codex. Every route points at the gateway's
-	// /llm/<provider> with a placeholder key (D2, D14).
+	// Code, "bedrock" or "openai" for Codex (ModelProvider resolves ""). Every
+	// route points at the gateway's /llm/<provider> with a placeholder key
+	// (D2, D14).
 	Provider string
 	// Model is the default model id ("" leaves the connector's default).
 	Model string
@@ -369,6 +371,56 @@ var HeadlessArgv = map[string][]string{
 	"codex":      {"/usr/local/bin/codex", "exec", "--skip-git-repo-check", "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="never"`, "{prompt}"},
 }
 
+// Wave1Connectors are the connectors InteractiveArgv and HeadlessArgv serve.
+var Wave1Connectors = []string{"claudecode", "codex"}
+
+// Connectors is every connector the kit builds an actor image for, waves 1
+// to 3 (PLAN 4.3) in that order. Help texts list it, so they cannot drift.
+func Connectors() []string {
+	out := append([]string(nil), Wave1Connectors...)
+	out = append(out, Wave2Connectors...)
+	return append(out, Wave3Connectors...)
+}
+
+// CheckConnector refuses a connector the kit does not build an image for.
+func CheckConnector(name string) error {
+	for _, c := range Connectors() {
+		if c == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("%q is not a connector the kit builds; use %s", name, ConnectorList())
+}
+
+// ConnectorList is Connectors in words: "claudecode, codex, ... or devin".
+func ConnectorList() string {
+	c := Connectors()
+	return strings.Join(c[:len(c)-1], ", ") + " or " + c[len(c)-1]
+}
+
+// ModelProvider resolves the model route of a template build. A named
+// provider must be one the connector has a route for. Without one, Claude
+// Code and Codex take Bedrock unless the install serves (substrate.llm.providers)
+// their vendor API and not Bedrock: "anthropic" for Claude Code, "openai"
+// for Codex. The other connectors have the Bedrock route only.
+func ModelProvider(connectorName, provider string, served []string) (string, error) {
+	vendor := map[string]string{"claudecode": "anthropic", "codex": "openai"}[connectorName]
+	switch {
+	case vendor == "":
+		if provider != "" && provider != "bedrock" {
+			return "", fmt.Errorf("--provider %q: %s has only the bedrock route", provider, connectorName)
+		}
+		return provider, nil
+	case provider == "bedrock" || provider == vendor:
+		return provider, nil
+	case provider != "":
+		return "", fmt.Errorf("--provider %q: %s routes are bedrock or %s", provider, connectorName, vendor)
+	case slices.Contains(served, vendor) && !slices.Contains(served, "bedrock"):
+		return vendor, nil
+	}
+	return "bedrock", nil
+}
+
 func modelEnv(connectorName, gw string, o OverlayOptions) map[string]string {
 	env := map[string]string{}
 	switch connectorName {
@@ -472,25 +524,33 @@ func codexManagedConfig(data []byte, gw string, o OverlayOptions) ([]byte, error
 	s = strings.Replace(s, oldNotify, "notify = ['"+HookBinary+"', '--connector', 'codex', '--notify']", 1)
 	s = strings.Replace(s, "(OpenShell sandbox image, root-owned)", "(Agent Substrate actor image, root-owned)", 1)
 	s = strings.Replace(s, "\n[analytics]\n", "\n[feedback]\nenabled = false\n\n[analytics]\n", 1)
-	// The model route: the gateway's OpenAI Responses route with a
-	// placeholder key (D2, D14). Top-level keys must come before the first
-	// table.
-	model := ""
-	if o.Model != "" {
-		model = fmt.Sprintf("model = %q\n", o.Model)
+	// The model route: a Responses route of the gateway with a placeholder
+	// key (D2, D14). Top-level keys must come before the first table.
+	model, base := o.Model, gw+"/llm/openai/v1"
+	if o.Provider != "openai" {
+		// Bedrock (the default): Bedrock Runtime's OpenAI-compatible
+		// Responses API through /llm/bedrock (GAP-0187), Luna unless the
+		// template names a model.
+		base = gw + bedrockOpenAIPath
+		if model == "" {
+			model = LunaModel
+		}
 	}
-	top := model + "model_provider = 'defenseclaw'\n"
-	if o.Provider == "bedrock-mantle" {
-		// Mantle's OpenAI-compatible models serve function tools only
-		// (as the OpenShell harness's Mantle profile).
+	top := "model_provider = 'defenseclaw'\n"
+	if model != "" {
+		top = fmt.Sprintf("model = %q\n", model) + top
+	}
+	if o.Provider != "openai" {
+		// Bedrock's OpenAI-family models serve function tools only (no
+		// hosted web search, as the OpenShell harness's Bedrock profile).
 		top += "web_search = 'disabled'\n"
 		s = strings.Replace(s, "\n[features]\n", "\n[features]\nmulti_agent = false\n", 1)
 	}
 	if i := strings.Index(s, "\n["); i >= 0 {
 		s = s[:i+1] + top + s[i+1:]
 	}
-	s += fmt.Sprintf("\n[model_providers.defenseclaw]\nname = 'DefenseClaw'\nbase_url = '%s/llm/openai/v1'\nenv_key = 'OPENAI_API_KEY'\nwire_api = 'responses'\n"+
-		"http_headers = { %s = '%s', X-DefenseClaw-Client = 'codex-llm/1.0' }\n", gw, PlaceholderHeader, PlaceholderValue)
+	s += fmt.Sprintf("\n[model_providers.defenseclaw]\nname = 'DefenseClaw'\nbase_url = '%s'\nenv_key = 'OPENAI_API_KEY'\nwire_api = 'responses'\n"+
+		"http_headers = { %s = '%s', X-DefenseClaw-Client = 'codex-llm/1.0' }\n", base, PlaceholderHeader, PlaceholderValue)
 	return []byte(s), nil
 }
 

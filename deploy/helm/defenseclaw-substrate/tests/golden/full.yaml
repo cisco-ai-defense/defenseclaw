@@ -537,7 +537,7 @@ data:
     judge:
       ca_file: /var/run/ate/ca.crt
       token_file: /var/run/secrets/defenseclaw-callout-judge/token
-      url: https://defenseclaw-admin.defenseclaw-system.svc.cluster.local/api/v1/substrate/callout/verdict
+      url: https://defenseclaw-admin.defenseclaw-system.svc/api/v1/substrate/callout/verdict
     mcp_hosts:
     - mcp.example.com=tickets
     profiles:
@@ -819,6 +819,29 @@ rules:
   resourceNames: [defenseclaw-policy-resets]
   verbs: [get, update]
 ---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-actor-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: ["github-app"]
+  verbs: [get, patch]
+---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -905,6 +928,29 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-controller
+  namespace: defenseclaw-system
+---
+# Source: defenseclaw-substrate/templates/rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: defenseclaw-actor-secrets
+  labels:
+    app.kubernetes.io/name: defenseclaw-substrate
+    app.kubernetes.io/instance: dc
+    app.kubernetes.io/version: "1.0.10"
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: defenseclaw
+    helm.sh/chart: defenseclaw-substrate-1.0.10
+    app.kubernetes.io/component: gateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway-secrets
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
   namespace: defenseclaw-system
 ---
 # Source: defenseclaw-substrate/templates/callout.yaml
@@ -1101,7 +1147,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: 92b4faa95b0e992f008b0560755f27bd41f56c2b78aa1252cd406a6d724fd492
-        checksum/callout: a21a3ef606970d09bc35c6dd48d408de615e18c0542f7434ebc863c6761f0b37
+        checksum/callout: 2481d52c889551e2a6f507a67f39ed015cc4cf95f003b0ad43327ccd1d5fd68b
     spec:
       
       serviceAccountName: defenseclaw-callout

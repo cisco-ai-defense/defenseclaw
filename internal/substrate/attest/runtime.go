@@ -38,7 +38,11 @@ const (
 	RoleSkillFile = "skill_file"
 	RoleMCPConfig = "mcp_config"
 	RoleMCPServer = "mcp_server"
-	RoleRead      = "read_target"
+	// RoleMCPConfigWrite is the content an MCP config of the connector will
+	// have after this Write or Edit (the kit applies the edit to the file;
+	// GAP-0185): its servers decide the call.
+	RoleMCPConfigWrite = "mcp_config_write"
+	RoleRead           = "read_target"
 )
 
 // AttachedFile is a file the kit read for the gateway. Everything in it is a
@@ -60,6 +64,9 @@ type RuntimeAsset struct {
 	Files []AttachedFile
 	// Server is set for kind mcp.
 	Server *MCPServer
+	// Ambiguous is set for an MCP config whose keys differ only by case
+	// (GAP-0176): the asset is blocked whatever the admission rules say.
+	Ambiguous string
 }
 
 // RuntimeDecision is the answer for the hook route.
@@ -79,8 +86,10 @@ type RuntimeDecision struct {
 	// decision then fails closed for kind skill and mcp.
 	Incomplete bool
 	// Unavailable is true when no scanner could run here (scanner.Unavailable:
-	// not installed, or a host that refuses scanner containment). The action
-	// is then block; the caller applies its fail mode (GAP-0164).
+	// not installed, or a host that refuses scanner containment). For a
+	// skill the action is then block and the caller applies its fail mode
+	// (GAP-0164). For an MCP server only the tool scan is missing: the
+	// config rules decided the action (GAP-0185).
 	Unavailable bool
 }
 
@@ -93,9 +102,6 @@ type RuntimeScanner struct {
 	BlockList []policy.ListEntry
 	// AllowedMCPHosts, when not empty, lists the remote MCP hosts allowed.
 	AllowedMCPHosts []string
-	// BlockAtOrAbove is an optional severity floor (see ScanOptions); the
-	// default follows the host admission rules exactly.
-	BlockAtOrAbove scanner.Severity
 	// MaxFiles and MaxBytes bound one asset (defaults 64 files, 2 MiB).
 	MaxFiles int
 	MaxBytes int64
@@ -105,6 +111,17 @@ type RuntimeScanner struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedDecision
+}
+
+// NewRuntimeScanner is the gateway's runtime scanner (serve --substrate):
+// the skill scanner the config names, the in-process MCP scan and the host
+// admission rules.
+func NewRuntimeScanner(cfg *config.Config) *RuntimeScanner {
+	return &RuntimeScanner{
+		Skill:     scanner.NewSkillScannerFromLLM(cfg.Scanners.SkillScanner, cfg.ResolveLLM("scanners.skill"), cfg.CiscoAIDefense),
+		MCPStatic: &MCPStaticScanner{},
+		Compiled:  policy.CompileAdmission(cfg),
+	}
 }
 
 type cachedDecision struct {
@@ -122,9 +139,6 @@ func (r *RuntimeScanner) now() time.Time {
 // Scan decides one asset. An error means the scan could not run: the caller
 // applies its fail mode (unattended is closed, D8).
 func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDecision, error) {
-	if r.Skill == nil {
-		return nil, errors.New("runtime scan: no skill scanner")
-	}
 	maxFiles, maxBytes, ttl := r.MaxFiles, r.MaxBytes, r.TTL
 	if maxFiles == 0 {
 		maxFiles = 64
@@ -171,7 +185,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	// The allow list is not used here: a name or a path from the actor is a
 	// claim, and a skill that names itself after an allow-listed one must still
 	// be scanned.
-	so := ScanOptions{Admission: r.Admission, Compiled: r.Compiled, BlockList: r.BlockList, BlockAtOrAbove: r.BlockAtOrAbove, Now: r.now}
+	so := ScanOptions{Admission: r.Admission, Compiled: r.Compiled, BlockList: r.BlockList, Now: r.now}
 	if so.Admission == nil {
 		so.Admission = FallbackAdmission
 	}
@@ -179,6 +193,9 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	var res *scanner.ScanResult
 	switch a.Kind {
 	case config.AdmissionTypeSkill:
+		if r.Skill == nil {
+			return nil, errors.New("runtime scan: no skill scanner")
+		}
 		dir := filepath.Join(work, "skill")
 		if err := writeAttached(dir, files); err != nil {
 			return nil, err
@@ -196,6 +213,13 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 			res = failedScan(r.Skill.Name(), a.Name, err)
 		}
 	case config.AdmissionTypeMCP:
+		if a.Ambiguous != "" {
+			// GAP-0176: the agent and the scan read different servers.
+			res = &scanner.ScanResult{Scanner: ConfigScannerName, Target: a.Name, Timestamp: r.now().UTC()}
+			res.Findings = append(res.Findings, ambiguousFinding(a.Path, errors.New(a.Ambiguous)))
+			return &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Action: "block",
+				Reason: "the MCP config has keys that differ only by case, so the servers it starts cannot be checked"}, nil
+		}
 		if a.Server == nil {
 			return nil, errors.New("runtime scan: no MCP server definition")
 		}
@@ -204,7 +228,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 		if r.MCPStatic != nil && a.Server.Transport == "stdio" {
 			var src strings.Builder
 			for _, f := range files {
-				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] {
+				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] && serverStarts(*a.Server, f.Path) {
 					src.Write(f.Content)
 					src.WriteByte('\n')
 				}
@@ -216,14 +240,21 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 					return nil, err
 				}
 				sr, err := r.MCPStatic.Scan(ctx, tf)
-				if err != nil || sr == nil {
-					sr = failedScan(r.MCPStatic.Name(), a.Name, err)
+				if err != nil && scanner.Unavailable(err) {
+					// The tool scan cannot run here: the config rules above
+					// still decide, and the fail mode decides the rest
+					// (Unavailable; GAP-0185, as for skills in GAP-0164).
+					unavailable = true
+				} else {
+					if err != nil || sr == nil {
+						sr = failedScan(r.MCPStatic.Name(), a.Name, err)
+					}
+					res.Findings = append(res.Findings, sr.Findings...)
+					if sr.ScanError != "" {
+						res.ScanError, res.ExitCode = sr.ScanError, sr.ExitCode
+					}
+					res.Scanner = r.MCPStatic.Name()
 				}
-				res.Findings = append(res.Findings, sr.Findings...)
-				if sr.ScanError != "" {
-					res.ScanError, res.ExitCode = sr.ScanError, sr.ExitCode
-				}
-				res.Scanner = r.MCPStatic.Name()
 			}
 		}
 	default:
@@ -232,6 +263,21 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 
 	// Host admission rules: no template-build floor.
 	verdict, reason, _ := so.decide(ctx, a.Kind, a.Name, a.Path, res)
+	if a.Kind == config.AdmissionTypeMCP && verdict != VerdictBlock {
+		// GAP-0185: a HIGH finding of an MCP server (fetch-and-exec, a
+		// private or metadata address) is refused at run time as the
+		// template build refuses it, in every tier; the host admission
+		// default would only warn.
+		var high []string
+		for _, f := range res.Findings {
+			if sevRank(f.Severity) >= sevRank(scanner.SeverityHigh) {
+				high = append(high, f.RuleID+" ("+f.Title+")")
+			}
+		}
+		if len(high) > 0 {
+			verdict, reason = VerdictBlock, "a HIGH finding, refused at run time as at the template build: "+strings.Join(high, ", ")
+		}
+	}
 	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete, Unavailable: unavailable}
 	switch verdict {
 	case VerdictBlock:
@@ -317,8 +363,15 @@ func skillRelative(p string) string {
 
 var (
 	skillPathInCommand = regexp.MustCompile(`(\S*(?:\.claude|\.codex|\.agents)/skills/[A-Za-z0-9._\-]+)(?:/(\S*))?`)
-	mcpAddJSONRE       = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add-json\b`)
-	mcpAddRE           = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+add(?:\s|$)`)
+	// The vendor CLIs' "mcp add" under any name (GAP-0185): the CLI run
+	// through node, npx, a quoted or split name. The literal vendor form
+	// (vendorMCPRE) also turns a command it cannot read into a refusal under
+	// the fail mode; any other form only adds the servers it can read, and the
+	// configs the kit attaches at agent start and before every MCP tool call
+	// decide the rest.
+	mcpAddJSONRE = regexp.MustCompile(`\bmcp\s+add-json\b`)
+	mcpAddRE     = regexp.MustCompile(`\bmcp\s+(?:add|install)(?:\s|$)`)
+	vendorMCPRE  = regexp.MustCompile(`\b(?:claude|codex)\s+mcp\s+`)
 	// mcpOnlyFile are config files that exist for MCP servers only, so any
 	// partial edit of one may add a server.
 	mcpOnlyFile    = map[string]bool{".mcp.json": true, "mcp.json": true, "managed-mcp.json": true}
@@ -333,9 +386,17 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 	var ev struct {
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
+		CWD       string          `json:"cwd"`
 	}
 	if json.Unmarshal(payload, &ev) != nil {
 		return nil
+	}
+	// Writes the kit read as the config's next content.
+	kitWrites := map[string]bool{}
+	for _, f := range attached {
+		if f.Role == RoleMCPConfigWrite {
+			kitWrites[path.Clean("/"+f.Path)] = true
+		}
 	}
 	var in map[string]any
 	_ = json.Unmarshal(ev.ToolInput, &in)
@@ -441,7 +502,7 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 	// write that mentions servers but cannot be read as a whole (an Edit
 	// fragment, a patch, invalid text) becomes an asset with no definition,
 	// which Scan refuses: the caller's fail mode decides, never an allow.
-	if target != "" && mcpConfigWrite.MatchString(target) && (writeTool || patch != "") {
+	if target != "" && !kitWrites[path.Clean("/"+target)] && mcpConfigWrite.MatchString(target) && (writeTool || patch != "") {
 		text := content
 		if text == "" {
 			text = patch
@@ -454,6 +515,8 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 			servers, perr = ParseMCPConfig(target, []byte(text))
 		}
 		switch {
+		case wholeFile && errors.Is(perr, ErrMCPConfigAmbiguous):
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(target), Path: target, Files: serverFiles(attached), Ambiguous: perr.Error()})
 		case wholeFile && perr == nil:
 			for _, s := range servers {
 				s := s
@@ -464,34 +527,54 @@ func HookAssets(payload json.RawMessage, attached []AttachedFile) []RuntimeAsset
 		}
 	}
 	// MCP servers added by "claude mcp add" / "codex mcp add" (add-json too).
+	vendor := vendorMCPRE.MatchString(command)
 	if command != "" && mcpAddJSONRE.MatchString(command) {
-		s := parseMCPAddJSON(command)
-		if s != nil {
+		s, amb := parseMCPAddJSON(command)
+		if amb != nil {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached), Ambiguous: amb.Error()})
+		} else if s != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add-json", Server: s, Files: serverFiles(attached)})
-		} else {
+		} else if vendor {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add-json", Path: "mcp add-json", Files: serverFiles(attached)})
 		}
 	} else if command != "" && mcpAddRE.MatchString(command) {
 		if s := parseMCPAddCommand(command); s != nil {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: "mcp add", Server: s, Files: serverFiles(attached)})
-		} else {
+		} else if vendor {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: "mcp add", Path: "mcp add", Files: serverFiles(attached)})
 		}
 	}
 	// An MCP admission event: the kit attached the repository's MCP
 	// configuration and the server files (E20). A configuration that does not
 	// parse, or was cut by the kit's cap, is not read as "no servers".
+	//
+	// The kit attaches every MCP source of the connector (project, user and
+	// local scope, from the connector's MCP surface) and the next content of
+	// a config a Write or Edit changes (RoleMCPConfigWrite, whose servers
+	// decide that call). Of ~/.claude.json only the user scope and the
+	// local scope of this working folder start servers here.
+	cwd := ""
+	if ev.CWD != "" {
+		cwd = path.Clean("/" + filepath.ToSlash(ev.CWD))
+	}
 	for _, f := range attached {
-		if f.Role != RoleMCPConfig {
+		if f.Role != RoleMCPConfig && f.Role != RoleMCPConfigWrite {
 			continue
 		}
 		servers, err := ParseMCPConfig(f.Path, f.Content)
+		if errors.Is(err, ErrMCPConfigAmbiguous) {
+			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(f.Path), Path: f.Path, Files: serverFiles(attached), Ambiguous: err.Error()})
+			continue
+		}
 		if err != nil || f.Truncated {
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: path.Base(f.Path), Path: f.Path, Files: serverFiles(attached)})
 			continue
 		}
 		for _, s := range servers {
 			s := s
+			if s.Scope != "" && cwd != "" && path.Clean("/"+filepath.ToSlash(s.Scope)) != cwd {
+				continue
+			}
 			out = append(out, RuntimeAsset{Kind: config.AdmissionTypeMCP, Name: s.Name, Path: f.Path, Server: &s, Files: serverFiles(attached)})
 		}
 	}
@@ -504,6 +587,33 @@ func skillDirOf(file, name string) string {
 		return path.Dir(file)
 	}
 	return file[:i] + "/skills/" + name
+}
+
+// serverStarts reports whether the server's command line names the attached
+// file p: the kit attaches the in-repository files of every server of a
+// config (E20), and one server's source must not decide another server's
+// tool calls (GAP-0185: a package server beside a local one).
+func serverStarts(s MCPServer, p string) bool {
+	p = path.Clean("/" + filepath.ToSlash(p))
+	for _, cand := range append([]string{s.Command}, s.Args...) {
+		if cand == "" || strings.HasPrefix(cand, "-") {
+			continue
+		}
+		c := path.Clean(filepath.ToSlash(cand))
+		if c == "." || c == ".." || strings.HasPrefix(c, "../") {
+			continue
+		}
+		if path.IsAbs(c) {
+			if c == p {
+				return true
+			}
+			continue
+		}
+		if strings.HasSuffix(p, "/"+c) {
+			return true
+		}
+	}
+	return false
 }
 
 func serverFiles(all []AttachedFile) []AttachedFile {
@@ -582,16 +692,21 @@ func parseMCPAddCommand(cmd string) *MCPServer {
 }
 
 // parseMCPAddJSON reads "claude mcp add-json [flags] <name> '<json>'".
-func parseMCPAddJSON(cmd string) *MCPServer {
+// A server object with keys that differ only by case is returned as an
+// ErrMCPConfigAmbiguous error (GAP-0176): the CLI reads the exact keys.
+func parseMCPAddJSON(cmd string) (*MCPServer, error) {
 	loc := mcpAddJSONRE.FindStringIndex(cmd)
 	rest := cmd[loc[1]:]
 	i, j := strings.Index(rest, "{"), strings.LastIndex(rest, "}")
 	if i < 0 || j < i {
-		return nil
+		return nil, nil
+	}
+	if err := checkMCPServerKeys([]byte(rest[i : j+1])); err != nil {
+		return nil, err
 	}
 	var raw rawServer
 	if json.Unmarshal([]byte(rest[i:j+1]), &raw) != nil {
-		return nil
+		return nil, nil
 	}
 	var name string
 	for _, f := range strings.Fields(rest[:i]) {
@@ -601,8 +716,8 @@ func parseMCPAddJSON(cmd string) *MCPServer {
 		}
 	}
 	if name == "" {
-		return nil
+		return nil, nil
 	}
 	s := raw.server(name, "mcp add-json", "")
-	return &s
+	return &s, nil
 }

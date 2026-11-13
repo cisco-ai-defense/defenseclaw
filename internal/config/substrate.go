@@ -108,6 +108,41 @@ type SubstrateTemplatesConfig struct {
 	// RevokedDigests are image digests (sha256:...) never admitted again,
 	// whatever their attestation says.
 	RevokedDigests []string `mapstructure:"revoked_digests" yaml:"revoked_digests,omitempty"`
+	// RegistryAuth is how the controller and the gateway's create path log
+	// in to the template registries to read images and attestations
+	// (GAP-0190). Unset: anonymous.
+	RegistryAuth SubstrateRegistryAuthConfig `mapstructure:"registry_auth" yaml:"registry_auth,omitempty"`
+}
+
+// SubstrateRegistryAuthConfig names the template registry logins. Each one
+// belongs to exactly one registry host and is sent only to that host, in
+// answer to its challenge (GAP-0052); every other host is read anonymously.
+type SubstrateRegistryAuthConfig struct {
+	// DockerConfig is a docker config.json (the chart mounts a
+	// kubernetes.io/dockerconfigjson Secret here). Each auths entry is for
+	// its own host. The file is re-read when it changes; a missing file is
+	// no logins.
+	DockerConfig string `mapstructure:"docker_config" yaml:"docker_config,omitempty"`
+	// ECRHosts are Amazon ECR registry hosts
+	// (<account>.dkr.ecr.<region>.amazonaws.com) logged in to with an
+	// ecr:GetAuthorizationToken token through the AWS SDK default
+	// credential chain (IRSA or EKS Pod Identity), refreshed before it
+	// expires.
+	ECRHosts []string `mapstructure:"ecr_hosts" yaml:"ecr_hosts,omitempty"`
+}
+
+// substrateECRHostRe is an Amazon ECR private registry host: account,
+// optional FIPS endpoint, region, and the partition's domain.
+var substrateECRHostRe = regexp.MustCompile(`^([0-9]{12})\.dkr\.ecr(-fips)?\.([a-z]{2}(?:-[a-z]+)+-[0-9]+)\.amazonaws\.com(?:\.cn)?$`)
+
+// ParseECRRegistryHost splits an Amazon ECR registry host into its account
+// and region; fips is true for a dkr.ecr-fips host.
+func ParseECRRegistryHost(host string) (account, region string, fips, ok bool) {
+	m := substrateECRHostRe.FindStringSubmatch(host)
+	if m == nil {
+		return "", "", false, false
+	}
+	return m[1], m[3], m[2] != "", true
 }
 
 // EffectiveTrustAnchors is TrustAnchors or the chart's Secret mount path.
@@ -142,9 +177,23 @@ type SubstrateIdentityConfig struct {
 	TokenLifetimeSeconds int64  `mapstructure:"token_lifetime_seconds" yaml:"token_lifetime_seconds,omitempty"`
 	// ActorCertOID is the ActorIdentity extension OID in actor
 	// certificates (it changes after the CNCF donation).
-	ActorCertOID string                        `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
+	ActorCertOID string `mapstructure:"actor_cert_oid" yaml:"actor_cert_oid,omitempty"`
+	// KeysURL is where the gateway reads the keys that sign actor tokens
+	// (a JWK set). Empty: the in-cluster idp Service,
+	// https://idp.<substrate namespace>.svc/openid/v1/jwks, whatever the
+	// issuer is, so a per-cluster issuer is only compared as the iss
+	// string and need not resolve (GAP-0194). KeysCAFile is the PEM bundle
+	// that signed the keys URL's certificate (empty: the servicedns trust
+	// bundle the chart mounts).
+	KeysURL      string                        `mapstructure:"keys_url"       yaml:"keys_url,omitempty"`
+	KeysCAFile   string                        `mapstructure:"keys_ca_file"   yaml:"keys_ca_file,omitempty"`
 	OIDC         SubstrateOIDCConfig           `mapstructure:"oidc"           yaml:"oidc,omitempty"`
 	WorkloadOIDC []SubstrateWorkloadOIDCConfig `mapstructure:"workload_oidc" yaml:"workload_oidc,omitempty"`
+	// AdminGroups are the groups (OIDC groups claim, or Kubernetes groups
+	// with the Kubernetes sign-in) whose members are Substrate
+	// administrators on the admin listener. The gateway's --admin-groups
+	// flag adds to them.
+	AdminGroups []string `mapstructure:"admin_groups" yaml:"admin_groups,omitempty"`
 }
 
 // SubstrateOIDCConfig is the people's identity provider (launcher sign-in).
@@ -340,6 +389,12 @@ const (
 	// it expires (GAP-0133); 300 s is the upstream minimum.
 	DefaultSubstrateTokenLifetime = 300
 	DefaultSubstrateActorCertOID  = "1.3.6.1.4.1.11129.2.12.2"
+	// DefaultSubstrateNamespace is where Substrate runs when the API
+	// address does not name another namespace.
+	DefaultSubstrateNamespace = "ate-system"
+	// DefaultSubstrateKeysCAFile is the servicedns trust bundle the chart
+	// projects into the gateway: it signs the idp Service's certificate.
+	DefaultSubstrateKeysCAFile = "/run/servicedns.podcert.ate.dev/trust-bundle.pem"
 	// The Service defaults are fully qualified: the egress DNS relay answers
 	// only names an actor's policy lists, so the rule, the kit's URLs and
 	// the request Host must all be this one spelling (GAP-0023).
@@ -443,6 +498,35 @@ func (s SubstrateConfig) EffectiveAudience() string {
 	return orDefault(s.Identity.Audience, DefaultSubstrateAudience)
 }
 
+// SubstrateNamespace is the namespace Substrate runs in, read from the API
+// address (api.<namespace>.svc[.cluster.local]:port), else ate-system.
+func (s SubstrateConfig) SubstrateNamespace() string {
+	host := strings.TrimSpace(s.API.Address)
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimSuffix(host, "."), ".cluster.local")
+	if parts := strings.Split(host, "."); len(parts) == 3 && parts[0] == "api" && parts[2] == "svc" && parts[1] != "" {
+		return parts[1]
+	}
+	return DefaultSubstrateNamespace
+}
+
+// EffectiveKeysURL is identity.keys_url, or the idp Service's key set
+// (GAP-0194): ate-idp-server serves it at /openid/v1/jwks.
+func (s SubstrateConfig) EffectiveKeysURL() string {
+	if u := strings.TrimSpace(s.Identity.KeysURL); u != "" {
+		return u
+	}
+	return "https://idp." + s.SubstrateNamespace() + ".svc/openid/v1/jwks"
+}
+
+// EffectiveKeysCAFile is identity.keys_ca_file, or the servicedns trust
+// bundle.
+func (s SubstrateConfig) EffectiveKeysCAFile() string {
+	return orDefault(s.Identity.KeysCAFile, DefaultSubstrateKeysCAFile)
+}
+
 func (s SubstrateConfig) EffectiveTokenLifetime() int64 {
 	if s.Identity.TokenLifetimeSeconds == 0 {
 		return DefaultSubstrateTokenLifetime
@@ -531,12 +615,20 @@ func (s *SubstrateConfig) Validate() error {
 	if oid := id.ActorCertOID; oid != "" && !substrateOIDRe.MatchString(oid) {
 		bad("identity.actor_cert_oid", "%q is not a dotted OID", oid)
 	}
+	if u := id.KeysURL; u != "" && (!httpsURL(u) || strings.TrimSpace(u) != u) {
+		bad("identity.keys_url", "%q must be an https URL with no query or fragment", u)
+	}
 	if o := id.OIDC; o.Issuer != "" || o.ClientID != "" {
 		if !httpsURL(o.Issuer) {
 			bad("identity.oidc.issuer", "%q must be an https URL", o.Issuer)
 		}
 		if strings.TrimSpace(o.ClientID) == "" {
 			bad("identity.oidc.client_id", "is required with identity.oidc.issuer")
+		}
+	}
+	for i, g := range id.AdminGroups {
+		if strings.TrimSpace(g) == "" || len(g) > 256 {
+			bad(fmt.Sprintf("identity.admin_groups[%d]", i), "must be a group name of 1 to 256 bytes")
 		}
 	}
 	for i, w := range id.WorkloadOIDC {
@@ -779,6 +871,14 @@ func (s *SubstrateConfig) validateTemplates(bad func(key, format string, a ...an
 	for i, h := range t.PlainHTTPRegistries {
 		if host, port, err := net.SplitHostPort(h); err != nil || host == "" || port == "" {
 			bad(fmt.Sprintf("templates.plain_http_registries[%d]", i), "%q must be host:port", h)
+		}
+	}
+	if f := t.RegistryAuth.DockerConfig; f != "" && !path.IsAbs(f) {
+		bad("templates.registry_auth.docker_config", "%q must be an absolute path", f)
+	}
+	for i, h := range t.RegistryAuth.ECRHosts {
+		if _, _, _, ok := ParseECRRegistryHost(h); !ok {
+			bad(fmt.Sprintf("templates.registry_auth.ecr_hosts[%d]", i), "%q must be an Amazon ECR registry host (<account>.dkr.ecr.<region>.amazonaws.com)", h)
 		}
 	}
 }

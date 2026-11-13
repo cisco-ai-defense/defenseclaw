@@ -20,10 +20,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest/templatecli"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 )
 
 // substrateTemplateRun runs one template command with the arguments after
@@ -44,14 +46,13 @@ Flags build, verify, scan and publish all take:
   --platform OS/ARCH              image platform (default linux/amd64)
 `
 
-const templateBuildLong = `Builds a coding-agent image for the cluster from a base image: adds the DefenseClaw hook and relay, scans what is
+var templateBuildLong = `Builds a coding-agent image for the cluster from a base image: adds the DefenseClaw hook and relay, scans what is
 inside, and pushes it with a signed attestation that the cluster checks before it runs the image.
 
 Usage: defenseclaw substrate template build --from IMAGE --to REPO:TAG --hook-binary FILE --relay-binary FILE --key FILE [flags]
 
 Flags:
-  --connector NAME                claudecode or codex (default claudecode)
-  --from IMAGE                    base image (the OpenShell harness image for the connector, with tmux)
+` + templateConnectorHelp("connector to build: ", " (default claudecode)") + `  --from IMAGE                    base image (the OpenShell harness image for the connector, with tmux)
   --to REPO:TAG                   target repository and tag
   --kit-version VERSION           kit version (default dev)
   --hook-binary FILE              defenseclaw-actor-hook (linux static)
@@ -62,7 +63,7 @@ Flags:
   --block-at LEVEL                lowest finding severity that blocks the build: critical, high, medium, low or none (default high)
   --policy-generation N           policy generation recorded in the attestation (default 1)
   --builder-id ID                 builder id recorded in the attestation
-  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or bedrock-mantle)
+  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or openai; default from substrate.llm.providers)
   --model ID                      default model id
   --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of --config)
   --fail-mode MODE                interactive outage mode: open or closed
@@ -96,7 +97,7 @@ Flags:
 ` + templateCommonFlags + `
 Exit code: 0 admitted, 1 not admitted, 2 usage error.`
 
-const templateScanLong = `Scans an image the way a build does (skills, MCP servers, plugins and the hook files) and prints the verdict. It
+var templateScanLong = `Scans an image the way a build does (skills, MCP servers, plugins and the hook files) and prints the verdict. It
 changes nothing.
 
 Usage: defenseclaw substrate template scan IMAGE [flags]
@@ -105,8 +106,7 @@ Flags:
   --no-mcp-static                 do not run mcp-scanner over tool descriptions
   --mcp-analyzers LIST            mcp-scanner analyzers (default yara)
   --block-at LEVEL                lowest finding severity that blocks: critical, high, medium, low or none (default high)
-  --connector NAME                check the kit's hook files and switches for this connector (claudecode or codex)
-  --mcp-host HOST                 remote MCP host that is allowed (repeatable)
+` + templateConnectorHelp("check the kit's hook files and switches for this connector: ", "") + `  --mcp-host HOST                 remote MCP host that is allowed (repeatable)
 ` + templateCommonFlags + `
 Exit code: 0 clean, 1 blocked, 2 usage error.`
 
@@ -216,4 +216,26 @@ func newSubstrateTemplatePassthrough(name, short, long, example string) *cobra.C
 			return withExitCode(fmt.Errorf("template %s ended with code %d", name, code), code)
 		},
 	}
+}
+
+// templateConnectorHelp is the --connector line of a template command: the
+// kit's connectors (kit.ConnectorList), wrapped at 120 columns under the
+// help column like the other flag lines.
+func templateConnectorHelp(lead, tail string) string {
+	const prefix = "  --connector NAME                "
+	indent := strings.Repeat(" ", len(prefix))
+	var b strings.Builder
+	line := prefix
+	for _, w := range strings.Fields(lead + kit.ConnectorList() + tail) {
+		switch {
+		case len(line) == len(prefix):
+			line += w
+		case len(line)+1+len(w) > 120:
+			b.WriteString(line + "\n")
+			line = indent + w
+		default:
+			line += " " + w
+		}
+	}
+	return b.String() + line + "\n"
 }

@@ -258,12 +258,37 @@ func newSubstrateID(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// substrateProven lists the connectors that run on Substrate although their
+// OpenShell harness is unverified (GAP-0184): that status is about an
+// OpenShell V2 sandbox, not an actor. The value is a note the launcher prints
+// when the agent starts ("" for none). This is the only list; the cluster
+// decides the rest for every connector.
+//
+//   - opencode: its plugin posts through the actor kit's hook-post, live on a
+//     Bedrock model (lane A10, TST-0125, TST-0184).
+//   - cursor, devin, amp: vendor sign-in connectors (PLAN E9, lane A11, J41
+//     TST-0286 to TST-0299). The gateway decides at create with
+//     signin.Evaluate: open source runs the agent and the create answer
+//     carries the warning that the sign-in token sits in the actor and its
+//     snapshots, which run prints; a managed deployment refuses it with
+//     subscription_signin_refused before any actor exists. Kiro and
+//     Antigravity are verified harnesses with no entry here; the same rule
+//     applies to them.
+var substrateProven = map[string]string{
+	"opencode": "",
+	"cursor":   "",
+	"devin":    "",
+	"amp":      "Amp reaches its service over WebSocket connections that the cluster's network guard does not pass through yet, so it may not reach its model.",
+}
+
 // substrateRunTarget is what one run needs, resolved from flags and context.
 type substrateRunTarget struct {
 	spec     *harness.Spec
 	connName string
 	profile  string
 	template string
+	// note is the substrateProven note, printed when the agent starts.
+	note string
 }
 
 func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent string) (substrateRunTarget, error) {
@@ -271,10 +296,11 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	if err != nil {
 		return substrateRunTarget{}, withExitCode(err, 2)
 	}
-	if spec.Verification().Status == harness.Unverified {
+	note, proven := substrateProven[spec.Name]
+	if spec.Verification().Status == harness.Unverified && !proven {
 		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
-	t := substrateRunTarget{spec: spec, connName: spec.Name}
+	t := substrateRunTarget{spec: spec, connName: spec.Name, note: note}
 	// No profile named: the cluster gives the person the profile their
 	// groups map to (GAP-0166); --profile is only for someone with several.
 	t.profile = substrateFirst(f.profile, os.Getenv("DEFENSECLAW_SUBSTRATE_PROFILE"), s.Ctx.Profile)
@@ -339,6 +365,13 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 		return a, substrateFail(err)
 	}
 	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
+	// E9: in open source the cluster says what a vendor sign-in costs.
+	for _, warn := range a.Warnings {
+		fmt.Fprintf(w, "Warning: %s\n", warn)
+	}
+	if t.note != "" {
+		fmt.Fprintf(w, "Note: %s\n", t.note)
+	}
 	defer func() {
 		if err != nil {
 			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
@@ -374,11 +407,14 @@ func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrate
 	}
 	defer rel.Close()
 	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
-	dir, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
+	res, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
 	if err != nil {
 		return withExitCode(err, 1)
 	}
-	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(dir))
+	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
+	if res.Note != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %s.\n", safetext.Line(res.Note))
+	}
 	return nil
 }
 
@@ -504,9 +540,16 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if asJSON {
 		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONLine(w, e) }
 	}
+	started := time.Now()
 	code, err = attach.RunTask(tctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: emit})
 	if err != nil {
 		return -1, substrateFail(err)
+	}
+	// A task whose hook and model calls the gateway refused may still end
+	// with exit 0; it did not finish (GAP-0194).
+	if msg, refused := substrateTokenRefusal(ctx, s, started); refused {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s\nReview it with: defenseclaw substrate logs %s\n", msg, a.Name)
+		return 1, withExitCode(errors.New("the task did not run: the cluster refused its calls"), 1)
 	}
 	if code != 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "The task ended with exit code %d. Review it with: defenseclaw substrate logs %s; bring changes home with: defenseclaw substrate pull %s\n", code, a.Name, a.Name)
@@ -514,6 +557,28 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "The task finished. Bring changes home with: defenseclaw substrate pull %s\n", a.Name)
 	return code, nil
+}
+
+// substrateTokenRefusal asks the cluster whether it refused every agent's
+// token since start, and says so in words a person can act on.
+func substrateTokenRefusal(ctx context.Context, s *substrateSession, start time.Time) (string, bool) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	info, err := s.Client.Info(cctx)
+	if err != nil || !info.ActorTokens.Refusing(start) {
+		return "", false
+	}
+	why := "the agent's identity could not be checked"
+	switch info.ActorTokens.Reason {
+	case "keyset_unavailable":
+		why = "the cluster gateway cannot read the keys that sign agent tokens"
+	case "issuer":
+		why = "the agent's token names another issuer than the cluster gateway trusts"
+	case "verifier_unavailable":
+		why = "the cluster gateway cannot reach the Substrate control API"
+	}
+	return fmt.Sprintf("The task did not run: the cluster gateway refused its tool and model calls (%s: %s). "+
+		"Ask your administrator to run: defenseclaw substrate verify", info.ActorTokens.Reason, why), true
 }
 
 func substrateFirstErr(errs ...error) error {

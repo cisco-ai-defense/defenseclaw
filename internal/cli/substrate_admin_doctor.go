@@ -300,6 +300,9 @@ func doctorCluster(ctx context.Context, d *doctorRun, s *substrateSession, clust
 
 func doctorSignInServer(ctx context.Context, c auth.Context) substrateCheck {
 	const id = "sign_in_server"
+	if c.Kube {
+		return substrateCheck{ID: id, Status: doctorSkip, Summary: "this context signs in with your Kubernetes credentials (no sign-in server)"}
+	}
 	if strings.TrimSpace(c.Issuer) == "" {
 		return substrateCheck{ID: id, Status: doctorSkip, Summary: "this context signs in with a workload token only"}
 	}

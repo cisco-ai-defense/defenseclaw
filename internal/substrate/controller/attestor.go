@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/regauth"
 )
 
 // TemplateAttestor admits a template only when every container image is
@@ -194,9 +195,12 @@ func (a *AnchorFile) Get() (*attest.TrustAnchors, error) {
 // VerifierFromConfig builds the attestation verifier for substrate.templates
 // (anchors from the admin-only Secret, digest pins required). The kit
 // version is judged by the controller (N and N-1, with the migrate hint).
+// It is the one verifier of the controller and the gateway's create path,
+// so both read attestations with the same registry logins
+// (substrate.templates.registry_auth; anonymous when unset, GAP-0190).
 func VerifierFromConfig(t config.SubstrateTemplatesConfig) (*attest.Verifier, *AnchorFile) {
 	af := &AnchorFile{Path: t.EffectiveTrustAnchors()}
-	reg := attest.NewRegistry(attest.RegistryOptions{PlainHTTP: t.PlainHTTPRegistries})
+	reg := attest.NewRegistry(registryOptions(t))
 	maxAge := t.EffectiveMaxAge()
 	registries := AllowedRegistries(t)
 	revoked := map[string]bool{}
@@ -208,6 +212,11 @@ func VerifierFromConfig(t config.SubstrateTemplatesConfig) (*attest.Verifier, *A
 		return attest.Policy{Anchors: anchors, MinPolicyGeneration: t.MinPolicyGeneration, MaxAge: maxAge,
 			AllowUnverifiedBase: t.AllowUnverifiedBase, AllowedRegistries: registries, RevokedDigests: revoked}
 	}), af
+}
+
+// registryOptions are the verifier's registry client options.
+func registryOptions(t config.SubstrateTemplatesConfig) attest.RegistryOptions {
+	return attest.RegistryOptions{PlainHTTP: t.PlainHTTPRegistries, Source: regauth.FromConfig(t.RegistryAuth)}
 }
 
 // AllowedRegistries are the registry hosts the verifier may connect to:

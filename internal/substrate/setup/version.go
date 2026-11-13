@@ -61,14 +61,6 @@ func (v Version) Compare(o Version) int {
 	return strings.Compare(v.Pre, o.Pre)
 }
 
-func (v Version) String() string {
-	s := fmt.Sprintf("%d.%d.%d", v.Major, v.Minor, v.Patch)
-	if v.Pre != "" {
-		s += "-" + v.Pre
-	}
-	return s
-}
-
 // InRange reports whether version satisfies a range of space-separated
 // comparisons (">=1.0.0 <1.1.0"), the substrate.supported_versions form.
 func InRange(version, rng string) (bool, error) {

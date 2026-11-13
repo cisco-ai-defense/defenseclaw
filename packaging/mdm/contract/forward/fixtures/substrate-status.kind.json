@@ -84,6 +84,11 @@
       "edge_case": "E13"
     },
     {
+      "id": "actor_keys",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
       "id": "snapshot_bucket",
       "status": "pass",
       "message": "ok"

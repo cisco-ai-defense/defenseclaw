@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -53,6 +54,11 @@ type SubstrateSecretStore interface {
 	Remove(ctx context.Context, namespace, name, key string) error
 	Exists(ctx context.Context, namespace, name, key string) (bool, error)
 }
+
+// ErrSubstrateSecretNotOwned is the SubstrateSecretStore error for a Secret
+// that exists but was not created by DefenseClaw (no managed-by label): it
+// is not changed (GAP-0183).
+var ErrSubstrateSecretNotOwned = errors.New("the Secret is not managed by DefenseClaw")
 
 // Secret statuses.
 const (
@@ -179,7 +185,7 @@ func (a *APIServer) substrateSetSecret(st *substrateState) http.HandlerFunc {
 		if err := st.cfg.SecretStore.Set(r.Context(), ns, name, key, []byte(in.Value)); err != nil {
 			// The error names the Secret, never the value.
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not stored: %v\n", r.PathValue("name"), err)
-			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_stored")
+			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_stored"))
 			return
 		}
 		c, _ := substrateCallerFrom(r.Context())
@@ -197,11 +203,27 @@ func (a *APIServer) substrateRemoveSecret(st *substrateState) http.HandlerFunc {
 		}
 		if err := st.cfg.SecretStore.Remove(r.Context(), ns, name, key); err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] secret %s not removed: %v\n", r.PathValue("name"), err)
-			writeSubstrateJSONError(w, http.StatusBadGateway, "secret_not_removed")
+			writeSubstrateJSONError(w, substrateSecretErrorStatus(err), substrateSecretErrorReason(err, "secret_not_removed"))
 			return
 		}
 		writeSubstrateJSON(w, http.StatusOK, map[string]any{"name": r.PathValue("name"), "status": substrateSecretNotSet})
 	}
+}
+
+// substrateSecretErrorStatus and substrateSecretErrorReason answer a store
+// error: a Secret DefenseClaw does not own is 409, anything else 502.
+func substrateSecretErrorStatus(err error) int {
+	if errors.Is(err, ErrSubstrateSecretNotOwned) {
+		return http.StatusConflict
+	}
+	return http.StatusBadGateway
+}
+
+func substrateSecretErrorReason(err error, other string) string {
+	if errors.Is(err, ErrSubstrateSecretNotOwned) {
+		return "secret_not_managed_by_defenseclaw"
+	}
+	return other
 }
 
 func (a *APIServer) substrateTestSecret(st *substrateState) http.HandlerFunc {

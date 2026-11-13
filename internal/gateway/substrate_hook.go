@@ -80,8 +80,9 @@ type SubstrateFacts struct {
 	Truncated bool                        `json:"truncated,omitempty"`
 }
 
-// SubstrateSkillFingerprint is one skill folder's lstat fingerprint;
-// Attached says its files are in Files (role skill_file) in this post.
+// SubstrateSkillFingerprint is one skill folder's content digest
+// (skilldigest); Attached says its files are in Files (role skill_file) in
+// this post.
 type SubstrateSkillFingerprint struct {
 	Path     string `json:"path"`
 	FP       string `json:"fp"`
@@ -90,6 +91,12 @@ type SubstrateSkillFingerprint struct {
 	Receipt string `json:"receipt,omitempty"`
 	// Over marks a folder past a kit cap (no FP): the fail mode decides.
 	Over bool `json:"over,omitempty"`
+	// Sums are the file digests of a folder that did not fit the post (name
+	// -> sha256 hex): FP is rebuilt from them and matched to the attested
+	// template build (GAP-0164).
+	Sums map[string]string `json:"sums,omitempty"`
+	// Big marks a folder bigger than one post carries: it is never attached.
+	Big bool `json:"big,omitempty"`
 }
 
 // SubstratePathFact is one path argument as the actor resolves it.
@@ -202,6 +209,15 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
+			if msg := st.substrateMCPRefusal(ctx, env); msg != "" {
+				st.logRefusal("%s", msg)
+				writeSubstrateMCPRefusal(w, msg)
+				if reg, ok := substrateRegistrationFrom(ctx); ok {
+					body, _ := json.Marshal(map[string]string{"reason": kit.MCPRefusedCode, "message": msg})
+					st.substrateRecordDecision(ctx, reg, env.Event, body)
+				}
+				return
+			}
 			answer := withSubstrateAnswer(w, r, next, st.substrateSkills(ctx, env.Connector, env.Facts))
 			if reg, ok := substrateRegistrationFrom(ctx); ok {
 				st.substrateRecordDecision(ctx, reg, env.Event, answer)

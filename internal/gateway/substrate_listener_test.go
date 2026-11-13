@@ -100,7 +100,15 @@ var (
 func newSubstrateFixture(t *testing.T, mutate ...func(*SubstrateConfig)) *substrateFixture {
 	t.Helper()
 	cfg := &config.Config{DataDir: t.TempDir(), Gateway: config.GatewayConfig{Token: sandboxTestMasterToken}}
+	// The proxy resolves the guardrail profiles the process's API server
+	// last published (liveGuardrailProfiles). Pin them to this fixture's
+	// server, so a set another test's server published (for example the
+	// sandbox fixture's, whose profiles carry no mode and so observe) is
+	// not what the /llm proxy applies here (GAP-0195).
+	prevProfiles := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(prevProfiles) })
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
+	liveGuardrailProfiles.Store(api.guardrailProfileSet())
 	regs, err := registry.OpenFileStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

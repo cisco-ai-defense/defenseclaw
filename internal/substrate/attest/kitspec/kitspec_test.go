@@ -121,3 +121,39 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 		t.Fatal("missing binaries accepted")
 	}
 }
+
+// The --connector help lists kit.Connectors: each one has a kit spec, and
+// the list is exactly what the relay can start.
+func TestEveryListedConnectorHasAKitSpec(t *testing.T) {
+	names := kit.Connectors()
+	seen := map[string]bool{}
+	for _, name := range names {
+		if seen[name] {
+			t.Errorf("%s listed twice", name)
+		}
+		seen[name] = true
+		if _, _, _, err := Spec(Options{Connector: name, KitVersion: "test", HookBinary: []byte("x"), RelayBinary: []byte("x"), MetadataOnly: true}); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if len(names) != 10 {
+		t.Errorf("%d connectors, want 10: %v", len(names), names)
+	}
+	// The argv tables (wave 1 here, waves 2 and 3 added by their init) are
+	// what the relay can start: exactly the listed connectors.
+	for table, argv := range map[string]map[string][]string{"InteractiveArgv": kit.InteractiveArgv, "HeadlessArgv": kit.HeadlessArgv} {
+		for name := range argv {
+			if !seen[name] {
+				t.Errorf("%s has %s, which kit.Connectors does not list", table, name)
+			}
+		}
+		for _, name := range names {
+			if argv[name] == nil {
+				t.Errorf("%s has no entry for listed %s", table, name)
+			}
+		}
+	}
+	if got := kit.ConnectorList(); !strings.HasPrefix(got, "claudecode, codex, ") || !strings.HasSuffix(got, " or devin") {
+		t.Errorf("ConnectorList = %q", got)
+	}
+}

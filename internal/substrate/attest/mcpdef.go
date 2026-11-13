@@ -15,6 +15,8 @@ import (
 
 	toml "github.com/pelletier/go-toml/v2"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -76,6 +78,41 @@ func looksLikeCredential(v string) bool {
 	return credentialShape.MatchString(v)
 }
 
+// connectorMCPFormat is the reader of a config file that is neither Claude
+// Code's JSON (mcpServers, projects) nor Codex's TOML (mcp_servers): the
+// other connectors' MCP sources, which the kit attaches from each
+// connector's MCP surface (GAP-0185). It uses the host's own readers
+// (internal/config), so a server is read the way the host inventory reads
+// it; nil means the Claude/Codex reader below.
+func connectorMCPFormat(p string) func([]byte) ([]config.MCPServerEntry, error) {
+	base, dir := path.Base(p), path.Base(path.Dir(p))
+	switch {
+	case strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml"):
+		// Hermes config.yaml (mcp_servers; older mcp.servers, mcpServers).
+		return func(b []byte) ([]config.MCPServerEntry, error) {
+			return config.ParseMCPFromYAMLPaths(b, []string{"mcp_servers"}, []string{"mcp", "servers"}, []string{"mcpServers"})
+		}
+	case base == "opencode.json" || base == "opencode.jsonc" || (dir == "opencode" && base == "config.json"):
+		return func(b []byte) ([]config.MCPServerEntry, error) { return config.ParseMCPFromOpenCodeConfig(p, b) }
+	case (dir == "amp" || dir == ".amp" || dir == "ampcode") && strings.HasPrefix(base, "settings.json") || base == "managed-settings.json" && dir == "ampcode":
+		return config.ParseMCPFromAmpSettings
+	case strings.HasSuffix(base, ".jsonc"):
+		return func(b []byte) ([]config.MCPServerEntry, error) {
+			return config.ParseMCPFromJSONCPaths(b, []string{"mcpServers"})
+		}
+	}
+	return nil
+}
+
+// entryServer is a host inventory entry as the runtime scan's server.
+func entryServer(e config.MCPServerEntry, source string) MCPServer {
+	r := rawServer{Command: e.Command, Args: e.Args, Env: e.Env, URL: e.URL}
+	if t := strings.ToLower(e.Transport); t == "sse" {
+		r.Type = "sse"
+	}
+	return r.server(e.Name, source, "")
+}
+
 // mcpConfigNames are the file names (and parents) that carry MCP servers.
 func isMCPConfig(p string) bool {
 	base := path.Base(p)
@@ -91,9 +128,25 @@ func isMCPConfig(p string) bool {
 }
 
 // ParseMCPConfig reads the servers one config file defines. A file that
-// parses but names no servers returns none; a file that does not parse is an
+// parses but names no servers returns none; a file that does not parse, or
+// has keys that differ only by case (ErrMCPConfigAmbiguous, GAP-0176), is an
 // error, so a malformed config is never read as "no servers".
 func ParseMCPConfig(p string, data []byte) ([]MCPServer, error) {
+	if parse := connectorMCPFormat(p); parse != nil {
+		entries, err := parse(data)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		out := make([]MCPServer, 0, len(entries))
+		for _, e := range entries {
+			out = append(out, entryServer(e, p))
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return out, nil
+	}
+	if err := checkMCPConfigKeys(p, data); err != nil {
+		return nil, fmt.Errorf("%s: %w", p, err)
+	}
 	var out []MCPServer
 	if strings.HasSuffix(p, ".toml") {
 		var doc struct {

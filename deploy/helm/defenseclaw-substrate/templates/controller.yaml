@@ -53,7 +53,13 @@ spec:
         # Reads admin policy_conflict resets (defenseclaw-policy-resets).
         {{- include "dc.kubeTokenMount" . | nindent 8 }}
         {{- include "dc.templateAnchorsMount" . | nindent 8 }}
+        {{- if .Values.controller.templateRegistrySecret }}
+        {{- include "dc.templateRegistryMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- include "dc.templateAnchorsVolume" . | nindent 6 }}
+      {{- if .Values.controller.templateRegistrySecret }}
+      {{- include "dc.templateRegistryVolume" . | nindent 6 }}
+      {{- end }}

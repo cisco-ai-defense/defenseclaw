@@ -45,8 +45,8 @@
       "items": {
         "$ref": "#/$defs/check"
       },
-      "minItems": 8,
-      "maxItems": 8
+      "minItems": 9,
+      "maxItems": 9
     }
   },
   "$defs": {
@@ -109,6 +109,7 @@
           "enum": [
             "substrate_version",
             "issuer_unique",
+            "actor_keys",
             "snapshot_bucket",
             "openfga_grants",
             "callout_registered",
@@ -165,6 +166,11 @@
           "status": "warn",
           "message": "the default issuer is fine for one cluster; set a unique one before adding another",
           "edge_case": "E13"
+        },
+        {
+          "id": "actor_keys",
+          "status": "pass",
+          "message": "ok"
         },
         {
           "id": "snapshot_bucket",

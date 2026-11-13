@@ -44,6 +44,19 @@ substrate:
     podPort: 8444
     # The relay port inside the actor (the kit's relay).
     relayPort: 8080
+  # The key set the gateway verifies actor tokens with (GAP-0194). The
+  # gateway compares a token's iss with config.substrate.identity.issuer as a
+  # string and reads the keys from this URL, never from the issuer's host, so
+  # a unique per-cluster issuer (setup --issuer) need not resolve. url empty:
+  # the idp Service, https://idp.<substrate namespace>.svc/openid/v1/jwks
+  # (config.substrate.identity.keys_url). caConfigMap: a ConfigMap in this
+  # namespace whose key ca.crt is the PEM CA of the url's certificate,
+  # mounted on the gateway; empty: the servicedns trust bundle, which signs
+  # the idp Service certificate. A url on another in-cluster Service or a
+  # private address may need a change to networkPolicy.egress.
+  actorKeys:
+    url: ""
+    caConfigMap: ""
   # The upstream Kubernetes credential provider. The bootstrap Job grants the
   # launcher atespaces the secrets namespace below in its namespace policy,
   # and the pre-delete Job removes the grant.
@@ -134,6 +147,25 @@ gateway:
   # gateway can make TokenReviews. Never rendered with an OIDC issuer. Its
   # name; "" is defenseclaw-auth-delegator-<namespace>-<release>.
   authDelegatorBinding: ""
+  # Flags appended to the gateway's serve flags (GAP-0191), for example
+  # [--chain-egress-action=alert].
+  extraArgs: []
+  # OIDC groups whose members are DefenseClaw administrators (--admin-groups;
+  # config.substrate.identity.admin_groups is the same list in config).
+  adminGroups: []
+  # The trust bundle of a private OIDC issuer: a key of a ConfigMap or of a
+  # Secret (the Secret wins when both are set), mounted read-only, and
+  # --oidc-ca-file set to it ("" uses the system roots).
+  oidcCA:
+    configMap: ""
+    secret: ""
+    key: ca.crt
+  # Extra environment, volumes and mounts of the gateway container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Replaces the whole container argument list, `serve --substrate ...`
+  # included; for an added flag use extraArgs.
   args: []
   resources:
     requests: {cpu: 250m, memory: 256Mi}
@@ -168,6 +200,15 @@ controller:
   # substrate.templates.trust_anchors. Without it every template
   # is refused (require_attested_templates).
   templateAnchorsSecret: defenseclaw-template-anchors
+  # A kubernetes.io/dockerconfigjson Secret (key .dockerconfigjson) with
+  # logins for private template registries, mounted read-only in the
+  # controller and the gateway (both read attestations, GAP-0190). Each login
+  # goes only to its own registry host. Sets
+  # config.substrate.templates.registry_auth.docker_config. On EKS, prefer
+  # config.substrate.templates.registry_auth.ecr_hosts with an IRSA role on
+  # serviceAccounts.componentAnnotations (no stored password). "" reads
+  # registries anonymously.
+  templateRegistrySecret: ""
   args: []
   resources:
     requests: {cpu: 100m, memory: 128Mi}
@@ -227,7 +268,13 @@ callout:
 serviceAccounts:
   # Token audience and lifetime of the projected ate-api tokens.
   apiTokenExpirationSeconds: 3600
+  # Annotations on every DefenseClaw ServiceAccount.
   annotations: {}
+  # Annotations on one component's ServiceAccount (gateway, controller,
+  # callout), merged over annotations. On EKS, an IRSA role for the ECR
+  # template logins goes on gateway and controller only, for example
+  #   gateway: {eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/dc-ecr-read}
+  componentAnnotations: {}
 
 networkPolicy:
   enabled: true

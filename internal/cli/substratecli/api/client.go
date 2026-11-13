@@ -143,6 +143,9 @@ type Error struct {
 	Detail   string
 	Actor    string
 	ActorUID string
+	// Message is the gateway's explanation, sent with a sign-in refusal
+	// (subscription_signin_refused, agent_hook_tamper_refused), one line.
+	Message string
 }
 
 func (e *Error) Error() string {
@@ -221,10 +224,12 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 			Detail   string `json:"detail"`
 			Actor    string `json:"actor"`
 			ActorUID string `json:"actor_uid"`
+			Message  string `json:"message"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
 			e.Refusal, e.Detail, e.Actor, e.ActorUID = d.Refusal, d.Detail, d.Actor, d.ActorUID
+			e.Message = safetext.Line(d.Message)
 		}
 		return e
 	}
@@ -249,6 +254,26 @@ type Info struct {
 	ClientID string `json:"client_id,omitempty"`
 	// Attach reports that the cluster can attach launchers to agents.
 	Attach bool `json:"attach"`
+	// ActorTokens is set while the gateway refuses every agent's token
+	// (the key set cannot be read, a wrong issuer): no hook or model call
+	// of any agent runs (GAP-0194).
+	ActorTokens *ActorTokens `json:"actor_tokens,omitempty"`
+}
+
+// ActorTokens is the /info actor_tokens member.
+type ActorTokens struct {
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+	Since  string `json:"since"`
+}
+
+// Refusing reports a cluster-wide refusal seen at or after t.
+func (a *ActorTokens) Refusing(t time.Time) bool {
+	if a == nil || a.State != "refusing" {
+		return false
+	}
+	since, err := time.Parse(time.RFC3339, a.Since)
+	return err != nil || !since.Before(t.Truncate(time.Second))
 }
 
 // Info asks the cluster how people sign in to it. It sends no token.

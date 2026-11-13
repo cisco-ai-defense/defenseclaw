@@ -93,6 +93,11 @@ type hostRecord struct {
 	Result     string          `json:"result,omitempty"`
 	Pulled     *osw.PullResult `json:"pulled,omitempty"`
 	UploadedAt time.Time       `json:"uploaded_at"`
+	// CloneURL and CloneRef are set for a run --clone: the baseline is the
+	// fresh clone read back from the actor, and pull and apply use the
+	// folder pull runs in as the project, on any OS.
+	CloneURL string `json:"clone_url,omitempty"`
+	CloneRef string `json:"clone_ref,omitempty"`
 }
 
 func hostDir(dataDir string) string { return filepath.Join(dataDir, "substrate", "hostcopies") }
@@ -132,8 +137,8 @@ func (r *hostRecord) save(dataDir string) error {
 }
 
 // RemoteDirOf is where a copy this computer made lives in the actor, from
-// whichever record it has (the copy pipeline's, the host copy's, a clone);
-// "" when it has none.
+// whichever record it has (the copy pipeline's, the host copy's, which a
+// clone also writes); "" when it has none.
 func RemoteDirOf(dataDir, name string) string {
 	if rec, err := osw.LoadCopy(dataDir, name); err == nil && rec != nil && rec.RemoteDir != "" {
 		return rec.RemoteDir
@@ -141,10 +146,14 @@ func RemoteDirOf(dataDir, name string) string {
 	if rec, err := loadHostRecord(dataDir, name); err == nil && rec.RemoteDir != "" {
 		return rec.RemoteDir
 	}
-	if c, err := loadCloneRecord(dataDir, name); err == nil && c.RemoteDir != "" {
-		return c.RemoteDir
-	}
 	return ""
+}
+
+// usesHostCopy says whether pull and apply of name go through the host
+// copy: on Windows, and for a clone everywhere.
+func usesHostCopy(dataDir, name string) bool {
+	rec, err := loadHostRecord(dataDir, name)
+	return err == nil && (hostCopy || rec.CloneURL != "")
 }
 
 // HasCopy reports whether this computer has a copy record for name that
@@ -699,6 +708,22 @@ func hostPull(ctx context.Context, opts PullOptions, label string) (*Review, err
 	if err != nil {
 		return nil, cleanErr("read "+label, err)
 	}
+	if rec.CloneURL != "" {
+		if rec.Baseline == "" {
+			return nil, fmt.Errorf("this computer kept no copy of the clone of %s, so pull cannot tell what the agent changed; push from inside the agent (connect, then git push)", rec.CloneURL)
+		}
+		// A clone has no folder of its own here: the changes go into the
+		// folder pull runs in (a checkout of the repository).
+		project := opts.Project
+		if project == "" {
+			if project, err = os.Getwd(); err != nil {
+				return nil, err
+			}
+		}
+		if rec.Project, err = filepath.Abs(project); err != nil {
+			return nil, err
+		}
+	}
 	stage := filepath.Join(hostDir(opts.DataDir), opts.Name+".pull")
 	_ = os.RemoveAll(stage)
 	if err := os.MkdirAll(stage, 0o700); err != nil {
@@ -709,9 +734,13 @@ func hostPull(ctx context.Context, opts PullOptions, label string) (*Review, err
 	if err != nil {
 		return nil, cleanErr("read "+label, err)
 	}
-	files = gitIgnoredLocally(ctx, rec.Project, files)
 	gitDir := hostGitDir(opts.DataDir, opts.Name)
 	from := firstNonEmpty(rec.Since, rec.Baseline)
+	if rec.CloneURL != "" {
+		files = cloneIgnored(ctx, gitDir, stage, from, files)
+	} else {
+		files = gitIgnoredLocally(ctx, rec.Project, files)
+	}
 	result, err := hostCommit(ctx, gitDir, stage, files, from)
 	if err != nil {
 		return nil, cleanErr("read "+label, err)
@@ -871,6 +900,9 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 			_ = os.WriteFile(save, patch, 0o600)
 			out.FellBack, out.PatchPath = true, save
 			out.Conflicts = []string{"files you changed since the copy"}
+			if rec.CloneURL != "" {
+				out.Conflicts = []string{"files in this folder that differ from the clone"}
+			}
 			out.Text = applyText(out, rec.Project, len(pr.Changes))
 			return out, nil
 		}

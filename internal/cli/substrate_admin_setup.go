@@ -17,15 +17,19 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/setup"
 )
 
@@ -41,6 +45,9 @@ type substrateSetupOptions struct {
 	namespace    string
 	calloutPort  int
 	issuer       string
+	keysURL      string
+	kubeconfig   string
+	kubeContext  string
 	capabilities []string
 	remove       bool
 	printPolicy  bool
@@ -72,7 +79,8 @@ func newSubstrateSetupCmd() *cobra.Command {
 		Long: `Reads the SubstrateInstall document you give to ate-setup and adds the settings DefenseClaw needs: the egress
 callout, the router client the gateway attaches launchers through, and, only when you say your Substrate build has them,
 the callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends egress to another callout,
-and says what to do. Nothing here contacts the cluster.
+and says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it can, the key set the
+gateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does not answer.
 
 The result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it replaces the file and keeps
 the old one as FILE.bak. With --dry-run it only shows the changes. With --remove it takes DefenseClaw's settings out again.
@@ -93,6 +101,9 @@ Next: run ate-setup deploy with the new file, then install the chart with helm i
 	f.StringVar(&o.namespace, "namespace", "defenseclaw", "the namespace DefenseClaw is installed in")
 	f.IntVar(&o.calloutPort, "callout-port", 9443, "the port of the DefenseClaw callout Service")
 	f.StringVar(&o.issuer, "issuer", "", "this cluster's actor token issuer (each cluster needs its own); empty leaves it alone")
+	f.StringVar(&o.keysURL, "keys-url", (config.SubstrateConfig{}).EffectiveKeysURL(), "the key set the gateway verifies actor tokens with (substrate.identity.keys_url), checked with --issuer")
+	f.StringVar(&o.kubeconfig, "kubeconfig", "", "kubectl configuration file for the --issuer check (default: kubectl's own)")
+	f.StringVar(&o.kubeContext, "kube-context", "", "kubectl context for the --issuer check")
 	f.StringSliceVar(&o.capabilities, "capability", nil, "a setting your Substrate build has: body-mode or route-timeouts (repeatable; off by default)")
 	f.BoolVar(&o.remove, "remove", false, "take DefenseClaw's settings out of the file")
 	f.BoolVar(&o.printPolicy, "print-access-policies", false, "print the access policies for --plan and stop")
@@ -196,6 +207,9 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 	if res.Changes == nil {
 		res.Changes = []setup.Change{}
 	}
+	if o.issuer != "" && !o.remove {
+		res.Notes = append(res.Notes, substrateSetupKeysNote(cmd.Context(), o))
+	}
 	if res.Notes == nil {
 		res.Notes = []string{}
 	}
@@ -221,6 +235,38 @@ func runSubstrateSetup(cmd *cobra.Command, o *substrateSetupOptions) error {
 	}
 	printSubstrateSetup(w, res, isNew, o)
 	return nil
+}
+
+// substrateSetupKeysNote says whether the keys URL answers (GAP-0194): the
+// gateway compares iss with the issuer as a string and reads the keys from
+// the keys URL, never from the issuer's host, so a unique issuer works only
+// when that URL answers. The idp Service does not move with the issuer, so
+// it can be read before ate-setup deploy.
+func substrateSetupKeysNote(parent context.Context, o *substrateSetupOptions) string {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	same := "Set the same issuer in substrate.identity.issuer (chart config.substrate.identity.issuer)."
+	kf := &substrateClusterFlags{kubeconfig: o.kubeconfig, kubeContext: o.kubeContext}
+	if _, err := substrateKubectl(ctx, kf, "config", "current-context"); err != nil {
+		return fmt.Sprintf("The keys URL %s was not checked (%s). %s After the install, defenseclaw substrate verify checks it.",
+			o.keysURL, firstLineOf(err.Error()), same)
+	}
+	var obs fleet.Observed
+	readActorKeys(ctx, kf, &obs, o.keysURL)
+	switch {
+	case obs.Keys == nil:
+		return fmt.Sprintf("The keys URL %s was not checked (%s). %s After the install, defenseclaw substrate verify checks it.",
+			o.keysURL, obs.KeysNote, same)
+	case *obs.Keys == 0:
+		return fmt.Sprintf("WARNING: the keys URL %s does not answer (%s). The gateway reads the actor token keys there, not from "+
+			"the issuer's host, so with this issuer it would refuse every actor token. Set substrate.identity.keys_url (chart "+
+			"value substrate.actorKeys.url) to the idp Service key set, then run this again.", o.keysURL, obs.KeysErr)
+	}
+	return fmt.Sprintf("The keys URL %s answers (%d keys): the gateway verifies tokens of this issuer with them, so the issuer "+
+		"need not resolve. %s", o.keysURL, *obs.Keys, same)
 }
 
 func printSubstrateSetup(w io.Writer, res substrateSetupResult, isNew bool, o *substrateSetupOptions) {

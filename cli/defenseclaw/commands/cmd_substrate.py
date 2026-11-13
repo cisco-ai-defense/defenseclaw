@@ -381,7 +381,18 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "kube-namespace",
                 "string",
-                "with --kube, the namespace DefenseClaw runs in (default: defenseclaw-system)",
+                (
+                    "with --kube, the namespace DefenseClaw runs in (required; without it login only says which "
+                    "namespace publishes --admin-url)"
+                ),
+            ),
+            _Flag(
+                "kube-service-account",
+                "string",
+                (
+                    "with --kube, sign in as this ServiceAccount (NAMESPACE/NAME or NAME) with a short-lived token; a "
+                    "client-certificate kubeconfig uses defenseclaw-launcher"
+                ),
             ),
             _Flag("kubeconfig", "string", "with --kube, the kubeconfig file (default: kubectl's own rules)"),
             _Flag(
@@ -551,9 +562,12 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Starts the coding agent in a sandbox in the cluster, on a copy of the current folder (secret\n"
             "files such as .env and keys are held back), and puts the agent on your terminal. The agent is "
             "claude,\n"
-            "codex, copilot, opencode, kiro, hermes or antigravity (amp, cursor-agent and devin are not verified "
-            "yet, so\n"
-            "they do not run). A banner shows the guard profile, model, allowed hosts and how to leave. When the\n"
+            "codex, copilot, opencode, hermes, kiro, antigravity, cursor-agent, amp or devin. The agents that "
+            "sign in to a\n"
+            "vendor account (kiro, antigravity, cursor-agent, amp, devin) run with a warning in open source, "
+            "because the\n"
+            "sign-in token stays in the agent and its snapshots; a managed cluster refuses them. A banner shows "
+            "the guard profile, model, allowed hosts and how to leave. When the\n"
             "guard asks before a step, the question appears on the last line: press Ctrl-\\ to answer once, "
             "always or deny.\n"
             "\n"
@@ -708,7 +722,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Substrate build has them,\n"
             "the callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends "
             "egress to another callout,\n"
-            "and says what to do. Nothing here contacts the cluster.\n"
+            "and says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it "
+            "can, the key set the\n"
+            "gateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does "
+            "not answer.\n"
             "\n"
             "The result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it "
             "replaces the file and keeps\n"
@@ -742,6 +759,17 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 metavar="URL",
             ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag(
+                "keys-url",
+                "string",
+                (
+                    "the key set the gateway verifies actor tokens with (substrate.identity.keys_url), checked with "
+                    "--issuer"
+                ),
+                default="https://idp.ate-system.svc/openid/v1/jwks",
+            ),
+            _Flag("kube-context", "string", "kubectl context for the --issuer check"),
+            _Flag("kubeconfig", "string", "kubectl configuration file for the --issuer check (default: kubectl's own)"),
             _Flag("namespace", "string", "the namespace DefenseClaw is installed in", default="defenseclaw"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag(
@@ -829,7 +857,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "--relay-binary FILE --key FILE [flags]\n"
             "\n"
             "Flags:\n"
-            "  --connector NAME                claudecode or codex (default claudecode)\n"
+            "  --connector NAME                connector to build: claudecode, codex, opencode, copilot, hermes, "
+            "kiro, antigravity,\n"
+            "                                  cursor, amp or devin (default claudecode)\n"
             "  --from IMAGE                    base image (the OpenShell harness image for the connector, with "
             "tmux)\n"
             "  --to REPO:TAG                   target repository and tag\n"
@@ -845,8 +875,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "medium, low or none (default high)\n"
             "  --policy-generation N           policy generation recorded in the attestation (default 1)\n"
             "  --builder-id ID                 builder id recorded in the attestation\n"
-            "  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or "
-            "bedrock-mantle)\n"
+            "  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or "
+            "openai; default from substrate.llm.providers)\n"
             "  --model ID                      default model id\n"
             "  --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of "
             "--config)\n"
@@ -981,8 +1011,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "  --mcp-analyzers LIST            mcp-scanner analyzers (default yara)\n"
             "  --block-at LEVEL                lowest finding severity that blocks: critical, high, medium, low "
             "or none (default high)\n"
-            "  --connector NAME                check the kit's hook files and switches for this connector "
-            "(claudecode or codex)\n"
+            "  --connector NAME                check the kit's hook files and switches for this connector: "
+            "claudecode, codex,\n"
+            "                                  opencode, copilot, hermes, kiro, antigravity, cursor, amp or "
+            "devin\n"
             "  --mcp-host HOST                 remote MCP host that is allowed (repeatable)\n"
             "\n"
             "Flags build, verify, scan and publish all take:\n"

@@ -156,7 +156,13 @@ func TestKubeVerifyEndpoint(t *testing.T) {
 				cluster = tc.cluster
 			}
 			cfg := writeFile(t, dir, "config", apiKubeconfig(server, cluster))
-			pin, err := KubeVerifyEndpoint(context.Background(), KubeOptions{Kubeconfig: cfg, Env: emptyEnv, apiTimeoutT: tc.timeout}, admin.srv.URL, tc.namespace)
+			// These cases name the namespace (the old default); finding it
+			// is TestKubeEndpointDiscovery's.
+			ns := tc.namespace
+			if ns == "" {
+				ns = "defenseclaw-system"
+			}
+			pin, err := KubeVerifyEndpoint(context.Background(), KubeOptions{Kubeconfig: cfg, Env: emptyEnv, apiTimeoutT: tc.timeout}, admin.srv.URL, ns)
 			if admin.count() != 0 {
 				t.Fatal("the admin listener was contacted during the endpoint check")
 			}
@@ -304,7 +310,7 @@ func TestKubePinFields(t *testing.T) {
 			t.Errorf("%s missing in %s", k, b)
 		}
 	}
-	if strings.Contains(string(b), "alice") || c.KubeNamespaceOrDefault() != "dc-ns" || (Context{}).KubeNamespaceOrDefault() != DefaultKubeNamespace {
+	if strings.Contains(string(b), "alice") || c.KubeNamespace != "dc-ns" {
 		t.Errorf("pin fields: %s", b)
 	}
 	if err := (Context{AdminURL: "https://admin.example.test", Kube: true, KubeNamespace: "Bad_NS"}).Validate(false); err == nil {
