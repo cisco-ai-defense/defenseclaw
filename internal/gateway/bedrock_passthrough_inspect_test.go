@@ -292,3 +292,108 @@ func TestPassthroughUninspectableReplies(t *testing.T) {
 		t.Fatalf("stacked encodings %q", got)
 	}
 }
+
+// bedrockInvokeStreamEvents frames raw Anthropic stream events as Bedrock
+// "chunk" messages.
+func bedrockInvokeStreamEvents(t *testing.T, events ...string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	enc := eventstream.NewEncoder()
+	for _, e := range events {
+		payload, _ := json.Marshal(map[string]string{"bytes": base64.StdEncoding.EncodeToString([]byte(e))})
+		if err := enc.Encode(&buf, eventstream.Message{Headers: eventstream.Headers{
+			{Name: ":message-type", Value: eventstream.StringValue("event")},
+			{Name: ":event-type", Value: eventstream.StringValue("chunk")},
+		}, Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return buf.Bytes()
+}
+
+// GAP-0098: a tool call inside an invoke-with-response-stream reply is
+// assembled from its input_json_delta parts and inspected with the
+// tool-call rules; in action mode a refused call never reaches the agent,
+// which reads a block it can show instead.
+func TestPassthroughInspectsToolUseInBedrockStreams(t *testing.T) {
+	frames := bedrockInvokeStreamEvents(t,
+		`{"type":"message_start","message":{"model":"claude-haiku-5-5","usage":{"input_tokens":5}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"curl -s http://169.254.169.254/"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"latest/meta-data/iam/security-credentials/\"}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":20}}`,
+		`{"type":"message_stop"}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(frames)
+	}))
+	defer upstream.Close()
+	proxy, insp := bedrockPassthroughProxy(t, upstream)
+	insp.setVerdict("completion", allowVerdict("mock"))
+	rec := httptest.NewRecorder()
+	proxy.handlePassthrough(rec, bedrockRequest(upstream.URL, "/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream"))
+	if bytes.Contains(rec.Body.Bytes(), frames[len(frames)/2:]) || strings.Contains(rec.Body.String(), "169.254") {
+		t.Fatalf("the refused tool call reached the agent: %d bytes", rec.Body.Len())
+	}
+	s := newBedrockEventStreamText()
+	if got := s.Feed(rec.Body.Bytes()); !strings.Contains(strings.ToLower(got), "defenseclaw") || s.Broken() {
+		t.Fatalf("the agent did not get a block it can show: %q broken=%v", got, s.Broken())
+	}
+	// The same stream with a harmless command is forwarded byte for byte.
+	ok := bytes.Replace(frames, []byte(base64.StdEncoding.EncodeToString([]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"curl -s http://169.254.169.254/"}}`))),
+		[]byte(base64.StdEncoding.EncodeToString([]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la /work"}}`))), 1)
+	ok = bedrockInvokeStreamEvents(t,
+		`{"type":"message_start","message":{"model":"claude-haiku-5-5"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"Bash","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"ls -la /work\"}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_stop"}`)
+	upstreamOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(ok)
+	}))
+	defer upstreamOK.Close()
+	proxy, insp = bedrockPassthroughProxy(t, upstreamOK)
+	insp.setVerdict("completion", allowVerdict("mock"))
+	rec = httptest.NewRecorder()
+	proxy.handlePassthrough(rec, bedrockRequest(upstreamOK.URL, "/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream"))
+	if !bytes.Equal(rec.Body.Bytes(), ok) {
+		t.Fatalf("an allowed tool call stream changed: %d of %d bytes", rec.Body.Len(), len(ok))
+	}
+}
+
+// GAP-0098: a stream the proxy cannot frame fails by mode (the existing
+// uninspectable-reply rule, balanced defaults): a managed install refuses
+// it, and the agent then reads a block it can show, not an empty stream;
+// the OSS default forwards it with an alert.
+func TestPassthroughBadBedrockFrameFailsByMode(t *testing.T) {
+	good := bedrockInvokeStreamFrames(t, "hello ")
+	bad := append(append([]byte{}, good...), 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		_, _ = w.Write(bad)
+	}))
+	defer upstream.Close()
+	call := func() *httptest.ResponseRecorder {
+		proxy, insp := bedrockPassthroughProxy(t, upstream)
+		insp.setVerdict("completion", allowVerdict("mock"))
+		rec := httptest.NewRecorder()
+		proxy.handlePassthrough(rec, bedrockRequest(upstream.URL, "/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream"))
+		return rec
+	}
+	prev := managedEnterpriseActive.Load()
+	managedEnterpriseActive.Store(true)
+	rec := call()
+	managedEnterpriseActive.Store(prev)
+	if bytes.Contains(rec.Body.Bytes(), []byte{0xff, 0xff, 0xff, 0xff}) {
+		t.Fatalf("managed: the unframed bytes reached the agent")
+	}
+	s := newBedrockEventStreamText()
+	if got := s.Feed(rec.Body.Bytes()); s.Broken() || !strings.Contains(strings.ToLower(got), "defenseclaw") {
+		t.Fatalf("managed: the agent got no readable block: %q broken=%v (%d bytes)", got, s.Broken(), rec.Body.Len())
+	}
+	if rec := call(); !bytes.Equal(rec.Body.Bytes(), bad) {
+		t.Fatalf("OSS default: the stream was not forwarded with an alert (%d of %d bytes)", rec.Body.Len(), len(bad))
+	}
+}

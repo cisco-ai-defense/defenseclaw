@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -75,16 +76,28 @@ type PersonIssuer struct {
 // WorkloadBinding names the workloads of an issuer DefenseClaw trusts.
 type WorkloadBinding struct {
 	// Subject is the token subject, exact, or a prefix when it ends in
-	// "*" (for example "repo:acme/web:ref:refs/heads/*").
+	// ":*" or "/*" (for example "repo:acme/web:*"): the wildcard matches
+	// whole segments only, so "repo:acme/web*" (which trusted
+	// repo:acme/web-evil) and a bare "*" are refused (GAP-0043).
 	Subject string
 	// Claims are top-level string claims the token must carry exactly
 	// (for example repository: acme/web).
 	Claims map[string]string
 }
 
-// Empty reports a binding that names nothing.
+// WorkloadSubjectPattern is the subject rule (GAP-0043): exact, or a
+// prefix ending in ":*" or "/*" with something before the separator.
+var WorkloadSubjectPattern = regexp.MustCompile(`^(?:[^*]+|[^*]+[:/]\*)$`)
+
+// Empty reports a binding that names nothing, or names its subject in a
+// form that is refused (a raw prefix, a bare "*"): such a binding trusts
+// no workload.
 func (b WorkloadBinding) Empty() bool {
-	return strings.Trim(strings.TrimSpace(b.Subject), "*") == "" && len(b.Claims) == 0
+	sub := strings.TrimSpace(b.Subject)
+	if sub != "" && !WorkloadSubjectPattern.MatchString(sub) {
+		return true
+	}
+	return sub == "" && len(b.Claims) == 0
 }
 
 func (b WorkloadBinding) matches(sub string, raw map[string]json.RawMessage) bool {
@@ -93,6 +106,7 @@ func (b WorkloadBinding) matches(sub string, raw map[string]json.RawMessage) boo
 	}
 	if want := strings.TrimSpace(b.Subject); want != "" {
 		if prefix, ok := strings.CutSuffix(want, "*"); ok {
+			// prefix ends in ':' or '/', so the match stops on a boundary.
 			if !strings.HasPrefix(sub, prefix) {
 				return false
 			}

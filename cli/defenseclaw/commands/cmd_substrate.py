@@ -112,8 +112,9 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Lists the questions your agents asked that nobody has answered yet. Answer with\n"
             '"defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your\n'
-            "terminal shows the same question on its last line. An unattended run (--task) never waits:\n"
-            "its asks are denied."
+            "terminal shows the same question on its last line. An unattended run (--task, --batch)\n"
+            "denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked\n"
+            '"unattended" in the RUN column and is denied when its time runs out.'
         ),
         flags=(
             _Flag("context", "string", "cluster to use (default: the one you signed in to last)", metavar="NAME"),

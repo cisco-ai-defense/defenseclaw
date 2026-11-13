@@ -248,6 +248,9 @@ func TestSubstrateApprovalsAndDecisions(t *testing.T) {
 	if err != nil || !strings.Contains(out, "run npm publish") || !strings.Contains(out, "substrate approve ID") {
 		t.Fatalf("approvals = %q, %v", out, err)
 	}
+	if !strings.Contains(out, "RUN") || !strings.Contains(out, "attached") || strings.Contains(out, "unattended") {
+		t.Fatalf("an attached ask: %q", out)
+	}
 	if out, _, err := runSubstrate(t, newSubstrateApproveCmd(), "a1", "--always", "--reason", "known"); err != nil || !strings.Contains(out, "Approved a1") {
 		t.Fatalf("approve = %q, %v", out, err)
 	}
@@ -256,6 +259,26 @@ func TestSubstrateApprovalsAndDecisions(t *testing.T) {
 	}
 	if _, _, err := runSubstrate(t, newSubstrateRejectCmd(), "a1"); err != nil || body["decision"] != "deny" {
 		t.Errorf("reject body = %v, %v", body, err)
+	}
+}
+
+// D12 (F3 c8172fd81e): an ask an unattended run queued is marked
+// "unattended" with the time left before it is denied, and --json carries
+// the field.
+func TestSubstrateApprovalsShowUnattended(t *testing.T) {
+	now := time.Now()
+	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
+		"GET asks": jsonReply(map[string]any{"asks": []map[string]any{{"id": "a2", "actor": "eng-web/nightly-3", "summary": "reach registry.npmjs.org",
+			"severity": "MEDIUM", "created": now.Add(-time.Minute), "expires": now.Add(29*time.Minute + 30*time.Second), "unattended": true}}}),
+	}}
+	useFakeAdmin(t, f)
+	out, _, err := runSubstrate(t, newSubstrateApprovalsCmd())
+	if err != nil || !strings.Contains(out, "unattended, 29m left") {
+		t.Fatalf("approvals = %q, %v", out, err)
+	}
+	out, _, err = runSubstrate(t, newSubstrateApprovalsCmd(), "--json")
+	if err != nil || !strings.Contains(out, `"unattended": true`) {
+		t.Fatalf("approvals --json = %q, %v", out, err)
 	}
 }
 

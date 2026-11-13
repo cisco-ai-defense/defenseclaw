@@ -128,10 +128,17 @@ func substrateUserMatches(entry string, p identity.Person) bool {
 
 // substrateWorkloadMatches compares a workloads entry (exact, or a prefix
 // with a trailing "*") with a workload subject.
+// substrateWorkloadMatches matches a match.substrate.workloads entry: exact,
+// or a ":*" / "/*" prefix that stops on a segment boundary (GAP-0043, the
+// rule identity.WorkloadSubjectPattern holds); a raw prefix or a bare "*"
+// matches nothing.
 func substrateWorkloadMatches(entry, subject string) bool {
 	entry = strings.TrimSpace(entry)
-	if prefix, ok := strings.CutSuffix(entry, "*"); ok {
-		return prefix != "" && strings.HasPrefix(subject, prefix)
+	if !identity.WorkloadSubjectPattern.MatchString(entry) {
+		return false
 	}
-	return entry != "" && entry == subject
+	if prefix, ok := strings.CutSuffix(entry, "*"); ok {
+		return strings.HasPrefix(subject, prefix)
+	}
+	return entry == subject
 }

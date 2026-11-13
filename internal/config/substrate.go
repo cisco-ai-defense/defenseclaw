@@ -546,7 +546,9 @@ func (s *SubstrateConfig) Validate() error {
 		if strings.TrimSpace(w.Audience) == "" {
 			bad(fmt.Sprintf("identity.workload_oidc[%d].audience", i), "is required (use one unique to this install)")
 		}
-		if strings.Trim(strings.TrimSpace(w.Subject), "*") == "" && len(w.Claims) == 0 {
+		if sub := strings.TrimSpace(w.Subject); sub != "" && !substrateWorkloadSubjectRe.MatchString(sub) {
+			bad(fmt.Sprintf("identity.workload_oidc[%d].subject", i), substrateWorkloadSubjectHint, w.Subject)
+		} else if sub == "" && len(w.Claims) == 0 {
 			bad(fmt.Sprintf("identity.workload_oidc[%d]", i),
 				"needs subject or claims naming the trusted workloads (for example claims: {repository: acme/web}); the issuer signs tokens for every repository")
 		}
@@ -889,10 +891,19 @@ func (m *ProfileMatchSubstrate) validate(prefix string) error {
 	for _, w := range m.Workloads {
 		if strings.TrimSpace(w) == "" {
 			errs = append(errs, fmt.Errorf("%s.workloads: an entry is empty", prefix))
+		} else if !substrateWorkloadSubjectRe.MatchString(strings.TrimSpace(w)) {
+			errs = append(errs, fmt.Errorf("%s.workloads: "+substrateWorkloadSubjectHint, prefix, w))
 		}
 	}
 	return errors.Join(errs...)
 }
+
+// substrateWorkloadSubjectRe is the workload subject rule (GAP-0043), the
+// same as identity.WorkloadSubjectPattern (config does not import the
+// identity package): exact, or a prefix ending in ":*" or "/*".
+var substrateWorkloadSubjectRe = regexp.MustCompile(`^(?:[^*]+|[^*]+[:/]\*)$`)
+
+const substrateWorkloadSubjectHint = `%q must be exact or end in ":*" or "/*" (for example repo:acme/web:*); a raw prefix such as repo:acme/web* also trusts repo:acme/web-evil, and a bare * trusts everything`
 
 func httpsURL(raw string) bool {
 	u, err := url.Parse(raw)
