@@ -55,9 +55,18 @@ func fireAnswerDeadline(t *testing.T, w *answerWatchdog, exited chan int, stdout
 // home. Production exits the process there. A test that returned at once had
 // its TempDir removed under that goroutine (macOS CI run 43337422577:
 // "TempDir RemoveAll cleanup: unlinkat .../logs: directory not empty").
+// It also waits for the record writers watch started (w.records): watch exits
+// once the marker or the ordinary line has recorded the answer, and the
+// other one can still be writing the logs folder (macOS CI, PR #1456,
+// TestPerUserNoAnswerStaysClosed/per-user_deadline_before_contact).
 func awaitAnswerWatchdogBackground(t *testing.T, w *answerWatchdog) {
 	t.Helper()
-	for _, done := range []<-chan struct{}{w.watchDone, w.failureLog.done} {
+	records := make(chan struct{})
+	go func() {
+		w.records.Wait()
+		close(records)
+	}()
+	for _, done := range []<-chan struct{}{w.watchDone, w.failureLog.done, records} {
 		select {
 		case <-done:
 		case <-time.After(time.Minute):
