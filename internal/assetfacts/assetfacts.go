@@ -615,11 +615,11 @@ func DeclaredSkillName(dir string) string {
 	if !readableTarget(path) {
 		return ""
 	}
-	info, err := os.Lstat(path)
+	info, err := fsLstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	file, err := os.Open(path)
+	file, err := fsOpen(path)
 	if err != nil {
 		return ""
 	}
@@ -1175,7 +1175,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 			original := dir
 			dir = ResolveLinks(dir)
 			if shareAnswers(original) && shareAnswers(dir) {
-				if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+				if info, statErr := fsStat(dir); statErr == nil && info.IsDir() {
 					certain = callerCanEnterDirectory(original, uid, gid) && callerCanEnterDirectory(dir, uid, gid)
 				}
 			}
@@ -1336,7 +1336,7 @@ func namesEntryIn(cwd, token string) bool {
 	if !ShareAnswers(path) {
 		return false
 	}
-	_, err := os.Lstat(path)
+	_, err := fsLstat(path)
 	return err == nil
 }
 
@@ -1346,7 +1346,7 @@ func pathExists(path string) bool {
 	if !readableTarget(path) {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := fsStat(path)
 	return err == nil
 }
 
@@ -1472,7 +1472,7 @@ func ResolveLinks(path string) string {
 		if !shareAnswers(next) {
 			return filepath.Join(append([]string{next}, pending...)...)
 		}
-		info, err := os.Lstat(next)
+		info, err := fsLstat(next)
 		if err != nil && !slices.Contains(pending, "..") {
 			// Under a part that cannot be examined there is no link the
 			// walk could follow, and no .. leads back out of it: the rest
@@ -1485,7 +1485,7 @@ func ResolveLinks(path string) string {
 			resolved = next
 			continue
 		}
-		target, err := os.Readlink(next)
+		target, err := fsReadlink(next)
 		if err != nil {
 			resolved = next
 			continue
@@ -1509,7 +1509,7 @@ func ResolveLinks(path string) string {
 	if !shareAnswers(resolved) {
 		return resolved
 	}
-	if real, err := filepath.EvalSymlinks(resolved); err == nil {
+	if real, err := fsEvalSymlinks(resolved); err == nil {
 		return real
 	}
 	return resolved
