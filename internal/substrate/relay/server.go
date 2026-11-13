@@ -281,6 +281,23 @@ func termSize(r *http.Request) (uint16, uint16) {
 	return cols, rows
 }
 
+// startDir applies the dir query parameter of an attach: the folder the
+// agent starts in when it is not running yet. It answers 400 itself when
+// the folder is refused.
+func (s *Server) startDir(w http.ResponseWriter, r *http.Request) bool {
+	q := r.URL.Query().Get("dir")
+	if q == "" {
+		return true
+	}
+	d, err := s.projectDir(q)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	s.agent.UseDir(d)
+	return true
+}
+
 // open pre-connects, starts the agent if needed and attaches to it.
 func (s *Server) open(ctx context.Context, cols, rows uint16) (*Attachment, error) {
 	s.preconnect(ctx)
@@ -336,7 +353,7 @@ var upgrader = websocket.Upgrader{
 
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.auth(w, r, "ws", true)
-	if !ok {
+	if !ok || !s.startDir(w, r) {
 		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -444,7 +461,7 @@ func (p *pollAttachment) end() {
 
 func (s *Server) pollOpen(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.auth(w, r, "poll", true)
-	if !ok {
+	if !ok || !s.startDir(w, r) {
 		return
 	}
 	s.mu.Lock()

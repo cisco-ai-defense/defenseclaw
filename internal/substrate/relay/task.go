@@ -31,6 +31,9 @@ import (
 // registered (its SHA-256 is the session's TaskDigest, GAP-0071).
 type TaskRequest struct {
 	Prompt string `json:"prompt"`
+	// Dir is the folder the task runs in (the copy of the project,
+	// GAP-0163): inside the relay working directory; "" for the workdir.
+	Dir string `json:"dir,omitempty"`
 }
 
 // TaskDigest is the registration's digest of a task text.
@@ -88,6 +91,9 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest,
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = cfg.Relay.Workdir
+	if req.Dir != "" {
+		cmd.Dir = req.Dir // checked by the caller (Server.projectDir)
+	}
 	cmd.Env = append(os.Environ(), kit.ModeEnv+"="+kit.ModeUnattend)
 	for k, v := range cfg.Relay.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -136,6 +142,14 @@ func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&req); err != nil || req.Prompt == "" {
 		http.Error(w, "relay: a task is {\"prompt\": ...} and nothing else", http.StatusBadRequest)
 		return
+	}
+	if req.Dir != "" {
+		d, err := s.projectDir(req.Dir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.Dir = d
 	}
 	if sess.TaskDigest == "" || TaskDigest(req.Prompt) != sess.TaskDigest {
 		s.log.Warn("relay.refused", "what", "task", "reason", "task text is not the registered task", "person", sess.Person)

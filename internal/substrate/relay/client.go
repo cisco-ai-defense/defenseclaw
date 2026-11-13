@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,9 @@ type AttachOptions struct {
 	// every route is BaseURL + "/" + route. Without it BaseURL is the relay
 	// origin and the routes are under Prefix.
 	FlatRoutes bool
+	// Dir is the folder in the actor the agent starts in when it is not
+	// running yet (the copy of the project); "" keeps the relay default.
+	Dir string
 	// HTTPClient carries long-poll requests (default http.DefaultClient).
 	HTTPClient *http.Client
 	// Dialer dials WebSocket (default websocket.DefaultDialer).
@@ -67,7 +71,11 @@ func Attach(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (
 }
 
 func sizeQuery(o AttachOptions) string {
-	return "?cols=" + strconv.Itoa(int(o.Cols)) + "&rows=" + strconv.Itoa(int(o.Rows))
+	q := "?cols=" + strconv.Itoa(int(o.Cols)) + "&rows=" + strconv.Itoa(int(o.Rows))
+	if o.Dir != "" {
+		q += "&dir=" + url.QueryEscape(o.Dir)
+	}
+	return q
 }
 
 // pumpInput reads in and calls send for each chunk until Ctrl-] or EOF.

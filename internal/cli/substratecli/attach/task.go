@@ -98,7 +98,7 @@ func RunTask(ctx context.Context, o TaskOptions) (int, error) {
 		// The client puts the person's bearer on the request; the token
 		// argument is not used for it.
 		code, err := relay.RunTask(ctx, l.tun.HTTPClient(), l.tun.BaseURL(), "",
-			relay.TaskRequest{Prompt: o.Prompt}, track)
+			relay.TaskRequest{Prompt: o.Prompt, Dir: o.Dir}, track)
 		if err == nil {
 			return code, nil
 		}

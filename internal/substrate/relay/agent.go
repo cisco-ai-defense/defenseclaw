@@ -71,6 +71,17 @@ func (a *Agent) Running() bool {
 	return a.running
 }
 
+// UseDir sets the directory the agent starts in from now on (the copy of
+// the project, GAP-0163). A running agent keeps its directory.
+func (a *Agent) UseDir(dir string) {
+	if dir == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Dir = dir
+}
+
 // start starts the agent on a new PTY of cols x rows. Called with a.mu held.
 func (a *Agent) start(cols, rows uint16) error {
 	if len(a.Argv) == 0 {

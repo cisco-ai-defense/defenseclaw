@@ -96,6 +96,9 @@ type Backoff struct {
 // Options configure Attach, RunTask, FollowTask and Status.
 type Options struct {
 	Target Target
+	// Dir is the folder in the actor the agent starts in, and a task runs
+	// in: the copy of the project (GAP-0163). "" keeps the relay default.
+	Dir string
 	// Gateway is the cluster's admin listener.
 	Gateway Gateway
 	// Bearer gives the person's OIDC token for every request.
@@ -464,7 +467,7 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		// request.
 		BaseURL: a.tun.BaseURL(), Token: tok, Cols: sz.Cols, Rows: sz.Rows,
 		LongPoll: a.mode == TransportLongPoll, HTTPClient: a.tun.HTTPClient(), Dialer: a.tun.Dialer(), FlatRoutes: true,
-		Resize: ch,
+		Resize: ch, Dir: a.o.Dir,
 		OnControl: func(c relay.Control) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)

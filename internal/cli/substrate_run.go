@@ -35,9 +35,11 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
+	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
 
@@ -122,6 +124,12 @@ func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor
 		Target:  attach.Target{Atespace: a.Atespace, Name: a.Name},
 		Gateway: attach.Gateway{BaseURL: s.Ctx.AdminURL, CAFile: s.Ctx.AdminCAFile}, Bearer: s.Bearer, In: os.Stdin, Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 		Transport: tr, NoAsks: noAsks,
+	}
+	// The agent starts in the copy of the project, so what it writes where
+	// it starts comes back with pull (GAP-0163). A computer that did not
+	// upload the folder has no record and keeps the relay default.
+	if rec, err := osw.LoadCopy(auth.StateDir(), substrateCopyName(a)); err == nil && rec != nil {
+		o.Dir = rec.RemoteDir
 	}
 	if !noAsks {
 		o.Asks = substrateAsks{s.Client}
