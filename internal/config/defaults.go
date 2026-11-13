@@ -204,6 +204,14 @@ func DefaultConfig() *Config {
 			HookSelfHealDebounceMs:      500,
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
+			EffectsRules:                "shadow",
+			SecretFlow: SecretFlowConfig{
+				Mode:        "shadow",
+				Reencodings: true,
+				LabelSets:   SecretFlowLabelSets{Credentials: true},
+				SinkAction:  SecretFlowSinkAction{Default: "alert", Strict: "block", Managed: "block"},
+				Memory:      SecretFlowMemory{MaxLabeledPaths: 512, MaxValueDigests: 256},
+			},
 			Judge: JudgeConfig{
 				Injection:     true,
 				PII:           true,

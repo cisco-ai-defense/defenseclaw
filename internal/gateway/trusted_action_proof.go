@@ -34,6 +34,14 @@ const (
 	findingProofParserShadow
 	findingProofEvaluationFailure
 	findingProofActiveStateMutation
+	// findingProofEffect is the effect-model rule lane. It is authoritative
+	// (may authorize a synchronous deny) only when the effect rules are ON;
+	// in shadow it rides along detection-only.
+	findingProofEffect
+	// findingProofFlow is the Secret flow tracking lane. It is authoritative
+	// only when secret_flow.mode is ON; in shadow it rides along
+	// detection-only.
+	findingProofFlow
 )
 
 // findingProof is deliberately value-free. It records neither argv nor shell
@@ -167,6 +175,8 @@ func (p findingProof) authorizes(ruleID string) bool {
 	case findingProofActionFactsSemantic,
 		findingProofActionFactsSubgraph,
 		findingProofActiveStateMutation,
+		findingProofEffect,
+		findingProofFlow,
 		findingProofExactCodeGuard,
 		findingProofExactFallback,
 		findingProofResolvedTarget,

@@ -73,6 +73,11 @@ type DeterministicActionEvaluation struct {
 	// stateful benchmark runner. It is never copied into a Prediction.
 	ValueJoinDigests    [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	CELEvaluationStatus string
+	// EffectShadow is the effect-model rule lane verdict for this call,
+	// computed beside today's when guardrail.effects_rules is shadow or on.
+	// It never changes result.Action in shadow; it is the measurement the
+	// benchmark diffs against today's answer.
+	EffectShadow *EffectShadowResult
 }
 
 // DeterministicToolResultInput models one already-validated, exact
@@ -267,6 +272,13 @@ func EvaluateDeterministicAction(
 		result.Route = "mixed"
 	}
 	result.Action = strings.ToLower(strings.TrimSpace(result.Action))
+	if mode := effectsRulesModeFor(); mode != effectRulesOff {
+		es := computeEffectShadow(trustedActionRequest{
+			Input: input, Connector: connector, EnforcementCapable: true,
+			StrictPolicy: profile == "strict",
+		}, mode)
+		result.EffectShadow = &es
+	}
 	return result
 }
 

@@ -1,0 +1,469 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package psparse
+
+import (
+	"math"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+// stringLit builds a StringLit from a TokString token, resolving the literal
+// value for literal forms and, for expandable forms, the segment list.
+func (p *parser) stringLit(t Token) *StringLit {
+	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str, Raw: t.Raw}
+	switch t.Str {
+	case StrSingle:
+		inner := trimRuneDelims(t.Raw)
+		sl.Value = collapseDoubled(inner, isSingleQuote)
+		sl.Static = true
+	case StrHereSingle:
+		sl.Value = hereBody(t.Raw)
+		sl.Static = true
+	case StrDouble:
+		inner := trimRuneDelims(t.Raw)
+		inner = collapseDoubled(inner, isDoubleQuote)
+		parts, static, lit := p.expandable(inner, t.Start+1)
+		sl.Parts, sl.Static, sl.Value = parts, static, lit
+	case StrHereDouble:
+		inner := hereBody(t.Raw)
+		parts, static, lit := p.expandable(inner, t.Start)
+		sl.Parts, sl.Static, sl.Value = parts, static, lit
+	default:
+		sl.Value = t.Raw
+		sl.Static = true
+	}
+	return sl
+}
+
+// trimRuneDelims drops the first and last rune (the quote delimiters), which
+// may be multi-byte Unicode quote characters.
+func trimRuneDelims(s string) string {
+	rs := []rune(s)
+	if len(rs) >= 2 {
+		return string(rs[1 : len(rs)-1])
+	}
+	return ""
+}
+
+// collapseDoubled replaces each doubled quote-class pair (the quote-escape
+// form) with one repl rune.
+func collapseDoubled(s string, isClass func(rune) bool) string {
+	rs := []rune(s)
+	var b strings.Builder
+	for i := 0; i < len(rs); i++ {
+		if isClass(rs[i]) && i+1 < len(rs) && isClass(rs[i+1]) {
+			b.WriteRune(rs[i]) // a doubled quote collapses to that same quote char
+			i++
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
+}
+
+// hereBody extracts the content of a here-string (@" ... "@ / @' ... '@),
+// which is the text between the first line break after the opener and the
+// terminating line that begins with "@ or '@.
+func hereBody(raw string) string {
+	nl := strings.IndexByte(raw, '\n')
+	if nl < 0 {
+		return ""
+	}
+	body := raw[nl+1:]
+	// strip the terminator: last line is  "@  or  '@
+	if i := strings.LastIndexByte(body, '\n'); i >= 0 {
+		return strings.TrimSuffix(body[:i], "\r")
+	}
+	// no trailing newline before terminator: drop the final 2 delimiter bytes
+	if len(body) >= 2 {
+		return body[:len(body)-2]
+	}
+	return body
+}
+
+// expandable scans the body of a double-quoted / here-double string and
+// returns its segments (literal runs and embedded $var / $(...) expressions),
+// whether it is fully static, and the concatenated literal skeleton.
+func (p *parser) expandable(s string, base int) (parts []StringPart, static bool, literal string) {
+	var lit strings.Builder
+	flush := func() {
+		if lit.Len() > 0 {
+			parts = append(parts, StringPart{Lit: lit.String()})
+			lit.Reset()
+		}
+	}
+	runes := []rune(s)
+	hasExpr := false
+	forceDyn := false
+	for i := 0; i < len(runes); {
+		r := runes[i]
+		switch {
+		case r == '`' && i+1 < len(runes):
+			if runes[i+1] == 'u' && i+2 < len(runes) && runes[i+2] == '{' {
+				j := i + 3
+				for j < len(runes) && runes[j] != '}' {
+					j++
+				}
+				if j < len(runes) {
+					switch p.dialect {
+					case DialectWindowsPS51:
+						lit.WriteString(string(runes[i+1 : j+1])) // `u{..} literal in 5.1
+						i = j + 1
+						continue
+					case DialectUnknown:
+						forceDyn = true
+						lit.WriteString(string(runes[i+1 : j+1]))
+						i = j + 1
+						continue
+					default:
+						if cp, err := strconv.ParseInt(string(runes[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+							lit.WriteRune(rune(cp))
+							i = j + 1
+							continue
+						}
+					}
+				}
+				forceDyn = true // malformed `u{...}: cannot resolve statically
+			}
+			if runes[i+1] == 'e' {
+				switch p.dialect {
+				case DialectWindowsPS51:
+					lit.WriteRune('e')
+				case DialectUnknown:
+					forceDyn = true
+					lit.WriteRune('e')
+				default:
+					lit.WriteRune(0x1b)
+				}
+				i += 2
+				continue
+			}
+			lit.WriteRune(backtickEscape(runes[i+1]))
+			i += 2
+		case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
+			flush()
+			inner, consumed := scanParenBody(runes[i+2:])
+			stmts, ds := p.subParse(inner)
+			p.diags = append(p.diags, ds...)
+			parts = append(parts, StringPart{Expr: &SubExpr{Statements: stmts}})
+			hasExpr = true
+			i += 2 + consumed
+		case r == '$' && i+1 < len(runes) && runes[i+1] != '(' && dollarStartsVar(runes[i+1]):
+			flush()
+			v, consumed := scanEmbeddedVar(runes[i:])
+			parts = append(parts, StringPart{Expr: v})
+			hasExpr = true
+			i += consumed
+		default:
+			lit.WriteRune(r)
+			i++
+		}
+	}
+	flush()
+	static = !hasExpr && !forceDyn
+	for _, pt := range parts {
+		if pt.Expr == nil {
+			literal += pt.Lit
+		}
+	}
+	return parts, static, literal
+}
+
+func backtickEscape(r rune) rune {
+	switch r {
+	case 'n':
+		return '\n'
+	case 't':
+		return '\t'
+	case 'r':
+		return '\r'
+	case '0':
+		return 0
+	case 'a':
+		return 7
+	case 'b':
+		return 8
+	case 'f':
+		return 12
+	case 'v':
+		return 11
+	}
+	return r
+}
+
+// dollarStartsVar reports whether a '$' followed by r begins a variable or a
+// $( ) sub-expression (so a bareword ends before it). Matches the tokenizer:
+// a name char, a digit, '_', '?', '^', '$', '{' or '('.
+func dollarStartsVar(r rune) bool {
+	return r == '(' || r == '{' || r == '$' || r == '?' || r == '^' || r == '_' || r == ':' ||
+		unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+// decodeBacktick resolves PowerShell backtick escapes in a bareword or command
+// name per the parser's dialect. `n `t `r `0 `a `b `f `v and `<char> are the
+// same in all editions; `e (ESC) and `u{hex} exist only in PS 6/7, so under
+// DialectWindowsPS51 they stay literal and under DialectUnknown they make the
+// value ambiguous (the second return is true -> the caller marks it
+// non-static). When stripQuotes is set, unescaped quote-class delimiters are
+// dropped (command-name generic token).
+func (p *parser) decodeBacktick(raw string, stripQuotes bool) (string, bool) {
+	rs := []rune(raw)
+	var b strings.Builder
+	ambiguous := false
+	for i := 0; i < len(rs); i++ {
+		if rs[i] == '`' && i+1 < len(rs) {
+			c := rs[i+1]
+			if c == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
+				j := i + 3
+				for j < len(rs) && rs[j] != '}' {
+					j++
+				}
+				if j < len(rs) {
+					switch p.dialect {
+					case DialectWindowsPS51:
+						b.WriteString(string(rs[i+1 : j+1])) // `u{hex} is literal in 5.1
+						i = j
+						continue
+					case DialectUnknown:
+						ambiguous = true
+						b.WriteString(string(rs[i+1 : j+1]))
+						i = j
+						continue
+					default: // PS 6/7
+						if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+							b.WriteRune(rune(cp))
+							i = j
+							continue
+						}
+					}
+				}
+				b.WriteRune('u')
+				i++
+				continue
+			}
+			if c == 'e' {
+				switch p.dialect {
+				case DialectWindowsPS51:
+					b.WriteRune('e')
+				case DialectUnknown:
+					ambiguous = true
+					b.WriteRune('e')
+				default:
+					b.WriteRune(0x1b)
+				}
+				i++
+				continue
+			}
+			b.WriteRune(backtickEscape(c))
+			i++
+			continue
+		}
+		if stripQuotes && (isSingleQuote(rs[i]) || isDoubleQuote(rs[i])) {
+			continue
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String(), ambiguous
+}
+
+// scanParenBody returns the text inside a $( ... ) starting just after the '(',
+// and how many runes were consumed including the closing ')'.
+func scanParenBody(runes []rune) (string, int) {
+	depth := 1
+	var b strings.Builder
+	i := 0
+	for ; i < len(runes); i++ {
+		r := runes[i]
+		if r == '(' {
+			depth++
+		} else if r == ')' {
+			depth--
+			if depth == 0 {
+				return b.String(), i + 1
+			}
+		}
+		b.WriteRune(r)
+	}
+	return b.String(), i
+}
+
+// scanEmbeddedVar reads a $var / ${...} / $scope:name beginning at runes[0]=='$'
+// and returns a Variable plus the rune count consumed.
+func scanEmbeddedVar(runes []rune) (Expr, int) {
+	i := 1 // past $
+	if i < len(runes) && runes[i] == '{' {
+		i++
+		start := i
+		for i < len(runes) && runes[i] != '}' {
+			i++
+		}
+		name := string(runes[start:i])
+		if i < len(runes) {
+			i++ // }
+		}
+		scope := ""
+		if idx := strings.IndexByte(name, ':'); idx >= 0 {
+			scope, name = name[:idx], name[idx+1:]
+		}
+		return &Variable{Name: name, Scope: scope}, i
+	}
+	if i < len(runes) && (runes[i] == '$' || runes[i] == '?' || runes[i] == '^') {
+		return &Variable{Name: string(runes[i])}, i + 1
+	}
+	start := i
+	for i < len(runes) && isNameChar(runes[i]) {
+		i++
+	}
+	first := string(runes[start:i])
+	scope := ""
+	name := first
+	if i < len(runes) && runes[i] == ':' && i > start {
+		i++
+		nstart := i
+		for i < len(runes) && isNameChar(runes[i]) {
+			i++
+		}
+		scope = first
+		name = string(runes[nstart:i])
+	}
+	// member access inside interpolation ($obj.Prop) extends the token but we
+	// only need the base variable for the literal skeleton.
+	return &Variable{Name: name, Scope: scope}, i
+}
+
+var numberMultipliers = map[string]float64{"kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50}
+
+func numberLit(t Token) *Number {
+	n := &Number{span: span{t.Start, t.End}, Text: t.Raw}
+	raw := t.Raw
+	lower := strings.ToLower(raw)
+	// multiplier suffix (kb mb gb tb pb)
+	mult := int64(1)
+	for _, suf := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if i := strings.Index(lower, suf); i >= 0 {
+			switch suf {
+			case "kb":
+				mult = 1 << 10
+			case "mb":
+				mult = 1 << 20
+			case "gb":
+				mult = 1 << 30
+			case "tb":
+				mult = 1 << 40
+			case "pb":
+				mult = 1 << 50
+			}
+			raw = raw[:i] + raw[i+2:]
+			lower = strings.ToLower(raw)
+			break
+		}
+	}
+	// trailing numeric type suffix (l u y s n d and combos)
+	isDecimalType := false
+	unsigned := false
+	bigInt := false
+	narrow := false     // y (sbyte) or s (int16): a narrow signed integer type
+	typeSuffix := false // any trailing l/u/y/s/n/d type suffix
+	for len(raw) > 0 {
+		c := raw[len(raw)-1]
+		if c == 'd' || c == 'D' {
+			isDecimalType = true
+		}
+		if c == 'u' || c == 'U' {
+			unsigned = true
+		}
+		if c == 'n' || c == 'N' {
+			bigInt = true
+		}
+		if c == 'y' || c == 'Y' || c == 's' || c == 'S' {
+			narrow = true
+		}
+		if strings.IndexByte("lLuUyYsSnNdD", c) >= 0 {
+			typeSuffix = true
+			raw = raw[:len(raw)-1]
+			continue
+		}
+		break
+	}
+	low := strings.ToLower(raw)
+	// Conservatism for numeric suffix/multiplier combinations whose exact pwsh
+	// value depends on signed-width wrap or suffix/multiplier ordering we do not
+	// model (0xFFy -> -1, 0x100y -> bareword, 1kbl, 1.5l -> 2): do not assert a
+	// value (review 3 R11). Numbers are never a path/program, so non-static is
+	// safe. (Plain forms -- 0x10, 1kb, 1.5, 1u, 10l -- are unaffected.)
+	hexOrBin := strings.HasPrefix(low, "0x") || strings.HasPrefix(low, "0b")
+	fractional := strings.ContainsAny(raw, ".eE")
+	if (narrow && hexOrBin) || (mult != 1 && typeSuffix) || (fractional && (narrow || (typeSuffix && !isDecimalType && !bigInt))) {
+		return n
+	}
+	setInt := func(v int64) {
+		n.Value, n.Int = float64(v), true
+		n.Display, n.OK = strconv.FormatInt(v, 10), true
+	}
+	switch {
+	case strings.HasPrefix(low, "0x"):
+		dig := raw[2:]
+		if u, err := strconv.ParseUint(dig, 16, 64); err == nil {
+			var v int64
+			if unsigned {
+				v = int64(u) // a u suffix keeps the unsigned value (no sign wrap)
+			} else if len(dig) <= 8 {
+				v = int64(int32(uint32(u))) // 1-8 hex digits: Int32 width (wraps)
+			} else {
+				v = int64(u) // 9-16 hex digits: Int64 width (wraps)
+			}
+			setInt(v * mult)
+		}
+		return n
+	case strings.HasPrefix(low, "0b"):
+		if u, err := strconv.ParseUint(raw[2:], 2, 64); err == nil {
+			setInt(int64(u) * mult)
+		}
+		return n
+	case !strings.ContainsAny(raw, ".eE") && !isDecimalType:
+		// a decimal integer
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			setInt(v * mult)
+		} else if mult == 1 {
+			n.Display, n.OK = raw, true // too big for int64: the exact source digits
+		}
+		return n
+	case isDecimalType && mult == 1 && !strings.ContainsAny(raw, "eE"):
+		// a [decimal] literal keeps its written form (trailing zeros): 1.50d -> "1.50"
+		n.Display, n.OK = raw, true
+		return n
+	default:
+		if bigInt {
+			// a [bigint] literal with a non-integer mantissa (e.g. 1.5n) rounds
+			// to an integer in pwsh; we do not assert that value statically.
+			return n
+		}
+		if f, err := strconv.ParseFloat(raw, 64); err == nil {
+			f *= float64(mult)
+			n.Value = f
+			switch {
+			case math.IsInf(f, 1):
+				n.Display, n.OK = "Infinity", true
+			case math.IsInf(f, -1):
+				n.Display, n.OK = "-Infinity", true
+			case f == math.Trunc(f) && math.Abs(f) < 1e15:
+				n.Display, n.Int, n.OK = strconv.FormatInt(int64(f), 10), true, true
+			default:
+				// .NET double.ToString() uses E notation for magnitudes >= 1e15
+				// or < 1e-4, else a plain decimal. (A direct range test avoids
+				// log10 float imprecision at exact powers of ten.)
+				if a := math.Abs(f); a != 0 && (a >= 1e15 || a < 1e-4) {
+					n.Display = strconv.FormatFloat(f, 'E', -1, 64)
+				} else {
+					n.Display = strconv.FormatFloat(f, 'f', -1, 64)
+				}
+				n.OK = true
+			}
+		}
+		return n
+	}
+}
