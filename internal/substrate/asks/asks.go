@@ -80,9 +80,10 @@ type Ask struct {
 	Kind string `json:"kind"`
 	Host string `json:"host,omitempty"`
 	Tool string `json:"tool,omitempty"`
-	// Rule is the egress callout rule that raised an egress ask:
-	// "ask_hosts:<pattern>" (an approval covers the host) or
-	// "url_rules:<name>" (it covers that rule only, GAP-0177).
+	// Rule is the egress rule that asked: "ask_hosts:<pattern>" (an
+	// approval covers the host) or "url_rules:<name>" (an approval covers
+	// that rule only, its methods and path prefix; GAP-0177). Empty: a host
+	// ask from a callout that names no rule.
 	Rule     string    `json:"rule,omitempty"`
 	Summary  string    `json:"summary,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
@@ -104,10 +105,6 @@ type Ask struct {
 	// (the profile's ask_timeout, at most 24 h).
 	TimeoutSeconds int64 `json:"timeout_seconds,omitempty"`
 }
-
-// URLRuleAsk reports an ask an url rule raised: its approval covers that
-// rule, not the whole host (GAP-0177).
-func (a Ask) URLRuleAsk() bool { return strings.HasPrefix(a.Rule, "url_rules:") }
 
 // MaxAskTimeout bounds Ask.TimeoutSeconds (config ask_timeout).
 const MaxAskTimeout = 24 * time.Hour
@@ -538,4 +535,12 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// HostWide reports whether an approval of an ask raised by rule covers its
+// whole host (an ask_hosts rule, or no rule named): such an approval joins
+// the actor's approved hosts. A url_rules ask asks about some methods and a
+// path prefix only, so its approval covers that rule alone (GAP-0177).
+func HostWide(rule string) bool {
+	return !strings.HasPrefix(rule, "url_rules:")
 }

@@ -108,13 +108,13 @@ func TestURLRuleAskCarriesTheRuleGAP0177(t *testing.T) {
 	if len(h.asks.got) != 4 {
 		t.Fatalf("asks %+v", h.asks.got)
 	}
-	if g := h.asks.got[0]; g.Rule != "url_rules:ask-release" || g.Path != "/repos/acme/releases" {
+	if g := h.asks.got[0]; !strings.HasPrefix(g.Rule, "url_rules:ask-release ") || g.PathPrefix != "/repos/acme/releases" {
 		t.Errorf("url rule ask %+v", g)
 	}
-	if h.asks.got[1].Rule == h.asks.got[2].Rule || h.asks.got[1].Path != "/a/" {
+	if h.asks.got[1].Rule == h.asks.got[2].Rule || h.asks.got[1].PathPrefix != "/a/" {
 		t.Errorf("unnamed rules share a name: %+v %+v", h.asks.got[1], h.asks.got[2])
 	}
-	if g := h.asks.got[3]; g.Rule != "ask_hosts:files.example.io" || g.Path != "" {
+	if g := h.asks.got[3]; g.Rule != "ask_hosts:files.example.io" || g.PathPrefix != "" {
 		t.Errorf("host ask %+v", g)
 	}
 }

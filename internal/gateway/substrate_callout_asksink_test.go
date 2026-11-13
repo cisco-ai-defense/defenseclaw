@@ -130,3 +130,52 @@ func TestSubstrateCalloutAskApprovedHostBeforeTheRegistrationCatchesUp(t *testin
 		t.Fatalf("after the approval: %s, pending %v", rec.Body, store.Pending())
 	}
 }
+
+// GAP-0177 (R3a TestR3aURLRuleAskApprovalIsHostWide, with the rule the
+// callout sends): approving one url_rules ask on a host does not approve
+// another rule's ask on that host, nor a host-wide ask, and the approved
+// rule's next ask answers approved; a host-wide approval still covers the
+// host's host-wide asks.
+func TestSubstrateURLRuleApprovalIsPerRule(t *testing.T) {
+	store := asks.NewMemory()
+	fake := ateapifake.New()
+	fake.PutActor(&ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "bob-1"}})
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
+		c.Asks, c.Policies = asksDirect{store}, fake
+		c.UnattendedAsk = func(string) SubstrateUnattendedAsk { return SubstrateUnattendedAsk{Queue: true, Timeout: time.Minute} }
+	})
+	ask := func(host, rule, summary string) map[string]any {
+		body := `{"actor":{"atespace":"eng-web","name":"bob-1"},"host":"` + host + `","summary":"` + summary + `","rule":"` + rule + `"}`
+		rec := f.do(t, f.admin, http.MethodPost, substrateCalloutAskPath, subCallout, body, "X-DefenseClaw-Client", "substrate-extproc")
+		var got map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &got)
+		return got
+	}
+	approve := func(id any) {
+		if _, err := store.Resolve(context.Background(), asks.ResolveRequest{ID: id.(string), Decision: "approve", CallerID: ownerOf(bob).ID()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := ask("api.github.com", "url_rules:release-ask", "POST api.github.com /repos/acme/releases*")
+	if first["state"] != asks.StatePending || first["rule"] != "url_rules:release-ask" {
+		t.Fatalf("first: %v", first)
+	}
+	approve(first["id"])
+	if got := ask("api.github.com", "url_rules:admin-delete-ask", "DELETE api.github.com /admin*"); got["state"] != asks.StatePending {
+		t.Fatalf("another url rule on the approved host: %v", got)
+	}
+	if got := ask("api.github.com", "ask_hosts:api.github.com", "GET api.github.com"); got["state"] != asks.StatePending {
+		t.Fatalf("a host-wide ask after a url-rule approval: %v", got)
+	}
+	if got := ask("api.github.com", "url_rules:release-ask", "POST api.github.com /repos/acme/releases*"); got["state"] != asks.StateApproved {
+		t.Fatalf("the approved rule again: %v", got)
+	}
+	host := ask("example.com", "ask_hosts:example.com", "GET example.com")
+	approve(host["id"])
+	if got := ask("example.com", "", "PUT example.com"); got["state"] != asks.StateApproved {
+		t.Fatalf("a host-wide ask after a host-wide approval: %v", got)
+	}
+	if got := ask("example.com", "url_rules:x", "DELETE example.com /x*"); got["state"] != asks.StatePending {
+		t.Fatalf("a url rule on a host approved host-wide: %v", got)
+	}
+}

@@ -302,8 +302,13 @@ func listHostProject(ctx context.Context, project string) ([]hostFile, []string,
 // folder's own name (spaces and Unicode kept).
 func hostFolderName(project string) string {
 	n := filepath.Base(filepath.Clean(project))
-	if n == "" || n == "." || n == string(filepath.Separator) || strings.ContainsAny(n, "/\\:") {
+	if n == "" || n == "." || n == ".." || n == string(filepath.Separator) || strings.ContainsAny(n, "/\\:\x00") || len(n) > 255 {
 		return "project"
+	}
+	for _, r := range n {
+		if r < 0x20 || r == 0x7f {
+			return "project"
+		}
 	}
 	return n
 }
@@ -807,7 +812,7 @@ func hostApply(ctx context.Context, opts ApplyOptions) (*ApplyResult, error) {
 	}
 	pr := rec.Pulled
 	if pr.Review.Sensitive() && !opts.AcceptSensitive && opts.Mode != ModePatch {
-		if !(opts.Mode == ModeBranch && len(pr.Review.SecretPaths()) == 0) {
+		if opts.Mode != ModeBranch || len(pr.Review.SecretPaths()) != 0 {
 			return nil, &SensitiveError{Files: flaggedPaths(pr)}
 		}
 	}

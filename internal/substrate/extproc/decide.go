@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -389,7 +390,7 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	var target *askTarget
 	switch {
 	case askRule != nil:
-		t := askFor(askRule, req)
+		t := askFor(askRule, req, requestMethods(req))
 		target = &t
 	default:
 		if pat, ok := pol.askHosts.match(req.Host); ok {
@@ -489,22 +490,38 @@ func (e *Engine) checkFormOverride(ctx context.Context, req *Request, pol *Polic
 	case refused:
 		return refusal
 	case rule != nil && rule.action == "ask":
-		return e.ask(ctx, v, req, pol, askFor(rule, req))
+		return e.ask(ctx, v, req, pol, askFor(rule, req, methods))
 	}
 	return v
 }
 
 // askTarget is what an ask names: the rule that raised it, and for an url
-// rule its methods and path, so an approval covers that rule only
-// (GAP-0177).
+// rule the methods it asks about and its path prefix. An approval binds to
+// exactly what the person saw (GAP-0177, STEER 03:40Z): host, rule id,
+// method and path prefix. The gateway keys approvals by host and rule, so
+// the methods are part of an url rule ask's rule key.
 type askTarget struct {
 	rule   string
 	method string
 	path   string
 }
 
-func askFor(r *urlRule, req *Request) askTarget {
-	t := askTarget{rule: "url_rules:" + r.name, method: req.Method, path: r.pathPrefix}
+// askFor is the ask of url rule r for a request standing for methods (its
+// own and every override it names): the methods r lists among them, sorted
+// (all of them for a rule without methods).
+func askFor(r *urlRule, req *Request, methods []string) askTarget {
+	var ms []string
+	for _, m := range methods {
+		if (len(r.methods) == 0 || r.methods[m]) && !slices.Contains(ms, m) {
+			ms = append(ms, m)
+		}
+	}
+	if len(ms) == 0 {
+		ms = []string{strings.ToUpper(req.Method)}
+	}
+	slices.Sort(ms)
+	method := strings.Join(ms, ",")
+	t := askTarget{rule: "url_rules:" + r.name + " " + method, method: method, path: r.pathPrefix}
 	if t.path == "" {
 		t.path = "/"
 	}
@@ -561,8 +578,12 @@ func (e *Engine) ask(ctx context.Context, v Verdict, req *Request, pol *Policy, 
 	}
 	actx, cancel := context.WithTimeout(ctx, e.cfg.Ask.Hold)
 	defer cancel()
-	res, err := e.asks.Ask(actx, AskRequest{Actor: req.Actor, Profile: pol.Name, Host: req.Host, Method: req.Method,
-		Rule: rule, Path: t.path, UnattendedAsks: pol.UnattendedAsks})
+	method := t.method
+	if method == "" {
+		method = req.Method
+	}
+	res, err := e.asks.Ask(actx, AskRequest{Actor: req.Actor, Profile: pol.Name, Host: req.Host, Method: method,
+		Rule: rule, PathPrefix: t.path, UnattendedAsks: pol.UnattendedAsks})
 	v.AskID = res.ID
 	switch {
 	case err != nil && !errors.Is(err, context.DeadlineExceeded):

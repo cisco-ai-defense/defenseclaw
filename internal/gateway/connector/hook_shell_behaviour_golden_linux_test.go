@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -951,38 +950,23 @@ func runHookGoldenCase(base string, i int, c hookGoldenCase) (hookGoldenObservat
 	env, review2Delay := review2Env(env, base)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
+	if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
+		cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
+	}
+	cmd.Dir = work
+	cmd.Env = env
+	if review2Delay > 0 {
+		pr, pw := io.Pipe()
+		go func() { time.Sleep(review2Delay); _, _ = pw.Write(stdin); _ = pw.Close() }()
+		cmd.Stdin = pr
+	} else {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	var stdout, stderr bytes.Buffer
-	newCmd := func() *exec.Cmd {
-		cmd := exec.CommandContext(ctx, script, c.hook.args(c.event)...)
-		if sh := os.Getenv("DC_REVIEW2_BASH"); sh != "" {
-			cmd = exec.CommandContext(ctx, sh, append([]string{script}, c.hook.args(c.event)...)...)
-		}
-		cmd.Dir = work
-		cmd.Env = env
-		if review2Delay > 0 {
-			pr, pw := io.Pipe()
-			go func() { time.Sleep(review2Delay); _, _ = pw.Write(stdin); _ = pw.Close() }()
-			cmd.Stdin = pr
-		} else {
-			cmd.Stdin = bytes.NewReader(stdin)
-		}
-		stdout.Reset()
-		stderr.Reset()
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		return cmd
-	}
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	hookStart := time.Now()
-	// 32 cases run at once, each writing its hook script and then executing it. A fork in another case, while
-	// this script is still open for writing there, makes the exec fail with ETXTBSY before the hook ran at all
-	// (Go issue 22315); that is not a verdict, so the start is retried.
-	var runErr error
-	for attempt := 0; ; attempt++ {
-		runErr = newCmd().Run()
-		if runErr == nil || !errors.Is(runErr, syscall.ETXTBSY) || attempt >= 8 {
-			break
-		}
-		time.Sleep(time.Duration(20*(attempt+1)) * time.Millisecond)
-	}
+	runErr := cmd.Run()
 	obs.raw.HookMs = time.Since(hookStart).Milliseconds()
 	obs.raw.LoadAfter = hookGoldenLoad()
 	obs.raw.Stdout, obs.raw.Stderr, obs.raw.Root, obs.raw.Addr = stdout.String(), stderr.String(), root, addr

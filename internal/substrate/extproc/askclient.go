@@ -78,10 +78,12 @@ type askWire struct {
 		UID      string `json:"uid,omitempty"`
 	} `json:"actor"`
 	Host    string `json:"host"`
-	Rule    string `json:"rule,omitempty"`
 	Summary string `json:"summary,omitempty"`
 	Reason  string `json:"reason,omitempty"`
-	AskID   string `json:"ask_id,omitempty"`
+	// Rule keys the approval: an ask_hosts approval covers the host, a
+	// url_rules one its rule only (GAP-0177).
+	Rule  string `json:"rule,omitempty"`
+	AskID string `json:"ask_id,omitempty"`
 }
 
 type askAnswer struct {
@@ -95,11 +97,15 @@ type askAnswer struct {
 func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) {
 	var in askWire
 	in.Actor.Atespace, in.Actor.Name, in.Actor.UID = req.Actor.Atespace, req.Actor.Name, req.Actor.UID
-	in.Host, in.Rule = req.Host, req.Rule
-	// The person sees what the approval covers: the host, and for an url
-	// rule its method and path (GAP-0177).
-	in.Summary = strings.TrimSpace(req.Method + " " + req.Host + req.Path)
+	in.Host = req.Host
+	// The person who answers sees the method, the host and, for a url
+	// rule, the path prefix the approval covers.
+	in.Summary = strings.TrimSpace(req.Method + " " + req.Host)
+	if req.PathPrefix != "" {
+		in.Summary += " " + req.PathPrefix + "*"
+	}
 	if req.Rule != "" {
+		in.Rule = req.Rule
 		in.Reason = "the egress policy asks first (" + req.Rule + ")"
 	}
 	for {

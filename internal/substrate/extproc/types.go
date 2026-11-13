@@ -76,9 +76,9 @@ type AskRequest struct {
 	// approval of an url rule ask covers that rule only (GAP-0177); an
 	// ask_hosts approval covers the host.
 	Rule string
-	// Path is the url rule's path prefix ("" for an ask host), shown to
-	// the person who decides.
-	Path string
+	// PathPrefix is the url rule's path prefix, for the person who answers
+	// ("" for a host ask).
+	PathPrefix string
 	// UnattendedAsks is the profile's unattended_asks (deny or queue, D12).
 	UnattendedAsks string
 }

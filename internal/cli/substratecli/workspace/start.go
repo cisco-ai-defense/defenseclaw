@@ -175,7 +175,7 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	prev, _ := osw.LoadCopy(opts.DataDir, opts.Name)
 	_, err := osw.Stage(ctx, osw.StageOptions{
 		Project: opts.Project, Name: opts.Name, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
-		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes,
+		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes, FolderName: hostFolderName(opts.Project),
 		Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
 		Detector: opts.Detector, DisableContentScan: opts.DisableContentScan, Replace: opts.Replace,
 	})

@@ -4587,38 +4587,6 @@ attributes:
       max_utf8_bytes: 256
     notes: NFC bounded metric dimension; producer cardinality gate applies
   introduced_in: telemetry-registry-v1
-- id: defenseclaw.metric.cache
-  type: string
-  brief: Canonical bounded metric dimension projected as cache for local observability
-  examples:
-  - unknown
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: internal
-  cardinality: bounded
-  normalization:
-    id: bounded-v1
-    overrides:
-      max_utf8_bytes: 256
-    notes: NFC bounded metric dimension; producer cardinality gate applies
-  introduced_in: telemetry-registry-v1
-- id: defenseclaw.metric.ttl_bucket
-  type: string
-  brief: Canonical bounded metric dimension projected as ttl_bucket for local observability
-  examples:
-  - unknown
-  stability: stable
-  owner: defenseclaw
-  field_class: metadata
-  sensitivity: internal
-  cardinality: bounded
-  normalization:
-    id: bounded-v1
-    overrides:
-      max_utf8_bytes: 256
-    notes: NFC bounded metric dimension; producer cardinality gate applies
-  introduced_in: telemetry-registry-v1
 - id: defenseclaw.metric.verdict
   type: string
   brief: Canonical bounded metric dimension projected as verdict for local observability

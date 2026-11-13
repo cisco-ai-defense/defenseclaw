@@ -1,6 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+// Uses the host copy fixtures (POSIX paths).
+//go:build unix
+
 package workspace
 
 import (
@@ -11,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -20,9 +22,6 @@ import (
 // agent then starts in the clone. A real git HTTP server (git http-backend)
 // stands in for the repository host.
 func TestCloneInTheActor(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the relay exec runs in a Linux actor")
-	}
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("git not installed")
@@ -89,7 +88,12 @@ func TestCloneRefusesWhatIsNotARepositoryAddress(t *testing.T) {
 			t.Errorf("ref %q accepted", bad)
 		}
 	}
-	if cloneFolder("git@github.com:me/My-App.git") != "My-App" || cloneFolder("https://h/x/") != "x" {
+	if cloneFolder("git@github.com:me/My-App.git") != "My-App" || cloneFolder("https://h/x/") != "x" || cloneFolder("https://h/team/projekt-über.git") != "projekt-über" {
 		t.Error("folder names")
+	}
+	// Seen on stk: the egress guard answers 503; the person learns who refused.
+	e := &CloneError{URL: "https://github.com/a/b.git", Message: "unable to access 'https://github.com/a/b.git/': The requested URL returned error: 503"}
+	if !strings.Contains(e.Error(), "network guard refused the request") {
+		t.Errorf("503 hint missing: %q", e.Error())
 	}
 }
