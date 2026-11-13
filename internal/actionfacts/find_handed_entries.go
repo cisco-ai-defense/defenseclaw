@@ -111,6 +111,17 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 	}
 	var only bool
 	switch program {
+	case "env":
+		// `env [NAME=VALUE ...] PROGRAM ...` runs PROGRAM with the same
+		// words: it is judged (rel-1-0-10:GAP-0365).
+		rest := args
+		for len(rest) > 0 && !strings.HasPrefix(rest[0], "-") && strings.Contains(rest[0], "=") {
+			rest = rest[1:]
+		}
+		if len(rest) == 0 || strings.HasPrefix(rest[0], "-") {
+			return mayChange
+		}
+		return handedEntriesOf(rest, inEntryDir)
 	case "timeout", "nice":
 		// `timeout 5 PROGRAM ...`, `nice -n 5 PROGRAM ...` run PROGRAM with
 		// the same words: it is judged (GAP-2404).
@@ -138,7 +149,7 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 	case "python", "python3":
 		// `python3 -c CODE {}` whose code opens files only to read them
 		// writes nothing (rel-1-0-10:GAP-0104).
-		if len(args) >= 2 && args[0] == "-c" && PythonCodeOnlyReads(args[1]) {
+		if code, _, inline := PythonInlineCode(args); inline && PythonCodeOnlyReads(code) {
 			return HandedEntries{}
 		}
 		return jsonToolHandedEntries(args, inEntryDir)

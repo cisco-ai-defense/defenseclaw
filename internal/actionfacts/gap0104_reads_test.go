@@ -210,9 +210,49 @@ func TestGAP0104FindHandedReadOnlyBodies(t *testing.T) {
 		{[]string{"find", "/h", "-exec", "sh", "-c", `sed -i s/a/b/ "$1"`, "sh", "{}", ";"}, true},
 		{[]string{"find", "/h", "-exec", "python3", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
 		{[]string{"find", "/h", "-exec", "sh", "/tmp/script.sh", "{}", ";"}, true},
+		// rel-1-0-10:GAP-0365: wrappers and interpreter options are looked
+		// through, for a body that reads and for one that may write.
+		{[]string{"find", "/h", "-exec", "env", "python3", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, false},
+		{[]string{"find", "/h", "-exec", "python3", "-I", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, false},
+		{[]string{"find", "/h", "-execdir", "/usr/bin/python3", "-s", "-c", "import sys; print(open(sys.argv[1]).read())", "{}", ";"}, false},
+		{[]string{"find", "/h", "-exec", "env", "python3", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
+		{[]string{"find", "/h", "-exec", "python3", "-I", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
+		{[]string{"find", "/h", "-exec", "timeout", "5", "python3", "-c", "import sys; open(sys.argv[1], 'w')", "{}", ";"}, true},
 	} {
 		if got := FindHandedEntries(tc.argv).Writes(); got != tc.writes {
 			t.Errorf("FindHandedEntries(%q).Writes() = %t, want %t", tc.argv, got, tc.writes)
 		}
+	}
+}
+
+// rel-1-0-10:GAP-0365: the operands a runner hands to python code that is not
+// proven read-only are the paths it may write; code that only reads is
+// handed none to write. Bodies are the existing fixtures by id.
+func TestGAP0365PythonCodeHandedOperands(t *testing.T) {
+	const target = "/h/.defenseclaw/config.yaml"
+	for _, fixture := range gap0104PythonWriteFixtures {
+		for name, argv := range map[string][]string{
+			"direct":   {"python3", "-c", fixture.code, target},
+			"absolute": {"/usr/bin/python3", "-I", "-c", fixture.code, target},
+			"sudo":     {"sudo", "-n", "python3", "-c", fixture.code, target},
+			"env":      {"env", "A=1", "python3", "-c", fixture.code, target},
+			"nice":     {"nice", "-n", "5", "python3", "-c", fixture.code, target},
+			"timeout":  {"timeout", "5", "python3", "-c", fixture.code, target},
+			"xargs":    {"xargs", "-I", "{}", "python3", "-c", fixture.code, target},
+			"parallel": {"parallel", "python3", "-c", fixture.code, ":::", target},
+		} {
+			command := CommandFact{Argv: argv, Dialect: DialectPOSIX}
+			if got := PythonCodeHandedOperandsOf(command); len(got) != 1 || got[0] != target {
+				t.Errorf("fixture %s, %s: handed %q, want [%s]", fixture.id, name, got, target)
+			}
+		}
+	}
+	for _, code := range []string{"import sys; print(open(sys.argv[1]).read())", `import json, sys; print(json.load(open(sys.argv[1])))`} {
+		if got := PythonCodeHandedOperands([]string{"python3", "-c", code, target}); got != nil {
+			t.Errorf("read-only code handed %q", got)
+		}
+	}
+	if got := PythonCodeHandedOperands([]string{"python3", "script.py", target}); got != nil {
+		t.Errorf("a script file handed %q (not inline code)", got)
 	}
 }

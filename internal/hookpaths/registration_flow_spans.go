@@ -33,13 +33,21 @@ type registrationFlowSpans struct {
 	texts   []string
 	words   []string
 	blanket bool
+	// counted is the number of texts that were added by something other than
+	// an assignment.
+	counted int
 }
 
 // registrationReachTexts returns the texts and the static words of command
 // in which a mention counts, or blanket when every mention does.
 func registrationReachTexts(file *syntax.File, command, home string) (texts, words []string, blanket bool) {
 	spans := registrationFlowSpans{home: home, bound: registrationBoundNames(file)}
-	spans.statements(command, file.Stmts, false)
+	capable, consumer := spans.statements(command, file.Stmts, false)
+	if !capable && !consumer && !spans.blanket && spans.counted == 0 {
+		// Nothing in the command writes and only bindings were read: a name a
+		// binding holds cannot reach a write (rel-1-0-10:GAP-0365).
+		return nil, nil, false
+	}
 	return spans.texts, spans.words, spans.blanket
 }
 
@@ -96,6 +104,7 @@ func (s *registrationFlowSpans) add(src string, node syntax.Node) {
 		return
 	}
 	s.texts = append(s.texts, src[start:end])
+	s.counted++
 	syntax.Walk(node, func(child syntax.Node) bool {
 		if word, ok := child.(*syntax.Word); ok {
 			if value, fixed := StaticWord(word, s.home); fixed && value != "" && !strings.HasPrefix(value, "-") {
@@ -205,11 +214,12 @@ func (s *registrationFlowSpans) command(src string, stmt *syntax.Stmt, piped boo
 		}
 		return capable, consumer
 	case *syntax.WhileClause:
-		c, k := s.statements(src, cmd.Cond, piped)
+		c, _ := s.statements(src, cmd.Cond, piped)
 		c2, k2 := s.statements(src, cmd.Do, piped)
 		capable = c || c2
 		// A loop that writes reads its names from its input (while read f).
-		return capable, capable || k || k2
+		// The read itself (the condition) only binds the name.
+		return capable, capable || k2
 	case *syntax.ForClause:
 		capable, consumer = s.statements(src, cmd.Do, piped)
 		if iter, ok := cmd.Loop.(*syntax.WordIter); ok {
@@ -269,7 +279,9 @@ var registrationOperandWriters = map[string]bool{
 
 func (s *registrationFlowSpans) call(src string, stmt *syntax.Stmt, call *syntax.CallExpr) (capable, consumer bool) {
 	for _, assign := range call.Assigns {
+		before := s.counted
 		s.add(src, assign)
+		s.counted = before // a binding by itself reaches no write
 	}
 	if len(call.Args) == 0 {
 		return false, false
@@ -313,6 +325,12 @@ func (s *registrationFlowSpans) call(src string, stmt *syntax.Stmt, call *syntax
 				return len(writes) > 0, program == "tar" || program == "rsync"
 			}
 		}
+	}
+	if runner, run := registrationRunnerChild(call.Args, s.home); runner != "" && registrationReadOnlyPythonChild(run, s.home) {
+		// xargs / parallel handing names to python code that is proven
+		// read-only (rel-1-0-10:GAP-0365): the names it receives are read.
+		s.nested(src, call)
+		return false, false
 	}
 	if registrationEditsInPlace(call, s.home) || registrationCallWrites(call, s.home) {
 		s.writeTarget(src, call)
@@ -375,12 +393,24 @@ func (s *registrationFlowSpans) interpreter(src string, stmt *syntax.Stmt, call 
 	if kind != "python" {
 		return false, false, false
 	}
-	for index := range static {
-		if !fixed[index] {
-			return false, false, false
+	// Inline code: the interpreter, its options and the code are spelled out;
+	// the words after the code are what the code receives as sys.argv and may
+	// be dynamic (a loop variable, a handed name): code that is proven
+	// read-only writes none of them.
+	code, inline := actionInterpreterInlineCode(static, 0)
+	if inline {
+		for index := range static {
+			if !fixed[index] && static[index] == code {
+				return false, false, false
+			}
+		}
+	} else {
+		for index := range static {
+			if !fixed[index] {
+				return false, false, false
+			}
 		}
 	}
-	code, inline := actionInterpreterInlineCode(static, 0)
 	if !inline {
 		if !registrationInterpreterReadsStdin(kind, static) {
 			return false, false, false
@@ -698,3 +728,58 @@ func registrationSudoShellWords(args []*syntax.Word, home string) ([]*syntax.Wor
 	}
 	return nil, false
 }
+
+// registrationRunnerChild returns the program a xargs or parallel call runs,
+// with the runner's options stripped through the shared runner grammar.
+func registrationRunnerChild(args []*syntax.Word, home string) (runner string, run []*syntax.Word) {
+	words, known := actionLiteralCommandWords(args, home)
+	if !known || len(words) < 2 {
+		return "", nil
+	}
+	first, fixed := StaticWord(words[0], home)
+	if !fixed {
+		return "", nil
+	}
+	base := programBase(first)
+	spec, ok := registrationRunners[base]
+	if base == "parallel" {
+		spec, ok = registrationParallelRunner, true
+	}
+	if !ok || base != "xargs" && base != "parallel" {
+		return "", nil
+	}
+	run, ok = registrationRunWords(spec, words[1:], home)
+	if !ok || len(run) == 0 {
+		return "", nil
+	}
+	return base, run
+}
+
+// registrationReadOnlyPythonChild reports a child command that is python
+// with inline code proven read-only (actionfacts.PythonCodeOnlyReads), run
+// through the wrappers that pass argv on and with any absolute interpreter
+// path or interpreter options. Words after the code may be dynamic.
+func registrationReadOnlyPythonChild(args []*syntax.Word, home string) bool {
+	words, known := actionLiteralCommandWords(args, home)
+	if !known || len(words) < 3 {
+		return false
+	}
+	static := make([]string, len(words))
+	for index, word := range words {
+		static[index], _ = StaticWord(word, home)
+	}
+	if actionInterpreterKind(static[0]) != "python" {
+		return false
+	}
+	code, inline := actionInterpreterInlineCode(static, 0)
+	return inline && actionfacts.PythonCodeOnlyReads(code)
+}
+
+// registrationParallelRunner is the GNU parallel grammar the reader models:
+// the options below, then the command, then ::: or :::: and its arguments.
+// An option it does not know leaves the call unread (counted as a writer).
+var registrationParallelRunner = registrationRunner{short: "jNnaSIlLCdE", flag: "kvuXqtmr0xi", long: map[string]bool{
+	"jobs": true, "max-args": true, "max-replace-args": true, "arg-file": true, "delimiter": true,
+	"keep-order": false, "null": false, "verbose": false, "ungroup": false, "no-notice": false,
+	"will-cite": false, "quote": false, "xargs": false, "max-lines": true, "eof": true,
+}}

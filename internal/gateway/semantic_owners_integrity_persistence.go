@@ -3695,11 +3695,19 @@ func provenPartialFindHandOff(
 		candidate.Access == actionfacts.PathAccessDelete && findDeletesBesideItsExec(projected) ||
 		// The program of a find -exec or an xargs, read on its own words,
 		// changes a path it names itself (GAP-2304).
-		actionfacts.IsEmbeddedProgramCommand(projected) && stateCommandMutatesPath(projected, candidate)
+		actionfacts.IsEmbeddedProgramCommand(projected) && stateCommandMutatesPath(projected, candidate) ||
+		// python -c CODE PATH where the code is not proven read-only: the path
+		// is handed to code that may write it (rel-1-0-10:GAP-0365).
+		pythonHandedPath(projected, candidate)
 	if !handsOff {
 		return false
 	}
 	original, ok := integrityCommandByID(facts, projected.ID)
+	if ok && pythonHandedPath(projected, candidate) && original.Effect == actionfacts.EffectUncertain {
+		// A home spelling the wrapper cannot resolve leaves the effect
+		// uncertain; the handed path itself is spelled out.
+		return !original.ControlFlowUncertain
+	}
 	return ok && original.Effect == actionfacts.EffectExecute && !original.ControlFlowUncertain
 }
 
@@ -4191,4 +4199,14 @@ func provesTypedGuardrailsOff(
 		previousEnforcementEnabled &&
 		!newEnforcementEnabled &&
 		effect == actionfacts.EffectExecute
+}
+
+// pythonHandedPath reports a written path that a runner hands to python
+// code that is not proven read-only (rel-1-0-10:GAP-0365).
+func pythonHandedPath(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if candidate.Access != actionfacts.PathAccessWrite {
+		return false
+	}
+	handed := actionfacts.PythonCodeHandedOperandsOf(command)
+	return slices.Contains(handed, candidate.Value) || candidate.Resolved != "" && slices.Contains(handed, candidate.Resolved)
 }

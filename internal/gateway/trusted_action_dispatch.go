@@ -1305,7 +1305,7 @@ func withActiveStateTargetMention(
 		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
 			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
-			!provenPowerShellStateWrite(request) {
+			!provenPowerShellStateWrite(request) && !provenPythonHandedStateWrite(facts, request) {
 			return findings
 		}
 	}
@@ -3337,33 +3337,64 @@ func provenShellRedirectStateWrite(request trustedActionRequest) bool {
 		return false
 	}
 	for _, target := range targets {
-		if strings.ContainsAny(target, "'\n") {
-			continue
-		}
-		input := request.Input
-		input.Command, input.Args, input.Argv = ": > '"+target+"'", nil, nil
-		input.DialectHint = actionfacts.DialectPOSIX
-		twin := request
-		twin.Input = input
-		if !strings.HasPrefix(target, "/") {
-			// A drive path below a Windows home (Git Bash): the POSIX reading
-			// places it as a relative word, so the twin carries the physical
-			// target the gateway resolves for it, as a hook target map does.
-			if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
-				continue
-			}
-			physical, ok := hookpaths.ResolveWriteTarget(target)
-			if !ok {
-				continue
-			}
-			twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets)+1)
-			for spelling, value := range request.ResolvedWriteTargets {
-				twin.ResolvedWriteTargets[spelling] = value
-			}
-			twin.ResolvedWriteTargets[target] = physical
-		}
-		if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+		if provenStateWriteOfTarget(request, target) {
 			return true
+		}
+	}
+	return false
+}
+
+// provenStateWriteOfTarget judges one target a command opens for writing as
+// the command-less redirect ": > target" (see provenShellRedirectStateWrite).
+func provenStateWriteOfTarget(request trustedActionRequest, target string) bool {
+	if strings.ContainsAny(target, "'\n") {
+		return false
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = ": > '"+target+"'", nil, nil
+	input.DialectHint = actionfacts.DialectPOSIX
+	twin := request
+	twin.Input = input
+	if !strings.HasPrefix(target, "/") {
+		// A drive path below a Windows home (Git Bash): the POSIX reading
+		// places it as a relative word, so the twin carries the physical
+		// target the gateway resolves for it, as a hook target map does.
+		if request.SkipLocalFilesystemResolution || request.ProtectedHomeHook {
+			return false
+		}
+		physical, ok := hookpaths.ResolveWriteTarget(target)
+		if !ok {
+			return false
+		}
+		twin.ResolvedWriteTargets = make(map[string]string, len(request.ResolvedWriteTargets)+1)
+		for spelling, value := range request.ResolvedWriteTargets {
+			twin.ResolvedWriteTargets[spelling] = value
+		}
+		twin.ResolvedWriteTargets[target] = physical
+	}
+	if provenStateMutationPath(actionfacts.Analyze(input), twin) {
+		return true
+	}
+	return false
+}
+
+// provenPythonHandedStateWrite judges each path a runner hands to python
+// code that is not proven read-only (actionfacts.PythonCodeHandedOperandsOf)
+// as the redirect to it: the code may write it (rel-1-0-10:GAP-0365). The
+// command may carry a wrapper whose effect the facts leave uncertain; the
+// handed path itself is spelled out.
+func provenPythonHandedStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if request.Input.DialectHint != actionfacts.DialectPOSIX && request.Input.DialectHint != "" {
+		return false
+	}
+	for _, command := range facts.Commands {
+		for _, target := range actionfacts.PythonCodeHandedOperandsOf(command) {
+			if rest, home := strings.CutPrefix(target, "~/"); home && request.Input.ActiveHome != "" {
+				target = path.Join(request.Input.ActiveHome, rest)
+			}
+			if provenStateWriteOfTarget(request, target) {
+				return true
+			}
 		}
 	}
 	return false

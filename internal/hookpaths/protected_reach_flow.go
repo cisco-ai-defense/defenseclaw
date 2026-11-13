@@ -405,7 +405,8 @@ func registrationFindWrites(args []*syntax.Word, home string) bool {
 	return registrationFindActions(args, home, func(action string, operands []*syntax.Word) bool {
 		switch action {
 		case "-exec", "-execdir", "-ok", "-okdir":
-			return len(operands) > 0 && registrationCallWrites(&syntax.CallExpr{Args: operands}, home)
+			return len(operands) > 0 && !registrationReadOnlyPythonChild(operands, home) &&
+				registrationCallWrites(&syntax.CallExpr{Args: operands}, home)
 		}
 		return true
 	})

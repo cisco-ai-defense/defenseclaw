@@ -368,6 +368,29 @@ func registrationWalkLinks(file *syntax.File, command, cwd, home string, protect
 				}
 			}
 		}
+		if inert == 0 {
+			// python -c CODE PATH...: the path is handed to code that is not
+			// proven read-only (rel-1-0-10:GAP-0365). The wrappers that pass
+			// argv on (sudo, env, nice, ...) are looked through.
+			words, wrapped := actionLiteralCommandWords(call.Args, home)
+			if _, run := registrationRunnerChild(call.Args, home); run != nil {
+				// xargs / parallel: the child, then the words after ::: (the
+				// arguments parallel hands it).
+				words, wrapped = registrationParallelArguments(run, home), true
+				if unwrapped, ok := actionLiteralCommandWords(words, home); ok {
+					words = unwrapped
+				}
+			}
+			if wrapped && len(words) > 2 && actionInterpreterKind(staticOrEmpty(words[0], home)) == "python" {
+				stmt := &syntax.Stmt{Cmd: &syntax.CallExpr{Args: words}}
+				for _, target := range registrationLoopStatementTargets(stmt, values, currentCWD, home) {
+					if protectedReachPath(OperandPath(target, currentCWD), protected, "") {
+						found = true
+						return false
+					}
+				}
+			}
+		}
 		if args, placer := registrationPlacingCall(call.Args, home); placer != "" && inert == 0 {
 			// A link or a rename is judged by where it is placed: its operands
 			// go through the values the command has bound so far (a name, a
@@ -729,10 +752,9 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 	}
 	operands := args[1:]
 	if actionInterpreterKind(program) == "python" {
-		// python -c CODE ARG...: code that may write is handed its arguments
-		// (sys.argv), so each fixed argument is a path it may write. Code that
-		// provably only reads (actionfacts.PythonCodeOnlyReads) hands none
-		// (rel-1-0-10:GAP-0269).
+		// python -c CODE ARG...: code that is not proven read-only is handed
+		// its arguments (sys.argv), so each fixed argument is a path it may
+		// write (rel-1-0-10:GAP-0269, GAP-0365).
 		words := []string{program}
 		for _, word := range operands {
 			value, fixed := actionWordValue(word, values, cwd, home)
@@ -741,11 +763,10 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 			}
 			words = append(words, value)
 		}
-		if code, inline := actionInterpreterInlineCode(words, 0); inline && !actionfacts.PythonCodeOnlyReads(code) {
-			if at := slices.Index(words, code); at > 0 {
-				for _, word := range operands[at:] {
-					add(word)
-				}
+		handed := actionfacts.PythonCodeHandedOperands(words)
+		for index, word := range operands {
+			if slices.Contains(handed, words[index+1]) {
+				add(word)
 			}
 		}
 		return targets
@@ -1655,4 +1676,24 @@ func registrationPatchReach(file *syntax.File, cwd, home string, protected prote
 		return true
 	})
 	return found
+}
+
+// staticOrEmpty is the spelled-out value of a word, or "" when it is dynamic.
+func staticOrEmpty(word *syntax.Word, home string) string {
+	value, _ := StaticWord(word, home)
+	return value
+}
+
+// registrationParallelArguments drops the ::: and :::: separators of a
+// parallel command line: the words after them are the arguments the child
+// receives.
+func registrationParallelArguments(run []*syntax.Word, home string) []*syntax.Word {
+	out := make([]*syntax.Word, 0, len(run))
+	for _, word := range run {
+		if value, fixed := StaticWord(word, home); fixed && (value == ":::" || value == "::::") {
+			continue
+		}
+		out = append(out, word)
+	}
+	return out
 }

@@ -281,3 +281,71 @@ func TestGAP0104ChmodWorldMatchesOnlyOthersWrite(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0365: inline python that is not proven read-only is handed
+// the path any runner passes it; code proven read-only is handed nothing to
+// write. The bodies are the two inline bodies of the existing find -exec
+// rows; the runner spellings are built here from one template each.
+func TestGAP0365RunnersHandThePathToPythonCode(t *testing.T) {
+	h := newGAP0104Home(t)
+	const (
+		writes = `import sys; open(sys.argv[1], "w").write("")`
+		reads  = `import sys; print(open(sys.argv[1]).read())`
+	)
+	templates := map[string]string{
+		"direct":        `python3 -c 'BODY' TARGET`,
+		"sudo":          `sudo python3 -c 'BODY' TARGET`,
+		"env":           `env python3 -c 'BODY' TARGET`,
+		"nice":          `nice -n 5 python3 -c 'BODY' TARGET`,
+		"timeout":       `timeout 5 python3 -c 'BODY' TARGET`,
+		"isolated":      `python3 -I -c 'BODY' TARGET`,
+		"absolute":      `/usr/bin/python3 -c 'BODY' TARGET`,
+		"sh -c":         `sh -c "python3 -c 'BODY' TARGET"`,
+		"for loop":      `for f in TARGET; do python3 -c 'BODY' "$f"; done`,
+		"while read":    `echo TARGET | while read f; do python3 -c 'BODY' "$f"; done`,
+		"xargs":         `echo TARGET | xargs python3 -c 'BODY'`,
+		"xargs -I":      `echo TARGET | xargs -I{} python3 -c 'BODY' {}`,
+		"parallel":      `parallel python3 -c 'BODY' ::: TARGET`,
+		"variable":      `p=TARGET; python3 -c 'BODY' "$p"`,
+		"find exec":     `find DIR -name NAME -exec python3 -c 'BODY' {} \;`,
+		"find exec env": `find DIR -name NAME -exec env python3 -c 'BODY' {} \;`,
+		"find execdir":  `find DIR -name NAME -execdir python3 -I -c 'BODY' {} \;`,
+	}
+	state, hook := agentHookConfigWriteRuleID, "tamper.detector_state_write"
+	for _, target := range []struct {
+		path, dir, name, rule, defaults, strict string
+	}{
+		{"~/.defenseclaw/config.yaml", "~/.defenseclaw", "config.yaml", "tamper.detector_state_write", "block", "block"},
+		{"~/.claude/settings.json", "~/.claude", "settings.json", state, "alert", "block"},
+	} {
+		_ = hook
+		for _, profile := range []string{"default", "strict"} {
+			judge := newHookConfigJudge(t, "claudecode", profile)
+			for name, template := range templates {
+				for _, body := range []struct {
+					code string
+					want string
+				}{{writes, ""}, {reads, "allow"}} {
+					want := body.want
+					if want == "" {
+						want = target.defaults
+						if profile == "strict" {
+							want = target.strict
+						}
+					}
+					command := strings.NewReplacer("BODY", body.code, "TARGET", target.path, "DIR", target.dir, "NAME", target.name).Replace(template)
+					t.Run(profile+"/"+target.name+"/"+name+"/"+want, func(t *testing.T) {
+						t.Parallel()
+						got := judge(h.project, false, "Bash", map[string]any{"command": command})
+						if action := hookConfigAction(got); action != want {
+							t.Fatalf("%s %q: action %q, want %q: %.700s", profile, command, action, want, got)
+						}
+						if want != "allow" && !strings.Contains(got, target.rule) {
+							t.Fatalf("%s %q: want rule %s: %.700s", profile, command, target.rule, got)
+						}
+					})
+				}
+			}
+		}
+	}
+}

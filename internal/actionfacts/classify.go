@@ -313,6 +313,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		return
 	}
 
+	// python -c CODE PATH...: code that is not proven read-only may write each
+	// path it is handed, whichever runner hands it (rel-1-0-10:GAP-0365).
+	for _, operand := range PythonCodeHandedOperandsOf(*command) {
+		appendPath(out, command.ID, PathAccessWrite, operand)
+	}
+
 	switch program {
 	case "impacket-secretsdump", "secretsdump.py", "impacket-getuserspns",
 		"getuserspns.py", "impacket-getnpusers", "getnpusers.py", "hashcat",

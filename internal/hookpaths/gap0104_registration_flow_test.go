@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -103,6 +104,60 @@ func TestGAP0269FindExecPythonReachesTheFileItIsHanded(t *testing.T) {
 	} {
 		if got := RegistrationWriteReached(tc.command, filepath.Join(home, "proj"), home, []string{settings}); !slices.Equal(got, tc.want) {
 			t.Errorf("%q: reached %v, want %v", tc.command, got, tc.want)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0365: python -c code that is not proven read-only is handed
+// the path a runner passes it, whatever the runner (direct argv, sudo, nice,
+// env, nested sh -c, a literal for loop, xargs and parallel with a literal
+// operand). The body is the existing write body of
+// TestGAP0269FindExecPythonReachesTheFileItIsHanded; the read body hands
+// nothing.
+func TestGAP0365RunnersHandThePathToUncertainPython(t *testing.T) {
+	home := t.TempDir()
+	settings := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const (
+		writes = `import sys; open(sys.argv[1], "w").write("")`
+		reads  = `import sys; print(open(sys.argv[1]).read())`
+	)
+	target := `~/.claude/settings.json`
+	wrap := map[string]string{
+		"direct":        `python3 -c 'BODY' TARGET`,
+		"sudo":          `sudo python3 -c 'BODY' TARGET`,
+		"env":           `env python3 -c 'BODY' TARGET`,
+		"nice":          `nice -n 5 python3 -c 'BODY' TARGET`,
+		"timeout":       `timeout 5 python3 -c 'BODY' TARGET`,
+		"isolated":      `python3 -I -c 'BODY' TARGET`,
+		"absolute":      `/usr/bin/python3 -c 'BODY' TARGET`,
+		"for loop":      `for f in TARGET; do python3 -c 'BODY' "$f"; done`,
+		"while read":    `echo TARGET | while read f; do python3 -c 'BODY' "$f"; done`,
+		"xargs":         `echo TARGET | xargs python3 -c 'BODY'`,
+		"xargs -I":      `echo TARGET | xargs -I{} python3 -c 'BODY' {}`,
+		"xargs env":     `echo TARGET | xargs env python3 -c 'BODY'`,
+		"parallel":      `parallel python3 -c 'BODY' ::: TARGET`,
+		"var":           `p=TARGET; python3 -c 'BODY' "$p"`,
+		"find exec env": `find ~/.claude -name settings.json -exec env python3 -c 'BODY' {} \;`,
+		"find isolated": `find ~/.claude -name settings.json -exec python3 -I -c 'BODY' {} \;`,
+		"find execdir":  `find ~/.claude -name settings.json -execdir python3 -c 'BODY' {} \;`,
+		"two bodies":    `python3 -c 'print(1)'; python3 -c 'BODY' TARGET`,
+	}
+	for name, template := range wrap {
+		for _, tc := range []struct {
+			body string
+			want []string
+		}{{writes, []string{settings}}, {reads, nil}} {
+			command := strings.NewReplacer("BODY", tc.body, "TARGET", target).Replace(template)
+			got := RegistrationWriteReached(command, filepath.Join(home, "proj"), home, []string{settings})
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("%s %q: reached %v, want %v", name, command, got, tc.want)
+			}
 		}
 	}
 }
