@@ -354,10 +354,14 @@ export default function (api: DefenseClawPluginHost) {
       : configuredHookMode === "hybrid" || configuredHookMode === "native"
         ? "hybrid"
         : "proxy";
-  // The prompt gate setup derived from config.yaml (always on in native
-  // mode, the only request-side check there); the gateway answer can turn it
-  // on, never off.
-  const promptGateFloor = pluginCfg.promptGate === true || hookMode === "native";
+  // The prompt gate: always on in native mode (the only request-side check
+  // there); otherwise what the gateway reports, and until it first answers,
+  // what setup wrote into openclaw.json.
+  const promptGateOn = (): boolean => {
+    if (hookMode === "native") return true;
+    const runtime = getRuntimeSettings();
+    return runtime.inspectTimeoutMs > 0 ? runtime.promptGate : pluginCfg.promptGate === true;
+  };
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   if (!isLoopbackHost(sidecarConfig.host)) {
@@ -781,7 +785,7 @@ export default function (api: DefenseClawPluginHost) {
     // the user prompt is inspected before the model reads it. OpenClaw keeps
     // only the replacement message in the transcript of a blocked run.
     api.on("before_agent_run", async (event, ctx) => {
-      if (!promptGateFloor && !getRuntimeSettings().promptGate) return;
+      if (!promptGateOn()) return;
       const prompt = typeof event?.prompt === "string" ? event.prompt : "";
       if (!prompt) return;
       const sessionId = sessionOf(ctx);

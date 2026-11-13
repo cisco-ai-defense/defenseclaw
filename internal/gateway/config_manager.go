@@ -2304,8 +2304,15 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("llm_providers", oldCfg.LLMProviders, newCfg.LLMProviders)
 	add("decision_model", oldCfg.DecisionModel, newCfg.DecisionModel)
 	add("update", oldCfg.Update, newCfg.Update)
-	// connectors.agent_gateway registers a route at start: restart-required.
-	add("connectors", oldCfg.Connectors, newCfg.Connectors)
+	// connectors.agent_gateway registers a route at start, and the rest of
+	// connectors.openclaw is applied by the OpenClaw setup at start:
+	// restart-required. connectors.openclaw.hooks.prompt_gate is read per
+	// request by GET /api/v1/openclaw/runtime, which the plugin polls, so it
+	// reloads hot (rel-1-0-10 GAP-0058).
+	oldConnectors, newConnectors := oldCfg.Connectors, newCfg.Connectors
+	add("connectors.openclaw.hooks.prompt_gate", oldConnectors.OpenClaw.Hooks.PromptGate, newConnectors.OpenClaw.Hooks.PromptGate)
+	oldConnectors.OpenClaw.Hooks.PromptGate, newConnectors.OpenClaw.Hooks.PromptGate = false, false
+	add("connectors", oldConnectors, newConnectors)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)
 	add("workspace_id", oldCfg.WorkspaceID, newCfg.WorkspaceID)
@@ -2374,7 +2381,8 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// The gateway never reads registry sources (the CLI fetches and
 		// promotes them into asset_policy), so a registry add/edit must not
 		// make every later reload fail as restart-required (GAP-2422).
-		"registries": {},
+		"registries":                            {},
+		"connectors.openclaw.hooks.prompt_gate": {},
 		// Sandbox settings are read per launch, and the sandbox listeners
 		// rebind in-process (apiNeedsRestart).
 		"openshell": {},

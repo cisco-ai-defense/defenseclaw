@@ -97,7 +97,7 @@ describe("native hooks", () => {
   });
 
   it("honours the promptGate key setup wrote before the gateway answers", async () => {
-    setRuntimeSettings({ prompt_gate: false });
+    setRuntimeSettings({});
     const listeners: Record<string, Handler> = {};
     (pluginSetup as (api: unknown) => void)({
       config: {}, pluginConfig: { hookMode: "hybrid", promptGate: true },
@@ -125,8 +125,19 @@ describe("native hooks", () => {
     expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
   });
 
+  it("follows the gateway once it answered, also to turn the gate off", async () => {
+    setRuntimeSettings({ prompt_gate: false, inspect_timeout_ms: 5000 });
+    const listeners: Record<string, Handler> = {};
+    (pluginSetup as (api: unknown) => void)({
+      config: {}, pluginConfig: { hookMode: "hybrid", promptGate: true },
+      on: vi.fn((e: string, h: Handler) => { listeners[e] = h; }), registerService: vi.fn(), registerCommand: vi.fn(),
+    });
+    expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
+    expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
+  });
+
   it("does nothing when the prompt gate is off", async () => {
-    setRuntimeSettings({ prompt_gate: false });
+    setRuntimeSettings({ prompt_gate: false, inspect_timeout_ms: 5000 });
     const { listeners } = setup("hybrid");
     expect(await listeners["before_agent_run"]({ prompt: "hi", messages: [] }, {})).toBeUndefined();
     expect(mockDaemonClient.postRaw).not.toHaveBeenCalled();
