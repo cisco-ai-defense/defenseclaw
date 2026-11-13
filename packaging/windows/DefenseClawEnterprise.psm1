@@ -32491,7 +32491,14 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             throw "Codex requirements report $($pair[0]) is outside the exact installed layout: $actual"
         }
     }
-    if (Test-DefenseClawStandaloneProfile) {
+    # A report that names a launch image (not the layout hook itself) must
+    # name that image folder as the Codex managed folder; a report for the
+    # layout hook keeps the exact managed_dir check above.
+    $reportNamesLaunchImage = -not [string]::Equals(
+        [IO.Path]::GetFullPath([string]$report.hook_binary).TrimEnd('\'),
+        [IO.Path]::GetFullPath([string]$Layout.HookPath).TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase)
+    if ((Test-DefenseClawStandaloneProfile) -and $reportNamesLaunchImage) {
         $reportHookFolder = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$report.hook_binary)).TrimEnd('\')
         $reportManagedDir = [IO.Path]::GetFullPath([string]$report.managed_dir).TrimEnd('\')
         if (-not [string]::Equals($reportHookFolder, $reportManagedDir, [StringComparison]::OrdinalIgnoreCase)) {
