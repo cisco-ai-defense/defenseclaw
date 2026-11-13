@@ -232,3 +232,62 @@ func TestSubstrateCreateAttestationErrorFailsClosedInManaged(t *testing.T) {
 		t.Fatalf("open source, no connector named: %d %v", code, out)
 	}
 }
+
+// GAP-0181 class (R4): in managed, only a template positively attested with
+// a connector label creates. A refusal (retryable or not) or an attestation
+// without a label is refused before any actor exists, whatever connector the
+// launcher names; the message says "retryable" when the cause may pass.
+// Open source warns and goes on with the named connector.
+func TestSubstrateManagedCreateNeedsAPositiveAttestationGAP0181(t *testing.T) {
+	cases := []struct {
+		name, code, msg string
+		err             error
+		retryable       bool
+	}{
+		{"retryable", "template_attestation_unreadable", "(retryable)",
+			&SubstrateTemplateAttestation{Reason: "container 0 image reg.example.com/dc/claude: registry_error: connection refused", Retryable: true}, true},
+		{"refused", "template_not_attested", "not attested",
+			&SubstrateTemplateAttestation{Reason: "container 0 image reg.example.com/dc/claude: signature_invalid: no valid signature"}, false},
+		{"unlabeled", "template_connector_unlabeled", "names no connector",
+			&SubstrateTemplateAttestation{Reason: "the attestation carries no connector label", Unlabeled: true}, false},
+	}
+	for _, c := range cases {
+		f, acts := signinFixture(t, true, "claudecode")
+		acts.attestErr = c.err
+		for _, body := range []string{
+			`{"profile":"eng","template":"cc","connector":"claudecode"}`,
+			`{"profile":"eng","template":"cc"}`,
+		} {
+			code, out := create(t, f, body)
+			msg, _ := out["message"].(string)
+			retry, _ := out["retryable"].(bool)
+			if code != http.StatusForbidden || out["reason"] != c.code || !strings.Contains(msg, c.msg) || retry != c.retryable {
+				t.Fatalf("managed %s, %s: %d %v", c.name, body, code, out)
+			}
+			if c.name != "unlabeled" && out["detail"] == nil {
+				t.Fatalf("managed %s: no detail in %v", c.name, out)
+			}
+		}
+		if acts.created != 0 {
+			t.Fatalf("managed %s: %d actors made", c.name, acts.created)
+		}
+
+		f, acts = signinFixture(t, false, "claudecode")
+		acts.attestErr = c.err
+		code, out := create(t, f, `{"profile":"eng","template":"cc","connector":"claudecode"}`)
+		warnings, _ := out["warnings"].([]any)
+		if code != http.StatusCreated || len(warnings) == 0 || !strings.Contains(warnings[0].(string), c.msg) {
+			t.Fatalf("open source %s: %d %v", c.name, code, out)
+		}
+	}
+
+	// A label reader that answers none (or an Actions that reads no label)
+	// is not a positive attestation either.
+	f, acts := signinFixture(t, true, "")
+	if code, out := create(t, f, `{"profile":"eng","template":"cc","connector":"claudecode"}`); code != http.StatusForbidden || out["reason"] != "template_connector_unlabeled" {
+		t.Fatalf("managed, no label read: %d %v", code, out)
+	}
+	if acts.created != 0 {
+		t.Fatalf("managed, no label read: %d actors made", acts.created)
+	}
+}

@@ -143,6 +143,9 @@ type Error struct {
 	Detail   string
 	Actor    string
 	ActorUID string
+	// Retryable marks a refusal whose cause may pass (a template
+	// attestation that could not be checked now, GAP-0181).
+	Retryable bool
 }
 
 func (e *Error) Error() string {
@@ -221,10 +224,11 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 			Detail   string `json:"detail"`
 			Actor    string `json:"actor"`
 			ActorUID string `json:"actor_uid"`
+			Retry    bool   `json:"retryable"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
-			e.Refusal, e.Detail, e.Actor, e.ActorUID = d.Refusal, d.Detail, d.Actor, d.ActorUID
+			e.Refusal, e.Detail, e.Actor, e.ActorUID, e.Retryable = d.Refusal, d.Detail, d.Actor, d.ActorUID, d.Retry
 		}
 		return e
 	}
