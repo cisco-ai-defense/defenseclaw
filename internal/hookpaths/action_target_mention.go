@@ -2754,6 +2754,12 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			safe = false
 			return false
 		}
+		// A privilege or run wrapper in front of a reader (sudo sha256sum
+		// FILE, env LC_ALL=C cmp A B, timeout 5 stat FILE) reads as the
+		// reader does; it is the wrapped program that decides.
+		if wrapped, ok := actionReadOnlyWrappedCall(call, home); ok {
+			call = wrapped
+		}
 		program, known := staticProgramWord(call.Args[0], home)
 		if !known {
 			safe = false
@@ -2783,7 +2789,13 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// decision 2, TGT-0194; GAP-2168). So do the size and path
 			// readers: du reports sizes, readlink and realpath print a
 			// resolved name; none has an output option.
-			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
+			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath",
+			// Checksum, compare and attribute readers print or compare what
+			// they read and have no output file (sha256sum FILE, cmp A B,
+			// lsattr FILE): a call that only names a protected file to one of
+			// them is not a write to it (rel-1-0-10:GAP-0018).
+			"sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum", "md5sum", "b2sum", "cksum", "shasum",
+			"cmp", "diff", "lsattr", "getfacl", "namei", "od", "hexdump", "strings", "nl", "cut":
 		case "echo", "printf":
 			// echo and printf print their operands (a glob prints the names
 			// it expands to). They write a file only through a redirect,
@@ -2830,6 +2842,29 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 		return safe
 	})
 	return seen && safe
+}
+
+// actionReadOnlyWrappedCall is the call a sudo, doas, env, nohup, command,
+// timeout, nice, stdbuf, ionice or setsid wrapper runs, when the wrapper's
+// options are all ones the literal-wrapper reader knows (actionLiteralCommandWords).
+// A wrapper that starts a shell (sudo -s, sudo -i) has no wrapped command and
+// is not unwrapped; the wrapped program is then judged like any other call,
+// and a shell or an unknown program stays outside the read-only list.
+func actionReadOnlyWrappedCall(call *syntax.CallExpr, home string) (*syntax.CallExpr, bool) {
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known {
+		return nil, false
+	}
+	switch programBase(program) {
+	case "sudo", "doas", "env", "nohup", "command", "timeout", "nice", "stdbuf", "ionice", "setsid":
+	default:
+		return nil, false
+	}
+	words, ok := actionLiteralCommandWords(call.Args, home)
+	if !ok || len(words) == 0 || len(words) == len(call.Args) {
+		return nil, false
+	}
+	return &syntax.CallExpr{Args: words}, true
 }
 
 func actionReadOnlyBashCLaunch(call *syntax.CallExpr, home string, depth int) bool {
