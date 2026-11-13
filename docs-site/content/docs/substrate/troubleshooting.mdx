@@ -101,7 +101,7 @@ The default actor-token issuer is the same on every cluster. Give each cluster i
 
 The launcher prints `The task did not run: the cluster gateway refused its tool and model calls (keyset_unavailable: ...)` and exits with code 1. The gateway can't check agent tokens, and that holds for every agent on the cluster. The reason in brackets says why:
 
-- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate admin doctor` shows the `substrate.actor_keys` row from the gateway.
+- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate doctor --cluster` (administrators) shows the `substrate.actor_keys` row from the gateway.
 - `issuer`: Substrate signs with another issuer than `substrate.identity.issuer`. Use the same value in `setup --issuer` (then `ate-setup deploy`) and in the configuration.
 - `verifier_unavailable`: the gateway can't reach the Substrate control API.
 

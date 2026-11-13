@@ -19,7 +19,7 @@ Every DefenseClaw feature runs in the cluster gateway, the same code as on a lap
 |---|---|---|
 | Model request and reply checks | Same, stronger | Every model call goes through the guardrail proxy. The provider is not in the agent's allow list, so nothing bypasses it. The Bedrock event stream passes through unchanged |
 | Tool-call checks | Same | Hooks call the cluster gateway; Substrate's egress gateway adds a signed agent identity |
-| Tool chains and intent | Changed | Findings that span several calls (a secret read, then a send) need state across stateless gateway replicas. A single leader holds the state, per verified session and per actor, so rotating session IDs can't empty it. Time spent suspended doesn't count against the 30 minute window |
+| Tool chains and intent | Changed | Findings that span several calls (a secret read, then a send) need state across stateless gateway replicas. A single leader holds the state, per verified session and per actor, so rotating session IDs can't empty it. Time spent suspended doesn't count against the 30 minute window. Egress after a secret read is refused by default in every mode, because actors are unattended; set the chain egress action to `alert` to only alert. Host-side hooks keep the balanced default |
 | Several agents per person | Same | Each agent is its own session and its own record |
 | User and group policies | Changed | Groups come from the company sign-in (OIDC) instead of the OS. See [Identity](#identity) |
 | LLM judge, unified LLM key | Changed | The judge runs in the cluster gateway. The key is a Kubernetes Secret, or comes from Substrate's credential provider, and never reaches an agent |
