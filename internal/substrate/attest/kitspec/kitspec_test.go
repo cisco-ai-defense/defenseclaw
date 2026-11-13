@@ -134,7 +134,7 @@ func TestSpecOverlayFolders(t *testing.T) {
 		}
 		return 0, false
 	}
-	spec, _, _, err := Spec(Options{Connector: "antigravity", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
+	spec, _, err := Spec(Options{Connector: "antigravity", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestSpecOverlayFolders(t *testing.T) {
 			t.Errorf("antigravity %s: root-owned folder entry = %v, %v", d, uid, ok)
 		}
 	}
-	spec, _, _, err = Spec(Options{Connector: "devin", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
+	spec, _, err = Spec(Options{Connector: "devin", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestEveryListedConnectorHasAKitSpec(t *testing.T) {
 // to be root-owned all the way up (the home is the user's); the canonical
 // copy outside the home is.
 func TestSpecRootOwnedFilesInTheHomeAreNotExpectedChains(t *testing.T) {
-	spec, _, _, err := Spec(Options{Connector: "antigravity", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
+	spec, _, err := Spec(Options{Connector: "antigravity", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
 	if err != nil {
 		t.Fatal(err)
 	}
