@@ -5778,7 +5778,7 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 // (rel-1-0-10:GAP-0051): an NTDS dump, or a complete statically credentialed
 // domain-service call, adds a credential-read operation; anything else stays
 // partial. So does a PowerShell argv that 5.1 can reserialize (a literal
-// double quote, as in `-x powershell -Command ...`): the parse claims no
+// double quote, as in `-x 'powershell -Command "..."'`): the parse claims no
 // authority it does not have, so the Windows hook does not pick PowerShell for
 // it and the remote-command recognizers still judge the -x body.
 func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
