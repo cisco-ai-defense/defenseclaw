@@ -7,5 +7,11 @@ package peercred
 
 import "net"
 
-// loopbackTCPOwnerSID: SIDs exist only on Windows.
-func loopbackTCPOwnerSID(_, _ *net.TCPAddr) (string, error) { return "", ErrUnsupported }
+// SIDs and the owner-module TCP table exist only on Windows.
+func loopbackTCPClientOwner(_, _ *net.TCPAddr) (TCPConnOwner, error) {
+	return TCPConnOwner{}, ErrUnsupported
+}
+
+func verifyLoopbackTCPPeer(_, _ *net.TCPAddr, _ uint32, _ TCPConnOwner) (PeerIdentity, error) {
+	return PeerIdentity{}, ErrUnsupported
+}

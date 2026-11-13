@@ -31,13 +31,26 @@ func LoopbackTCPPeerUID(local, remote *net.TCPAddr) (int, error) {
 	return loopbackTCPOwner(local, remote)
 }
 
-// LoopbackTCPPeerSID returns the user SID of the process on the client end
-// of a loopback TCP connection this process accepted (Windows: the owning
-// PID from the kernel TCP table, then that process token). Other platforms
-// return ErrUnsupported; use LoopbackTCPPeerUID there.
-func LoopbackTCPPeerSID(local, remote *net.TCPAddr) (string, error) {
+// LoopbackTCPClientOwner returns the PID and connection creation time the
+// kernel TCP table names for the client end of a loopback TCP connection
+// this process accepted (Windows; no process is opened). The managed
+// Windows gateway sends it to the guardian peer broker, which proves the
+// account (VerifyLoopbackTCPPeer). Other platforms return ErrUnsupported.
+func LoopbackTCPClientOwner(local, remote *net.TCPAddr) (TCPConnOwner, error) {
 	if local == nil || remote == nil || !local.IP.IsLoopback() || !remote.IP.IsLoopback() {
-		return "", errors.New("peercred: the connection is not on a loopback address")
+		return TCPConnOwner{}, errors.New("peercred: the connection is not on a loopback address")
 	}
-	return loopbackTCPOwnerSID(local, remote)
+	return loopbackTCPClientOwner(local, remote)
+}
+
+// VerifyLoopbackTCPPeer is the peer broker lookup (Windows, LocalSystem):
+// the server end of the connection must be owned by serverPID, the client
+// end by want, and the process with that PID must have started no later
+// than the connection was created; it returns the token user SID and the
+// session of that process. Other platforms return ErrUnsupported.
+func VerifyLoopbackTCPPeer(local, remote *net.TCPAddr, serverPID uint32, want TCPConnOwner) (PeerIdentity, error) {
+	if local == nil || remote == nil || !local.IP.IsLoopback() || !remote.IP.IsLoopback() {
+		return PeerIdentity{}, errors.New("peercred: the connection is not on a loopback address")
+	}
+	return verifyLoopbackTCPPeer(local, remote, serverPID, want)
 }

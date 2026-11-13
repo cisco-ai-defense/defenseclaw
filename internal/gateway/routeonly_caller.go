@@ -4,17 +4,21 @@
 package gateway
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/peercred"
+	"github.com/defenseclaw/defenseclaw/internal/managed/peerbroker"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -35,6 +39,7 @@ const subjectSourceKernelPeer = "kernel_peer"
 const (
 	routeCallerAuthorizerUnavailable = "authorizer_unavailable"
 	routeCallerPeerUnverified        = "peer_unverified"
+	routeCallerPeerBrokerUnavailable = "peer_broker_unavailable"
 	routeCallerPeerMismatch          = "peer_mismatch"
 	routeCallerRoot                  = "root"
 	routeCallerServiceAccount        = "service_account"
@@ -187,6 +192,9 @@ func decideWindowsRouteCaller(in routeCallerInputs) routeCaller {
 		return unverifiedRoute(routeCallerCredentialInvalid)
 	}
 	if in.PeerSIDErr != nil {
+		if errors.Is(in.PeerSIDErr, peerbroker.ErrUnavailable) {
+			return unverifiedRoute(routeCallerPeerBrokerUnavailable)
+		}
 		return unverifiedRoute(routeCallerPeerUnverified)
 	}
 	sid, ok := connector.CanonicalUserScopedIdentity(in.PeerSID)
@@ -241,8 +249,8 @@ func windowsServiceSID(sid string) bool {
 }
 
 // acpLoopbackPeerSID names the user SID of the process on the client end of
-// a loopback TCP request (Windows); replaceable in tests. A connection is
-// looked up once.
+// a loopback TCP request (managed Windows); replaceable in tests. A
+// connection is looked up once.
 var acpLoopbackPeerSID = func(r *http.Request) (string, error) {
 	if peer, ok := r.Context().Value(acpConnPeerKey{}).(*acpConnPeer); ok {
 		return peer.lookupSID()
@@ -252,7 +260,7 @@ var acpLoopbackPeerSID = func(r *http.Request) (string, error) {
 	if local == nil || err != nil {
 		return "", errors.New("the request carries no TCP addresses")
 	}
-	return peercred.LoopbackTCPPeerSID(local, remote)
+	return routePeerSID(local, remote)
 }
 
 // lookupSID reads the SID of the connection client once; a failed lookup
@@ -263,12 +271,79 @@ func (p *acpConnPeer) lookupSID() (string, error) {
 	if p.sid != "" {
 		return p.sid, nil
 	}
-	sid, err := peercred.LoopbackTCPPeerSID(p.local, p.remote)
+	sid, err := routePeerSID(p.local, p.remote)
 	if err != nil {
 		return "", err
 	}
 	p.sid = sid
 	return sid, nil
+}
+
+// routePeerSID asks the guardian peer SID broker who owns the client end
+// of a loopback connection this gateway accepted (managed Windows, S1 Q7
+// lead ruling: the gateway gets no SeDebugPrivilege and has no in-process
+// fallback; an error that wraps peerbroker.ErrUnavailable means no trusted
+// broker answered, and the caller is unverified). Replaceable in tests.
+var routePeerSID = func(local, remote *net.TCPAddr) (string, error) {
+	client, err := routePeerBrokerClient()
+	if err != nil {
+		return "", err
+	}
+	identity, err := client.Lookup(context.Background(), local, remote)
+	if err != nil {
+		return "", err
+	}
+	return identity.SID, nil
+}
+
+var routePeerBroker struct {
+	once   sync.Once
+	client *peerbroker.Client
+	err    error
+}
+
+// routePeerBrokerClient is the broker client of this gateway service
+// (DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME in the protected service
+// environment); without it there is no broker.
+func routePeerBrokerClient() (*peerbroker.Client, error) {
+	routePeerBroker.once.Do(func() {
+		name := strings.TrimSpace(os.Getenv(peerbroker.GatewayServiceEnv))
+		if name == "" {
+			routePeerBroker.err = fmt.Errorf("%w: the gateway service environment names no gateway service", peerbroker.ErrUnavailable)
+			return
+		}
+		client, err := peerbroker.NewClient(name)
+		if err != nil {
+			routePeerBroker.err = fmt.Errorf("%w: %v", peerbroker.ErrUnavailable, err)
+			return
+		}
+		routePeerBroker.client = client
+	})
+	return routePeerBroker.client, routePeerBroker.err
+}
+
+// routePeerBrokerProbe is the route_peer_broker entry of /status on a
+// managed Windows gateway with route-only connectors (doctor row
+// "Route-only peer broker"): the broker is asked about the connection of
+// this status request itself, so the answer shows whether it serves real
+// lookups now. nil elsewhere.
+func routePeerBrokerProbe(r *http.Request, cfg *config.Config) map[string]interface{} {
+	if !routeCallerWindows || cfg == nil || !cfg.StandaloneEnterprise() || !cfg.Routing.Enabled || len(cfg.Routing.RouteOnly.Connectors) == 0 {
+		return nil
+	}
+	local, _ := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+	remote, err := net.ResolveTCPAddr("tcp", r.RemoteAddr)
+	if local == nil || err != nil || !local.IP.IsLoopback() || !remote.IP.IsLoopback() {
+		return map[string]interface{}{"state": "unknown", "detail": "the status request is not a loopback TCP connection"}
+	}
+	if _, err := routePeerSID(local, remote); err != nil {
+		state := "refused"
+		if errors.Is(err, peerbroker.ErrUnavailable) {
+			state = "unavailable"
+		}
+		return map[string]interface{}{"state": state, "detail": err.Error()}
+	}
+	return map[string]interface{}{"state": "ok"}
 }
 
 // verifiedRouteCaller answers for a request on a managed gateway: the
@@ -292,7 +367,12 @@ func (a *APIServer) verifiedRouteCaller(r *http.Request, connectorName string, r
 		}
 	}
 	if in.Windows {
-		in.PeerSID, in.PeerSIDErr = acpLoopbackPeerSID(r)
+		// The guardian peer broker is asked only for a request whose route
+		// credential is valid (route-only) or for the proxy: a caller
+		// without one is refused first and costs the broker nothing.
+		if !requireCredential || in.CredentialIdentity != "" {
+			in.PeerSID, in.PeerSIDErr = acpLoopbackPeerSID(r)
+		}
 		store := a.userScopedCredentialStore()
 		in.Enrolled = func(identity string) bool { return store.enrolledFor(identity, name) }
 		exempt := a.scannerCfg.Enterprise.Enrollment.ExemptUsers
@@ -426,11 +506,12 @@ func (s *Sidecar) proxyKernelPeer(r *http.Request, connectorName string) (string
 
 // proxyKernelPeerAllowed reports whether the guardrail proxy asks for the
 // kernel peer: managed + routing.enabled only, and not on Windows yet. The
-// Windows peer SID carries the creation-time PID reuse check
-// (peercred.ownerSIDLookup, REVIEW-code-slice4 P1-1), but the guardrail
-// proxy has no second factor there, so it stays off until the live probe
-// on the managed Windows host (CERT-110, S1 slice 4) confirms the lookup;
-// the proxy keeps the 1.0.9 base-only answer meanwhile.
+// Windows peer SID comes from the guardian peer broker with the
+// creation-time PID reuse check (peercred ownerSIDLookup.verify,
+// REVIEW-code-slice4 P1-1), but the guardrail proxy has no second factor
+// there, so it stays off until the live probe on the managed Windows host
+// (CERT-110 S1-D4-WINPEER) confirms the lookup; the proxy keeps the 1.0.9
+// base-only answer meanwhile.
 func proxyKernelPeerAllowed(cfg *config.Config, connectorName string, windows bool) bool {
 	if windows {
 		return false
