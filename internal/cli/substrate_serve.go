@@ -419,6 +419,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Providers:     gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion),
 			Proxy:         llmProxy,
 			BedrockModels: c.Substrate.LLM.BedrockModels,
+			// actor_secrets: exact-value DLP on prompts (PLAN §7.2), from
+			// the callout's actor-secrets Secret mounted in the gateway.
+			ExposedValues: gateway.SubstrateExposedValues(c, c.Substrate.Extproc.ActorSecretsDir),
 		})
 		if err != nil {
 			return out, err
@@ -447,6 +450,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Actors: actors, Registrations: regs, Activity: recorder,
 			Chains: &chainstate.Client{Leader: toLeader},
 			Asks:   &asks.Client{Leader: toLeader}, Policies: ate,
+			UnattendedAsk: func(profile string) gateway.SubstrateUnattendedAsk {
+				return gateway.SubstrateUnattendedAskFor(c, profile)
+			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: substrateRelays(),
 			Skills: newRuntimeSkillScanner(c),

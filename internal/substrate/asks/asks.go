@@ -92,7 +92,17 @@ type Ask struct {
 	DecidedAt time.Time `json:"decided_at,omitzero"`
 	Always    bool      `json:"always,omitempty"`
 	Note      string    `json:"note,omitempty"`
+	// Unattended marks an ask an unattended actor queued (D12
+	// unattended_asks: queue): nobody is watching the run, so a person
+	// decides from `asks`, and the timeout denies it.
+	Unattended bool `json:"unattended,omitempty"`
+	// TimeoutSeconds, when over 0, replaces the store's expiry for this ask
+	// (the profile's ask_timeout, at most 24 h).
+	TimeoutSeconds int64 `json:"timeout_seconds,omitempty"`
 }
+
+// MaxAskTimeout bounds Ask.TimeoutSeconds (config ask_timeout).
+const MaxAskTimeout = 24 * time.Hour
 
 // Decision is one verdict that was not a plain allow.
 type Decision struct {
@@ -283,6 +293,9 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 	exp := s.Expiry
 	if exp <= 0 {
 		exp = DefaultAskExpiry
+	}
+	if t := time.Duration(a.TimeoutSeconds) * time.Second; a.TimeoutSeconds > 0 {
+		exp = min(t, MaxAskTimeout)
 	}
 	a.ID, a.Created, a.Expires, a.State = "ask-"+hex.EncodeToString(b), now, now.Add(exp), StatePending
 	a.DecidedBy, a.DecidedAt, a.Always = "", time.Time{}, false

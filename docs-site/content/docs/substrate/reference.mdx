@@ -97,7 +97,18 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 
 Profile keys for Substrate: `profile_assignments[].match.substrate` (`atespaces`, `templates`, `workloads`). The `sandbox` section of a profile is the same as for OpenShell (`required_for`, `allowed_harnesses`, `egress_allow_only`, `allow_unblock`, `user_approvals` and the rest). See [Managed enterprise](/docs/substrate/enterprise).
 
-{/* TODO(substrate): per-profile `runtimes`, `sandbox_class`, `idle_suspend_after`, `unattended_asks` and `actor_secrets` are planned (PLAN 7.3) and are not in the config yet. Add them here when they land. */}
+Keys of the `sandbox` section (and of `substrate.admin`) for the runtime:
+
+| Key | Values | Meaning | How a profile tightens `substrate.admin` |
+|---|---|---|---|
+| `runtimes` | `[openshell, substrate]` | Where the profile's agents may run. Left out: both. Without `substrate`, its actors get no policy | Intersection |
+| `sandbox_class` | `gvisor`, `microvm` | The weakest isolation an actor may run in. Unset: `substrate.default_sandbox_class` | `microvm` wins |
+| `idle_suspend_after` | Go duration, 1m or more | Replaces `substrate.idle_suspend_after` | The minimum |
+| `unattended_asks` | `deny`, `queue` | What an unattended run's ask does. Unset: `substrate.unattended.asks` | `deny` wins |
+| `ask_timeout` | Go duration, 1m to 24h | How long a queued ask waits before it is denied. Unset: `substrate.unattended.ask_timeout` | The minimum |
+| `actor_secrets` | key names | Values a program inside the actor may read, keys of the Secret in `callout.actorSecrets.secretName`. Matched by exact value on prompts and egress | Intersection |
+
+`openshell.admin` refuses `sandbox_class`, `idle_suspend_after`, `unattended_asks`, `ask_timeout` and `actor_secrets`. `substrate.admin` refuses `allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*` keys.
 
 ## Chart values
 

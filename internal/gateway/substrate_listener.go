@@ -141,6 +141,9 @@ type SubstrateConfig struct {
 	Skills SubstrateSkillScanner
 	// Asks is the leader's ask and decision store (nil: 501).
 	Asks SubstrateAskStore
+	// UnattendedAsk is what an unattended actor's ask does for its profile
+	// (SubstrateUnattendedAskFor; nil: deny, D12).
+	UnattendedAsk func(profile string) SubstrateUnattendedAsk
 	// Policies reads an actor's egress policy for policy explain.
 	Policies SubstratePolicyReader
 	// Relays reaches an actor's relay through the router for attach

@@ -2162,6 +2162,15 @@ class SandboxAdminConfig:
     # none refuses a Linux sandbox that wants the MicroVM driver where KVM
     # is not available (no docker fallback); none wins, docker never loosens.
     driver_fallback: str = ""  # docker | none ("" = unset)
+    # The runtime keys (Go sandbox_runtime_keys.go, PLAN 7.3). ``runtimes``
+    # applies on computers and in clusters; the others are Agent Substrate
+    # keys that ``openshell.admin`` refuses. None / "" is unset.
+    runtimes: list[str] | None = None  # openshell | substrate (unset = both)
+    sandbox_class: str = ""  # gvisor | microvm (microvm wins)
+    idle_suspend_after: str = ""  # Go duration, >= 1m (the shortest wins)
+    unattended_asks: str = ""  # deny | queue (deny wins)
+    ask_timeout: str = ""  # Go duration, 1m to 24h (the shortest wins)
+    actor_secrets: list[str] | None = None  # exposed values (unset = none)
 
 
 # OpenShellAdminConfig is the name SandboxAdminConfig had through 1.0.9.
@@ -2184,7 +2193,27 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "delete_stopped_after",
     "request_access",
     "driver_fallback",
+    "runtimes",
+    "sandbox_class",
+    "idle_suspend_after",
+    "unattended_asks",
+    "ask_timeout",
+    "actor_secrets",
 )
+
+# The Agent Substrate floor keys, refused in openshell.admin (Go
+# SandboxSubstrateOnlyKeys).
+_SANDBOX_SUBSTRATE_ONLY_KEYS = (
+    "sandbox_class",
+    "idle_suspend_after",
+    "unattended_asks",
+    "ask_timeout",
+    "actor_secrets",
+)
+
+# The Agent Substrate floor keys, refused in openshell.admin (Go
+# SandboxSubstrateOnlyKeys).
+_SANDBOX_SUBSTRATE_ONLY_KEYS = ("sandbox_class", "idle_suspend_after", "unattended_asks", "ask_timeout", "actor_secrets")
 
 
 @dataclass
@@ -3713,6 +3742,88 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
                 f"{prefix}: required_for [{', '.join(outside)}] is outside allowed_harnesses "
                 f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
             )
+    return _sandbox_runtime_keys_error(section, prefix)
+
+
+_SANDBOX_ACTOR_SECRET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+
+
+def _go_duration_ns(value: str) -> int | None:
+    """Nanoseconds of a Go duration (time.ParseDuration without a sign), or None."""
+    from fractions import Fraction
+
+    v = value.strip()
+    if v == "0":
+        return 0
+    if not _GO_DURATION_RE.match(v):
+        return None
+    total = Fraction(0)
+    for number, unit in _GO_DURATION_PART_RE.findall(v):
+        total += Fraction(number) * _GO_DURATION_UNIT_NS[unit]
+    return int(total)
+
+
+def _sandbox_go_duration_error(
+    field_name: str, value: Any, minimum_ns: int, maximum_ns: int, minimum: str, maximum: str, example: str
+) -> str | None:
+    if value in (None, ""):
+        return None
+    ns = _go_duration_ns(str(value))
+    if ns is None:
+        return f"{field_name} {_go_quote(value)} must be a Go duration such as {example}"
+    if ns < minimum_ns:
+        return f"{field_name} {_go_quote(value)} must be at least {minimum}"
+    if maximum_ns and ns > maximum_ns:
+        return f"{field_name} {_go_quote(value)} must be at most {maximum}"
+    return None
+
+
+def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str | None:
+    """The first refusal of a section's runtime keys (Go validateRuntimeKeys)."""
+    runtimes = section.get("runtimes")
+    if isinstance(runtimes, list) and not runtimes:
+        return f"{prefix}.runtimes: an empty list is refused; leave the key out for no constraint"
+    for index, name in enumerate(runtimes if isinstance(runtimes, list) else []):
+        if name not in ("openshell", "substrate"):
+            return f"{prefix}.runtimes[{index}]: {_go_quote(name)} must be openshell or substrate"
+    for key, allowed in (("sandbox_class", ("gvisor", "microvm")), ("unattended_asks", ("deny", "queue"))):
+        error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
+        if error:
+            return error
+    minute, day = 60 * 10**9, 24 * 3600 * 10**9
+    for error in (
+        _sandbox_go_duration_error(
+            f"{prefix}.idle_suspend_after", section.get("idle_suspend_after"), minute, 0, "1m", "", "30m"
+        ),
+        _sandbox_go_duration_error(
+            f"{prefix}.ask_timeout", section.get("ask_timeout"), minute, day, "1m", "24h0m0s", "30m"
+        ),
+    ):
+        if error:
+            return error
+    secrets = section.get("actor_secrets")
+    if isinstance(secrets, list) and not secrets:
+        return f"{prefix}.actor_secrets: an empty list is refused; leave the key out to expose no value"
+    secrets = secrets if isinstance(secrets, list) else []
+    if len(secrets) > 64:
+        return f"{prefix}.actor_secrets: at most 64 entries"
+    for index, name in enumerate(secrets):
+        if not isinstance(name, str) or not _SANDBOX_ACTOR_SECRET_RE.match(name):
+            return (
+                f"{prefix}.actor_secrets[{index}]: {_go_quote(name)} "
+                'must be a secret key (letters, digits, ".", "_" and "-")'
+            )
+    return None
+
+
+def _sandbox_host_scope_error(admin: Mapping[str, Any]) -> str | None:
+    """openshell.admin refuses the Agent Substrate keys (Go hostScopeError)."""
+    for key in _SANDBOX_SUBSTRATE_ONLY_KEYS:
+        if admin.get(key) not in (None, ""):
+            return (
+                f"admin.{key} is an Agent Substrate key; "
+                "set it in substrate.admin or a guardrail profile's sandbox section"
+            )
     return None
 
 
@@ -3922,6 +4033,10 @@ def _sandbox_tighten_error(base: Mapping[str, Any], overlay: Mapping[str, Any]) 
         right = [p for p in (_sandbox_egress_pattern(v) for v in egress) if p]
         if not any(_sandbox_egress_covers(b, o) or _sandbox_egress_covers(o, b) for b in left for o in right):
             return intersection_error("egress_allow_only", "destination", egress_base, egress)
+    runtimes_base, runtimes = base.get("runtimes"), overlay.get("runtimes")
+    if isinstance(runtimes_base, list) and isinstance(runtimes, list):
+        if not any(str(v).strip().lower() == str(o).strip().lower() for v in runtimes_base for o in runtimes):
+            return intersection_error("runtimes", "runtime", runtimes_base, runtimes)
     required = _sandbox_union(base.get("required_for") or [], overlay.get("required_for") or [])
     if (base.get("allowed") is False or overlay.get("allowed") is False) and required:
         return (
@@ -3977,7 +4092,7 @@ def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
         error = _sandbox_section_error(sections[name], "sandbox") or _sandbox_tighten_error(admin, sections[name])
         if error:
             raise ValueError(where + error)
-    error = _sandbox_section_error(admin, "admin")
+    error = _sandbox_section_error(admin, "admin") or _sandbox_host_scope_error(admin)
     if error:
         raise ValueError("openshell: " + error)
 
@@ -8165,6 +8280,12 @@ def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
         delete_stopped_after=_openshell_str(admin.get("delete_stopped_after")),
         request_access=str(admin.get("request_access") or ""),
         driver_fallback=_openshell_str(admin.get("driver_fallback")),
+        runtimes=_openshell_optional_str_list(admin.get("runtimes")),
+        sandbox_class=_openshell_str(admin.get("sandbox_class")),
+        idle_suspend_after=_openshell_str(admin.get("idle_suspend_after")),
+        unattended_asks=_openshell_str(admin.get("unattended_asks")),
+        ask_timeout=_openshell_str(admin.get("ask_timeout")),
+        actor_secrets=_openshell_optional_str_list(admin.get("actor_secrets")),
     )
 
 
