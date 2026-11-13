@@ -496,6 +496,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			// D8: interactive actors fail as hosts do (managed closed, OSS
 			// open with a warning); unattended actors always closed.
 			FailOpenInteractive: !managed.IsManagedEnterprise(c.DeploymentMode),
+			// E9: a managed deployment refuses a vendor sign-in held in an actor.
+			Managed:            managed.IsManagedEnterprise(c.DeploymentMode),
+			SecretPlaceholders: substrateSecretPlaceholders(c.Substrate.Secrets),
 			OnRateLimited: func(scope ratelimit.Scope, route string) {
 				substrateRateLimited.WithLabelValues(string(scope), route).Inc()
 			},
@@ -537,6 +540,27 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		}
 		ready.Store(true)
 		return out, nil
+	}
+}
+
+// substrateSecretPlaceholders resolves bound secret names to the environment
+// variable names the actor carries in their place. E9 looks there for a
+// vendor API key (CURSOR_API_KEY, AMP_API_KEY, KIRO_API_KEY, GEMINI_API_KEY).
+func substrateSecretPlaceholders(secrets []config.SubstrateSecret) func([]string) []string {
+	byName := make(map[string]string, len(secrets))
+	for _, s := range secrets {
+		if s.Inject.Placeholder != "" {
+			byName[s.Name] = s.Inject.Placeholder
+		}
+	}
+	return func(names []string) []string {
+		var out []string
+		for _, n := range names {
+			if p, ok := byName[n]; ok {
+				out = append(out, p)
+			}
+		}
+		return out
 	}
 }
 

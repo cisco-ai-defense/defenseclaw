@@ -395,7 +395,7 @@ const SandboxSubstrateHookBinary = SandboxHookDir + "/defenseclaw-actor-hook"
 // substratePluginTransports are the in-agent plugin connectors whose
 // Substrate variant execs "defenseclaw-actor-hook hook-post". Amp's plugin
 // has no such variant yet, so a Substrate render of it is refused.
-var substratePluginTransports = map[string]bool{"opencode": true}
+var substratePluginTransports = map[string]bool{"opencode": true, "amp": true}
 
 // sandboxHookHostOnlyMarkers must never survive into a rendered sandbox
 // script: each one is a host-only credential, fail-mode or data-dir input.

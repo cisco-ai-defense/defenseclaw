@@ -26,6 +26,10 @@ type Agent struct {
 	Argv []string
 	Dir  string
 	Env  []string
+	// Banner is a line shown at the top of the terminal before the agent's
+	// own output (the E9 warning of an agent that signs in to a vendor
+	// account).
+	Banner string
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -82,6 +86,9 @@ func (a *Agent) start(cols, rows uint16) error {
 	}
 	a.cmd, a.pty, a.running, a.cols, a.rows = cmd, p, true, cols, rows
 	a.scroll = nil
+	if a.Banner != "" {
+		a.scroll = []byte("\x1b[33mdefenseclaw: warning: " + a.Banner + "\x1b[0m\r\n")
+	}
 	go a.pump(cmd, p)
 	return nil
 }
