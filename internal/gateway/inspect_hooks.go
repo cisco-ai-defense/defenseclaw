@@ -86,6 +86,24 @@ func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Du
 	}
 }
 
+// scanToolResultWithTimeout is scanWithTimeout for a tool's output: the
+// tool-result checks (toolResultRuleFindings) under the same deadline.
+func scanToolResultWithTimeout(ctx context.Context, text string, timeout time.Duration) ([]RuleFinding, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	ch := make(chan []RuleFinding, 1)
+	go func() {
+		ch <- toolResultRuleFindings(snapshotRulePackGenerationFor(ctx, profileRequestConnector(ctx)), text, ruleContentScopeUntrusted, !ManagedEnterpriseActive())
+	}()
+	select {
+	case findings := <-ch:
+		return findings, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func truncateInspectContent(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -359,7 +377,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
 		)
 	} else {
-		ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
+		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, inspectScanTimeout)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
@@ -367,12 +385,11 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		}
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "tool_response", false)
 
-		// Judge lane (J3-3c/J3-3d): the generic /inspect/tool-response
-		// endpoint was regex-only. Forward the tool output to the LLM judge
+		// Judge lane (J3-3c/J3-3d): forward the tool output to the LLM judge
 		// for connectors opted into the completion direction via
-		// guardrail.judge.hook_connectors + EffectiveStrategy("completion").
-		// Tool output is completion-shaped (matches the proxy lane's
-		// inspectToolResult). This is the J3-3c timeout split: the regex
+		// guardrail.judge.hook_connectors + EffectiveStrategy("completion"),
+		// as a tool result (the tool-result injection judge, GAP-0171) with
+		// the tool-result disposition. This is the J3-3c timeout split: the regex
 		// scan above keeps the 200ms inspectScanTimeout cap, while the judge
 		// runs on the request context bounded by its own HookTimeout.
 		// Secure Client keeps its existing detached request context. The
@@ -383,8 +400,8 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		if cfg := a.decisionConfig(judgeCtx); cfg != nil && cfg.SecureClientIntegration() {
 			judgeCtx = context.WithoutCancel(judgeCtx)
 		}
-		if jv := a.runHookJudge(judgeCtx, "completion", "completion",
-			a.connectorName(), outputStr, req.Tool, verdict); jv != nil {
+		if jv := capToolResultJudgeVerdict(a.decisionConfig(judgeCtx), a.connectorName(), a.runHookJudge(judgeCtx, "completion", directionToolResult,
+			a.connectorName(), outputStr, req.Tool, verdict)); jv != nil {
 			verdict = mergeWithJudgeVerdict(verdict, jv)
 		}
 	}
