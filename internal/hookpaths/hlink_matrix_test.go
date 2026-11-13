@@ -6,7 +6,6 @@
 package hookpaths
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -38,5 +37,5 @@ func TestHLinkMatrixPerUserDecision(t *testing.T) {
 	if len(falseBlock) > 0 {
 		t.Errorf("%d benign rows blocked: %s", len(falseBlock), strings.Join(falseBlock, ", "))
 	}
-	t.Log(fmt.Sprintf("rows=%d", len(hlinkmatrix.Rows(f.names))))
+	t.Logf("rows=%d", len(hlinkmatrix.Rows(f.names)))
 }

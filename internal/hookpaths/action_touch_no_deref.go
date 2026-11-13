@@ -97,14 +97,6 @@ func noDereferenceTouchStatusIn(command, cwd, home string, startup ShellStartup)
 	return !unknown && !protectedTarget && !startup.mayChange("touch", "gtouch"), protectedTarget
 }
 
-// startupMayChangeProgram reports a shell startup of this process that can
-// change what a statement running one of programs does: a startup file, an
-// exported function named for the program (any path spelling), or
-// command_not_found_handle (see ShellStartup).
-func startupMayChangeProgram(programs ...string) bool {
-	return CurrentShellStartup().mayChange(programs...)
-}
-
 // entryOnlyStatement reads the bounded statement the entry-only proofs
 // (touch -h, the replace verbs) accept: one simple command, optionally after
 // one plain assignment of a fixed value, with no redirect, no background and
