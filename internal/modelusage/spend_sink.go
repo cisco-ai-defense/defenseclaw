@@ -5,11 +5,11 @@ package modelusage
 
 import "time"
 
-// SpendSink receives the computed cost of an agent call against the
-// routing.admin budget keys the routing verdict gave it (CallFacts.ChargeKeys).
-// The gateway wires the routing admin runtime in; it must not block.
+// SpendSink is where finished calls charge routing.admin budgets: the
+// routing admin runtime (routingadmin.Runtime.Add). The gateway wires it in;
+// it must not block. callID makes a charge idempotent.
 type SpendSink interface {
-	Charge(keys []string, usd float64, at time.Time)
+	Add(callID string, keys []string, usd float64, known bool, at time.Time)
 }
 
 type spendSinkBox struct{ sink SpendSink }
@@ -22,12 +22,11 @@ func (e *Engine) SetSpendSink(sink SpendSink) {
 	e.budgetSink.Store(&spendSinkBox{sink: sink})
 }
 
-// chargeBudgets counts a finished call against its budget keys: agent calls
-// only (judge, decision model and AI Defense calls are DefenseClaw's own),
-// and only the computed cost (a reported cost comes from the agent, which
-// the user controls). An unknown cost charges nothing.
+// chargeBudgets charges a finished call to its budget keys with the
+// resolved cost: computed, else reported (lead ruling 2026-11-12T23:38Z).
+// An unknown cost is passed as unknown, never as 0.
 func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
-	if e == nil || len(f.ChargeKeys) == 0 || f.CallRole != RoleAgent {
+	if e == nil || len(f.ChargeKeys) == 0 {
 		return
 	}
 	box := e.budgetSink.Load()
@@ -35,11 +34,12 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 		return
 	}
 	usd := rec.Cost.ComputedUSD
-	if usd == nil && rec.Cost.Basis == BasisComputed {
+	if usd == nil {
 		usd = rec.Cost.USD
 	}
 	if usd == nil {
+		box.sink.Add(f.RequestID, f.ChargeKeys, 0, false, rec.EndedAt)
 		return
 	}
-	box.sink.Charge(f.ChargeKeys, *usd, rec.EndedAt)
+	box.sink.Add(f.RequestID, f.ChargeKeys, *usd, true, rec.EndedAt)
 }

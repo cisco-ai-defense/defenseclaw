@@ -108,6 +108,8 @@ type RoutingAdminConfig struct {
 	Rules      []RoutingAdminRule `mapstructure:"rules"      yaml:"rules,omitempty"`
 	Budgets    []RoutingBudget    `mapstructure:"budgets"    yaml:"budgets,omitempty"`
 	Visibility *RoutingVisibility `mapstructure:"visibility" yaml:"visibility,omitempty"`
+	// BudgetStore is the opt-in fleet budget store (routing_admin_rules.go).
+	BudgetStore *RoutingBudgetStoreConfig `mapstructure:"budget_store" yaml:"budget_store,omitempty"`
 }
 
 // Policy returns the floor part of routing.admin.

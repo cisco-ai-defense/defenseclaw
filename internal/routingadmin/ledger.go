@@ -27,9 +27,12 @@ type Ledger struct {
 	mu     sync.Mutex
 	local  map[string]map[int32]float64
 	remote map[string]map[int32]float64
+	// unknown marks the UTC days a key had a call whose cost is unknown.
+	unknown map[string]map[int32]bool
 	// seeded holds the budget ids whose remote spend has been read once.
 	seeded    map[string]bool
 	syncErr   string
+	pushErr   string
 	lastSync  time.Time
 	lastPrune int32
 	now       func() time.Time
@@ -38,7 +41,7 @@ type Ledger struct {
 // NewLedger returns an empty ledger.
 func NewLedger() *Ledger {
 	return &Ledger{local: map[string]map[int32]float64{}, remote: map[string]map[int32]float64{},
-		seeded: map[string]bool{}, now: time.Now}
+		unknown: map[string]map[int32]bool{}, seeded: map[string]bool{}, now: time.Now}
 }
 
 // Charge adds usd to every key on the UTC day of at. Non-positive or
@@ -66,6 +69,44 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 	if today != l.lastPrune {
 		l.pruneLocked(today)
 	}
+}
+
+// MarkUnknown records a call of unknown cost on keys (UTC day of at).
+func (l *Ledger) MarkUnknown(keys []string, at time.Time) {
+	if l == nil {
+		return
+	}
+	day := dayNumber(at)
+	if today := dayNumber(l.now()); day > today {
+		day = today
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, key := range keys {
+		days := l.unknown[key]
+		if days == nil {
+			days = map[int32]bool{}
+			l.unknown[key] = days
+		}
+		days[day] = true
+	}
+}
+
+// Unknown reports whether the key had a call of unknown cost in the current
+// period window (its spend is then not known, never counted as 0).
+func (l *Ledger) Unknown(key, period string, now time.Time) bool {
+	if l == nil {
+		return false
+	}
+	today, from := dayNumber(now), windowStart(period, now)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for day := range l.unknown[key] {
+		if day >= from && day <= today {
+			return true
+		}
+	}
+	return false
 }
 
 // Spend returns the key's spend (local and remote) in the current period
@@ -191,6 +232,21 @@ func (l *Ledger) SyncFailed(err error) {
 	l.mu.Unlock()
 }
 
+// PushResult records whether this process's spend was stored (an error
+// stays until a push succeeds, independent of reads).
+func (l *Ledger) PushResult(err error) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	if err != nil {
+		l.pushErr = err.Error()
+	} else {
+		l.pushErr = ""
+	}
+	l.mu.Unlock()
+}
+
 // Seeded reports whether the budget's remote spend has been read.
 func (l *Ledger) Seeded(id string) bool {
 	if l == nil {
@@ -221,6 +277,9 @@ func (l *Ledger) SeedState(ids []string) string {
 	if l.syncErr != "" {
 		return "seeded (stale: " + l.syncErr + ")"
 	}
+	if l.pushErr != "" {
+		return "seeded (not stored: " + l.pushErr + ")"
+	}
 	return "seeded"
 }
 
@@ -236,6 +295,16 @@ func (l *Ledger) pruneLocked(today int32) {
 			if len(days) == 0 {
 				delete(m, key)
 			}
+		}
+	}
+	for key, days := range l.unknown {
+		for day := range days {
+			if day <= today-LedgerDays {
+				delete(days, day)
+			}
+		}
+		if len(days) == 0 {
+			delete(l.unknown, key)
 		}
 	}
 }

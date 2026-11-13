@@ -1815,6 +1815,9 @@
       "additionalProperties": false,
       "description": "Organization routing floor; profiles only tighten it.",
       "properties": {
+        "budget_store": {
+          "$ref": "#/$defs/routingBudgetStore"
+        },
         "rules": {
           "type": "array",
           "maxItems": 256,
@@ -3859,7 +3862,7 @@
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage.db for the usage API and status."
+              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status."
             },
             "retention_days": {
               "type": "integer",
@@ -5369,6 +5372,93 @@
             "none"
           ],
           "description": "own (default): a user reads only their own usage; none: only administrators read usage."
+        }
+      }
+    },
+    "routingBudgetStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Opt-in fleet budget store (defenseclaw-gateway budget-store serve). Absent: budgets count on each device. Devices send only charge keys (keyed hashes, no names), UTC days and dollar amounts, signed with the shared tenant secret, over HTTPS.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://[^/?#@\\s]+/?$",
+          "description": "https://host[:port] of the store."
+        },
+        "credential": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Protected credential with the tenant secret (base64, 32 bytes); default routing-budget-store-key."
+        },
+        "ca_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])",
+          "description": "PEM file of the only CA trusted for the store; empty: the system roots."
+        },
+        "sync_interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m)$",
+          "description": "How often a device sends its spend and reads the fleet's: 10s to 10m (default 30s)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        },
+        "server": {
+          "$ref": "#/$defs/routingBudgetStoreServer"
+        }
+      }
+    },
+    "routingBudgetStoreServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Read only by budget-store serve on the store host; refused in a device config.",
+      "required": [
+        "listen",
+        "tls_cert_file",
+        "tls_key_file",
+        "secret_file",
+        "db_path"
+      ],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 256
+        },
+        "tls_cert_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "tls_key_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "secret_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "db_path": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "rate_limit_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000
         }
       }
     },

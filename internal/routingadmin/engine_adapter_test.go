@@ -62,7 +62,7 @@ func (f *fakeCounter) Push(_ context.Context, epoch string, rows []SeedRow) erro
 	return f.err
 }
 
-func (f *fakeCounter) Totals(context.Context, string, time.Time) ([]SeedRow, error) {
+func (f *fakeCounter) Totals(context.Context, string, time.Time, []string) ([]SeedRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.totals, f.err
@@ -158,11 +158,11 @@ func TestLocalCounterKeepsEarlierProcesses(t *testing.T) {
 	if err := c.Push(ctx, "p2", []SeedRow{{Day: today, Key: "k", USD: 4}}); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := c.Totals(ctx, "p2", time.Now().AddDate(0, 0, -LedgerDays))
+	rows, err := c.Totals(ctx, "p2", time.Now().AddDate(0, 0, -LedgerDays), nil)
 	if err != nil || len(rows) != 1 || rows[0].USD != 3 {
 		t.Fatalf("other epochs only, old days pruned: %+v %v", rows, err)
 	}
-	rows, _ = c.Totals(ctx, "p3", time.Now().AddDate(0, 0, -LedgerDays))
+	rows, _ = c.Totals(ctx, "p3", time.Now().AddDate(0, 0, -LedgerDays), nil)
 	if len(rows) != 1 || rows[0].USD != 7 {
 		t.Fatalf("a new process sees both: %+v", rows)
 	}
@@ -172,6 +172,7 @@ func TestAdapterEvaluateAndGate(t *testing.T) {
 	rules := []config.RoutingAdminRule{{ID: "local-high", Match: config.RoutingAdminMatch{SeverityAtLeast: "HIGH"}, Allow: []string{"local"}, Default: "local"}}
 	budgets := []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "downgrade:fast"}}
 	rt := NewRuntime()
+	rt.SetFeed(true)
 	ev := rt.For(adapterConfig(rules, budgets))
 	rt.Ledger().ApplyRemote([]string{"d"}, nil, time.Now())
 	floor := engine.Policy{AllowedAliases: []string{"fast", "local"}, DefaultAlias: "fast"}
@@ -234,6 +235,19 @@ func TestToEngineVerdictKeepsNothingAllowed(t *testing.T) {
 	}
 }
 
+func TestBudgetsReadNotLoadedWithoutAFeed(t *testing.T) {
+	rt := NewRuntime()
+	budgets := []config.RoutingBudget{{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 1, OnExceed: "deny"}}
+	cfg := adapterConfig(nil, budgets)
+	cfg.DeploymentMode = "managed_enterprise"
+	ev := &evaluator{policy: Compile(nil, budgets, true)}
+	rt.For(cfg)
+	rt.Ledger().ApplyRemote([]string{"d"}, nil, time.Now())
+	if v := ev.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: engine.Caller{Verified: true, Key: "1001"}}, "", false); v.Deny == nil || v.Deny.Code != "budget_unavailable:d" {
+		t.Fatalf("no feed: a managed deny budget refuses: %+v", v)
+	}
+}
+
 func TestCallerFromEngine(t *testing.T) {
 	c := CallerFromEngine(engine.Caller{Verified: true, Key: "S-1-5-21-1", GroupsUnknown: true,
 		Matches: func(config.ProfileMatch) engine.Tri { return engine.Maybe }}, true)
@@ -245,5 +259,89 @@ func TestCallerFromEngine(t *testing.T) {
 	}
 	if c := CallerFromEngine(engine.Caller{Verified: true, Key: "1001"}, false); c.Key != OwnerKey {
 		t.Fatalf("every OSS caller is the owner: %+v", c)
+	}
+}
+
+type mapKeys struct{ to, from map[string]string }
+
+func (m mapKeys) ToFleet(k string) (string, bool)   { v, ok := m.to[k]; return v, ok }
+func (m mapKeys) FromFleet(k string) (string, bool) { v, ok := m.from[k]; return v, ok }
+func (m mapKeys) Wanted() []string                  { return []string{"group:g:hX"} }
+
+func TestRuntimeTranslatesKeysForTheFleet(t *testing.T) {
+	today := time.Now().UTC().Format(time.DateOnly)
+	rt := NewRuntime()
+	rt.For(adapterConfig(nil, dailyBudget()))
+	fleet := &recordingFleet{totals: []SeedRow{{Day: today, Key: "user:d:*:ak1:1:abc", USD: 5}, {Day: today, Key: "user:d:*:ak1:1:other", USD: 50}}}
+	keys := mapKeys{to: map[string]string{"user:d:*:1001": "user:d:*:ak1:1:abc"}, from: map[string]string{"user:d:*:ak1:1:abc": "user:d:*:1001"}}
+	rt.mu.Lock()
+	rt.local, rt.fleet, rt.keys = &fakeCounter{}, fleet, keys
+	rt.mu.Unlock()
+	rt.Charge([]string{"user:d:*:1001", "user:d:*:1002"}, 1, time.Now())
+	rt.SyncOnce(context.Background())
+	if got, _ := rt.Ledger().Spend("user:d:*:1001", "day", time.Now()); got != 6 {
+		t.Fatalf("own key in the fleet form, mapped back: %v", got)
+	}
+	if got, _ := rt.Ledger().Spend("user:d:*:1002", "day", time.Now()); got != 1 {
+		t.Fatalf("a user without a join key counts on this device only: %v", got)
+	}
+	if len(fleet.pushed) != 1 || fleet.pushed[0].Key != "user:d:*:ak1:1:abc" {
+		t.Fatalf("only fleet-form keys leave the device: %+v", fleet.pushed)
+	}
+	if !slices.Equal(fleet.asked, []string{"group:g:hX", "user:d:*:ak1:1:abc"}) {
+		t.Fatalf("asked %v", fleet.asked)
+	}
+}
+
+type recordingFleet struct {
+	pushed []SeedRow
+	asked  []string
+	totals []SeedRow
+}
+
+func (f *recordingFleet) Push(_ context.Context, _ string, rows []SeedRow) error {
+	f.pushed = append([]SeedRow(nil), rows...)
+	return nil
+}
+
+func (f *recordingFleet) Totals(_ context.Context, _ string, _ time.Time, keys []string) ([]SeedRow, error) {
+	f.asked = keys
+	return f.totals, nil
+}
+
+func TestAddIsIdempotentAndUnknownCostIsNotZero(t *testing.T) {
+	budgets := []config.RoutingBudget{
+		{ID: "d", Scope: "user", Subject: "*", Period: "day", LimitUSD: 10, OnExceed: "deny"},
+		{ID: "g", Scope: "user", Subject: "*", Period: "day", LimitUSD: 10, OnExceed: "downgrade:fast"},
+	}
+	rt := NewRuntime()
+	rt.SetFeed(true)
+	rt.For(adapterConfig(nil, budgets))
+	rt.Ledger().ApplyRemote([]string{"d", "g"}, nil, time.Now())
+	key := "user:d:*:1001"
+	rt.Add("call-1", []string{key}, 2, true, time.Now())
+	rt.Add("call-1", []string{key}, 2, true, time.Now())
+	if got, _ := rt.Ledger().Spend(key, "day", time.Now()); got != 2 {
+		t.Fatalf("one charge per call id: %v", got)
+	}
+	caller := engine.Caller{Verified: true, Key: "1001"}
+	managed := &evaluator{policy: Compile(nil, budgets, true), ledger: rt.Ledger()}
+	if v := managed.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false); v.Deny != nil {
+		t.Fatalf("under the limit: %+v", v.Deny)
+	}
+	rt.Add("call-2", []string{key, "user:g:*:1001"}, 0, false, time.Now())
+	v := managed.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false)
+	if v.Deny == nil || v.Deny.Code != "budget_cost_unknown:d" {
+		t.Fatalf("managed: an unknown cost makes a deny budget refuse: %+v", v)
+	}
+	rt.Add("call-3", []string{"user:d:*:" + OwnerKey}, 0, false, time.Now()) // on OSS every caller is the owner
+	oss := &evaluator{policy: Compile(nil, budgets, false), ledger: rt.Ledger()}
+	v = oss.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false)
+	if v.Deny != nil || !slices.Contains(v.Warnings, "budget_cost_unknown:d") || v.Force != nil {
+		t.Fatalf("OSS warns: %+v", v)
+	}
+	onlyDowngrade := &evaluator{policy: Compile(nil, budgets[1:], true), ledger: rt.Ledger()}
+	if v := onlyDowngrade.Evaluate(context.Background(), engine.Policy{}, engine.Request{Caller: caller}, "", false); !slices.Equal(v.Force, []string{"fast"}) {
+		t.Fatalf("managed: an unknown cost forces the downgrade: %+v", v)
 	}
 }

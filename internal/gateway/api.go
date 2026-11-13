@@ -56,7 +56,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -74,7 +73,7 @@ import (
 type APIServer struct {
 	// modelUsage is the local usage store behind GET /usage (nil until the
 	// sidecar binds it; the store itself reports whether it is on).
-	modelUsage atomic.Pointer[modelusage.Store]
+	modelUsage atomic.Pointer[usageQuerierBox]
 	health     *SidecarHealth
 	client     *Client
 	store      *audit.Store

@@ -1031,6 +1031,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// connector pending before it can answer a retained native hook.
 	s.beginPerUserConnectorHookSetup()
 	s.applyModelUsage(s.cfg)
+	defer s.stopRoutingAdmin()
 	defer s.stopModelUsage()
 	s.startRoutingAdmin(ctx)
 	s.carryObservabilityV8ShutdownDrops()
@@ -2548,6 +2549,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		proxy.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
 	}
 	s.applyModelUsage(appliedCfg)
+	s.applyRoutingAdmin(appliedCfg)
 
 	if aiRestart {
 		if nextAIDiscovery != nil {

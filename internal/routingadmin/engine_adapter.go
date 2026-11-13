@@ -5,9 +5,10 @@ package routingadmin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
-	"os"
-	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -27,18 +28,50 @@ const OwnerKey = "owner"
 type Runtime struct {
 	decisions Decisions
 
-	mu       sync.Mutex
-	ledger   *Ledger
-	ids      []string // budget ids of the newest generation
-	last     *config.Config
-	lastEv   *evaluator
-	ctx      context.Context
-	local    SpendCounter // this device's store (per-device budgets and the fallback)
-	fleet    SpendCounter // optional: shared by devices or gateway replicas
+	mu     sync.Mutex
+	ledger *Ledger
+	ids    []string // budget ids of the newest generation
+	last   *config.Config
+	lastEv *evaluator
+	ctx    context.Context
+	local  SpendCounter // this device's store (per-device budgets and the fallback)
+	fleet  SpendCounter // optional: shared by devices or gateway replicas
+	keys   FleetKeys    // local <-> fleet key forms (nil: the same keys)
+	hash   func(string) string
+	// feed is true once agent call costs reach Charge (the usage engine
+	// records agent calls with a computed cost); until then budgets read
+	// as not loaded, so a managed deny budget refuses instead of counting 0.
+	feed     bool
 	interval time.Duration
 	epoch    string
 	syncing  bool
 	kick     chan struct{}
+	pushMu   sync.Mutex // one push at a time: snapshot and send stay in order
+
+	callsMu   sync.Mutex
+	calls     map[string]struct{}
+	callOrder []string
+}
+
+// Kick asks the sync loop to sync now (a new user was seen).
+func (rt *Runtime) Kick() {
+	if rt == nil {
+		return
+	}
+	select {
+	case rt.kick <- struct{}{}:
+	default:
+	}
+}
+
+// SetInterval changes the sync interval (routing.admin.budget_store.sync_interval).
+func (rt *Runtime) SetInterval(d time.Duration) {
+	if rt == nil || d <= 0 {
+		return
+	}
+	rt.mu.Lock()
+	rt.interval = d
+	rt.mu.Unlock()
 }
 
 // DefaultSyncInterval is how often the ledger stores this process's spend
@@ -48,8 +81,10 @@ const DefaultSyncInterval = 30 * time.Second
 // NewRuntime returns an empty runtime; it costs nothing until a config
 // with routing.admin rules or budgets is compiled.
 func NewRuntime() *Runtime {
-	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1),
-		epoch: strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)}
+	var id [12]byte
+	_, _ = rand.Read(id[:])
+	// A random epoch: the store learns nothing about the process or host.
+	return &Runtime{interval: DefaultSyncInterval, kick: make(chan struct{}, 1), epoch: hex.EncodeToString(id[:])}
 }
 
 // Decisions returns the recent-decisions ring.
@@ -87,12 +122,81 @@ func (rt *Runtime) SetCounters(ctx context.Context, local, fleet SpendCounter, i
 	rt.startSync()
 }
 
-// Charge counts a priced agent call against its budget keys (the usage
-// engine calls it with the computed cost when the call ends).
+// SetFeed says whether agent call costs reach Charge (observability
+// tokenomics records agent calls with a computed cost). Generations compile
+// again.
+func (rt *Runtime) SetFeed(active bool) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	changed := rt.feed != active
+	rt.feed = active
+	if changed {
+		rt.last, rt.lastEv = nil, nil
+	}
+	rt.mu.Unlock()
+}
+
+// SetFleet installs (or, with a nil counter, removes) the fleet counter, its
+// key mapping and the subject hash budget keys use (a keyed hash shared by
+// the fleet; nil = the device-only hash). Generations compile again.
+func (rt *Runtime) SetFleet(fleet SpendCounter, keys FleetKeys, hash func(string) string) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	rt.fleet, rt.keys, rt.hash = fleet, keys, hash
+	rt.last, rt.lastEv = nil, nil
+	rt.mu.Unlock()
+	rt.startSync()
+}
+
+// Charge counts usd against keys (no idempotency; tests and Add use it).
 func (rt *Runtime) Charge(keys []string, usd float64, at time.Time) {
 	if l := rt.Ledger(); l != nil {
 		l.Charge(keys, usd, at)
 	}
+}
+
+// recentCallsMax bounds the call ids Add remembers for idempotency.
+const recentCallsMax = 65536
+
+// Add is the one producer call of budget spend (lead ruling 2026-11-12T23:38Z):
+// the usage engine calls it once per finished call with the call id as the
+// idempotency key, the budget keys of the routing verdict and the resolved
+// cost (computed, else reported). known false is a call whose cost is
+// unknown: never counted as 0, the budget reads as unknown for the period.
+func (rt *Runtime) Add(callID string, keys []string, usd float64, known bool, at time.Time) {
+	if rt == nil || len(keys) == 0 {
+		return
+	}
+	l := rt.Ledger()
+	if l == nil {
+		return
+	}
+	if callID != "" {
+		rt.callsMu.Lock()
+		if rt.calls == nil {
+			rt.calls = map[string]struct{}{}
+		}
+		if _, seen := rt.calls[callID]; seen {
+			rt.callsMu.Unlock()
+			return
+		}
+		if len(rt.callOrder) >= recentCallsMax {
+			delete(rt.calls, rt.callOrder[0])
+			rt.callOrder = rt.callOrder[1:]
+		}
+		rt.calls[callID] = struct{}{}
+		rt.callOrder = append(rt.callOrder, callID)
+		rt.callsMu.Unlock()
+	}
+	if !known {
+		l.MarkUnknown(keys, at)
+		return
+	}
+	l.Charge(keys, usd, at)
 }
 
 // For returns the admin evaluator of cfg, or nil when cfg has no
@@ -110,9 +214,10 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 		}
 		return ev
 	}
+	hash := rt.hash
 	rt.mu.Unlock()
 	a := cfg.Routing.Admin
-	policy := Compile(a.Rules, a.Budgets, cfg.StandaloneEnterprise())
+	policy := CompileWith(a.Rules, a.Budgets, cfg.StandaloneEnterprise(), hash)
 	if policy == nil {
 		rt.mu.Lock()
 		rt.last, rt.lastEv, rt.ids = cfg, nil, nil
@@ -130,7 +235,9 @@ func (rt *Runtime) For(cfg *config.Config) engine.AdminEvaluator {
 	if len(a.Budgets) > 0 && rt.ledger == nil {
 		rt.ledger = NewLedger()
 	}
-	ev.ledger = rt.ledger
+	if rt.feed {
+		ev.ledger = rt.ledger
+	}
 	rt.last, rt.lastEv, rt.ids = cfg, ev, policy.BudgetIDs()
 	rt.mu.Unlock()
 	rt.startSync()
@@ -186,7 +293,7 @@ func (rt *Runtime) syncLoop(ctx context.Context) {
 // (per-device budgets; a fleet outage falls back to them).
 func (rt *Runtime) SyncOnce(ctx context.Context) {
 	rt.mu.Lock()
-	ledger, local, fleet, ids, epoch := rt.ledger, rt.local, rt.fleet, append([]string(nil), rt.ids...), rt.epoch
+	ledger, local, fleet, keys, ids, epoch := rt.ledger, rt.local, rt.fleet, rt.keys, append([]string(nil), rt.ids...), rt.epoch
 	rt.mu.Unlock()
 	if ledger == nil || local == nil {
 		return
@@ -195,43 +302,155 @@ func (rt *Runtime) SyncOnce(ctx context.Context) {
 	since := time.Unix(int64(dayNumber(time.Now())-LedgerDays)*86400, 0).UTC()
 	var rows []SeedRow
 	var err error
+	// This device's earlier processes always count: a fleet answer that
+	// leaves them out (a user with no fleet id, a store that lost data) can
+	// never lower what this device already knows.
+	localRows, localErr := local.Totals(ctx, epoch, since, nil)
 	if fleet != nil {
-		if rows, err = fleet.Totals(ctx, epoch, since); err == nil {
-			ledger.ApplyRemote(ids, rows, time.Now())
+		if rows, err = fleet.Totals(ctx, epoch, since, fleetWanted(ledger, keys)); err == nil {
+			ledger.ApplyRemote(ids, maxRows(fromFleet(rows, keys), localRows), time.Now())
+			if localErr != nil {
+				ledger.SyncFailed(localErr)
+			}
 			return
 		}
 		ledger.SyncFailed(err)
 	}
-	if rows, err = local.Totals(ctx, epoch, since); err != nil {
-		ledger.SyncFailed(err)
+	if localErr != nil {
+		ledger.SyncFailed(localErr)
 		return
 	}
-	ledger.ApplyRemote(ids, rows, time.Now())
+	ledger.ApplyRemote(ids, localRows, time.Now())
 	if fleet != nil {
 		ledger.SyncFailed(errFleetFallback)
 	}
 }
 
+// maxRows merges two spend answers per (key, day), keeping the larger.
+func maxRows(a, b []SeedRow) []SeedRow {
+	type dk struct{ day, key string }
+	m := map[dk]float64{}
+	for _, rows := range [][]SeedRow{a, b} {
+		sum := map[dk]float64{}
+		for _, r := range rows {
+			sum[dk{r.Day, r.Key}] += r.USD
+		}
+		for k, v := range sum {
+			if v > m[k] {
+				m[k] = v
+			}
+		}
+	}
+	out := make([]SeedRow, 0, len(m))
+	for k, v := range m {
+		out = append(out, SeedRow{Day: k.day, Key: k.key, USD: v})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Day != out[j].Day {
+			return out[i].Day < out[j].Day
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out
+}
+
 var errFleetFallback = errors.New("fleet spend unavailable; counting this device only")
 
+// Flush stores this process's spend once (the gateway calls it after the
+// usage engine drained at shutdown).
+func (rt *Runtime) Flush(ctx context.Context) {
+	if rt == nil {
+		return
+	}
+	rt.push(ctx)
+}
+
 func (rt *Runtime) push(ctx context.Context) {
+	rt.pushMu.Lock()
+	defer rt.pushMu.Unlock()
 	rt.mu.Lock()
 	ledger, local, fleet, epoch := rt.ledger, rt.local, rt.fleet, rt.epoch
 	rt.mu.Unlock()
+	if ledger == nil {
+		return
+	}
 	rows := ledger.LocalRows()
 	if len(rows) == 0 {
 		return
 	}
+	var failed error
 	if local != nil {
 		if err := local.Push(ctx, epoch, rows); err != nil {
-			ledger.SyncFailed(err)
+			failed = err
 		}
 	}
 	if fleet != nil {
-		if err := fleet.Push(ctx, epoch, rows); err != nil {
-			ledger.SyncFailed(err)
+		if err := fleet.Push(ctx, epoch, toFleet(rows, rt.fleetKeys())); err != nil && failed == nil {
+			failed = err
 		}
 	}
+	ledger.PushResult(failed)
+}
+
+func (rt *Runtime) fleetKeys() FleetKeys {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.keys
+}
+
+// toFleet keeps the rows that have a fleet form, in that form.
+func toFleet(rows []SeedRow, keys FleetKeys) []SeedRow {
+	if keys == nil {
+		return rows
+	}
+	out := make([]SeedRow, 0, len(rows))
+	for _, r := range rows {
+		if k, ok := keys.ToFleet(r.Key); ok {
+			out = append(out, SeedRow{Day: r.Day, Key: k, USD: r.USD})
+		}
+	}
+	return out
+}
+
+// fromFleet keeps the rows with a local form, in that form.
+func fromFleet(rows []SeedRow, keys FleetKeys) []SeedRow {
+	if keys == nil {
+		return rows
+	}
+	out := make([]SeedRow, 0, len(rows))
+	for _, r := range rows {
+		if k, ok := keys.FromFleet(r.Key); ok {
+			out = append(out, SeedRow{Day: r.Day, Key: k, USD: r.USD})
+		}
+	}
+	return out
+}
+
+// fleetWanted is every fleet key this device needs: its own spend's keys and
+// the mapper's (named budgets, users seen here).
+func fleetWanted(ledger *Ledger, keys FleetKeys) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(k string) {
+		if k != "" && !seen[k] {
+			seen[k] = true
+			out = append(out, k)
+		}
+	}
+	for _, r := range ledger.LocalRows() {
+		if keys == nil {
+			add(r.Key)
+		} else if k, ok := keys.ToFleet(r.Key); ok {
+			add(k)
+		}
+	}
+	if keys != nil {
+		for _, k := range keys.Wanted() {
+			add(k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // evaluator implements engine.AdminEvaluator for one config generation.

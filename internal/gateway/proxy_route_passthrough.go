@@ -124,11 +124,11 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 	switch in.APIFamily {
 	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
 		if !strings.EqualFold(d.Provider, "bedrock") {
-			return passthroughRoute{}, false, outcome
+			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
 		}
 		route.Path = swapBedrockPathModel(r.URL, d.Model)
 		if route.Path == "" {
-			return passthroughRoute{}, false, outcome
+			return passthroughRoute{}, false, p.gateOriginal(r.Context(), outcome, in.Provider, model)
 		}
 	default:
 		route.Body = patchModelInBody(in.Body, d.Model)

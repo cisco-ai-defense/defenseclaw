@@ -763,12 +763,14 @@ func TestGeneratedMetricOTLPSinkExportsEveryCatalogInstrumentShapeOverGRPC(t *te
 			observability.BucketComplianceActivity,
 			observability.BucketAgentLifecycle,
 			observability.BucketPlatformHealth,
+			observability.BucketModelIO,
 		},
 	)
 	destination.Protocol = "grpc"
 	plan := compileGenerationRuntimePlan(t, t.TempDir(), destination)
 	families := []observability.EventName{
 		"defenseclaw.activity.total",
+		"defenseclaw.model.cost",
 		"defenseclaw.audit.sink.circuit.state",
 		"defenseclaw.agent.discovery.installed",
 		"defenseclaw.agent.last_seen",
