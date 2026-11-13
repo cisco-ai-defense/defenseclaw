@@ -37,8 +37,10 @@ const correlationGraphBudgetPerDecision = 5200
 // rows and the correlation graph) a benign per-user Claude Code PreToolUse,
 // and a settled PreToolUse + PostToolUse pair, may add (S8 R4 + R5, #1384).
 // 1.0.9 wrote 39.5 KB per PreToolUse. The owner accepted about 10.5 KB per
-// decision for 1.0.10; the hook_decision row keeps its payload_json copy so
-// a rollback to 1.0.9 still reads every decision. Pinned at the bytes
+// decision for 1.0.10. The hook_decision row keeps its payload_json copy for
+// a rollback to 1.0.9, which keeps every block and alert; its hook counters,
+// audit-export connector-hook lines and replay check read connector-hook
+// rows only, so they miss the benign allows 1.0.10 wrote. Pinned at the bytes
 // measured on s8/recset (R4+R5 on rel/1.0.10) plus about 5 percent.
 const (
 	hookStoreBudgetPerBenignPreToolUse = 11300

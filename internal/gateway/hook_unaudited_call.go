@@ -24,6 +24,14 @@ func (l hookFailureLine) auditGap() bool {
 	return strings.TrimSpace(l.Category) == hookAuditGapCategory
 }
 
+// correlatedOrEmpty is value for a call whose correlation write held.
+func correlatedOrEmpty(req agentHookRequest, value string) string {
+	if req.CorrelationUnavailable {
+		return ""
+	}
+	return value
+}
+
 // recordUnauditedHookCall keeps the record of a script-route tool call whose
 // audit row could not be written (a locked or full store, a write that ran
 // past its window). The gateway has answered the call and no hook line exists
@@ -36,14 +44,6 @@ func (l hookFailureLine) auditGap() bool {
 // gateway records a shed or abandoned call at admission instead. Best effort:
 // a log that cannot be written leaves the stderr line of the failed audit
 // write as the only trace.
-// correlatedOrEmpty is value for a call whose correlation write held.
-func correlatedOrEmpty(req agentHookRequest, value string) string {
-	if req.CorrelationUnavailable {
-		return ""
-	}
-	return value
-}
-
 func (a *APIServer) recordUnauditedHookCall(connectorName string, req agentHookRequest, resp agentHookResponse) {
 	if a == nil || !hookFailOpenReportApplies(a.scannerCfg) || a.scannerCfg.SecureClientIntegration() ||
 		req.ToolInvocationID == "" || !hookexec.ToolGateEvent(connectorName, req.HookEventName) {
