@@ -104,6 +104,13 @@ rules:
     severity: CRITICAL
     confidence: 0.95
     tags: [credential, file-sensitive]
+  - id: PATH-CRED-STORE
+    tool_call_only: true
+    pattern: '(?i)(?:/etc/(?:k8s|kubernetes)/(?:admin|kubelet|controller-manager|scheduler)\.conf|/etc/kubernetes/pki/[^\s"'']*\.key|/etc/(?:aws|azure|gcloud)/credentials|[/\\]\.azure[/\\](?:credentials|accessTokens\.json|msal_token_cache\.\w+)|[/\\]\.config[/\\]gh[/\\]hosts\.yml|[/\\]\.my\.cnf|[/\\]\.pgpass|[/\\]\.vault-token|[/\\]\.config[/\\]gcloud[/\\](?:application_default_credentials\.json|credentials\.db)|krb5\.keytab|[/\\][\w.-]+\.keytab\b|/var/lib/jenkins/(?:credentials\.xml|secrets/)|/run/secrets/|/etc/master\.passwd|/etc/gshadow|/etc/security/opasswd)'
+    title: "Credential store file"
+    severity: HIGH
+    confidence: 0.9
+    tags: [credential, file-sensitive]
   - id: PATH-NETRC
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc'
     title: "netrc credentials file"
@@ -128,8 +135,14 @@ rules:
     # `pas{1,4}wd` also tolerates the common "passswd" typo
     # (extra s) which LLMs happily resolve to /etc/passwd but
     # a strict-spelling regex misses.
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p, (p.resolved == '/etc/passwd' || p.normalized == '/etc/passwd') &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: 'a^'
-    title: "/etc/passwd access"
+    title: "/etc/passwd mutation"
     severity: HIGH
     confidence: 0.85
     tags: [system-file]

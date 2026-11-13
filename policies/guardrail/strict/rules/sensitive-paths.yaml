@@ -97,6 +97,13 @@ rules:
     severity: CRITICAL
     confidence: 0.95
     tags: [credential, file-sensitive]
+  - id: PATH-CRED-STORE
+    tool_call_only: true
+    pattern: '(?i)(?:/etc/(?:k8s|kubernetes)/(?:admin|kubelet|controller-manager|scheduler)\.conf|/etc/kubernetes/pki/[^\s"'']*\.key|/etc/(?:aws|azure|gcloud)/credentials|[/\\]\.azure[/\\](?:credentials|accessTokens\.json|msal_token_cache\.\w+)|[/\\]\.config[/\\]gh[/\\]hosts\.yml|[/\\]\.my\.cnf|[/\\]\.pgpass|[/\\]\.vault-token|[/\\]\.config[/\\]gcloud[/\\](?:application_default_credentials\.json|credentials\.db)|krb5\.keytab|[/\\][\w.-]+\.keytab\b|/var/lib/jenkins/(?:credentials\.xml|secrets/)|/run/secrets/|/etc/master\.passwd|/etc/gshadow|/etc/security/opasswd)'
+    title: "Credential store file"
+    severity: HIGH
+    confidence: 0.9
+    tags: [credential, file-sensitive]
   - id: PATH-NETRC
     pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc'
     title: "netrc credentials file"
