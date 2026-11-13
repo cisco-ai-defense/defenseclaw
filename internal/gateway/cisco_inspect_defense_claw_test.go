@@ -177,6 +177,64 @@ func TestDefenseClawInspect_WireShape(t *testing.T) {
 	}
 }
 
+// TestDefenseClawInspect_AgentClass checks the policy-class field on the
+// managed wire without allowing an unverified connector to choose it.
+func TestDefenseClawInspect_AgentClass(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000, ReportAgentClass: true}, newFakeCloudProvider("token"))
+	cases := []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{
+		{"global", t.Context(), ""},
+		{"codex hook", withAuthenticatedHookConnector(t.Context(), "codex"), "DEFENSE_CLAW_AGENT_CLASS_CODEX"},
+		{"cursor inspect", withAuthenticatedInspectConnector(t.Context(), "cursor"), "DEFENSE_CLAW_AGENT_CLASS_CURSOR"},
+		{"claude hook", withAuthenticatedHookConnector(t.Context(), "claudecode"), "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"},
+		{"unsupported", withAuthenticatedHookConnector(t.Context(), "openclaw"), ""},
+		{"conflicting trusted contexts", withAuthenticatedInspectConnector(withAuthenticatedHookConnector(t.Context(), "codex"), "cursor"), ""},
+	}
+	defaultOff := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{Endpoint: srv.URL, TimeoutMs: 3000}, newFakeCloudProvider("token"))
+	if defaultOff.Inspect(withAuthenticatedHookConnector(t.Context(), "codex"), []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
+		t.Fatal("expected default-off inspection response")
+	}
+	var offBody map[string]json.RawMessage
+	if err := json.Unmarshal(gotBody, &offBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := offBody["agent_class"]; present {
+		t.Fatal("default-off client sent agent_class")
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if c.Inspect(tc.ctx, []ChatMessage{{Role: "user", Content: "hello"}}) == nil {
+				t.Fatal("expected inspect response")
+			}
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(gotBody, &body); err != nil {
+				t.Fatal(err)
+			}
+			got, present := body["agent_class"]
+			if tc.want == "" {
+				if present {
+					t.Fatalf("agent_class must be absent; got %s", got)
+				}
+				return
+			}
+			var class string
+			if err := json.Unmarshal(got, &class); err != nil || class != tc.want {
+				t.Fatalf("agent_class = %s, err = %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 // TestDefenseClawInspect_UnauthorizedRefreshAndRetry: on 401, the
 // client must invalidate the provider's token cache and retry with a
 // fresh token exactly once.

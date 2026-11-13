@@ -56,10 +56,11 @@ const tokenUnavailableWarnCooldown = 60 * time.Second
 // cached token and retrying once. See doInspectHTTP for the shared
 // retry mechanics.
 type CiscoDefenseClawInspectClient struct {
-	provider cloudreg.Provider
-	endpoint string
-	timeout  time.Duration
-	client   *http.Client
+	provider         cloudreg.Provider
+	endpoint         string
+	timeout          time.Duration
+	client           *http.Client
+	reportAgentClass bool
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   hookLifecycleMetricV8Runtime
@@ -117,10 +118,11 @@ func NewCiscoDefenseClawInspectClient(cfg *config.CiscoAIDefenseConfig, provider
 	// rationale.
 
 	return &CiscoDefenseClawInspectClient{
-		provider: provider,
-		endpoint: endpoint,
-		timeout:  timeout,
-		client:   &http.Client{Timeout: timeout},
+		provider:         provider,
+		endpoint:         endpoint,
+		timeout:          timeout,
+		client:           &http.Client{Timeout: timeout},
+		reportAgentClass: cfg.ReportAgentClass,
 	}
 }
 
@@ -220,6 +222,34 @@ func (c *CiscoDefenseClawInspectClient) warnTokenUnavailable(err error) {
 		detail)
 }
 
+// managedInspectAgentClass derives the policy class only from connector context
+// established by gateway authentication or a typed hook adapter. An untrusted
+// connector assertion in a request body never selects a cloud connection.
+func managedInspectAgentClass(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	hookClass := authenticatedHookConnector(ctx)
+	inspectClass := authenticatedInspectConnector(ctx)
+	if hookClass != "" && inspectClass != "" && hookClass != inspectClass {
+		return ""
+	}
+	connector := hookClass
+	if connector == "" {
+		connector = inspectClass
+	}
+	switch connector {
+	case "codex":
+		return "DEFENSE_CLAW_AGENT_CLASS_CODEX"
+	case "cursor":
+		return "DEFENSE_CLAW_AGENT_CLASS_CURSOR"
+	case "claudecode":
+		return "DEFENSE_CLAW_AGENT_CLASS_CLAUDECODE"
+	default:
+		return ""
+	}
+}
+
 // Inspect sends messages to the DefenseClaw AID endpoint and returns a
 // normalized verdict. Returns nil on any error so the caller falls back
 // to local-only scanning — same fail-open contract as the API-key path.
@@ -306,6 +336,9 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// cisco_ai_defense.enabled_rules is set; otherwise it omits config
 	// too and the tenant's own rules apply.
 	payload := map[string]interface{}{"messages": chatMsgs}
+	if agentClass := managedInspectAgentClass(ctx); c.reportAgentClass && agentClass != "" {
+		payload["agent_class"] = agentClass
+	}
 
 	// currentToken is captured by both setAuth and onUnauthorized so
 	// the retry can attach the refreshed token without re-invoking
