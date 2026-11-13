@@ -92,7 +92,8 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	if req != nil {
 		connectorName = firstNonEmpty(req.Connector, action.Connector)
 	}
-	unverified := len(command) == 0 && req != nil && connector.IsShellTool(connectorName, req.Tool)
+	unverified := len(command) == 0 && req != nil && connector.IsShellTool(connectorName, req.Tool) &&
+		!connector.BlankShellCommand(connectorName, req.Tool, req.Args)
 	if len(command) == 0 && !unverified {
 		return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 	}

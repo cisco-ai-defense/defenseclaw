@@ -659,6 +659,18 @@ func sudoArgvDisposition(argv []string, wide bool) (bool, bool) {
 
 	discovery := false
 	shellMode := false
+	var target sudoTargetUser
+	// elevates is the CMD-SUDO answer once the options are read. A shell the
+	// call starts for another, non-root user (sudo -u builder -i) is a user
+	// switch, not an elevation, so only the wide grammar of the CMD-SUDO owner
+	// drops it; the tool-chain roles keep the narrow grammar unchanged.
+	elevates := func(rest []string) bool {
+		shell := shellMode || (len(rest) > 0 && privilegeTargetShell(rest, wide))
+		if wide && target.nonRoot() {
+			shell = false
+		}
+		return discovery || shell
+	}
 	for index := 1; index < len(argv); index++ {
 		argument := argv[index]
 		if argument == "--" {
@@ -666,7 +678,7 @@ func sudoArgvDisposition(argv []string, wide bool) (bool, bool) {
 			if index >= len(argv) {
 				return false, false
 			}
-			return discovery || shellMode || privilegeTargetShell(argv[index:], wide), true
+			return elevates(argv[index:]), true
 		}
 		switch argument {
 		case "-l", "-ll", "--list":
@@ -702,10 +714,16 @@ func sudoArgvDisposition(argv []string, wide bool) (bool, bool) {
 				if value == "" {
 					return false, false
 				}
+				if key == "--user" {
+					target.set(value)
+				}
 				continue
 			}
 			if index+1 >= len(argv) || argv[index+1] == "" {
 				return false, false
+			}
+			if key == "-u" || key == "--user" {
+				target.set(argv[index+1])
 			}
 			index++
 			continue
@@ -714,13 +732,16 @@ func sudoArgvDisposition(argv []string, wide bool) (bool, bool) {
 			continue
 		}
 		if wide && len(argument) > 2 && argument[0] == '-' && argument[1] != '-' {
-			consumesNext, ok := sudoShortOptionCluster(argument[1:], &discovery, &shellMode)
+			consumesNext, ok := sudoShortOptionCluster(argument[1:], &discovery, &shellMode, &target)
 			if !ok {
 				return false, false
 			}
 			if consumesNext {
 				if index+1 >= len(argv) || argv[index+1] == "" {
 					return false, false
+				}
+				if target.pending {
+					target.set(argv[index+1])
 				}
 				index++
 			}
@@ -729,18 +750,50 @@ func sudoArgvDisposition(argv []string, wide bool) (bool, bool) {
 		if strings.HasPrefix(argument, "-") {
 			return false, false
 		}
-		return discovery || shellMode || privilegeTargetShell(argv[index:], wide), true
+		return elevates(argv[index:]), true
 	}
-	if discovery || shellMode {
-		return true, true
+	return elevates(nil), true
+}
+
+// sudoTargetUser is the user a sudo call runs as (-u, --user).
+type sudoTargetUser struct {
+	user    string
+	given   bool
+	pending bool // the user is the next argument (the cluster ended on u)
+}
+
+func (t *sudoTargetUser) set(user string) {
+	t.user, t.given, t.pending = user, true, false
+}
+
+// nonRoot reports a literal user name that is not root. A variable, a glob or
+// a numeric ID that can be root (#0, #-1 and #4294967295 wrap to root) stay
+// elevations.
+func (t sudoTargetUser) nonRoot() bool {
+	if !t.given || t.user == "" {
+		return false
 	}
-	return false, true
+	user := t.user
+	if strings.HasPrefix(user, "#") {
+		id, err := strconv.ParseInt(user[1:], 10, 64)
+		return err == nil && id > 0 && id != 4294967295
+	}
+	if strings.EqualFold(user, "root") {
+		return false
+	}
+	for _, r := range user {
+		if !(r == '_' || r == '-' || r == '.' || r == '@' || r == '\\' ||
+			r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 // sudoShortOptionCluster reads one cluster of sudo short options (the
 // letters after the dash). A value option ends the cluster: its value is the
 // rest of the word, or the next word when it is the last letter.
-func sudoShortOptionCluster(letters string, discovery, shellMode *bool) (consumesNext, ok bool) {
+func sudoShortOptionCluster(letters string, discovery, shellMode *bool, target *sudoTargetUser) (consumesNext, ok bool) {
 	for index := 0; index < len(letters); index++ {
 		switch letter := letters[index]; {
 		case letter == 'l':
@@ -749,6 +802,13 @@ func sudoShortOptionCluster(letters string, discovery, shellMode *bool) (consume
 			*shellMode = true
 		case strings.IndexByte("AbEHKknPSv", letter) >= 0:
 		case strings.IndexByte("CDgpRrTtUu", letter) >= 0:
+			if letter == 'u' {
+				if index == len(letters)-1 {
+					target.pending = true
+				} else {
+					target.set(letters[index+1:])
+				}
+			}
 			return index == len(letters)-1, true
 		default:
 			return false, false

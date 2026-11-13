@@ -114,8 +114,10 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback: pathOwnerSafeNegative(matchesGitCredentialFile, matchesActiveGitCredentialFile),
 	},
 	"PATH-PROC-ENVIRON": {
-		prerequisite:     pathOwnerPrerequisite(pathValueMatcher(matchesProcEnviron)),
-		suppressFallback: pathOwnerSafeNegative(matchesProcEnvironCandidate, pathValueMatcher(matchesProcEnviron)),
+		prerequisite: procEnvironPrerequisite,
+		suppressFallback: procEnvironSafeNegative(
+			pathOwnerSafeNegative(matchesProcEnvironCandidate, pathValueMatcher(matchesProcEnviron)),
+		),
 	},
 	"CMD-ENV-DUMP": {
 		matchedOnlyAliases: []string{"CMD-WGET-POST"},
