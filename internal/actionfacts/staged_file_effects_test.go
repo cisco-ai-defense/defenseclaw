@@ -58,6 +58,15 @@ func TestEscapedBinaryFileWrite(t *testing.T) {
 		{"color codes appended", `printf '\033[1;31mred\033[0m\n' >> log`, false},
 		{"byte order mark appended", `printf '\xef\xbb\xbfhello' >> out.txt`, false},
 		{"utf-8 text appended", `printf '\xc3\xa9\xc3\xa8' >> out.txt`, false},
+		// echo reads backslash escapes only under -e; printf always does
+		{"echo without -e writes the text", `echo "` + escapes(40, false) + `" >> drop`, false},
+		{"echo with -e", `echo -e "` + escapes(40, false) + `" >> drop`, true},
+		{"echo with -E", `echo -E "` + escapes(40, false) + `" >> drop`, false},
+		// a lone digit is a back-reference or a NUL separator, not a program byte
+		{"sed back-reference line", `printf 's/\(a\)/\1/\n' >> script.sed`, false},
+		{"NUL separated list", `printf 'a\0b\0' >> list.bin`, false},
+		{"bell character", `printf 'done\a' >> log`, false},
+		{"utf-16 byte order mark", `printf '\xff\xfeh\x00i\x00' >> out.txt`, false},
 		{"no file", `echo -ne "` + escapes(40, false) + `"`, false},
 		{"device", `echo -ne "` + escapes(40, false) + `" >> /dev/null`, false},
 		{"plain text", `echo hello >> notes.txt`, false},

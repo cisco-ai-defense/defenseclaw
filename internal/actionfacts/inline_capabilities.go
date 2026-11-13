@@ -22,50 +22,18 @@ import (
 // network and exec" (detection evidence, alert-only). The table is data: a
 // language is one row, a capability is a list of library or builtin names.
 //
-// The scan is token-aware where it can read the code and conservative where
-// it cannot. Reading: per language it removes comments and the contents of
-// string literals before a name is looked for, so a sentence or a log message
-// that mentions "subprocess" asks for nothing; a string that is exactly a
-// table name (the way a module is handed to a loader) counts as that name.
-// Not reading: the precision filter may only ever remove a name that is
-// plainly prose, so whenever the code can hand a string to the interpreter as
-// code (an eval-style sink from the row, an interpolation body), or the
-// scanner is not sure what it read (an unterminated literal or comment, a
-// quote-like operator, a heredoc, a "#" that cannot be a comment, a regular
-// expression literal with no end), the whole operand is scanned as text, the
-// same scan that existed before the filter. Unknown input is never a clean
-// pass.
+// The names are looked for in the whole operand as text, comments and string
+// bodies included. A lexer that removed prose first was tried and dropped: on
+// the owner traces the plain scan reports nothing, so the lexer bought no
+// precision, and every language's quoting, regular-expression, heredoc and
+// long-bracket rules made it misread balanced code as prose (code that was
+// plainly there went unseen). A one-liner that merely names a network library
+// and a process library in a sentence alerts; that is the price of never
+// reading code as prose, and the rule only alerts.
 //
 // The pairing is by design: a one-liner that fetches and also spawns a
 // process is reported even when it is ordinary tarball handling. That is the
 // class this rule owns; it never blocks.
-
-type inlineSyntax struct {
-	lineComments  []string
-	blockComments [][2]string
-	// quotes are the characters that open a string literal.
-	quotes string
-	// tripleQuotes: a tripled quote opens a long string (python).
-	tripleQuotes bool
-	// template: backtick opens a template literal whose ${...} bodies are code (javascript family).
-	template bool
-	// regexLiterals: a slash where an operand may start opens a regular expression literal (javascript family).
-	regexLiterals bool
-	// longBrackets: [[ ... ]] is a long string (lua).
-	longBrackets bool
-	// backtickExec: a backtick runs a command (perl, ruby, php).
-	backtickExec bool
-	// fStrings: a string with an f or F prefix interpolates code (python).
-	fStrings bool
-	// interpolation lists the markers inside a double-quoted string that start code.
-	interpolation []string
-	// quoteLike lists the words that open a delimited literal of their own (perl q, qq, qw, ...).
-	quoteLike []string
-	// percentLiterals: %q(...), %w[...] style literals (ruby).
-	percentLiterals bool
-	// heredocs: << followed by a word or a quote opens a heredoc whose body this scan does not read.
-	heredocs bool
-}
 
 type inlineCapabilityRow struct {
 	// options are the argv flags whose next operand is the code.
@@ -74,103 +42,68 @@ type inlineCapabilityRow struct {
 	// whole identifiers (a dotted name such as os.system matches as written).
 	network []string
 	exec    []string
-	// sinks list the names that turn a string into running code.
-	sinks []string
 	// dynamicInput lists the names that read a value from outside the code
 	// (environment, arguments, stdin): a destination read from them is not
 	// the literal next to it.
 	dynamicInput []string
-	syntax       inlineSyntax
+	// backtickExec: a backtick runs a command (perl, ruby, php).
+	backtickExec bool
 }
-
-var (
-	pythonSyntax = inlineSyntax{
-		lineComments: []string{"#"}, quotes: `'"`, tripleQuotes: true, fStrings: true,
-	}
-	jsSyntax = inlineSyntax{
-		lineComments: []string{"//"}, blockComments: [][2]string{{"/*", "*/"}}, quotes: `'"`, template: true, regexLiterals: true,
-	}
-)
 
 var inlineCapabilityTable = map[string]inlineCapabilityRow{
 	"python": {
 		options:      []string{"-c"},
 		network:      []string{"socket", "urllib", "http.client", "requests", "asyncio.open_connection", "ftplib", "telnetlib", "smtplib"},
 		exec:         []string{"os.system", "os.popen", "subprocess", "pty", "os.execv", "os.execve", "os.execvp", "os.execl", "os.spawnl", "commands.getoutput"},
-		sinks:        []string{"eval", "exec", "compile"},
 		dynamicInput: []string{"os.environ", "os.getenv", "sys.argv", "sys.stdin", "input", "getpass"},
-		syntax:       pythonSyntax,
 	},
 	"node": {
 		options:      []string{"-e", "--eval", "-p", "--print"},
 		network:      []string{"net", "http", "https", "dgram", "tls", "fetch", "WebSocket"},
 		exec:         []string{"child_process", "execSync", "spawnSync", "execFile", "spawn", "eval", "Function"},
-		sinks:        []string{"eval", "Function", "vm"},
 		dynamicInput: []string{"process.env", "process.argv", "process.stdin", "readline"},
-		syntax:       jsSyntax,
 	},
 	"bun": {
 		options:      []string{"-e", "--eval", "-p", "--print"},
 		network:      []string{"fetch", "WebSocket", "Bun.connect", "net", "http", "https"},
 		exec:         []string{"Bun.spawn", "Bun.spawnSync", "child_process", "eval", "Function"},
-		sinks:        []string{"eval", "Function", "vm"},
 		dynamicInput: []string{"process.env", "process.argv", "Bun.env", "Bun.argv", "Bun.stdin"},
-		syntax:       jsSyntax,
 	},
 	"deno": {
 		options:      []string{"eval"},
 		network:      []string{"fetch", "Deno.connect", "WebSocket"},
 		exec:         []string{"Deno.Command", "Deno.run", "eval", "Function"},
-		sinks:        []string{"eval", "Function"},
 		dynamicInput: []string{"Deno.env", "Deno.args", "Deno.stdin"},
-		syntax:       jsSyntax,
 	},
 	"perl": {
 		options:      []string{"-e", "-E"},
 		network:      []string{"IO::Socket", "IO::Socket::INET", "Socket", "LWP::Simple", "HTTP::Tiny"},
 		exec:         []string{"system", "exec", "qx"},
-		sinks:        []string{"eval"},
 		dynamicInput: []string{"ENV", "ARGV", "STDIN"},
-		syntax: inlineSyntax{
-			lineComments: []string{"#"}, quotes: `'"`, backtickExec: true,
-			interpolation: []string{"${", "@{", "$("},
-			quoteLike:     []string{"q", "qq", "qw", "qr", "qx", "m", "s", "tr", "y"}, heredocs: true,
-		},
+		backtickExec: true,
 	},
 	"ruby": {
 		options:      []string{"-e"},
 		network:      []string{"socket", "TCPSocket", "UDPSocket", "Net::HTTP", "open-uri"},
 		exec:         []string{"system", "exec", "spawn", "IO.popen", "Open3", "pty"},
-		sinks:        []string{"eval", "instance_eval", "class_eval", "module_eval"},
 		dynamicInput: []string{"ENV", "ARGV", "STDIN", "gets"},
-		syntax: inlineSyntax{
-			lineComments: []string{"#"}, quotes: `'"`, backtickExec: true,
-			interpolation: []string{"#{"}, percentLiterals: true, heredocs: true,
-		},
+		backtickExec: true,
 	},
 	"php": {
 		options: []string{"-r"},
 		// file_get_contents is not here: on a local path it is a file read. A URL
-		// handed to it or to fopen is a string literal and counts through the
-		// literal-URL test below.
+		// handed to it or to fopen is a URL in the text and counts through the
+		// URL test below.
 		network:      []string{"fsockopen", "stream_socket_client", "socket_create", "curl_init"},
 		exec:         []string{"shell_exec", "system", "passthru", "proc_open", "popen", "exec"},
-		sinks:        []string{"eval", "assert", "create_function"},
 		dynamicInput: []string{"getenv", "$_SERVER", "$_ENV", "$argv", "$_GET", "$_POST", "STDIN"},
-		syntax: inlineSyntax{
-			lineComments: []string{"//", "#"}, blockComments: [][2]string{{"/*", "*/"}}, quotes: `'"`, backtickExec: true,
-			interpolation: []string{"{$", "${"}, heredocs: true,
-		},
+		backtickExec: true,
 	},
 	"lua": {
 		options:      []string{"-e"},
 		network:      []string{"socket", "socket.http"},
 		exec:         []string{"os.execute", "io.popen"},
-		sinks:        []string{"load", "loadstring"},
 		dynamicInput: []string{"os.getenv", "arg", "io.read", "io.stdin"},
-		syntax: inlineSyntax{
-			lineComments: []string{"--"}, blockComments: [][2]string{{"--[[", "]]"}}, quotes: `'"`, longBrackets: true,
-		},
 	},
 }
 
@@ -201,20 +134,21 @@ func identifierMatcher(names []string) *regexp.Regexp {
 	return matcher
 }
 
-func inlineProgramRow(command CommandFact) (inlineCapabilityRow, bool) {
-	if len(command.Argv) < 2 || command.Kind != CommandKindProcess {
-		return inlineCapabilityRow{}, false
+func inlineProgramRow(command CommandFact) (inlineCapabilityRow, []string, bool) {
+	argv := transparentWrapperTarget(command.Argv)
+	if len(argv) < 2 || command.Kind != CommandKindProcess {
+		return inlineCapabilityRow{}, nil, false
 	}
-	base := path.Base(command.Argv[0])
+	base := path.Base(argv[0])
 	for len(base) > 0 && (base[len(base)-1] == '.' || (base[len(base)-1] >= '0' && base[len(base)-1] <= '9')) &&
 		inlineProgramAliases[base] == "" {
 		base = base[:len(base)-1]
 	}
 	key, ok := inlineProgramAliases[base]
 	if !ok {
-		return inlineCapabilityRow{}, false
+		return inlineCapabilityRow{}, nil, false
 	}
-	return inlineCapabilityTable[key], true
+	return inlineCapabilityTable[key], argv, true
 }
 
 func inlineCodeOperands(row inlineCapabilityRow, args []string) string {
@@ -227,303 +161,18 @@ func inlineCodeOperands(row inlineCapabilityRow, args []string) string {
 	return strings.Join(code, "\n")
 }
 
-// inlineScan is the code of a one-liner with comments removed and string
-// contents blanked, plus the contents of its string literals. Unreadable says
-// the scanner is not sure what it read; Interpolates says a string body may
-// hold code.
-type inlineScan struct {
-	code         string
-	literals     []string
-	unreadable   bool
-	interpolates bool
-}
-
-type inlineScanner struct {
-	source     string
-	pos        int
-	syntax     inlineSyntax
-	out        strings.Builder
-	literals   []string
-	unreadable bool
-	interpoles bool
-}
-
-func scanInlineCode(source string, syntax inlineSyntax) inlineScan {
-	scanner := &inlineScanner{source: source, syntax: syntax}
-	scanner.scan(false)
-	return inlineScan{
-		code: scanner.out.String(), literals: scanner.literals,
-		unreadable: scanner.unreadable, interpolates: scanner.interpoles,
-	}
-}
-
-func isIdentifierByte(c byte) bool {
-	return c == '_' || c == '$' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-}
-
-// scan reads code until the end, or until the brace that closes a template
-// literal expression.
-func (s *inlineScanner) scan(untilBrace bool) {
-	depth := 0
-	for s.pos < len(s.source) {
-		rest := s.source[s.pos:]
-		switch c := s.source[s.pos]; {
-		case s.skipBlockComment(rest):
-		case s.skipLineComment(rest):
-		case s.syntax.longBrackets && strings.HasPrefix(rest, "[["):
-			s.pos += 2
-			s.literal(s.until("]]"))
-		case strings.IndexByte(s.syntax.quotes, c) >= 0:
-			s.quoted(c)
-		case s.syntax.template && c == '`':
-			s.pos++
-			s.templateLiteral()
-		case s.syntax.regexLiterals && c == '/' && s.regexMayStart():
-			s.regexLiteral()
-		case s.unsureConstruct(rest):
-			s.unreadable = true
-			s.out.WriteByte(c)
-			s.pos++
-		default:
-			if untilBrace {
-				if c == '{' {
-					depth++
-				} else if c == '}' {
-					if depth == 0 {
-						s.pos++
-						return
-					}
-					depth--
-				}
-			}
-			s.out.WriteByte(c)
-			s.pos++
-		}
-	}
-}
-
-// unsureConstruct reports the start of a construct this scanner does not
-// read: a quote-like operator, a percent literal, a heredoc.
-func (s *inlineScanner) unsureConstruct(rest string) bool {
-	if s.pos > 0 && isIdentifierByte(s.source[s.pos-1]) {
-		return false
-	}
-	if s.syntax.heredocs && strings.HasPrefix(rest, "<<") && len(rest) > 2 &&
-		(isIdentifierByte(rest[2]) || strings.IndexByte("'\"~-", rest[2]) >= 0) {
-		return true
-	}
-	if s.syntax.percentLiterals && rest[0] == '%' && len(rest) > 1 {
-		next := rest[1]
-		if strings.IndexByte("qQwWiIrsx", next) >= 0 && len(rest) > 2 {
-			next = rest[2]
-		}
-		return strings.IndexByte("([{<|!/", next) >= 0
-	}
-	for _, word := range s.syntax.quoteLike {
-		if strings.HasPrefix(rest, word) && len(rest) > len(word) &&
-			!isIdentifierByte(rest[len(word)]) && strings.IndexByte("/{([<|!#~^@%:", rest[len(word)]) >= 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *inlineScanner) skipBlockComment(rest string) bool {
-	for _, pair := range s.syntax.blockComments {
-		if strings.HasPrefix(rest, pair[0]) {
-			s.pos += len(pair[0])
-			if _, closed := s.untilFound(pair[1]); !closed {
-				s.unreadable = true
-			}
-			s.out.WriteByte(' ')
-			return true
-		}
-	}
-	return false
-}
-
-// skipLineComment skips a line comment. A "#" is a comment only where a
-// comment can start (the beginning of the text or after a space, a statement
-// or a bracket); anywhere else it is the last-index sigil, a delimiter, a
-// color, and the scan is unsure.
-func (s *inlineScanner) skipLineComment(rest string) bool {
-	for _, marker := range s.syntax.lineComments {
-		if !strings.HasPrefix(rest, marker) {
-			continue
-		}
-		if marker == "#" && s.pos > 0 && strings.IndexByte(" \t\r\n;{}()", s.source[s.pos-1]) < 0 {
-			s.unreadable = true
-			return false
-		}
-		end := strings.IndexByte(rest, '\n')
-		if end < 0 {
-			end = len(rest)
-		}
-		s.pos += end
-		return true
-	}
-	return false
-}
-
-func (s *inlineScanner) untilFound(terminator string) (string, bool) {
-	start := s.pos
-	if end := strings.Index(s.source[start:], terminator); end >= 0 {
-		s.pos = start + end + len(terminator)
-		return s.source[start : start+end], true
-	}
-	s.pos = len(s.source)
-	return s.source[start:], false
-}
-
-// until consumes up to and including terminator and returns the text before
-// it; a missing terminator makes the scan unsure.
-func (s *inlineScanner) until(terminator string) string {
-	text, closed := s.untilFound(terminator)
-	if !closed {
-		s.unreadable = true
-	}
-	return text
-}
-
-// regexMayStart reports whether a slash here opens a regular expression
-// literal: it does where an operand may start, after an operator, a bracket,
-// a comma or at the start of the code.
-func (s *inlineScanner) regexMayStart() bool {
-	text := s.out.String()
-	for i := len(text) - 1; i >= 0; i-- {
-		if text[i] == ' ' || text[i] == '\t' || text[i] == '\n' {
-			continue
-		}
-		return strings.IndexByte("(,=:[!&|?{};+-*%<>~^", text[i]) >= 0
-	}
-	return true
-}
-
-// regexLiteral skips a regular expression literal; one that has no end on
-// its line makes the scan unsure.
-func (s *inlineScanner) regexLiteral() {
-	start := s.pos + 1
-	inClass := false
-	for i := start; i < len(s.source); i++ {
-		switch c := s.source[i]; {
-		case c == '\n':
-			s.unreadable = true
-			s.out.WriteByte('/')
-			s.pos++
-			return
-		case c == '\\':
-			i++
-		case c == '[':
-			inClass = true
-		case c == ']':
-			inClass = false
-		case c == '/' && !inClass:
-			s.pos = i + 1
-			s.out.WriteByte(' ')
-			return
-		}
-	}
-	s.unreadable = true
-	s.out.WriteByte('/')
-	s.pos++
-}
-
-func (s *inlineScanner) quoted(quote byte) {
-	prefix := s.stringPrefix()
-	delimiter := string(quote)
-	if s.syntax.tripleQuotes && strings.HasPrefix(s.source[s.pos:], strings.Repeat(delimiter, 3)) {
-		delimiter = strings.Repeat(delimiter, 3)
-	}
-	s.pos += len(delimiter)
-	start := s.pos
-	closed := false
-	for s.pos < len(s.source) {
-		if s.source[s.pos] == '\\' {
-			s.pos += 2
-			continue
-		}
-		if strings.HasPrefix(s.source[s.pos:], delimiter) {
-			closed = true
-			break
-		}
-		s.pos++
-	}
-	s.pos = min(s.pos, len(s.source))
-	content := s.source[start:s.pos]
-	if closed {
-		s.pos = min(s.pos+len(delimiter), len(s.source))
-	} else {
-		s.unreadable = true
-	}
-	if s.syntax.fStrings && strings.ContainsAny(prefix, "fF") {
-		s.interpoles = true
-	}
-	if quote == '"' {
-		for _, marker := range s.syntax.interpolation {
-			if strings.Contains(content, marker) {
-				s.interpoles = true
-			}
-		}
-	}
-	s.literal(content)
-}
-
-// stringPrefix returns the letters directly before the opening quote (the r, b
-// and f of a python string).
-func (s *inlineScanner) stringPrefix() string {
-	end := s.pos
-	begin := end
-	for begin > 0 && end-begin < 3 && isIdentifierByte(s.source[begin-1]) {
-		begin--
-	}
-	return s.source[begin:end]
-}
-
-// templateLiteral reads a JavaScript template literal: its text is string
-// content, its ${...} bodies are code.
-func (s *inlineScanner) templateLiteral() {
-	var text strings.Builder
-	for s.pos < len(s.source) {
-		switch {
-		case s.source[s.pos] == '\\':
-			s.pos += 2
-		case s.source[s.pos] == '`':
-			s.pos++
-			s.literal(text.String())
-			return
-		case strings.HasPrefix(s.source[s.pos:], "${"):
-			s.pos += 2
-			s.out.WriteByte(' ')
-			s.scan(true)
-		default:
-			text.WriteByte(s.source[s.pos])
-			s.pos++
-		}
-	}
-	s.unreadable = true
-	s.literal(text.String())
-}
-
-// literal records a string literal and writes a placeholder for it.
-func (s *inlineScanner) literal(content string) {
-	s.literals = append(s.literals, content)
-	s.out.WriteByte(' ')
-}
-
 // InlineCodeNetworkAndExec reports an interpreter one-liner that asks for a
-// network capability (a library name from the table, in code or as a whole
-// string, or a URL string literal) and a process spawn or exec capability.
-// Code whose destinations are all loopback literals, with no value read from
-// outside the code, is a test of a local service and is not a network
-// capability.
+// network capability (a library name from the table, or a URL) and a process
+// spawn or exec capability. Code whose destinations are all loopback literals,
+// with no value read from outside the code, is a test of a local service and
+// is not a network capability.
 func InlineCodeNetworkAndExec(facts Facts) bool {
 	for _, command := range facts.Commands {
-		row, ok := inlineProgramRow(command)
+		row, argv, ok := inlineProgramRow(command)
 		if !ok {
 			continue
 		}
-		source := inlineCodeOperands(row, command.Argv[1:])
-		if source != "" && inlineSourceNetworkAndExec(row, source) {
+		if source := inlineCodeOperands(row, argv[1:]); source != "" && inlineSourceNetworkAndExec(row, source) {
 			return true
 		}
 	}
@@ -531,44 +180,67 @@ func InlineCodeNetworkAndExec(facts Facts) bool {
 }
 
 func inlineSourceNetworkAndExec(row inlineCapabilityRow, source string) bool {
-	scan := scanInlineCode(source, row.syntax)
-	// Text to match names in: the code with strings and comments removed, or,
-	// where a string may be code or the scan is unsure, the whole operand.
-	text, literals := scan.code, scan.literals
-	opaque := scan.unreadable || scan.interpolates || identifierMatcher(row.sinks).MatchString(scan.code)
-	if opaque {
-		text, literals = source, []string{source}
-	}
-	network := identifierMatcher(row.network).MatchString(text) || inlineLiteralsAre(scan.literals, row.network) ||
-		inlineLiteralsHaveURL(literals)
-	if !network {
+	if !identifierMatcher(row.network).MatchString(source) && !inlineLiteralURLPattern.MatchString(source) {
 		return false
 	}
-	if !opaque && !identifierMatcher(row.dynamicInput).MatchString(text) && inlineCodeOnlyLoopback(literals) {
+	if !identifierMatcher(row.dynamicInput).MatchString(source) && inlineCodeOnlyLoopback(source) {
 		return false
 	}
-	return identifierMatcher(row.exec).MatchString(text) || inlineLiteralsAre(scan.literals, row.exec) ||
-		(row.syntax.backtickExec && strings.Contains(text, "`"))
+	return identifierMatcher(row.exec).MatchString(source) || (row.backtickExec && strings.Contains(source, "`"))
 }
 
-// inlineLiteralsAre reports a string literal that is exactly one of the names:
-// the way a module is handed to a loader.
-func inlineLiteralsAre(literals, names []string) bool {
-	for _, literal := range literals {
-		if slices.Contains(names, strings.TrimPrefix(strings.TrimSpace(literal), "node:")) {
-			return true
-		}
-	}
-	return false
+// transparentWrappers are the commands that start the next word as the real
+// command and change nothing about it: each entry lists the options that take
+// a separate value and how many plain operands precede the command (timeout
+// takes a duration). env and command are read by POSIXExecWrapperTarget.
+var transparentWrappers = map[string]struct {
+	valueOptions []string
+	operands     int
+}{
+	"nohup":   {},
+	"time":    {valueOptions: []string{"-f", "--format", "-o", "--output"}},
+	"nice":    {valueOptions: []string{"-n", "--adjustment"}},
+	"ionice":  {valueOptions: []string{"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"}},
+	"stdbuf":  {valueOptions: []string{"-i", "--input", "-o", "--output", "-e", "--error"}},
+	"timeout": {valueOptions: []string{"-s", "--signal", "-k", "--kill-after"}, operands: 1},
 }
 
-func inlineLiteralsHaveURL(literals []string) bool {
-	for _, literal := range literals {
-		if inlineLiteralURLPattern.MatchString(literal) {
-			return true
+// transparentWrapperTarget returns argv without leading transparent wrappers
+// (env and command through the shared reader, the rest from the table above).
+func transparentWrapperTarget(argv []string) []string {
+	for range 8 {
+		argv = POSIXExecWrapperTarget(argv)
+		if len(argv) == 0 {
+			return argv
 		}
+		wrapper, ok := transparentWrappers[path.Base(argv[0])]
+		if !ok {
+			return argv
+		}
+		rest := argv[1:]
+		operands := wrapper.operands
+		for len(rest) > 0 {
+			argument := rest[0]
+			switch {
+			case argument == "--":
+				rest = rest[1:]
+			case strings.HasPrefix(argument, "-") && len(argument) > 1:
+				step := 1
+				if !strings.Contains(argument, "=") && slices.Contains(wrapper.valueOptions, argument) {
+					step = 2
+				}
+				rest = rest[min(step, len(rest)):]
+				continue
+			case operands > 0:
+				operands--
+				rest = rest[1:]
+				continue
+			}
+			break
+		}
+		argv = rest
 	}
-	return false
+	return argv
 }
 
 // runnerSpec describes a package or script runner that executes the target it
@@ -582,7 +254,7 @@ type runnerSpec struct {
 var runnerTable = map[string]runnerSpec{
 	"bun":     {subcommands: []string{"run", "x"}, valueOptions: []string{"--cwd", "--config", "-c", "--env-file", "--preload", "-r", "--filter"}},
 	"bunx":    {subcommands: []string{""}, valueOptions: []string{"--package", "-p", "--cwd", "--config", "-c"}},
-	"deno":    {subcommands: []string{"run"}, valueOptions: []string{"--config", "-c", "--import-map", "--cert", "--location", "--v8-flags", "--lock", "--reload", "-r"}},
+	"deno":    {subcommands: []string{"run"}, valueOptions: []string{"--config", "-c", "--import-map", "--cert", "--location", "--v8-flags", "--lock"}},
 	"npx":     {subcommands: []string{""}, valueOptions: []string{"--package", "-p", "--call", "-c", "--registry", "--cache", "--userconfig", "--prefix"}},
 	"npm":     {subcommands: []string{"exec", "x"}, valueOptions: []string{"--package", "-p", "--call", "-c", "--workspace", "-w", "--registry", "--cache", "--userconfig", "--prefix"}},
 	"pnpm":    {subcommands: []string{"dlx"}, valueOptions: []string{"--package", "-p", "--registry", "--reporter", "--filter"}},
@@ -601,10 +273,11 @@ var runnerTable = map[string]runnerSpec{
 // this rule reports, and it only alerts.
 func RemoteRunnerURL(facts Facts) bool {
 	for _, command := range facts.Commands {
-		if command.Kind != CommandKindProcess || len(command.Argv) < 2 {
+		argv := transparentWrapperTarget(command.Argv)
+		if command.Kind != CommandKindProcess || len(argv) < 2 {
 			continue
 		}
-		if spec, ok := runnerTable[path.Base(command.Argv[0])]; ok && runnerTargetIsURL(command.Argv[1:], spec) {
+		if spec, ok := runnerTable[path.Base(argv[0])]; ok && runnerTargetIsURL(argv[1:], spec) {
 			return true
 		}
 	}
@@ -640,30 +313,35 @@ var (
 	inlineDottedNamePattern   = lazyMustCompile(`(?i)^(?:localhost|(?:[a-z0-9-]+\.)+(?:[a-z]{2,}|xn--[a-z0-9-]+))$`)
 )
 
+// inlineQuotedPattern finds the quoted strings of a one-liner. It is used only
+// to find host literals, not to decide what is code.
+var inlineQuotedPattern = lazyMustCompile(`'([^'\n]*)'|"([^"\n]*)"`)
+
 // inlineCodeOnlyLoopback reports code whose every literal host is loopback:
 // the name localhost or one under .localhost, or a loopback IP literal. The
 // test is an allowlist. Any other host, whatever its ending and including a
 // private-range address (an internal host is a normal lateral target), makes
 // the code a network client, and a host mentioned next to a loopback one is
-// not hidden by it. A host is the authority of a URL literal, an IP literal,
-// or a whole string literal that is an address or a dotted name, with an
-// optional port. Code that names no host at all is not local (the host is
-// dynamic); the caller also refuses the exemption when the code reads a value
-// from outside itself.
-func inlineCodeOnlyLoopback(literals []string) bool {
+// not hidden by it. A host is the authority of a URL, an IP literal, or a
+// whole quoted string that is an address or a dotted name, with an optional
+// port. Code that names no host at all is not local (the host is dynamic);
+// the caller also refuses the exemption when the code reads a value from
+// outside itself.
+func inlineCodeOnlyLoopback(source string) bool {
 	var hosts []string
-	for _, literal := range literals {
-		authorities := inlineURLAuthorityPattern.FindAllStringSubmatch(literal, -1)
-		for _, match := range authorities {
-			hosts = append(hosts, urlAuthorityHost(match[1]))
-		}
-		if len(authorities) == 0 {
-			if host := wholeLiteralHost(strings.TrimSpace(literal)); host != "" {
-				hosts = append(hosts, host)
-			}
-		}
-		hosts = append(hosts, inlineIPv4Pattern.FindAllString(literal, -1)...)
+	for _, match := range inlineURLAuthorityPattern.FindAllStringSubmatch(source, -1) {
+		hosts = append(hosts, urlAuthorityHost(match[1]))
 	}
+	for _, match := range inlineQuotedPattern.FindAllStringSubmatch(source, -1) {
+		literal := strings.TrimSpace(match[1] + match[2])
+		if inlineURLAuthorityPattern.MatchString(literal) {
+			continue
+		}
+		if host := wholeLiteralHost(literal); host != "" {
+			hosts = append(hosts, host)
+		}
+	}
+	hosts = append(hosts, inlineIPv4Pattern.FindAllString(source, -1)...)
 	if len(hosts) == 0 {
 		return false
 	}

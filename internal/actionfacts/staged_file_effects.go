@@ -78,8 +78,18 @@ func EscapedBinaryFileWrite(facts Facts) bool {
 func decodeEscapedOperands(command CommandFact) ([]byte, int) {
 	var decoded []byte
 	escaped := 0
+	interprets := command.Program == "printf"
 	for index, argument := range command.Argv {
-		if index == 0 || isEchoOptionWord(argument) {
+		if index == 0 {
+			continue
+		}
+		if command.Program == "echo" && !interprets && isEchoOptionWord(argument) {
+			// echo reads backslash escapes only under -e (and -E turns them off again)
+			interprets = strings.Contains(argument, "e") && !strings.HasSuffix(argument, "E")
+			continue
+		}
+		if !interprets {
+			decoded = append(decoded, argument...)
 			continue
 		}
 		for i := 0; i < len(argument); i++ {
@@ -99,15 +109,19 @@ func decodeEscapedOperands(command CommandFact) ([]byte, int) {
 				escaped++
 				i += width
 			case c >= '0' && c <= '7':
+				// An octal escape is three digits (or \0 and up to three more). A lone
+				// digit is a back-reference or a NUL separator, not a byte of a program.
 				digits := argument[i:]
 				if c == '0' {
 					digits = argument[i+1:]
 					i++
 				}
 				value, width := parseEscapeDigits(digits, 8, 3)
-				if width == 0 {
-					decoded = append(decoded, 0)
-					escaped++
+				if width < 3 && !(c == '0' && width > 0) {
+					decoded = append(decoded, '\\', c)
+					if c == '0' {
+						i--
+					}
 					continue
 				}
 				decoded = append(decoded, byte(value))
@@ -157,6 +171,11 @@ func parseEscapeDigits(text string, base, maxWidth int) (uint64, int) {
 // isBinaryContent reports bytes that are not text: not valid UTF-8, or a NUL or
 // a control byte other than tab, newline, carriage return and escape.
 func isBinaryContent(data []byte) bool {
+	for _, bom := range [][]byte{{0xef, 0xbb, 0xbf}, {0xff, 0xfe}, {0xfe, 0xff}} {
+		if len(data) >= len(bom) && string(data[:len(bom)]) == string(bom) {
+			return false // a byte order mark: the text that follows is text
+		}
+	}
 	if !utf8.Valid(data) {
 		return true
 	}

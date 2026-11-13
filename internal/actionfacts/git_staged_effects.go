@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"net/netip"
 	"path"
 	"slices"
 	"strings"
@@ -23,10 +24,11 @@ func GitCloneThenRunOrAdHocPush(facts Facts) bool {
 		return false
 	}
 	for index, command := range facts.Commands {
-		if command.Kind != CommandKindProcess || gitProgram(command) != "git" {
+		argv := gitArgv(command)
+		if argv == nil {
 			continue
 		}
-		if subcommand, rest := gitSubcommand(command.Argv); subcommand == "push" &&
+		if subcommand, rest := gitSubcommand(argv); subcommand == "push" &&
 			gitPushNamesAdHocRemote(rest, gitRemoteDefinitions(facts.Commands[:index+1])) {
 			return true
 		}
@@ -34,11 +36,17 @@ func GitCloneThenRunOrAdHocPush(facts Facts) bool {
 	return gitCloneThenRunsClonedFile(facts)
 }
 
-func gitProgram(command CommandFact) string {
-	if len(command.Argv) == 0 {
-		return ""
+// gitArgv returns the argv of a git command, read through the transparent
+// wrappers (env, nohup, time, timeout, nice ...), or nil for any other command.
+func gitArgv(command CommandFact) []string {
+	if command.Kind != CommandKindProcess {
+		return nil
 	}
-	return path.Base(command.Argv[0])
+	argv := transparentWrapperTarget(command.Argv)
+	if len(argv) == 0 || path.Base(argv[0]) != "git" {
+		return nil
+	}
+	return argv
 }
 
 func gitSubcommand(argv []string) (string, []string) {
@@ -97,32 +105,68 @@ func gitPushNamesAdHocRemote(args []string, defined map[string]string) bool {
 func gitRemoteDefinitions(commands []CommandFact) map[string]string {
 	defined := map[string]string{}
 	for _, command := range commands {
-		if command.Kind != CommandKindProcess || gitProgram(command) != "git" {
+		argv := gitArgv(command)
+		if argv == nil {
 			continue
 		}
-		for index := 1; index+1 < len(command.Argv) && command.Argv[index] != "remote"; index++ {
-			if command.Argv[index] != "-c" {
+		for index := 1; index+1 < len(argv) && argv[index] != "remote" && argv[index] != "config"; index++ {
+			if argv[index] != "-c" {
 				continue
 			}
-			key, value, found := strings.Cut(command.Argv[index+1], "=")
+			key, value, found := strings.Cut(argv[index+1], "=")
 			if name, isURL := remoteURLKey(key); found && isURL {
 				defined[name] = value
 			}
 		}
-		if subcommand, rest := gitSubcommand(command.Argv); subcommand == "remote" && len(rest) > 0 &&
-			(rest[0] == "add" || rest[0] == "set-url") {
-			var operands []string
-			for _, argument := range rest[1:] {
-				if !strings.HasPrefix(argument, "-") {
-					operands = append(operands, argument)
-				}
-			}
+		subcommand, rest := gitSubcommand(argv)
+		switch {
+		case subcommand == "remote" && len(rest) > 0 && (rest[0] == "add" || rest[0] == "set-url"):
+			operands := gitOperands(rest[1:], gitRemoteAddValueOptions)
 			if len(operands) >= 2 {
 				defined[operands[0]] = operands[1]
+			}
+		case subcommand == "remote" && len(rest) > 0 && rest[0] == "rename":
+			operands := gitOperands(rest[1:], nil)
+			if len(operands) >= 2 {
+				if url, known := defined[operands[0]]; known {
+					defined[operands[1]] = url
+				}
+			}
+		case subcommand == "config":
+			operands := gitOperands(rest, gitConfigValueOptions)
+			if len(operands) >= 2 {
+				if name, isURL := remoteURLKey(operands[0]); isURL {
+					defined[name] = operands[1]
+				}
 			}
 		}
 	}
 	return defined
+}
+
+// gitRemoteAddValueOptions and gitConfigValueOptions are the options of
+// git remote add/set-url and git config that take a separate value.
+var (
+	gitRemoteAddValueOptions = []string{"-m", "-t", "--master", "--track"}
+	gitConfigValueOptions    = []string{"-f", "--file", "--blob", "--default", "--type"}
+)
+
+// gitOperands returns the non-option words of args, skipping the value of each
+// option in valueOptions.
+func gitOperands(args, valueOptions []string) []string {
+	var operands []string
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch {
+		case strings.HasPrefix(argument, "-") && len(argument) > 1:
+			if !strings.Contains(argument, "=") && slices.Contains(valueOptions, argument) {
+				index++
+			}
+		default:
+			operands = append(operands, argument)
+		}
+	}
+	return operands
 }
 
 // remoteURLKey returns the remote name of a remote.<name>.url or
@@ -142,10 +186,11 @@ func remoteURLKey(key string) (string, bool) {
 
 // isAdHocGitRemote reports a push destination given inline instead of as a
 // configured remote name, in a form a contributor workflow does not use. The
-// two ssh spellings of a remote, user@host:path and ssh://host/path, are one
-// case: ad hoc when the host is not a well-known code-hosting service, so a
-// self-hosted server reached inline alerts in both forms and a push to a
-// forge never does. A URL over another transport (https, git) is ad hoc only
+// two ssh spellings of a remote, [user@]host:path and ssh://host/path, are one
+// case: ad hoc when the host is an address or a dotted name that is not a
+// well-known code-hosting service, so a self-hosted server reached inline
+// alerts in both forms and a push to a forge never does. A bare alias (a name
+// from the user's ssh configuration) is quiet. A URL over another transport (https, git) is ad hoc only
 // when its host is a bare public IP address, since a named https remote
 // carries a normal authenticated push. Pushes to a fork URL on a forge are
 // ordinary and not reported.
@@ -160,7 +205,7 @@ func isAdHocGitRemote(value string) bool {
 		}
 		switch strings.ToLower(value[:scheme]) {
 		case "ssh", "git+ssh", "ssh+git":
-			return host != "" && !knownCodeForge(host)
+			return isInlineRemoteHost(host)
 		}
 		return parsesAsUntrustedAddress(host)
 	}
@@ -173,11 +218,22 @@ func isAdHocGitRemote(value string) bool {
 	if at := strings.LastIndexByte(host, '@'); at >= 0 {
 		host = host[at+1:]
 	}
-	// A single letter is a drive, not a host.
-	if len(host) < 2 {
+	return isInlineRemoteHost(host)
+}
+
+// isInlineRemoteHost reports a host that an agent can only have chosen by
+// writing its address or its name out: an IP address or a dotted name that is
+// not a well-known code forge. A bare word is a name from the user's own ssh
+// configuration (an alias), not a destination the agent picked, and a single
+// letter is a drive.
+func isInlineRemoteHost(host string) bool {
+	if host == "" || knownCodeForge(host) {
 		return false
 	}
-	return !knownCodeForge(host)
+	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return true
+	}
+	return strings.Contains(host, ".")
 }
 
 func knownCodeForge(host string) bool {
@@ -191,10 +247,11 @@ func knownCodeForge(host string) bool {
 
 func gitCloneThenRunsClonedFile(facts Facts) bool {
 	for index, command := range facts.Commands {
-		if command.Kind != CommandKindProcess || gitProgram(command) != "git" {
+		argv := gitArgv(command)
+		if argv == nil {
 			continue
 		}
-		if subcommand, rest := gitSubcommand(command.Argv); subcommand != "clone" {
+		if subcommand, rest := gitSubcommand(argv); subcommand != "clone" {
 			continue
 		} else if directory := clonedDirectory(rest); directory != "" && runsFileAfterClone(facts, index, directory) {
 			return true

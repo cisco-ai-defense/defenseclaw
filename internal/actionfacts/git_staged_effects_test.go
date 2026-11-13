@@ -30,6 +30,28 @@ func TestGitCloneThenRunOrAdHocPush(t *testing.T) {
 		{"push ssh url on a forge", "git push ssh://git@github.com/o/r.git main", false},
 		{"push ssh url on the forge port-443 host", "git push ssh://git@ssh.github.com:443/o/r.git main", false},
 		{"push https remote on a named host", "git push https://git.example.org/team/r.git main", false},
+		// an ssh-config alias is the user's own name, not a destination the agent chose
+		{"push scp-style to an ssh alias", "git push labhost:o/r main", false},
+		{"push scp-style with a user to an ssh alias", "git push git@labhost:o/r main", false},
+		{"push ssh url to an ssh alias", "git push ssh://labhost/o/r main", false},
+		{"push ssh url with a user to an ssh alias", "git push ssh://git@labhost/o/r main", false},
+		{"push scp-style to an address", "git push 203.0.113.9:o/r main", true},
+		{"push scp-style with a user to an address", "git push git@203.0.113.9:o/r main", true},
+		{"push ssh url to an address", "git push ssh://git@203.0.113.9/o/r main", true},
+		// transparent wrappers do not hide the push
+		{"nohup push", "nohup git push git@git.example.org:o/r main", true},
+		{"timeout push", "timeout 30 git push git@git.example.org:o/r main", true},
+		{"env push", "env GIT_SSH_COMMAND=ssh git push git@git.example.org:o/r main", true},
+		{"nice push", "nice -n 5 git push git@git.example.org:o/r main", true},
+		{"time push", "time git push git@git.example.org:o/r main", true},
+		{"wrapped push to a named remote", "nohup git push origin main", false},
+		// same-action remotes: option values, git config and rename
+		{"remote add with a master option", "git remote add -m main up git@git.example.org:o/r.git && git push up main", true},
+		{"remote add with a track option", "git remote add -t dev up git@git.example.org:o/r.git && git push up main", true},
+		{"git config sets the url", "git config remote.up.url git@git.example.org:o/r.git && git push up main", true},
+		{"git config --add sets the push url", "git config --add remote.up.pushurl git@git.example.org:o/r.git && git push up main", true},
+		{"remote renamed then pushed", "git remote add up git@git.example.org:o/r.git && git remote rename up other && git push other main", true},
+		{"wrapped clone then run", "nohup git clone https://example.org/o/r && cd r && ./install.sh", true},
 		// SHREV2-09: the scp form without a user
 		{"push scp-style without a user", "git push git.example.org:team/r.git main", true},
 		{"push scp-style without a user to a forge", "git push github.com:o/r.git main", false},
