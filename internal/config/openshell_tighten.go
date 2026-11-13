@@ -294,7 +294,10 @@ func printableLine(s string) bool {
 // session < unset; max_resources, max_silence_after (at least a minute) and
 // delete_stopped_after: minimum; request_access: the profile's non-empty
 // value replaces the base's; driver_fallback: none wins (a profile can
-// refuse the docker fallback, never allow it back). A profile naming the base's own pack keeps the
+// refuse the docker fallback, never allow it back); runtimes and
+// actor_secrets: intersection; sandbox_class: microvm wins;
+// unattended_asks: deny wins; idle_suspend_after and ask_timeout: minimum
+// (tightenRuntimeKeys). A profile naming the base's own pack keeps the
 // base's required_pack_digest; its own pin applies over an unpinned base,
 // and a different pin is a contradiction.
 //
@@ -382,6 +385,9 @@ func TightenSandboxAdmin(base SandboxAdminConfig, overlay *SandboxAdminConfig) (
 	if o.DriverFallback == EnterpriseOpenShellFallbackNone || out.DriverFallback == "" {
 		out.DriverFallback = o.DriverFallback
 	}
+	if err := tightenRuntimeKeys(&out, o); err != nil {
+		return SandboxAdminConfig{}, err
+	}
 
 	if out.Allowed != nil && !*out.Allowed && len(out.RequiredFor) > 0 {
 		return SandboxAdminConfig{}, &SandboxPolicyContradictionError{
@@ -437,7 +443,7 @@ func cloneSandboxAdmin(a SandboxAdminConfig) SandboxAdminConfig {
 		}
 	}
 	for _, s := range []*[]string{&out.AllowedHarnesses, &out.EgressBlock, &out.EgressAllowOnly, &out.RequireCopyFor,
-		&out.Locked, &out.RequiredFor, &out.AllowedCredentials} {
+		&out.Locked, &out.RequiredFor, &out.AllowedCredentials, &out.Runtimes, &out.ActorSecrets} {
 		*s = slices.Clone(*s)
 	}
 	return out
@@ -759,8 +765,14 @@ type sandboxFloorDigestView struct {
 // of their lists.
 func sandboxFloorDigest(f SandboxAdminConfig, packDir string) (string, error) {
 	view := sandboxFloorDigestView{Version: 1, Floor: cloneSandboxAdmin(f)}
+	// The Agent Substrate keys change nothing on a computer, so a profile
+	// that adds them keeps its host floor digest (runtimes stays: it gates
+	// host runs).
+	view.Floor.SandboxClass, view.Floor.IdleSuspendAfter, view.Floor.UnattendedAsks, view.Floor.AskTimeout = "", "", "", ""
+	view.Floor.ActorSecrets = nil
 	for _, s := range []*[]string{&view.Floor.AllowedHarnesses, &view.Floor.EgressBlock, &view.Floor.EgressAllowOnly,
-		&view.Floor.RequireCopyFor, &view.Floor.Locked, &view.Floor.RequiredFor, &view.Floor.AllowedCredentials} {
+		&view.Floor.RequireCopyFor, &view.Floor.Locked, &view.Floor.RequiredFor, &view.Floor.AllowedCredentials,
+		&view.Floor.Runtimes, &view.Floor.ActorSecrets} {
 		sort.Strings(*s)
 	}
 	view.Pack = sandboxPackContentDigest(f.RequiredPack, packDir)
