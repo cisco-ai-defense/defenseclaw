@@ -66,6 +66,8 @@ func TestGAP0293StartupUnknownOnlyRemovesAllowProofs(t *testing.T) {
 			base[s.name+"|"+row.name] = s.read(row.command)
 		}
 	}
+	// Every site must also give the same answer with an unrelated exported
+	// function as without one, on rows that do not run a function.
 	for _, startupKind := range []struct{ name, variable, value string }{
 		{"unrelated-exported-function", "BASH_FUNC_s7probe%%", "() {  :\n}"},
 		{"unrelated-patched-export", "BASH_FUNC_s7probe()", "() {  :\n}"},
@@ -75,6 +77,21 @@ func TestGAP0293StartupUnknownOnlyRemovesAllowProofs(t *testing.T) {
 		t.Run(startupKind.name, func(t *testing.T) {
 			clearShellStartupEnv(t)
 			t.Setenv(startupKind.variable, startupKind.value)
+			if t.Name() == "TestGAP0293StartupUnknownOnlyRemovesAllowProofs/unrelated-exported-function" {
+				// The touch -h entry proof reads only an exported touch:
+				// an unrelated function leaves it, and so the command
+				// decision, exactly as without one (the GAP-0293 trigger).
+				for _, row := range rows {
+					for _, s := range sites {
+						if !strings.HasPrefix(s.name, "no-dereference-touch") && s.name != "command-decision" {
+							continue
+						}
+						if was, got := base[s.name+"|"+row.name], s.read(row.command); was != got {
+							t.Errorf("%s %s: an unrelated exported function changed %t to %t", s.name, row.name, was, got)
+						}
+					}
+				}
+			}
 			for _, s := range sites {
 				for _, row := range rows {
 					was, got := base[s.name+"|"+row.name], s.read(row.command)

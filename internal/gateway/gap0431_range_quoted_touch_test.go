@@ -65,8 +65,35 @@ func TestGAP0431SignedStepRangeFourCell(t *testing.T) {
 	}
 }
 
+// gap0293ExportedFunction is the startup the dev host's profile gives every
+// process (RHEL exports which the same way): an exported bash function the
+// touch statement never calls. Each class test sets it with t.Setenv after
+// the fixture has cleared the host's own startup, and runs a control
+// without it, so the result never depends on the host's environment.
+const gap0293ExportedFunction = "BASH_FUNC_s7probe%%"
+
+// gap0293StartupCells are the two environments of every GAP-0293 and
+// GAP-0298 class test: the control and the exported function.
+var gap0293StartupCells = []struct {
+	name     string
+	exported bool
+}{{"no-startup", false}, {"exported-function", true}}
+
+func gap0293SetStartup(t *testing.T, exported bool) {
+	t.Helper()
+	if exported {
+		t.Setenv(gap0293ExportedFunction, "() {  :\n}")
+	}
+}
+
 func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
-	runGAP0431QuotedTouchIdentity(t, newB36ManagedHookFixture(t), true, true)
+	for _, cell := range gap0293StartupCells {
+		t.Run(cell.name, func(t *testing.T) {
+			f := newB36ManagedHookFixture(t)
+			gap0293SetStartup(t, cell.exported)
+			runGAP0431QuotedTouchIdentity(t, f, true, true)
+		})
+	}
 }
 
 // The same rows without -h: touch follows a link, and the target scan, not
@@ -74,7 +101,52 @@ func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
 // the name, so the hard link is the protected file (GAP-0293: it was never
 // resolved, in any environment).
 func TestGAP0293QuotedTouchFollowIdentityFourCell(t *testing.T) {
-	runGAP0431QuotedTouchIdentity(t, newB36ManagedHookFixture(t), true, false)
+	for _, cell := range gap0293StartupCells {
+		t.Run(cell.name, func(t *testing.T) {
+			f := newB36ManagedHookFixture(t)
+			gap0293SetStartup(t, cell.exported)
+			runGAP0431QuotedTouchIdentity(t, f, true, false)
+		})
+	}
+}
+
+// GAP-0298: a touch of a variable that names a link to the keys file. The
+// managed cells have no fact of their own for the operand, so the client
+// carries its reading; every cell blocks, with and without an exported
+// function, and the ordinary twin allows. The rows are the assigned row of
+// the quoted touch identity table with its value swapped in code: the
+// fixture's symlink, a hard link of the keys file, an ordinary file.
+func TestGAP0298ManagedVariableTouchFourCell(t *testing.T) {
+	for _, cell := range gap0293StartupCells {
+		t.Run(cell.name, func(t *testing.T) {
+			f := newB36ManagedHookFixture(t)
+			gap0293SetStartup(t, cell.exported)
+			if err := os.Link(f.keys, filepath.Join(f.project, "keyhard")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.project, "plain"), []byte("ordinary\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			const assigned = `p='alias[1]'; touch -h "$p"`
+			rows := []struct{ name, value, want string }{
+				{"variable-symlink", "keylink", "block"},
+				{"variable-hardlink", "keyhard", "block"},
+				{"variable-ordinary", "plain", "allow"},
+			}
+			var calls []*hookCall
+			for _, row := range rows {
+				command := strings.Replace(strings.Replace(assigned, "'alias[1]'", row.value, 1), "touch -h ", "touch ", 1)
+				payload := f.payload(t, command)
+				calls = append(calls, everyMode(row.name, payload, f.clientHeader(t, payload))...)
+			}
+			f.answerAll(t, calls)
+			for i, call := range calls {
+				if want := rows[i/4].want; call.verdict != want {
+					t.Errorf("%s: got %s, want %s", call.name, call.verdict, want)
+				}
+			}
+		})
+	}
 }
 
 // The hook reads the shell startup from the account's environment. An
