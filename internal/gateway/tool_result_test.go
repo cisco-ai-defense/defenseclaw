@@ -291,3 +291,27 @@ func TestGuardrailInspectorInspectToolResult(t *testing.T) {
 		t.Fatalf("proxy target type for a tool result = %q", got)
 	}
 }
+
+// A result answer names its rules even when no audit logger records the scan
+// (rel-1-0-10 GAP-0353: rule_ids came only from the audit write).
+func TestToolResultAnswerNamesItsRulesWithoutAuditLogger(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	api := &APIServer{scannerCfg: cfg}
+	resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "WebFetch",
+		ToolInput:     map[string]interface{}{"url": "https://example.invalid/untrusted"},
+		ToolResponse:  trustExploitKeyword(),
+		CWD:           "/repo",
+	})
+	if len(resp.Findings) == 0 || len(resp.RuleIDs) == 0 {
+		t.Fatalf("findings=%v rule_ids=%v, want the answer to name its rule", resp.Findings, resp.RuleIDs)
+	}
+	for _, id := range resp.RuleIDs {
+		if !strings.Contains(strings.Join(resp.Findings, ","), id) {
+			t.Fatalf("rule id %q is not among the findings %v", id, resp.Findings)
+		}
+	}
+}
