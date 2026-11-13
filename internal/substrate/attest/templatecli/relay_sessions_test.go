@@ -7,6 +7,7 @@
 package templatecli
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -213,5 +214,30 @@ func TestActorGatewayURLDefaultIsTheKitDefault(t *testing.T) {
 	c := config.SubstrateConfig{Services: config.SubstrateServicesConfig{Actor: "defenseclaw-actor.dc.svc.cluster.local"}}
 	if got := c.ActorGatewayURL(); got != "http://defenseclaw-actor.dc.svc.cluster.local" {
 		t.Fatalf("custom %q", got)
+	}
+}
+
+// template build and scan take exactly the kit's connectors (all 10): a
+// listed one passes the connector check (the next refusal is the missing
+// --from), anything else is a usage error that names the list.
+func TestTemplateCommandsTakeTheKitConnectors(t *testing.T) {
+	ctx := context.Background()
+	for _, name := range kit.Connectors() {
+		var out, errb strings.Builder
+		if code := Run(ctx, []string{"build", "--connector", name}, &out, &errb); code != ExitUsageError || !strings.Contains(errb.String(), "build needs --from") {
+			t.Errorf("build --connector %s: %d %q", name, code, errb.String())
+		}
+	}
+	for _, bad := range []string{"openclaw", "cursor-agent", "claude"} {
+		var out, errb strings.Builder
+		if code := Run(ctx, []string{"build", "--connector", bad}, &out, &errb); code != ExitUsageError ||
+			!strings.Contains(errb.String(), "is not a connector the kit builds") || !strings.Contains(errb.String(), "or devin") {
+			t.Errorf("build --connector %s: %d %q", bad, code, errb.String())
+		}
+		errb.Reset()
+		if code := Run(ctx, []string{"scan", "registry.example/x@sha256:" + strings.Repeat("0", 64), "--connector", bad}, &out, &errb); code != ExitUsageError ||
+			!strings.Contains(errb.String(), "is not a connector the kit builds") {
+			t.Errorf("scan --connector %s: %d %q", bad, code, errb.String())
+		}
 	}
 }
