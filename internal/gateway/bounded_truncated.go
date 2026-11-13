@@ -117,8 +117,9 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 // to the caps in set to bounded.Floor: at least the unknown tier of the pack,
 // never below the verdict. An action name in any case is read (and written
 // back in its canonical spelling); a name the floor cannot read is kept as it
-// is where the floor alerts and becomes block where the floor blocks. The verdict carries one evaluation-limit finding whose severity agrees
-// with the floor (MEDIUM and alert-only where the floor alerts, HIGH where it
+// is where the floor alerts and becomes block where the floor blocks. The
+// verdict carries one evaluation-limit finding whose severity agrees with
+// the floor (MEDIUM and alert-only where the floor alerts, HIGH where it
 // blocks). A verdict applyMode already mapped is floored on its raw action
 // and mapped again, so the order of the two calls cannot drop the floor.
 func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier bounded.Tier) {
