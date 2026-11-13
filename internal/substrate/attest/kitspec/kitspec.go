@@ -210,6 +210,22 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 		spec.Files = append(spec.Files, attest.LayerFile{Path: d.p, Mode: d.mode, UID: o.UID, GID: o.GID, Dir: true})
 	}
 
+	// A root-owned file or folder inside the image user's home (Antigravity's
+	// ~/.gemini/config/hooks.json, GAP-0117) sits below a folder the user owns,
+	// which the user can rename or replace whatever the owner of what is
+	// below: the build's "root-owned all the way up" check cannot hold for it
+	// (GAP-0120, the connector has no managed hooks tier). It stays root-owned
+	// in the layer, so the agent cannot edit or delete it in place, and the
+	// kit's root-owned start wrapper compares it with the canonical copy
+	// outside the home at every start; that canonical copy
+	// (/usr/local/lib/defenseclaw/...) is the file the build checks. Such
+	// paths are listed with the user's files, so they are not expected.
+	for _, f := range spec.Files {
+		if f.UID == 0 && f.GID == 0 && strings.HasPrefix(f.Path, Home+"/") {
+			spec.UserFiles[f.Path] = true
+		}
+	}
+
 	// The switches the image must carry (E7).
 	for _, set := range []string{o.Connector, "npm"} {
 		for k, v := range kit.PhoneHomeOff[set] {

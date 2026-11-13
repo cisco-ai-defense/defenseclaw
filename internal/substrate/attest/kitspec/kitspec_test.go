@@ -191,3 +191,33 @@ func TestEveryListedConnectorHasAKitSpec(t *testing.T) {
 		t.Errorf("ConnectorList = %q", got)
 	}
 }
+
+// Lane K1: Antigravity's root-owned hooks.json registration in the user's home
+// stays root-owned in the layer but is not one of the paths the build expects
+// to be root-owned all the way up (the home is the user's); the canonical
+// copy outside the home is.
+func TestSpecRootOwnedFilesInTheHomeAreNotExpectedChains(t *testing.T) {
+	spec, _, _, err := Spec(Options{Connector: "antigravity", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := Home + "/.gemini/config/hooks.json"
+	var found bool
+	for _, f := range spec.Files {
+		if f.Path == hooks {
+			found = true
+			if f.UID != 0 || f.Mode != 0o644 {
+				t.Errorf("%s must stay root 0644 in the layer, got uid %d mode %o", hooks, f.UID, f.Mode)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("%s is not in the layer", hooks)
+	}
+	if !spec.UserFiles[hooks] || !spec.UserFiles[Home+"/.gemini"] || !spec.UserFiles[Home+"/.gemini/config"] {
+		t.Error("root-owned paths below the home must not be expected as root-owned chains")
+	}
+	if spec.UserFiles["/usr/local/lib/defenseclaw/antigravity/hooks.json"] {
+		t.Error("the canonical hooks copy outside the home is the checked file")
+	}
+}
