@@ -3,25 +3,17 @@
 
 package modelusage
 
-import "time"
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"time"
+)
 
-// SpendSink receives the resolved cost of an agent call against the
-// routing.admin budget keys the routing verdict gave it (CallFacts.ChargeKeys).
-// It is the only way spend leaves this package: routingadmin.SpendCounter is
-// the one spend truth that budgets read and that a leader or fleet store
-// fills, and the gateway wires its runtime in as the sink. modelusage keeps
-// no spend ledger of its own, and imports nothing from routingadmin (the
-// sink interface is the whole seam, so there is no import cycle). The sink
-// must not block.
+// SpendSink is where finished calls charge routing.admin budgets: the
+// routing admin runtime (routingadmin.Runtime.Add). The gateway wires it in;
+// it must not block. callID makes a charge idempotent.
 type SpendSink interface {
-	Charge(keys []string, usd float64, at time.Time)
-}
-
-// IdempotentSpendSink is a SpendSink that wants the call id, so a re-delivered
-// record is counted once. When a sink implements it, ChargeCall is used and
-// Charge is not.
-type IdempotentSpendSink interface {
-	ChargeCall(id string, keys []string, usd float64, at time.Time)
+	Add(callID string, keys []string, usd float64, known bool, at time.Time)
 }
 
 type spendSinkBox struct{ sink SpendSink }
@@ -34,26 +26,12 @@ func (e *Engine) SetSpendSink(sink SpendSink) {
 	e.budgetSink.Store(&spendSinkBox{sink: sink})
 }
 
-// ChargedUSD is the cost a record charges to a budget: the computed cost,
-// else the reported one (the one Resolve rule), and nothing when the cost is
-// unknown. Unknown is never 0: the budget treats it as unknown and its fail
-// mode decides.
-func ChargedUSD(c Cost) (float64, bool) {
-	switch {
-	case c.ComputedUSD != nil:
-		return *c.ComputedUSD, true
-	case c.Basis == BasisComputed && c.USD != nil:
-		return *c.USD, true
-	case c.ReportedUSD != nil:
-		return *c.ReportedUSD, true
-	case c.Basis == BasisReported && c.USD != nil:
-		return *c.USD, true
-	}
-	return 0, false
-}
-
-// chargeBudgets counts a finished call against its budget keys: agent calls
-// only (judge, decision model and AI Defense calls are DefenseClaw own).
+// chargeBudgets charges a finished agent call to its budget keys with the
+// resolved cost: computed, else reported (lead ruling 2026-11-12T23:38Z).
+// A call that returned usage nobody can price is passed as unknown, never 0.
+// A call with no usage at all (refused, failed or cancelled before the
+// provider counted anything) bills nothing and is not unknown. Each call
+// gets an id minted here, so a client-chosen request id cannot merge calls.
 func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 	if e == nil || len(f.ChargeKeys) == 0 || f.CallRole != RoleAgent {
 		return
@@ -62,13 +40,23 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 	if box == nil || box.sink == nil {
 		return
 	}
-	usd, ok := ChargedUSD(rec.Cost)
-	if !ok {
-		return
+	id := newCallID()
+	usd := rec.Cost.ComputedUSD
+	if usd == nil {
+		usd = rec.Cost.USD
 	}
-	if s, ok := box.sink.(IdempotentSpendSink); ok {
-		s.ChargeCall(f.RequestID, f.ChargeKeys, usd, rec.EndedAt)
-		return
+	switch {
+	case usd != nil:
+		box.sink.Add(id, f.ChargeKeys, *usd, true, rec.EndedAt)
+	case rec.Usage.Has != 0:
+		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)
 	}
-	box.sink.Charge(f.ChargeKeys, usd, rec.EndedAt)
+}
+
+// newCallID is a random id for one upstream call (the idempotency key of
+// its budget charge).
+func newCallID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }

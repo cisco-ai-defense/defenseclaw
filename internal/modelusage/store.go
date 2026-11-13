@@ -28,6 +28,9 @@ const (
 	storeFlushInterval = 15 * time.Second
 	storeMaxDim        = 128
 	storeBusyMillis    = 5000
+	// storeMaxRows bounds model_usage rows on disk. Past it a flush only
+	// updates rows that already exist.
+	storeMaxRows = 100000
 	// storeReadFlushGap is the freshest a read is guaranteed to be: a read
 	// flushes the pending aggregate unless one happened this recently.
 	storeReadFlushGap = 2 * time.Second
@@ -55,7 +58,8 @@ type Store struct {
 	done     chan struct{}
 	retDays  int
 	lastPrun time.Time
-	overflow int64
+	overflow int64 // pending buckets dropped at the cap
+	rowCap   int64 // new rows dropped at the row cap
 	now      func() time.Time
 	flushDur time.Duration
 	// readFlushGap throttles flush-on-read, so a caller that reads in a loop
@@ -147,6 +151,16 @@ func (s *Store) Enabled() bool {
 	return s.db != nil
 }
 
+// DropTotals implements DropSource.
+func (s *Store) DropTotals() map[string]int64 {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return map[string]int64{"bucket_cap": s.overflow, "row_cap": s.rowCap}
+}
+
 // Overflow reports records dropped because the bucket cap was reached.
 func (s *Store) Overflow() int64 {
 	if s == nil {
@@ -158,6 +172,9 @@ func (s *Store) Overflow() int64 {
 }
 
 func openUsageDB(path string) (*sql.DB, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("model usage store: no data_dir to keep it in")
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("model usage store directory: %w", err)
 	}
@@ -228,14 +245,47 @@ func dim(v string) string {
 // OwnerID is the stable owner key of a verified caller: kind and subject.
 // An unverified call has the empty owner, which only an admin query reads.
 func OwnerID(f CallFacts) string {
-	if !f.IdentityVerified || strings.TrimSpace(f.Subject) == "" {
+	subject := strings.TrimSpace(f.Subject)
+	if !f.IdentityVerified || subject == "" {
 		return ""
 	}
-	kind := f.SubjectKind
-	if kind == "" {
-		kind = "id"
+	return dim(ownerKind(f.SubjectKind, subject) + ":" + subject)
+}
+
+// ownerKind is the useridentity kind of an owner: posix_uid, windows_sid, or
+// the given kind for any other subject. A numeric subject is a uid and an
+// S-1- subject a SID whatever the writer called its source, so the writer
+// (proxy, route-only) and the readers (usage API, own-status) agree.
+func ownerKind(kind, subject string) string {
+	switch {
+	case strings.HasPrefix(strings.ToUpper(subject), "S-1-"):
+		return "windows_sid"
+	case isDigits(subject):
+		return "posix_uid"
+	case kind == "":
+		return "id"
 	}
-	return dim(kind + ":" + f.Subject)
+	return kind
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < 0x30 || c > 0x39 {
+			return false
+		}
+	}
+	return true
+}
+
+// boundedOther is a dimension that is never empty.
+func boundedOther(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "other"
+	}
+	return dim(v)
 }
 
 // Emit implements Sink: it adds the record to the pending aggregate.
@@ -248,10 +298,11 @@ func (s *Store) Emit(_ context.Context, rec Record) {
 	if s.db == nil {
 		return
 	}
-	f, u, c := rec.Facts, rec.Usage, rec.Cost
+	f, c := rec.Facts, rec.Cost
 	hour := rec.EndedAt.UTC().Truncate(time.Hour).Unix()
+	model, provider := boundedOther(rec.ModelKey), boundedOther(rec.ProviderKey)
 	k := usageKey{
-		hour: hour, owner: OwnerID(f), connector: dim(storeConnector(f.Connector)), provider: dim(f.SelectedProvider), model: dim(f.SelectedModel),
+		hour: hour, owner: OwnerID(f), connector: dim(storeConnector(f.Connector)), provider: provider, model: model,
 		route: dim(f.Route.Decision), role: dim(string(f.CallRole)), prof: dim(f.ProfileName), family: dim(string(f.APIFamily)), basis: dim(c.Basis),
 	}
 	a := s.pend[k]
@@ -272,7 +323,7 @@ func (s *Store) Emit(_ context.Context, rec Record) {
 				continue
 			}
 			seen[g] = true
-			gk := groupKey{hour: hour, group: g, connector: dim(storeConnector(f.Connector)), model: dim(f.SelectedModel)}
+			gk := groupKey{hour: hour, group: g, connector: dim(storeConnector(f.Connector)), model: model}
 			ga := s.pendGrp[gk]
 			if ga == nil {
 				if len(s.pend)+len(s.pendGrp) >= storeBucketCap {
@@ -285,7 +336,6 @@ func (s *Store) Emit(_ context.Context, rec Record) {
 			addRecord(ga, rec)
 		}
 	}
-	_ = u
 }
 
 func addRecord(a *usageAgg, rec Record) {
@@ -347,10 +397,16 @@ func (s *Store) flushLocked() error {
 		cache_creation=cache_creation+excluded.cache_creation, reasoning=reasoning+excluded.reasoning,
 		cost_usd_sum=CASE WHEN excluded.cost_calls>0 THEN COALESCE(cost_usd_sum,0)+excluded.cost_usd_sum ELSE cost_usd_sum END,
 		cost_calls=cost_calls+excluded.cost_calls, latency_ms_sum=latency_ms_sum+excluded.latency_ms_sum`
+	rows := 0
+	_ = tx.QueryRow("SELECT COUNT(*) FROM model_usage").Scan(&rows)
 	for k, a := range s.pend {
 		var cost any
 		if a.costCalls > 0 {
 			cost = a.costSum
+		}
+		if rows >= storeMaxRows && !s.rowExists(tx, k) {
+			s.rowCap++
+			continue
 		}
 		if _, err = tx.Exec(upsert, k.hour, k.owner, k.connector, k.provider, k.model, k.route, k.role, k.prof, k.family, k.basis,
 			a.calls, a.errors, a.usageCalls, a.input, a.output, a.cacheRead, a.cacheCreate, a.reasoning, cost, a.costCalls, a.latencyMs); err != nil {
@@ -563,4 +619,12 @@ func orderFor(by, col string) string {
 		return col + " DESC"
 	}
 	return "SUM(COALESCE(cost_usd_sum,0)) DESC, SUM(calls) DESC"
+}
+
+// rowExists reports whether a usage row with this key is already stored.
+func (s *Store) rowExists(tx *sql.Tx, k usageKey) bool {
+	var one int
+	err := tx.QueryRow(`SELECT 1 FROM model_usage WHERE hour_start=? AND owner=? AND connector=? AND provider=? AND model=? AND route_decision=? AND call_role=? AND profile=? AND api_family=? AND cost_basis=?`,
+		k.hour, k.owner, k.connector, k.provider, k.model, k.route, k.role, k.prof, k.family, k.basis).Scan(&one)
+	return err == nil
 }

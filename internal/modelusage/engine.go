@@ -23,9 +23,14 @@ const (
 	// stopDeadline bounds the drain when the engine is turned off.
 	stopDeadline  = 2 * time.Second
 	maxLabelBytes = 128
+	// dropReportEvery is how often lost records are reported.
+	dropReportEvery = 10 * time.Second
 )
 
-var profileLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+var (
+	profileLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	providerKeyPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+)
 
 // snapshot is the immutable view of the config one call is recorded under.
 type snapshot struct {
@@ -44,9 +49,11 @@ type snapshot struct {
 // until Apply enables it: no goroutine, no buffer. Apply is the hot-reload
 // entry; it never needs a restart.
 type Engine struct {
-	snap    atomic.Pointer[snapshot]
-	applyMu sync.Mutex // serialises Apply so the snapshot and the worker never disagree
-	dropped atomic.Int64
+	snap     atomic.Pointer[snapshot]
+	applyMu  sync.Mutex // serialises Apply so the snapshot and the worker never disagree
+	dropped  atomic.Int64
+	dropMu   sync.Mutex
+	dropSeen map[string]int64
 	// budgetSink receives agent call costs for routing.admin budgets.
 	budgetSink atomic.Pointer[spendSinkBox]
 
@@ -110,9 +117,6 @@ func (e *Engine) Dropped() int64 {
 	return e.dropped.Load()
 }
 
-// PriceTable returns the current price table (never nil).
-func (e *Engine) PriceTable() *PriceTable { return e.snap.Load().table }
-
 func (e *Engine) start() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -143,14 +147,67 @@ func (e *Engine) stop() {
 
 func (e *Engine) work(q chan Record, done chan struct{}) {
 	defer close(done)
-	for rec := range q {
-		e.mu.RLock()
-		sinks := e.sinks
-		e.mu.RUnlock()
-		for _, s := range sinks {
-			emitSafe(s, rec)
+	tick := time.NewTicker(dropReportEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case rec, ok := <-q:
+			if !ok {
+				e.reportDrops()
+				return
+			}
+			e.mu.RLock()
+			sinks := e.sinks
+			e.mu.RUnlock()
+			for _, s := range sinks {
+				emitSafe(s, rec)
+			}
+		case <-tick.C:
+			e.reportDrops()
 		}
 	}
+}
+
+// reportDrops tells the drop reporters how many records were lost since the
+// last report: the engine queue and every sink that counts its own losses.
+// Lost records are never silent: the absent-cost panels would read low.
+func (e *Engine) reportDrops() {
+	e.mu.RLock()
+	sinks := e.sinks
+	e.mu.RUnlock()
+	totals := map[string]int64{"queue": e.dropped.Load()}
+	for _, s := range sinks {
+		if src, ok := s.(DropSource); ok {
+			for kind, n := range src.DropTotals() {
+				totals[kind] += n
+			}
+		}
+	}
+	e.dropMu.Lock()
+	if e.dropSeen == nil {
+		e.dropSeen = map[string]int64{}
+	}
+	var lost int64
+	for kind, n := range totals {
+		if d := n - e.dropSeen[kind]; d > 0 {
+			lost += d
+			e.dropSeen[kind] = n
+		}
+	}
+	e.dropMu.Unlock()
+	if lost == 0 {
+		return
+	}
+	for _, s := range sinks {
+		if r, ok := s.(DropReporter); ok {
+			reportSafe(r, lost)
+		}
+	}
+}
+
+func reportSafe(r DropReporter, n int64) {
+	defer func() { _ = recover() }()
+	r.ReportDrops(n)
 }
 
 func emitSafe(s Sink, rec Record) {
@@ -291,7 +348,9 @@ func (c *call) build(err error) Record {
 	u := c.pickUsage()
 	rec.Usage = u
 	rec.Cost = c.cost(u)
-	rec.Labels = c.labels(rec.Cost, u)
+	rec.ModelKey = c.modelKey(rec.Cost, u)
+	rec.ProviderKey = providerKey(c.f.SelectedProvider)
+	rec.Labels = c.labels(rec.ModelKey, rec.ProviderKey)
 	return rec
 }
 
@@ -335,7 +394,7 @@ func (c *call) cost(u Usage) Cost {
 
 // labels builds the bounded metric labels. The model label is the matched
 // price entry or other, so a client-chosen model string cannot add series.
-func (c *call) labels(cost Cost, u Usage) []Label {
+func (c *call) modelKey(cost Cost, u Usage) string {
 	f := c.f
 	model := c.s.table.ModelKey(f.SelectedProvider, f.SelectedModel)
 	if model == "other" && u.ResponseModel != "" {
@@ -344,6 +403,20 @@ func (c *call) labels(cost Cost, u Usage) []Label {
 	if cost.PriceEntry == "fallback" {
 		model = "other"
 	}
+	return model
+}
+
+// providerKey bounds a provider name: a plain lower-case identifier, else other.
+func providerKey(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if providerKeyPattern.MatchString(p) {
+		return p
+	}
+	return "other"
+}
+
+func (c *call) labels(model, provider string) []Label {
+	f := c.f
 	out := make([]Label, 0, len(c.s.labels))
 	for _, name := range c.s.labels {
 		var v string
@@ -351,7 +424,7 @@ func (c *call) labels(cost Cost, u Usage) []Label {
 		case "connector":
 			v = f.Connector
 		case "provider":
-			v = f.SelectedProvider
+			v = provider
 		case "model":
 			v = model
 		case "route_decision":

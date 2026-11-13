@@ -62,7 +62,11 @@ type CallFacts struct {
 	// Subject and Groups come from a verified caller only. Groups never leave
 	// the endpoint on exported records: only the local store and the admin
 	// API read them.
-	Subject          string
+	Subject string
+	// SubjectKind is a useridentity kind: posix_uid or windows_sid. Writers
+	// (the proxy, the route-only listener) and readers (/usage, the own-status
+	// block) must use the same form, because it is the owner key of a usage row.
+	// OwnerID also derives it from the subject when the kind is anything else.
 	SubjectKind      string
 	Groups           []string
 	IdentityVerified bool
@@ -128,6 +132,22 @@ type Record struct {
 	// Labels are the bounded metric labels for this call, in the configured
 	// order. They carry no identity.
 	Labels []Label
+	// ModelKey and ProviderKey are the bounded model and provider of the call:
+	// the price-table entry that priced it (else other) and a plain lower-case
+	// provider name (else other). The local store and the labels key on these,
+	// never on the client-chosen model string.
+	ModelKey, ProviderKey string
+}
+
+// DropSource is a sink that counts records it lost (cumulative, by kind).
+type DropSource interface {
+	DropTotals() map[string]int64
+}
+
+// DropReporter is a sink that exports how many records were lost since the
+// last report (defenseclaw.tokenomics.dropped).
+type DropReporter interface {
+	ReportDrops(n int64)
 }
 
 // Recorder is what the proxy and the connectors call. Begin is called once

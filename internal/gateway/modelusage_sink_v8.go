@@ -43,6 +43,25 @@ func newModelUsageV8Sink(
 	return &modelUsageV8Sink{emitter: emitter, metrics: metrics}
 }
 
+// ReportDrops implements modelusage.DropReporter: the records the engine or
+// the store lost since the last report, as defenseclaw.tokenomics.dropped.
+func (s *modelUsageV8Sink) ReportDrops(n int64) {
+	if s == nil || s.metrics == nil || n <= 0 {
+		return
+	}
+	runtime := s.metrics()
+	if runtime == nil {
+		return
+	}
+	at := time.Now().UTC()
+	item := newHookV8MetricBatchItemForProducer(context.Background(), at, llmEventMeta{Source: "gateway"}, modelUsageV8Producer,
+		observability.EventName(observability.TelemetryInstrumentDefenseClawTokenomicsDropped),
+		func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return b.BuildMetricDefenseClawTokenomicsDropped(observability.MetricDefenseClawTokenomicsDroppedInput{Envelope: e, Value: n})
+		})
+	_, _ = runtime.RecordGeneratedMetricBatch(context.Background(), []observabilityruntime.GeneratedMetricBatchItem{item})
+}
+
 // Emit implements modelusage.Sink.
 func (s *modelUsageV8Sink) Emit(ctx context.Context, rec modelusage.Record) {
 	if s == nil {
