@@ -126,30 +126,41 @@ type k8sObject struct {
 	Metadata   map[string]any `yaml:"metadata"`
 	Spec       map[string]any `yaml:"spec"`
 	Data       map[string]any `yaml:"data"`
-	Rules      []any          `yaml:"rules"`
 	RoleRef    map[string]any `yaml:"roleRef"`
 	Subjects   []any          `yaml:"subjects"`
 }
 
-// tokenReviewGrant reports whether a cluster-scoped RBAC object is exactly
-// the Kubernetes sign-in grant: a ClusterRole whose only rule is create on
-// authentication.k8s.io tokenreviews, or its binding to the gateway
-// ServiceAccount alone (GAP-0153).
-func tokenReviewGrant(o k8sObject) bool {
-	name, _ := o.Metadata["name"].(string)
-	if !strings.HasPrefix(name, "defenseclaw-tokenreview-") {
-		return false
-	}
-	switch o.Kind {
-	case "ClusterRole":
-		if len(o.Rules) != 1 {
+// authDelegatorGrant reports whether a cluster-scoped RBAC object is the
+// chart's one allowed exception (lead ruling, GAP-0153): a
+// ClusterRoleBinding of the gateway ServiceAccount alone to
+// system:auth-delegator. Whether it may be rendered at all (the Kubernetes
+// sign-in on) is checked by the caller.
+func authDelegatorGrant(o k8sObject) bool {
+	return o.Kind == "ClusterRoleBinding" && o.RoleRef["kind"] == "ClusterRole" && o.RoleRef["name"] == "system:auth-delegator" &&
+		len(o.Subjects) == 1 && dig(o.Subjects[0], "kind") == "ServiceAccount" && dig(o.Subjects[0], "name") == "defenseclaw-gateway"
+}
+
+// kubeSignInRendered reports whether the render runs the Kubernetes sign-in:
+// the gateway config has no OIDC issuer and the install is not managed.
+func kubeSignInRendered(objs []k8sObject) bool {
+	for _, o := range objs {
+		if o.Kind != "ConfigMap" || o.Metadata["name"] != "defenseclaw-config" {
+			continue
+		}
+		var cfg struct {
+			DeploymentMode string `yaml:"deployment_mode"`
+			Substrate      struct {
+				Identity struct {
+					OIDC struct {
+						Issuer string `yaml:"issuer"`
+					} `yaml:"oidc"`
+				} `yaml:"identity"`
+			} `yaml:"substrate"`
+		}
+		if yaml.Unmarshal([]byte(fmt.Sprint(o.Data["config.yaml"])), &cfg) != nil {
 			return false
 		}
-		r := fmt.Sprint(dig(o.Rules[0], "apiGroups"), dig(o.Rules[0], "resources"), dig(o.Rules[0], "verbs"))
-		return r == "[authentication.k8s.io] [tokenreviews] [create]" && dig(o.Rules[0], "resourceNames") == nil
-	case "ClusterRoleBinding":
-		return o.RoleRef["kind"] == "ClusterRole" && o.RoleRef["name"] == name && len(o.Subjects) == 1 &&
-			dig(o.Subjects[0], "kind") == "ServiceAccount" && dig(o.Subjects[0], "name") == "defenseclaw-gateway"
+		return cfg.Substrate.Identity.OIDC.Issuer == "" && !strings.HasPrefix(strings.ToLower(cfg.DeploymentMode), "managed")
 	}
 	return false
 }
@@ -189,15 +200,16 @@ func dig(m any, path ...string) any {
 func checkChartInvariants(t *testing.T, name string, out []byte) {
 	t.Helper()
 	objs := decodeObjects(t, out)
+	kubeSignIn := kubeSignInRendered(objs)
 	byName := map[string]k8sObject{}
 	for _, o := range objs {
 		byName[o.Kind+"/"+o.Metadata["name"].(string)] = o
 		if o.Kind == "Secret" {
 			t.Errorf("%s: the chart renders a Secret (%v); DefenseClaw's secrets are never chart values", name, o.Metadata["name"])
 		}
-		if (o.Kind == "ClusterRole" || o.Kind == "ClusterRoleBinding") && !tokenReviewGrant(o) {
-			// The one cluster-wide grant is the Kubernetes sign-in's
-			// tokenreviews create to the gateway (GAP-0153).
+		if (o.Kind == "ClusterRole" || o.Kind == "ClusterRoleBinding") && !(kubeSignIn && authDelegatorGrant(o)) {
+			// The one exception: the gateway bound to system:auth-delegator,
+			// and only when people sign in with Kubernetes (GAP-0153).
 			t.Errorf("%s: cluster-wide RBAC %v", name, o.Metadata["name"])
 		}
 		if o.Kind == "Deployment" || o.Kind == "Job" {

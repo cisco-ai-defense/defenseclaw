@@ -125,6 +125,12 @@ gateway:
   # (callout.judge.tokenSecret, shared with the callout).
   relaySessionSecret: defenseclaw-relay-session
   llmCredentialsSecret: defenseclaw-llm
+  # The chart's one cluster-wide grant: with no OIDC issuer (people sign in
+  # with Kubernetes credentials, not on a managed install), a
+  # ClusterRoleBinding of this ServiceAccount to system:auth-delegator, so the
+  # gateway can make TokenReviews. Never rendered with an OIDC issuer. Its
+  # name; "" is defenseclaw-auth-delegator-<namespace>-<release>.
+  authDelegatorBinding: ""
   args: []
   resources:
     requests: {cpu: 250m, memory: 256Mi}

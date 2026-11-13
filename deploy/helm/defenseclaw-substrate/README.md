@@ -48,6 +48,7 @@ Every value is checked by `values.schema.json`. The main ones:
 | `substrate.credentialProvider.*` | grant on, namespace `defenseclaw-actor-secrets` | the launcher atespaces' grant in the Kubernetes credential provider policy |
 | `bootstrap.ownerTokenSecret` | "" | a global owner's token Secret (key `token`) for the OpenFGA bootstrap |
 | `callout.judge.tokenSecret` | `defenseclaw-callout-judge` | the callout's token for the MCP tool verdict route on the admin Service; the chain-key hook creates this Secret when absent. `""` turns the route off (tools/call alerts on OSS, refused on managed) |
+| `gateway.authDelegatorBinding` | "" | name of the one cluster-wide object: the gateway's ClusterRoleBinding to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer); "" is `defenseclaw-auth-delegator-<namespace>-<release>` |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP, mounted read-only in the callout (egress) and the gateway (/llm); sets `config.substrate.extproc.actor_secrets_dir` |
 | `networkPolicy.adminFrom`, `networkPolicy.metricsFrom` | [] | extra peers for the admin and metrics ports |
 | `deploymentMode` | "" | sets `config.deployment_mode`; `managed_enterprise` mounts `config.yaml` as one read-only file and gives each pod a data volume owned by the gateway account (`0700`, set by an init container running as root with only `CHOWN` and `FOWNER`), as the managed trust checks require. `managed.serviceAccountName` names that account (`nonroot`). |

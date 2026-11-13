@@ -38,32 +38,22 @@ subjects:
   namespace: {{ .Release.Namespace }}
 {{- if include "dc.kubeSignIn" . }}
 ---
-# The Kubernetes sign-in (no OIDC issuer, not managed): the gateway asks the
-# API server who a person's token belongs to with a TokenReview (GAP-0153).
-# Only tokenreviews create, not the whole system:auth-delegator role (which
-# also grants subjectaccessreviews). Cluster-scoped, so the name carries the
-# namespace and release.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "dc.tokenReviewName" . }}
-  labels:
-    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
-rules:
-- apiGroups: [authentication.k8s.io]
-  resources: [tokenreviews]
-  verbs: [create]
----
+# The chart's one cluster-wide grant (lead ruling, STEER 2026-11-13 00:32Z):
+# the Kubernetes sign-in (no OIDC issuer, not managed) verifies a person's
+# token with a TokenReview, which is cluster-scoped, so the gateway
+# ServiceAccount is bound to system:auth-delegator (tokenreviews create,
+# subjectaccessreviews come with it). Never rendered with an OIDC issuer.
+# Named by gateway.authDelegatorBinding; helm removes it on uninstall.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "dc.tokenReviewName" . }}
+  name: {{ include "dc.authDelegatorBinding" . }}
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "dc.tokenReviewName" . }}
+  name: system:auth-delegator
 subjects:
 - kind: ServiceAccount
   name: defenseclaw-gateway
