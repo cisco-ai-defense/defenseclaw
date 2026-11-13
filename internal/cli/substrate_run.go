@@ -427,17 +427,9 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 		tctx, cancel = context.WithTimeout(ctx, f.timeout)
 		defer cancel()
 	}
-	emit := func(e relay.TaskEvent) {
-		if asJSON {
-			_ = writeSubstrateJSONLine(w, e)
-			return
-		}
-		switch e.Type {
-		case "stdout":
-			fmt.Fprintln(w, safetext.Clean(e.Data))
-		case "stderr", "error":
-			fmt.Fprintln(cmd.ErrOrStderr(), safetext.Clean(e.Data))
-		}
+	emit := attach.TextEmitter(w, cmd.ErrOrStderr())
+	if asJSON {
+		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONLine(w, e) }
 	}
 	code, err = attach.RunTask(tctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: emit})
 	if err != nil {

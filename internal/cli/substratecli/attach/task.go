@@ -36,15 +36,18 @@ type TaskOptions struct {
 	Emit func(relay.TaskEvent)
 }
 
-// TextEmitter prints a task's output: stdout lines to out, stderr and
-// error lines to errw. The agent wrote them, so they are printed without
-// terminal controls (safetext.Clean: no clipboard, title, hyperlink or
-// cursor movement).
+// TextEmitter prints a task's output: stdout lines to out (an agent's JSON
+// events as text, agentLine), stderr and error lines to errw. The agent
+// wrote them, so they are printed without terminal controls (safetext: no
+// clipboard, title, hyperlink or cursor movement). run --task and logs use
+// it; --json prints the raw events instead.
 func TextEmitter(out, errw io.Writer) func(relay.TaskEvent) {
 	return func(e relay.TaskEvent) {
 		switch e.Type {
 		case "stdout":
-			fmt.Fprintln(out, safetext.Clean(e.Data))
+			if s, ok := agentLine(e.Data); ok {
+				fmt.Fprintln(out, s)
+			}
 		case "stderr":
 			fmt.Fprintln(errw, safetext.Clean(e.Data))
 		case "error":
