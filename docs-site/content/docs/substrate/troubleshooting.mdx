@@ -8,7 +8,7 @@ keywords:
   - no free worker
 ---
 
-Start with `defenseclaw substrate doctor`. It checks your computer and your sign-in and says how to fix each failure. Administrators add `--cluster` (or run `verify`) for the cluster's own checks. Exit codes are in the [reference](/docs/substrate/reference#exit-codes). The quoted messages below are what the launcher and gateway print; `run` and `connect` show them after `Error:`.
+Start with `defenseclaw substrate doctor`. It checks your computer and your sign-in and says how to fix each failure. Administrators add `--install-file FILE` (the SubstrateInstall file given to ate-setup) for the cluster's own checks, the same ones `verify` runs; `--cluster` without it says what is missing. Exit codes are in the [reference](/docs/substrate/reference#exit-codes). The quoted messages below are what the launcher and gateway print; `run` and `connect` show them after `Error:`.
 
 ## Symptoms
 
@@ -101,7 +101,7 @@ The default actor-token issuer is the same on every cluster. Give each cluster i
 
 The launcher prints `The task did not run: the cluster gateway refused its tool and model calls (keyset_unavailable: ...)` and exits with code 1. The gateway can't check agent tokens, and that holds for every agent on the cluster. The reason in brackets says why:
 
-- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate doctor --cluster` (administrators) shows the `substrate.actor_keys` row from the gateway.
+- `keyset_unavailable`: the gateway can't read the keys URL. Check `substrate.identity.keys_url` (chart value `substrate.actorKeys.url`) and its CA (`substrate.identity.keys_ca_file`, chart value `substrate.actorKeys.caConfigMap`). `defenseclaw substrate verify --install-file FILE` (administrators) shows the `actor_keys` check.
 - `issuer`: Substrate signs with another issuer than `substrate.identity.issuer`. Use the same value in `setup --issuer` (then `ate-setup deploy`) and in the configuration.
 - `verifier_unavailable`: the gateway can't reach the Substrate control API.
 
