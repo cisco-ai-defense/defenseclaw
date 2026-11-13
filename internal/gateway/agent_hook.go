@@ -4635,6 +4635,16 @@ func withSubstrateActor(ctx context.Context, actor substrateActor) context.Conte
 // that is not whole (wellFormed), never counts: a listener that set it
 // before checking every claim gets a host
 // request, which the require-sandbox gate still judges.
+// isVerifiedSubstrateActor reports a call of a verified Substrate actor.
+// The managed_enterprise switches of the host hook path (the local chain
+// lane, the trusted-action evaluation) exist because a managed host's
+// machine daemon evaluates there; an actor has no host daemon, so they
+// don't apply to it (GAP-0211).
+func isVerifiedSubstrateActor(ctx context.Context) bool {
+	_, ok := substrateActorFrom(ctx)
+	return ok
+}
+
 func substrateActorFrom(ctx context.Context) (substrateActor, bool) {
 	if ctx == nil {
 		return substrateActor{}, false

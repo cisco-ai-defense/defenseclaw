@@ -33,6 +33,12 @@ type Attestation struct {
 	Digest     string
 	Connector  string
 	KitVersion string
+	// AgentVersion and HookContract are the agent version and the hook
+	// contract the signed statement names. The gateway resolves the hook
+	// profile of an actor from them (GAP-0201), never from what the actor
+	// sends.
+	AgentVersion string
+	HookContract string
 	// Reason says why a template is not attested (no attestation, bad
 	// signature, digest mismatch...).
 	Reason string

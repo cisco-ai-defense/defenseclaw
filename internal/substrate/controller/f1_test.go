@@ -221,6 +221,8 @@ func verified(digest, kit string, until time.Time) *attest.Verified {
 	st := &attest.Statement{}
 	st.Predicate.Kit.Version = kit
 	st.Predicate.Template.Connector = "claudecode"
+	st.Predicate.Template.AgentVersion = "2.1.317"
+	st.Predicate.Kit.HookContract = "claudecode-hooks-v2"
 	return &attest.Verified{Digest: digest, Statement: st, ValidUntil: until}
 }
 
@@ -272,7 +274,8 @@ func TestTemplateAttestor(t *testing.T) {
 			if att.Attested != tc.ok || !strings.Contains(att.Reason, tc.reason) {
 				t.Fatalf("attestation = %+v", att)
 			}
-			if tc.ok && (att.Digest != digA || att.KitVersion != "1.0.10" || att.Connector != "claudecode") {
+			if tc.ok && (att.Digest != digA || att.KitVersion != "1.0.10" || att.Connector != "claudecode" ||
+				att.AgentVersion != "2.1.317" || att.HookContract != "claudecode-hooks-v2") {
 				t.Fatalf("attestation = %+v", att)
 			}
 			if name == "both attested" && !att.ValidUntil.Equal(now.Add(time.Minute)) {

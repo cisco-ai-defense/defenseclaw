@@ -34,11 +34,11 @@ func fakeAgentPin(t *testing.T) []byte {
 }
 
 func TestSpecRefusesAnAgentThatIsNotThePin(t *testing.T) {
-	if _, _, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"),
+	if _, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"),
 		AgentBinary: []byte("something else")}); err == nil {
 		t.Fatal("an agent binary that is not the pinned build was accepted")
 	}
-	if _, _, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"),
+	if _, _, err := Spec(Options{Connector: "claudecode", KitVersion: "1", HookBinary: []byte("h"), RelayBinary: []byte("r"),
 		MetadataOnly: true}); err != nil {
 		t.Fatalf("metadata only: %v", err)
 	}
@@ -53,12 +53,12 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 			if name == "claudecode" {
 				o.AgentBinary = agent
 			}
-			spec, tpl, version, err := Spec(o)
+			spec, tpl, err := Spec(o)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tpl.Connector != name || version == "" || spec.HookContract == "" || spec.User != "1000:1000" {
-				t.Fatalf("spec: %+v %q", tpl, version)
+			if tpl.Connector != name || tpl.AgentVersion == "" || spec.HookContract == "" || spec.User != "1000:1000" {
+				t.Fatalf("spec: %+v", tpl)
 			}
 			layer, err := attest.BuildLayer(spec.Files, nil, spec.HomeOwners, nil)
 			if err != nil {
@@ -93,8 +93,8 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 				t.Fatal("the hook, relay or kit config is missing from the layer")
 			}
 			if r, ok := kit.AgentReleases[name]; ok {
-				if contents[r.Path] != string(agent) || version != r.Version || tpl.AgentVersion != r.Version {
-					t.Fatalf("pinned agent: %d bytes at %s, version %q", len(contents[r.Path]), r.Path, version)
+				if contents[r.Path] != string(agent) || tpl.AgentVersion != r.Version {
+					t.Fatalf("pinned agent: %d bytes at %s, version %q", len(contents[r.Path]), r.Path, tpl.AgentVersion)
 				}
 			}
 			for k, v := range kit.PhoneHomeOff[name] {
@@ -114,10 +114,10 @@ func TestSpecLayerOwnershipAndSwitches(t *testing.T) {
 			}
 		})
 	}
-	if _, _, _, err := Spec(Options{Connector: "nope", HookBinary: []byte("h"), RelayBinary: []byte("r")}); err == nil {
+	if _, _, err := Spec(Options{Connector: "nope", HookBinary: []byte("h"), RelayBinary: []byte("r")}); err == nil {
 		t.Fatal("unknown connector accepted")
 	}
-	if _, _, _, err := Spec(Options{Connector: "codex"}); err == nil {
+	if _, _, err := Spec(Options{Connector: "codex"}); err == nil {
 		t.Fatal("missing binaries accepted")
 	}
 }
@@ -166,7 +166,7 @@ func TestEveryListedConnectorHasAKitSpec(t *testing.T) {
 			t.Errorf("%s listed twice", name)
 		}
 		seen[name] = true
-		if _, _, _, err := Spec(Options{Connector: name, KitVersion: "test", HookBinary: []byte("x"), RelayBinary: []byte("x"), MetadataOnly: true}); err != nil {
+		if _, _, err := Spec(Options{Connector: name, KitVersion: "test", HookBinary: []byte("x"), RelayBinary: []byte("x"), MetadataOnly: true}); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}

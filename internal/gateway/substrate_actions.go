@@ -119,13 +119,31 @@ type SubstratePolicyEnsurer func(ctx context.Context, atespace, name string) err
 type SubstrateATEActions struct {
 	Client ateapi.Client
 	Ensure SubstratePolicyEnsurer
-	// ConnectorOf reads the connector a template was built for (its attested
-	// label, GAP-0160). It answers a label only for a template positively
-	// attested with one; anything else (an attestor error, a refusal,
-	// retryable or not, an attestation without a label) is an error wrapping
-	// ErrSubstrateTemplateAttestation (*SubstrateTemplateAttestation), never
-	// "" (GAP-0181). Nil reads no label: a managed create refuses then.
-	ConnectorOf func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error)
+	// TemplateKit reads what a template's signed statement says it carries:
+	// the connector (GAP-0160), the agent version and the hook contract
+	// (GAP-0201), the kit version and the image digest. It answers only for a
+	// template positively attested with a connector label; anything else (an
+	// attestor error, a refusal, retryable or not, an attestation without a
+	// label) is an error wrapping ErrSubstrateTemplateAttestation
+	// (*SubstrateTemplateAttestation), never a zero kit (GAP-0181). Nil reads
+	// no label: a managed create refuses then.
+	TemplateKit func(ctx context.Context, tmpl *ateapi.ActorTemplate) (SubstrateTemplateKit, error)
+}
+
+// SubstrateTemplateKit is what an attested template carries.
+type SubstrateTemplateKit struct {
+	Connector    string
+	AgentVersion string
+	HookContract string
+	KitVersion   string
+	Digest       string
+}
+
+func (s *SubstrateATEActions) templateKit(ctx context.Context, tmpl *ateapi.ActorTemplate) (SubstrateTemplateKit, error) {
+	if s.TemplateKit == nil {
+		return SubstrateTemplateKit{}, nil
+	}
+	return s.TemplateKit(ctx, tmpl)
 }
 
 // SubstrateTemplateConnector is the optional part of an Actions that tells
@@ -136,7 +154,7 @@ type SubstrateTemplateConnector interface {
 
 // TemplateConnector implements SubstrateTemplateConnector.
 func (s *SubstrateATEActions) TemplateConnector(ctx context.Context, atespace, template string) (string, error) {
-	if s.ConnectorOf == nil {
+	if s.TemplateKit == nil {
 		return "", nil
 	}
 	tmplSpace, tmplName := atespace, strings.TrimSpace(template)
@@ -153,7 +171,8 @@ func (s *SubstrateATEActions) TemplateConnector(ctx context.Context, atespace, t
 	if err != nil {
 		return "", err
 	}
-	return s.ConnectorOf(ctx, t)
+	kit, err := s.TemplateKit(ctx, t)
+	return kit.Connector, err
 }
 
 var substrateActorNameRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -177,6 +196,17 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 		}
 		return SubstrateCreated{}, err
 	}
+	// The registration names the agent version and the hook contract the
+	// signed statement gives: the hook profile, and so the actor's chain
+	// window, is resolved from them (GAP-0201).
+	kit, err := s.templateKit(ctx, tmpl)
+	if err != nil {
+		// The create route decided by mode already (GAP-0181): managed
+		// refused before this call, open source warned. Such a template
+		// records no agent version, so its steps are reported as unrecorded
+		// (GAP-0201).
+		kit = SubstrateTemplateKit{}
+	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = substrateActorName(req.Owner.Principal, req.Owner.Subject)
@@ -198,6 +228,8 @@ func (s *SubstrateATEActions) Create(ctx context.Context, req SubstrateCreate) (
 	return SubstrateCreated{
 		Atespace: req.Atespace, Name: name, UID: a.GetMetadata().GetUid(),
 		Template: ateapi.Key(tref), Connector: req.Connector,
+		HarnessVersion: kit.AgentVersion, HookContract: kit.HookContract,
+		KitVersion: kit.KitVersion, TemplateDigest: kit.Digest,
 	}, nil
 }
 

@@ -367,7 +367,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 	if strings.TrimSpace(*gateway) == "" {
 		*gateway = cfg.Substrate.ActorGatewayURL()
 	}
-	spec, tpl, harnessVersion, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
+	spec, tpl, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
 		FailMode: *failMode, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,
 		SessionIssuer: sessions.Issuer, Audience: sessions.Audience, VerifyURL: sessions.VerifyURL,
 		AgentBinary: agent, Arch: "amd64", Providers: providers(*connectorName, *provider)})
@@ -410,7 +410,6 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 			return attest.Policy{Anchors: ta}
 		})
 	}
-	_ = harnessVersion
 	res, err := attest.Build(ctx, opts)
 	out := BuildOutput{Relay: sessions}
 	if res != nil {
@@ -655,7 +654,7 @@ func runScan(ctx context.Context, args []string, stdout io.Writer) (int, error) 
 	skill, mcp := scanners(cfg, *noMCP, *analyzers)
 	so := attest.ScanOptions{Skill: skill, MCPStatic: mcp, Compiled: policy.CompileAdmission(cfg), AllowedMCPHosts: mcpHosts, BlockAtOrAbove: floor}
 	if *connectorName != "" {
-		spec, _, _, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: "scan", HookBinary: []byte("x"), RelayBinary: []byte("x"),
+		spec, _, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: "scan", HookBinary: []byte("x"), RelayBinary: []byte("x"),
 			MetadataOnly: true})
 		if err != nil {
 			return ExitUsageError, err

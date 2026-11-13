@@ -286,7 +286,12 @@ func TestSubstrateActorListenerAuthentication(t *testing.T) {
 }
 
 func TestSubstrateHookAnswersLikeTheSandboxIngress(t *testing.T) {
-	f := newSubstrateFixture(t)
+	// A gateway replica has its audit store (the hook correlation) and its
+	// leader client, as on a chart install; without them a Substrate tool
+	// step is reported as unrecorded (GAP-0201).
+	chains := newTestChainLeader(t)
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.Chains = chains })
+	f.api.store, f.api.logger = testStoreAndV8Logger(t)
 	sb := newSandboxIngressFixture(t)
 	copyBinding, copyTok := sb.mint(t, "dc-claude-copy", "claudecode", "2.1.156", "claudecode-hooks-v1", "")
 	_ = copyBinding
