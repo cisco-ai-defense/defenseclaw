@@ -1529,9 +1529,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved, resolvedTarget := false, false, false
+	overBudget, unresolved, resolvedTarget, readsOnlyMention := false, false, false, false
 	var unprovenTarget unprovenWrite
 	evidence := request
+	evidence.readsOnlyMention = &readsOnlyMention
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	evidence.resolvedTarget = &resolvedTarget
@@ -1607,7 +1608,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if unprovenOnly {
 				enforcement = findingEnforcementAlertOnly
 			}
-			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
+			// A command held as a key write only because words of statements
+			// that read the keys file name it, in a per-user default or
+			// permissive install, alerts: reading the file is not writing it
+			// (S7 lead 2026-11-13, rel-1-0-10:GAP-0018). Strict and managed
+			// installs keep the block.
+			readsOnly := readsOnlyMention && !unprovenOnly && named.ID == rule.ID
+			if readsOnly {
+				enforcement = findingEnforcementAlertOnly
+			}
+			if readsOnly {
+				title = readOnlyKeyMentionTitle
+			} else if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
@@ -1958,6 +1970,10 @@ func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 	return false
 }
+
+// readOnlyKeyMentionTitle is the title of the alert for a command whose only
+// statements naming the keys file read it.
+const readOnlyKeyMentionTitle = "A command that also does other work reads an SSH key file"
 
 // unresolvedWriteTargetTitle is the title of the authorized-keys block of a
 // write whose target neither the managed hook client nor the gateway could

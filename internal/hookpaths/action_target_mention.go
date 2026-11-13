@@ -378,6 +378,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
+				if !readOnly && !stateOnly && memo.readsExcused() {
+					// The redirects of the statement were judged above, each on
+					// its own word; a reader that sends its output to an
+					// ordinary file still only reads what it names.
+					readOnly = actionStatementReadsOnly(stmt, home)
+				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
 				if !stateOnly {
@@ -414,6 +420,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						continue
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
+						if readOnly && direct[stmt] && memo.readsExcused() && !actionCallChangesDirectory(call, home) {
+							// ActionMentionsOnlyReads asks whether every protected
+							// name sits in a statement that only reads.
+							judgedWords = append(judgedWords, word)
+							continue
+						}
 						if readOnly && direct[stmt] {
 							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values)})
 							judgedWords = append(judgedWords, word)
@@ -2828,13 +2840,46 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// (rel-1-0-6:GAP-0145).
 			body, static := actionPowerShellCommandBody(call.Args, home)
 			safe = static && actionPowerShellListOnlyBody(body, home)
-		case "bash":
-			// A literal bash -c body that only reads is still read-only when
-			// the outer call is judged from a home containing protected files.
-			// The exact launch and every child statement are checked below.
-			safe = actionReadOnlyBashCLaunch(call, home, depth)
+		case "ssh":
+			// The remote command line runs on another machine; it is judged
+			// as if it ran here, which can only be stricter.
+			if body, ok := actionSSHRemoteBody(call, home); ok && depth+1 < 8 {
+				child, parsed := parseShell(body)
+				safe = parsed && actionKnownReadOnlyShellDepth(child, home, depth+1)
+			} else {
+				safe = false
+			}
+		case "sed":
+			safe = actionSedPrintsOnly(call, home)
 		default:
-			safe = false
+			base := programBase(program)
+			switch {
+			case slices.Contains(actionBodyShells, base):
+				// A shell given a literal -c (or -lc) body is read-only when
+				// the body it runs is (rel-1-0-10:GAP-0018).
+				if body, ok := actionShellBodyOfCall(call, home); ok && depth+1 < 8 {
+					child, parsed := parseShell(body)
+					safe = parsed && actionKnownReadOnlyShellDepth(child, home, depth+1)
+				} else {
+					safe = base == "bash" && actionReadOnlyBashCLaunch(call, home, depth)
+				}
+			case slices.Contains(actionStateProbePrograms, base):
+				// test and [ only report the state of a file (-e, -L, -r, -s).
+				safe = true
+			case base == actionSearchProgram:
+				// ripgrep searches its operands; --pre runs a program on every
+				// file it opens.
+				safe = true
+				for _, arg := range call.Args[1:] {
+					option, known := StaticWord(arg, home)
+					if !known || slices.ContainsFunc(actionSearchHelperFlags, func(flag string) bool { return strings.HasPrefix(option, flag) }) {
+						safe = false
+						break
+					}
+				}
+			default:
+				safe = false
+			}
 		}
 		return safe
 	})
@@ -2862,6 +2907,30 @@ func actionReadOnlyWrappedCall(call *syntax.CallExpr, home string) (*syntax.Call
 		return nil, false
 	}
 	return &syntax.CallExpr{Args: words}, true
+}
+
+// actionCallChangesDirectory reports a cd, pushd or popd call: it reads
+// nothing, and the directory it enters decides what the statements after it
+// write (cd ~/.ssh && cp a.txt note.txt).
+func actionCallChangesDirectory(call *syntax.CallExpr, home string) bool {
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known {
+		return false
+	}
+	switch programBase(program) {
+	case "cd", "pushd", "popd":
+		return true
+	}
+	return false
+}
+
+// actionStatementReadsOnly is actionKnownReadOnlyShell for one statement
+// whose own output redirects are left to the redirect check (the walk judges
+// every redirect word of a statement before its arguments).
+func actionStatementReadsOnly(stmt *syntax.Stmt, home string) bool {
+	bare := *stmt
+	bare.Redirs = nil
+	return actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{&bare}}, home)
 }
 
 func actionReadOnlyBashCLaunch(call *syntax.CallExpr, home string, depth int) bool {

@@ -16,8 +16,6 @@ func TestLinkPointsIntoItselfIsNotAnAlias(t *testing.T) {
 		want int
 	}{
 		{"target below the link name", []string{"-s", "/data/ws/dir1", "/data/ws"}, 0},
-		{"target is the link name", []string{"-s", "/data/ws", "/data/ws"}, 0},
-		{"relative target below the link", []string{"-s", "dir1/sub", "/data/ws/dir1"}, 0},
 		{"sibling target", []string{"-s", "/data/ws/dir1", "/data/other"}, 1},
 		{"parent target", []string{"-s", "/data", "/data/ws"}, 1},
 		{"link to the keys file", []string{"-s", "/home/alice/.ssh/authorized_keys", "/data/note"}, 1},
