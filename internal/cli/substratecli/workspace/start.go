@@ -147,7 +147,18 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	}
 	stateDir := opts.StateDir
 	if stateDir == "" {
-		dir, err := NewStateDir(root, opts.Name)
+		// The relay names a private folder outside the working directory
+		// (GAP-0163); an older relay does not, and the state goes beside
+		// the copy as before.
+		base := root
+		if sr, ok := t.(interface {
+			StateRoot(context.Context) (string, error)
+		}); ok {
+			if d, err := sr.StateRoot(ctx); err == nil && d != "" {
+				base = d
+			}
+		}
+		dir, err := NewStateDir(base, opts.Name)
 		if err != nil {
 			return nil, cleanErr("copy the project", err)
 		}

@@ -116,11 +116,14 @@ type Options struct {
 	Backoff   Backoff
 	// MaxWait bounds the wait while the cluster is full or the agent is
 	// starting (default 10m).
-	MaxWait  time.Duration
-	Now      func() time.Time
-	Sleep    func(context.Context, time.Duration) error
-	NoBanner bool
-	NoAsks   bool
+	MaxWait time.Duration
+	// ReconnectFor bounds how long a lost connection is retried, as when
+	// the agent is suspended and resumes (default 3m, GAP-0003).
+	ReconnectFor time.Duration
+	Now          func() time.Time
+	Sleep        func(context.Context, time.Duration) error
+	NoBanner     bool
+	NoAsks       bool
 	// InitialSize is the terminal size when In is not a terminal
 	// (default 80x24).
 	InitialSize relay.Resize
@@ -148,7 +151,9 @@ const (
 	stableAfter = 30 * time.Second
 	fullMsg     = "The cluster is full. Waiting for room (Ctrl-C to stop)..."
 	startingMsg = "The agent is starting. Waiting for it (Ctrl-C to stop)..."
-	lostMsg     = "Connection lost; reconnecting..."
+	lostMsg     = "Connection lost; reconnecting (Ctrl-] detaches; keys typed now are not sent)..."
+	backMsg     = "Reconnected."
+	stopMsg     = "Stopped reconnecting. The agent keeps running. Come back with: "
 	fallbackMsg = "WebSocket is blocked here; using the slower fallback"
 )
 
@@ -180,6 +185,9 @@ func (o *Options) normalize() error {
 	o.Backoff = o.Backoff.withDefaults()
 	if o.MaxWait <= 0 {
 		o.MaxWait = 10 * time.Minute
+	}
+	if o.ReconnectFor <= 0 {
+		o.ReconnectFor = 3 * time.Minute
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -238,6 +246,20 @@ type attacher struct {
 	close func()
 
 	wsBlocked int
+
+	// Input while the link is down (GAP-0003): what was typed then is not
+	// sent (it would land on a screen the person cannot see), and the
+	// person is told. unsent counts bytes the relay client read but could
+	// not send when the connection ended; dropped the bytes typed during
+	// the outage; lost is set while a lost connection is retried.
+	unsent, dropped atomic.Int64
+	lost            atomic.Bool
+	// drain is the outage reader: it runs from a lost connection until
+	// the relay greets the next one.
+	drainMu     sync.Mutex
+	drainCtx    context.Context
+	drainStop   func()
+	drainCancel []context.CancelCauseFunc
 
 	sizeMu sync.Mutex
 	size   relay.Resize
@@ -342,16 +364,20 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 	failures, connections := 0, 0
 	lostShown := false
 	var lastErr error
+	var outageStart time.Time
+	defer a.endAllDrains()
+	cur := ctx // a reconnect uses the outage context: Ctrl-] ends it too
 	for {
 		res.Transport = a.mode
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
 		began := o.Now()
-		ar, connected, err := a.once(ctx)
+		ar, connected, err := a.once(cur)
 		if connected {
 			connections++
 			res.Reconnects = connections - 1
+			outageStart = time.Time{}
 			park.reset()
 			a.pending = false
 			failures, lostShown = 0, false
@@ -379,7 +405,28 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 				return res, nil
 			}
 		}
-		k, kerr := a.classify(ctx, err, connected)
+		// The link is down from here until the next connection: the
+		// keyboard is read here, so Ctrl-] still detaches and what is
+		// typed is counted, not silently lost.
+		wctx := ctx
+		if connections > 0 {
+			// Before the first connection, type-ahead goes to the agent
+			// as in a shell; after a loss it does not.
+			wctx = a.beginDrain(ctx)
+			cur = wctx
+			a.lost.Store(true)
+			if outageStart.IsZero() {
+				outageStart = o.Now()
+			}
+		}
+		k, kerr := a.classify(wctx, err, connected)
+		if a.outageStopped(wctx, &res) {
+			return res, nil
+		}
+		if connections > 0 && o.Now().Sub(outageStart) >= o.ReconnectFor {
+			a.endLine()
+			return res, a.reconnectGaveUp(o.Target, o.ReconnectFor, kerr)
+		}
 		switch k {
 		case outFatal:
 			a.endLine()
@@ -387,7 +434,10 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 		case outWait:
 			var re *RouteError
 			errors.As(kerr, &re)
-			if werr := park.wait(ctx, re); werr != nil {
+			if werr := park.wait(wctx, re); werr != nil {
+				if a.outageStopped(wctx, &res) {
+					return res, nil
+				}
 				return res, werr
 			}
 			continue
@@ -405,7 +455,7 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 		failures++
 		if failures >= o.Backoff.MaxAttempts {
 			a.endLine()
-			return res, giveUp(o.Target, connections > 0, failures, lastErr)
+			return res, a.notSentErr(giveUp(o.Target, connections > 0, failures, lastErr))
 		}
 		if !lostShown {
 			lostShown = true
@@ -415,10 +465,156 @@ func (a *attacher) run(ctx context.Context) (Result, error) {
 				a.say("Could not connect yet ("+kerr.Error()+"); retrying...", false)
 			}
 		}
-		if serr := o.Sleep(ctx, rec.next()); serr != nil {
+		if serr := o.Sleep(wctx, rec.next()); serr != nil {
+			if a.outageStopped(wctx, &res) {
+				return res, nil
+			}
 			return res, ctxErr(ctx, serr)
 		}
 	}
+}
+
+// errOutageDetach and errOutageStop end a wait for the link: Ctrl-] or
+// Ctrl-C typed while it was down.
+var (
+	errOutageDetach = errors.New("detached while reconnecting")
+	errOutageStop   = errors.New("stopped while reconnecting")
+)
+
+// draining reports that the outage reader runs.
+func (a *attacher) draining() bool {
+	a.drainMu.Lock()
+	defer a.drainMu.Unlock()
+	return a.drainStop != nil
+}
+
+// beginDrain starts the outage reader (once per outage) and returns its
+// context.
+func (a *attacher) beginDrain(ctx context.Context) context.Context {
+	a.drainMu.Lock()
+	defer a.drainMu.Unlock()
+	if a.drainStop == nil {
+		var cancel context.CancelCauseFunc
+		a.drainCtx, a.drainStop, cancel = a.drainInput(ctx)
+		a.drainCancel = append(a.drainCancel, cancel)
+	}
+	return a.drainCtx
+}
+
+// endDrain stops the outage reader; its context stays valid for the
+// connection it carried.
+func (a *attacher) endDrain() {
+	a.drainMu.Lock()
+	stop := a.drainStop
+	a.drainStop = nil
+	a.drainMu.Unlock()
+	if stop != nil {
+		stop()
+	}
+}
+
+func (a *attacher) endAllDrains() {
+	a.endDrain()
+	a.drainMu.Lock()
+	defer a.drainMu.Unlock()
+	for _, c := range a.drainCancel {
+		c(nil)
+	}
+	a.drainCancel = nil
+}
+
+// drainInput reads the keyboard while the link is down, until stop is
+// called. Ctrl-] or Ctrl-C cancel the returned context (the wait ends at
+// once); every other byte is counted as not sent and the status line says
+// so. A wait that uses the context ends when the person stops it.
+func (a *attacher) drainInput(ctx context.Context) (context.Context, func(), context.CancelCauseFunc) {
+	wctx, cancel := context.WithCancelCause(ctx)
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer a.term.guard()
+		noted := false
+		for {
+			select {
+			case <-quit:
+				return
+			case <-wctx.Done():
+				return
+			case <-a.hub.eof:
+				return
+			case b := <-a.hub.ch:
+				for i, c := range b {
+					switch c {
+					case relay.DetachKey:
+						a.dropped.Add(int64(i))
+						cancel(errOutageDetach)
+						return
+					case 0x03:
+						a.dropped.Add(int64(i))
+						cancel(errOutageStop)
+						return
+					}
+				}
+				a.dropped.Add(int64(len(b)))
+				if a.errTTY || !noted {
+					noted = true
+					a.say("Connection lost; reconnecting (Ctrl-] detaches)..."+a.notSentNote(" ", false), false)
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return wctx, func() {
+		once.Do(func() {
+			close(quit)
+			<-done
+		})
+	}, cancel
+}
+
+// outageStopped reports a wait the person ended with Ctrl-] or Ctrl-C.
+func (a *attacher) outageStopped(wctx context.Context, res *Result) bool {
+	switch context.Cause(wctx) {
+	case errOutageDetach, errOutageStop:
+		res.Detached = true
+		a.say(stopMsg+connectHint(a.o.Target.Name)+a.notSentNote(" ", true), true)
+		return true
+	}
+	return false
+}
+
+// notSentNote says how much input was not sent (and with reset, starts
+// counting again); "" when nothing was lost.
+func (a *attacher) notSentNote(sep string, reset bool) string {
+	n := a.unsent.Load() + a.dropped.Load()
+	if reset {
+		a.unsent.Store(0)
+		a.dropped.Store(0)
+	}
+	switch {
+	case n == 0:
+		return ""
+	case reset:
+		return sep + fmt.Sprintf("%d typed character(s) were not sent; type them again.", n)
+	}
+	return sep + fmt.Sprintf("(%d typed character(s) not sent)", n)
+}
+
+func (a *attacher) notSentErr(err error) error {
+	if note := a.notSentNote(" ", true); note != "" {
+		return fmt.Errorf("%w.%s", err, note)
+	}
+	return err
+}
+
+// reconnectGaveUp ends a reconnect that took longer than ReconnectFor.
+func (a *attacher) reconnectGaveUp(t Target, d time.Duration, last error) error {
+	why := ""
+	if last != nil {
+		why = " (" + safetext.Line(last.Error()) + ")"
+	}
+	return a.notSentErr(fmt.Errorf("could not reconnect to %s for %s%s; the agent keeps running (a suspended agent wakes when you connect). Come back with: %s", t.Name, fmtDur(d), why, connectHint(t.Name)))
 }
 
 func giveUp(t Target, wasConnected bool, tries int, last error) error {
@@ -449,6 +645,9 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 	defer cancel()
 	in := a.hub.open()
 	defer in.close()
+	if a.draining() {
+		in.gate = make(chan struct{})
+	}
 	var r io.Reader = in
 	ch := make(chan relay.Resize, 4)
 	a.sizeMu.Lock()
@@ -471,8 +670,14 @@ func (a *attacher) once(ctx context.Context) (relay.AttachResult, bool, error) {
 		OnControl: func(c relay.Control) {
 			if c.Type == relay.CtlHello {
 				connected.Store(true)
+				a.endDrain()
+				in.openGate()
+				if a.lost.Swap(false) {
+					a.say(backMsg+a.notSentNote(" ", true), true)
+				}
 			}
 		},
+		OnUnsent: func(n int) { a.unsent.Add(int64(n)) },
 	}
 	if err := a.term.raw(); err != nil {
 		return relay.AttachResult{}, false, &fatalError{fmt.Errorf("could not switch the terminal to raw mode: %w", err)}
