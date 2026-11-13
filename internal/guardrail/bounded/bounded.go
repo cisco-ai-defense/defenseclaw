@@ -66,8 +66,12 @@ func Caps() []Cap {
 }
 
 // CapSet is the set of caps a reading hit: a plain value a reader returns in
-// its result. The zero value hit none.
+// its result. The zero value hit none. Bit 0 (no cap kind) marks an internal
+// bound misuse (see Misuse).
 type CapSet struct{ bits uint16 }
+
+// misuseBit marks a CapSet that holds the hit of a misused Counter.
+const misuseBit = 1
 
 // Of is the CapSet of the given caps. A cap with no kind (0 or out of range)
 // counts as Items: a reader that names no kind is still truncated.
@@ -93,8 +97,16 @@ func (s CapSet) Union(o CapSet) CapSet { return CapSet{s.bits | o.bits} }
 // Any reports that some cap was hit.
 func (s CapSet) Any() bool { return s.bits != 0 }
 
+// Misuse reports that the set holds the hit of a misused Counter (one never
+// bound with NewCounter, or one bound to another Truncated): an internal
+// error of the reader, named in the audit reason.
+func (s CapSet) Misuse() bool { return s.bits&misuseBit != 0 }
+
 // Has reports that cap c was hit.
 func (s CapSet) Has(c Cap) bool { return c != 0 && c < capEnd && s.bits&(1<<c) != 0 }
+
+// MisuseReason names an internal bound misuse in the audit reason.
+const MisuseReason = "internal bound misuse"
 
 // ReasonCode is the audit reason code of every truncated input.
 const ReasonCode = "bounded_truncated"
@@ -118,6 +130,9 @@ func (s CapSet) Reason() string {
 			buf = append(buf, capNames[c]...)
 			first = false
 		}
+	}
+	if s.Misuse() {
+		buf = append(buf, "; "+MisuseReason...)
 	}
 	return string(buf)
 }
@@ -167,51 +182,87 @@ func (t *Truncated) Before(now, deadline time.Time) bool {
 // Merge adds the caps of a nested reading.
 func (t *Truncated) Merge(s CapSet) { t.set = t.set.Union(s) }
 
-// Any reports that some cap was hit.
-//
-// Any sees this Truncated's hits and those of any unbound Counter (see
-// Counter); a Counter bound to another Truncated is seen only by
-// Set(counters...).
-func (t *Truncated) Any() bool { return t.set.Any() || unboundHits.Load() != 0 }
+// Any reports that some cap was hit. It sees this Truncated's own hits; the
+// hits of a misused Counter (unbound, or bound elsewhere) reach the result
+// only through Set(counters...).
+func (t *Truncated) Any() bool { return t.set.Any() }
 
-// Set is the caps hit so far, the value a reader returns, including the hits
-// of any unbound Counter (see Counter). Pass the reader's Counters: the hits
-// of one bound to another Truncated by mistake are included too. With
-// PanicOnMisuse on (go test binaries), such a Counter panics here instead.
+// Set is the caps hit so far, the value a reader returns. Pass the reader's
+// Counters: a misused one (never bound with NewCounter, or bound to another
+// Truncated) adds its hit and the misuse mark to THIS call's result, so the
+// call that was cut short floors and its reason names the misuse; no other
+// call is affected. With PanicOnMisuse on (go test), the misuse panics where
+// it is made instead. A Counter bound to another Truncated is read without a
+// lock, so share nothing between goroutines (go test catches it first).
 func (t *Truncated) Set(counters ...*Counter) CapSet {
-	set := t.set.Union(CapSet{uint16(unboundHits.Load())})
+	set := t.set
 	for _, k := range counters {
 		if k == nil || k.t == t {
 			continue
 		}
-		if misusePanics.Load() {
-			panic("bounded: a Counter passed to Truncated.Set is bound to another Truncated; make it with NewCounter(&thisTruncated, ...)")
+		if k.t == nil {
+			set = set.Union(k.own) // the misuse was reported at its take
+			continue
 		}
-		if k.t != nil {
-			set = set.Union(k.t.set)
-		}
+		misuse(MisuseMisbound)
+		set = set.Union(k.t.set).with(k.cap).Union(CapSet{misuseBit})
 	}
 	return set
 }
 
-// unboundHits holds the caps hit by Counters that were never bound to a
-// Truncated (a zero Counter, a struct field one constructor path forgot to
-// set with NewCounter). Every Truncated reports them (Any, Set), process-wide
-// and for good: such a reader cannot say which call it cut short, so every
-// call is judged as truncated (the unknown tier) rather than one input going
-// unread in silence. Go test binaries panic at the first take instead
-// (PanicOnMisuse).
-var unboundHits atomic.Uint32
+// Misuse is a kind of internal bound misuse.
+type Misuse uint8
 
-// misusePanics: see PanicOnMisuse.
-var misusePanics atomic.Bool
+const (
+	// MisuseUnbound: a take on a Counter never bound with NewCounter.
+	MisuseUnbound Misuse = iota + 1
+	// MisuseMisbound: Set given a Counter bound to another Truncated.
+	MisuseMisbound
+)
+
+// String is the misuse's log name.
+func (m Misuse) String() string {
+	switch m {
+	case MisuseUnbound:
+		return "a take on a Counter never bound with NewCounter"
+	case MisuseMisbound:
+		return "a Counter passed to Truncated.Set is bound to another Truncated"
+	}
+	return "unknown misuse"
+}
+
+var (
+	misusePanics atomic.Bool
+	misuseHook   atomic.Pointer[func(Misuse)]
+)
+
+// misuse reports one misuse: a panic with PanicOnMisuse on, else the hook.
+func misuse(m Misuse) {
+	if misusePanics.Load() {
+		panic("bounded: " + m.String() + "; make every Counter with NewCounter(&thisTruncated, cap, max)")
+	}
+	if hook := misuseHook.Load(); hook != nil {
+		(*hook)(m)
+	}
+}
+
+// OnMisuse sets the function told about each misuse in production (the
+// gateway logs it once and counts it). The call is still floored: the hit
+// and the misuse mark are in its CapSet.
+func OnMisuse(hook func(Misuse)) {
+	if hook == nil {
+		misuseHook.Store(nil)
+		return
+	}
+	misuseHook.Store(&hook)
+}
 
 // PanicOnMisuse makes a misused Counter panic where the mistake is made (the
 // first take of an unbound Counter, Set with a Counter bound elsewhere)
-// instead of the production fallback (every call floored, hits merged). It is
-// a test hook: a package that adopts the helper calls it from a _test.go file
-// (func init() { bounded.PanicOnMisuse(true) }); production code never does.
-// This package does not import testing, so its binaries do not grow.
+// instead of the production path (the hook, and the call floored). It is a
+// test hook: every package that imports this one calls it from a _test.go
+// file (func init() { bounded.PanicOnMisuse(true) }), which TestAdopters
+// checks; production code never does. This package does not import testing.
 func PanicOnMisuse(on bool) { misusePanics.Store(on) }
 
 // Counter counts one cap kind across a walk and records its hit in the
@@ -226,11 +277,13 @@ func PanicOnMisuse(on bool) { misusePanics.Store(on) }
 // wall-clock deadline.
 //
 // NewCounter is the only way to make a Counter that counts. A zero Counter
-// (never set with NewCounter) refuses its first take and records the hit in
-// every Truncated (see unboundHits); under go test it panics.
+// (never set with NewCounter) refuses every take and keeps the hit, with the
+// misuse mark, for Truncated.Set(counters...), so the call it read floors;
+// under go test it panics. TestAdopters rejects a zero Counter in the code.
 type Counter struct {
 	_      noCopy
 	t      *Truncated
+	own    CapSet // the hits of an unbound Counter
 	n, max int
 	cap    Cap
 }
@@ -250,10 +303,10 @@ func (k *Counter) Take() bool { return k.TakeN(1) }
 // saturates instead of wrapping.
 func (k *Counter) TakeN(n int) bool {
 	if k.t == nil {
-		if misusePanics.Load() {
-			panic("bounded: Take on a Counter that was never bound; make it with NewCounter(&trunc, cap, max)")
+		if !k.own.Misuse() {
+			misuse(MisuseUnbound)
 		}
-		unboundHits.Or(uint32(CapSet{}.with(k.cap).bits))
+		k.own = k.own.with(k.cap).Union(CapSet{misuseBit})
 		return false
 	}
 	switch {
