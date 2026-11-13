@@ -262,7 +262,7 @@ func (s *Store) expire(now time.Time) {
 			a.State, a.DecidedAt = StateExpired, now
 			s.persist(a)
 			s.appendLocked(Decision{At: now, Atespace: a.Atespace, Actor: a.Actor, UID: a.UID, OwnerID: a.OwnerID,
-				Source: "ask", Tool: a.Tool, Verdict: "expired", Reason: "nobody answered the ask in time"})
+				Source: "ask", Tool: firstNonEmpty(a.Tool, a.Host), Verdict: "expired", Reason: "nobody answered the ask in time"})
 		}
 	}
 	if len(s.asks) > maxAsks {

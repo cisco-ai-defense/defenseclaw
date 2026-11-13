@@ -338,14 +338,17 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(),
 			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
 		}
+		// The leader's store is the record of this actor's asks; the
+		// registration copy here is cached (registry.Remote) and can miss an
+		// approval for seconds, so an approved host is looked up in the store.
+		list, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, Atespace: reg.Atespace, Actor: reg.Name})
+		if err != nil {
+			writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
+			return
+		}
 		if in.AskID != "" {
 			// The callout holds the request and reads its ask again; only
 			// this actor incarnation's ask is answered.
-			list, err := st.cfg.Asks.List(r.Context(), asks.ListRequest{All: true, Atespace: reg.Atespace, Actor: reg.Name})
-			if err != nil {
-				writeSubstrateJSONError(w, http.StatusServiceUnavailable, "asks_unavailable")
-				return
-			}
 			for _, a := range list {
 				if a.ID == in.AskID && a.UID == reg.UID {
 					writeSubstrateJSON(w, http.StatusOK, askView(a))
@@ -355,7 +358,9 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
 			return
 		}
-		if ask.Host != "" && slices.Contains(reg.Approved, ask.Host) {
+		if ask.Host != "" && (slices.Contains(reg.Approved, ask.Host) || slices.ContainsFunc(list, func(a asks.Ask) bool {
+			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved
+		})) {
 			// Approved earlier for this actor (the controller adds it to the
 			// policy on its next pass): not asked twice.
 			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
