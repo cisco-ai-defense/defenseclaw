@@ -203,6 +203,9 @@ func NewEngine(o Options) (*Engine, error) {
 	}
 	e.uids = NewUIDCache(o.UIDs, cfg.UID.CacheTTL, cfg.UID.StaleMax)
 	e.uids.now = e.now
+	if cfg.Chain.CheckBudget > 0 {
+		e.uids.refreshBudget = cfg.Chain.CheckBudget
+	}
 	e.secrets = newSecretValues(cfg.ActorSecretsDir)
 	e.secrets.now = e.now
 	e.red = newRedactor(cfg, e.secrets)
@@ -293,9 +296,24 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	switch {
 	case p.stale:
 		// The cache entry is dropped: the name is resolved again.
-		v = e.decideHeaders(ctx, req, &pass{last: true})
-	case !p.confirmed && e.uids.Refresh(ctx, req.Actor):
-		v = e.decideHeaders(ctx, req, &pass{last: true})
+		p = pass{last: true}
+		v = e.decideHeaders(ctx, req, &p)
+	case !p.confirmed:
+		switch e.uids.Refresh(ctx, req.Actor) {
+		case RefreshChanged:
+			p = pass{last: true, refreshed: true}
+			v = e.decideHeaders(ctx, req, &p)
+		case RefreshSame:
+			p.confirmed = true
+		}
+	}
+	if !p.confirmed && (v.Allow || v.Category == CategoryChainUnchecked || v.Category == CategoryActorNotLive) {
+		// Not even a refusal of the policy stages to stand on: an unchecked
+		// step or a cached delete, and the leader did not confirm the
+		// incarnation in time. Never chain.failure_mode's allow (GAP-0243).
+		v = deny(v, CategoryChainUnchecked, sourceIdentity, uncheckedUnconfirmed,
+			"DefenseClaw could not confirm this actor's registration in time.")
+		v.Retryable = true
 	}
 	return v
 }
@@ -314,8 +332,16 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 // request again; a stale chain answer drops the entry and decides it
 // again. So a recreated actor is decided under its own profile and UID,
 // never its predecessor's (GAP-0237). The last pass decides as it is.
+//
+// A refresh is bounded (GAP-0243): a request waits for it a short budget,
+// and a name is looked up once per interval. Unconfirmed, a refusal of the
+// policy stages stands (it is a refusal); an unchecked step or a cached
+// delete is refused, retryable (registration_unconfirmed), never left to
+// chain.failure_mode, which decides only a leader that cannot be reached.
 type pass struct {
-	last      bool
+	last bool
+	// refreshed: the entry was resolved by Refresh for this request.
+	refreshed bool
 	confirmed bool
 	stale     bool
 }
@@ -355,7 +381,7 @@ func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Ve
 	// A cached entry is confirmed by the chain check below, or resolved
 	// again. Nothing is learned from a second lookup during an outage, and
 	// an entry with no registration lives uidMissTTL only.
-	p.confirmed = src != fromCache || (err == nil && rec.UID == "")
+	p.confirmed = p.refreshed || src != fromCache || (err == nil && rec.UID == "")
 	lookupDown := false
 	switch {
 	case errors.Is(err, ErrActorNotLive):

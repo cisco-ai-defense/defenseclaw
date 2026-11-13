@@ -53,11 +53,44 @@ type UIDCache struct {
 	ttl      time.Duration
 	staleMax time.Duration
 	now      func() time.Time
+	// refreshBudget bounds how long a request waits for a Refresh, and
+	// refreshEvery how often a name is refreshed (GAP-0243).
+	refreshBudget time.Duration
+	refreshEvery  time.Duration
 
-	mu sync.Mutex
-	m  map[string]uidEntry
-	sf singleflight.Group
+	mu      sync.Mutex
+	m       map[string]uidEntry
+	refresh map[string]*refreshState
+	sf      singleflight.Group
 }
+
+// refreshFlightMax bounds one refresh lookup. A request waits refreshBudget
+// at most; the lookup goes on, so its answer fills the cache for the next.
+const refreshFlightMax = 2 * time.Second
+
+// refreshState is a name's last refresh: when it started, whether it is
+// still running, and what it confirmed (GAP-0243).
+type refreshState struct {
+	started   time.Time
+	running   bool
+	confirmed time.Time
+	entry     uidEntry
+}
+
+// RefreshResult is what a Refresh learned.
+type RefreshResult int
+
+// Refresh results.
+const (
+	// RefreshSame: the registration is the cached one.
+	RefreshSame RefreshResult = iota
+	// RefreshChanged: another UID, profile or attendance, or deleted.
+	RefreshChanged
+	// RefreshUnconfirmed: no answer within the budget, an outage, or a
+	// name refreshed within refreshEvery whose last refresh confirmed
+	// nothing.
+	RefreshUnconfirmed
+)
 
 type uidEntry struct {
 	rec  ActorRecord
@@ -75,7 +108,8 @@ func (e uidEntry) fresh(now time.Time, ttl time.Duration) bool {
 // NewUIDCache wraps r. A nil r resolves nothing: every actor is live with
 // no registration (a callout without a leader).
 func NewUIDCache(r UIDResolver, ttl, staleMax time.Duration) *UIDCache {
-	return &UIDCache{r: r, ttl: ttl, staleMax: staleMax, now: time.Now, m: map[string]uidEntry{}}
+	return &UIDCache{r: r, ttl: ttl, staleMax: staleMax, now: time.Now, m: map[string]uidEntry{},
+		refresh: map[string]*refreshState{}, refreshBudget: defaultRefreshBudget, refreshEvery: ttl / 4}
 }
 
 // Where Resolve's answer came from.
@@ -142,23 +176,81 @@ func (c *UIDCache) load(ctx context.Context, a ActorRef) (uidEntry, error) {
 	return v.(uidEntry), nil
 }
 
+// defaultRefreshBudget is the refresh wait when the engine sets none.
+const defaultRefreshBudget = 20 * time.Millisecond
+
 // Refresh resolves a again past its cached entry and reports whether the
-// registration changed: another UID, profile or attendance, or deleted
-// (GAP-0237). An outage changes nothing.
-func (c *UIDCache) Refresh(ctx context.Context, a ActorRef) bool {
+// registration changed (GAP-0237). It bounds what a flood of refused
+// requests costs the leader and the requests (GAP-0243): one lookup per
+// name at a time (its own singleflight, never forgotten while it runs), at
+// most one started per refreshEvery, and a request waits refreshBudget for
+// it. A name a refresh confirmed within refreshEvery, still cached as it
+// was, is the same without a lookup.
+func (c *UIDCache) Refresh(ctx context.Context, a ActorRef) RefreshResult {
 	if c == nil || c.r == nil {
-		return false
+		return RefreshSame
 	}
 	key := a.Key()
+	now := c.now()
 	c.mu.Lock()
 	prev, ok := c.m[key]
-	c.mu.Unlock()
-	c.sf.Forget(key)
-	ne, err := c.load(ctx, a)
-	if err != nil {
-		return false
+	st := c.refresh[key]
+	if st == nil {
+		if len(c.refresh) >= maxUIDEntries {
+			for k, old := range c.refresh {
+				if !old.running {
+					delete(c.refresh, k)
+				}
+			}
+		}
+		st = &refreshState{}
+		c.refresh[key] = st
 	}
-	return !ok || ne.live != prev.live || ne.rec != prev.rec
+	switch {
+	case st.running:
+		// Join the lookup that is running.
+	case !st.confirmed.IsZero() && now.Sub(st.confirmed) < c.refreshEvery && ok && prev.live == st.entry.live && prev.rec == st.entry.rec:
+		c.mu.Unlock()
+		return RefreshSame
+	case !st.started.IsZero() && now.Sub(st.started) < c.refreshEvery:
+		c.mu.Unlock()
+		return RefreshUnconfirmed
+	default:
+		st.started, st.running = now, true
+	}
+	c.mu.Unlock()
+	ch := c.sf.DoChan("refresh\x00"+key, func() (any, error) {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshFlightMax)
+		defer cancel()
+		rec, live, err := c.r.ResolveActor(fctx, a.Atespace, a.Name)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		st.running = false
+		if err != nil {
+			return nil, err
+		}
+		ne := uidEntry{rec: rec, live: live, at: c.now()}
+		st.confirmed, st.entry = ne.at, ne
+		c.storeLocked(key, ne)
+		return ne, nil
+	})
+	t := time.NewTimer(c.refreshBudget)
+	defer t.Stop()
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return RefreshUnconfirmed
+		}
+		ne := r.Val.(uidEntry)
+		if !ok || ne.live != prev.live || ne.rec != prev.rec {
+			return RefreshChanged
+		}
+		return RefreshSame
+	case <-t.C:
+		return RefreshUnconfirmed
+	case <-ctx.Done():
+		return RefreshUnconfirmed
+	}
 }
 
 // LookupError is a registration lookup outage with no cached entry young
@@ -185,6 +277,10 @@ func (e uidEntry) result() (ActorRecord, error) {
 func (c *UIDCache) store(key string, e uidEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.storeLocked(key, e)
+}
+
+func (c *UIDCache) storeLocked(key string, e uidEntry) {
 	if len(c.m) >= maxUIDEntries {
 		for k, old := range c.m {
 			if e.at.Sub(old.at) >= c.staleMax {

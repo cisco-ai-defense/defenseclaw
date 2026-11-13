@@ -126,6 +126,10 @@ const (
 	// uncheckedStale is a UID the leader answered stale again after the
 	// name was resolved afresh: refused, retryable (GAP-0234).
 	uncheckedStale = "registration_stale"
+	// uncheckedUnconfirmed is an unchecked step or a cached delete whose
+	// registration the leader did not confirm in time: refused, retryable
+	// (GAP-0243).
+	uncheckedUnconfirmed = "registration_unconfirmed"
 )
 
 // chainLimiter bounds in-flight checks per actor: one semaphore per actor,
