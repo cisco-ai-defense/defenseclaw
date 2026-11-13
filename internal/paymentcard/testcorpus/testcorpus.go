@@ -14,8 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package testcorpus generates the payment-card detector corpus used by the
-// tests of every card detector (substrate-1:GAP-0132). All benign values are
+// Package testcorpus generates the PII detector corpora used by the tests of
+// every payment card detector (substrate-1:GAP-0132) and email rule
+// (substrate-1:GAP-0149, GAP-0159). All benign values are
 // generated from a fixed seed (no real identifiers); the card set is the
 // public payment-provider test PANs (Stripe, PayPal/Braintree), which are
 // not real accounts. The package has no dependencies so that a measurement

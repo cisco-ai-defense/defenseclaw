@@ -34,6 +34,7 @@ struct InstallationContextTests {
         nestedAuditPathIsReadCorrectly()
         protectedEnvironmentCannotBeOverridden()
         await redactionDefaultProfileMatchesRuntimeSchema()
+        await clawModeKeepsTheLoaderDefault()
         await configStoreRebindDropsThePreviousInstallation()
         await lowerLevelMutationGateSurvivesRebind()
         await gatewayPOSTGateFailsBeforeNetwork()
@@ -525,6 +526,42 @@ struct InstallationContextTests {
         expect(environment["DEFENSECLAW_CONFIG"] == context.configURL.path, "config env is pinned")
         expect(environment["DEFENSECLAW_HOME"] == context.homeRoot.path, "home env is pinned")
         expect(environment["PATH"]?.hasPrefix("/custom/bin") == true, "normal PATH inheritance remains")
+    }
+
+    /// config.load keeps claw.mode's "openclaw" default; the not-installed
+    /// marking is skipped for a managed enterprise profile, a fleet link, an
+    /// explicit connector or roster, and an empty mode (setup remove).
+    private static func clawModeKeepsTheLoaderDefault() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-claw-mode-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let configURL = directory.appendingPathComponent("config.yaml", isDirectory: false)
+            let context = InstallationContext.resolve(
+                environment: ["DEFENSECLAW_CONFIG": configURL.path], appConfigOverride: nil, userHome: directory
+            )
+            let store = ConfigStore(context: context)
+            func load(_ yaml: String) async -> DefenseClawConfig {
+                try? yaml.write(to: configURL, atomically: true, encoding: .utf8)
+                return await store.reload()
+            }
+            var config = await load("config_version: 9\ndeployment_mode: unmanaged_byod\n")
+            expect(config.clawMode == "openclaw", "no claw block loads claw.mode as openclaw")
+            config = await load("config_version: 9\nclaw:\n  mode: ''\n")
+            expect(config.clawMode == "" && !config.openclawNotInstalled && config.activeConnector == "",
+                   "setup remove's empty claw.mode names no connector and is not marked")
+            config = await load("config_version: 9\nguardrail:\n  connector: codex\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "codex", "an explicit connector is never marked")
+            config = await load("config_version: 9\ngateway:\n  host: 10.0.0.5\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "openclaw", "a remote fleet host keeps OpenClaw")
+            config = await load("config_version: 9\ndeployment_mode: managed_enterprise\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "openclaw", "managed enterprise keeps OpenClaw")
+            config = await load("config_version: 9\ngateway:\n  host: 127.0.0.1\n  fleet_mode: enabled\n")
+            expect(!config.openclawNotInstalled && config.activeConnector == "openclaw", "an enabled fleet mode keeps OpenClaw")
+        } catch {
+            expect(false, "claw.mode fixture: \(error)")
+        }
     }
 
     private static func redactionDefaultProfileMatchesRuntimeSchema() async {
