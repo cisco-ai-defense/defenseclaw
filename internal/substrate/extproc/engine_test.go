@@ -329,15 +329,24 @@ func TestIdentityAndUID(t *testing.T) {
 	if v := h.eng.DecideHeaders(ctx, req("gone", "GET", "example.com", "/")); v.Allow || v.Category != CategoryActorNotLive {
 		t.Fatalf("not live: %+v", v)
 	}
-	h.uids.live, h.uids.err = true, errors.New("control API down")
+	// A registration lookup outage stops no traffic by itself (failure_mode
+	// closed included): the request is decided by atespace, with an alert,
+	// and only the chain check is missing (GAP-0090, balanced defaults).
+	h.uids.live, h.uids.err = true, errors.New("leader down")
 	v := h.eng.DecideHeaders(ctx, req("down", "GET", "example.com", "/"))
-	if v.Allow || v.Category != CategoryActorUnverified || !v.Retryable {
-		t.Fatalf("outage closed: %+v", v)
+	if !v.Allow || !v.Alert || !strings.Contains(strings.Join(v.Findings, ","), "registration_unavailable") {
+		t.Fatalf("lookup outage: %+v", v)
 	}
-	ho := newHarness(t, func(c *Config, _ *Options) { c.FailureMode = FailureOpen })
-	ho.uids.err = errors.New("control API down")
-	if v := ho.eng.DecideHeaders(ctx, req("down", "GET", "example.com", "/")); !v.Allow || !v.Alert {
-		t.Fatalf("outage open: %+v", v)
+	// With the chain check on: an alert on OSS, refused on a managed install.
+	hc := newHarness(t, func(_ *Config, o *Options) { o.ChainChecker = fakeChecker{} })
+	hc.uids.err = errors.New("leader down")
+	if v := hc.eng.DecideHeaders(ctx, req("down", "GET", "example.com", "/")); !v.Allow || !strings.Contains(strings.Join(v.Findings, ","), "chain_unchecked:"+uncheckedLookup) {
+		t.Fatalf("lookup outage, oss: %+v", v)
+	}
+	hm := newHarness(t, func(c *Config, o *Options) { c.Managed = true; o.ChainChecker = fakeChecker{} })
+	hm.uids.err = errors.New("leader down")
+	if v := hm.eng.DecideHeaders(ctx, req("down", "GET", "example.com", "/")); v.Allow || v.Category != CategoryChainUnchecked || v.Rule != uncheckedLookup || !v.Retryable {
+		t.Fatalf("lookup outage, managed: %+v", v)
 	}
 }
 

@@ -32,7 +32,6 @@ import (
 const (
 	CategoryUnattributed    = "unattributed"
 	CategoryActorNotLive    = "actor_not_live"
-	CategoryActorUnverified = "actor_unverified"
 	CategoryURLRule         = "url_rule"
 	CategoryPathAmbiguous   = "path_ambiguous"
 	CategoryChainEgress     = "chain_egress"
@@ -266,14 +265,21 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		// hook or model call itself. Never buffered (model streams).
 		return Verdict{Allow: true, OwnHost: true, Source: sourceOwnHost}
 	}
+	// The registration names the actor's UID (its chain window), profile and
+	// attendance (GAP-0090). A lookup outage (the leader, past the stale
+	// window) does not stop the actor's traffic: the actor is matched by
+	// atespace, and only its chain check is missing, which
+	// chain.failure_mode decides (refused on a managed install).
 	rec, err := e.uids.Resolve(ctx, req.Actor)
+	lookupDown := false
 	switch {
 	case errors.Is(err, ErrActorNotLive):
 		return deny(v, CategoryActorNotLive, sourceIdentity, "",
 			"DefenseClaw's registrations say this actor was deleted.")
 	case err != nil:
-		return e.failure(v, CategoryActorUnverified,
-			"DefenseClaw could not look up this actor's registration.")
+		lookupDown = true
+		v.Alert = true
+		v.Findings = append(v.Findings, "registration_unavailable")
 	}
 	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
@@ -327,8 +333,12 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		v.Findings = append(v.Findings, f.String())
 	}
 
-	switch cv, outcome, why := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
-		Method: req.Method, Allowed: true, Time: e.now()}); outcome {
+	cv, outcome, chainWhy := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
+		Method: req.Method, Allowed: true, Time: e.now()})
+	if lookupDown && e.checker != nil {
+		outcome, chainWhy = chainUnchecked, uncheckedLookup
+	}
+	switch outcome {
 	case chainHit:
 		reason := cv.Reason
 		if reason == "" {
@@ -339,13 +349,13 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		// The step still reaches the window through the observed_egress
 		// queue (Finish); only this request's check is missing.
 		if e.chainFailClosed(pol) {
-			v = deny(v, CategoryChainUnchecked, sourceChain, why,
+			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy,
 				"DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress.")
 			v.Retryable = true
 			return v
 		}
 		v.Alert = true
-		v.Findings = append(v.Findings, "chain_unchecked:"+why)
+		v.Findings = append(v.Findings, "chain_unchecked:"+chainWhy)
 	}
 
 	if askRule == "" {

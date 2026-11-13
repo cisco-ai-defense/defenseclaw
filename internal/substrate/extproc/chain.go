@@ -118,6 +118,8 @@ const (
 	// uncheckedUnregistered is an actor with no registration (no UID), so
 	// no chain window can be named for it (GAP-0090).
 	uncheckedUnregistered = "unregistered"
+	// uncheckedLookup is a registration lookup that failed.
+	uncheckedLookup = "registration_unavailable"
 )
 
 // chainLimiter bounds in-flight checks per actor: one semaphore per actor,
