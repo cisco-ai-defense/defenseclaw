@@ -18,7 +18,7 @@ import (
 )
 
 // compactHolderPathEnv names the store TestCompactHolderProcess keeps open.
-const compactHolderPathEnv = "DEFENSECLAW_TEST_COMPACT_HOLD"
+const compactHolderPathEnv = "DC_COMPACT_TEST_HOLD"
 
 // prunedStoreWithoutAutoVacuum builds what issue #1440 found: an initialized
 // store with auto_vacuum off (created before 1.0, or rewritten by a manual
@@ -337,7 +337,7 @@ func TestCompactStoreRefusesAMissingPathAndAFileThatIsNotAnAuditStore(t *testing
 
 // compactClaimedPathEnv names the store TestCompactClaimedStoreChildProcess
 // tries to open while the parent holds the compaction claim.
-const compactClaimedPathEnv = "DEFENSECLAW_TEST_COMPACT_CLAIMED"
+const compactClaimedPathEnv = "DC_COMPACT_TEST_CLAIMED"
 
 func TestCompactClaimRefusesAStoreOpenedByAnotherProcess(t *testing.T) {
 	path, rows := prunedStoreWithoutAutoVacuum(t)

@@ -152,7 +152,7 @@ func TestAuditCompactRootRefusesARootStoreInAFolderAnotherAccountOwns(t *testing
 
 func TestAuditCompactRunAsForwardsSignalsAndWaitsForTheChild(t *testing.T) {
 	child := exec.Command(os.Args[0], "-test.run=^TestAuditCompactSignalChildProcess$")
-	child.Env = append(os.Environ(), "DEFENSECLAW_TEST_COMPACT_SIGNAL_CHILD=1")
+	child.Env = append(os.Environ(), "DC_COMPACT_TEST_SIGNAL_CHILD=1")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestAuditCompactRunAsForwardsSignalsAndWaitsForTheChild(t *testing.T) {
 
 // TestAuditCompactSignalChildProcess waits until it is signalled.
 func TestAuditCompactSignalChildProcess(t *testing.T) {
-	if os.Getenv("DEFENSECLAW_TEST_COMPACT_SIGNAL_CHILD") != "1" {
+	if os.Getenv("DC_COMPACT_TEST_SIGNAL_CHILD") != "1" {
 		return
 	}
 	time.Sleep(30 * time.Second)
