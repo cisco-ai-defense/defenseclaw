@@ -86,6 +86,24 @@ func TestChainBudgetIsExact(t *testing.T) {
 	}
 }
 
+// TestChainBytesFollowTheParser pins the first stage against the lexer: the
+// parser skips a NUL byte and a line continuation, so two & with one between
+// them are one && (found by FuzzBudget: the tree held a chain node the first
+// stage counted none for). The first stage never counts fewer chain bytes
+// than the tree has chain nodes.
+func TestChainBytesFollowTheParser(t *testing.T) {
+	for _, between := range []string{"", "\x00", "\\\n", "\x00\x00"} {
+		command := "a&" + between + "&b"
+		file, ok := Parse(command)
+		if !ok {
+			continue
+		}
+		if _, aware, _, _ := scanCounts(command); aware.chain < treeChain(file) {
+			t.Errorf("%q: %d chain bytes, tree has %d chain nodes", command, aware.chain, treeChain(file))
+		}
+	}
+}
+
 // TestUnparsedChainIsOverTheBudget pins GAP-0284: a chain past the soft
 // bound that cannot be parsed (a syntax error, a wrapper that fails) has no
 // tree to measure and is over the budget, not within it.
