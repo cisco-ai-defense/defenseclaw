@@ -31,6 +31,7 @@ Windows, macOS and Linux.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from typing import Any, NoReturn
@@ -49,6 +50,34 @@ from defenseclaw.commands.cmd_sandbox import (
     _Flag,
     _help_text,
 )
+
+_HYPHENATED_WORD = re.compile(r"\w-\w")
+
+
+def _go_wrapped_help(text: str | None) -> str | None:
+    """Keep the line breaks of a paragraph that has a hyphenated word.
+
+    The Go help is the source of the text, and Go wraps it by hand. Click wraps again, and it breaks a line at a
+    hyphen ("ate- setup"), which changes the words the docs check compares. A paragraph with a hyphenated word
+    is printed as Go wrote it (a Click no-rewrap block); the others are wrapped to the terminal as usual.
+    """
+    if not text:
+        return text
+    out = []
+    for paragraph in text.split("\n\n"):
+        if _HYPHENATED_WORD.search(paragraph) and not paragraph.lstrip().startswith("\b"):
+            paragraph = "\b\n" + paragraph
+        out.append(paragraph)
+    return "\n\n".join(out)
+
+
+class _SubstrateCommand(GatewayCommand):
+    """GatewayCommand whose help keeps the Go line breaks where a hyphen could be split."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["help"] = _go_wrapped_help(kwargs.get("help"))
+        super().__init__(*args, **kwargs)
+
 
 # Tests replace this to capture the argv instead of replacing the process.
 _execv = os.execv
@@ -1099,7 +1128,7 @@ def _build_command(cmd: _Cmd) -> click.Command:
         )
     params: list[click.Parameter] = [_click_argument(arg) for arg in cmd.args]
     params += [_option(flag) for flag in cmd.flags]
-    return GatewayCommand(
+    return _SubstrateCommand(
         cmd.path[-1],
         params=params,
         callback=click.pass_context(_forward),
