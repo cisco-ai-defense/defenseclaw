@@ -88,6 +88,10 @@ func TestChartAuthDelegatorGAP0153(t *testing.T) {
 		"oidc":            {"--set", "config.substrate.identity.oidc.issuer=https://idp.example", "--set", "config.substrate.identity.oidc.client_id=dc"},
 		"managed":         {"--set", "config.deployment_mode=managed_enterprise", "--set", images},
 		"no-kube-sign-in": {"--set", "gateway.args={serve,--substrate,--no-kube-sign-in}"},
+		// A Go bool flag: =true and =1 turn the sign-in off too (R3a P3).
+		"no-kube-sign-in=true": {"--set-json", `gateway.args=["serve","--substrate","--no-kube-sign-in=true"]`},
+		"no-kube-sign-in=1":    {"--set-json", `gateway.args=["serve","--substrate","--no-kube-sign-in=1"]`},
+		"last wins":            {"--set-json", `gateway.args=["serve","--no-kube-sign-in=false","--no-kube-sign-in"]`},
 	} {
 		objs := decodeObjects(t, renderChart(t, helm, "kube-signin", extra...))
 		if cs := clusterScoped(objs); len(cs) != 0 {
