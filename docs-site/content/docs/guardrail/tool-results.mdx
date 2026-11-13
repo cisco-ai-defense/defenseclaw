@@ -46,13 +46,22 @@ The checks:
   agent?"). It runs under `detection_strategy_completion`, the setting that
   already governs tool output (setup sets it with the judge): `regex_judge`
   judges every result the rules did not already block, `judge_first` every
-  result.
+  result. Next to the output, the judge gets three facts from DefenseClaw
+  itself: the tool's name, what the call did (the paths it read or the
+  command it ran, from DefenseClaw's own parser, or the call's arguments),
+  and your request for the turn (from the prompt hook). With them it can tell
+  a page that tells the agent to do something you did not ask for from an
+  email that asks a colleague for a report. Text in the output that calls
+  itself a test or an example never clears it. A fact DefenseClaw does not
+  have is sent as `unknown`.
 
 Not checked on tool output: the enterprise-data rules (card numbers, IBANs,
 phone numbers, email addresses). In a tool's output those are the data you
 asked the tool for. The PII judge likewise reads a tool's output only when
-the pack lists the tool in `sensitive-tools.yaml` with `judge_result: true`.
-To alert on personal data in the output of particular tools, list them there
+the pack lists the tool in `sensitive-tools.yaml` with `judge_result: true`,
+and then it asks whether the output carries personal data beyond your request
+(other people's records in bulk, credentials, government identifiers), not
+whether it contains any. To alert on personal data in the output of particular tools, list them there
 (`result_inspection`, `min_entities_for_alert`). Command, path and C2 rules
 never run on output text; they judge tool calls.
 
