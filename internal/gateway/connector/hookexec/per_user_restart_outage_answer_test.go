@@ -39,11 +39,31 @@ func fireAnswerDeadline(t *testing.T, w *answerWatchdog, exited chan int, stdout
 	go w.watch(time.Now())
 	select {
 	case code := <-exited:
+		awaitAnswerWatchdogBackground(t, w)
 		return code, stderr.String() + stdout.String()
 	case <-time.After(time.Minute):
 		t.Fatal("the watchdog never answered")
 	}
 	return 0, ""
+}
+
+// awaitAnswerWatchdogBackground waits, after a simulated exit, for the work a
+// watchdog leaves running when its exit does not end the process: watch's
+// deferred close of the prepared failure log, and the prepare goroutine that
+// watch's own timer starts ahead of the deadline (at once for a deadline that
+// has passed), which creates logs and hook-failures.dropped in the account's
+// home. Production exits the process there. A test that returned at once had
+// its TempDir removed under that goroutine (macOS CI run 43337422577:
+// "TempDir RemoveAll cleanup: unlinkat .../logs: directory not empty").
+func awaitAnswerWatchdogBackground(t *testing.T, w *answerWatchdog) {
+	t.Helper()
+	for _, done := range []<-chan struct{}{w.watchDone, w.failureLog.done} {
+		select {
+		case <-done:
+		case <-time.After(time.Minute):
+			t.Fatal("the watchdog's background work did not finish")
+		}
+	}
 }
 
 // TestPerUserRestartOutlastingTheBudgetFollowsTheOutageMode pins rel-1-0-6

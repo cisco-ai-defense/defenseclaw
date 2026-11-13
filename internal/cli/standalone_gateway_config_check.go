@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // validateStandaloneGatewayConfig proves the gateway service can load
@@ -34,6 +35,14 @@ import (
 // directory next to configPath). The process environment is restored
 // afterwards: the compiler loads the data directory's .env.
 func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string) error {
+	return validateStandaloneGatewayConfigWith(configPath, dataDir, credentialsDir, false)
+}
+
+// validateStandaloneGatewayConfigWith is validateStandaloneGatewayConfig;
+// shippedFromBinary checks the strict and permissive packs a managed Windows
+// config selects from this binary's own copy (useBinaryShippedRulePacks), for
+// a preflight that runs before the lifecycle writes their folder.
+func validateStandaloneGatewayConfigWith(configPath, dataDir, credentialsDir string, shippedFromBinary bool) error {
 	restore := snapshotProcessEnvironment()
 	defer restore()
 	var runtimeConfig *config.Config
@@ -131,16 +140,30 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	if err := gateway.CheckSelectedCustomRulePacks(runtimeConfig); err != nil {
 		return fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
 	}
+	shippedCopy := ""
+	if shippedFromBinary {
+		copyRoot, cleanup, err := useBinaryShippedRulePacks(runtimeConfig)
+		if err != nil {
+			return fmt.Errorf("cannot check the guardrail rule packs this release ships: %w", err)
+		}
+		defer cleanup()
+		shippedCopy = copyRoot
+	}
 	for _, pack := range standaloneGatewayRulePackDirs(runtimeConfig) {
+		if missing := shippedRulePackMissing(runtimeConfig, configPath, pack.dir); missing != nil {
+			return missing
+		}
 		// The check runs as an administrator or LocalSystem, who read any
 		// folder, so the gateway service account's own access is checked
 		// first: a pack with an explicit Deny for it loaded here, and the
 		// install then failed with only "Failed to start service" (GAP-0095).
-		if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
-			return fmt.Errorf("%s that %s names: %v", standaloneRulePackUnreadableText, configPath, err)
-		}
-		if missing := builtinRulePackMissing(runtimeConfig, configPath, pack.dir); missing != nil {
-			return missing
+		// This release's private copy of a shipped pack is not the folder
+		// the gateway reads: the lifecycle writes that one, readable by
+		// services, before the gateway starts.
+		if shippedCopy == "" || !pathWithinFolder(pack.dir, shippedCopy) {
+			if err := standaloneServiceCanReadTree(pack.dir, pack.label, serviceAccount); err != nil {
+				return fmt.Errorf("%s that %s names: %v", standaloneRulePackUnreadableText, configPath, err)
+			}
 		}
 		if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 			return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v%s",
@@ -243,8 +266,17 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 		if err := gateway.CheckSelectedCustomRulePacks(loaded.runtime); err != nil {
 			return nil, fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
 		}
+		// Repair writes the shipped packs of this release before the gateway
+		// restarts, and its rollback keeps them, so their check reads this
+		// binary's copy: a deleted or edited shipped folder is what the
+		// repair puts back, not a reason to refuse it (#1445).
+		_, cleanup, err := useBinaryShippedRulePacks(loaded.runtime)
+		if err != nil {
+			return nil, fmt.Errorf("cannot check the guardrail rule packs this release ships: %w", err)
+		}
+		defer cleanup()
 		for _, pack := range standaloneGatewayRulePackDirs(loaded.runtime) {
-			if missing := builtinRulePackMissing(loaded.runtime, configPath, pack.dir); missing != nil {
+			if missing := shippedRulePackMissing(loaded.runtime, configPath, pack.dir); missing != nil {
 				return nil, missing
 			}
 			if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
@@ -438,26 +470,98 @@ func rulePackNestedCopyHint(dir string, err error) string {
 	return fmt.Sprintf("; the stray folder is %s: move it out of the pack folder or remove it, then run again", nested)
 }
 
-// builtinRulePackMissing is the refusal of a built-in rule pack other than
-// default whose folder is not under the config's policy_dir on a managed
-// Windows install: the Setup ships no such pack, so the message names the
-// property to set (GAP-1041). It is nil for any other folder or install.
-func builtinRulePackMissing(cfg *config.Config, configPath, dir string) error {
-	if cfg == nil {
-		return nil
-	}
-	policyDir := strings.TrimSpace(cfg.PolicyDir)
-	name := filepath.Base(filepath.Clean(dir))
-	advice := cfg.WindowsBuiltinRulePackAdvice(name)
-	if advice == "" || policyDir == "" || filepath.Clean(dir) != filepath.Join(policyDir, "guardrail", name) {
+// shippedRulePackMissing is the refusal of a shipped pack folder of a managed
+// Windows install (config.WindowsShippedRulePackDir) that is not there: Setup
+// writes it, so the refusal names the repair (#1445). Before 1.0.10 the Setup
+// shipped no such folder and this refusal named policy_dir instead
+// (GAP-1041). It is nil for any other folder or install.
+func shippedRulePackMissing(cfg *config.Config, configPath, dir string) error {
+	advice := cfg.WindowsShippedRulePackAdvice(dir)
+	if advice == "" {
 		return nil
 	}
 	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	_, loadErr := guardrail.LoadRulePack(dir)
-	return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %v; policy_dir is %s and has no guardrail\\%s folder: %s",
-		dir, configPath, loadErr, policyDir, name, advice)
+	return fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s selects: the folder is missing; %s", dir, configPath, advice)
+}
+
+// useBinaryShippedRulePacks points the shipped pack folder of a managed
+// Windows config (config.WindowsShippedRulePacksFolder) at a private copy of
+// the strict and permissive packs this binary embeds, for a check that runs
+// before the lifecycle writes the folder (#1445): a first install has no
+// folder yet, and an upgrade's new release writes its own in the
+// transaction. It returns the copy's folder ("" when cfg selects no shipped
+// pack) and the function that removes the copy and the redirect.
+func useBinaryShippedRulePacks(cfg *config.Config) (string, func(), error) {
+	none := func() {}
+	if cfg == nil {
+		return "", none, nil
+	}
+	folder := config.WindowsShippedRulePacksFolder()
+	if folder == "" || configSelectsShippedRulePack(cfg) == "" {
+		return "", none, nil
+	}
+	files, err := policyassets.ShippedRulePackFiles()
+	if err != nil {
+		return "", none, err
+	}
+	root, err := os.MkdirTemp("", "defenseclaw-shipped-rule-packs-")
+	if err != nil {
+		return "", none, err
+	}
+	cleanup := func() {
+		cfg.UseOfflineVendorPolicies("", "")
+		_ = os.RemoveAll(root)
+	}
+	for _, file := range files {
+		name := filepath.Join(root, filepath.FromSlash(file.Path))
+		if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+			cleanup()
+			return "", none, err
+		}
+		if err := os.WriteFile(name, file.Data, 0o600); err != nil {
+			cleanup()
+			return "", none, err
+		}
+	}
+	cfg.UseOfflineVendorPolicies(folder, root)
+	return root, cleanup, nil
+}
+
+// configSelectsShippedRulePack is the shipped pack (strict or permissive) a
+// setting of cfg loads from the folder a managed Windows Setup ships it in
+// (config.WindowsShippedRulePackDir), "" when no setting does.
+func configSelectsShippedRulePack(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	for _, dir := range cfg.ReferencedRulePackDirs() {
+		if name := cfg.WindowsShippedRulePackName(dir); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+// shippedRulePacksWriteRequired reports whether a failed write of the
+// shipped rule packs must fail the lifecycle run (#1445 review P1): only when
+// the config it applies selects one of them, or cannot be read (its config
+// check then refuses it anyway). A deployment on the default pack goes on
+// with a warning; the next run whose config selects strict or permissive
+// writes them, and fails if it cannot.
+func shippedRulePacksWriteRequired(cfg *config.Config, loadErr error) bool {
+	return loadErr != nil || cfg == nil || configSelectsShippedRulePack(cfg) != ""
+}
+
+// pathWithinFolder reports whether path is folder or below it.
+func pathWithinFolder(path, folder string) bool {
+	path, folder = filepath.Clean(path), filepath.Clean(folder)
+	if strings.EqualFold(path, folder) {
+		return true
+	}
+	rel, err := filepath.Rel(folder, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // standaloneServiceCanReadTree checks that the gateway service account can
