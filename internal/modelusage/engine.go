@@ -262,9 +262,7 @@ func (e *Engine) RecordNative(rec Record) (out Record, ok bool) {
 	reported := rec.Cost.ReportedUSD
 	rec.Cost = s.price(rec.Facts, rec.Status, rec.Usage, reported)
 	rec.Labels = s.metricLabels(rec.Facts, rec.Cost, rec.Usage)
-	if rec.Cost.USD != nil {
-		e.spend.add(rec.Facts, *rec.Cost.USD, rec.EndedAt)
-	}
+	e.chargeBudgets(rec.Facts, rec)
 	e.enqueue(rec)
 	return rec, true
 }

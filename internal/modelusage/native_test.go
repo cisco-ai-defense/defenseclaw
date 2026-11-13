@@ -42,9 +42,6 @@ func TestRecordNativeIsGatedByTokenomicsAndConnector(t *testing.T) {
 		if _, ok := e.RecordNative(nativeRecord(&usd)); ok || e.NativeImportEnabled("claudecode") {
 			t.Fatalf("%s: native usage must not be recorded", name)
 		}
-		if got, _ := e.Spend(ScopeConnector, "claudecode", PeriodDay, time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)); got != 0 {
-			t.Fatalf("%s: spend %v counted", name, got)
-		}
 		e.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
 		if len(sink.recs) != 0 {
 			t.Fatalf("%s: sink got %d records", name, len(sink.recs))
@@ -96,8 +93,33 @@ func TestRecordNativeReportedPerCallCostWinsAndIsRepriced(t *testing.T) {
 	if got[0].Facts.SessionID != "s1" || got[0].Cost.Basis != BasisReported {
 		t.Fatalf("sink record %+v", got[0])
 	}
-	if spent, known := e.Spend(ScopeConnector, "claudecode", PeriodDay, rec.EndedAt); !known || abs(spent-usd) > 1e-12 {
-		t.Fatalf("spend %v %v", spent, known)
+}
+
+type nativeChargeSink struct {
+	keys [][]string
+	usd  []float64
+}
+
+func (s *nativeChargeSink) Charge(keys []string, usd float64, _ time.Time) {
+	s.keys, s.usd = append(s.keys, keys), append(s.usd, usd)
+}
+
+func TestRecordNativeChargesBudgetsOnlyWithChargeKeys(t *testing.T) {
+	e := NewEngine()
+	charges := &nativeChargeSink{}
+	e.SetSpendSink(charges)
+	e.Apply(enabled(), testPricing())
+	defer e.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
+	usd := 0.0123
+	if _, ok := e.RecordNative(nativeRecord(&usd)); !ok || len(charges.usd) != 0 {
+		t.Fatalf("a native record without budget keys charged %v", charges.usd)
+	}
+	rec := nativeRecord(&usd)
+	rec.Facts.ChargeKeys = []string{"user:u1"}
+	out, ok := e.RecordNative(rec)
+	want, known := ChargedUSD(out.Cost)
+	if !ok || !known || len(charges.usd) != 1 || charges.usd[0] != want || charges.keys[0][0] != "user:u1" {
+		t.Fatalf("charges=%v keys=%v want %v", charges.usd, charges.keys, want)
 	}
 }
 
