@@ -134,6 +134,10 @@ type table struct {
 	DecodeExec []string `yaml:"decode_exec"`
 	LocalHosts []string `yaml:"local_hosts"`
 
+	PathRules     []PathRule    `yaml:"path_rules"`
+	CommandRules  []CommandRule `yaml:"command_rules"`
+	ShellTriggers []string      `yaml:"shell_triggers"`
+
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
 	pathWrite     map[string]bool
@@ -218,6 +222,10 @@ func load() (*table, error) {
 				return
 			}
 			t.decodeExec = append(t.decodeExec, re)
+		}
+		if err := t.compileRules(); err != nil {
+			tblErr = err
+			return
 		}
 		tbl = &t
 	})
@@ -446,12 +454,17 @@ func (w *walker) str(key, val, parent string) {
 	switch {
 	case t.pathWrite[key] && looksPath(val):
 		w.add(Effect{Kind: KindWrite, Arg: key, Path: val})
+	case inputKeys[key] && looksPath(val):
+		w.add(Effect{Kind: KindRead, Arg: key, Path: val})
 	case t.pathRead[key] && looksPath(val):
 		w.add(Effect{Kind: w.pathKind(), Arg: key, Path: val})
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
 		w.add(Effect{Kind: w.pathKind(), Arg: key, Path: val})
 	}
 }
+
+// inputKeys always name a file that is read, whatever the verb of the tool name.
+var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "input_path": true, "input_file": true, "from": true}
 
 // pathKind is the kind of a path under a read-style key: the verb of the name
 // decides, a name with no file verb reads.

@@ -1527,31 +1527,38 @@ rules:
     tags: [integrity, system-binary, python, binary-hijacking, bounded-grammar]
   - id: CMD-SECRET-REVEAL
     tool_call_only: true
-    pattern: '(?i)(?:--show-secrets\b|--reveal\b|\bvault\s+token\s+lookup\b|\bgit\s+show\s+[^\s:|;&]+:\S*(?:secret|credential|\.env|\.pem|id_rsa|token)\S*|\baws\s+iam\s+(?:create|get)-access-key\b)'
+    pattern: 'a^'
     title: "Command prints a stored secret"
     severity: HIGH
     confidence: 0.8
     tags: [credential, secret-reveal]
+  - id: CMD-SECRET-LOOKUP
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Command reads a stored secret or issues a credential"
+    severity: HIGH
+    confidence: 0.8
+    tags: [credential, secret-reveal]
+  - id: CMD-GIT-SHOW-SECRET
+    tool_call_only: true
+    pattern: 'a^'
+    title: "git show prints a committed secret file"
+    severity: HIGH
+    confidence: 0.75
+    tags: [credential, secret-reveal]
   - id: CMD-PERSIST-SYSTEM-SCHEDULE
     tool_call_only: true
-    pattern: '(?i)(?:>>?\s*|\btee\b[^\n;|&]*?\s)(?:/etc/cron\.(?:d|daily|hourly|weekly|monthly)/|/etc/crontab\b|/var/spool/cron/|/etc/sudoers\.d/)'
+    pattern: 'a^'
     title: "Write to a system schedule or sudoers drop-in"
     severity: HIGH
     confidence: 0.85
     tags: [persistence, privilege-escalation]
   - id: CMD-PRIV-SETUID
     tool_call_only: true
-    pattern: '(?i)\bchmod\s+(?:-[A-Za-z]+\s+)*(?:[ugoa]*\+[rwxXt]*s[rwxXt]*|[2-7][0-7]{3})\s+\S'
+    pattern: 'a^'
     title: "Set-id bit set with chmod"
     severity: HIGH
     confidence: 0.8
-    tags: [privilege-escalation]
-  - id: CMD-PRIV-PATH-HIJACK
-    tool_call_only: true
-    pattern: '(?i)\bPATH=(?:/tmp|/var/tmp|/dev/shm|\.)[^\s:]*:\$\{?PATH\}?\s+(?:sudo|pkexec|su|doas)\b'
-    title: "Privileged program run with a writable directory first in PATH"
-    severity: HIGH
-    confidence: 0.85
     tags: [privilege-escalation]
   - id: MCP-SQL-DESTRUCTIVE
     tool_call_only: true

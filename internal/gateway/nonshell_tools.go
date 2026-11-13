@@ -83,6 +83,9 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			}
 			seenPath[key] = true
 			paths++
+			for _, id := range toolshape.PathRules(toolshape.PathAccessOf(e.Kind), e.Path) {
+				add(id, "path in MCP tool arguments")
+			}
 			for _, f := range nonShellPathTwin(ctx, request, e) {
 				if slices.ContainsFunc(out, func(x RuleFinding) bool { return x.RuleID == f.RuleID }) {
 					continue
@@ -221,4 +224,49 @@ func nonShellContentArg(raw json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+// shellToolFindings judges a shell call with the path and command rules of
+// the tool-shape table, in Go on the parsed ActionFacts (the rule catalog's
+// CEL budget is spent). Like the MCP lane, outside the strict tier and
+// managed installs a finding is an alert. A call without a word any rule
+// needs is not parsed again.
+func shellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	if !request.EnforcementCapable || ManagedEnterpriseActive() {
+		return findings
+	}
+	command, ok := trustedBashCommandInput(request.Input)
+	if !ok || !toolshape.ShellCandidate(command) {
+		return findings
+	}
+	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+	if generation == nil {
+		return findings
+	}
+	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
+	facts := actionfacts.Analyze(request.Input)
+	hard := request.StrictPolicy || request.ManagedInstall
+	out := append([]RuleFinding(nil), findings...)
+	add := func(ruleID, note string) {
+		if slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == ruleID }) {
+			return
+		}
+		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+		if !ok {
+			return
+		}
+		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
+	}
+	for _, c := range facts.Commands {
+		for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
+			add(id, "")
+		}
+	}
+	for _, p := range facts.Paths {
+		path := firstNonEmpty(p.Resolved, p.Normalized, p.Value)
+		for _, id := range toolshape.PathRules(string(p.Access), path) {
+			add(id, "")
+		}
+	}
+	return out
 }

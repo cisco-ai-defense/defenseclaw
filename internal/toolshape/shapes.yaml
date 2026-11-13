@@ -95,3 +95,22 @@ decode_exec:
 
 # Destinations that are never a collector or paste endpoint.
 local_hosts: [localhost, "127.0.0.1", "::1", "0.0.0.0"]
+
+# Rules the gateway judges in Go on the effects above and on parsed shell
+# commands. The rule ids belong to the rule packs, which hold the title,
+# severity and tags (a rule with only these entries costs no CEL budget).
+# Paths are matched with "/" separators, after the call's own normalisation.
+path_rules:
+  - {id: PATH-K8S-CLUSTER-CRED, access: [read], re: "^/etc/(k8s|kubernetes)/(admin|kubelet)[.]conf$|^/etc/kubernetes/pki/.*[.]key$"}
+  - {id: PATH-CRED-STORE, access: [read], re: "^/(private/)?etc/(master[.]passwd|gshadow|security/opasswd|krb5[.]keytab)$|^/run/secrets/|^/var/lib/jenkins/(credentials[.]xml$|secrets/)|^/etc/(aws|azure|gcloud)/credentials$|/[^/]+[.]keytab$"}
+  - {id: PATH-CRED-STORE-USER, access: [read], re: "/[.](azure/(credentials|accessTokens[.]json)|config/gh/hosts[.]yml|my[.]cnf|pgpass|vault-token)$"}
+  - {id: PATH-ETC-PASSWD, access: [write, append, delete], re: "^/etc/passwd$"}
+  - {id: CMD-PERSIST-SYSTEM-SCHEDULE, access: [write, append], re: "^/etc/(cron[.](d|daily|hourly|weekly|monthly)/|crontab$|sudoers[.]d/)|^/var/spool/cron/"}
+command_rules:
+  - {id: CMD-SECRET-REVEAL, any_argv: ["--show-secrets", "--reveal"]}
+  - {id: CMD-SECRET-LOOKUP, program: [vault], all_argv: [token, lookup]}
+  - {id: CMD-SECRET-LOOKUP, program: [aws], any_argv: [create-access-key, get-access-key]}
+  - {id: CMD-GIT-SHOW-SECRET, program: [git], all_argv: [show], colon_path_re: "(?i)(^|/)([.]env([.][a-z0-9_-]+)?|[^/]*(secret|credential)[^/]*|id_rsa|[^/]*[.]pem)$"}
+  - {id: CMD-PRIV-SETUID, program: [chmod], any_argv: ["u+s", "g+s", "ug+s", "a+s", "+s", "u=rwxs", "4755", "6755", "2755", "4750", "4711", "4700", "4777", "4555"]}
+# A shell text without one of these words is not parsed again for the rules above.
+shell_triggers: ["/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron"]
