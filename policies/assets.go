@@ -15,12 +15,16 @@
 package policyassets
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"path"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -88,6 +92,72 @@ func Files() ([]File, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out, nil
+}
+
+// ShippedRulePackNames are the built-in rule packs besides default that a
+// managed Windows standalone install keeps as folders on disk (#1445). The
+// default pack is embedded in every binary and needs no folder there; Linux
+// and macOS ship every pack in their vendor policy folder.
+var ShippedRulePackNames = []string{"permissive", "strict"}
+
+// IsShippedRulePack reports whether name is one of ShippedRulePackNames.
+func IsShippedRulePack(name string) bool {
+	return slices.Contains(ShippedRulePackNames, name)
+}
+
+// ShippedRulePackFiles lists the files of the shipped packs in path order,
+// each Path relative to the folder that holds the packs
+// ("strict/rules/c2.yaml").
+func ShippedRulePackFiles() ([]File, error) {
+	all, err := Files()
+	if err != nil {
+		return nil, err
+	}
+	var out []File
+	for _, file := range all {
+		rest, ok := strings.CutPrefix(file.Path, "guardrail/")
+		if !ok {
+			continue
+		}
+		if pack, _, _ := strings.Cut(rest, "/"); IsShippedRulePack(pack) {
+			out = append(out, File{Path: rest, Data: file.Data})
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no shipped rule pack is embedded")
+	}
+	return out, nil
+}
+
+var shippedRulePackDigest = sync.OnceValues(func() (string, error) {
+	files, err := ShippedRulePackFiles()
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	for _, file := range files {
+		sum := sha256.Sum256(file.Data)
+		fmt.Fprintf(h, "%s\n%x\n", file.Path, sum)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+})
+
+// ShippedRulePackDigest is the hex sha256 of ShippedRulePackFiles (each
+// path and the sha256 of its bytes, in path order). A managed Windows
+// install keeps each release's copy in a folder named by its first 16
+// digits (ShippedRulePackFolderName), so two releases never share one.
+func ShippedRulePackDigest() (string, error) {
+	return shippedRulePackDigest()
+}
+
+// ShippedRulePackFolderName is the folder name of this binary's shipped
+// packs: the first 16 digits of ShippedRulePackDigest.
+func ShippedRulePackFolderName() (string, error) {
+	digest, err := ShippedRulePackDigest()
+	if err != nil {
+		return "", err
+	}
+	return digest[:16], nil
 }
 
 // GuardrailRuleIDs lists, sorted and without duplicates, every rule id and

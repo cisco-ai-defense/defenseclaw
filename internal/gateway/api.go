@@ -5084,11 +5084,6 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Any cached LLM-judge verdict was rendered under the previous
-	// policy; drop it in O(1) so the next call re-evaluates under
-	// the fresh rulepack. Safe no-op when the cache is unset.
-	InvalidateJudgeVerdictCache()
-
 	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "policy and config reloaded via API"); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})
 		return

@@ -135,7 +135,7 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 	}
 	// The administrator's config may sit anywhere, so credential references
 	// resolve from the deployment's secrets directory, as in the service.
-	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir, layout.SecretsDir); err != nil {
+	if err := validateStandaloneGatewayConfigWith(configPath, layout.DataDir, layout.SecretsDir, true); err != nil {
 		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
 	}
 	// The generic compiler accepts settings that the installed service rejects
@@ -222,6 +222,12 @@ func windowsEnterpriseStandaloneRulePacksTrusted(runtime *config.Config) error {
 			continue
 		}
 		seen[strings.ToLower(dir)] = true
+		// The packs this release ships are written, with their access list,
+		// by the lifecycle after this check (#1445); a changed folder is
+		// what it puts back.
+		if runtime.WindowsShippedRulePackName(dir) != "" {
+			continue
+		}
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -266,6 +272,9 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 		}
 		seen[strings.ToLower(dir)] = true
 		if lower := strings.ToLower(filepath.Clean(dir)); shipped != "" && (lower == shipped || strings.HasPrefix(lower, shipped+`\`)) {
+			continue
+		}
+		if cfg.WindowsShippedRulePackName(dir) != "" {
 			continue
 		}
 		if _, err := os.Lstat(dir); err != nil {
@@ -467,6 +476,13 @@ func windowsEnterpriseStandaloneRepairRulePackPreflight(suppliedConfig string) e
 	if !runtime.Guardrail.Enabled {
 		return nil
 	}
+	// The repair writes the shipped packs of this release again before the
+	// gateway restarts (#1445).
+	_, cleanup, err := useBinaryShippedRulePacks(runtime)
+	if err != nil {
+		return fmt.Errorf("cannot check the guardrail rule packs this release ships: %v (nothing was changed)", err)
+	}
+	defer cleanup()
 	if err := windowsEnterpriseStandaloneRulePackBuild(runtime); err != nil {
 		return fmt.Errorf("the gateway cannot load the guardrail rule packs that the installed config %s selects, so a repair would restart it into a failed start: %v. The running gateway keeps its last good policy. Put the pack back as its digest pin names it, or apply a config with the new digest with %s from an elevated PowerShell prompt (%s), then run the repair again (nothing was changed)", layout.ConfigPath, err,
 			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config path>"), managed.WindowsSetupSource)
