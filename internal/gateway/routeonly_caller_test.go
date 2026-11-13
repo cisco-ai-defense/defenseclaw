@@ -375,3 +375,20 @@ func TestProxyKernelPeerAllowedOffOnWindows(t *testing.T) {
 		t.Fatal("OSS never asks for the kernel peer")
 	}
 }
+
+// A refresh that fails (key or ledger unreadable) drops the enrollment
+// answers with the index, never serving the last good ledger (P3-1).
+func TestUserScopedStoreFailClearsEnrolled(t *testing.T) {
+	const alice = "S-1-5-21-100-200-300-1001"
+	ledger := &userScopedTestLedger{}
+	ledger.set(managedHookLedgerTarget{User: "alice", SID: alice, Connector: "codex", OK: true})
+	api, _, _ := newUserScopedTestServer(t, true, ledger, nil)
+	store := api.userScopedCredentialStore()
+	if !store.enrolledFor(alice, "codex") {
+		t.Fatal("an enrolled account must be reported")
+	}
+	store.loadKey = func(string) (string, error) { return "", errors.New("key unreadable") }
+	if store.enrolledFor(alice, "codex") {
+		t.Fatal("a failed refresh must not answer from the last good ledger")
+	}
+}

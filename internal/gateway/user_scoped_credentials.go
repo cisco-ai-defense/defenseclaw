@@ -214,7 +214,9 @@ func (s *userScopedCredentialStore) refreshLocked() {
 		if s.built {
 			userScopedCredentialDropLog(cause, err)
 		}
-		s.index, s.keys, s.built = nil, nil, false
+		// enrolled goes with the index: the Windows proxy path must not
+		// answer from the last good ledger (S1 REVIEW-code-slice4 P3-1).
+		s.index, s.keys, s.built, s.enrolled = nil, nil, false, nil
 	}
 	if dir == "" || s.ledger == nil {
 		fail("no data directory", errors.New("data directory not set"))
