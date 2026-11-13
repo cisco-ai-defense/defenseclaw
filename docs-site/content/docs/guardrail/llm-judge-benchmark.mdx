@@ -52,9 +52,22 @@ coverage, but it adds model latency to every eligible call.
 </Flow>
 
 `weak_signal` findings are ignored. `needs_review` can alert but cannot block
-by itself. A block requires actionable corroboration or strong structural
-evidence of exfiltration or destruction. This keeps ambiguous activity visible
-without turning ordinary coding commands into routine interruptions.
+by itself. In the default pack a lone `needs_review` finding on a call no rule
+flagged is recorded without an alert. A block requires actionable corroboration
+or strong structural evidence of exfiltration or destruction. This keeps
+ambiguous activity visible without turning ordinary coding commands into
+routine interruptions.
+
+Next to the call, the judge gets what DefenseClaw's own parser proves the call
+does: the paths it reads, writes, deletes or runs, and its network actions.
+The judge treats a plain read of a named key or secret file as a review case
+only when the parser shows every effect of the call and the call has no write
+and no network action. A database, secrets or MCP tool call the parser does not
+model is judged from the call itself, so a call that returns secret records or
+fetches many secrets at once still alerts. Turning off or excluding endpoint
+protection, the firewall or audit logging, clearing logs, deleting shadow copies
+or backups, and changes to accounts, passwords, authentication or sudo rights are
+never treated as routine administration.
 
 ## Frozen public validation
 
