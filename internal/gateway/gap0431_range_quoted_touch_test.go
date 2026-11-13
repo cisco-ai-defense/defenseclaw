@@ -6,8 +6,10 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -64,7 +66,15 @@ func TestGAP0431SignedStepRangeFourCell(t *testing.T) {
 }
 
 func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
-	runGAP0431QuotedTouchIdentity(t, newB36ManagedHookFixture(t), true)
+	runGAP0431QuotedTouchIdentity(t, newB36ManagedHookFixture(t), true, true)
+}
+
+// The same rows without -h: touch follows a link, and the target scan, not
+// the entry proof, reads each name. A quoted or escaped bracket is part of
+// the name, so the hard link is the protected file (GAP-0293: it was never
+// resolved, in any environment).
+func TestGAP0293QuotedTouchFollowIdentityFourCell(t *testing.T) {
+	runGAP0431QuotedTouchIdentity(t, newB36ManagedHookFixture(t), true, false)
 }
 
 // The hook reads the shell startup from the account's environment. An
@@ -86,25 +96,28 @@ func TestGAP0431QuotedTouchIdentityShellStartupFourCell(t *testing.T) {
 		{name: "exported-path-touch-function", variable: "BASH_FUNC_/usr/bin/touch%%"},
 		{name: "startup-file", variable: "BASH_ENV", startupFile: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newB36ManagedHookFixture(t)
-			value := "() {  :\n}"
-			if tc.startupFile {
-				value = filepath.Join(f.home, "startup.sh")
-				if err := os.WriteFile(value, []byte(":\n"), 0o600); err != nil {
-					t.Fatal(err)
+		for _, noDereference := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/no-dereference=%t", tc.name, noDereference), func(t *testing.T) {
+				f := newB36ManagedHookFixture(t)
+				value := "() {  :\n}"
+				if tc.startupFile {
+					value = filepath.Join(f.home, "startup.sh")
+					if err := os.WriteFile(value, []byte(":\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
-			t.Setenv(tc.variable, value)
-			runGAP0431QuotedTouchIdentity(t, f, tc.exact)
-		})
+				t.Setenv(tc.variable, value)
+				runGAP0431QuotedTouchIdentity(t, f, tc.exact, noDereference)
+			})
+		}
 	}
 }
 
 // runGAP0431QuotedTouchIdentity runs the quoted touch identity rows in all
 // four cells. Every protected row must block; exact also holds each ordinary
-// row to allow.
-func runGAP0431QuotedTouchIdentity(t *testing.T, f b36ManagedHookFixture, exact bool) {
+// row to allow. Without noDereference the rows drop -h: the quoted symlink
+// row then touches the keys file through the link and blocks.
+func runGAP0431QuotedTouchIdentity(t *testing.T, f b36ManagedHookFixture, exact, noDereference bool) {
 	t.Helper()
 	if err := os.Link(f.keys, filepath.Join(f.project, "alias[1]")); err != nil {
 		t.Fatal(err)
@@ -151,15 +164,24 @@ func runGAP0431QuotedTouchIdentity(t *testing.T, f b36ManagedHookFixture, exact 
 		{"quoted-prefix-ordinary", `touch -h 'normal[1]'*`, "allow"},
 		{"escaped-prefix-ordinary", `touch -h normal\[1\]*`, "allow"},
 	}
+	if !noDereference {
+		for i := range rows {
+			rows[i].name += "/follow"
+			rows[i].command = strings.Replace(rows[i].command, "touch -h ", "touch ", 1)
+			if strings.HasPrefix(rows[i].name, "quoted-symlink") {
+				rows[i].want = "block"
+			}
+		}
+	}
 	var calls []*hookCall
 	for _, row := range rows {
-		if row.want == "block" && hookpaths.NoDereferenceTouchSafe(row.command, f.project, f.home) {
+		if noDereference && row.want == "block" && hookpaths.NoDereferenceTouchSafe(row.command, f.project, f.home) {
 			t.Errorf("%s: entry proof marked protected target safe", row.name)
 		}
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
 		facts, decoded := hookpaths.Decode(header)
-		if row.want == "block" && (!decoded || facts[hookpaths.ActionDecisionKey] != hookpaths.ProtectedTargetDecision) {
+		if noDereference && row.want == "block" && (!decoded || facts[hookpaths.ActionDecisionKey] != hookpaths.ProtectedTargetDecision) {
 			t.Errorf("%s: client target decision missing", row.name)
 		}
 		calls = append(calls, everyMode(row.name, payload, header)...)
