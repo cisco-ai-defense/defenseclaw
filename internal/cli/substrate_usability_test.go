@@ -123,6 +123,26 @@ func TestSubstrateRunNeedsNoProfile(t *testing.T) {
 	}
 }
 
+// GAP-0184: OpenCode runs (proven in an actor although its OpenShell harness
+// is unverified); the connectors with no Substrate proof stay refused.
+func TestSubstrateRunVerifiedConnectors(t *testing.T) {
+	t.Setenv("DEFENSECLAW_SUBSTRATE_PROFILE", "")
+	t.Setenv("DEFENSECLAW_SUBSTRATE_TEMPLATE", "")
+	tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, "opencode")
+	if err != nil {
+		t.Fatalf("run opencode refused: %v", err)
+	}
+	if tg.connName != "opencode" {
+		t.Errorf("connector %q, want opencode", tg.connName)
+	}
+	for _, agent := range []string{"amp", "cursor-agent", "devin"} {
+		_, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, agent)
+		if err == nil || !strings.Contains(err.Error(), "not verified yet") {
+			t.Errorf("run %s: %v, want the not-verified refusal", agent, err)
+		}
+	}
+}
+
 // GAP-0167: no free worker says what to do.
 func TestSubstrateNoFreeWorkerMessage(t *testing.T) {
 	msg := substrateAPIMessage(&api.Error{Status: 503, Reason: "no_free_worker"})

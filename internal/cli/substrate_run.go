@@ -258,6 +258,13 @@ func newSubstrateID(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// substrateProven are the connectors proven end to end in a Substrate actor
+// whose OpenShell harness is still unverified (GAP-0184). The harness status
+// is about an OpenShell V2 sandbox, not an actor. OpenCode: its plugin posts
+// through the actor kit's hook-post, live on a Bedrock model (lane A10,
+// TST-0125, TST-0184). Amp, Cursor Agent and Devin stay refused.
+var substrateProven = map[string]bool{"opencode": true}
+
 // substrateRunTarget is what one run needs, resolved from flags and context.
 type substrateRunTarget struct {
 	spec     *harness.Spec
@@ -271,7 +278,7 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	if err != nil {
 		return substrateRunTarget{}, withExitCode(err, 2)
 	}
-	if spec.Verification().Status == harness.Unverified {
+	if spec.Verification().Status == harness.Unverified && !substrateProven[spec.Name] {
 		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
 	t := substrateRunTarget{spec: spec, connName: spec.Name}

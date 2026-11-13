@@ -12,7 +12,7 @@ keywords:
 
 ## Short answer
 
-- **Every agent that DefenseClaw runs in OpenShell can run in Agent Substrate**, in three waves. An actor is a Linux container, and DefenseClaw reuses the same harness images it builds for OpenShell. Only the address the hooks call changes. Amp and OpenCode need a plugin transport change first, so they are refused in the first build.
+- **Every agent that DefenseClaw runs in OpenShell can run in Agent Substrate**, in three waves. An actor is a Linux container, and DefenseClaw reuses the same harness images it builds for OpenShell. Only the address the hooks call changes. Amp needs a plugin transport change first, so it is refused in the first build. OpenCode's plugin already sends its hook events through the actor kit.
 - **Desktop and IDE apps can't.** An actor has no screen, so the Claude desktop app, Cowork, and the Cursor, Kiro and Antigravity editors keep their host connectors. Their command-line versions can run in an actor.
 - **The checks are the same.** The same hooks, rules, guardrails, scans and asks apply.
 - **The surroundings are not.** There's no live folder and nothing on your machine is reachable. In return you get suspend and resume, any laptop OS, model traffic that always passes the guardrail proxy, and unattended runs.
@@ -23,7 +23,7 @@ keywords:
 |---|---|---|---|---|
 | 1 | Claude Code | Yes | `claude -p` | First release; managed tamper tier |
 | 1 | Codex | Yes | `codex exec` | First release; managed tamper tier |
-| 2 | OpenCode | Yes | `opencode run` | Verified OpenShell image |
+| 2 | OpenCode | Yes | `opencode run` | Proven in an actor; needs its kit image |
 | 2 | GitHub Copilot CLI | Yes | `copilot -p` | Verified OpenShell image |
 | 2 | Hermes | Yes | Found per connector | Verified OpenShell image |
 | 2 | Kiro CLI | Yes | `kiro-cli chat --no-interactive` | Verified OpenShell image |
