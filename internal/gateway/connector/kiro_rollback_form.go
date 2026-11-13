@@ -23,8 +23,8 @@ import (
 // release's entries into the target release's form first, and the restore of
 // an aborted rollback puts them back.
 //
-// That form differs by release (every tag rendered:
-// testdata/kiro_windows_release_hook_forms.json): 1.0.8 renders
+// That form differs by release (the tags 1.0.0, 1.0.2, 1.0.4 to 1.0.8
+// rendered: testdata/kiro_windows_release_hook_forms.json): 1.0.8 renders
 // preStartAnswerWindowsKiroHookCommand, and 1.0.0 to 1.0.7 render it with the
 // earlier Constrained Language fallback end (legacyWindowsAwaitedHookCommand),
 // which is the only form they own. Writing the 1.0.8 form for a rollback to
@@ -86,6 +86,12 @@ func kiroWindowsHookFormPairs(launchers []string, target string, toEarlier bool)
 				earlier = append(earlier, preStart)
 			default:
 				earlier = append(earlier, legacy)
+				// A 1.0.8-form entry already in the file (an earlier
+				// rollback, or 1.0.8 itself) is one 1.0.0-1.0.7 cannot
+				// remove either.
+				if preStart != legacy {
+					pairs = append(pairs, [2]string{preStart, legacy})
+				}
 			}
 			for _, form := range earlier {
 				if current != form {

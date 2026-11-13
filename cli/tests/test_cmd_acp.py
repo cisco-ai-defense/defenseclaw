@@ -1035,11 +1035,16 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
 
         guard_path.write_bytes(b"upgraded-guard")
         agent_path.write_bytes(b"updated-agent")
+        # Unattended (--yes): the guard is re-pinned, the changed agent only named.
         tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
-        assert tag == "plan" and "guard for zed/kiro" in plan and "updated agent for zed/kiro" in plan
-        tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True)
+        assert tag == "plan" and "guard for zed/kiro" in plan and "updated agent" not in plan
+        assert "defenseclaw acp refresh --agent kiro" in plan
+        tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=False, plan_only=True)
+        assert tag == "plan" and "guard for zed/kiro" in plan and "updated agent for zed/kiro (" in plan
+        with patch("click.confirm", return_value=True):
+            tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=False)
         assert tag == "pass" and "updated agent for zed/kiro" in detail
-        tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
+        tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=False, plan_only=True)
         assert tag == "skip" and "pins are current" in detail
         result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
         assert result.exit_code == 0, result.output
@@ -2598,6 +2603,33 @@ def test_refresh_agent_repins_an_updated_agent_and_records_it(tmp_path, monkeypa
         # Nothing left to re-pin.
         result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
         assert result.exit_code == 0 and "Re-pinned" not in result.output
+        assert "nothing to re-pin" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_refresh_agent_refuses_when_a_folder_above_can_be_replaced(tmp_path, monkeypatch):
+    # Another account that can rename a folder above the agent could swap its
+    # own folder in around the re-pin (review of rel-1-0-10:GAP-0250).
+    app, data_dir, db_path = _app(tmp_path)
+    try:
+        _setup_zed_kiro(tmp_path, monkeypatch, app)
+        before = _lock(data_dir)
+        agent_path = tmp_path / "bin" / "kiro-cli"
+        agent_path.write_bytes(b"updated")
+        original = tmp_path.stat().st_mode & 0o7777
+        try:
+            tmp_path.chmod(0o777)
+            result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+            assert result.exit_code != 0
+            assert "other accounts can replace" in result.output
+            assert _lock(data_dir) == before
+            tmp_path.chmod(0o1777)  # sticky: other accounts cannot rename this folder
+            result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+            assert result.exit_code == 0, result.output
+        finally:
+            tmp_path.chmod(original)
     finally:
         cleanup_app(app, db_path, data_dir)
 

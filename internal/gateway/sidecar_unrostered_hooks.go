@@ -30,9 +30,14 @@ import (
 //
 // A connector qualifies only when this install wrote its hook script (one
 // of its HookScriptNames is in the hooks folder), it is not configured, not
-// in the active roster and not in the lock, and its VerifyClean finds
-// DefenseClaw state. Its own Teardown removes only what DefenseClaw wrote
-// and leaves the disabled-hook tombstone, so the next boot finds it clean.
+// in the active roster and not in the lock, its VerifyClean reports
+// DefenseClaw hooks left ("teardown incomplete"; a file it cannot read is
+// no proof), and, outside Windows, one of the files it patches names this
+// install's own hook command, so the hooks of another DefenseClaw data
+// directory on the account stay. Windows commands name the per-account
+// launcher, not a data directory. Its own Teardown removes only what
+// DefenseClaw wrote, then the hook script goes and its hook token is
+// revoked as for a removed connector, so the next boot finds nothing to do.
 // A managed install leaves it to the hook guardian. A failure is logged and
 // never fails a boot.
 func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *connector.Registry) {
@@ -78,7 +83,10 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 		if _, hooked := conn.(connector.HookEndpoint); !hooked || !installWroteHookScript(conn, opts) {
 			continue
 		}
-		if conn.VerifyClean(opts) == nil {
+		if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "teardown incomplete") {
+			continue
+		}
+		if !connector.PatchedFilesNameOwnHook(opts, conn) {
 			continue
 		}
 		result := "removed"
@@ -89,6 +97,9 @@ func (s *Sidecar) reclaimUnguardedConnectorHooks(ctx context.Context, registry *
 			result = "incomplete"
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is not guarded and its DefenseClaw hooks are not all gone: %v\n", name, err)
 		} else {
+			if err := removeTeardownHookFiles(registry, conn, cfg.ActiveConnectors(), opts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s hook script and token were not removed: %v\n", name, err)
+			}
 			fmt.Fprintf(os.Stderr, "[guardrail] connector %s is not guarded: removed the DefenseClaw hooks an earlier setup left\n", name)
 		}
 		if s.logger != nil {

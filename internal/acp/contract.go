@@ -466,7 +466,11 @@ func (lock RuntimeContractLock) guardExecutablePathMatches(guardPath string) err
 // executableDigestsMatch checks the agent and guard executables against the
 // digests the lock pins.
 func (lock RuntimeContractLock) executableDigestsMatch(agentPath, guardPath string) error {
-	if observed, err := fileSHA256(agentPath); err != nil || !strings.EqualFold(observed, lock.Agent.SHA256) {
+	observed, err := fileSHA256(agentPath)
+	if err != nil {
+		return errors.New("ACP agent executable named by the runtime contract cannot be read")
+	}
+	if !strings.EqualFold(observed, lock.Agent.SHA256) {
 		return ErrAgentExecutableDrift
 	}
 	observedGuardDigest, err := fileSHA256(guardPath)

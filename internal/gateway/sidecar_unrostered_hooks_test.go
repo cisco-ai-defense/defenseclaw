@@ -1,6 +1,8 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
 package gateway
 
 import (
@@ -33,8 +35,12 @@ func TestBootRemovesHooksOfAConnectorTheInstallNoLongerGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	hooksFile := filepath.Join(home, ".kiro", "hooks", "defenseclaw.json")
-	stale := `{"version":"v1","hooks":[{"name":"defenseclaw-pre-tool","trigger":"PreToolUse","matcher":".*",` +
-		`"action":{"type":"command","command":"/old/install/kiro-hook.sh --hook-surface v3"},"timeout":30,"enabled":true}]}` + "\n"
+	entry := func(command string) string {
+		return `{"version":"v1","hooks":[{"name":"defenseclaw-pre-tool","trigger":"PreToolUse","matcher":".*",` +
+			`"action":{"type":"command","command":"` + command + `"},"timeout":30,"enabled":true}]}` + "\n"
+	}
+	stale := entry(filepath.Join(dataDir, "hooks", "kiro-hook.sh") + " --hook-surface v3")
+	foreign := entry("/other/defenseclaw-home/hooks/kiro-hook.sh --hook-surface v3")
 	write := func(path, body string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -61,15 +67,29 @@ func TestBootRemovesHooksOfAConnectorTheInstallNoLongerGuards(t *testing.T) {
 		t.Fatal("hooks of a connector this install never set up were removed")
 	}
 
-	// Set up once, now unguarded and in no roster or lock: removed, and the
-	// next boot finds nothing to do.
-	write(filepath.Join(dataDir, "hooks", "kiro-hook.sh"), "#!/bin/sh\nexit 0\n")
+	// Set up once, now unguarded and in no roster or lock, but the hooks name
+	// another DefenseClaw data directory: left alone.
+	script := filepath.Join(dataDir, "hooks", "kiro-hook.sh")
+	write(script, "#!/bin/sh\nexit 0\n")
+	write(hooksFile, foreign)
+	s.reclaimUnguardedConnectorHooks(context.Background(), registry)
+	if !kiroHasHooks() {
+		t.Fatal("the hooks of another DefenseClaw data directory were removed")
+	}
+
+	// This install's own hooks: removed with the hook script, and the next boot
+	// finds nothing to do.
+	write(hooksFile, stale)
 	for boot := 1; boot <= 2; boot++ {
 		s.reclaimUnguardedConnectorHooks(context.Background(), registry)
 		if kiroHasHooks() {
 			t.Fatalf("boot %d: the unguarded Kiro hooks are still there", boot)
 		}
 	}
+	if _, err := os.Lstat(script); !os.IsNotExist(err) {
+		t.Fatalf("the hook script of the unguarded connector is still there: %v", err)
+	}
+	write(script, "#!/bin/sh\nexit 0\n")
 
 	// Guarded, or still in the active roster (the set-difference teardown
 	// owns that one): left alone.

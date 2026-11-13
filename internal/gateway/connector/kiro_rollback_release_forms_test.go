@@ -65,6 +65,12 @@ func TestKiroRollbackWritesTheFormTheTargetReleaseOwns(t *testing.T) {
 			t.Fatalf("restore after a rollback to %q changed %d commands; bytes equal = %v", target, back, string(restored) == string(original))
 		}
 	}
+	// A 1.0.8-form entry already in the file goes to the earlier form too.
+	eight := file(fixture.Releases["1.0.8"]["v2"], fixture.Releases["1.0.8"]["v3"])
+	converted, changed := convertKiroHookFileForms(eight, kiroWindowsHookFormPairs([]string{fixture.Launcher}, "1.0.5", true), true)
+	if want := file(fixture.Releases["1.0.5"]["v2"], fixture.Releases["1.0.5"]["v3"]); changed != 2 || string(converted) != string(want) {
+		t.Fatalf("a 1.0.8-form file converted %d commands for a rollback to 1.0.5", changed)
+	}
 	// 1.0.9 and later own the 1.0.8 form, so a rollback there keeps it.
 	if pairs := kiroWindowsHookFormPairs([]string{fixture.Launcher}, "1.0.9", true); len(pairs) != 2 ||
 		pairs[0][1] != preStartAnswerWindowsKiroHookCommand(fixture.Launcher, "") || !strings.Contains(pairs[0][1], "-EncodedCommand") {

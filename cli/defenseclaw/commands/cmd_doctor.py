@@ -17632,7 +17632,7 @@ def _doctor_repair_specs() -> tuple[RepairSpec, ...]:
             "safe",
             _fix_acp_guard_pins,
             (),
-            ("re-pin the upgraded DefenseClaw ACP guard in the editor entries DefenseClaw wrote",),
+            ("re-pin the upgraded DefenseClaw ACP guard, or an agent you updated once you confirm it, in the editor entries DefenseClaw wrote",),
             False,
             False,
         ),
@@ -21993,9 +21993,12 @@ def _fix_acp_guard_pins(
     """Re-pin the upgraded DefenseClaw ACP guard, as ``defenseclaw acp refresh`` does.
 
     Companion to :func:`_check_acp_bindings`. Only the editor entries
-    DefenseClaw wrote are touched, and only their guard digest: an agent
-    executable that changed since setup is named with its setup command,
-    never re-pinned. Managed enrollments keep their locks in a per-user
+    DefenseClaw wrote are touched, and only their pins. An agent that changed
+    since setup is re-pinned only when you confirm it at the prompt and it
+    passes the custody check of ``acp refresh --agent`` (rel-1-0-10:GAP-0250);
+    with --yes, or when it fails that check, it is named with its command and
+    left for you to review, so an unattended repair never accepts agent bytes
+    nobody looked at. Managed enrollments keep their locks in a per-user
     runtime directory that doctor does not know, so they are left alone.
     """
     if getattr(cfg, "acp", None) is None:
@@ -22025,6 +22028,15 @@ def _fix_acp_guard_pins(
         )
     except Exception as exc:  # noqa: BLE001 - unreadable editor settings must not abort the repair run.
         return ("skip", f"could not read the editor ACP settings: {exc}")
+    if agent_pending and assume_yes:
+        # An unattended repair (--yes, the TUI auto-repair) does not accept
+        # changed agent bytes: it names the refresh instead.
+        agent_refused = agent_refused + [
+            (pair, f"the agent changed since setup ({old[:12]} to {new[:12]}); "
+             f"review it and run: defenseclaw acp refresh --agent {pair.split('/', 1)[1]}")
+            for pair, _path, old, new in agent_pending
+        ]
+        agent_pending = []
     agent_note = ""
     if agent_refused:
         agent_note = "; ".join(
@@ -22037,7 +22049,8 @@ def _fix_acp_guard_pins(
     if pending:
         work.append(f"the DefenseClaw ACP guard for {', '.join(pending)}")
     if agent_pairs:
-        work.append(f"the updated agent for {', '.join(agent_pairs)}")
+        changes = ", ".join(f"{pair} ({old[:12]} to {new[:12]})" for pair, _path, old, new in agent_pending)
+        work.append(f"the updated agent for {changes}")
     if not work:
         current = "the ACP guard pins are current"
         return ("skip", f"{current}; {agent_note}" if agent_note else current)

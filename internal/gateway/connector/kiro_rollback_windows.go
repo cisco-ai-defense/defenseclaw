@@ -11,8 +11,9 @@ import (
 
 // ConvertHooksForRollback rewrites the per-user Kiro hook commands this
 // release writes (the bridge that answers a launcher that cannot start,
-// rel-1-0-6 GAP-0676) into the form releases before 1.0.9 write and own, so
-// the older release's setup and teardown find them. Rolling forward again
+// rel-1-0-6 GAP-0676) into the form the rollback target release writes and
+// owns (opts.RollbackTargetVersion, rel-1-0-10:GAP-0275), so the older
+// release's setup and teardown find them. Rolling forward again
 // runs Setup, which writes the current form. A copy of each file it changes
 // goes to <data dir>/backups first.
 func (c *KiroConnector) ConvertHooksForRollback(opts SetupOpts) (int, error) {
