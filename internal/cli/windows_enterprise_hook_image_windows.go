@@ -55,7 +55,7 @@ func newWindowsHookImageCommand() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 	}
-	command.AddCommand(newWindowsHookImageStageCommand(), newWindowsHookImagePruneCommand())
+	command.AddCommand(newWindowsHookImageStageCommand(), newWindowsHookImagePruneCommand(), newWindowsHookImageRetireCommand())
 	return command
 }
 
@@ -187,7 +187,16 @@ func runWindowsHookImagePrune(keep []string) windowsHookImagePruneReport {
 	if err != nil {
 		return failed(err)
 	}
-	return pruneWindowsHookImages(osWindowsHookImageFS{}, bin, keep)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
+	if err != nil {
+		return failed(fmt.Errorf("resolve the standalone roots: %w", err))
+	}
+	// A folder a DefenseClaw-written config still names, or that was
+	// superseded recently, stays (review 1 P1-2).
+	return pruneWindowsHookImages(osWindowsHookImageFS{}, bin, keep, windowsHookImagePrunePolicy{
+		Scan: scanWindowsHookImageConfigs(roots),
+		Now:  time.Now(),
+	})
 }
 
 type osWindowsHookImageFS struct{}
@@ -309,7 +318,14 @@ func applyWindowsEnterpriseHookImage(result *enterprisestatus.Result) {
 	if !ok {
 		return
 	}
-	if problem := windowsHookImageVerifyProblem(windowsHookImageResolve(bin)); problem != "" {
+	image := windowsHookImageResolve(bin)
+	if image.State == winpath.EnterpriseHookImageRetired {
+		// An administrator retired the launch folders before a rollback to
+		// an older release: expected, and not a drift to repair.
+		result.AddWarning("hook_image_retired", image.Problem)
+		return
+	}
+	if problem := windowsHookImageVerifyProblem(image); problem != "" {
 		result.AddError("hook_image_not_staged", problem)
 	}
 }
@@ -322,7 +338,13 @@ var windowsEnterpriseHookImageEnsureDrift = func() (reason, detail string) {
 	if !ok {
 		return "", ""
 	}
-	if problem := windowsHookImageVerifyProblem(windowsHookImageResolve(bin)); problem != "" {
+	image := windowsHookImageResolve(bin)
+	if image.State == winpath.EnterpriseHookImageRetired {
+		// A compliant ensure must not undo a retire that waits for the older
+		// Setup; this release's own Setup run un-retires on its stage.
+		return "", ""
+	}
+	if problem := windowsHookImageVerifyProblem(image); problem != "" {
 		return "drift:hook_image", problem
 	}
 	return "", ""

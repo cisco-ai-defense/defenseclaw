@@ -78,13 +78,41 @@ type windowsHookImageInUse struct {
 }
 
 type windowsHookImagePruneReport struct {
-	SchemaVersion int                     `json:"schema_version"`
-	OK            bool                    `json:"ok"`
-	Removed       []string                `json:"removed"`
-	Kept          []string                `json:"kept"`
-	InUse         []windowsHookImageInUse `json:"in_use"`
-	Error         string                  `json:"error"`
-	Notes         []string                `json:"notes,omitempty"`
+	SchemaVersion int                        `json:"schema_version"`
+	OK            bool                       `json:"ok"`
+	Removed       []string                   `json:"removed"`
+	Kept          []string                   `json:"kept"`
+	Retained      []windowsHookImageRetained `json:"retained"`
+	InUse         []windowsHookImageInUse    `json:"in_use"`
+	Error         string                     `json:"error"`
+	Notes         []string                   `json:"notes,omitempty"`
+}
+
+// windowsHookImageRetained is a launch folder prune left although it is
+// neither current nor kept: Why is named_by:<file>,
+// superseded_recently:<RFC3339 time it was superseded> or scan_incomplete.
+type windowsHookImageRetained struct {
+	Folder string `json:"folder"`
+	Why    string `json:"why"`
+}
+
+// hookImageRetainAfterSupersede is how long prune keeps a launch folder
+// after a newer one was staged, even when no config names it any more. An
+// agent session reads its hook command once, at its start, and keeps it for
+// its life: a Claude Code or Codex session that started on release N keeps
+// starting N's folder after N+1 and N+2 switched every config. Removing that
+// folder makes the session's hook command fail to start, which the agent
+// takes as a non-blocking error and runs the tool call without a DefenseClaw
+// decision (review 1 P1-2). Sessions that outlive this window are expected to
+// be restarted; the windows enterprise guide says so.
+const hookImageRetainAfterSupersede = 14 * 24 * time.Hour
+
+// windowsHookImagePrunePolicy is what prune needs besides the folders: the
+// config scan (which launch folders a DefenseClaw-written config still names)
+// and the clock.
+type windowsHookImagePrunePolicy struct {
+	Scan windowsHookImageConfigScan
+	Now  time.Time
 }
 
 // windowsHookImageFS is the file access of stage and prune. Paths are
@@ -282,6 +310,7 @@ func stageWindowsHookImage(fsys windowsHookImageFS, starter windowsHookImageStar
 	if problem := checkWindowsHookImageStarts(starter, report.Hook, report.Guard, req.Build); problem != "" {
 		return fail(windowsHookImageStartFailed, "%s", problem)
 	}
+	report.Notes = append(report.Notes, clearWindowsHookImagesRetired(fsys, root)...)
 	report.OK = true
 	return report
 }
@@ -407,16 +436,19 @@ func removeWindowsHookImageStaging(fsys windowsHookImageFS, root string) []strin
 	return notes
 }
 
-// pruneWindowsHookImages removes every launch folder of bin that is neither
-// kept nor the current one, and the staging folders an interrupted stage
-// left. A folder an image of which is still running stays and is reported;
-// so is anything that is not a launch or staging folder, which prune never
-// touches.
-func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string) windowsHookImagePruneReport {
+// pruneWindowsHookImages removes the launch folders of bin no agent can
+// still start, and the staging folders an interrupted stage left. A launch
+// folder goes only when it is neither current nor kept, no DefenseClaw-written
+// config names it (policy.Scan, which must be complete), and it was
+// superseded at least hookImageRetainAfterSupersede ago. A folder an image of
+// which is still running stays and is reported; so is anything that is not a
+// launch or staging folder, which prune never touches.
+func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string, policy windowsHookImagePrunePolicy) windowsHookImagePruneReport {
 	report := windowsHookImagePruneReport{
 		SchemaVersion: windowsHookImageReportSchema,
 		Removed:       []string{},
 		Kept:          []string{},
+		Retained:      []windowsHookImageRetained{},
 		InUse:         []windowsHookImageInUse{},
 	}
 	bin = strings.TrimRight(strings.TrimSpace(bin), `\`)
@@ -462,6 +494,10 @@ func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string) 
 		return report
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	staged := windowsHookImageStageTimes(fsys, root, entries)
+	for _, note := range policy.Scan.Incomplete {
+		report.Notes = append(report.Notes, "scan_incomplete: "+note)
+	}
 	for _, entry := range entries {
 		name := entry.Name()
 		path := windowsHookImageJoin(root, name)
@@ -478,6 +514,12 @@ func pruneWindowsHookImages(fsys windowsHookImageFS, bin string, keep []string) 
 		if launch && keepSet[strings.ToLower(name)] {
 			report.Kept = append(report.Kept, path)
 			continue
+		}
+		if launch {
+			if why := windowsHookImageRetainReason(strings.ToLower(name), staged, policy); why != "" {
+				report.Retained = append(report.Retained, windowsHookImageRetained{Folder: path, Why: why})
+				continue
+			}
 		}
 		target := path
 		if launch {

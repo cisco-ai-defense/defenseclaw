@@ -44,7 +44,15 @@ const (
 	EnterpriseHookImageName      = "defenseclaw-hook.exe"
 	EnterpriseHookGuardImageName = "defenseclaw-hook-guard.exe"
 	EnterpriseHookImagesDirName  = "hooks"
-	enterpriseHookImageDigestLen = 16
+	// EnterpriseHookImagesRetiredMarker is the file an administrator's
+	// `enterprise windows hook-image retire` writes in bin\hooks before an
+	// older release's Setup takes over (a rollback to 1.0.9 or earlier, whose
+	// writers know only the transition path). While it exists every writer
+	// names the transition set again; the launch folders stay for the agent
+	// sessions that still start them. The next stage of this release removes
+	// it.
+	EnterpriseHookImagesRetiredMarker = ".retired"
+	enterpriseHookImageDigestLen      = 16
 )
 
 // EnterpriseHookImageLocation is a parsed managed hook image path.
@@ -220,6 +228,11 @@ const (
 	// returned, which is this release's own bytes and always starts, and
 	// verify reports the state (hook_image_not_staged).
 	EnterpriseHookImageNotStaged EnterpriseHookImageState = "not_staged"
+	// EnterpriseHookImageRetired: an administrator retired the launch
+	// folders (EnterpriseHookImagesRetiredMarker) before going back to a
+	// release that names only the transition path; writers name the
+	// transition set.
+	EnterpriseHookImageRetired EnterpriseHookImageState = "retired"
 )
 
 // EnterpriseHookImage is the resolved launch set of a managed bin.
@@ -286,6 +299,14 @@ func ResolveEnterpriseHookImageWith(fsys EnterpriseHookImageFS, bin string) Ente
 	}
 	if !info.IsDir() || info.Mode()&fs.ModeSymlink != 0 || info.Mode()&fs.ModeIrregular != 0 {
 		return notStaged("%s is not a plain folder", root)
+	}
+	if marker, err := fsys.Lstat(joinWindowsPath(root, EnterpriseHookImagesRetiredMarker)); err == nil && marker.Mode().IsRegular() {
+		if digest, hashErr := fsys.FileSHA256(transitionHook); hashErr == nil {
+			out.SHA256 = digest
+		}
+		out.State = EnterpriseHookImageRetired
+		out.Problem = "the launch folders are retired (" + joinWindowsPath(root, EnterpriseHookImagesRetiredMarker) + "); agent hooks name the transition image"
+		return out
 	}
 	digest, err := fsys.FileSHA256(transitionHook)
 	if err != nil {
