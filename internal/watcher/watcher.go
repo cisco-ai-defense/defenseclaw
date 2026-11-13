@@ -229,15 +229,17 @@ type InstallWatcher struct {
 	// stagingSeen is when each folder was first seen, stagingDeferred the
 	// paths to re-check, stagingMemo and registryMemo one answer per
 	// folder and registry for a pass. stagingClock, stagingWalkLimit and
-	// stagingWalks are for tests (nil/0: time.Now, the default limit).
+	// stagingWalks and stagingFold are for tests (nil/0: time.Now, the
+	// default limit, the platform's case rule).
 	stagingMu        sync.Mutex
-	stagingSeen      map[string]time.Time
+	stagingSeen      map[string]stagingSeenEntry
 	stagingDeferred  map[string]stagingDeferral
 	stagingMemo      map[string]stagingAnswer
 	registryMemo     map[string]registryAnswer
 	stagingNextCheck time.Time
 	stagingClock     func() time.Time
 	stagingWalkLimit int
+	stagingFold      func(string) string
 	stagingWalks     atomic.Int64
 
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
