@@ -17,7 +17,7 @@ import (
 func TestKiroRollbackConvertsTheAnsweringBridgeToTheEarlierFormAndBack(t *testing.T) {
 	pinWindowsSystemDirectoryForTest(t)
 	const launcher = `C:\Users\dcw std1\.local\bin\defenseclaw-hook.exe`
-	pairs := kiroWindowsHookFormPairs([]string{launcher, launcher, ""})
+	pairs := kiroWindowsHookFormPairs([]string{launcher, launcher, ""}, "1.0.8", true)
 	if len(pairs) != 2 {
 		t.Fatalf("pairs = %d, want one per surface", len(pairs))
 	}
@@ -56,7 +56,7 @@ func TestKiroRollbackConvertsTheAnsweringBridgeToTheEarlierFormAndBack(t *testin
 	if again, n := convertKiroHookFileForms(converted, pairs, true); n != 0 || !bytes.Equal(again, converted) {
 		t.Fatalf("a second conversion changed %d commands", n)
 	}
-	restored, back := convertKiroHookFileForms(converted, pairs, false)
+	restored, back := convertKiroHookFileForms(converted, kiroWindowsHookFormPairs([]string{launcher}, "", false), false)
 	if back != 2 || !bytes.Equal(restored, original) {
 		t.Fatalf("restore changed %d commands; bytes equal = %v", back, bytes.Equal(restored, original))
 	}

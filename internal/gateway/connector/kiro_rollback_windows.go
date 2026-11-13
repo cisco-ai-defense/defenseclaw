@@ -42,7 +42,7 @@ func (c *KiroConnector) convertKiroConfigHookForms(opts SetupOpts, toEarlier boo
 		return 0, nil
 	}
 	launchers := append([]string{strings.TrimSpace(opts.HookExecutable)}, nativeHookBinaryOwnershipCandidates()...)
-	pairs := kiroWindowsHookFormPairs(launchers)
+	pairs := kiroWindowsHookFormPairs(launchers, opts.RollbackTargetVersion, toEarlier)
 	paths := append(append(c.hookCleanupPaths(opts), c.agentConfigPaths(opts)...), c.agentCleanupPaths(opts)...)
 	total := 0
 	for _, path := range uniqueNonEmptyStrings(paths) {

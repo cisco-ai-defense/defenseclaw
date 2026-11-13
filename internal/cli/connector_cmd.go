@@ -1335,6 +1335,7 @@ func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
 		names = []string{connectorFlagName}
 	}
 	opts := resolveConnectorOpts(dataDir)
+	opts.RollbackTargetVersion = strings.TrimSpace(connectorRollbackToVersion)
 	converted := map[string]int{}
 	failed := map[string]string{}
 	for _, name := range names {
