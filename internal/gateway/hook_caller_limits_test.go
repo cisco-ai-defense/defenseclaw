@@ -432,7 +432,7 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 		}
 		var running []held
 		for call := range 600 {
-			now = time.Unix(4_000_000, 0).Add(time.Duration(call) * 100 * time.Millisecond)
+			now = time.Unix(4_000_000, 0).Add(time.Duration(call) * 50 * time.Millisecond)
 			kept := running[:0]
 			for _, request := range running {
 				if request.until.After(now) {
@@ -453,11 +453,11 @@ func TestHookCallerLimiterAdmitsTenCallsASecondOfOneAccount(t *testing.T) {
 	}
 	for _, service := range []time.Duration{40 * time.Millisecond, 500 * time.Millisecond, time.Second, 3 * time.Second} {
 		if refused := flood(service); refused != 0 {
-			t.Fatalf("10 calls a second taking %s each: %d of 600 refused, want 0", service, refused)
+			t.Fatalf("20 calls a second taking %s each: %d of 600 refused, want 0", service, refused)
 		}
 	}
 	if refused := flood(4 * time.Second); refused == 0 {
-		t.Fatal("10 calls a second taking 4 s each were all admitted; the in-flight bound did not apply")
+		t.Fatal("20 calls a second taking 4 s each were all admitted; the in-flight bound did not apply")
 	}
 }
 
@@ -1020,11 +1020,16 @@ func TestGAP0490ManagedHookAndReceiptWindows(t *testing.T) {
 		class    string
 		span     time.Duration
 		bindings int
+		// bound is the call past which the in-flight bound refuses (0: none):
+		// the bounds hold one answer window at the account rate
+		// (sandboxInFlightWindow), not the 12 s attempt or 15 s receipt
+		// lifetime (S8 lead review P2-1).
+		bound int
 	}{
-		{"hook-review-window", sandboxBudgetPending, 3510 * time.Millisecond, 20},
-		{"receipt-review-window", sandboxBudgetReceipt, 3510 * time.Millisecond, 20},
-		{"hook-full-window", sandboxBudgetPending, max(first, retry) - 10*time.Millisecond, 60},
-		{"receipt-full-window", sandboxBudgetReceipt, sandboxHookReceiptWindow - 10*time.Millisecond, 60},
+		{"hook-review-window", sandboxBudgetPending, 3510 * time.Millisecond, 20, 0},
+		{"receipt-review-window", sandboxBudgetReceipt, 3510 * time.Millisecond, 20, 0},
+		{"hook-full-window", sandboxBudgetPending, max(first, retry) - 10*time.Millisecond, 60, sandboxUserHookInFlight},
+		{"receipt-full-window", sandboxBudgetReceipt, sandboxHookReceiptWindow - 10*time.Millisecond, 60, sandboxUserReceiptInFlight},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			start := time.Unix(4_000_000, 0)
@@ -1047,6 +1052,13 @@ func TestGAP0490ManagedHookAndReceiptWindows(t *testing.T) {
 					t.Fatalf("binding %d reached its own in-flight limit", binding)
 				}
 				release, _, reason, _ := limiter.acquire("1001|" + tc.class)
+				if tc.bound > 0 && i >= tc.bound {
+					if reason == "" {
+						release()
+						t.Fatalf("call %d held past the in-flight bound of %d was admitted", i+1, tc.bound)
+					}
+					break
+				}
 				if reason != "" {
 					t.Fatalf("call %d of %d at %s refused: %s", i+1, calls, now.Sub(start), reason)
 				}

@@ -96,7 +96,7 @@ func removeUnusedSharedHookRuntimeLocked(dataRoot, hooks *os.Root) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read hook config sidecar: %w", err)
 	}
-	names := append(append([]string{hookConfigSidecarName, ".gateway-helper"}, genericHookScripts...), hookHelperScripts...)
+	names := append(append(append([]string{hookConfigSidecarName, ".gateway-helper"}, genericHookScripts...), hookHelperScripts...), outageModeLookFiles...)
 	var errs []error
 	for _, name := range names {
 		info, err := hooks.Lstat(name)
@@ -228,3 +228,9 @@ func plainDisabledHookTombstoneAgent(body string) (string, bool) {
 	}
 	return agent, true
 }
+
+// outageModeLookFiles are the files defenseclaw-hook-user keeps in the hooks
+// folder to share one outage-mode look among the late calls of an account
+// (cmd/defenseclaw-hook-user/outage_shared.go): DefenseClaw files, removed
+// with the hook runtime and owned by the account state.
+var outageModeLookFiles = []string{".outage-mode.lock", ".outage-mode.result", ".outage-mode.result.tmp"}
