@@ -734,6 +734,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// cmd /c | /k: the rest is an inner command to unwrap (review CM-9); a cmd
 	// reading its command from a pipe is opaque code (review N8 K6).
+	if entry.CmdC && c.Host != nil {
+		// psparse read this cmd host call: unwrap its payload only from a Static
+		// verdict, with psparse's text; a NotStatic one is opaque, and the walker's
+		// own /c scan must not turn an off-table shape into a known payload (R9-3).
+		w.hostPayload(c, dialect, depth, cond, origin)
+		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		return
+	}
 	if entry.CmdC {
 		rest := inner[1:]
 		found := false
@@ -775,6 +783,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 
 	// powershell/pwsh launched from any dialect: decode -enc and unwrap its
 	// -Command / positional script as PowerShell (review N8 K4/K5).
+	if entry.PSLaunch && c.Host != nil {
+		w.hostPayload(c, dialect, depth, cond, origin)
+		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+		return
+	}
 	if entry.PSLaunch {
 		// -EncodedArguments carries a base64 CLIXML argument payload for a child
 		// host; we do not deserialize it, so the launch is opaque, never a trusted
@@ -3761,4 +3774,14 @@ func (w *walker) declWords(program string, args []Word) bool {
 		}
 	}
 	return ok
+}
+
+// hostPayload applies psparse's verdict for a host call: opaque, or the Static
+// payload text walked as its own grammar in program order.
+func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, origin Origin) {
+	if c.Host.Opaque {
+		w.opaqueExec(origin, cond)
+		return
+	}
+	w.unwrapCode(c.Host.Text, true, c.Host.Dialect, depth, cond, origin)
 }

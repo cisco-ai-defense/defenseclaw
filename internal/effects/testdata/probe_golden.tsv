@@ -181,9 +181,9 @@ D6 icacls	U|permission_change:c:\x
 D7 certutil	K|
 D8 cmd cond	K|delete:c:\x\a
 D9 cmd %1	U|
-DU-a powershell -Command delete (ps dialect)	K|delete:c:\t\a,delete:c:\t\a
+DU-a powershell -Command delete (ps dialect)	K|delete:c:\t\a
 DU-b powershell -Command delete (cmd outer)	K|delete:c:\t\a
-DU-c powershell -Command protected	K|delete:c:\users\u\.ssh\authorized_keys,delete:c:\users\u\.ssh\authorized_keys
+DU-c powershell -Command protected	K|delete:c:\users\u\.ssh\authorized_keys
 DU-d pwsh -EncodedArguments opaque	U|
 E1 HOME reassigned	K|write:/etc/passwd
 E2 HOME dynamic then ~	U|
@@ -354,7 +354,7 @@ H2 ps Invoke-Command	U|delete:c:\windows\x
 H3 ps if block	K|delete:c:\windows\x
 H4 ps -WhatIf	K|delete:c:\windows\x
 H5 ps Out-File	K|write:c:\x\o.txt
-H6 ps -enc nested in ps	K|delete:c:\x,delete:c:\x
+H6 ps -enc nested in ps	K|delete:c:\x
 J1 dq $HOME	K|delete:/home/u/.ssh
 J2 escaped prog	K|delete:/etc/x
 J3 quoted prog	K|delete:/etc/x
@@ -653,7 +653,7 @@ S46 Set-Location $HOME	U|
 S47 sc PS5 alias	U|
 S48 Move-Item -Destination	U|
 S49 Copy-Item -ToSession	U|write:c:\users\u\.ssh\authorized_keys\k
-S5 ps powershell positional	K|delete:c:\users\u\.ssh,delete:c:\users\u\.ssh
+S5 ps powershell positional	U|
 S50 Set-Location -LiteralPath	U|
 S51 [Environment]::SetEnvironmentVariable	U|
 S52 Out-File positional	K|write:c:\users\u\.ssh\authorized_keys
@@ -1362,9 +1362,9 @@ rv8-X15 ps legacy quote in foreach	U|
 rv8-X16 ps legacy quote CMD upper	U|
 rv8-X17 ps legacy quote /k	U|
 rv8-X18 ps legacy quote cd	U|
-rv8-X19 ps cmd /r	U|
+rv8-X19 ps cmd /r	K|delete:c:\users\u\.ssh\authorized_keys
 rv8-X20 ps cmd padded /c	U|
-rv8-X21 ps cmd /c colon param	U|delete:c:\t,delete:c:\users\u\.ssh\authorized_keys
+rv8-X21 ps cmd /c colon param	U|
 rv8-X22 ps cmd /c env var arg	U|
 rv8-X23 ps cmd stop-parse tail	U|
 rv8-X24 ps cmd /c then stop-parse	U|
@@ -1374,7 +1374,21 @@ rv8-Y03 ps hash value & Remove-Item	K|delete:c:\users\u\.ssh\authorized_keys
 rv8-Y04 ps hash value bare Remove-Item	K|delete:c:\users\u\.ssh\authorized_keys
 rv8-Y05 ps member LHS Remove-Item	U|
 rv8-Y06 ps void & Remove-Item (control)	K|delete:c:\users\u\.ssh\authorized_keys
-rv8-Y07 ps hash value & powershell	K|delete:c:\users\u\.ssh\authorized_keys,delete:c:\users\u\.ssh\authorized_keys
+rv8-Y07 ps hash value & powershell	K|delete:c:\users\u\.ssh\authorized_keys
 rv8-Y08 ps LHS index Set-Content	U|
 rv8-Y09 ps hash value & Add-Content	K|write:c:\users\u\.ssh\authorized_keys
+rv9-G02 pwsh -nop -c in order	K|delete:/home/u/.ssh/authorized_keys,delete:/home/u/authorized_keys
+rv9-K01 cmd: a word before /c	U|
+rv9-K02 cmd: unknown option before /c	U|
+rv9-K03 cmd: padded /c	U|
+rv9-K04 cmd: /d /c table shape	K|delete:c:\users\u\.ssh\authorized_keys
+rv9-K05 cmd: /r	K|delete:c:\users\u\.ssh\authorized_keys
+rv9-K06 cmd: /k then /c	U|
+rv9-K07 cmd: two words before /c	U|
+rv9-K08 cmd: dynamic option	U|
+rv9-K09 cmd: /c table shape	K|delete:c:\users\u\.ssh\authorized_keys
+rv9-W03 pwsh -wd	U|
+rv9-W04 pwsh -WorkingDirectory	U|
+rv9-W05 powershell -wd win	U|
+rv9-W07 pwsh -wd -enc	U|
 tee single unlisted	U|write:/tmp/x
