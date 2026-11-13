@@ -2039,8 +2039,13 @@ func scanLocalPatternsWithActivation(
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
 		ruleSeverity := rf.Severity
-		if severityRank[ruleSeverity] == 0 {
-			// A rule without a known severity keeps the old fail-closed floor.
+		if severityRank[ruleSeverity] == 0 || (rf.enforcement == findingEnforcementDetectionOnly && severityRank[ruleSeverity] < severityRank["MEDIUM"]) {
+			// A rule without a known severity, and a shipped weak-literal rule
+			// that the trust-literal context demoted to detection-only LOW
+			// (TRUST-FICTIONAL, TRUST-PROMPT-EXTRACT), keep the MEDIUM floor the
+			// prompt scan always gave them. Whether the prompt path should honor
+			// that demotion as the tool path does is the injection floor's
+			// decision (rel-1-0-10:GAP-0175), not this gap's.
 			ruleSeverity = "MEDIUM"
 		}
 		if severityRank[ruleSeverity] > severityRank[maxRuleSev] {
