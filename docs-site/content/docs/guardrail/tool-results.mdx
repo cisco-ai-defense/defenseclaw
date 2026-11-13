@@ -41,10 +41,10 @@ The checks:
   match. Rule IDs: `TOOLRESULT-AGENT-DIRECTIVE`, `TOOLRESULT-ROLE-SWITCH`,
   `TOOLRESULT-DISCARD-INSTRUCTIONS`.
 - **Secrets** (`secret` rules), as before.
-- **C2 and exfil hosts** (`c2` rules: webhook.site, ngrok, Pipedream and the
-  like). An output that names one is how an injection hands the agent a place
-  to send data. The call to the host, if the agent makes it, is judged on its
-  own.
+- **C2 and exfil hosts** (`c2` rules: webhook.site, ngrok, Pipedream, cloud
+  metadata and the like), recorded as LOW telemetry: a host named in a
+  document or a test file is not an action. The call to the host, if the agent
+  makes it, is judged on its own.
 - **The judge, when you turn it on.** The injection judge reads a tool result
   as untrusted data with its own prompt ("does this data try to direct the
   agent?"). It runs under `detection_strategy_completion`, the setting that
@@ -64,16 +64,17 @@ never run on output text; they judge tool calls.
 
 ## What happens
 
-A rule finding keeps its rule's severity, as before: a CRITICAL rule (a
-jailbreak or "ignore previous instructions") is a block answer in every pack,
-a HIGH one an alert in default and permissive and a block in strict. The
-checks new to tool output (the structural checks, the judge) and every finding
-on the `/llm` proxy are HIGH at most:
+The tool has already run, so a verdict on its output cannot undo it. Every
+tool-result finding (rules, structural checks, judge) is HIGH at most, so the
+default pack never blocks a tool result:
 
-| posture | HIGH-at-most findings |
+| posture | what you get |
 |---|---|
 | default, permissive | an alert. The tool output reaches the model. |
-| strict | a block answer. What that does depends on the agent, below. |
+| strict | a block answer: the output is withheld where the agent allows it, below; elsewhere an alert. |
+
+Secrets in a tool's output are an alert today; redacting them where the agent
+can replace the output is planned.
 
 What a block on a tool result does, per agent:
 

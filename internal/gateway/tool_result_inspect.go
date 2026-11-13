@@ -30,28 +30,28 @@ import (
 //     tool outputs). PII in the output of named tools stays covered by the
 //     sensitive-tools result inspection (sensitive-tools.yaml) and the opt-in
 //     PII judge;
-//   - the C2 rules (known exfil and tunnel hosts: webhook.site, ngrok, ...):
-//     an output that names one is how an indirect injection hands the agent
-//     an exfil endpoint, and the generic /inspect/tool-response route always
-//     alerted on it (security suite tool-response/c2-webhook). The other
-//     action categories (command, path, cognitive-file) judge tool calls and
-//     never run on content;
+//   - the C2 rules (known exfil and tunnel hosts: webhook.site, ngrok, cloud
+//     metadata, ...) as LOW telemetry: an output that names one is recorded,
+//     but the host in a document or a test fixture is not an action (on the
+//     owner's real tool outputs C2 on output alerted or blocked 98 times, all
+//     docs and fixtures, run s7tr-atA); the call to the host is judged at
+//     PreToolUse. The other action categories (command, path, cognitive-file)
+//     judge tool calls and never run on content;
 //   - the trust-exploit rules again on the tool-result view: string escapes
 //     decoded (tool output is often JSON or YAML in which the text the model
 //     reads is a quoted string) and confusables folded;
 //   - the structural injection checks (tool_result_injection.go);
 //   - the opt-in judge, with the tool-result injection prompt (llm_judge.go).
 //
-// Disposition: rule findings keep the severity of their rule, as on the hook
-// path before (a CRITICAL rule answers block in the default pack, which a
-// connector that can act on a finished call uses to withhold the output from
-// the model; docs-site guardrail/tool-results.mdx lists what each connector
-// does with it). What is new on this surface is HIGH at most, so the default
-// and permissive packs (block at CRITICAL) alert on it and strict (block at
-// MEDIUM) blocks: the structural checks, the judge (capToolResultJudgeVerdict)
-// and every finding on the /llm proxy, which did not inspect tool results
-// before and enforces by refusing the model call that would carry the output
-// (proxy_tool_result.go).
+// Disposition (S7 lead decision 2026-11-13, option B in plans TOOLRESULT.md):
+// no result-side block in the default pack. The call has already run; a block
+// cannot undo it and on the connectors that can act on it only withholds the
+// output. Every finding on this surface is HIGH at most (rules here, the judge
+// in capToolResultJudgeVerdict, the structural checks): the default and
+// permissive packs (block at CRITICAL) alert, strict (block at MEDIUM) blocks,
+// which withholds the output where the connector can (Codex PostToolUse, Amp
+// tool.result, the /llm proxy refusing the model call) and is an alert with
+// would_block elsewhere (docs-site guardrail/tool-results.mdx).
 
 const directionToolResult = "tool_result"
 
@@ -86,9 +86,12 @@ func toolResultRuleFindings(generation *compiledRulePackCategories, content stri
 			ruleScanOptions{onlyCategory: "trust-exploit"})
 		if scope != ruleContentScopeSource {
 			// C2 is an action category, which a content scope leaves out; on a
-			// tool's output it runs on its own (see the surface comment above).
-			findings = append(findings, scanContentRulesWithOptions(generation, content, "message", ruleContentScopeAll,
-				ruleScanOptions{onlyCategory: "c2"})...)
+			// tool's output it runs on its own, as telemetry (surface comment).
+			for _, f := range scanContentRulesWithOptions(generation, content, "message", ruleContentScopeAll,
+				ruleScanOptions{onlyCategory: "c2"}) {
+				f.Severity = "LOW"
+				findings = append(findings, f)
+			}
 		}
 	}
 	seen := make(map[string]bool, len(injection))
@@ -118,7 +121,13 @@ func toolResultRuleFindings(generation *compiledRulePackCategories, content stri
 		}
 		injection = append(injection, f)
 	}
-	return append(findings, injection...)
+	out := append(findings, injection...)
+	for i := range out {
+		if strings.EqualFold(out[i].Severity, "CRITICAL") {
+			out[i].Severity = "HIGH"
+		}
+	}
+	return out
 }
 
 // capToolResultJudgeVerdict applies the tool-result disposition to a judge
