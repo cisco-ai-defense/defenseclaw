@@ -6614,6 +6614,20 @@ def _check_connector_version_supported_for_setup(
         return True
 
     if compatibility.status == STATUS_NOT_GATED:
+        from defenseclaw.connector_contracts import OPENCLAW_NATIVE_HOOKS_SINCE, openclaw_lacks_native_hooks
+        from defenseclaw.platform_support import uses_guardrail_proxy
+
+        if connector == "openclaw" and not uses_guardrail_proxy("openclaw") and openclaw_lacks_native_hooks(raw_version):
+            # Windows has no guardrail proxy: OpenClaw needs its native plugin
+            # hooks. Refuse before anything is saved (rel-1-0-10 GAP-0066).
+            if emit:
+                ux.err(
+                    f"{label} {normalize_agent_version(raw_version)}: on this OS DefenseClaw guards OpenClaw "
+                    f"through its native plugin hooks, which need OpenClaw {OPENCLAW_NATIVE_HOOKS_SINCE} or later. "
+                    "No changes made."
+                )
+                ux.subhead("Upgrade OpenClaw (npm install -g openclaw@latest), then run setup again.")
+            return False
         if connector == "openclaw" and human_approval and openclaw_lacks_plugin_approvals(raw_version):
             # OpenClaw before 2026.3.28 rejects approvals.plugin, so its
             # gateway would no longer start (GAP-1956).

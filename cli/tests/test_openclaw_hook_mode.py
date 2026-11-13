@@ -62,3 +62,12 @@ class OpenClawInstallPolicyStateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpenClawNativeFloorTest(unittest.TestCase):
+    def test_floor(self):
+        from defenseclaw.connector_contracts import openclaw_lacks_native_hooks
+
+        self.assertTrue(openclaw_lacks_native_hooks("OpenClaw 2026.8.34 (abc)"))
+        self.assertFalse(openclaw_lacks_native_hooks("2026.8.35"))
+        self.assertFalse(openclaw_lacks_native_hooks(""))
