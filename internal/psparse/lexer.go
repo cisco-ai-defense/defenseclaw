@@ -137,7 +137,7 @@ func (l *lexer) lex() []Token {
 			l.lexSingleString()
 		case isDoubleQuote(r):
 			l.lexDoubleString()
-		case r == '@' && (l.peek(1) == '"' || l.peek(1) == '\''):
+		case r == '@' && (isDoubleQuote(l.peek(1)) || isSingleQuote(l.peek(1))):
 			l.lexHereString()
 		case r == '@' && l.peek(1) == '(':
 			a := l.i
@@ -163,7 +163,7 @@ func (l *lexer) lex() []Token {
 			l.scanRedirectFromHere(a, string(r))
 		case unicode.IsDigit(r):
 			l.lexNumber()
-		case r == '.' && unicode.IsDigit(l.peek(1)) && !l.prevWasValue:
+		case r == '.' && unicode.IsDigit(l.peek(1)) && l.atStart:
 			l.lexNumber()
 		default:
 			l.lexOperatorOrWord()
@@ -253,9 +253,9 @@ func (l *lexer) lexDoubleString() {
 
 func (l *lexer) lexHereString() {
 	a := l.i
-	quote := l.peek(1) // ' or "
+	quote := l.peek(1) // ' or " (straight or smart)
 	kind := StrHereDouble
-	if quote == '\'' {
+	if isSingleQuote(quote) {
 		kind = StrHereSingle
 	}
 	l.i += 2 // @ and quote
@@ -271,7 +271,8 @@ func (l *lexer) lexHereString() {
 	// at the start of a line.
 	for l.i < len(l.runes) {
 		atLineStart := l.i == 0 || l.runes[l.i-1] == '\n'
-		if atLineStart && l.cur() == quote && l.peek(1) == '@' {
+		sameClass := (kind == StrHereSingle && isSingleQuote(l.cur())) || (kind == StrHereDouble && isDoubleQuote(l.cur()))
+		if atLineStart && sameClass && l.peek(1) == '@' {
 			l.i += 2
 			t := Token{Kind: TokString, Str: kind, Raw: l.slice(a, l.i), Start: l.byteAt(a), End: l.byteAt(l.i)}
 			t.Value = t.Raw

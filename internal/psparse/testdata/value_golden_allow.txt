@@ -9,16 +9,11 @@ V3JpdGUtT3V0cHV0IC1hJ2In	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hImIi	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IC1hJHg=	pending step-3: parameter vs argument boundary
 V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
-V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC0tIC0tJSBh	pending step-3: --% verbatim tail as elements
 ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	pending step-3: param/attribute block command recursion
-V3JpdGUtT3V0cHV0IC41	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IDEuNW4=	pending step-3: number value formatting (int width / suffix / decimal)
-c3dpdGNoIC1SZWdleCAtQ2FzZVNlbnNpdGl2ZSAoJHgpIHsgJ15hJyB7IFJlbW92ZS1JdGVtIEM6XHggfSBkZWZhdWx0IHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
 c3dpdGNoIC1GaWxlIEM6XHgudHh0IHsgJ2EnIHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
-c3dpdGNoIC13ICgnYScpIHsgYSB7IFJlbW92ZS1JdGVtIEM6XHggfSB9	pending step-3: command count mismatch (delta review)
 c3dpdGNoIC1yZWdleCAtZmlsZSBDOlx4IHsgJ2EnIHsgYnJlYWsgfSB9	pending step-3: command count mismatch (delta review)
-c3dpdGNoIChHZXQtQ2hpbGRJdGVtKSB7IGRlZmF1bHQgeyBSZW1vdmUtSXRlbSAkXyB9IH0=	pending step-3: command count mismatch (delta review)
-c3dpdGNoICgnYScsJ2InKSB7IGEgeyBSZW1vdmUtSXRlbSBDOlx4OyBjb250aW51ZSB9IGIgeyBSZW1vdmUtSXRlbSBDOlx5IH0gfQ==	pending step-3: command count mismatch (delta review)
 c3dpdGNoIC1maWxlOkM6XHggeyBhIHsgUmVtb3ZlLUl0ZW0gQzpceSB9IH0=	pending step-3: command count mismatch (delta review)
+c3dpdGNoIC1yZWdleCAoJHgpIHsgImEkKFJlbW92ZS1JdGVtIEM6XHgpIiB7IDEgfSB9	pending step-3: command count mismatch (delta review)

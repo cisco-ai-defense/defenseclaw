@@ -423,7 +423,11 @@ func (p *parser) parseControl(kw string) Statement {
 		case p.at(TokLParen):
 			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
 		case p.at(TokLBrace):
-			blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
+			if kw == "switch" {
+				p.parseSwitchBody(blk)
+			} else {
+				blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
+			}
 		case p.at(TokParameter):
 			// a control option such as switch -regex / -wildcard / -file
 			p.advance()
@@ -439,6 +443,40 @@ func (p *parser) parseControl(kw string) Statement {
 	}
 	blk.start, blk.end = start, p.prevEnd()
 	return blk
+}
+
+// parseSwitchBody parses a switch body { <pattern> { block } ... }. Clause
+// patterns that are bare labels ('a', default, a number) are not commands and
+// are skipped; a ( ) or { } pattern (an evaluated condition) and every clause
+// block are parsed and walked.
+func (p *parser) parseSwitchBody(blk *Block) {
+	if !p.at(TokLBrace) {
+		return
+	}
+	p.advance() // {
+	save := p.enter()
+	guard := 0
+	for !p.at(TokRBrace) && !p.at(TokEOF) && guard < 1<<16 {
+		guard++
+		p.skipSeparators()
+		switch {
+		case p.at(TokRBrace):
+			goto done
+		case p.at(TokLBrace):
+			blk.Bodies = append(blk.Bodies, p.parseScriptBlock())
+		case p.at(TokLParen):
+			blk.Conditions = append(blk.Conditions, p.parseParenExprStatement())
+		case p.at(TokDollarParen), p.at(TokAtParen):
+			blk.Conditions = append(blk.Conditions, p.exprStmt(p.parsePrimary()))
+		default:
+			p.advance() // a bare clause label / separator
+		}
+	}
+done:
+	p.leave(save)
+	if p.at(TokRBrace) {
+		p.advance()
+	}
 }
 
 func (p *parser) isSubKeyword() bool {
