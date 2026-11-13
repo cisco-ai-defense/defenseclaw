@@ -3735,6 +3735,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:     dialectHint,
+			windowsDialectReadings:  dialectHint,
 			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
@@ -4155,12 +4156,16 @@ func agentHookTrustedActionArgs(connectorName, toolName string, args json.RawMes
 // shell dialect is inferred from its command (agentHookWindowsShellDialect):
 // on a Windows host, outside a sandbox and Secure Client.
 func (a *APIServer) agentHookWindowsDialectHint(ctx context.Context) bool {
-	if runtime.GOOS != "windows" || isSandboxHookRequest(ctx) {
+	if !windowsHookHost() || isSandboxHookRequest(ctx) {
 		return false
 	}
 	cfg := a.decisionConfig(ctx)
 	return cfg == nil || !cfg.SecureClientIntegration()
 }
+
+// windowsHookHost reports whether the gateway runs on a Windows host. It is a
+// variable so that a test can judge a call as the Windows hook does on any OS.
+var windowsHookHost = func() bool { return runtime.GOOS == "windows" }
 
 func managedWindowsHookOverflowHold(ctx context.Context, cfg *config.Config, connector, goos string) bool {
 	return goos == "windows" && cfg != nil && cfg.StandaloneEnterprise() &&

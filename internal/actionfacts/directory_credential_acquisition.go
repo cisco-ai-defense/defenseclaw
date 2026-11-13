@@ -666,6 +666,35 @@ var netExecDirectoryPrograms = map[string]struct{}{
 	"nxc": {}, "netexec": {}, "crackmapexec": {},
 }
 
+// netExecProgramFamily is the one identity of a NetExec / CrackMapExec
+// executable word, whatever the shell: the base name of the word, in either
+// slash spelling, case-folded, without one launcher extension (.exe, .cmd,
+// .bat, .ps1). It is applied where a command's Program is derived
+// (commandProgramForDialect), so every dialect and every recognizer sees the
+// same name for nxc, NXC.EXE, a pipx path and a Windows path
+// (rel-1-0-10:GAP-0366). It names a family and proves nothing about the
+// binary: the recognizers only ever add a credential finding.
+func netExecProgramFamily(executable string) (string, bool) {
+	if executable == "" || strings.TrimSpace(executable) != executable {
+		return "", false
+	}
+	word := strings.ReplaceAll(executable, `\`, "/")
+	if strings.HasSuffix(word, "/") {
+		return "", false
+	}
+	base := strings.ToLower(path.Base(word))
+	for _, extension := range []string{".exe", ".cmd", ".bat", ".ps1"} {
+		if trimmed := strings.TrimSuffix(base, extension); trimmed != base {
+			base = trimmed
+			break
+		}
+	}
+	if _, ok := netExecDirectoryPrograms[base]; !ok {
+		return "", false
+	}
+	return base, true
+}
+
 var netExecDirectoryProtocols = map[string]struct{}{
 	"smb": {}, "ldap": {}, "mssql": {}, "winrm": {}, "wmi": {},
 	"rdp": {}, "ssh": {}, "ftp": {}, "vnc": {}, "nfs": {}, "smtp": {},
