@@ -3557,7 +3557,8 @@ func findAttachedPathOption(word string) bool {
 func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfacts.PathFact, lineStaysOff func() bool, clientTargets map[string]string) bool {
 	command, ok := integrityCommandByID(facts, candidate.CommandID)
 	if !ok || !strings.EqualFold(command.Program, "find") ||
-		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" {
+		candidate.Flavor != "" && candidate.Flavor != actionfacts.PathFlavorPOSIX || facts.ActiveHome == "" ||
+		!findStartingPoint(command, candidate) {
 		return false
 	}
 	acted := command
@@ -3606,6 +3607,26 @@ func findAncestorStartChangesState(facts actionfacts.Facts, candidate actionfact
 		return false
 	}
 	return true
+}
+
+// findStartingPoint reports a path fact that names one of the starting points
+// of the find: a word before its first expression primary. A path of an
+// -exec program (the folder find -exec mv {} / moves into) is no starting
+// point, so it cannot make the find reach the state root from above
+// (rel-1-0-10:GAP-0018).
+func findStartingPoint(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if len(command.Argv) < 2 {
+		return false
+	}
+	end := min(findExpressionStart(command.Argv), len(command.Argv))
+	for _, word := range command.Argv[1:end] {
+		// The argv holds the word as the shell expands it (~ is the home),
+		// the path fact holds it as written and as resolved.
+		if word != "" && (word == candidate.Value || word == candidate.Normalized || word == candidate.Resolved) {
+			return true
+		}
+	}
+	return false
 }
 
 // findPatternMatchesNoStateName reports a -name/-iname pattern that
