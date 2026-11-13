@@ -183,6 +183,15 @@
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "audit export",
       "note": "The managed audit log is administrator-only."
+    },
+    {
+      "command": "defenseclaw audit compact",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Administrators only",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "audit compact",
+      "note": "Gives the disk space of deleted audit history back. An administrator runs it after stopping the gateway service."
     }
   ]
 }

@@ -47,9 +47,9 @@ func holdFirstDurableBatch(t *testing.T, store *Store) (release func(), entered 
 func waitDurableQueue(t *testing.T, store *Store, depth int64) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for store.durableGroup.snapshot(time.Now()).Depth < depth {
+	for store.durableQueue().snapshot(time.Now()).Depth < depth {
 		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d writes queued", store.durableGroup.snapshot(time.Now()).Depth, depth)
+			t.Fatalf("only %d of %d writes queued", store.durableQueue().snapshot(time.Now()).Depth, depth)
 		}
 		time.Sleep(time.Millisecond)
 	}

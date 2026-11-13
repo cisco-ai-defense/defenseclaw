@@ -139,6 +139,16 @@ def _is_linux() -> bool:
     return sys.platform.startswith("linux")
 
 
+def _claude_native_per_user_os() -> bool:
+    """Where per-user Claude Code hooks use the native launcher.
+
+    Mirrors claudeCodeNativePerUserOS (internal/gateway/connector/claudecode.go):
+    Linux since 1.0.8, macOS since 1.0.10 (#1384, rel-1-0-6 GAP-0559).
+    """
+
+    return _is_linux() or sys.platform == "darwin"
+
+
 def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     raw = str(value or "").strip().lower()
     return raw if raw in _VALID_MODES else default
@@ -1936,10 +1946,11 @@ def _claude_per_user_native_registration(cfg: Any) -> _ClaudeNativeRegistration 
     the gateway's APIAddr (apiListenAddr): Linux, not managed, the account's
     default data directory, a .gateway-helper record naming
     ~/.local/bin/defenseclaw-gateway and an owner-only defenseclaw-hook-user
-    beside it. macOS, managed and custom data directories keep the shell hook.
+    beside it, on Linux and macOS (_claude_native_per_user_os). Managed and
+    custom data directories keep the shell hook.
     """
 
-    if _is_windows() or not _is_linux():
+    if _is_windows() or not _claude_native_per_user_os():
         return None
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         return None
