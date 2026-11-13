@@ -17,12 +17,15 @@
 package chainstate
 
 import (
+	"bytes"
 	"context"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/leader"
 )
@@ -31,44 +34,59 @@ import (
 // under the callout's budget (20 ms by default) on every request to an
 // allowed host, and a store write on the leader's volume (opening a new
 // actor's store, the connector instance row, the observe transaction)
-// does not fit it: on a chart install every request of a new actor timed
-// out and was refused as unchecked. So the leader keeps, per actor, the
-// egress-relevant part of its actor window in memory, fed by the hook
-// observations it already handles, and answers from it. The exact record
-// of the egress step (the window event) is written afterwards by one
-// background worker, batched, off the RPC. The memo is saved in the
-// actor's state file whenever a chain starts or ends, before the store
-// write, so a new leader answers from it at once.
+// does not fit it. So the leader keeps, per actor, a copy of the store's
+// own state of the actor window (audit ScopeState: the window events, the
+// next sequence and the prepared actions that start an egress chain) and
+// matches an egress step against it with the store's matcher
+// (guardrail.MatchToolChains). The copy is not a second model of the
+// window: syncMemo reads it back from the store after every write to the
+// actor window, whatever the path (a hook's prepare, resolve, observe,
+// discard or reset; a fork copy; a revert barrier; the worker's egress
+// record), so replays, resets, barriers and promoted pending steps count
+// exactly as in the store. A prepared step counts from PreToolUse, before
+// its PostToolUse promotes it, because the command may send the data
+// while it runs. The exact record of an allowed egress step is written
+// afterwards by one background worker, batched, off the RPC. The copy is
+// saved in the actor's state file, so a new leader answers from it at
+// once.
 
 // egressMemo is an actor's egress state in memory. Times are the actor's
-// running time (suspension does not count), in nanoseconds.
+// running time (suspension does not count).
 type egressMemo struct {
 	mu sync.Mutex
-	// warm: the memo covers everything in the actor's store. A store from
-	// a leader that saved no memo is not covered until the worker has
-	// evaluated one egress step on it.
+	// warm: the memo is the store's state. A store from a leader that
+	// saved no memo, or a read back that failed, leaves it cold until the
+	// worker has synced it: the check answers unavailable meanwhile.
 	warm bool
-	// step1 is the last first step of each egress chain, and how many
-	// actor events came after it.
-	step1 map[string]memoStep
-	// hit is the last detection of an egress chain the store reported.
-	hit map[string]int64
+	// synced: the memo came from the store (or its saved copy); a fork
+	// link made before the child's store leaves it alone.
+	synced bool
+	w      memoWindow
+	// enc is w encoded, for the state file and to tell a change.
+	enc []byte
 }
 
-type memoStep struct {
-	At     int64  `json:"at"`
-	Events uint64 `json:"events,omitempty"`
+// memoWindow is the actor window as the store has it.
+type memoWindow struct {
+	Ruleset string
+	Next    uint64
+	Events  []guardrail.ToolChainWindowEvent
+	Pending []audit.ToolChainPendingStep
 }
+
+// egressSnapshotVersion is the saved memo's format. A state file with
+// another version (or none) is from an older leader: its memo is cold.
+const egressSnapshotVersion = 2
 
 // egressSnapshot is the memo as the state file keeps it.
 type egressSnapshot struct {
-	Step1 map[string]memoStep `json:"step1,omitempty"`
-	Hit   map[string]int64    `json:"hit,omitempty"`
+	V      int    `json:"v"`
+	Window []byte `json:"window,omitempty"`
 }
 
-// errWarming answers a chain check for an actor whose stored windows the
-// memo does not cover yet (a store from an older leader): the callout's
-// chain failure mode decides, and the worker warms the memo.
+// errWarming answers a chain check for an actor whose stored window the
+// memo does not hold yet: the callout's chain failure mode decides, and
+// the worker syncs the memo.
 var errWarming = &leader.WireError{Code: leader.CodeUnavailable, Message: "the actor's chain state is loading"}
 
 // egressChainDefs are the definitions of egressChains.
@@ -82,171 +100,125 @@ var egressChainDefs = func() []guardrail.ToolChainDefinition {
 	return out
 }()
 
+// egressStep1Mask holds the first steps of the egress chains: the prepared
+// actions the memo keeps.
+var egressStep1Mask = func() uint64 {
+	var m uint64
+	for _, d := range egressChainDefs {
+		m |= d.Step1Bit
+	}
+	return m
+}()
+
+// egressStep is the projection of an egress step: the second step of every
+// egress chain.
+var egressStep = func() guardrail.ToolChainProjection {
+	var m uint64
+	for _, id := range egressChains {
+		if bit, ok := guardrail.ToolChainStepMask(id, 2); ok {
+			m |= bit
+		}
+	}
+	return guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusComplete, DetectionStepMask: m}
+}()
+
 // startsEgressChain reports whether mask holds the first step of an
 // egress chain.
-func startsEgressChain(mask uint64) bool {
-	for _, d := range egressChainDefs {
-		if d.Step1Bit != 0 && mask&d.Step1Bit != 0 {
-			return true
-		}
+func startsEgressChain(mask uint64) bool { return mask&egressStep1Mask != 0 }
+
+func encodeWindow(w memoWindow) []byte {
+	raw, err := encodeGob(w)
+	if err != nil {
+		return nil
 	}
-	return false
+	return raw
 }
 
-func (m *egressMemo) init() {
-	if m.step1 == nil {
-		m.step1, m.hit = map[string]memoStep{}, map[string]int64{}
-	}
-}
-
-// noteStep1 records the first steps in mask, before the store sees them:
-// a store write that fails afterwards leaves the memo stricter, never
-// laxer.
-func (m *egressMemo) noteStep1(at int64, mask uint64) {
+// set makes w the memo (read back from the store); it reports whether the
+// memo changed.
+func (m *egressMemo) set(w memoWindow) bool {
+	enc := encodeWindow(w)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
-	for _, d := range egressChainDefs {
-		if d.Step1Bit != 0 && mask&d.Step1Bit != 0 {
-			m.step1[d.ID] = memoStep{At: at}
-		}
-	}
+	changed := !m.warm || !m.synced || !bytes.Equal(enc, m.enc)
+	m.w, m.enc, m.warm, m.synced = w, enc, true, true
+	return changed
 }
 
-// noteObserved feeds one stored actor-window observation into the memo:
-// any event other than a first step counts against the chain's event
-// window, and a detection is kept. It reports whether a detection is new.
-func (m *egressMemo) noteObserved(at int64, mask uint64, detected []string) bool {
+// notePending adds a step the store is about to record, before it does:
+// a leader that stops between the store write and the read back restarts
+// from a saved memo that is stricter, never laxer. The next sync replaces
+// it with the store's own state.
+func (m *egressMemo) notePending(at time.Time, p guardrail.ToolChainProjection) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
-	fresh := false
-	for _, d := range egressChainDefs {
-		if d.Step1Bit != 0 && mask&d.Step1Bit != 0 {
-			if _, ok := m.step1[d.ID]; !ok {
-				m.step1[d.ID] = memoStep{At: at}
-			}
-		} else if s, ok := m.step1[d.ID]; ok {
-			s.Events++
-			m.step1[d.ID] = s
-		}
-		if slices.Contains(detected, d.ID) {
-			if _, ok := m.hit[d.ID]; !ok {
-				fresh = true
-			}
-			m.hit[d.ID] = at
-		}
-	}
-	return fresh
+	w := m.w
+	w.Pending = append(slices.Clone(w.Pending), audit.ToolChainPendingStep{
+		PreparedAt: at, ExpiresAt: at.Add(guardrail.ToolChainMaxHorizon), Projection: p})
+	m.w, m.enc = w, encodeWindow(w)
 }
 
-// reset forgets the windows (a terminal reset, or a revert barrier for the
-// chains that keep one).
-func (m *egressMemo) reset(barrierOnly bool) {
+// invalidate makes the memo cold: a read back failed, so it may miss a step.
+func (m *egressMemo) invalidate() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, d := range egressChainDefs {
-		if !barrierOnly || d.ArtifactMutationBarrier {
-			delete(m.step1, d.ID)
-			delete(m.hit, d.ID)
-		}
-	}
+	m.warm = false
+	m.mu.Unlock()
 }
 
-// warmUp marks the memo as covering the store; it reports whether it did
-// not before.
-func (m *egressMemo) warmUp() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cold := !m.warm
-	m.warm = true
-	return cold
-}
-
-// merge adds a fork parent's windows to the child's memo (GAP-0091): a
-// chain the child lacks, or whose parent step is later, comes from the
-// parent. The child is warm only if both are.
-func (m *egressMemo) merge(p *egressMemo) {
+// linkFrom gives a new forked actor's memo its parent's window before the
+// child has a store (GAP-0091): its first egress is checked against what
+// the parent did. A memo already synced from the child's store, which
+// holds the copied windows, is kept.
+func (m *egressMemo) linkFrom(p *egressMemo) {
 	p.mu.Lock()
-	warm := p.warm
-	step1, hit := map[string]memoStep{}, map[string]int64{}
-	for k, v := range p.step1 {
-		step1[k] = v
-	}
-	for k, v := range p.hit {
-		hit[k] = v
-	}
+	w, warm := p.w, p.warm
 	p.mu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.init()
-	m.warm = m.warm && warm
-	for k, v := range step1 {
-		if c, ok := m.step1[k]; !ok || v.At > c.At {
-			m.step1[k] = v
-		}
+	if m.synced {
+		return
 	}
-	for k, v := range hit {
-		if v > m.hit[k] {
-			m.hit[k] = v
-		}
-	}
+	m.w, m.enc, m.warm = w, encodeWindow(w), m.warm && warm
 }
 
 // snapshot is the memo for the state file.
 func (m *egressMemo) snapshot() *egressSnapshot {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := &egressSnapshot{}
-	if len(m.step1) > 0 {
-		out.Step1 = map[string]memoStep{}
-		for k, v := range m.step1 {
-			out.Step1[k] = v
-		}
-	}
-	if len(m.hit) > 0 {
-		out.Hit = map[string]int64{}
-		for k, v := range m.hit {
-			out.Hit[k] = v
-		}
-	}
-	return out
+	return &egressSnapshot{V: egressSnapshotVersion, Window: slices.Clone(m.enc)}
 }
 
-// restore loads a saved memo: it covers the store (warm).
-func (m *egressMemo) restore(snap *egressSnapshot) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.step1, m.hit = map[string]memoStep{}, map[string]int64{}
-	for k, v := range snap.Step1 {
-		m.step1[k] = v
+// restore loads a saved memo; false for a memo of another format.
+func (m *egressMemo) restore(snap *egressSnapshot) bool {
+	if snap == nil || snap.V != egressSnapshotVersion {
+		return false
 	}
-	for k, v := range snap.Hit {
-		m.hit[k] = v
+	var w memoWindow
+	if len(snap.Window) > 0 {
+		if err := decodeGob(snap.Window, &w); err != nil {
+			return false
+		}
 	}
-	m.warm = true
+	m.set(w)
+	return true
 }
 
 // verdict is the chain check's answer at running time now; ok is false
-// while the memo is not warm. A chain is live while its first step is
-// inside the chain's windows; a detection the store reported counts only
-// for a chain whose first step the memo does not know (a store from an
-// older leader).
-func (m *egressMemo) verdict(now int64, action string) (EgressVerdict, bool) {
+// while the memo is cold or the window can't be matched.
+func (m *egressMemo) verdict(now time.Time, action string) (EgressVerdict, bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.warm {
+	w, warm := m.w, m.warm
+	m.mu.Unlock()
+	if !warm {
+		return EgressVerdict{}, false
+	}
+	detected, ok := detectEgress(w, now)
+	if !ok {
 		return EgressVerdict{}, false
 	}
 	var v EgressVerdict
 	for _, d := range egressChainDefs {
-		live := false
-		if s, ok := m.step1[d.ID]; ok {
-			live = now-s.At <= int64(d.TimeWindow) && s.Events < d.EventWindow
-		} else if t, ok := m.hit[d.ID]; ok {
-			live = now-t <= int64(d.TimeWindow)
-		}
-		if !live {
+		if detected&d.ResultBit == 0 {
 			continue
 		}
 		v.Detected = append(v.Detected, d.ID)
@@ -259,19 +231,57 @@ func (m *egressMemo) verdict(now int64, action string) (EgressVerdict, bool) {
 	return v, true
 }
 
-// egressRecord is one egress step for the worker.
+// detectEgress matches an egress step at now against the window, as the
+// store's Observe of that step would, and against each prepared first
+// step on its own, as if it had just resolved.
+func detectEgress(w memoWindow, now time.Time) (uint32, bool) {
+	next := max(w.Next, 1)
+	final := guardrail.ToolChainWindowEvent{SemanticEventID: "substrate.egress", Sequence: next, ReceivedAt: now, Projection: egressStep}
+	var mask uint32
+	if len(w.Events) > 0 {
+		m, err := guardrail.MatchToolChains(w.Events, final)
+		if err != nil {
+			return 0, false
+		}
+		mask |= m.DetectedMask
+	}
+	for _, p := range w.Pending {
+		if !now.Before(p.ExpiresAt) {
+			continue
+		}
+		prior := []guardrail.ToolChainWindowEvent{{SemanticEventID: "substrate.pending", Sequence: 1, ReceivedAt: p.PreparedAt, Projection: p.Projection}}
+		m, err := guardrail.MatchToolChains(prior, guardrail.ToolChainWindowEvent{
+			SemanticEventID: final.SemanticEventID, Sequence: 2, ReceivedAt: now, Projection: egressStep})
+		if err != nil {
+			return 0, false
+		}
+		mask |= m.DetectedMask
+	}
+	return mask, true
+}
+
+// egressRecord is one job for the worker: an egress step to record, or
+// (sync) a memo to read back from the store.
 type egressRecord struct {
 	actor Actor
 	in    EgressRequest
+	sync  bool
 }
 
-// egressQueueSize bounds the steps waiting for the worker; a full queue
-// drops the step (counted, warned once per drop run) and never blocks
-// the check.
+func (r egressRecord) key() string {
+	if r.sync {
+		return "sync/" + r.actor.key()
+	}
+	return "egress/" + r.actor.key()
+}
+
+// egressQueueSize bounds the jobs waiting for the worker; a full queue
+// drops the job (counted, warned once per drop run) and never blocks the
+// check.
 const egressQueueSize = 4096
 
-// egressBatch is how many queued steps the worker takes at once; steps of
-// one actor in a batch are recorded as one.
+// egressBatch is how many queued jobs the worker takes at once; the same
+// job of one actor in a batch runs once.
 const egressBatch = 64
 
 // egressWorker writes the exact egress steps off the RPC.
@@ -308,18 +318,24 @@ func (s *Service) startEgressWorkerWith(record func(context.Context, EgressReque
 			}
 			seen := map[string]bool{}
 			for _, r := range batch {
-				if seen[r.actor.key()] {
+				if seen[r.key()] {
 					continue
 				}
-				seen[r.actor.key()] = true
+				seen[r.key()] = true
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if err := record(ctx, r.in); err != nil {
-					s.warnf("record egress step for %s/%s: %v", r.actor.Atespace, r.actor.UID, err)
+				var err error
+				if r.sync {
+					err = s.warmMemo(ctx, r.actor)
+				} else {
+					err = record(ctx, r.in)
+				}
+				if err != nil {
+					s.warnf("chain worker for %s/%s: %v", r.actor.Atespace, r.actor.UID, err)
 				}
 				cancel()
 			}
 			if d := w.dropped.Load(); d != reported {
-				s.warnf("egress worker queue full: %d egress steps not recorded in the actor windows (the checks were answered)", d-reported)
+				s.warnf("egress worker queue full: %d jobs dropped (the checks were answered)", d-reported)
 				reported = d
 			}
 		}
@@ -350,7 +366,7 @@ func (w *egressWorker) stop() {
 	<-w.done
 }
 
-// EgressDropped is how many egress steps a full queue dropped.
+// EgressDropped is how many worker jobs a full queue dropped.
 func (s *Service) EgressDropped() uint64 {
 	if s.egress == nil {
 		return 0

@@ -69,6 +69,12 @@ func fakeKubectl(t *testing.T, fail error) {
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-gateway-leader"},"spec":{"holderIdentity":"pod-1"}}]}`), nil
 		case strings.HasPrefix(joined, "get configmaps -n defenseclaw-system"):
 			return []byte(`{"items":[{"metadata":{"name":"defenseclaw-config"},"data":{"config.yaml":"substrate:\n  supported_versions: \">=1.0.0 <1.1.0\"\n  identity:\n    issuer: https://idp.cluster-a.example.test\n"}}]}`), nil
+		// The idp Service through the API server's Service proxy
+		// (GAP-0194): its key set and its discovery document.
+		case joined == "get --raw /api/v1/namespaces/ate-system/services/https:idp:443/proxy/openid/v1/jwks":
+			return []byte(`{"keys":[{"kty":"EC","kid":"k1"}]}`), nil
+		case joined == "get --raw /api/v1/namespaces/ate-system/services/https:idp:443/proxy/.well-known/openid-configuration":
+			return []byte(`{"issuer":"https://idp.cluster-a.example.test","jwks_uri":"https://idp.cluster-a.example.test/openid/v1/jwks"}`), nil
 		case strings.HasPrefix(joined, "get deployments -n ate-system"):
 			return []byte(`{"items":[{"metadata":{"name":"ate-api-server"},"spec":{"template":{"spec":{"containers":[{"name":"api","image":"ghcr.io/agent-substrate/substrate:v1.0.0"}]}}}}]}`), nil
 		}
@@ -97,7 +103,7 @@ func TestSubstrateVerifyReadsTheClusterAndPasses(t *testing.T) {
 	}
 	for id, want := range map[string]string{
 		fleet.CheckSubstrateVersion: fleet.Pass, fleet.CheckCallout: fleet.Pass, fleet.CheckIngressClients: fleet.Pass,
-		fleet.CheckAPIAccess: fleet.Pass, fleet.CheckIssuer: fleet.Pass,
+		fleet.CheckAPIAccess: fleet.Pass, fleet.CheckIssuer: fleet.Pass, fleet.CheckActorKeys: fleet.Pass,
 	} {
 		if status[id] != want {
 			t.Errorf("check %s = %q, want %q (%+v)", id, status[id], want, status)

@@ -53,19 +53,27 @@ type KubePin struct {
 	Server    string
 	AdminURL  string
 	Principal string
-	// Namespace is where the record was read (the one named, or the one
-	// found).
-	Namespace string
 }
 
-// WithKubePin returns c with the pin recorded, and the record's namespace
-// when the context named none.
+// WithKubePin returns c with the pin recorded.
 func (c Context) WithKubePin(p KubePin) Context {
 	c.KubePinServer, c.KubePinAdminURL = p.Server, p.AdminURL
-	if c.KubeNamespace == "" {
-		c.KubeNamespace = p.Namespace
-	}
 	return c
+}
+
+// KubeNamespaceFound is login --kube without --kube-namespace: the one
+// endpoint record that names the admin URL sits in Namespace. Discovery
+// never pins a namespace by itself (GAP-0192, lane R5): anyone who may
+// create a ConfigMap in some namespace can publish a record. Nothing went
+// to the admin URL and nothing was minted; the person re-runs with
+// --kube-namespace once they know DefenseClaw runs there.
+type KubeNamespaceFound struct {
+	Namespace string
+	AdminURL  string
+}
+
+func (e *KubeNamespaceFound) Error() string {
+	return fmt.Sprintf("the launcher endpoint record that names %s is in namespace %s; nothing was sent to it. If DefenseClaw runs there, sign in again with --kube-namespace %s", e.AdminURL, e.Namespace, e.Namespace)
 }
 
 var kubeNamespaceRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
@@ -117,10 +125,11 @@ func normEndpoint(raw string) (string, error) {
 // kubeconfig's cluster publishes, before any Kubernetes credential is
 // sent to it. It reads the ConfigMap KubeEndpointConfigMap in namespace
 // from the cluster's API server, the only place the user's own credential
-// goes, trusting the kubeconfig's certificate authority. With no namespace
-// it looks in every namespace for the one record that names adminURL
-// (GAP-0192; the chart installs into any namespace). It returns the pin to
-// record in the context.
+// goes, trusting the kubeconfig's certificate authority. It returns the pin
+// to record in the context. With no namespace it only looks in every
+// namespace for the record that names adminURL and returns
+// *KubeNamespaceFound (one), or an error (none, several): it never signs in
+// to a namespace the person did not name (GAP-0192).
 func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace string) (KubePin, error) {
 	o = o.withDefaults()
 	if namespace = strings.TrimSpace(namespace); namespace != "" {
@@ -159,9 +168,11 @@ func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace 
 		bearer, principal = tok.AccessToken, tok.Principal
 	}
 	if namespace == "" {
-		if namespace, err = kubeFindRecord(ctx, o, hc, sel.cluster.Server, server, bearer, principal, admin); err != nil {
+		found, err := kubeFindRecord(ctx, o, hc, sel.cluster.Server, server, bearer, principal, admin)
+		if err != nil {
 			return KubePin{}, err
 		}
+		return KubePin{}, &KubeNamespaceFound{Namespace: found, AdminURL: admin}
 	}
 	record := fmt.Sprintf("the endpoint record (ConfigMap %s in namespace %s)", KubeEndpointConfigMap, namespace)
 	rctx, cancel := context.WithTimeout(ctx, o.apiTimeout())
@@ -213,7 +224,7 @@ func KubeVerifyEndpoint(ctx context.Context, o KubeOptions, adminURL, namespace 
 	if published != admin {
 		return KubePin{}, fmt.Errorf("the cluster at %s publishes the launcher endpoint %s, not %s, so no Kubernetes credential is sent to %s; use --admin-url %s, or ask your administrator to fix the endpoint record (ConfigMap %s in namespace %s); %s", server, published, admin, admin, published, KubeEndpointConfigMap, namespace, kubeNoOverride)
 	}
-	return KubePin{Server: server, AdminURL: admin, Principal: principal, Namespace: namespace}, nil
+	return KubePin{Server: server, AdminURL: admin, Principal: principal}, nil
 }
 
 // kubeAuthorize sets the headers of a request to the API server: the

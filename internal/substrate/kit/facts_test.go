@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-func TestFactsResolveLinksAndAttachReadTargets(t *testing.T) {
+func TestFactsResolveLinksAndReadsOfSkills(t *testing.T) {
 	repo := t.TempDir()
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "id_rsa")
@@ -47,9 +47,12 @@ func TestFactsResolveLinksAndAttachReadTargets(t *testing.T) {
 
 	payload, _ = json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": repo, "tool_name": "Read",
 		"tool_input": map[string]any{"file_path": filepath.Join(skill, "big.txt")}})
+	// A read of a skill's file runs the skill folder pass in that call (the
+	// folder's digest decides, GAP-0039/0164); the read target itself is
+	// not attached (its role had no reader at the gateway, GAP-0185).
 	f = CollectFacts("claudecode", "", payload, 10)
-	if !f.Truncated || len(f.Files) != 1 || len(f.Files[0].Content) != 10 || !f.Files[0].Truncated || f.Files[0].Size != 100 {
-		t.Fatalf("capped %+v", f)
+	if f == nil || !f.readsSkill || len(f.Files) != 0 {
+		t.Fatalf("skill read %+v", f)
 	}
 	// A write does not attach content.
 	payload, _ = json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": repo, "tool_name": "Write",
@@ -72,6 +75,10 @@ func TestFactsApplyPatchPaths(t *testing.T) {
 }
 
 func TestFactsMCPAdmission(t *testing.T) {
+	// The connector reads user-scope configs too (GAP-0185): an empty home.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", "")
 	repo := t.TempDir()
 	os.MkdirAll(filepath.Join(repo, "tools"), 0o755)
 	os.WriteFile(filepath.Join(repo, "tools", "srv.py"), []byte("print('mcp')"), 0o644)

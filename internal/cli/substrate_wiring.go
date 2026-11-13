@@ -24,8 +24,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
-	"github.com/defenseclaw/defenseclaw/internal/policy"
-	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
@@ -110,11 +108,7 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 type runtimeSkillScanner struct{ rt *attest.RuntimeScanner }
 
 func newRuntimeSkillScanner(cfg *config.Config) runtimeSkillScanner {
-	return runtimeSkillScanner{rt: &attest.RuntimeScanner{
-		Skill:     scanner.NewSkillScannerFromLLM(cfg.Scanners.SkillScanner, cfg.ResolveLLM("scanners.skill"), cfg.CiscoAIDefense),
-		MCPStatic: &attest.MCPStaticScanner{},
-		Compiled:  policy.CompileAdmission(cfg),
-	}}
+	return runtimeSkillScanner{rt: attest.NewRuntimeScanner(cfg)}
 }
 
 // ScanSkillFolder implements gateway.SubstrateSkillScanner.

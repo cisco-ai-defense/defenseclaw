@@ -179,7 +179,7 @@ func TestKubeVerifyEndpoint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if pin != (KubePin{Server: apiNorm, AdminURL: adminNorm, Principal: "alice", Namespace: ns}) {
+			if pin != (KubePin{Server: apiNorm, AdminURL: adminNorm, Principal: "alice"}) {
 				t.Fatalf("pin = %+v", pin)
 			}
 			api.mu.Lock()

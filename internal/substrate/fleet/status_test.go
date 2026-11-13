@@ -41,6 +41,7 @@ func healthyCluster() Observed {
 		SubstrateVersion: "v1.0.0", SupportedVersions: ">=1.0.0 <1.1.0",
 		Issuer: "https://idp.cluster-a.example", SubstrateNamespace: "ate-system",
 		OtherIssuers: []string{"https://idp.cluster-b.example"}, Clusters: 2,
+		KeysURL: "https://idp.ate-system.svc/openid/v1/jwks", Keys: ptr(1), ServedIssuer: "https://idp.cluster-a.example",
 		Bucket: &Bucket{Location: "s3://snapshots/e1/", Encrypted: ptr(true), PublicAccessBlocked: ptr(true),
 			RetentionDays: ptr(30), Region: "us-east-1", ClusterRegion: "us-east-1"},
 		GlobalPolicy: &setup.AccessPolicy{Bindings: []setup.Binding{{Role: setup.RoleOwner, Members: []string{"user:admin"}},

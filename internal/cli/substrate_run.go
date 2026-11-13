@@ -540,9 +540,16 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	if asJSON {
 		emit = func(e relay.TaskEvent) { _ = writeSubstrateJSONLine(w, e) }
 	}
+	started := time.Now()
 	code, err = attach.RunTask(tctx, attach.TaskOptions{Options: o, Prompt: task, Args: agentArgs, Emit: emit})
 	if err != nil {
 		return -1, substrateFail(err)
+	}
+	// A task whose hook and model calls the gateway refused may still end
+	// with exit 0; it did not finish (GAP-0194).
+	if msg, refused := substrateTokenRefusal(ctx, s, started); refused {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s\nReview it with: defenseclaw substrate logs %s\n", msg, a.Name)
+		return 1, withExitCode(errors.New("the task did not run: the cluster refused its calls"), 1)
 	}
 	if code != 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "The task ended with exit code %d. Review it with: defenseclaw substrate logs %s; bring changes home with: defenseclaw substrate pull %s\n", code, a.Name, a.Name)
@@ -550,6 +557,28 @@ func runSubstrateOneTask(ctx context.Context, cmd *cobra.Command, s *substrateSe
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "The task finished. Bring changes home with: defenseclaw substrate pull %s\n", a.Name)
 	return code, nil
+}
+
+// substrateTokenRefusal asks the cluster whether it refused every agent's
+// token since start, and says so in words a person can act on.
+func substrateTokenRefusal(ctx context.Context, s *substrateSession, start time.Time) (string, bool) {
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	info, err := s.Client.Info(cctx)
+	if err != nil || !info.ActorTokens.Refusing(start) {
+		return "", false
+	}
+	why := "the agent's identity could not be checked"
+	switch info.ActorTokens.Reason {
+	case "keyset_unavailable":
+		why = "the cluster gateway cannot read the keys that sign agent tokens"
+	case "issuer":
+		why = "the agent's token names another issuer than the cluster gateway trusts"
+	case "verifier_unavailable":
+		why = "the cluster gateway cannot reach the Substrate control API"
+	}
+	return fmt.Sprintf("The task did not run: the cluster gateway refused its tool and model calls (%s: %s). "+
+		"Ask your administrator to run: defenseclaw substrate verify", info.ActorTokens.Reason, why), true
 }
 
 func substrateFirstErr(errs ...error) error {

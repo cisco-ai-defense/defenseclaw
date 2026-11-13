@@ -124,7 +124,7 @@ func TestClaudeCodeOverlay(t *testing.T) {
 }
 
 func TestCodexOverlay(t *testing.T) {
-	ov := overlayFor(t, harness.Codex, "bedrock-mantle")
+	ov := overlayFor(t, harness.Codex, "bedrock")
 	req := string(file(ov, connector.CodexSandboxRequirementsPath))
 	if strings.Contains(req, "codex-hook.sh") || !strings.Contains(req, "command = '"+HookBinary+" --connector codex --event PreToolUse --hook-contract codex-hooks-v4'") ||
 		!strings.Contains(req, "managed_dir = '"+HookDir+"'") || !strings.Contains(req, "allow_managed_hooks_only = true") {
@@ -135,7 +135,7 @@ func TestCodexOverlay(t *testing.T) {
 		"notify = ['" + HookBinary + "', '--connector', 'codex', '--notify']",
 		"endpoint = '" + DefaultGatewayURL + "/v1/logs'", "x-defenseclaw-actor = 'defenseclaw-actor-placeholder'", "environment = 'substrate'",
 		"check_for_update_on_startup = false", "[feedback]\nenabled = false", "model_provider = 'defenseclaw'",
-		"base_url = '" + DefaultGatewayURL + "/llm/openai/v1'", "web_search = 'disabled'", "multi_agent = false",
+		"base_url = '" + DefaultGatewayURL + "/llm/bedrock/openai/v1'", "web_search = 'disabled'", "multi_agent = false",
 		"http_headers = { x-defenseclaw-actor = 'defenseclaw-actor-placeholder', X-DefenseClaw-Client = 'codex-llm/1.0' }",
 	} {
 		if !strings.Contains(mc, want) {

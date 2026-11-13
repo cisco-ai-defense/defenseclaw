@@ -230,23 +230,28 @@ func New(opts Options) (*Service, error) {
 	if err := s.load(); err != nil {
 		return nil, err
 	}
+	var cold []Actor
 	for _, e := range s.actors {
 		// A known actor is past its first call: a fork was linked then.
 		e.memoLinked = true
 		switch _, err := os.Stat(s.dbPath(e.actor)); {
-		case e.state.Egress != nil:
-			// The memo this leader's predecessor saved covers the store.
-			e.memo.restore(e.state.Egress)
+		case e.memo.restore(e.state.Egress):
+			// The memo this leader's predecessor saved is the store's state.
 		case errors.Is(err, os.ErrNotExist):
 			// No store: nothing the memo would miss.
 			e.memo.warm = true
 		default:
-			// A store from a leader that saved no memo: the first egress
-			// check answers errWarming, and the worker warms the memo.
+			// A store from a leader that saved no memo (or another format):
+			// the worker reads it back; until then the egress check answers
+			// errWarming.
+			cold = append(cold, e.actor)
 		}
 		e.state.Egress = nil
 	}
 	s.startEgressWorker()
+	for _, a := range cold {
+		s.egress.push(egressRecord{actor: a, sync: true})
+	}
 	return s, nil
 }
 
@@ -644,12 +649,6 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 	}
 	cst := child.state
 	s.mu.Unlock()
-	if pe != nil {
-		// The egress memo gets the parent's windows too: the egress check
-		// answers from it (GAP-0179). A parent this leader has no entry
-		// for has no store either (load indexes every store).
-		child.memo.merge(&pe.memo)
-	}
 	cst = forkClock(cst, pst, at)
 	result := LifecycleResult{}
 	if _, err := os.Stat(s.dbPath(parent)); err == nil {
@@ -668,7 +667,13 @@ func (s *Service) copyFork(ctx context.Context, child *actorEntry, st *audit.Sto
 			s.warnf("fork %s/%s: %d parent windows not copied, the child already had them", child.actor.Atespace, child.actor.UID, r.Skipped)
 		}
 	}
-	return result, s.setState(child, cst)
+	if err := s.setState(child, cst); err != nil {
+		return result, err
+	}
+	// The child's egress memo is its store's window, the copied parent
+	// windows included (GAP-0179 with GAP-0091).
+	s.syncMemo(ctx, st, child)
+	return result, nil
 }
 
 // forkClock starts a child's clock from its parent's running time, once:
@@ -742,7 +747,7 @@ func (s *Service) linkMemo(ctx context.Context, e *actorEntry) error {
 		e.state = forkClock(e.state, pst, s.opts.Now())
 		s.mu.Unlock()
 		if pe != nil {
-			e.memo.merge(&pe.memo)
+			e.memo.linkFrom(&pe.memo)
 		}
 	}
 	e.memoLinked = true
@@ -827,24 +832,10 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 			return ObserveResponse{}, bad(err)
 		}
 		x.ConnectorInstanceID = instance
-		at := s.stateOf(e).running(s.opts.Now()).UnixNano()
-		mask := x.Projection.DetectionStepMask
-		if in.Scope == ScopeActor && startsEgressChain(mask) {
-			// The memo and its saved copy learn a chain start before the
-			// store does (GAP-0179): a failure after this is stricter.
-			e.memo.noteStep1(at, mask)
-			if err := s.writeState(e); err != nil {
-				return ObserveResponse{}, err
-			}
+		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
+			return ObserveResponse{}, err
 		}
-		var r audit.ToolChainObserveResult
-		r, err = repo.Observe(ctx, x)
-		result = r
-		if err == nil && in.Scope == ScopeActor && e.memo.noteObserved(at, mask, r.DetectedChainIDs) {
-			if werr := s.writeState(e); werr != nil {
-				s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, werr)
-			}
-		}
+		result, err = repo.Observe(ctx, x)
 	case OpResolve:
 		var x audit.ToolChainResolvePendingInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -858,6 +849,9 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 			return ObserveResponse{}, bad(err)
 		}
 		x.ConnectorInstanceID = instance
+		if err := s.notePending(e, in.Scope, x.Projection); err != nil {
+			return ObserveResponse{}, err
+		}
 		result, err = repo.PreparePending(ctx, x)
 	case OpDiscard:
 		var x audit.ToolChainDiscardPendingForEventSessionInput
@@ -873,12 +867,6 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 		}
 		x.ConnectorInstanceID = instance
 		result, err = repo.ResetForTerminalEventSession(ctx, x)
-		if err == nil && in.Scope == ScopeActor {
-			e.memo.reset(false)
-			if werr := s.writeState(e); werr != nil {
-				s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, werr)
-			}
-		}
 	case OpAttach:
 		var x AttachInput
 		if err := decodeGob(in.Input, &x); err != nil {
@@ -889,6 +877,11 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 	default:
 		return ObserveResponse{}, bad(fmt.Errorf("chainstate: unknown operation %q", in.Op))
 	}
+	if in.Scope == ScopeActor && in.Op != OpAttach {
+		// Whatever the operation did to the actor window (a failed one may
+		// have written part of it), the memo is the store's again.
+		s.syncMemo(ctx, st, e)
+	}
 	if err != nil {
 		if errors.Is(err, audit.ErrToolChainIntegrity) || errors.Is(err, audit.ErrToolChainConflict) {
 			return ObserveResponse{}, bad(err)
@@ -897,6 +890,79 @@ func (s *Service) Observe(ctx context.Context, in ObserveRequest) (ObserveRespon
 	}
 	out, err := encodeGob(result)
 	return ObserveResponse{Result: out}, err
+}
+
+// notePending puts a first step of an egress chain that an actor-window
+// operation is about to store (an observe, or a prepare at PreToolUse) in
+// the memo and its saved copy first: a leader that stops before the read
+// back restarts stricter, never laxer.
+func (s *Service) notePending(e *actorEntry, scope Scope, p guardrail.ToolChainProjection) error {
+	if scope != ScopeActor || !startsEgressChain(p.DetectionStepMask) {
+		return nil
+	}
+	e.memo.notePending(s.stateOf(e).running(s.opts.Now()), p)
+	return s.writeState(e)
+}
+
+// syncMemo makes the actor's egress memo the store's own state of the
+// actor window (GAP-0179). It is the one way the memo learns a step: every
+// path that writes the actor window calls it afterwards, with the actor's
+// calls ordered (the actor lock, or a store not yet published): the hook
+// operations, the fork copy, the revert barrier and the worker's egress
+// record, and the worker for a memo a new leader could not restore. The
+// state file is saved when the memo changed. A failed read leaves the memo
+// cold, so the egress check answers unavailable (the callout's chain
+// failure mode decides) and the worker reads it again.
+func (s *Service) syncMemo(ctx context.Context, st *audit.Store, e *actorEntry) {
+	changed, err := s.readMemo(ctx, st, e)
+	if err != nil {
+		e.memo.invalidate()
+		s.warnf("chain memo of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+		return
+	}
+	if !changed {
+		return
+	}
+	if err := s.writeState(e); err != nil {
+		s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
+	}
+}
+
+// readMemo reads the actor window into the memo; it reports whether the
+// memo changed.
+func (s *Service) readMemo(ctx context.Context, st *audit.Store, e *actorEntry) (bool, error) {
+	instance, err := audit.ToolChainSubstrateInstanceID(e.actor.Atespace, e.actor.UID)
+	if err != nil {
+		return false, err
+	}
+	repo, err := s.repo(ctx, st, e, ScopeActor)
+	if err != nil {
+		return false, err
+	}
+	state, err := repo.ScopeState(ctx, instance, egressStep1Mask)
+	if err != nil {
+		return false, err
+	}
+	return e.memo.set(memoWindow{Ruleset: state.RulesetFingerprint, Next: state.NextSequence,
+		Events: state.Events, Pending: state.Pending}), nil
+}
+
+// warmMemo is the worker's read back of a cold memo.
+func (s *Service) warmMemo(ctx context.Context, a Actor) error {
+	e, release, err := s.acquire(a)
+	if err != nil {
+		return err
+	}
+	defer release()
+	st, _, err := s.storeOf(ctx, e)
+	if err != nil {
+		return err
+	}
+	defer s.lock(a)()
+	if _, err := s.readMemo(ctx, st, e); err != nil {
+		return err
+	}
+	return s.writeState(e)
 }
 
 // AttachResult is OpAttach's answer.
@@ -1129,19 +1195,18 @@ func (s *Service) revert(ctx context.Context, e *actorEntry, at time.Time) (Life
 		}
 		n++
 	}
-	e.memo.reset(true)
-	if err := s.writeState(e); err != nil {
-		s.warnf("state of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
-	}
+	s.syncMemo(ctx, st, e)
 	return LifecycleResult{Barriers: n}, nil
 }
 
 // Egress serves ChainEgress: the callout's synchronous chain check. It
-// answers from the actor's memo (no store access, GAP-0179) and hands the
-// step to the egress worker, which records it in the actor window under
-// its active ruleset. A memo that does not yet cover a store an older
-// leader left on the volume answers errWarming. A new forked actor's memo
-// is linked to its parent's first (linkMemo).
+// answers from the actor's memo (no store access, GAP-0179) and hands an
+// allowed step to the egress worker, which records it in the actor window
+// under its active ruleset. A refused request sent nothing, so it is not
+// recorded: refused attempts never age a secret read out of its chain's
+// event window. A cold memo answers errWarming and the worker reads it
+// back. A new forked actor's memo is linked to its parent's first
+// (linkMemo).
 func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, error) {
 	e, release, err := s.acquireWith(in.Actor, true)
 	if err != nil {
@@ -1151,16 +1216,19 @@ func (s *Service) Egress(ctx context.Context, in EgressRequest) (EgressVerdict, 
 	if err := s.linkMemo(ctx, e); err != nil {
 		return EgressVerdict{}, err
 	}
-	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()).UnixNano(), s.opts.EgressAction)
-	s.egress.push(egressRecord{actor: e.actor, in: in})
-	if !ok {
+	v, ok := e.memo.verdict(s.stateOf(e).running(s.opts.Now()), s.opts.EgressAction)
+	switch {
+	case !ok:
+		s.egress.push(egressRecord{actor: e.actor, sync: true})
 		return EgressVerdict{}, errWarming
+	case !v.Deny:
+		s.egress.push(egressRecord{actor: e.actor, in: in})
 	}
 	return v, nil
 }
 
 // recordEgress is the worker's exact record of an egress step: the event
-// in the actor window, and the memo warmed with the store's own verdict.
+// in the actor window, then the memo read back from the store.
 func (s *Service) recordEgress(ctx context.Context, in EgressRequest) error {
 	e, release, err := s.acquire(in.Actor)
 	if err != nil {
@@ -1182,19 +1250,16 @@ func (s *Service) recordEgress(ctx context.Context, in EgressRequest) error {
 			ruleset = w.RulesetDigest
 		}
 	}
-	if ruleset == "" {
-		// No actor window: nothing to record or to match.
-		if e.memo.warmUp() {
-			return s.writeState(e)
-		}
-		return nil
+	if ruleset != "" {
+		// With no actor window there is nothing to join the step to.
+		err = s.recordEgressStep(ctx, st, instance, e, ruleset)
 	}
-	var mask uint64
-	for _, id := range egressChains {
-		if bit, ok := guardrail.ToolChainStepMask(id, 2); ok {
-			mask |= bit
-		}
-	}
+	s.syncMemo(ctx, st, e)
+	return err
+}
+
+// recordEgressStep records one egress step in the actor window.
+func (s *Service) recordEgressStep(ctx context.Context, st *audit.Store, instance audit.ConnectorInstanceID, e *actorEntry, ruleset string) error {
 	repo, err := s.repo(ctx, st, e, ScopeActor)
 	if err != nil {
 		return err
@@ -1203,20 +1268,9 @@ func (s *Service) recordEgress(ctx context.Context, in EgressRequest) error {
 	if err != nil {
 		return err
 	}
-	result, err := repo.Observe(ctx, audit.ToolChainObserveInput{SemanticEventID: id, ConnectorInstanceID: instance,
-		InputFingerprint: fp, RulesetFingerprint: ruleset,
-		Projection: guardrail.ToolChainProjection{ParseStatus: actionfacts.StatusComplete, DetectionStepMask: mask}})
-	if err != nil {
-		return err
-	}
-	// The store's own verdict on the step: a detection the memo did not
-	// have (a window from an older leader) is kept, and the memo now
-	// covers the store and is saved with it.
-	fresh := e.memo.noteObserved(s.stateOf(e).running(s.opts.Now()).UnixNano(), mask, result.DetectedChainIDs)
-	if cold := e.memo.warmUp(); fresh || cold {
-		return s.writeState(e)
-	}
-	return nil
+	_, err = repo.Observe(ctx, audit.ToolChainObserveInput{SemanticEventID: id, ConnectorInstanceID: instance,
+		InputFingerprint: fp, RulesetFingerprint: ruleset, Projection: egressStep})
+	return err
 }
 
 // SweepResult counts what a sweep did.

@@ -77,9 +77,9 @@ contexts:
 	}
 	t.Setenv("DEFENSECLAW_HOME", dir)
 
-	run := func(adminURL string) (string, error) {
-		out, _, err := runSubstrate(t, newSubstrateLoginCmd(), "--name", "k", "--admin-url", adminURL, "--admin-ca-file", adminCA,
-			"--kube", "--kubeconfig", kubeconfig)
+	run := func(adminURL string, extra ...string) (string, error) {
+		out, _, err := runSubstrate(t, newSubstrateLoginCmd(), append([]string{"--name", "k", "--admin-url", adminURL, "--admin-ca-file", adminCA,
+			"--kube", "--kubeconfig", kubeconfig}, extra...)...)
 		return out, err
 	}
 	// An admin address the record does not name gets no credential at all.
@@ -89,8 +89,22 @@ contexts:
 	if adminHits.Load() != 0 {
 		t.Fatal("the admin listener was contacted before the record was checked")
 	}
-	// The record's own address works, and the bearer went to the API server.
-	out, err := run(record)
+	// No --kube-namespace: login names the namespace, with the command to
+	// run, and signs in to nothing (GAP-0192, R5).
+	if _, err := run(record); err == nil || !strings.Contains(err.Error(), "is in namespace defenseclaw-system") ||
+		!strings.Contains(err.Error(), "run: defenseclaw substrate login --admin-ca-file") || !strings.Contains(err.Error(), "--kube --kubeconfig") ||
+		!strings.HasSuffix(err.Error(), "--kube-namespace defenseclaw-system") || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("login without --kube-namespace: %v", err)
+	}
+	if adminHits.Load() != 0 {
+		t.Fatal("the admin listener was contacted by a login without --kube-namespace")
+	}
+	if cf, err := auth.LoadContexts(); err == nil && cf.Contexts["k"].KubePinAdminURL != "" {
+		t.Fatal("a login without --kube-namespace pinned the context")
+	}
+	// The record's own address with its namespace works, and the bearer
+	// went to the API server.
+	out, err := run(record, "--kube-namespace", "defenseclaw-system")
 	if err != nil || !strings.Contains(out, "Signed in as dev-user") {
 		t.Fatalf("login = %q, %v", out, err)
 	}

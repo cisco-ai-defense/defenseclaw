@@ -124,6 +124,8 @@ substrate:
     audience: defenseclaw
     token_lifetime_seconds: 300
     actor_cert_oid: 1.3.6.1.4.1.11129.2.12.2
+    keys_url: https://idp.ate-system.svc/openid/v1/jwks
+    keys_ca_file: /run/servicedns.podcert.ate.dev/trust-bundle.pem
     oidc: {issuer: https://login.example.com, client_id: defenseclaw-launcher, groups_claim: groups}
     workload_oidc: [{issuer: https://token.actions.githubusercontent.com, audience: defenseclaw-prod, claims: {repository: acme/web}}]
   services: {actor: defenseclaw-actor.defenseclaw-system.svc, admin: defenseclaw-admin.defenseclaw-system.svc}
@@ -224,6 +226,8 @@ func TestSubstrateValidate(t *testing.T) {
 		"supported_versions": func(s *SubstrateConfig) { s.SupportedVersions = "~1.0" },
 		"token_lifetime":     func(s *SubstrateConfig) { s.Identity.TokenLifetimeSeconds = 4000 },
 		"actor_cert_oid":     func(s *SubstrateConfig) { s.Identity.ActorCertOID = "1.3.x" },
+		"keys_url http":      func(s *SubstrateConfig) { s.Identity.KeysURL = "http://idp.ate-system.svc/openid/v1/jwks" },
+		"keys_url query":     func(s *SubstrateConfig) { s.Identity.KeysURL = "https://idp.ate-system.svc/jwks?a=1" },
 		"oidc client":        func(s *SubstrateConfig) { s.Identity.OIDC.Issuer = "https://login" },
 		"workload audience": func(s *SubstrateConfig) {
 			s.Identity.WorkloadOIDC = []SubstrateWorkloadOIDCConfig{{Issuer: "https://t", Claims: map[string]string{"repository": "a/b"}}}

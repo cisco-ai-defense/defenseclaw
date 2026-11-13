@@ -382,8 +382,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "kube-namespace",
                 "string",
                 (
-                    "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record "
-                    "names --admin-url)"
+                    "with --kube, the namespace DefenseClaw runs in (required; without it login only says which "
+                    "namespace publishes --admin-url)"
                 ),
             ),
             _Flag(
@@ -722,7 +722,10 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "Substrate build has them,\n"
             "the callout body opt-in and the long-stream timeouts. It refuses when Substrate already sends "
             "egress to another callout,\n"
-            "and says what to do. Nothing here contacts the cluster.\n"
+            "and says what to do. Nothing here changes the cluster. With --issuer it reads, with kubectl when it "
+            "can, the key set the\n"
+            "gateway verifies actor tokens with (--keys-url, the idp Service by default) and warns when it does "
+            "not answer.\n"
             "\n"
             "The result is written next to the file as FILE.new (mode 0600) for you to read. With --yes it "
             "replaces the file and keeps\n"
@@ -756,6 +759,17 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 metavar="URL",
             ),
             _Flag("json", "bool", "same as --output json"),
+            _Flag(
+                "keys-url",
+                "string",
+                (
+                    "the key set the gateway verifies actor tokens with (substrate.identity.keys_url), checked with "
+                    "--issuer"
+                ),
+                default="https://idp.ate-system.svc/openid/v1/jwks",
+            ),
+            _Flag("kube-context", "string", "kubectl context for the --issuer check"),
+            _Flag("kubeconfig", "string", "kubectl configuration file for the --issuer check (default: kubectl's own)"),
             _Flag("namespace", "string", "the namespace DefenseClaw is installed in", default="defenseclaw"),
             _Flag("output", "string", "output format: text or json", short="o", default="text", metavar="FORMAT"),
             _Flag(
@@ -861,8 +875,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
             "medium, low or none (default high)\n"
             "  --policy-generation N           policy generation recorded in the attestation (default 1)\n"
             "  --builder-id ID                 builder id recorded in the attestation\n"
-            "  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or "
-            "bedrock-mantle)\n"
+            "  --provider NAME                 model route (claudecode: bedrock or anthropic; codex: bedrock or "
+            "openai; default from substrate.llm.providers)\n"
             "  --model ID                      default model id\n"
             "  --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of "
             "--config)\n"

@@ -46,9 +46,16 @@ Every value is checked by `values.schema.json`. The main ones:
 | `config.substrate.launcher_atespaces` | {} | profile to atespaces; only DefenseClaw edits these |
 | `managedAtespaces` | [] | other atespaces DefenseClaw writes egress policy in |
 | `substrate.namespace`, `substrate.apiAddress`, `substrate.apiAudience` | ate-system | where Substrate runs |
+| `substrate.actorKeys.url` | `""` | the key set the gateway verifies actor tokens with (`config.substrate.identity.keys_url`); empty is the idp Service, `https://idp.<substrate.namespace>.svc/openid/v1/jwks`. The token's `iss` is compared with `config.substrate.identity.issuer` as a string, so a unique per-cluster issuer need not resolve (GAP-0194). A URL on another in-cluster Service or a private address may need a change to `networkPolicy.egress` |
+| `substrate.actorKeys.caConfigMap` | `""` | a ConfigMap (key `ca.crt`) with the PEM CA of the keys URL certificate, mounted on the gateway as `keys_ca_file`; empty is the servicedns trust bundle, which signs the idp Service certificate |
 | `substrate.credentialProvider.*` | grant on, namespace `defenseclaw-actor-secrets` | the launcher atespaces' grant in the Kubernetes credential provider policy |
 | `bootstrap.ownerTokenSecret` | "" | a global owner's token Secret (key `token`) for the OpenFGA bootstrap |
 | `callout.judge.tokenSecret` | `defenseclaw-callout-judge` | the callout's token for the MCP tool verdict route on the admin Service; the chain-key hook creates this Secret when absent. `""` turns the route off (tools/call alerts on OSS, refused on managed) |
+| `gateway.extraArgs` | [] | flags appended to the gateway's serve flags |
+| `gateway.adminGroups` | [] | groups whose members are DefenseClaw administrators (`--admin-groups`); `config.substrate.identity.admin_groups` is the same list as a config key, and the two add up |
+| `gateway.oidcCA.configMap` or `gateway.oidcCA.secret`, `gateway.oidcCA.key` | "", "", ca.crt | a private OIDC issuer's trust bundle from a ConfigMap or a Secret (the Secret wins): mounted read-only at `/etc/defenseclaw/oidc-ca/`, `--oidc-ca-file` set |
+| `gateway.extraEnv`, `gateway.extraVolumes`, `gateway.extraVolumeMounts` | [] | added to the gateway container and pod |
+| `gateway.args` | [] | replaces the whole container argument list (`serve --substrate ...` included); for an added flag use `gateway.extraArgs` |
 | `gateway.authDelegatorBinding` | "" | name of the one cluster-wide object: the gateway's ClusterRoleBinding to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer); "" is `defenseclaw-auth-delegator-<namespace>-<release>` |
 | `callout.actorSecrets.secretName` | "" | exposed `actor_secrets` values for exact-value DLP, mounted read-only in the callout (egress) and the gateway (/llm); sets `config.substrate.extproc.actor_secrets_dir` |
 | `networkPolicy.adminFrom`, `networkPolicy.metricsFrom` | [] | extra peers for the admin and metrics ports |
@@ -57,6 +64,9 @@ Every value is checked by `values.schema.json`. The main ones:
 | `admin.url` | Ingress host, or the in-cluster admin Service | the https URL laptops use, published in ConfigMap `defenseclaw-launcher-endpoint` (key `admin_url`) that every authenticated user may read; `login --kube` sends a Kubernetes credential only to this URL. Required for `LoadBalancer`. |
 | `admin.tlsSecretName` | "" | a `kubernetes.io/tls` Secret for the external name; without it the admin listener presents its in-cluster certificate |
 | `controller.templateAnchorsSecret` | `defenseclaw-template-anchors` | admin-only Secret (key `anchors.pem`) with the template signing keys; without it every template is refused |
+| `controller.templateRegistrySecret` | "" | a `kubernetes.io/dockerconfigjson` Secret with logins for private template registries, mounted read-only in the controller and the gateway (both read attestations); sets `config.substrate.templates.registry_auth.docker_config`. "" reads registries anonymously. See "Private template registries" |
+| `config.substrate.templates.registry_auth.ecr_hosts` | [] | Amazon ECR registry hosts (`<account>.dkr.ecr.<region>.amazonaws.com`) the controller and the gateway log in to with `ecr:GetAuthorizationToken` through the AWS SDK default chain (IRSA or EKS Pod Identity); the token is renewed before it expires |
+| `serviceAccounts.annotations`, `serviceAccounts.componentAnnotations.<gateway\|controller\|callout>` | {} | annotations on every ServiceAccount, and on one (merged over the first), for example an IRSA `eks.amazonaws.com/role-arn` on `gateway` and `controller` only |
 | `substrate.podPorts` | `[443, 8443, 8445]` | container ports of the Substrate pods DefenseClaw calls (ate-api-server, the idp JWKS); NetworkPolicies match pod ports, so change them when a Substrate release moves a port |
 | `substrate.router.enabled` | `true` | the gateway's attach route (run, connect, pull, logs, checkpoint) reaches actor relays through the atenet router; needs `podCertificates.enabled`. The router admits the gateway only when its SPIFFE ID is in Substrate's cluster-global `ingressAllowedSPIFFEIDs`: `defenseclaw substrate setup` adds it, `defenseclaw substrate admin doctor` checks it |
 | `substrate.router.address` | `""` | router CONNECT-TLS `host:port`; empty is `atenet-router.<substrate.namespace>.svc:8444` |
@@ -68,6 +78,22 @@ Every value is checked by `values.schema.json`. The main ones:
 | `metrics.prometheusRule.enabled` | false | alert rules |
 | `observability.local.enabled` | false | a local OTel collector for trying the chart |
 | `bundles.enabled`, `bundles.anchorsSecret`, `bundles.inbox` | off, `defenseclaw-bundle-anchors`, `defenseclaw-bundle-inbox` | signed policy bundles; see below |
+
+## Private template registries
+
+The controller and the gateway's create path read each template image's attestation from its registry (only hosts in
+`config.substrate.templates.allowed_images`). By default they read anonymously. For a private registry, give them a
+login. Each login is sent only to its own host, after that host asks for it, and never to another registry or to a
+token service it does not name:
+
+- **Amazon ECR (EKS):** list the registry in `config.substrate.templates.registry_auth.ecr_hosts`, and give the gateway
+  and controller ServiceAccounts an IAM role with `ecr:GetAuthorizationToken`, `ecr:BatchGetImage` and
+  `ecr:GetDownloadUrlForLayer` on the template repositories. Use IRSA
+  (`serviceAccounts.componentAnnotations.{gateway,controller}: {eks.amazonaws.com/role-arn: ...}`; it reaches STS on
+  443), or EKS Pod Identity (also add a `networkPolicy.egress.extra` rule to `169.254.170.23/32` port 80). No password
+  is stored, and the token is renewed before it expires.
+- **Any other registry:** `kubectl -n <ns> create secret docker-registry dc-template-registry --docker-server=<host> ...`
+  and `--set controller.templateRegistrySecret=dc-template-registry`. A Secret update applies within about a minute.
 
 ## Signed policy bundles
 
@@ -120,6 +146,10 @@ shows the profile and egress an actor would get before you apply.
   (for example WireGuard) where that matters.
 - **Use the full Service names.** An actor resolves only the names in its egress policy, so policies and agent
   settings use `defenseclaw-actor.<namespace>.svc.cluster.local`, never the short `.svc` name.
+- **In-cluster clients of the admin Service use `defenseclaw-admin.<namespace>.svc`.** Its certificate is the
+  Substrate pod certificate, which names Services as `<svc>.<namespace>.svc` only, so the callout's verdict and ask
+  calls (and the launcher endpoint's in-cluster default) use that name. With `admin.tlsSecretName`, the admin listener
+  serves your certificate for external names and keeps the pod certificate for in-cluster Service names.
 - **MCP body inspection needs an egress filter with mode override, and buffers the answer too.** Body mode needs
   Agent Substrate's egress filter rendered with `--experimental-additional-egress-extproc-allow-mode-override`
   (upstream #3817). Stock v1.0.0 ignores it: set `config.substrate.extproc.body_inspection: off` there (MCP calls are

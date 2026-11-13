@@ -65,8 +65,21 @@ spec:
         {{- end }}
         {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
+        {{- range .Values.gateway.adminGroups }}
+        # Quoted: a group name is data, never YAML (GAP-0198).
+        - {{ printf "--admin-groups=%s" . | quote }}
+        {{- end }}
+        {{- if or .Values.gateway.oidcCA.configMap .Values.gateway.oidcCA.secret }}
+        - {{ printf "--oidc-ca-file=/etc/defenseclaw/oidc-ca/%s" .Values.gateway.oidcCA.key | quote }}
+        {{- end }}
+        {{- with .Values.gateway.extraArgs }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         env:
         {{- include "dc.env" . | nindent 8 }}
+        {{- with .Values.gateway.extraEnv }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         ports:
         - name: actor
           containerPort: {{ .Values.gateway.ports.actor }}
@@ -95,12 +108,25 @@ spec:
         # The create path admits a launcher actor with the controller's own
         # attestation check (GAP-0154), so it reads the same anchors.
         {{- include "dc.templateAnchorsMount" . | nindent 8 }}
+        {{- if .Values.controller.templateRegistrySecret }}
+        # Template registry logins, as the controller (GAP-0190).
+        {{- include "dc.templateRegistryMount" . | nindent 8 }}
+        {{- end }}
         # The admin route writes policy_conflict resets for the controller.
         {{- include "dc.kubeTokenMount" . | nindent 8 }}
         {{- if .Values.admin.tlsSecretName }}
         - name: admin-tls
           mountPath: /etc/defenseclaw/admin-tls
           readOnly: true
+        {{- end }}
+        {{- if or .Values.gateway.oidcCA.configMap .Values.gateway.oidcCA.secret }}
+        # The trust bundle of a private OIDC issuer (--oidc-ca-file).
+        - name: oidc-ca
+          mountPath: /etc/defenseclaw/oidc-ca
+          readOnly: true
+        {{- end }}
+        {{- with .Values.gateway.extraVolumeMounts }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       volumes:
       {{- include "dc.volumes" $sel | nindent 6 }}
@@ -109,6 +135,29 @@ spec:
       {{- include "dc.actorSecretsVolume" . | nindent 6 }}
       {{- end }}
       {{- include "dc.templateAnchorsVolume" . | nindent 6 }}
+      {{- if .Values.controller.templateRegistrySecret }}
+      {{- include "dc.templateRegistryVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if .Values.gateway.oidcCA.secret }}
+      - name: oidc-ca
+        secret:
+          secretName: {{ .Values.gateway.oidcCA.secret }}
+          items:
+          - key: {{ .Values.gateway.oidcCA.key }}
+            path: {{ .Values.gateway.oidcCA.key }}
+          defaultMode: 0444
+      {{- else if .Values.gateway.oidcCA.configMap }}
+      - name: oidc-ca
+        configMap:
+          name: {{ .Values.gateway.oidcCA.configMap }}
+          items:
+          - key: {{ .Values.gateway.oidcCA.key }}
+            path: {{ .Values.gateway.oidcCA.key }}
+          defaultMode: 0444
+      {{- end }}
+      {{- with .Values.gateway.extraVolumes }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- include "dc.kubeTokenVolume" . | nindent 6 }}
       {{- if .Values.admin.tlsSecretName }}
       - name: admin-tls

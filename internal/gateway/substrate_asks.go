@@ -363,10 +363,10 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		}
 		if ask.Host != "" && ((hostWide && slices.Contains(reg.Approved, ask.Host)) || slices.ContainsFunc(list, func(a asks.Ask) bool {
 			// A host-wide approval answers a host-wide ask; a url_rules
-			// ask is answered only by an approval of the same rule
-			// (GAP-0177).
+			// ask is answered only by an approval of the same rule that
+			// named every method this ask names (GAP-0177).
 			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
-				(a.Rule == ask.Rule || (hostWide && asks.HostWide(a.Rule)))
+				(urlRuleApprovalCovers(a.Rule, ask.Rule) || (hostWide && asks.HostWide(a.Rule)))
 		})) {
 			// Approved earlier for this actor (the controller adds a
 			// host-wide one to the policy on its next pass): not asked twice.
@@ -455,4 +455,41 @@ func (st *substrateState) substrateRecordDecision(ctx context.Context, reg regis
 		defer cancel()
 		_, _ = st.cfg.Asks.Record(cctx, d)
 	}()
+}
+
+// urlRuleApprovalCovers reports whether an approval of the url_rules key
+// approved answers the ask key asked (GAP-0177, STEER 03:40Z: an approval
+// binds to what the person saw). The callout's key is
+// "url_rules:<rule> <METHODS>", METHODS sorted and comma-separated: every
+// method the request can stand for (its own, each override header and
+// _method value, and a form body's _method, GAP-0046) that the rule
+// covers. An approval answers the same rule asking for some of the
+// methods it named, never for one it did not, so a person who approved a
+// POST never runs a DELETE. Any other key is matched exactly.
+func urlRuleApprovalCovers(approved, asked string) bool {
+	if approved == asked {
+		return true
+	}
+	if asks.HostWide(approved) || asks.HostWide(asked) {
+		return false
+	}
+	ar, am, ok1 := cutLast(approved, " ")
+	qr, qm, ok2 := cutLast(asked, " ")
+	if !ok1 || !ok2 || ar != qr || am == "" || qm == "" {
+		return false
+	}
+	have := strings.Split(am, ",")
+	for _, m := range strings.Split(qm, ",") {
+		if !slices.Contains(have, m) {
+			return false
+		}
+	}
+	return true
+}
+
+func cutLast(s, sep string) (before, after string, found bool) {
+	if i := strings.LastIndex(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return s, "", false
 }
