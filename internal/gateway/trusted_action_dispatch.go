@@ -374,7 +374,7 @@ func dispatchTrustedAction(
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
-	if ManagedEnterpriseActive() && !isVerifiedSubstrateActor(parent) {
+	if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
 		return nil
 	}
 	// A script body the hook call kept unread because its network share

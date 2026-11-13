@@ -267,7 +267,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	// The switch is the host daemon's: a verified Substrate actor's steps
 	// always feed its actor window on the leader, which the callout's egress
 	// check reads, in every tier (GAP-0211).
-	if a == nil || (ManagedEnterpriseActive() && !isVerifiedSubstrateActor(ctx)) || req.toolChain == nil {
+	if a == nil || (ManagedEnterpriseActive() && !isSubstrateActorRequest(ctx)) || req.toolChain == nil {
 		return resp, finalization
 	}
 
