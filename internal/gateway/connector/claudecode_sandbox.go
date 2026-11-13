@@ -59,7 +59,10 @@ const ClaudeCodeSandboxDropInPath = claudeCodeSandboxManagedRoot + "/managed-set
 // (Claude skips an empty managed value; measured on 2.1.311, rel-1-0-10
 // TST-1230). With the flag Claude also ignores CLAUDE_CODE_PLUGIN_DIRS,
 // CLAUDE_CODE_PLUGIN_DIR_WATCH and CLAUDE_CODE_PROCESS_WRAPPER in the user
-// settings env block, loads no user-scope plugins, ignores allowed-tools in
+// settings env block, stops a plugin folder placed directly in the personal
+// skills directory (~/.claude/skills/NAME) from loading as a plugin (its
+// skills still load; marketplace plugins at user, project and local scope
+// still load: measured on 2.1.311, rel-1-0-10 GAP-0279), ignores allowed-tools in
 // the user's own skills and commands, lets the user's own agents neither
 // widen their permission mode nor add MCP servers, refuses cloud subagents,
 // and refuses every prompt while ~/.claude/settings.json has errors (it
