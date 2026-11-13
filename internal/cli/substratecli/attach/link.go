@@ -139,6 +139,16 @@ func (l *link) endLine() {
 	}
 }
 
+// gaveUpError is the end of a wait: its text says what to do, and it still
+// unwraps to ErrStarting or ErrClusterFull, so callers can tell the case.
+type gaveUpError struct {
+	kind error
+	msg  string
+}
+
+func (e *gaveUpError) Error() string { return e.msg }
+func (e *gaveUpError) Unwrap() error { return e.kind }
+
 // parker waits while the cluster is full (HTTP 503 or 429) or the agent is
 // starting (502 or 504), for MaxWait in all.
 type parker struct {
@@ -166,9 +176,9 @@ func (p *parker) wait(ctx context.Context, re *RouteError) error {
 	if waited >= o.MaxWait {
 		p.l.endLine()
 		if re.Kind == ErrStarting {
-			return fmt.Errorf("the agent %s did not start within %s; check it with: defenseclaw substrate status %s", o.Target.Name, fmtDur(o.MaxWait), o.Target.Name)
+			return &gaveUpError{kind: re.Kind, msg: fmt.Sprintf("the agent %s did not start within %s; check it with: defenseclaw substrate status %s", o.Target.Name, fmtDur(o.MaxWait), o.Target.Name)}
 		}
-		return fmt.Errorf("no room in the cluster after %s; try again later or ask your administrator to raise the pool", fmtDur(o.MaxWait))
+		return &gaveUpError{kind: re.Kind, msg: fmt.Sprintf("no room in the cluster after %s; try again later or ask your administrator to raise the pool", fmtDur(o.MaxWait))}
 	}
 	msg := fullMsg
 	if re.Kind == ErrStarting {

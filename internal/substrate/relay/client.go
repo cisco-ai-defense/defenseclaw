@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,10 +33,13 @@ type AttachOptions struct {
 	Rows    uint16
 	// LongPoll uses the HTTP long-poll transport instead of WebSocket.
 	LongPoll bool
-	// FlatRoutes means BaseURL ends where the relay's routes begin, so the
-	// WebSocket is BaseURL + "/ws" and not BaseURL + "/dcrelay/1/ws" (the
-	// gateway's attach route adds /dcrelay/1 itself).
+	// FlatRoutes means BaseURL is a route base (the gateway attach prefix):
+	// every route is BaseURL + "/" + route. Without it BaseURL is the relay
+	// origin and the routes are under Prefix.
 	FlatRoutes bool
+	// Dir is the folder in the actor the agent starts in when it is not
+	// running yet (the copy of the project); "" keeps the relay default.
+	Dir string
 	// HTTPClient carries long-poll requests (default http.DefaultClient).
 	HTTPClient *http.Client
 	// Dialer dials WebSocket (default websocket.DefaultDialer).
@@ -67,7 +71,11 @@ func Attach(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions) (
 }
 
 func sizeQuery(o AttachOptions) string {
-	return "?cols=" + strconv.Itoa(int(o.Cols)) + "&rows=" + strconv.Itoa(int(o.Rows))
+	q := "?cols=" + strconv.Itoa(int(o.Cols)) + "&rows=" + strconv.Itoa(int(o.Rows))
+	if o.Dir != "" {
+		q += "&dir=" + url.QueryEscape(o.Dir)
+	}
+	return q
 }
 
 // pumpInput reads in and calls send for each chunk until Ctrl-] or EOF.
@@ -103,11 +111,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 	u := strings.Replace(strings.Replace(strings.TrimRight(o.BaseURL, "/"), "https://", "wss://", 1), "http://", "ws://", 1)
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+o.Token)
-	wsPath := "/dcrelay/1/ws"
-	if o.FlatRoutes {
-		wsPath = "/ws"
-	}
-	conn, resp, err := dd.DialContext(ctx, u+wsPath+sizeQuery(o), h)
+	conn, resp, err := dd.DialContext(ctx, RouteURL(o.routeBase(u), RouteWS)+sizeQuery(o), h)
 	if err != nil {
 		if resp != nil {
 			return AttachResult{}, fmt.Errorf("relay refused the attachment (status %d): %w", resp.StatusCode, err)
@@ -193,16 +197,16 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	if c == nil {
 		c = http.DefaultClient
 	}
-	base := strings.TrimRight(o.BaseURL, "/")
-	do := func(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
+	base := o.routeBase(o.BaseURL)
+	do := func(ctx context.Context, method, route string, body []byte) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, method, RouteURL(base, route), bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+o.Token)
 		return c.Do(req)
 	}
-	resp, err := do(ctx, http.MethodPost, "/dcrelay/1/poll"+sizeQuery(o), nil)
+	resp, err := do(ctx, http.MethodPost, RoutePoll+sizeQuery(o), nil)
 	if err != nil {
 		return AttachResult{}, err
 	}
@@ -214,7 +218,7 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	if resp.StatusCode != http.StatusOK || open.ID == "" {
 		return AttachResult{}, fmt.Errorf("relay refused the attachment (status %d)", resp.StatusCode)
 	}
-	path := "/dcrelay/1/poll/" + open.ID
+	path := RoutePoll + "/" + open.ID
 	var res AttachResult
 	var resMu sync.Mutex // the follower goroutine writes res while the paths below read it
 	var outMu sync.Mutex
@@ -310,14 +314,24 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	return res, nil
 }
 
+// routeBase is where the routes begin for origin (BaseURL, or its ws:// form).
+func (o AttachOptions) routeBase(origin string) string {
+	if o.FlatRoutes {
+		return strings.TrimRight(origin, "/")
+	}
+	return RouteBase(origin)
+}
+
 // RunTask starts a headless task and copies its NDJSON events to emit until
-// it exits. It returns the task's exit code.
-func RunTask(ctx context.Context, c *http.Client, baseURL, token string, req TaskRequest, emit func(TaskEvent)) (int, error) {
+// it exits. routeBase is where the relay routes begin: RouteBase(origin)
+// for a relay reached directly, the attach prefix through the gateway.
+// It returns the task's exit code.
+func RunTask(ctx context.Context, c *http.Client, routeBase, token string, req TaskRequest, emit func(TaskEvent)) (int, error) {
 	if c == nil {
 		c = http.DefaultClient
 	}
 	body, _ := json.Marshal(req)
-	r, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/dcrelay/1/task", bytes.NewReader(body))
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, RouteURL(routeBase, RouteTask), bytes.NewReader(body))
 	if err != nil {
 		return -1, err
 	}

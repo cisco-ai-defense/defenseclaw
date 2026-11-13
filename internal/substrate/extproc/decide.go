@@ -211,6 +211,24 @@ func (e *Engine) Redactor() *Redactor { return e.red }
 // doctor): off, unknown or supported.
 func (e *Engine) BodyModeStatus() string { return e.body.status() }
 
+// Degraded names what the callout can't do now, for readiness and doctor:
+// "mcp_refused_until_body_support" while closed-mode auto refuses MCP
+// requests to listed hosts (GAP-0146), "" otherwise.
+func (e *Engine) Degraded() string {
+	if e.closedAuto() && len(e.cfg.MCPHosts) > 0 && !e.body.confirmed() {
+		return "mcp_refused_until_body_support"
+	}
+	return ""
+}
+
+// closedAuto is a managed enterprise callout that fails closed with
+// body_inspection auto: it may not forward an MCP body it was never shown
+// it can read (GAP-0146). OSS installs ask for the body and alert when it
+// does not come (balanced defaults).
+func (e *Engine) closedAuto() bool {
+	return e.cfg.Managed && e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto
+}
+
 // InvalidateActor is the lifecycle hook: a deleted, recreated or forked
 // actor's cached UID is dropped.
 func (e *Engine) InvalidateActor(atespace, name string) { e.uids.Invalidate(atespace, name) }
@@ -385,6 +403,9 @@ const (
 	whyOverCap    = "over_cap"
 	whyStreaming  = "streaming_content_type"
 	whyInspectOff = "body_inspection_off"
+	// whyUnavailable: a managed closed callout, body_inspection auto and no
+	// body has reached the callout yet (GAP-0146).
+	whyUnavailable = "body_inspection_unavailable"
 )
 
 // uninspected applies GAP-0044 to a request on an MCP or admin-listed host
@@ -397,6 +418,9 @@ func (e *Engine) uninspected(v Verdict, why string) Verdict {
 	switch why {
 	case "":
 		return v
+	case whyUnavailable:
+		return deny(v, CategoryBodyUninspected, sourceCallout, why,
+			"DefenseClaw checks the requests sent to this MCP server, and this cluster's egress has not shown that it sends request bodies to the check, so the request can't be inspected. An administrator sets substrate.extproc.body_inspection to on (Agent Substrate with the body opt-in) or off (headers only).")
 	case whyOverCap, whyStreaming:
 		v.BodyOverCap = why == whyOverCap
 		if e.cfg.FailureMode == FailureClosed {
@@ -467,6 +491,11 @@ func (e *Engine) wantBody(req *Request) (bool, string) {
 	}
 	if !e.body.want() {
 		return false, whyInspectOff
+	}
+	if mcp && e.closedAuto() && !e.body.confirmed() {
+		// A stock egress filter would send this request on with its body
+		// unread; nothing has shown that this one sends bodies (GAP-0146).
+		return false, whyUnavailable
 	}
 	return true, ""
 }

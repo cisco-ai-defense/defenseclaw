@@ -37,9 +37,11 @@ type Config struct {
 	// callout can't decide: a Control API outage past the stale window, a
 	// tool judge error, an internal error. Managed installs render closed.
 	FailureMode string `yaml:"failure_mode"`
-	// BodyInspection is auto or on (ask for the body of every qualifying
-	// request; the two are the same since run-time detection was removed,
-	// GAP-0045) or off (headers only, recorded).
+	// BodyInspection is on (the egress filter sends bodies: ask for the
+	// body of every qualifying request), auto (the same, except that a
+	// managed enterprise callout failing closed refuses an MCP request to a
+	// listed MCP host until a body has reached the callout, GAP-0146) or off
+	// (headers only, recorded).
 	BodyInspection string `yaml:"body_inspection"`
 	// BodyMaxBytes caps a buffered body; a larger one is judged on its
 	// headers and recorded body_over_cap. Default 1 MiB.

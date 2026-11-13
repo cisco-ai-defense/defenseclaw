@@ -45,6 +45,11 @@ func (a *signinActions) Create(_ context.Context, req SubstrateCreate) (Substrat
 	return SubstrateCreated{Atespace: req.Atespace, Name: "new-1", UID: subUIDOther, Template: req.Template, Connector: a.connector}, nil
 }
 
+// TemplateConnector is the connector label of the template ("" = none).
+func (a *signinActions) TemplateConnector(context.Context, string, string) (string, error) {
+	return a.connector, nil
+}
+
 func (a *signinActions) Resume(context.Context, string, string) error { return nil }
 
 func (a *signinActions) Delete(context.Context, string, string) error {
@@ -100,17 +105,36 @@ func TestSubstrateManagedRefusesASigninConnectorAtCreate(t *testing.T) {
 	}
 
 	// The launcher omits the connector: the template's connector decides,
-	// and the actor made for it is deleted again with no registration.
+	// and the refusal comes before any actor exists (GAP-0160).
 	f, acts = signinFixture(t, true, "devin")
 	code, out = create(t, f, `{"profile":"eng","template":"devin-tpl"}`)
 	if code != http.StatusForbidden || out["reason"] != "subscription_signin_refused" {
 		t.Fatalf("create devin (template connector) in managed: %d %v", code, out)
 	}
-	if acts.created != 1 || acts.deleted != 1 {
-		t.Fatalf("created %d, deleted %d: the refused actor must be deleted", acts.created, acts.deleted)
+	if acts.created != 0 || acts.deleted != 0 {
+		t.Fatalf("created %d, deleted %d: a refused create makes no actor", acts.created, acts.deleted)
 	}
 	if _, ok, _ := f.regs.Get(context.Background(), "eng-web", subUIDOther); ok {
 		t.Fatal("a refused create left a registration")
+	}
+}
+
+// One create rule (GAP-0160): a named connector must equal the template's,
+// an omitted one is the template's, and neither is connector_required.
+func TestSubstrateCreateConnectorRule(t *testing.T) {
+	f, acts := signinFixture(t, false, "claudecode")
+	if code, out := create(t, f, `{"profile":"eng","template":"claude-wave1","connector":"cursor"}`); code != http.StatusBadRequest || out["reason"] != "connector_mismatch" {
+		t.Fatalf("named cursor on a claudecode template: %d %v", code, out)
+	}
+	if acts.created != 0 {
+		t.Fatalf("a mismatch made %d actors", acts.created)
+	}
+	if code, out := create(t, f, `{"profile":"eng","template":"claude-wave1"}`); code != http.StatusCreated {
+		t.Fatalf("omitted connector, template claudecode: %d %v", code, out)
+	}
+	f, _ = signinFixture(t, false, "")
+	if code, out := create(t, f, `{"profile":"eng","template":"unlabelled"}`); code != http.StatusBadRequest || out["reason"] != "connector_required" {
+		t.Fatalf("no connector anywhere: %d %v", code, out)
 	}
 }
 

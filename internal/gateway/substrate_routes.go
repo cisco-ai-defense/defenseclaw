@@ -296,20 +296,45 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusForbidden, "atespace_not_allowed")
 			return
 		}
-		if strings.TrimSpace(req.Connector) == "" {
+		// One connector rule (GAP-0160): an omitted connector is the
+		// template's own (its attested label); a named one must equal it;
+		// a template that carries no label (or an Actions that cannot read
+		// it) leaves the launcher's word, and no word is connector_required.
+		tmplConnector, err := st.cfg.templateConnector(r.Context(), atespace, req.Template)
+		if errors.Is(err, ErrSubstrateTemplateNotFound) {
+			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
+			return
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[substrate] template lookup failed: %v\n", err)
+			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
+			return
+		}
+		named := strings.TrimSpace(req.Connector)
+		switch {
+		case named != "" && tmplConnector != "" && !sameSubstrateConnector(named, tmplConnector):
+			writeSubstrateJSONError(w, http.StatusBadRequest, "connector_mismatch")
+			return
+		case named == "" && tmplConnector == "":
 			writeSubstrateJSONError(w, http.StatusBadRequest, "connector_required")
 			return
+		case named == "":
+			// The profile was picked without a connector; pick it again for the
+			// template's, because a profile may be bound to one.
+			req.Connector = tmplConnector
+			if profile, atespace, err = resolve(c.person, req.Profile, req.Connector, c.admin); err != nil {
+				writeSubstrateJSONError(w, http.StatusForbidden, "profile_not_allowed")
+				return
+			}
 		}
 		req.Profile, req.Atespace, req.Owner = profile, atespace, ownerOf(c.person)
 		// E9: a managed deployment refuses an agent that signs in to a
-		// vendor account. The launcher names the connector, so this
-		// refuses before an actor exists; the template's connector is
-		// checked again below, because that is what the actor runs.
-		if req.Connector != "" {
-			if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
-				writeSubstrateSigninRefusal(w, d)
-				return
-			}
+		// vendor account, before any actor exists. The connector is now the
+		// template's whenever the template has one; it is checked again
+		// below on what the created actor runs.
+		if d := st.cfg.signinDecision(req.Connector, req.Secrets); !d.Allowed {
+			writeSubstrateSigninRefusal(w, d)
+			return
 		}
 		created, err := st.cfg.Actions.Create(r.Context(), req)
 		switch {
@@ -380,7 +405,7 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			out["warnings"] = []string{signinDecision.Message}
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
-			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, 0)
+			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)
 			if err == nil {
 				out["session_token"], out["session_expires"] = tok, exp
 			}
@@ -509,7 +534,7 @@ func (a *APIServer) substrateSessionCert(st *substrateState) http.HandlerFunc {
 		}
 		// The token names the person as issuer#subject: two issuers may
 		// use the same subject (GAP-0061).
-		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), identity.SessionActor{Atespace: reg.Atespace, Name: reg.Name, UID: reg.UID}, ttl)
+		tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), ttl)
 		if err != nil {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "session_refused")
 			return

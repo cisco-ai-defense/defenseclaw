@@ -136,7 +136,7 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 		}); ok {
 			detected, err := r.Root(ctx)
 			if err != nil {
-				return nil, fmt.Errorf("workspace: ask the actor for its working directory: %w", err)
+				return nil, err
 			}
 			root = detected
 		}

@@ -493,7 +493,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 				return []gateway.SubstrateCheck{gateway.SubstrateUpstreamCheck(ctx,
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl)},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl)},
 			Limiter: ratelimit.New(ratelimit.Config{
 				PerActorRPS: c.Substrate.RateLimits.PerActorRPS, PerAtespaceRPS: c.Substrate.RateLimits.PerAtespaceRPS,
 			}),
@@ -649,6 +649,15 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 				return "", err
 			}
 			return reg.ParentUID, nil
+		},
+		// A delete purges only a registration the controller marked
+		// deleted (or an actor never registered) (GAP-0142).
+		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil {
+				return false, err
+			}
+			return !ok || reg.Deleted, nil
 		}})
 	if err != nil {
 		return err

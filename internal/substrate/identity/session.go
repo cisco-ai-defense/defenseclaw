@@ -44,6 +44,10 @@ const (
 	SessionAudience = "dcrelay"
 	// SessionClaim holds the actor a session token is for.
 	SessionClaim = "dc.actor"
+	// SessionTaskClaim holds the SHA-256 (hex) of the task the actor was
+	// registered for; the relay starts a task only when its text has this
+	// digest (GAP-0071, GAP-0162).
+	SessionTaskClaim = "dc.task_sha256"
 	// DefaultSessionLifetime and MaxSessionLifetime bound a token's life.
 	DefaultSessionLifetime = 15 * time.Minute
 	MaxSessionLifetime     = time.Hour
@@ -54,6 +58,9 @@ type SessionActor struct {
 	Atespace string `json:"atespace"`
 	Name     string `json:"actorName"`
 	UID      string `json:"actorUID"`
+	// TaskDigest is the registration task digest ("" for an interactive
+	// run). It travels as the top-level SessionTaskClaim, not in dc.actor.
+	TaskDigest string `json:"-"`
 }
 
 // Session is a verified relay session token.
@@ -64,6 +71,8 @@ type Session struct {
 	ActorUID string       `json:"actor_uid"`
 	TokenID  string       `json:"jti,omitempty"`
 	Expires  time.Time    `json:"expires"`
+	// TaskDigest is the SessionTaskClaim ("" when the token has none).
+	TaskDigest string `json:"task_digest,omitempty"`
 }
 
 type sessionClaims struct {
@@ -75,6 +84,23 @@ type sessionClaims struct {
 	IssuedAt  *int64        `json:"iat"`
 	ID        string        `json:"jti"`
 	Actor     *SessionActor `json:"dc.actor"`
+	Task      string        `json:"dc.task_sha256,omitempty"`
+}
+
+// validTaskDigest reports an empty digest or 64 lowercase hex digits.
+func validTaskDigest(d string) bool {
+	if d == "" {
+		return true
+	}
+	if len(d) != 64 {
+		return false
+	}
+	for _, c := range d {
+		if (c < 0x30 || c > 0x39) && (c < 0x61 || c > 0x66) {
+			return false
+		}
+	}
+	return true
 }
 
 // SessionSigner issues and verifies relay session tokens with one P-256
@@ -151,6 +177,9 @@ func (s *SessionSigner) Issue(person string, actor SessionActor, ttl time.Durati
 	if !nameRE.MatchString(actor.Atespace) || !nameRE.MatchString(actor.Name) || !validUID(actor.UID) {
 		return "", time.Time{}, errors.New("identity: a session token names one actor incarnation")
 	}
+	if !validTaskDigest(actor.TaskDigest) {
+		return "", time.Time{}, errors.New("identity: a task digest is the SHA-256 of the task in hex")
+	}
 	if ttl <= 0 {
 		ttl = DefaultSessionLifetime
 	}
@@ -167,7 +196,7 @@ func (s *SessionSigner) Issue(person string, actor SessionActor, ttl time.Durati
 	claims := sessionClaims{
 		Issuer: s.issuer, Subject: person, Audience: audience{SessionAudience},
 		Expiry: &ex, NotBefore: &nbf, IssuedAt: &iat,
-		ID: base64.RawURLEncoding.EncodeToString(jti), Actor: &actor,
+		ID: base64.RawURLEncoding.EncodeToString(jti), Actor: &actor, Task: actor.TaskDigest,
 	}
 	hb, _ := json.Marshal(jwsHeader{Alg: "ES256", Kid: s.kid, Typ: SessionTokenType})
 	cb, err := json.Marshal(claims)
@@ -223,8 +252,13 @@ func (s *SessionSigner) Verify(token string) (Session, error) {
 	if c.Actor == nil || c.Actor.Atespace == "" || c.Actor.Name == "" || c.Actor.UID == "" {
 		return Session{}, reasonf(ReasonClaims, "session token names no actor")
 	}
+	if !validTaskDigest(c.Task) {
+		return Session{}, reasonf(ReasonClaims, "session token task digest is not a SHA-256")
+	}
+	actor := *c.Actor
+	actor.TaskDigest = c.Task
 	return Session{
-		Person: c.Subject, Actor: *c.Actor, ActorRef: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID,
-		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0),
+		Person: c.Subject, Actor: actor, ActorRef: c.Actor.Atespace + "/" + c.Actor.Name, ActorUID: c.Actor.UID,
+		TokenID: c.ID, Expires: time.Unix(*c.Expiry, 0), TaskDigest: c.Task,
 	}, nil
 }

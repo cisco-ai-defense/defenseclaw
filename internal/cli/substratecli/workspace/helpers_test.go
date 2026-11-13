@@ -74,7 +74,7 @@ func newActor(t *testing.T) *actor {
 }
 
 func (a *actor) client() *Client {
-	return NewClient(a.srv.Client(), a.srv.URL, func(context.Context) (string, error) { return testToken, nil })
+	return NewClient(a.srv.Client(), relay.RouteBase(a.srv.URL), func(context.Context) (string, error) { return testToken, nil })
 }
 
 // sandboxFS maps the paths the copy-mode pipeline uses inside a sandbox
