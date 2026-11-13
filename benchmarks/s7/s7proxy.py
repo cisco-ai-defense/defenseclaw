@@ -28,6 +28,10 @@ PRICES = {  # USD per 1M tokens: input, output, cache read
     "gpt-oss-safeguard-120b": (0.15, 0.60, 0.15),
     "haiku-4-5": (1.00, 5.00, 0.10), "haiku-5-5": (0.10, 0.50, 0.01), "sonnet-5-5": (2.00, 10.00, 0.10),
 }
+# Mantle route per model (AWS model cards): Gemma 4 is served only under /openai/v1 on
+# bedrock-mantle; the gpt-oss and Gemma 3 models only under /v1 (each refuses the other route
+# with "isn't supported on this route").
+MANTLE_ROUTE = {"gemma-4-31b": "/openai/v1", "gemma-4-26b-a4b": "/openai/v1"}
 MANTLE = {"gemma-4-31b": "google.gemma-4-31b", "gemma-4-26b-a4b": "google.gemma-4-26b-a4b",
           "gemma-3-27b": "google.gemma-3-27b-it", "gpt-oss-safeguard-20b": "openai.gpt-oss-safeguard-20b",
           "gpt-oss-safeguard-120b": "openai.gpt-oss-safeguard-120b"}
@@ -44,6 +48,7 @@ ap.add_argument("--cap-usd", type=float, default=70.0)
 ap.add_argument("--region", default="us-east-1")
 ap.add_argument("--conc", type=int, default=16)
 ap.add_argument("--replay-latency", action="store_true")
+ap.add_argument("--cache-only", action="store_true", help="answer only from the cache; a miss is refused (503) and logged, never sent to a model")
 args = ap.parse_args()
 
 lock = threading.Lock()
@@ -92,7 +97,8 @@ def call_model(model, messages, max_tokens, temperature, response_format=None):
             body["response_format"] = response_format
         last = None
         for attempt in range(6):
-            req = urllib.request.Request(f"https://bedrock-mantle.{args.region}.api.aws/v1/chat/completions",
+            route = MANTLE_ROUTE.get(model, "/v1")
+            req = urllib.request.Request(f"https://bedrock-mantle.{args.region}.api.aws{route}/chat/completions",
                                          data=json.dumps(body).encode(), method="POST",
                                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + mantle_token()})
             try:
@@ -135,6 +141,10 @@ def run(kind, model_tag, messages, max_tokens, temperature, response_format=None
     key = hashlib.sha256(json.dumps([model_tag, messages, max_tokens, temperature, response_format], sort_keys=True).encode()).hexdigest()
     with lock:
         hit = cache.get(key)
+    if hit is None and args.cache_only:
+        with lock:
+            logf.write(json.dumps({"ts": time.time(), "kind": kind, "model": model, "key": key[:16], "cache_miss_refused": True}) + "\n"); logf.flush()
+        raise PermissionError("cache-only: miss refused")
     rec = {"ts": time.time(), "kind": kind, "model": model, "tag": tag, "key": key[:16]}
     if hit is not None:
         rec.update(cache_hit=True, in_tok=hit["in"], out_tok=hit["out"], latency_ms=hit["ms"], cost=0.0, stop=hit.get("stop"))
