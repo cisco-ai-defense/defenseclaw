@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
 // runGitListMaxBytes caps the bytes we will read from a `git`
@@ -2455,7 +2456,7 @@ func codexStaticReaderShellStructureSafe(command string) bool {
 		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(
-		strings.NewReader(command), "",
+		shellparse.Reader(command), "",
 	)
 	if err != nil {
 		return false
