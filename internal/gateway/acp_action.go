@@ -139,10 +139,12 @@ func acpTerminalCreateCall(raw json.RawMessage, goos string) acpToolCall {
 		if variable.Name == nil || variable.Value == nil || !acpEnvName.MatchString(*variable.Name) {
 			return acpToolCall{tool: "shell", unread: true}
 		}
+		// The value is always quoted: a bare word after = is a command in
+		// PowerShell, and a value is data in both shells.
 		if goos == "windows" {
-			line.WriteString("$env:" + *variable.Name + "=" + acpQuoteWord(*variable.Value, goos) + "; ")
+			line.WriteString("$env:" + *variable.Name + "=" + acpQuoteAlways(*variable.Value, goos) + "; ")
 		} else {
-			line.WriteString(*variable.Name + "=" + acpQuoteWord(*variable.Value, goos) + " ")
+			line.WriteString(*variable.Name + "=" + acpQuoteAlways(*variable.Value, goos) + " ")
 		}
 	}
 	line.WriteString(*params.Command)
@@ -363,6 +365,14 @@ func acpQuoteWord(word, goos string) string {
 	if acpPlainWord.MatchString(word) {
 		return word
 	}
+	if goos == "windows" {
+		return "'" + strings.ReplaceAll(word, "'", "''") + "'"
+	}
+	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
+}
+
+// acpQuoteAlways quotes a value even when it is a plain word.
+func acpQuoteAlways(word, goos string) string {
 	if goos == "windows" {
 		return "'" + strings.ReplaceAll(word, "'", "''") + "'"
 	}
