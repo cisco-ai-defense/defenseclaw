@@ -76,7 +76,7 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 		o.GID = 1000
 	}
 	if err := kit.CheckConnector(o.Connector); err != nil {
-		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %w", err)
+		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: %w", err)
 	}
 	h, ok := harness.Get(o.Connector)
 	if !ok {

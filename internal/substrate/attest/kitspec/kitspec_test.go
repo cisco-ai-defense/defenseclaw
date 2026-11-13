@@ -132,7 +132,7 @@ func TestEveryListedConnectorHasAKitSpec(t *testing.T) {
 			t.Errorf("%s listed twice", name)
 		}
 		seen[name] = true
-		if _, _, _, err := Spec(Options{Connector: name, KitVersion: "test", HookBinary: []byte("x"), RelayBinary: []byte("x"), MetadataOnly: true}); err != nil {
+		if _, _, err := Spec(Options{Connector: name, KitVersion: "test", HookBinary: []byte("x"), RelayBinary: []byte("x"), MetadataOnly: true}); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
