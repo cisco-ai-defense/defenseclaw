@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +153,11 @@ func TestRoutingAPIUsersSeeNone(t *testing.T) {
 	cfg.Routing.Admin = &config.RoutingAdminConfig{Visibility: &config.RoutingVisibility{UsersSee: "none"}}
 	a := &APIServer{scannerCfg: cfg}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/routing/effective", nil)
-	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{UID: 1001, Name: "u"}))
+	uid := 1001
+	if uid == os.Geteuid() {
+		uid = 1002 // the gateway owner is an administrator; the fixture needs a standard user
+	}
+	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{UID: uid, Name: "u"}))
 	if !cfg.StandaloneEnterprise() {
 		t.Skip("fixture is not a standalone managed config on this platform")
 	}
@@ -159,7 +165,7 @@ func TestRoutingAPIUsersSeeNone(t *testing.T) {
 		t.Fatal("users_see none: a standard user reads nothing")
 	}
 	cfg.Routing.Admin.Visibility = nil
-	if key, admin, ok := a.routingAPICaller(req, cfg); !ok || admin || key != "1001" {
+	if key, admin, ok := a.routingAPICaller(req, cfg); !ok || admin || key != strconv.Itoa(uid) {
 		t.Fatalf("users_see own: the kernel peer reads its own (key %q admin %v ok %v)", key, admin, ok)
 	}
 }

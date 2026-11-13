@@ -444,7 +444,8 @@ func TestRequestBounds(t *testing.T) {
 		t.Fatal("a sequence above 2^63-1 must be refused")
 	}
 	limit := RateLimiter(2)
-	if !limit("a") || !limit("a") || limit("a") || !limit("b") {
+	first, second, third := limit("a"), limit("a"), limit("a")
+	if !first || !second || third || !limit("b") {
 		t.Fatal("two per minute per key")
 	}
 	if clientKey("[2001:db8:1:2:aaaa::1]:443") != clientKey("[2001:db8:1:2:bbbb::9]:443") || clientKey("192.0.2.1:443") != "192.0.2.1" {
