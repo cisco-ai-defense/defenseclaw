@@ -41,6 +41,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/peercred"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -108,13 +109,18 @@ type Client struct {
 // were one value, so everything that could read openclaw.json held the
 // token that allows blocked tools and stops the gateway.
 func (c *Client) wsToken() string {
-	if p := c.openClawToken.Load(); p != nil {
+	// The DefenseClaw master token never goes to OpenClaw (R-TOK).
+	notMaster := func(t string) bool {
+		master := strings.TrimSpace(c.cfg.Token)
+		return t != "" && (master == "" || !constantTimeStringMatch(t, master))
+	}
+	if p := c.openClawToken.Load(); p != nil && notMaster(*p) {
 		return *p
 	}
-	if t := strings.TrimSpace(c.cfg.OpenClawToken); t != "" {
+	if t := strings.TrimSpace(c.cfg.OpenClawToken); notMaster(t) {
 		return t
 	}
-	if t, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath()); ok {
+	if t, ok, _ := readOpenClawGatewayTokenAt(c.openClawConfigPath()); ok && notMaster(t) {
 		return t
 	}
 	return ""
@@ -152,6 +158,10 @@ func NewClient(cfg *config.GatewayConfig, dataDirs ...string) (*Client, error) {
 	// fingerprint, on the same canonical path used for identity custody.
 	cfg.DeviceKeyFile = target
 
+	if dataDir != "" {
+		d := dataDir
+		openClawDataDir.Store(&d)
+	}
 	return &Client{
 		cfg:     cfg,
 		device:  device,
@@ -289,14 +299,13 @@ func setOpenClawListenerAccount(account string) {
 	openClawListenerAccount.Store(&account)
 }
 
-var openClawUnverifiedAccountOnce sync.Once
-
 // acceptOpenClawPluginAccountListener accepts, in the separate-user layout,
-// a listener owned by the OpenClaw account. On Linux the kernel names the
-// owner; macOS cannot read the owner of a socket of another account without
-// privileges, so there the listener is accepted unverified with a warning
-// (a documented limit of the separate-user layout on macOS; what DefenseClaw
-// sends there is the OpenClaw credential, never the DefenseClaw one).
+// a listener owned by the OpenClaw account (connectors.openclaw.plugin_account).
+// On Linux the kernel connection table names the owner of the accepted
+// socket; on macOS the TCP pcb list does (peercred), without privileges. Any
+// other owner, or an owner that cannot be read, is refused (OC review 3 P2-1:
+// an unverified macOS accept handed the OpenClaw credential to whoever held
+// the port while OpenClaw restarted).
 func acceptOpenClawPluginAccountListener(conn net.Conn) bool {
 	p := openClawListenerAccount.Load()
 	if p == nil || *p == "" {
@@ -310,14 +319,16 @@ func acceptOpenClawPluginAccountListener(conn net.Conn) bool {
 	if err != nil || uid <= 0 {
 		return false
 	}
-	err = hookexec.VerifyLocalPeerOwnedBy(conn, uid)
-	if errors.Is(err, hookexec.ErrPeerAccountUnverifiable) && runtime.GOOS == "darwin" {
-		openClawUnverifiedAccountOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "[gateway] WARNING: macOS cannot verify that the OpenClaw listener belongs to %s; connecting without that check (separate-user layout)\n", *p)
-		})
-		return true
+	if runtime.GOOS == "darwin" {
+		local, lok := conn.LocalAddr().(*net.TCPAddr)
+		remote, rok := conn.RemoteAddr().(*net.TCPAddr)
+		if !lok || !rok {
+			return false
+		}
+		owner, err := peercred.LoopbackTCPPeerUID(local, remote)
+		return err == nil && owner == uid
 	}
-	return err == nil
+	return hookexec.VerifyLocalPeerOwnedBy(conn, uid) == nil
 }
 
 // openClawListenerOwnerChecked reports whether conn's listener account is
@@ -1219,10 +1230,13 @@ func readOpenClawGatewayTokenAt(path string) (string, bool, error) {
 		Source string `json:"source"`
 		ID     string `json:"id"`
 	}
-	// A reference to the DefenseClaw gateway token is refused: OpenClaw would
-	// then hold the token that allows blocked tools (R-TOK).
-	if json.Unmarshal(raw, &ref) == nil && ref.Source == "env" && openClawEnvNameRE.MatchString(ref.ID) &&
-		!gatewayTokenEnvNameEqual(ref.ID, "DEFENSECLAW_GATEWAY_TOKEN") {
+	// The gateway sends what this resolves to the OpenClaw gateway, so a
+	// reference may name only a variable that is not a DefenseClaw credential
+	// (R-TOK; OC review 3 P1-1: openclaw.json could name ANTHROPIC_API_KEY or
+	// the DefenseClaw token and receive it). In the separate-user layout
+	// another account owns openclaw.json and OpenClaw reads the variable from
+	// its own environment, so no reference is resolved here at all.
+	if json.Unmarshal(raw, &ref) == nil && ref.Source == "env" && openClawEnvRefAllowed(ref.ID) {
 		if value := os.Getenv(ref.ID); value != "" {
 			return value, true, nil
 		}
@@ -1242,6 +1256,45 @@ func openClawEnvGatewayToken() string {
 }
 
 var openClawEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// openClawSecretNameRE matches variable names that hold a credential
+// DefenseClaw or its connectors use (mirrors the Python setup refusal,
+// _names_defenseclaw_credential).
+var openClawSecretNameRE = regexp.MustCompile(`(?i)^DEFENSECLAW_|API_KEY|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY|SESSION_TOKEN|BEARER`)
+
+// openClawDataDir is the DefenseClaw data folder of the running client: a
+// name its .env defines (the gateway loads that file into its environment)
+// is a DefenseClaw credential and is never resolved for OpenClaw.
+var openClawDataDir atomic.Pointer[string]
+
+// openClawEnvRefAllowed reports whether an openclaw.json SecretRef may be
+// resolved from this process environment: the OpenClaw variable itself, or
+// a plain name that is no credential DefenseClaw holds, and never in the
+// separate-user layout.
+func openClawEnvRefAllowed(name string) bool {
+	if p := openClawListenerAccount.Load(); p != nil && *p != "" {
+		return false
+	}
+	if !openClawEnvNameRE.MatchString(name) {
+		return false
+	}
+	if gatewayTokenEnvNameEqual(name, "OPENCLAW_GATEWAY_TOKEN") {
+		return true
+	}
+	if openClawSecretNameRE.MatchString(name) {
+		return false
+	}
+	if d := openClawDataDir.Load(); d != nil && *d != "" {
+		if values, err := loadDotEnv(filepath.Join(*d, ".env")); err == nil {
+			for key := range values {
+				if gatewayTokenEnvNameEqual(key, name) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
 
 func truncateBytes(b []byte, maxLen int) string {
 	s := string(b)

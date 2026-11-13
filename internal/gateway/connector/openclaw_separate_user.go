@@ -207,6 +207,9 @@ func (c *OpenClawConnector) teardownSeparateUser(opts SetupOpts, paths openClawP
 			return fmt.Errorf("remove the plugin credential %s: %w", tokenFile, err)
 		}
 	}
+	if opts.DataDir != "" {
+		_ = os.Remove(filepath.Join(opts.DataDir, "openclaw-merge.json"))
+	}
 	fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: removed the plugin credential; DefenseClaw does not write %s in the separate-user layout, "+
 		"so remove plugins.entries.defenseclaw, defenseclaw from plugins.allow, %s from plugins.load.paths and a security.installPolicy that runs defenseclaw-gateway there yourself\n", paths.config, paths.external)
 	return nil

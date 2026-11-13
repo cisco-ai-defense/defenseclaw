@@ -18213,6 +18213,21 @@ def _wait_for_connector_runtime(
             time.sleep(sleep_for)
 
 
+def _openclaw_cli() -> str | None:
+    """The openclaw command on PATH, never one in the current folder.
+
+    On Windows Python 3.11 shutil.which also searches the current folder
+    first, so setup run from an agent workspace could start a planted
+    openclaw.cmd (OC review 3 P3-4).
+    """
+    found = shutil.which("openclaw", path=os.environ.get("PATH", ""))
+    if not found:
+        return None
+    if os.path.dirname(os.path.abspath(found)) == os.path.abspath(os.getcwd()):
+        return None
+    return found
+
+
 def _restart_openclaw_gateway() -> bool:
     """Ask OpenClaw to restart its gateway service so the updated
     plugin registration (written by OpenClawConnector.Setup) takes
@@ -18229,7 +18244,7 @@ def _restart_openclaw_gateway() -> bool:
         # CreateProcess does not find by its bare name (GAP-0048 rel-1-0-10);
         # shutil.which applies PATHEXT. The arguments are fixed literals.
         result = subprocess.run(
-            [shutil.which("openclaw") or "openclaw", "gateway", "restart"],
+            [_openclaw_cli() or "openclaw", "gateway", "restart"],
             capture_output=True,
             # Output is only shown to the operator: bytes that do not decode
             # must not turn into an exception that skips the health probe.

@@ -80,7 +80,7 @@ func openClawInstallPolicyOwnerOK(p string, info os.FileInfo, uid int, dir bool)
 	if int(st.Uid) != 0 && int(st.Uid) != uid {
 		return fmt.Errorf("%s is owned by uid %d, not root or the OpenClaw account (uid %d)", p, st.Uid, uid)
 	}
-	if info.Mode().Perm()&0o022 != 0 && !(dir && info.Mode()&os.ModeSticky != 0) {
+	if info.Mode().Perm()&0o022 != 0 && (!dir || info.Mode()&os.ModeSticky == 0) {
 		return fmt.Errorf("%s is group or world writable (mode %04o)", p, info.Mode().Perm())
 	}
 	return nil

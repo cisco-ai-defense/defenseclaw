@@ -67,12 +67,6 @@ func verifyExternalOpenClawPlugin(dir string, paths openClawPaths) error {
 	return nil
 }
 
-// openClawExtensionExactBundle reports whether dir holds exactly the
-// embedded plugin files, byte for byte, and nothing else.
-func openClawExtensionExactBundle(dir string) bool {
-	return openClawBundleDifference(dir) == ""
-}
-
 // openClawBundleDifference names the first way dir differs from the
 // embedded plugin (a changed, added, missing or non-regular file), or "".
 func openClawBundleDifference(dir string) string {

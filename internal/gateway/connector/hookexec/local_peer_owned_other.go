@@ -21,5 +21,5 @@ package hookexec
 import "net"
 
 // VerifyLocalPeerOwnedBy is Linux only; elsewhere it reports
-// ErrPeerAccountUnverifiable.
+// ErrPeerAccountUnverifiable (the gateway checks macOS with peercred).
 func VerifyLocalPeerOwnedBy(net.Conn, int) error { return ErrPeerAccountUnverifiable }

@@ -113,7 +113,7 @@ func publishOpenClawPluginToken(path, group, account, token string) error {
 	}
 	// Giving the file to the group needs this account in it too (GAP-0080).
 	if me, err := user.Current(); err == nil && os.Geteuid() != 0 && !openClawGroupHasMember(g, me.Username) {
-		return fmt.Errorf("the DefenseClaw account %s is not in plugin_token_group %s; add both accounts to the group (usermod -aG %s %s), then restart the DefenseClaw gateway", me.Username, group, group, me.Username)
+		return fmt.Errorf("the DefenseClaw account %s is not in plugin_token_group %s; add both accounts to the group (usermod -aG %s %s); the membership applies to processes started after it, so restart the service manager of that account (or log in again) and then the DefenseClaw gateway", me.Username, group, group, me.Username)
 	}
 	gid, err := strconv.Atoi(g.Gid)
 	if err != nil {

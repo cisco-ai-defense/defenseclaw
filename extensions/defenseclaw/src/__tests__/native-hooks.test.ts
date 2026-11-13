@@ -47,6 +47,7 @@ vi.mock("../scanners/mcp-scanner.js", () => ({ scanMCPServer: vi.fn() }));
 
 import pluginSetup from "../index.js";
 import { setRuntimeSettings } from "../sidecar-config.js";
+import { commandArgs, scanArgs } from "../index.js";
 
 type Handler = (...args: unknown[]) => unknown;
 
@@ -197,5 +198,13 @@ describe("slash command arguments (rel-1-0-10 GAP-0065)", () => {
     expect(out.text).toContain("defenseclaw skill allow some-skill");
     const none = await commands["block"].handler({});
     expect(none.text).toContain("defenseclaw <skill|mcp|plugin> block <name>");
+  });
+});
+
+describe("command argument parsing", () => {
+  it("keeps a path with spaces whole", () => {
+    expect(scanArgs("/Users/u/My Skill")).toEqual({ target: "/Users/u/My Skill", type: undefined });
+    expect(scanArgs("/Users/u/My Skill plugin")).toEqual({ target: "/Users/u/My Skill", type: "plugin" });
+    expect(commandArgs("skill \"my skill\"", ["type", "name"])).toEqual({ type: "skill", name: "my skill" });
   });
 });

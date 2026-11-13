@@ -849,7 +849,7 @@ export default function (api: DefenseClawPluginHost) {
       { name: "type", description: "Scan type: skill (default), plugin, mcp, code", required: false },
     ],
     handler: async (cmd) => {
-      const args = commandArgs(cmd.args, ["target", "type"]);
+      const args = scanArgs(cmd.args);
       const target = args.target;
       if (!target) {
         return { text: "Usage: /scan <path> [skill|plugin|mcp|code]" };
@@ -999,9 +999,25 @@ function formatScanOutput(
 export function commandArgs(raw: unknown, names: string[]): Record<string, string | undefined> {
   const out: Record<string, string | undefined> = {};
   if (typeof raw === "string") {
-    const words = raw.trim().split(/\s+/).filter(Boolean);
+    // The first arguments are single words; the last takes the rest of the
+    // line, so a path with spaces stays whole (/scan ~/My Skill).
+    let rest = raw.trim();
     names.forEach((name, i) => {
-      out[name] = words[i];
+      if (!rest) return;
+      if (i === names.length - 1) {
+        out[name] = rest.replace(/^"(.*)"$/, "$1");
+        rest = "";
+        return;
+      }
+      const quoted = rest.match(/^"([^"]*)"\s*(.*)$/);
+      if (quoted) {
+        out[name] = quoted[1];
+        rest = quoted[2];
+        return;
+      }
+      const m = rest.match(/^(\S+)\s*(.*)$/);
+      out[name] = m ? m[1] : rest;
+      rest = m ? m[2] : "";
     });
   } else if (raw && typeof raw === "object") {
     for (const name of names) {
@@ -1010,4 +1026,13 @@ export function commandArgs(raw: unknown, names: string[]): Record<string, strin
     }
   }
   return out;
+}
+
+/** /scan <path> [skill|plugin|mcp|code]: the path may contain spaces. */
+export function scanArgs(raw: unknown): Record<string, string | undefined> {
+  if (typeof raw !== "string") return commandArgs(raw, ["target", "type"]);
+  const text = raw.trim().replace(/^"(.*)"$/, "$1");
+  const m = text.match(/^(.*\S)\s+(skill|plugin|mcp|code)$/);
+  if (m) return { target: m[1].replace(/^"(.*)"$/, "$1"), type: m[2] };
+  return { target: text || undefined, type: undefined };
 }

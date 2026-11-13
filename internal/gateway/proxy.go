@@ -6650,8 +6650,7 @@ func (p *GuardrailProxy) openClawPluginCredentialIsOwner(r *http.Request) bool {
 	if token == "" || presented == "" || !constantTimeStringMatch(presented, token) {
 		return false
 	}
-	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.OpenClawSeparateUser() {
-		return false
-	}
-	return true
+	cfg := proxyDecisionConfig(r.Context())
+	// No config yet: the layout is unknown, so the credential proves nothing.
+	return cfg != nil && !cfg.OpenClawSeparateUser()
 }
