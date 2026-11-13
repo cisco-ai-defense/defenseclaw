@@ -5102,6 +5102,13 @@ def _connector_teardown(plan: UninstallPlan) -> None:
     """
     connectors = plan.connectors
     gateway_supported = _gateway_supports_connector_teardown(plan.gateway_path or None)
+    if gateway_supported:
+        # Route-only model settings go back first, for every connector that
+        # supports them (also one that is no longer active): an agent left on
+        # a removed gateway would lose model access (DESIGN 7.4, 15.9).
+        from defenseclaw.routing_route_only import restore_agent_config
+
+        restore_agent_config(None)
     for name in connectors:
         if gateway_supported:
             errors: list[str] = []
