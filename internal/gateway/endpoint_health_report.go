@@ -689,7 +689,11 @@ func applyEndpointHealthGuardian(
 			}
 			report.HooksFailingTargets = append(report.HooksFailingTargets, failing)
 		}
-		if report.HooksTargets > 0 && report.HooksOK == 0 {
+		// No working target and at least one broken. A pending target only
+		// waits for its account to sign in, so a host where every account is
+		// signed out (a Mac at the login window) is not unhealthy; an overdue
+		// pending target raises HOOKS_PARTIAL below.
+		if report.HooksFailed > 0 && report.HooksOK == 0 {
 			add(endpointHealthReasonHooksNone, endpointHealthComponentHooks, endpointHealthStatusUnhealthy, "")
 		}
 		pendingOverdue := !src.HooksPendingSince.IsZero() &&

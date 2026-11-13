@@ -181,6 +181,31 @@ func TestEndpointHealthReasonTable(t *testing.T) {
 			s.Guardian.Targets[1].OK, s.Guardian.Targets[1].Pending = false, true
 			s.HooksPendingSince = endpointHealthTestNow
 		}, nil},
+		{"hooks all pending just seen", func(s *endpointHealthSources) {
+			for i := range s.Guardian.Targets {
+				s.Guardian.Targets[i].OK, s.Guardian.Targets[i].Pending = false, true
+			}
+			s.HooksPendingSince = endpointHealthTestNow
+		}, nil},
+		{"hooks all pending past one guardian interval", func(s *endpointHealthSources) {
+			for i := range s.Guardian.Targets {
+				s.Guardian.Targets[i].OK, s.Guardian.Targets[i].Pending = false, true
+			}
+			s.HooksPendingSince = endpointHealthTestNow.Add(-2 * time.Minute)
+		}, []want{
+			{"HOOKS_PARTIAL", "hooks", "degraded", "claudecode"},
+			{"HOOKS_PARTIAL", "hooks", "degraded", "codex"},
+		}},
+		{"hooks none with one failed and the rest pending", func(s *endpointHealthSources) {
+			for i := range s.Guardian.Targets {
+				s.Guardian.Targets[i].OK, s.Guardian.Targets[i].Pending = false, true
+			}
+			s.Guardian.Targets[0].Pending, s.Guardian.Targets[0].Error = false, "access is denied"
+			s.HooksPendingSince = endpointHealthTestNow
+		}, []want{
+			{"HOOKS_NONE", "hooks", "unhealthy", ""},
+			{"HOOKS_PARTIAL", "hooks", "degraded", "claudecode"},
+		}},
 		{"guardian stale", func(s *endpointHealthSources) {
 			s.Guardian.UpdatedAt = endpointHealthTestNow.Add(-6 * time.Minute)
 		}, []want{{"GUARDIAN_STALE", "guardian", "degraded", ""}}},
