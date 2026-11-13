@@ -39,6 +39,12 @@ const (
 	effectRulesOn     effectRulesMode = "on"
 )
 
+// effectResolverOverride, when set, replaces the file-system link resolver in
+// computeEffectShadow. It is nil in production (the hookpaths reader is used)
+// and set by the s7bench harness to a lexical resolver, because the harness
+// has no real user home to follow links through.
+var effectResolverOverride func(string) (string, bool)
+
 type effectTier string
 
 const (
@@ -126,8 +132,9 @@ func computeEffectShadow(request trustedActionRequest, mode effectRulesMode) Eff
 	}
 	result := effects.Extract(call, opts)
 	facts := effectrules.Project(result, effectrules.Env{
-		Home:   request.Input.ActiveHome,
-		Flavor: opts.Flavor,
+		Home:    request.Input.ActiveHome,
+		Flavor:  opts.Flavor,
+		Resolve: effectResolverOverride,
 	})
 	tier, sets, program, kind := classifyEffectFacts(facts)
 	res.Tier, res.Sets, res.Program, res.Kind = string(tier), sets, program, kind
