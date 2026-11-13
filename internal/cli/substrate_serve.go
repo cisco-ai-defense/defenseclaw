@@ -501,7 +501,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 					gateway.DefaultSubstrateLLMProviders(serveFlags.llmCredDir, serveFlags.bedrockRegion), c.Guardrail.AllowPrivateUpstreams, nil),
 					substrateRouterCheck(ctx, router, routerErr)}
 			},
-			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), ConnectorOf: substrateTemplateConnector(ctl.Attestor())},
+			Actions: &gateway.SubstrateATEActions{Client: ate, Ensure: substrateEnsurer(ctl), TemplateKit: substrateTemplateKit(ctl.Attestor())},
 			// PLAN 7.3: the profile sandbox_class picks the class at create.
 			SandboxClass: gateway.SubstrateSandboxClassFor(c),
 			Limiter: ratelimit.New(ratelimit.Config{

@@ -64,10 +64,10 @@ type Options struct {
 
 // Spec returns the kit layer, the template facts and the harness version of
 // a connector.
-func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
+func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, error) {
 	var zero attest.KitSpec
 	if len(o.HookBinary) == 0 || len(o.RelayBinary) == 0 {
-		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: the hook and relay binaries are required")
+		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: the hook and relay binaries are required")
 	}
 	if o.UID == 0 {
 		o.UID = 1000
@@ -77,12 +77,12 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	}
 	h, ok := harness.Get(o.Connector)
 	if !ok {
-		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: unknown connector %q", o.Connector)
+		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: unknown connector %q", o.Connector)
 	}
 	ictx, err := image.NewContext(image.BuildSpec{Harness: h, UID: o.UID, GID: o.GID, IngressPort: 18970,
 		DefenseClawVersion: o.KitVersion, Owner: "0000000000000000"})
 	if err != nil {
-		return zero, attest.TemplateInfo{}, "", err
+		return zero, attest.TemplateInfo{}, err
 	}
 	cfg := kit.DefaultConfig()
 	if o.GatewayURL != "" {
@@ -106,10 +106,10 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 		for kid, pem := range o.SessionKeys {
 			id, err := kit.SessionKeyID(pem)
 			if err != nil {
-				return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %s: %w", kid, err)
+				return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: %s: %w", kid, err)
 			}
 			if kid != id {
-				return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: session key id %q is not the key's id %q (the gateway signs with that kid)", kid, id)
+				return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: session key id %q is not the key's id %q (the gateway signs with that kid)", kid, id)
 			}
 			p := path.Join(KeyDir, kid+".pem")
 			cfg.Relay.SessionKeys[kid] = p
@@ -119,10 +119,10 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	// The rules the hook and the relay apply when they load the file: a
 	// configuration they would refuse is never baked into an image.
 	if err := cfg.Validate(); err != nil {
-		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %w", err)
+		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: %w", err)
 	}
 	if err := cfg.Relay.CheckSessions(); err != nil {
-		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: %w", err)
+		return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: %w", err)
 	}
 	// The kit may install a newer agent than the harness pins (GAP-0114).
 	agentVersion := kit.AgentVersion(o.Connector, ictx.HarnessVersion)
@@ -132,16 +132,16 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 			arch = "amd64"
 		}
 		if err := kit.CheckAgent(o.Connector, arch, o.AgentBinary); err != nil {
-			return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: the pinned agent binary (kit.FetchAgent): %w", err)
+			return zero, attest.TemplateInfo{}, fmt.Errorf("kit spec: the pinned agent binary (kit.FetchAgent): %w", err)
 		}
 	}
 	art, err := kit.SubstrateArtifacts(h.Provider, agentVersion, cfg)
 	if err != nil {
-		return zero, attest.TemplateInfo{}, "", err
+		return zero, attest.TemplateInfo{}, err
 	}
 	ov, err := kit.ActorOverlay(art, kit.OverlayOptions{Config: cfg, Home: Home, Workdir: Workdir, Provider: o.Provider, Model: o.Model, HarnessVersion: agentVersion})
 	if err != nil {
-		return zero, attest.TemplateInfo{}, "", err
+		return zero, attest.TemplateInfo{}, err
 	}
 	for p, b := range keyFiles {
 		ov.Files = append(ov.Files, kit.ImageFile{Path: p, Mode: 0o644, Data: b})
@@ -206,5 +206,5 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 		}
 	}
 	tpl := attest.TemplateInfo{Connector: o.Connector, AgentVersion: agentVersion, Name: o.Connector, Providers: o.Providers}
-	return spec, tpl, agentVersion, nil
+	return spec, tpl, nil
 }

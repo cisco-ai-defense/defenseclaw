@@ -109,6 +109,8 @@ func (t *TemplateAttestor) Attest(ctx context.Context, tmpl *ateapi.ActorTemplat
 			if st := v.Statement; st != nil {
 				out.Connector = st.Predicate.Template.Connector
 				out.KitVersion = st.Predicate.Kit.Version
+				out.AgentVersion = st.Predicate.Template.AgentVersion
+				out.HookContract = st.Predicate.Kit.HookContract
 			}
 		}
 	}

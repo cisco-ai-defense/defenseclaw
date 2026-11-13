@@ -72,23 +72,25 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 	})
 }
 
-// substrateTemplateConnector reads the connector a template was built for
-// from its attestation (the signed io.defenseclaw.connector label); an
-// unattested template names none, and the controller refuses it at resume.
-func substrateTemplateConnector(a controller.Attestor) func(context.Context, *ateapi.ActorTemplate) (string, error) {
-	return func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error) {
+// substrateTemplateKit reads what a template was built with from its
+// attestation (the signed statement): the connector, the agent version and
+// the hook contract. An unattested template names none, and the controller
+// refuses it at resume.
+func substrateTemplateKit(a controller.Attestor) func(context.Context, *ateapi.ActorTemplate) (gateway.SubstrateTemplateKit, error) {
+	return func(ctx context.Context, tmpl *ateapi.ActorTemplate) (gateway.SubstrateTemplateKit, error) {
 		if a == nil {
-			return "", nil
+			return gateway.SubstrateTemplateKit{}, nil
 		}
 		att, err := a.Attest(ctx, tmpl)
 		if err != nil {
 			// Not "no label": the create route decides by mode (GAP-0181).
-			return "", fmt.Errorf("%w: %v", gateway.ErrSubstrateTemplateAttestation, err)
+			return gateway.SubstrateTemplateKit{}, fmt.Errorf("%w: %v", gateway.ErrSubstrateTemplateAttestation, err)
 		}
 		if !att.Attested {
-			return "", nil
+			return gateway.SubstrateTemplateKit{}, nil
 		}
-		return att.Connector, nil
+		return gateway.SubstrateTemplateKit{Connector: att.Connector, AgentVersion: att.AgentVersion,
+			HookContract: att.HookContract, KitVersion: att.KitVersion, Digest: att.Digest}, nil
 	}
 }
 

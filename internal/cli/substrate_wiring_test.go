@@ -142,14 +142,14 @@ func (a failingAttestor) Attest(context.Context, *ateapi.ActorTemplate) (control
 // read as "no label", which let the launcher's connector decide).
 func TestTemplateConnectorReportsAnAttestationError(t *testing.T) {
 	tmpl := &ateapi.ActorTemplate{Metadata: &ateapi.ResourceMetadata{Atespace: "eng-web", Name: "cc"}}
-	_, err := substrateTemplateConnector(failingAttestor{err: errors.New("rekor unreachable")})(context.Background(), tmpl)
+	_, err := substrateTemplateKit(failingAttestor{err: errors.New("rekor unreachable")})(context.Background(), tmpl)
 	if !errors.Is(err, gateway.ErrSubstrateTemplateAttestation) {
 		t.Fatalf("attestor error: %v", err)
 	}
-	if got, err := substrateTemplateConnector(failingAttestor{})(context.Background(), tmpl); err != nil || got != "claudecode" {
+	if got, err := substrateTemplateKit(failingAttestor{})(context.Background(), tmpl); err != nil || got.Connector != "claudecode" {
 		t.Fatalf("attested: %q %v", got, err)
 	}
-	if got, err := substrateTemplateConnector(nil)(context.Background(), tmpl); err != nil || got != "" {
+	if got, err := substrateTemplateKit(nil)(context.Background(), tmpl); err != nil || got != (gateway.SubstrateTemplateKit{}) {
 		t.Fatalf("no attestor: %q %v", got, err)
 	}
 }

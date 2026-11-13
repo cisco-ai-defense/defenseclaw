@@ -62,7 +62,7 @@ func TestBuiltRelayAcceptsTheInstallsSessionTokens(t *testing.T) {
 			if rs.Issuer != signer.Issuer() || !slices.Equal(rs.KeyIDs, []string{signer.KeyID()}) || rs.Audience != identity.SessionAudience {
 				t.Fatalf("relay sessions %+v, gateway issuer %q kid %q", rs, signer.Issuer(), signer.KeyID())
 			}
-			spec, _, _, err := kitspec.Spec(kitspec.Options{Connector: "claudecode", KitVersion: "t", HookBinary: []byte("h"),
+			spec, _, err := kitspec.Spec(kitspec.Options{Connector: "claudecode", KitVersion: "t", HookBinary: []byte("h"),
 				RelayBinary: []byte("r"), MetadataOnly: true, SessionKeys: keys, SessionIssuer: rs.Issuer, Audience: rs.Audience})
 			if err != nil {
 				t.Fatal(err)
@@ -189,17 +189,17 @@ func TestKitSpecRefusesARelayThatWouldNotStart(t *testing.T) {
 	base := kitspec.Options{Connector: "claudecode", KitVersion: "t", HookBinary: []byte("h"), RelayBinary: []byte("r"), MetadataOnly: true}
 	o := base
 	o.SessionKeys = map[string][]byte{signer.KeyID(): b}
-	if _, _, _, err := kitspec.Spec(o); err == nil || !strings.Contains(err.Error(), "session_issuer") {
+	if _, _, err := kitspec.Spec(o); err == nil || !strings.Contains(err.Error(), "session_issuer") {
 		t.Fatalf("keys without an issuer: %v", err)
 	}
 	o.SessionKeys = map[string][]byte{"k1": b}
 	o.SessionIssuer = signer.Issuer()
-	if _, _, _, err := kitspec.Spec(o); err == nil || !strings.Contains(err.Error(), "not the key's id") {
+	if _, _, err := kitspec.Spec(o); err == nil || !strings.Contains(err.Error(), "not the key's id") {
 		t.Fatalf("a kid that is not the key's: %v", err)
 	}
 	o = base
 	o.VerifyURL = "ftp://x"
-	if _, _, _, err := kitspec.Spec(o); err == nil {
+	if _, _, err := kitspec.Spec(o); err == nil {
 		t.Fatal("a verify URL that is not http(s) was accepted")
 	}
 }
