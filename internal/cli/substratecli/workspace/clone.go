@@ -146,6 +146,8 @@ func (e *CloneError) Error() string {
 		msg += ". The agent has no SSH key; use the https:// address, for which the cluster adds the credential"
 	case strings.Contains(low, "could not resolve host") || strings.Contains(low, "connection refused") || strings.Contains(low, "403 forbidden"):
 		msg += ". The agent's network rules may not allow this host; ask your administrator"
+	case strings.Contains(low, "returned error: 503") || strings.Contains(low, "returned error: 502"):
+		msg += ". The cluster's network guard refused the request or could not check it; ask your administrator to look at the DefenseClaw egress log for this agent"
 	}
 	return msg
 }

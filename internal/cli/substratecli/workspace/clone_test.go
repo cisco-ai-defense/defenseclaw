@@ -92,4 +92,9 @@ func TestCloneRefusesWhatIsNotARepositoryAddress(t *testing.T) {
 	if cloneFolder("git@github.com:me/My-App.git") != "My-App" || cloneFolder("https://h/x/") != "x" {
 		t.Error("folder names")
 	}
+	// Seen on stk: the egress guard answers 503; the person learns who refused.
+	e := &CloneError{URL: "https://github.com/a/b.git", Message: "unable to access 'https://github.com/a/b.git/': The requested URL returned error: 503"}
+	if !strings.Contains(e.Error(), "network guard refused the request") {
+		t.Errorf("503 hint missing: %q", e.Error())
+	}
 }
