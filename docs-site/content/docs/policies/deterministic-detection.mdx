@@ -21,7 +21,7 @@ This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
-The balanced/default enabled rule catalog contains 244 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
+The balanced/default enabled rule catalog contains 249 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
 
 ## Decision architecture
 
@@ -56,9 +56,9 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 248 | 244 | 137 | 127 | 69 |
-| Permissive | 248 | 240 | 137 | 127 | 71 |
-| Strict | 260 | 260 | 150 | 145 | 71 |
+| Balanced/default | 253 | 249 | 137 | 132 | 74 |
+| Permissive | 253 | 245 | 137 | 132 | 76 |
+| Strict | 265 | 265 | 150 | 150 | 76 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
@@ -70,12 +70,12 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 244 enabled balanced/default rules are generated from
+The 249 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 131 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `command` | 136 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
 | `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
@@ -112,6 +112,18 @@ commands, so there is no finding for them.
 To turn these alerts off, use the `permissive` pack (`defenseclaw guardrail use-pack permissive`)
 or add a suppression. The shipped default is `guardrail.rule_pack: default`;
 connector-specific choices take precedence.
+
+### Staged files, literal credentials and inline code
+
+Five alert-only rules report effects a coding agent has little reason to produce. The rules carry no CEL expression (the semantic rule count is capped to keep headroom for partner rules) and an inert regex; the result comes from a code-owned proof over the parsed commands, so a harmless mention never matches. None of them can block, in any profile: the evidence shows a staging step, not that the file runs or that the call succeeded.
+
+| Rule | Effect it reports |
+| --- | --- |
+| `exec.escaped_binary_write` | `echo` or `printf` writes a run of eight or more hex or octal byte escapes to a file (redirect or `tee`). Droppers append a binary chunk by chunk, so the run test is per call. |
+| `account.literal_password_change_via_stdin` | `passwd` fed by `echo` or `printf`, or `passwd` or `chpasswd` piped on into a shell. A `chpasswd` run on its own is account automation and does not match. |
+| `exec.download_then_run_fetched_file` | `wget`, `curl`, `tftp` or `ftpget` takes a file from a bare public IPv4 address and a later command of the same action runs that file name, after a copy, or after the fetched archive was unpacked. Hostnames are not covered. |
+| `source_control.clone_then_run_or_adhoc_push` | `git clone` followed by running a file of the clone (or a build entry point after a `cd` into it), and `git push` to a URL or `user@host:path` remote. |
+| `exec.inline_code_network_and_exec` | An interpreter one-liner (`python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, `bun -e`, `deno eval`) that asks for a network capability and a process spawn or exec capability, and `bun run`, `deno run`, `npx`, `pnpm dlx` told to run a URL. Capabilities are read from a table of documented library and builtin names in `internal/actionfacts/inline_capabilities.go`, not from what the code is for. |
 
 ## ActionFacts
 

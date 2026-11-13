@@ -2426,6 +2426,70 @@
                     "binary-hijacking",
                     "bounded-grammar"
                   ]
+                },
+                {
+                  "id": "exec.escaped_binary_write",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Binary bytes written to a file through shell escapes",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "execution",
+                    "staging",
+                    "obfuscation"
+                  ]
+                },
+                {
+                  "id": "account.literal_password_change_via_stdin",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Account password set from literal stdin",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "persistence",
+                    "account",
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "exec.download_then_run_fetched_file",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "File fetched from a bare IP address and then run",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "execution",
+                    "download-exec"
+                  ]
+                },
+                {
+                  "id": "source_control.clone_then_run_or_adhoc_push",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+                  "severity": "MEDIUM",
+                  "confidence": 0.8,
+                  "tags": [
+                    "execution",
+                    "source-control",
+                    "exfiltration"
+                  ]
+                },
+                {
+                  "id": "exec.inline_code_network_and_exec",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "execution",
+                    "network",
+                    "opaque-code"
+                  ]
                 }
               ]
             },
@@ -6403,6 +6467,70 @@
                     "mount",
                     "bounded-grammar"
                   ]
+                },
+                {
+                  "id": "exec.escaped_binary_write",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Binary bytes written to a file through shell escapes",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "execution",
+                    "staging",
+                    "obfuscation"
+                  ]
+                },
+                {
+                  "id": "account.literal_password_change_via_stdin",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Account password set from literal stdin",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "persistence",
+                    "account",
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "exec.download_then_run_fetched_file",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "File fetched from a bare IP address and then run",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "execution",
+                    "download-exec"
+                  ]
+                },
+                {
+                  "id": "source_control.clone_then_run_or_adhoc_push",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+                  "severity": "MEDIUM",
+                  "confidence": 0.8,
+                  "tags": [
+                    "execution",
+                    "source-control",
+                    "exfiltration"
+                  ]
+                },
+                {
+                  "id": "exec.inline_code_network_and_exec",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "execution",
+                    "network",
+                    "opaque-code"
+                  ]
                 }
               ]
             },
@@ -10119,6 +10247,70 @@
                     "python",
                     "binary-hijacking",
                     "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "exec.escaped_binary_write",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Binary bytes written to a file through shell escapes",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "execution",
+                    "staging",
+                    "obfuscation"
+                  ]
+                },
+                {
+                  "id": "account.literal_password_change_via_stdin",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Account password set from literal stdin",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "persistence",
+                    "account",
+                    "credential"
+                  ]
+                },
+                {
+                  "id": "exec.download_then_run_fetched_file",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "File fetched from a bare IP address and then run",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "execution",
+                    "download-exec"
+                  ]
+                },
+                {
+                  "id": "source_control.clone_then_run_or_adhoc_push",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+                  "severity": "MEDIUM",
+                  "confidence": 0.8,
+                  "tags": [
+                    "execution",
+                    "source-control",
+                    "exfiltration"
+                  ]
+                },
+                {
+                  "id": "exec.inline_code_network_and_exec",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+                  "severity": "HIGH",
+                  "confidence": 0.85,
+                  "tags": [
+                    "execution",
+                    "network",
+                    "opaque-code"
                   ]
                 }
               ]

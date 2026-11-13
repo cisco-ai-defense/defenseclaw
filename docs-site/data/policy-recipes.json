@@ -5021,6 +5021,139 @@
       ]
     },
     {
+      "id": "RECIPE-exec.escaped_binary_write",
+      "title": "Binary bytes written to a file through shell escapes",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.escaped_binary_write",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Binary bytes written to a file through shell escapes",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "execution",
+          "staging",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "staging",
+        "obfuscation"
+      ]
+    },
+    {
+      "id": "RECIPE-account.literal_password_change_via_stdin",
+      "title": "Account password set from literal stdin",
+      "kind": "rule:command",
+      "body": {
+        "id": "account.literal_password_change_via_stdin",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Account password set from literal stdin",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "persistence",
+          "account",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence",
+        "account",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-exec.download_then_run_fetched_file",
+      "title": "File fetched from a bare IP address and then run",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.download_then_run_fetched_file",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "File fetched from a bare IP address and then run",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ]
+    },
+    {
+      "id": "RECIPE-source_control.clone_then_run_or_adhoc_push",
+      "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+      "kind": "rule:command",
+      "body": {
+        "id": "source_control.clone_then_run_or_adhoc_push",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Git clone whose files are then run, or push to an ad-hoc remote",
+        "severity": "MEDIUM",
+        "confidence": 0.8,
+        "tags": [
+          "execution",
+          "source-control",
+          "exfiltration"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "source-control",
+        "exfiltration"
+      ]
+    },
+    {
+      "id": "RECIPE-exec.inline_code_network_and_exec",
+      "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.inline_code_network_and_exec",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "execution",
+          "network",
+          "opaque-code"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "network",
+        "opaque-code"
+      ]
+    },
+    {
       "id": "RECIPE-ENT-BULK-SSN",
       "title": "US Social Security Number",
       "kind": "rule:enterprise-data",
