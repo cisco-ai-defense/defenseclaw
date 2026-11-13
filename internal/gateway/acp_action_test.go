@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -374,6 +375,11 @@ func TestACPActionVerdictSemantics(t *testing.T) {
 			env := newACPActionEnv(t, "default")
 			env.setMode(mode)
 			creds := filepath.Join(filepath.Dir(env.project), ".aws", "credentials")
+			if runtime.GOOS == "windows" {
+				// The temp directory is not the account home on Windows, so the
+				// credential-path rule reads a user profile path.
+				creds = `C:\Users\alice\.aws\credentials`
+			}
 			write := env.evaluate(t, acp.AgentToClient, acpFrameJSON(t, 1, "fs/write_text_file",
 				map[string]any{"sessionId": "s", "path": creds, "content": "x"}))
 			read := env.evaluate(t, acp.AgentToClient, acpFrameJSON(t, 2, "fs/read_text_file",

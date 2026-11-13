@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -100,8 +101,12 @@ func acpParityPairs(t *testing.T, cases []acpParityCase) (pairs []acpParityPair,
 				skipped++
 				continue
 			}
+			// terminal/create is judged for the editor's platform: PowerShell on
+			// a Windows gateway. The hook call that performs the same action
+			// there is Kiro's PowerShell tool, whatever shell the corpus case
+			// was written for.
 			hookTool := "execute_bash"
-			if strings.EqualFold(c.Tool, "powershell") {
+			if strings.EqualFold(c.Tool, "powershell") || runtime.GOOS == "windows" {
 				hookTool = "execute_pwsh"
 			}
 			pairs = append(pairs, acpParityPair{

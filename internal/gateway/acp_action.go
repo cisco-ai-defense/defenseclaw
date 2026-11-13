@@ -421,11 +421,14 @@ func (a *APIServer) inspectACPFrameAction(
 				ConnectorName: connectorName,
 				HookEventName: req.Method,
 				SessionID:     session,
-				CWD:           call.cwd,
-				ReportedCWD:   call.cwd,
-				ToolName:      call.tool,
-				ToolArgs:      call.args,
-				Direction:     "tool_call",
+				// The working directory is read as a hook event's is: kept as
+				// reported, and placed by the same rule (Windows cleaning, the
+				// account's own folders) for the rules that need a place.
+				CWD:         hookCWDForContext(ctx, call.cwd),
+				ReportedCWD: strings.TrimSpace(call.cwd),
+				ToolName:    call.tool,
+				ToolArgs:    call.args,
+				Direction:   "tool_call",
 			}, profile, action.enforceable)
 		}
 		verdict = strongerACPVerdict(verdict, judged)
