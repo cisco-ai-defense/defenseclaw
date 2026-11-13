@@ -68,6 +68,15 @@ const (
 	// attestationGrace bounds how long a registry outage keeps the last good
 	// attestation of an unchanged template (GAP-0127).
 	attestationGrace = 15 * time.Minute
+	// registrationOutageGrace bounds how long a leader outage keeps using an
+	// actor's last good registration, so foreign policy edits are still
+	// reverted while the leader is down (GAP-0145).
+	registrationOutageGrace = 15 * time.Minute
+	// launcherRegistrationGrace is how long after its create an actor in a
+	// launcher atespace may be unregistered without being called foreign:
+	// the gateway writes the registration one leader call after CreateActor
+	// (GAP-0145). The actor is held (no alert, no policy change) meanwhile.
+	launcherRegistrationGrace = 15 * time.Second
 	// MigrateHint is the fix the kit refusal names.
 	MigrateHint = "rebuild the template with the current kit: defenseclaw substrate migrate"
 )
@@ -180,7 +189,15 @@ type actorState struct {
 	regOK      bool
 	regAt      time.Time
 	regState   ateapi.ActorState
-	written    bool
+	// regStaleWarned is set while a leader outage keeps the last good
+	// registration in use (one warning per outage).
+	regStaleWarned bool
+	// forkQueued and inventoried make the once-per-incarnation fork event
+	// and inventory event survive a failed first pass.
+	forkQueued, inventoried bool
+	// runGen is the snapshot generation last seen while RUNNING.
+	runGen  int32
+	written bool
 	// unmanagedChecked is set once an unmanaged actor's policy was checked
 	// for a DefenseClaw policy left from when it was managed.
 	unmanagedChecked bool
@@ -440,6 +457,31 @@ func (c *Controller) parallel(actors []*ateapi.Actor, fn func(*ateapi.Actor)) {
 // ErrRefused means EnsurePolicy left the actor without network.
 var ErrRefused = errors.New("controller: actor refused")
 
+// refusePending is attribution's answer for a just-created launcher actor
+// whose registration is not readable yet: hold, change nothing (GAP-0145).
+const refusePending = "pending_registration"
+
+// Tombstoner is a Registry that can mark an actor's registration deleted
+// (LeaderRegistry); a registry without one keeps nothing to mark.
+type Tombstoner interface {
+	MarkDeleted(ctx context.Context, atespace, uid string) error
+}
+
+// FreshRegistry is a Registry that can read past its own miss cache
+// (LeaderRegistry over registry.Remote).
+type FreshRegistry interface {
+	GetFresh(ctx context.Context, atespace, uid string) (Registration, bool, error)
+}
+
+// createdAt is the actor's create time from the API server, or when this
+// controller first saw it.
+func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
+	if t := md.GetCreateTime(); t != nil && t.IsValid() {
+		return t.AsTime()
+	}
+	return st.firstSeen
+}
+
 // EnsurePolicy reconciles one actor now, for a caller (the launcher's
 // create path) that resumes the actor only after its policy is written. It
 // returns ErrRefused (wrapped with the reason) when the actor gets no
@@ -498,8 +540,19 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	st.lastState = state
 	base := Event{Atespace: md.GetAtespace(), Actor: md.GetName(), ActorUID: md.GetUid()}
 	self := chainstate.Actor{Atespace: md.GetAtespace(), UID: md.GetUid()}
-	if ev := lifecycleOf(prev, state); ev != "" && !first {
-		st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
+	gen := a.GetStatus().GetLastAssignedGeneration()
+	if ev := lifecycleOf(prev, state); !first {
+		if revertedUnseen(prev, state, gen, st.runGen) {
+			// REVERTING fell between two passes: a revert must still put
+			// the mutation barrier in the actor's chains (GAP-0141).
+			ev = chainstate.LifecycleReverted
+		}
+		if ev != "" {
+			st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: ev, AtUnixNano: now.UnixNano()})
+		}
+	}
+	if state == ateapi.ActorStateRunning {
+		st.runGen = gen
 	}
 	c.flushLifecycle(ctx, st, base)
 
@@ -508,14 +561,24 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	if err != nil {
 		return err
 	}
-	if first && reg.Source == SourceFork && reg.ParentUID != "" {
+	if !st.forkQueued && reg.Source == SourceFork && reg.ParentUID != "" {
+		// Once per incarnation, on the first pass whose attribution
+		// succeeds (a leader outage on the first pass must not lose it).
+		st.forkQueued = true
 		// The leader copies the parent's chain windows to the fork once
 		// (never its asks), keyed on the registration's ParentUID.
 		st.pendingLife = append(st.pendingLife, chainstate.LifecycleEvent{Actor: self, Event: chainstate.LifecycleForked,
 			Parent: &chainstate.Actor{Atespace: md.GetAtespace(), UID: reg.ParentUID}, AtUnixNano: now.UnixNano()})
 		c.flushLifecycle(ctx, st, base)
 	}
-	if first {
+	if refuse == refusePending {
+		// Unregistered and just created in a launcher atespace: no
+		// inventory, alert or policy change until the registration is
+		// read or the grace ends (GAP-0145).
+		return nil
+	}
+	if !st.inventoried {
+		st.inventoried = true
 		ev := base
 		ev.Type, ev.Severity, ev.Message = EventInventory, SeverityInfo, "actor seen"
 		ev.Detail = map[string]any{"template": ateapi.Key(a.GetActorTemplate()), "state": state.String(), "source": reg.Source,
@@ -576,11 +639,33 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 	}
 	md := a.GetMetadata()
 	reg, ok, err := c.o.Registry.Get(ctx, md.GetAtespace(), md.GetUid())
+	if err == nil && !ok && launcher {
+		// A miss is cached briefly; before an actor is called foreign, read
+		// the leader again past that cache (GAP-0145).
+		if fr, has := c.o.Registry.(FreshRegistry); has {
+			reg, ok, err = fr.GetFresh(ctx, md.GetAtespace(), md.GetUid())
+		}
+	}
 	if err != nil {
-		// The leader is unreachable: hold. Never call an unknown actor in a
-		// launcher atespace foreign on a failed read, and change no policy.
+		// The leader is unreachable. With a recent good registration of this
+		// incarnation, go on with it, so the actor keeps DefenseClaw's
+		// policy and foreign edits are still reverted (GAP-0145). Without
+		// one, hold: never call an unknown actor in a launcher atespace
+		// foreign on a failed read, and change no policy.
+		if st.reg.UID == md.GetUid() && !st.regAt.IsZero() && now.Sub(st.regAt) < registrationOutageGrace {
+			if !st.regStaleWarned {
+				st.regStaleWarned = true
+				ev := base
+				ev.Type, ev.Severity = EventWarning, SeverityWarn
+				ev.Message = "registry unreachable, using the actor's last registration: " + err.Error()
+				c.emit(ev)
+			}
+			st.reg.Template = ateapi.Key(a.GetActorTemplate())
+			return st.reg, "", nil
+		}
 		return Registration{}, "", fmt.Errorf("%s: registry (holding, no policy change): %w", st.key, err)
 	}
+	st.regStaleWarned = false
 	// A registration that is gone (the launcher revoked it, or an in-memory
 	// registry restarted) is made again below like a new one: in a launcher
 	// atespace that makes the actor foreign (no policy).
@@ -620,6 +705,17 @@ func (c *Controller) attribution(ctx context.Context, a *ateapi.Actor, st *actor
 			}
 		}
 		if launcher && reg.Source == SourceAtespace {
+			if created := createdAt(md, st); now.Sub(created) < launcherRegistrationGrace {
+				// Just created: the launcher's registration may not be
+				// written yet. Hold (no alert, no policy change) and look
+				// again on the next fast pass (GAP-0145).
+				c.mu.Lock()
+				if until := created.Add(launcherRegistrationGrace); until.After(c.fastUntil) {
+					c.fastUntil = until
+				}
+				c.mu.Unlock()
+				return reg, refusePending, nil
+			}
 			// Every actor in a launcher atespace is bound to a person at
 			// create; one nobody registered was made outside DefenseClaw.
 			c.refuseOnce(st, base, EventForeignActor, "actor in a launcher atespace that DefenseClaw did not create", SignalForeignActor, "")
@@ -1062,6 +1158,24 @@ func lifecycleOf(prev, cur ateapi.ActorState) string {
 	return ""
 }
 
+// revertedUnseen reports a revert the controller saw only as its outcome:
+// SUSPENDED straight from CRASHED (only a revert does that), or SUSPENDED
+// from RUNNING with no new snapshot generation since the actor ran (a
+// suspend assigns one, a revert goes back to the durable snapshot and
+// assigns none; ateapi ActorStatus.last_assigned_generation).
+func revertedUnseen(prev, cur ateapi.ActorState, gen, runGen int32) bool {
+	if cur != ateapi.ActorStateSuspended {
+		return false
+	}
+	switch prev {
+	case ateapi.ActorStateCrashed:
+		return true
+	case ateapi.ActorStateRunning:
+		return gen <= runGen
+	}
+	return false
+}
+
 // flushLifecycle sends st's pending lifecycle events in order; the first
 // failure keeps it and the rest for the next pass (one warning).
 func (c *Controller) flushLifecycle(ctx context.Context, st *actorState, base Event) {
@@ -1070,7 +1184,7 @@ func (c *Controller) flushLifecycle(ctx context.Context, st *actorState, base Ev
 		return
 	}
 	for len(st.pendingLife) > 0 {
-		if _, err := c.o.Lifecycle.Lifecycle(ctx, st.pendingLife[0]); err != nil {
+		if err := c.sendLifecycle(ctx, st.pendingLife[0]); err != nil {
 			if len(st.pendingLife) > maxPendingLifecycle {
 				st.pendingLife = st.pendingLife[len(st.pendingLife)-maxPendingLifecycle:]
 			}
@@ -1085,6 +1199,22 @@ func (c *Controller) flushLifecycle(ctx context.Context, st *actorState, base Ev
 		st.pendingLife = st.pendingLife[1:]
 		st.lifeWarned = false
 	}
+}
+
+// sendLifecycle delivers one event. A delete first marks the registration
+// deleted: the leader purges an actor's chain state only for a deleted
+// registration (substrate-1 GAP-0142), so the tombstone must land first and
+// a failed write keeps the event for the next pass.
+func (c *Controller) sendLifecycle(ctx context.Context, ev chainstate.LifecycleEvent) error {
+	if ev.Event == chainstate.LifecycleDeleted {
+		if t, ok := c.o.Registry.(Tombstoner); ok {
+			if err := t.MarkDeleted(ctx, ev.Actor.Atespace, ev.Actor.UID); err != nil {
+				return fmt.Errorf("mark the registration deleted: %w", err)
+			}
+		}
+	}
+	_, err := c.o.Lifecycle.Lifecycle(ctx, ev)
+	return err
 }
 
 func (c *Controller) retryLifecycle(ctx context.Context) {
