@@ -467,6 +467,9 @@ rules block.
   management team") is not named, so the finding is expected there; name it in
   the prompt to avoid it. Only text you typed counts: a prompt DefenseClaw
   blocks, a tool result and a remote chat message name nothing.
+  `guardrail.judge.intent_scope` sets what DefenseClaw does with the finding:
+  `alert` (raise it), `shadow` (record it in a judge event of kind
+  `tool_intent_scope_shadow` and leave the verdict alone) or `off`.
 
 ### Let tool calls go first
 

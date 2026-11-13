@@ -17,12 +17,17 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -494,4 +499,29 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 	}
 	out.ScannerSources = appendUniqueStrings(out.ScannerSources, judged.Scanner, floor.Scanner)
 	return &out
+}
+
+// intentScopeMode is guardrail.judge.intent_scope of this judge.
+func (j *LLMJudge) intentScopeMode() string {
+	if j == nil || j.cfg == nil {
+		return config.IntentScopeAlert
+	}
+	return j.cfg.IntentScopeMode()
+}
+
+// recordIntentScopeShadow records a call the scope floor would have raised, in
+// shadow mode: a judge event of kind tool_intent_scope_shadow (action allow, the
+// finding INTENT-SCOPE-SEND, the tool name) and one log line with the reason.
+// The verdict is not touched.
+func (j *LLMJudge) recordIntentScopeShadow(ctx context.Context, toolName, args, reason string) {
+	shadow := applyIntentScopeFloor(nil, reason)
+	findings := judgeFindingsPayload(shadow)
+	for i := range findings {
+		findings[i].Source = "intent-scope-shadow"
+		findings[i].Evidence = reason
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] intent-scope shadow: tool=%s reason=%q (record only, verdict unchanged)\n", sanitizeToolName(toolName), reason)
+	emitJudge(ctx, "tool_intent_scope_shadow", j.model, gatewaylog.DirectionToolCall,
+		len(args), 0, "allow", deriveSeverity(shadow.Severity), "", "",
+		JudgeEmitOpts{Findings: findings, ToolName: sanitizeToolName(toolName)})
 }

@@ -2732,6 +2732,10 @@ class JudgeConfig:
     # ``curl --max-time 10`` budget — the proxy lane's 30s would let the
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
+    # What the tool judge does with a call that sends data to a destination the
+    # user's task does not name (Go ``JudgeConfig.IntentScope``): ``"alert"``,
+    # ``"shadow"`` (record only) or ``"off"``; empty is the built-in default.
+    intent_scope: str = ""
     # Most judge calls sent to the judge model at once (Go
     # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
     # judging goes ahead of prompt judging (#1395).
@@ -5560,6 +5564,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
+        if not judge.get("intent_scope"):
+            judge.pop("intent_scope", None)
         judge.pop("_max_parallel_explicit_zero", None)
         if not judge.get("max_parallel") and not cfg.guardrail.judge._max_parallel_explicit_zero:
             judge.pop("max_parallel", None)
@@ -6027,6 +6033,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "decision_model.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
+        # Task-scope check of the tool judge: empty = built-in default, stripped on save.
+        "guardrail.judge.intent_scope",
         # Judge call bound: 0 = no limit, stripped on save.
         "guardrail.judge.max_parallel",
         # Identity-based guardrail profile selection: empty = no profiles.
@@ -6950,6 +6958,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         timeout=raw.get("timeout", 30.0),
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
+        intent_scope=raw.get("intent_scope", "") or "",
         max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         extra_body=raw.get("extra_body", {}),
         _max_parallel_explicit_zero=type(raw.get("max_parallel")) is int and raw["max_parallel"] == 0,

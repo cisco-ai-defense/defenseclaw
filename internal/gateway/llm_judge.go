@@ -2233,8 +2233,10 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	}
 	writeToolJudgeSection(&sample, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
 	sampleText := strings.TrimSuffix(sample.String(), "\n")
-	if reason := intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args); reason != "" {
-		j.keepScopeFloor(sampleText, reason)
+	if j.intentScopeMode() != config.IntentScopeOff {
+		if reason := intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args); reason != "" {
+			j.keepScopeFloor(sampleText, reason)
+		}
 	}
 	if j.decision != nil {
 		state := decisionModelState{

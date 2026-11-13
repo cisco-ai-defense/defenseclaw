@@ -1616,6 +1616,11 @@
           "minimum": 0,
           "maximum": 86400
         },
+        "intent_scope": {
+          "type": "string",
+          "enum": ["", "alert", "shadow", "off"],
+          "description": "What the tool judge does with a call that sends data to a destination the user's task does not name (INTENT-SCOPE-SEND): alert raises at least a medium finding, shadow records it in a judge event and leaves the verdict alone, off does not look. Empty is the built-in default. Releases before 1.0.10 refuse this key."
+        },
         "max_parallel": {
           "type": "integer",
           "minimum": 0,

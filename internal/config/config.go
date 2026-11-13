@@ -2453,6 +2453,27 @@ func (g *GuardrailConfig) EffectiveStrategy(direction string) string {
 	return "regex_judge"
 }
 
+// Values of guardrail.judge.intent_scope.
+const (
+	IntentScopeAlert  = "alert"
+	IntentScopeShadow = "shadow"
+	IntentScopeOff    = "off"
+)
+
+// IntentScopeMode is the normalized guardrail.judge.intent_scope. The built-in
+// default is the last line of this function: it is the one line that decides
+// whether INTENT-SCOPE-SEND ships raising alerts or recording only (shadow).
+// An unknown value enforces: a typo never turns the check off.
+func (j JudgeConfig) IntentScopeMode() string {
+	switch strings.ToLower(strings.TrimSpace(j.IntentScope)) {
+	case IntentScopeShadow:
+		return IntentScopeShadow
+	case IntentScopeOff:
+		return IntentScopeOff
+	}
+	return IntentScopeAlert
+}
+
 // JudgeConfig controls the LLM-as-a-Judge guardrail scanners that use
 // an LLM to detect prompt injection and PII exfiltration.
 type JudgeConfig struct {
@@ -2491,6 +2512,13 @@ type JudgeConfig struct {
 	// scripts abandon the gateway call at curl --max-time 10; the
 	// gateway applies a 5s default when unset.
 	HookTimeout float64 `mapstructure:"hook_timeout" yaml:"hook_timeout,omitempty"`
+
+	// IntentScope is what the tool judge does with a call that sends data to a
+	// destination the user's task does not name (INTENT-SCOPE-SEND): "alert"
+	// raises at least a MEDIUM finding, "shadow" records the finding in a judge
+	// event and leaves the verdict alone, "off" does not look. Empty is the
+	// built-in default (IntentScopeMode).
+	IntentScope string `mapstructure:"intent_scope" yaml:"intent_scope,omitempty"`
 
 	// MaxParallel bounds how many judge calls the gateway sends to the
 	// judge model at once; an explicit 0 sets no bound. When omitted,

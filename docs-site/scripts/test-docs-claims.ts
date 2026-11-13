@@ -38,6 +38,7 @@ describe('Tool judge task scope', () => {
     assert.match(section, /\*\*Not kept[^*]*\*\*[^*]*OpenCode[^*]*OpenClaw/);
     assert.match(section, /`INTENT-SCOPE-SEND`/);
     assert.match(section, /`alert_at`/);
+    assert.match(section, /`guardrail\.judge\.intent_scope` sets what DefenseClaw does with the finding: `alert` \(raise it\), `shadow`[^`]*`tool_intent_scope_shadow`[^`]*or `off`/);
     assert.match(section, /Naming a mailbox covers that address only, and naming only a domain covers no mailbox at it/);
     assert.match(section, /default pack it raises an alert and never blocks on its own; the permissive pack records the finding without an alert; the strict pack, or `block_at: medium`, blocks it/);
     assert.match(section, /too large to read in full counts as outside the task and, as for any input past a limit, is at least an alert in the default and permissive packs and a block in the strict pack/);
