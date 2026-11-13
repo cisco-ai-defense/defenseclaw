@@ -10,29 +10,39 @@ import "testing"
 // powershell / pwsh host call. The walker unwraps the payload only from a Static
 // verdict, using psparse's text; a NotStatic verdict stays opaque, and the
 // walker's own /c scan never turns an off-table shape into a known payload.
-var rv9cases = []rv7case{
+var psr9cases = []rv7case{
 	// off-table cmd shapes: psparse is NotStatic (ps_cmd_argv) -> never fully known
-	{"rv9-K01 cmd: a word before /c", raPS, "", `cmd foo /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
-	{"rv9-K02 cmd: unknown option before /c", raPS, "", `cmd /t:0a /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
-	{"rv9-K03 cmd: padded /c", raPS, "", `cmd '/c ' del C:\Users\u\.ssh\authorized_keys`, rwAK},
-	{"rv9-K05 cmd: /r", raPS, "", `cmd /r del C:\Users\u\.ssh\authorized_keys`, rwAK},
-	{"rv9-K06 cmd: /k then /c", raPS, "", `cmd /k /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
-	{"rv9-K07 cmd: two words before /c", raPS, "", `cmd foo bar /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
-	{"rv9-K08 cmd: dynamic option", raPS, "", `cmd $o /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
+	{"psr9-K01 cmd: a word before /c", raPS, "", `cmd foo /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
+	{"psr9-K02 cmd: unknown option before /c", raPS, "", `cmd /t:0a /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K03 cmd: padded /c", raPS, "", `cmd '/c ' del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K05 cmd: /r", raPS, "", `cmd /r del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K06 cmd: /k then /c", raPS, "", `cmd /k /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K07 cmd: two words before /c", raPS, "", `cmd foo bar /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
+	{"psr9-K08 cmd: dynamic option", raPS, "", `cmd $o /c del C:\Users\u\.ssh\authorized_keys`, rdyn},
 	// the cmd-run shape psparse returns Static: unwrapped in place with its text
-	{"rv9-K04 cmd: /d /c table shape", raPS, "", `cmd /d /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
-	{"rv9-K09 cmd: /c table shape", raPS, "", `cmd /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K04 cmd: /d /c table shape", raPS, "", `cmd /d /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
+	{"psr9-K09 cmd: /c table shape", raPS, "", `cmd /c del C:\Users\u\.ssh\authorized_keys`, rwAK},
 	// pwsh hosts: -wd runs the text elsewhere, which a nested script cannot record
-	{"rv9-W03 pwsh -wd", raLinPS, "", `pwsh -wd ~/.ssh -c 'Remove-Item authorized_keys'`, rdyn},
-	{"rv9-W04 pwsh -WorkingDirectory", raLinPS, "", `pwsh -WorkingDirectory ~/.ssh -Command Remove-Item authorized_keys`, rdyn},
-	{"rv9-W05 powershell -wd win", raPS, "", `powershell -nop -wd C:\Windows\System32 -c 'Remove-Item drivers -Recurse'`, rdyn},
-	{"rv9-W07 pwsh -wd -enc", raLinPS, "", `pwsh -wd ~/.ssh -enc UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAYQB1AHQAaABvAHIAaQB6AGUAZABfAGsAZQB5AHMA`, rdyn},
+	{"psr9-W03 pwsh -wd", raLinPS, "", `pwsh -wd ~/.ssh -c 'Remove-Item authorized_keys'`, rdyn},
+	{"psr9-W04 pwsh -WorkingDirectory", raLinPS, "", `pwsh -WorkingDirectory ~/.ssh -Command Remove-Item authorized_keys`, rdyn},
+	{"psr9-W05 powershell -wd win", raPS, "", `powershell -nop -wd C:\Windows\System32 -c 'Remove-Item drivers -Recurse'`, rdyn},
+	{"psr9-W07 pwsh -wd -enc", raLinPS, "", `pwsh -wd ~/.ssh -enc UgBlAG0AbwB2AGUALQBJAHQAZQBtACAAYQB1AHQAaABvAHIAaQB6AGUAZABfAGsAZQB5AHMA`, rdyn},
+	// effects' own host parser (a pwsh launched from a POSIX shell or cmd, where
+	// psparse did not lower the command): an option it does not know is opaque
+	{"psr10-H01 posix: pwsh -wd", raLin, "", `pwsh -wd ~/.ssh -c 'Remove-Item authorized_keys'`, rdyn},
+	{"psr10-H02 posix: pwsh -WorkingDirectory", raLin, "", `pwsh -WorkingDirectory ~/.ssh -Command 'Remove-Item authorized_keys'`, rdyn},
+	{"psr10-H03 posix: pwsh -File", raLin, "", `pwsh -File x.ps1`, rdyn},
+	{"psr10-H04 posix: unknown option", raLin, "", `pwsh -bogus value -c 'Remove-Item ~/.ssh/authorized_keys'`, rdyn},
+	{"psr10-H05 posix: -Option:value", raLin, "", `pwsh -wd:/home/u/.ssh -c 'Remove-Item authorized_keys'`, rdyn},
+	{"psr10-H06 posix: known valued option", raLin, "", `pwsh -nop -ep Bypass -c 'Remove-Item ~/.ssh/authorized_keys'`, rlAK},
+	{"psr10-H07 posix: dynamic option", raLin, "", `pwsh $o -c 'Remove-Item ~/.ssh/authorized_keys'`, rdyn},
+	{"psr10-H08 cmd: pwsh -wd", raCmd, "", `pwsh -wd C:\Users\u\.ssh -c "Remove-Item authorized_keys"`, rdyn},
 	// ordinary table shapes keep their place in program order
-	{"rv9-G02 pwsh -nop -c in order", raLinPS, "", `Set-Location ~/.ssh; pwsh -nop -c 'Remove-Item authorized_keys'; Set-Location /tmp`, rlAK},
+	{"psr9-G02 pwsh -nop -c in order", raLinPS, "", `Set-Location ~/.ssh; pwsh -nop -c 'Remove-Item authorized_keys'; Set-Location /tmp`, rlAK},
 }
 
-func TestReview9Table(t *testing.T) {
-	for _, c := range rv9cases {
+func TestPSParseReview9Table(t *testing.T) {
+	for _, c := range psr9cases {
 		checkRow(t, c.id, c.o, Call{Surface: SurfaceShell, Command: c.cmd, Workdir: c.wd}, c.real)
 	}
 }

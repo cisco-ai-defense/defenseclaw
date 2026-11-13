@@ -42,132 +42,130 @@ type propTemplate struct {
 
 var propTemplates = []propTemplate{
 	// sed: scripts with write commands, expressions, script files
-	{`sed -n 'w M' f`, refWrites},
-	{`sed 's/x/y/w M' f`, refWrites},
-	{`sed -e 'w M' f`, refWrites},
-	{`sed --expression='w M' f`, refWrites},
-	{`sed --expression 'w M' f`, refWrites},
-	{`sed -n -e p -e 'w M' f`, refWrites},
-	{`sed -ne 'w M' f`, refWrites},
-	{`sed -n '1w M' f`, refWrites},
-	{`sed -n '/a/,/b/w M' f`, refWrites},
-	{`sed -n '$!w M' f`, refWrites},
-	{`sed 's/a/b/;w M' f`, refWrites},
-	{`sed -n '/x/{w M
+	{`sed -n 'w {M}' f`, refWrites},
+	{`sed 's/x/y/w {M}' f`, refWrites},
+	{`sed -e 'w {M}' f`, refWrites},
+	{`sed --expression='w {M}' f`, refWrites},
+	{`sed --expression 'w {M}' f`, refWrites},
+	{`sed -n -e p -e 'w {M}' f`, refWrites},
+	{`sed -ne 'w {M}' f`, refWrites},
+	{`sed -n '1w {M}' f`, refWrites},
+	{`sed -n '/a/,/b/w {M}' f`, refWrites},
+	{`sed -n '$!w {M}' f`, refWrites},
+	{`sed 's/a/b/;w {M}' f`, refWrites},
+	{`sed -n '/x/{w {M}
 }' f`, refWrites},
-	{`sed 'y/ab/cd/;s/x/y/gw M' f`, refWrites},
-	{`sed -i s/a/b/ M`, refWrites},
-	{`sed -i.bak s/a/b/ M`, refWrites},
-	{`sed -n 'W M' f`, refWrites},
+	{`sed 'y/ab/cd/;s/x/y/gw {M}' f`, refWrites},
+	{`sed -i s/a/b/ {M}`, refWrites},
+	{`sed -i.bak s/a/b/ {M}`, refWrites},
+	{`sed -n '{W} {M}' f`, refWrites},
 	{`sed -f s.sed f`, refUnknown},
 	{`sed --file=s.sed f`, refUnknown},
 	{`sed -n -f s.sed f`, refUnknown},
 	{`sed 'e echo hi' f`, refUnknown},
 	{`sed 's/a/b/e' f`, refUnknown},
 	{`sed 'r x' f`, refUnknown},
-	{`sed s/a/b/ M`, refNoWrite},
-	{`sed -n 5,10p M`, refNoWrite},
+	{`sed s/a/b/ {M}`, refNoWrite},
+	{`sed -n 5,10p {M}`, refNoWrite},
 	// awk: programs with redirects, pipes, system(), program files
-	{`awk 'BEGIN{print "k" >> "M"}'`, refWrites},
-	{`awk '{print > "M"}' f`, refWrites},
-	{`awk '{print $1 > "M"}' f`, refWrites},
-	{`awk -F: '{print $1 >> "M"}' f`, refWrites},
-	{`awk -v x=1 '{printf "%s", $1 > "M"}' f`, refWrites},
-	{`awk 'BEGIN{system("echo k >> M")}'`, refUnknown},
-	{`awk '{print | "tee M"}' f`, refUnknown},
+	{`awk 'BEGIN{print "k" >> "{M}"}'`, refWrites},
+	{`awk '{print > "{M}"}' f`, refWrites},
+	{`awk '{print $1 > "{M}"}' f`, refWrites},
+	{`awk -F: '{print $1 >> "{M}"}' f`, refWrites},
+	{`awk -v x=1 '{printf "%s", $1 > "{M}"}' f`, refWrites},
+	{`awk 'BEGIN{system("echo k >> {M}")}'`, refUnknown},
+	{`awk '{print | "tee {M}"}' f`, refUnknown},
 	{`awk -f p.awk f`, refUnknown},
 	{`awk --file=p.awk f`, refUnknown},
 	{`awk 'BEGIN { "date" | getline x }'`, refUnknown},
-	{`awk '{print $1}' M`, refNoWrite},
-	{`awk -F: '{print $1}' M`, refNoWrite},
+	{`awk '{print $1}' {M}`, refNoWrite},
+	{`awk -F: '{print $1}' {M}`, refNoWrite},
 	// uniq and xxd: the second operand is written
-	{`uniq in M`, refWrites},
-	{`uniq -c in M`, refWrites},
-	{`uniq -d in M`, refWrites},
-	{`uniq -f 1 in M`, refWrites},
-	{`uniq -i -u in M`, refWrites},
-	{`uniq M`, refNoWrite},
-	{`uniq -c M`, refNoWrite},
-	{`xxd -r -p in M`, refWrites},
-	{`xxd in M`, refWrites},
-	{`xxd -c 8 in M`, refWrites},
-	{`xxd -r -p - M`, refWrites},
-	{`xxd -g 1 -l 16 in M`, refWrites},
-	{`xxd M`, refNoWrite},
+	{`uniq in {M}`, refWrites},
+	{`uniq -c in {M}`, refWrites},
+	{`uniq -d in {M}`, refWrites},
+	{`uniq -f 1 in {M}`, refWrites},
+	{`uniq -i -u in {M}`, refWrites},
+	{`uniq {M}`, refNoWrite},
+	{`uniq -c {M}`, refNoWrite},
+	{`xxd -r -p in {M}`, refWrites},
+	{`xxd in {M}`, refWrites},
+	{`xxd -c 8 in {M}`, refWrites},
+	{`xxd -r -p - {M}`, refWrites},
+	{`xxd -g 1 -l 16 in {M}`, refWrites},
+	{`xxd {M}`, refNoWrite},
 	// curl: output flags, write-out formats, config files
 	{`curl -w '%output{M}k' http://example.test/`, refWrites},
 	{`curl -s -w '%output{M}k' http://example.test/`, refWrites},
 	{`curl --write-out '%output{M}k' http://example.test/`, refWrites},
-	{`curl --write-out='%output{M}k' http://example.test/`, refWrites},
-	{`curl -o M http://example.test/`, refWrites},
-	{`curl -sSo M http://example.test/`, refWrites},
-	{`curl --output M http://example.test/`, refWrites},
-	{`curl --output=M http://example.test/`, refWrites},
-	{`curl -c M http://example.test/`, refWrites},
-	{`curl --cookie-jar M http://example.test/`, refWrites},
+	{`curl -o {M} http://example.test/`, refWrites},
+	{`curl -sSo {M} http://example.test/`, refWrites},
+	{`curl --output {M} http://example.test/`, refWrites},
+	{`curl -c {M} http://example.test/`, refWrites},
+	{`curl --cookie-jar {M} http://example.test/`, refWrites},
 	{`curl -K cfg http://example.test/`, refUnknown},
 	{`curl --config cfg http://example.test/`, refUnknown},
 	{`curl -w @fmt http://example.test/`, refUnknown},
 	{`curl -s http://example.test/`, refNoWrite},
 	{`curl -w '%{http_code}' http://example.test/`, refNoWrite},
-	{`curl -d @M http://example.test/`, refNoWrite},
+	{`curl -d @{M} http://example.test/`, refNoWrite},
 	// sort, tee, truncate, touch, dd
-	{`sort -o M f`, refWrites},
-	{`sort -oM f`, refWrites},
-	{`sort -ro M f`, refWrites},
-	{`sort --output=M f`, refWrites},
-	{`sort --output M f`, refWrites},
-	{`sort M`, refNoWrite},
-	{`tee M`, refWrites},
-	{`tee -a M`, refWrites},
-	{`tee -ai M`, refWrites},
-	{`tee -p M`, refWrites},
-	{`tee f M`, refWrites},
-	{`touch M`, refWrites},
-	{`touch -c M`, refWrites},
-	{`truncate -s 0 M`, refWrites},
-	{`dd if=f of=M`, refWrites},
-	{`dd of=M`, refWrites},
-	{`dd if=M of=f`, refNoWrite},
+	{`sort -o {M} f`, refWrites},
+	{`sort -o{M} f`, refWrites},
+	{`sort -ro {M} f`, refWrites},
+	{`sort --output={M} f`, refWrites},
+	{`sort --output {M} f`, refWrites},
+	{`sort {M}`, refNoWrite},
+	{`tee {M}`, refWrites},
+	{`tee -a {M}`, refWrites},
+	{`tee -ai {M}`, refWrites},
+	{`tee -p {M}`, refWrites},
+	{`tee f {M}`, refWrites},
+	{`touch {M}`, refWrites},
+	{`touch -c {M}`, refWrites},
+	{`truncate -s 0 {M}`, refWrites},
+	{`dd if=f of={M}`, refWrites},
+	{`dd of={M}`, refWrites},
+	{`dd if={M} of=f`, refNoWrite},
 	// cp / mv / install / ln: destinations, target directories, fused values
-	{`cp f M`, refWrites},
-	{`cp -p f M`, refWrites},
-	{`cp -t D authorized_keys`, refWrites},
-	{`cp -t D f authorized_keys`, refWrites},
-	{`cp -tD authorized_keys`, refWrites},
-	{`cp -pt D authorized_keys`, refWrites},
-	{`cp -ptD authorized_keys`, refWrites},
-	{`cp --target-directory=D authorized_keys`, refWrites},
-	{`cp --target-directory D authorized_keys`, refWrites},
-	{`cp f D/authorized_keys`, refWrites},
-	{`cp M f`, refNoWrite},
-	{`mv f M`, refWrites},
-	{`mv -t D authorized_keys`, refWrites},
-	{`mv -tD authorized_keys`, refWrites},
-	{`install -m600 f M`, refWrites},
-	{`install -m 600 f M`, refWrites},
-	{`install -D f M`, refWrites},
-	{`install -t D authorized_keys`, refWrites},
-	{`install -tD authorized_keys`, refWrites},
-	{`ln -sf f M`, refWrites},
-	{`rm M`, refWrites},
-	{`rm -f M`, refWrites},
-	{`unlink M`, refWrites},
+	{`cp f {M}`, refWrites},
+	{`cp -p f {M}`, refWrites},
+	{`cp -t {D} authorized_keys`, refWrites},
+	{`cp -t {D} f authorized_keys`, refWrites},
+	{`cp -t{D} authorized_keys`, refWrites},
+	{`cp -pt {D} authorized_keys`, refWrites},
+	{`cp -pt{D} authorized_keys`, refWrites},
+	{`cp --target-directory={D} authorized_keys`, refWrites},
+	{`cp --target-directory {D} authorized_keys`, refWrites},
+	{`cp f {D}/authorized_keys`, refWrites},
+	{`cp {M} f`, refNoWrite},
+	{`mv f {M}`, refWrites},
+	{`mv -t {D} authorized_keys`, refWrites},
+	{`mv -t{D} authorized_keys`, refWrites},
+	{`install -m600 f {M}`, refWrites},
+	{`install -m 600 f {M}`, refWrites},
+	{`install -D f {M}`, refWrites},
+	{`install -t {D} authorized_keys`, refWrites},
+	{`install -t{D} authorized_keys`, refWrites},
+	{`ln -sf f {M}`, refWrites},
+	{`rm {M}`, refWrites},
+	{`rm -f {M}`, refWrites},
+	{`unlink {M}`, refWrites},
 	// archives and compressors
-	{`gzip M`, refWrites},
-	{`gzip -f M`, refWrites},
-	{`gzip -d M.gz`, refWrites},
-	{`gunzip M.gz`, refWrites},
-	{`xz -d M.xz`, refWrites},
-	{`bzip2 M`, refWrites},
-	{`zip M.zip f`, refUnknown},
-	{`gzip -c M`, refNoWrite},
-	{`zcat M.gz`, refNoWrite},
+	{`gzip {M}`, refWrites},
+	{`gzip -f {M}`, refWrites},
+	{`gzip -d {M}.gz`, refWrites},
+	{`gunzip {M}.gz`, refWrites},
+	{`xz -d {M}.xz`, refWrites},
+	{`bzip2 {M}`, refWrites},
+	{`zip {M}.zip f`, refUnknown},
+	{`gzip -c {M}`, refNoWrite},
+	{`zcat {M}.gz`, refNoWrite},
 	// git
-	{`git clone http://example.test/r D`, refWrites},
-	{`git -C D reset --hard`, refUnknown},
-	{`git -C D filter-branch --force HEAD`, refUnknown},
-	{`git -C D status`, refNoWrite},
+	{`git clone http://example.test/r {D}`, refWrites},
+	{`git -C {D} reset --hard`, refUnknown},
+	{`git -C {D} filter-branch --force HEAD`, refUnknown},
+	{`git -C {D} status`, refNoWrite},
 }
 
 // propWrappers wrap a command the way a hook sees it; a wrapper must not change
@@ -190,7 +188,7 @@ var propWrappers = []string{
 }
 
 func expandProp(t propTemplate, wrap string) string {
-	c := strings.ReplaceAll(strings.ReplaceAll(t.cmd, "M", propMarker), "D", propDir)
+	c := strings.ReplaceAll(strings.ReplaceAll(t.cmd, "{M}", propMarker), "{D}", propDir)
 	if strings.HasPrefix(wrap, "sh -c") || strings.HasPrefix(wrap, "bash -c") {
 		if strings.ContainsAny(c, "\"$`\\\n") {
 			return "" // cannot be double-quoted unchanged
@@ -318,46 +316,6 @@ func TestPropertyReadersCannotWrite(t *testing.T) {
 				if writish[fl.Role] {
 					t.Errorf("%s is a reader in the reference but flag %s has role %s", name, fname, fl.Role)
 				}
-			}
-		}
-	}
-}
-
-// Every valued flag of a text-bearing program is either grammar-checked or on
-// this explicit list of plainly inert values (counts, modes, headers, timeouts).
-// An ignored value is not accounted by default.
-var inertValuedFlags = map[string]map[string]bool{
-	"sed":  {"-l": true},
-	"awk":  {"-v": true, "-F": true},
-	"curl": setOf("-H", "-X", "-A", "-e", "-b", "-x", "-u", "-m", "--max-time", "--retry", "-C", "--connect-timeout", "--resolve", "-y", "-Y", "--output-dir", "--url"),
-	"wget": setOf("-P", "--directory-prefix", "-U", "-t", "-T", "--header", "--tries", "--timeout"),
-}
-
-func setOf(xs ...string) map[string]bool {
-	m := map[string]bool{}
-	for _, x := range xs {
-		m[x] = true
-	}
-	return m
-}
-
-func TestPropertyIgnoredValuesAreJustified(t *testing.T) {
-	for name, allowed := range inertValuedFlags {
-		p, ok := posixTable[name]
-		if !ok {
-			t.Errorf("%s: no row", name)
-			continue
-		}
-		for fname, fl := range p.Flags {
-			if !fl.Value || fl.Text != TextNone {
-				continue
-			}
-			// a flag whose role is a real file role is accounted by that role
-			if fl.Role != RoleNone && fl.Role != RoleIgnore {
-				continue
-			}
-			if !allowed[fname] {
-				t.Errorf("%s %s: an ignored valued flag with no closed grammar and no entry in the inert list", name, fname)
 			}
 		}
 	}

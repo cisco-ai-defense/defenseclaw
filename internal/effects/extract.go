@@ -164,6 +164,10 @@ type walker struct {
 	// narrowed is the state a linked statement runs under; narrowedFor restores
 	// the joined state afterwards.
 	narrowed *cwdState
+	// narrowedOther is the state when the narrowed statement does not run (the
+	// other side of the cd's outcome); a statement that moves the cwd joins its
+	// result with it (round 10, GAP-0183 class N).
+	narrowedOther *cwdState
 	// exported records which shell variables a child process inherits (POSIX
 	// frontends only; cmd and PowerShell variables are all environment).
 	exported   map[string]bool
@@ -179,6 +183,9 @@ type walker struct {
 	// variables (enable -n cd, shopt -s cdable_vars), or cd was aliased: its
 	// target and effect are no longer what the argument says.
 	cdUnreliable bool
+	// namerefSeen: a `declare -n` was seen, so any later assignment may land on
+	// HOME or CDPATH through the reference; both stay dynamic for the call.
+	namerefSeen bool
 	// curProgram is the program of the command being classified (a table row can
 	// serve several names, e.g. gzip and gunzip).
 	curProgram string
@@ -276,9 +283,11 @@ func (w *walker) walkScript(s *Script, depth int) {
 	// The narrowing state belongs to the frame that set it: an eval / source /
 	// nested body walked inside a linked statement must neither consume nor reset
 	// the enclosing statement's narrowing (round 9, GAP-0183).
-	prevDialect, prevNarrowed, prevChain := w.curDialect, w.narrowed, w.cdChain
-	w.curDialect, w.narrowed, w.cdChain = s.Dialect, nil, nil
-	defer func() { w.curDialect, w.narrowed, w.cdChain = prevDialect, prevNarrowed, prevChain }()
+	prevDialect, prevNarrowed, prevOther, prevChain := w.curDialect, w.narrowed, w.narrowedOther, w.cdChain
+	w.curDialect, w.narrowed, w.narrowedOther, w.cdChain = s.Dialect, nil, nil, nil
+	defer func() {
+		w.curDialect, w.narrowed, w.narrowedOther, w.cdChain = prevDialect, prevNarrowed, prevOther, prevChain
+	}()
 	for _, fn := range s.Funcs {
 		w.funcs[funcKey(fn, s.Dialect)] = true
 	}
@@ -341,7 +350,7 @@ func (s cwdState) equal(o cwdState) bool {
 // `cd X || ..` only when it failed (the cwd is unchanged). Every other statement
 // sees the joined set {X, old} (round 8 F).
 func (w *walker) enterStmt(st *Stmt) {
-	w.narrowed = nil
+	w.narrowed, w.narrowedOther = nil, nil
 	ch := w.cdChain
 	if st.Link == OpNone {
 		w.cdChain = nil
@@ -354,16 +363,16 @@ func (w *walker) enterStmt(st *Stmt) {
 	case OpAnd:
 		if ch.andOK {
 			ch.orOK = false
-			n := ch.succ
-			w.narrowed = &n
+			n, o := ch.succ, ch.fail
+			w.narrowed, w.narrowedOther = &n, &o
 		} else {
 			w.cdChain = nil
 		}
 	case OpOr:
 		if ch.orOK {
 			ch.andOK = false
-			n := ch.fail
-			w.narrowed = &n
+			n, o := ch.fail, ch.succ
+			w.narrowed, w.narrowedOther = &n, &o
 		} else {
 			w.cdChain = nil
 		}
@@ -380,12 +389,18 @@ func (w *walker) leaveStmt() {
 		if w.cwdNow().equal(*w.narrowed) {
 			w.setCWDState(w.cdChain.joined)
 		} else {
-			// the statement moved the cwd itself: the cd's outcome no longer
-			// describes what the following statements run under.
+			// The statement moved the cwd itself (a nested eval / source / function
+			// that cds). It ran only on one side of the cd's outcome; on the other
+			// side the cwd is that side's state, so the result is the union.
+			if w.narrowedOther != nil {
+				w.setCWDState(joinCWD(w.cwdNow(), *w.narrowedOther))
+			} else {
+				w.setCWDDynamic()
+			}
 			w.cdChain = nil
 		}
 	}
-	w.narrowed = nil
+	w.narrowed, w.narrowedOther = nil, nil
 }
 
 func (w *walker) emit(e Effect) int {
@@ -510,6 +525,16 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	w.spec = &childSpec{}
 	for _, a := range c.Assigns {
 		rv := w.resolveWord(a.ValueWord)
+		// A name keeps a certain value only after a plain NAME=value. `+=` adds to
+		// the old value, an attribute (-l -u -i ...) transforms the new one, and a
+		// nameref makes the name an alias for another variable: each leaves the
+		// value dynamic (round 10, GAP-0184 class X).
+		if a.Append || a.Attr || a.NameRef || w.namerefSeen {
+			rv = Word{Reason: ReasonDynamicExpansion}
+		}
+		if a.NameRef {
+			w.noteNameRef()
+		}
 		if role, ok := envRoles[a.Name]; ok && role == EnvCode {
 			w.envCodeEffect(a.Name, dialect, cmdNo, depth, cond, c.Span)
 		}
@@ -606,10 +631,22 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		return
 	}
-	w.unbindReader(program, inner)
+	nameOpaque := w.unbindReader(program, inner)
 	declUA := false
 	if dialect == DialectPOSIX && isDeclBuiltin(program) && len(inner) > 1 {
-		declUA = !w.declWords(program, inner[1:])
+		ok, opq := w.declWords(program, inner[1:])
+		declUA = !ok
+		nameOpaque = nameOpaque || opq
+	}
+	if nameOpaque {
+		w.opaqueExec(origin, cond) // a name operand bash evaluates (GAP-0197)
+	}
+	// A prefix assignment on a builtin that keeps it (export, declare, readonly,
+	// local, the special builtins) is not temporary: the name is uncertain.
+	if prefix && persistentPrefixBuiltins[program] {
+		for _, a := range c.Assigns {
+			w.makeUncertain(a.Name)
+		}
 	}
 
 	// A per-command working directory from env -C / git -C / make -C / tar -C
@@ -797,7 +834,13 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 			return
 		}
-		if code, ok := powershellLaunchCode(inner[1:]); ok {
+		code, ok, opq := powershellLaunchCode(inner[1:])
+		if opq {
+			w.opaqueExec(origin, cond)
+			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+			return
+		}
+		if ok {
 			// A -Command / positional value of exactly "-" reads the script from
 			// stdin, which we never see; the piped-in text does not change that
 			// (psparse delta review 6 (a)).
@@ -1017,7 +1060,7 @@ func (w *walker) placedHome(rv Word) string {
 // uses a relative HOME literally, relative to the cwd at the moment `~` or a
 // bare cd is evaluated, so a relative value is dynamic (round 9, GAP-0184).
 func (w *walker) placeHomeValue(v string) string {
-	if !absoluteSpelling(v, w.o.flavor()) {
+	if w.namerefSeen || !absoluteSpelling(v, w.o.flavor()) {
 		return ""
 	}
 	if abs, ok, _ := placePath(v, w.opts()); ok {
@@ -2561,13 +2604,14 @@ func gitOperands(ps []Word) []operand {
 // scopeState is the running state saved around a child shell (subshell,
 // pipeline stage, background command, command substitution, unwrapped code).
 type scopeState struct {
-	cwd, home string
-	alt       []string
-	stack     []string
-	env       map[string]string
-	exported  map[string]bool
-	chain     *cdChain
-	narrowed  *cwdState
+	cwd, home     string
+	alt           []string
+	stack         []string
+	env           map[string]string
+	exported      map[string]bool
+	chain         *cdChain
+	narrowed      *cwdState
+	narrowedOther *cwdState
 	// varsOwned: the saved scope owned its env / exported maps.
 	varsOwned bool
 }
@@ -2577,7 +2621,7 @@ type scopeState struct {
 // to them can leak into the parent when restoreScope puts the originals back.
 func (w *walker) saveScope() scopeState {
 	s := scopeState{cwd: w.curCWD, home: w.curHome, alt: w.cwdAlt, stack: w.cwdStack, env: w.env,
-		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed}
+		exported: w.exported, chain: w.cdChain, narrowed: w.narrowed, narrowedOther: w.narrowedOther}
 	// The env and exported maps are shared with the saved state until the child
 	// first writes one (ownVars): most scopes (a command substitution, a pipeline
 	// stage) never assign, so copying on every entry would cost the deep-nesting
@@ -2585,7 +2629,7 @@ func (w *walker) saveScope() scopeState {
 	s.varsOwned = w.varsOwned
 	w.varsOwned = false
 	w.cwdAlt = append([]string(nil), w.cwdAlt...)
-	w.cdChain, w.narrowed = nil, nil
+	w.cdChain, w.narrowed, w.narrowedOther = nil, nil, nil
 	return s
 }
 
@@ -2602,7 +2646,7 @@ func (w *walker) ownVars() {
 
 func (w *walker) restoreScope(s scopeState) {
 	w.curCWD, w.curHome, w.cwdAlt, w.cwdStack, w.env = s.cwd, s.home, s.alt, s.stack, s.env
-	w.exported, w.cdChain, w.narrowed = s.exported, s.chain, s.narrowed
+	w.exported, w.cdChain, w.narrowed, w.narrowedOther = s.exported, s.chain, s.narrowed, s.narrowedOther
 	w.varsOwned = s.varsOwned
 }
 
@@ -2635,30 +2679,91 @@ func (w *walker) unsetVar(name string) {
 // unbindReader drops the variables a builtin binds by name: read-like builtins,
 // printf -v, getopts, unset. A name given through an expansion could be any
 // variable, so it makes HOME and CDPATH uncertain too.
-func (w *walker) unbindReader(program string, inner []Word) {
+func (w *walker) unbindReader(program string, inner []Word) (opaque bool) {
 	args := inner[1:]
-	named := func(wd Word) {
-		if wd.Static {
-			if !strings.HasPrefix(wd.Value, "-") && wd.Value != "" {
-				w.unsetVar(wd.Value)
-			}
+	// name checks a word a builtin reads as a variable name: only a plain
+	// identifier counts; anything else (NAME[subscript], a quoted or computed
+	// name) is evaluated by bash and is opaque code (round 10, GAP-0197).
+	name := func(wd Word) {
+		if !wd.Static || !plainIdent(wd.Value) {
+			opaque = true
+			w.unsetVar("HOME")
+			w.unsetVar("CDPATH")
 			return
 		}
-		w.unsetVar("HOME")
-		w.unsetVar("CDPATH")
+		w.unsetVar(wd.Value)
+	}
+	// skipValues are the options whose next word is a value, not a name.
+	skip := func(opts ...string) map[string]bool { return set(opts...) }
+	namesAfterOptions := func(valued map[string]bool, nameOpts map[string]bool) {
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			if !a.Static {
+				name(a)
+				continue
+			}
+			switch {
+			case nameOpts[a.Value]:
+				if i+1 < len(args) {
+					i++
+					name(args[i])
+				}
+			case valued[a.Value]:
+				i++
+			case strings.HasPrefix(a.Value, "-") && a.Value != "-":
+			default:
+				name(a)
+			}
+		}
 	}
 	switch program {
-	case "read", "mapfile", "readarray", "getopts", "unset":
+	case "read":
+		namesAfterOptions(skip("-d", "-i", "-n", "-N", "-p", "-t", "-u"), skip("-a"))
+	case "mapfile", "readarray":
+		namesAfterOptions(skip("-d", "-n", "-O", "-s", "-u", "-C", "-c"), nil)
+	case "getopts":
+		// getopts OPTSTRING NAME [ARG...]: only NAME is a variable name.
+		if len(args) >= 2 {
+			name(args[1])
+		}
+	case "unset":
+		// unset does not evaluate a subscript; a non-identifier name is ignored.
 		for _, wd := range args {
-			named(wd)
+			if wd.Static && plainIdent(wd.Value) {
+				w.unsetVar(wd.Value)
+			} else if !wd.Static {
+				w.unsetVar("HOME")
+				w.unsetVar("CDPATH")
+			}
 		}
 	case "printf":
 		for i := 0; i+1 < len(args); i++ {
 			if args[i].Static && args[i].Value == "-v" {
-				named(args[i+1])
+				name(args[i+1])
+			}
+		}
+	case "test", "[":
+		for i := 0; i+1 < len(args); i++ {
+			if args[i].Static && (args[i].Value == "-v" || args[i].Value == "-R") {
+				if !args[i+1].Static || !plainIdent(args[i+1].Value) {
+					opaque = true
+				}
+			}
+		}
+	case "wait":
+		for i := 0; i+1 < len(args); i++ {
+			if args[i].Static && args[i].Value == "-p" {
+				name(args[i+1])
+			}
+		}
+	case "let":
+		for _, wd := range args {
+			if !wd.Static || strings.ContainsAny(wd.Value, "$`[(") {
+				opaque = true // an arithmetic operand is evaluated, subscripts and all
 			}
 		}
 	}
+	return opaque
 }
 
 // commandCWDOverride returns the per-command working directory a git/make -C
@@ -2714,27 +2819,53 @@ func powershellHasEncodedArgs(args []Word) bool {
 	return false
 }
 
-func powershellLaunchCode(args []Word) (string, bool) {
+// psHostSwitches and psHostValued are the powershell / pwsh options the walker's
+// own host parser knows (names without the dash, lower case). Any other option
+// makes the launch opaque: an option it does not know may take a value, and that
+// value would be read as the program (round 10, GAP-0198).
+var psHostSwitches = set("noprofile", "nop", "noninteractive", "noni", "nologo", "nol", "noexit", "noe", "sta", "mta", "interactive", "i", "login", "l")
+var psHostValued = set("executionpolicy", "ep", "windowstyle", "w", "inputformat", "if", "in", "outputformat", "of", "o", "version", "v",
+	"configurationname", "config", "settingsfile", "custompipename", "psconsolefile")
+
+// powershellLaunchCode returns the PowerShell command text a powershell/pwsh
+// launch runs (a -Command / -EncodedCommand value or the positional tail). opaque
+// is true when the launch carries an option the parser does not know -- a
+// working directory, a script file, anything else -- so no text is trusted.
+func powershellLaunchCode(args []Word) (code string, ok, opaque bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if !a.Static {
-			continue
+			return "", false, true // a dynamic word could be an option or its value
 		}
 		lc := strings.ToLower(a.Value)
 		isCmd := lc == "-command" || lc == "-c"
 		isEnc := lc == "-encodedcommand" || lc == "-enc" || lc == "-ec" || lc == "-e"
-		if (isCmd || isEnc) && i+1 < len(args) && args[i+1].Static {
-			v := args[i+1].Value
-			if isEnc {
-				if dec, ok := psparse.DecodeEncodedCommand(v); ok {
-					return dec, true
+		if isCmd || isEnc {
+			if i+1 < len(args) && args[i+1].Static {
+				v := args[i+1].Value
+				if isEnc {
+					if dec, ok := psparse.DecodeEncodedCommand(v); ok {
+						return dec, true, false
+					}
+					return "", false, true
 				}
-				return "", false
+				return v, true, false
 			}
-			return v, true
+			return "", false, true
 		}
 		if strings.HasPrefix(a.Value, "-") && a.Value != "-" {
-			continue // another switch (-NoProfile, -File handled as a read elsewhere)
+			name := strings.TrimPrefix(lc, "-")
+			if eq := strings.IndexByte(name, ':'); eq >= 0 {
+				return "", false, true // -Option:value is not modeled
+			}
+			switch {
+			case psHostSwitches[name]:
+				continue
+			case psHostValued[name]:
+				i++ // the value belongs to the option
+				continue
+			}
+			return "", false, true // -wd, -File, -Version-less abbreviations, anything unknown
 		}
 		// a bare positional (incl. a lone "-" = read script from stdin, handled as
 		// opaque by the caller): the rest is a PowerShell command (review N8 K5/S5,
@@ -2742,13 +2873,13 @@ func powershellLaunchCode(args []Word) (string, bool) {
 		var parts []string
 		for _, w := range args[i:] {
 			if !w.Static {
-				return "", false
+				return "", false, true
 			}
 			parts = append(parts, w.Value)
 		}
-		return strings.Join(parts, " "), true
+		return strings.Join(parts, " "), true, false
 	}
-	return "", false
+	return "", false, false
 }
 
 func (w *walker) opaqueExec(origin Origin, cond bool) {
@@ -2793,6 +2924,8 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 			mode = 'c'
 		case long == "--list":
 			mode = 't'
+		case long == "--append" || long == "--update" || long == "--concatenate" || long == "--catenate" || long == "--delete":
+			mode = 'a' // the archive itself is rewritten
 		case v == "-C" || long == "--directory":
 			if hasInline {
 				cdir = inlineVal
@@ -2826,6 +2959,8 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 					mode = 'x'
 				case 't':
 					mode = 't'
+				case 'r', 'u', 'A':
+					mode = 'a' // append / update / concatenate: the archive is rewritten
 				case 'f':
 					archivePending = true
 				}
@@ -2864,6 +2999,17 @@ func (w *walker) tarEffects(args []Word, origin Origin, cond bool, depth int) {
 				mk(KindRead, f.Value, TargetStateKnown, "")
 			}
 		}
+	case 'a':
+		if archive != "" && archive != "-" {
+			mk(KindWrite, archive, TargetStateKnown, "")
+		} else {
+			mk(KindWrite, "", TargetStateUnknown, ReasonDynamicExpansion)
+		}
+		for _, f := range files {
+			if f.Static {
+				mk(KindRead, f.Value, TargetStateKnown, "")
+			}
+		}
 	case 'x':
 		if archive != "" && archive != "-" {
 			mk(KindRead, archive, TargetStateKnown, "")
@@ -2888,7 +3034,7 @@ func isTarModeBundle(v string) bool {
 	has := false
 	for i := 0; i < len(v); i++ {
 		switch v[i] {
-		case 'c', 'x', 't':
+		case 'c', 'x', 't', 'r', 'u', 'A':
 			has = true
 		case 'f', 'z', 'j', 'v', 'J', 'a', 'p', 'h':
 		default:
@@ -3047,6 +3193,13 @@ func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
 			op.remote = true
 		}
 		out = append(out, op)
+		// mv / move / ren / Move-Item remove each source from where it was: the
+		// source is mutated (deleted), not only read.
+		if p.MovesSources && haveDest {
+			del := op
+			del.role = RoleDelete
+			out = append(out, del)
+		}
 	}
 	if !haveDest {
 		return out
@@ -3346,6 +3499,7 @@ func tarHasUnknownFlag(args []Word) bool {
 		"--owner": true, "--group": true, "--mode": true, "--transform": true, "--wildcards": true,
 		"--no-recursion": true, "--one-file-system": true, "--dereference": true, "--keep-old-files": true,
 		"--absolute-names": true, "--numeric-owner": true, "--no-same-permissions": true,
+		"--append": true, "--update": true, "--concatenate": true, "--catenate": true, "--delete": true,
 	}
 	for _, a := range args {
 		if !a.Static {
@@ -3364,7 +3518,7 @@ func tarHasUnknownFlag(args []Word) bool {
 		}
 		if strings.HasPrefix(v, "-") || isTarModeBundle(v) {
 			for _, ch := range strings.TrimPrefix(v, "-") {
-				if !strings.ContainsRune("cxtfzjJvphakmrunwOWCT", ch) {
+				if !strings.ContainsRune("cxtfzjJvphakmrunwOWCTA", ch) {
 					return true
 				}
 			}
@@ -3723,10 +3877,10 @@ func isDeclBuiltin(program string) bool {
 // environment, +x / export -n take it out. It returns false when an operand
 // could not be understood (a name or value that is not literal): the call is
 // then unaccounted and HOME and CDPATH are uncertain.
-func (w *walker) declWords(program string, args []Word) bool {
+func (w *walker) declWords(program string, args []Word) (ok, opaque bool) {
 	exported := program == "export"
-	unexport := false
-	ok := true
+	unexport, attr, nameref := false, false, false
+	ok = true
 	var operands []Word
 	for _, a := range args {
 		if a.Static && len(a.Value) > 1 && (a.Value[0] == '-' || a.Value[0] == '+') && !strings.Contains(a.Value, "=") {
@@ -3739,6 +3893,12 @@ func (w *walker) declWords(program string, args []Word) bool {
 				unexport, exported = true, false
 			case a.Value == "-p" || a.Value == "-f" || a.Value == "-F":
 				ok = false // listing / function mode: names are not variables
+			}
+			if a.Value[0] == '-' && program != "export" && strings.Contains(a.Value, "n") {
+				nameref = true
+			}
+			if strings.ContainsAny(a.Value[1:], "luciaAnftC") && (program != "export" || a.Value != "-n") {
+				attr = true
 			}
 			continue
 		}
@@ -3755,6 +3915,13 @@ func (w *walker) declWords(program string, args []Word) bool {
 		if eq := strings.IndexByte(a.Value, '='); eq > 0 {
 			name, val, hasVal = a.Value[:eq], a.Value[eq+1:], true
 		}
+		if !plainIdent(name) {
+			// NAME[subscript]=v and computed names are evaluated (GAP-0197)
+			ok, opaque = false, true
+			w.unsetVar("HOME")
+			w.unsetVar("CDPATH")
+			continue
+		}
 		w.ownVars()
 		if exported && !unexport {
 			w.exported[name] = true
@@ -3765,7 +3932,17 @@ func (w *walker) declWords(program string, args []Word) bool {
 		if name == "CDPATH" {
 			w.cdpathMaybeSet = true
 		}
+		if nameref {
+			w.noteNameRef()
+		}
 		if !hasVal {
+			continue
+		}
+		if attr || nameref || w.namerefSeen {
+			delete(w.env, name) // the stored value is transformed or aliased
+			if name == "HOME" && w.curDialect == DialectPOSIX {
+				w.curHome = ""
+			}
 			continue
 		}
 		w.env[name] = val
@@ -3773,7 +3950,7 @@ func (w *walker) declWords(program string, args []Word) bool {
 			w.curHome = w.placeHomeValue(val)
 		}
 	}
-	return ok
+	return ok, opaque
 }
 
 // hostPayload applies psparse's verdict for a host call: opaque, or the Static
@@ -3784,4 +3961,54 @@ func (w *walker) hostPayload(c *Cmd, dialect Dialect, depth int, cond bool, orig
 		return
 	}
 	w.unwrapCode(c.Host.Text, true, c.Host.Dialect, depth, cond, origin)
+}
+
+// noteNameRef records a nameref declaration: HOME and CDPATH can be written
+// through the reference from now on, so they are no longer certain.
+func (w *walker) noteNameRef() {
+	w.namerefSeen = true
+	if w.curDialect == DialectPOSIX {
+		w.curHome = ""
+	}
+	w.cdpathMaybeSet = true
+}
+
+// persistentPrefixBuiltins are the builtins whose prefix assignment is not
+// confined to the command: export / declare / readonly / local assign the
+// variable with that value, and the POSIX special builtins keep it in POSIX mode.
+// A certainty name given a prefix on one of them is dynamic afterwards.
+var persistentPrefixBuiltins = set("export", "declare", "typeset", "readonly", "local", "eval", "source", ".", ":", "set", "unset",
+	"read", "mapfile", "readarray", "getopts", "printf", "let", "trap", "shift", "break", "continue", "return", "exec", "wait", "umask", "alias")
+
+// plainIdent reports a plain shell identifier: the only form of a name operand
+// that a builtin reads as a variable name without evaluating it. bash evaluates
+// the subscript of NAME[...] -- and a command substitution inside it -- even when
+// the word is quoted (round 10, GAP-0197).
+func plainIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (i > 0 && c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// makeUncertain forgets what the walker knew about a variable after a prefix
+// assignment it can not confine to one command.
+func (w *walker) makeUncertain(name string) {
+	w.ownVars()
+	delete(w.env, name)
+	switch name {
+	case "HOME":
+		if w.curDialect == DialectPOSIX {
+			w.curHome = ""
+		}
+	case "CDPATH":
+		w.cdpathMaybeSet = true
+	}
 }

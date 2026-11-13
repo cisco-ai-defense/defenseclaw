@@ -128,6 +128,13 @@ type Assign struct {
 	NoValue bool
 	// Unexport removes the export attribute (`export -n`, `declare +x`).
 	Unexport bool
+	// Append is `NAME+=value`: the value is concatenated (or added), not assigned.
+	Append bool
+	// Attr marks a declaration with an attribute that transforms the value or the
+	// variable's type (-l -u -c -i -a -A): the value is no longer what was written.
+	Attr bool
+	// NameRef marks `declare -n`: the name is a reference to another variable.
+	NameRef bool
 }
 
 // RedirOp is the kind of a redirection.
