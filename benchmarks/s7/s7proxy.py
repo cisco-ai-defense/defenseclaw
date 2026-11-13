@@ -28,6 +28,10 @@ PRICES = {  # USD per 1M tokens: input, output, cache read
     "gpt-oss-safeguard-120b": (0.15, 0.60, 0.15),
     "haiku-4-5": (1.00, 5.00, 0.10), "haiku-5-5": (0.10, 0.50, 0.01), "sonnet-5-5": (2.00, 10.00, 0.10),
 }
+# Mantle route per model (AWS model cards): Gemma 4 is served only under /openai/v1 on
+# bedrock-mantle; the gpt-oss and Gemma 3 models only under /v1 (each refuses the other route
+# with "isn't supported on this route").
+MANTLE_ROUTE = {"gemma-4-31b": "/openai/v1", "gemma-4-26b-a4b": "/openai/v1"}
 MANTLE = {"gemma-4-31b": "google.gemma-4-31b", "gemma-4-26b-a4b": "google.gemma-4-26b-a4b",
           "gemma-3-27b": "google.gemma-3-27b-it", "gpt-oss-safeguard-20b": "openai.gpt-oss-safeguard-20b",
           "gpt-oss-safeguard-120b": "openai.gpt-oss-safeguard-120b"}
@@ -93,7 +97,8 @@ def call_model(model, messages, max_tokens, temperature, response_format=None):
             body["response_format"] = response_format
         last = None
         for attempt in range(6):
-            req = urllib.request.Request(f"https://bedrock-mantle.{args.region}.api.aws/v1/chat/completions",
+            route = MANTLE_ROUTE.get(model, "/v1")
+            req = urllib.request.Request(f"https://bedrock-mantle.{args.region}.api.aws{route}/chat/completions",
                                          data=json.dumps(body).encode(), method="POST",
                                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + mantle_token()})
             try:
