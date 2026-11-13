@@ -46,6 +46,12 @@ import (
 //
 // Rules never read the task, so a rule finding stands whatever it says.
 
+// scopeUnreadableReason is the floor's reason for a command that may send and
+// whose destination could not be read (a host the shell builds, a syntax error,
+// a command past the parser's limits). It gets the unknown tier, like a call cut
+// short at a cap.
+const scopeUnreadableReason = "the call may send data and its destination cannot be read, so it is judged as outside the user's task (unreadable_send)"
+
 const (
 	intentScopeFinding    = "INTENT-SCOPE-SEND"
 	maxNamedScopeTargets  = 20
@@ -60,13 +66,6 @@ var (
 	scopeEmailRe   = lazyregexp.New(`(?i)\b[a-z0-9._%+-]+@([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,})\b`)
 	scopeDomainRe  = lazyregexp.New(`(?i)\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,})\b`)
 	scopePathRe    = lazyregexp.New(`(?:^|[\s"'(])((?:~|\.{1,2})?/[A-Za-z0-9._@%+=,~/-]{2,})`)
-	// The text pattern for a shell command the parser cannot read (an unterminated
-	// quote, a command past the reading bounds): curl or wget with a body or an
-	// upload in the same command, or a transfer or mail program. The destination is
-	// read from the same text. A command the parser reads goes through
-	// shellSendDestinations instead (GAP-0363: this pattern read "https://" as the
-	// httpie program, -f and -t as -F and -T, and ran across ; && and |).
-	scopeShellSendRe = lazyregexp.New(`(?:^|[\s;&|(])(?i:curl|wget|xh|xhs)\b[^\n;&|]*?(?:\s-X\s*(?i:POST|PUT|PATCH)\b|\s--request[\s=]\s*(?i:POST|PUT|PATCH)\b|\s-d\b|\s--data\b|\s--data-[a-z]+\b|\s-F\b|\s--form\b|\s-T\b|\s--upload-file\b|\s--json\b)|(?:^|[\s;&|(])(?i:scp|rsync|sftp|ncat|netcat|nc|mail|mailx|sendmail|swaks|aws\s+s3\s+(?:cp|sync|mv)|gsutil\s+(?:cp|rsync)|az\s+storage\s+blob\s+upload)\b`)
 )
 
 // scopeSendSegments and scopeReadSegments classify a tool name by its words
@@ -251,10 +250,6 @@ func scopeNamedMailbox(mailbox string, named []string) bool {
 	return false
 }
 
-// scopeMailProgramRe finds a mail program in a shell command: an address there
-// is a mailbox; user@host in scp, rsync or curl is a host.
-var scopeMailProgramRe = lazyregexp.New(`(?i)\b(?:mail|mailx|sendmail|swaks|msmtp|mutt)\b`)
-
 // scopeToolVerb reads what a tool does from its name: the verb is the last word
 // of a namespaced name (email.exists, http.post) or the first of a verb_noun
 // name (browse_website, send_email); a name whose ends are neither falls back
@@ -287,8 +282,10 @@ func scopeToolVerb(toolName string) (sends, reads bool) {
 }
 
 // callSendDestinations returns the places a sending call goes to, and the caps
-// its reading hit; nil for a call that does not send.
-func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []scopeDest {
+// its reading hit; nil for a call that does not send. unreadable reports a
+// command that may send and could not be read (the unknown tier applies to the
+// send; there is no text scan).
+func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dests []scopeDest, unreadable bool) {
 	toolSends, toolReads := scopeToolVerb(toolName)
 	values := scopeStrings(args, trunc)
 	var texts, shellTexts []string
@@ -319,18 +316,16 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 			out = append(out, d)
 		}
 	}
-	// A shell command is read by its commands: a send is a command that sends.
+	// A shell command is read by its parsed effects: a send is a command that sends.
 	shell := false
-	for _, t := range shellTexts {
-		if shellSendDestinations(t, trunc, add) {
-			shell = true
-		}
+	if len(shellTexts) > 0 {
+		shell, unreadable = shellSendDestinations(toolName, args, shellTexts, add)
 	}
 	if !shell && !toolSends && len(texts) == 0 {
-		return nil
+		return nil, false
 	}
 	if !shell && toolReads && !toolSends {
-		return nil
+		return nil, false
 	}
 	for _, t := range texts {
 		// One match past the cap is enough to know the cap is hit.
@@ -347,7 +342,7 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 			}
 		}
 	}
-	return out
+	return out, unreadable
 }
 
 const maxSessionScopeTargets = 64
@@ -382,7 +377,7 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 		return ""
 	}
 	var trunc bounded.Truncated
-	dests := callSendDestinations(toolName, args, &trunc)
+	dests, unreadable := callSendDestinations(toolName, args, &trunc)
 	named := append(namedScopeTargets(intent), sessionTargets...)
 	// What was read before a cap is still judged, and a call cut short at a cap
 	// is judged as unknown at least: the stricter of the two stands.
@@ -397,6 +392,9 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 		}
 		exceeded = true
 		break
+	}
+	if unreadable {
+		return scopeUnreadableReason
 	}
 	if trunc.Any() {
 		reason := "the call is too large to read in full, so it is judged as outside the user's task (" + trunc.Set().Reason() + ")"
@@ -463,6 +461,9 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 		Reason:   reason,
 		Findings: []string{intentScopeFinding},
 		Scanner:  "intent-scope",
+	}
+	if reason == scopeUnreadableReason {
+		floor.Severity = "HIGH"
 	}
 	if i := strings.Index(reason, bounded.ReasonCode); i >= 0 {
 		// A walk cut short at a cap also carries the shared evaluation-limit finding

