@@ -80,7 +80,7 @@ Substrate 1.0.0 refuses every WebSocket upgrade on an inspected or `http` rule, 
 
 ### An MCP call is refused with `body_uninspectable` or `path_ambiguous`
 
-DefenseClaw reads the requests sent to MCP and listed hosts as the server will. It decodes gzip and deflate bodies and drops a UTF-8 byte order mark. With `extproc.failure_mode: closed` (the default) it refuses a body it can't read: another encoding, a charset that isn't UTF-8, or, for MCP, a body that isn't JSON (`NaN` in the arguments, for example). With `open` it allows the request and raises an alert. `path_ambiguous` is a path that servers can read in more than one way, such as an encoded slash or semicolon, or `..;`, on a host that has path rules. Send the plain form.
+DefenseClaw reads the requests sent to MCP and listed hosts as the server will. It decodes gzip and deflate bodies and drops a UTF-8 byte order mark. With `extproc.failure_mode: closed` (the default) it refuses a body it can't read: another encoding, a charset that isn't UTF-8, or, for MCP, a body that isn't JSON (`NaN` in the arguments, for example). With `open` it allows the request and raises an alert. `path_ambiguous` is a path that servers can read in more than one way, such as an encoded slash or semicolon, a `..` segment or `..;`, on a host that has path rules. Send the resolved form (`/public/x`, not `/admin/../public/x`).
 
 ### A secret placeholder shows up in a tool's output
 
