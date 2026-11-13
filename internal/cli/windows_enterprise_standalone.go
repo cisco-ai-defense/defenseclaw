@@ -3726,6 +3726,11 @@ var windowsEnterpriseKnownCodes = []string{
 	// image) through the publish retries: retryable, exit 1618, nothing
 	// switched.
 	"hook_image_publish_busy",
+	// hook-image retire (before a rollback to 1.0.9 or earlier, GAP-0751):
+	// refused (the transition image is not the recorded one; nothing
+	// changed) or pending (a config still names a launch folder; rerun).
+	"hook_image_retire_refused",
+	"hook_image_retire_pending",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
