@@ -321,6 +321,11 @@ func main() {
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
+		// As setup guardrail does when it turns the judge on for a hook
+		// connector: tool output and completions use the same strategy (the
+		// default config keeps detection_strategy_completion regex_only, so
+		// without this a -surface tool-result run never judges a tool output).
+		cfg.Guardrail.DetectionStrategyCompletion = *strategy
 		// The judge covers every connector the run sends cases to: with
 		// -connector auto a Codex or Cursor case goes to its own handler,
 		// which a claudecode-only list left unjudged.
