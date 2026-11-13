@@ -676,7 +676,43 @@ func (repo *CorrelationRepository) loadEvidence(
 		evidence.CreatedAt = time.Unix(0, created).UTC()
 		result = append(result, evidence)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return withImpliedCorrelationEvidence(result, relationships), nil
+}
+
+// withImpliedCorrelationEvidence adds the evidence each relationship implies
+// (impliedCorrelationEvidence) unless the store holds it, in the order of
+// loadEvidence's query.
+func withImpliedCorrelationEvidence(
+	stored []CorrelationRelationshipEvidence,
+	relationships []CorrelationRelationship,
+) []CorrelationRelationshipEvidence {
+	present := make(map[string]bool, len(stored))
+	for _, evidence := range stored {
+		present[evidence.EvidenceID] = true
+	}
+	result := stored
+	for _, relationship := range relationships {
+		implied, ok := impliedCorrelationEvidence(relationship)
+		if !ok || present[implied.EvidenceID] {
+			continue
+		}
+		present[implied.EvidenceID] = true
+		result = append(result, implied)
+	}
+	if len(result) == len(stored) {
+		return result
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		left, right := result[i].CreatedAt.UnixNano(), result[j].CreatedAt.UnixNano()
+		if left != right {
+			return left < right
+		}
+		return result[i].EvidenceID < result[j].EvidenceID
+	})
+	return result
 }
 
 func (repo *CorrelationRepository) ingestWatermark(ctx context.Context) (time.Time, error) {

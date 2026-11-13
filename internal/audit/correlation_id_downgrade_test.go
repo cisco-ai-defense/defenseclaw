@@ -138,8 +138,17 @@ func TestCorrelationIDsSurviveARollbackTo103(t *testing.T) {
 			t.Fatalf("late attachment returned %s %+v %s", againIdentifier, againRelationship, againEvidence)
 		}
 	}
+	// The evidence is the source the relationship's from node implies: it is
+	// not stored (S8 R5), and QueryGraph builds it with the 1.0.3 ID.
+	graph, err := repo.QueryGraph(t.Context(), CorrelationGraphQuery{Anchor: CorrelationAnchor{SemanticEventID: semantic}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(graph.Evidence) != 1 || graph.Evidence[0].EvidenceID != wantEvidence {
+		t.Fatalf("graph evidence %+v, want the one row %s", graph.Evidence, wantEvidence)
+	}
 	for table, want := range map[string]int{
-		"correlation_identifiers": 1, "correlation_relationships": 1, "correlation_relationship_evidence": 1,
+		"correlation_identifiers": 1, "correlation_relationships": 1, "correlation_relationship_evidence": 0,
 	} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {

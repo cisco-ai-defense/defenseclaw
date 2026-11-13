@@ -1631,6 +1631,19 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 		evidenceValue = string(evidence.SemanticEventID)
 	}
 	id := deterministicCorrelationID("ev_", evidence.RelationshipID, evidenceValue, string(evidence.Role))
+	if evidence.RecordID == "" && evidence.Role == CorrelationEvidenceSource &&
+		evidence.Integrity == CorrelationIntegrityVerified {
+		var fromKind, fromID string
+		err := tx.tx.QueryRowContext(ctx, `SELECT from_kind, from_id FROM correlation_relationships
+			WHERE relationship_id=?`, evidence.RelationshipID).Scan(&fromKind, &fromID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("audit: read relationship of correlation evidence: %w", err)
+		}
+		if err == nil && fromKind == string(CorrelationNodeSemanticEvent) && fromID == string(evidence.SemanticEventID) {
+			// The relationship implies this row (impliedCorrelationEvidence).
+			return id, nil
+		}
+	}
 	_, err := txExecContextObserved(ctx, tx.tx, "correlation_evidence_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationship_evidence (
 			evidence_id, relationship_id, evidence_record_id, semantic_event_id, evidence_role,
@@ -1662,13 +1675,50 @@ func (tx *CorrelationTx) RelationshipEvidenceCount(
 	); err != nil {
 		return 0, err
 	}
+	var fromKind, fromID string
+	switch err := tx.tx.QueryRowContext(ctx, `SELECT from_kind, from_id FROM correlation_relationships
+		WHERE relationship_id=?`, relationshipID).Scan(&fromKind, &fromID); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return 0, fmt.Errorf("audit: read correlation relationship of evidence count: %w", err)
+	}
+	implied, hasImplied := impliedCorrelationEvidence(CorrelationRelationship{
+		RelationshipID: relationshipID, FromKind: CorrelationNodeKind(fromKind), FromID: fromID,
+	})
 	var count int64
 	if err := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM correlation_relationship_evidence WHERE relationship_id = ?`,
-		relationshipID).Scan(&count); err != nil {
+		FROM correlation_relationship_evidence WHERE relationship_id = ? AND evidence_id <> ?`,
+		relationshipID, implied.EvidenceID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("audit: count correlation relationship evidence: %w", err)
 	}
+	if hasImplied {
+		count++
+	}
 	return count, nil
+}
+
+// impliedCorrelationEvidence is the evidence a relationship from a semantic
+// event implies: that event, as its verified source. Every writer of such a
+// relationship records the occurrence it came from as its source, so the
+// row only repeated the relationship's own from_id. PutRelationshipEvidence
+// stores it no more; QueryGraph (loadEvidence) and RelationshipEvidenceCount
+// add it, with the evidence ID and creation time a stored row had, so the
+// graph a reader gets and the exported evidence count are the same with or
+// without the stored row (a store a 1.0.9 binary wrote keeps its rows).
+// Retention was already blind to it: a relationship's from node protects it
+// exactly when this row's semantic event did (S8 R5).
+func impliedCorrelationEvidence(relationship CorrelationRelationship) (CorrelationRelationshipEvidence, bool) {
+	if relationship.FromKind != CorrelationNodeSemanticEvent || relationship.FromID == "" {
+		return CorrelationRelationshipEvidence{}, false
+	}
+	return CorrelationRelationshipEvidence{
+		EvidenceID: deterministicCorrelationID("ev_", relationship.RelationshipID, relationship.FromID,
+			string(CorrelationEvidenceSource)),
+		RelationshipID:  relationship.RelationshipID,
+		SemanticEventID: SemanticEventID(relationship.FromID),
+		Role:            CorrelationEvidenceSource, Integrity: CorrelationIntegrityVerified,
+		CreatedAt: relationship.CreatedAt,
+	}, true
 }
 
 func (tx *CorrelationTx) requireExistingOccurrenceTarget(
