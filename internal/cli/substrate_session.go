@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
@@ -91,7 +92,7 @@ pipeline's own identity, with a GitHub Actions token or a projected Kubernetes t
 	fl.BoolVar(&f.kube, "kube", false, "sign in with your current kubeconfig identity (clusters without a sign-in server)")
 	fl.StringVar(&f.kubeconfig, "kubeconfig", "", "with --kube, the kubeconfig file (default: kubectl's own rules)")
 	fl.StringVar(&f.kubeContext, "kube-context", "", "with --kube, the kubeconfig context (default: its current one)")
-	fl.StringVar(&f.kubeNS, "kube-namespace", "", "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record names --admin-url)")
+	fl.StringVar(&f.kubeNS, "kube-namespace", "", "with --kube, the namespace DefenseClaw runs in (required; without it login only says which namespace publishes --admin-url)")
 	fl.StringVar(&f.kubeSA, "kube-service-account", "", "with --kube, sign in as this ServiceAccount (NAMESPACE/NAME or NAME) with a short-lived token; a client-certificate kubeconfig uses defenseclaw-launcher")
 	fl.BoolVar(&f.noBrowser, "no-browser", false, "do not open a browser; print the address and code only")
 	fl.BoolVar(&f.workload, "workload", false, "sign in as a CI workload with the pipeline's own token")
@@ -213,6 +214,10 @@ func runSubstrateLogin(cmd *cobra.Command, f *substrateLoginFlags) error {
 		// names (GAP-0130); the check sends it to the Kubernetes API server alone.
 		var pin auth.KubePin
 		if pin, err = auth.KubeVerifyEndpoint(ctx, c.KubeOptions(), c.AdminURL, c.KubeNamespace); err != nil {
+			var found *auth.KubeNamespaceFound
+			if errors.As(err, &found) {
+				return withExitCode(fmt.Errorf("%s: %s", err.Error(), substrateLoginAgainWith(fl, "kube-namespace", found.Namespace)), 2)
+			}
 			return substrateFail(err)
 		}
 		c = c.WithKubePin(pin)
@@ -352,4 +357,38 @@ func newSubstrateWhoamiCmd() *cobra.Command {
 	out.add(cmd)
 	com.add(cmd)
 	return cmd
+}
+
+// substrateLoginAgainWith is the login command the person typed, with
+// --name value set (replaced if given), as one line they can copy.
+func substrateLoginAgainWith(fl *pflag.FlagSet, name, value string) string {
+	parts := []string{"defenseclaw", "substrate", "login"}
+	fl.Visit(func(f *pflag.Flag) {
+		if f.Name == name {
+			return
+		}
+		if f.Value.Type() == "bool" {
+			if f.Value.String() == "true" {
+				parts = append(parts, "--"+f.Name)
+			}
+			return
+		}
+		if sv, ok := f.Value.(pflag.SliceValue); ok {
+			for _, v := range sv.GetSlice() {
+				parts = append(parts, "--"+f.Name, substrateShellWord(v))
+			}
+			return
+		}
+		parts = append(parts, "--"+f.Name, substrateShellWord(f.Value.String()))
+	})
+	parts = append(parts, "--"+name, substrateShellWord(value))
+	return "run: " + strings.Join(parts, " ")
+}
+
+// substrateShellWord quotes v for a POSIX shell when it needs it.
+func substrateShellWord(v string) string {
+	if v != "" && strings.Trim(v, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:=@,+%") == "" {
+		return v
+	}
+	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
 }

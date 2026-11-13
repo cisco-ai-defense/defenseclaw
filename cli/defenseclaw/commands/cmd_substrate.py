@@ -382,8 +382,8 @@ SUBSTRATE_COMMANDS: tuple[_Cmd, ...] = (
                 "kube-namespace",
                 "string",
                 (
-                    "with --kube, the namespace DefenseClaw runs in (default: the one whose launcher endpoint record "
-                    "names --admin-url)"
+                    "with --kube, the namespace DefenseClaw runs in (required; without it login only says which "
+                    "namespace publishes --admin-url)"
                 ),
             ),
             _Flag(
