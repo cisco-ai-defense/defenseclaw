@@ -13,6 +13,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
 // correlateClaudeHookForTest runs one Claude Code hook payload through the
@@ -160,5 +162,78 @@ func TestHookOccurrenceKeepsTurnAndAgentNodesWithoutTheirIdentifiers(t *testing.
 			edge.fromKind, edge.fromID, edge.toKind, edge.toID); got != 1 {
 			t.Fatalf("edge %+v: %d rows, want 1", edge, got)
 		}
+	}
+}
+
+// TestNativeCustodyClaudeHooksKeepClaimsAndToolIdentifier: a per-user
+// Claude Code hook has no native counterpart, so it stores no cross-rail
+// identity claim and no tool identifier; a managed or sandboxed hook keeps
+// both, and a managed hook and the native span of the same tool call are
+// still one logical event with a same_as edge (S8 R5).
+func TestNativeCustodyClaudeHooksKeepClaimsAndToolIdentifier(t *testing.T) {
+	for _, mode := range []string{"per-user", "sandboxed", "managed"} {
+		t.Run(mode, func(t *testing.T) {
+			installCorrelationHMACForTest()
+			fixture := newCodexNativeOTLPFixture(t)
+			api := &APIServer{store: fixture.store}
+			api.bindOTLPObservabilityRuntime(fixture.runtime)
+			ctx := t.Context()
+			switch mode {
+			case "per-user":
+				api.scannerCfg = config.DefaultConfig()
+			case "sandboxed":
+				api.scannerCfg = config.DefaultConfig()
+				ctx = sandboxauth.WithRequest(ctx, sandboxauth.Binding{
+					ID: "sb_0000000000000000000000000000000a", Connector: "claudecode",
+				}, nil)
+				ctx = withAuthenticatedHookConnector(ctx, "claudecode")
+			case "managed":
+				api.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+					Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+			}
+			payload, raw := loadClaudeHookCorrelationSourceFixture(t)
+			profile := api.hookProfileForRequest(ctx, "claudecode")
+			hook := normalizeAgentHookRequestWithProfile("claudecode", payload, profile)
+			_, hook, err := api.correlateHookOccurrence(ctx, profile, hook, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_identity_claims
+				WHERE semantic_event_id=?`, hook.SemanticEventID)
+			tools := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_identifiers
+				WHERE semantic_event_id=? AND identifier_kind='tool_invocation'`, hook.SemanticEventID)
+			sessions := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_identifiers
+				WHERE semantic_event_id=? AND identifier_kind='session'`, hook.SemanticEventID)
+			if mode == "per-user" {
+				if claims != 0 || tools != 0 || sessions != 1 {
+					t.Fatalf("per-user hook claims=%d tool identifiers=%d session identifiers=%d, want 0, 0, 1",
+						claims, tools, sessions)
+				}
+				return
+			}
+			if claims == 0 || tools != 1 || sessions != 1 {
+				t.Fatalf("%s hook claims=%d tool identifiers=%d session identifiers=%d, want claims, 1, 1",
+					mode, claims, tools, sessions)
+			}
+			if mode != "managed" {
+				return
+			}
+			accounting, err := api.importDecodedOTLPRequestV8(
+				t.Context(), loadClaudeNativeCorrelationSourceFixture(t), otelSignalTraces,
+				"claudecode", time.Now().UTC(),
+			)
+			if err != nil || !accounting.valid() || accounting.importedAndDerived != 1 {
+				t.Fatalf("Claude native import accounting=%+v err=%v", accounting, err)
+			}
+			events := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_events
+				WHERE logical_group_id=?`, hook.LogicalEventID)
+			sameAs := countCorrelationRowsForTest(t, fixture.path, `SELECT COUNT(*) FROM correlation_relationships
+				WHERE relationship_type='same_as' AND status='active'
+				AND ((from_kind='semantic_event' AND from_id=?) OR (to_kind='semantic_event' AND to_id=?))`,
+				hook.SemanticEventID, hook.SemanticEventID)
+			if events != 2 || sameAs == 0 {
+				t.Fatalf("managed hook and native span: %d events in the hook group, %d same_as edges", events, sameAs)
+			}
+		})
 	}
 }

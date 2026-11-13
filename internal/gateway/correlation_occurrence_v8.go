@@ -421,7 +421,10 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	sourceTime := parseCorrelationSourceTime(req.SourceTimestamp)
 	envelope := audit.EnvelopeFromContext(ctx)
 	exactIdentityClaims := []audit.CorrelationExactIdentityClaim(nil)
-	if hasLifecycle && !match.Conflict {
+	// A claim waits for the same provider ID on the native rail. A per-user
+	// hook has no native counterpart (nativePerUserHookOnly), so its claims
+	// were never paired and only took bytes (S8 R5).
+	if hasLifecycle && !match.Conflict && !nativePerUserHookOnly {
 		exactIdentityClaims = correlationExactIdentityClaims(
 			spec, instance.ConnectorInstanceID, audit.CorrelationRailHook, lifecycle, allValues,
 		)
@@ -477,6 +480,13 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		kind, ok := auditIdentifierKind(value)
 		if digest == "" || !ok || value.Target == connector.CorrelationTargetSemanticEvent ||
 			!correlationIdentifierStored(kind) {
+			continue
+		}
+		// The tool identifier of a per-user hook could only join a native
+		// leaf of the same call (a mirror match or same_as), and a per-user
+		// gateway has none; the call's PostToolUse finds its start through
+		// the pending operation (S8 R5).
+		if nativePerUserHookOnly && kind == audit.CorrelationIdentifierTool {
 			continue
 		}
 		if _, err := tx.PutIdentifier(ctx, audit.CorrelationIdentifier{
