@@ -395,10 +395,23 @@ func routeCallerRefusalText(reason string) string {
 // route-only without a route credential; OSS and routing off keep the
 // 1.0.9 token behaviour.
 func (s *Sidecar) proxyKernelPeer(r *http.Request, connectorName string) (string, bool) {
-	cfg := s.currentConfig()
-	if cfg == nil || !cfg.StandaloneEnterprise() || !cfg.Routing.Enabled || connectorName == "" {
+	if !proxyKernelPeerAllowed(s.currentConfig(), connectorName, routeCallerWindows) {
 		return "", false
 	}
 	caller := s.apiSnapshot().verifiedRouteCaller(r, connectorName, false, "")
 	return caller.Subject, caller.Verified
+}
+
+// proxyKernelPeerAllowed reports whether the guardrail proxy asks for the
+// kernel peer: managed + routing.enabled only, and not on Windows yet. The
+// Windows peer SID carries the creation-time PID reuse check
+// (peercred.ownerSIDLookup, REVIEW-code-slice4 P1-1), but the guardrail
+// proxy has no second factor there, so it stays off until the live probe
+// on the managed Windows host (CERT-110, S1 slice 4) confirms the lookup;
+// the proxy keeps the 1.0.9 base-only answer meanwhile.
+func proxyKernelPeerAllowed(cfg *config.Config, connectorName string, windows bool) bool {
+	if windows {
+		return false
+	}
+	return cfg != nil && cfg.StandaloneEnterprise() && cfg.Routing.Enabled && connectorName != ""
 }

@@ -305,3 +305,29 @@ func TestGuardrailProxyKernelPeerAttachesTheVerifiedSubject(t *testing.T) {
 		t.Fatalf("verified peer subject = %+v %v", subject, has)
 	}
 }
+
+// The guardrail proxy asks for the kernel peer on managed Linux and macOS
+// with routing on, never on Windows until the live probe (P1-1).
+func TestProxyKernelPeerAllowedOffOnWindows(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.DeploymentMode, cfg.Enterprise.Profile = "managed_enterprise", "standalone"
+	cfg.Routing.Enabled = true
+	if !proxyKernelPeerAllowed(cfg, "claudecode", false) {
+		t.Fatal("managed Unix with routing on asks for the kernel peer")
+	}
+	if proxyKernelPeerAllowed(cfg, "claudecode", true) {
+		t.Fatal("managed Windows must keep the base-only proxy answer")
+	}
+	if proxyKernelPeerAllowed(cfg, "", false) || proxyKernelPeerAllowed(nil, "claudecode", false) {
+		t.Fatal("no connector or no config asks nothing")
+	}
+	cfg.Routing.Enabled = false
+	if proxyKernelPeerAllowed(cfg, "claudecode", false) {
+		t.Fatal("routing off keeps the 1.0.9 behaviour")
+	}
+	oss := &config.Config{}
+	oss.Routing.Enabled = true
+	if proxyKernelPeerAllowed(oss, "claudecode", false) {
+		t.Fatal("OSS never asks for the kernel peer")
+	}
+}
