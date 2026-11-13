@@ -29,9 +29,9 @@ func TestClaudeClientClassificationIsTheSameOnEveryOS(t *testing.T) {
 	uid := os.Getuid() + 1000
 	type shape struct {
 		os, name, exe, image string // image is how the OS's argv names the client
-		uid                      *int
-		sid                      string
-		source                   plane.EventSource
+		uid                  *int
+		sid                  string
+		source               plane.EventSource
 	}
 	shapes := []shape{
 		{"linux", "2.1.317", "/home/cwk-v1/.local/share/claude/versions/2.1.317", "claude", &uid, "", plane.SourceCNProc},
