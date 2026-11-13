@@ -351,7 +351,9 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	// has shown it sends bodies; until then they are raised now as well, in
 	// case the body never comes.
 	deferAsks := false
-	if bodyOverridable(req) && pol.rulesOnPath(req) {
+	// A JSON POST can name it too (Laravel, Express's req.body getter): held
+	// only where a deny or ask rule names a method other than POST.
+	if (bodyOverridable(req) && pol.rulesOnPath(req)) || (jsonBody(req) && pol.rulesNameAnotherMethod(req)) {
 		if why := e.overrideBodyUnreadable(req); why != "" {
 			if v, refused = e.overrideUnchecked(v, req, why); refused {
 				return v

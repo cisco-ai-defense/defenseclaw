@@ -30,7 +30,7 @@ import (
 // The GAP-0046 class table (lane F10). A request's effective method and
 // path are what the server frameworks compute; the callout evaluates the
 // url rules for every candidate and the strictest wins. Rows come from
-// lane R (R1), R2, R3a and R4, then the framework list (F10). Every row
+// lane R (R1), R2, R3a, R4 and R5, then the framework list (F10). Every row
 // runs the headers and, when the callout asks for it and the egress
 // filter sends it, the body.
 
@@ -169,6 +169,27 @@ func ovCases() []ovCase {
 		{name: "stock Substrate, managed", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{formCT}, body: del, stock: true, managed: true, want: "deny:body_uninspectable"},
 		{name: "stock Substrate, open", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", body: del, stock: true, mode: FailureOpen, want: "unchecked"},
 		{name: "body_inspection on, body arrives", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", body: del, inspect: BodyOn, want: "deny:url_rule"},
+		// R5: a JSON POST body's top-level _method (Laravel's JSON request
+		// bag, Express method-override's req.body getter after express.json()),
+		// read where a deny or ask rule names a method other than POST.
+		{name: "JSON _method (Laravel)", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_method":"DELETE","title":"x"}`), want: "deny:url_rule"},
+		{name: "+json type", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/vnd.api+json"}, body: []byte(`{"_method":"DELETE"}`), want: "deny:url_rule"},
+		{name: "JSON charset, case variants", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"Application/JSON; charset=utf-8"}, body: []byte(`{"_METHOD":"delete"}`), want: "deny:url_rule"},
+		{name: "JSON _HttpMethod", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_httpMethod":"DELETE"}`), want: "deny:url_rule"},
+		{name: "gzip JSON", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, hdr: []string{"content-encoding", "gzip"}, body: ovGzip(`{"_method":"DELETE"}`), want: "deny:url_rule"},
+		{name: "JSON duplicate key", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_method":"GET","_method":"DELETE"}`), want: "deny:url_rule"},
+		{name: "JSON array value", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_method":["DELETE"]}`), want: "deny:url_rule"},
+		{name: "JSON UTF-16 charset", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json; charset=utf-16le"}, body: ovUTF16LE(`{"_method":"DELETE"}`), want: "deny:url_rule"},
+		{name: "JSON, stock Substrate, closed", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_method":"DELETE"}`), stock: true, want: "deny:body_uninspectable"},
+		{name: "JSON, stock Substrate, open", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_method":"DELETE"}`), stock: true, mode: FailureOpen, want: "unchecked"},
+		{name: "JSON, body_inspection off, open", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"_method":"DELETE"}`), inspect: BodyOff, mode: FailureOpen, want: "alert:method_override_unchecked"},
+		{name: "JSON ask binds the body method", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/releases/1", ct: []string{"application/json"}, body: []byte(`{"_method":"DELETE"}`),
+			rules: []URLRuleCfg{{Name: "release-writes", Hosts: []string{"api.github.com"}, Methods: []string{"POST", "DELETE"}, PathPrefix: "/repos/acme/releases", Action: "ask"}},
+			want:  "allow", wantAskMethod: "DELETE", wantAsks: 1},
+		{name: "JSON under a POST-only rule is not held", from: "R5", method: "POST", host: "y.example", path: "/api/x", ct: []string{"application/json"}, body: []byte(`{"_method":"DELETE"}`), stock: true,
+			rules: []URLRuleCfg{{Name: "api-posts", Hosts: []string{"y.example"}, Methods: []string{"POST"}, PathPrefix: "/api", Action: "ask"}},
+			want:  "allow-nobody"},
+
 		// Asks: every applying ask rule is asked, each with its methods.
 		{name: "two ask rules both asked", from: "F10", method: "POST", host: "y.example", path: "/api/admin/x", ct: []string{formCT}, body: del,
 			rules: []URLRuleCfg{{Name: "api-posts", Hosts: []string{"y.example"}, Methods: []string{"POST"}, PathPrefix: "/api", Action: "ask"},
@@ -177,8 +198,9 @@ func ovCases() []ovCase {
 
 		// Balanced defaults: these pass, and no body is asked for where no
 		// rule could apply.
-		{name: "JSON API POST", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"title":"x"}`), stock: true, want: "allow-nobody"},
-		{name: "JSON with charset", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json; charset=utf-8"}, body: []byte(`{}`), stock: true, managed: true, want: "allow-nobody"},
+		{name: "JSON API POST, no rule names another method", from: "F10", method: "POST", host: "x.example", path: "/public/x", ct: []string{"application/json"}, body: []byte(`{"title":"x"}`), stock: true, want: "allow-nobody"},
+		{name: "JSON with charset, only a POST rule on the path", from: "F10", method: "POST", host: "x.example", path: "/public/x", ct: []string{"application/json; charset=utf-8"}, body: []byte(`{}`), stock: true, managed: true, want: "allow-nobody"},
+		{name: "JSON without _method under a DELETE rule, body read", from: "R5", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{"application/json"}, body: []byte(`{"title":"x"}`), want: "allow"},
 		{name: "plain form", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{formCT}, body: []byte("title=hello"), want: "allow"},
 		{name: "override to an allowed method", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", ct: []string{formCT}, body: []byte("_method=PATCH"), want: "allow"},
 		{name: "POST without a body", from: "F10", method: "POST", host: "api.github.com", path: "/repos/acme/web", stock: true, want: "allow-nobody"},
