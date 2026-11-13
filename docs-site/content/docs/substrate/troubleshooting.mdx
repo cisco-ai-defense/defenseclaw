@@ -1,60 +1,92 @@
 ---
 title: Troubleshooting Agent Substrate
-description: Symptoms, causes and fixes for DefenseClaw on Agent Substrate - 503 and parking, the ask delay, unattended templates, drift and policy conflicts, another callout, version, issuer, bucket and kit skew - and a section written for the agents themselves.
+description: Symptoms, causes and fixes for DefenseClaw on Agent Substrate - no free worker, the ask delay, unattended templates, drift and policy conflicts, another callout, version, issuer, bucket and kit skew - and a section written for the agents themselves.
 keywords:
   - Agent Substrate troubleshooting
   - defenseclaw substrate doctor
   - policy_conflict
-  - 503 parking
+  - no free worker
 ---
 
-{/* TODO(substrate): confirm each message, reason code and event name below against the merged code. Messages are quoted from design notes and may differ in wording. */}
-
-Start with `defenseclaw substrate doctor`. It checks the cluster side and says how to fix each failure. Exit codes are in the [reference](/docs/substrate/reference#exit-codes).
+Start with `defenseclaw substrate doctor`. It checks your computer and your sign-in and says how to fix each failure. Administrators add `--cluster` (or run `verify`) for the cluster's own checks. Exit codes are in the [reference](/docs/substrate/reference#exit-codes). The quoted messages below are what the launcher and gateway print; `run` and `connect` show them after `Error:`.
 
 ## Symptoms
 
-### "cluster full", a 503, or the launcher waits
+### Not signed in, or the sign-in can't be kept
 
-Substrate parks a request when no worker has room for the actor. The launcher waits, retries with backoff, and then says the cluster is full. Suspend idle actors (`defenseclaw substrate list`, then `delete` the ones you don't need), or add workers to the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
+- `you are not signed in; run: defenseclaw substrate login`. Add the reason in brackets when the issuer ended it: `you are not signed in (the issuer ended the sign-in: Session not active); run: defenseclaw substrate login`. Exit code 4.
+- `the cluster did not accept your sign-in (token refused). Sign in again with: defenseclaw substrate login`.
+- `the cluster certificate is not trusted; give the certificate authority with: defenseclaw substrate login --admin-ca-file FILE`. A private CA also needs `--issuer-ca-file` for the sign-in server. Your browser may show its own certificate warning on the sign-in page; that is the browser, not the launcher.
+- **macOS, over SSH or with the keychain locked:** `the macOS keychain is locked and this session cannot ask you to unlock it (for example over SSH); unlock it with: security unlock-keychain`. If you declined the question: `you declined the macOS keychain request; run the command again and allow DefenseClaw`.
+- **Linux without a keyring:** `token_store: no OS keychain is usable: secret-tool is not on PATH; install it (package libsecret-tools or libsecret) with a running Secret Service such as GNOME Keyring; or set DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file`. Set the variable in every shell, or in CI. The sign-in itself still needs a browser on some machine: `login --no-browser` prints the address and code.
+
+### No free worker for a new agent
+
+```text
+the cluster has no free worker for a new agent right now; nothing was started. 2 of your agents are running (claude-b66c97d1, codex-2c9e41a7). Free a worker with: defenseclaw substrate delete NAME (see them all with defenseclaw substrate list), or ask your administrator for more workers.
+```
+
+Substrate answers `503` with the reason `no_free_worker` when no worker has room for the actor. `run` starts nothing and says which of your agents hold workers. Delete the ones you don't need (`list` has a `STATE` column), or add workers to the pool. If none of your agents are running, other work holds the pool. A golden-snapshot build also takes a worker. Lowering a worker pool's replica count while it hosts a running actor crashes that actor. Revert it with `kubectl ate revert`.
 
 ### A request to a new site hangs for several seconds after I approved it
 
-After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain` and check that your profile lets you approve (`allow_unblock`).
+After an approval, DefenseClaw updates the agent's allow list and Substrate applies it. The held request is retried for about ten seconds, so a delay of that order is expected. If it never goes through, run `defenseclaw substrate policy explain NAME` and check that your profile lets you approve (`allow_unblock`).
 
 ### "could not read the template's attestation" when I start an agent
 
-On a managed cluster, DefenseClaw reads the template's attestation to know which agent it runs, and it checks the sign-in rules on that. If the attestation can't be read, nothing starts; the connector you named is not taken on trust. Try again in a minute. If it keeps happening, an administrator checks the template with `defenseclaw substrate template verify`. On an open-source cluster the agent starts with a warning instead.
+```text
+the cluster could not read the template's attestation, so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify
+```
+
+The gateway answered `403` with the reason `template_attestation_unreadable`. On a managed cluster, DefenseClaw reads the template's attestation to know which agent it runs, and it checks the sign-in rules on that. If the attestation can't be read, nothing starts; the connector you named is not taken on trust. On an open-source cluster the agent starts instead, with the warning `template attestation could not be read; the connector you named decides the sign-in check`.
+
+### The cluster refused to start the agent
+
+- `the cluster refused to start this agent: <reason> (<code>). Nothing was started. If this is unexpected, give your administrator the agent id ...`. This is the reason `actor_refused`: the actor would get no network policy, for example an unattested template or a kit that is too old. The agent id lets an administrator find it in the events.
+- `you may not use that profile. Ask your administrator which profiles you can run, or leave --profile out to use your default` (`profile_not_allowed`). Only a DefenseClaw administrator can name another profile.
+- `that group of agents is not open to you; ask your administrator` (`atespace_not_allowed`).
+- The reason `connector_mismatch` (`400`): you named an agent that differs from the one the template runs. Leave the agent name out of the request or use the template that matches. `connector_required` means neither the template nor the request names an agent.
+- The reason `subscription_signin_refused` (`403`), on a managed cluster: the agent signs in with a vendor account, so its token would sit in the actor and its snapshots. The message tells the user to ask an administrator to bind the agent's key (for example `CURSOR_API_KEY`) as a Substrate secret, or to use an agent that runs through the DefenseClaw model route. `agent_hook_tamper_refused` is the same for Amp, whose hook registration can't be protected. See [Agents and features](/docs/substrate/agents#vendor-sign-in). Nothing is created: the refusal comes before the actor.
+- `NAME is not verified yet, so it does not run`: the launcher only starts agents it has verified. See [Agents and features](/docs/substrate/agents#agents).
 
 ### My agent can't reach anything
 
 An actor with no allow list has no network. The usual causes:
 
-- **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match. `doctor` lists it with the reason. Rebuild it with `defenseclaw substrate template build`, or `template verify`.
+- **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match, or its signing key was revoked. `doctor --cluster` lists it with the reason (the events say `untrusted_signer` or `no_attestation`, and `sandbox.template_unverified`). Rebuild it with `defenseclaw substrate template build`, or `template verify`.
 - **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
-- **The profile has no matching assignment.** You get `default_profile`. `policy explain` shows which one.
+- **The profile has no matching assignment.** You get `default_profile`. `policy explain NAME` shows which one.
+- **Someone else made the actor.** An actor in a launcher atespace that DefenseClaw didn't create is removed from policy (`sandbox.foreign_actor`, `sandbox.policy.removed`).
 
 ### An unattended run stopped on an ask
 
-Unattended runs deny asks by default. Either allow the site in the profile, or set `unattended_asks` to allow a wait of up to `ask_timeout`, and answer with `defenseclaw substrate approvals`.
+Unattended runs deny asks by default. Either allow the site in the profile, or set `unattended_asks: queue` to hold the ask for up to `ask_timeout`, and answer with `defenseclaw substrate approvals`. When nobody answers, the agent is told: "Nobody answered the approval this host needs in time." If a person rejects it: "The owner denied the approval this host needs."
 
 ### An actor is marked `policy_conflict`
 
-Another writer reverted DefenseClaw's egress policy three times in ten minutes, usually a GitOps tool or a script that owns `EgressPolicy` objects. The controller stopped reverting (it never adds access while doing so) and raised an alert. Find the other writer in the actor's audit records (`drift` and `policy_conflict` lifecycle records name the change) and stop it. The conflict clears when another writer restores DefenseClaw's policy. An administrator can also clear it with `defenseclaw substrate policy reset <actor>`, which is audited: the controller then writes the policy again and starts reverting again.
+Another writer reverted DefenseClaw's egress policy three times in ten minutes, usually a GitOps tool or a script that owns `EgressPolicy` objects. The controller stopped reverting (it never adds access while doing so) and raised the `sandbox.policy_conflict` event. Find the other writer in the actor's audit records (`drift` and `policy_conflict` lifecycle records name the change) and stop it. The conflict clears (`sandbox.policy_conflict.cleared`) when another writer restores DefenseClaw's policy. An administrator can also clear it with `defenseclaw substrate policy reset ATESPACE/NAME`, which is audited (`sandbox.policy_conflict.reset`): the controller then writes the policy again and starts reverting again.
+
+### A recreated agent is refused for a few minutes
+
+Substrate's egress gateway caches an actor's identity token by the actor's name. A new actor with the same name as a deleted one is refused until the old token expires (`actor_uid_mismatch`, up to 5 minutes), and the controller raises `sandbox.actor.recreated_same_name`. `defenseclaw substrate run` never reuses a name, so you only meet this with actors you create by hand with the same name. Use a new name, or wait.
+
+### A request is refused with `chain_unchecked`
+
+The callout checks each request against the actor's earlier tool calls (a secret read, then a send). If the check can't answer in time, the answer depends on the policy: an unattended actor, and any actor on a managed install, is refused with "DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress." and the request can be retried. On other installs the request goes through and an alert records `chain_unchecked`. Retry first. If it keeps happening, check that the gateway leader is up (`kubectl -n defenseclaw-system get deploy defenseclaw-gateway-leader`) and not overloaded; `substrate.extproc.chain.check_budget` bounds the wait.
 
 ### `setup` says another callout is registered
 
-Substrate has one slot for an egress callout. DefenseClaw refuses to replace another, because that would turn off someone's checks. Chain them on the other callout's side, or remove it deliberately. `setup` shows what is registered.
+Substrate has one slot for an egress callout. DefenseClaw refuses to replace another, because that would turn off someone's checks. Chain them on the other callout's side, or remove it deliberately. `setup --dry-run` shows what is registered.
 
-### `doctor` says the Substrate version is outside the tested range
+### `verify` says the Substrate version is outside the tested range
 
-DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may work but aren't supported. Upgrade or downgrade Substrate with the upstream runbook, then run `setup` and `doctor`.
+DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may work but aren't supported. Upgrade or downgrade Substrate with the upstream runbook, then run `setup` and `verify`.
 
-### `doctor` says two clusters share an issuer
+### `verify` says two clusters share an issuer
 
 The default actor-token issuer is the same on every cluster. Give each cluster its own with `substrate.identity.issuer`, and redeploy Substrate's API server with the matching `--actor-jwt-issuer`.
 
-### `doctor` warns about the snapshot bucket
+### `verify` warns about the snapshot bucket
 
 Snapshots hold everything an actor held, so the bucket should be encrypted, private, region-correct and have a retention rule. Fix the bucket, or accept the warning knowingly. `delete` removes an agent's snapshots.
 
@@ -68,7 +100,7 @@ An actor created and resumed outside DefenseClaw, inside one poll interval, gets
 
 ### A kit version refusal with a `migrate` hint
 
-The gateway accepts the kit from its own release and the one before. Rebuild the template with `template build`, then `defenseclaw substrate migrate <name>`.
+The gateway accepts the kit from its own release and the one before. Rebuild the template with `template build`, then `defenseclaw substrate migrate NAME`.
 
 ### Hooks fail with "gateway unreachable"
 
@@ -80,11 +112,15 @@ Egress inspects HTTPS, so tools must trust Substrate's bundle. Python needs `SSL
 
 ### An agent that uses WebSockets can't connect (Amp)
 
-Substrate 1.0.0 refuses every WebSocket upgrade on an inspected or `http` rule, even to a host in the allow list. The agent gets `403 Forbidden` with the body `WebSocket egress is not supported`, and Amp keeps saying "Reconnecting". The workaround is to add the host to `substrate.allow_passthrough_for` (for Amp, `ampcode.com`). That host is then forwarded without inspection: DefenseClaw doesn't check its requests and doesn't inject a secret there, so the agent's key or sign-in has to be in the actor. An open-source install warns about that, and a managed install refuses agents that hold their own sign-in.
+Substrate 1.0.0 refuses every HTTP/1.1 WebSocket upgrade on an inspected or `http` rule, even to a host in the allow list. The agent gets `403 Forbidden` with the body `WebSocket egress is not supported`, and Amp keeps saying "Reconnecting". The workaround is to add the host to `substrate.allow_passthrough_for` (for Amp, `ampcode.com`). That host is then forwarded without inspection: DefenseClaw doesn't check its requests and doesn't inject a secret there, so the agent's key or sign-in has to be in the actor. An open-source install warns about that, and a managed install refuses agents that hold their own sign-in.
 
 ### An MCP call is refused with `body_uninspectable` or `path_ambiguous`
 
 DefenseClaw reads the requests sent to MCP and listed hosts as the server will. It decodes gzip and deflate bodies and drops a UTF-8 byte order mark. With `extproc.failure_mode: closed` (the default) it refuses a body it can't read: another encoding, a charset that isn't UTF-8, or, for MCP, a body that isn't JSON (`NaN` in the arguments, for example). With `open` it allows the request and raises an alert. `path_ambiguous` is a path that servers can read in more than one way, such as an encoded slash or semicolon, a `..` segment or `..;`, on a host that has path rules. Send the resolved form (`/public/x`, not `/admin/../public/x`).
+
+### A request is blocked with `egress_blocked`
+
+The callout's refusal is a JSON body with `error: egress_blocked`, a `message` that starts "DefenseClaw blocked egress from actor NAME to HOST (CATEGORY): ...", the `category` (for example `url_rule`, `ask_denied`, `ask_pending`, `chain_egress`, `mcp_tool_blocked`, `body_uninspectable`, `path_ambiguous`, `actor_not_live`), the `rule` and a `how_to_unblock` hint. A message that starts "Blocked by your organization's DefenseClaw policy:" is your profile refusing something you can't approve; it names the request-access contact.
 
 ### A secret placeholder shows up in a tool's output
 
@@ -93,6 +129,18 @@ The placeholder was sent to a host the secret isn't bound to, so nothing was swa
 ### Credential injection returns 403 "atespace not permitted"
 
 The Kubernetes credential provider hadn't picked up its namespace policy. The chart's bootstrap grants the launcher atespaces; restart the provider (`kubectl -n ate-system rollout restart deploy/k8s-credential-provider`) after any manual change.
+
+### `secrets set` or `rm` fails with `secret_not_managed_by_defenseclaw`
+
+The Kubernetes Secret named by the secret's source already exists, and DefenseClaw didn't create it: it has no `app.kubernetes.io/managed-by: defenseclaw` label. The gateway answers `409` and changes nothing, because it only touches Secrets it created. Point the source at a new Secret name, or remove the existing Secret if it is yours. The chart gives the gateway a Role only in the namespaces your Kubernetes sources name (`create`, and `get` and `patch` on the named Secret), so a failure with a `502` (`secret_not_stored`) usually means the source's namespace has no Role yet: upgrade the chart after adding a source. Keep per-person sources (`{person}` in the Secret name) in a namespace of their own. See [Secrets](/docs/substrate/secrets#manage-them).
+
+### A skill I added in the session was refused
+
+skill-scanner does not run in the cluster. A skill in the attested template is trusted by its digest. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert. To use the skill everywhere, put it in the image and rebuild the template with `template build`.
+
+### Pull says there is no record of the folder
+
+`pull` compares the agent's work with the folder you sent. It can only do that from the computer you ran `run` on. From another computer, `connect` to the agent and `git push` from inside it.
 
 ## For agents
 

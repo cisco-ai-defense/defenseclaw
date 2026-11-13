@@ -122,13 +122,15 @@ func (st *substrateState) substrateRefuseOrAlert(ctx context.Context, connector,
 }
 
 // substrateScanSkills scans the attached folders and returns the ones to
-// quarantine and, for each folder that passed, a scan receipt. A scan error
+// quarantine and, for each folder that passed, a scan receipt, plus the
+// folders it decided (so the unscanned pass leaves them alone). A scan error
 // blocks the folder: the kit attached it because the model would see it
 // next (fail closed, as the runtime scan does for an incomplete folder).
-func (st *substrateState) substrateScanSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned) {
+func (st *substrateState) substrateScanSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateQuarantine, []SubstrateScanned, map[string]bool) {
 	if f == nil || st.cfg.Skills == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
+	decided := map[string]bool{}
 	var out []SubstrateQuarantine
 	// A folder past a kit cap (too many, too deep or too big files, or the
 	// root's folders past the listing cap) has no digest and cannot be
@@ -153,6 +155,31 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 	sort.Strings(dirs)
 	trusted := st.templateSkillDigests(ctx)
 	passed := map[string]string{} // folder -> the digest it passed with
+	// GAP-0164: a folder that did not fit the post comes with its file
+	// digests. One whose rebuilt digest is the listed fingerprint and is in
+	// the attested template build is trusted without its files, whatever its
+	// size. One bigger than a post that is not attested can never be scanned
+	// here: the fail mode decides now, with that reason (never "had room").
+	if actor, ok := substrateActorFrom(ctx); ok {
+		for _, fp := range f.Skills {
+			if fp.Attached || fp.Over || fp.FP == "" || len(fp.Sums) == 0 {
+				continue
+			}
+			dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
+			if st.skillReceiptOK(actor.UID, dir, fp.FP, fp.Receipt) || skilldigest.DigestSums(fp.Sums) != fp.FP {
+				continue
+			}
+			switch {
+			case trusted[fp.FP]:
+				passed[dir], decided[dir] = fp.FP, true
+			case fp.Big:
+				decided[dir] = true
+				if q := st.substrateRefuseOrAlert(ctx, connector, dir, "the skill folder is bigger than one DefenseClaw hook post carries and is not one the attested template build scanned", f); q != nil {
+					out = append(out, *q)
+				}
+			}
+		}
+	}
 	for i, dir := range dirs {
 		if i >= substrateSkillFoldersMax {
 			break
@@ -201,13 +228,17 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 	// the receipt key accepts it in a later post (GAP-0039).
 	var scanned []SubstrateScanned
 	if actor, ok := substrateActorFrom(ctx); ok {
-		for _, dir := range dirs {
-			if d, ok := passed[dir]; ok {
-				scanned = append(scanned, SubstrateScanned{Path: dir, FP: d, Receipt: st.skillReceipt(actor.UID, dir, d)})
-			}
+		names := make([]string, 0, len(passed))
+		for dir := range passed {
+			names = append(names, dir)
+		}
+		sort.Strings(names)
+		for _, dir := range names {
+			d := passed[dir]
+			scanned = append(scanned, SubstrateScanned{Path: dir, FP: d, Receipt: st.skillReceipt(actor.UID, dir, d)})
 		}
 	}
-	return out, scanned
+	return out, scanned, decided
 }
 
 // ErrSubstrateSkillScannerUnavailable is what a SubstrateSkillScanner returns
@@ -349,7 +380,7 @@ func (st *substrateState) skillReceiptOK(uid, dir, fp, receipt string) bool {
 // one the kit had room for. Without a receipt key every replica shares,
 // a receipt from another replica cannot be checked, so a folder that has one
 // is only named, never refused.
-func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connector string, f *SubstrateFacts) ([]SubstrateUnscanned, []SubstrateQuarantine) {
+func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connector string, f *SubstrateFacts, decided map[string]bool) ([]SubstrateUnscanned, []SubstrateQuarantine) {
 	actor, ok := substrateActorFrom(ctx)
 	if !ok || f == nil || st.cfg.Skills == nil {
 		return nil, nil
@@ -361,7 +392,7 @@ func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connecto
 			continue
 		}
 		dir := path.Clean("/" + strings.TrimPrefix(fp.Path, "/"))
-		if st.skillReceiptOK(actor.UID, dir, fp.FP, fp.Receipt) {
+		if decided[dir] || st.skillReceiptOK(actor.UID, dir, fp.FP, fp.Receipt) {
 			continue
 		}
 		out = append(out, SubstrateUnscanned{Path: dir, FP: fp.FP})
@@ -373,18 +404,19 @@ func (st *substrateState) substrateUnscannedSkills(ctx context.Context, connecto
 		// first, so one still pending after substrateSkillMaxPending posts
 		// is being kept out (folders that change on every call, an edited
 		// rotation): it counts as one the kit had room for.
-		if f.Truncated && st.pendingPosts(actor.UID, dir, fp.FP) <= substrateSkillMaxPending {
-			continue
+		why := "the DefenseClaw kit did not send it although it had room"
+		if f.Truncated {
+			if st.pendingPosts(actor.UID, dir, fp.FP) <= substrateSkillMaxPending {
+				continue
+			}
+			why = "the DefenseClaw kit did not send it in " + strconv.Itoa(substrateSkillMaxPending) + " posts"
 		}
-		block := st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector)
-		details := map[string]any{"actor_uid": actor.UID, "atespace": actor.Atespace, "actor": actor.Name,
-			"folder": dir, "fingerprint": fp.FP, "connector": connector, "refused": block}
-		if block {
-			refused = append(refused, SubstrateQuarantine{Path: dir,
-				Reason: "the skill folder was not scanned: the DefenseClaw kit did not send it although it had room"})
-			st.alert(ctx, "HIGH", "Substrate skill folder refused: it reached the actor without a scan", details)
+		// One alert per actor, folder and fingerprint, not one per post.
+		if st.cfg.BlockUnscannedSkills != nil && st.cfg.BlockUnscannedSkills(connector) {
+			refused = append(refused, SubstrateQuarantine{Path: dir, Reason: "the skill folder was not scanned: " + why})
+			st.alertOnce(ctx, "HIGH", "Substrate skill folder refused: it reached the actor without a scan", dir, f, errors.New(why))
 		} else {
-			st.alert(ctx, "MEDIUM", "Substrate skill folder reached the actor without a scan", details)
+			st.alertOnce(ctx, "MEDIUM", "Substrate skill folder reached the actor without a scan", dir, f, errors.New(why))
 		}
 	}
 	return out, refused
@@ -403,8 +435,8 @@ func (s substrateSkillAnswer) empty() bool {
 
 // substrateSkills runs the skill pass of one hook post.
 func (st *substrateState) substrateSkills(ctx context.Context, connector string, f *SubstrateFacts) substrateSkillAnswer {
-	q, scanned := st.substrateScanSkills(ctx, connector, f)
-	unscanned, refused := st.substrateUnscannedSkills(ctx, connector, f)
+	q, scanned, decided := st.substrateScanSkills(ctx, connector, f)
+	unscanned, refused := st.substrateUnscannedSkills(ctx, connector, f, decided)
 	return substrateSkillAnswer{Quarantine: append(q, refused...), Scanned: scanned, Unscanned: unscanned}
 }
 

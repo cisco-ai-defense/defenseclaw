@@ -31,6 +31,7 @@ for an admin to apply.
 | Deployment `defenseclaw-controller` (2, one active by lease, PDB) | policies, admission, drift, idle suspend |
 | Deployment `defenseclaw-callout` (HPA min 2, PDB), Service, ConfigMap `defenseclaw-callout` | the atenet-egress ext_proc callout and its config |
 | ConfigMap `defenseclaw-config` | config.yaml, rendered from `config:` (the single source) |
+| Role and RoleBinding `defenseclaw-gateway-secrets`, in each namespace a Kubernetes source of `config.substrate.secrets` names | the secrets admin API writes those Secrets: create, plus get and patch by name (every Secret of the namespace for a `{person}` name); a source in the release or Substrate namespace fails the render |
 | NetworkPolicies | default deny; actor listener and callout from atenet-egress only; admin from this namespace (not worker pods) and `networkPolicy.adminFrom`; leader from the release |
 | Hook Jobs | bootstrap (post-install/upgrade), pre-upgrade, pre-rollback, pre-delete |
 

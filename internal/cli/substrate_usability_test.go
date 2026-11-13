@@ -8,11 +8,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 )
 
 // The first sign-in needs only --admin-url: the cluster says how people
@@ -120,6 +122,64 @@ func TestSubstrateRunNeedsNoProfile(t *testing.T) {
 	}
 	if tg.profile != "" {
 		t.Errorf("profile %q, want empty (the cluster picks)", tg.profile)
+	}
+}
+
+// GAP-0184 and the E9 ruling: every connector runs from the launcher; the
+// cluster refuses the sign-in ones in managed and warns in open source.
+// substrateProven holds only unverified harnesses (no dead entries).
+func TestSubstrateRunVerifiedConnectors(t *testing.T) {
+	t.Setenv("DEFENSECLAW_SUBSTRATE_PROFILE", "")
+	t.Setenv("DEFENSECLAW_SUBSTRATE_TEMPLATE", "")
+	for _, agent := range []string{"claude", "codex", "copilot", "opencode", "hermes", "kiro", "antigravity", "cursor-agent", "amp", "devin"} {
+		tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, agent)
+		if err != nil {
+			t.Errorf("run %s refused: %v", agent, err)
+			continue
+		}
+		if (tg.connName == "amp") != (tg.note != "") {
+			t.Errorf("run %s: note %q (only Amp has one, the WebSocket limit)", agent, tg.note)
+		}
+	}
+	for name := range substrateProven {
+		h, ok := harness.Get(name)
+		if !ok {
+			t.Errorf("substrateProven names %q, which is not a harness", name)
+			continue
+		}
+		if h.Verification().Status != harness.Unverified {
+			t.Errorf("substrateProven names %s, whose harness is verified already", name)
+		}
+	}
+}
+
+// E9 in managed: the refusal shows the gateway's own explanation.
+func TestSubstrateSigninRefusalMessage(t *testing.T) {
+	msg := substrateAPIMessage(&api.Error{Status: 403, Reason: "subscription_signin_refused",
+		Message: "Devin CLI signs in with a vendor account, and a managed deployment does not allow that."})
+	for _, want := range []string{"Devin CLI signs in", "managed deployment", "Nothing was started", "subscription_signin_refused"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+	if msg := substrateAPIMessage(&api.Error{Status: 403, Reason: "agent_hook_tamper_refused"}); !strings.Contains(msg, "Nothing was started") {
+		t.Errorf("tamper refusal without a message: %q", msg)
+	}
+}
+
+// Live on stk (f7-clone4, 11-13 05:53Z): pull with stdin from /dev/null (a char device) asked for a
+// yes instead of printing the hint.
+func TestSubstrateInteractiveNeedsATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old }()
+	if substrateInteractive() {
+		t.Error("stdin from the null device counted as a terminal")
 	}
 }
 

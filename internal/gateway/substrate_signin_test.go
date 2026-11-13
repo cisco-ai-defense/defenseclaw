@@ -24,9 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	substrateapi "github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -230,5 +232,38 @@ func TestSubstrateCreateAttestationErrorFailsClosedInManaged(t *testing.T) {
 	}
 	if code, out := create(t, f, `{"profile":"eng","template":"claude-wave1"}`); code != http.StatusBadRequest || out["reason"] != "connector_required" {
 		t.Fatalf("open source, no connector named: %d %v", code, out)
+	}
+}
+
+// E9 through the launcher's own client: open source creates the sign-in
+// connector and returns the warning with the actor; managed refuses it with
+// the gateway's explanation and makes no actor.
+func TestSubstrateLauncherSigninBothModes(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		f, acts := signinFixture(t, managed, "devin")
+		srv := httptest.NewServer(f.admin)
+		c, err := substrateapi.New(substrateapi.Options{Base: srv.URL, Token: func(context.Context) (string, error) { return "p-alice", nil }})
+		if err != nil {
+			srv.Close()
+			t.Fatal(err)
+		}
+		a, err := c.Create(context.Background(), substrateapi.CreateRequest{Profile: "eng", Template: "devin-tpl", Connector: "devin"})
+		srv.Close()
+		if !managed {
+			if err != nil {
+				t.Fatalf("open source create devin: %v", err)
+			}
+			if len(a.Warnings) != 1 || !strings.Contains(a.Warnings[0], "snapshot") || acts.created != 1 {
+				t.Fatalf("open source: warnings %q, created %d", a.Warnings, acts.created)
+			}
+			continue
+		}
+		e, ok := substrateapi.AsError(err)
+		if !ok || e.Status != http.StatusForbidden || e.Reason != "subscription_signin_refused" || !strings.Contains(e.Message, "managed") {
+			t.Fatalf("managed create devin: %v (%+v)", err, e)
+		}
+		if acts.created != 0 {
+			t.Fatalf("managed: an actor was created (%d)", acts.created)
+		}
 	}
 }

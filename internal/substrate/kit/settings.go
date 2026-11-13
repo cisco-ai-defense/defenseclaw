@@ -371,6 +371,33 @@ var HeadlessArgv = map[string][]string{
 	"codex":      {"/usr/local/bin/codex", "exec", "--skip-git-repo-check", "-c", `sandbox_mode="danger-full-access"`, "-c", `approval_policy="never"`, "{prompt}"},
 }
 
+// Wave1Connectors are the connectors InteractiveArgv and HeadlessArgv serve.
+var Wave1Connectors = []string{"claudecode", "codex"}
+
+// Connectors is every connector the kit builds an actor image for, waves 1
+// to 3 (PLAN 4.3) in that order. Help texts list it, so they cannot drift.
+func Connectors() []string {
+	out := append([]string(nil), Wave1Connectors...)
+	out = append(out, Wave2Connectors...)
+	return append(out, Wave3Connectors...)
+}
+
+// CheckConnector refuses a connector the kit does not build an image for.
+func CheckConnector(name string) error {
+	for _, c := range Connectors() {
+		if c == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("%q is not a connector the kit builds; use %s", name, ConnectorList())
+}
+
+// ConnectorList is Connectors in words: "claudecode, codex, ... or devin".
+func ConnectorList() string {
+	c := Connectors()
+	return strings.Join(c[:len(c)-1], ", ") + " or " + c[len(c)-1]
+}
+
 // ModelProvider resolves the model route of a template build. A named
 // provider must be one the connector has a route for. Without one, Claude
 // Code and Codex take Bedrock unless the install serves (substrate.llm.providers)
