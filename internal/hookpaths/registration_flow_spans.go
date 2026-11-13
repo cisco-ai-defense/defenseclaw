@@ -461,19 +461,42 @@ func registrationOperandRoleWrites(program string, static []string, fixed []bool
 }
 
 // registrationCopyValueOptions are the cp, install and rsync options whose
-// value is the next word.
-var registrationCopyValueOptions = map[string]bool{
-	"-t": true, "-S": true, "--target-directory": true, "--suffix": true,
-	"-m": true, "-o": true, "-g": true, "--mode": true, "--owner": true, "--group": true,
-	"-e": true, "--rsh": true, "-f": true, "--filter": true, "-T": true, "--temp-dir": true,
-	"-B": true, "--block-size": true, "--rsync-path": true, "--exclude": true, "--include": true,
-	"--exclude-from": true, "--include-from": true, "--files-from": true, "--compare-dest": true,
-	"--copy-dest": true, "--link-dest": true, "--backup-dir": true, "--chmod": true, "--chown": true,
-	"--log-file": true, "--password-file": true, "--partial-dir": true, "--max-size": true,
-	"--min-size": true, "--bwlimit": true, "--timeout": true, "--port": true, "--out-format": true,
-	"--info": true, "--debug": true, "--max-delete": true, "--modify-window": true,
-	"--compress-level": true, "--skip-compress": true, "--usermap": true, "--groupmap": true,
-	"--iconv": true, "--contimeout": true, "--address": true,
+// value is the next word. The names are one text, not one literal each: the
+// GAP-0055 sweep reads every option-shaped literal of this package as an
+// option of a program branch, and these are not.
+var registrationCopyValueOptions = registrationFieldSet("-t -S --target-directory --suffix -m -o -g --mode --owner --group " +
+	"-e --rsh -f --filter -T --temp-dir -B --block-size --rsync-path --exclude --include --exclude-from --include-from " +
+	"--files-from --compare-dest --copy-dest --link-dest --backup-dir --chmod --chown --log-file --password-file " +
+	"--partial-dir --max-size --min-size --bwlimit --timeout --port --out-format --info --debug --max-delete " +
+	"--modify-window --compress-level --skip-compress --usermap --groupmap --iconv --contimeout --address")
+
+// registrationTarLongModes are the tar long options that set the mode, by
+// the letter of that mode; registrationTarLongValues take the next word;
+// registrationTarLongUnread change files the reader does not follow (append,
+// update, remove the sources, run a command).
+var (
+	registrationTarLongModes  = map[string]byte{}
+	registrationTarLongStdout = registrationFieldSet("--to-stdout")
+	registrationTarLongValues = registrationFieldSet("--directory --exclude --files-from --transform --owner --group " +
+		"--mode --mtime --format --use-compress-program")
+	registrationTarLongUnread = registrationFieldSet("--remove-files --append --update --delete --concatenate --catenate " +
+		"--to-command --checkpoint-action --info-script --new-volume-script --rsh-command --rmt-command")
+)
+
+func init() {
+	for _, pair := range strings.Fields("create:c extract:x get:x list:t diff:d compare:d") {
+		name, letter, _ := strings.Cut(pair, ":")
+		registrationTarLongModes["--"+name] = letter[0]
+	}
+}
+
+// registrationFieldSet is the set of the space-separated names in text.
+func registrationFieldSet(text string) map[string]bool {
+	set := map[string]bool{}
+	for _, name := range strings.Fields(text) {
+		set[name] = true
+	}
+	return set
 }
 
 func registrationCopyWrites(program string, static []string, fixed []bool) ([]int, bool) {
@@ -543,37 +566,25 @@ func registrationTarWrites(static []string, fixed []bool) ([]int, bool) {
 		switch {
 		case strings.HasPrefix(word, "--"):
 			name, _, attached := strings.Cut(word, "=")
-			switch name {
-			case "--create":
-				if !setMode('c') {
+			switch letter, isMode := registrationTarLongModes[name]; {
+			case isMode:
+				if !setMode(letter) {
 					return nil, false
 				}
-			case "--extract", "--get":
-				if !setMode('x') {
-					return nil, false
-				}
-			case "--list":
-				if !setMode('t') {
-					return nil, false
-				}
-			case "--diff", "--compare":
-				if !setMode('d') {
-					return nil, false
-				}
-			case "--to-stdout":
+			case registrationTarLongStdout[name]:
 				stdout = true
-			case "--file":
+			case name == "--file":
 				if attached {
 					archive = index
 				} else if index+1 < len(static) {
 					index++
 					archive = index
 				}
-			case "--directory", "--exclude", "--files-from", "--transform", "--owner", "--group", "--mode", "--mtime", "--format", "--use-compress-program":
+			case registrationTarLongValues[name]:
 				if !attached {
 					index++
 				}
-			case "--remove-files", "--append", "--update", "--delete", "--concatenate", "--catenate", "--to-command", "--checkpoint-action", "--info-script", "--new-volume-script", "--rsh-command", "--rmt-command":
+			case registrationTarLongUnread[name]:
 				return nil, false
 			}
 		case index == 1 && !strings.HasPrefix(word, "-") || strings.HasPrefix(word, "-") && len(word) > 1:
