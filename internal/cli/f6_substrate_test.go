@@ -5,11 +5,14 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi/ateapifake"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/attest"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/controller"
 )
 
@@ -75,5 +78,49 @@ func TestShippedControllerUsesTheAttestationVerifier(t *testing.T) {
 	}
 	if _, ok := ctl.Attestor().(controller.NoAttestor); !ok {
 		t.Fatalf("attestation off: %T", ctl.Attestor())
+	}
+}
+
+// GAP-0154: the create path builds its controller the way serve does
+// (substrate_serve.go) and reads the anchors from
+// substrate.templates.trust_anchors, the file the chart mounts in the
+// gateway pod (setup TestTemplateAnchorsReachTheCreatePath pins the mount
+// to config.DefaultSubstrateTemplateAnchors). With the file there it warns
+// nothing; without it, it says every template is refused.
+func TestCreatePathReadsTheTemplateAnchors(t *testing.T) {
+	createPath := func(anchors string) string {
+		cfg := &config.Config{}
+		cfg.Substrate.Enabled = true
+		cfg.Substrate.Templates.TrustAnchors = anchors
+		var sink bytes.Buffer
+		ctl, err := newSubstrateController(cfg, ateapifake.New(), &controller.LeaderRegistry{Store: nil}, nil, nil, &controller.JSONSink{W: &sink}, false, nil, "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := ctl.Attestor().(*controller.TemplateAttestor); !ok {
+			t.Fatalf("the create path admits with %T", ctl.Attestor())
+		}
+		return sink.String()
+	}
+	p := filepath.Join(t.TempDir(), "anchors.pem")
+	if out := createPath(p); !strings.Contains(out, "every template is refused") {
+		t.Fatalf("a missing anchors file must be reported: %q", out)
+	}
+	s, err := attest.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes, err := s.PublicKeyPEM()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, pemBytes, 0o440); err != nil {
+		t.Fatal(err)
+	}
+	if out := createPath(p); strings.Contains(out, "trust anchors") {
+		t.Fatalf("the create path did not find the mounted anchors: %q", out)
+	}
+	if config.DefaultSubstrateTemplateAnchors != "/etc/defenseclaw/substrate/template-anchors/anchors.pem" {
+		t.Fatal("the default anchors path moved: move the chart mount (dc.templateAnchorsMount) with it")
 	}
 }
