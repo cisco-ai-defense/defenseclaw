@@ -730,7 +730,7 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 		}
 		// Historical rule for operator patterns: not the fraction of a
 		// float (GAP-2062).
-		return !(start >= 2 && text[start-1] == '.' && text[start-2] >= '0' && text[start-2] <= '9')
+		return start < 2 || text[start-1] != '.' || text[start-2] < '0' || text[start-2] > '9'
 	}
 	return true
 }
@@ -741,7 +741,7 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 func localPANShaped(match, digits string) bool {
 	for i := 0; i < len(match); i++ {
 		c := match[i]
-		if !(c >= '0' && c <= '9' || c == ' ' || c == '\t' || c == '-' || c == '.') {
+		if (c < '0' || c > '9') && c != ' ' && c != '\t' && c != '-' && c != '.' {
 			return false
 		}
 	}
