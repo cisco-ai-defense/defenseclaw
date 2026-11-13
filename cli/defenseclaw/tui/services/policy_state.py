@@ -60,6 +60,7 @@ POLICY_VIEWS: tuple[str, ...] = (
     "packs",
     "sandbox_packs",
 )
+
 VIEW_TITLES = {
     "posture": "Posture",
     "optin": "Opt-in packs",
@@ -778,6 +779,21 @@ def chain_domain_label(domain: str) -> str:
     return dict(CHAIN_DOMAINS).get(domain, "Other")
 
 
+
+def secret_flow_effective_mode(effects_rules: str, mode: str) -> str:
+    """Fold the rollout key (guardrail.effects_rules) and the feature switch
+    (guardrail.secret_flow.mode) into the effective mode, mirroring
+    internal/gateway.secretFlowLaneMode."""
+    rollout = (effects_rules or "shadow")
+    if rollout == "off":
+        return "off"
+    m = mode or "shadow"
+    if m == "off":
+        return "off"
+    if m == "on":
+        return "on" if rollout == "on" else "shadow"
+    return "shadow"
+
 def chain_display_rows(chains: Iterable[Any]) -> tuple[tuple[str, Any | None], ...]:
     """``(group label, None)`` header rows, each followed by its chains.
 
@@ -921,6 +937,12 @@ class PoliciesPanelModel:
         self.pack_rules: dict[str, tuple[PackRule, ...]] = {}
         self.families: dict[str, tuple[Any, ...]] = {}
         self.chains: tuple[Any, ...] = ()
+        # Secret flow tracking view (read-only).
+        self.secret_flow_cfg: dict[str, Any] = {}
+        self.secret_flow_hits: tuple[dict[str, Any], ...] = ()
+        self.secret_flow_loaded = False
+        self.secret_flow_error = ""
+        self.secret_flow_tracked = 0
         self.pack_bases: dict[str, str] = {}
         self.multi_connector = False
         self.policy_dir = ""
@@ -938,6 +960,28 @@ class PoliciesPanelModel:
         self.multi_connector = isinstance(connectors, Mapping) and bool(connectors)
         # policy_dir, else <data_dir>/policies.
         self.policy_dir = policy_root(config)
+        sf = getattr(guardrail, "secret_flow", None)
+        if sf is not None:
+            label = getattr(sf, "label_sets", None)
+            sink = getattr(sf, "sink_action", None)
+            mem = getattr(sf, "memory", None)
+            self.secret_flow_cfg = {
+                "mode": getattr(sf, "mode", "shadow"),
+                "effective": secret_flow_effective_mode(getattr(guardrail, "effects_rules", "shadow"), getattr(sf, "mode", "shadow")),
+                "effects_rules": getattr(guardrail, "effects_rules", "shadow"),
+                "credentials": bool(getattr(label, "credentials", True)) if label is not None else True,
+                "extra_path_globs": list(getattr(label, "extra_path_globs", []) or []) if label is not None else [],
+                "extra_secret_patterns": list(getattr(label, "extra_secret_patterns", []) or []) if label is not None else [],
+                "sink_default": getattr(sink, "default", "alert") if sink is not None else "alert",
+                "sink_strict": getattr(sink, "strict", "block") if sink is not None else "block",
+                "sink_managed": getattr(sink, "managed", "block") if sink is not None else "block",
+                "reencodings": bool(getattr(sf, "reencodings", True)),
+                "max_labeled_paths": getattr(mem, "max_labeled_paths", 512) if mem is not None else 512,
+                "max_value_digests": getattr(mem, "max_value_digests", 256) if mem is not None else 256,
+                "destination_allowlist": list(getattr(sf, "destination_allowlist", []) or []),
+            }
+        else:
+            self.secret_flow_cfg = {}
 
     def apply_policies(self, policies: list[Any] | tuple[Any, ...]) -> None:
         self.policies = tuple(policies)
@@ -992,6 +1036,48 @@ class PoliciesPanelModel:
         except ValueError as exc:
             self.set_sandbox_error(str(exc))
 
+    def apply_secret_flow(self, hits: Iterable[Mapping[str, Any]], tracked: int = 0) -> None:
+        self.secret_flow_hits = tuple(dict(h) for h in hits)
+        self.secret_flow_tracked = int(tracked)
+        self.secret_flow_loaded = True
+        self.secret_flow_error = ""
+        self._clamp()
+
+    def set_secret_flow_error(self, message: str) -> None:
+        self.secret_flow_error = message
+        self.secret_flow_loaded = True
+
+    def secret_flow_rows(self) -> tuple[tuple[str, str], ...]:
+        cfg = self.secret_flow_cfg
+        if not cfg:
+            return ()
+        label_sets = ["credentials"] if cfg.get("credentials") else ["(credentials off)"]
+        if cfg.get("extra_path_globs"):
+            label_sets.append("path globs: " + ", ".join(cfg["extra_path_globs"]))
+        if cfg.get("extra_secret_patterns"):
+            label_sets.append("secret patterns: " + ", ".join(cfg["extra_secret_patterns"]))
+        allow = ", ".join(cfg.get("destination_allowlist") or []) or "(none)"
+        rows = [
+            ("mode", f"{cfg.get('mode', 'shadow')} (effective {cfg.get('effective', 'shadow')})"),
+            ("label sets", ", ".join(label_sets)),
+            ("sink action", f"default {cfg.get('sink_default')}, strict {cfg.get('sink_strict')}, managed {cfg.get('sink_managed')}"),
+            ("re-encodings", "on" if cfg.get("reencodings") else "off"),
+            ("memory", f"{cfg.get('max_labeled_paths')} paths / {cfg.get('max_value_digests')} digests"),
+            ("allowlist", allow),
+            ("tracked sessions", str(self.secret_flow_tracked)),
+        ]
+        if self.secret_flow_error:
+            rows.append(("hits", "unavailable: " + self.secret_flow_error))
+        elif not self.secret_flow_hits:
+            rows.append(("recent hits", "none recorded"))
+        else:
+            for h in self.secret_flow_hits:
+                sets = ", ".join(h.get("sets") or []) or "-"
+                when = str(h.get("time", ""))[11:19] or str(h.get("time", ""))
+                line = f"{when} {h.get('action', '')} {h.get('kind', '')} {h.get('program', '?')}->{h.get('host', '?')} ({sets})"
+                rows.append(("hit", line.strip()))
+        return tuple(rows)
+
     def set_error(self, message: str) -> None:
         """A failed read keeps the last good rows."""
         self.error = message
@@ -1010,7 +1096,9 @@ class PoliciesPanelModel:
     # ---- queries ----------------------------------------------------------
 
     def views(self) -> tuple[str, ...]:
-        return POLICY_VIEWS if self.sandbox_supported else POLICY_VIEWS[:-1]
+        if self.sandbox_supported:
+            return POLICY_VIEWS
+        return tuple(view for view in POLICY_VIEWS if view != "sandbox_packs")
 
     @property
     def cursor(self) -> int:
@@ -1264,8 +1352,19 @@ class PoliciesPanelModel:
             return None
         return rows[self.cursors["families"]]
 
+
     def chain_rows(self) -> tuple[tuple[str, Any | None], ...]:
-        return chain_display_rows(self.chains)
+        # The Chains view also carries the Secret flow tracking summary as
+        # leading, non-selectable (None) rows: it is the read-only view of the
+        # correlation/flow behaviors, and Secret flow replaces the
+        # credential-read -> egress chain. (Folded here, not a separate view,
+        # to keep the 80-column one-line view switcher within budget.)
+        info: list[tuple[str, Any | None]] = []
+        if self.secret_flow_cfg:
+            info.append(("Secret flow tracking", None))
+            for label, value in self.secret_flow_rows():
+                info.append((f"{label}: {value}", None))
+        return tuple(info) + chain_display_rows(self.chains)
 
     def blocking_chains(self) -> int:
         return sum(1 for chain in self.chains if _attr(chain, "can_block", False))
@@ -1330,6 +1429,8 @@ class PoliciesPanelModel:
         self.set_view(view)
         if view == "sandbox_packs" and not self.sandbox_loaded:
             return PolicyPanelAction("load_sandbox_packs")
+        if view == "chains" and not self.secret_flow_loaded:
+            return PolicyPanelAction("load_secret_flow")
         return PolicyPanelAction("render")
 
     def handle_key(self, key: str) -> PolicyPanelAction:
@@ -1509,9 +1610,12 @@ class PoliciesPanelModel:
             return f"Scope: {scope} ▾  ·  {pack} pack"
         if view == "chains":
             blocking = self.blocking_chains()
+            flow = ""
+            if self.secret_flow_cfg:
+                flow = " · secret flow " + str(self.secret_flow_cfg.get("effective", "shadow"))
             return (
                 f"{len(self.chains)} bounded chains · ✓ {blocking} can block · "
-                f"◐ {len(self.chains) - blocking} alert only · built in, read-only"
+                f"◐ {len(self.chains) - blocking} alert only · read-only" + flow
             )
         active = self.active_policy()
         policy = f"active policy {active.name}" if active is not None else "no policy activated yet"
@@ -1733,6 +1837,7 @@ class PoliciesPanelModel:
         else:
             columns = ("", "Pack", "Kind")
         return columns, tuple(rows)
+
 
     def _policy_table(self, width: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         rows = []

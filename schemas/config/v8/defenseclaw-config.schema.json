@@ -1519,6 +1519,63 @@
       "pattern": "^(|[Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
       "description": "Lowest severity that takes the action: CRITICAL, HIGH, MEDIUM or LOW, in any case. Empty inherits: a connector falls back to the global value, and the global value to the rule pack's level."
     },
+    "effectsRulesTier": {
+      "type": "string",
+      "enum": [
+        "restricted",
+        "full"
+      ]
+    },
+    "effectsRules": {
+      "type": "string",
+      "enum": [
+        "off",
+        "shadow",
+        "on"
+      ]
+    },
+    "secretFlow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Secret flow tracking (guardrail.secret_flow): label the secrets a session reads and alert or block when a labeled secret reaches an external sink. Rollout rides guardrail.effects_rules; these are the feature's own settings.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["off", "shadow", "on"],
+          "default": "shadow",
+          "description": "off (skip, no cost), shadow (measure beside today's) or on (verdict participates). Ships shadow."
+        },
+        "label_sets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "credentials": { "type": "boolean", "default": true, "description": "Label the built-in credential set (.env, SSH private keys, cloud/token files, keychain exports, /proc/*/environ)." },
+            "extra_path_globs": { "type": "array", "items": { "type": "string" }, "description": "Extra absolute or ~ path globs to label as secret." },
+            "extra_secret_patterns": { "type": "array", "items": { "type": "string" }, "description": "Extra basename globs to label as secret." }
+          }
+        },
+        "sink_action": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Action per mode when a labeled secret reaches an external sink. The default profile never blocks.",
+          "properties": {
+            "default": { "type": "string", "enum": ["alert"], "default": "alert", "description": "The default profile never blocks; alert only." },
+            "strict": { "type": "string", "enum": ["alert", "block"], "default": "block" },
+            "managed": { "type": "string", "enum": ["alert", "block"], "default": "block" }
+          }
+        },
+        "reencodings": { "type": "boolean", "default": true, "description": "Index base64/hex/URL-encoded forms of each secret value so a re-encoded secret still matches." },
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_labeled_paths": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 512, "description": "Max labeled file paths held per session (LRU). 0 uses the default." },
+            "max_value_digests": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 256, "description": "Max secret-value digests held per session. 0 uses the default." }
+          }
+        },
+        "destination_allowlist": { "type": "array", "items": { "type": "string" }, "description": "Hosts (and dotted suffixes) that do not count as external sinks, e.g. your own git remote or a package registry." }
+      }
+    },
     "detectionStrategy": {
       "type": "string",
       "enum": [
@@ -2199,6 +2256,15 @@
         },
         "detection_strategy_tool_call": {
           "$ref": "#/$defs/detectionStrategyOrInherit"
+        },
+        "effects_rules": {
+          "$ref": "#/$defs/effectsRules"
+        },
+        "effects_rules_tier": {
+          "$ref": "#/$defs/effectsRulesTier"
+        },
+        "secret_flow": {
+          "$ref": "#/$defs/secretFlow"
         },
         "judge_sweep": {
           "type": "boolean"

@@ -1098,6 +1098,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			observation.ParserUncertaintyCount,
 		)
 	}
+	// The live shadow run of the effect lane records through the audit log
+	// (guardrail.effects_rules=shadow, GAP-0256); it never changes the verdict.
+	action.recordEffectShadow = func(res EffectShadowResult) {
+		a.recordEffectShadow(ctx, firstNonEmpty(req.Connector, action.Connector), res)
+	}
 	// CodeGuard: scan file content for any file-write tool.
 	//
 	// the legacy gate matched only the canonical

@@ -57,6 +57,23 @@ The repository ships two separate policy layers:
 They are not interchangeable. The focused engineering contract is
 [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md).
 
+## Command reading budget
+
+Every shell reader of a hook call (the parser, the statement split, the
+analysers) works inside one budget in `internal/shellparse`, checked before
+any of them runs: nesting of `(`, `{` and `[` (`MaxNestingDepth`, 512), brace
+expansion size, the chain operators `|`, `&&` and `||` of the parse tree
+(`MaxChainOperators`, 4096; a text with more than `MaxChainOperatorBytes`,
+32,768, `|` and `&&` bytes is refused without a parse), and, for a command of
+64 KiB or more, the nodes of its tree (`MaxParsedNodes`, 262,144). The values
+are 20 to 100 times the largest of 3.1 million real agent calls. A call past
+the budget is opaque to the readers: it gets the evaluation-limit finding
+(`ACTION-COMPOUND-LIMIT`, reason `parse_budget_exceeded`), which alerts outside
+the strict profile (managed non-strict included, rel-1-0-6:GAP-0675) and blocks
+in strict (managed strict included). Allocation and time grow linearly up to
+the budget, and the copy of the parse cache stops at a depth limit instead of
+overflowing the stack.
+
 ## Verification
 
 Behavior changes should be proven by the owning unit tests, the security corpus

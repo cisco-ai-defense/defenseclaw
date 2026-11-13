@@ -230,6 +230,7 @@ class PolicyPanelMixin:
         # running read saw the old config, so one more load follows it.
         self._policy_load_pending = False
         self._policy_sandbox_running = False
+        self._policy_secret_flow_running = False
 
     def _policy_mount(self) -> None:
         """Read the catalog once so Overview and the status strip name the active policy."""
@@ -378,6 +379,40 @@ class PolicyPanelMixin:
             return None
         return Aside(title, "\n".join(rich_escape(line) for line in lines))
 
+    def _schedule_secret_flow_load(self) -> None:
+        if getattr(self, "_app_shutting_down", False) or self._policy_secret_flow_running:
+            return
+        self._policy_secret_flow_running = True
+        self.run_worker(self._load_secret_flow(), exclusive=False, thread=False)  # type: ignore[attr-defined]
+
+    async def _load_secret_flow(self) -> None:
+        """Read the live gateway's Secret flow tracking view (config summary and
+        recent redacted hits). The gateway holds the per-session state; if it is
+        not running, the view still shows the configured settings."""
+        model = self.policy_model
+
+        def _fetch() -> dict:
+            from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+            cfg = getattr(self, "config", None)
+            client = OrchestratorClient(
+                host=gateway_api_client_host(cfg),
+                port=cfg.gateway.api_port,
+                token=cfg.gateway.resolved_token(),
+                timeout=3,
+            )
+            return client.secret_flow()
+
+        try:
+            data = await asyncio.to_thread(_fetch)
+            model.apply_secret_flow(data.get("recent_hits") or [], tracked=int(data.get("tracked_sessions") or 0))
+        except Exception as exc:  # noqa: BLE001 - gateway down is fine; show settings only
+            model.set_secret_flow_error(str(exc).splitlines()[0] if str(exc) else "gateway not reachable")
+        finally:
+            self._policy_secret_flow_running = False
+        if getattr(self, "active_panel", "") == "policies" and not getattr(self, "help_open", False):
+            self._render_chrome()  # type: ignore[attr-defined]
+
     def _select_policy_nav(self, key: str) -> bool:
         """A click on a nav item or switcher segment opens that view."""
         model = self.policy_model
@@ -386,6 +421,8 @@ class PolicyPanelMixin:
         action = model.select_view(key)
         if action.kind == "load_sandbox_packs":
             self._schedule_policy_load(sandbox=True)
+        elif action.kind == "load_secret_flow":
+            self._schedule_secret_flow_load()
         return True
 
     def _policies_body_text(self) -> str:
@@ -409,6 +446,7 @@ class PolicyPanelMixin:
             model.error
             or (model.view == "packs" and model.pack_error)
             or (model.view == "sandbox_packs" and model.sandbox_error)
+            or (model.view == "chains" and model.secret_flow_error)
             or (model.view in {"posture", "optin", "chains", "families"} and model.posture_error)
         )
         empty = model.empty_state()
@@ -485,6 +523,8 @@ class PolicyPanelMixin:
             self._schedule_policy_load(sandbox=self.policy_model.sandbox_loaded)
         elif kind == "load_sandbox_packs":
             self._schedule_policy_load(sandbox=True)
+        elif kind == "load_secret_flow":
+            self._schedule_secret_flow_load()
         elif kind == "pick_policy":
             flow = self._policy_activate_flow(action.policy)
         elif kind == "pick_pack":

@@ -1234,6 +1234,14 @@ func newAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
 	}
+	if logger != nil {
+		// Secret flow tracking: write each shadow hit to the audit log (the
+		// in-memory explain ring does not survive a restart).
+		SetSecretFlowAuditSink(func(ctx context.Context, r FlowAuditRecord) {
+			defer func() { _ = recover() }()
+			_ = logger.LogActionCtxSeverity(ctx, string(audit.ActionGuardrailInspection), "secret-flow:shadow", r.Details(), "INFO")
+		})
+	}
 	return s
 }
 
@@ -1479,6 +1487,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	mux.HandleFunc("/v1/guardrail/secret-flow", a.handleSecretFlow)
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
 		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
