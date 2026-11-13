@@ -1814,7 +1814,8 @@ class DecisionModelConfig:
         return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
 
     def effective_protocol(self) -> str:
-        return (self.protocol or "").strip().lower() or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
+        # Exact values only (validation_error refuses anything else), as in Go and the schema.
+        return self.protocol or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
 
     def effective_timeout(self) -> float:
         return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
@@ -1850,7 +1851,7 @@ class DecisionModelConfig:
             return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
         if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
             return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
-        if self.effective_protocol() not in DECISION_MODEL_PROTOCOLS:
+        if self.protocol not in ("", *DECISION_MODEL_PROTOCOLS):
             return f"protocol must be system-one or gemini-decisions, got {self.protocol!r}"
         if self.base_url.strip():
             err = decision_model_url_error(self.base_url)
@@ -1862,6 +1863,13 @@ class DecisionModelConfig:
             if not self.model.strip():
                 return "enabled needs model (the model name the endpoint serves)"
         return ""
+
+
+# Query parameters that carry a key or token. Mirrors decisionModelKeyQueryParams in Go.
+_DECISION_MODEL_KEY_QUERY_PARAMS = frozenset({
+    "key", "api_key", "apikey", "api-key", "x-goog-api-key", "access_token", "token",
+    "auth_token", "auth", "secret", "client_secret", "password",
+})
 
 
 def decision_model_url_error(raw: str) -> str:
@@ -1878,6 +1886,14 @@ def decision_model_url_error(raw: str) -> str:
         return "base_url must be an absolute http(s) URL"
     if parsed.username or parsed.password:
         return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    from urllib.parse import parse_qsl
+
+    for name, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if name.lower() in _DECISION_MODEL_KEY_QUERY_PARAMS:
+            return (
+                f"base_url must not carry a key in its query string ({name}=); put the key in "
+                f"{DECISION_MODEL_KEY_ENV} (decision_model.api_key_env)"
+            )
     scheme = parsed.scheme.lower()
     if scheme == "https":
         return ""

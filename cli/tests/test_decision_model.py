@@ -661,9 +661,36 @@ def gemini():
 
 def test_protocol_validation_and_default():
     assert DecisionModelConfig().effective_protocol() == "system-one"
-    assert DecisionModelConfig(protocol="Gemini-Decisions").effective_protocol() == "gemini-decisions"
     assert DecisionModelConfig(protocol="gemini-decisions").validation_error() == ""
     assert "system-one or gemini-decisions" in DecisionModelConfig(protocol="openai").validation_error()
+    # Exact values only, as in Go and the schema.
+    assert "system-one or gemini-decisions" in DecisionModelConfig(protocol="Gemini-Decisions").validation_error()
+
+
+def test_base_url_refuses_a_key_in_the_query_string():
+    for bad in (
+        "https://generativelanguage.googleapis.com/v1beta/decisions?key=placeholder",
+        "https://dm.example/x?alt=json&API_KEY=placeholder",
+        "https://dm.example/x?access_token=placeholder",
+    ):
+        problem = decision_model_url_error(bad)
+        assert "query string" in problem and "DEFENSECLAW_DECISION_MODEL_KEY" in problem, bad
+        assert "placeholder" not in problem
+    assert decision_model_url_error("https://dm.example/x?alt=json") == ""
+
+
+def test_google_url_infers_the_protocol(home):
+    cfg = config_module.load()
+    dmod.apply_settings(cfg, enabled=True, model="gemini-decision-1", base_url=dmod.GEMINI_BASE_URL)
+    assert cfg.decision_model.protocol == "gemini-decisions"
+    other = config_module.load()
+    dmod.apply_settings(other, enabled=True, model="m", base_url="https://dm.example/v1/systemone")
+    assert other.decision_model.protocol == ""
+    # An explicit protocol wins.
+    explicit = config_module.load()
+    dmod.apply_settings(explicit, enabled=True, model="m", base_url=dmod.GEMINI_BASE_URL, protocol="system-one")
+    assert explicit.decision_model.protocol == ""
+
 
 
 def test_gemini_request_body_matches_the_gateway():

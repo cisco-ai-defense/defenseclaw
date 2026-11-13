@@ -96,6 +96,10 @@ def apply_settings(
     if protocol is not None:
         name = protocol.strip().lower()
         updated.protocol = "" if name == "system-one" else name  # the default; keep the file minimal
+    elif base_url is not None and not current.protocol and infer_protocol(updated.base_url):
+        # A Google Decisions API URL with no protocol given (init, or setup
+        # with --base-url only) would send System One requests and get 400.
+        updated.protocol = infer_protocol(updated.base_url)
     if api_key_env is not None:
         name = api_key_env.strip()
         if name == DECISION_MODEL_KEY_ENV:
@@ -116,6 +120,17 @@ def apply_settings(
         raise DecisionModelError(f"decision_model: {problem}")
     cfg.decision_model = updated
     return updated
+
+
+def infer_protocol(base_url: str) -> str:
+    """gemini-decisions for a Google Decisions API URL, else ""."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit((base_url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+    return DECISION_MODEL_PROTOCOL_GEMINI if host == "generativelanguage.googleapis.com" else ""
 
 
 def parse_connectors(value: str | list[str] | tuple[str, ...]) -> list[str]:

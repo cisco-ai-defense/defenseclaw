@@ -467,6 +467,7 @@ Defaults from the loader. Omitted keys take these values.
 | `watch.rescan_enabled`, `watch.rescan_interval_min`, `watch.rescan_content_gated` | `true`, `60`, `true` | Periodic rescan of installed assets; content gating skips a target whose content did not change. |
 | `llm.timeout`, `llm.max_retries` | `30`, `2` | Seconds and retries for the unified LLM block. |
 | `decision_model.enabled` | `false` | The [decision model](/docs/guardrail/decision-model) for tool calls: in front of the LLM judge where the judge runs. Needs `decision_model.base_url` and `.model`; the token is in `DEFENSECLAW_DECISION_MODEL_KEY` (`.api_key_env`), or `.credential` on a managed device. |
+| `decision_model.protocol` | `system-one` | Wire protocol of the endpoint: `system-one` (`{model, state, questions}`, Bearer token) or `gemini-decisions` ([Gemini Decision 1](/docs/guardrail/decision-model#gemini-decision-1): `{model, input, questions}`, key in `x-goog-api-key`). Exact lowercase values. Hot reload. |
 | `decision_model.hook_connectors` | empty | Connectors (or `*`) whose tool calls the decision model answers on its own where the LLM judge does not run: rules, then the decision model, no judge. Empty keeps it in front of the judge only. Hot reload. |
 | `decision_model.timeout`, `.allow_threshold`, `.block_threshold`, `.on_confident_block` | `1`, `0.30`, `0.75`, `escalate` | Seconds per call; risk at or below which an allow is confident; risk at or above which a block answer is confident; whether the judge still checks a confident block (with the judge only). Hot reload. |
 | `cisco_ai_defense.endpoint` | `https://us.api.inspect.aidefense.security.cisco.com` | The AI Defense inspection endpoint. |
@@ -682,7 +683,7 @@ Routing keys added in 1.0.10. Each one is optional; leaving it out keeps the 1.0
 | `routing.categories` | map of classifier category to alias | none |
 | `routing.allow_user_override` | `true` lets a request that names an allowed alias keep it | `false` |
 | `routing.sensitive` | `aliases` plus `severity_at_least` and/or `signals` (keyword signal names): at or above that guardrail severity, or when a listed signal matches, only these aliases are used. Best effort: regex and keyword checks miss personal data written in prose; for regulated groups give their profile an `allowed_aliases` list of local models only | none |
-| `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none |
+| `routing.systemone` | `use_decision_model` (reuse `decision_model`), `base_url`, `model`, `api_key_env`, `credential`, `timeout_ms` (default 300, at most 1000) | none. With Gemini Decision 1 every routed prompt goes to Google and `timeout_ms` should be `1000` ([privacy and latency](/docs/guardrail/decision-model#gemini-decision-1)). |
 | `routing.models[].apis` | `chat`, `messages`, `responses`, `converse`, `invoke`: API families the backend serves without translation | the provider default |
 | `routing.models[].credential` | protected credential name on a managed host (`api_key_env` is for per-user installs) | none |
 | `routing.models[].bedrock` | `region`, `auth` (`passthrough`, `profile`, `instance_role`, `iam_credentials`) and the key names for gateway signing | none |
