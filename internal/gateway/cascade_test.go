@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -461,5 +462,46 @@ func TestCascadeUpgradeFrom109Unchanged(t *testing.T) {
 	}
 	if codex.Judge.Runs != "off" || codex.SystemOne.Runs != "alone" || codex.Rules.BlockAt != "HIGH" || codex.SystemOne.OnUnsure != "confirm" {
 		t.Fatalf("codex = %+v", codex)
+	}
+}
+
+// I1 (unit side; the corpus side is the s7-gate compare): every cascade key
+// written at its default decides exactly as no cascade block, on the hook
+// path, in every pack.
+func TestCascadeExplicitDefaultsDecideAsNone(t *testing.T) {
+	no := false
+	root := t.TempDir()
+	writeActiveAgentTestFile(t, root, "CLAUDE.md")
+	write := map[string]interface{}{"command": "printf changed >> CLAUDE.md"}
+	writeCtx := withAuthenticatedHookConnector(instructionResolvedWriteContext(t, root, "Bash", write), "claudecode")
+	plainCtx := withAuthenticatedHookConnector(t.Context(), "claudecode")
+	for _, posture := range []string{"default", "permissive", "strict"} {
+		for _, blockAt := range []string{"", "HIGH"} {
+			decide := func(api *APIServer, ctx context.Context, input map[string]interface{}) claudeCodeHookResponse {
+				api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "InstructionsLoaded", SessionID: "s", CWD: root})
+				return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "s", CWD: root, ToolName: "Bash", ToolInput: input,
+				})
+			}
+			for name, c := range map[string]struct {
+				ctx   context.Context
+				input map[string]interface{}
+			}{"flagged write": {writeCtx, write}, "plain call": {plainCtx, map[string]interface{}{"command": "ls"}}} {
+				none := instructionProtectionTestAPIWithPack(t, "claudecode", "action", blockAt, posture)
+				explicit := instructionProtectionTestAPIWithPack(t, "claudecode", "action", blockAt, posture)
+				explicit.scannerCfg.Guardrail.Cascade = config.CascadeConfig{
+					Unknown:   "pack",
+					Judge:     config.CascadeJudgeConfig{MaxAction: "block", BlockNeedsSystemOne: &no, NoVerdict: "rules"},
+					SystemOne: config.CascadeSystemOneConfig{OnUnsure: "confirm"},
+					Admin:     config.CascadeAdminConfig{CriticalFloor: "alert"},
+				}
+				a, b := decide(none, c.ctx, c.input), decide(explicit, c.ctx, c.input)
+				ja, _ := json.Marshal(a)
+				jb, _ := json.Marshal(b)
+				if string(ja) != string(jb) {
+					t.Fatalf("%s/%s/%s: explicit defaults changed the answer:\n%s\n%s", posture, blockAt, name, ja, jb)
+				}
+			}
+		}
 	}
 }
