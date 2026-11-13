@@ -26,14 +26,18 @@ bound of 16.11%.
 
 ## Recommended runtime path
 
-Use the deterministic-first `regex_judge` strategy for coding sessions. A
-decisive local result returns immediately. Only unresolved tool calls incur a
-model request. `judge_first` remains useful for measuring the judge's maximum
+Use the deterministic-first `regex_judge` strategy for coding sessions, with
+Gemma 4 31B on Amazon Bedrock as the judge model
+([configuration](/docs/guardrail#recommended-judge-model-gemma-4-31b-on-bedrock)).
+The judge stays opt-in. A decisive local result returns immediately. Only
+unresolved tool calls incur a model request, and a call the parser proves
+only reads (`cat`, `ls`, `grep` or a file Read, with no write, network action
+or interpreter) is not sent to the judge unless a rule flagged it. `judge_first` remains useful for measuring the judge's maximum
 coverage, but it adds model latency to every eligible call.
 
 <Flow
   direction="TB"
-  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks, or has a CRITICAL finding the rules can enforce, skips the judge. A finding the rules flag but cannot block on their own (detection-only) goes to the judge; if the judge then gives no verdict, a CRITICAL one follows `hook_fail_mode` (refused when it is closed: strict tier, managed hosts, explicit `closed`). Otherwise the judge sees the call together with the user's latest prompt and this session's recent tool calls, kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
+  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks, or has a CRITICAL finding the rules can enforce, skips the judge. A finding the rules flag but cannot block on their own (detection-only) goes to the judge; if the judge then gives no verdict, a CRITICAL one follows `hook_fail_mode` (refused when it is closed: strict tier, managed hosts, explicit `closed`). Otherwise the judge sees the call together with the user's latest prompt, this session's recent tool calls, what DefenseClaw's parser proves the call does (its effects and resolved targets), what the session did earlier to those targets, and the rules that flagged it, all kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
 >
   <Node id="intent" kind="operator">{`User's latest prompt\nfrom the prompt hook`}</Node>
   <Node id="tool" kind="agent">{`Agent proposes a tool call\npre-tool hook`}</Node>
