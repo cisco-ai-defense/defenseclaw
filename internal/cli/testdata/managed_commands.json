@@ -23,13 +23,13 @@
       "note": "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment."
     },
     {
-      "command": "defenseclaw routing status, routing budgets list, routing explain",
+      "command": "defenseclaw routing status",
       "managed_linux": "Offered",
       "managed_macos": "Offered",
       "managed_windows": "Offered",
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "routing status",
-      "note": "Shows your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config."
+      "note": "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config."
     },
     {
       "command": "defenseclaw sandbox ...",
