@@ -81,7 +81,7 @@ defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw-
 defenseclaw substrate verify --install-file install.yaml
 ```
 
-`verify` reads the cluster with `kubectl` and checks that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster, that DefenseClaw holds the access it needs, that the egress callout is registered, and that nobody else can reach agents through the router. A failed check names the fix. `verify` does not read the snapshot bucket yet: that check reports `skipped`. Check yourself that the bucket is private, encrypted and expires old objects.
+`verify` reads the cluster with `kubectl` and checks that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster and the gateway can read the keys that sign actor tokens, that DefenseClaw holds the access it needs, that the egress callout is registered, and that nobody else can reach agents through the router. A failed check names the fix. `verify` does not read the snapshot bucket yet: that check reports `skipped`. Check yourself that the bucket is private, encrypted and expires old objects.
 
 </Step>
 
