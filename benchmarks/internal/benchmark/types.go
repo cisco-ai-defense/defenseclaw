@@ -61,7 +61,7 @@ var validOptInPolicyPacks = map[string]bool{
 	"infrastructure-destruction-protection": true,
 	"kubernetes-production-protection":      true,
 	"privacy-high-assurance":                true,
-	"active-directory-protection":          true,
+	"active-directory-protection":           true,
 }
 
 const optInPolicyLabelPrefix = "opt-in/"
