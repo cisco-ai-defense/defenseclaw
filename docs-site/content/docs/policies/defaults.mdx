@@ -146,9 +146,11 @@ file. The other plain file names past the bound (a name with no protected part, 
 dot-dot, outside the system folders, that is no link) are not resolved further. The command gets the
 evaluation-limit finding `ACTION-COMPOUND-LIMIT` with the reason `bounded_truncated cap=items`: the `default` and
 `permissive` profiles allow it with that alert, and the `strict` profile (and managed strict) blocks it. Pass such a
-list through a file (`xargs -a list.txt`) or split it. Up to 1.0.9 this alert was the finding `ACTION-OPERAND-BOUND`;
-from 1.0.10 a SIEM filter or audit query on that id should match `ACTION-COMPOUND-LIMIT` with
-`bounded_truncated cap=items` in its evidence instead.
+list through a file (`xargs -a list.txt`) or split it. Up to 1.0.9 this alert was the MEDIUM finding
+`ACTION-OPERAND-BOUND`. From 1.0.10 a SIEM filter or audit query should match the rule id `ACTION-COMPOUND-LIMIT` with
+`bounded_truncated cap=items` in the finding title (`defenseclaw.finding.title`). The title is an evidence-class field:
+a destination with the `content` or `strict` redaction profile replaces or removes it, and there only the rule id and
+severity remain. The finding is CRITICAL; its action is the alert above, so a severity-based rule sees it at CRITICAL.
 
 ## What `setup guardrail` actually writes
 
