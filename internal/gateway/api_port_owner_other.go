@@ -1,11 +1,11 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !linux
+//go:build !linux && !windows
 
 package gateway
 
-// apiPortHolderUID is Linux-only (S1 DESIGN 17.1): Windows reports another
-// account through its bind error (isAPIPortHeldByAnotherAccount), and macOS
-// has no /proc (doctor warns on a shared Mac instead).
-func apiPortHolderUID(string, int) (int, bool, error) { return 0, false, nil }
+// apiPortHolderOf names no holder on macOS: it has no /proc and its socket
+// table does not name another account's listener to this account (S1
+// DESIGN 17.1; doctor warns on a shared Mac instead).
+func apiPortHolderOf(string) (apiPortHolderInfo, error) { return apiPortHolderInfo{}, nil }

@@ -20,6 +20,19 @@ var procNetRoot = "/proc"
 // procNetMaxBytes bounds one /proc/net table read.
 const procNetMaxBytes = 32 << 20
 
+// apiPortSelfUID is the account this gateway runs as; replaceable in tests.
+var apiPortSelfUID = os.Getuid
+
+// apiPortHolderOf is the /proc/net listener that blocks a bind of addr.
+func apiPortHolderOf(addr string) (apiPortHolderInfo, error) {
+	self := apiPortSelfUID()
+	uid, found, err := apiPortHolderUID(addr, self)
+	if err != nil || !found {
+		return apiPortHolderInfo{}, err
+	}
+	return apiPortHolderInfo{Found: true, Other: uid != self, UID: &uid}, nil
+}
+
 // apiPortHolderUID reads /proc/net/tcp and /proc/net/tcp6 for the account
 // that listens on the port of addr (S1 DESIGN 17.1). found is false when
 // no listener blocks the address (the holder exited, or it is in another
