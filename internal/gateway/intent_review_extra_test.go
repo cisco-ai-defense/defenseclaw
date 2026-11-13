@@ -68,7 +68,8 @@ func TestScopeFloorSurvivesPendingCap(t *testing.T) {
 	j2 := &LLMJudge{}
 	j2.keepScopeFloor("same", "r")
 	j2.keepScopeFloor("same", "r")
-	if j2.takeScopeFloor("same") == "" || j2.takeScopeFloor("same") == "" {
+	first, second := j2.takeScopeFloor("same"), j2.takeScopeFloor("same")
+	if first == "" || second == "" {
 		t.Fatal("two concurrent identical samples must each get their floor")
 	}
 	if j2.takeScopeFloor("same") != "" {
