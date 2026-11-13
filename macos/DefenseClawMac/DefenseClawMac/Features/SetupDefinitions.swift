@@ -975,7 +975,7 @@ enum TUIWizards {
             + "upstream), because Docker Desktop's Linux kernel has no Landlock: setup sets "
             + "compute_driver = \"vm\" in the gateway's gateway.toml and restarts the gateway once. "
             + "A MicroVM mounts no host folders, so every run works on a copy and "
-            + "`defenseclaw sandbox pull` brings the changes back. The first run of each image prepares "
+            + "`defenseclaw sandbox pull NAME --apply` (or --branch) brings the changes back. The first run of each image prepares "
             + "its MicroVM disk (about a minute and 5 GB). "
             + "If OpenShell or e2fsprogs is missing, run `defenseclaw sandbox setup --install-openshell` "
             + "in a terminal (it installs NVIDIA's nvidia/openshell Homebrew formula and e2fsprogs).",

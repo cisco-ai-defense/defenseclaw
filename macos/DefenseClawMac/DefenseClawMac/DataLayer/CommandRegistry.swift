@@ -99,7 +99,7 @@ struct CommandDefinition: Identifiable, Hashable, Sendable {
 
     var isDestructive: Bool {
         let tokens = arguments.map { $0.lowercased() }
-        return !Set(tokens).isDisjoint(with: ["remove", "delete", "reset", "uninstall", "quarantine", "teardown", "destroy"])
+        return !Set(tokens).isDisjoint(with: ["remove", "rm", "delete", "reset", "uninstall", "quarantine", "teardown", "destroy"])
     }
 
     var changesState: Bool {

@@ -76,7 +76,13 @@ struct OverviewView: View {
                         if let appliedPolicyError {
                             Text(appliedPolicyError).font(.caption).foregroundStyle(Cisco.orange)
                         } else {
-                            KeyValueGrid(pairs: appliedPolicy.keys.sorted().map { ($0, appliedPolicy[$0] ?? "") })
+                            // A failed account lookup reads like the error line
+                            // above, not like one more setting (GAP-1271).
+                            if let lookupError = appliedPolicy["Lookup error"] {
+                                Text(lookupError).font(.caption).foregroundStyle(Cisco.orange)
+                            }
+                            KeyValueGrid(pairs: appliedPolicy.keys.sorted().filter { $0 != "Lookup error" }
+                                .map { ($0, appliedPolicy[$0] ?? "") })
                         }
                     }
                 }

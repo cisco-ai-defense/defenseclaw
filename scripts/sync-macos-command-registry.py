@@ -50,7 +50,23 @@ def registry_entries(path: Path) -> tuple[tuple, ...]:
 
 
 def swift_string(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    out = []
+    for char in value:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == '"':
+            out.append('\\"')
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            out.append(f"\\u{{{ord(char):x}}}")
+        else:
+            out.append(char)
+    return '"' + "".join(out) + '"'
 
 
 def swift_row(index: int, entry: tuple) -> str:
