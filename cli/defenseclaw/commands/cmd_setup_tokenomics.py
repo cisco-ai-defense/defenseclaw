@@ -33,6 +33,10 @@ def _section(parent: Any, key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _days(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 30
+
+
 def status_of(doc: dict[str, Any]) -> dict[str, Any]:
     """The tokenomics state a config file describes. Pure; used by tests and --json."""
     obs = _section(doc, "observability")
@@ -42,7 +46,7 @@ def status_of(doc: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(tok.get("enabled", False)),
         "local_store": bool(store.get("enabled", False)),
-        "retention_days": int(store.get("retention_days", 30) or 30),
+        "retention_days": _days(store.get("retention_days")),
         "pricing_version": str(price.get("version", "") or ""),
         "priced_models": len(price.get("models") or []),
     }
@@ -72,6 +76,8 @@ def tokenomics(
     if enable and disable:
         raise click.UsageError("Cannot use --enable and --disable together.")
     path = config_path_for_data_dir(getattr(app.cfg, "data_dir", None))
+    if show_status and (enable or disable or seed_pricing):
+        raise click.UsageError("--status shows the state; use it without --enable, --disable or --seed-pricing.")
     if not (enable or disable or seed_pricing):
         show_status = True
     if show_status:

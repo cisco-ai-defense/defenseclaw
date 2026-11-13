@@ -53,3 +53,16 @@ func finishJudgeUsage(call modelusage.Call, resp *ChatResponse, err error) {
 	}
 	call.End(err)
 }
+
+// beginGatewayCallUsage starts the usage record of a call the gateway makes
+// itself that has no token counts (decision model, Cisco AI Defense). The
+// record carries role, latency and outcome; AI Defense also gets its flat
+// per-call price from observability.pricing.ai_defense.
+func beginGatewayCallUsage(ctx context.Context, role modelusage.CallRole, surface, model string) modelusage.Call {
+	return processUsageRecorder().Begin(ctx, modelusage.CallFacts{
+		RequestID: RequestIDFromContext(ctx), Surface: surface, Listener: "gateway",
+		APIFamily: modelusage.FamilyOther, CallRole: role,
+		SelectedProvider: surface, SelectedModel: model,
+		Route: modelusage.RouteFacts{Decision: modelusage.DecisionNone},
+	})
+}

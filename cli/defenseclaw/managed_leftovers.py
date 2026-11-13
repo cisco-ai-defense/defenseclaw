@@ -57,6 +57,7 @@ MANAGED_ENTRIES = (
     "inventory.db-journal",
     "inventory.db-shm",
     "inventory.db-wal",
+    "model_usage",
     os.path.join("logs", "hook-failures.jsonl"),
 )
 

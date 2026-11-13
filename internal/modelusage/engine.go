@@ -47,7 +47,8 @@ type Engine struct {
 	snap    atomic.Pointer[snapshot]
 	applyMu sync.Mutex // serialises Apply so the snapshot and the worker never disagree
 	dropped atomic.Int64
-	spend   spendTracker
+	// budgetSink receives agent call costs for routing.admin budgets.
+	budgetSink atomic.Pointer[spendSinkBox]
 
 	mu      sync.RWMutex
 	sinks   []Sink
@@ -338,9 +339,7 @@ func (c *call) End(err error) Record {
 		}
 	}()
 	c.rec = c.build(err)
-	if c.rec.Cost.USD != nil {
-		c.e.spend.add(c.f, *c.rec.Cost.USD, c.rec.EndedAt)
-	}
+	c.e.chargeBudgets(c.f, c.rec)
 	c.e.enqueue(c.rec)
 	return c.rec
 }

@@ -3649,7 +3649,7 @@
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage.db for the usage API and status."
+              "description": "Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status."
             },
             "retention_days": {
               "type": "integer",

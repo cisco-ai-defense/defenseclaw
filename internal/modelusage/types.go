@@ -75,6 +75,11 @@ type CallFacts struct {
 	ModelRequestID, ModelResponseID string
 
 	StartedAt time.Time
+
+	// ChargeKeys are the budget keys the admin routing verdict says this call
+	// is charged to (S11 AdminVerdict.ChargeKeys). The record keeps them and the
+	// SpendSink charges the resolved call cost to each of them.
+	ChargeKeys []string
 }
 
 // ParsedUsage is usage the caller already parsed (the Bifrost chat path). It

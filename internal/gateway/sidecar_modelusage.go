@@ -15,6 +15,10 @@ import (
 // modelUsageDBName is the local usage aggregate, next to the audit database.
 const modelUsageDBName = "model_usage.db"
 
+// modelUsageDBDir keeps the database in its own folder, so the folder (not
+// data_dir) is what the SQLite permissions are applied to.
+const modelUsageDBDir = "model_usage"
+
 // modelUsageRuntime is the process-owned model usage engine and its local
 // store. Both are created once and are inert until observability.tokenomics
 // turns them on; a config reload only calls Apply, never rebuilds them.
@@ -33,7 +37,7 @@ func (s *Sidecar) modelUsage() *modelUsageRuntime {
 	if s.cfg != nil {
 		dataDir = s.cfg.DataDir
 	}
-	store := modelusage.NewStore(filepath.Join(dataDir, modelUsageDBName))
+	store := modelusage.NewStore(filepath.Join(dataDir, modelUsageDBDir, modelUsageDBName))
 	sink := newModelUsageV8Sink(
 		func() sidecarRuntimeEmitter { return s.observabilityV8Emitter() },
 		func() hookLifecycleMetricV8Runtime {
@@ -73,8 +77,7 @@ func (s *Sidecar) stopModelUsage() {
 	if s == nil {
 		return
 	}
-	if rt := s.modelUsageRT.Swap(nil); rt != nil {
-		processModelUsage.CompareAndSwap(rt.engine, nil)
+	if rt := s.modelUsageRT.Load(); rt != nil {
 		rt.engine.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
 		_ = rt.store.Configure(false, 0)
 	}

@@ -15,11 +15,36 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// usageQuerierBox lets the API server hold any modelusage.Querier atomically.
+type usageQuerierBox struct{ q modelusage.Querier }
+
 // SetModelUsage binds the local usage store the /usage endpoint reads.
 func (a *APIServer) SetModelUsage(store *modelusage.Store) {
-	if a != nil {
-		a.modelUsage.Store(store)
+	if store == nil {
+		a.SetModelUsageQuerier(nil)
+		return
 	}
+	a.SetModelUsageQuerier(store)
+}
+
+// SetModelUsageQuerier binds the source of /usage and of the own-status usage
+// block: the local store by default, or a leader-backed one on Substrate.
+func (a *APIServer) SetModelUsageQuerier(q modelusage.Querier) {
+	if a == nil {
+		return
+	}
+	if q == nil {
+		a.modelUsage.Store(nil)
+		return
+	}
+	a.modelUsage.Store(&usageQuerierBox{q: q})
+}
+
+func (a *APIServer) usageQuerier() modelusage.Querier {
+	if box := a.modelUsage.Load(); box != nil {
+		return box.q
+	}
+	return nil
 }
 
 // usageScope decides whose rows a caller may read. On a per-user gateway
@@ -65,7 +90,7 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	store := a.modelUsage.Load()
+	store := a.usageQuerier()
 	if store == nil || !store.Enabled() {
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"enabled": false,
@@ -91,8 +116,11 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, modelusage.ErrAdminOnly):
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
-	case err != nil:
+	case err != nil && strings.HasPrefix(err.Error(), "unknown rollup"):
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case err != nil:
+		http.Error(w, "the usage store could not be read", http.StatusInternalServerError)
 		return
 	}
 	scope := "own"
@@ -112,7 +140,7 @@ func (a *APIServer) handleUsage(w http.ResponseWriter, r *http.Request) {
 // it used; Linux and macOS accounts get the same field. nil when the usage
 // store is off or the caller has no recorded usage.
 func (a *APIServer) ownUsageSummary(ctx context.Context, idKey, self string) map[string]any {
-	store := a.modelUsage.Load()
+	store := a.usageQuerier()
 	if store == nil || !store.Enabled() {
 		return nil
 	}

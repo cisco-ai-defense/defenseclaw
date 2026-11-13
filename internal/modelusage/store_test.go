@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,7 +28,8 @@ func rec(owner string, groups []string, model string, usd *float64, at time.Time
 
 func openStore(t *testing.T) *Store {
 	t.Helper()
-	s := NewStore(filepath.Join(t.TempDir(), "model_usage.db"))
+	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
+	s.readFlushGap = 0
 	if err := s.Configure(true, 30); err != nil {
 		t.Fatal(err)
 	}
@@ -179,39 +181,70 @@ func TestStorePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestSpendTrackerPeriodsScopesAndUnknown(t *testing.T) {
-	e := NewEngine()
-	now := time.Date(2026, 11, 12, 15, 0, 0, 0, time.UTC) // Thursday
-	cf := CallFacts{Connector: "codex", Subject: "7", SubjectKind: "posix_uid", IdentityVerified: true, Groups: []string{"eng"}}
-	e.spend.add(cf, 1.5, now)
-	e.spend.add(cf, 0.5, now.Add(-24*time.Hour)) // Wednesday: same week, other day
-	e.spend.add(cf, 4, now.AddDate(0, -1, 0))    // last month
-	owner := OwnerID(cf)
-	if v, ok := e.Spend(ScopeUser, owner, PeriodDay, now); !ok || v != 1.5 {
-		t.Fatal(v, ok)
+func TestConcurrentConfigureNeverPanicsOrLeavesTheStoreHalfOpen(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				if err := s.Configure((i+j)%2 == 0, 30); err != nil {
+					t.Error(err)
+				}
+			}
+		}(i)
 	}
-	if v, ok := e.Spend(ScopeUser, owner, PeriodWeek, now); !ok || v != 2 {
-		t.Fatal(v, ok)
+	wg.Wait()
+	if err := s.Configure(true, 30); err != nil || !s.Enabled() {
+		t.Fatalf("enabled=%v err=%v", s.Enabled(), err)
 	}
-	if v, ok := e.Spend(ScopeGroup, "eng", PeriodMonth, now); !ok || v != 2 {
-		t.Fatal(v, ok)
+	if err := s.Configure(false, 30); err != nil || s.Enabled() {
+		t.Fatalf("enabled=%v err=%v", s.Enabled(), err)
 	}
-	if v, ok := e.Spend(ScopeConnector, "codex", PeriodDay, now); !ok || v != 1.5 {
-		t.Fatal(v, ok)
+}
+
+func TestHourTimelineIsNotCutToTheMostExpensiveHours(t *testing.T) {
+	s := openStore(t)
+	now := time.Now()
+	for h := 0; h < 300; h++ {
+		s.Emit(context.Background(), rec("1", nil, "m", f(float64(h+1)), now.Add(-time.Duration(h)*time.Hour)))
 	}
-	if _, ok := e.Spend(ScopeUser, "posix_uid:nobody", PeriodDay, now); ok {
-		t.Fatal("a subject with no priced call must be unknown, not 0")
+	rows, err := s.Run(context.Background(), Query{By: "hour", AllOwners: true, From: now.Add(-400 * time.Hour)})
+	if err != nil || len(rows) != 300 {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
 	}
-	if _, ok := e.Spend(ScopeUser, owner, "year", now); ok {
-		t.Fatal("unknown period")
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1].Key > rows[i].Key {
+			t.Fatal("a timeline must be in time order")
+		}
 	}
-	// unverified calls never count toward a user or group
-	e.spend.add(CallFacts{Connector: "codex", Subject: "7", Groups: []string{"eng"}}, 100, now)
-	if v, _ := e.Spend(ScopeGroup, "eng", PeriodDay, now); v != 1.5 {
-		t.Fatalf("unverified identity counted: %v", v)
+}
+
+func TestGatewayOwnCallsAreStoredUnderTheGatewaySource(t *testing.T) {
+	s := openStore(t)
+	r := rec("", nil, "m", f(1), time.Now())
+	r.Facts.Connector = ""
+	s.Emit(context.Background(), r)
+	rows, _ := s.Run(context.Background(), Query{By: "connector", AllOwners: true})
+	if len(rows) != 1 || rows[0].Key != "gateway" {
+		t.Fatalf("%+v", rows)
 	}
-	var nilEngine *Engine
-	if _, ok := nilEngine.Spend(ScopeUser, "x", PeriodDay, now); ok {
-		t.Fatal("nil engine")
+}
+
+func TestReadFlushIsThrottled(t *testing.T) {
+	s := NewStore(filepath.Join(t.TempDir(), "model_usage", "model_usage.db"))
+	if err := s.Configure(true, 30); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Configure(false, 30)
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), time.Now()))
+	if rows, _ := s.Run(context.Background(), Query{By: "model", AllOwners: true}); len(rows) != 1 {
+		t.Fatalf("the first read flushes: %+v", rows)
+	}
+	s.Emit(context.Background(), rec("1", nil, "m", f(1), time.Now()))
+	rows, _ := s.Run(context.Background(), Query{By: "model", AllOwners: true})
+	if rows[0].Calls != 1 {
+		t.Fatalf("a read inside the gap must not write: %+v", rows)
 	}
 }
