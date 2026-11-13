@@ -79,6 +79,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "f2c82cccb42034045e13853d42a4f3c32eed4dfc3eaaeab129408e42aaab498d",
         }
     ),
     "permissive": frozenset(
@@ -114,6 +116,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "f45c6600187298a693319744f29d3e0c3c1fa6fc1623c62a95c320fd9e2a29ec",
         }
     ),
     "strict": frozenset(
@@ -148,6 +152,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "5498d207c5633212f5b3b421baec4b8f2345417f156bf6b149efd99fdd682695",
         }
     ),
 }
