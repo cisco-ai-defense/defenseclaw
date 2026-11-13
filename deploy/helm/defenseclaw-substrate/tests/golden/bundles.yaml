@@ -604,8 +604,10 @@ subjects:
 # Source: defenseclaw-substrate/templates/bundles.yaml
 # Signed policy bundles (substrate.bundles). The controller applies the
 # GitOps inbox and re-verifies every stage on each refresh; the gateway's
-# admin listener applies and rolls back for administrators. Both keep the
-# bundle state and receipts here. A bundle is verified against the anchors
+# admin listener applies and rolls back for administrators, and a managed
+# gateway reads the state at start (a verified bundle is its activated config
+# when the mounted one is not, GAP-0135). Both keep the bundle state and
+# receipts here. A bundle is verified against the anchors
 # Secret whenever it is read, so these rights cannot put an unsigned policy
 # in force.
 apiVersion: rbac.authorization.k8s.io/v1
