@@ -107,6 +107,15 @@ func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byt
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+connectorName, bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
+	if connectorName == "codex" {
+		// Codex hooks are installer-bound: the hook command passes the event and the protected contract id out of band.
+		var probe struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		req.Header.Set("X-DefenseClaw-Hook-Event", probe.Event)
+		req.Header.Set("X-DefenseClaw-Hook-Contract", e.api.hookProfileForRequest(ctx, "codex").ContractID)
+	}
 	rec := httptest.NewRecorder()
 	h(rec, req)
 	return rec.Code, rec.Body.Bytes()

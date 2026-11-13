@@ -397,8 +397,27 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det,
 			bm["model"] = "bench"
 			body, _ = json.Marshal(bm)
 		}
+		if conn == "cursor" && mapped == "shell" {
+			// Cursor's shell hook is beforeShellExecution: it names no tool, its payload is the command.
+			var in struct {
+				Command string `json:"command"`
+			}
+			_ = json.Unmarshal(input, &in)
+			body, _ = json.Marshal(map[string]any{"hook_event_name": "beforeShellExecution", "conversation_id": sid, "generation_id": sid, "cwd": ecwd, "command": in.Command, "workspace_roots": []string{ecwd}})
+		}
 		t0 := time.Now()
 		status, resp := e.HookFor(ctx, conn, body)
+		fallback := ""
+		if status >= 400 && conn != "claudecode" && !legacy {
+			// The connector's handler refused the payload shape (a binding this harness cannot supply): judge the call through the
+			// Claude Code handler instead, and say so in the record, so a refused shape is never scored as an allow.
+			cc := ev
+			ftool, finput, _ := mapTool(cc)
+			fbody, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": sid, "cwd": ecwd, "tool_name": ftool, "tool_input": finput,
+				"permission_mode": "default", "transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
+			fallback = fmt.Sprintf("%s:%d", conn, status)
+			status, resp = e.HookFor(ctx, "claudecode", fbody)
+		}
 		r := record{Case: c.ID, Connector: conn, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
 		var hr hookResp
@@ -412,7 +431,13 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det,
 		}
 		r.Reason = hr.Reason
 		if status != 200 {
+			if os.Getenv("S7_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "[s7bench-debug] %s status=%d body=%s resp=%s\n", conn, status, string(body), string(resp))
+			}
 			r.Err = fmt.Sprintf("http %d", status)
+		}
+		if fallback != "" {
+			r.Extra = map[string]string{"connector_fallback": fallback}
 		}
 		if det {
 			d := e.DeterministicFor(ctx, conn, tool, input, ecwd)
