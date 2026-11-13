@@ -183,17 +183,18 @@ const (
 type DataKind string
 
 const (
-	DataNone       DataKind = "none"
-	DataLiteral    DataKind = "literal"
-	DataHeredoc    DataKind = "heredoc"
-	DataHereString DataKind = "here_string"
-	DataPatchText  DataKind = "patch_text"
-	DataFile       DataKind = "file"
-	DataStdin      DataKind = "stdin"
-	DataPipe       DataKind = "pipe"
-	DataArgument   DataKind = "argument"
-	DataCode       DataKind = "code"
-	DataCommandOut DataKind = "command_output"
+	DataNone         DataKind = "none"
+	DataLiteral      DataKind = "literal"
+	DataHeredoc      DataKind = "heredoc"
+	DataHereString   DataKind = "here_string"
+	DataPatchText    DataKind = "patch_text"
+	DataFile         DataKind = "file"
+	DataStdin        DataKind = "stdin"
+	DataPipe         DataKind = "pipe"
+	DataArgument     DataKind = "argument"
+	DataCode         DataKind = "code"
+	DataCommandOut   DataKind = "command_output"
+	DataSecretOutput DataKind = "secret_output"
 )
 
 // SourceKind classifies one producer of an effect's data (review R6).

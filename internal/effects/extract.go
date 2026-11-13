@@ -448,6 +448,19 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// 6. Interpreter reading piped / heredoc stdin as code (review PX-5).
 	w.interpreterStdin(c, entry, known, dialect, depth, cond, origin, prevPrim)
 
+	// A command that prints a secret to stdout (gh auth token, vault kv get, ...):
+	// emit a read whose data is secret_output and make it this stage's primary,
+	// so a pipe into a sender (curl -d @-) joins it (s7-flow). This runs even for
+	// a program the table does not model, since the base exec stays unknown.
+	if secretStdoutCommand(program, inner[1:]) {
+		e := Effect{Kind: KindRead, Cond: cond, RoleState: RoleStateKnown, TargetState: TargetStateKnown,
+			Target: Target{Type: TargetProcess, Link: LinkNotChecked}, Origin: origin,
+			Data: &Data{Kind: DataSecretOutput}}
+		if idx := w.emit(e); idx != 0 {
+			w.lastPrim = idx
+		}
+	}
+
 	if !known {
 		w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
 		for _, sub := range c.Nested {
@@ -491,6 +504,14 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 	// powershell/pwsh launched from any dialect: decode -enc and unwrap its
 	// -Command / positional script as PowerShell (review N8 K4/K5).
 	if entry.PSLaunch {
+		// -EncodedArguments carries a base64 CLIXML argument payload for a child
+		// host; we do not deserialize it, so the launch is opaque, never a trusted
+		// KNOWN (psparse delta review 4 (c)).
+		if powershellHasEncodedArgs(inner[1:]) {
+			w.opaqueExec(origin, cond)
+			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
+			return
+		}
 		if code, ok := powershellLaunchCode(inner[1:]); ok {
 			w.unwrapCode(code, true, DialectPowerShell, depth, cond, origin)
 			w.handleRedirs(c, dialect, cmdNo, depth, cond, nil)
@@ -562,6 +583,7 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		w.command(&Cmd{Words: argv, Cond: cond}, dialect, depth, cond)
 	}
 	readIdx := []int{}
+	readByKeyLocal := map[string]int{} // source path key -> read index, for the copy-label join
 	emittedTargetEffect := false
 	for _, op := range ops {
 		e := w.effectForOperand(op, entry, origin, cond, foreign, fromInput, shadowed, dialect, depth)
@@ -578,7 +600,20 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 		switch e.Kind {
 		case KindRead:
 			readIdx = append(readIdx, idx)
+			if k := e.Target.Key(); k != "" {
+				readByKeyLocal[k] = idx
+			}
 		case KindWrite, KindAppend:
+			// A cp/mv/install/rsync destination carries the label of its source
+			// read, so a policy label follows the copy (s7-flow).
+			if op.copyFrom != "" {
+				if abs, ok, _ := placePath(op.copyFrom, w.opts()); ok {
+					srcKey := Target{Path: abs, Flavor: w.o.flavor()}.Key()
+					if ri, ok := readByKeyLocal[srcKey]; ok && ri != idx {
+						w.res.Effects[idx-1].Data = &Data{Kind: DataFile, Sources: []Source{{Kind: SourceEffect, Effect: ri}}}
+					}
+				}
+			}
 			if k := e.Target.Key(); k != "" {
 				w.writeByKey[k] = idx
 			}
@@ -589,6 +624,11 @@ func (w *walker) command(c *Cmd, dialect Dialect, depth int, cond bool) {
 			childScope := !(program == "eval" || program == "source" || program == ".")
 			w.unwrapCodeScoped(op.value, op.static, dialect, depth, cond, origin, childScope)
 		}
+	}
+	// curl/wget/iwr: attach the destination host to the send and join an @- body
+	// to the pipe (s7-flow).
+	if isHTTPUploader(program) {
+		w.finishNetworkSends(cmdStart, c.PipeIn, prevPrim)
 	}
 
 	// A cmdlet fed by a pipeline with no explicit path operand acts on the
@@ -786,6 +826,8 @@ type operand struct {
 	remote        bool
 	roleUncertain bool
 	destMaybeDir  bool
+	uploadIsFile  bool   // RoleSendData: the body is a file / stdin ("-"), not literal text
+	copyFrom      string // a copy destination write: the source spelling whose read it carries (s7-flow)
 }
 
 // classifyOperands walks flags and positionals of a command against a table row.
@@ -1018,12 +1060,31 @@ func (w *walker) splitShortFlags(name string, words []Word, i *int, p Program, o
 func operandValue(fl Flag, v Word, p Program) operand {
 	op := operand{value: v.Value, static: v.Static, quoted: v.Quoted, glob: v.Glob, role: fl.Role}
 	if fl.Role == RoleUploadFile {
-		path, ok := uploadPath(v.Value)
-		if !ok {
-			op.role = RoleIgnore // inline data, not a file
-			return op
+		// -T / --upload-file / --post-file / -InFile: the value is always a local
+		// file (or "-" for stdin); it is never inline literal data.
+		op.uploadIsFile = true
+		if v.Static {
+			op.value = strings.TrimSpace(v.Value)
 		}
-		op.value = path
+	}
+	if fl.Role == RoleSendData {
+		// -d / --data* / -F / --form / --post-data / -Body: a request body that is
+		// literal text unless it is @file (or @- / - for stdin) -- then a file
+		// read follows the send (s7-flow).
+		if v.Static {
+			if at := strings.LastIndex(v.Value, "@"); at >= 0 {
+				pth := v.Value[at+1:]
+				if semi := strings.IndexByte(pth, ';'); semi >= 0 {
+					pth = pth[:semi]
+				}
+				if pth != "" {
+					op.value, op.uploadIsFile = pth, true
+					return op
+				}
+			}
+			op.value, op.uploadIsFile = v.Value, false
+		}
+		return op
 	}
 	if fl.Role == RoleURL {
 		op.value = v.Value
@@ -1270,13 +1331,13 @@ func (w *walker) effectForOperand(op operand, p Program, origin Origin, cond, fo
 		return e
 	case RoleUploadFile:
 		e.Kind = KindNetworkSend
-		if op.value != "" {
-			e.Data = &Data{Kind: DataFile, Sources: []Source{{Kind: SourcePath, Path: op.value}}}
-			w.joinSourceWrite(e)
-		} else {
-			e.addReason(ReasonDynamicExpansion, ScopeTarget)
-		}
 		e.Target.Type = TargetURL
+		w.fillSendBody(e, op, true)
+		return e
+	case RoleSendData:
+		e.Kind = KindNetworkSend
+		e.Target.Type = TargetURL
+		w.fillSendBody(e, op, op.uploadIsFile)
 		return e
 	}
 
@@ -1337,6 +1398,68 @@ func (w *walker) fillURL(e *Effect, op operand) {
 	if host == "" {
 		e.addReason(ReasonDynamicExpansion, ScopeTarget)
 	}
+}
+
+// fillSendBody sets the Data of a network_send from a curl/wget/iwr body or
+// upload operand: a file read (joined to a prior write of the same path), stdin
+// (joined to the piped producer by finishNetworkSends), or literal text. The URL
+// host is attached to the send by finishNetworkSends (s7-flow).
+func (w *walker) fillSendBody(e *Effect, op operand, isFile bool) {
+	if !op.static {
+		e.Data = &Data{Kind: DataArgument}
+		return
+	}
+	if isFile {
+		if op.value == "-" || op.value == "" {
+			e.Data = &Data{Kind: DataStdin}
+			return
+		}
+		e.Data = &Data{Kind: DataFile, Sources: []Source{{Kind: SourcePath, Path: op.value}}}
+		w.joinSourceWrite(e)
+		return
+	}
+	e.Data = &Data{Kind: DataLiteral, Bytes: len(op.value), Text: cap8k(op.value)}
+}
+
+// finishNetworkSends puts the destination host of a curl/wget/iwr call on its
+// network_send effects (not only on the sibling fetch), and joins a stdin body
+// (@- / -) to the piped producer (s7-flow). It runs only for HTTP uploader
+// programs so a git push (its own unknown-host send) is untouched.
+func (w *walker) finishNetworkSends(start int, pipeIn bool, prevPrim int) {
+	var host, scheme, url string
+	var port int
+	for i := start; i < len(w.res.Effects); i++ {
+		e := &w.res.Effects[i]
+		if e.Kind == KindNetworkFetch && e.Target.Host != "" && host == "" {
+			host, scheme, url, port = e.Target.Host, e.Target.Scheme, e.Target.URL, e.Target.Port
+		}
+	}
+	for i := start; i < len(w.res.Effects); i++ {
+		e := &w.res.Effects[i]
+		if e.Kind != KindNetworkSend {
+			continue
+		}
+		if e.Data != nil && e.Data.Kind == DataStdin && len(e.Data.Sources) == 0 && pipeIn && prevPrim > 0 {
+			e.Data.Sources = []Source{{Kind: SourceEffect, Effect: prevPrim}}
+		}
+		if e.Target.Type == TargetURL && e.Target.Host == "" {
+			if host != "" {
+				e.Target.Host, e.Target.Scheme, e.Target.URL, e.Target.Port = host, scheme, url, port
+			} else {
+				e.addReason(ReasonDynamicExpansion, ScopeTarget)
+			}
+		}
+	}
+}
+
+// isHTTPUploader reports a program whose body/upload flags send to a URL that
+// appears as a separate operand, so the host must be copied onto the send.
+func isHTTPUploader(program string) bool {
+	switch strings.ToLower(program) {
+	case "curl", "wget", "invoke-webrequest", "invoke-restmethod", "iwr", "irm":
+		return true
+	}
+	return false
 }
 
 func (w *walker) joinSourceWrite(e *Effect) {
@@ -1552,12 +1675,24 @@ func gitOperands(ps []Word) []operand {
 			}
 		}
 	case "push":
+		sent := false
 		for _, wd := range rest {
 			if wd.Static {
 				if _, ok := urlHost(wd.Value); ok || strings.Contains(wd.Value, "://") {
 					out = append(out, operand{value: wd.Value, static: true, role: RoleURLUpload})
+					sent = true
 				}
 			}
+		}
+		// push to a named ("origin") or default remote still sends to the network;
+		// the host is unknown unless the remote was a literal URL (s7-flow / N21).
+		if !sent {
+			out = append(out, operand{role: RoleURLUpload, static: false})
+		}
+	case "add", "stage":
+		// git add <paths>: each pathspec is a read of the working tree (s7-flow).
+		for _, wd := range rest {
+			out = append(out, operand{value: wd.Value, static: wd.Static, quoted: wd.Quoted, glob: wd.Glob, role: RoleRead})
 		}
 	}
 	return out
@@ -1642,6 +1777,26 @@ func isTilde(lit string, flavor Flavor) bool {
 // powershellLaunchCode returns the PowerShell command text a powershell/pwsh
 // invocation runs: the value of -Command/-c, a decoded -EncodedCommand/-enc/-e,
 // or the first positional script onward. ok is false when it only reads stdin.
+// powershellHasEncodedArgs reports a powershell/pwsh host launched with an
+// -EncodedArguments payload (a serialized CLIXML argument blob for a child
+// runspace). PowerShell accepts any unambiguous prefix, so -encodedarguments,
+// -encodeda and -ea all match; we never deserialize it (psparse delta review
+// 4 (c)).
+func powershellHasEncodedArgs(args []Word) bool {
+	for _, a := range args {
+		if !a.Static || !strings.HasPrefix(a.Value, "-") {
+			continue
+		}
+		name := strings.ToLower(a.Value[1:])
+		// -ea is the host's short switch for -EncodedArguments; any longer prefix
+		// must reach "encodeda" to be unambiguous against -EncodedCommand.
+		if name == "ea" || (strings.HasPrefix(name, "encodeda") && strings.HasPrefix("encodedarguments", name)) {
+			return true
+		}
+	}
+	return false
+}
+
 func powershellLaunchCode(args []Word) (string, bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -1874,6 +2029,60 @@ func codeRunsOpaque(program string, args []Word) bool {
 	return false
 }
 
+// secretStdoutCommand reports a command invocation that prints a secret / token
+// to stdout, so its read effect can be joined to a downstream send (s7-flow).
+// It matches the precise subcommand shape, not just the program name, so an
+// unrelated use (gh pr list, kubectl get pods) is not treated as a secret read.
+func secretStdoutCommand(program string, args []Word) bool {
+	lc := func(w Word) string { return strings.ToLower(w.Value) }
+	has := func(v string) bool {
+		for _, a := range args {
+			if a.Static && lc(a) == v {
+				return true
+			}
+		}
+		return false
+	}
+	seq := func(a, b string) bool {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i].Static && args[i+1].Static && lc(args[i]) == a && lc(args[i+1]) == b {
+				return true
+			}
+		}
+		return false
+	}
+	containsSecret := func() bool {
+		for _, a := range args {
+			if a.Static && strings.Contains(lc(a), "secret") {
+				return true
+			}
+		}
+		return false
+	}
+	switch strings.ToLower(program) {
+	case "gh":
+		return seq("auth", "token")
+	case "aws":
+		if seq("configure", "get") && containsSecret() {
+			return true
+		}
+		return has("get-secret-value") || has("get-parameter") || has("get-parameters")
+	case "security": // macOS keychain
+		return (has("find-generic-password") || has("find-internet-password")) && has("-w")
+	case "op": // 1Password CLI
+		return has("read") || has("get")
+	case "vault":
+		return seq("kv", "get") || has("read")
+	case "kubectl", "oc":
+		return has("get") && (has("secret") || has("secrets"))
+	case "gcloud":
+		return seq("auth", "print-access-token") || seq("auth", "print-identity-token") || seq("secrets", "versions")
+	case "doppler":
+		return has("secrets")
+	}
+	return false
+}
+
 // sourcesDestOperands models cp/mv/scp/rsync/copy-item/move-item: the sources
 // are reads, the destination a write. A directory destination (trailing
 // separator, ., ~, .., a -t/--target-directory dir, or more than one source)
@@ -1907,7 +2116,11 @@ func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
 		return out
 	}
 	if remoteOf(dest) {
-		out = append(out, operand{value: dest.Value, static: dest.Static, role: RoleWrite, remote: true})
+		w := operand{value: dest.Value, static: dest.Static, role: RoleWrite, remote: true}
+		if len(sources) == 1 && sources[0].Static {
+			w.copyFrom = sources[0].Value // the local read's label follows the upload
+		}
+		out = append(out, w)
 		return out
 	}
 	dirDest := destDir != "" || len(sources) > 1 || looksDir(dest)
@@ -1921,7 +2134,7 @@ func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
 				out = append(out, operand{role: RoleWrite})
 				continue
 			}
-			out = append(out, operand{value: joinDir(dest.Value, baseName2(s.Value)), static: true, role: RoleWrite})
+			out = append(out, operand{value: joinDir(dest.Value, baseName2(s.Value)), static: true, role: RoleWrite, copyFrom: s.Value})
 		}
 		if len(sources) == 0 {
 			out = append(out, operand{value: dest.Value, static: true, role: RoleWrite})
@@ -1930,7 +2143,11 @@ func sourcesDestOperands(ps []Word, destDir string, p Program) []operand {
 	}
 	// a single source into a bare destination: a rename to a new file, or a
 	// write into a directory of that name -- unknown until the resolver knows.
-	out = append(out, operand{value: dest.Value, static: true, role: RoleWrite, destMaybeDir: true})
+	wr := operand{value: dest.Value, static: true, role: RoleWrite, destMaybeDir: true}
+	if len(sources) == 1 && sources[0].Static {
+		wr.copyFrom = sources[0].Value // the source read's label follows the copy
+	}
+	out = append(out, wr)
 	return out
 }
 

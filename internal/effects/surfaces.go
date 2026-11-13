@@ -219,6 +219,33 @@ func extractMCP(call Call, o Options) Result {
 	if truncated {
 		res.addUnknown(ReasonLimit)
 	}
+	// A tool whose name means "send" (post_message, send_email, create_issue,
+	// upload, webhook, ...) exfiltrates even when no URL appears in its arguments
+	// (the endpoint is the server's, configured out of band). Emit a network_send
+	// with the role only guessed; the host is a guess from a small server table,
+	// else unknown (s7-flow). Skip when a URL argument already produced a send.
+	if mcpIsSender(call.Tool) {
+		hasSend := false
+		for _, e := range res.Effects {
+			if e.Kind == KindNetworkSend {
+				hasSend = true
+				break
+			}
+		}
+		if !hasSend && len(res.Effects) < o.maxEffects() {
+			e := Effect{Kind: KindNetworkSend, RoleState: RoleStateGuessed, TargetState: TargetStateUnknown,
+				Target: Target{Type: TargetHost, Flavor: o.flavor(), Link: LinkNotChecked},
+				Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
+			if host := mcpSendHost(call.Tool); host != "" {
+				e.Target.Host = host
+				e.TargetState = TargetStateKnown
+			} else {
+				e.addReason(ReasonDynamicExpansion, ScopeTarget)
+			}
+			e.addReason(ReasonMCPSemantics, ScopeRole)
+			res.Effects = append(res.Effects, e)
+		}
+	}
 	if len(res.Effects) == 0 {
 		e := Effect{Kind: KindOpaque, TargetState: TargetStateUnknown, RoleState: RoleStateUnknown,
 			Origin: Origin{Surface: SurfaceMCP, Command: 1, Program: call.Tool}}
@@ -241,6 +268,49 @@ func mcpKindFromTool(tool string) Kind {
 		return KindRead
 	}
 	return KindRead
+}
+
+// mcpIsSender reports an MCP tool whose name means it transmits data to an
+// external service (s7-flow). The match is on the tool name only, so the role is
+// always guessed, never known.
+func mcpIsSender(tool string) bool {
+	l := strings.ToLower(tool)
+	for _, s := range []string{"send", "email", "upload", "post", "webhook", "notify",
+		"publish", "message", "tweet", "dispatch", "sms", "pager", "create_issue",
+		"create_pull", "create_pr", "comment", "http_request"} {
+		if strings.Contains(l, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpSendHost guesses the destination host of a sender MCP tool from a small
+// table of common servers. It is a guess (the effect's role stays guessed); an
+// empty result leaves the host unknown.
+func mcpSendHost(tool string) string {
+	l := strings.ToLower(tool)
+	switch {
+	case strings.Contains(l, "slack"):
+		return "slack.com"
+	case strings.Contains(l, "github"):
+		return "api.github.com"
+	case strings.Contains(l, "gitlab"):
+		return "gitlab.com"
+	case strings.Contains(l, "discord"):
+		return "discord.com"
+	case strings.Contains(l, "telegram"):
+		return "api.telegram.org"
+	case strings.Contains(l, "twilio"), strings.Contains(l, "sms"):
+		return "api.twilio.com"
+	case strings.Contains(l, "pagerduty"):
+		return "events.pagerduty.com"
+	case strings.Contains(l, "notion"):
+		return "api.notion.com"
+	case strings.Contains(l, "jira"):
+		return "atlassian.net"
+	}
+	return ""
 }
 
 func mcpURLKind(tool string) Kind {
