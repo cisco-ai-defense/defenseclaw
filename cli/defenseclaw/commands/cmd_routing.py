@@ -883,12 +883,14 @@ def routing_budgets_list(app: AppContext, as_json: bool) -> None:
 
 @routing_budgets.command("add")
 @click.argument("budget_id")
-@click.option("--scope", type=click.Choice(SCOPES), required=True)
+@click.option(
+    "--scope", type=click.Choice(SCOPES), required=True, help="Count spend per user, per group or per connector."
+)
 @click.option(
     "--subject", required=True, help="user: a user or * (each user); group: one group; connector: a connector or *."
 )
 @click.option("--period", type=click.Choice(PERIODS), required=True, help="UTC calendar window; a week starts Monday.")
-@click.option("--limit-usd", type=float, required=True)
+@click.option("--limit-usd", type=float, required=True, help="Spend limit per period, in US dollars.")
 @click.option("--on-exceed", required=True, help="warn, deny (managed devices only) or downgrade:<alias>[,<alias>].")
 @pass_ctx
 def routing_budgets_add(
@@ -975,9 +977,9 @@ def _next_version(current: str, today: _dt.date | None = None) -> str:
 @click.argument("target", metavar="PROVIDER/MODEL")
 @click.option("--input", "input_price", type=float, required=True, help="USD per million input tokens.")
 @click.option("--output", "output_price", type=float, required=True, help="USD per million output tokens.")
-@click.option("--cache-read", type=float, default=None)
-@click.option("--cache-write", type=float, default=None)
-@click.option("--reasoning", type=float, default=None)
+@click.option("--cache-read", type=float, default=None, help="USD per million cache-read tokens.")
+@click.option("--cache-write", type=float, default=None, help="USD per million cache-write tokens.")
+@click.option("--reasoning", type=float, default=None, help="USD per million reasoning tokens.")
 @pass_ctx
 def routing_pricing_set(
     app: AppContext,
@@ -1128,7 +1130,14 @@ def _since(value: str) -> str:
 
 
 @routing_cmd.command("usage")
-@click.option("--by", "group_by", type=click.Choice(USAGE_BY), default="model", show_default=True)
+@click.option(
+    "--by",
+    "group_by",
+    type=click.Choice(USAGE_BY),
+    default="model",
+    show_default=True,
+    help="Group the usage rows by this field.",
+)
 @click.option("--since", default="7d", show_default=True, callback=lambda _c, _p, v: _since(v), help="24h, 7d, 30d ...")
 @click.option("--json", "as_json", is_flag=True, help="Print JSON.")
 @pass_ctx

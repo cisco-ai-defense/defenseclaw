@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -183,6 +184,7 @@ def test_setup_adds_models_without_prompting(home: Path, monkeypatch) -> None:
     assert run("setup", "--yes", "--model", "bad").exit_code == 2
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 0 does not take read access away on Windows")
 def test_managed_unreadable_config_says_so(home: Path, monkeypatch) -> None:
     monkeypatch.setattr(cmd_routing.config_writer, "machine_managed_standalone", lambda: True)
     monkeypatch.setattr("defenseclaw.enforce.asset_lists.audit_managed_config_refusal", lambda *a: None)
