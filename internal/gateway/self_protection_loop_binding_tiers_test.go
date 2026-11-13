@@ -130,6 +130,13 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 		connector, pack string
 		managed         bool
 	}
+	type judgment struct {
+		name, command string
+		cell          cell
+		want          bool
+		got           string
+	}
+	var judgments []judgment
 	judged := map[cell][2]int{}
 	turn := map[[2]bool]int{}
 	for _, row := range rows {
@@ -152,14 +159,24 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 				counts[1]++
 			}
 			judged[c] = counts
-			got := postSelfProtectionPackCell(t, home, project, c.connector, c.pack, c.managed, false, row.command)
-			block := strings.HasPrefix(got, `{"action":"block"`)
-			if want && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
-				t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, c.connector, c.managed, c.pack, got)
-			}
-			if !want && block {
-				t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", row.name, c.connector, c.managed, c.pack, got)
-			}
+			judgments = append(judgments, judgment{name: row.name, command: row.command, cell: c, want: want})
+		}
+	}
+	// Each call builds its own gateway and only reads the fixture, as
+	// concurrent hooks do, so the calls run on every CPU; the checks read
+	// the verdicts in row order.
+	forEachOnEveryCPU(len(judgments), func(i int) {
+		j := &judgments[i]
+		j.got = postSelfProtectionPackCell(t, home, project, j.cell.connector, j.cell.pack, j.cell.managed, false, j.command)
+	})
+	for _, j := range judgments {
+		c, got := j.cell, j.got
+		block := strings.HasPrefix(got, `{"action":"block"`)
+		if j.want && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+			t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", j.name, c.connector, c.managed, c.pack, got)
+		}
+		if !j.want && block {
+			t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", j.name, c.connector, c.managed, c.pack, got)
 		}
 	}
 	for _, connector := range connectors {
