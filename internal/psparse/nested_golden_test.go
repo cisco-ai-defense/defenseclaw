@@ -34,7 +34,9 @@ func nestedCorpus() []string {
 		`powershell -ExecutionPolicy Bypass -File x.ps1`,
 		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`,
 		`cmd /c del C:\x`, `cmd /c "del C:\x"`, `cmd.exe /c del C:\x & del C:\y`,
-		`cmd /c --% del %TEMP%\x`, `powershell -Command --% Remove-Item C:\x`,
+		`cmd /c --% del %TEMP%\x`,
+		// (powershell -Command --% <text> is non-static since review 8 R8-1: the caller
+		// expands %NAME% in the tail, which the AST oracle does not model; see rev7_test.go.)
 		`cmd /k dir`, `& $env:ComSpec /c del C:\x`,
 		`powershell -Command $payload`,
 		// review 3 R3: -Version/-v takes a value (the PS 2.0 downgrade evasion)
@@ -48,6 +50,13 @@ func nestedCorpus() []string {
 		// review 4 R4-4: -EncodedArguments is a value flag, never the payload
 		`powershell -EncodedArguments UABMAEEAQwBFAEgATwBMAEQA -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`,
 		`powershell -encodeda UABMAEEAQwBFAEgATwBMAEQA -c Remove-Item C:\x`,
+		// tested host-call shapes (host_shapes.go): switches, options, multi-word and encoded
+		`pwsh -nop -noni -c Write-Output a`, `powershell -NoLogo -NoProfile -NonInteractive -Command "Get-Date"`,
+		`pwsh -w hidden -ep Bypass -c Get-Date`, `powershell -c Write-Output a b`,
+		`pwsh -e ZQBjAGgAbwAgAGgAaQA=`, `pwsh -wd C:\ -c Get-Date`, `pwsh -if text -of text -c Get-Date`,
+		`cmd /q /d /c ver`, `cmd /e:on /v:off /c ver`, `cmd /K ver`, `cmd /s /r ver`, `cmd /a /u /c ver`,
+		// outside the tested shapes: the oracle resolves a script, psparse is NotStatic (nestedUnderStatic)
+		`cmd foo /c ver`, `pwsh -nop -foo -c Get-Date`, `pwsh -sta -version 2 -c Get-Date`,
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -58,6 +67,23 @@ func nestedCorpus() []string {
 		}
 	}
 	return out
+}
+
+// nestedUnderStatic are corpus lines outside the tested host-call shapes
+// (host_shapes.go): the AST oracle resolves a script text, psparse reports
+// NotStatic. The gate still fails if psparse is Static and disagrees.
+var nestedUnderStatic = map[string]bool{
+	`cmd /c --% del %TEMP%\x`:                                                                    true,
+	`powershell -Version 2 -c Remove-Item C:\x`:                                                  true,
+	`powershell -v 2 -enc ZQBjAGgAbwAgAGgAaQA=`:                                                  true,
+	`powershell -Version 2.0 -Command "Remove-Item C:\y"`:                                        true,
+	`powershell -Version 5.1 -NoProfile -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`:                    true,
+	`powershell -version 2 -nop -w hidden -c "Remove-Item C:\x"`:                                 true,
+	`powershell -EncodedArguments UABMAEEAQwBFAEgATwBMAEQA -EncodedCommand ZQBjAGgAbwAgAGgAaQA=`: true,
+	`powershell -encodeda UABMAEEAQwBFAEgATwBMAEQA -c Remove-Item C:\x`:                          true,
+	`cmd foo /c ver`:                   true,
+	`pwsh -nop -foo -c Get-Date`:       true,
+	`pwsh -sta -version 2 -c Get-Date`: true,
 }
 
 type nestedGoldLine struct {
@@ -113,6 +139,19 @@ func TestNestedGolden(t *testing.T) {
 		if !ok {
 			t.Errorf("nested #%d %q: no golden entry", i, s)
 			continue
+		}
+		if nestedUnderStatic[s] && len(mine) == len(want) {
+			// outside the tested host-call shapes: psparse is NotStatic where the
+			// AST oracle resolves a script. Never the other way round.
+			ok := true
+			for k := range mine {
+				if mine[k].Static && (!want[k].Static || mine[k].Text != want[k].Text) {
+					ok = false
+				}
+			}
+			if ok {
+				continue
+			}
 		}
 		if !sameNested(mine, want) {
 			t.Errorf("nested #%d %q:\n mine=%v\n want=%v", i, s, mine, want)

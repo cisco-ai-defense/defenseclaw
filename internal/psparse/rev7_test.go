@@ -28,22 +28,39 @@ var rev7Cases = []rev7Case{
 	// command is rejected by pwsh 7 and dropped by 5.1, so it is opaque.
 	{"N01", `pwsh '' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N02", `pwsh ' ' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N03", `pwsh ' -c' '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
-	{"N04", `pwsh '-c ' '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
+	{"N03", `pwsh ' -c' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"N04", `pwsh '-c ' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N05", `powershell '' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N06", `pwsh -nop '' '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N07", `pwsh ' -nop' -c '` + rev7Del + `'`, KindPowerShellCommand, true, rev7Del, ""},
+	{"N07", `pwsh ' -nop' -c '` + rev7Del + `'`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"N08", `pwsh ' -File' -`, KindPowerShellCommand, false, "", ReasonStdin},
 	// -ec is outside the modeled abbreviations (R6-8), so the padded N09 is opaque like the unpadded form;
 	// N09e is the same shape with the modeled -enc, which must decode.
 	{"N09", `pwsh ' -ec' ` + rev7B64, KindPowerShellCommand, false, "", ReasonHostOption},
-	{"N09e", `pwsh ' -enc' ` + rev7B64, KindEncodedCommand, true, "Write-Output EVIL", ""},
+	{"N09e", `pwsh ' -enc' ` + rev7B64, KindEncodedCommand, false, "", ReasonHostOption},
 	// R7-3: forms pwsh rejects are opaque with a host-option reason, not stdin.
 	{"A06", `pwsh -c:-`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B03", `pwsh -File:-`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B05", `pwsh -File - extra`, KindPowerShellCommand, false, "", ReasonHostOption},
 	{"B13", `pwsh -nop -File - -c 'Remove-Item C:\Windows'`, KindPowerShellCommand, false, "", ReasonStdin},
-	{"C11", `pwsh -c Remove-Item C:\x --% -`, KindPowerShellCommand, true, `Remove-Item C:\x -`, ""},
+	// R8-1 (GAP-0168): any --% tail on a pwsh/powershell host is non-static; the
+	// caller expands %NAME% in it. C11 was static in round 8.
+	{"C11", `pwsh -c Remove-Item C:\x --% -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S01", `pwsh -c Write-Output --% -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S03", `pwsh -c Write-Output --% - %DCV%`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S04", `pwsh -c Write-Output --% %DCV%`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S07", `pwsh -c Write-Output --% "-"`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S09", `pwsh -c --% Write-Output -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	{"S12", `pwsh ' -c' Write-Output --% -`, KindPowerShellCommand, false, "", ReasonStopParsing},
+	// R8-2: a padded lone dash is opaque.
+	{"A14", `pwsh '- '`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"A13", `pwsh ' -'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	// R8-3: -Command:<text> is rejected by pwsh 7.
+	{"COLC", `pwsh -c:'Write-Output MARK'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	{"COLC2", `pwsh -Command:'Write-Output MARK'`, KindPowerShellCommand, false, "", ReasonHostOption},
+	// R8-4: a /c inside a non-switch value is not a run switch.
+	{"K01", `cmd -x:C:/code`, "", false, "", ""},
+	{"K04", `cmd -x:/c ver`, KindCmdC, false, "", ReasonCmdArgv},
 	// still stdin (R6-1 / PS-FILE-STDIN / PS-STOPPARSE-DASH hold)
 	{"A01", `pwsh -c -`, KindPowerShellCommand, false, "", ReasonStdin},
 	{"B01", `pwsh -File -`, KindPowerShellCommand, false, "", ReasonStdin},
