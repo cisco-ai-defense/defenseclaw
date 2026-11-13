@@ -371,9 +371,16 @@ func (l *lexer) scanVarName() (name, scope string) {
 }
 
 func (l *lexer) lexDash() {
-	// --% stop-parsing: the remainder of the logical line is verbatim and must
-	// not be tokenized (an apostrophe or quote after it is literal text).
+	// --% stop-parsing: a standalone --% (at a token boundary) makes the rest
+	// of the logical line verbatim; the tail ends at a newline or an unquoted
+	// pipe or &&/|| (a ; and redirects are verbatim). --%glued is a bareword.
 	if l.peek(1) == '-' && l.peek(2) == '%' {
+		n := l.peek(3)
+		boundary := n == -1 || n == '\n' || isSpace(n) || n == '|' || n == '&' || n == ';'
+		if !boundary {
+			l.lexBareword() // --%foo is a single bareword, not stop-parsing
+			return
+		}
 		a := l.i
 		l.i += 3
 		l.emit(TokStopParse, a, l.i)
@@ -387,7 +394,7 @@ func (l *lexer) lexDash() {
 			if c == '\n' {
 				break
 			}
-			if q == 0 && c == '|' { // an unquoted pipe ends the verbatim tail
+			if q == 0 && (c == '|' || c == '&') { // unquoted | / && / || ends the tail
 				break
 			}
 			if q == 0 && (c == '\'' || c == '"') {
@@ -397,10 +404,10 @@ func (l *lexer) lexDash() {
 			}
 			l.i++
 		}
-		if l.i > vs {
-			raw := l.slice(vs, l.i)
-			l.push(Token{Kind: TokGeneric, Str: StrBare, Raw: raw, Value: raw, Start: l.byteAt(vs), End: l.byteAt(l.i)})
-		}
+		raw := l.slice(vs, l.i)
+		// always emit the verbatim tail token (possibly empty) so the parser
+		// can surface --% and its tail as two command elements.
+		l.push(Token{Kind: TokGeneric, Str: StrBare, Raw: raw, Value: raw, Start: l.byteAt(vs), End: l.byteAt(l.i)})
 		return
 	}
 	// '--name' is a double-dash bareword argument in PowerShell, not an

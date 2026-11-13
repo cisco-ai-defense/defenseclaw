@@ -167,10 +167,13 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 		case TokAmp:
 			goto done
 		case TokStopParse:
-			p.advance()
-			cmd.StopParsing = p.consumeStopParsingTail()
-			p.diag(start, p.prevEnd(), ReasonStopParsing, "verbatim --% tail not structured")
-			goto done
+			sp := p.advance()
+			cmd.Elements = append(cmd.Elements, &Arg{span: span{sp.Start, sp.End}, Value: &StringLit{span: span{sp.Start, sp.End}, Kind: StrBare, Value: "--%", Static: true, Bare: true}})
+			// the lexer always emits the verbatim tail token next
+			tl := p.advance()
+			cmd.StopParsing = tl.Raw
+			cmd.Elements = append(cmd.Elements, &Arg{span: span{tl.Start, tl.End}, Value: &StringLit{span: span{tl.Start, tl.End}, Kind: StrBare, Value: tl.Raw, Static: true, Bare: true}})
+			p.diag(start, p.prevEnd(), ReasonStopParsing, "verbatim --% tail")
 		case TokRedir:
 			cmd.Redirs = append(cmd.Redirs, p.parseRedirection())
 		case TokParameter:
@@ -521,20 +524,6 @@ func (p *parser) parseRedirection() *Redirection {
 		}
 	}
 	return r
-}
-
-// consumeStopParsingTail collects the verbatim remainder after --% up to the
-// next newline (PowerShell treats the rest of the line as literal args).
-func (p *parser) consumeStopParsingTail() string {
-	var b strings.Builder
-	for !p.at(TokNewline) && !p.at(TokEOF) && !p.at(TokSemi) &&
-		!p.at(TokPipe) && !p.at(TokPipePipe) && !p.at(TokAmpAmp) {
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(p.advance().Raw)
-	}
-	return b.String()
 }
 
 func (p *parser) diag0(e Expr, reason, detail string) {

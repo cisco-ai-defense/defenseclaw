@@ -3,8 +3,6 @@
 # the delta-review (PSPARSE-DELTA-REVIEW.md) fixes land.
 TmV3LUl0ZW0gLVBhdGg6IC1OYW1lOmNoaWxkLnR4dA==	pending step-3: parameter vs argument boundary
 Z2l0IGNvbW1pdCAtbSAibXNnIiAtLSAu	pending step-3: glued operator/bracket/comment splits an argument
-Y21kIC9jIC0tJSBlY2hvIGhpIHwgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: --% verbatim tail as elements
-aWNhY2xzIC0tJSBDOlx4IC9ncmFudCBFdmVyeW9uZTpG	pending step-3: --% verbatim tail as elements
 R2V0LUl0ZW0gLS0gLXg=	pending step-3: parameter vs argument boundary
 UmVtb3ZlLUl0ZW0gQzpceCBgIAotUmVjdXJzZQ==	pending step-3: glued operator/bracket/comment splits an argument
 V3JpdGUtT3V0cHV0IC1hJ2In	pending step-3: parameter vs argument boundary
@@ -17,21 +15,8 @@ YHV7NzJ9bSBDOlx4	pending step-3: delta review (cmd0 name mine=("u{72}m",true) or
 V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
-V3JpdGUtT3V0cHV0IC0tJSBhIGI=	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSAiYSBiIg==	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSBhIHwgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSBhIDsgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSBhICJ8IiBi	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSAlVEVNUCU=	pending step-3: --% verbatim tail as elements
-Y21kIC9jIC0tJSBkZWwgJVRFTVAlXHg=	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IGEgLS0lIGI=	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJQ==	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJWE=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tIC0tJSBh	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSBhICYmIFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail should be command elements, not dropped
-V3JpdGUtT3V0cHV0IC0tJSBhClJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail as elements
 V3JpdGUtT3V0cHV0IC0tJSBhIDI+JjE=	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSBhIHx8IFJlbW92ZS1JdGVtIEM6XHg=	pending step-3: --% verbatim tail as elements
 dXNpbmcgbmFtZXNwYWNlIFN5c3RlbS5JTzsgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
 ZW51bSBFIHsgQTsgQiB9OyBSZW1vdmUtSXRlbSBDOlx4	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
 ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	pending step-3: param/attribute block command recursion
