@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -171,9 +172,14 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	if err := auditDBOpenElsewhere(absolute); err != nil {
 		return CompactReport{}, fmt.Errorf("%w: %w", ErrCompactStoreInUse, err)
 	}
+	var validated os.FileInfo
 	if opts.ServiceOwned {
 		if err := validateServiceOwnedAuditDB(absolute, false); err != nil {
 			return CompactReport{}, err
+		}
+		// The open after the plan must reach this same file.
+		if validated, err = os.Lstat(absolute); err != nil {
+			return CompactReport{}, fmt.Errorf("audit: inspect %s: %w", absolute, err)
 		}
 	}
 	// The integrity and space checks read the store through the read-only
@@ -186,7 +192,7 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	if planned.DiskFreeKnown && planned.DiskFreeBytes < planned.NeedBytes {
 		return planned, &CompactSpaceError{Dir: filepath.Dir(absolute), Need: planned.NeedBytes, Free: planned.DiskFreeBytes}
 	}
-	opened, revalidate, err := openCompactConnection(absolute, opts)
+	opened, revalidate, err := openCompactConnection(absolute, opts, validated)
 	if err != nil {
 		if isSQLiteBusy(err) {
 			return CompactReport{}, ErrCompactStoreInUse
@@ -212,6 +218,11 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 		return CompactReport{}, err
 	}
 	report.IntegrityCheck = planned.IntegrityCheck
+	if report.IntegrityCheck == compactIntegrityAfterClaim && report.Method != CompactNothing {
+		if report.IntegrityCheck, err = compactQuickCheck(conn, absolute); err != nil {
+			return report, err
+		}
+	}
 	if report.DiskFreeKnown && report.DiskFreeBytes < report.NeedBytes {
 		return report, &CompactSpaceError{Dir: filepath.Dir(absolute), Need: report.NeedBytes, Free: report.DiskFreeBytes}
 	}
@@ -228,6 +239,11 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	if busy, err := checkpointTruncate(ctx, conn); err != nil || busy != 0 {
 		return report, fmt.Errorf("compact the audit database: checkpoint the WAL (busy=%d): %w", busy, err)
 	}
+	// An exclusive connection keeps the WAL index in memory and never uses
+	// audit.db-shm. One left by an earlier process is removed while the claim
+	// is held: an opener reaches the -shm only after a lock on audit.db,
+	// which the claim refuses. The close below removes the WAL.
+	removeStaleSHM(absolute)
 	var mode int
 	if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
 		return report, fmt.Errorf("compact the audit database: read auto_vacuum: %w", err)
@@ -237,6 +253,12 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 	if err := errors.Join(conn.Close(), opened.Close()); err != nil {
 		return report, fmt.Errorf("compact the audit database: close: %w", err)
 	}
+	if runtime.GOOS == "windows" {
+		// The store's custody open pins an existing -shm, so on Windows it
+		// is removed now. Windows does not delete a file another process has
+		// open, so a gateway that started since keeps its -shm.
+		removeStaleSHM(absolute)
+	}
 	report.FileBytesAfter, report.WALBytesAfter = compactFileSizes(absolute)
 	return report, nil
 }
@@ -244,7 +266,7 @@ func CompactStore(path string, opts CompactOptions) (CompactReport, error) {
 // openCompactConnection opens the store in exclusive locking mode: through
 // the store's custody checks, or for ServiceOwned through a plain open after
 // validateServiceOwnedAuditDB, which revalidate repeats on the same file.
-func openCompactConnection(absolute string, opts CompactOptions) (*hardenedAuditSQLite, func() error, error) {
+func openCompactConnection(absolute string, opts CompactOptions, validated os.FileInfo) (*hardenedAuditSQLite, func() error, error) {
 	if !opts.ServiceOwned {
 		opened, err := openHardenedAuditSQLite(absolute, auditDBPathHooks{exclusive: true})
 		if err != nil {
@@ -252,9 +274,9 @@ func openCompactConnection(absolute string, opts CompactOptions) (*hardenedAudit
 		}
 		return opened, opened.prepared.validateAfterOpen, nil
 	}
-	before, err := os.Lstat(absolute)
-	if err != nil {
-		return nil, nil, fmt.Errorf("audit: inspect %s: %w", absolute, err)
+	before := validated
+	if before == nil {
+		return nil, nil, errors.New("audit: a service-owned compaction needs the validated store")
 	}
 	db, err := openSQLiteWithPragmas(absolute, exclusiveLockingQuery+strings.TrimPrefix(auditPragmasFor(false), "?"))
 	if err != nil {
@@ -277,10 +299,55 @@ func openCompactConnection(absolute string, opts CompactOptions) (*hardenedAudit
 	return &hardenedAuditSQLite{DB: db}, revalidate, nil
 }
 
+// errCompactUncheckpointedWAL: audit.db-wal holds changes and there is no
+// audit.db-shm: the last writer did not stop cleanly. Reading it would make
+// SQLite create a -shm, so compact asks for one clean start and stop.
+var errCompactUncheckpointedWAL = errors.New("audit.db-wal holds changes the last writer did not checkpoint " +
+	"(it did not stop cleanly): start the gateway, stop it again, then run defenseclaw audit compact")
+
+// openCompactReadOnly opens the store for the plan and the dry run without
+// creating a file next to it. With no WAL frames on disk (a stopped gateway)
+// it opens immutable: SQLite then takes no lock and creates no -wal or -shm.
+// A WAL with frames is read through the plain read-only handle, which uses
+// the -shm of the writer that has it; with no -shm a dry run reads the store
+// without the WAL frames and a compaction refuses (errCompactUncheckpointedWAL).
+func openCompactReadOnly(absolute string, dryRun bool) (*sql.DB, bool, error) {
+	walFrames := false
+	if info, err := os.Lstat(absolute + "-wal"); err == nil && info.Size() > 0 {
+		walFrames = true
+	}
+	_, shmErr := os.Lstat(absolute + "-shm")
+	shm := shmErr == nil
+	if walFrames && shm {
+		db, err := OpenReadOnlyDB(absolute)
+		return db, false, err
+	}
+	if walFrames && !dryRun {
+		return nil, false, errCompactUncheckpointedWAL
+	}
+	db, err := openAuditReadOnlyWith(absolute, "&immutable=1")
+	if err != nil {
+		return nil, false, err
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, false, fmt.Errorf("audit: open %s read-only: %w", absolute, err)
+	}
+	return db, true, nil
+}
+
+// removeStaleSHM removes audit.db-shm; a file that is gone already, or that
+// a process holds open (Windows), is left. On Linux and macOS it runs only
+// while the claim is held: unlinking a -shm a gateway had mapped would split
+// its WAL index.
+func removeStaleSHM(absolute string) {
+	_ = os.Remove(absolute + "-shm")
+}
+
 // planCompaction reads the store read-only, picks the method and runs a
 // bounded quick_check before a rewrite.
 func planCompaction(absolute string, opts CompactOptions) (CompactReport, error) {
-	db, err := OpenReadOnlyDB(absolute)
+	db, immutable, err := openCompactReadOnly(absolute, false)
 	if err != nil {
 		if isSQLiteBusy(err) {
 			// A compaction claim, or a writer in exclusive mode, holds it.
@@ -308,23 +375,39 @@ func planCompaction(absolute string, opts CompactOptions) (CompactReport, error)
 	if report.Method == CompactNothing {
 		return report, nil
 	}
+	if immutable {
+		// An immutable handle takes no lock, so a writer could change the
+		// file under the check: it runs on the claimed connection instead,
+		// where the store holds no WAL frames a refused close could fold in.
+		report.IntegrityCheck = compactIntegrityAfterClaim
+		return report, nil
+	}
+	report.IntegrityCheck, err = compactQuickCheck(conn, absolute)
+	return report, err
+}
+
+// compactIntegrityAfterClaim marks a plan whose quick_check runs on the
+// claimed connection.
+const compactIntegrityAfterClaim = "after-claim"
+
+// compactQuickCheck runs SQLite's quick_check within compactIntegrityBudget:
+// "ok", "unfinished", or ErrCompactStoreDamaged.
+func compactQuickCheck(conn *sql.Conn, absolute string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), compactIntegrityBudget)
 	defer cancel()
 	var result string
-	err = conn.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&result)
+	err := conn.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&result)
 	switch {
 	case ctx.Err() != nil:
-		report.IntegrityCheck = "unfinished"
+		return "unfinished", nil
 	case err != nil && isSQLiteCorrupt(err):
-		return report, fmt.Errorf("%w: %w", ErrCompactStoreDamaged, err)
+		return "", fmt.Errorf("%w: %w", ErrCompactStoreDamaged, err)
 	case err != nil:
-		return report, fmt.Errorf("audit: check %s: %w", absolute, err)
+		return "", fmt.Errorf("audit: check %s: %w", absolute, err)
 	case result != "ok":
-		return report, fmt.Errorf("%w: quick_check: %s", ErrCompactStoreDamaged, result)
-	default:
-		report.IntegrityCheck = "ok"
+		return "", fmt.Errorf("%w: quick_check: %s", ErrCompactStoreDamaged, result)
 	}
-	return report, nil
+	return "ok", nil
 }
 
 // compactStorePath resolves path and refuses one that holds no file.
@@ -368,7 +451,7 @@ func claimExclusive(ctx context.Context, conn *sql.Conn) error {
 // review handle, which never writes, migrates or takes the store from a
 // running gateway.
 func inspectCompaction(absolute string, opts CompactOptions) (CompactReport, error) {
-	db, err := OpenReadOnlyDB(absolute)
+	db, _, err := openCompactReadOnly(absolute, true)
 	if err != nil {
 		return CompactReport{}, err
 	}

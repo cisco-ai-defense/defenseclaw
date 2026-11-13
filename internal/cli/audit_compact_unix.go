@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"syscall"
 
@@ -38,7 +39,22 @@ func auditCompactAsStoreOwner(cmd *cobra.Command, db string) (bool, error) {
 		return false, nil // CompactStore reports it.
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid == 0 {
+	if !ok {
+		return false, nil
+	}
+	if stat.Uid == 0 {
+		// Root compacts a root-owned store itself, but only in a folder
+		// that only root can change: the WAL and the VACUUM copy are
+		// created there by name.
+		folder, err := os.Stat(filepath.Dir(db))
+		if err != nil {
+			return false, nil // CompactStore reports it.
+		}
+		if folderStat, ok := folder.Sys().(*syscall.Stat_t); !ok || !auditCompactRootOnlyFolder(folderStat.Uid, folder.Mode()) {
+			return true, fmt.Errorf("audit compact: %s belongs to root, but its folder %s can be changed by another account; "+
+				"give the store to the account that owns the folder (on a managed computer, run the enterprise repair) "+
+				"and run compact again. Nothing was changed", db, filepath.Dir(db))
+		}
 		return false, nil
 	}
 	if !auditCompactManaged() {
@@ -53,8 +69,8 @@ func auditCompactAsStoreOwner(cmd *cobra.Command, db string) (bool, error) {
 
 // auditCompactChildEnv is the whole environment of the service-account
 // child: the managed deployment pins applyManagedStandaloneAdminEnv set, the
-// locale, a system PATH and HOME set to the managed data directory. Nothing else of root's (sudo) environment
-// reaches it.
+// locale, a system PATH and HOME set to the managed data directory. Nothing
+// else of root's (sudo) environment reaches it.
 func auditCompactChildEnv(getenv func(string) string) []string {
 	env := []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin"}
 	if home := getenv("DEFENSECLAW_HOME"); home != "" {
@@ -86,14 +102,24 @@ var auditCompactRunAs = func(cmd *cobra.Command, db string, uid, gid uint32) err
 	if err != nil {
 		return fmt.Errorf("audit compact: find this program: %w", err)
 	}
-	child := exec.CommandContext(cmd.Context(), self, os.Args[1:]...)
+	// Not CommandContext: a cancelled context would SIGKILL the child.
+	// Ctrl-C and SIGTERM go to the child (in its own session) instead, and
+	// this process waits for it, so the prompt returns only once the child
+	// has let go of the store.
+	child := exec.Command(self, os.Args[1:]...)
 	child.Dir = filepath.Dir(db)
 	child.Env = auditCompactChildEnv(os.Getenv)
 	// No stdin, and a session of its own: the child cannot read the root
 	// terminal or take signals meant for the caller's job.
 	child.Stdin, child.Stdout, child.Stderr = nil, cmd.OutOrStdout(), cmd.ErrOrStderr()
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: []uint32{}}}
-	err = child.Run()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	if err := child.Start(); err != nil {
+		return fmt.Errorf("audit compact: run as the gateway service account: %w", err)
+	}
+	err = waitForwardingSignals(child, signals)
 	var exited *exec.ExitError
 	if errors.As(err, &exited) {
 		// The child printed its own answer.
@@ -104,4 +130,28 @@ var auditCompactRunAs = func(cmd *cobra.Command, db string, uid, gid uint32) err
 		return fmt.Errorf("audit compact: run as the gateway service account: %w", err)
 	}
 	return nil
+}
+
+// waitForwardingSignals waits for a started child and passes it every signal
+// that arrives on signals meanwhile.
+func waitForwardingSignals(child *exec.Cmd, signals <-chan os.Signal) error {
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case received := <-signals:
+				_ = child.Process.Signal(received)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return child.Wait()
+}
+
+// auditCompactRootOnlyFolder reports a folder that only root can change:
+// owned by root, and no group or other write.
+func auditCompactRootOnlyFolder(uid uint32, mode os.FileMode) bool {
+	return uid == 0 && mode.Perm()&0o022 == 0
 }

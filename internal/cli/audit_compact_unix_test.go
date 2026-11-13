@@ -8,8 +8,12 @@ package cli
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -128,5 +132,63 @@ func TestAuditCompactServiceChildGetsOnlyThePinsLocaleAndPath(t *testing.T) {
 	}
 	if len(env) != 8 {
 		t.Errorf("child env has %d entries, want 8:\n%s", len(env), got)
+	}
+}
+
+func TestAuditCompactRootRefusesARootStoreInAFolderAnotherAccountOwns(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to own the store")
+	}
+	db := prunedAuditStore(t)
+	if err := os.Chown(filepath.Dir(db), 4242, 4242); err != nil {
+		t.Skipf("chown the folder: %v", err)
+	}
+	cmd := useAuditCompact(t, db, false, 0)
+	handled, err := auditCompactAsStoreOwner(cmd, db)
+	if !handled || err == nil || !strings.Contains(err.Error(), "can be changed by another account") {
+		t.Fatalf("root store in a user folder = %v, %v", handled, err)
+	}
+}
+
+func TestAuditCompactRunAsForwardsSignalsAndWaitsForTheChild(t *testing.T) {
+	child := exec.Command(os.Args[0], "-test.run=^TestAuditCompactSignalChildProcess$")
+	child.Env = append(os.Environ(), "DEFENSECLAW_TEST_COMPACT_SIGNAL_CHILD=1")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	signals := make(chan os.Signal, 1)
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		signals <- syscall.SIGTERM
+	}()
+	started := time.Now()
+	err := waitForwardingSignals(child, signals)
+	if err == nil || child.ProcessState == nil || !child.ProcessState.Exited() && child.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGTERM {
+		t.Fatalf("child after a forwarded SIGTERM: %v (%v)", err, child.ProcessState)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("the forwarded SIGTERM did not end the child (%s)", elapsed)
+	}
+}
+
+// TestAuditCompactSignalChildProcess waits until it is signalled.
+func TestAuditCompactSignalChildProcess(t *testing.T) {
+	if os.Getenv("DEFENSECLAW_TEST_COMPACT_SIGNAL_CHILD") != "1" {
+		return
+	}
+	time.Sleep(30 * time.Second)
+}
+
+func TestAuditCompactRootOnlyFolderNeedsRootOwnerAndNoSharedWrite(t *testing.T) {
+	for _, tc := range []struct {
+		uid  uint32
+		mode os.FileMode
+		want bool
+	}{
+		{0, 0o700, true}, {0, 0o755, true}, {995, 0o700, false}, {0, 0o770, false}, {0, 0o1777, false}, {501, 0o755, false},
+	} {
+		if got := auditCompactRootOnlyFolder(tc.uid, tc.mode); got != tc.want {
+			t.Errorf("auditCompactRootOnlyFolder(%d, %o) = %v, want %v", tc.uid, tc.mode, got, tc.want)
+		}
 	}
 }

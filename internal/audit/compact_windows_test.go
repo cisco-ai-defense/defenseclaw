@@ -6,8 +6,6 @@
 package audit
 
 import (
-	"errors"
-	"os"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -60,9 +58,18 @@ func TestCompactStoreServiceOwnedAsAnAdministratorWithoutTheGatewayToken(t *test
 	if err := validateServiceOwnedAuditDB(path, false); err != nil {
 		t.Fatalf("the store lost its managed DACL: %v", err)
 	}
-	if _, err := os.Stat(path + "-wal"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the compaction left a WAL behind: %v", err)
+	assertNoSidecars(t, path, "the service-owned compaction")
+	// A dry run and a second compaction create no -wal or -shm either, so
+	// no administrator-owned sidecar with inherited entries is left for the
+	// next run's checks to refuse (re-review P2-1).
+	if _, err := CompactStore(path, CompactOptions{DryRun: true, ServiceOwned: true}); err != nil {
+		t.Fatalf("service-owned dry run: %v", err)
 	}
+	assertNoSidecars(t, path, "the service-owned dry run")
+	if again, err := CompactStore(path, CompactOptions{ServiceOwned: true, FreeDiskBytes: roomyDisk}); err != nil || again.Method != CompactNothing {
+		t.Fatalf("second service-owned compaction = %+v, %v", again, err)
+	}
+	assertNoSidecars(t, path, "the second service-owned compaction")
 }
 
 func TestCompactStoreServiceOwnedRefusesAStoreWithoutTheManagedDACL(t *testing.T) {

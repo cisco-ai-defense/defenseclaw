@@ -53,7 +53,8 @@ func prunedStoreWithoutAutoVacuum(t *testing.T) (string, int) {
 
 func compactPragma(t *testing.T, path, pragma string) int64 {
 	t.Helper()
-	db, err := OpenReadOnlyDB(path)
+	// Immutable, so the check itself creates no -wal or -shm.
+	db, err := openAuditReadOnlyWith(path, "&immutable=1")
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
@@ -67,7 +68,8 @@ func compactPragma(t *testing.T, path, pragma string) int64 {
 
 func compactRows(t *testing.T, path string) int {
 	t.Helper()
-	db, err := OpenReadOnlyDB(path)
+	// Immutable, so the check itself creates no -wal or -shm.
+	db, err := openAuditReadOnlyWith(path, "&immutable=1")
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
@@ -80,6 +82,19 @@ func compactRows(t *testing.T, path string) int {
 }
 
 func roomyDisk(string) (uint64, error) { return 1 << 40, nil }
+
+// assertNoSidecars fails when audit.db-wal or audit.db-shm exists: a dry
+// run and a compaction of a stopped store leave none (re-review P2-1).
+func assertNoSidecars(t *testing.T, path, after string) {
+	t.Helper()
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if info, err := os.Stat(path + suffix); err == nil {
+			t.Errorf("%s left %s%s (%d bytes)", after, filepath.Base(path), suffix, info.Size())
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("inspect %s%s: %v", path, suffix, err)
+		}
+	}
+}
 
 func TestCompactStoreShrinksAPrunedStoreAndSwitchesItToIncrementalAutoVacuum(t *testing.T) {
 	path, rows := prunedStoreWithoutAutoVacuum(t)
@@ -98,8 +113,13 @@ func TestCompactStoreShrinksAPrunedStoreAndSwitchesItToIncrementalAutoVacuum(t *
 	if !dry.DryRun || dry.Method != CompactVacuum || dry.AutoVacuumBefore != "none" || dry.FreeBytes <= 0 || dry.ReclaimedBytes() != 0 {
 		t.Fatalf("dry run report = %+v", dry)
 	}
-	if size, _ := compactFileSizes(path); size != before || compactPragma(t, path, "auto_vacuum") != 0 {
+	assertNoSidecars(t, path, "the dry run")
+	if size, _ := compactFileSizes(path); size != before {
 		t.Fatalf("dry run changed the store: size %d -> %d", before, size)
+	}
+	// A -shm an earlier process left is removed by the compaction.
+	if err := os.WriteFile(path+"-shm", make([]byte, 32<<10), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
 	report, err := CompactStore(path, CompactOptions{FreeDiskBytes: roomyDisk})
@@ -113,6 +133,7 @@ func TestCompactStoreShrinksAPrunedStoreAndSwitchesItToIncrementalAutoVacuum(t *
 	if after >= before/2 || wal != 0 || report.FileBytesAfter != after || report.ReclaimedBytes() < before/2 {
 		t.Fatalf("store %d -> %d bytes (wal %d), report %+v", before, after, wal, report)
 	}
+	assertNoSidecars(t, path, "the compaction")
 	if mode := compactPragma(t, path, "auto_vacuum"); mode != 2 {
 		t.Fatalf("auto_vacuum after compaction = %d, want 2 (incremental)", mode)
 	}
@@ -144,6 +165,7 @@ func TestCompactStoreShrinksAPrunedStoreAndSwitchesItToIncrementalAutoVacuum(t *
 	if err != nil || incremental.Method != CompactIncremental || incremental.ReclaimedBytes() <= 0 {
 		t.Fatalf("incremental run = %+v, %v", incremental, err)
 	}
+	assertNoSidecars(t, path, "the incremental compaction")
 	if free := compactPragma(t, path, "freelist_count"); free != 0 {
 		t.Fatalf("free pages after the incremental run = %d", free)
 	}
@@ -406,8 +428,19 @@ func TestCompactStoreRefusesADamagedStoreAndLeavesItAsItWas(t *testing.T) {
 	if err != nil || !bytes.Equal(after, damaged) {
 		t.Fatalf("a refused compaction changed the damaged store: %v", err)
 	}
-	if info, err := os.Stat(path + "-wal"); err == nil && info.Size() > 0 {
-		t.Fatalf("the refused compaction wrote a %d-byte WAL", info.Size())
+	assertNoSidecars(t, path, "the refused compaction")
+}
+
+func TestCompactStoreRefusesAnUncheckpointedWALWithoutItsSHM(t *testing.T) {
+	path, _ := prunedStoreWithoutAutoVacuum(t)
+	if err := os.WriteFile(path+"-wal", []byte("frames of a writer that did not stop cleanly"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CompactStore(path, CompactOptions{FreeDiskBytes: roomyDisk}); !errors.Is(err, errCompactUncheckpointedWAL) {
+		t.Fatalf("CompactStore beside an uncheckpointed WAL = %v", err)
+	}
+	if _, err := os.Stat(path + "-shm"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refusal created audit.db-shm: %v", err)
 	}
 }
 
