@@ -93,6 +93,13 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
+	// toolCallVerdictForTest, when set, decides every tool-call check in
+	// place of the rules (inspectToolCalls). Only tests set it (the field is
+	// unexported and nothing outside a _test.go file assigns it), to prove
+	// the reply paths hold and refuse a call without real command content;
+	// it is nil in every production proxy.
+	toolCallVerdictForTest func(context.Context, json.RawMessage) *ScanVerdict
+
 	// kernelPeer names the verified caller of a request from the kernel
 	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
 	// leaves authentication as it was.
@@ -5719,6 +5726,9 @@ func injectNotificationForPassthrough(raw json.RawMessage, content, path string)
 // JSON array. Returns a verdict when the configured guardrail policy produces
 // an alert or block; unsupported HILT confirmations degrade to alert+audit.
 func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON json.RawMessage) *ScanVerdict {
+	if p.toolCallVerdictForTest != nil {
+		return p.toolCallVerdictForTest(ctx, toolCallsJSON)
+	}
 	if len(toolCallsJSON) == 0 {
 		return nil
 	}
