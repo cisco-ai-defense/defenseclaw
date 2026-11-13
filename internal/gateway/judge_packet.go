@@ -28,14 +28,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-// The tool judge's context packet (S7 TASKS B): next to the call text the
+// The tool judge's context packet: next to the call text the
 // judge gets what DefenseClaw's own parser proves the call does (its
 // effects and resolved targets), what this session did earlier to those
 // targets, and the rules that sent the call to the judge. Without it the
 // judge read vocabulary: a plain read of a key file came back as a
 // Sensitive Data Access signal, a scoped rm -f as Destructive Commands and
 // a local script run by path as hidden execution (Gemma 4 31B on the S7
-// corpora, BENCH-gemma4.md).
+// benchmark corpora).
 //
 // The packet is derived from the same untrusted call text, so every value
 // in it is bounded and stripped of control characters and block tags; only
@@ -286,7 +286,7 @@ var judgeReadOnlyPrograms = map[string]bool{
 }
 
 // hookJudgeSkipsProvenReadOnly reports a tool call the rules did not flag
-// and the parser proves only reads (S7 TASKS B: ask the judge about the
+// and the parser proves only reads (ask the judge about the
 // calls the rules leave open, not about reads): the parse is complete and
 // authoritative, every command is a read-only program (a pipe between them
 // included; a file tool is decided by its typed paths), every path effect is a
@@ -333,7 +333,7 @@ func hookJudgeSkipsProvenReadOnly(ctx context.Context, toolName, args string, cu
 	return true
 }
 
-// The tool-result judges' context (S7, TOOLRESULT-TO-GEMMA4.md): a tool's
+// The tool-result judges' context (rel-1-0-10:GAP-0171): a tool's
 // output alone does not say which tool produced it, what the call read or
 // fetched, or what the user asked for, so a mailbox the user asked for read
 // as personal data and a test fixture the agent opened read as injection.
