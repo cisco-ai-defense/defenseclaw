@@ -81,7 +81,14 @@ The chart exposes the admin Service on a ClusterIP only. For laptops, set `admin
 
 ## The token issuer
 
-Set a unique issuer per cluster: `--actor-jwt-issuer https://UNIQUE-HOST` on `deploy apiserver`. The default is the same on every cluster. With S3 nothing in the cluster fetches the issuer's URL, so actors and egress keep working with a non-resolving name. In-cluster verifiers fetch keys from the `idp` Service and compare `iss` as a string. Real federation needs a public host with a certificate in front of that Service. Set the same value in `substrate.identity.issuer`.
+Set a unique issuer per cluster, then set the same value in `substrate.identity.issuer`:
+
+```bash
+defenseclaw substrate setup --install-file install.yaml --issuer https://UNIQUE-HOST --yes
+ate-setup deploy ate-system --config install.yaml
+```
+
+The default issuer is the same on every cluster, so an actor token of one cluster would verify in another. The name doesn't have to resolve: the gateway compares `iss` with `substrate.identity.issuer` as a string and reads the signing keys from the `idp` Service (`https://idp.<substrate namespace>.svc/openid/v1/jwks`), whatever the issuer is. `setup --issuer` checks that this keys URL answers (through `kubectl`, when it reaches the cluster), and `verify` checks it again after the install (the `actor_keys` check). Real federation, a verifier outside the cluster, needs a public host with a certificate in front of that Service. An issuer that is only a string verifies only inside the cluster.
 
 ## Things that tripped us
 
