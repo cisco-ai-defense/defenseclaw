@@ -50,10 +50,10 @@ func TestGAP0183GatewayCanWriteThePersonSecrets(t *testing.T) {
 			names := asList(dig(r, "resourceNames"))
 			for _, v := range asList(dig(r, "verbs")) {
 				verbs = append(verbs, v)
-				switch {
-				case v == "list" || v == "watch" || v == "delete" || v == "*":
+				switch v {
+				case "list", "watch", "delete", "*":
 					t.Errorf("%s: verb %v", ns, v)
-				case v == "get" || v == "patch":
+				case "get", "patch":
 					want := map[string][]any{"defenseclaw-actor-secrets": {"github-app", "pypi"}, "dc-people": nil}[ns]
 					if !slices.Equal(names, want) {
 						t.Errorf("%s: %v by names %v, want %v", ns, v, names, want)
