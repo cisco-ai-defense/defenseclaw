@@ -636,6 +636,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"version": Version, "session": s.session, "agent_running": s.agent.Running(),
 		"last_preconnect_ms": float64(warm.Microseconds()) / 1000, "tasks": tasks, "workdir": relayWorkdir(s.opts.Config.Relay.Workdir),
+		"state_root": s.stateRoot(),
 	})
 }
 

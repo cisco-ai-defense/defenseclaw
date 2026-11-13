@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +78,10 @@ type Client struct {
 	// RemoteRoot is the actor directory copies are placed in. It is empty
 	// until DetectRoot (or the caller) sets it.
 	RemoteRoot string
+	// StateRootDir is where the relay keeps copy state outside RemoteRoot
+	// ("state_root" in the status route, GAP-0163); "" when the relay
+	// does not say (the state then goes beside the copy).
+	StateRootDir string
 	// MaxDownloadBytes caps the content Download extracts
 	// (DefaultMaxDownloadBytes when 0).
 	MaxDownloadBytes int64
@@ -191,7 +196,8 @@ func (c *Client) DetectRoot(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 	var st struct {
-		Workdir string `json:"workdir"`
+		Workdir   string `json:"workdir"`
+		StateRoot string `json:"state_root"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&st); err != nil {
 		return "", fmt.Errorf("workspace: the actor's status is unreadable: %w", err)
@@ -201,7 +207,21 @@ func (c *Client) DetectRoot(ctx context.Context) (string, error) {
 		root = DefaultRemoteRoot
 	}
 	c.RemoteRoot = root
+	if sr := path.Clean(st.StateRoot); strings.HasPrefix(st.StateRoot, "/") && sr != "/" && sr != root && !strings.HasPrefix(sr, root+"/") && !strings.HasPrefix(root, sr+"/") {
+		c.StateRootDir = sr
+	}
 	return root, nil
+}
+
+// StateRoot is where copy state goes, outside the working directory; ""
+// for beside the copy. It asks the relay when the root is not known yet.
+func (c *Client) StateRoot(ctx context.Context) (string, error) {
+	if c.RemoteRoot == "" {
+		if _, err := c.DetectRoot(ctx); err != nil {
+			return "", err
+		}
+	}
+	return c.StateRootDir, nil
 }
 
 // Root returns RemoteRoot, asking the relay for it first when it is not set.
