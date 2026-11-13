@@ -3015,6 +3015,11 @@ var actionPowerShellListOnly = map[string]bool{
 	"select-object": true, "select": true, "format-list": true, "fl": true, "format-table": true, "ft": true,
 	"format-wide": true, "fw": true, "measure-object": true, "measure": true, "sort-object": true,
 	"out-string": true, "write-output": true, "echo": true,
+	// Get-Content and Get-Acl read what a file holds and who may use it and
+	// write nothing; the bare statements are read-only already
+	// (actionKnownReadOnlyWindowsStatement), so a launcher around them is too
+	// (rel-1-0-10:GAP-0157).
+	"get-content": true, "gc": true, "get-acl": true,
 }
 
 // actionPowerShellListOnlyBodyText is the text a list-only body may hold:
@@ -3047,6 +3052,11 @@ func actionPowerShellListOnlyBody(body, home string) bool {
 				program, static = StaticWord(node.Args[0], home)
 			}
 			listOnly = static && actionPowerShellListOnly[strings.ToLower(program)]
+			for _, arg := range node.Args[1:] {
+				if option, known := StaticWord(arg, home); !known || actionPowerShellKeepsObjects(option) {
+					listOnly = false
+				}
+			}
 			calls++
 		}
 		return listOnly
@@ -4536,6 +4546,28 @@ func actionWindowsDiscardTarget(word string) bool {
 	return false
 }
 
+// actionPowerShellKeepsObjects reports a PowerShell common parameter that
+// stores what the stage outputs in a variable or buffer (-OutVariable, -ov,
+// -PipelineVariable, -pv, -OutBuffer, -ob, with the abbreviations the engine
+// accepts). The stage then hands the object, with its path, to a later
+// statement that names no path (Get-Item <key> -OutVariable k; Set-Content
+// -Path $k.FullName x), so the read is not only a read.
+func actionPowerShellKeepsObjects(option string) bool {
+	if len(option) < 3 || option[0] != '-' {
+		return false
+	}
+	name := strings.ToLower(option[1:])
+	if colon := strings.IndexByte(name, ':'); colon >= 0 {
+		name = name[:colon]
+	}
+	for _, full := range []string{"outvariable", "pipelinevariable", "outbuffer"} {
+		if strings.HasPrefix(full, name) && len(name) >= 2 && name[0] == full[0] {
+			return true
+		}
+	}
+	return name == "ov" || name == "pv" || name == "ob"
+}
+
 func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	if len(words) == 0 {
 		return false
@@ -4552,12 +4584,12 @@ func actionKnownReadOnlyWindowsStatement(words []string) bool {
 	}
 	program := programBase(words[0])
 	for _, option := range words[1:] {
-		if actionReadOptionMayWrite(option) {
+		if actionReadOptionMayWrite(option) || actionPowerShellKeepsObjects(option) {
 			return false
 		}
 	}
 	switch program {
-	case "cat", "get-content", "get-childitem", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
+	case "cat", "get-content", "get-childitem", "get-item", "gi", "get-acl", "format-table", "ft", "format-list", "fl", "format-wide", "fw", "measure-object", "measure", "resolve-path", "test-path", "head", "tail", "dir", "ls", "stat", "cd", "pushd", "popd", "set-location", "push-location", "pop-location",
 		// cmd type, and the search and select filters, only read (GAP-2168).
 		"type", "findstr", "select-string", "sls", "select-object", "select",
 		// Git Bash search and count programs read their operands as on a
