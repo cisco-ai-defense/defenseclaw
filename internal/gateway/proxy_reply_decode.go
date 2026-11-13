@@ -31,6 +31,11 @@ import (
 // replyDecodeCap bounds a decoded reply: the 10 MiB the passthrough reads.
 const replyDecodeCap = 10 << 20
 
+// replyDecodeMaxLayers bounds stacked encodings: a reply that names more
+// non-identity layers is uninspectable (each layer may expand to the cap,
+// so the work would grow with the square of the layer count).
+const replyDecodeMaxLayers = 4
+
 var (
 	errReplyEncodingUnknown = errors.New("unknown content-encoding")
 	errReplyDecodedTooLarge = errors.New("decoded reply over the cap")
@@ -46,6 +51,15 @@ func decodeReplyBody(h http.Header, body []byte) ([]byte, bool) {
 		return body, false
 	}
 	layers := strings.Split(enc, ",")
+	real := 0
+	for _, l := range layers {
+		if t := strings.TrimSpace(l); t != "" && t != "identity" {
+			real++
+		}
+	}
+	if real > replyDecodeMaxLayers {
+		return body, false
+	}
 	out := body
 	for i := len(layers) - 1; i >= 0; i-- {
 		var err error

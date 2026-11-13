@@ -298,3 +298,11 @@ func TestRouteOnlyAcceptEncodingAndDecodedUsage(t *testing.T) {
 	}
 	_ = nextUsage(t, ch)
 }
+
+func TestDecodeReplyBodyRefusesTooManyLayers(t *testing.T) {
+	h := http.Header{}
+	h.Set("Content-Encoding", "gzip, gzip, gzip, gzip, gzip")
+	if out, ok := decodeReplyBody(h, []byte("x")); ok || string(out) != "x" || h.Get("Content-Encoding") == "" {
+		t.Fatalf("five layers decoded: ok=%v", ok)
+	}
+}

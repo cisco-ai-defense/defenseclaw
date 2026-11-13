@@ -1718,7 +1718,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// binary AWS eventstream: streamed through like SSE, decoded frame by
 	// frame for inspection (GAP-0098).
 	var bedrockStream *bedrockEventStreamText
-	if strings.Contains(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") {
+	if strings.Contains(resp.Header.Get("Content-Type"), "application/vnd.amazon.eventstream") ||
+		(bedrockStreamingPath(r.URL.Path) && !isSSE && resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		// A streaming Bedrock path is read as eventstream whatever its
+		// Content-Type says: the AWS SDK reads the frames regardless, so a
+		// mislabelled reply must not skip inspection (item 5 review P2-2).
+		// A body that does not frame takes the uninspectable path.
 		bedrockStream = newBedrockEventStreamText()
 	}
 
@@ -1737,6 +1742,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		if enc := uninspectableEncoding(resp.Header); enc != "" {
 			if p.uninspectableReply(r.Context(), label, mode, "content-encoding "+enc) {
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
+					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
+				return
+			}
+		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 && len(bytes.TrimSpace(respBody)) > 0 && !json.Valid(respBody) {
+			// A 2xx body that is not JSON (for example compressed bytes with
+			// no Content-Encoding) cannot be inspected either (item 5 review
+			// P2-2).
+			if p.uninspectableReply(r.Context(), label, mode, "the reply body is not JSON") {
 				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false,
 					blockMessage(customBlockMsg, "completion", "the provider reply could not be inspected"))
 				return
