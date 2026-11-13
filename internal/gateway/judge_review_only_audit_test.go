@@ -93,7 +93,7 @@ func TestHookJudgeLoneReviewFindingByPack(t *testing.T) {
 		{"default", reviewOnlyJudgeMedium, flagged, guardrailActionAlert},
 		{"default", escalationJudgeHigh, plain, guardrailActionAlert},
 		{"strict", reviewOnlyJudgeMedium, plain, guardrailActionBlock}, // strict block_at MEDIUM, unchanged
-		{"strict", reviewOnlyJudgeMedium, flagged, ""}, // today's strict answer for the rule finding: checked below
+		{"strict", reviewOnlyJudgeMedium, flagged, ""},                 // today's strict answer for the rule finding: checked below
 		{"strict", escalationJudgeHigh, plain, guardrailActionBlock},
 	} {
 		name := tc.pack + "/" + map[string]string{reviewOnlyJudgeMedium: "lone-medium", escalationJudgeHigh: "high"}[tc.answer]
@@ -125,5 +125,33 @@ func TestHookJudgeLoneReviewFindingByPack(t *testing.T) {
 				t.Fatalf("raw_action=%q findings=%v, want %q", resp.RawAction, resp.Findings, tc.want)
 			}
 		})
+	}
+}
+
+// Review findings (Opus, b276bf3ece): a decision-model HIGH floor over a lone
+// judge review finding keeps its alert, and a low rule finding on the call
+// keeps the judge MEDIUM an alert.
+func TestJudgeReviewOnlyAuditKeepsMergedAndFlaggedVerdicts(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	lone := toolInjectionToVerdict(parseJudgeJSON(reviewOnlyJudgeMedium))
+	floor := &ScanVerdict{Action: "block", Severity: "HIGH", Findings: []string{decisionModelFindingID}, Scanner: decisionModelScanner}
+	merged := strongerDecisionVerdict(lone, floor)
+	if merged.reviewOnly {
+		t.Fatal("the decision-model floor must clear the review-only mark")
+	}
+	stale := *merged
+	stale.reviewOnly = true // a merge that copied the mark
+	for name, v := range map[string]*ScanVerdict{"merged": merged, "stale mark": &stale} {
+		lane := judgeReviewOnlyAudit(cfg, "claudecode", false, hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", v))
+		if lane.Action != guardrailActionAlert {
+			t.Errorf("%s: HIGH decision-model floor over a lone review finding gave %s, want alert", name, lane.Action)
+		}
+	}
+	low := &ToolInspectVerdict{Action: "allow", Severity: "LOW",
+		DetailedFindings: []RuleFinding{{RuleID: "R-LOW", Severity: "LOW"}}}
+	lane := judgeReviewOnlyAudit(cfg, "claudecode", rulesFlagged(low), hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", lone))
+	if lane.Action != guardrailActionAlert {
+		t.Fatalf("a LOW rule finding plus a lone judge MEDIUM gave %s, want today's alert", lane.Action)
 	}
 }

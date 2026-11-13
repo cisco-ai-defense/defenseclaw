@@ -2168,9 +2168,6 @@ func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strat
 	return judge, strategy
 }
 
-// hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
-// the judge gave none (the caller keeps the regex/AID verdict), else v with
-// its action set by the connector block_at / alert_at.
 // judgeReviewOnlyAudit makes a lone review finding of the tool judge audit
 // only in the default pack (owner decision 2026-11-13, GAP-0045): when the
 // judge's only finding is one needs_review category (MEDIUM, nothing
@@ -2180,10 +2177,18 @@ func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strat
 // levels, a call the rules flagged keeps the alert, and HIGH and CRITICAL
 // judge verdicts are unchanged. Secure Client keeps the judge action.
 func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool, v *ScanVerdict) *ScanVerdict {
-	if v == nil || !v.reviewOnly || ruleFlagged || cfg == nil || cfg.SecureClientIntegration() {
+	// The mark alone is not trusted: a merged verdict (the decision model's
+	// HIGH floor over a lone judge finding) can copy it, so the verdict must
+	// still be one MEDIUM finding.
+	if v == nil || !v.reviewOnly || ruleFlagged || cfg == nil || cfg.SecureClientIntegration() ||
+		!strings.EqualFold(v.Severity, "MEDIUM") || len(v.Findings) != 1 {
 		return v
 	}
-	if guardrailPackPosture(&cfg.Guardrail, cfg.Guardrail.EffectiveRulePackRef(connector)) != "default" {
+	// The posture of the pack whose levels mapped the verdict
+	// (resolveThresholds): the connector's effective pack, application
+	// protection overlay included.
+	ref := cfg.EffectiveRulePackRefForConnector(connector)
+	if packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref)) != "default" {
 		return v
 	}
 	if normalizedGuardrailAction(v.Action) != guardrailActionAlert {
@@ -2195,6 +2200,9 @@ func judgeReviewOnlyAudit(cfg *config.Config, connector string, ruleFlagged bool
 	return &out
 }
 
+// hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
+// the judge gave none (the caller keeps the regex/AID verdict), else v with
+// its action set by the connector block_at / alert_at.
 func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection string, v *ScanVerdict) *ScanVerdict {
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
