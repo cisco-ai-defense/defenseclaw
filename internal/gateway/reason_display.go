@@ -134,7 +134,7 @@ func logDisplayReason(reason string) string {
 	}
 	for _, label := range labels {
 		id, title, ok := strings.Cut(label, ":")
-		if !ok || !(trustedBuiltInFindingLabel(label) || activeRulePackLabel(id, title)) {
+		if !ok || (!trustedBuiltInFindingLabel(label) && !activeRulePackLabel(id, title)) {
 			return redaction.Reason(reason)
 		}
 	}
