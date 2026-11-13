@@ -22,3 +22,25 @@ func TestGAP0185MissingMCPScannerPathIsUnavailable(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0185: one server's in-repository source decides only that server.
+func TestGAP0185ServerSourceBelongsToItsServer(t *testing.T) {
+	local := MCPServer{Name: "notes", Transport: "stdio", Command: "python3", Args: []string{"srv.py"}}
+	pkg := MCPServer{Name: "fs", Transport: "stdio", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-filesystem@2025.8.21", "."}}
+	abs := MCPServer{Name: "abs", Transport: "stdio", Command: "/work/repo/bin/srv.js"}
+	for _, c := range []struct {
+		s    MCPServer
+		p    string
+		want bool
+	}{
+		{local, "/work/repo/srv.py", true},
+		{local, "/work/repo/other.py", false},
+		{pkg, "/work/repo/srv.py", false},
+		{abs, "/work/repo/bin/srv.js", true},
+		{abs, "/work/repo/srv.js", false},
+	} {
+		if got := serverStarts(c.s, c.p); got != c.want {
+			t.Errorf("%s starts %s = %v, want %v", c.s.Name, c.p, got, c.want)
+		}
+	}
+}

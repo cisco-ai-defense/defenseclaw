@@ -224,7 +224,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 		if r.MCPStatic != nil && a.Server.Transport == "stdio" {
 			var src strings.Builder
 			for _, f := range files {
-				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] {
+				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] && serverStarts(*a.Server, f.Path) {
 					src.Write(f.Content)
 					src.WriteByte('\n')
 				}
@@ -554,6 +554,33 @@ func skillDirOf(file, name string) string {
 		return path.Dir(file)
 	}
 	return file[:i] + "/skills/" + name
+}
+
+// serverStarts reports whether the server's command line names the attached
+// file p: the kit attaches the in-repository files of every server of a
+// config (E20), and one server's source must not decide another server's
+// tool calls (GAP-0185: a package server beside a local one).
+func serverStarts(s MCPServer, p string) bool {
+	p = path.Clean("/" + filepath.ToSlash(p))
+	for _, cand := range append([]string{s.Command}, s.Args...) {
+		if cand == "" || strings.HasPrefix(cand, "-") {
+			continue
+		}
+		c := path.Clean(filepath.ToSlash(cand))
+		if c == "." || c == ".." || strings.HasPrefix(c, "../") {
+			continue
+		}
+		if path.IsAbs(c) {
+			if c == p {
+				return true
+			}
+			continue
+		}
+		if strings.HasSuffix(p, "/"+c) {
+			return true
+		}
+	}
+	return false
 }
 
 func serverFiles(all []AttachedFile) []AttachedFile {

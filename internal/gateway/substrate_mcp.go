@@ -58,11 +58,12 @@ type SubstrateMCPDecision struct {
 // AttestMCPScanner is the shipped SubstrateMCPScanner (E20, GAP-0185): the
 // MCP servers a hook event adds or calls, read with attest.HookAssets and
 // decided by the runtime scanner. The config rules and the GAP-0176 key
-// check run in the gateway process and decide; the mcp-scanner tool scan
-// adds its findings only where that scanner is installed. The gateway
-// image has none, so a server the rules clear is not refused for want of
-// it (the lead's GAP-0164 ruling for scanners in the cluster; a known
-// limit).
+// check run in the gateway process. The mcp-scanner tool scan of a
+// server's in-repository source runs only where that scanner is installed;
+// the gateway image has none, so such a server follows the fail mode
+// (managed and strict refuse, OSS allows with a MEDIUM alert; the lead's
+// GAP-0164 ruling, a known limit). A server with no source to scan (a
+// package or a remote URL) is decided by the config rules alone.
 type AttestMCPScanner struct{ RT *attest.RuntimeScanner }
 
 // ScanMCP implements SubstrateMCPScanner.
@@ -97,6 +98,11 @@ func (s AttestMCPScanner) ScanMCP(ctx context.Context, payload json.RawMessage, 
 			// A block from the config rules stands even when the tool scan
 			// could not run.
 			d.Block, d.Reason = true, r.Reason
+		case r.Unavailable:
+			// The server has in-repository source to scan and no
+			// mcp-scanner can run here: the fail mode decides, as for an
+			// unscanned skill (lead's GAP-0164 ruling).
+			d.Unreadable, d.Reason = true, "the MCP tool scan cannot run in the gateway (no mcp-scanner)"
 		case r.Action == "warn":
 			d.Warn, d.Reason = true, r.Reason
 		}
