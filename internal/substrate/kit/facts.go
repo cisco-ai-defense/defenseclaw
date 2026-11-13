@@ -88,20 +88,24 @@ func CollectFacts(connector, event string, payload []byte, attachCap int64) *Fac
 	isPre := event == "PreToolUse" || event == "preToolUse"
 	if isPre && readTools[connector][view.ToolName] {
 		for _, pf := range f.Paths {
-			// Only a read of a skill's files: the gateway scans what is about
-			// to reach the model's context there (attest.HookAssets); any
-			// other read target's content has no reader (GAP-0072).
+			// A read of a skill's files runs the skill folder pass in this
+			// call (one rule for every skill: the folder's content digest,
+			// GAP-0039/0164), so a folder that arrived since the last pass is
+			// decided before its files reach the model.
 			if pf.Type == "file" && (pf.Field == "tool_input.file_path" || pf.Field == "tool_input.notebook_path") &&
 				(inSkillRoot(pf.Abs) || inSkillRoot(pf.Resolved)) {
-				budget = attach(f, "read_target", pf.Abs, pf.Resolved, budget)
+				f.readsSkill = true
 			}
 		}
 	}
-	if event == "SessionStart" {
+	// The repository's MCP config and server files: at SessionStart (the
+	// agent starts the servers) and before every call of an MCP tool, which
+	// the gateway refuses when the scan blocks its server (E20, GAP-0185).
+	if event == "SessionStart" || event == "sessionStart" || (isPre && strings.HasPrefix(view.ToolName, "mcp__")) {
 		budget = attachMCP(f, connector, cwd, budget)
 	}
 	_ = budget
-	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated {
+	if len(f.Paths) == 0 && len(f.Files) == 0 && !f.Truncated && !f.readsSkill {
 		return nil
 	}
 	return f
@@ -232,10 +236,17 @@ func inspectPath(field, p, cwd string) PathFact {
 // folder.
 func inSkillRoot(p string) bool {
 	p = filepath.ToSlash(p)
+	if p == "" {
+		return false
+	}
 	for _, root := range []string{"/.claude/skills/", "/.codex/skills/", "/.agents/skills/"} {
-		if p != "" && strings.Contains(p, root) {
+		if strings.Contains(p, root) {
 			return true
 		}
+	}
+	// A Claude Code plugin's skills (skillRoots watches them too).
+	if i := strings.Index(p, "/.claude/plugins/"); i >= 0 && strings.Contains(p[i:], "/skills/") {
+		return true
 	}
 	return false
 }
@@ -353,25 +364,32 @@ func readSmall(path string) []byte {
 	return b
 }
 
+// claudeMCPServers reads the stdio servers of a Claude Code MCP config by
+// the exact keys Claude Code reads (encoding/json's struct matching folds
+// case, GAP-0176): the kit attaches the files these servers start.
 func claudeMCPServers(path string) []mcpServer {
-	var doc struct {
-		MCPServers map[string]struct {
-			Type    string   `json:"type"`
-			Command string   `json:"command"`
-			Args    []string `json:"args"`
-		} `json:"mcpServers"`
-	}
+	var doc map[string]json.RawMessage
 	if json.Unmarshal(readSmall(path), &doc) != nil {
 		return nil
 	}
-	names := make([]string, 0, len(doc.MCPServers))
-	for n := range doc.MCPServers {
+	var servers map[string]map[string]json.RawMessage
+	if json.Unmarshal(doc["mcpServers"], &servers) != nil {
+		return nil
+	}
+	names := make([]string, 0, len(servers))
+	for n := range servers {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	var out []mcpServer
 	for _, n := range names {
-		s := doc.MCPServers[n]
+		var s struct {
+			Type, Command string
+			Args          []string
+		}
+		_ = json.Unmarshal(servers[n]["type"], &s.Type)
+		_ = json.Unmarshal(servers[n]["command"], &s.Command)
+		_ = json.Unmarshal(servers[n]["args"], &s.Args)
 		if s.Command != "" && (s.Type == "" || s.Type == "stdio") {
 			out = append(out, mcpServer{Command: s.Command, Args: s.Args})
 		}

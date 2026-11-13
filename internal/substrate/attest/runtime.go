@@ -82,8 +82,10 @@ type RuntimeDecision struct {
 	// decision then fails closed for kind skill and mcp.
 	Incomplete bool
 	// Unavailable is true when no scanner could run here (scanner.Unavailable:
-	// not installed, or a host that refuses scanner containment). The action
-	// is then block; the caller applies its fail mode (GAP-0164).
+	// not installed, or a host that refuses scanner containment). For a
+	// skill the action is then block and the caller applies its fail mode
+	// (GAP-0164). For an MCP server only the tool scan is missing: the
+	// config rules decided the action (GAP-0185).
 	Unavailable bool
 }
 
@@ -96,9 +98,6 @@ type RuntimeScanner struct {
 	BlockList []policy.ListEntry
 	// AllowedMCPHosts, when not empty, lists the remote MCP hosts allowed.
 	AllowedMCPHosts []string
-	// BlockAtOrAbove is an optional severity floor (see ScanOptions); the
-	// default follows the host admission rules exactly.
-	BlockAtOrAbove scanner.Severity
 	// MaxFiles and MaxBytes bound one asset (defaults 64 files, 2 MiB).
 	MaxFiles int
 	MaxBytes int64
@@ -108,6 +107,17 @@ type RuntimeScanner struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedDecision
+}
+
+// NewRuntimeScanner is the gateway's runtime scanner (serve --substrate):
+// the skill scanner the config names, the in-process MCP scan and the host
+// admission rules.
+func NewRuntimeScanner(cfg *config.Config) *RuntimeScanner {
+	return &RuntimeScanner{
+		Skill:     scanner.NewSkillScannerFromLLM(cfg.Scanners.SkillScanner, cfg.ResolveLLM("scanners.skill"), cfg.CiscoAIDefense),
+		MCPStatic: &MCPStaticScanner{},
+		Compiled:  policy.CompileAdmission(cfg),
+	}
 }
 
 type cachedDecision struct {
@@ -125,9 +135,6 @@ func (r *RuntimeScanner) now() time.Time {
 // Scan decides one asset. An error means the scan could not run: the caller
 // applies its fail mode (unattended is closed, D8).
 func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDecision, error) {
-	if r.Skill == nil {
-		return nil, errors.New("runtime scan: no skill scanner")
-	}
 	maxFiles, maxBytes, ttl := r.MaxFiles, r.MaxBytes, r.TTL
 	if maxFiles == 0 {
 		maxFiles = 64
@@ -174,7 +181,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	// The allow list is not used here: a name or a path from the actor is a
 	// claim, and a skill that names itself after an allow-listed one must still
 	// be scanned.
-	so := ScanOptions{Admission: r.Admission, Compiled: r.Compiled, BlockList: r.BlockList, BlockAtOrAbove: r.BlockAtOrAbove, Now: r.now}
+	so := ScanOptions{Admission: r.Admission, Compiled: r.Compiled, BlockList: r.BlockList, Now: r.now}
 	if so.Admission == nil {
 		so.Admission = FallbackAdmission
 	}
@@ -182,6 +189,9 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	var res *scanner.ScanResult
 	switch a.Kind {
 	case config.AdmissionTypeSkill:
+		if r.Skill == nil {
+			return nil, errors.New("runtime scan: no skill scanner")
+		}
 		dir := filepath.Join(work, "skill")
 		if err := writeAttached(dir, files); err != nil {
 			return nil, err
@@ -214,7 +224,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 		if r.MCPStatic != nil && a.Server.Transport == "stdio" {
 			var src strings.Builder
 			for _, f := range files {
-				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] {
+				if f.Role == RoleMCPServer && sourceExt[path.Ext(f.Path)] && serverStarts(*a.Server, f.Path) {
 					src.Write(f.Content)
 					src.WriteByte('\n')
 				}
@@ -226,14 +236,21 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 					return nil, err
 				}
 				sr, err := r.MCPStatic.Scan(ctx, tf)
-				if err != nil || sr == nil {
-					sr = failedScan(r.MCPStatic.Name(), a.Name, err)
+				if err != nil && scanner.Unavailable(err) {
+					// The tool scan cannot run here: the config rules above
+					// still decide, and the fail mode decides the rest
+					// (Unavailable; GAP-0185, as for skills in GAP-0164).
+					unavailable = true
+				} else {
+					if err != nil || sr == nil {
+						sr = failedScan(r.MCPStatic.Name(), a.Name, err)
+					}
+					res.Findings = append(res.Findings, sr.Findings...)
+					if sr.ScanError != "" {
+						res.ScanError, res.ExitCode = sr.ScanError, sr.ExitCode
+					}
+					res.Scanner = r.MCPStatic.Name()
 				}
-				res.Findings = append(res.Findings, sr.Findings...)
-				if sr.ScanError != "" {
-					res.ScanError, res.ExitCode = sr.ScanError, sr.ExitCode
-				}
-				res.Scanner = r.MCPStatic.Name()
 			}
 		}
 	default:
@@ -242,6 +259,21 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 
 	// Host admission rules: no template-build floor.
 	verdict, reason, _ := so.decide(ctx, a.Kind, a.Name, a.Path, res)
+	if a.Kind == config.AdmissionTypeMCP && verdict != VerdictBlock {
+		// GAP-0185: a HIGH finding of an MCP server (fetch-and-exec, a
+		// private or metadata address) is refused at run time as the
+		// template build refuses it, in every tier; the host admission
+		// default would only warn.
+		var high []string
+		for _, f := range res.Findings {
+			if sevRank(f.Severity) >= sevRank(scanner.SeverityHigh) {
+				high = append(high, f.RuleID+" ("+f.Title+")")
+			}
+		}
+		if len(high) > 0 {
+			verdict, reason = VerdictBlock, "a HIGH finding, refused at run time as at the template build: "+strings.Join(high, ", ")
+		}
+	}
 	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete, Unavailable: unavailable}
 	switch verdict {
 	case VerdictBlock:
@@ -522,6 +554,33 @@ func skillDirOf(file, name string) string {
 		return path.Dir(file)
 	}
 	return file[:i] + "/skills/" + name
+}
+
+// serverStarts reports whether the server's command line names the attached
+// file p: the kit attaches the in-repository files of every server of a
+// config (E20), and one server's source must not decide another server's
+// tool calls (GAP-0185: a package server beside a local one).
+func serverStarts(s MCPServer, p string) bool {
+	p = path.Clean("/" + filepath.ToSlash(p))
+	for _, cand := range append([]string{s.Command}, s.Args...) {
+		if cand == "" || strings.HasPrefix(cand, "-") {
+			continue
+		}
+		c := path.Clean(filepath.ToSlash(cand))
+		if c == "." || c == ".." || strings.HasPrefix(c, "../") {
+			continue
+		}
+		if path.IsAbs(c) {
+			if c == p {
+				return true
+			}
+			continue
+		}
+		if strings.HasSuffix(p, "/"+c) {
+			return true
+		}
+	}
+	return false
 }
 
 func serverFiles(all []AttachedFile) []AttachedFile {

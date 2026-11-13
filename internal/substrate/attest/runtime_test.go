@@ -79,21 +79,11 @@ func TestRuntimeMCPAdd(t *testing.T) {
 	if len(assets) != 1 || assets[0].Kind != "mcp" || assets[0].Server.Command != "python3" || assets[0].Server.Args[0] != "/work/notes/server.py" {
 		t.Fatalf("assets: %+v", assets)
 	}
-	// Host admission rules, no floor: the default MCP HIGH action warns.
+	// GAP-0185: a HIGH finding of an MCP server is a block at run time, as
+	// at the template build, where the host admission default only warns.
 	d, err := rs.Scan(ctx, assets[0])
-	if err != nil || d.Action != "warn" || d.Result.MaxSeverity() != "HIGH" {
-		t.Fatalf("host rules: %+v %v", d, err)
-	}
-	// With a floor (a profile that wants it) it is a block.
-	rs.BlockAtOrAbove = "HIGH"
-	// Every reading of the clock is a second later, so the cached decision is stale on any OS: Windows clocks
-	// tick about every 15 ms and a one-nanosecond TTL kept the cached warn.
-	tick := time.Now().Add(time.Hour)
-	rs.Now = func() time.Time { tick = tick.Add(time.Second); return tick }
-	rs.TTL = time.Nanosecond
-	d, err = rs.Scan(ctx, assets[0])
-	if err != nil || d.Action != "block" {
-		t.Fatalf("with floor: %+v %v", d, err)
+	if err != nil || d.Action != "block" || d.Result.MaxSeverity() != "HIGH" || !strings.Contains(d.Reason, "HIGH finding") {
+		t.Fatalf("HIGH tool finding: %+v %v", d, err)
 	}
 	// fetch-and-exec is HIGH by config rule too, and so is a remote one on a private address.
 	assets = HookAssets(hook(t, "Bash", map[string]any{"command": "claude mcp add --transport http meta http://169.254.169.254/mcp"}), nil)

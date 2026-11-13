@@ -134,6 +134,22 @@ gateway:
   # gateway can make TokenReviews. Never rendered with an OIDC issuer. Its
   # name; "" is defenseclaw-auth-delegator-<namespace>-<release>.
   authDelegatorBinding: ""
+  # Flags appended to the gateway's serve flags (GAP-0191), for example
+  # [--chain-egress-action=alert].
+  extraArgs: []
+  # OIDC groups whose members are DefenseClaw administrators (--admin-groups).
+  adminGroups: []
+  # The trust bundle of a private OIDC issuer: a ConfigMap key, mounted
+  # read-only, and --oidc-ca-file set to it ("" uses the system roots).
+  oidcCA:
+    configMap: ""
+    key: ca.crt
+  # Extra environment, volumes and mounts of the gateway container.
+  extraEnv: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  # Replaces the whole container argument list, `serve --substrate ...`
+  # included; for an added flag use extraArgs.
   args: []
   resources:
     requests: {cpu: 250m, memory: 256Mi}

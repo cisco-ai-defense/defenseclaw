@@ -476,6 +476,7 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			return out, fmt.Errorf("serve: controller for the create path: %w", err)
 		}
 		router, routerErr := substrateRouter()
+		runtimeScan := newRuntimeSkillScanner(c)
 		out = gateway.SubstrateConfig{
 			ActorAddr: serveFlags.actorListen, ActorTLS: actorTLS,
 			Actors: actors, Registrations: regs, Activity: recorder,
@@ -486,7 +487,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			},
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: relayDialer(router),
-			Skills: newRuntimeSkillScanner(c),
+			Skills: runtimeScan,
+			// E20, GAP-0185: the runtime MCP scan of hook events.
+			MCP: gateway.AttestMCPScanner{RT: runtimeScan.rt},
 			// GAP-0039: an unscanned skill folder is refused where hooks fail
 			// closed (managed, strict tier) and alerted on elsewhere; scan
 			// receipts hold on every replica that shares the chain key.

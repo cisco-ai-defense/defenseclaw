@@ -60,7 +60,8 @@ const (
 	// attaches them again in its next post).
 	substrateUnscannedField = "substrate_unscanned"
 	// substrateSkillFoldersMax bounds the folders scanned per call (the
-	// kit sends at most 4).
+	// kit attaches at most 8, maxSkillFoldersPerCall); past it the fail
+	// mode decides.
 	substrateSkillFoldersMax = 8
 )
 
@@ -182,7 +183,12 @@ func (st *substrateState) substrateScanSkills(ctx context.Context, connector str
 	}
 	for i, dir := range dirs {
 		if i >= substrateSkillFoldersMax {
-			break
+			// More attached folders than one post scans: none of them is left
+			// silently unscanned (fail closed past the cap).
+			if q := st.substrateRefuseOrAlert(ctx, connector, dir, "more skill folders came in one post than DefenseClaw scans", f); q != nil {
+				out = append(out, *q)
+			}
+			continue
 		}
 		// The receipt binds the content the gateway saw: its own digest of
 		// the attached files must be the fingerprint the kit listed, so a
@@ -324,13 +330,22 @@ const substrateAlertMemory = 10000
 const substrateSkillMaxPending = 8
 
 // pendingPosts counts the posts in which a folder fingerprint stayed pending
-// on this replica (bounded memory).
+// on this replica. The memory is bounded in two generations: when the
+// current one is full it becomes the previous one, and a key found there is
+// carried over with its count, so a folder that stays pending (seen in every
+// post) never has its count reset by other folders filling the memory.
 func (st *substrateState) pendingPosts(uid, dir, fp string) int {
 	key := uid + "\x00" + dir + "\x00" + fp
 	st.alertMu.Lock()
 	defer st.alertMu.Unlock()
-	if st.pending == nil || len(st.pending) >= substrateAlertMemory {
+	if st.pending == nil {
 		st.pending = map[string]int{}
+	}
+	if _, ok := st.pending[key]; !ok && len(st.pending) >= substrateAlertMemory/2 {
+		st.pendingOld, st.pending = st.pending, map[string]int{}
+	}
+	if _, ok := st.pending[key]; !ok {
+		st.pending[key] = st.pendingOld[key]
 	}
 	st.pending[key]++
 	return st.pending[key]

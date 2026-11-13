@@ -69,8 +69,8 @@ type HookEnvelope struct {
 type Facts struct {
 	// Paths are the path-valued arguments of the event, resolved.
 	Paths []PathFact `json:"paths,omitempty"`
-	// Files are small file contents the event refers to: the target of a
-	// read, or the repository's MCP configuration and the stdio server files
+	// Files are small file contents the event refers to: a skill folder's
+	// files, or the repository's MCP configuration and the stdio server files
 	// it starts (E20).
 	Files []AttachedFile `json:"files,omitempty"`
 	// Skills fingerprints every skill folder after PostToolUse,
@@ -78,6 +78,9 @@ type Facts struct {
 	Skills []SkillFingerprint `json:"skills,omitempty"`
 	// Truncated is set when a cap dropped paths or file bytes.
 	Truncated bool `json:"truncated,omitempty"`
+	// readsSkill marks a PreToolUse read of a file in a skill root: the
+	// skill folder pass runs in that call.
+	readsSkill bool
 }
 
 // SkillFingerprint is one skill folder's lstat fingerprint. Attached says
@@ -132,7 +135,7 @@ type PathFact struct {
 
 // AttachedFile is a file the kit read for the gateway.
 type AttachedFile struct {
-	// Role is read_target, mcp_config or mcp_server.
+	// Role is skill_file, mcp_config or mcp_server.
 	Role     string `json:"role"`
 	Path     string `json:"path"`
 	Resolved string `json:"resolved,omitempty"`

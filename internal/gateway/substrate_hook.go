@@ -209,6 +209,15 @@ func substrateEnvelopeMiddleware(st *substrateState, next http.Handler) http.Han
 			r.Header.Set("X-DefenseClaw-Hook-Event", env.Event)
 		}
 		if route.class == sandboxauth.RouteHook {
+			if msg := st.substrateMCPRefusal(ctx, env); msg != "" {
+				st.logRefusal("%s", msg)
+				writeSubstrateMCPRefusal(w, msg)
+				if reg, ok := substrateRegistrationFrom(ctx); ok {
+					body, _ := json.Marshal(map[string]string{"reason": kit.MCPRefusedCode, "message": msg})
+					st.substrateRecordDecision(ctx, reg, env.Event, body)
+				}
+				return
+			}
 			answer := withSubstrateAnswer(w, r, next, st.substrateSkills(ctx, env.Connector, env.Facts))
 			if reg, ok := substrateRegistrationFrom(ctx); ok {
 				st.substrateRecordDecision(ctx, reg, env.Event, answer)
