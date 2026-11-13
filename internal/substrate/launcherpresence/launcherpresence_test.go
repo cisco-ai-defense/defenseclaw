@@ -5,6 +5,7 @@ package launcherpresence
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,8 @@ func TestWriteParseRemove(t *testing.T) {
 	}
 	p := Path(dir, os.Getpid())
 	fi, err := os.Stat(p)
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	// Windows has no permission bits to read back (the file system reports 0666); the file is private there by its folder ACL.
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("record %v %v", fi, err)
 	}
 	b, _ := os.ReadFile(p)

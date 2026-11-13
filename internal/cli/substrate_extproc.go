@@ -104,7 +104,13 @@ func substrateExtprocLeader(o substrateExtprocFlags) (*leader.Client, error) {
 		if err != nil {
 			return nil, err
 		}
-		hc.Transport = &http.Transport{TLSClientConfig: files.ClientConfig(o.leaderIDs), Proxy: nil}
+		// HTTP/2 multiplexes the checks on one kept connection: a check
+		// cancelled at its budget resets its stream only, so the next check
+		// never waits on a new TLS handshake (GAP-0179). Over HTTP/1.1 a
+		// cancelled request closed its connection, and only 2 idle ones
+		// were kept for the chain cap of 8.
+		hc.Transport = &http.Transport{TLSClientConfig: files.ClientConfig(o.leaderIDs), Proxy: nil,
+			ForceAttemptHTTP2: true, MaxIdleConnsPerHost: 16, IdleConnTimeout: 90 * time.Second}
 	}
 	return &leader.Client{BaseURL: base, HTTP: hc, Retry: time.Second}, nil
 }

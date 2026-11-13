@@ -93,9 +93,30 @@ type inReader struct {
 	stop    chan struct{}
 	once    sync.Once
 	pending []byte
+	// gate, when set, holds the reader until it is closed: a reconnect
+	// takes keys only once the relay has greeted it (GAP-0003); until
+	// then the outage reader counts them as not sent.
+	gate     chan struct{}
+	gateOnce sync.Once
+}
+
+// openGate lets the reader take keys.
+func (r *inReader) openGate() {
+	if r.gate != nil {
+		r.gateOnce.Do(func() { close(r.gate) })
+	}
 }
 
 func (r *inReader) Read(p []byte) (int, error) {
+	if r.gate != nil {
+		select {
+		case <-r.gate:
+		case <-r.stop:
+			return 0, io.EOF
+		case <-r.h.eof:
+			return 0, io.EOF
+		}
+	}
 	if len(r.pending) > 0 {
 		n := copy(p, r.pending)
 		r.pending = r.pending[n:]

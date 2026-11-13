@@ -37,9 +37,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/attach"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
-	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/launcherpresence"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
 )
@@ -129,9 +129,7 @@ func substrateAttachOptions(cmd *cobra.Command, s *substrateSession, a api.Actor
 	// The agent starts in the copy of the project, so what it writes where
 	// it starts comes back with pull (GAP-0163). A computer that did not
 	// upload the folder has no record and keeps the relay default.
-	if rec, err := osw.LoadCopy(auth.StateDir(), substrateCopyName(a)); err == nil && rec != nil {
-		o.Dir = rec.RemoteDir
-	}
+	o.Dir = workspace.RemoteDirOf(auth.StateDir(), substrateCopyName(a))
 	if !noAsks {
 		o.Asks = substrateAsks{s.Client}
 	}
@@ -260,6 +258,13 @@ func newSubstrateID(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// substrateProven are the connectors proven end to end in a Substrate actor
+// whose OpenShell harness is still unverified (GAP-0184). The harness status
+// is about an OpenShell V2 sandbox, not an actor. OpenCode: its plugin posts
+// through the actor kit's hook-post, live on a Bedrock model (lane A10,
+// TST-0125, TST-0184). Amp, Cursor Agent and Devin stay refused.
+var substrateProven = map[string]bool{"opencode": true}
+
 // substrateRunTarget is what one run needs, resolved from flags and context.
 type substrateRunTarget struct {
 	spec     *harness.Spec
@@ -273,7 +278,7 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	if err != nil {
 		return substrateRunTarget{}, withExitCode(err, 2)
 	}
-	if spec.Verification().Status == harness.Unverified {
+	if spec.Verification().Status == harness.Unverified && !substrateProven[spec.Name] {
 		return substrateRunTarget{}, withExitCode(fmt.Errorf("%s is not verified yet, so it does not run (%s)", spec.DisplayName, spec.Verification().Note), substrateExitRefused)
 	}
 	t := substrateRunTarget{spec: spec, connName: spec.Name}
@@ -283,6 +288,35 @@ func resolveSubstrateRunTarget(s *substrateSession, f *substrateRunFlags, agent 
 	t.template = substrateFirst(f.template, os.Getenv("DEFENSECLAW_SUBSTRATE_TEMPLATE"), s.Ctx.Template, sandboxcli.HarnessArg(spec))
 	return t, nil
 }
+
+// substrateNoWorkerMessage says the pool is full (GAP-0167), how many of the
+// person's own agents hold a worker, and how to free one.
+func substrateNoWorkerMessage(ctx context.Context, s *substrateSession) string {
+	msg := "the cluster has no free worker for a new agent right now; nothing was started."
+	actors, err := s.Client.List(ctx, api.ListOptions{})
+	if err != nil {
+		return msg + " " + substrateNoWorkerNext
+	}
+	var running []string
+	for _, a := range actors {
+		if !a.Deleted && (a.State == "running" || a.State == "resuming") {
+			running = append(running, a.Name)
+		}
+	}
+	switch len(running) {
+	case 0:
+		return msg + " None of your agents are running, so the pool is busy with other work; try again later or ask your administrator for more workers."
+	case 1:
+		return msg + " 1 of your agents is running (" + running[0] + "). " + substrateNoWorkerNext
+	}
+	shown := running
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	return msg + fmt.Sprintf(" %d of your agents are running (%s). ", len(running), strings.Join(shown, ", ")) + substrateNoWorkerNext
+}
+
+const substrateNoWorkerNext = "Free a worker with: defenseclaw substrate delete NAME (see them all with defenseclaw substrate list), or ask your administrator for more workers."
 
 func substrateFirst(v ...string) string {
 	for _, s := range v {
@@ -304,11 +338,11 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 	// (GAP-0133). Every actor gets a name nobody had before.
 	req.Name = uniqueSubstrateActorName(req.Name, t.spec.Command)
 	req.Secrets = f.secrets
-	if f.clone != "" {
-		req.Workspace = api.Workspace{Clone: f.clone, Ref: f.ref}
-	}
 	a, err = s.Client.Create(ctx, req)
 	if err != nil {
+		if e, ok := api.AsError(err); ok && e.Status == 503 && e.Reason == "no_free_worker" {
+			return a, withExitCode(errors.New(substrateNoWorkerMessage(ctx, s)), substrateAPIExit(e))
+		}
 		return a, substrateFail(err)
 	}
 	fmt.Fprintf(w, "Started %s/%s (%s, profile %s).\n", a.Atespace, a.Name, t.spec.DisplayName, substrateDash(substrateFirst(a.Profile, t.profile)))
@@ -328,7 +362,34 @@ func substrateCreate(ctx context.Context, cmd *cobra.Command, s *substrateSessio
 			return a, err
 		}
 	}
+	if f.clone != "" {
+		if err = substrateCloneInActor(ctx, cmd, s, a, f); err != nil {
+			return a, err
+		}
+	}
 	return a, nil
+}
+
+// substrateCloneInActor clones --clone into the actor through the relay
+// (GAP-0175): the clone goes out through the actor's egress rules, which add
+// the credential for a host the profile allows; nothing of this computer's
+// credentials is sent. The agent then starts in the clone.
+func substrateCloneInActor(ctx context.Context, cmd *cobra.Command, s *substrateSession, a api.Actor, f *substrateRunFlags) error {
+	rel, err := substrateOpenRelay(ctx, s, a)
+	if err != nil {
+		return err
+	}
+	defer rel.Close()
+	fmt.Fprintf(cmd.ErrOrStderr(), "Cloning %s in the agent...\n", safetext.Line(f.clone))
+	res, err := workspace.Clone(ctx, rel.Client, auth.StateDir(), substrateCopyName(a), f.clone, f.ref)
+	if err != nil {
+		return withExitCode(err, 1)
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "Cloned into %s.\n", safetext.Line(res.Dir))
+	if res.Note != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Note: %s.\n", safetext.Line(res.Note))
+	}
+	return nil
 }
 
 func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) error {
@@ -345,6 +406,12 @@ func runSubstrateRun(cmd *cobra.Command, f *substrateRunFlags, args []string) er
 		return withExitCode(errors.New("--parallel goes with --batch"), 2)
 	case f.clone != "" && f.noUpload:
 		return withExitCode(errors.New("--clone and --no-upload both say what the agent starts with; use one"), 2)
+	case f.clone != "" && workspace.CheckCloneURL(f.clone) != nil:
+		return withExitCode(workspace.CheckCloneURL(f.clone), 2)
+	case workspace.CheckCloneRef(f.ref) != nil:
+		return withExitCode(workspace.CheckCloneRef(f.ref), 2)
+	case f.ref != "" && f.clone == "":
+		return withExitCode(errors.New("--ref goes with --clone URL"), 2)
 	}
 	if _, err := substrateTransport(f.transport); err != nil {
 		return withExitCode(err, 2)

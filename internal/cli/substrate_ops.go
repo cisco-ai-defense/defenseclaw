@@ -32,8 +32,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/auth"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/safetext"
 	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/workspace"
-	osw "github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/relay"
+
+	"golang.org/x/term"
 )
 
 // --- logs -------------------------------------------------------------------
@@ -147,7 +148,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	}
 	name := substrateCopyName(a)
 	dataDir := auth.StateDir()
-	if _, err := osw.LoadCopy(dataDir, name); err != nil {
+	if !workspace.HasCopy(dataDir, name) {
 		return fmt.Errorf("this computer has no record of the folder you sent to %s/%s, so it cannot tell what the agent changed. "+
 			"Pull from the computer you ran it on, or push from inside the agent (defenseclaw substrate connect %s, then git push)", a.Atespace, a.Name, a.Name)
 	}
@@ -158,7 +159,7 @@ func runSubstratePull(cmd *cobra.Command, f *substratePullFlags, ref string) err
 	defer rel.Close()
 	w := cmd.OutOrStdout()
 	fmt.Fprintln(cmd.ErrOrStderr(), "Reading the agent's work...")
-	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout})
+	rev, err := workspace.Pull(ctx, workspace.PullOptions{Exec: rel.Client, DataDir: dataDir, Name: name, Label: a.Name, Timeout: f.timeout, Project: "."})
 	if err != nil {
 		return fmt.Errorf("could not read the agent's work: %w", err)
 	}
@@ -223,9 +224,11 @@ func substratePullChoose(cmd *cobra.Command, f *substratePullFlags, a api.Actor,
 	return substrateApply(cmd, dataDir, name, workspace.ModeApply, "", "", true)
 }
 
+// substrateInteractive is true when stdin is a terminal. A char device is
+// not enough: /dev/null is one, and a script that gives pull no input must
+// get the hint, not a question.
 func substrateInteractive() bool {
-	st, err := os.Stdin.Stat()
-	return err == nil && st.Mode()&os.ModeCharDevice != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.ApplyMode, branch, patch string, accept bool) error {
@@ -246,11 +249,11 @@ func substrateApply(cmd *cobra.Command, dataDir, name string, mode workspace.App
 // --- checkpoint and undo ----------------------------------------------------
 
 func substrateRemoteDir(a api.Actor) (string, error) {
-	rec, err := osw.LoadCopy(auth.StateDir(), substrateCopyName(a))
-	if err != nil || rec == nil || rec.RemoteDir == "" {
+	dir := workspace.RemoteDirOf(auth.StateDir(), substrateCopyName(a))
+	if dir == "" {
 		return "", fmt.Errorf("this computer has no record of where %s/%s keeps your folder. Run checkpoint and undo on the computer you started it from", a.Atespace, a.Name)
 	}
-	return rec.RemoteDir, nil
+	return dir, nil
 }
 
 func runSubstrateCheckpoint(cmd *cobra.Command, out *substrateOutput, com *substrateCommon, ref string, every time.Duration) error {

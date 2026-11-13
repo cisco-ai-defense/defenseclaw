@@ -131,3 +131,21 @@ func TestExpiredAskDecisionNamesTheHost(t *testing.T) {
 		t.Fatalf("decisions %+v", ds)
 	}
 }
+
+// GAP-0177: two url rules on one host are two questions; an ask_hosts or
+// unnamed rule is host-wide, a url_rules one is not.
+func TestAsksAreKeyedByRule(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+	a, _ := s.OpenAsk(ctx, Ask{Atespace: "e", Actor: "a", UID: "u", OwnerID: "o", Host: "api.github.com", Rule: "url_rules:release-ask"})
+	b, _ := s.OpenAsk(ctx, Ask{Atespace: "e", Actor: "a", UID: "u", OwnerID: "o", Host: "api.github.com", Rule: "url_rules:admin-delete-ask"})
+	again, _ := s.OpenAsk(ctx, Ask{Atespace: "e", Actor: "a", UID: "u", OwnerID: "o", Host: "api.github.com", Rule: "url_rules:release-ask"})
+	if a.ID == b.ID || again.ID != a.ID {
+		t.Fatalf("asks %s %s %s", a.ID, b.ID, again.ID)
+	}
+	for rule, want := range map[string]bool{"": true, "ask_hosts:*.github.com": true, "url_rules:release-ask": false} {
+		if HostWide(rule) != want {
+			t.Errorf("HostWide(%q) = %v", rule, !want)
+		}
+	}
+}

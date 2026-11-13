@@ -256,7 +256,7 @@ func TestURLRules(t *testing.T) {
 		t.Fatalf("get: %+v", v)
 	}
 	v = h.eng.DecideHeaders(ctx, req("eng-web", "POST", "api.github.com", "/repos/acme/releases?x=1"))
-	if !v.Allow || v.AskID != "ask-1" || len(h.asks.got) != 1 || h.asks.got[0].Rule != "url_rules:ask-release" {
+	if !v.Allow || v.AskID != "ask-1" || len(h.asks.got) != 1 || !strings.HasPrefix(h.asks.got[0].Rule, "url_rules:ask-release ") {
 		t.Fatalf("ask rule: %+v asks=%+v", v, h.asks.got)
 	}
 }

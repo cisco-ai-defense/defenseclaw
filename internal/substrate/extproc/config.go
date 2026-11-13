@@ -185,9 +185,9 @@ type EgressLists struct {
 	Allow      []string `yaml:"allow"`
 }
 
-// URLRuleCfg is a profile URL and method rule. The first rule matching the
-// host, method and path decides: allow ends the rule pass, deny refuses, ask
-// raises an ask.
+// URLRuleCfg is a profile URL and method rule: deny refuses, ask raises an
+// ask. Rules only tighten: every rule matching the host, method and path
+// counts, and the strictest wins (GAP-0171). There is no allow action.
 type URLRuleCfg struct {
 	Name       string   `yaml:"name"`
 	Hosts      []string `yaml:"hosts"`
@@ -419,9 +419,13 @@ func (c *Config) normalize() error {
 
 func (r *URLRuleCfg) normalize() error {
 	switch r.Action = strings.ToLower(strings.TrimSpace(r.Action)); r.Action {
-	case "allow", "deny", "ask":
+	case "deny", "ask":
+	case "allow":
+		// An allow can't lift a deny or an ask (GAP-0171): it would do
+		// nothing, so it is refused rather than read as a carve-out.
+		return errors.New(`action "allow" is not supported: url rules only tighten (deny, ask); the strictest matching rule wins`)
 	default:
-		return fmt.Errorf("action %q (want allow, deny or ask)", r.Action)
+		return fmt.Errorf("action %q (want deny or ask)", r.Action)
 	}
 	if len(r.Hosts) == 0 {
 		return errors.New("hosts is required")

@@ -123,6 +123,9 @@ gateway:
   # relay session signing key (keys private.pem, public.pem), the provider
   # keys for /llm (one file per provider), and the callout judge token
   # (callout.judge.tokenSecret, shared with the callout).
+  # The relay session key Secret (private.pem signs attach tokens; images
+  # are built with public.pem): the relay-session hook creates it when
+  # absent and never replaces it; uninstall keeps it.
   relaySessionSecret: defenseclaw-relay-session
   llmCredentialsSecret: defenseclaw-llm
   # The chart's one cluster-wide grant: with no OIDC issuer (people sign in

@@ -119,11 +119,10 @@ func parseRename(args []string, cwd string) (op renameOp, ok bool) {
 			}
 		}
 	}
-	for _, operand := range append(operands, op.targetDir) {
-		if strings.ContainsAny(operand, "*?[") {
-			return op, false
-		}
-	}
+	// Every caller passes static words only (StaticWord), which refuse an
+	// unquoted glob: a *, ? or [ left in an operand was quoted or escaped
+	// and is a character of the file name, which mv takes as written
+	// ('/app/assets/file*with*stars.dat', rel-1-0-10:GAP-0013).
 	switch {
 	case op.targetDir != "":
 		op.sources = operands
@@ -277,12 +276,22 @@ func (l *shellLinks) followRenames(ops []renameOp, userView bool) bool {
 // A name that goes through an existing file that is not a directory names
 // nothing and is skipped (ln -s README.md docs.md also names
 // docs.md/README.md).
+//
+// The working directory is read only when a link operand is relative to it:
+// a command whose links all have absolute names and targets (ln
+// /app/a.dat /tmp/l && mv /tmp/l /app/b.dat) is judged the same in any
+// directory, including one this gateway cannot resolve (rel-1-0-10:GAP-0013).
 func (l shellLinks) aliasesAwayFromState(cwd, home string) bool {
-	if cwd == "" || home == "" || !filepath.IsAbs(cwd) {
+	if home == "" {
 		return false
 	}
-	if _, ok := ResolveWriteTarget(cwd); !ok {
-		return false
+	if l.relative || !l.aliasesAbsolute() {
+		if cwd == "" || !filepath.IsAbs(cwd) {
+			return false
+		}
+		if _, ok := ResolveWriteTarget(cwd); !ok {
+			return false
+		}
 	}
 	state := newStateReach(home)
 	reach := Links{links: l}
@@ -301,6 +310,17 @@ func (l shellLinks) aliasesAwayFromState(cwd, home string) bool {
 			if state.hits(resolved) {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// aliasesAbsolute reports that every link the command makes has an absolute
+// name and target, so no directory of the shell changes what it names.
+func (l shellLinks) aliasesAbsolute() bool {
+	for _, alias := range l.aliases {
+		if !filepath.IsAbs(alias.name) || !filepath.IsAbs(alias.target) {
+			return false
 		}
 	}
 	return true

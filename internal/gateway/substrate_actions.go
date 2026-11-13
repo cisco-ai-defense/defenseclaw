@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -52,6 +53,12 @@ var ErrSubstrateActorExists = errors.New("an actor with this name exists")
 // ErrSubstrateActorRefused is an actor the controller gives no policy.
 var ErrSubstrateActorRefused = errors.New("the controller refused the actor")
 
+// ErrSubstrateTemplateAttestation is a template whose attestation could not
+// be read (the attestor failed), so its connector label is unknown. A
+// managed create refuses it; an open-source one warns and goes on with the
+// launcher's connector (GAP-0181).
+var ErrSubstrateTemplateAttestation = errors.New("template attestation could not be read")
+
 // SubstratePolicyEnsurer writes an actor's egress policy before its first
 // resume (controller.Controller.EnsurePolicy). An error wrapping
 // ErrSubstrateActorRefused means the actor gets no policy.
@@ -63,7 +70,8 @@ type SubstrateATEActions struct {
 	Ensure SubstratePolicyEnsurer
 	// ConnectorOf reads the connector a template was built for (its attested
 	// label, GAP-0160). Nil, or "" for an unattested template, means the
-	// template names none.
+	// template names none; an attestation that could not be read is an
+	// error wrapping ErrSubstrateTemplateAttestation, never "".
 	ConnectorOf func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error)
 }
 
@@ -221,4 +229,27 @@ func substrateActorName(principal, subject string) string {
 	buf := make([]byte, 3)
 	_, _ = rand.Read(buf)
 	return prefix + "-" + hex.EncodeToString(buf)
+}
+
+// maxRefusalDetail bounds the refusal reason sent to the launcher.
+const maxRefusalDetail = 300
+
+// writeSubstrateActorRefusal answers a create the controller refused: the closed
+// reason actor_refused, the refusal code and its reason in words, and the
+// actor with its UID, so the launcher says why and the administrator finds
+// the controller's log line by that UID (GAP-0182).
+func writeSubstrateActorRefusal(w http.ResponseWriter, atespace, name, uid string, err error) {
+	out := map[string]any{"error": http.StatusText(http.StatusForbidden), "reason": "actor_refused",
+		"actor": atespace + "/" + name, "actor_uid": uid}
+	var re *controller.RefusedError
+	if errors.As(err, &re) {
+		detail := re.Reason
+		if len(detail) > maxRefusalDetail {
+			detail = detail[:maxRefusalDetail] + "..."
+		}
+		out["refusal"], out["detail"] = re.Code, detail
+	} else {
+		out["refusal"], out["detail"] = controller.RefusalNoPolicy, "the controller gave the actor no egress policy"
+	}
+	writeSubstrateJSON(w, http.StatusForbidden, out)
 }

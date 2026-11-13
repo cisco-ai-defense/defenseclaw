@@ -76,10 +76,17 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 // substrateTemplateConnector reads the connector a template was built for
 // from its attestation (the signed io.defenseclaw.connector label); an
 // unattested template names none, and the controller refuses it at resume.
-func substrateTemplateConnector(ctl *controller.Controller) func(context.Context, *ateapi.ActorTemplate) (string, error) {
+func substrateTemplateConnector(a controller.Attestor) func(context.Context, *ateapi.ActorTemplate) (string, error) {
 	return func(ctx context.Context, tmpl *ateapi.ActorTemplate) (string, error) {
-		att, err := ctl.Attestor().Attest(ctx, tmpl)
-		if err != nil || !att.Attested {
+		if a == nil {
+			return "", nil
+		}
+		att, err := a.Attest(ctx, tmpl)
+		if err != nil {
+			// Not "no label": the create route decides by mode (GAP-0181).
+			return "", fmt.Errorf("%w: %v", gateway.ErrSubstrateTemplateAttestation, err)
+		}
+		if !att.Attested {
 			return "", nil
 		}
 		return att.Connector, nil
@@ -91,7 +98,9 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 	return func(ctx context.Context, atespace, name string) error {
 		err := ctl.EnsurePolicy(ctx, ateapi.Ref(atespace, name))
 		if errors.Is(err, controller.ErrRefused) {
-			return fmt.Errorf("%w: %v", gateway.ErrSubstrateActorRefused, err)
+			// Keep the controller's *RefusedError in the chain: the create
+			// path answers with its code, reason and actor UID (GAP-0182).
+			return fmt.Errorf("%w: %w", gateway.ErrSubstrateActorRefused, err)
 		}
 		return err
 	}

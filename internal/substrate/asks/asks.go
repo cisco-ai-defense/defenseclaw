@@ -77,9 +77,14 @@ type Ask struct {
 	UID      string `json:"uid"`
 	OwnerID  string `json:"owner_id"`
 	// Kind is egress (a host) or tool.
-	Kind     string    `json:"kind"`
-	Host     string    `json:"host,omitempty"`
-	Tool     string    `json:"tool,omitempty"`
+	Kind string `json:"kind"`
+	Host string `json:"host,omitempty"`
+	Tool string `json:"tool,omitempty"`
+	// Rule is the egress rule that asked: "ask_hosts:<pattern>" (an
+	// approval covers the host) or "url_rules:<name>" (an approval covers
+	// that rule only, its methods and path prefix; GAP-0177). Empty: a host
+	// ask from a callout that names no rule.
+	Rule     string    `json:"rule,omitempty"`
 	Summary  string    `json:"summary,omitempty"`
 	Reason   string    `json:"reason,omitempty"`
 	Severity string    `json:"severity,omitempty"`
@@ -311,7 +316,7 @@ func (s *Store) OpenAsk(_ context.Context, a Ask) (Ask, error) {
 	pending := 0
 	for _, o := range s.asks {
 		if o.State == StatePending && o.UID == a.UID {
-			if o.Host == a.Host && o.Tool == a.Tool {
+			if o.Host == a.Host && o.Tool == a.Tool && o.Rule == a.Rule {
 				return *o, nil // the same question is asked once
 			}
 			pending++
@@ -530,4 +535,12 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// HostWide reports whether an approval of an ask raised by rule covers its
+// whole host (an ask_hosts rule, or no rule named): such an approval joins
+// the actor's approved hosts. A url_rules ask asks about some methods and a
+// path prefix only, so its approval covers that rule alone (GAP-0177).
+func HostWide(rule string) bool {
+	return !strings.HasPrefix(rule, "url_rules:")
 }

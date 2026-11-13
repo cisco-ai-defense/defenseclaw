@@ -37,6 +37,16 @@ type AttachOptions struct {
 	// every route is BaseURL + "/" + route. Without it BaseURL is the relay
 	// origin and the routes are under Prefix.
 	FlatRoutes bool
+	// KeepaliveEvery and KeepaliveDead bound how long a WebSocket attach
+	// stays up with nothing from the relay (LC-J9a): a ping is sent every
+	// KeepaliveEvery, and the connection is closed (the caller reconnects
+	// and says so) when no frame or pong arrives for KeepaliveDead.
+	// Defaults 10 s and 30 s.
+	KeepaliveEvery, KeepaliveDead time.Duration
+	// OnUnsent sees the size of every chunk of input that was read but
+	// could not be sent because the connection ended (GAP-0003), so the
+	// caller can say so instead of losing keys silently.
+	OnUnsent func(n int)
 	// Dir is the folder in the actor the agent starts in when it is not
 	// running yet (the copy of the project); "" keeps the relay default.
 	Dir string
@@ -125,9 +135,37 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		defer wmu.Unlock()
 		return conn.WriteMessage(websocket.BinaryMessage, frame)
 	}
+	every, dead := o.KeepaliveEvery, o.KeepaliveDead
+	if every <= 0 {
+		every = 10 * time.Second
+	}
+	if dead <= 0 {
+		dead = 30 * time.Second
+	}
+	// A network that drops without a reset leaves the socket open: only a
+	// read deadline notices. Any frame or pong from the relay extends it.
+	_ = conn.SetReadDeadline(time.Now().Add(dead))
+	conn.SetPongHandler(func(string) error { return conn.SetReadDeadline(time.Now().Add(dead)) })
 	var res AttachResult
 	var resMu sync.Mutex // the reader goroutine writes res while the paths below read it
 	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				wmu.Lock()
+				err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(every))
+				wmu.Unlock()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 	go func() {
 		defer close(done)
 		for {
@@ -135,6 +173,7 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 			if err != nil {
 				return
 			}
+			_ = conn.SetReadDeadline(time.Now().Add(dead))
 			t, p, err := Decode(msg)
 			if err != nil {
 				continue
@@ -172,7 +211,9 @@ func attachWS(ctx context.Context, in io.Reader, out io.Writer, o AttachOptions)
 		}()
 	}
 	detached := make(chan bool, 1)
-	go func() { detached <- pumpInput(in, func(b []byte) error { return send(Encode(FrameData, b)) }) }()
+	go func() {
+		detached <- pumpInput(in, o.unsentTracked(func(b []byte) error { return send(Encode(FrameData, b)) }))
+	}()
 	select {
 	case <-done:
 	case d := <-detached:
@@ -295,7 +336,9 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 		}()
 	}
 	detached := make(chan bool, 1)
-	go func() { detached <- pumpInput(in, func(b []byte) error { return send(Encode(FrameData, b)) }) }()
+	go func() {
+		detached <- pumpInput(in, o.unsentTracked(func(b []byte) error { return send(Encode(FrameData, b)) }))
+	}()
 	select {
 	case <-done:
 	case d := <-detached:
@@ -312,6 +355,17 @@ func attachPoll(ctx context.Context, in io.Reader, out io.Writer, o AttachOption
 	resMu.Lock()
 	defer resMu.Unlock()
 	return res, nil
+}
+
+// unsentTracked wraps send so a chunk that fails is reported (OnUnsent).
+func (o AttachOptions) unsentTracked(send func([]byte) error) func([]byte) error {
+	return func(b []byte) error {
+		err := send(b)
+		if err != nil && o.OnUnsent != nil && len(b) > 0 {
+			o.OnUnsent(len(b))
+		}
+		return err
+	}
 }
 
 // routeBase is where the routes begin for origin (BaseURL, or its ws:// form).

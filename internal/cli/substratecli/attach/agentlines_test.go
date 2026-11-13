@@ -44,3 +44,21 @@ func TestTaskOutputShowsTheAgentsText(t *testing.T) {
 		t.Errorf("an error result must show: %q", out.String())
 	}
 }
+
+// LC-J4: a tool call DefenseClaw refused shows as one plain line; another
+// failed tool call too; a successful tool result shows nothing.
+func TestTaskOutputShowsBlocksPlainly(t *testing.T) {
+	var out, errw bytes.Buffer
+	emit := TextEmitter(&out, &errw)
+	for _, l := range []string{
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"PreToolUse:Bash hook returned blocking error: DefenseClaw blocked this command: reads a credential file (CRED-READ)\nmore detail"}]},"session_id":"s1"}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":[{"type":"text","text":"Exit code 2\nls: cannot access"}]}]},"session_id":"s1"}`,
+		`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t3","content":"ok"}]},"session_id":"s1"}`,
+	} {
+		emit(relay.TaskEvent{Type: "stdout", Data: l})
+	}
+	want := "! blocked by DefenseClaw: PreToolUse:Bash hook returned blocking error: DefenseClaw blocked this command: reads a credential file (CRED-READ)\n! the tool call failed: Exit code 2\n"
+	if out.String() != want {
+		t.Fatalf("got %q\nwant %q", out.String(), want)
+	}
+}

@@ -100,7 +100,7 @@ func TestAskClientAgainstTheCalloutAskRoute(t *testing.T) {
 	}
 	for _, b := range bodies {
 		for k := range b {
-			if k != "actor" && k != "host" && k != "summary" && k != "reason" && k != "ask_id" {
+			if k != "actor" && k != "host" && k != "summary" && k != "reason" && k != "rule" && k != "ask_id" {
 				t.Fatalf("unexpected field %q sent to the gateway", k)
 			}
 		}
@@ -117,5 +117,25 @@ func TestAskClientNeedsAGatewayURL(t *testing.T) {
 	c, err := NewAskClient(&Config{Judge: JudgeConfig{URL: "https://gw.example:8443" + calloutapi.Path}})
 	if err != nil || c == nil || c.url != "https://gw.example:8443/api/v1/substrate/callout/ask" {
 		t.Fatalf("ask url from judge.url: %v %v", c, err)
+	}
+}
+
+// GAP-0177: the gateway gets the rule (it keys the approval) and the person
+// sees the path prefix a url rule approval covers.
+func TestAskClientSendsTheRuleAndPathPrefix(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"state":"denied","reason":"unattended runs do not ask"}`))
+	}))
+	defer srv.Close()
+	c, err := NewAskClient(&Config{Judge: JudgeConfig{URL: srv.URL + calloutapi.Path}})
+	if err != nil || c == nil {
+		t.Fatal(c, err)
+	}
+	_, _ = c.Ask(context.Background(), AskRequest{Actor: ActorRef{Atespace: "a", Name: "n"}, Host: "api.github.com", Method: "DELETE",
+		Rule: "url_rules:admin-delete-ask", PathPrefix: "/admin"})
+	if got["rule"] != "url_rules:admin-delete-ask" || got["summary"] != "DELETE api.github.com /admin*" {
+		t.Fatalf("wire %v", got)
 	}
 }

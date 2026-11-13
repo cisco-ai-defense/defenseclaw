@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -123,12 +124,70 @@ func TestSubstrateRunNeedsNoProfile(t *testing.T) {
 	}
 }
 
+// GAP-0184: OpenCode runs (proven in an actor although its OpenShell harness
+// is unverified); the connectors with no Substrate proof stay refused.
+func TestSubstrateRunVerifiedConnectors(t *testing.T) {
+	t.Setenv("DEFENSECLAW_SUBSTRATE_PROFILE", "")
+	t.Setenv("DEFENSECLAW_SUBSTRATE_TEMPLATE", "")
+	tg, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, "opencode")
+	if err != nil {
+		t.Fatalf("run opencode refused: %v", err)
+	}
+	if tg.connName != "opencode" {
+		t.Errorf("connector %q, want opencode", tg.connName)
+	}
+	for _, agent := range []string{"amp", "cursor-agent", "devin"} {
+		_, err := resolveSubstrateRunTarget(&substrateSession{}, &substrateRunFlags{}, agent)
+		if err == nil || !strings.Contains(err.Error(), "not verified yet") {
+			t.Errorf("run %s: %v, want the not-verified refusal", agent, err)
+		}
+	}
+}
+
+// Live on stk (f7-clone4, 11-13 05:53Z): pull with stdin from /dev/null (a char device) asked for a
+// yes instead of printing the hint.
+func TestSubstrateInteractiveNeedsATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	old := os.Stdin
+	os.Stdin = f
+	defer func() { os.Stdin = old }()
+	if substrateInteractive() {
+		t.Error("stdin from the null device counted as a terminal")
+	}
+}
+
 // GAP-0167: no free worker says what to do.
 func TestSubstrateNoFreeWorkerMessage(t *testing.T) {
 	msg := substrateAPIMessage(&api.Error{Status: 503, Reason: "no_free_worker"})
 	for _, want := range []string{"no free worker", "nothing was started", "defenseclaw substrate list", "defenseclaw substrate delete NAME"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message %q lacks %q", msg, want)
+		}
+	}
+}
+
+// GAP-0167: the message counts the person own running agents.
+func TestSubstrateNoWorkerCountsRunningAgents(t *testing.T) {
+	f := &fakeAdmin{h: map[string]func(http.ResponseWriter, *http.Request){
+		"GET actors": jsonReply(map[string]any{"actors": []map[string]any{
+			{"atespace": "eng-web", "name": "a1", "state": "running"},
+			{"atespace": "eng-web", "name": "a2", "state": "running"},
+			{"atespace": "eng-web", "name": "a3", "state": "suspended"},
+		}}),
+	}}
+	useFakeAdmin(t, f)
+	s, err := substrateOpen(nil, &substrateCommon{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := substrateNoWorkerMessage(t.Context(), s)
+	for _, want := range []string{"no free worker", "nothing was started", "2 of your agents are running (a1, a2)", "defenseclaw substrate delete NAME"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("%q lacks %q", msg, want)
 		}
 	}
 }

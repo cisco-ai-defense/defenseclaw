@@ -80,7 +80,10 @@ type askWire struct {
 	Host    string `json:"host"`
 	Summary string `json:"summary,omitempty"`
 	Reason  string `json:"reason,omitempty"`
-	AskID   string `json:"ask_id,omitempty"`
+	// Rule keys the approval: an ask_hosts approval covers the host, a
+	// url_rules one its rule only (GAP-0177).
+	Rule  string `json:"rule,omitempty"`
+	AskID string `json:"ask_id,omitempty"`
 }
 
 type askAnswer struct {
@@ -95,8 +98,14 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 	var in askWire
 	in.Actor.Atespace, in.Actor.Name, in.Actor.UID = req.Actor.Atespace, req.Actor.Name, req.Actor.UID
 	in.Host = req.Host
+	// The person who answers sees the method, the host and, for a url
+	// rule, the path prefix the approval covers.
 	in.Summary = strings.TrimSpace(req.Method + " " + req.Host)
+	if req.PathPrefix != "" {
+		in.Summary += " " + req.PathPrefix + "*"
+	}
 	if req.Rule != "" {
+		in.Rule = req.Rule
 		in.Reason = "the egress policy asks first (" + req.Rule + ")"
 	}
 	for {
@@ -105,7 +114,11 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 			if in.AskID != "" && ctx.Err() != nil {
 				return AskResult{Outcome: AskPending, ID: in.AskID}, nil
 			}
-			return AskResult{ID: in.AskID}, err
+			// The gateway never answered (refused, unreachable, or still
+			// dialling when the hold ended): no ask exists, so this is an
+			// outage the failure mode decides, never a pending ask. %v keeps
+			// a context deadline out of the chain (GAP-0168).
+			return AskResult{ID: in.AskID}, fmt.Errorf("%w: %v", ErrAskUnreachable, err)
 		}
 		switch got.State {
 		case "approved":
@@ -140,6 +153,9 @@ func (c *AskClient) Ask(ctx context.Context, req AskRequest) (AskResult, error) 
 	}
 }
 
+// ErrAskUnreachable is a callout ask the gateway did not answer.
+var ErrAskUnreachable = errors.New("callout ask: the gateway did not answer")
+
 func (c *AskClient) post(ctx context.Context, in askWire) (askAnswer, error) {
 	body, err := json.Marshal(in)
 	if err != nil {
@@ -167,6 +183,27 @@ func (c *AskClient) post(ctx context.Context, in askWire) (askAnswer, error) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return askAnswer{}, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		// The gateway answered: it knows no such actor incarnation, or the
+		// held ask is gone (its actor was deleted or recreated). That is a
+		// refusal, never an outage the failure mode could let through.
+		// The gateway writes {"error": status text, "reason": code}.
+		var e struct {
+			Error  string `json:"error"`
+			Reason string `json:"reason"`
+		}
+		_ = json.Unmarshal(raw, &e)
+		code := e.Reason
+		if code == "" {
+			code = e.Error
+		}
+		switch code {
+		case "actor_not_found":
+			return askAnswer{State: "denied", Reason: "DefenseClaw has no running registration for this actor, so it can't ask for it."}, nil
+		case "ask_not_found":
+			return askAnswer{State: "denied", ID: in.AskID, Note: "The approval this request waited for no longer exists."}, nil
+		}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return askAnswer{}, fmt.Errorf("callout ask: HTTP %d", resp.StatusCode)

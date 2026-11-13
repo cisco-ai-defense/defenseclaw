@@ -68,7 +68,7 @@ func askView(a asks.Ask) map[string]any {
 	return map[string]any{
 		"id": a.ID, "atespace": a.Atespace, "actor": a.Actor, "kind": a.Kind, "host": a.Host, "tool": a.Tool,
 		"summary": a.Summary, "reason": a.Reason, "severity": a.Severity, "created": a.Created, "expires": a.Expires,
-		"state": a.State, "unattended": a.Unattended, "note": a.Note,
+		"state": a.State, "unattended": a.Unattended, "note": a.Note, "rule": a.Rule,
 	}
 }
 
@@ -316,11 +316,12 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			Summary  string `json:"summary,omitempty"`
 			Reason   string `json:"reason,omitempty"`
 			Severity string `json:"severity,omitempty"`
+			Rule     string `json:"rule,omitempty"`
 			AskID    string `json:"ask_id,omitempty"`
 		}
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
-		if err := dec.Decode(&in); err != nil || in.Actor.Atespace == "" || in.Actor.Name == "" || (in.Host == "" && in.Tool == "") {
+		if err := dec.Decode(&in); err != nil || in.Actor.Atespace == "" || in.Actor.Name == "" || (in.Host == "" && in.Tool == "") || len(in.Rule) > 256 {
 			writeSubstrateJSONError(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
@@ -337,7 +338,9 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 		ask := asks.Ask{
 			Atespace: reg.Atespace, Actor: reg.Name, UID: reg.UID, OwnerID: reg.Person.ID(),
 			Host: strings.ToLower(strings.TrimSpace(in.Host)), Tool: in.Tool, Summary: in.Summary, Reason: in.Reason, Severity: in.Severity,
+			Rule: strings.TrimSpace(in.Rule),
 		}
+		hostWide := asks.HostWide(ask.Rule)
 		// The leader's store is the record of this actor's asks; the
 		// registration copy here is cached (registry.Remote) and can miss an
 		// approval for seconds, so an approved host is looked up in the store.
@@ -358,11 +361,15 @@ func (a *APIServer) substrateCalloutAsk(st *substrateState) http.Handler {
 			writeSubstrateJSONError(w, http.StatusNotFound, "ask_not_found")
 			return
 		}
-		if ask.Host != "" && (slices.Contains(reg.Approved, ask.Host) || slices.ContainsFunc(list, func(a asks.Ask) bool {
-			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved
+		if ask.Host != "" && ((hostWide && slices.Contains(reg.Approved, ask.Host)) || slices.ContainsFunc(list, func(a asks.Ask) bool {
+			// A host-wide approval answers a host-wide ask; a url_rules
+			// ask is answered only by an approval of the same rule
+			// (GAP-0177).
+			return a.UID == reg.UID && a.Host == ask.Host && a.State == asks.StateApproved &&
+				(a.Rule == ask.Rule || (hostWide && asks.HostWide(a.Rule)))
 		})) {
-			// Approved earlier for this actor (the controller adds it to the
-			// policy on its next pass): not asked twice.
+			// Approved earlier for this actor (the controller adds a
+			// host-wide one to the policy on its next pass): not asked twice.
 			writeSubstrateJSON(w, http.StatusOK, map[string]any{"state": asks.StateApproved, "reason": "approved earlier for this actor"})
 			return
 		}

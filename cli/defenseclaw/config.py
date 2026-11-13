@@ -2171,6 +2171,11 @@ class SandboxAdminConfig:
     unattended_asks: str = ""  # deny | queue (deny wins)
     ask_timeout: str = ""  # Go duration, 1m to 24h (the shortest wins)
     actor_secrets: list[str] | None = None  # exposed values (unset = none)
+    # The egress ask keys (Go sandbox_ask_keys.go, GAP-0171): allowed hosts
+    # that need an approval, and url rules (deny | ask) the egress callout
+    # applies. Agent Substrate only; profiles add to substrate.admin's.
+    ask_hosts: list[str] | None = None  # host or "*.<host>" (unset = none)
+    url_rules: list[dict[str, Any]] | None = None  # {name, hosts, methods, path_prefix, action}
 
 
 # OpenShellAdminConfig is the name SandboxAdminConfig had through 1.0.9.
@@ -2199,6 +2204,8 @@ _OPENSHELL_ADMIN_FLOOR_KEYS = (
     "unattended_asks",
     "ask_timeout",
     "actor_secrets",
+    "ask_hosts",
+    "url_rules",
 )
 
 # The Agent Substrate floor keys, refused in openshell.admin (Go
@@ -2209,16 +2216,8 @@ _SANDBOX_SUBSTRATE_ONLY_KEYS = (
     "unattended_asks",
     "ask_timeout",
     "actor_secrets",
-)
-
-# The Agent Substrate floor keys, refused in openshell.admin (Go
-# SandboxSubstrateOnlyKeys).
-_SANDBOX_SUBSTRATE_ONLY_KEYS = (
-    "sandbox_class",
-    "idle_suspend_after",
-    "unattended_asks",
-    "ask_timeout",
-    "actor_secrets",
+    "ask_hosts",
+    "url_rules",
 )
 
 
@@ -3755,6 +3754,12 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
 
 
 _SANDBOX_ACTOR_SECRET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
+# The egress ask keys (Go sandbox_ask_keys.go).
+_SANDBOX_HOST_PATTERN_RE = re.compile(
+    r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
+_SANDBOX_HTTP_METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
+_SANDBOX_URL_RULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _go_duration_ns(value: str) -> int | None:
@@ -3821,6 +3826,65 @@ def _sandbox_runtime_keys_error(section: Mapping[str, Any], prefix: str) -> str 
             return (
                 f"{prefix}.actor_secrets[{index}]: {_go_quote(name)} "
                 'must be a secret key (letters, digits, ".", "_" and "-")'
+            )
+    return _sandbox_ask_keys_error(section, prefix)
+
+
+def _sandbox_host_pattern_ok(host: Any) -> bool:
+    return isinstance(host, str) and len(host) <= 253 and _SANDBOX_HOST_PATTERN_RE.fullmatch(host) is not None
+
+
+def _sandbox_path_prefix_ok(path: Any) -> bool:
+    """Go sandboxPathPrefixOK: "/"-rooted printable ASCII, no %, ;, \\ or dot segment."""
+    if path in (None, ""):
+        return True
+    if not isinstance(path, str) or not path.startswith("/") or len(path) > 512 or any(c in path for c in "%;\\"):
+        return False
+    if any(ord(c) < 0x21 or ord(c) > 0x7E for c in path):
+        return False
+    return not any(seg in (".", "..") for seg in path.split("/"))
+
+
+def _sandbox_ask_keys_error(section: Mapping[str, Any], prefix: str) -> str | None:
+    """The first refusal of a section's ask_hosts and url_rules (Go validateAskKeys)."""
+    hosts = section.get("ask_hosts")
+    if isinstance(hosts, list) and not hosts:
+        return f"{prefix}.ask_hosts: an empty list is refused; leave the key out for no ask"
+    hosts = hosts if isinstance(hosts, list) else []
+    if len(hosts) > 256:
+        return f"{prefix}.ask_hosts: at most 256 entries"
+    for index, host in enumerate(hosts):
+        if not _sandbox_host_pattern_ok(host):
+            return f'{prefix}.ask_hosts[{index}]: {_go_quote(host)} must be a lower-case host name or "*.<host>"'
+    rules = section.get("url_rules")
+    if isinstance(rules, list) and not rules:
+        return f"{prefix}.url_rules: an empty list is refused; leave the key out for no rule"
+    rules = rules if isinstance(rules, list) else []
+    if len(rules) > 64:
+        return f"{prefix}.url_rules: at most 64 entries"
+    for index, rule in enumerate(rules):
+        p = f"{prefix}.url_rules[{index}]"
+        rule = rule if isinstance(rule, Mapping) else {}
+        name = rule.get("name") or ""
+        if name and (not isinstance(name, str) or not _SANDBOX_URL_RULE_NAME_RE.fullmatch(name)):
+            return f'{p}.name {_go_quote(name)} must be letters, digits, ".", "_" and "-" (at most 64)'
+        action = rule.get("action") or ""
+        if not isinstance(action, str) or action.lower() not in ("deny", "ask"):
+            return f"{p}.action {_go_quote(action)} must be one of deny, ask"
+        rule_hosts = rule.get("hosts") if isinstance(rule.get("hosts"), list) else []
+        if not rule_hosts or len(rule_hosts) > 64:
+            return f"{p}.hosts: name one to 64 hosts"
+        for j, host in enumerate(rule_hosts):
+            if not _sandbox_host_pattern_ok(host):
+                return f'{p}.hosts[{j}]: {_go_quote(host)} must be a lower-case host name or "*.<host>"'
+        methods = rule.get("methods") if isinstance(rule.get("methods"), list) else []
+        for j, method in enumerate(methods):
+            if not isinstance(method, str) or not _SANDBOX_HTTP_METHOD_RE.fullmatch(method):
+                return f"{p}.methods[{j}]: {_go_quote(method)} must be an HTTP method in capitals such as POST"
+        if not _sandbox_path_prefix_ok(rule.get("path_prefix")):
+            return (
+                f"{p}.path_prefix {_go_quote(rule.get('path_prefix'))} must start with \"/\" "
+                "and have no percent sign, semicolon, backslash or dot segment"
             )
     return None
 
@@ -8334,7 +8398,30 @@ def _merge_openshell_admin(raw: Any) -> SandboxAdminConfig:
         unattended_asks=_openshell_str(admin.get("unattended_asks")),
         ask_timeout=_openshell_str(admin.get("ask_timeout")),
         actor_secrets=_openshell_optional_str_list(admin.get("actor_secrets")),
+        ask_hosts=_openshell_optional_str_list(admin.get("ask_hosts")),
+        url_rules=_sandbox_url_rules(admin.get("url_rules")),
     )
+
+
+def _sandbox_url_rules(value: Any) -> list[dict[str, Any]] | None:
+    """url_rules as written (None when unset), each entry with its known keys
+    only, in Go's field order (SandboxURLRule)."""
+    if value is None:
+        return None
+    out: list[dict[str, Any]] = []
+    for rule in value if isinstance(value, list) else []:
+        rule = rule if isinstance(rule, Mapping) else {}
+        entry: dict[str, Any] = {}
+        if rule.get("name"):
+            entry["name"] = str(rule["name"])
+        entry["hosts"] = _openshell_str_list(rule.get("hosts") or [])
+        if rule.get("methods"):
+            entry["methods"] = _openshell_str_list(rule["methods"])
+        if rule.get("path_prefix"):
+            entry["path_prefix"] = str(rule["path_prefix"])
+        entry["action"] = str(rule.get("action") or "")
+        out.append(entry)
+    return out
 
 
 def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:

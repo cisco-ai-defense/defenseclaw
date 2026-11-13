@@ -4164,6 +4164,7 @@ func actionWindowsLocationProgram(word string) bool {
 // directive paths stay and are scanned (GAP-1717: a Git Bash apply_patch
 // heredoc from the home folder read *** as a glob that selects .ssh).
 func actionWindowsBlankPatchText(command string) string {
+	command = actionWindowsBlankHereDocData(command)
 	if !strings.Contains(command, patchBeginMarker) ||
 		strings.Count(command, "\r") != strings.Count(command, "\r\n") {
 		// PowerShell also ends a line at a lone CR, where the line-based

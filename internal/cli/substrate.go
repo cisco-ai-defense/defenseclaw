@@ -239,6 +239,11 @@ func substrateAPIMessage(e *api.Error) string {
 		return "you may not use that profile. Ask your administrator which profiles you can run, or leave --profile out to use your default"
 	case e.Status == 403 && e.Reason == "atespace_not_allowed":
 		return "that group of agents is not open to you; ask your administrator"
+	case e.Status == 403 && e.Reason == "actor_refused":
+		return "the cluster refused to start this agent: " + orWord(e.Detail, "it got no network policy") + " (" + orWord(e.Refusal, "refused") +
+			"). Nothing was started. If this is unexpected, give your administrator the agent id " + orWord(e.ActorUID, "(none)") + " (" + orWord(e.Actor, "unknown") + ")"
+	case e.Status == 403 && e.Reason == "template_attestation_unreadable":
+		return "the cluster could not read the template's attestation, so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify"
 	case e.Status == 403:
 		return "the cluster refused this (" + orWord(e.Reason, "not allowed") + ")"
 	case e.Status == 404:

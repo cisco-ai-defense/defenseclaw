@@ -128,6 +128,12 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	if t == nil {
 		return nil, errors.New("workspace: start needs a transport to the actor")
 	}
+	if hostCopy {
+		// GAP-0173: no OpenShell copy pipeline on this OS.
+		if c, ok := t.(*Client); ok {
+			return hostStart(ctx, opts, c)
+		}
+	}
 	root := opts.RemoteRoot
 	if root == "" {
 		root = DefaultRemoteRoot
@@ -147,7 +153,18 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	}
 	stateDir := opts.StateDir
 	if stateDir == "" {
-		dir, err := NewStateDir(root, opts.Name)
+		// The relay names a private folder outside the working directory
+		// (GAP-0163); an older relay does not, and the state goes beside
+		// the copy as before.
+		base := root
+		if sr, ok := t.(interface {
+			StateRoot(context.Context) (string, error)
+		}); ok {
+			if d, err := sr.StateRoot(ctx); err == nil && d != "" {
+				base = d
+			}
+		}
+		dir, err := NewStateDir(base, opts.Name)
 		if err != nil {
 			return nil, cleanErr("copy the project", err)
 		}
@@ -158,7 +175,7 @@ func Start(ctx context.Context, opts StartOptions) (*StartResult, error) {
 	prev, _ := osw.LoadCopy(opts.DataDir, opts.Name)
 	_, err := osw.Stage(ctx, osw.StageOptions{
 		Project: opts.Project, Name: opts.Name, DataDir: opts.DataDir, Home: opts.Home, Protected: opts.Protected,
-		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes,
+		RemoteRoot: root, StateDir: stateDir, GitDepth: opts.GitDepth, MaxBytes: maxBytes, FolderName: hostFolderName(opts.Project),
 		Masks: opts.Masks, Unmask: opts.Unmask, UnmaskAsked: opts.UnmaskAsked,
 		Detector: opts.Detector, DisableContentScan: opts.DisableContentScan, Replace: opts.Replace,
 	})

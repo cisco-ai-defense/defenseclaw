@@ -58,10 +58,9 @@ type SubstrateCreate struct {
 	Template  string `json:"template"`
 	Connector string `json:"connector,omitempty"`
 	// Name is the actor name; empty lets the gateway choose one.
-	Name      string             `json:"name,omitempty"`
-	Workspace SubstrateWorkspace `json:"workspace,omitzero"`
-	Task      string             `json:"task,omitempty"`
-	BatchID   string             `json:"batch_id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Task    string `json:"task,omitempty"`
+	BatchID string `json:"batch_id,omitempty"`
 	// Unattended is a --task or --batch run (fail closed, D8).
 	Unattended bool     `json:"unattended,omitempty"`
 	Secrets    []string `json:"secrets,omitempty"`
@@ -73,15 +72,6 @@ type SubstrateCreate struct {
 	// SandboxClass is filled by the gateway from the profile (never from
 	// the request): the class the actor must run in (PLAN 7.3).
 	SandboxClass string `json:"-"`
-}
-
-// SubstrateWorkspace is what the actor starts with.
-type SubstrateWorkspace struct {
-	// UploadID names a workspace archive the launcher uploaded.
-	UploadID string `json:"upload_id,omitempty"`
-	// Clone is a repository URL to clone at first resume.
-	Clone string `json:"clone,omitempty"`
-	Ref   string `json:"ref,omitempty"`
 }
 
 // SubstrateCreated is the actor the control API created, suspended.
@@ -308,6 +298,20 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 			writeSubstrateJSONError(w, http.StatusNotFound, "template_not_found")
 			return
 		}
+		var createWarnings []string
+		if errors.Is(err, ErrSubstrateTemplateAttestation) {
+			fmt.Fprintf(os.Stderr, "[substrate] template %s/%s: %v\n", atespace, req.Template, err)
+			if st.cfg.Managed {
+				// Fail closed (GAP-0181): the connector, and so the sign-in
+				// check, comes from the attestation, never from the
+				// launcher's word alone.
+				writeSubstrateJSON(w, http.StatusForbidden, map[string]any{"error": "Forbidden",
+					"reason": "template_attestation_unreadable", "message": "template attestation could not be read"})
+				return
+			}
+			createWarnings = append(createWarnings, "template attestation could not be read; the connector you named decides the sign-in check")
+			err = nil
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[substrate] template lookup failed: %v\n", err)
 			writeSubstrateJSONError(w, http.StatusBadGateway, "create_failed")
@@ -398,8 +402,8 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				_ = st.cfg.Actions.Delete(ctx, created.Atespace, created.Name)
 				reg.Deleted = true
 				_ = st.cfg.Registrations.Put(ctx, reg)
-				fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s refused and removed: %v\n", created.Atespace, created.Name, err)
-				writeSubstrateJSONError(w, http.StatusForbidden, "actor_refused")
+				fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s uid %s refused and removed: %v\n", created.Atespace, created.Name, created.UID, err)
+				writeSubstrateActorRefusal(w, created.Atespace, created.Name, created.UID, err)
 				return
 			}
 			// GAP-0167: an actor that never ran holds nothing the person
@@ -419,7 +423,10 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 		}
 		out := substrateActorView(reg)
 		if signinDecision.Warn {
-			out["warnings"] = []string{signinDecision.Message}
+			createWarnings = append(createWarnings, signinDecision.Message)
+		}
+		if len(createWarnings) > 0 {
+			out["warnings"] = createWarnings
 		}
 		if st.cfg.Sessions != nil && !req.Unattended {
 			tok, exp, err := st.cfg.Sessions.Issue(c.person.ID(), substrateSessionActor(reg), 0)

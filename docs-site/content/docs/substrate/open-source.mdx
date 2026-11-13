@@ -8,16 +8,14 @@ keywords:
   - Helm chart defenseclaw-substrate
 ---
 
-{/* TODO(substrate): command output on this page is example output. Replace it with captured output from the usability pass (lanes/a7/PROGRESS.md) before the PR is marked ready. */}
-
-This page follows one developer, on their own cluster, from install to a finished session. You own the cluster, the config file and the decisions.
+This page follows one developer, on their own cluster, from install to a finished session. You own the cluster, the config file and the decisions. The output blocks are real, taken from runs on a test cluster. Names, addresses and users are replaced with examples.
 
 ## What you need
 
 - A Kubernetes cluster, version 1.34 or later, with [Agent Substrate](https://ate.dev) `1.0.x` installed. For a first try, a Linux machine with Docker and the upstream `kind` [quickstart](https://ate.dev/docs/get-started/quickstart/) is enough. For EKS, follow the [EKS guide](/docs/substrate/eks). GKE works with the upstream guide. `kind` and ordinary cloud nodes run the `gvisor` sandbox. The `microvm` sandbox needs nodes with KVM.
 - `kubectl` and `helm` pointed at that cluster, and the `kubectl ate` plugin.
 - DefenseClaw 1.0.10 or later on your laptop. Any OS works, because the agent doesn't run on your laptop.
-- A model key: an Anthropic or OpenAI API key, or Amazon Bedrock. It goes into the cluster once, and agents never see it.
+- A model key: an Anthropic or OpenAI API key, or an Amazon Bedrock key. It goes into the cluster once, and agents never see it.
 - A way to sign in. Either an OpenID Connect (OIDC) provider the launcher can use (device flow; for a lab, Keycloak is enough), or nothing at all: without `substrate.identity.oidc`, the cluster accepts your Kubernetes identity.
 
 ## Set up once
@@ -37,7 +35,13 @@ helm install defenseclaw oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-subst
   --version 1.0.10 -n defenseclaw-system -f my-values.yaml
 ```
 
-The chart installs the gateway (two replicas, with a separate single-replica leader that holds the state), the controller that writes each agent's network allow list, and the egress callout that checks each web request. The values file sets your OIDC issuer, the atespaces the launcher may create agents in, and the model providers. The [reference](/docs/substrate/reference#configuration) lists the keys.
+The chart installs the gateway (two replicas, with a separate single-replica leader that holds the state), the controller that writes each agent's network allow list, and the egress callout that checks each web request. The values file sets your OIDC issuer (or none), the atespaces the launcher may create agents in, and the model providers. The [reference](/docs/substrate/reference#configuration) lists the keys.
+
+The model key goes into a Secret the gateway mounts, one key per provider (`anthropic`, `openai`, `bedrock` or `gemini`). Agents only ever see a placeholder:
+
+```bash
+kubectl -n defenseclaw-system create secret generic defenseclaw-llm --from-literal=anthropic="$ANTHROPIC_API_KEY"
+```
 
 Substrate checks who may create agents in an atespace. If you hold a Substrate global-owner token, give it to the install once (the chart deletes it afterward):
 
@@ -46,19 +50,13 @@ kubectl -n defenseclaw-system create secret generic ate-bootstrap-owner --from-f
 helm upgrade defenseclaw ... --set bootstrap.ownerTokenSecret=ate-bootstrap-owner
 ```
 
-Without a token, `defenseclaw substrate setup --print-access-policies` prints the policies for an admin to apply.
+Without a token, `defenseclaw substrate setup --print-access-policies --plan plan.json` prints the policies for an admin to apply.
 
-People attach to their agents with a short-lived session token the gateway signs. Make its key pair once and store it where the gateway reads it:
+The chart creates the key pair that signs attach sessions (Secret `defenseclaw-relay-session`) the first time you install, and never replaces it. Build every agent image with its public half:
 
 ```bash
-openssl ecparam -name prime256v1 -genkey -noout -out private.pem
-openssl ec -in private.pem -pubout -out relay-session.pub
-kubectl -n defenseclaw-system create secret generic defenseclaw-relay-session \
-  --from-file=private.pem --from-file=public.pem=relay-session.pub
-rm private.pem
+kubectl -n defenseclaw-system get secret defenseclaw-relay-session -o jsonpath='{.data.public\.pem}' | base64 -d > relay-session.pub
 ```
-
-Keep `relay-session.pub`: every agent image is built with it.
 
 </Step>
 
@@ -67,22 +65,23 @@ Keep `relay-session.pub`: every agent image is built with it.
 ### Connect Substrate to DefenseClaw
 
 ```bash
-defenseclaw substrate setup
+defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw-system --dry-run
+defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw-system --yes
 ```
 
-This writes the `SubstrateInstall` overlay that registers the egress callout with Substrate's egress gateway. It refuses if another callout is registered, because Substrate has one callout slot and DefenseClaw never replaces someone else's. Store the model key as a Kubernetes Secret as the command tells you.
+`install.yaml` is the `SubstrateInstall` file you gave Substrate's `ate-setup`. `setup` adds the egress callout and the router client the gateway attaches launchers through. With `--yes` it replaces the file and keeps the old one as `install.yaml.bak`. Without it, the result is written next to the file as `install.yaml.new` for you to read. It refuses if another callout is registered, because Substrate has one callout slot and DefenseClaw never replaces someone else's. Then apply the file with `ate-setup deploy`, as the Substrate install guide says.
 
 </Step>
 
 <Step>
 
-### Check it
+### Check the cluster
 
 ```bash
-defenseclaw substrate doctor
+defenseclaw substrate verify --install-file install.yaml
 ```
 
-The doctor checks that the gateway can verify agent identities, that the callout answers, that every running agent has a current allow list, that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster, that the snapshot bucket is encrypted, and that your templates carry the DefenseClaw kit. It ends with `ready for agents`. A failed check names the fix.
+`verify` reads the cluster with `kubectl` and checks that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster, that the snapshot bucket is private and encrypted, that DefenseClaw holds the access it needs, that the egress callout is registered, and that nobody else can reach agents through the router. A failed check names the fix.
 
 </Step>
 
@@ -104,7 +103,34 @@ With an OIDC provider, sign in with the device flow instead:
 defenseclaw substrate login --admin-url https://defenseclaw-admin.example.test
 ```
 
-The cluster tells the launcher which sign-in server to use; `--issuer` and `--client-id` override it. A browser opens on your provider's page (`--no-browser` prints the address and code instead). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. `defenseclaw substrate whoami` shows who you are signed in as. Managed installs always require OIDC.
+```text
+This cluster signs you in with https://sso.example.test/realms/corp.
+To sign in, open this page in a browser:
+
+    https://sso.example.test/realms/corp/device?user_code=ABCD-EFGH
+
+Check that the page shows the code ABCD-EFGH.
+The code expires in 15 minutes. Waiting for the sign-in (Ctrl-C to stop).
+Signed in as alice on default.
+Next: start a coding agent in a project folder with: defenseclaw substrate run claude
+```
+
+The first time, `--admin-url` is all you need: the cluster tells the launcher which sign-in server and application ID to use. `--issuer` and `--client-id` override them. A browser opens on your provider's page (`--no-browser` only prints the address and code). The launcher keeps the tokens in the operating system's keychain, and the cluster addresses in a context file with no secrets. The launcher reaches your agent's terminal through the cluster gateway, so your laptop needs access to the gateway's admin address only, not to Substrate's router. Managed installs always require OIDC.
+
+```bash
+defenseclaw substrate whoami
+defenseclaw substrate doctor
+```
+
+```text
+Signed in as alice (person) on default
+Groups:   engineering
+Token:    renews itself; the current one lasts until Fri, 13 Nov 2026 03:48:37 GMT
+```
+
+`doctor` checks this computer and your sign-in: the cluster's admin address answers over TLS, the cluster accepts your sign-in, the sign-in server matches, a terminal can attach through the gateway, and the sign-in can be kept safely. It ends with `ready for agents`, or with `not ready` and one fix line per failed check. Administrators add `--cluster --install-file install.yaml` for the cluster's own checks.
+
+Over SSH, or on Linux with no keyring, there is no keychain to ask: set `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file` to keep the tokens in a file only you can read. The sign-in itself needs a browser on some machine: use `--no-browser` and open the address elsewhere.
 
 </Step>
 
@@ -124,16 +150,19 @@ defenseclaw substrate template build --connector claudecode \
   --session-key relay-session.pub
 ```
 
-`template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). Wave 1 builds `claudecode` and `codex`. `template scan IMAGE` scans an image without changing it. The relay in the image accepts only session tokens signed with that key by the gateway in `defenseclaw-system`. For an install in another namespace, add `--session-issuer https://defenseclaw-admin.NAMESPACE.svc.cluster.local`. Run `defenseclaw substrate template build --help` for every flag.
+`template build` adds the DefenseClaw hook and relay to the base image, scans the agent's config, skills, plugins and MCP servers, and pushes the image with a signed record of the result (the attestation). A skill or MCP server with a finding at HIGH or above stops the build. If a finding is a known false positive, `--accept-finding RULE-ID --reason "..."` lets the build pass and records the rule and the reason in the attestation. `--connector` takes `claudecode` or `codex`. The kits for the other agents come from the same kit generator in the repository (`deploy/images/actor-kit/kitgen`); see [Agents and features](/docs/substrate/agents). `template scan IMAGE` scans an image without changing it. The relay in the image accepts only session tokens signed with that key by the gateway. For an install in another namespace, add `--session-issuer https://defenseclaw-admin.NAMESPACE.svc.cluster.local`. Run `defenseclaw substrate template build --help` for every flag.
 
 Agents from an image that was not built and checked this way get no network at all. Substrate needs the image pinned by digest.
 
-Then check the image and publish it. `publish` copies it to the registry the cluster pulls from and creates (or updates) the ActorTemplate from the attested image:
+Then check the image and publish it. `publish` copies it to the registry the cluster pulls from and, with `--template`, creates the ActorTemplate from the attested image:
 
 ```bash
 defenseclaw substrate template verify registry.example.test/actors/claudecode@sha256:... --anchors ./keys/attestation.pub
-defenseclaw substrate template publish registry.example.test/actors/claudecode@sha256:... registry.example.test/team/claudecode:1.0.10 --anchors ./keys/attestation.pub
+defenseclaw substrate template publish registry.example.test/actors/claudecode@sha256:... registry.example.test/team/claudecode:1.0.10 \
+  --anchors ./keys/attestation.pub --template dc-eng/claude
 ```
+
+A template can't be changed once it exists. If `dc-eng/claude` already has another image or other settings, `publish` creates `claude-<8 digits of the digest>` and prints the name; give that name to `run --template`. Nothing is ever deleted.
 
 Keep `attestation.key` where only builds can read it (mode 0600); the controller needs only `attestation.pub`. The build scans with skill-scanner and mcp-scanner, so they must be installed where you build. An image built with an earlier DefenseClaw build is refused with a rebuild hint; the output is deterministic, so a rebuild keeps the digest.
 
@@ -154,19 +183,21 @@ cd ~/code/myapp
 defenseclaw substrate run claude
 ```
 
-The launcher copies your project up (secret files such as `.env` and keys are held back, as in OpenShell copy mode), creates an actor, waits for it to start, and connects your terminal.
+The launcher creates an actor, copies your project up (secret files such as `.env` and keys are held back, as in OpenShell copy mode), waits for it to start, and connects your terminal. Every agent gets a name nobody had before: the agent's command plus a random suffix. `--name` sets a readable start.
 
 ```text
-Agent myapp-7f3a · Claude Code · Agent Substrate (gvisor) · atespace dc-alice
-  Project   ~/code/myapp → /work (copy, 14 MB up; .env and certs/dev.pem held back)
-  Changes   come back with: defenseclaw substrate pull myapp-7f3a
-  Model     Anthropic through the DefenseClaw guardrail proxy (the key stays in the cluster)
-  Network   denied by default · allowed: github.com, registry.npmjs.org, pypi.org
-  Asks      appear here, or answer them later with: defenseclaw substrate approvals
-  Leave     Ctrl-] detaches; the agent keeps going and suspends when idle
+Started dc-eng/claude-b66c97d1 (Claude Code, profile eng).
+Copying this folder into the agent...
+Held back from the copy: .env (1 file). Share one anyway with --unmask.
+DefenseClaw agent claude-b66c97d1 (claudecode) in actor dc-eng/claude-b66c97d1
+Profile eng
+Asks appear on the bottom line; press Ctrl-\ to answer one.
+Ctrl-] detaches; the agent keeps running.
 ```
 
-Prefer git to an upload? `defenseclaw substrate run claude --clone git@github.com:me/myapp.git --ref agent/fix-tests` clones inside the agent. The git credential is added by the cluster's egress gateway on the git host only, so the agent never holds it. See [Secrets](/docs/substrate/secrets).
+Claude Code starts below the banner, in `/work/myapp`. The first start takes about 30 to 40 seconds, because the actor is created, your folder is copied and the actor is resumed from its template snapshot. Claude Code asks whether you trust the folder, in each new agent.
+
+Prefer git to an upload? `defenseclaw substrate run claude --clone https://git.example.test/me/myapp.git --ref agent/fix-tests` clones inside the agent. The clone goes through the cluster's network rules, so the git host must be one your profile allows. The credential is added by the cluster's egress gateway on that host only, so the agent never holds it. Put no user name or token in the address. See [Secrets](/docs/substrate/secrets).
 
 </Step>
 
@@ -176,14 +207,17 @@ Prefer git to an upload? `defenseclaw substrate run claude --clone git@github.co
 
 Claude Code behaves as it does on your machine. DefenseClaw checks every tool call with the same rules: a blocked command, a write outside the project, or a secret about to leave shows the same message as on your laptop. Model requests and replies go through the guardrail proxy, so a prompt injection in a fetched page or a key pasted into a prompt is caught there.
 
-When the agent tries a site that isn't allowed, you get an ask in the session:
-
 ```text
-DefenseClaw · myapp-7f3a wants to reach api.stripe.com (HTTPS)
-  [o] once   [a] always for this agent   [d] deny        (no answer in 60 s = deny)
+Reason: PreToolUse:Bash hook error: DefenseClaw policy blocked this action (rule C2-METADATA-AWS: AWS metadata endpoint (SSRF)). Do not retry it in another form.
 ```
 
-After you approve, the held request goes through within about ten seconds, once Substrate has applied the new allow list.
+When a profile asks before an action, the question appears on the last line of your terminal:
+
+```text
+DefenseClaw ask 4c1f from dc-eng/claude-b66c97d1: POST api.example.test /v1/charges* -- press Ctrl-\ to answer
+```
+
+Press `Ctrl-\`. The line becomes `... -- [o]nce [a]lways [d]eny [Esc] cancel`. One key answers; `a` asks you to press `y` to confirm, because it covers every later identical ask. Typing and pasting never answer by accident: only a single key pressed after the prompt appears does. After you approve, the held request goes through within about ten seconds, once Substrate has applied the new allow list.
 
 </Step>
 
@@ -191,14 +225,25 @@ After you approve, the held request goes through within about ten seconds, once 
 
 ### Leave and come back
 
-Press `Ctrl-]` to detach. The agent keeps working. When it has nothing to do, DefenseClaw suspends it (after 30 minutes without hooks, model calls, terminal traffic, web requests or CPU use), and Substrate frees the machine. Later, from this laptop or another one:
+Press `Ctrl-]` to detach. The agent keeps working.
+
+```text
+Detached. The agent keeps running. Come back with: defenseclaw substrate connect claude-b66c97d1
+```
+
+When it has nothing to do, DefenseClaw suspends it (after 30 minutes without hooks, model calls, terminal traffic, web requests or CPU use), and Substrate frees the machine. Later, from this laptop or another one:
 
 ```bash
 defenseclaw substrate list
-defenseclaw substrate connect myapp-7f3a
+defenseclaw substrate connect claude-b66c97d1
 ```
 
-The agent resumes where it stopped, with its terminal, its running processes and its files, usually in under a second.
+```text
+NAME                       AGENT       PROFILE  STATE      AGE  BATCH
+dc-eng/claude-b66c97d1     claudecode  eng      suspended  3h   -
+```
+
+The agent resumes where it stopped, with its terminal, its running processes and its files, usually in under a second. The screen comes back as you left it.
 
 </Step>
 
@@ -207,12 +252,21 @@ The agent resumes where it stopped, with its terminal, its running processes and
 ### Bring the changes back
 
 ```bash
-defenseclaw substrate pull myapp-7f3a
+defenseclaw substrate pull claude-b66c97d1
 ```
 
-As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell config). Then you choose: apply them to your folder, put them on a branch, or write a patch. If you cloned with `--clone`, the agent can push a branch instead.
+```text
+Reading the agent's work...
+sub-55cccd5ce016: 1 file changed (+1 -1)
+  calc.py (modified)
+Write these changes into this folder? [y/N] y
+applied 1 changes to /home/alice/code/myapp
+your previous working tree is kept at refs/defenseclaw/copy/sub-55cccd5ce016/pre-apply
+```
 
-To go back in time, `defenseclaw substrate checkpoint myapp-7f3a` saves one, and `defenseclaw substrate undo myapp-7f3a` returns the whole agent, files and memory, to the last checkpoint.
+As in OpenShell copy mode, you see the changed files first, with any file that could run code on your machine flagged (git hooks, build scripts, shell config). `--diff` prints the full diff. Nothing touches your folder until you choose: `--apply` writes the changes into it (after a question), `--branch NAME` puts them on a new git branch, `--patch-out FILE` writes a patch. If you cloned with `--clone`, the agent can push a branch instead, and `pull` has no copy to compare.
+
+To go back in time, `defenseclaw substrate checkpoint claude-b66c97d1` saves a restore point of the agent's folder, and `defenseclaw substrate undo claude-b66c97d1` returns the folder to the last one and discards what the agent changed since. It asks first.
 
 </Step>
 
@@ -221,10 +275,10 @@ To go back in time, `defenseclaw substrate checkpoint myapp-7f3a` saves one, and
 ### Finish
 
 ```bash
-defenseclaw substrate delete myapp-7f3a
+defenseclaw substrate delete claude-b66c97d1
 ```
 
-Suspended agents cost storage only, so you can keep them as long as you like. `delete` also removes the agent's snapshots from the bucket.
+Suspended agents cost storage only, so you can keep them as long as you like. `delete` also removes the agent's snapshots from the bucket, so pull first: what is not pulled is gone.
 
 </Step>
 
@@ -236,14 +290,20 @@ Not every agent needs your terminal:
 
 ```bash
 defenseclaw substrate run codex --task "make the failing tests in pkg/parser pass" --detach
-defenseclaw substrate logs api-2c9e -f
+defenseclaw substrate logs codex-2c9e41a7 -f
 ```
 
 Several at once is fine: each gets its own sandbox and allow list. Asks wait for you in `defenseclaw substrate approvals`, and unattended runs deny them by default. See [Unattended runs](/docs/substrate/unattended).
 
+If the cluster has no free worker, `run` says so and starts nothing:
+
+```text
+Error: the cluster has no free worker for a new agent right now; nothing was started. 2 of your agents are running (claude-b66c97d1, codex-2c9e41a7). Free a worker with: defenseclaw substrate delete NAME (see them all with defenseclaw substrate list), or ask your administrator for more workers.
+```
+
 ## Where to look
 
-- The [TUI](/docs/tui) Sandboxes panel lists your Substrate agents beside your OpenShell sandboxes, marked `substrate`.
+- The [TUI](/docs/tui) Sandboxes panel lists your Substrate agents beside your OpenShell sandboxes.
 - Every event carries the agent's name and Substrate UID, so the [observability stack](/docs/observability) shows them on the same dashboards. The [Substrate agents board](/docs/observability/grafana-dashboards) shows the cluster side.
 
 ## What you give up compared with OpenShell
