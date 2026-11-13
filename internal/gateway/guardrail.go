@@ -3048,6 +3048,14 @@ func blockMessage(customMsg, direction, reason string) string {
 				"If you believe this is a false positive, contact your "+
 				"administrator or adjust the guardrail policy.", reason)
 	}
+	if direction == directionToolResult {
+		return fmt.Sprintf(
+			"[DefenseClaw] This request was blocked. A tool's output "+
+				"carried instructions aimed at the agent (%s), so it was "+
+				"not sent to the model. If you believe this is a false "+
+				"positive, contact your administrator or adjust the "+
+				"guardrail policy.", reason)
+	}
 	return fmt.Sprintf(
 		"[DefenseClaw] The model's response was blocked due to a "+
 			"potential security concern (%s). "+
