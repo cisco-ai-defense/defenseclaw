@@ -5267,36 +5267,10 @@
         "id": "ENT-EMAIL-BULK",
         "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
         "title": "Email address",
-        "severity": "LOW",
+        "severity": "MEDIUM",
         "confidence": 0.4,
         "tags": [
           "pii"
-        ]
-      },
-      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity LOW.",
-      "examples": [],
-      "counterexamples": [],
-      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
-      "tags": [
-        "pii"
-      ],
-      "data_axis": [
-        "sensitive_access"
-      ]
-    },
-    {
-      "id": "RECIPE-ENT-EMAIL-FIELD",
-      "title": "Email address in a labeled field",
-      "kind": "rule:enterprise-data",
-      "body": {
-        "id": "ENT-EMAIL-FIELD",
-        "pattern": "(?i)\\b(?:e-?mail)(?:[\\s_-]+address)?[\\s*_:#=-]{1,12}[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
-        "title": "Email address in a labeled field",
-        "severity": "MEDIUM",
-        "confidence": 0.7,
-        "tags": [
-          "pii",
-          "structured"
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
@@ -5304,8 +5278,7 @@
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
       "tags": [
-        "pii",
-        "structured"
+        "pii"
       ],
       "data_axis": [
         "sensitive_access"
