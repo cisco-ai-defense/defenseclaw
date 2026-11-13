@@ -314,7 +314,7 @@ func classifyDiff(line, diff string) string {
 	case strings.Contains(line, "--%"):
 		return "representation-only: the -- before a --% stop-parsing marker is read as a parameter vs pwsh's positional; the verbatim --% tail is preserved"
 	case strings.Contains(line, " -- ") || strings.HasSuffix(line, " --") || strings.Contains(line, "-- -"):
-		return "under-static (R7, safe): a post-`--` token that pwsh keeps is read as a parameter / folded to a dynamic expression and not asserted as a value; the dropped token is never a command or path, and mine never asserts a wrong value"
+		return "R7 (safe, P3): mine asserts the -- end-of-parameters marker as a static positional \"--\" and reads the following dash-led token as a parameter, where pwsh keeps -- as a parameter named \"-\"; the only affected elements are dash-led relative targets (-x, -rf), never a command or a protected path, so effects never acts on a wrong path or program"
 	case strings.Contains(line, "-Path:") || strings.Contains(line, "-Name:") || strings.Contains(line, "-file:") || strings.Contains(line, "-File:"):
 		return "representation-only: colon-form parameter boundary (-Name:value binding); the command and filename are preserved"
 	case strings.Contains(diff, "param"):

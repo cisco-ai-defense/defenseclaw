@@ -785,17 +785,22 @@ func validNumberSuffix(s string) bool {
 		return true
 	}
 	s = strings.ToLower(s)
-	for _, m := range []string{"kb", "mb", "gb", "tb", "pb"} {
-		if strings.HasPrefix(s, m) {
-			s = s[2:]
+	// pwsh order is <type suffix><multiplier>: 1lkb = 1L then kb (valid);
+	// 1kbl = kb then l is not a number (a bareword). Strip an optional type
+	// suffix first, then an optional multiplier (review 4 R11).
+	for _, t := range []string{"ul", "lu", "uy", "us", "l", "u", "y", "s", "n", "d"} {
+		if strings.HasPrefix(s, t) {
+			s = s[len(t):]
 			break
 		}
 	}
-	switch s {
-	case "", "l", "u", "ul", "lu", "y", "uy", "s", "us", "n", "d":
-		return true
+	for _, m := range []string{"kb", "mb", "gb", "tb", "pb"} {
+		if s == m {
+			s = ""
+			break
+		}
 	}
-	return false
+	return s == ""
 }
 
 func isHex(r rune) bool {
