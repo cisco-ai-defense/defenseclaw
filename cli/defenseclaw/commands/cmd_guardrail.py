@@ -988,9 +988,10 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         actives = [connector]
     # Only proxy connectors (openclaw, zeptoclaw) use guardrail.port; hook
     # connectors have no proxy listener (GAP-1649).
-    from defenseclaw.platform_support import PROXY_CONNECTORS
+    # Native OpenClaw (Windows) runs no proxy (rel-1-0-10 GAP-0047).
+    from defenseclaw.platform_support import uses_guardrail_proxy
 
-    proxy_in_use = any(normalize_connector(n) in PROXY_CONNECTORS for n in actives)
+    proxy_in_use = any(uses_guardrail_proxy(normalize_connector(n)) for n in actives)
 
     # G3: optional --connector scoping. Default shows the full roster (uniform
     # layout, unchanged); --connector X narrows it to one active peer, matched

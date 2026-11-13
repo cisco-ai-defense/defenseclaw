@@ -108,9 +108,45 @@ def configured_openclaw_hook_mode(cfg: object) -> str:
     plugins = document.get("plugins") if isinstance(document, dict) else None
     entries = plugins.get("entries") if isinstance(plugins, dict) else None
     entry = entries.get("defenseclaw") if isinstance(entries, dict) else None
+    if entry is None:
+        # Setup has not written the plugin entry yet (the gateway writes it
+        # after setup saves): the mode it will write (rel-1-0-10 GAP-0113).
+        return expected_openclaw_hook_mode(cfg)
     plugin_cfg = entry.get("config") if isinstance(entry, dict) else None
     mode = plugin_cfg.get("hookMode") if isinstance(plugin_cfg, dict) else None
     return mode if mode in OPENCLAW_HOOK_MODES else "proxy"
+
+
+def expected_openclaw_hook_mode(cfg: object) -> str:
+    # Mirrors Go connector.ResolveOpenClawHookMode: hooks.mode proxy wins;
+    # Windows is native; an OpenClaw known to be older than 2026.8.35, or of
+    # unknown version, is proxy; otherwise hybrid.
+    from defenseclaw.connector_contracts import openclaw_lacks_native_hooks
+    from defenseclaw.platform_support import uses_guardrail_proxy
+
+    if str(_openclaw_connector_block().get("hooks", {}).get("mode", "") or "").strip().lower() == "proxy":
+        return "proxy"
+    if not uses_guardrail_proxy("openclaw"):
+        return "native"
+    version = _cached_openclaw_version(cfg)
+    if not version or openclaw_lacks_native_hooks(version):
+        return "proxy"
+    return "hybrid"
+
+
+def _cached_openclaw_version(cfg: object) -> str:
+    # The OpenClaw version setup and doctor last probed (agent_discovery.json).
+    import json
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        return ""
+    try:
+        with open(os.path.join(data_dir, "agent_discovery.json"), encoding="utf-8") as stream:
+            agents = json.load(stream).get("agents") or {}
+        return str((agents.get("openclaw") or {}).get("version") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
 
 
 def openclaw_hook_mode_detail(mode: str) -> str:

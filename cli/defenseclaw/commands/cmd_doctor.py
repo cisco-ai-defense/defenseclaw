@@ -13100,7 +13100,7 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         detail = "plugin self-test rewrote an LLM URL onto the local guardrail proxy"
         last_traffic = info.get("last_agent_traffic_at")
         if isinstance(last_traffic, str) and last_traffic.strip():
-            detail += "; agent traffic has reached :4000"
+            detail += f"; agent traffic has reached :{cfg.guardrail.port}"
         _emit("pass", label, detail, r=r)
         return
     if info.get("verified") is True:

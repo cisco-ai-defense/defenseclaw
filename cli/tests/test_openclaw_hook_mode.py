@@ -90,3 +90,46 @@ class OpenClawOperatorAdminTest(unittest.TestCase):
         self.assertTrue(self._off({"operator_admin": False}))
         self.assertFalse(self._off({"operator_admin": True}))
         self.assertFalse(self._off({}))
+
+
+class OpenClawExpectedHookModeTest(unittest.TestCase):
+    # rel-1-0-10 GAP-0113: before the gateway writes the plugin entry, the
+    # mode is the one setup will write, not "proxy".
+    def _cfg(self, version):
+        home = tempfile.mkdtemp()
+        with open(os.path.join(home, "openclaw.json"), "w", encoding="utf-8") as f:
+            json.dump({"plugins": {"entries": {}}}, f)
+        with open(os.path.join(home, "agent_discovery.json"), "w", encoding="utf-8") as f:
+            json.dump({"agents": {"openclaw": {"version": version}}}, f)
+        claw = SimpleNamespace(home_dir=home, config_file=os.path.join(home, "openclaw.json"))
+        return SimpleNamespace(claw=claw, data_dir=home)
+
+    def _mode(self, version, os_name):
+        from unittest.mock import patch
+
+        missing = os.path.join(tempfile.mkdtemp(), "config.yaml")
+        with (
+            patch("defenseclaw.config.config_path", return_value=missing),
+            patch("defenseclaw.platform_support.host_os", return_value=os_name),
+        ):
+            return configured_openclaw_hook_mode(self._cfg(version))
+
+    def test_no_entry_yet_resolves_like_the_gateway(self):
+        self.assertEqual(self._mode("OpenClaw 2026.8.35 (abc)", "linux"), "hybrid")
+        self.assertEqual(self._mode("2026.3.24", "linux"), "proxy")
+        self.assertEqual(self._mode("", "darwin"), "proxy")
+        self.assertEqual(self._mode("2026.8.35", "windows"), "native")
+
+
+class OpenClawCompatibilitySummaryTest(unittest.TestCase):
+    # rel-1-0-10 GAP-0047: the doctor compatibility row names the hook mode.
+    def test_summary_follows_os_and_version(self):
+        from unittest.mock import patch
+
+        from defenseclaw.doctor_health import _openclaw_compatibility_summary
+
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+            self.assertIn("native plugin hooks", _openclaw_compatibility_summary("openclaw", "2026.8.35"))
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            self.assertIn("next to the proxy", _openclaw_compatibility_summary("openclaw", "2026.8.35"))
+            self.assertIn("uses the guardrail proxy", _openclaw_compatibility_summary("openclaw", "2026.3.24"))

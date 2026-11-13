@@ -4768,17 +4768,8 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
-		if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
-			if errors.Is(err, ErrOpenClawRemediationUnavailable) {
-				actions = append(actions, openClawRemediationUnavailableAction)
-			}
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable skill %s failed: %v\n",
-				r.Event.Name, err)
-		} else {
-			actions = append(actions, "disabled")
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
-			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherDisable), r.Event.Name,
-				fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
+		if action := s.remediateAtOpenClaw(ctx, "skill", r, s.client.DisableSkill, audit.ActionSidecarWatcherDisable, "auto-disabled skill via gateway after verdict=%s"); action != "" {
+			actions = append(actions, action)
 		}
 	}
 
@@ -4938,17 +4929,8 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
-		if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
-			if errors.Is(err, ErrOpenClawRemediationUnavailable) {
-				actions = append(actions, openClawRemediationUnavailableAction)
-			}
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disable plugin %s failed: %v\n",
-				r.Event.Name, err)
-		} else {
-			actions = append(actions, "disabled")
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
-			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherDisablePlugin), r.Event.Name,
-				fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
+		if action := s.remediateAtOpenClaw(ctx, "plugin", r, s.client.DisablePlugin, audit.ActionSidecarWatcherDisablePlugin, "auto-disabled plugin via gateway after verdict=%s"); action != "" {
+			actions = append(actions, action)
 		}
 	}
 
@@ -4981,17 +4963,8 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
-		if err := s.client.BlockMCPServer(ctx, r.Event.Name); err != nil {
-			if errors.Is(err, ErrOpenClawRemediationUnavailable) {
-				actions = append(actions, openClawRemediationUnavailableAction)
-			}
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway block MCP %s failed: %v\n",
-				r.Event.Name, err)
-		} else {
-			actions = append(actions, "disabled")
-			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway blocked MCP %s\n", r.Event.Name)
-			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherBlockMCP), r.Event.Name,
-				fmt.Sprintf("auto-blocked MCP server via gateway after verdict=%s", r.Verdict))
+		if action := s.remediateAtOpenClaw(ctx, "mcp", r, s.client.BlockMCPServer, audit.ActionSidecarWatcherBlockMCP, "auto-blocked MCP server via gateway after verdict=%s"); action != "" {
+			actions = append(actions, action)
 		}
 	}
 
@@ -5000,6 +4973,39 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 		defer s.alertWg.Done()
 		s.sendEnforcementAlert("mcp", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
 	}()
+}
+
+// remediateAtOpenClaw asks OpenClaw to disable a blocked skill, plugin or MCP
+// server and returns the action for the alert: "disabled",
+// openclaw_remediation_unavailable, or "" when the call failed. Without
+// operator.admin (connectors.openclaw.operator_admin false, or OpenClaw
+// refused the scope) nothing is sent: the block stays enforced by DefenseClaw
+// admission and inspect, and the audit row says OpenClaw was not told
+// (rel-1-0-10 GAP-0111).
+func (s *Sidecar) remediateAtOpenClaw(
+	ctx context.Context, kind string, r watcher.AdmissionResult,
+	call func(context.Context, string) error, okAction audit.Action, okDetail string,
+) string {
+	err := ErrOpenClawRemediationUnavailable
+	if s.client.RequestsOperatorAdmin() {
+		err = call(ctx, r.Event.Name)
+	}
+	switch {
+	case err == nil:
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway OpenClaw disabled %s %s\n", kind, r.Event.Name)
+		_ = s.logger.LogAction(string(okAction), r.Event.Name, fmt.Sprintf(okDetail, r.Verdict))
+		return "disabled"
+	case errors.Is(err, ErrOpenClawRemediationUnavailable):
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: %s %s blocked by DefenseClaw; OpenClaw not told (no operator.admin)\n",
+			kind, r.Event.Name)
+		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
+			fmt.Sprintf("type=%s verdict=%s %s: blocked and enforced by DefenseClaw; OpenClaw was not told to disable it",
+				kind, r.Verdict, openClawRemediationUnavailableAction+" (scope operator.admin)"))
+		return openClawRemediationUnavailableAction
+	default:
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway OpenClaw disable %s %s failed: %v\n", kind, r.Event.Name, err)
+		return ""
+	}
 }
 
 func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
