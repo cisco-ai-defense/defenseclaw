@@ -99,7 +99,7 @@ func TestACPFrameWithKeysThatDifferOnlyInCaseIsRefused(t *testing.T) {
 // (GAP-0296).
 func TestACPPermissionPastTheLocationBoundIsRefused(t *testing.T) {
 	env := newACPActionEnv(t, "default")
-	creds := filepath.Join(filepath.Dir(env.project), ".aws", "credentials")
+	creds := env.credentialsFile()
 	permission := func(benign int, last string) acp.Verdict {
 		var locations []any
 		for i := 0; i < benign; i++ {

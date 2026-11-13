@@ -373,6 +373,18 @@ func TestACPBenignSessionsAreNotFlagged(t *testing.T) {
 	t.Logf("%d benign frames, 0 flagged", len(frames))
 }
 
+// credentialsFile is the AWS credentials file of the account the tests run
+// as, which the packs protect. On Windows the temp directory is not the
+// account profile (a process reads its profile once, so the home of a
+// test's env is not the one the rules protect after another test ran),
+// so a user profile path is used.
+func (e *acpActionEnv) credentialsFile() string {
+	if runtime.GOOS == "windows" {
+		return `C:\Users\alice\.aws\credentials`
+	}
+	return filepath.Join(filepath.Dir(e.project), ".aws", "credentials")
+}
+
 // setMode runs the ACP profile in mode.
 func (e *acpActionEnv) setMode(mode acp.Mode) {
 	e.mode = mode
@@ -393,12 +405,7 @@ func TestACPActionVerdictSemantics(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			env := newACPActionEnv(t, "default")
 			env.setMode(mode)
-			creds := filepath.Join(filepath.Dir(env.project), ".aws", "credentials")
-			if runtime.GOOS == "windows" {
-				// The temp directory is not the account home on Windows, so the
-				// credential-path rule reads a user profile path.
-				creds = `C:\Users\alice\.aws\credentials`
-			}
+			creds := env.credentialsFile()
 			write := env.evaluate(t, acp.AgentToClient, acpFrameJSON(t, 1, "fs/write_text_file",
 				map[string]any{"sessionId": "s", "path": creds, "content": "x"}))
 			read := env.evaluate(t, acp.AgentToClient, acpFrameJSON(t, 2, "fs/read_text_file",
