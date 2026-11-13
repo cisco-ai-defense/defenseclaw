@@ -81,7 +81,6 @@ func splitOpenClawAddr(addr string, defaultPort int) (string, int) {
 func openClawSeparateUserBlock(opts SetupOpts, paths openClawPaths) string {
 	entry := map[string]interface{}{"enabled": true, "config": openClawSeparateUserEntry(opts)}
 	block := map[string]interface{}{"plugins": map[string]interface{}{
-		"allow":   []string{"defenseclaw"},
 		"load":    map[string]interface{}{"paths": []string{paths.external}},
 		"entries": map[string]interface{}{"defenseclaw": entry},
 	}}
@@ -99,9 +98,9 @@ func openClawSeparateUserBlock(opts SetupOpts, paths openClawPaths) string {
 func openClawSeparateUserMissing(cfg map[string]interface{}, opts SetupOpts, paths openClawPaths) []string {
 	var missing []string
 	plugins, _ := cfg["plugins"].(map[string]interface{})
-	allow, _ := plugins["allow"].([]interface{})
-	if !containsJSONString(allow, "defenseclaw") {
-		missing = append(missing, "plugins.allow defenseclaw")
+	// An allowlist the operator has must name defenseclaw; none is needed.
+	if allow, ok := plugins["allow"].([]interface{}); ok && len(allow) > 0 && !containsJSONString(allow, "defenseclaw") {
+		missing = append(missing, "defenseclaw in your plugins.allow")
 	}
 	load, _ := plugins["load"].(map[string]interface{})
 	loadPaths, _ := load["paths"].([]interface{})

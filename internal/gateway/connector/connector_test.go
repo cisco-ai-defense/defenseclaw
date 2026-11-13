@@ -1168,15 +1168,9 @@ func TestOpenClaw_Setup_IsIdempotent(t *testing.T) {
 	json.Unmarshal(data, &cfg)
 	plugins := cfg["plugins"].(map[string]interface{})
 
-	allow := plugins["allow"].([]interface{})
-	dcCount := 0
-	for _, v := range allow {
-		if s, _ := v.(string); s == "defenseclaw" {
-			dcCount++
-		}
-	}
-	if dcCount != 1 {
-		t.Errorf("plugins.allow has %d defenseclaw entries after two Setups, want 1", dcCount)
+	// plugins.allow is exclusive in OpenClaw; setup creates none (GAP-0069).
+	if _, ok := plugins["allow"]; ok {
+		t.Errorf("setup created plugins.allow: %v", plugins["allow"])
 	}
 
 	paths := plugins["load"].(map[string]interface{})["paths"].([]interface{})

@@ -349,7 +349,7 @@ func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 		observedVersion := openClawObservedVersion(opts)
 		dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
 		if err := installOpenClawExtension(paths, externalDir, opts.HILTEnabled, dropRejectedApprovals,
-			openClawConversationHooksSupported(observedVersion), openClawPluginKeysFor(opts, observedVersion)); err != nil {
+			openClawConversationHooksSupported(observedVersion), openClawPluginKeysWithAllow(opts, observedVersion)); err != nil {
 			return fmt.Errorf("openclaw extension install: %w", err)
 		}
 		if err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
@@ -706,7 +706,20 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 		plugins = map[string]interface{}{}
 	}
 
-	plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+	// plugins.allow is an exclusive allowlist in OpenClaw: creating one with
+	// only defenseclaw turned off every other plugin (a model provider, the
+	// browser, channels; rel-1-0-10 GAP-0069). DefenseClaw joins an
+	// allowlist the operator has and creates none; an enabled entry with a
+	// load path loads the plugin without one. A list that holds only
+	// defenseclaw and that an earlier setup created (pluginKeys.allowCreated)
+	// is taken out again.
+	if list, ok := plugins["allow"].([]interface{}); ok && len(list) > 0 {
+		if pluginKeys.allowCreated && len(list) == 1 && list[0] == "defenseclaw" {
+			delete(plugins, "allow")
+		} else {
+			plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+		}
+	}
 
 	entries, _ := plugins["entries"].(map[string]interface{})
 	if entries == nil {
@@ -901,6 +914,10 @@ var openClawSetupConfigKeys = []string{openClawHookModeKey, openClawPromptGateKe
 type openClawPluginKeys struct {
 	hookMode   string
 	promptGate bool
+	// allowCreated: the openclaw.json before the first setup had no
+	// plugins.allow, so a ["defenseclaw"] list there is one an earlier
+	// setup created.
+	allowCreated bool
 }
 
 // setOpenClawPluginKeys writes config.hookMode for a native or hybrid mode
@@ -1217,4 +1234,32 @@ func openClawPluginKeysFor(opts SetupOpts, observedVersion string) openClawPlugi
 		hookMode:   ResolveOpenClawHookMode(opts.OpenClawHooksMode, observedVersion),
 		promptGate: opts.OpenClawPromptGate,
 	}
+}
+
+// openClawPluginKeysWithAllow is openClawPluginKeysFor plus whether the
+// copy of openclaw.json from before the first setup had no plugins.allow.
+func openClawPluginKeysWithAllow(opts SetupOpts, observedVersion string) openClawPluginKeys {
+	keys := openClawPluginKeysFor(opts, observedVersion)
+	keys.allowCreated = openClawPristineLacksAllow(opts.DataDir)
+	return keys
+}
+
+// openClawPristineLacksAllow reports a pre-setup copy of openclaw.json that
+// exists and has no plugins.allow, or no file at all before setup. With no
+// copy, or one that cannot be read, nothing is claimed.
+func openClawPristineLacksAllow(dataDir string) bool {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "openclaw", "openclaw.json"))
+	if err != nil {
+		return false
+	}
+	if !b.Existed {
+		return true
+	}
+	pristine, err := parseOpenClawConfig(b.Path, b.PristineBytes)
+	if err != nil {
+		return false
+	}
+	plugins, _ := pristine["plugins"].(map[string]interface{})
+	_, had := plugins["allow"]
+	return !had
 }

@@ -82,3 +82,35 @@ func TestOpenClawRequiresScopedPluginCredential(t *testing.T) {
 		t.Fatal("openclaw must require the connector-scoped plugin credential")
 	}
 }
+
+// rel-1-0-10 GAP-0069: plugins.allow is an exclusive allowlist, so setup
+// joins one the operator has and creates none; a list with only
+// defenseclaw that an earlier setup created is taken out again.
+func TestOpenClawSetupCreatesNoAllowlist(t *testing.T) {
+	cases := []struct{ name, before, wantAllow string }{
+		{"no list", "{\"plugins\": {}}\n", ""},
+		{"operator list", "{\"plugins\": {\"allow\": [\"browser\"]}}\n", "browser,defenseclaw"},
+	}
+	for _, tc := range cases {
+		_, configPath, opts := openClawJSON5Fixture(t, t.TempDir())
+		if err := os.WriteFile(configPath, []byte(tc.before), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := NewOpenClawConnector().Setup(context.Background(), opts); err != nil {
+			t.Fatalf("%s: Setup: %v", tc.name, err)
+		}
+		plugins := readOpenClawJSON5(t, configPath)["plugins"].(map[string]interface{})
+		got := ""
+		if list, ok := plugins["allow"].([]interface{}); ok {
+			for i, v := range list {
+				if i > 0 {
+					got += ","
+				}
+				got += v.(string)
+			}
+		}
+		if got != tc.wantAllow {
+			t.Errorf("%s: plugins.allow = %q, want %q", tc.name, got, tc.wantAllow)
+		}
+	}
+}
