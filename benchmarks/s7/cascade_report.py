@@ -11,7 +11,17 @@ start-up cost, BENCH-phase1.md section 8). Writes no corpus content.
 """
 import json, sys, os, random, collections
 
-PRICE = {"gemma-3-27b": (0.23, 0.38)}  # USD per 1M tokens in / out, AWS price list us-east-1 (Mantle standard)
+PRICE = {  # USD per 1M tokens in / out, AWS Pricing API us-east-1 (Mantle standard / on demand)
+    "gemma-3-27b": (0.23, 0.38), "gemma-4-31b": (0.14, 0.40),
+    "gpt-oss-safeguard-20b": (0.07, 0.20), "gpt-oss-safeguard-120b": (0.15, 0.60),
+}
+
+
+def model_of(run):
+    for m in sorted(PRICE, key=len, reverse=True):
+        if m in run:
+            return m
+    return "gemma-3-27b"  # the earlier runs (rj, jf, rj2, rj-b45, rj-a45) all used Gemma 3 27B
 WINDOW_MS = 3400
 E = sys.argv[1]
 runs = sys.argv[2:]
@@ -70,6 +80,7 @@ for run in runs:
         case = collections.defaultdict(lambda: {"block": False, "alert": False, "judge_block": False})
         jl, jerr, jlate, jcalls, tin, tout, hook_lat, decisions, over, first_lat = [], 0, 0, 0, 0, 0, [], 0, 0, []
         judge_findings = 0
+        parse_fail = 0
         for l in open(path):
             try:
                 r = json.loads(l)
@@ -95,6 +106,8 @@ for run in runs:
                         jerr += 1
                 else:
                     jl.append(jc["latency_ms"])
+                    if not jc.get("parsed"):
+                        parse_fail += 1
                     tin += jc.get("in_tok") or 0
                     tout += jc.get("out_tok") or 0
         ids = [i for i in truth if i in case]
@@ -112,8 +125,9 @@ for run in runs:
             "answered_over_window_share": sum(1 for x in jl if x > WINDOW_MS) / max(1, done),
             "in_tok_avg": tin / max(1, done), "out_tok_avg": tout / max(1, done),
             "decisions_with_judge_finding": judge_findings,
+            "parse_failed": parse_fail, "parse_fail_share": parse_fail / max(1, done),
         }
-        model = "gemma-3-27b"
+        model = model_of(run)
         if done:
             pi, po = PRICE[model]
             per_call = (tin / done * pi + tout / done * po) / 1e6
@@ -143,14 +157,14 @@ for k, res in out.items():
         m = res[key]
         print(f"| {run} | {corpus} | {'block' if key == 'block' else 'block or alert'} | {ci(m, 'P')} | {ci(m, 'R')} | {ci(m, 'FPR', 4)} | {ci(m, 'F1')} |")
 print()
-print("| run | corpus | judge calls / tool call | answered | failed | cut at window | judge p50 / p95 / p99 ms | answered > 3.4 s | hook p50 / p95 ms (later calls) | hook > 3.4 s | in / out tok | USD / 1k judge calls | USD / 1k tool calls |")
-print("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+print("| run | corpus | judge calls / tool call | answered | parse failed | failed | cut at window | judge p50 / p95 / p99 ms | answered > 3.4 s | hook p50 / p95 ms (later calls) | hook > 3.4 s | in / out tok | USD / 1k judge calls | USD / 1k tool calls |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 for k, res in out.items():
     run, corpus = k.split("|")
     j, h = res["judge"], res["hook"]
     if not j["calls"]:
-        print(f"| {run} | {corpus} | 0 | - | - | - | - | - | {f(h['p50_ms'],0)} / {f(h['p95_ms'],0)} | {f(h['over_window_share'])} | - | - | - |")
+        print(f"| {run} | {corpus} | 0 | - | - | - | - | - | - | {f(h['p50_ms'],0)} / {f(h['p95_ms'],0)} | {f(h['over_window_share'])} | - | - | - |")
         continue
-    print(f"| {run} | {corpus} | {f(j['per_tool_call'],2)} | {j['answered']} | {j['failed']} | {j['cancelled_at_window']} ({f(100*j['late_share'],1)}%) | "
+    print(f"| {run} | {corpus} | {f(j['per_tool_call'],2)} | {j['answered']} | {j['parse_failed']} ({f(100*j['parse_fail_share'],1)}%) | {j['failed']} | {j['cancelled_at_window']} ({f(100*j['late_share'],1)}%) | "
           f"{f(j['p50_ms'],0)} / {f(j['p95_ms'],0)} / {f(j['p99_ms'],0)} | {f(100*j['answered_over_window_share'],1)}% | {f(h['p50_ms'],0)} / {f(h['p95_ms'],0)} | "
           f"{f(100*h['over_window_share'],1)}% | {f(j['in_tok_avg'],0)} / {f(j['out_tok_avg'],0)} | {f(j.get('usd_per_1k_judge_calls'),3)} | {f(j.get('usd_per_1k_tool_calls'),3)} |")
