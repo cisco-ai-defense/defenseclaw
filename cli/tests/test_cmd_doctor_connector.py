@@ -693,6 +693,10 @@ class TestCheckConnectorInventory(unittest.TestCase):
         cfg.guardrail.effective_mode.return_value = "observe"
         cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
         cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        # A bare MagicMock judge reads as enabled with an empty hook gate,
+        # which doctor warns about (rel-1-0-10:GAP-0247); these tests are not
+        # about the judge.
+        cfg.guardrail.judge.enabled = False
         cfg.data_dir = ""
         return cfg
 
