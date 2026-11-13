@@ -18,6 +18,8 @@ package cli
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -427,7 +429,8 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 		if serveFlags.actorPlainHTTP {
 			actorTLS = nil
 		}
-		if err := loadChainKey(serveFlags.chainKeyFile); err != nil {
+		chainKey, err := loadChainKey(serveFlags.chainKeyFile)
+		if err != nil {
 			return out, err
 		}
 		toLeader := &leader.Client{BaseURL: base, HTTP: hc}
@@ -450,7 +453,12 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			Secrets: c.Substrate.Secrets, SecretStore: substrateKubeSecrets(),
 			Relays: substrateRelays(),
 			Skills: newRuntimeSkillScanner(c),
-			Info:   substrateInfo(c),
+			// GAP-0039: an unscanned skill folder is refused where hooks fail
+			// closed (managed, strict tier) and alerted on elsewhere; scan
+			// receipts hold on every replica that shares the chain key.
+			BlockUnscannedSkills: substrateBlocksUnscannedSkills(c),
+			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
+			Info:                 substrateInfo(c),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
@@ -734,16 +742,37 @@ func substrateStartupChecks(c *config.Config) {
 // loadChainKey sets the value lineage key every gateway replica shares
 // (Secret defenseclaw-chain-key). Without it each replica keeps its own
 // random key and value joins only match on the replica that saw both calls.
-func loadChainKey(path string) error {
+func loadChainKey(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "[substrate] warning: no chain key at %s: value-lineage chains match only within one replica\n", path)
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return fmt.Errorf("serve: chain key: %w", err)
+		return nil, fmt.Errorf("serve: chain key: %w", err)
 	}
-	return gateway.SetToolValueLineageKey([]byte(strings.TrimSpace(string(raw))))
+	key := []byte(strings.TrimSpace(string(raw)))
+	return key, gateway.SetToolValueLineageKey(key)
+}
+
+// substrateSkillReceiptKey derives the skill scan receipt key from the
+// shared chain key, so a receipt one replica gives holds on all of them
+// (GAP-0039). No chain key: nil, and each replica uses its own.
+func substrateSkillReceiptKey(chainKey []byte) []byte {
+	if len(chainKey) == 0 {
+		return nil
+	}
+	m := hmac.New(sha256.New, chainKey)
+	m.Write([]byte("defenseclaw substrate skill receipt key v1"))
+	return m.Sum(nil)
+}
+
+// substrateBlocksUnscannedSkills refuses an unscanned skill folder where a
+// hook fails closed: managed installs and the strict tier of a connector.
+func substrateBlocksUnscannedSkills(c *config.Config) func(connector string) bool {
+	return func(connector string) bool {
+		return managed.IsManagedEnterprise(c.DeploymentMode) || c.HookPolicyTierForConnector(connector) == config.HookPolicyTierStrict
+	}
 }
 
 // substrateLifecycleClosesAsks wraps the chain lifecycle handler: after a
