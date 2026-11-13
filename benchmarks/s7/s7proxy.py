@@ -44,6 +44,7 @@ ap.add_argument("--cap-usd", type=float, default=70.0)
 ap.add_argument("--region", default="us-east-1")
 ap.add_argument("--conc", type=int, default=16)
 ap.add_argument("--replay-latency", action="store_true")
+ap.add_argument("--cache-only", action="store_true", help="answer only from the cache; a miss is refused (503) and logged, never sent to a model")
 args = ap.parse_args()
 
 lock = threading.Lock()
@@ -135,6 +136,10 @@ def run(kind, model_tag, messages, max_tokens, temperature, response_format=None
     key = hashlib.sha256(json.dumps([model_tag, messages, max_tokens, temperature, response_format], sort_keys=True).encode()).hexdigest()
     with lock:
         hit = cache.get(key)
+    if hit is None and args.cache_only:
+        with lock:
+            logf.write(json.dumps({"ts": time.time(), "kind": kind, "model": model, "key": key[:16], "cache_miss_refused": True}) + "\n"); logf.flush()
+        raise PermissionError("cache-only: miss refused")
     rec = {"ts": time.time(), "kind": kind, "model": model, "tag": tag, "key": key[:16]}
     if hit is not None:
         rec.update(cache_hit=True, in_tok=hit["in"], out_tok=hit["out"], latency_ms=hit["ms"], cost=0.0, stop=hit.get("stop"))
