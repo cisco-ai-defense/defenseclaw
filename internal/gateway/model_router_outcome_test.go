@@ -153,13 +153,18 @@ func TestEngineRouterManagedAPIKeyEnvKeepsWorking(t *testing.T) {
 	cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
 	cfg.Enterprise.Profile = "standalone"
 	if !cfg.StandaloneEnterprise() {
-		t.Skip("fixture is not standalone on this build")
+		t.Fatal("fixture is not standalone")
 	}
 	cfg.Routing.Models[1].APIKeyEnv = "ROUTING_MANAGED_LEGACY_KEY_7731"
 	r := newEngineRouter(cfg, nil, "")
 	b, _ := mustRouterEngine(t, r).Backend("paid")
 	if got := r.backendKey(cfg, b); got != "k-legacy" {
 		t.Fatalf("managed api_key_env key = %q", got)
+	}
+	// A named credential is the only source, even when it is missing.
+	b.Credential = "missing-credential"
+	if got := r.backendKey(cfg, b); got != "" {
+		t.Fatalf("a model with a credential read the environment: %q", got)
 	}
 }
 

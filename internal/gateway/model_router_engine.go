@@ -146,8 +146,9 @@ func (r *engineRouter) RouterActive(ctx context.Context) bool {
 // process env, data-dir .env). "" with no key reference means keyless.
 func (r *engineRouter) backendKey(cfg *config.Config, b engine.Backend) string {
 	if cfg != nil && cfg.StandaloneEnterprise() {
-		if key := cfg.RoutingCredential(b.Credential); key != "" || b.APIKeyEnv == "" {
-			return key
+		if strings.TrimSpace(b.Credential) != "" || b.APIKeyEnv == "" {
+			// A named credential is the only source, even when it is missing.
+			return cfg.RoutingCredential(b.Credential)
 		}
 		// A 1.0.9 or 1.0.8 managed config names the key by api_key_env only;
 		// keep its meaning (the service environment or the data-dir .env),

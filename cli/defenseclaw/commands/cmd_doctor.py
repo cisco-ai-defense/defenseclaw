@@ -13228,8 +13228,13 @@ def _check_routing_managed_key_env(cfg, r: _DoctorResult) -> None:
     """
     if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
         return
+    enterprise = getattr(cfg, "enterprise", None)
+    if str(getattr(enterprise, "profile", "") or "").strip().lower() == "secure_client":
+        return
     routing = getattr(cfg, "routing", None)
-    models = (getattr(routing, "models", []) or []) if routing is not None else []
+    if routing is None or not bool(getattr(routing, "enabled", False)):
+        return
+    models = getattr(routing, "models", []) or []
     legacy = [
         str(m.get("name") or i)
         for i, m in enumerate(models)
