@@ -27,6 +27,7 @@ const (
 	ReasonTruncated        = "ps_truncated"         // input exceeded the byte budget
 	ReasonIncompleteExpr   = "ps_incomplete_expr"   // expression ended unexpectedly
 	ReasonDialectAmbiguous = "ps_dialect_ambiguous" // escape decodes differently under PS 5.1 vs 7
+	ReasonUnsafeLiteral    = "ps_unsafe_literal"    // static source has a rune outside the safe allowlist
 )
 
 // Script is the root: an ordered list of statements plus the parameter block

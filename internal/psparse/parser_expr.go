@@ -245,7 +245,7 @@ func (p *parser) parsePrimary() Expr {
 	case TokGeneric:
 		p.advance()
 		v, amb := p.decodeBacktick(t.Raw, false)
-		sl := &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: v, Static: !amb, Bare: true}
+		sl := &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: v, Static: !amb, Bare: true, Raw: t.Raw}
 		if amb {
 			p.diag(t.Start, t.End, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
 		}

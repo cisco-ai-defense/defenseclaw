@@ -166,11 +166,11 @@ func (p *parser) parseCommand(invokeOp string) *Command {
 			goto done
 		case TokStopParse:
 			sp := p.advance()
-			cmd.Elements = append(cmd.Elements, &Arg{span: span{sp.Start, sp.End}, Value: &StringLit{span: span{sp.Start, sp.End}, Kind: StrBare, Value: "--%", Static: true, Bare: true}})
+			cmd.Elements = append(cmd.Elements, &Arg{span: span{sp.Start, sp.End}, Value: &StringLit{span: span{sp.Start, sp.End}, Kind: StrBare, Value: "--%", Static: true, Bare: true, Raw: sp.Raw}})
 			// the lexer always emits the verbatim tail token next
 			tl := p.advance()
 			cmd.StopParsing = tl.Raw
-			cmd.Elements = append(cmd.Elements, &Arg{span: span{tl.Start, tl.End}, Value: &StringLit{span: span{tl.Start, tl.End}, Kind: StrBare, Value: tl.Raw, Static: true, Bare: true}})
+			cmd.Elements = append(cmd.Elements, &Arg{span: span{tl.Start, tl.End}, Value: &StringLit{span: span{tl.Start, tl.End}, Kind: StrBare, Value: tl.Raw, Static: true, Bare: true, Raw: tl.Raw}})
 			p.diag(start, p.prevEnd(), ReasonStopParsing, "verbatim --% tail")
 		case TokRedir:
 			cmd.Redirs = append(cmd.Redirs, p.parseRedirection())
@@ -228,7 +228,7 @@ doneName:
 		raw = p.src[s0:end]
 	}
 	v, amb := p.decodeBacktick(raw, true)
-	sl := &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: !amb, Value: v}
+	sl := &StringLit{span: span{s0, end}, Kind: StrBare, Bare: true, Static: !amb, Value: v, Raw: raw}
 	if amb {
 		p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape in a name differs between PS 5.1 and 7")
 	}
@@ -290,7 +290,7 @@ func (p *parser) parseCommandName() Expr {
 	case TokOperator:
 		if v := p.cur().Value; v == "%" || v == "?" {
 			t := p.advance()
-			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+			return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true, Raw: t.Raw}
 		}
 	case TokParameter:
 		t := p.advance()
@@ -298,7 +298,7 @@ func (p *parser) parseCommandName() Expr {
 		if t.HasColon {
 			name += ":"
 		}
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: name, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: name, Static: true, Bare: true, Raw: t.Raw}
 	}
 	// no recognisable name
 	t := p.cur()
@@ -397,7 +397,7 @@ func (p *parser) parseFusedArg() Expr {
 // $( ) (PowerShell parses such an argument as an ExpandableString).
 func (p *parser) barewordExpr(t Token) Expr {
 	parts, static, lit := p.expandable(t.Raw, t.Start)
-	return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Bare: true, Static: static, Value: lit, Parts: parts}
+	return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Bare: true, Static: static, Value: lit, Parts: parts, Raw: t.Raw}
 }
 
 // parseArgAtom parses a single argument atom (no comma, no fusion).
@@ -414,15 +414,15 @@ func (p *parser) parseArgAtom() Expr {
 		// an operator character used as argument text (a lone '-', or a glob
 		// lead such as * in */*).
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Value, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Value, Static: true, Bare: true, Raw: t.Raw}
 	case TokDot:
 		// a '.' at argument position is a bareword (Remove-Item . -Recurse).
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: ".", Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: ".", Static: true, Bare: true, Raw: t.Raw}
 	case TokLabel:
 		// a ':name' at argument position is a bareword (Remove-Item :x -Force).
 		t := p.advance()
-		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true}
+		return &StringLit{span: span{t.Start, t.End}, Kind: StrBare, Value: t.Raw, Static: true, Bare: true, Raw: t.Raw}
 	case TokLBracket:
 		// [..] at argument position is a literal bareword in command mode
 		// (Write-Output [int] -> "[int]"), not a type literal or an index.
@@ -433,7 +433,7 @@ func (p *parser) parseArgAtom() Expr {
 			raw = p.src[start:end]
 		}
 		v, amb := p.decodeBacktick(raw, true)
-		sl := &StringLit{span: span{start, end}, Kind: StrBare, Value: v, Static: !amb, Bare: true}
+		sl := &StringLit{span: span{start, end}, Kind: StrBare, Value: v, Static: !amb, Bare: true, Raw: raw}
 		if amb {
 			p.diag(start, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
 		}
@@ -478,7 +478,7 @@ func (p *parser) composeAtoms(atoms []Expr, s0, end int) Expr {
 		if amb {
 			p.diag(s0, end, ReasonDialectAmbiguous, "backtick escape differs between PS 5.1 and 7")
 		}
-		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true}
+		return &StringLit{span: span{s0, end}, Kind: StrBare, Value: val, Static: !amb, Bare: true, Raw: p.rawSpan(s0, end)}
 	}
 	parts := make([]StringPart, 0, len(atoms))
 	for _, a := range atoms {

@@ -145,9 +145,16 @@ func walkCommandsExpr(e Expr, fn func(*Command)) {
 func LiteralString(e Expr) (string, bool) {
 	switch v := e.(type) {
 	case *StringLit:
-		// A non-static string is never a trusted literal (a variable, sub
-		// expression, or a dialect-ambiguous escape): the caller must escalate.
-		if v.Static {
+		// A value is a trusted static literal only when it is marked Static AND
+		// every rune of its source span (and resolved value) is in the safe
+		// allowlist: ASCII letters, digits and \ / : . - _ , = + @ ~ % plus
+		// ASCII quotes and spaces. Anything else -- a backtick escape of any
+		// kind, smart quotes/dashes, brackets, $, u{, braces, control runes or
+		// non-ASCII -- is reported non-static (ps_unsafe_literal), so an
+		// obfuscated name/path (i`u{65}x, C:\tmp\`[a]) can never resolve to a
+		// trusted literal. (The AST Static flag itself stays set for node-kind
+		// matching against the reference parser.)
+		if v.Static && safeStaticLiteral(v.Raw) && safeStaticLiteral(v.Value) {
 			return v.Value, true
 		}
 		return "", false
@@ -194,4 +201,22 @@ func DecodeEncodedCommand(s string) (string, bool) {
 		u16[i] = uint16(raw[2*i]) | uint16(raw[2*i+1])<<8
 	}
 	return string(utf16.Decode(u16)), true
+}
+
+// safeStaticLiteral reports whether every rune of s is in the Static-value
+// allowlist (ASCII letters/digits and \ / : . - _ , = + @ ~ % plus ASCII
+// quotes and spaces). It is the one gate that decides whether a parsed literal
+// is trusted as an exact value; anything outside the class is treated as
+// ps_unsafe_literal and resolves non-static.
+func safeStaticLiteral(s string) bool {
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		if strings.ContainsRune(`\/:.-_,=+@~% '"`, r) {
+			continue
+		}
+		return false
+	}
+	return true
 }

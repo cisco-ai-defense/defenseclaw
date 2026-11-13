@@ -14,7 +14,7 @@ import (
 // stringLit builds a StringLit from a TokString token, resolving the literal
 // value for literal forms and, for expandable forms, the segment list.
 func (p *parser) stringLit(t Token) *StringLit {
-	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str}
+	sl := &StringLit{span: span{t.Start, t.End}, Kind: t.Str, Raw: t.Raw}
 	switch t.Str {
 	case StrSingle:
 		inner := trimRuneDelims(t.Raw)

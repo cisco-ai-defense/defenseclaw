@@ -13,6 +13,14 @@ type Options struct {
 
 const maxDepth = 200
 
+// rawSpan returns the exact source text of [s0,end) (or "" if out of range).
+func (p *parser) rawSpan(s0, end int) string {
+	if s0 >= 0 && end <= len(p.src) && end >= s0 {
+		return p.src[s0:end]
+	}
+	return ""
+}
+
 // parser is a recursive-descent parser over the token slice. It is
 // unknown-tolerant: on any construct it cannot structure it records a
 // Diagnostic and resynchronises to the next statement boundary rather than

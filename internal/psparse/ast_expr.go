@@ -22,6 +22,7 @@ type StringLit struct {
 	Static bool
 	Parts  []StringPart // for expandable strings
 	Bare   bool         // was an unquoted bareword
+	Raw    string       // the exact source span (for the Static value allowlist)
 }
 
 func (*StringLit) expr()    {}
