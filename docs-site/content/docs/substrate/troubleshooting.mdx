@@ -24,6 +24,8 @@ Start with `defenseclaw substrate doctor`. It checks your computer and your sign
 - **macOS, over SSH or with the keychain locked:** `the macOS keychain is locked and this session cannot ask you to unlock it (for example over SSH); unlock it with: security unlock-keychain`. If you declined the question: `you declined the macOS keychain request; run the command again and allow DefenseClaw`.
 - **Linux without a keyring:** `token_store: no OS keychain is usable: secret-tool is not on PATH; install it (package libsecret-tools or libsecret) with a running Secret Service such as GNOME Keyring; or set DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file`. Set the variable in every shell, or in CI. The sign-in itself still needs a browser on some machine: `login --no-browser` prints the address and code.
 
+![defenseclaw substrate doctor when the cluster cannot be reached: ok for context and token_store (the sign-in is kept in a file because DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file), fail for admin_address (cannot connect, connection refused), skip for sign_in, ok for sign_in_server, fail for agent_entrance, then not ready: 2 problem(s) with one fix line for each failed check](/images/substrate/oss/doctor-not-ready.png)
+
 ### No free worker for a new agent
 
 ```text
@@ -41,6 +43,8 @@ After an approval, DefenseClaw updates the agent's allow list and Substrate appl
 ```text
 the cluster could not read the template's attestation, so it started nothing; try again in a minute, and if it stays, ask your administrator to check the template with defenseclaw substrate template verify
 ```
+
+![defenseclaw substrate run claude refused by the cluster: Error, the cluster refused to start this agent because the template dc-eng/claude is not attested, the registry answered HTTP 401 authentication required when it read the attestation (sandbox.template unverified), nothing was started, and the agent id to give your administrator](/images/substrate/enterprise/attestation-refused.png)
 
 On a managed cluster, DefenseClaw starts an agent only from a template whose attestation it has verified and that names the agent it runs. It checks the sign-in rules on that agent; the connector you named is not taken on trust. Nothing starts when:
 
@@ -158,6 +162,8 @@ DefenseClaw reads the requests sent to MCP and listed hosts as the server will. 
 ### A request is blocked with `egress_blocked`
 
 The callout's refusal is a JSON body with `error: egress_blocked`, a `message` that starts "DefenseClaw blocked egress from actor NAME to HOST (CATEGORY): ...", the `category` (for example `url_rule`, `ask_denied`, `ask_pending`, `chain_egress`, `mcp_tool_blocked`, `body_uninspectable`, `path_ambiguous`, `actor_not_live`), the `rule` and a `how_to_unblock` hint. A message that starts "Blocked by your organization's DefenseClaw policy:" is your profile refusing something you can't approve; it names the request-access contact.
+
+![A tool call to an MCP server refused inside the agent: curl to https://mcp.deepwiki.com/mcp for the tool ask_wiki_question answers HTTP/2 403 with x-defenseclaw-decision: block and the body error egress_blocked, category mcp_tool_blocked, DefenseClaw's tool rules refused the MCP tool call, and Claude saying the call was blocked by a policy and not by the server](/images/substrate/oss/mcp-tool-refused.png)
 
 ### A secret placeholder shows up in a tool's output
 
