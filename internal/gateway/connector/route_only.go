@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // RouteOnlySetup is the route-only rendering of one hook connector, derived
@@ -46,6 +48,15 @@ const RouteOnlyHeader = "X-DC-Route-Auth"
 type routeEnvBackup struct {
 	Original map[string]*string `json:"original,omitempty"`
 	Applied  map[string]string  `json:"applied,omitempty"`
+	// Wrapped is the agent provider a render wrapped (Codex), kept so a
+	// re-render never takes settings from a provider the user switched to.
+	Wrapped map[string]interface{} `json:"wrapped,omitempty"`
+}
+
+// isOwnRouteValue reports a value that only a route-only render writes (a
+// loopback /r/<connector> URL), used to recover after a lost record.
+func isOwnRouteValue(v string) bool {
+	return strings.Contains(v, "/r/claudecode") || strings.Contains(v, "/r/codex")
 }
 
 func routeBackupPath(dataDir, connector string) string {
@@ -85,11 +96,7 @@ func saveRouteBackup(dataDir, connector string, b routeEnvBackup) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return safefile.WritePrivate(path, raw)
 }
 
 // headerLines splits a "Name: value" newline list.
@@ -154,8 +161,21 @@ func applyRouteEnv(env map[string]interface{}, desired map[string]string, header
 	}
 	for k, want := range desired {
 		cur, had := str(k)
+		if applied, recorded := b.Applied[k]; recorded && had && cur != applied {
+			// The user changed the value after the render: theirs becomes the
+			// value a restore puts back.
+			orig := cur
+			if k == headerKey {
+				orig = withoutRouteHeader(cur)
+			}
+			b.Original[k] = &orig
+		}
 		if _, recorded := b.Original[k]; !recorded {
-			if had {
+			if had && k != headerKey && isOwnRouteValue(cur) {
+				// Our own render without its record (crash, reset): the value
+				// before it is unknown, so a restore removes the key.
+				b.Original[k] = nil
+			} else if had {
 				orig := cur
 				if k == headerKey {
 					orig = withoutRouteHeader(cur)
@@ -191,6 +211,12 @@ func restoreRouteEnvKey(env map[string]interface{}, k, headerKey string, b *rout
 			env[k] = rest
 		}
 		return
+	}
+	if applied == lostRecordMarker {
+		applied = cur
+		if !isOwnRouteValue(cur) {
+			return
+		}
 	}
 	if !had || cur != applied {
 		// The user changed or removed it after the render: theirs stays.

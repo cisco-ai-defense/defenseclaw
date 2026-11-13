@@ -74,3 +74,51 @@ func TestCodexRouteOnlyRefusesAProfileProvider(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestCodexRouteOnlyLostRecordAndLineEndings(t *testing.T) {
+	for name, original := range map[string]string{
+		"crlf": "model = \"gpt-5\"\r\nmodel_provider = \"azure\"\r\n\r\n[model_providers.azure]\r\nbase_url = \"https://x.openai.azure.com/openai\"\r\nquery_params = { api-version = \"2025-04-01-preview\" }\r\nenv_key = \"AZURE_KEY\"\r\n",
+		"bom":  "\ufeffmodel = \"gpt-5\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path, opts := codexRouteFixture(t, original)
+			c := NewCodexConnector()
+			route := &RouteOnlySetup{BaseURL: "http://127.0.0.1:1/r/codex", Token: "t"}
+			if err := c.ApplyRouteOnly(opts, route); err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := os.ReadFile(path)
+			var doc map[string]interface{}
+			if err := parseCodexTOML(raw, &doc); err != nil {
+				t.Fatalf("rendered config does not parse: %v\n%q", err, raw)
+			}
+			if name == "crlf" {
+				prov := doc["model_providers"].(map[string]interface{})["defenseclaw_route"].(map[string]interface{})
+				if qp, _ := prov["query_params"].(map[string]interface{}); qp["api-version"] != "2025-04-01-preview" {
+					t.Fatalf("query_params not copied: %v", prov)
+				}
+			}
+			if err := c.ApplyRouteOnly(opts, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := os.ReadFile(path); string(got) != original {
+				t.Fatalf("restore not byte-exact:\n got %q\nwant %q", got, original)
+			}
+		})
+	}
+	// Lost record: our render is in the file but the record is gone.
+	path, opts := codexRouteFixture(t, "model = \"gpt-5\"\n")
+	c := NewCodexConnector()
+	if err := c.ApplyRouteOnly(opts, &RouteOnlySetup{BaseURL: "http://127.0.0.1:1/r/codex", Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(routeBackupPath(opts.DataDir, "codex")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "model = \"gpt-5\"\n" {
+		t.Fatalf("lost-record restore = %q", got)
+	}
+}

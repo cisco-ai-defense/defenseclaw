@@ -119,3 +119,38 @@ func TestClaudeCodeRouteOnlyNilWithoutRenderTouchesNothing(t *testing.T) {
 		t.Fatalf("an unrouted connector rewrote settings.json: %q", got)
 	}
 }
+
+func TestClaudeCodeRouteOnlyLostRecordAndUserEdit(t *testing.T) {
+	path, opts := routeSettingsFixture(t, "{\n  \"model\": \"sonnet\"\n}")
+	c := NewClaudeCodeConnector()
+	route := &RouteOnlySetup{BaseURL: "http://127.0.0.1:1/r/claudecode", Token: "t"}
+	if err := c.ApplyRouteOnly(opts, route); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(routeBackupPath(opts.DataDir, "claudecode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if env := readEnv(t, path); env != nil {
+		t.Fatalf("lost-record restore left %v", env)
+	}
+	// A user edit of a rendered key between renders becomes the restore value.
+	if err := c.ApplyRouteOnly(opts, route); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, []byte(strings.Replace(string(raw), route.BaseURL, "https://mine.example", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ApplyRouteOnly(opts, route); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := readEnv(t, path)["ANTHROPIC_BASE_URL"]; got != "https://mine.example" {
+		t.Fatalf("restore = %v, want the user value", got)
+	}
+}

@@ -754,6 +754,16 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 	if !slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName) || strings.TrimSpace(apiAddr) == "" {
 		return nil
 	}
+	// Only connectors whose hooks DefenseClaw installs: teardown and
+	// uninstall restore exactly those (REVIEW-code-slice5b P1-2).
+	if !slices.Contains(cfg.ActiveConnectors(), connectorName) {
+		return nil
+	}
+	// The agent always talks to the loopback listener, whatever the bind
+	// address (0.0.0.0 or an IPv6 form is not a usable client URL).
+	if _, port, err := net.SplitHostPort(apiAddr); err == nil {
+		apiAddr = net.JoinHostPort("127.0.0.1", port)
+	}
 	up, ok := cfg.Routing.RouteOnly.Upstreams[connectorName]
 	if !ok {
 		return nil
