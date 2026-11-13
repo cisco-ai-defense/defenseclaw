@@ -32,12 +32,11 @@ var auditRejectedCmd = &cobra.Command{
 	Long: `List the records the v8 schema gate refused, newest first, one JSON object
 per line: when, the signal, family and event name, the reason code, the field
 that failed, the validation error and a copy of the record's fields redacted
-with the sensitive profile.
+with the stricter of the sensitive profile and the record's bucket profile.
 
 Records are kept only while observability.local.keep_rejected_records is
-true (off by default; turn it on with 'defenseclaw config set
-observability.local.keep_rejected_records true'). retention_days and
-max_store_mb prune them with the other local history.
+true in config.yaml (off by default). retention_days and max_store_mb prune
+them with the other local history.
 
 The audit database is opened read-only. On a standalone managed host run it
 as root or the gateway service account (Linux, macOS), or from an elevated
@@ -104,7 +103,7 @@ func runAuditRejected(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("audit rejected: config not loaded")
 	}
 	stderr := auditExportStderr(cmd)
-	if note := auditRejectedOffNote(); note != "" {
+	if note := auditRejectedOffNote(cfg.StandaloneEnterprise()); note != "" {
 		fmt.Fprintln(stderr, note)
 	}
 	path := cfg.AuditDB
@@ -148,14 +147,19 @@ func writeAuditRejectedLines(out io.Writer, rows []audit.RejectedRecordRow) erro
 
 // auditRejectedOffNote says, on stderr, that the store is off in the
 // effective configuration, so an empty listing is not mistaken for "nothing
-// was refused". "" when it is on or the plan cannot be read.
-func auditRejectedOffNote() string {
+// was refused". "" when it is on or the plan cannot be read. A managed
+// computer's configuration comes from its deployment, so the note names no
+// per-user command there.
+func auditRejectedOffNote(managedHost bool) string {
 	keep, ok := auditRejectedKeepEnabled()
 	if !ok || keep {
 		return ""
 	}
-	return "note: observability.local.keep_rejected_records is off, so refused records are counted but not kept; " +
-		"turn it on with 'defenseclaw config set observability.local.keep_rejected_records true'"
+	note := "note: observability.local.keep_rejected_records is off, so refused records are counted but not kept; "
+	if managedHost {
+		return note + "set it to true in this computer's managed configuration"
+	}
+	return note + "turn it on with 'defenseclaw config set observability.local.keep_rejected_records true'"
 }
 
 // auditRejectedKeepEnabled reads the effective key from the loaded config. A

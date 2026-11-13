@@ -155,3 +155,17 @@ func TestAuditRejectedRefusesAStandardUserOnAManagedWindowsComputer(t *testing.T
 		t.Fatalf("standard user error=%v", err)
 	}
 }
+
+func TestAuditRejectedOffNoteNamesNoPerUserCommandOnAManagedComputer(t *testing.T) {
+	withAuditRejectedFlags(t, "", 100, false, true)
+	if note := auditRejectedOffNote(true); strings.Contains(note, "defenseclaw ") || !strings.Contains(note, "managed configuration") {
+		t.Fatalf("managed note=%q", note)
+	}
+	if note := auditRejectedOffNote(false); !strings.Contains(note, "defenseclaw config set observability.local.keep_rejected_records true") {
+		t.Fatalf("per-user note=%q", note)
+	}
+	withAuditRejectedFlags(t, "", 100, true, true)
+	if note := auditRejectedOffNote(true); note != "" {
+		t.Fatalf("note while on=%q", note)
+	}
+}
