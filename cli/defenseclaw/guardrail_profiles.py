@@ -81,8 +81,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
-            # 1.0.10 (s7/secret-recall merged with s7/pii-email): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
-            "c915604b325d231352c94bc2c6c836d0f693f7fe75428c251a3dabb0fa93ec38",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "bada955b0ca029db29465c2ab0d5b4ffde02406eed0e16c36e70c7bc1de27ec6",
         }
     ),
     "permissive": frozenset(
@@ -120,8 +120,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
-            # 1.0.10 (s7/secret-recall merged with s7/pii-email): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
-            "6720bbd0c6a6ddb73a465a43af50e5be14e06d7791346e501663f8bdee200a08",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "a35b1f3babbf06082de85953c1b6f7743233cff459a7ec19dbbf6c64181c5177",
         }
     ),
     "strict": frozenset(
@@ -158,8 +158,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
-            # 1.0.10 (s7/secret-recall merged with s7/pii-email): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
-            "46a7ffc10dd841ca23e42d7437f5f5c9113b3fefefa5f8ce2271e1d9b6240aa3",
+            # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
+            "18bef68d5e6cf60390d9f3925667fa2afa39d9d74b70ee5114c02de8b714c3ec",
         }
     ),
 }
