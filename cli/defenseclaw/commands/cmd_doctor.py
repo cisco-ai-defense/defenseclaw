@@ -19015,6 +19015,10 @@ def _check_connector_inventory(
         judge_details = guardrail_health.get("details") if isinstance(guardrail_health, dict) else None
         judge_failing = isinstance(judge_details, dict) and judge_details.get("judge_state") == "failing"
         detail = f"strategy={strategy}"
+        # An enabled judge with an empty hook gate judges no hook connector:
+        # setup, the TUI and ``guardrail judge add`` write the gate, a
+        # hand-written or pushed config may not (rel-1-0-10:GAP-0247).
+        gate_empty = False
         if not judge_enabled:
             detail += "; judge disabled (regex and Cisco AI Defense lanes only)"
         elif connector not in _HOOK_ENFORCED_CONNECTORS:
@@ -19026,11 +19030,14 @@ def _check_connector_inventory(
             if gated_on:
                 detail += "; judge active (hook lane)"
             else:
+                gate_empty = not any(str(entry).strip() for entry in hook_conns)
                 detail += (
                     "; judge enabled but not turned on for this connector's hook "
                     "lane (regex and Cisco AI Defense lanes only); opt in: "
                     f"defenseclaw guardrail judge add {connector}"
                 )
+                if gate_empty:
+                    detail += "; no hook connector is turned on, so the judge reviews proxy traffic only (all: defenseclaw guardrail judge add all)"
         if judge_enabled and judge_failing:
             detail += "; judge failing: all recent calls failed, so only the rules decide"
         by_connector = judge_details.get("judge_fallbacks_by_connector") if isinstance(judge_details, dict) else None
@@ -19043,7 +19050,7 @@ def _check_connector_inventory(
             hint = judge_max_parallel_hint(cfg)
             if hint:
                 detail += f" ({hint})"
-        _emit("warn" if judge_enabled and judge_failing else "pass", "Detection", detail, r=r)
+        _emit("warn" if judge_enabled and (judge_failing or gate_empty) else "pass", "Detection", detail, r=r)
 
 
 def _check_hook_contract_lock(

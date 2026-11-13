@@ -3310,6 +3310,19 @@ class TestDetectionStrategyRow(unittest.TestCase):
         self.assertNotIn("hook_connectors", row["detail"])
         self.assertIn("Cisco AI Defense", row["detail"])
 
+    def test_hook_gate_empty_warns(self):
+        # rel-1-0-10:GAP-0247: an enabled judge with an empty gate covers no
+        # hook connector (hand-written or pushed config); the row warns.
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=[]), "codex")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("reviews proxy traffic only", row["detail"])
+        self.assertIn("defenseclaw guardrail judge add all", row["detail"])
+        self.assertNotIn("hook_connectors", row["detail"])
+
+    def test_hook_gate_other_connector_passes(self):
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
+        self.assertEqual(row["status"], "pass")
+
     def test_hook_connector_gated_explicit(self):
         row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")
         self.assertIn("judge active (hook lane)", row["detail"])
