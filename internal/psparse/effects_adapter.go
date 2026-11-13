@@ -174,18 +174,37 @@ func LiteralString(e Expr) (string, bool) {
 		// reference side, so it is never a static literal value.
 		return "", false
 	case *ArrayLit:
-		// a comma list of literals joins with spaces (ArgumentList style)
-		parts := make([]string, 0, len(v.Elements))
-		for _, el := range v.Elements {
-			s, ok := LiteralString(el)
-			if !ok {
-				return "", false
-			}
-			parts = append(parts, s)
-		}
-		return strings.Join(parts, " "), true
+		// A comma/array argument is never one static value: effects must read
+		// the elements (LiteralList) and treat each as its own word, so a
+		// protected element (Remove-Item C:\tmp\a,C:\Windows) is not hidden
+		// inside a fabricated joined string (review 4 R4-2).
+		return "", false
 	}
 	return "", false
+}
+
+// ListItem is one element of a comma/array argument: its resolved value and
+// whether that value is a trusted static literal.
+type ListItem struct {
+	Text   string
+	Static bool
+}
+
+// LiteralList returns the elements of a comma/array argument, each with its own
+// Static flag, and true if e is such a list. Callers must treat each element as
+// a separate word; LiteralString on the same expression is non-static by
+// design, so a comma list can never resolve to one joined value.
+func LiteralList(e Expr) ([]ListItem, bool) {
+	a, ok := e.(*ArrayLit)
+	if !ok {
+		return nil, false
+	}
+	items := make([]ListItem, 0, len(a.Elements))
+	for _, el := range a.Elements {
+		v, st := LiteralString(el)
+		items = append(items, ListItem{Text: v, Static: st})
+	}
+	return items, true
 }
 
 // DecodeEncodedCommand decodes a PowerShell -EncodedCommand value: base64 of

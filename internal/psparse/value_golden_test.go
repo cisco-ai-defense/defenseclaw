@@ -61,6 +61,8 @@ type goldenEl struct {
 	hasColon bool
 	val      string
 	ok       bool
+	isList   bool       // a comma/array argument (review 4 R4-2)
+	list     []goldenEl // its elements (val/ok each), compared element by element
 }
 
 func projectMine(c *Command) goldenProj {
@@ -76,14 +78,24 @@ func projectMine(c *Command) goldenProj {
 			}
 			g.els = append(g.els, ge)
 		case *Arg:
-			v, ok := LiteralString(e.Value)
-			g.els = append(g.els, goldenEl{val: v, ok: ok})
+			g.els = append(g.els, projMineArg(e.Value))
 		case Expr:
-			v, ok := LiteralString(e)
-			g.els = append(g.els, goldenEl{val: v, ok: ok})
+			g.els = append(g.els, projMineArg(e))
 		}
 	}
 	return g
+}
+
+func projMineArg(e Expr) goldenEl {
+	if items, ok := LiteralList(e); ok {
+		ge := goldenEl{isList: true}
+		for _, it := range items {
+			ge.list = append(ge.list, goldenEl{val: it.Text, ok: it.Static})
+		}
+		return ge
+	}
+	v, ok := LiteralString(e)
+	return goldenEl{val: v, ok: ok}
 }
 
 func projectOracle(c ovCmd) goldenProj {
@@ -94,6 +106,12 @@ func projectOracle(c ovCmd) goldenProj {
 			if e.C != nil {
 				ge.hasColon = true
 				ge.colon, ge.colonOK = e.C.V, e.C.S
+			}
+			g.els = append(g.els, ge)
+		} else if e.L != nil {
+			ge := goldenEl{isList: true}
+			for _, it := range e.L {
+				ge.list = append(ge.list, goldenEl{val: it.V, ok: it.S})
 			}
 			g.els = append(g.els, ge)
 		} else {
@@ -119,6 +137,24 @@ func cmpCommand(mine, oracle goldenProj) string {
 	}
 	for i := 0; i < n; i++ {
 		m, o := mine.els[i], oracle.els[i]
+		if m.isList || o.isList {
+			// a comma/array argument is compared element by element: a wrong
+			// static element fails, mine being non-static is safe, and a length
+			// or shape mismatch fails (review 4 R4-2).
+			if m.isList != o.isList {
+				return fmt.Sprintf("el%d list mine=%v oracle=%v", i, m.isList, o.isList)
+			}
+			if len(m.list) != len(o.list) {
+				return fmt.Sprintf("el%d list len mine=%d oracle=%d", i, len(m.list), len(o.list))
+			}
+			for j := range m.list {
+				mj, oj := m.list[j], o.list[j]
+				if mj.ok && (!oj.ok || mj.val != oj.val) {
+					return fmt.Sprintf("el%d[%d] list WRONG-STATIC mine=%q oracle=(%q,%v)", i, j, mj.val, oj.val, oj.ok)
+				}
+			}
+			continue
+		}
 		if m.param != o.param {
 			return fmt.Sprintf("el%d param mine=%q oracle=%q", i, m.param, o.param)
 		}
