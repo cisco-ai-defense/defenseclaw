@@ -241,15 +241,40 @@ func TestRouteEpochRotationRefusesOldCredentialsAtOnce(t *testing.T) {
 	if valid(plain) {
 		t.Fatal("before the gateway owns its port no route credential may authenticate")
 	}
-	api.rotateRouteEpoch()
+	api.startRouteEpoch(false)
 	first, bobFirst := token(alice), token(bob)
 	if !valid(first) || !valid(bobFirst) || valid(plain) {
-		t.Fatal("after the first rotation the published epoch credentials authenticate, and only they")
+		t.Fatal("after the first start the published epoch credentials authenticate, and only they")
 	}
-	api.rotateRouteEpoch()
+	// A normal restart (a new gateway process, nothing held the port)
+	// keeps the published epoch: running agents keep working (P2-3).
+	store.routeEpoch = newRouteEpochState(api.configDataDir)
+	store.invalidate()
+	if valid(first) {
+		t.Fatal("before the restarted gateway owns its port no route credential may authenticate")
+	}
+	api.startRouteEpoch(false)
+	if !valid(first) || token(alice) != first {
+		t.Fatal("a normal restart must keep the route epoch and the rendered credential")
+	}
+	// The bind found the port held during the restart: a new epoch.
+	api.startRouteEpoch(true)
 	second := token(alice)
 	if valid(first) || !valid(second) {
-		t.Fatal("a restart rotation must refuse the old credential at once")
+		t.Fatal("a restart after another process held the port must refuse the old credential at once")
+	}
+	// An unusable published epoch is never adopted.
+	path, _ := connector.RouteEpochPath(api.scannerCfg.DataDir)
+	saved, _ := os.ReadFile(path)
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := newRouteEpochState(api.configDataDir)
+	if rotated, err := other.start(false); !rotated || err != nil {
+		t.Fatalf("start over a corrupt published epoch = %v, %v; want a new epoch", rotated, err)
+	}
+	if err := os.WriteFile(path, saved, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	bobSecond := token(bob)
 	ledger.set(bobRow)

@@ -30,6 +30,7 @@ var routeEpochPlatform = runtime.GOOS == "windows"
 type routeEpochState struct {
 	dataDir func() string
 	write   func(dataDir string, epoch connector.RouteEpoch) error
+	load    func(dataDir string) (*connector.RouteEpoch, error)
 
 	mu      sync.Mutex
 	epoch   *connector.RouteEpoch
@@ -43,7 +44,55 @@ type routeEpochState struct {
 }
 
 func newRouteEpochState(dataDir func() string) *routeEpochState {
-	return &routeEpochState{dataDir: dataDir, write: connector.WriteRouteEpoch, seen: map[string]bool{}}
+	return &routeEpochState{dataDir: dataDir, write: connector.WriteRouteEpoch, load: connector.LoadRouteEpoch, seen: map[string]bool{}}
+}
+
+// start runs each time the gateway owns its API port. A normal restart
+// keeps the published epoch, so running agents keep their rendered route
+// credential (S1 REVIEW-code-slice4 P2-3). A new epoch starts when the
+// port was held by another process while the gateway restarted (a
+// credential sent to it is refused from the first request on), and when
+// no trusted, valid published epoch exists. It reports whether it rotated.
+func (s *routeEpochState) start(portWasHeld bool) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	if !portWasHeld && s.adoptPublished() {
+		return false, nil
+	}
+	return true, s.rotate()
+}
+
+// adoptPublished keeps the epoch this process already has, or takes the
+// one an earlier gateway run published; false when there is none.
+func (s *routeEpochState) adoptPublished() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.epoch != nil {
+		return true
+	}
+	dir := strings.TrimSpace(s.dataDir())
+	if dir == "" || s.load == nil {
+		return false
+	}
+	published, err := s.load(dir)
+	if err != nil || published == nil {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar-api] published route epoch not used (a new one starts): %v\n", err)
+		}
+		return false
+	}
+	s.epoch = published
+	if s.epoch.Generations == nil {
+		s.epoch.Generations = map[string]int{}
+	}
+	s.version++
+	s.seen = maps.Clone(s.present)
+	if s.seen == nil {
+		s.seen = map[string]bool{}
+	}
+	s.dirty = false
+	return true
 }
 
 // rotate starts a new epoch and publishes it.
@@ -136,11 +185,16 @@ func (s *routeEpochState) publishLocked() error {
 	return nil
 }
 
-// rotateRouteEpoch runs when this gateway owns its API port: a managed
-// Windows gateway starts a new route epoch, so every route credential from
-// before (including one captured by another account that held the port
-// while the gateway restarted) is refused from the first request on.
-func (a *APIServer) rotateRouteEpoch() {
+// startRouteEpoch runs when this gateway owns its API port. A managed
+// Windows gateway keeps its published route epoch across a normal restart
+// and starts a new one when the bind found the port held during the
+// restart (portWasHeld: the Windows bind-owner check
+// isAPIPortHeldByAnotherAccount or an address in use), so a route
+// credential sent to whoever held the port is refused from the first
+// request on. The kernel SID factor already refuses that credential for
+// any other account (decideWindowsRouteCaller); the rotation is defence
+// in depth. Enrollment return bumps the account generation (observe).
+func (a *APIServer) startRouteEpoch(portWasHeld bool) {
 	if !a.userScopedCredentialsRequired() {
 		return
 	}
@@ -148,8 +202,12 @@ func (a *APIServer) rotateRouteEpoch() {
 	if store == nil || store.routeEpoch == nil {
 		return
 	}
-	if err := store.routeEpoch.rotate(); err == nil {
-		fmt.Fprintf(os.Stderr, "[sidecar-api] route epoch rotated: route-only credentials from before this start are refused\n")
+	rotated, err := store.routeEpoch.start(portWasHeld)
+	switch {
+	case rotated && err == nil && portWasHeld:
+		fmt.Fprintf(os.Stderr, "[sidecar-api] route epoch rotated: the API port was held by another process during the restart; route-only credentials from before are refused\n")
+	case rotated && err == nil:
+		fmt.Fprintf(os.Stderr, "[sidecar-api] route epoch started: no published epoch to keep\n")
 	}
 	store.invalidate()
 }
