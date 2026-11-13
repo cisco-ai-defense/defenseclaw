@@ -366,7 +366,7 @@ guardrail:
   judge:
     enabled: true
     tool_injection: true
-    hook_connectors: [claudecode]        # the hook connectors you want judged
+    hook_connectors: ["*"]              # every hook connector; or name them, e.g. [claudecode, codex]
     llm:
       provider: openai-compatible
       model: google.gemma-4-31b
@@ -374,7 +374,9 @@ guardrail:
       api_key_env: DEFENSECLAW_LLM_KEY
 ```
 
-Run `defenseclaw config validate`, then restart the gateway. To turn the judge
+Keep `hook_connectors`: without it the judge reviews no hook connector's tool
+calls, even with `enabled: true`. `defenseclaw setup guardrail` writes `["*"]`
+when it turns the judge on. Run `defenseclaw config validate`, then restart the gateway. To turn the judge
 off again, set `guardrail.detection_strategy: regex_only` (or
 `guardrail.judge.enabled: false`).
 
