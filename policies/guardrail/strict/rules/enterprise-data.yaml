@@ -64,12 +64,24 @@ rules:
     confidence: 0.55
     tags: [pii]
 
+  # Any one address alerts, as in the default pack: agents carry vendor and
+  # commit-author addresses in their own instructions and tool output (Claude
+  # Code's request always holds its vendor no-reply address), and blocking on
+  # that stopped every turn (GAP-0149 live, GAP-0091). An address given as a
+  # labeled data field still blocks in strict (ENT-EMAIL-FIELD).
   - id: ENT-EMAIL-BULK
     pattern: '(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
     title: "Email address"
-    severity: MEDIUM
+    severity: LOW
     confidence: 0.40
     tags: [pii]
+
+  - id: ENT-EMAIL-FIELD
+    pattern: '(?i)\b(?:e-?mail)(?:[\s_-]+address)?[\s*_:#=-]{1,12}[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
+    title: "Email address in a labeled field"
+    severity: MEDIUM
+    confidence: 0.70
+    tags: [pii, structured]
 
   - id: ENT-PASSPORT-US
     pattern: '\b[A-Z]\d{8}\b'
