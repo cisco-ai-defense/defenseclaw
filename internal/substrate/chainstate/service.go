@@ -397,7 +397,12 @@ func (s *Service) purgeLocked(e *actorEntry) {
 }
 
 // storeOf opens the actor's store (a held entry). A store opened for the
-// first time for an actor with a parent starts from the parent's windows.
+// first time for an actor with a parent starts from the parent's windows:
+// the copy runs before the store is published, so a concurrent call of the
+// child waits for it (on openMu) and its first hooks and egress checks see
+// the parent's windows (GAP-0091). If the parent can't be named or copied,
+// the store is not kept and the call answers unavailable, so the caller's
+// fail mode applies and the next call tries the link again.
 func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, audit.ConnectorInstanceID, error) {
 	instance, err := audit.ToolChainSubstrateInstanceID(e.actor.Atespace, e.actor.UID)
 	if err != nil {
@@ -438,6 +443,18 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 		_ = st.Close()
 		return nil, "", err
 	}
+	if fresh && s.opts.ParentOf != nil {
+		if err := s.linkFork(ctx, e, st, instance); err != nil {
+			_ = st.Close()
+			for _, p := range []string{path, path + "-wal", path + "-shm"} {
+				if rerr := os.Remove(p); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+					s.warnf("fork link for %s/%s: remove %s: %v", e.actor.Atespace, e.actor.UID, filepath.Base(p), rerr)
+				}
+			}
+			s.warnf("fork link for %s/%s failed, its chain calls answer unavailable until it succeeds: %v", e.actor.Atespace, e.actor.UID, err)
+			return nil, "", errForkUnlinked
+		}
+	}
 	s.mu.Lock()
 	if e.purged {
 		s.mu.Unlock()
@@ -447,17 +464,27 @@ func (s *Service) storeOf(ctx context.Context, e *actorEntry) (*audit.Store, aud
 	e.store = st
 	s.open++
 	s.mu.Unlock()
-	if fresh && s.opts.ParentOf != nil {
-		parent, err := s.opts.ParentOf(ctx, e.actor.Atespace, e.actor.UID)
-		if err != nil {
-			s.warnf("parent of %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
-		} else if parent != "" && parent != e.actor.UID {
-			if _, err := s.copyFork(ctx, e, st, instance, Actor{Atespace: e.actor.Atespace, UID: parent}, s.opts.Now()); err != nil {
-				s.warnf("fork copy for %s/%s: %v", e.actor.Atespace, e.actor.UID, err)
-			}
-		}
-	}
 	return st, instance, nil
+}
+
+// errForkUnlinked answers a forked actor's call while its parent's windows
+// could not be linked (GAP-0091).
+var errForkUnlinked = &leader.WireError{Code: leader.CodeUnavailable, Message: "the forked actor's chain windows are not linked to its parent yet"}
+
+// linkFork copies the parent's windows into a new child store (not yet
+// published) when the verified registration names a parent.
+func (s *Service) linkFork(ctx context.Context, e *actorEntry, st *audit.Store, instance audit.ConnectorInstanceID) error {
+	parent, err := s.opts.ParentOf(ctx, e.actor.Atespace, e.actor.UID)
+	if err != nil {
+		return fmt.Errorf("parent: %w", err)
+	}
+	if parent == "" || parent == e.actor.UID {
+		return nil
+	}
+	if _, err := s.copyFork(ctx, e, st, instance, Actor{Atespace: e.actor.Atespace, UID: parent}, s.opts.Now()); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	return nil
 }
 
 // copyFork copies the parent's windows, clock and task into the child (a

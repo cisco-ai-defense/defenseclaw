@@ -484,6 +484,10 @@ data:
     - defenseclaw-admin.defenseclaw-system.svc
     - defenseclaw-admin.defenseclaw-system
     - defenseclaw-admin
+    judge:
+      ca_file: /var/run/ate/ca.crt
+      token_file: /var/run/secrets/defenseclaw-callout-judge/token
+      url: https://defenseclaw-admin.defenseclaw-system.svc.cluster.local/api/v1/substrate/callout/verdict
     profiles:
     - atespaces:
       - data-ml
@@ -935,7 +939,7 @@ spec:
         app.kubernetes.io/component: callout
       annotations:
         checksum/config: ce19d51312c3ec89dc69f72757d8daf017bc8cd3a28f233f1c07b61bb1e751ea
-        checksum/callout: 0ab4a2a8bf81e84c8652807710db6ee70bfcb87efc37f72f5a6101ab2a307226
+        checksum/callout: 38066f7f61f9bb09e1388584d3ed8daca10d934b8b845197fafebf3342ba76b2
     spec:
       
       serviceAccountName: defenseclaw-callout
@@ -1030,6 +1034,9 @@ spec:
         - name: callout-config
           mountPath: /etc/defenseclaw-callout
           readOnly: true
+        - name: callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
+          readOnly: true
       volumes:
       - name: config
         configMap:
@@ -1085,6 +1092,11 @@ spec:
       - name: callout-config
         configMap:
           name: defenseclaw-callout
+      - name: callout-judge
+        secret:
+          secretName: defenseclaw-callout-judge
+          items:
+          - {key: token, path: token}
 ---
 # Source: defenseclaw-substrate/templates/controller.yaml
 # One replica, Recreate: policies, admission, idle suspend, drift and
@@ -1388,6 +1400,9 @@ spec:
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
+        - name: callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
+          readOnly: true
         # The create path admits a launcher actor with the controller's own
         # attestation check (GAP-0154), so it reads the same anchors.
         - name: template-anchors
@@ -1464,6 +1479,11 @@ spec:
         secret:
           secretName: defenseclaw-llm
           optional: true
+      - name: callout-judge
+        secret:
+          secretName: defenseclaw-callout-judge
+          items:
+          - {key: token, path: token}
       - name: template-anchors
         secret:
           secretName: defenseclaw-template-anchors
@@ -1613,6 +1633,9 @@ spec:
         - name: llm-credentials
           mountPath: /var/run/secrets/defenseclaw-llm
           readOnly: true
+        - name: callout-judge
+          mountPath: /var/run/secrets/defenseclaw-callout-judge
+          readOnly: true
         - name: store
           mountPath: /var/lib/defenseclaw/store
         # The Kubernetes API token for the leader Lease and the store state
@@ -1687,6 +1710,11 @@ spec:
         secret:
           secretName: defenseclaw-llm
           optional: true
+      - name: callout-judge
+        secret:
+          secretName: defenseclaw-callout-judge
+          items:
+          - {key: token, path: token}
       - name: kube-api-token
         projected:
           sources:
@@ -1785,7 +1813,8 @@ automountServiceAccountToken: false
 ---
 # Source: defenseclaw-substrate/templates/hooks/rbac.yaml
 # Only while the chain-key hook runs: create the shared chain key Secret
-# when it is absent (create cannot be limited to one name; get can).
+# and the callout token Secret when they are absent (create cannot be
+# limited to one name; get can).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -1805,7 +1834,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [secrets]
-  resourceNames: [defenseclaw-chain-key]
+  resourceNames: [defenseclaw-chain-key, defenseclaw-callout-judge]
   verbs: [get]
 - apiGroups: [""]
   resources: [secrets]

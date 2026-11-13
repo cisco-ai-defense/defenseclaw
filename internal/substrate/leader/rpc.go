@@ -61,6 +61,9 @@ const (
 	// followers make of the registrations the leader keeps.
 	MethodRegistrationGet  = "RegistrationGet"
 	MethodRegistrationList = "RegistrationList"
+	// MethodRegistrationLookup answers the callout's name lookup: the UID,
+	// profile and attendance of an actor's newest incarnation (GAP-0090).
+	MethodRegistrationLookup = "RegistrationLookup"
 	// MethodActivityObserve carries a gateway replica's batch of last
 	// activity per actor; MethodActivitySnapshot answers the controller's
 	// idle check (internal/substrate/activity).
@@ -72,7 +75,7 @@ const (
 var Methods = []string{
 	MethodChainObserve, MethodIntentGet, MethodIntentPut,
 	MethodAskOpen, MethodAskResolve, MethodRegistrationWrite,
-	MethodRegistrationGet, MethodRegistrationList,
+	MethodRegistrationGet, MethodRegistrationList, MethodRegistrationLookup,
 	MethodActivityObserve, MethodActivitySnapshot,
 }
 
