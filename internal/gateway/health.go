@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1038,6 +1039,11 @@ func (h *SidecarHealth) SetRouting(state SubsystemState, lastErr string, details
 // connector (nil: none), shown as routing.details.route_only.
 func (h *SidecarHealth) SetRouteOnlyReadiness(r []routeOnlyReadiness) {
 	h.mu.Lock()
+	if reflect.DeepEqual(h.routeOnly, r) {
+		// The periodic recheck found nothing new: no subscriber wake-up.
+		h.mu.Unlock()
+		return
+	}
 	h.routeOnly = r
 	h.mu.Unlock()
 	h.notifySubscribers()
