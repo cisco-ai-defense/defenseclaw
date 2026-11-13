@@ -10474,7 +10474,7 @@ function Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
         $files += [string]$openCodePlugin.LegacyPluginPath
     }
     # GAP-0751: the guardian keeps its swap backups beside a launch image too.
-    foreach ($hookImageItem in @(Get-DefenseClawHookImageAclItems -Layout $Layout)) {
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
         if ([string]$hookImageItem.Kind -ceq 'InstallFile') {
             $files += [string]$hookImageItem.Path
         }
@@ -14410,7 +14410,7 @@ function Set-DefenseClawManagedAcls {
     }
     # GAP-0751: the hooks folder and its launch folders like bin, their images
     # like the hook (standalone; nothing on a layout without bin\hooks).
-    foreach ($hookImageItem in @(Get-DefenseClawHookImageAclItems -Layout $Layout)) {
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
         Set-DefenseClawPathAcl -Path $hookImageItem.Path -Kind ([string]$hookImageItem.Kind) -GatewayServiceSID $gatewaySID
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
@@ -18334,7 +18334,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
     if ($Scope -ceq 'Lifecycle') {
         # GAP-0751: the hooks folder and its launch folders, judged like bin;
         # their images are installed binaries (out of class, as HookPath).
-        foreach ($hookImageFolder in @(Get-DefenseClawHookImageAclItems -Layout $Layout -FoldersOnly)) {
+        foreach ($hookImageFolder in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout -FoldersOnly })) {
             $entries.Add([pscustomobject]@{
                 Path     = [string]$hookImageFolder.Path
                 Writer   = 'Admin'
@@ -21570,7 +21570,7 @@ function Get-DefenseClawCommittedUninstallHeldTargets {
         $targets.Add([pscustomobject]@{ Path = $hook; Code = 'hook_in_use'; What = 'the installed hook' })
     }
     # GAP-0751: the launch images agents start (standalone).
-    foreach ($hookImageItem in @(Get-DefenseClawHookImageAclItems -Layout $Layout)) {
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
         if ([string]$hookImageItem.Kind -ceq 'InstallFile') {
             $targets.Add([pscustomobject]@{ Path = [string]$hookImageItem.Path; Code = 'hook_in_use'; What = 'an installed hook launch image' })
         }
@@ -22012,8 +22012,12 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
     $escapedHook = [IO.Path]::GetFullPath([string]$Layout.HookPath).Replace('\', '\\')
     # GAP-0751: a file that names one of this layout's launch images
     # (bin\hooks\<16 hex>\defenseclaw-hook.exe, JSON-escaped) names this hook.
-    $escapedBin = [IO.Path]::GetFullPath([string]$Layout.BinDirectory).TrimEnd('\').Replace('\', '\\')
-    $launchHookPattern = [regex]::Escape($escapedBin) + '\\\\hooks\\\\[0-9A-Fa-f]{16}\\\\defenseclaw-hook\.exe'
+    $hookImagesDirectory = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)
+    $launchHookPattern = '(?!)'
+    if (-not [string]::IsNullOrWhiteSpace($hookImagesDirectory)) {
+        $escapedHooks = [IO.Path]::GetFullPath($hookImagesDirectory).TrimEnd('\').Replace('\', '\\')
+        $launchHookPattern = [regex]::Escape($escapedHooks) + '\\\\[0-9A-Fa-f]{16}\\\\defenseclaw-hook\.exe'
+    }
     $namesThisHook = {
         param([string]$Path)
         # A file behind a link at its folder is not read (GAP-0758).
@@ -28525,16 +28529,20 @@ function Test-DefenseClawManagedHookImagePath {
     if ([string]::IsNullOrWhiteSpace($own) -or [string]::IsNullOrWhiteSpace($Path)) {
         return $false
     }
-    if (-not (Test-DefenseClawStandaloneProfile)) {
-        try {
-            return [string]::Equals(
+    # The layout's own path is always this hook, whatever its name.
+    try {
+        if ([string]::Equals(
                 [IO.Path]::GetFullPath($Path).TrimEnd('\'),
                 [IO.Path]::GetFullPath($own).TrimEnd('\'),
-                [StringComparison]::OrdinalIgnoreCase)
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
         }
-        catch {
-            return $false
-        }
+    }
+    catch {
+        return $false
+    }
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
     }
     return (Test-DefenseClawSameHookImageFamily -Path $Path -Other $own)
 }
@@ -39979,7 +39987,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     }
     # GAP-0751: the hooks folder and its launch folders like bin, the images
     # agents start like the hook (standalone; nothing before bin\hooks exists).
-    foreach ($hookImageItem in @(Get-DefenseClawHookImageAclItems -Layout $Layout)) {
+    foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {
         if ([string]$hookImageItem.Kind -ceq 'ServiceInstallDirectory') {
             Assert-DefenseClawPathAcl `
                 -Path ([string]$hookImageItem.Path) `

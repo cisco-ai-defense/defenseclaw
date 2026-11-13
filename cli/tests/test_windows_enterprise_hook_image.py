@@ -98,7 +98,7 @@ def test_the_install_and_retired_trees_admit_the_launch_folders() -> None:
     retired = _function_body(text, "Get-DefenseClawRetiredInstallTreeAllowlist")
     assert "Get-DefenseClawHookImageTreeItems -BinDirectory (Microsoft.PowerShell.Management\\Join-Path $RetiredRoot 'bin')" in retired
     backups = _function_body(text, "Remove-DefenseClawStandaloneInstallTreeReplacementBackups")
-    assert "foreach ($hookImageItem in @(Get-DefenseClawHookImageAclItems -Layout $Layout)) {" in backups
+    assert "foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {" in backups
 
 
 def test_recorded_hook_paths_accept_this_layouts_launch_images() -> None:
@@ -125,7 +125,7 @@ def test_acls_verify_and_the_content_gate_cover_the_launch_folders() -> None:
     acls = _function_body(text, "Set-DefenseClawManagedAcls")
     assert "Set-DefenseClawPathAcl -Path $hookImageItem.Path -Kind ([string]$hookImageItem.Kind) -GatewayServiceSID $gatewaySID" in acls
     verify = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
-    assert "foreach ($hookImageItem in @(Get-DefenseClawHookImageAclItems -Layout $Layout)) {" in verify
+    assert "foreach ($hookImageItem in @(if ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name HookImagesDirectory)) { Get-DefenseClawHookImageAclItems -Layout $Layout })) {" in verify
     gate = _function_body(text, "Assert-DefenseClawStandaloneContentTrusted")
     assert "Get-DefenseClawHookImageAclItems -Layout $Layout -FoldersOnly" in gate
     artifacts = _function_body(text, "Assert-DefenseClawInstalledArtifacts")

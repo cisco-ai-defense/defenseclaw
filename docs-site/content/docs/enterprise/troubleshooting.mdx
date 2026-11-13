@@ -501,7 +501,7 @@ The error starts `hook_image_start_failed: the hook image of this release could 
 
 **Fix.** Allow the DefenseClaw signer (not a folder path) in WDAC or AppLocker, or the antivirus exclusion for `C:\Program Files\Cisco\DefenseClaw\bin\hooks\*\defenseclaw-hook.exe` and `defenseclaw-hook-guard.exe`, then run the same Setup command again. `hook_image_digest_mismatch` means the hook in `bin` changed while Setup ran: run Setup again, and if it repeats, find the program that writes that file. `hook_image_stage_failed` names the step that failed.
 
-**Check.** The Setup run exits `0` and `defenseclaw-gateway enterprise windows verify` reports no `hook_image_not_staged`.
+**Check.** The Setup run exits `0` and `enterprise windows verify`, run from an elevated PowerShell prompt, reports no `hook_image_not_staged`.
 
 #### Setup refuses to replace the installed hook
 
