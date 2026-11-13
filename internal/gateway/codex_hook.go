@@ -262,10 +262,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
-		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Prompt)
-			}
+		intentEvent := !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration())
+		if intentEvent {
 			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
 		// Secure Client keeps the prompt of main, so AI Defense is sent the
@@ -281,6 +279,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
 		})
+		if intentEvent {
+			a.observeToolJudgeIntent(ctx, req.Prompt, verdict)
+		}
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
 				targetType: "skill",

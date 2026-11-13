@@ -519,6 +519,19 @@ func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
 	return out
 }
 
+// observeToolJudgeIntent starts a new tool-judge turn for the session on every
+// hook-lane judge. The prompt becomes the turn's task only when the guardrail
+// did not block it: a blocked prompt is not a task DefenseClaw lets later tool
+// calls be excused by.
+func (a *APIServer) observeToolJudgeIntent(ctx context.Context, prompt string, verdict *ToolInspectVerdict) {
+	if verdict != nil && strings.EqualFold(verdict.Action, "block") {
+		prompt = ""
+	}
+	for _, judge := range a.hookSessionJudges(ctx) {
+		judge.ObserveSessionPrompt(ctx, prompt)
+	}
+}
+
 // SetHookJudge wires the LLM judge onto the API server so the hook
 // content lane (inspectMessageContent) can adjudicate prompts and
 // tool results for connectors listed in

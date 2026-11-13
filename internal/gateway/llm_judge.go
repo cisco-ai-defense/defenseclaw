@@ -1971,7 +1971,14 @@ func toolJudgeArgumentExcerpt(args string, maxBytes int) string {
 }
 
 func toolJudgeUserIntentExcerpt(content string) string {
-	return toolJudgeSecurityExcerpt(content, maxToolJudgeUserIntentBytes, toolJudgeUserIntentTruncationMarker)
+	content = neutralizeToolJudgeDelimiters(content)
+	if len(content) <= maxToolJudgeUserIntentBytes {
+		return content
+	}
+	budget := maxToolJudgeUserIntentBytes - len(toolJudgeUserIntentTruncationMarker)
+	head := utf8SafePrefix(content, budget/2)
+	tail := utf8SafeSuffix(content, budget-len(head))
+	return head + toolJudgeUserIntentTruncationMarker + tail
 }
 
 func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker string) string {
@@ -1992,19 +1999,20 @@ func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker strin
 	return head + truncationMarker + middle + toolJudgeMiddleExcerptMarker + tail
 }
 
+// toolJudgeDelimiterTag matches anything a model could read as one of the
+// structural tags that separate the sample's context blocks: any letter
+// case, spaces or a slash between the bracket and the name, and the
+// full-width and small less-than signs. Matching only the exact upper-case
+// spelling let a tool argument or a pasted prompt close CURRENT_TOOL_CALL and
+// open a forged SESSION_USER_INTENT in lower case.
+var toolJudgeDelimiterTag = lazyregexp.New(`(?i)[<\x{FF1C}\x{FE64}](\s*/?\s*)(SESSION_USER_INTENT|RECENT_TOOL_CALL|CURRENT_TOOL_CALL)`)
+
 // neutralizeToolJudgeDelimiters prevents untrusted arguments or user intent
-// from forging the structural tags that separate context blocks. It leaves
-// ordinary shell redirection and source-code comparison operators untouched.
+// from forging the structural tags that separate context blocks: the opening
+// bracket of every tag-shaped name becomes '‹'. It leaves ordinary shell
+// redirection and source-code comparison operators untouched.
 func neutralizeToolJudgeDelimiters(value string) string {
-	replacer := strings.NewReplacer(
-		"<SESSION_USER_INTENT", "‹SESSION_USER_INTENT",
-		"</SESSION_USER_INTENT>", "‹/SESSION_USER_INTENT›",
-		"<RECENT_TOOL_CALL", "‹RECENT_TOOL_CALL",
-		"</RECENT_TOOL_CALL>", "‹/RECENT_TOOL_CALL›",
-		"<CURRENT_TOOL_CALL", "‹CURRENT_TOOL_CALL",
-		"</CURRENT_TOOL_CALL>", "‹/CURRENT_TOOL_CALL›",
-	)
-	return replacer.Replace(value)
+	return toolJudgeDelimiterTag.ReplaceAllString(value, "‹$1$2")
 }
 
 func utf8SafePrefix(value string, maxBytes int) string {
@@ -2194,16 +2202,16 @@ func (j *LLMJudge) pruneToolJudgeContextLocked(now time.Time) {
 
 // ObserveSessionPrompt records the latest bounded user task for an
 // authenticated connector session. A new user prompt starts a new tool chain,
-// so prior tool calls are cleared instead of contaminating the next turn.
-// The value is kept in memory only and remains untrusted data in the judge
-// sample.
+// so prior tool calls are cleared instead of contaminating the next turn. An
+// empty prompt starts a turn with no task. The value is kept in memory only
+// and remains untrusted data in the judge sample.
 func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if j == nil {
 		return
 	}
 	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
 	content = strings.TrimSpace(content)
-	if sessionID == "" || content == "" {
+	if sessionID == "" {
 		return
 	}
 	now := time.Now()
@@ -2215,9 +2223,43 @@ func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	if len(j.toolContext) >= maxToolJudgeContextSessions {
 		j.pruneToolJudgeContextLocked(now)
 	}
-	j.toolContext[sessionID] = toolJudgeSessionContext{
-		userIntent: toolJudgeUserIntentExcerpt(content),
-		lastSeen:   now,
+	entry := toolJudgeSessionContext{lastSeen: now}
+	if content != "" {
+		entry.userIntent = toolJudgeUserIntentExcerpt(content)
+	}
+	j.toolContext[sessionID] = entry
+}
+
+// inheritToolJudgeContext copies the per-session intent and recent calls of
+// the judge a config or rule-pack change replaces, so live sessions keep
+// their task across the rebuild instead of being judged with none until
+// their next prompt. Sessions the new judge already holds are kept.
+func (j *LLMJudge) inheritToolJudgeContext(from *LLMJudge) {
+	if j == nil || from == nil || j == from {
+		return
+	}
+	from.toolContextMu.Lock()
+	carried := make(map[string]toolJudgeSessionContext, len(from.toolContext))
+	for sessionID, entry := range from.toolContext {
+		entry.events = append([]toolJudgeContextEvent(nil), entry.events...)
+		carried[sessionID] = entry
+	}
+	from.toolContextMu.Unlock()
+	if len(carried) == 0 {
+		return
+	}
+	j.toolContextMu.Lock()
+	defer j.toolContextMu.Unlock()
+	if j.toolContext == nil {
+		j.toolContext = make(map[string]toolJudgeSessionContext, len(carried))
+	}
+	for sessionID, entry := range carried {
+		if _, held := j.toolContext[sessionID]; !held {
+			j.toolContext[sessionID] = entry
+		}
+	}
+	if len(j.toolContext) > maxToolJudgeContextSessions {
+		j.pruneToolJudgeContextLocked(time.Now())
 	}
 }
 

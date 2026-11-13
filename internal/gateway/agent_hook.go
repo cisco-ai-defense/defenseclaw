@@ -3598,13 +3598,14 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// lifecycle events) can repeat or contain model-generated material;
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ObserveSessionPrompt(ctx, req.Content)
-			}
+		intentEvent := isToolJudgeIntentEvent(req.HookEventName)
+		if intentEvent {
 			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
+		if intentEvent {
+			a.observeToolJudgeIntent(ctx, req.Content, verdict)
+		}
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
