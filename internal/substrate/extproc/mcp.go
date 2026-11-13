@@ -187,10 +187,20 @@ func NewVerdictClient(cfg JudgeConfig) (*VerdictClient, error) {
 	if !strings.HasPrefix(cfg.URL, "https://") && !strings.HasPrefix(cfg.URL, "http://") {
 		return nil, fmt.Errorf("%w: judge.url %q", ErrInvalidConfig, cfg.URL)
 	}
+	tr, err := calloutTransport(cfg.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	return &VerdictClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
+}
+
+// calloutTransport is the transport to the gateway's admin listener: no
+// proxy, and the judge.ca_file roots when set.
+func calloutTransport(caFile string) (*http.Transport, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
-	if cfg.CAFile != "" {
-		pem, err := os.ReadFile(cfg.CAFile)
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
 		if err != nil {
 			return nil, err
 		}
@@ -200,7 +210,7 @@ func NewVerdictClient(cfg JudgeConfig) (*VerdictClient, error) {
 		}
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 	}
-	return &VerdictClient{url: cfg.URL, tokenFile: cfg.TokenFile, http: &http.Client{Transport: tr}}, nil
+	return tr, nil
 }
 
 // JudgeToolCall implements ToolJudge. Any answer but 200 with contract

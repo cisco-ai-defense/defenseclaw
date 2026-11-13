@@ -638,3 +638,27 @@ func TestActorVerifierSeesADeleteWithinTheLiveTTL(t *testing.T) {
 	_, err := f.v.Verify(ctx, f.token(t))
 	wantReason(t, err, ReasonActorGone)
 }
+
+// GAP-0043 (lane R round 3): a trailing * matches only after a ':' or '/'
+// segment boundary, so repo:acme/web* is refused (it trusted
+// repo:acme/web-evil) and repo:acme/web:* trusts only acme/web; a bare *
+// or an empty binding is refused.
+func TestWorkloadBindingWildcardBoundaries(t *testing.T) {
+	b := func(sub string) WorkloadBinding { return WorkloadBinding{Subject: sub} }
+	if !b("repo:acme/web*").Empty() || !b("*").Empty() || !b("").Empty() ||
+		!(WorkloadBinding{Claims: map[string]string{}}).Empty() {
+		t.Fatal("a raw-prefix, bare-* or empty binding counts as a binding")
+	}
+	for sub, want := range map[string]bool{
+		"repo:acme/web:ref:refs/heads/main": true,
+		"repo:acme/web-evil:ref:main":       false,
+		"repo:acme/webx:pull_request":       false,
+	} {
+		if got := b("repo:acme/web:*").matches(sub, nil); got != want {
+			t.Errorf("repo:acme/web:* vs %s = %v", sub, got)
+		}
+	}
+	if b("repo:acme/web*").matches("repo:acme/web-evil:ref:main", nil) {
+		t.Fatal("a raw prefix matched another repository")
+	}
+}

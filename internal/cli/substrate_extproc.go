@@ -161,6 +161,18 @@ func runSubstrateExtproc(ctx context.Context, stdout, stderr io.Writer) error {
 	if judge != nil {
 		opts.Judge = judge
 	}
+	// Asks go to the gateway's callout ask route, which applies the actor's
+	// registration (unattended_asks: deny or queue, D12) and the leader's
+	// store; without it every ask-required host is refused.
+	asker, err := extproc.NewAskClient(cfg)
+	if err != nil {
+		return err
+	}
+	if asker != nil {
+		opts.Asks = asker
+	} else {
+		fmt.Fprintln(stderr, "substrate-extproc: judge.url is not the gateway callout route: ask-required hosts are refused")
+	}
 	switch {
 	case o.leaderAddress != "":
 		lc, err := substrateExtprocLeader(o)

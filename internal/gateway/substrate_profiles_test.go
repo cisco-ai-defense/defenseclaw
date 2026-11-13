@@ -73,3 +73,23 @@ func TestSubstrateLauncherProfilesFollowTheCaller(t *testing.T) {
 		t.Fatalf("no profiles, default named: %q %v", p, err)
 	}
 }
+
+// GAP-0043 (lane R round 3): match.substrate.workloads wildcards match on
+// segment boundaries only.
+func TestSubstrateWorkloadWildcardBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		entry, subject string
+		want           bool
+	}{
+		{"repo:acme/web:*", "repo:acme/web:ref:refs/heads/main", true},
+		{"repo:acme/web:*", "repo:acme/web-evil:ref:main", false},
+		{"repo:acme/web*", "repo:acme/web-evil:ref:main", false},
+		{"repo:acme/web*", "repo:acme/web:ref:main", false},
+		{"*", "repo:anything", false},
+		{"repo:acme/web:ref:refs/heads/main", "repo:acme/web:ref:refs/heads/main", true},
+	} {
+		if got := substrateWorkloadMatches(c.entry, c.subject); got != c.want {
+			t.Errorf("%q vs %q = %v, want %v", c.entry, c.subject, got, c.want)
+		}
+	}
+}
