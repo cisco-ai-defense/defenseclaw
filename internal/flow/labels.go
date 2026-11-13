@@ -5,6 +5,7 @@
 package flow
 
 import (
+	"net"
 	"path"
 	"strings"
 
@@ -70,9 +71,6 @@ type LabelSet struct {
 // Config is the engine's view of guardrail.secret_flow. The gateway builds it
 // from config.SecretFlowConfig; flow never imports internal/config.
 type Config struct {
-	// Mode is off, shadow or on. The engine runs the same in shadow and on;
-	// the caller decides whether the verdict participates.
-	Mode string
 	// Credentials turns the built-in credential label set on (default true).
 	Credentials bool
 	// ExtraPathGlobs are extra absolute/home path globs labeled as secret.
@@ -118,14 +116,26 @@ var credentialRelPaths = []string{
 var credentialBasenamePatterns = []string{
 	".env", ".env.*", "*.pem", "*.key", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
 	"*.p12", "*.pfx", "credentials.json", "service-account*.json", "*token*.json",
+	"*.keychain", "*.keychain-db", "login.keychain*",
 }
 
 // benignEnvSuffixes are .env siblings that are templates, not secrets.
 var benignEnvSuffixes = []string{".env.example", ".env.sample", ".env.template", ".env.dist"}
 
+// benignCredentialGlobs are basenames that look like a credential but are not
+// a secret: public certificates, signature bundles, tokenizer configs.
+var benignCredentialGlobs = []string{"checksums*.pem", "*cert*.pem", "*.crt", "*.crt.pem", "*.pub.pem", "tokenizer*.json", "tokenizer_config*.json"}
+
 // labelForTarget returns the label and sets for a read target that is a
 // secret source, if any. It matches on the resolved target, never on command
 // text (so a heredoc body that mentions ".env" is not a source).
+// LabelForTarget is the exported form of labelForTarget: the gateway uses it
+// to decide, with the same classifier that labels files, whether a tool
+// result's read target is a secret source worth value-indexing.
+func (cfg Config) LabelForTarget(t effects.Target) (Label, []string, bool) {
+	return cfg.labelForTarget(t)
+}
+
 func (cfg Config) labelForTarget(t effects.Target) (Label, []string, bool) {
 	if t.Type != effects.TargetPath {
 		return Label{}, nil, false
@@ -138,12 +148,15 @@ func (cfg Config) labelForTarget(t effects.Target) (Label, []string, bool) {
 		return Label{}, nil, false
 	}
 	base := baseOf(p, t.Flavor)
-	if isBenignEnv(base) {
+	if t.CaseFold {
+		base = strings.ToLower(base)
+	}
+	if isBenignEnv(base) || isBenignCredential(base) {
 		return Label{}, nil, false
 	}
 	var sets []string
 	if cfg.Credentials {
-		if matchesBuiltinCredential(p, base, cfg.Home, t.Flavor) {
+		if matchesBuiltinCredential(p, base, cfg.Home, t.Flavor, t.CaseFold) {
 			sets = append(sets, "credentials")
 		}
 	}
@@ -165,13 +178,16 @@ func (cfg Config) labelForTarget(t effects.Target) (Label, []string, bool) {
 	return Label{Audience: AudienceSelf}, dedup(sets), true
 }
 
-func matchesBuiltinCredential(p, base, home string, flavor effects.Flavor) bool {
+func matchesBuiltinCredential(p, base, home string, flavor effects.Flavor, caseFold bool) bool {
 	for _, g := range credentialBasenamePatterns {
 		if ok, _ := path.Match(g, base); ok {
 			return true
 		}
 	}
 	norm := toSlashLower(p, flavor)
+	if caseFold {
+		norm = strings.ToLower(norm)
+	}
 	if strings.Contains(norm, "/.ssh/") && !strings.HasSuffix(norm, ".pub") {
 		return true
 	}
@@ -249,17 +265,31 @@ func onlySessionContext(hits []Hit) bool {
 	return true
 }
 
+// isLocalHost reports whether a host is the local machine or a link-local
+// address. It parses IP literals with net.ParseIP and only treats loopback and
+// link-local as local; a private-range address is NOT local (an attacker can
+// name a 10.x VPC host) and a hostname is never local by prefix. Private
+// networks that should be exempt go in guardrail.secret_flow.destination_allowlist.
 func isLocalHost(h string) bool {
-	if i := strings.IndexByte(h, ':'); i >= 0 {
-		h = h[:i]
+	h = strings.TrimSpace(h)
+	// Strip an IPv6 bracket or a host:port suffix without eating ":" inside a
+	// bracketed IPv6 literal.
+	if strings.HasPrefix(h, "[") {
+		if end := strings.IndexByte(h, ']'); end > 0 {
+			h = h[1:end]
+		}
+	} else if i := strings.LastIndexByte(h, ':'); i >= 0 && strings.IndexByte(h, ':') == i {
+		h = h[:i] // host:port (single colon => not an IPv6 literal)
 	}
-	switch h {
-	case "localhost", "127.0.0.1", "::1", "0.0.0.0", "ip6-localhost":
+	lower := strings.ToLower(h)
+	if lower == "localhost" || lower == "ip6-localhost" {
 		return true
 	}
-	return strings.HasPrefix(h, "127.") || strings.HasPrefix(h, "169.254.") ||
-		strings.HasPrefix(h, "192.168.") || strings.HasPrefix(h, "10.") ||
-		strings.HasPrefix(h, "172.16.") || strings.HasPrefix(h, "fe80:")
+	ip := net.ParseIP(h)
+	if ip == nil {
+		return false // a hostname is never local by name
+	}
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
 }
 
 // --- small path helpers (flavor-aware, no filepath/OS dependence) ---
@@ -286,6 +316,15 @@ func baseOf(p string, flavor effects.Flavor) string {
 func isBenignEnv(base string) bool {
 	for _, s := range benignEnvSuffixes {
 		if base == s {
+			return true
+		}
+	}
+	return false
+}
+
+func isBenignCredential(base string) bool {
+	for _, g := range benignCredentialGlobs {
+		if ok, _ := path.Match(g, base); ok {
 			return true
 		}
 	}

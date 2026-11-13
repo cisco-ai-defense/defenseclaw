@@ -91,18 +91,17 @@ type Result struct {
 	// LabeledPaths is how many session paths carry a label after this call
 	// (for the status/explain view and the memory-bound test).
 	LabeledPaths int
-	// LabeledThisCall lists the basenames (redacted) this call newly labeled,
-	// for explain.
-	LabeledThisCall []string
 }
 
 // Step folds one call's effects into the state and returns the verdict. It
 // mutates the state (session label, labeled paths) and is O(number of effects)
 // in the call, independent of session length.
-func (s *State) Step(res effects.Result, cfg Config) Result {
+func (s *State) Step(res effects.Result, scanText string, cfg Config) Result {
 	if s == nil {
 		return Result{Action: ActionAllow}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := Result{Action: ActionAllow}
 
 	// Pass 1: credential-source reads tighten the session label and mark the
@@ -114,11 +113,10 @@ func (s *State) Step(res effects.Result, cfg Config) Result {
 			continue
 		}
 		if lbl, sets, ok := cfg.labelForTarget(e.Target); ok {
-			s.tighten(lbl)
+			s.Label = s.Label.meet(lbl)
 			readLabel[i+1] = lbl
 			if k := e.Target.Key(); k != "" {
 				s.labelPath(k, lbl, sets, basename(e.Target))
-				out.LabeledThisCall = append(out.LabeledThisCall, basename(e.Target))
 			}
 		}
 	}
@@ -132,10 +130,7 @@ func (s *State) Step(res effects.Result, cfg Config) Result {
 			if lbl, sets, src, ok := s.writeLabel(e, res.Effects, readLabel, cfg); ok {
 				if k := e.Target.Key(); k != "" {
 					s.labelPath(k, lbl, sets, src)
-					out.LabeledThisCall = append(out.LabeledThisCall, basename(e.Target))
 				}
-				// A link's physical target is the real file; label it too so a
-				// later read of the link name is caught.
 				if e.Kind == effects.KindLink && e.Target.Physical != "" {
 					s.labelPath(physicalKey(e.Target), lbl, sets, src)
 				}
@@ -149,14 +144,14 @@ func (s *State) Step(res effects.Result, cfg Config) Result {
 		if !isSink(e, cfg) {
 			continue
 		}
-		// The effect model does not yet put the destination host on the upload
-		// effect (it is on the sibling fetch of the same command); resolve it
-		// here. TODO: drop once s7-effects carries the host on the send effect.
+		// The effect model does not always put the destination host on the
+		// upload effect (it is on the sibling fetch of the same command);
+		// resolve it here.
 		host := sinkHost(e, res.Effects)
 		if cfg.isAllowlistedHost(host) {
 			continue
 		}
-		if h, ok := s.sinkHit(e, host, res.Effects, readLabel, cfg); ok {
+		if h, ok := s.sinkHit(e, host, scanText, res.Effects, readLabel, cfg); ok {
 			h.EffectIndex = i + 1
 			out.Hits = append(out.Hits, h)
 		}
@@ -196,9 +191,11 @@ func isSink(e *effects.Effect, cfg Config) bool {
 	case effects.KindNetworkSend:
 		return true
 	case effects.KindNetworkFetch:
-		// A fetch is a sink only when it carries data (a query/body the model
-		// built), handled by the value/label check; a plain GET is not.
-		return e.Data != nil || hasQuery(e.Target)
+		// Any external fetch is a sink for the value lane: the request line,
+		// its URL path/query and a header can carry a secret even on a GET.
+		// The value lane only matches an indexed secret, so a benign GET never
+		// fires; the session-context lane is gated to real sends (sendsData).
+		return true
 	case effects.KindWrite, effects.KindAppend, effects.KindLink:
 		// A write/copy to another host (scp/rsync host:path, an ssh remote
 		// operand) sends the data off the machine, so it is an external sink.
