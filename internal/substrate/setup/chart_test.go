@@ -101,6 +101,7 @@ func TestChartRefusesBadValues(t *testing.T) {
 		"hpa below 2":               "gateway.hpa.minReplicas=1",
 		"short digest":              "image.digest=sha256:abc",
 		"empty relay secret":        "gateway.relaySessionSecret=", // rendered secretName: "" and a hook Role naming ""
+		"empty llm secret":          "gateway.llmCredentialsSecret=", // rendered secretName: "" on the llm-credentials volume (GAP-0236)
 		"bad atespace":              "managedAtespaces={Bad_Name}",
 		"ingress no host":           "admin.expose.type=Ingress",
 		"ingress no tls":            "admin.expose.type=Ingress,admin.expose.ingress.host=dc.example.com",
