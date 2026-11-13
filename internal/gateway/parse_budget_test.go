@@ -4,46 +4,60 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 )
 
-// The two P1 probes of the hook (GAP-0254, GAP-0255) and their variants:
-// a call past the reading budget is opaque to the readers, so it takes the
-// evaluation-limit path. It alerts outside the strict tier, with the reason
-// parse_budget_exceeded, and the strict tier blocks it (managed included).
-// Each is generated from a small template, and each is decided within a
-// bounded time and memory.
-var parseBudgetRows = []struct {
-	name, unit, tail string
-	n                int
-}{
-	{"pipeline of 33,577 stages", "a|", "a", 33577},
-	{"left-deep || list of 166,443", "a||", "a", 166443},
-	{"&& list of 100,000", "a&&", "a", 100000},
-	{"mixed chain", "a|b&&c||", "d", 60000},
-	{"flat words", "a ", "", 200000},
-	{"flat statements", "a;", "a", 200000},
+// The reading budget of shellparse (GAP-0254, GAP-0255, review GAP-0281 to
+// GAP-0285) at the hook. Every input is generated from a shape of
+// budget_gen_test.go and a size; none is stored. A call past the budget is
+// opaque to the readers: it takes the evaluation-limit path, alerts outside
+// the strict tier with the reason parse_budget_exceeded, blocks in strict
+// (managed included), and keeps the proof the readers gave before.
+
+// overBudget is one shape at a size past one bound of the budget.
+type overBudget struct {
+	shape string
+	n     int
 }
+
+// overBudgetRows covers every dimension of the budget: chains of every
+// operator (the two P1 probes first), chains of compound stages, a chain
+// that does not parse, deep arithmetic, and flat words and statements.
+var overBudgetRows = []overBudget{
+	{"pipe", 33577}, {"or", 166443}, {"and", 100000}, {"mixed", 60000},
+	{"pipe", shellparse.MaxChainOperators + 1}, {"or", 4096},
+	{"subst-pipe", 3000}, {"group-pipe", 3000}, {"block-pipe", 3000}, {"redirect-pipe", 3000}, {"assign-pipe", 3000},
+	{"unparsed-pipe", 2000}, {"arith", 3000}, {"flat-words", 20000}, {"flat-stmts", 12000},
+}
+
+func (row overBudget) command() string { return budgetShapeNamed(row.shape).command(row.n) }
+
+func (row overBudget) String() string { return fmt.Sprintf("%s x%d", row.shape, row.n) }
 
 func TestParseBudgetCallsTakeTheEvaluationLimitPath(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes and a mode 0 homes folder")
 	}
 	var rows []readingBoundRow
-	for _, row := range parseBudgetRows {
-		rows = append(rows, readingBoundRow{row.name, "Bash", strings.Repeat(row.unit, row.n) + row.tail, guardrailActionAlert})
+	for _, row := range overBudgetRows {
+		if reason := shellparse.BudgetExceeded(row.command()); reason == "" {
+			t.Fatalf("%s is within the budget", row)
+		}
+		rows = append(rows, readingBoundRow{row.String(), "Bash", row.command(), guardrailActionAlert})
 	}
-	readingBoundCells(t, rows, 5*time.Second)
+	readingBoundCells(t, rows, 0)
 }
 
-// TestParseBudgetReasonIsExplicit pins the reason of the finding.
+// TestParseBudgetReasonIsExplicit pins the reason and the profile mapping of
+// the finding.
 func TestParseBudgetReasonIsExplicit(t *testing.T) {
 	findings := trustedActionBudgetFindings(true)
 	if len(findings) != 1 || findings[0].RuleID != "ACTION-COMPOUND-LIMIT" || findings[0].Evidence != "parse_budget_exceeded" {
@@ -57,10 +71,61 @@ func TestParseBudgetReasonIsExplicit(t *testing.T) {
 	}
 }
 
+// TestParseBudgetKeepsTheStateWriteProof pins GAP-0281: a write to the
+// active DefenseClaw state after any padding blocks in every mode, as it
+// did when the readers read the whole call (rel-1-0-2:GAP-0568), whether
+// the padding is inside the budget (the readers prove it) or past it (the
+// raw-text check, on every shape and for both connectors, per user and
+// managed). An over-budget call that names no state is never allowed in
+// action mode.
+func TestParseBudgetKeepsTheStateWriteProof(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX homes and a mode 0 homes folder")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can search a mode 0 directory")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "alice")
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state := gap0568StateFile(t, home)
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	rows := append([]overBudget{
+		{"pipe", 100}, {"and", 100}, {"pipe", shellparse.MaxChainOperators},
+	}, overBudgetRows...)
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, mode := range []string{"observe", "action"} {
+			api := instructionProtectionTestAPIWithPack(t, connector, mode, "HIGH", "strict")
+			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
+				for _, row := range rows {
+					separator := "; "
+					if row.shape == "arith" || row.shape == "flat-words" {
+						separator = "\n"
+					}
+					write := row.command() + separator + "printf changed >> " + state
+					if got := gap0568HookAction(t, api, connector, home, cwd, write, cell.client, cell.managed); got != guardrailActionBlock {
+						t.Errorf("%s/%s client=%t managed=%t state write after %s: action %q, want block", connector, mode, cell.client, cell.managed, row, got)
+					}
+					if mode == "action" && shellparse.BudgetExceeded(row.command()) != "" {
+						if got := gap0568HookAction(t, api, connector, home, cwd, row.command(), cell.client, cell.managed); got == guardrailActionAllow {
+							t.Errorf("%s/%s client=%t managed=%t %s: allowed", connector, mode, cell.client, cell.managed, row)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // TestParseBudgetProbesStayBounded asserts the memory and the time of the
-// hook on each probe, and that a pipeline just inside the budget still
-// grows linearly. Before the budget the 67 KB pipeline held 6 GiB and the
-// 499 KB list killed the process.
+// hook on every over-budget row (refused before any reader, so a few MiB)
+// and at the cap of each chain shape (read in full). The bounds are loose:
+// they hold under -race on a loaded box, and the cost curve of the caps is
+// PARSE_BUDGET_CURVE=1 (TestParseBudgetCostCurve).
 func TestParseBudgetProbesStayBounded(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX homes")
@@ -72,13 +137,15 @@ func TestParseBudgetProbesStayBounded(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	api := readingBoundTierTestAPI(t, "claudecode", config.HookPolicyTierDefault)
-	const memory, window = 256 << 20, 3 * time.Second
-	rows := append([]struct {
-		name, unit, tail string
-		n                int
-	}{{"pipeline inside the budget", "a|", "a", 4000}}, parseBudgetRows...)
-	for _, row := range rows {
-		command := strings.Repeat(row.unit, row.n) + row.tail
+	for _, row := range append(append([]overBudget(nil), overBudgetRows...),
+		overBudget{"pipe", shellparse.MaxChainOperators}, overBudget{"subst-pipe", shellparse.MaxChainOperators},
+		overBudget{"flat-words", 4000}, overBudget{"heredoc-lines", 4000}) {
+		command := row.command()
+		over := shellparse.BudgetExceeded(command) != ""
+		memory, window := uint64(256<<20), 10*time.Second
+		if over {
+			memory, window = 96<<20, 5*time.Second
+		}
 		var before, after runtime.MemStats
 		runtime.GC()
 		runtime.ReadMemStats(&before)
@@ -87,10 +154,10 @@ func TestParseBudgetProbesStayBounded(t *testing.T) {
 		took := time.Since(start)
 		runtime.ReadMemStats(&after)
 		if alloc := after.TotalAlloc - before.TotalAlloc; alloc > memory || took > window {
-			t.Errorf("%s (%d bytes): %d MiB allocated in %s", row.name, len(command), alloc>>20, took)
+			t.Errorf("%s (%d bytes, over=%t): %d MiB allocated in %s", row, len(command), over, alloc>>20, took)
 		}
-		if action != guardrailActionAlert {
-			t.Errorf("%s: action=%s, want alert", row.name, action)
+		if over && action != guardrailActionAlert {
+			t.Errorf("%s: action=%s, want alert", row, action)
 		}
 	}
 }

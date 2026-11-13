@@ -59,20 +59,12 @@ They are not interchangeable. The focused engineering contract is
 
 ## Command reading budget
 
-Every shell reader of a hook call (the parser, the statement split, the
-analysers) works inside one budget in `internal/shellparse`, checked before
-any of them runs: nesting of `(`, `{` and `[` (`MaxNestingDepth`, 512), brace
-expansion size, the chain operators `|`, `&&` and `||` of the parse tree
-(`MaxChainOperators`, 4096; a text with more than `MaxChainOperatorBytes`,
-32,768, `|` and `&&` bytes is refused without a parse), and, for a command of
-64 KiB or more, the nodes of its tree (`MaxParsedNodes`, 262,144). The values
-are 20 to 100 times the largest of 3.1 million real agent calls. A call past
-the budget is opaque to the readers: it gets the evaluation-limit finding
-(`ACTION-COMPOUND-LIMIT`, reason `parse_budget_exceeded`), which alerts outside
-the strict profile (managed non-strict included, rel-1-0-6:GAP-0675) and blocks
-in strict (managed strict included). Allocation and time grow linearly up to
-the budget, and the copy of the parse cache stops at a depth limit instead of
-overflowing the stack.
+Every shell reader of a hook call works inside one input budget (bytes, tokens,
+chain operators, tree nodes and depth), checked before any of them runs. A call
+past it is opaque to the readers: it takes the evaluation limit with the reason
+`parse_budget_exceeded` (alert outside strict, block in strict) and keeps the
+raw-text state-write block. See [`PARSELIMITS.md`](PARSELIMITS.md) for the
+values, the measured cost curve and the tests.
 
 ## Verification
 

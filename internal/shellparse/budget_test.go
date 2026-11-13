@@ -5,6 +5,7 @@ package shellparse
 
 import (
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -12,25 +13,39 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// Probe shapes of the reading budget (GAP-0254, GAP-0255): each is a small
-// template repeated to the size under test, so no test file holds a huge
-// literal.
-var budgetShapes = map[string]struct{ unit, tail string }{
-	"pipe":      {"a|", "a"},
-	"or":        {"a||", "a"},
-	"and":       {"a&&", "a"},
-	"mixed":     {"a|b&&c||", "d"},
-	"semi":      {"a;", "a"},
-	"words":     {"a ", ""},
-	"stmts":     {"a\n", "a"},
-	"hugeWord":  {"aaaaaaaaaaaaaaaa", ""},
-	"nestParen": {"(", "a" + strings.Repeat(")", 0)},
+// budgetShape is a family of generated command text: head, then unit
+// repeated n times, then tail. Every input of these tests is built from the
+// table and a size; none is stored.
+type budgetShape struct{ head, unit, tail string }
+
+var budgetShapes = map[string]budgetShape{
+	"pipe":       {"", "a|", "a"},
+	"and":        {"", "a&&", "a"},
+	"or":         {"", "a||", "a"},
+	"mixed":      {"", "a|b&&c||", "d"},
+	"subst":      {"", "$(a)|", "a"},
+	"group":      {"", "(a)|", "a"},
+	"semi":       {"", "a;", "a"},
+	"words":      {"echo ", "a ", ""},
+	"arith":      {"echo $((1", "+1", "))"},
+	"heredoc":    {"cat > f <<'EOF'\n", "d | e && f\n", "EOF\n"},
+	"heredoc-q":  {"cat > f <<'EOF'\n", "d | e\n", "EOF\n"},
+	"heredoc-u":  {"cat > f <<EOF\n", "d | e\n", "EOF\n"},
+	"heredoc-s":  {"cat > f <<EOF\n", "d | $(e)\n", "EOF\n"},
+	"heredoc-d":  {"cat <<-'EOF'\n", "\td | e\n", "\tEOF\n"},
+	"squote":     {"echo '", "a|a&&", "'"},
+	"comment":    {"echo a # ", "a|", "\n"},
+	"hugeword":   {"echo ", "aaaaaaaaaaaaaaaa", ""},
+	"unparsed":   {"", "a|", "fi"},
+	"wrapped":    {"(((", "a|", "a"},
+	"background": {"", "a&", "a"},
 }
 
-func budgetCommand(shape string, n int) string {
-	s := budgetShapes[shape]
-	return strings.Repeat(s.unit, n) + s.tail
+func (s budgetShape) command(n int) string {
+	return s.head + strings.Repeat(s.unit, n) + s.tail
 }
+
+func shape(name string, n int) string { return budgetShapes[name].command(n) }
 
 // measure returns the bytes allocated and the time the call took.
 func measure(call func()) (alloc uint64, took time.Duration) {
@@ -44,168 +59,262 @@ func measure(call func()) (alloc uint64, took time.Duration) {
 	return after.TotalAlloc - before.TotalAlloc, took
 }
 
-// TestChainOperatorBudgetIsExact pins the bound: a chain of MaxChainOperators
-// nodes reads; one more is past the budget, whatever the shape; and a
-// past-budget command is never parsed (Parse reports false at once, with no
-// tree, however large). It holds on both sides of MaxChainOperatorBytes,
-// where the text is refused without a parse.
-func TestChainOperatorBudgetIsExact(t *testing.T) {
-	for _, shape := range []string{"pipe", "and", "or"} {
-		within := budgetCommand(shape, MaxChainOperators)
+// TestChainBudgetIsExact pins the chain bound on its tree: a chain of
+// MaxChainOperators nodes reads, one more is past the budget, whatever the
+// operator, and a past-budget command is never parsed.
+func TestChainBudgetIsExact(t *testing.T) {
+	for _, name := range []string{"pipe", "and", "or", "subst", "group"} {
+		within := shape(name, MaxChainOperators)
 		if reason := BudgetExceeded(within); reason != "" {
-			t.Errorf("%s at the bound: BudgetExceeded=%q", shape, reason)
+			t.Errorf("%s at the bound: BudgetExceeded=%q", name, reason)
 		}
 		if _, ok := Parse(within); !ok {
-			t.Errorf("%s at the bound does not parse", shape)
+			t.Errorf("%s at the bound does not parse", name)
 		}
-		// Measured on the tree (5,000 nodes), and refused unparsed
-		// (200,000 or more).
-		for _, n := range []int{MaxChainOperators + 1, 16000, 200000} {
-			past := budgetCommand(shape, n)
+		for _, n := range []int{MaxChainOperators + 1, 2000, MaxChainBytes + 1, 100000} {
+			past := shape(name, n)
 			if reason := BudgetExceeded(past); reason != BudgetChain {
-				t.Errorf("%s n=%d past the bound: BudgetExceeded=%q, want %q", shape, n, reason, BudgetChain)
-			}
-			if !TooDeep(past) {
-				t.Errorf("%s n=%d past the bound: TooDeep=false", shape, n)
+				t.Errorf("%s n=%d: BudgetExceeded=%q, want %q", name, n, reason, BudgetChain)
 			}
 			if file, ok := Parse(past); ok || file != nil {
-				t.Errorf("%s n=%d past the bound was parsed", shape, n)
+				t.Errorf("%s n=%d was parsed", name, n)
+			}
+			if !TooDeep(past) {
+				t.Errorf("%s n=%d: TooDeep=false", name, n)
 			}
 		}
 	}
 }
 
-// TestChainBytesInTextAreNotAChain pins that a here-document of text with
-// far more | and && bytes than the bound is not a chain: its tree has one
-// statement, so the reading bound does not fire on it (a script or a patch
-// written through a here-document).
-func TestChainBytesInTextAreNotAChain(t *testing.T) {
-	for _, line := range []string{"d | e\n", "a && b || c\n"} {
-		command := "cat > notes.txt <<'EOF'\n" + strings.Repeat(line, 2*MaxChainOperators) + "EOF\n"
-		if reason := BudgetExceeded(command); reason != "" {
-			t.Errorf("%q: BudgetExceeded=%q", line, reason)
+// TestChainBytesFollowTheParser pins the first stage against the lexer: the
+// parser skips a NUL byte and a line continuation, so two & with one between
+// them are one && (found by FuzzBudget: the tree held a chain node the first
+// stage counted none for). The first stage never counts fewer chain bytes
+// than the tree has chain nodes.
+func TestChainBytesFollowTheParser(t *testing.T) {
+	for _, between := range []string{"", "\x00", "\\\n", "\x00\x00"} {
+		command := "a&" + between + "&b"
+		file, ok := Parse(command)
+		if !ok {
+			continue
 		}
-		if _, ok := Parse(command); !ok {
-			t.Errorf("%q: the here-document does not parse", line)
+		if _, aware, _, _ := scanCounts(command); aware.chain < treeChain(file) {
+			t.Errorf("%q: %d chain bytes, tree has %d chain nodes", command, aware.chain, treeChain(file))
 		}
 	}
 }
 
-// TestProbeShapesAreBoundedInTimeAndMemory runs the two P1 probe shapes of
-// the gateway (a 67 KB pipeline of 33,577 stages, a 499 KB left-deep list
-// of 166,443 ||) and variants through the reading budget and the parser:
-// each answers within a bound of time and memory, and none crashes. Before
-// the budget the list killed the process with a stack overflow in the copy
-// of the parse cache. A chain is refused before its parse (a few MiB); a
-// flat command is parsed once (linear, about 300 bytes for each byte of its
-// text) and measured on its nodes.
-func TestProbeShapesAreBoundedInTimeAndMemory(t *testing.T) {
-	const window = 2 * time.Second
+// TestUnparsedChainIsOverTheBudget pins GAP-0284: a chain past the soft
+// bound that cannot be parsed (a syntax error, a wrapper that fails) has no
+// tree to measure and is over the budget, not within it.
+func TestUnparsedChainIsOverTheBudget(t *testing.T) {
+	for _, name := range []string{"unparsed", "wrapped"} {
+		for _, n := range []int{MaxChainOperators + 1, 5000, MaxChainBytes} {
+			if reason := BudgetExceeded(shape(name, n)); reason != BudgetUnparsed && reason != BudgetChain {
+				t.Errorf("%s n=%d: BudgetExceeded=%q, want an over-budget reason", name, n, reason)
+			}
+		}
+		if reason := BudgetExceeded(shape(name, 100)); reason != "" {
+			t.Errorf("%s n=100: BudgetExceeded=%q, want within", name, reason)
+		}
+	}
+}
+
+// TestTreeBudgetCoversEveryTreeKind pins the node and depth bounds on trees
+// that are not chains: flat words and statements (nodes), and arithmetic
+// (depth, GAP-0285).
+func TestTreeBudgetCoversEveryTreeKind(t *testing.T) {
 	for _, row := range []struct {
-		shape  string
+		name   string
 		n      int
-		memory uint64
+		reason string
 	}{
-		{"pipe", 33577, 16 << 20}, {"or", 166443, 16 << 20}, {"and", 166443, 16 << 20}, {"mixed", 100000, 16 << 20},
-		{"semi", 300000, 512 << 20}, {"stmts", 300000, 512 << 20}, {"words", 400000, 512 << 20}, {"hugeWord", 60000, 128 << 20},
+		{"words", 3000, ""},
+		{"words", 20000, BudgetNodes},
+		{"semi", 2000, ""},
+		{"semi", 12000, BudgetNodes},
+		{"semi", 4000, ""},
+		{"arith", MaxTreeDepth/2 - 10, ""},
+		{"arith", MaxTreeDepth + 100, BudgetDepth},
+		{"arith", 9000, BudgetDepth},
+		{"heredoc", 3 * MaxChainOperators, ""},
+		// The first stage counts what the shell parses, not data (the P3
+		// of the review: base reads these in full).
+		{"heredoc-q", 100000, ""},
+		{"heredoc-u", 100000, ""},
+		{"heredoc-d", 100000, ""},
+		{"squote", 20000, ""},
+		{"comment", 60000, ""},
+		// A here-document that expands a command substitution is code.
+		{"heredoc-s", 20000, BudgetChain},
+		{"hugeword", 20000, ""},
 	} {
-		command := budgetCommand(row.shape, row.n)
+		command := shape(row.name, row.n)
+		if got := BudgetExceeded(command); got != row.reason {
+			t.Errorf("%s n=%d (%d bytes): BudgetExceeded=%q, want %q", row.name, row.n, len(command), got, row.reason)
+		}
+		if _, ok := Parse(command); ok != (row.reason == "") {
+			t.Errorf("%s n=%d: Parse ok=%t with reason %q", row.name, row.n, ok, row.reason)
+		}
+	}
+}
+
+// TestHardBoundsRefuseWithoutAParse pins the bounds of the first stage: a
+// text past MaxCommandBytes, MaxChainBytes or MaxWords is refused whatever
+// it holds, and the check costs a linear pass.
+func TestHardBoundsRefuseWithoutAParse(t *testing.T) {
+	for _, row := range []struct {
+		name, command, reason string
+	}{
+		{"bytes", "echo " + strings.Repeat("a", MaxCommandBytes), BudgetBytes},
+		{"tokens", "echo " + strings.Repeat("a ", MaxTokens), BudgetTokens},
+		{"statements", strings.Repeat("a;", MaxTokens/2+1), BudgetTokens},
+		{"heredoc raw bound", shape("heredoc-q", rawChainBytes+1), BudgetChain},
+		{"nesting", strings.Repeat("(", MaxNestingDepth+1) + "a", BudgetNesting},
+	} {
+		alloc, took := measure(func() {
+			if got := BudgetExceeded(row.command); got != row.reason {
+				t.Errorf("%s: BudgetExceeded=%q, want %q", row.name, got, row.reason)
+			}
+		})
+		if alloc > 4<<20 || took > time.Second {
+			t.Errorf("%s: %d KiB allocated in %s", row.name, alloc>>10, took)
+		}
+	}
+}
+
+// TestProbeShapesAreBoundedInTimeAndMemory runs the probes of the gateway
+// (a pipeline of 33,577 stages, a left-deep list of 166,443 ||) and every
+// family at sizes far past the budget through the budget and the parser:
+// each is decided within a few MiB and well under a second, and none
+// crashes. Before the budget the list killed the process with a stack
+// overflow in the copy of the parse cache. The bounds are loose on purpose:
+// they hold under -race on a loaded box.
+func TestProbeShapesAreBoundedInTimeAndMemory(t *testing.T) {
+	for name, n := range map[string]int{
+		"pipe": 33577, "or": 166443, "and": 166443, "mixed": 100000, "subst": 50000, "group": 50000,
+		"semi": 300000, "words": 400000, "arith": 300000, "hugeword": 60000, "unparsed": 100000, "wrapped": 60000,
+		"background": 200000, "heredoc": 100000,
+	} {
+		command := shape(name, n)
 		alloc, took := measure(func() {
 			BudgetExceeded(command)
 			Parse(command)
 			ParseWithComments(command)
 		})
-		if alloc > row.memory || took > window {
-			t.Errorf("%s n=%d (%d bytes): %d MiB allocated in %s", row.shape, row.n, len(command), alloc>>20, took)
+		if alloc > 24<<20 || took > 2*time.Second {
+			t.Errorf("%s n=%d (%d bytes): %d MiB allocated in %s", name, n, len(command), alloc>>20, took)
 		}
 	}
 }
 
-// TestParsedNodeBudget pins the node bound of a large command: flat words
-// and statements past MaxParsedNodes read as unparseable (BudgetNodes), a
-// long here-document or one huge word does not (it is a handful of nodes),
-// and a command below largeCommandMin bytes is never measured.
-func TestParsedNodeBudget(t *testing.T) {
-	for _, row := range []struct {
-		name, command string
-		reason        string
-	}{
-		{"flat words", "echo " + strings.Repeat("a ", MaxParsedNodes/2), BudgetNodes},
-		{"flat statements", strings.Repeat("a;", MaxParsedNodes/2), BudgetNodes},
-		{"long here-document", "cat <<'EOF'\n" + strings.Repeat("plain line of text\n", 50000) + "EOF\n", ""},
-		{"huge single word", "echo " + strings.Repeat("a", 1<<20-16), ""},
-		{"below the measured size", "echo " + strings.Repeat("a ", 30000), ""},
-	} {
-		if got := BudgetExceeded(row.command); got != row.reason {
-			t.Errorf("%s (%d bytes): BudgetExceeded=%q, want %q", row.name, len(row.command), got, row.reason)
-		}
-		_, ok := Parse(row.command)
-		if ok != (row.reason == "") {
-			t.Errorf("%s: Parse ok=%t with reason %q", row.name, ok, row.reason)
-		}
-	}
-}
-
-// TestCloneFileStopsAtDepth pins the copy of the parse cache: a tree
-// deeper than maxCloneDepth (built node by node, which no command can reach
-// through the budget) is refused with false instead of recursing until the
-// goroutine stack overflows, which is fatal and cannot be recovered.
-func TestCloneFileStopsAtDepth(t *testing.T) {
-	leaf := &syntax.Stmt{Cmd: &syntax.CallExpr{}}
-	deep := leaf
-	for range maxCloneDepth / 4 {
-		deep = &syntax.Stmt{Cmd: &syntax.BinaryCmd{Op: syntax.OrStmt, X: deep, Y: leaf}}
-	}
-	if _, ok := cloneFile(&syntax.File{Stmts: []*syntax.Stmt{deep}}); ok {
-		t.Fatal("a tree past maxCloneDepth was copied")
-	}
-	shallow := &syntax.Stmt{Cmd: &syntax.BinaryCmd{Op: syntax.OrStmt, X: leaf, Y: leaf}}
-	if copied, ok := cloneFile(&syntax.File{Stmts: []*syntax.Stmt{shallow}}); !ok || copied == nil {
-		t.Fatal("a shallow tree was not copied")
-	}
-	// A command at the chain bound is far below maxCloneDepth and is cached.
-	command := budgetCommand("or", MaxChainOperators/2) + strings.Repeat(" ", largeCommandMin)
-	if _, ok := Parse(command); !ok {
-		t.Fatal("a large command at the chain bound does not parse")
-	}
-	parseCache.Lock()
-	kept := false
-	for _, entry := range parseCache.entries {
-		kept = kept || entry.key.command == command
-	}
-	parseCache.Unlock()
-	if !kept {
-		t.Fatal("a large command at the chain bound was not kept")
-	}
-}
-
-// TestBudgetScalesLinearly doubles the size of each probe shape inside the
-// budget and asserts allocation grows at most about three times (a quadratic
-// reader grows four times or more).
-func TestBudgetScalesLinearly(t *testing.T) {
-	for _, shape := range []string{"pipe", "and", "semi", "words"} {
-		small, large := budgetCommand(shape, 1500), budgetCommand(shape, 3000)
+// TestBudgetCostGrowsLinearly doubles each family inside the budget and
+// asserts allocation grows at most about three times (a quadratic reader
+// grows four times or more).
+func TestBudgetCostGrowsLinearly(t *testing.T) {
+	for name, n := range map[string]int{"pipe": 120, "and": 120, "subst": 120, "words": 800, "semi": 800, "heredoc": 800} {
+		small, large := shape(name, n), shape(name, 2*n)
 		smallAlloc, _ := measure(func() { Parse(small) })
 		largeAlloc, _ := measure(func() { Parse(large) })
-		if smallAlloc > 0 && largeAlloc > 3*smallAlloc+(1<<20) {
-			t.Errorf("%s: %d KiB for 1500 units, %d KiB for 3000", shape, smallAlloc>>10, largeAlloc>>10)
+		if largeAlloc > 3*smallAlloc+(1<<20) {
+			t.Errorf("%s: %d KiB for %d units, %d KiB for %d", name, smallAlloc>>10, n, largeAlloc>>10, 2*n)
 		}
 	}
 }
 
-// FuzzBudget generates large commands from the probe templates (and takes
-// raw text as well) and asserts the invariants of the budget: it answers,
-// a command past the budget is never parsed, and a command within it parses
-// to a tree the copy of the parse cache can copy.
+// TestCloneFileDoesNotRecurse pins the copy of the parse cache: a tree
+// 200,000 levels deep (built node by node; no command passes the budget
+// with one) is copied under a 1 MiB goroutine stack limit, where a
+// recursive copy dies with a fatal stack overflow that nothing recovers.
+func TestCloneFileDoesNotRecurse(t *testing.T) {
+	const depth = 200000
+	leaf := &syntax.Stmt{Cmd: &syntax.CallExpr{}}
+	deep := leaf
+	for range depth {
+		deep = &syntax.Stmt{Cmd: &syntax.BinaryCmd{Op: syntax.OrStmt, X: deep, Y: leaf}}
+	}
+	old := debug.SetMaxStack(1 << 20)
+	defer debug.SetMaxStack(old)
+	copied := cloneFile(&syntax.File{Stmts: []*syntax.Stmt{deep}})
+	levels := 0
+	for stmt, original := copied.Stmts[0], deep; ; levels++ {
+		binary, ok := stmt.Cmd.(*syntax.BinaryCmd)
+		if !ok {
+			break
+		}
+		if stmt == original || binary == original.Cmd {
+			t.Fatalf("level %d shares a node with the original", levels)
+		}
+		stmt, original = binary.X, original.Cmd.(*syntax.BinaryCmd).X
+	}
+	if levels != depth {
+		t.Fatalf("the copy has %d levels, want %d", levels, depth)
+	}
+}
+
+// TestMeasureTreeDoesNotRecurse pins the measure of the budget the same
+// way: a tree far deeper than any stack limit is measured, and reported,
+// without recursion.
+func TestMeasureTreeDoesNotRecurse(t *testing.T) {
+	leaf := &syntax.Stmt{Cmd: &syntax.CallExpr{}}
+	deep := leaf
+	for range 100000 {
+		deep = &syntax.Stmt{Cmd: &syntax.BinaryCmd{Op: syntax.Pipe, X: deep, Y: leaf}}
+	}
+	old := debug.SetMaxStack(1 << 20)
+	defer debug.SetMaxStack(old)
+	if got := measureTree(&syntax.File{Stmts: []*syntax.Stmt{deep}}); got == "" {
+		t.Fatal("a 100,000-level tree was within the budget")
+	}
+}
+
+// TestBudgetAnswersAreStableAcrossTheMemo asks about more distinct texts
+// than the memo holds, in turn, and expects the same answer every time.
+func TestBudgetAnswersAreStableAcrossTheMemo(t *testing.T) {
+	var commands []string
+	want := map[string]string{}
+	for i, name := range []string{"pipe", "or", "subst", "words", "arith", "heredoc", "semi", "unparsed", "group", "and", "mixed"} {
+		command := shape(name, 700+i)
+		commands = append(commands, command)
+		want[command] = computeBudget(command)
+	}
+	for range 3 {
+		for _, command := range commands {
+			if got := BudgetExceeded(command); got != want[command] {
+				t.Fatalf("%.20q (%d bytes): %q then %q", command, len(command), want[command], got)
+			}
+		}
+	}
+}
+
+// treeChain counts the chain nodes of file.
+func treeChain(file *syntax.File) int {
+	chain := 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if binary, ok := node.(*syntax.BinaryCmd); ok {
+			switch binary.Op {
+			case syntax.Pipe, syntax.PipeAll, syntax.AndStmt, syntax.OrStmt:
+				chain++
+			}
+		}
+		return true
+	})
+	return chain
+}
+
+// FuzzBudget generates large commands from the family table (and takes raw
+// text as well) and asserts the invariants of the budget: it answers; a
+// command past the budget is never parsed; a command within it parses to a
+// tree the copy of the parse cache can copy and the measure accepts.
 func FuzzBudget(f *testing.F) {
-	for shape := range budgetShapes {
-		f.Add(shape, uint32(1000), "")
+	for name := range budgetShapes {
+		f.Add(name, uint32(1000), "")
 	}
 	f.Add("pipe", uint32(166443), "tail")
-	f.Fuzz(func(t *testing.T, shape string, n uint32, extra string) {
+	f.Fuzz(func(t *testing.T, name string, n uint32, extra string) {
 		command := extra
-		if _, known := budgetShapes[shape]; known {
-			command = budgetCommand(shape, int(n%400000)) + extra
+		if s, known := budgetShapes[name]; known {
+			command = s.command(int(n%200000)) + extra
 		}
 		reason := BudgetExceeded(command)
 		file, ok := Parse(command)
@@ -213,8 +322,23 @@ func FuzzBudget(f *testing.F) {
 			t.Fatalf("a command past the budget (%s) was parsed", reason)
 		}
 		if ok {
-			if _, cloned := cloneFile(file); !cloned {
+			if cloneFile(file) == nil {
 				t.Fatal("a parsed command could not be copied")
+			}
+			got := measureTree(file)
+			if reason == "" && got != "" {
+				t.Fatalf("a command within the budget measures as %q", got)
+			}
+			// The first stage never counts fewer chain operators than the
+			// tree holds (its reading of data may skip real code only up to
+			// the raw bound, which this check does not excuse).
+			if _, aware, _, nesting := scanCounts(command); nesting == "" && aware.chain < treeChain(file) {
+				t.Fatalf("the first stage counts %d chain bytes but the tree has %d chain nodes", aware.chain, treeChain(file))
+			}
+			// The soft bounds hold: a text under both is never past a
+			// tree bound, so it is not parsed to find out.
+			if chain := strings.Count(command, "|") + strings.Count(command, "&&"); got != "" && len(command) <= softBytes && chain <= softChainBytes {
+				t.Fatalf("a %d-byte command with %d chain bytes measures as %q but the first stage passes it", len(command), chain, got)
 			}
 		}
 	})

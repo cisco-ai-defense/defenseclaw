@@ -15,7 +15,7 @@ import (
 // nesting level of the left-deep tree made the names of n stages n^2 bytes:
 // a 67 KB pipeline held 6 GiB.
 func TestPipelineScopeNamesStayShort(t *testing.T) {
-	for _, stages := range []int{2, 3, 50, 3000} {
+	for _, stages := range []int{2, 3, 50, 500} {
 		command := strings.Repeat("a | ", stages-1) + "a"
 		statements, _, ok := sequenceStatementDetails(command, true, true, false, true)
 		if !ok || len(statements) != stages {
@@ -46,8 +46,8 @@ func TestPipelineSplitGrowsLinearly(t *testing.T) {
 		runtime.ReadMemStats(&after)
 		return after.TotalAlloc - before.TotalAlloc
 	}
-	small, large := alloc(1000), alloc(2000)
+	small, large := alloc(200), alloc(400)
 	if large > 3*small+(1<<20) {
-		t.Fatalf("1000 stages allocate %d KiB, 2000 stages %d KiB", small>>10, large>>10)
+		t.Fatalf("200 stages allocate %d KiB, 400 stages %d KiB", small>>10, large>>10)
 	}
 }
