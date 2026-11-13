@@ -35,7 +35,7 @@ func CheckKeyProductFloor(cfg *config.Config, rawConfig []byte, minProductVersio
 		// observability.tokenomics and observability.pricing: 1.0.10 and later.
 		// A 1.0.9 device refuses the whole config for either block.
 		keys = append(keys, later...)
-		if floor == "" || semver.Compare("v"+config.TokenomicsMinProductVersion, "v"+floor) > 0 {
+		if semver.Compare("v"+config.TokenomicsMinProductVersion, "v"+floor) > 0 {
 			floor = config.TokenomicsMinProductVersion
 		}
 	}

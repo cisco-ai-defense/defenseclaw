@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
 
@@ -356,15 +357,24 @@ func TestComposeRequiresProductFloorForTokenomics(t *testing.T) {
 	}
 }
 
-// A bundle that sets only 1.0.9 observability keys needs no 1.0.10 floor.
-func TestComposeNeedsNoTokenomicsFloorForEarlierObservability(t *testing.T) {
-	root, b := writeBundle(t, bundleConfig(t)+"observability:\n  local:\n    enabled: true\n")
-	in := enterprisebundle.ComposeInput{
-		Bundle: b, Root: root, BundleID: tamperBundleID, TenantID: "acme", DeviceGroup: "eng", Version: 5,
-		Platforms: []string{enterprisebundle.PlatformLinux}, CreatedAt: signedAt, CreatedBy: "operator:alice",
-		ProductVersion: "1.0.9", HostPlatform: enterprisebundle.PlatformLinux, Digester: digester,
+// A config that sets only 1.0.9 observability keys needs no 1.0.10 floor, and
+// an empty observability block does not either.
+func TestTokenomicsFloorNotRequiredForEarlierObservability(t *testing.T) {
+	for _, raw := range []string{
+		"observability:\n  local:\n    enabled: true\n",
+		"observability:\n  destinations: []\n",
+		"observability: {}\n",
+		"guardrail:\n  enabled: true\n",
+	} {
+		if err := enterprisebundle.CheckKeyProductFloor(&config.Config{}, []byte(raw), ""); err != nil {
+			t.Errorf("%q: a config without tokenomics or pricing was refused: %v", raw, err)
+		}
 	}
-	if _, _, err := enterprisebundle.Compose(context.Background(), in); err != nil && strings.Contains(errString(err), "tokenomics") {
-		t.Fatalf("an observability block without tokenomics was refused for the tokenomics floor: %v", err)
+	raw := []byte("observability:\n  pricing: {}\n")
+	if err := enterprisebundle.CheckKeyProductFloor(&config.Config{}, raw, "1.0.9"); err == nil || !strings.Contains(err.Error(), "observability.pricing") {
+		t.Errorf("pricing with floor 1.0.9: got %v, want a refusal naming observability.pricing", err)
+	}
+	if err := enterprisebundle.CheckKeyProductFloor(&config.Config{}, raw, "1.0.10"); err != nil {
+		t.Errorf("pricing with floor 1.0.10: %v", err)
 	}
 }
