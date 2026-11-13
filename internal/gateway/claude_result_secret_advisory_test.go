@@ -13,9 +13,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// awsExampleSecretEnv is a .env holding AWS's published example key pair.
-const awsExampleSecretEnv = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\n" +
-	"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+// awsSecretEnv is a .env holding a random AWS key pair. AWS documents an
+// example pair; that one is not a finding, so a fixture that wants a finding
+// uses a random pair (TestAWSDocumentedExampleSecretIsNotAFinding).
+func awsSecretEnv() string {
+	return "AWS_ACCESS_KEY_ID=" + runtimeDetectorSignature("AKIA", "3FKJ2M5NQ7XZ8BWV") + "\n" +
+		"AWS_SECRET_ACCESS_KEY=" + awsRandomSecretValue + "\n"
+}
+
+var awsRandomSecretValue = runtimeDetectorSignature("q9Zr4Vx2", "Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4Eu9Rv3Xi8")
 
 // GAP-0034. A secret in a Read result reaches Claude Code (and Cowork, which
 // runs the same engine and hook route) before PostToolUse runs, so in action
@@ -33,7 +39,7 @@ func TestClaudeCodeReadResultSecretIsAdvisoryInEveryMode(t *testing.T) {
 			HookEventName: "PostToolUse",
 			ToolName:      "Read",
 			ToolInput:     map[string]interface{}{"file_path": "/Users/alice/Desktop/cowork-test/.env"},
-			ToolResponse:  map[string]interface{}{"type": "text", "file": map[string]interface{}{"content": awsExampleSecretEnv}},
+			ToolResponse:  map[string]interface{}{"type": "text", "file": map[string]interface{}{"content": awsSecretEnv()}},
 			CWD:           "/Users/alice/Desktop/cowork-test",
 		})
 		if resp.Action != "allow" || resp.RawAction != "block" || !resp.WouldBlock || resp.Severity != "CRITICAL" {
@@ -50,7 +56,7 @@ func TestClaudeCodeReadResultSecretIsAdvisoryInEveryMode(t *testing.T) {
 		if context, _ := hookOutput["additionalContext"].(string); !strings.Contains(context, "SEC-AWS-SECRET") {
 			t.Fatalf("%s: claude output %+v: the model is not told about the secret finding", mode, resp.ClaudeCodeOutput)
 		}
-		if strings.Contains(resp.AdditionalContext, "wJalrXUtnFEMI") || strings.Contains(resp.Reason, "wJalrXUtnFEMI") {
+		if strings.Contains(resp.AdditionalContext, awsRandomSecretValue) || strings.Contains(resp.Reason, awsRandomSecretValue) {
 			t.Fatalf("%s: the secret value is echoed back: %+v", mode, resp)
 		}
 	}
