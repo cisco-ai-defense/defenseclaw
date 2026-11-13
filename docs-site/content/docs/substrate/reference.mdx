@@ -7,36 +7,46 @@ keywords:
   - substrate CLI reference
 ---
 
-{/* Commands and flags below were checked against internal/cli/testdata/substrate_commands.json on sub/a6 (head 77468de3d5). TODO(substrate): generate this table from the golden once merged, and check the config keys against the merged config schema. */}
-
-`defenseclaw substrate` runs on your laptop or in CI. It needs no `config.yaml` on the laptop: every command except the admin ones reads a small context file.
+`defenseclaw substrate` runs on your laptop or in CI. It needs no `config.yaml` on the laptop: every command except the admin ones reads a small context file. Until the 1.0.10 `defenseclaw` command is packaged, the same commands run as `defenseclaw-gateway substrate`.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), in CI with `--workload` and `--workload-token-file`, or with `--kube` on an open-source cluster that has no OIDC provider (your current kubeconfig; the gateway verifies it with a TokenReview). `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, the CA files (`--admin-ca-file`, `--issuer-ca-file`), `--default-profile`, `--default-template`, `--name`. `--kube-context` and `--kubeconfig` choose the Kubernetes identity for `--kube`; `--workload-audience` names the audience of a CI token. Tokens go in the operating system keychain |
-| `run <agent> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs headless, `--detach` doesn't attach, `--batch FILE --parallel N` runs one actor per task, `--clone URL --ref REF` starts from a repository instead of a copy of the folder, `--unmask` and `--exclude` change what is uploaded, `--secret NAME`, `--profile`, `--template`, `--keep`, `--no-upload`, `--max-upload-mb` |
-| `connect <name>` | Attach to an actor, resuming it first if it is suspended. `--no-asks` leaves asks for `approvals`; `--transport` picks the relay transport |
-| `list` | Your actors with state, last activity, checks and asks. `--all` (admins), `--batch` |
-| `status [name]` | One actor, or a batch (`--batch`). `status --cluster` is the cluster and fleet document for admins (`--json`) |
-| `verify` | Checks the cluster side against the install file; `--json` follows the management contract |
-| `logs <name> [-f]` | The agent's output; `--task` picks a task |
-| `pull <name>` | See the changed files, flagged for risk (`--diff`), then `--apply`, `--branch NAME` or `--patch-out FILE` |
-| `checkpoint <name> [--every D]` | Save the whole actor, files and memory |
-| `undo <name> [--to ID]` | Return the actor to its last checkpoint, or to a given one |
-| `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots |
-| `migrate <name>` | Move an actor with an old kit to a rebuilt template |
-| `approvals`, `approve <id> [--always]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. An ask an unattended run queued shows `unattended` and the time left in the RUN column |
-| `usage [--batch ID]` | Your own usage and cost. Admins can read the fleet |
-| `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown |
-| `policy explain NAME`, `show`, `test NAME` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed |
+| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), in CI with `--workload` and `--workload-token-file`, or with `--kube` on an open-source cluster that has no OIDC provider (your current kubeconfig; the gateway verifies it with a TokenReview). `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, `--scope`, the CA files (`--admin-ca-file`, `--issuer-ca-file`), `--default-profile`, `--default-template`, `--name`. `--kube-context`, `--kubeconfig` and `--kube-namespace` choose the Kubernetes identity for `--kube`; `--workload-audience` names the audience of a CI token. Tokens go in the operating system keychain |
+| `run <agent> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs headless, `--detach` doesn't attach (with `--task` or `--batch`), `--timeout` stops waiting for a task, `--batch FILE --parallel N` runs one actor per task, `--clone URL --ref REF` starts from a repository instead of a copy of the folder, `--unmask` and `--exclude` change what is uploaded, `--no-upload`, `--max-upload-mb` (default 500), `--secret NAME`, `--profile`, `--template`, `--name` (a readable start; a random suffix is always added), `--keep`, `--no-asks`, `--transport auto\|websocket\|longpoll`, `--workload-token-file`, `--yes` |
+| `connect <name>` | Attach to an actor, resuming it first if it is suspended. It reconnects by itself if the connection drops. `--no-asks` leaves asks for `approvals`; `--transport` picks the relay transport |
+| `list` | Your actors with `NAME`, `AGENT`, `PROFILE`, `STATE`, `AGE` and `BATCH`. `--all` (admins), `--batch` |
+| `status [name]` | Without a name, the cluster and account in use and how many agents you have. With a name, that agent. `--batch` shows a batch. `status --cluster` is the cluster and fleet document for admins (`--json`; `--api` reads it from the gateway, otherwise `kubectl` with `--install-file`) |
+| `verify` | Admins: checks the cluster side. Reads the cluster with `kubectl` (`--install-file`), or from the gateway with `--api`; `--json` follows the management contract |
+| `logs <name> [-f]` | What the headless task printed, and its exit code; `--task` picks a task |
+| `pull <name>` | See the changed files, flagged for risk, then `--diff` prints the diff, `--apply` writes the changes into the folder, `--branch NAME` puts them on a new branch, `--patch-out FILE` writes a patch. `--timeout`, `--yes` |
+| `checkpoint <name> [--every D]` | Save a restore point of the agent's folder, inside the agent. With `--every` it saves on that schedule for as long as the command runs |
+| `undo <name> [--to ID]` | Put the agent's folder back to its last restore point, or to a given one, and discard what the agent changed since. It asks first |
+| `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots. Pull first |
+| `migrate <name>` | Move an actor with an old kit to the current kit |
+| `approvals`, `approve <id> [--always] [--reason]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. `approvals` lists `ID`, `AGENT`, `WHAT`, `SEVERITY`, `AGE` and `RUN`; an ask an unattended run queued shows `unattended` and the time left in `RUN` |
+| `usage [--batch ID] [--all]` | Your own usage and cost. Not available yet: the cluster answers "does not offer that yet" (see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost)) |
+| `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown. See [Secrets](/docs/substrate/secrets) |
+| `policy explain NAME`, `show`, `test NAME --host H [--method M] \| --tool T` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed for an agent |
 | `policy reset ATESPACE/NAME [--reason TEXT] [--yes]` | Administrators: clear a `policy_conflict` once the other writer is stopped. The controller writes the policy again and starts reverting changes again. Audited under your own name |
-| `doctor` | Checks the cluster side (`--cluster`, `--namespace`, `--kube-context`, `--install-file`). Ends with `ready for agents` |
-| `setup` | Writes the Substrate install overlay. `--plan` and `--dry-run` show it, `--remove` takes the callout out, `--print-access-policies` prints the access policies, `--capability` tells it what your Substrate supports |
-| `template build\|verify\|scan\|publish\|keygen` | Administrators: build an agent image with the kit and a signed attestation, check or scan it, publish it to the cluster's registry, make the signing key. These run on this computer and need no sign-in |
+| `doctor` | Checks this computer and your sign-in. `--cluster` adds the cluster's own checks for administrators (with `--install-file` they are read with `kubectl`, `--kube-context`, `--kubeconfig`, `--namespace`, `--substrate-namespace`). Ends with `ready for agents`, or `not ready` and exit 1 |
+| `setup` | Administrators: adds the callout and the router client to the `SubstrateInstall` file (`--install-file`, `--namespace`). The result is written as `FILE.new`; `--yes` replaces the file and keeps `FILE.bak`; `--dry-run` shows the changes; `--remove` takes them out; `--print-access-policies --plan FILE` prints the access policies; `--capability body-mode\|route-timeouts` says what your Substrate build has; `--issuer` sets this cluster's actor-token issuer |
+| `template build\|verify\|scan\|publish\|keygen` | Administrators: build an agent image with the kit and a signed attestation, check or scan it, publish it to the cluster's registry, make the signing key. They run on this computer and need no sign-in. On a managed laptop's launcher they are not offered |
 
-Every read command has `--output text|json` and `--json`, and every command takes `--context` to pick a saved cluster. Errors say what failed and how to fix it. `--yes` answers questions.
+Every read command has `--output text|json` and `--json`, and every command takes `--context` to pick a saved cluster (the default is the one you signed in to last). Errors say what failed and how to fix it. `--yes` answers questions.
+
+### Template flags
+
+| Command | Flags that matter |
+|---|---|
+| `template build` | `--connector claudecode\|codex`, `--from`, `--to`, `--hook-binary`, `--relay-binary`, `--key`, `--session-key` (repeatable; the gateway's relay session public key), `--session-issuer`, `--session-audience`, `--block-at critical\|high\|medium\|low\|none` (default `high`), `--accept-finding RULE-ID` with `--reason`, `--trusted-base sha256:...`, `--allow-unverified-base`, `--mcp-host`, `--provider`, `--model`, `--dry-run`, `--json` |
+| `template verify` | `IMAGE --anchors FILE`, `--min-policy-generation`, `--max-age`, `--revoke KEYID`, `--allow-tag`. Exit 0 admitted, 1 not admitted |
+| `template scan` | `IMAGE`, `--connector`, `--block-at`. Exit 0 clean, 1 blocked |
+| `template publish` | `SOURCE@DIGEST TARGET:TAG --anchors FILE`, `--template ATESPACE/NAME` creates the ActorTemplate, with `--class gvisor\|microvm`, `--cpu`, `--memory`, `--env K=V`, `--worker-label K=V`, `--dry-run`, and `--api-*` flags for the Substrate API. Exit 75 means the Substrate API can't be reached; run it again |
+| `template keygen` | `--out DIR` makes `attestation.key` (0600) and `attestation.pub` |
+
+All four registry commands take `--registry-user`, `--registry-password-file`, `--registry-auth-host`, `--insecure-registry`, `--config` and `--platform`.
 
 ### Exit codes
 
@@ -47,7 +57,7 @@ Every read command has `--output text|json` and `--json`, and every command take
 | 2 | Usage error |
 | 3 | Unsupported or refused (a profile or setting forbids it) |
 | 4 | Not signed in; run `defenseclaw substrate login` |
-| 75 | The cluster is unreachable (`verify`, `status --cluster`) |
+| 75 | The cluster is unreachable (`verify`, `status --cluster`, `template publish`) |
 
 ### Environment variables
 
@@ -62,7 +72,7 @@ Every read command has `--output text|json` and `--json`, and every command take
 
 `run` copies your folder and `pull` brings the agent's work back with git on your computer (Git for Windows on Windows): git's ignore rules decide what is copied, secret files stay behind, and the bytes are copied as they are, line endings included. `--clone URL` instead clones the repository inside the agent, through the cluster's network rules, which add the credential for the hosts your profile allows; nothing of your computer's credentials is sent. Put no user name or token in the address.
 
-`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). On macOS the key that seals them is an item only the DefenseClaw program may read without asking; macOS asks once after you install a new DefenseClaw build, and over SSH the keychain must be unlocked (`security unlock-keychain`).
+`substrate/contexts.json` under the DefenseClaw state directory holds your contexts: addresses, issuer, client ID and the CA files. It has no secrets and mode 0600. Tokens live in the keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service). On macOS the key that seals them is an item only the DefenseClaw program may read without asking; macOS asks once after you install a new DefenseClaw build. Over SSH the keychain can't show that question, so the launcher stops with: "the macOS keychain is locked and this session cannot ask you to unlock it (for example over SSH); unlock it with: security unlock-keychain". Unlock it, or set `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file`.
 
 ## Configuration
 
@@ -71,31 +81,43 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | Key | Default | Meaning |
 |---|---|---|
 | `substrate.enabled` | `false` (the chart sets `true`) | Turns the Substrate components on |
-| `substrate.api.address`, `.ca_file`, `.auth` | `api.ate-system:443`, in-cluster CA, `serviceaccount` | How DefenseClaw reaches the Substrate control API |
-| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | The Substrate versions `doctor` accepts |
+| `substrate.api.address`, `.server_name`, `.ca_file`, `.auth` | `api.ate-system.svc:443`, none, in-cluster CA, `serviceaccount` | How DefenseClaw reaches the Substrate control API (`.auth` is `serviceaccount` or `mtls`) |
+| `substrate.supported_versions` | `>=1.0.0 <1.1.0` | The Substrate versions `verify` accepts |
 | `substrate.identity.issuer` | `https://idp.ate-system.svc` | Issuer of the actor tokens. Make it unique per cluster |
 | `substrate.identity.audience` | `defenseclaw` | Audience of actor tokens |
-| `substrate.identity.token_lifetime_seconds` | `300` | Lifetime of the token the egress gateway adds. Fixed at 300 s: egress caches the token by actor name, so a recreated actor with the same name is refused until the old token expires. |
+| `substrate.identity.token_lifetime_seconds` | `300` | Lifetime of the token the egress gateway adds. 300 s is the upstream minimum, and egress caches the token by actor name, so a recreated actor with the same name is refused until the old token expires. `run` never reuses a name for that reason |
 | `substrate.identity.oidc.issuer`, `.client_id`, `.groups_claim` | none, none, `groups` | The OIDC provider people sign in with. Unset on an open-source cluster to accept Kubernetes identities (`login --kube`) instead. Managed installs require it |
-| `substrate.identity.workload_oidc` | `[]` | Issuers accepted for CI workloads: `issuer`, `audience` |
-| `substrate.services.actor`, `.admin` | `defenseclaw-actor...svc`, `defenseclaw-admin...svc` | Service names (the chart fills them) |
+| `substrate.identity.workload_oidc` | `[]` | Issuers accepted for CI workloads: `issuer`, `audience`, `subject`, `claims` |
+| `substrate.services.actor`, `.admin` | `defenseclaw-actor.defenseclaw-system.svc.cluster.local`, `defenseclaw-admin.defenseclaw-system.svc.cluster.local` | Service names. Use the full name: an actor resolves only the names in its allow list |
 | `substrate.launcher_atespaces` | `{}` | Profile name to the atespaces the launcher may create actors in. Only DefenseClaw edits these |
 | `substrate.require_attested_templates` | `true` | Actors from unattested templates get no network |
+| `substrate.templates.trust_anchors` | the chart's anchors Secret mount | Public keys that sign attestations. Re-read when the Secret changes, so a revoked key applies at the next poll |
+| `substrate.templates.allowed_images`, `.profile_images`, `.volume_images` | `[]` | Repository globs (`registry/team/*`, no tag) an attested image must match, narrowed per profile; and images a template may mount read-only without an attestation |
+| `substrate.templates.min_policy_generation`, `.max_age`, `.revoked_digests`, `.allow_unverified_base`, `.plain_http_registries` | `0`, none, `[]`, `false`, `[]` | Refuse older scans, old builds, listed digests, untrusted bases; registries reached over plain HTTP (a dev registry only) |
 | `substrate.default_sandbox_class` | `gvisor` | `gvisor` or `microvm` |
-| `substrate.idle_suspend_after` | `30m` | Idle time before DefenseClaw suspends an actor. `--task` runs are exempt unless the profile says so |
-| `substrate.unattended.asks` | `deny` | What an unattended run does with an ask |
-| `substrate.unattended.ask_timeout` | `30m` | How long an allowed ask waits for a person |
+| `substrate.idle_suspend_after` | `30m` | Idle time before DefenseClaw suspends an actor; `0s` turns it off. `--task` runs are exempt unless the profile says so |
+| `substrate.workspace_max_bytes` | 1 GiB | Largest folder upload the gateway takes |
+| `substrate.unattended.asks` | `deny` | What an unattended run does with an ask: `deny` or `queue` |
+| `substrate.unattended.ask_timeout` | `30m` | How long a queued ask waits for a person |
 | `substrate.unattended.telemetry_sampling` | `1.0` | Fraction of routine events kept for `--task` runs. Blocks and lifecycle records are never sampled |
 | `substrate.rate_limits.per_actor_rps`, `.per_atespace_rps` | `20`, `500` | Fair-share limits. Over budget answers `429` with `Retry-After` |
 | `substrate.extproc.enabled` | `true` | The egress callout |
-| `substrate.extproc.failure_mode` | `closed` | What the egress gateway does when the callout fails |
+| `substrate.extproc.failure_mode` | `closed` | What the egress gateway does when the callout fails. Managed installs are always `closed` |
 | `substrate.extproc.body_inspection` | `auto` | Read bodies of POSTs to MCP and listed hosts when Substrate supports it. `on` says it does; `off` checks headers only. In managed enterprise, `auto` refuses requests to listed MCP servers until the callout has received a body |
 | `substrate.extproc.body_max_bytes` | `1048576` | Largest body the callout reads |
-| `substrate.extproc.mcp_hosts` | `[]` | Hosts whose bodies are read as MCP calls |
-| `substrate.llm.providers` | all the gateway proxy serves | Providers actors may reach, only through the proxy |
+| `substrate.extproc.mcp_hosts`, `.body_hosts` | `[]` | Hosts whose bodies are read as MCP calls (`host` or `host=name`), and other hosts whose bodies get the secret scans |
+| `substrate.extproc.request_access` | none | The contact a refusal names |
+| `substrate.extproc.chain.check_budget`, `.failure_mode` | `20ms` (at most `500ms`), `auto` | How long the tool-chain check may take per request, and what a request does when it can't be checked: `auto` refuses for unattended actors and alerts for the rest, `closed` always refuses, `open` always alerts |
+| `substrate.extproc.ask.hold` | `1.5s` | How long a request waits for an ask. Keep it under the egress filter's 2 s message timeout |
+| `substrate.extproc.dlp.credential_headers` | `alert` | `alert` or `deny` for a secret-shaped credential header on a host no secret is bound to |
+| `substrate.extproc.actor_secrets_dir` | set by the chart from `callout.actorSecrets.secretName` | Where the callout reads the values of profiles' `actor_secrets` |
+| `substrate.llm.providers` | all the gateway proxy serves | Providers actors may reach, only through the proxy: `anthropic`, `openai`, `bedrock`, `gemini` |
+| `substrate.llm.bedrock_models` | `[]` | Bedrock model IDs actors may call. A call for another model goes to the first entry instead, through the same guardrails |
 | `substrate.llm.credential.provider_uri` | none | Where the model key comes from (`ate-secret://...`) |
+| `substrate.egress.allow`, `.ecosystem_packs`, `.registries` | `[]`, every pack, `[]` | The base egress every actor gets before its profile tightens it |
 | `substrate.secrets` | `[]` | See [Secrets](/docs/substrate/secrets) |
 | `substrate.allow_passthrough_for` | `[]` | Hosts that are not inspected. Never given a secret |
+| `substrate.admin` | none | The cluster floor, the same keys as `openshell.admin` plus the Substrate keys below. Profiles tighten it |
 
 Profile keys for Substrate: `profile_assignments[].match.substrate` (`atespaces`, `templates`, `workloads`). The `sandbox` section of a profile is the same as for OpenShell (`required_for`, `allowed_harnesses`, `egress_allow_only`, `allow_unblock`, `user_approvals` and the rest). See [Managed enterprise](/docs/substrate/enterprise).
 
@@ -109,7 +131,7 @@ Keys of the `sandbox` section (and of `substrate.admin`) for the runtime:
 | `unattended_asks` | `deny`, `queue` | What an unattended run's ask does. Unset: `substrate.unattended.asks` | `deny` wins |
 | `ask_timeout` | Go duration, 1m to 24h | How long a queued ask waits before it is denied. Unset: `substrate.unattended.ask_timeout` | The minimum |
 | `ask_hosts` | host names or `*.<host>` | Allowed hosts an agent reaches only after a person approves (the egress callout asks; `substrate approvals` answers). They never open a host the agent's allow list doesn't have | Added together |
-| `url_rules` | `{name, hosts, methods, path_prefix, action}` | Requests to a host the callout refuses (`deny`) or asks about (`ask`), by method and path prefix. Every matching rule counts, whatever its order, and the strictest wins: deny, then ask. An approval never lifts a deny, and covers that rule only; an `ask_hosts` approval covers the host. Method overrides (headers, `_method` in the query or a form body) count as each method they name | Added together |
+| `url_rules` | `{name, hosts, methods, path_prefix, action}` | Requests to a host the callout refuses (`deny`) or asks about (`ask`), by method and path prefix. `action` is `deny` or `ask`; a rule with `action: allow` is refused when the configuration loads. Every matching rule counts, whatever its order or which side (`substrate.admin` or a profile) wrote it, and the strictest wins: deny, then ask. An approval never lifts a deny. An approval covers the rule and method it was asked for (the ask shows `METHOD host /prefix*`); an `ask_hosts` approval covers the host. Method overrides (headers, `_method` in the query or a form body) count as each method they name | Added together |
 | `actor_secrets` | key names | Values a program inside the actor may read, keys of the Secret in `callout.actorSecrets.secretName`. Matched by exact value on prompts and egress | Intersection |
 
 `openshell.admin` refuses `sandbox_class`, `idle_suspend_after`, `unattended_asks`, `ask_timeout`, `actor_secrets`, `ask_hosts` and `url_rules`. `substrate.admin` refuses `allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*` keys.
@@ -121,14 +143,20 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | Value | Meaning |
 |---|---|
 | `config` | The DefenseClaw configuration, rendered into one ConfigMap |
+| `deploymentMode` | `managed_enterprise` sets `config.deployment_mode`, mounts `config.yaml` as one read-only file and gives each pod a private data volume (`managed.serviceAccountName`, `managed.dataSizeLimit`) |
 | `bootstrap.ownerTokenSecret` | A Substrate global owner's token for the one-time access-policy bootstrap |
 | `managedAtespaces` | Other atespaces DefenseClaw writes policy in |
 | `substrate.namespace`, `substrate.apiAddress` | Where Substrate runs |
 | `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway |
-| `leader.store.size`, `leader.store.keepOnUninstall` | The leader's volume |
+| `gateway.relaySessionSecret` | The Secret holding the relay session key pair (`private.pem` signs attach tokens, `public.pem` goes into agent images). The relay-session hook creates it when absent, never replaces it, and uninstall keeps it. Default `defenseclaw-relay-session` |
+| `gateway.llmCredentialsSecret` | The Secret with one model key per provider (`anthropic`, `openai`, `bedrock`, `gemini`). Default `defenseclaw-llm` |
 | `gateway.authDelegatorBinding` | Name of the ClusterRoleBinding of the gateway to `system:auth-delegator`, rendered only for the Kubernetes sign-in (no OIDC issuer). Default `defenseclaw-auth-delegator-<namespace>-<release>` |
+| `leader.store.size`, `leader.store.keepOnUninstall` | The leader's volume |
+| `controller.templateAnchorsSecret` | The admin-only Secret with the template trust anchors. Default `defenseclaw-template-anchors` |
 | `callout.judge.tokenSecret` | The callout's token for the MCP tool-rules route. Default `defenseclaw-callout-judge`, which the chart creates. `""` turns the route off: MCP tool calls then raise an alert, and a managed install refuses them |
-| `networkPolicy.adminFrom`, `adminIngress.*` | Who can reach the admin Service |
+| `callout.actorSecrets.secretName` | A Secret whose keys are the values profiles' `actor_secrets` expose. Mounted in the callout and the gateway only |
+| `admin.expose.type`, `admin.expose.ingress.*`, `admin.url`, `admin.tlsSecretName` | How laptops reach the admin Service, and the https address published for `login --kube` |
+| `networkPolicy.adminFrom` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |
 | `observability.local.enabled` | A local collector for trying the chart |
 

@@ -9,8 +9,6 @@ keywords:
   - unattended coding agents
 ---
 
-{/* TODO(substrate): Substrate support ships in DefenseClaw 1.0.10. Re-check every command, flag and output on this section against the merged code before the PR is marked ready (list in lanes/a7/PROGRESS.md). */}
-
 [Agent Substrate](https://ate.dev) is an open-source runtime, a CNCF sandbox project, for running agents on Kubernetes. Each agent is an **actor**: a container in its own gVisor sandbox or microVM. When an actor is idle, Substrate saves its memory and files and frees the machine. It brings the actor back in under a second on any machine in the cluster.
 
 DefenseClaw protects an agent in an actor the way it protects one in an [OpenShell sandbox](/docs/sandboxes): every tool call, every model request and every site the agent reaches is checked. The difference is **where the agent runs**.
@@ -44,7 +42,7 @@ cd ~/code/myapp
 defenseclaw substrate run claude
 ```
 
-You get Claude Code in your terminal, with a DefenseClaw banner first. What happens around it:
+You get Claude Code in your terminal, with a short DefenseClaw banner first. What happens around it:
 
 <Flow direction="TB" caption="One Agent Substrate session. The agent runs in the cluster; your terminal is a window onto it. Leaving doesn't stop the agent.">
   <Node id="run" kind="operator">{`Start the agent\ndefenseclaw substrate run claude`}</Node>
@@ -71,4 +69,6 @@ You get Claude Code in your terminal, with a DefenseClaw banner first. What happ
 
 ## Does every agent work
 
-Every agent DefenseClaw supports as a **command-line tool** can run in an actor, in three waves. Desktop and IDE apps can't, because an actor is a Linux container with no screen. Some features differ: no live folder, no host ports, no local MCP servers. Some are new: suspend and resume, any laptop OS, always-on model guardrails, unattended batches. See [Agents and features](/docs/substrate/agents).
+Ten command-line agents are built to run in an actor: Claude Code, Codex, OpenCode, GitHub Copilot CLI, Hermes, Kiro CLI, Antigravity CLI, Cursor Agent CLI, Amp and Devin CLI. Not all of them are proven on a model yet; [Agents and features](/docs/substrate/agents) says which are. Desktop and IDE apps can't run in an actor, because an actor is a Linux container with no screen.
+
+Some features differ: no live folder, no host ports, no local MCP servers. Some are new: suspend and resume, any laptop OS, always-on model guardrails, unattended batches.

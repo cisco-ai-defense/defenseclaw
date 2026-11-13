@@ -8,7 +8,6 @@ keywords:
   - Agent Substrate identity
 ---
 
-{/* TODO(substrate): routing, usage and cost rows depend on the 1.0.10 routing and tokenomics streams (owner session b6616583); confirm the exact behaviour when they merge. Tool-chain rows depend on A13. */}
 
 Every DefenseClaw feature runs in the cluster gateway, the same code as on a laptop. What changes is how each one gets its inputs. On a laptop, DefenseClaw reads the machine. In a cluster, it hears only what reaches it through Substrate: hook calls, model calls, web requests, and the control plane's list of templates and agents.
 
@@ -29,7 +28,14 @@ Every DefenseClaw feature runs in the cluster gateway, the same code as on a lap
 
 ## Routing, budgets and cost
 
-Because every model call passes the proxy, the 1.0.10 routing and tokenomics features apply to every agent in an actor, for the first time on any DefenseClaw runtime: semantic and admin routing rules, budgets (warn, downgrade or deny), and per-call usage and cost records. The caller is the verified actor and person from the signed token, never a header the agent sends. `defenseclaw substrate usage` shows your own usage, and a batch's total with `--batch`. Metrics carry no person or actor labels.
+Because every model call passes the guardrail proxy, the model request and reply checks apply to every agent that routes through the gateway, and the caller is the verified actor and person from the signed token, never a header the agent sends.
+
+What is **not** in this release yet: semantic and admin routing rules, budgets (warn, downgrade or deny) and per-call usage and cost records. They belong to the 1.0.10 routing and tokenomics work, which is not merged into the release branch yet. Until it is:
+
+- `defenseclaw substrate usage` answers "this cluster does not offer that yet; ask your administrator to upgrade DefenseClaw on it". `usage --batch` does too.
+- No budget applies to an actor or a batch.
+- The fleet view has no spend.
+- Metrics carry no person or actor labels.
 
 ## Policies
 
@@ -47,13 +53,13 @@ Because every model call passes the proxy, the 1.0.10 routing and tokenomics fea
 | Feature | Coverage | How it works in the cluster |
 |---|---|---|
 | Scan before use | Changed, stronger | `template build` scans the agent's skills, plugins, MCP servers and agent config inside the image, then signs the result. Agents from unscanned images get no network |
-| Scan at run time | Changed | When an agent adds a skill or MCP server mid-session, the hook sends the files to the gateway for scanning (size-capped, as in OpenShell copy mode), because the gateway can't read the agent's disk. A skill folder that fails is moved out of the skill folder. One that arrives without a scan is refused in managed installs and the strict tier, and raises an alert otherwise |
+| Scan at run time | Changed, weaker | skill-scanner does not run in the cluster. A skill that ships in an attested template is trusted by its digest, because the signed attestation lists it. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it and raise an alert; open source allows it and raises an alert |
 | Remote MCP servers | Same, plus network | Allowed MCP servers are named in the allow list. The egress callout reads the body of a call to a listed MCP host (up to 1 MiB) to apply tool rules, and admission decides as usual |
-| MCP servers started inside the actor from the repo | Changed | The hook sends the server's files with the admission request so the MCP scanner can read them |
+| MCP servers started inside the actor from the repo | Not scanned at run time yet | The gateway does not yet scan an MCP server the agent adds mid-session (a repository `.mcp.json`, a written MCP config, `mcp add`). Servers in the image are scanned at build. Tool-call hooks and the egress policy still apply to what the server does |
 | Local MCP servers on your laptop | Not available | An agent in the cluster can't reach your machine |
 | Registries (skill and MCP catalogs) | Same | Clean catalog entries are promoted into admission and, for MCP, into the allow list |
 
-Reading a body needs a Substrate version that lets the callout ask for it. Without it the callout still checks headers, hosts and URLs, `doctor` says "headers only", and MCP tool rules fall back to the hook path.
+Reading a body needs a Substrate version that lets the callout ask for it. Without it the callout still checks headers, hosts and URLs, `verify` says "headers only", and MCP tool rules fall back to the hook path.
 
 ## AI discovery
 
@@ -91,7 +97,7 @@ Reading a body needs a Substrate version that lets the callout ask for it. Witho
 | Who | Coverage | How it works in the cluster |
 |---|---|---|
 | The agent | New, stronger | Substrate signs each agent's identity, and DefenseClaw trusts nothing the agent says about itself. The gateway also checks that the actor is alive with that UID |
-| The person | Changed | Company sign-in (Okta, Entra ID or any OIDC provider) through `defenseclaw substrate login`. Active Directory works through the provider's AD connection |
+| The person | Changed | Company sign-in (Okta, Entra ID or any OIDC provider), or on an open-source cluster without one your Kubernetes identity, through `defenseclaw substrate login`. Active Directory works through the provider's AD connection |
 | CI | New | A workload identity (GitHub Actions OIDC or a Kubernetes service-account token) is the "person" for a batch |
 | Profile choice | Same | The same profile assignments, matched on sign-in groups and, for agents started outside the launcher, on atespace and template |
 | Unverified people | Same | Get `default_profile`, as on managed laptops |
