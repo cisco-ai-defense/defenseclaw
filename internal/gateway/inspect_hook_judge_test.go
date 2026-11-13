@@ -301,6 +301,41 @@ func TestHookJudge_ToolResultMapsToCompletionDirection(t *testing.T) {
 	}
 }
 
+// A Claude Code PostToolUse hands the tool-result judge (the PII judge on
+// completion-shaped tool output on rel/1.0.10) its tool and call (the hook
+// inspects the output as "message"), and the session's user request from
+// UserPromptSubmit, outside the sample.
+func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
+	mock := injectionHitProvider()
+	a := newHookJudgeAPIServer(t,
+		config.JudgeConfig{Enabled: true, PII: true, PIICompletion: true, HookConnectors: []string{"claudecode"}},
+		"judge_first", mock)
+	a.scannerCfg.Guardrail.Connector = "claudecode"
+	home := t.TempDir()
+	ctx := ContextWithSessionID(t.Context(), "s-trctx")
+	judge := a.hookJudge.Load()
+	judge.ObserveSessionPrompt(ctx, "update the parser fixtures")
+	a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
+		HookEventName: "PostToolUse", SessionID: "s-trctx", CWD: home, ToolName: "Read",
+		ToolInput:    map[string]interface{}{"file_path": filepath.Join(home, "testdata", "cases.json")},
+		ToolResponse: map[string]interface{}{"content": "{\"case\": 1, \"text\": \"fixture row for the parser tests\"}"},
+	})
+	var system string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			system = req.Messages[0].Content
+		}
+	}
+	if system == "" {
+		t.Fatalf("no tool-result judge call with the context block (%d calls)", len(mock.captured))
+	}
+	for _, want := range []string{"\ntool: Read\n", "\ncall: read ", filepath.Join("testdata", "cases.json"), "\nuser_request: update the parser fixtures"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system message lacks %q:\n%s", want, system)
+		}
+	}
+}
+
 // HookConnectorEnabled gating matrix: case-insensitive names, the "*"
 // wildcard, judge.enabled as a hard precondition, and empty-list-off.
 func TestJudgeHookConnectorEnabled(t *testing.T) {
