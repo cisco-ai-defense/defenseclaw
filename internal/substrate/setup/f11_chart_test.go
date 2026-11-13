@@ -128,4 +128,23 @@ func TestGAP0190ChartRegistryLogins(t *testing.T) {
 			t.Error("componentAnnotations.leader accepted")
 		}
 	})
+	t.Run("GAP-0198: group names render verbatim", func(t *testing.T) {
+		pods, _, _ := f11Render(t, renderChart(t, helm, "default", "--set-json",
+			`gateway.adminGroups=["ops #1","a: b","plain"]`))
+		args := pods["defenseclaw-gateway"].args
+		for _, w := range []string{"--admin-groups=ops #1", "--admin-groups=a: b", "--admin-groups=plain"} {
+			if !slices.Contains(args, w) {
+				t.Errorf("gateway args lack %q: %q", w, args)
+			}
+		}
+		if slices.Contains(args, "--admin-groups=ops") {
+			t.Error("a group name was cut at a YAML comment")
+		}
+	})
+	t.Run("schema refuses an OIDC CA key that is not a file name", func(t *testing.T) {
+		args := []string{"template", "dc", chartDir, "--kube-version", chartKubeVersion, "--set", "gateway.oidcCA.configMap=c,gateway.oidcCA.key=../x"}
+		if err := exec.Command(helm, args...).Run(); err == nil {
+			t.Error("oidcCA.key=../x accepted")
+		}
+	})
 }

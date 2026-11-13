@@ -66,10 +66,11 @@ spec:
         {{- include "dc.peerFlags" . | nindent 8 }}
         {{- end }}
         {{- range .Values.gateway.adminGroups }}
-        - --admin-groups={{ . }}
+        # Quoted: a group name is data, never YAML (GAP-0198).
+        - {{ printf "--admin-groups=%s" . | quote }}
         {{- end }}
         {{- if or .Values.gateway.oidcCA.configMap .Values.gateway.oidcCA.secret }}
-        - --oidc-ca-file=/etc/defenseclaw/oidc-ca/{{ .Values.gateway.oidcCA.key }}
+        - {{ printf "--oidc-ca-file=/etc/defenseclaw/oidc-ca/%s" .Values.gateway.oidcCA.key | quote }}
         {{- end }}
         {{- with .Values.gateway.extraArgs }}
         {{- toYaml . | nindent 8 }}

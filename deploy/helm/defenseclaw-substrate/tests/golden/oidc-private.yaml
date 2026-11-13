@@ -1329,9 +1329,11 @@ spec:
         - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
         - --callout-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
         - --controller-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
-        - --admin-groups=dc-admins
-        - --admin-groups=platform-admins
-        - --oidc-ca-file=/etc/defenseclaw/oidc-ca/ca.crt
+        # Quoted: a group name is data, never YAML (GAP-0198).
+        - "--admin-groups=dc-admins"
+        # Quoted: a group name is data, never YAML (GAP-0198).
+        - "--admin-groups=platform-admins"
+        - "--oidc-ca-file=/etc/defenseclaw/oidc-ca/ca.crt"
         - --chain-egress-action=alert
         env:
         - name: DEFENSECLAW_CONFIG

@@ -1347,7 +1347,7 @@ spec:
         - --peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-gateway
         - --callout-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-callout
         - --controller-peer-id=spiffe://cluster.local/ns/defenseclaw-system/sa/defenseclaw-controller
-        - --oidc-ca-file=/etc/defenseclaw/oidc-ca/ca.crt
+        - "--oidc-ca-file=/etc/defenseclaw/oidc-ca/ca.crt"
         env:
         - name: DEFENSECLAW_CONFIG
           value: /etc/defenseclaw/config.yaml

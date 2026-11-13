@@ -325,7 +325,8 @@
             },
             "key": {
               "type": "string",
-              "minLength": 1
+              "minLength": 1,
+              "pattern": "^[-._a-zA-Z0-9]+$"
             },
             "secret": {
               "type": "string"
