@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -23,6 +24,9 @@ type gap0104Row struct {
 	name, command    string
 	defaults, strict string
 	rule             string
+	// posix: the archive-extraction state check reads a POSIX home only
+	// (rel-1-0-10:GAP-0154).
+	posix bool
 }
 
 func newGAP0104Home(t *testing.T) gap0048Home {
@@ -107,9 +111,9 @@ func TestGAP0104ShellReadsOfProtectedFilesStayAllowed(t *testing.T) {
 		{name: "ln over state", command: `ln -sf /tmp/gap0104-evil ~/.defenseclaw/config.yaml`, defaults: "block", strict: "block", rule: state},
 		{name: "find exec shell body truncates hooks", command: `find ~/.defenseclaw/hooks -type f -exec sh -c 'for f do : > "$f"; done' sh {} +`, defaults: "block", strict: "block", rule: state},
 		// rel-1-0-10:GAP-0142: an extraction that names a state member.
-		{name: "tar extract a named state member into the home", command: `tar -xf /tmp/gap0104.tar -C ~ .defenseclaw/config.yaml`, defaults: "block", strict: "block", rule: state},
-		{name: "old-style tar extract a named hooks member", command: `tar xf /tmp/gap0104.tar -C ~ .defenseclaw/hooks/codex-hook.sh`, defaults: "block", strict: "block", rule: state},
-		{name: "unzip a named state member into the home", command: `unzip -o /tmp/gap0104.zip .defenseclaw/config.yaml -d ~`, defaults: "block", strict: "block", rule: state},
+		{name: "tar extract a named state member into the home", command: `tar -xf /tmp/gap0104.tar -C ~ .defenseclaw/config.yaml`, defaults: "block", strict: "block", rule: state, posix: true},
+		{name: "old-style tar extract a named hooks member", command: `tar xf /tmp/gap0104.tar -C ~ .defenseclaw/hooks/codex-hook.sh`, defaults: "block", strict: "block", rule: state, posix: true},
+		{name: "unzip a named state member into the home", command: `unzip -o /tmp/gap0104.zip .defenseclaw/config.yaml -d ~`, defaults: "block", strict: "block", rule: state, posix: true},
 		{name: "find exec python writes state", command: `find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`, defaults: "block", strict: "block", rule: state},
 	}
 	for _, profile := range []string{"default", "strict"} {
@@ -125,6 +129,9 @@ func TestGAP0104ShellReadsOfProtectedFilesStayAllowed(t *testing.T) {
 				}
 				t.Run(row.name, func(t *testing.T) {
 					t.Parallel()
+					if row.posix && runtime.GOOS == "windows" {
+						t.Skip("POSIX home only (rel-1-0-10:GAP-0154)")
+					}
 					got := judge(h.project, false, "Bash", map[string]any{"command": row.command})
 					// A sudo read alerts on CMD-SUDO (LOW) in strict: not a
 					// self-protection finding.

@@ -55,7 +55,7 @@ func archiveExtractsIntoState(facts actionfacts.Facts, request trustedActionRequ
 	}
 	// A member the extraction names lands below its folder by that name:
 	// `tar -xf x.tar -C ~ .defenseclaw/config.yaml` writes the state file
-	// from the home (rel-1-0-10:GAP-0142).
+	// from the home (rel-1-0-10:GAP-0142; a Windows home is GAP-0154).
 	members := archiveNamedMembers(facts)
 	for _, full := range hookpaths.ArchiveExtractionFolders(command, facts.CWD, home) {
 		full = path.Clean(filepath.ToSlash(full))

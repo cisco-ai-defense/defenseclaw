@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -29,6 +30,12 @@ func TestGAP0104RegistrationFlowCountsOnlyWritingParts(t *testing.T) {
 	cwd := filepath.Join(home, "proj")
 	if err := os.MkdirAll(cwd, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	// A Windows home is spelled with backslashes; the flow net's mention of
+	// ~/... does not match it there (rel-1-0-10:GAP-0154).
+	posixOnly := map[string]bool{
+		`tar -xf /tmp/a.tar -C ~/.codex config.toml; echo ok > /tmp/x`: true,
+		`eval "cat ~/.claude/settings.json" > /tmp/o`:                  true,
 	}
 	for _, tc := range []struct {
 		command string
@@ -58,6 +65,9 @@ func TestGAP0104RegistrationFlowCountsOnlyWritingParts(t *testing.T) {
 		{`mv ~/.claude/settings.json /tmp/s.json; echo ok > /tmp/x`, []string{settings}},
 		{`eval "cat ~/.claude/settings.json" > /tmp/o`, []string{settings}},
 	} {
+		if posixOnly[tc.command] && runtime.GOOS == "windows" {
+			continue
+		}
 		got := RegistrationWriteReached(tc.command, cwd, home, names)
 		if !slices.Equal(got, tc.want) {
 			t.Errorf("%q: reached %v, want %v", tc.command, got, tc.want)
