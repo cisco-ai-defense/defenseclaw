@@ -53,6 +53,42 @@ func pathEffectState(facts []*semanticpb.EffectFact, set string) (string, bool) 
 	return "", false
 }
 
+// strongestState folds the protected state of a set across every path-target
+// effect: known beats unknown beats no.
+func strongestState(facts []*semanticpb.EffectFact, set string) string {
+	best := semantic.ProtectedNo
+	for _, f := range facts {
+		if f.GetTarget().GetType() != "path" {
+			continue
+		}
+		st := semantic.ProtectedState(f.GetTarget(), set)
+		if st == semantic.ProtectedKnown {
+			return semantic.ProtectedKnown
+		}
+		if st == semantic.ProtectedUnknown {
+			best = semantic.ProtectedUnknown
+		}
+	}
+	return best
+}
+
+func TestProjectOutsideHome(t *testing.T) {
+	cases := []struct{ name, command, set, want string }{
+		{"outside-home case 1: tar extract to /etc is outside_home unknown", `tar -xf a.tar -C /etc`, SetOutsideHome, semantic.ProtectedUnknown},
+		{"outside-home case 2: dynamic destination is outside_home unknown", `echo x > "$DEST"`, SetOutsideHome, semantic.ProtectedUnknown},
+		{"outside-home case 3: ordinary home write is clean everywhere", `echo x > ~/work/out.txt`, "", semantic.ProtectedNo},
+		{"outside-home case 4: ordinary home write not outside_home", `echo x > ~/work/out.txt`, SetOutsideHome, semantic.ProtectedNo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			facts := projectCommand(t, tc.command, Env{Home: testHome, Resolve: fakeResolver(nil)})
+			if got := strongestState(facts, tc.set); got != tc.want {
+				t.Fatalf("command %q set %q: state = %q, want %q", tc.command, tc.set, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProjectProtectedGrades(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -145,8 +181,8 @@ func TestProjectProtectedGrades(t *testing.T) {
 func TestProjectAgentCreated(t *testing.T) {
 	created := map[string]bool{"/tmp/test-artifact": true}
 	env := Env{
-		Home:    testHome,
-		Resolve: fakeResolver(nil),
+		Home:         testHome,
+		Resolve:      fakeResolver(nil),
 		AgentCreated: func(key string) bool { return created[key] },
 	}
 	facts := projectCommand(t, `rm /tmp/test-artifact`, env)

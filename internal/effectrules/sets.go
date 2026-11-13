@@ -31,6 +31,12 @@ const (
 	SetCredentials       = "credentials"
 	SetAgentHookConfig   = "agent_hook_config"
 	SetSelfProtection    = "self_protection"
+	// SetOutsideHome is not a lexical set. It flags an unresolved mutation
+	// whose destination is away from the user home (an absolute path not
+	// under home, or a fully dynamic target): per the lead ruling it alerts
+	// in OSS default and permissive and blocks in strict and managed. An
+	// archive extraction that writes outside home is the motivating case.
+	SetOutsideHome = "outside_home"
 )
 
 // AllSets is the grading order; stable for tests and output.

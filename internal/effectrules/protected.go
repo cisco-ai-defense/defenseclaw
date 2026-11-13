@@ -78,12 +78,11 @@ func gradeTarget(t effects.Target, state effects.TargetState, set protectedSet, 
 		// list, or a link placed there) stays suspect.
 		return gradeUnknown
 	}
-	// The resolver could trust the path and it is neither a member nor under
-	// a protected location. Still, a lexically unresolved target_state means
-	// the path we placed may be wrong.
-	if state != effects.TargetStateKnown {
-		return gradeUnknown
-	}
+	// The resolver trusted the path and it is neither a member nor under a
+	// protected location of this set. A lexically unresolved target_state is
+	// not, by itself, a match for a named set; the away-from-home signal
+	// (outside_home) covers an unresolved mutation whose destination we
+	// cannot vouch for.
 	return gradeNo
 }
 

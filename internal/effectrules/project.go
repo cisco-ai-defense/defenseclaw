@@ -64,7 +64,7 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 				Wrappers: append([]string(nil), e.Origin.Wrappers...),
 				Depth:    int64(e.Origin.Depth),
 			},
-			Target: projectTarget(e.Target, e.TargetState, sets, flavor, rsv, env.AgentCreated),
+			Target: projectTarget(e.Target, e.TargetState, e.Kind, sets, flavor, env.Home, rsv, env.AgentCreated),
 		}
 		if e.Data != nil {
 			fact.DataKind = string(e.Data.Kind)
@@ -78,8 +78,10 @@ func Project(res effects.Result, env Env) []*semanticpb.EffectFact {
 func projectTarget(
 	t effects.Target,
 	state effects.TargetState,
+	kind effects.Kind,
 	sets map[string]protectedSet,
 	flavor effects.Flavor,
+	home string,
 	rsv resolver,
 	agentCreated func(string) bool,
 ) *semanticpb.EffectTarget {
@@ -113,7 +115,42 @@ func projectTarget(
 			State: string(grade),
 		})
 	}
+	if awayFromHomeUnknown(t, state, kind, home, flavor) {
+		pt.Protected = append(pt.Protected, &semanticpb.ProtectedMatch{
+			Set:   SetOutsideHome,
+			State: string(gradeUnknown),
+		})
+	}
 	return pt
+}
+
+// awayFromHomeUnknown reports a mutation whose destination we cannot vouch
+// for: an unresolved target (dynamic, glob or a link the resolver could not
+// follow) that is away from the user home. A fully dynamic target counts
+// (it could land anywhere); a concrete absolute path counts only when it is
+// not under home. A resolved target under home is the agent's own workspace
+// and is not flagged.
+func awayFromHomeUnknown(t effects.Target, state effects.TargetState, kind effects.Kind, home string, flavor effects.Flavor) bool {
+	if !mutatingKind(kind) || state == effects.TargetStateKnown {
+		return false
+	}
+	if t.Path == "" {
+		return true // fully dynamic: could be away from home
+	}
+	if home == "" {
+		return true
+	}
+	return !atOrUnder(canon(t.Path, flavor), canon(home, flavor))
+}
+
+func mutatingKind(kind effects.Kind) bool {
+	switch kind {
+	case effects.KindWrite, effects.KindAppend, effects.KindDelete,
+		effects.KindLink, effects.KindPermissionChange:
+		return true
+	default:
+		return false
+	}
 }
 
 func projectSources(in []effects.Source) []*semanticpb.EffectSource {
