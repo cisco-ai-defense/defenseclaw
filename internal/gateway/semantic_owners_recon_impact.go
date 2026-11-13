@@ -782,8 +782,8 @@ func (t sudoTargetUser) nonRoot() bool {
 		return false
 	}
 	for _, r := range user {
-		if !(r == '_' || r == '-' || r == '.' || r == '@' || r == '\\' ||
-			r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+		if r != '_' && r != '-' && r != '.' && r != '@' && r != '\\' &&
+			(r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
 			return false
 		}
 	}
