@@ -94,7 +94,7 @@ type loneHookDecisionKey struct{}
 type loneHookDecisionMode int
 
 const (
-	loneHookDecisionNone loneHookDecisionMode = iota
+	_ loneHookDecisionMode = iota // not lone: the zero value
 	// loneHookDecisionOfRecord: the row of record of a benign per-user
 	// allow. No connector-hook row ever follows it.
 	loneHookDecisionOfRecord
