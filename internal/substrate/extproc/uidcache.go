@@ -29,13 +29,19 @@ import (
 // window are dropped, then everything.
 const maxUIDEntries = 1 << 16
 
+// uidMissTTL is how long "no registration" is reused: a launched actor is
+// registered right after it is created, and its chain window starts with
+// its first hook, so a miss must not hide it for the full TTL.
+const uidMissTTL = time.Second
+
 // ErrActorNotLive reports an actor the Control API says is not running.
 var ErrActorNotLive = errors.New("extproc: actor is not live")
 
 // UIDCache caches a UIDResolver per atespace/name. A fresh entry (younger
-// than ttl) is used as is; when the resolver fails, an entry younger than
-// staleMax still serves (§5.5). Lifecycle events call Invalidate so a
-// recreated actor never inherits its predecessor's UID.
+// than ttl, or uidMissTTL for an unregistered actor) is used as is; when
+// the resolver fails, an entry younger than staleMax still serves (§5.5).
+// Lifecycle events call Invalidate so a recreated actor never inherits its
+// predecessor's UID.
 type UIDCache struct {
 	r        UIDResolver
 	ttl      time.Duration
@@ -48,37 +54,44 @@ type UIDCache struct {
 }
 
 type uidEntry struct {
-	uid  string
+	rec  ActorRecord
 	live bool
 	at   time.Time
 }
 
+func (e uidEntry) fresh(now time.Time, ttl time.Duration) bool {
+	if e.live && e.rec.UID == "" {
+		ttl = min(ttl, uidMissTTL)
+	}
+	return now.Sub(e.at) < ttl
+}
+
 // NewUIDCache wraps r. A nil r resolves nothing: every actor is live with
-// an empty UID (the interim until A3's client lands).
+// no registration (a callout without a leader).
 func NewUIDCache(r UIDResolver, ttl, staleMax time.Duration) *UIDCache {
 	return &UIDCache{r: r, ttl: ttl, staleMax: staleMax, now: time.Now, m: map[string]uidEntry{}}
 }
 
-// Resolve returns the live UID of a. ErrActorNotLive: the actor is gone or
-// stopped. Any other error is an outage with no usable cached entry.
-func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (string, error) {
+// Resolve returns a's current incarnation. ErrActorNotLive: the actor was
+// deleted. Any other error is an outage with no usable cached entry.
+func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (ActorRecord, error) {
 	if c == nil || c.r == nil {
-		return "", nil
+		return ActorRecord{}, nil
 	}
 	key := a.Key()
 	now := c.now()
 	c.mu.Lock()
 	e, ok := c.m[key]
 	c.mu.Unlock()
-	if ok && now.Sub(e.at) < c.ttl {
+	if ok && e.fresh(now, c.ttl) {
 		return e.result()
 	}
 	v, err, _ := c.sf.Do(key, func() (any, error) {
-		uid, live, err := c.r.ResolveUID(ctx, a.Atespace, a.Name)
+		rec, live, err := c.r.ResolveActor(ctx, a.Atespace, a.Name)
 		if err != nil {
 			return nil, err
 		}
-		ne := uidEntry{uid: uid, live: live && uid != "", at: c.now()}
+		ne := uidEntry{rec: rec, live: live, at: c.now()}
 		c.store(key, ne)
 		return ne, nil
 	})
@@ -86,16 +99,16 @@ func (c *UIDCache) Resolve(ctx context.Context, a ActorRef) (string, error) {
 		if ok && now.Sub(e.at) < c.staleMax {
 			return e.result()
 		}
-		return "", err
+		return ActorRecord{}, err
 	}
 	return v.(uidEntry).result()
 }
 
-func (e uidEntry) result() (string, error) {
+func (e uidEntry) result() (ActorRecord, error) {
 	if !e.live {
-		return "", ErrActorNotLive
+		return ActorRecord{}, ErrActorNotLive
 	}
-	return e.uid, nil
+	return e.rec, nil
 }
 
 func (c *UIDCache) store(key string, e uidEntry) {

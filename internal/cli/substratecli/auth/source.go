@@ -129,17 +129,25 @@ func (s *Source) workload(ctx context.Context) (string, error) {
 
 // kubeLocked returns the kube bearer, read again when the kept one is
 // within refreshSkew of its expiry, older than kubeNoExpiryKeep when it
-// states no expiry, or came from a tokenFile.
+// states no expiry, or came from a tokenFile. On every call it first
+// checks the pin of login --kube (checkKubePin): the admin URL and the
+// kubeconfig's cluster must be the verified ones, else no token.
 func (s *Source) kubeLocked(ctx context.Context) (*Token, error) {
-	now := s.now()
-	if s.kube != nil && now.Before(s.kubeUntil) {
-		return s.kube, nil
-	}
 	o := *s.opts.Kube
 	if o.Now == nil {
 		o.Now = s.now
 	}
-	t, fromFile, err := kubeResolve(ctx, o)
+	o = o.withDefaults()
+	sel, err := checkKubePin(s.ctx, o)
+	if err != nil {
+		s.kube = nil
+		return nil, err
+	}
+	now := s.now()
+	if s.kube != nil && now.Before(s.kubeUntil) {
+		return s.kube, nil
+	}
+	t, fromFile, err := kubeCredential(ctx, o, sel)
 	if err != nil {
 		s.kube = nil
 		return nil, err

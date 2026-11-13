@@ -93,7 +93,12 @@ type Registration struct {
 	// the intent store, a verified source of the run's intent).
 	TaskDigest string `json:"task_digest,omitempty"`
 	// Secrets are the names of the per-person secrets bound to the actor.
-	Secrets   []string  `json:"secrets,omitempty"`
+	Secrets []string `json:"secrets,omitempty"`
+	// Approved are the hosts asks approved for this actor (the controller
+	// adds them to its policy).
+	Approved []string `json:"approved,omitempty"`
+	// ForkedBy is defenseclaw or unknown for a fork (ParentUID set).
+	ForkedBy  string    `json:"forked_by,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// Deleted is a tombstone: the actor was deleted (E10).
 	Deleted bool `json:"deleted,omitempty"`
@@ -112,8 +117,13 @@ func (r *Registration) Validate() error {
 		return errors.New("registry: key does not name the atespace and UID")
 	}
 	r.Key = key
-	if strings.TrimSpace(r.Name) == "" || strings.TrimSpace(r.Connector) == "" {
-		return errors.New("registry: a registration names its actor and connector")
+	if strings.TrimSpace(r.Name) == "" {
+		return errors.New("registry: a registration names its actor")
+	}
+	// An attributed actor (made outside DefenseClaw) has no launcher to
+	// name its connector; every launched one has.
+	if !r.Attributed && strings.TrimSpace(r.Connector) == "" {
+		return errors.New("registry: a launched actor names its connector")
 	}
 	if !r.Attributed && r.Person.Subject == "" {
 		return errors.New("registry: a launched actor has a verified person")
@@ -150,6 +160,42 @@ func (f Filter) match(r Registration) bool {
 		return false
 	}
 	return true
+}
+
+// Lookup is what the callout learns of an actor from its name, the only
+// identity atenet-egress gives it (GAP-0090): the newest incarnation's
+// UID, profile and attendance. No person, secret or approval leaves the
+// leader this way.
+type Lookup struct {
+	Found bool `json:"found"`
+	// Deleted is a tombstone for the newest incarnation: the actor is gone.
+	Deleted    bool   `json:"deleted,omitempty"`
+	UID        string `json:"uid,omitempty"`
+	Profile    string `json:"profile,omitempty"`
+	Unattended bool   `json:"unattended,omitempty"`
+}
+
+// LookupName finds the newest registration of atespace/name. An actor name
+// is reused only after a delete (the launcher never reuses one, GAP-0133),
+// so the newest record is the running incarnation, or its tombstone.
+func LookupName(ctx context.Context, s Store, atespace, name string) (Lookup, error) {
+	if atespace == "" || name == "" {
+		return Lookup{}, errors.New("registry: a lookup names the atespace and the actor")
+	}
+	rs, err := s.List(ctx, Filter{Atespace: atespace, IncludeDeleted: true})
+	if err != nil {
+		return Lookup{}, err
+	}
+	var best *Registration
+	for i := range rs {
+		if rs[i].Name == name && (best == nil || rs[i].CreatedAt.After(best.CreatedAt)) {
+			best = &rs[i]
+		}
+	}
+	if best == nil {
+		return Lookup{}, nil
+	}
+	return Lookup{Found: true, Deleted: best.Deleted, UID: best.UID, Profile: best.Profile, Unattended: best.Unattended}, nil
 }
 
 // Store is a registration store.

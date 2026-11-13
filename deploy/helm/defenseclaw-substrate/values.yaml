@@ -23,6 +23,10 @@ substrate:
   egressSpiffeId: spiffe://cluster.local/ns/ate-system/sa/atenet-egress
   egressPodLabels:
     app: atenet-egress
+  # Container ports of the Substrate pods DefenseClaw calls (Substrate
+  # v1.0.0: ate-api-server 443 and 8445, ate-idp-server 8443). The egress
+  # NetworkPolicies match pod ports, not Service ports.
+  podPorts: [443, 8443, 8445]
   # The upstream Kubernetes credential provider. The bootstrap Job grants the
   # launcher atespaces the secrets namespace below in its namespace policy,
   # and the pre-delete Job removes the grant.
@@ -33,6 +37,16 @@ substrate:
     # The namespace holding the Secrets egress injects into actors (never
     # this release's namespace: DefenseClaw's own Secrets stay here).
     secretsNamespace: defenseclaw-actor-secrets
+
+# Sets config.deployment_mode. managed_enterprise mounts config.yaml as one
+# read-only file and gives each pod a data volume owned by the gateway
+# account (0700, through an init container), as the managed trust checks
+# require (GAP-0135).
+deploymentMode: ""
+managed:
+  # The account of the gateway UID in the image (distroless: nonroot).
+  serviceAccountName: nonroot
+  dataSizeLimit: 512Mi
 
 # DefenseClaw config.yaml, rendered as is into the defenseclaw-config
 # ConfigMap: the single source of the gateway, controller and callout config.
@@ -48,7 +62,7 @@ config:
       # Unique per cluster (E13): doctor fails when two clusters share one.
       issuer: https://idp.ate-system.svc
       audience: defenseclaw
-      token_lifetime_seconds: 900
+      token_lifetime_seconds: 300
     launcher_atespaces: {}
     require_attested_templates: true
     default_sandbox_class: gvisor
@@ -122,6 +136,12 @@ leader:
 
 controller:
   # One replica (no Lease client in the controller yet).
+  # The admin-only Secret with the template signing keys (key anchors.pem),
+  # mounted read-only in the controller and the gateway (its create path
+  # admits launcher actors the same way, GAP-0154) for
+  # substrate.templates.trust_anchors. Without it every template
+  # is refused (require_attested_templates).
+  templateAnchorsSecret: defenseclaw-template-anchors
   args: []
   resources:
     requests: {cpu: 100m, memory: 128Mi}
@@ -129,6 +149,16 @@ controller:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# Signed policy bundles (substrate.bundles): profiles and match.substrate
+# assignments for a stage of atespaces, verified against trust anchors. An
+# administrator creates the anchors Secret (bundle-anchors.json) before
+# enabling this; the controller and the gateway mount it read-only.
+bundles:
+  enabled: false
+  anchorsSecret: defenseclaw-bundle-anchors
+  # The GitOps inbox ConfigMap: <stage>.dcbundle and <stage>.atespaces.
+  inbox: defenseclaw-bundle-inbox
 
 # The atenet-egress ext_proc callout.
 callout:
@@ -148,8 +178,12 @@ callout:
   # MCP asset policy and tool rules) on the admin Service. Name a Secret with
   # the bearer token in key "token" to turn it on; without it the callout
   # applies only its own MCP rules.
+  # The callout's token for the MCP tool verdict route on the admin
+  # Service (GAP-0015): the chain-key hook creates this Secret when it is
+  # absent, so the tool rules run at egress by default. "" turns the route
+  # off (tools/call is then an alert on OSS and refused on managed).
   judge:
-    tokenSecret: ""
+    tokenSecret: defenseclaw-callout-judge
   # A Secret whose keys are the exposed actor_secrets values (one file per
   # name), for exact-value DLP on egress. Never mounted into actors.
   actorSecrets:
@@ -175,14 +209,44 @@ networkPolicy:
   adminFrom: []
   # Peers that may scrape the metrics ports.
   metricsFrom: []
+  # Egress limits for the pods that hold keys (gateway, leader, callout):
+  # DNS, the Kubernetes and Substrate APIs, the release's own Services,
+  # OTLP, and (gateway and leader only) model providers on 443.
+  egress:
+    enabled: true
+    # Ports of the OTLP collector(s) the pods export to.
+    otlpPorts: [4317, 4318]
+    # Extra egress rules (NetworkPolicyEgressRule) for every key-holding pod.
+    extra: []
 
-# The admin Service ingress for launchers (optional).
-adminIngress:
-  enabled: false
-  className: ""
-  host: ""
+# How launchers on laptops reach the admin listener (TLS). The actor
+# listener is never exposed outside the cluster.
+admin:
+  expose:
+    # ClusterIP (in-cluster only), LoadBalancer or Ingress.
+    type: ClusterIP
+    loadBalancer:
+      # Required for LoadBalancer: the client ranges allowed (also put in
+      # the NetworkPolicy; the Service keeps client addresses).
+      sourceRanges: []
+      annotations: {}
+    ingress:
+      className: ""
+      host: ""
+      # Required for Ingress: the TLS Secret the ingress serves. The ingress
+      # must re-encrypt to the admin listener (HTTPS backend), for example
+      # nginx.ingress.kubernetes.io/backend-protocol: HTTPS.
+      tlsSecretName: ""
+      annotations: {}
+  # The https URL laptops use for the admin listener, published in the
+  # ConfigMap defenseclaw-launcher-endpoint (the only URL login --kube sends
+  # a Kubernetes credential to). Default: the Ingress host, or the in-cluster
+  # admin Service; required for LoadBalancer.
+  url: ""
+  # A kubernetes.io/tls Secret with a certificate for the external name
+  # (LoadBalancer). Without it the admin listener presents its in-cluster
+  # serving certificate, which laptops do not trust for other names.
   tlsSecretName: ""
-  annotations: {}
 
 # OpenFGA bootstrap (post-install and post-upgrade Job). It creates the
 # launcher atespaces, writes their access policies (only DefenseClaw's

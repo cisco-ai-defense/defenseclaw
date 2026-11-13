@@ -57,11 +57,14 @@ type subAdminFake struct {
 	attachStatus int
 	statusBody   string
 
-	bundleBody  []byte
-	bundleQuery url.Values
-	bundleType  string
-	bundleAuth  string
-	bundleCalls int
+	bundleBody     []byte
+	bundleQuery    url.Values
+	bundleType     string
+	bundleAuth     string
+	bundleCalls    int
+	bundleClient   string
+	rollbackBody   []byte
+	rollbackClient string
 }
 
 func newSubAdminFake(t *testing.T) *subAdminFake {
@@ -95,7 +98,7 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 		b, _ := json.Marshal(f.verifyDoc)
 		writeJSONStatus(w, 200, string(b))
 	})
-	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/dcrelay/1/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v1/substrate/actors/a1/n1/attach/status", func(w http.ResponseWriter, r *http.Request) {
 		if f.attachStatus != 200 {
 			writeJSONStatus(w, f.attachStatus, `{"error":"x","reason":"attach"}`)
 			return
@@ -110,11 +113,17 @@ func newSubAdminFake(t *testing.T) *subAdminFake {
 		f.bundleCalls++
 		f.bundleBody, _ = io.ReadAll(r.Body)
 		f.bundleQuery, f.bundleType, f.bundleAuth = r.URL.Query(), r.Header.Get("Content-Type"), r.Header.Get("Authorization")
+		f.bundleClient = r.Header.Get("X-DefenseClaw-Client")
 		if f.bundleStatus != 200 {
 			writeJSONStatus(w, f.bundleStatus, `{"error":"x","reason":"nope"}`)
 			return
 		}
 		writeJSONStatus(w, 200, `{"accepted":true,"generation":7}`)
+	})
+	mux.HandleFunc("/api/v1/substrate/bundle/rollback", func(w http.ResponseWriter, r *http.Request) {
+		f.rollbackBody, _ = io.ReadAll(r.Body)
+		f.rollbackClient = r.Header.Get("X-DefenseClaw-Client")
+		writeJSONStatus(w, 200, `{"result":"rolled_back","version":3}`)
 	})
 	mux.HandleFunc("/api/v1/substrate/bundle/status", func(w http.ResponseWriter, r *http.Request) {
 		if f.statusStatus != 200 {
@@ -441,14 +450,20 @@ func TestSubstrate_Admin_BundleApply(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(f.bundleBody, payload) {
-			t.Errorf("body %q", f.bundleBody)
+		var sent struct {
+			Name      string   `json:"name"`
+			Bundle    []byte   `json:"bundle"`
+			Stage     string   `json:"stage"`
+			Atespaces []string `json:"atespaces"`
 		}
-		if f.bundleType != "application/octet-stream" || f.bundleAuth != "Bearer test-bearer" {
-			t.Errorf("content type %q auth %q", f.bundleType, f.bundleAuth)
+		if err := json.Unmarshal(f.bundleBody, &sent); err != nil || !bytes.Equal(sent.Bundle, payload) {
+			t.Errorf("body %q (%v)", f.bundleBody, err)
 		}
-		if f.bundleQuery.Get("atespaces") != "team-a,team-b" || f.bundleQuery.Get("name") != "policy.bundle" {
-			t.Errorf("query %v", f.bundleQuery)
+		if f.bundleType != "application/json" || f.bundleAuth != "Bearer test-bearer" || f.bundleClient == "" {
+			t.Errorf("content type %q auth %q client %q", f.bundleType, f.bundleAuth, f.bundleClient)
+		}
+		if strings.Join(sent.Atespaces, ",") != "team-a,team-b" || sent.Name != "policy.bundle" || sent.Stage != "" {
+			t.Errorf("sent %+v", sent)
 		}
 		for _, w := range []string{"Sent policy.bundle", "for team-a, team-b", "generation: 7", "bundle status"} {
 			if !strings.Contains(out, w) {
@@ -465,8 +480,8 @@ func TestSubstrate_Admin_BundleApply(t *testing.T) {
 		if _, _, err := runSubAdmin(newSubstrateBundleCmd(), "apply", bundle, "--json"); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := f.bundleQuery["atespaces"]; ok {
-			t.Errorf("query %v", f.bundleQuery)
+		if strings.Contains(string(f.bundleBody), "atespaces") {
+			t.Errorf("body %s", f.bundleBody)
 		}
 	})
 	t.Run("json", func(t *testing.T) {
@@ -506,7 +521,7 @@ func TestSubstrate_Admin_BundleApply(t *testing.T) {
 		{"empty file", empty, "empty"},
 		{"missing file", filepath.Join(dir, "none.bundle"), "cannot be read"},
 		{"folder", dir, "folder"},
-		{"too large", big, "32 MiB"},
+		{"too large", big, "48 KiB"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSubAdminFake(t)

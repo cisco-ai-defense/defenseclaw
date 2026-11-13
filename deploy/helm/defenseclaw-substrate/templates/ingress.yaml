@@ -1,6 +1,8 @@
-{{- if .Values.adminIngress.enabled }}
-{{- if not .Values.adminIngress.host }}{{ fail "adminIngress.host is required when adminIngress.enabled" }}{{ end }}
-# Launchers reach the admin listener through this ingress; the actor
+{{- $x := .Values.admin.expose -}}
+{{- if eq $x.type "Ingress" }}
+{{- if not $x.ingress.host }}{{ fail "admin.expose.ingress.host is required for type Ingress" }}{{ end }}
+{{- if not $x.ingress.tlsSecretName }}{{ fail "admin.expose.ingress.tlsSecretName is required for type Ingress (the admin listener is TLS only)" }}{{ end }}
+# Launchers reach the admin listener through this ingress (TLS); the actor
 # listener is never exposed.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -8,21 +10,19 @@ metadata:
   name: defenseclaw-admin
   labels:
     {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
-  {{- with .Values.adminIngress.annotations }}
+  {{- with $x.ingress.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
-  {{- with .Values.adminIngress.className }}
+  {{- with $x.ingress.className }}
   ingressClassName: {{ . }}
   {{- end }}
-  {{- if .Values.adminIngress.tlsSecretName }}
   tls:
-  - hosts: [{{ .Values.adminIngress.host | quote }}]
-    secretName: {{ .Values.adminIngress.tlsSecretName }}
-  {{- end }}
+  - hosts: [{{ $x.ingress.host | quote }}]
+    secretName: {{ $x.ingress.tlsSecretName }}
   rules:
-  - host: {{ .Values.adminIngress.host | quote }}
+  - host: {{ $x.ingress.host | quote }}
     http:
       paths:
       - path: /
@@ -32,4 +32,33 @@ spec:
             name: defenseclaw-admin
             port:
               name: https
+{{- else if eq $x.type "LoadBalancer" }}
+{{- if not $x.loadBalancer.sourceRanges }}{{ fail "admin.expose.loadBalancer.sourceRanges is required for type LoadBalancer (list the launcher networks)" }}{{ end }}
+# Launchers reach the admin listener on this load balancer (TLS passes
+# through to the gateway). Only the admin port; the actor listener is never
+# exposed. Client addresses are kept so the NetworkPolicy can check them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: defenseclaw-admin-external
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+    defenseclaw.cisco.com/listener: admin
+  {{- with $x.loadBalancer.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  loadBalancerSourceRanges:
+    {{- toYaml $x.loadBalancer.sourceRanges | nindent 4 }}
+  selector:
+    {{- include "dc.selector" (dict "ctx" . "component" "gateway") | nindent 4 }}
+  ports:
+  - name: https
+    port: 443
+    targetPort: admin
+{{- else if ne $x.type "ClusterIP" }}
+{{- fail "admin.expose.type must be ClusterIP, LoadBalancer or Ingress" }}
 {{- end }}

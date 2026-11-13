@@ -171,7 +171,7 @@ func (e *Effective) computeDigest() (string, error) {
 func cloneFloor(f config.OpenShellAdminConfig) config.OpenShellAdminConfig {
 	for _, list := range []*[]string{
 		&f.AllowedHarnesses, &f.EgressBlock, &f.EgressAllowOnly, &f.RequireCopyFor, &f.Locked,
-		&f.RequiredFor, &f.AllowedCredentials,
+		&f.RequiredFor, &f.AllowedCredentials, &f.Runtimes, &f.ActorSecrets,
 	} {
 		*list = slices.Clone(*list)
 	}

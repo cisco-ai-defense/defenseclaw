@@ -69,7 +69,7 @@ func unusual(s string) bool {
 		return true
 	}
 	for _, r := range s {
-		if r == ' ' || r == '"' || r == '\\' || isControl(r) || isFormat(r) {
+		if r == ' ' || r == '"' || r == '\\' || isControl(r) || isFormat(r) || (r >= utf8.RuneSelf && asciiOnly.Load()) {
 			return true
 		}
 	}
@@ -108,7 +108,9 @@ func escapeAll(s string) string {
 			b.WriteString(`\t`)
 		case r < 0x20 || r == 0x7f:
 			fmt.Fprintf(&b, `\x%02x`, r)
-		case isControl(r) || isFormat(r):
+		case r > 0xffff && asciiOnly.Load():
+			fmt.Fprintf(&b, `\U%08x`, r)
+		case isControl(r) || isFormat(r) || (r >= utf8.RuneSelf && asciiOnly.Load()):
 			fmt.Fprintf(&b, `\u%04x`, r)
 		default:
 			b.WriteRune(r)
@@ -157,6 +159,8 @@ func render(s string, visible bool) string {
 				continue
 			case isControl(r) || isFormat(r):
 				mark(fmt.Sprintf(`\u%04x`, r))
+			case asciiOnly.Load():
+				b.WriteByte('?')
 			default:
 				b.WriteString(s[i : i+size])
 			}

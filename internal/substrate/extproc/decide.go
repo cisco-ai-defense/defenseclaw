@@ -32,7 +32,6 @@ import (
 const (
 	CategoryUnattributed    = "unattributed"
 	CategoryActorNotLive    = "actor_not_live"
-	CategoryActorUnverified = "actor_unverified"
 	CategoryURLRule         = "url_rule"
 	CategoryPathAmbiguous   = "path_ambiguous"
 	CategoryChainEgress     = "chain_egress"
@@ -65,6 +64,8 @@ type Header struct {
 
 // Request is the part of a request the Engine decides on.
 type Request struct {
+	// ID names the request in its event and in the tool verdict call.
+	ID          string
 	Actor       ActorRef
 	IdentityErr error
 	Method      string
@@ -264,16 +265,23 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		// hook or model call itself. Never buffered (model streams).
 		return Verdict{Allow: true, OwnHost: true, Source: sourceOwnHost}
 	}
-	uid, err := e.uids.Resolve(ctx, req.Actor)
+	// The registration names the actor's UID (its chain window), profile and
+	// attendance (GAP-0090). A lookup outage (the leader, past the stale
+	// window) does not stop the actor's traffic: the actor is matched by
+	// atespace, and only its chain check is missing, which
+	// chain.failure_mode decides (refused on a managed install).
+	rec, err := e.uids.Resolve(ctx, req.Actor)
+	lookupDown := false
 	switch {
 	case errors.Is(err, ErrActorNotLive):
 		return deny(v, CategoryActorNotLive, sourceIdentity, "",
-			"The Substrate Control API reports no running actor with this name.")
+			"DefenseClaw's registrations say this actor was deleted.")
 	case err != nil:
-		return e.failure(v, CategoryActorUnverified,
-			"The Substrate Control API could not confirm that this actor is running.")
+		lookupDown = true
+		v.Alert = true
+		v.Findings = append(v.Findings, "registration_unavailable")
 	}
-	req.Actor.UID = uid
+	req.Actor.UID, req.Actor.Profile, req.Actor.Unattended = rec.UID, rec.Profile, rec.Unattended
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
 		return e.failure(v, CategoryCalloutError, "DefenseClaw could not load this actor's policy.")
@@ -293,16 +301,17 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	// a path an origin could read another way is refused where a path rule
 	// applies.
 	reqPath, pathErr := canonicalPath(pathOnly(req.Path))
+	methods := requestMethods(req)
 	for _, r := range pol.urlRules {
-		if !r.appliesTo(req.Host, req.Method) {
+		if !r.appliesTo(req.Host, methods) {
 			continue
 		}
 		if r.pathPrefix != "" {
 			if pathErr != nil {
 				return deny(v, CategoryPathAmbiguous, sourceProfile, r.name,
-					"The request path uses an ambiguous encoding (an encoded slash, backslash, percent sign or control character), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
+					"The request path uses an ambiguous encoding (an encoded slash, backslash, semicolon, percent sign or control character, or a dot segment with parameters), so DefenseClaw can't check it against this profile's path rules for "+req.Host+".")
 			}
-			if !pathHasPrefix(reqPath, r.pathPrefix) {
+			if !r.matchesPath(reqPath) {
 				continue
 			}
 		}
@@ -324,8 +333,12 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		v.Findings = append(v.Findings, f.String())
 	}
 
-	switch cv, outcome, why := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
-		Method: req.Method, Allowed: true, Time: e.now()}); outcome {
+	cv, outcome, chainWhy := e.checkChain(ctx, ChainStep{Kind: StepObservedEgress, Actor: req.Actor, Host: req.Host,
+		Method: req.Method, Allowed: true, Time: e.now()})
+	if lookupDown && e.checker != nil {
+		outcome, chainWhy = chainUnchecked, uncheckedLookup
+	}
+	switch outcome {
 	case chainHit:
 		reason := cv.Reason
 		if reason == "" {
@@ -336,13 +349,13 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		// The step still reaches the window through the observed_egress
 		// queue (Finish); only this request's check is missing.
 		if e.chainFailClosed(pol) {
-			v = deny(v, CategoryChainUnchecked, sourceChain, why,
+			v = deny(v, CategoryChainUnchecked, sourceChain, chainWhy,
 				"DefenseClaw could not check this request against the actor's earlier tool calls in time, and this actor's policy refuses unchecked egress.")
 			v.Retryable = true
 			return v
 		}
 		v.Alert = true
-		v.Findings = append(v.Findings, "chain_unchecked:"+why)
+		v.Findings = append(v.Findings, "chain_unchecked:"+chainWhy)
 	}
 
 	if askRule == "" {
@@ -474,6 +487,17 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 		// A body sent without a length, larger than the cap.
 		return e.uninspected(v, whyOverCap)
 	}
+	// Inspect what the origin reads (GAP-0044): a gzip body or a UTF-8 BOM
+	// is decoded, and a body that can't be is refused or alerted, never
+	// passed as "no tool call".
+	body, why := decodeBody(body, req.header("content-encoding"), req.ContentType, e.cfg.BodyMaxBytes)
+	switch why {
+	case "":
+	case whyOverCap:
+		return e.uninspected(v, whyOverCap)
+	default:
+		return e.unreadable(v, why)
+	}
 	v.BodyInspected = true
 	pol, err := e.policies.PolicyFor(ctx, req.Actor)
 	if err != nil || pol == nil {
@@ -489,6 +513,11 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	if _, mcp := e.mcpHosts.match(req.Host); !mcp {
 		return v
 	}
+	// The DLP scans ran on the decoded text; a tool call needs JSON the
+	// callout can parse as the server will.
+	if why := jsonRPCReadable(body); why != "" {
+		return e.unreadable(v, why)
+	}
 	calls, err := parseToolCalls(body)
 	if err != nil {
 		return deny(v, CategoryMCPToolBlocked, sourceTool, "jsonrpc", clip(refusalReason(err), 320))
@@ -497,6 +526,14 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 		return v
 	}
 	if e.judge == nil {
+		// No rule path (callout.judge.tokenSecret turned off): the tool
+		// rules can't run, so the call is never a silent allow
+		// (GAP-0015). A managed install refuses it.
+		if e.cfg.Managed {
+			return deny(v, CategoryMCPToolBlocked, sourceTool, "tool_rules_not_configured",
+				"DefenseClaw can't check this MCP tool call: the tool rules are not configured for the egress callout.")
+		}
+		v.Alert = true
 		v.Findings = append(v.Findings, "tool_rules_not_configured")
 		return v
 	}
@@ -504,9 +541,19 @@ func (e *Engine) DecideBody(ctx context.Context, req *Request, v Verdict, body [
 	if server == "" {
 		server = req.Host
 	}
+	// The verdict route matches MCP asset rules on the URL (scheme, host and
+	// path, never the query) and ties its findings to the session and to
+	// this request's event (GAP-0015).
+	scheme := strings.ToLower(req.Scheme)
+	if scheme == "" {
+		scheme = "https"
+	}
+	callURL := scheme + "://" + req.Host + pathOnly(req.Path)
+	session := clip(req.header("mcp-session-id"), 128)
 	for _, c := range calls {
 		jctx, cancel := context.WithTimeout(ctx, e.cfg.Judge.Timeout)
-		tv, err := e.judge.JudgeToolCall(jctx, ToolCall{Actor: req.Actor, Server: server, Host: req.Host, Tool: c.name, Args: c.args})
+		tv, err := e.judge.JudgeToolCall(jctx, ToolCall{Actor: req.Actor, Server: server, Host: req.Host, URL: callURL,
+			Tool: c.name, Args: c.args, SessionID: session, RequestID: req.ID})
 		cancel()
 		if err != nil {
 			return e.failure(v, CategoryCalloutError, "DefenseClaw could not check this MCP tool call against its tool rules.")

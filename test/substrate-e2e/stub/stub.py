@@ -17,6 +17,9 @@ import urllib.request
 
 PORT = int(os.environ.get("STUB_PORT", "8080"))
 HOOK_URL = os.environ.get("STUB_HOOK_URL", "")
+# The version the shipped kit sends (kit.EnvelopeVersion). GAP-0138: older builds of the gateway accept only
+# "dcactor/1"; set STUB_ENVELOPE_VERSION for such a build.
+ENVELOPE_VERSION = os.environ.get("STUB_ENVELOPE_VERSION", "1")
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -54,7 +57,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/hook":
             if not HOOK_URL:
                 return self._send(500, "STUB_HOOK_URL is not set\n")
-            req = urllib.request.Request(HOOK_URL, data=body, method="POST", headers={"Content-Type": "application/json"})
+            # What the actor hook helper of the kit sends: the hook event wrapped in the envelope, with the
+            # placeholder header that egress replaces with the actor's JWT.
+            envelope = json.dumps({
+                "v": ENVELOPE_VERSION, "connector": "claudecode", "event": "PreToolUse", "mode": "interactive",
+                "kit_version": "0.0.0-e2e", "payload": json.loads(body or b"{}"),
+            }).encode()
+            req = urllib.request.Request(HOOK_URL, data=envelope, method="POST", headers={
+                "Content-Type": "application/json",
+                "x-defenseclaw-actor": "placeholder",
+                "X-DefenseClaw-Client": "actor-hook/0.0.0-e2e",
+                "X-DefenseClaw-Kit-Version": "0.0.0-e2e",
+                "X-DefenseClaw-Hook-Event": "PreToolUse",
+            })
             try:
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     return self._send(resp.status, resp.read(), "application/json")

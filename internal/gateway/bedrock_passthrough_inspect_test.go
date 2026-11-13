@@ -237,3 +237,58 @@ func TestSubstrateRouterAnswerNarrows(t *testing.T) {
 		}
 	}
 }
+
+func TestPassthroughUninspectableReplies(t *testing.T) {
+	const invoke = "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke"
+	const stream = "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke-with-response-stream"
+	brotli := []byte("\x1b\x07\x00\xf8\xa5opaque-br-bytes")
+	encoded := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// An encoding the proxy never asked for: the transport leaves it.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "br")
+		_, _ = w.Write(brotli)
+	}))
+	defer encoded.Close()
+	good := bedrockInvokeStreamFrames(t, "hi")
+	broken := append(append([]byte{}, good[:len(good)/2]...), 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0)
+	badStream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		// Whole frames first, then a frame with an impossible length.
+		_, _ = w.Write(bedrockInvokeStreamFrames(t, "a"))
+		_, _ = w.Write(broken[len(broken)-12:])
+	}))
+	defer badStream.Close()
+
+	run := func(up *httptest.Server, path string) *httptest.ResponseRecorder {
+		proxy, insp := bedrockPassthroughProxy(t, up)
+		insp.setVerdict("completion", allowVerdict("mock"))
+		rec := httptest.NewRecorder()
+		proxy.handlePassthrough(rec, bedrockRequest(up.URL, path))
+		return rec
+	}
+
+	t.Run("default tier forwards with an alert", func(t *testing.T) {
+		if rec := run(encoded, invoke); rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), brotli) || rec.Header().Get("Content-Encoding") != "br" {
+			t.Fatalf("encoded reply: %d %q", rec.Code, rec.Body.Bytes())
+		}
+		rec := run(badStream, stream)
+		if rec.Code != http.StatusOK || !bytes.HasSuffix(rec.Body.Bytes(), broken[len(broken)-12:]) {
+			t.Fatalf("broken stream not forwarded whole: %d, %d bytes", rec.Code, rec.Body.Len())
+		}
+	})
+	t.Run("managed refuses", func(t *testing.T) {
+		withManagedEnterprise(t, true)
+		if rec := run(encoded, invoke); bytes.Contains(rec.Body.Bytes(), brotli) || rec.Header().Get("Content-Encoding") == "br" {
+			t.Fatalf("managed forwarded an uninspectable reply: %d %q", rec.Code, rec.Body.Bytes())
+		}
+		if rec := run(badStream, stream); bytes.Contains(rec.Body.Bytes(), broken[len(broken)-12:]) {
+			t.Fatalf("managed forwarded a broken stream: %d bytes", rec.Body.Len())
+		}
+	})
+	if got := uninspectableEncoding(http.Header{"Content-Encoding": {"identity"}}); got != "" {
+		t.Fatalf("identity is inspectable: %q", got)
+	}
+	if got := uninspectableEncoding(http.Header{"Content-Encoding": {"gzip", "br"}}); got != "gzip, br" {
+		t.Fatalf("stacked encodings %q", got)
+	}
+}

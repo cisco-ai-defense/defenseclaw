@@ -5407,6 +5407,235 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_SUBSTRATE_ADMIN_URL",
+      "category": "runtime_path",
+      "purpose": "Address of the cluster's DefenseClaw admin listener for the Agent Substrate launcher. For CI, where no contexts file exists.",
+      "default": "unset (the context's admin_url)",
+      "accepted_values": [
+        "https://HOST:PORT",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Read when the launcher resolves its cluster"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_CLIENT_ID",
+      "category": "runtime_path",
+      "purpose": "OpenID client id the Agent Substrate launcher signs in with, in place of the context's client_id.",
+      "default": "unset (the context's client_id)",
+      "accepted_values": [
+        "client id",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Read when the launcher resolves its cluster"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_CONTEXT",
+      "category": "runtime_path",
+      "purpose": "Name of the cluster the Agent Substrate launcher (defenseclaw substrate) uses, in place of the one you signed in to last.",
+      "default": "the current context in the launcher's contexts file",
+      "accepted_values": [
+        "context name",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Read when the launcher resolves its cluster"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_ISSUER",
+      "category": "runtime_path",
+      "purpose": "OpenID issuer the Agent Substrate launcher signs in with, in place of the context's issuer.",
+      "default": "unset (the context's issuer)",
+      "accepted_values": [
+        "https://ISSUER URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Read when the launcher resolves its cluster"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE",
+      "category": "credential",
+      "purpose": "File holding a projected Kubernetes token minted for the cluster's workload audience, for the launcher in a pod.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path to a projected token file",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/workload.go",
+          "description": "Reads the token on every call"
+        }
+      ],
+      "since": "1.0.10",
+      "security_note": "Path only. The default service-account token is for the API server, not for DefenseClaw, and is not used."
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_KUBE",
+      "category": "runtime_path",
+      "purpose": "Sign in to the cluster with the current kubeconfig identity instead of a sign-in server (open-source clusters without OIDC).",
+      "default": "unset (the context decides)",
+      "accepted_values": [
+        "1",
+        "0",
+        "true",
+        "false",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Read when the launcher resolves its cluster"
+        }
+      ],
+      "since": "1.0.10",
+      "security_note": "The kubeconfig user's token is sent to the cluster's admin listener, which checks it with a TokenReview. Nothing is stored by the launcher."
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_PROFILE",
+      "category": "runtime_path",
+      "purpose": "Guard profile that substrate run uses when --profile is not given.",
+      "default": "unset (the context's default profile)",
+      "accepted_values": [
+        "profile name",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substrate_run.go",
+          "description": "Default profile of substrate run"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_TEMPLATE",
+      "category": "runtime_path",
+      "purpose": "Agent template that substrate run uses when --template is not given.",
+      "default": "unset (the context's default template, else the agent's name)",
+      "accepted_values": [
+        "template name",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substrate_run.go",
+          "description": "Default template of substrate run"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_TOKEN_STORE",
+      "category": "runtime_path",
+      "purpose": "Where the Agent Substrate launcher keeps your sign-in: the operating system keychain, or with file a file readable only by you.",
+      "default": "unset (the operating system keychain; the launcher says so and stops when none is usable)",
+      "accepted_values": [
+        "file",
+        "keychain",
+        "auto",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/store.go",
+          "description": "Selects the token store"
+        }
+      ],
+      "since": "1.0.10",
+      "security_note": "file keeps the sign-in in a 0600 file under the DefenseClaw state directory; anyone who can read your files can use it."
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_WORKLOAD_AUDIENCE",
+      "category": "runtime_path",
+      "purpose": "Audience a CI workload token must be minted for (and that GitHub Actions is asked for). The launcher refuses a workload token without it.",
+      "default": "defenseclaw",
+      "accepted_values": [
+        "audience string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/context.go",
+          "description": "Read when the launcher resolves its cluster"
+        }
+      ],
+      "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE",
+      "category": "credential",
+      "purpose": "File holding the CI workload identity token the Agent Substrate launcher sends instead of a person's sign-in.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path to a token file",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/cli/substratecli/auth/workload.go",
+          "description": "Reads the token on every call"
+        }
+      ],
+      "since": "1.0.10",
+      "security_note": "Path only; the token never belongs in an environment variable. The launcher refuses a token that is not minted for the workload audience."
+    },
+    {
       "name": "DEFENSECLAW_TELEMETRY_ENABLED",
       "category": "telemetry",
       "purpose": "Local-observability-stack-only toggle. Used by bundles/local_observability_stack/docker-compose.yml to gate telemetry collection. Distinct from DEFENSECLAW_OTEL_ENABLED.",
@@ -8452,229 +8681,6 @@
         }
       ],
       "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_ADMIN_URL",
-      "category": "runtime_path",
-      "purpose": "Address of a cluster's DefenseClaw admin listener for the substrate commands. Overrides the one stored with the context.",
-      "default": "(the context's address)",
-      "accepted_values": [
-        "https URL"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substratecli/auth/auth.go",
-          "description": "Go reader"
-        },
-        {
-          "location": "internal/cli/substratecli/auth/context.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10",
-      "security_note": "Redirects where the launcher sends its sign-in token; a managed computer ignores it."
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_CLIENT_ID",
-      "category": "runtime_path",
-      "purpose": "OIDC client id the substrate login uses. Overrides the context's.",
-      "default": "(the context's client id)",
-      "accepted_values": [
-        "client id"
-      ],
-      "security_impact": "low",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substratecli/auth/auth.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_CONTEXT",
-      "category": "runtime_path",
-      "purpose": "Name of the cluster context the substrate commands use. Same as --context.",
-      "default": "(the context signed in to last)",
-      "accepted_values": [
-        "context name"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/cli/substratecli/auth/auth.go",
-          "description": "Go reader"
-        },
-        {
-          "location": "internal/cli/substratecli/auth/context.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_ISSUER",
-      "category": "runtime_path",
-      "purpose": "OIDC issuer the substrate login signs in with. Overrides the context's.",
-      "default": "(the context's issuer)",
-      "accepted_values": [
-        "https URL"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substratecli/auth/auth.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10",
-      "security_note": "Changes who vouches for the person; a managed computer ignores it."
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_K8S_TOKEN_FILE",
-      "category": "credential",
-      "purpose": "Path of a Kubernetes service account token the substrate commands sign in with when they run inside a cluster (CI).",
-      "default": "unset",
-      "accepted_values": [
-        "absolute path",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substrate.go",
-          "description": "Go reader"
-        },
-        {
-          "location": "internal/cli/substratecli/auth/auth.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10",
-      "security_note": "Names a credential file; the token itself is never read from the environment."
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_PROFILE",
-      "category": "runtime_path",
-      "purpose": "Guard profile `defenseclaw substrate run` uses when --profile is not given.",
-      "default": "(the cluster's default)",
-      "accepted_values": [
-        "profile name"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/cli/substrate_run.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_ROUTER_URL",
-      "category": "runtime_path",
-      "purpose": "Address of the cluster's agent entrance (the atenet router) the substrate commands connect through. Overrides the context's.",
-      "default": "(the context's address)",
-      "accepted_values": [
-        "https URL"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substratecli/auth/auth.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10",
-      "security_note": "Redirects agent traffic; a managed computer ignores it."
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_TEMPLATE",
-      "category": "runtime_path",
-      "purpose": "Agent template `defenseclaw substrate run` uses when --template is not given.",
-      "default": "(the cluster's default)",
-      "accepted_values": [
-        "template name"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "managed": "allow",
-      "consumers": [
-        {
-          "location": "internal/cli/substrate_run.go",
-          "description": "Go reader"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_TOKEN_STORE",
-      "category": "runtime_path",
-      "purpose": "Set to `file` to keep the substrate sign-in in a 0600 file (CI and headless Linux) instead of the operating system key store.",
-      "default": "(the operating system key store)",
-      "accepted_values": [
-        "keychain",
-        "file",
-        "unset"
-      ],
-      "security_impact": "medium",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substratecli/auth/store.go",
-          "description": "Go reader"
-        },
-        {
-          "location": "internal/cli/substrate_admin_doctor.go",
-          "description": "doctor hint"
-        }
-      ],
-      "since": "1.0.10"
-    },
-    {
-      "name": "DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE",
-      "category": "credential",
-      "purpose": "Path of a workload identity token file the substrate commands sign in with in CI (`--workload`). The run is then attributed to the pipeline's own identity and nothing is stored.",
-      "default": "unset",
-      "accepted_values": [
-        "absolute path",
-        "unset"
-      ],
-      "security_impact": "high",
-      "surface_in_doctor": false,
-      "managed": "ignore",
-      "consumers": [
-        {
-          "location": "internal/cli/substrate.go",
-          "description": "Go reader"
-        },
-        {
-          "location": "internal/cli/substrate_session.go",
-          "description": "Go reader"
-        },
-        {
-          "location": "cli/defenseclaw/commands/cmd_substrate.py",
-          "description": "Python command definition"
-        }
-      ],
-      "since": "1.0.10",
-      "security_note": "Names a credential file; the token itself is never read from the environment."
     }
   ]
 }

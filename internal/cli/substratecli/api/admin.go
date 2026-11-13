@@ -17,24 +17,20 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/fleet"
 )
 
-// MaxBundleBytes is the largest policy bundle ApplyBundle sends.
-const MaxBundleBytes = 32 << 20
+// MaxBundleBytes is the largest policy bundle ApplyBundle sends: the
+// cluster keeps two per stage in a ConfigMap (bundle.MaxArchiveBytes).
+const MaxBundleBytes = 48 << 10
 
 // ErrBundleTooLarge is returned by ApplyBundle for a bundle over MaxBundleBytes.
-var ErrBundleTooLarge = errors.New("the bundle is larger than 32 MiB")
+var ErrBundleTooLarge = errors.New("the bundle is larger than 48 KiB")
 
 // FleetVerifyDocument returns the administrator verify document: the
 // cluster checks and one verdict. A person who is not an administrator gets
@@ -44,10 +40,21 @@ func (c *Client) FleetVerifyDocument(ctx context.Context) (fleet.VerifyDocument,
 	return out, c.do(ctx, http.MethodGet, "fleet/verify", nil, nil, &out)
 }
 
-// ApplyBundle sends a signed policy bundle to the cluster as the request
-// body, named by name, optionally limited to some atespaces. The bytes are
-// sent as they are; the cluster verifies the signature.
-func (c *Client) ApplyBundle(ctx context.Context, name string, data io.Reader, atespaces []string) (map[string]any, error) {
+// bundleApplyRequest is the body of POST bundle. The admin listener takes
+// JSON only (its CSRF gate), so the bundle bytes travel as base64.
+type bundleApplyRequest struct {
+	Name      string   `json:"name,omitempty"`
+	Bundle    []byte   `json:"bundle"`
+	Stage     string   `json:"stage,omitempty"`
+	Atespaces []string `json:"atespaces,omitempty"`
+}
+
+// ApplyBundle sends a signed policy bundle to the cluster, named by name,
+// for a stage: the atespaces given, or every atespace without them. An
+// empty stage lets the cluster name it (all, or one stage per atespace
+// set). The bytes are sent as they are; the cluster verifies them and
+// answers with the receipt.
+func (c *Client) ApplyBundle(ctx context.Context, name string, data io.Reader, stage string, atespaces []string) (map[string]any, error) {
 	raw, err := io.ReadAll(io.LimitReader(data, MaxBundleBytes+1))
 	if err != nil {
 		return nil, err
@@ -55,67 +62,19 @@ func (c *Client) ApplyBundle(ctx context.Context, name string, data io.Reader, a
 	if len(raw) > MaxBundleBytes {
 		return nil, ErrBundleTooLarge
 	}
-	q := url.Values{}
-	if name != "" {
-		q.Set("name", name)
-	}
-	if len(atespaces) > 0 {
-		q.Set("atespaces", strings.Join(atespaces, ","))
-	}
 	var out map[string]any
-	return out, c.doRaw(ctx, http.MethodPost, "bundle", q, "application/octet-stream", raw, &out)
+	return out, c.do(ctx, http.MethodPost, "bundle", nil, bundleApplyRequest{Name: name, Bundle: raw, Stage: stage, Atespaces: atespaces}, &out)
+}
+
+// RollbackBundle re-activates a stage's previous bundle and answers with the
+// receipt.
+func (c *Client) RollbackBundle(ctx context.Context, stage string) (map[string]any, error) {
+	var out map[string]any
+	return out, c.do(ctx, http.MethodPost, "bundle/rollback", nil, map[string]string{"stage": stage}, &out)
 }
 
 // BundleStatus returns the policy bundles in force.
 func (c *Client) BundleStatus(ctx context.Context) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, http.MethodGet, "bundle/status", nil, nil, &out)
-}
-
-// doRaw is do with a body that is already bytes and its own content type.
-func (c *Client) doRaw(ctx context.Context, method, path string, q url.Values, contentType string, body []byte, out any) error {
-	u := *c.base
-	u.Path = prefix + strings.TrimLeft(path, "/")
-	u.RawQuery = q.Encode()
-	tok, err := c.token(ctx)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, method, u.String(), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.ua)
-	req.Header.Set("Content-Type", contentType)
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return redactErr(err, tok)
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
-	if err != nil {
-		return redactErr(err, tok)
-	}
-	if len(raw) > maxResponse {
-		return errors.New("the cluster answer is too large")
-	}
-	if resp.StatusCode >= 300 {
-		e := &Error{Status: resp.StatusCode, Path: path}
-		var d struct {
-			Reason string `json:"reason"`
-		}
-		if json.Unmarshal(raw, &d) == nil {
-			e.Reason = d.Reason
-		}
-		return e
-	}
-	if out == nil || len(bytes.TrimSpace(raw)) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("the cluster answer is not what this version expects: %w", err)
-	}
-	return nil
 }

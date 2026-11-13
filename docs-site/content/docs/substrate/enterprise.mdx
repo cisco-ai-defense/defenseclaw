@@ -8,7 +8,7 @@ keywords:
   - OIDC groups
 ---
 
-{/* TODO(substrate): the profile keys runtimes, sandbox_class, unattended_asks and actor_secrets are planned and not in the config yet (sub/a6 77468de3d5 has required_for, user_approvals, allowed_harnesses, egress_allow_only, allow_unblock and match.substrate). Add them to the example when they land. Replace example output with captured output. */}
+{/* TODO(substrate): replace example output with captured output. */}
 
 In a company, three people meet this feature:
 
@@ -79,7 +79,7 @@ config:
 
 ### Write the profiles
 
-These are the same profiles as on managed laptops, plus a `substrate` match. The `sandbox` section applies to OpenShell and Agent Substrate alike, and a profile can only tighten the company floor. Unattended asks are set once for the cluster in `substrate.unattended.asks` (default `deny`).
+These are the same profiles as on managed laptops, plus a `substrate` match. The `sandbox` section applies to OpenShell and Agent Substrate alike, and a profile can only tighten the company floor (`substrate.admin` in the cluster). A few keys are for Agent Substrate only: `sandbox_class`, `idle_suspend_after`, `unattended_asks`, `ask_timeout` and `actor_secrets`.
 
 ```yaml
 guardrail:
@@ -89,15 +89,21 @@ guardrail:
       block_at: MEDIUM
       sandbox:
         required_for: [claudecode, codex]   # not allowed on the laptop itself
+        runtimes: [substrate]               # ...and not in a laptop sandbox either
         allowed_harnesses: [claudecode, codex]
         egress_allow_only: ["*.amazonaws.com", github.com]
         allow_unblock: false                # contractors can't approve new sites
+        sandbox_class: microvm              # never gVisor
     engineering:
       mode: action
       block_at: HIGH
       sandbox:
         allowed_harnesses: [claudecode, codex, opencode, hermes]
         user_approvals: session
+        idle_suspend_after: 1h              # the cluster default is 30m
+        unattended_asks: queue              # --task runs wait for a person
+        ask_timeout: 2h                     # then the ask is denied
+        actor_secrets: [npm-read-token]     # a value programs inside may read
   profile_assignments:
     - profile: contractors
       match: {groups: ["contractors"]}
@@ -107,6 +113,16 @@ guardrail:
 ```
 
 An atespace pattern matches only atespaces DefenseClaw created or that you list, so a foreign `eng-evil` atespace never inherits a profile.
+
+What the Substrate keys do:
+
+- **`runtimes`** lists where the profile's agents may run: `openshell` (a sandbox on the laptop) and `substrate`. Left out, both are allowed. A profile without `substrate` gets no actors in the cluster.
+- **`sandbox_class`** is the weakest isolation an agent may run in. With `microvm`, an actor whose template runs on gVisor gets no network. Templates choose their class with `template build --class`.
+- **`idle_suspend_after`** replaces the cluster's `substrate.idle_suspend_after` for the profile.
+- **`unattended_asks`** is what happens when an unattended run (`run --task`, `--batch`) hits an ask: `deny` (the default) refuses it at once; `queue` holds it, notifies your webhooks, and lets the owner answer with `defenseclaw substrate approvals` and `approve <id>`. If nobody answers within `ask_timeout`, the ask is denied.
+- **`actor_secrets`** names values a program inside the agent may read, such as a read-only package token. They are short-lived, marked as exposed, and DefenseClaw refuses any model call or outbound request that carries one. Everything else stays outside the agent (see [Secrets](/docs/substrate/secrets)).
+
+Two rules keep the scopes apart: `openshell.admin` on a laptop refuses the Substrate keys, and `substrate.admin` refuses the laptop-only keys (`allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*`). A profile shared by laptops and the cluster may carry both; each side reads only its own.
 
 Deliver profile changes with `helm upgrade` or GitOps. See [Delivery and fleet management](/docs/substrate/delivery).
 
@@ -121,12 +137,12 @@ The platform team builds the approved agent images once, signs them with the com
 ```bash
 defenseclaw substrate template build --connector claudecode --from REGISTRY/harness/claudecode@sha256:... \
   --to REGISTRY/actors/claudecode:1.0.10 --hook-binary defenseclaw-actor-hook --relay-binary defenseclaw-actor-relay \
-  --key attestation.key
+  --key attestation.key --session-key relay-session.pub
 defenseclaw substrate template verify REGISTRY/actors/claudecode@sha256:... --anchors attestation.pub
 defenseclaw substrate template publish REGISTRY/actors/claudecode@sha256:... TARGET:TAG --anchors attestation.pub
 ```
 
-Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
+`relay-session.pub` is the public half of the gateway's relay session key (Secret `defenseclaw-relay-session`, made as in [the open-source setup](/docs/substrate/open-source)). Without it nobody could attach to the agents, so the build stops with an error. Each build is scanned and attested, and the controller admits only an image whose attestation verifies against the anchors. A template made any other way, for example with plain `kubectl ate create actor-template`, still starts, but its agents get no network. The admin sees why in `doctor` and in the fleet view.
 
 </Step>
 
@@ -134,16 +150,17 @@ Each build is scanned and attested, and the controller admits only an image whos
 
 ### Point the laptops at it
 
-On managed laptops, a profile with the connector in `required_for` refuses a local `claude` and says where to go instead:
+On managed laptops, a profile with the connector in `required_for` and `runtimes: [substrate]` refuses a local `claude` and says where to go instead:
 
 ```text
 $ claude
-DefenseClaw: your organization runs Claude Code in the cloud sandbox.
-  Start it with:  defenseclaw substrate run claude
-  Questions:      it-security@example.test
+Blocked by your organization's DefenseClaw policy: Claude Code can't run on this computer (profile contractors): your organization runs Claude Code on Agent Substrate.
+Start it there from your project folder:
+  defenseclaw substrate run claude
+Need an exception? Contact it-security@example.test
 ```
 
-The launcher itself is exempt from that rule. Engineering, whose profile doesn't require it, can still run locally or in an OpenShell sandbox.
+`defenseclaw sandbox run claude` is refused the same way, and `defenseclaw sandbox policy explain` and the TUI policy panel say that these agents run only on Agent Substrate. The launcher itself is exempt: it starts no agent on the laptop. Engineering, whose profile doesn't require it, can still run locally or in an OpenShell sandbox.
 
 </Step>
 
@@ -161,7 +178,7 @@ The launcher itself is exempt from that rule. Engineering, whose profile doesn't
 defenseclaw substrate login
 ```
 
-(The admin gives you the cluster addresses once, as `--admin-url`, `--issuer`, `--client-id` and `--router-url`, or in an environment file.) A browser opens on the company sign-in page. After that, the launcher knows who you are and which profile you get:
+(The first time, add the cluster address your admin gives you: `--admin-url https://HOST:PORT`, or `DEFENSECLAW_SUBSTRATE_ADMIN_URL`. The cluster tells the launcher which sign-in server to use.) A browser opens on the company sign-in page. After that, the launcher knows who you are and which profile you get:
 
 ```text
 Signed in as alice@example.test · profile engineering · atespace eng-payments

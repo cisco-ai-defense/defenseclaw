@@ -367,7 +367,7 @@ func TestActorVerifierControlAPIDown(t *testing.T) {
 	f.down.Store(true)
 	f.now = f.now.Add(59 * time.Second)
 	if _, err := f.v.Verify(ctx, tok); err != nil {
-		t.Fatalf("within the live cache: %v", err)
+		t.Fatalf("within the outage grace: %v", err)
 	}
 	f.now = f.now.Add(2 * time.Second)
 	_, err := f.v.Verify(ctx, tok)
@@ -529,11 +529,112 @@ func TestPersonVerifier(t *testing.T) {
 	}
 	_, err = v.Verify(context.Background(), sign(t, key, hdr, claims(func(c map[string]any) { c["aud"] = "other"; c["azp"] = "other" })))
 	wantReason(t, err, ReasonAudience)
-	if _, err := v.Verify(context.Background(), sign(t, key, hdr, claims(func(c map[string]any) { c["aud"] = "other"; c["azp"] = "dc-launcher" }))); err != nil {
-		t.Fatalf("azp: %v", err)
-	}
+	// azp alone, with aud naming another API, is refused (GAP-0059).
+	_, err = v.Verify(context.Background(), sign(t, key, hdr, claims(func(c map[string]any) { c["aud"] = "other"; c["azp"] = "dc-launcher" })))
+	wantReason(t, err, ReasonAudience)
+	// aud names the client but azp another party: refused.
+	_, err = v.Verify(context.Background(), sign(t, key, hdr, claims(func(c map[string]any) { c["azp"] = "other" })))
+	wantReason(t, err, ReasonAudience)
 	_, err = v.Verify(context.Background(), sign(t, key, hdr, claims(func(c map[string]any) { c["sub"] = "actor/a/b" })))
 	wantReason(t, err, ReasonSubject)
 	_, err = v.Verify(context.Background(), sign(t, key, hdr, claims(func(c map[string]any) { c["iss"] = "https://evil.example" })))
 	wantReason(t, err, ReasonIssuer)
+}
+
+// A Keycloak device-flow access token: aud names DefenseClaw's API audience
+// (an audience mapper), azp the launcher client.
+func TestPersonVerifierAPIAudience(t *testing.T) {
+	p := newIDP(t)
+	key := p.addKey(t, "p1", "ES256")
+	now := time.Unix(1_800_000_000, 0)
+	clock := func() time.Time { return now }
+	ks, _ := NewKeySet(KeySetOptions{Issuer: p.srv.URL, HTTPClient: p.srv.Client(), Now: clock})
+	v, err := NewPersonVerifier([]PersonIssuer{{KeySet: ks, Audience: "defenseclaw-launcher", APIAudience: "defenseclaw"}}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]any{"typ": "JWT", "alg": "ES256", "kid": "p1"}
+	tok := func(aud any, azp string) string {
+		c := map[string]any{"iss": p.srv.URL, "sub": "u1", "aud": aud, "exp": now.Unix() + 600, "iat": now.Unix()}
+		if azp != "" {
+			c["azp"] = azp
+		}
+		return sign(t, key, hdr, c)
+	}
+	if _, err := v.Verify(context.Background(), tok([]string{"defenseclaw", "account"}, "defenseclaw-launcher")); err != nil {
+		t.Fatalf("device-flow access token: %v", err)
+	}
+	_, err = v.Verify(context.Background(), tok([]string{"defenseclaw"}, "another-client"))
+	wantReason(t, err, ReasonAudience)
+	_, err = v.Verify(context.Background(), tok([]string{"defenseclaw"}, ""))
+	wantReason(t, err, ReasonAudience)
+}
+
+// GAP-0043: a CI issuer signs tokens for every repository; only the bound
+// workloads are trusted, and an entry without a binding is refused.
+func TestPersonVerifierWorkloadBinding(t *testing.T) {
+	p := newIDP(t)
+	key := p.addKey(t, "w1", "RS256")
+	now := time.Unix(1_800_000_000, 0)
+	clock := func() time.Time { return now }
+	ks, _ := NewKeySet(KeySetOptions{Issuer: p.srv.URL, HTTPClient: p.srv.Client(), Now: clock})
+	if _, err := NewPersonVerifier([]PersonIssuer{{KeySet: ks, Audience: "dc-ci", Kind: PersonWorkload}}, clock); err == nil {
+		t.Fatal("a workload issuer without a binding was accepted")
+	}
+	v, err := NewPersonVerifier([]PersonIssuer{
+		{KeySet: ks, Audience: "dc-ci", Kind: PersonWorkload, Binding: WorkloadBinding{Claims: map[string]string{"repository": "acme/web"}}},
+		{KeySet: ks, Audience: "dc-ci", Kind: PersonWorkload, Binding: WorkloadBinding{Subject: "repo:acme/api:ref:refs/heads/*"}},
+	}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := map[string]any{"typ": "JWT", "alg": "RS256", "kid": "w1"}
+	tok := func(sub, repo string) string {
+		return sign(t, key, hdr, map[string]any{"iss": p.srv.URL, "sub": sub, "aud": "dc-ci", "repository": repo,
+			"exp": now.Unix() + 600, "iat": now.Unix()})
+	}
+	got, err := v.Verify(context.Background(), tok("repo:acme/web:ref:refs/heads/main", "acme/web"))
+	if err != nil || got.Kind != PersonWorkload {
+		t.Fatalf("bound repository: %+v %v", got, err)
+	}
+	if _, err := v.Verify(context.Background(), tok("repo:acme/api:ref:refs/heads/release", "acme/api")); err != nil {
+		t.Fatalf("bound subject prefix: %v", err)
+	}
+	_, err = v.Verify(context.Background(), tok("repo:evil/fork:ref:refs/heads/main", "evil/fork"))
+	wantReason(t, err, ReasonSubject)
+	_, err = v.Verify(context.Background(), tok("repo:acme/api:pull_request", "acme/api"))
+	wantReason(t, err, ReasonSubject)
+}
+
+// GAP-0061: the keys of the last good fetch serve while the issuer is down,
+// for at most DefaultKeyStaleLimit.
+func TestKeySetStaleKeysExpire(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if _, err := f.v.Verify(ctx, f.token(t)); err != nil {
+		t.Fatal(err)
+	}
+	f.idp.srv.Close()
+	f.now = f.now.Add(DefaultKeyMaxAge + time.Second)
+	if _, err := f.v.Verify(ctx, f.token(t)); err != nil {
+		t.Fatalf("within the stale limit: %v", err)
+	}
+	f.now = f.now.Add(DefaultKeyStaleLimit)
+	_, err := f.v.Verify(ctx, f.token(t))
+	wantReason(t, err, ReasonKeysetFailed)
+}
+
+// GAP-0060: a replica that did not serve the delete sees a deleted actor
+// within DefaultLiveTTL, with no invalidation.
+func TestActorVerifierSeesADeleteWithinTheLiveTTL(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	tok := f.token(t)
+	if _, err := f.v.Verify(ctx, tok); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.actors, "team-a/agent-1")
+	f.now = f.now.Add(DefaultLiveTTL + time.Second)
+	_, err := f.v.Verify(ctx, f.token(t))
+	wantReason(t, err, ReasonActorGone)
 }

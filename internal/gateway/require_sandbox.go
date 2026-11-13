@@ -412,6 +412,13 @@ func (a *APIServer) requireSandboxDecision(ctx context.Context, connectorName, e
 		}
 		return message
 	}
+	// runtimes: [substrate] (E26): the agent runs in an Agent Substrate
+	// actor, which the launcher starts; whether OpenShell could run here
+	// does not matter, so the refusal points to `defenseclaw substrate run`.
+	if floor.SubstrateOnly() {
+		return requireSandboxOutcome{Outcome: requireSandboxRefused, Code: requireSandboxReasonRequired, Profile: decision,
+			Message: word(sandboxapi.HostRunRefusedSubstrate(connectorName, surface, profile, floor.RequestAccess))}
+	}
 	uid, known := requestPeerUID(ctx)
 	if avail := defaultSandboxAvailability.check(cfg, uid, known, floor); !avail.Available {
 		if strings.TrimSpace(floor.WhenUnavailable) == config.OpenShellWhenUnavailableAlert {

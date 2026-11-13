@@ -16,6 +16,63 @@ spec:
       app.kubernetes.io/name: defenseclaw-substrate
   policyTypes: [Ingress]
 ---
+# The pods that hold keys or dial out (gateway, leader: provider keys and the
+# store; controller: template registries on 443, GAP-0131;
+# callout: actor_secrets) may connect only where they need to (GAP-0084).
+{{- if .Values.networkPolicy.egress.enabled }}
+{{- range $c := list "gateway" "leader" "callout" "controller" }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: defenseclaw-{{ $c }}-egress
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" $ "component" $c) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dc.selector" (dict "ctx" $ "component" $c) | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+  # DNS.
+  - ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  # This release's pods (leader RPC, admin listener for the callout judge).
+  - to:
+    - {{- toYaml $release | nindent 6 }}
+  # The Substrate namespace (ate-api-server, the actor JWT issuer's JWKS).
+  # A NetworkPolicy matches the pod port after the Service is resolved,
+  # so these are the pods' container ports (GAP-0139: idp serves 8443
+  # behind Service port 443).
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ $.Values.substrate.namespace }}
+    ports:
+    {{- range $.Values.substrate.podPorts }}
+    - {protocol: TCP, port: {{ . }}}
+    {{- end }}
+  {{- if ne $c "callout" }}
+  # Model providers (/llm) and template registries (controller), the
+  # Kubernetes API (leader Lease, store state, resets;
+  # 6443 is its usual endpoint port). The callout needs neither.
+  - ports:
+    - {protocol: TCP, port: 443}
+    - {protocol: TCP, port: 6443}
+  {{- end }}
+  {{- with $.Values.networkPolicy.egress.otlpPorts }}
+  # OTLP export.
+  - ports:
+    {{- range . }}
+    - {protocol: TCP, port: {{ . }}}
+    {{- end }}
+  {{- end }}
+  {{- with $.Values.networkPolicy.egress.extra }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+{{- end }}
+{{- end }}
 # Gateway: the actor listener (plain HTTP) only from atenet-egress (actors
 # reach it only through egress, with the injected actor JWT); the admin listener only from
 # this namespace and adminFrom (launcher ingress, fleet).
@@ -44,6 +101,14 @@ spec:
         - {key: ate.dev/worker-pool, operator: DoesNotExist}
     {{- with .Values.networkPolicy.adminFrom }}
     {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if eq .Values.admin.expose.type "LoadBalancer" }}
+    # admin.expose LoadBalancer: the launcher networks (client addresses
+    # are kept, externalTrafficPolicy Local).
+    {{- range .Values.admin.expose.loadBalancer.sourceRanges }}
+    - ipBlock:
+        cidr: {{ . }}
+    {{- end }}
     {{- end }}
     ports:
     - protocol: TCP

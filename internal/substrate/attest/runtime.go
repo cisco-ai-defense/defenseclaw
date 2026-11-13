@@ -225,7 +225,7 @@ func (r *RuntimeScanner) Scan(ctx context.Context, a RuntimeAsset) (*RuntimeDeci
 	}
 
 	// Host admission rules: no template-build floor.
-	verdict, reason := so.decide(ctx, a.Kind, a.Name, a.Path, res)
+	verdict, reason, _ := so.decide(ctx, a.Kind, a.Name, a.Path, res)
 	d := &RuntimeDecision{Kind: a.Kind, Name: a.Name, Path: a.Path, Result: res, Reason: reason, Incomplete: incomplete}
 	switch verdict {
 	case VerdictBlock:

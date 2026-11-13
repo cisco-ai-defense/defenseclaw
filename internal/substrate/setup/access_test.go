@@ -23,7 +23,6 @@ func TestLauncherPolicyOnlyDefenseClawEdits(t *testing.T) {
 	next, changes := LauncherPolicy("eng-web", current, editors)
 	want := []Binding{
 		{Role: RoleEditor, Members: []string{Member(editors[1]), Member(editors[0])}},
-		{Role: RoleViewer, Members: []string{"user:carol"}},
 	}
 	for i := range want {
 		sortStrings(want[i].Members)
@@ -42,7 +41,8 @@ func TestLauncherPolicyOnlyDefenseClawEdits(t *testing.T) {
 			granted++
 		}
 	}
-	if revoked != 2 || granted != 1 {
+	// alice (owner), bob (editor) and carol (viewer, GAP-0084: own data only).
+	if revoked != 3 || granted != 1 {
 		t.Errorf("changes = %+v", changes)
 	}
 	if current.Bindings[1].Members[0] != "user:bob" {

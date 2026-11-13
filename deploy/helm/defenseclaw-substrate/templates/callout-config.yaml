@@ -19,6 +19,16 @@ A4 extproc.Config); "enabled" is the chart's, not the callout's. */ -}}
 refused in every spelling, whatever config.yaml says. */ -}}
 {{- $adminShort := trimSuffix ".svc.cluster.local" $admin -}}
 {{- $_ := set $c "internal_hosts" (list $admin (trimSuffix ".cluster.local" $admin) $adminShort (first (splitList "." $adminShort))) -}}
+{{- /* Managed enterprise installs never fail open (D8): the callout gets
+managed true, which makes chain.failure_mode auto mean closed, and open is
+refused here as for extproc.failure_mode (GAP-0063, GAP-0090). */ -}}
+{{- $mode := lower (toString (.Values.config.deployment_mode | default "")) -}}
+{{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
+{{- if eq (lower (toString (dig "chain" "failure_mode" "auto" $c))) "open" -}}
+{{- fail "config.substrate.extproc.chain.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout fails closed there (use auto or closed)" -}}
+{{- end -}}
+{{- $_ := set $c "managed" true -}}
+{{- end -}}
 {{- if not (hasKey $c "egress_peers") }}{{ $_ := set $c "egress_peers" (list .Values.substrate.egressSpiffeId) }}{{ end -}}
 {{- if and .Values.callout.judge.tokenSecret (not (hasKey $c "judge")) -}}
 {{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/verdict" $admin) "token_file" "/var/run/secrets/defenseclaw-callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
@@ -34,13 +44,30 @@ refused in every spelling, whatever config.yaml says. */ -}}
 {{- end -}}
 {{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}
 {{- /* One profile per launcher profile: its atespaces, the egress allow
-list and the unattended ask mode. */ -}}
+list, the unattended ask mode and the exposed values. The profile's
+sandbox section (guardrail.profiles.<p>.sandbox) tightens substrate.admin as
+config.TightenSandboxAdmin does: unattended_asks deny wins (else the
+profile's, else substrate.unattended.asks), actor_secrets intersect. */ -}}
 {{- $profiles := list -}}
 {{- $egress := $sub.egress | default dict -}}
 {{- $asks := ($sub.unattended | default dict).asks | default "deny" -}}
+{{- $floor := $sub.admin | default dict -}}
+{{- $gprofiles := (.Values.config.guardrail | default dict).profiles | default dict -}}
 {{- range $name, $spaces := ($sub.launcher_atespaces | default dict) -}}
-{{- $p := dict "name" $name "atespaces" $spaces "unattended_asks" $asks -}}
+{{- $sb := (get $gprofiles $name | default dict).sandbox | default dict -}}
+{{- $pasks := lower ($sb.unattended_asks | default ($floor.unattended_asks | default $asks)) -}}
+{{- if eq (lower ($floor.unattended_asks | default "")) "deny" }}{{ $pasks = "deny" }}{{ end -}}
+{{- $p := dict "name" $name "atespaces" $spaces "unattended_asks" $pasks -}}
 {{- with $egress.allow }}{{ $_ := set $p "egress" (dict "allow" .) }}{{ end -}}
+{{- $sec := $sb.actor_secrets | default list -}}
+{{- if and $floor.actor_secrets $sb.actor_secrets -}}
+{{- $both := list -}}
+{{- range $sb.actor_secrets }}{{ if has . $floor.actor_secrets }}{{ $both = append $both . }}{{ end }}{{ end -}}
+{{- $sec = $both -}}
+{{- else if $floor.actor_secrets -}}
+{{- $sec = $floor.actor_secrets -}}
+{{- end -}}
+{{- if $sec }}{{ $_ := set $p "actor_secrets" $sec }}{{ end -}}
 {{- $profiles = append $profiles $p -}}
 {{- end -}}
 {{- if $profiles }}{{ $_ := set $c "profiles" $profiles }}{{ end -}}

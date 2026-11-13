@@ -232,6 +232,18 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawOpenshellInstallMode:     managed.InstallMode,
 			DefenseClawSubjectKey:               managed.SubjectKey,
 		}
+		if sub := hookV8Substrate(ctx); sub.ActorUID.IsPresent() {
+			identityInput.DefenseClawSandboxRuntime = sub.Runtime
+			identityInput.DefenseClawSandboxSubstrateAtespace = sub.Atespace
+			identityInput.DefenseClawSandboxSubstrateActor = sub.Actor
+			identityInput.DefenseClawSandboxSubstrateActorUid = sub.ActorUID
+			identityInput.DefenseClawSandboxSubstrateTemplate = sub.Template
+			identityInput.DefenseClawSandboxSubstrateBatchID = sub.BatchID
+			identityInput.DefenseClawSandboxSubstrateKitVersion = sub.KitVersion
+			identityInput.DefenseClawSandboxSubstrateParentUid = sub.ParentUID
+			identityInput.DefenseClawSandboxSubstrateRunMode = sub.RunMode
+			identityInput.AteActorUid = sub.ActorUID
+		}
 		meta.Identity.applyTo(&identityInput)
 		return builder.BuildLogCompatHookDecision(identityInput)
 	})

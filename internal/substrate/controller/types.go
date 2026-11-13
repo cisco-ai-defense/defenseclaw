@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/chainstate"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/render"
 )
 
@@ -35,6 +36,14 @@ type Attestation struct {
 	// Reason says why a template is not attested (no attestation, bad
 	// signature, digest mismatch...).
 	Reason string
+	// Retryable marks a refusal whose cause may pass (the registry is
+	// unreachable): the controller keeps a recent good verdict meanwhile
+	// (GAP-0127).
+	Retryable bool
+	// ValidUntil is when the verdict must be checked again (the earliest
+	// attest.Verified.ValidUntil of the template's images); zero = the
+	// controller's own TTL only.
+	ValidUntil time.Time
 }
 
 // Attestor verifies a template's DefenseClaw attestation (lane A9
@@ -58,6 +67,14 @@ type ActivitySource interface {
 // (ate.actor.usage_sampled); controllerfake.Activity is the test fake.
 type CPUSource interface {
 	CPU(uid string) (cores float64, sampledAt time.Time, ok bool)
+}
+
+// LifecycleSink receives the actor lifecycle the controller observes, with
+// the controller's own time (the gateway leader's chain state runs each
+// actor's clock on it and copies a parent's windows to a fork, A13).
+// chainstate.Client implements it.
+type LifecycleSink interface {
+	Lifecycle(ctx context.Context, ev chainstate.LifecycleEvent) (chainstate.LifecycleResult, error)
 }
 
 // Attribution sources of a Registration.
@@ -101,8 +118,10 @@ type Registration struct {
 	Source          string   `json:"source"`
 }
 
-// Registry stores registrations (lane A2/A13 back it with sandboxreg and
-// the leader store; NewMemoryRegistry is the in-process one).
+// Registry stores registrations. The shipped controller uses
+// LeaderRegistry, the gateway leader's store the launcher writes to
+// (GAP-0125); NewMemoryRegistry is for tests. A Get error means "unknown
+// right now": the controller holds and changes no policy.
 type Registry interface {
 	Get(ctx context.Context, atespace, uid string) (Registration, bool, error)
 	Put(ctx context.Context, r Registration) error
@@ -117,9 +136,19 @@ type Resolution struct {
 	// Refuse, when set, means the profile does not allow the actor
 	// (sandboxes not allowed for the subject); it gets no policy.
 	Refuse string
+	// SandboxClass is the weakest isolation the profile admits (gvisor or
+	// microvm, "" = any): an actor whose template runs weaker gets no
+	// policy (PLAN §7.3 sandbox_class).
+	SandboxClass string
+	// IdleSuspendAfter, when set, replaces Options.IdleSuspendAfter for the
+	// actor (the profile's idle_suspend_after; 0 = off).
+	IdleSuspendAfter *time.Duration
 	// Warnings are shown as events (for example a glob on a foreign
 	// atespace, E3).
 	Warnings []string
+	// DenyOnly, when set, is why the actor keeps only the DefenseClaw rule
+	// (a managed install whose bundle no longer verifies, D8).
+	DenyOnly string
 }
 
 // ProfileResolver picks an actor's profile.
@@ -143,12 +172,14 @@ type Sink interface {
 const (
 	EventInventory          = "sandbox.inventory"
 	EventDeleted            = "sandbox.deleted"
+	EventRecreatedSameName  = "sandbox.actor.recreated_same_name"
 	EventPolicyWritten      = "sandbox.policy.written"
 	EventPolicyRemoved      = "sandbox.policy.removed"
 	EventPolicyWriteFailed  = "sandbox.policy.write_failed"
 	EventForeignRule        = "sandbox.policy.foreign_rule"
 	EventPolicyConflict     = "sandbox.policy_conflict"
 	EventConflictCleared    = "sandbox.policy_conflict.cleared"
+	EventConflictReset      = "sandbox.policy_conflict.reset"
 	EventResumeRecheck      = "sandbox.resume_recheck"
 	EventTemplateUnverified = "sandbox.template_unverified"
 	EventKitRefused         = "sandbox.kit_refused"

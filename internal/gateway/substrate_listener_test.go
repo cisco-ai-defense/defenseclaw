@@ -19,6 +19,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -36,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ratelimit"
 	"github.com/defenseclaw/defenseclaw/internal/substrate/registry"
 )
@@ -447,7 +449,7 @@ func TestSubstrateAdminListener(t *testing.T) {
 	}
 	var sess struct{ Token string }
 	_ = json.Unmarshal(rec.Body.Bytes(), &sess)
-	if s, err := f.sessions.Verify(sess.Token); err != nil || s.Person != "alice" || s.ActorUID != subUID1 {
+	if s, err := f.sessions.Verify(sess.Token); err != nil || s.Person != alice.ID() || s.ActorUID != subUID1 {
 		t.Fatalf("issued session %+v %v", s, err)
 	}
 	if rec := cert("p-alice", "bob-1"); rec.Code != http.StatusNotFound {
@@ -499,7 +501,7 @@ func (a *fakeActions) Delete(context.Context, string, string) error {
 func TestSubstrateCreateWritesTheRegistrationFirst(t *testing.T) {
 	var acts *fakeActions
 	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
-		c.Profiles = func(p identity.Person, requested string) (string, string, error) {
+		c.Profiles = func(p identity.Person, requested, _ string, _ bool) (string, string, error) {
 			if requested != "eng" {
 				return "", "", errors.New("no")
 			}
@@ -509,7 +511,7 @@ func TestSubstrateCreateWritesTheRegistrationFirst(t *testing.T) {
 	acts = &fakeActions{f: f}
 	st := f.api.substrateState()
 	st.cfg.Actions = acts
-	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"eng","template":"claude-wave1","task":"fix the tests"}`)
+	rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"eng","template":"claude-wave1","connector":"claudecode","task":"fix the tests"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create %d %s", rec.Code, rec.Body)
 	}
@@ -523,17 +525,19 @@ func TestSubstrateCreateWritesTheRegistrationFirst(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "session_token") {
 		t.Fatal("interactive create has no session token")
 	}
-	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"ops","template":"t"}`); rec.Code != http.StatusForbidden {
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"ops","template":"t","connector":"claudecode"}`); rec.Code != http.StatusForbidden {
 		t.Fatalf("other profile %d", rec.Code)
 	}
-	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"eng","template":"t","atespace":"eng-evil"}`); rec.Code != http.StatusForbidden {
+	if rec := f.do(t, f.admin, http.MethodPost, "/api/v1/substrate/actors", "p-alice", `{"profile":"eng","template":"t","connector":"claudecode","atespace":"eng-evil"}`); rec.Code != http.StatusForbidden {
 		t.Fatalf("foreign atespace %d", rec.Code)
 	}
 }
 
 func TestSubstrateCalloutVerdictRoute(t *testing.T) {
 	f := newSubstrateFixture(t)
-	req := `{"v":"1","actor":{"atespace":"eng-web","name":"alice-1"},"mcp":{"server":"docs","url":"https://mcp.example.com/mcp","method":"tools/call","tool":"search"},"args":{"q":"hello"}}`
+	// The calloutapi wire shape (GAP-0015): the callout names the actor by
+	// atespace and name only; the gateway finds the live UID.
+	req := `{"v":"1","actor":{"atespace":"eng-web","name":"alice-1"},"mcp":{"server":"docs","url":"https://mcp.example.com/mcp","transport":"http","method":"tools/call","tool":"search"},"args":{"q":"hello"}}`
 	if rec := f.do(t, f.admin, http.MethodPost, substrateCalloutPath, "", req); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no token %d", rec.Code)
 	}
@@ -549,6 +553,15 @@ func TestSubstrateCalloutVerdictRoute(t *testing.T) {
 	if v.Verdict != "allow" || v.ActorUID != subUID1 || v.Profile != "eng" {
 		t.Fatalf("verdict %+v", v)
 	}
+	// A suspended actor makes no call (GAP-0061).
+	f.live["eng-web/alice-1"] = identity.LiveActor{UID: subUID1, State: "SUSPENDED"}
+	rec = f.do(t, f.admin, http.MethodPost, substrateCalloutPath, subCallout, req)
+	v = SubstrateCalloutVerdict{}
+	_ = json.Unmarshal(rec.Body.Bytes(), &v)
+	if v.Verdict != "deny" {
+		t.Fatalf("suspended actor %+v", v)
+	}
+	f.live["eng-web/alice-1"] = identity.LiveActor{UID: subUID1, State: identity.ActorRunning}
 	// The route is not on the actor listener.
 	if rec := f.do(t, f.actor, http.MethodPost, substrateCalloutPath, "tok-alice", req); rec.Code != http.StatusNotFound {
 		t.Fatalf("callout route on the actor listener %d", rec.Code)
@@ -556,11 +569,12 @@ func TestSubstrateCalloutVerdictRoute(t *testing.T) {
 	// An unregistered or gone actor is denied.
 	gone := strings.Replace(req, "alice-1", "ghost", 1)
 	rec = f.do(t, f.admin, http.MethodPost, substrateCalloutPath, subCallout, gone)
+	v = SubstrateCalloutVerdict{}
 	_ = json.Unmarshal(rec.Body.Bytes(), &v)
 	if v.Verdict != "deny" {
 		t.Fatalf("gone actor %+v", v)
 	}
-	if rec := f.do(t, f.admin, http.MethodPost, substrateCalloutPath, subCallout, `{"v":"1","extra":1}`); rec.Code != http.StatusBadRequest {
+	if rec := f.do(t, f.admin, http.MethodPost, substrateCalloutPath, subCallout, `{"extra":1}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad body %d", rec.Code)
 	}
 }
@@ -624,5 +638,150 @@ func TestSubstrateCSRFOnlyOnTheAdminListener(t *testing.T) {
 	// Reads need no tag.
 	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/actors", "p-alice", "", noTag...); rec.Code != http.StatusOK {
 		t.Fatalf("admin GET without a client tag: %d", rec.Code)
+	}
+}
+
+type countingRegistrations struct {
+	registry.Store
+	mu   sync.Mutex
+	gets int
+}
+
+func (c *countingRegistrations) Get(ctx context.Context, atespace, uid string) (registry.Registration, bool, error) {
+	c.mu.Lock()
+	c.gets++
+	c.mu.Unlock()
+	return c.Store.Get(ctx, atespace, uid)
+}
+
+// GAP-0057: the limits run right after the token check, so a refused
+// request costs no registration lookup.
+func TestSubstrateRateLimitBeforeTheRegistrationLookup(t *testing.T) {
+	var counted *countingRegistrations
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) {
+		c.Limiter = ratelimit.New(ratelimit.Config{PerActorRPS: 2, PerAtespaceRPS: 1000})
+		counted = &countingRegistrations{Store: c.Registrations}
+		c.Registrations = counted
+	})
+	ok := 0
+	for i := 0; i < 50; i++ {
+		if rec := f.do(t, f.actor, http.MethodGet, "/api/v1/substrate/hook/claudecode", "tok-alice", "", substrateWarmHeader, "1"); rec.Code == http.StatusNoContent {
+			ok++
+		}
+	}
+	counted.mu.Lock()
+	defer counted.mu.Unlock()
+	if counted.gets != ok || ok == 0 || ok > 5 {
+		t.Fatalf("%d admitted, %d registration lookups", ok, counted.gets)
+	}
+}
+
+// GAP-0106: batch IDs are checked, and an administrator's all=1 view keeps
+// two owners' batches of the same ID apart.
+func TestSubstrateBatchesStayPerOwner(t *testing.T) {
+	f := newSubstrateFixture(t)
+	ctx := context.Background()
+	if err := f.regs.Put(ctx, registry.Registration{Atespace: "eng-web", Name: "alice-2", UID: subUIDOther, Connector: "claudecode",
+		Profile: "eng", Person: ownerOf(alice), BatchID: "b1"}); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches?all=1", "p-admin", "")
+	var list struct {
+		Batches []map[string]any `json:"batches"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list.Batches) != 2 {
+		t.Fatalf("all=1 batches %s", rec.Body)
+	}
+	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches/b1?all=1", "p-admin", ""); rec.Code != http.StatusConflict {
+		t.Fatalf("ambiguous batch %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches/b1?all=1&owner="+ownerOf(bob).ID(), "p-admin", ""); rec.Code != http.StatusOK {
+		t.Fatalf("batch by owner %d %s", rec.Code, rec.Body)
+	}
+	// A person sees only their own b1.
+	rec = f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches/b1", "p-alice", "")
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "bob-1") {
+		t.Fatalf("own batch %d %s", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, f.admin, http.MethodGet, "/api/v1/substrate/batches/..%2Fx", "p-alice", ""); rec.Code == http.StatusOK {
+		t.Fatalf("bad batch id %d", rec.Code)
+	}
+}
+
+// GAP-0138: the gateway accepts exactly the envelope version the kit
+// writes (kit.EnvelopeVersion); the old spelling and anything else are
+// refused.
+func TestSubstrateEnvelopeVersionFollowsTheKit(t *testing.T) {
+	f := newSubstrateFixture(t)
+	ev := map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": "v1", "cwd": "/work", "prompt": "hi"}
+	p, _ := json.Marshal(ev)
+	for v, want := range map[string]int{kit.EnvelopeVersion: http.StatusOK, "dcactor/1": http.StatusBadRequest, "2": http.StatusBadRequest, "": http.StatusBadRequest} {
+		b, _ := json.Marshal(map[string]any{"v": v, "connector": "claudecode", "mode": "interactive", "kit_version": "0.1.0", "payload": json.RawMessage(p)})
+		if rec := f.do(t, f.actor, http.MethodPost, "/api/v1/substrate/hook/claudecode", "tok-alice", string(b)); rec.Code != want {
+			t.Errorf("envelope v=%q: %d, want %d", v, rec.Code, want)
+		}
+	}
+}
+
+// GAP-0071: the relay check of a --task actor carries the registered task
+// digest (never the text); an interactive actor's carries none.
+func TestSubstrateRelayVerifyCarriesTheTaskDigest(t *testing.T) {
+	f := newSubstrateFixture(t)
+	ctx := context.Background()
+	reg, _, _ := f.regs.Get(ctx, "eng-web", subUID2)
+	reg.TaskDigest = "3f0a9c2e8b7d6f5a4c3b2a1908f7e6d5c4b3a29180f7e6d5c4b3a2918f7e6d5c"
+	if err := f.regs.Put(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	verify := func(actorTok string, uid string, name string) map[string]any {
+		tok, _, err := f.sessions.Issue(bob.ID(), identity.SessionActor{Atespace: "eng-web", Name: name, UID: uid}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := f.do(t, f.actor, http.MethodPost, substrateRelayVerify, actorTok, `{"token":"`+tok+`"}`)
+		var out map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return out
+	}
+	if got := verify("tok-bob", subUID2, "bob-1"); got["task_digest"] != reg.TaskDigest {
+		t.Fatalf("task actor: %v", got)
+	}
+	if got := verify("tok-alice", subUID1, "alice-1"); got["task_digest"] != nil {
+		t.Fatalf("interactive actor carries a digest: %v", got)
+	}
+}
+
+// GAP-0138 contract test: the kit's own hook code (kit.RunHook, the
+// resident helper's transport replaced by a direct call) posts to the real
+// actor listener, and the listener answers the connector's verdict.
+func TestKitEnvelopeAgainstTheRealListener(t *testing.T) {
+	f := newSubstrateFixture(t)
+	var status int
+	send := func(_ context.Context, r kit.Request) (kit.Response, string, error) {
+		req := httptest.NewRequest(http.MethodPost, r.Path, bytes.NewReader(r.Body))
+		for k, v := range r.Header {
+			req.Header.Set(k, v)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(substrateActorHeader, "Bearer tok-alice") // what egress injects
+		rec := httptest.NewRecorder()
+		f.actor.ServeHTTP(rec, req)
+		status = rec.Code
+		return kit.Response{Status: rec.Code, Body: rec.Body.Bytes()}, "", nil
+	}
+	ev, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "contract", "cwd": "/work",
+		"tool_name": "Bash", "tool_input": map[string]any{"command": "curl -s http://169.254.169.254/latest/meta-data/"}})
+	var out, errOut bytes.Buffer
+	code := kit.RunHook(context.Background(), kit.HookOptions{
+		Connector: "claudecode", Event: "PreToolUse", Config: kit.DefaultConfig(),
+		Stdin: bytes.NewReader(ev), Stdout: &out, Stderr: &errOut,
+		Getenv: func(string) string { return "" }, Send: send, Home: t.TempDir(),
+	})
+	if status != http.StatusOK {
+		t.Fatalf("listener answered %d to the kit's envelope (stderr %q)", status, errOut.String())
+	}
+	if !strings.Contains(out.String()+errOut.String(), "C2-METADATA") && code == 0 {
+		t.Fatalf("the kit did not relay the block: code %d out %q err %q", code, out.String(), errOut.String())
 	}
 }

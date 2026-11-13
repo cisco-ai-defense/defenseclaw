@@ -74,6 +74,14 @@ The hook retries once, then follows the fail mode. Check that the `defenseclaw-a
 
 Egress inspects HTTPS, so tools must trust Substrate's bundle. Python needs `SSL_CERT_FILE=/run/ate/egress-trust-bundle/trust-bundle.pem`; the directory form wasn't enough. Set it in the actor's environment (the template) if your tools need it.
 
+### An agent that uses WebSockets can't connect (Amp)
+
+Substrate 1.0.0 refuses every WebSocket upgrade on an inspected or `http` rule, even to a host in the allow list. The agent gets `403 Forbidden` with the body `WebSocket egress is not supported`, and Amp keeps saying "Reconnecting". The workaround is to add the host to `substrate.allow_passthrough_for` (for Amp, `ampcode.com`). That host is then forwarded without inspection: DefenseClaw doesn't check its requests and doesn't inject a secret there, so the agent's key or sign-in has to be in the actor. An open-source install warns about that, and a managed install refuses agents that hold their own sign-in.
+
+### An MCP call is refused with `body_uninspectable` or `path_ambiguous`
+
+DefenseClaw reads the requests sent to MCP and listed hosts as the server will. It decodes gzip and deflate bodies and drops a UTF-8 byte order mark. With `extproc.failure_mode: closed` (the default) it refuses a body it can't read: another encoding, a charset that isn't UTF-8, or, for MCP, a body that isn't JSON (`NaN` in the arguments, for example). With `open` it allows the request and raises an alert. `path_ambiguous` is a path that servers can read in more than one way, such as an encoded slash or semicolon, or `..;`, on a host that has path rules. Send the plain form.
+
 ### A secret placeholder shows up in a tool's output
 
 The placeholder was sent to a host the secret isn't bound to, so nothing was swapped. That is working as intended. Bind the secret to the right host, or stop the tool from echoing it. Hosts that echo tokens back are a known case.

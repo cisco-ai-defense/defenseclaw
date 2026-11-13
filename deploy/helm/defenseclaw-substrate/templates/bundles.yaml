@@ -1,0 +1,44 @@
+{{- if .Values.bundles.enabled }}
+# Signed policy bundles (substrate.bundles). The controller applies the
+# GitOps inbox and re-verifies every stage on each refresh; the gateway's
+# admin listener applies and rolls back for administrators. Both keep the
+# bundle state and receipts here. A bundle is verified against the anchors
+# Secret whenever it is read, so these rights cannot put an unsigned policy
+# in force.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-bundles
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-bundles, defenseclaw-bundle-receipts]
+  verbs: [get, update]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [{{ .Values.bundles.inbox | quote }}]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-bundles
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-bundles
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: {{ .Release.Namespace }}
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: {{ .Release.Namespace }}
+{{- end }}

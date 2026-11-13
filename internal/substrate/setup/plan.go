@@ -37,8 +37,10 @@ type ChartPlan struct {
 	GlobalViewers       []string           `json:"global_viewers"`
 	CredentialProvider  CredentialProvider `json:"credential_provider"`
 	StoreStateConfigMap string             `json:"store_state_config_map"`
-	OwnerTokenSecret    string             `json:"owner_token_secret"`
-	DeleteOwnerToken    bool               `json:"delete_owner_token"`
+	// ControllerDeployment is stopped first by the uninstall (GAP-0056).
+	ControllerDeployment string `json:"controller_deployment"`
+	OwnerTokenSecret     string `json:"owner_token_secret"`
+	DeleteOwnerToken     bool   `json:"delete_owner_token"`
 }
 
 // PlanAPI is the ate-api-server address and token audience.

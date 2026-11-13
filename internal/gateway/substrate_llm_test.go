@@ -89,3 +89,91 @@ func TestSubstrateLLMRoute(t *testing.T) {
 		t.Fatalf("no model activity %v", f.activity)
 	}
 }
+
+// GAP-0041: /llm serves only the providers' model APIs; the guardrail
+// proxy's other routes are never an actor's. Haiku 5.5 inference profiles
+// (us. and global.) are model paths like any other Bedrock ID.
+func TestSubstrateLLMOnlyModelPaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"bedrock", "openai", "anthropic", "gemini"} {
+		if err := os.WriteFile(filepath.Join(dir, p), []byte("k"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reached := 0
+	proxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached++; w.WriteHeader(200) })
+	h, err := NewSubstrateLLMHandler(SubstrateLLMConfig{Providers: DefaultSubstrateLLMProviders(dir, ""), Proxy: proxy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.LLM = h })
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/llm/openai/v1/config/providers"},
+		{http.MethodPost, "/llm/openai/v1/config/providers/reload"},
+		{http.MethodPost, "/llm/openai/v1/events/egress"},
+		{http.MethodGet, "/llm/openai/health"},
+		{http.MethodGet, "/llm/openai/v1/models"},
+		{http.MethodGet, "/llm/anthropic/v1/messages"},
+		{http.MethodPost, "/llm/anthropic/v1/messages/batches"},
+		{http.MethodPost, "/llm/bedrock/model/x/invoke/extra"},
+		{http.MethodPost, "/llm/bedrock/guardrail/g1/version/1/apply"},
+		{http.MethodPost, "/llm/gemini/v1beta/models/gemini-2.5-pro:deleteEverything"},
+	} {
+		if rec := f.do(t, f.actor, c.method, c.path, "tok-alice", `{}`); rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s: %d, want 404", c.method, c.path, rec.Code)
+		}
+	}
+	if reached != 0 {
+		t.Fatalf("%d refused calls reached the proxy", reached)
+	}
+	for _, p := range []string{
+		"/llm/bedrock/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream",
+		"/llm/bedrock/model/global.anthropic.claude-haiku-5-5/converse-stream",
+		"/llm/bedrock/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke",
+		"/llm/anthropic/v1/messages",
+		"/llm/anthropic/v1/messages/count_tokens",
+		"/llm/openai/v1/chat/completions",
+		"/llm/openai/v1/responses",
+		"/llm/gemini/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+	} {
+		if rec := f.do(t, f.actor, http.MethodPost, p, "tok-alice", `{}`); rec.Code != 200 {
+			t.Errorf("POST %s: %d %s", p, rec.Code, rec.Body)
+		}
+	}
+	// An escaped Bedrock model ID (SDKs escape the colon) is still a model path.
+	if rec := f.do(t, f.actor, http.MethodPost, "/llm/bedrock/model/us.anthropic.claude-haiku-4-5-20251001-v1%3A0/invoke", "tok-alice", `{}`); rec.Code != 200 {
+		t.Errorf("escaped model ID: %d", rec.Code)
+	}
+}
+
+// GAP-0008: with substrate.llm.bedrock_models set, the probe models Claude
+// Code sends at start go to the allowed model through the proxy; an
+// allowed model goes where it says.
+func TestSubstrateBedrockProbesGoToTheAllowedModel(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bedrock"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	proxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = append(got, r.URL.Path); w.WriteHeader(200) })
+	h, err := NewSubstrateLLMHandler(SubstrateLLMConfig{Providers: DefaultSubstrateLLMProviders(dir, ""), Proxy: proxy,
+		BedrockModels: []string{"us.anthropic.claude-haiku-5-5", "global.anthropic.claude-haiku-5-5"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newSubstrateFixture(t, func(c *SubstrateConfig) { c.LLM = h })
+	for _, c := range []struct{ in, want string }{
+		{"/llm/bedrock/model/us.anthropic.claude-opus-5-5/invoke", "/model/us.anthropic.claude-haiku-5-5/invoke"},
+		{"/llm/bedrock/model/us.anthropic.claude-sonnet-4-5-20250929-v1:0/invoke", "/model/us.anthropic.claude-haiku-5-5/invoke"},
+		{"/llm/bedrock/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream", "/model/us.anthropic.claude-haiku-5-5/invoke-with-response-stream"},
+		{"/llm/bedrock/model/global.anthropic.claude-haiku-5-5/converse-stream", "/model/global.anthropic.claude-haiku-5-5/converse-stream"},
+	} {
+		got = nil
+		if rec := f.do(t, f.actor, http.MethodPost, c.in, "tok-alice", `{}`); rec.Code != 200 || len(got) != 1 || got[0] != c.want {
+			t.Errorf("%s: %d -> %v, want %s", c.in, rec.Code, got, c.want)
+		}
+	}
+	if _, ok := substrateBedrockRoute("/model/x/invoke", nil); ok {
+		t.Fatal("routed with no allowed list")
+	}
+}

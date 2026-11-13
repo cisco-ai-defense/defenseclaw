@@ -17,8 +17,10 @@
 package gateway
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,9 +62,21 @@ type SubstrateLLMProvider struct {
 // SubstrateLLMConfig configures /llm.
 type SubstrateLLMConfig struct {
 	Providers map[string]SubstrateLLMProvider
+	// BedrockModels are the Bedrock model IDs actors may call
+	// (substrate.llm.bedrock_models); a call for another model is sent to
+	// the first one. Empty serves the model the call names.
+	BedrockModels []string
 	// Proxy serves the call (GuardrailProxy.SubstrateHandler).
 	Proxy http.Handler
+	// ExposedValues, when set, returns the actor_secrets values of a
+	// profile (SubstrateExposedValues): a request body that carries one is
+	// refused before it reaches the proxy (PLAN §7.2, exact-value DLP).
+	ExposedValues func(profile string) map[string]string
 }
+
+// substrateLLMMaxDLPBody bounds the body /llm reads to look for an exposed
+// value; a larger body of an actor with exposed values is refused.
+const substrateLLMMaxDLPBody = 32 << 20
 
 var substrateProviderRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
@@ -146,8 +160,27 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstream := "/" + upstreamPath
-	if path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream) {
+	// A Bedrock ARN model ID (application inference profile, provisioned
+	// throughput) carries an escaped slash; it is forwarded escaped, and
+	// accepted only when that segment is a Bedrock ARN (GAP-0129).
+	rawUpstream := ""
+	if provider == "bedrock" {
+		if esc, ok := strings.CutPrefix(r.URL.EscapedPath(), substrateLLMPrefix+provider); ok {
+			if dec, ok := substrateBedrockARNPath(esc); ok && dec == upstream {
+				rawUpstream = esc
+			}
+		}
+	}
+	if rawUpstream == "" && (path.Clean(upstream) != upstream || strings.Contains(upstream, "\\") || !substrateModelPath(provider, upstream)) {
 		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// Every model API call is a POST; a GET of a model path is a probe.
+	if r.Method != http.MethodPost {
+		writeSubstrateRefusal(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if !s.exposedValueCheck(w, r) {
 		return
 	}
 	key, err := os.ReadFile(p.CredentialFile)
@@ -173,11 +206,58 @@ func (s *substrateLLM) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		r2.Header.Set("Authorization", "Bearer "+secret)
 	}
+	if provider == "bedrock" {
+		if routed, ok := substrateBedrockRoute(upstream, s.cfg.BedrockModels); ok {
+			// Claude Code probes models the profile does not offer at start
+			// (GAP-0008): the call goes to the allowed model, through the
+			// same guardrails, never to the model it named.
+			r2.Header.Set("X-DefenseClaw-Model-Routed", "1")
+			upstream, rawUpstream = routed, ""
+		}
+	}
 	u := *r.URL
-	u.Path, u.RawPath = upstream, ""
+	u.Path, u.RawPath = upstream, rawUpstream
 	r2.URL = &u
 	r2.RequestURI = ""
 	s.cfg.Proxy.ServeHTTP(w, r2)
+}
+
+// exposedValueCheck refuses a model call whose body carries one of the
+// actor's exposed values (its profile's actor_secrets), and puts the body
+// back otherwise. A body it cannot read whole (too large, compressed) is
+// refused for an actor that has exposed values: the check fails closed.
+// The refusal names the secret, never its value.
+func (s *substrateLLM) exposedValueCheck(w http.ResponseWriter, r *http.Request) bool {
+	if s.cfg.ExposedValues == nil {
+		return true
+	}
+	reg, ok := substrateRegistrationFrom(r.Context())
+	if !ok {
+		return true
+	}
+	values := s.cfg.ExposedValues(reg.Profile)
+	if len(values) == 0 {
+		return true
+	}
+	if enc := strings.TrimSpace(r.Header.Get("Content-Encoding")); enc != "" && !strings.EqualFold(enc, "identity") {
+		writeSubstrateRefusal(w, http.StatusUnsupportedMediaType, "exposed_value_check_needs_plain_body")
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, substrateLLMMaxDLPBody+1))
+	if err != nil || len(body) > substrateLLMMaxDLPBody {
+		writeSubstrateRefusal(w, http.StatusRequestEntityTooLarge, "body_too_large")
+		return false
+	}
+	_ = r.Body.Close()
+	if name, hit := substrateExposedValueIn(body, values); hit {
+		fmt.Fprintf(os.Stderr, "[substrate] llm: refused a model call of %s/%s carrying the exposed value %s (actor_secrets)\n",
+			reg.Atespace, reg.Name, name)
+		writeSubstrateRefusal(w, http.StatusForbidden, "exposed_secret_in_request")
+		return false
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	return true
 }
 
 // substrateRouterAnswerNarrows reports a semantic-router answer an Agent
@@ -203,4 +283,47 @@ func substrateRouterAnswerNarrows(target string, d *ModelRouterDecision) bool {
 		return false
 	}
 	return strings.EqualFold(from.Scheme, to.Scheme) && strings.EqualFold(from.Host, to.Host)
+}
+
+var (
+	substrateBedrockRawPathRE = regexp.MustCompile(`^/model/([^/]+)/(invoke|invoke-with-response-stream|converse|converse-stream)$`)
+	substrateBedrockARNRE     = regexp.MustCompile(`^arn:aws(-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]{12}:` +
+		`(application-inference-profile|inference-profile|provisioned-model|custom-model|imported-model|foundation-model)/[A-Za-z0-9._:-]+$`)
+)
+
+// substrateBedrockARNPath reads an escaped Bedrock model path whose model
+// segment is an ARN: one segment on the wire, a Bedrock ARN with exactly
+// one slash once unescaped. It returns the decoded path.
+func substrateBedrockARNPath(escaped string) (string, bool) {
+	m := substrateBedrockRawPathRE.FindStringSubmatch(escaped)
+	if m == nil {
+		return "", false
+	}
+	id, err := url.PathUnescape(m[1])
+	if err != nil || strings.Count(id, "/") != 1 || !substrateBedrockARNRE.MatchString(id) {
+		return "", false
+	}
+	return "/model/" + id + "/" + m[2], true
+}
+
+// substrateBedrockRoute rewrites /model/<id>/<action> to the first allowed
+// model when <id> is not allowed. ok is false when nothing changes.
+func substrateBedrockRoute(upstream string, allowed []string) (string, bool) {
+	if len(allowed) == 0 {
+		return "", false
+	}
+	rest, found := strings.CutPrefix(upstream, "/model/")
+	if !found {
+		return "", false
+	}
+	id, action, found := strings.Cut(rest, "/")
+	if !found {
+		return "", false
+	}
+	for _, m := range allowed {
+		if strings.EqualFold(id, m) {
+			return "", false
+		}
+	}
+	return "/model/" + allowed[0] + "/" + action, true
 }

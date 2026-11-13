@@ -9,10 +9,14 @@ package setup
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
+
+func init() { RecheckAfter, pollEvery = time.Millisecond, time.Millisecond }
 
 func testPlan() ChartPlan {
 	return ChartPlan{
@@ -37,6 +41,8 @@ type fakeAPI struct {
 	egress    map[ActorRef]*EgressPolicy
 	puts      []AccessPolicy
 	deleteErr map[ActorRef]error
+	// afterDelete runs after a successful delete (models a controller).
+	afterDelete func(ActorRef)
 }
 
 func newFakeAPI() *fakeAPI {
@@ -87,6 +93,9 @@ func (f *fakeAPI) DeleteEgressPolicy(_ context.Context, r ActorRef) error {
 		return err
 	}
 	f.egress[r] = nil
+	if f.afterDelete != nil {
+		f.afterDelete(r)
+	}
 	return nil
 }
 
@@ -95,9 +104,16 @@ type fakeKube struct {
 	restarts  []string
 	deleted   []string
 	updateErr error
+	// replicas of Deployments by ns/name; scales records every scale call.
+	replicas map[string]int32
+	scales   []string
+	// onScale runs after a scale (tests use it to model the controller).
+	onScale func(name string, n int32)
 }
 
-func newFakeKube() *fakeKube { return &fakeKube{cms: map[string]*ConfigMap{}} }
+func newFakeKube() *fakeKube {
+	return &fakeKube{cms: map[string]*ConfigMap{}, replicas: map[string]int32{}}
+}
 
 func (k *fakeKube) GetConfigMap(_ context.Context, ns, name string) (*ConfigMap, error) {
 	if cm := k.cms[ns+"/"+name]; cm != nil {
@@ -120,6 +136,21 @@ func (k *fakeKube) UpdateConfigMap(_ context.Context, cm *ConfigMap) error {
 func (k *fakeKube) RestartDeployment(_ context.Context, ns, name string) error {
 	k.restarts = append(k.restarts, ns+"/"+name)
 	return nil
+}
+func (k *fakeKube) ScaleDeployment(_ context.Context, ns, name string, n int32) (int32, bool, error) {
+	prev, ok := k.replicas[ns+"/"+name]
+	if !ok {
+		return 0, false, nil
+	}
+	k.replicas[ns+"/"+name] = n
+	k.scales = append(k.scales, fmt.Sprintf("%s=%d", name, n))
+	if k.onScale != nil {
+		k.onScale(name, n)
+	}
+	return prev, true, nil
+}
+func (k *fakeKube) DeploymentPods(_ context.Context, ns, name string) (int32, error) {
+	return k.replicas[ns+"/"+name], nil
 }
 func (k *fakeKube) DeleteSecret(_ context.Context, ns, name string) error {
 	k.deleted = append(k.deleted, ns+"/"+name)
@@ -264,6 +295,76 @@ func TestPreDeleteFailsWhilePoliciesRemain(t *testing.T) {
 	_, err := PreDelete(context.Background(), plan, api, kube)
 	if !errors.Is(err, ErrPoliciesLeft) || !strings.Contains(err.Error(), "elsewhere/a") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// GAP-0056: the uninstall stops the controller before it removes the
+// policies (a running controller writes them again on its next poll), and
+// looks again after one poll interval.
+func TestPreDeleteStopsTheControllerFirst(t *testing.T) {
+	api, kube := newFakeAPI(), newFakeKube()
+	plan := testPlan()
+	plan.ControllerDeployment = "defenseclaw-controller"
+	ours := ActorRef{"eng-web", "a1"}
+	api.egress[ours] = &EgressPolicy{Actor: ours, Hostnames: []string{plan.ActorHost}}
+	kube.replicas[plan.Namespace+"/defenseclaw-controller"] = 1
+	// The controller recreates a missing policy while it runs.
+	running := func() bool { return kube.replicas[plan.Namespace+"/defenseclaw-controller"] > 0 }
+	api.afterDelete = func(a ActorRef) {
+		if running() {
+			api.egress[a] = &EgressPolicy{Actor: a, Hostnames: []string{plan.ActorHost}}
+		}
+	}
+	r, err := PreDelete(context.Background(), plan, api, kube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.egress[ours] != nil || len(kube.scales) != 1 || kube.scales[0] != "defenseclaw-controller=0" {
+		t.Fatalf("policy=%v scales=%v notes=%v", api.egress[ours], kube.scales, r.Notes)
+	}
+
+	// A policy that cannot be removed stops the uninstall and the controller
+	// comes back, so what remains stays enforced.
+	api2, kube2 := newFakeAPI(), newFakeKube()
+	stuck := ActorRef{"elsewhere", "a"}
+	api2.egress[stuck] = &EgressPolicy{Actor: stuck, Hostnames: []string{plan.ActorHost}}
+	api2.deleteErr[stuck] = errors.New("PermissionDenied")
+	kube2.replicas[plan.Namespace+"/defenseclaw-controller"] = 1
+	if _, err := PreDelete(context.Background(), plan, api2, kube2); !errors.Is(err, ErrPoliciesLeft) {
+		t.Fatalf("err = %v", err)
+	}
+	if kube2.replicas[plan.Namespace+"/defenseclaw-controller"] != 1 {
+		t.Fatalf("controller not scaled back: %v", kube2.scales)
+	}
+}
+
+// GAP-0083: the uninstall revokes the secrets namespace from every atespace
+// it was granted to; a bootstrap revokes it from atespaces no longer listed.
+func TestProviderGrantsFollowTheLauncherList(t *testing.T) {
+	api, kube := newFakeAPI(), newFakeKube()
+	plan := testPlan()
+	key := "ate-system/k8s-credential-provider-namespace-policy"
+	kube.cms[key] = &ConfigMap{Namespace: "ate-system", Name: "k8s-credential-provider-namespace-policy",
+		Data: map[string]string{NamespacePolicyKey: "policies:\n- atespace: old-launcher\n  allowedNamespaces: [defenseclaw-actor-secrets]\n- atespace: team-a\n  allowedNamespaces: [ns1]\n"}}
+	if _, err := Bootstrap(context.Background(), plan, api, kube); err != nil {
+		t.Fatal(err)
+	}
+	pol := kube.cms[key].Data[NamespacePolicyKey]
+	if strings.Contains(pol, "old-launcher") || !strings.Contains(pol, "eng-web") || !strings.Contains(pol, "team-a") {
+		t.Fatalf("after bootstrap:\n%s", pol)
+	}
+	// Add a stale grant again, then uninstall: every grant of the namespace goes.
+	stale, _, err := GrantNamespace(pol, []string{"old-launcher"}, "defenseclaw-actor-secrets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kube.cms[key].Data[NamespacePolicyKey] = stale
+	if _, err := PreDelete(context.Background(), plan, api, kube); err != nil {
+		t.Fatal(err)
+	}
+	pol = kube.cms[key].Data[NamespacePolicyKey]
+	if strings.Contains(pol, "defenseclaw-actor-secrets") || !strings.Contains(pol, "team-a") {
+		t.Fatalf("after uninstall:\n%s", pol)
 	}
 }
 

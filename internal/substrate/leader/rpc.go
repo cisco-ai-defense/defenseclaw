@@ -43,6 +43,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -60,13 +61,22 @@ const (
 	// followers make of the registrations the leader keeps.
 	MethodRegistrationGet  = "RegistrationGet"
 	MethodRegistrationList = "RegistrationList"
+	// MethodRegistrationLookup answers the callout's name lookup: the UID,
+	// profile and attendance of an actor's newest incarnation (GAP-0090).
+	MethodRegistrationLookup = "RegistrationLookup"
+	// MethodActivityObserve carries a gateway replica's batch of last
+	// activity per actor; MethodActivitySnapshot answers the controller's
+	// idle check (internal/substrate/activity).
+	MethodActivityObserve  = "ActivityObserve"
+	MethodActivitySnapshot = "ActivitySnapshot"
 )
 
 // Methods lists every method a leader serves.
 var Methods = []string{
 	MethodChainObserve, MethodIntentGet, MethodIntentPut,
 	MethodAskOpen, MethodAskResolve, MethodRegistrationWrite,
-	MethodRegistrationGet, MethodRegistrationList,
+	MethodRegistrationGet, MethodRegistrationList, MethodRegistrationLookup,
+	MethodActivityObserve, MethodActivitySnapshot,
 }
 
 // Error codes.
@@ -76,6 +86,7 @@ const (
 	CodeUnknownMethod = "unknown_method"
 	CodeInternal      = "internal"
 	CodeUnavailable   = "unavailable"
+	CodeForbidden     = "forbidden"
 )
 
 // PathPrefix is the route prefix of leader calls.
@@ -155,15 +166,59 @@ func NewRequestID() string {
 	return hex.EncodeToString(b)
 }
 
+// Permissions maps a peer identity (the SPIFFE ID in its verified mTLS
+// certificate) to the methods it may call; "*" is every method (GAP-0094).
+type Permissions map[string][]string
+
+// Allows reports whether peer may call method.
+func (p Permissions) Allows(peer, method string) bool {
+	for _, m := range p[peer] {
+		if m == "*" || m == method {
+			return true
+		}
+	}
+	return false
+}
+
+// Peers lists every identity with a permission (the TLS allowlist).
+func (p Permissions) Peers() []string {
+	out := make([]string, 0, len(p))
+	for id := range p {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// PeerID is the first URI SAN of the verified client certificate of r, ""
+// without one. The TLS layer (podcert) has already checked the chain and
+// that the identity is on the allowlist.
+func PeerID(r *http.Request) string {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return ""
+	}
+	for _, u := range r.TLS.PeerCertificates[0].URIs {
+		return u.String()
+	}
+	return ""
+}
+
 // Server serves leader calls. IsLeader gates every call.
 type Server struct {
 	IsLeader func() bool
+	// Permit, when set, limits each peer identity to its methods; a call
+	// without a verified identity, or for a method its identity lacks, is
+	// refused (403 forbidden). Nil checks nothing (tests, plain HTTP).
+	Permit Permissions
 	// Now replaces the clock (tests).
 	Now func() time.Time
 
 	mu       sync.Mutex
 	handlers map[string]Handler
-	done     map[string]*idemEntry
+	// reads are methods without side effects: their answers are not kept
+	// for replay (GAP-0057).
+	reads map[string]bool
+	done  map[string]*idemEntry
 }
 
 type idemEntry struct {
@@ -181,6 +236,22 @@ func (s *Server) Handle(method string, fn Handler) {
 		s.handlers = map[string]Handler{}
 	}
 	s.handlers[method] = fn
+	delete(s.reads, method)
+}
+
+// HandleRead registers fn for a method without side effects. Its answers
+// are not kept for replay: a retry simply reads again.
+func (s *Server) HandleRead(method string, fn Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.handlers == nil {
+		s.handlers = map[string]Handler{}
+	}
+	if s.reads == nil {
+		s.reads = map[string]bool{}
+	}
+	s.handlers[method] = fn
+	s.reads[method] = true
 }
 
 func (s *Server) now() time.Time {
@@ -199,9 +270,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	method := strings.TrimPrefix(r.URL.Path, PathPrefix)
 	s.mu.Lock()
 	h, ok := s.handlers[method]
+	read := s.reads[method]
 	s.mu.Unlock()
 	if !ok {
 		writeWire(w, http.StatusNotFound, Response{Error: &WireError{Code: CodeUnknownMethod, Message: "unknown method"}})
+		return
+	}
+	if s.Permit != nil && !s.Permit.Allows(PeerID(r), method) {
+		writeWire(w, http.StatusForbidden, Response{Error: &WireError{Code: CodeForbidden, Message: "this peer may not call the method"}})
 		return
 	}
 	if s.IsLeader == nil || !s.IsLeader() {
@@ -218,8 +294,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeWire(w, http.StatusBadRequest, Response{Error: &WireError{Code: CodeBadRequest, Message: "request_id and body are required"}})
 		return
 	}
+	if read {
+		ctx := context.WithValue(r.Context(), requestIDKey{}, req.RequestID)
+		body, err := h(ctx, req.Body)
+		status, resp := http.StatusOK, Response{Body: body}
+		if err != nil {
+			var we *WireError
+			if !errors.As(err, &we) {
+				we = &WireError{Code: CodeInternal, Message: "the leader could not complete the call"}
+			}
+			resp, status = Response{Error: we}, statusOf(we.Code)
+		}
+		writeWire(w, status, resp)
+		return
+	}
 	key := method + "\x00" + req.RequestID
 	entry, first := s.claim(key)
+	if entry == nil {
+		writeWire(w, http.StatusServiceUnavailable, Response{Error: &WireError{Code: CodeUnavailable, Message: "the leader is busy"}})
+		return
+	}
 	if !first {
 		select {
 		case <-entry.ready:
@@ -249,6 +343,12 @@ func statusOf(code string) int {
 		return http.StatusBadRequest
 	case CodeNotLeader, CodeUnavailable:
 		return http.StatusServiceUnavailable
+	case CodeForbidden:
+		return http.StatusForbidden
+	case "not_found":
+		return http.StatusNotFound
+	case "decided":
+		return http.StatusConflict
 	}
 	return http.StatusInternalServerError
 }
@@ -268,6 +368,22 @@ func (s *Server) claim(key string) (*idemEntry, bool) {
 			if !e.at.IsZero() && now.Sub(e.at) >= IdempotencyTTL {
 				delete(s.done, k)
 			}
+		}
+	}
+	if len(s.done) >= maxIdempotent {
+		// Still full of fresh answers: drop finished ones until there is
+		// room (a retry after that runs again), so the map never grows past
+		// its cap (GAP-0057).
+		for k, e := range s.done {
+			if len(s.done) < maxIdempotent*9/10 {
+				break
+			}
+			if !e.at.IsZero() {
+				delete(s.done, k)
+			}
+		}
+		if len(s.done) >= maxIdempotent {
+			return nil, false // every entry is in flight
 		}
 	}
 	e := &idemEntry{ready: make(chan struct{})}

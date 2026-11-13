@@ -8,27 +8,16 @@ package setup
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/ateapi"
 )
 
-// AccessAPI is what the bootstrap needs beyond ateapi.Client: creating an
-// atespace and reading and writing access policies. ateapi.Client has no
-// such calls yet; DialAccess supplies them until it does.
-type AccessAPI interface {
-	CreateAtespace(ctx context.Context, name string) error
-	GetAccessPolicy(ctx context.Context, atespace string) (*AccessPolicy, error)
-	PutAccessPolicy(ctx context.Context, p AccessPolicy) error
-	Close() error
-}
-
-// API is SubstrateAPI over the ateapi client (actors, atespaces, egress
-// policies) and an AccessAPI (bootstrap only; nil elsewhere).
+// API is SubstrateAPI over the ateapi client: actors, atespaces, egress
+// policies and access policies (the bootstrap writes those with a global
+// owner's token).
 type API struct {
 	Client ateapi.Client
-	Access AccessAPI
 }
 
 var _ SubstrateAPI = (*API)(nil)
@@ -41,37 +30,20 @@ type APIOptions struct {
 	// TokenFile is the bearer token: the pod's projected ServiceAccount
 	// token, or the global owner's token for the bootstrap.
 	TokenFile string
-	// WithAccess also opens the AccessAPI (the bootstrap).
-	WithAccess bool
 }
 
-// NewAPI connects the ateapi client, and the AccessAPI when asked.
+// NewAPI connects the ateapi client.
 func NewAPI(o APIOptions) (*API, error) {
 	c, err := ateapi.New(ateapi.Options{Address: o.Address, ServerName: o.ServerName, CAFile: o.CAFile,
 		Auth: ateapi.AuthServiceAccount, TokenFile: o.TokenFile})
 	if err != nil {
 		return nil, err
 	}
-	api := &API{Client: c}
-	if o.WithAccess {
-		if api.Access, err = DialAccess(o); err != nil {
-			_ = c.Close()
-			return nil, err
-		}
-	}
-	return api, nil
+	return &API{Client: c}, nil
 }
 
-// Close closes both connections.
-func (a *API) Close() error {
-	err := a.Client.Close()
-	if a.Access != nil {
-		err = errors.Join(err, a.Access.Close())
-	}
-	return err
-}
-
-var errNoAccess = errors.New("this step has no access-policy connection (only the bootstrap writes access policies)")
+// Close closes the connection.
+func (a *API) Close() error { return a.Client.Close() }
 
 // GetAtespace implements SubstrateAPI.
 func (a *API) GetAtespace(ctx context.Context, name string) (bool, error) {
@@ -84,26 +56,40 @@ func (a *API) GetAtespace(ctx context.Context, name string) (bool, error) {
 
 // CreateAtespace implements SubstrateAPI.
 func (a *API) CreateAtespace(ctx context.Context, name string) error {
-	if a.Access == nil {
-		return errNoAccess
-	}
-	return a.Access.CreateAtespace(ctx, name)
+	_, err := a.Client.CreateAtespace(ctx, name)
+	return err
 }
 
 // GetAccessPolicy implements SubstrateAPI.
 func (a *API) GetAccessPolicy(ctx context.Context, atespace string) (*AccessPolicy, error) {
-	if a.Access == nil {
-		return nil, errNoAccess
+	p, err := a.Client.GetAccessPolicy(ctx, atespace)
+	if ateapi.IsNotFound(err) {
+		return nil, nil
 	}
-	return a.Access.GetAccessPolicy(ctx, atespace)
+	if err != nil {
+		return nil, err
+	}
+	out := &AccessPolicy{Atespace: atespace, UID: p.GetMetadata().GetUid(), Version: p.GetMetadata().GetVersion()}
+	for _, b := range p.GetBindings() {
+		out.Bindings = append(out.Bindings, Binding{Role: b.GetRole(), Members: append([]string{}, b.GetMembers()...)})
+	}
+	return out, nil
 }
 
-// PutAccessPolicy implements SubstrateAPI.
+// PutAccessPolicy implements SubstrateAPI: create when UID is empty,
+// otherwise update with the UID and version preconditions.
 func (a *API) PutAccessPolicy(ctx context.Context, p AccessPolicy) error {
-	if a.Access == nil {
-		return errNoAccess
+	msg := &ateapi.AccessPolicy{Metadata: &ateapi.ResourceMetadata{Uid: p.UID, Version: p.Version}}
+	for _, b := range p.Bindings {
+		msg.Bindings = append(msg.Bindings, &ateapi.Binding{Role: b.Role, Members: b.Members})
 	}
-	return a.Access.PutAccessPolicy(ctx, p)
+	var err error
+	if p.UID == "" {
+		_, err = a.Client.CreateAccessPolicy(ctx, p.Atespace, msg)
+	} else {
+		_, err = a.Client.UpdateAccessPolicy(ctx, p.Atespace, msg)
+	}
+	return err
 }
 
 // ListActors implements SubstrateAPI.

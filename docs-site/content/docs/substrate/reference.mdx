@@ -15,7 +15,7 @@ keywords:
 
 | Command | What it does |
 |---|---|
-| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), in CI with `--workload` and `--workload-token-file`, or with `--kube` on an open-source cluster that has no OIDC provider (your current kubeconfig; the gateway verifies it with a TokenReview). `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, `--router-url`, the CA and certificate files, `--default-profile`, `--default-template`, `--name`. Tokens go in the operating system keychain |
+| `login`, `logout`, `whoami` | Sign in with your organization's OIDC provider (device flow; `--no-browser` prints the code), in CI with `--workload` and `--workload-token-file`, or with `--kube` on an open-source cluster that has no OIDC provider (your current kubeconfig; the gateway verifies it with a TokenReview). `login` saves a context: `--admin-url`, `--issuer`, `--client-id`, the CA files (`--admin-ca-file`, `--issuer-ca-file`), `--default-profile`, `--default-template`, `--name`. `--kube-context` and `--kubeconfig` choose the Kubernetes identity for `--kube`; `--workload-audience` names the audience of a CI token. Tokens go in the operating system keychain |
 | `run <agent> [-- args]` | Start an agent in an actor and attach. `--task "..."` runs headless, `--detach` doesn't attach, `--batch FILE --parallel N` runs one actor per task, `--clone URL --ref REF` starts from a repository instead of a copy of the folder, `--unmask` and `--exclude` change what is uploaded, `--secret NAME`, `--profile`, `--template`, `--keep`, `--no-upload`, `--max-upload-mb` |
 | `connect <name>` | Attach to an actor, resuming it first if it is suspended. `--no-asks` leaves asks for `approvals`; `--transport` picks the relay transport |
 | `list` | Your actors with state, last activity, checks and asks. `--all` (admins), `--batch` |
@@ -31,7 +31,7 @@ keywords:
 | `usage [--batch ID]` | Your own usage and cost. Admins can read the fleet |
 | `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown |
 | `policy explain NAME`, `show`, `test NAME` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed |
-| `policy reset <actor>` | Administrators: clear a `policy_conflict`. The controller writes the policy again and starts reverting changes again. Audited |
+| `policy reset ATESPACE/NAME [--reason TEXT] [--yes]` | Administrators: clear a `policy_conflict` once the other writer is stopped. The controller writes the policy again and starts reverting changes again. Audited under your own name |
 | `doctor` | Checks the cluster side (`--cluster`, `--namespace`, `--kube-context`, `--install-file`). Ends with `ready for agents` |
 | `setup` | Writes the Substrate install overlay. `--plan` and `--dry-run` show it, `--remove` takes the callout out, `--print-access-policies` prints the access policies, `--capability` tells it what your Substrate supports |
 | `template build\|verify\|scan\|publish\|keygen` | Administrators: build an agent image with the kit and a signed attestation, check or scan it, publish it to the cluster's registry, make the signing key. These run on this computer and need no sign-in |
@@ -54,7 +54,8 @@ Every read command has `--output text|json` and `--json`, and every command take
 | Variable | Meaning |
 |---|---|
 | `DEFENSECLAW_SUBSTRATE_CONTEXT` | Which saved cluster to use |
-| `DEFENSECLAW_SUBSTRATE_ADMIN_URL`, `DEFENSECLAW_SUBSTRATE_ISSUER`, `DEFENSECLAW_SUBSTRATE_CLIENT_ID`, `DEFENSECLAW_SUBSTRATE_ROUTER_URL` | Override the saved context, for CI |
+| `DEFENSECLAW_SUBSTRATE_ADMIN_URL`, `DEFENSECLAW_SUBSTRATE_ISSUER`, `DEFENSECLAW_SUBSTRATE_CLIENT_ID`, `DEFENSECLAW_SUBSTRATE_PROFILE`, `DEFENSECLAW_SUBSTRATE_TEMPLATE` | Override the saved context, for CI |
+| `DEFENSECLAW_SUBSTRATE_KUBE`, `DEFENSECLAW_SUBSTRATE_WORKLOAD_TOKEN_FILE`, `DEFENSECLAW_SUBSTRATE_WORKLOAD_AUDIENCE` | Sign in with the Kubernetes identity, or as a CI workload, without flags |
 | `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file` | Keep tokens in a 0600 file instead of the keychain (headless Linux and CI). The launcher never falls back to this on its own; it says so and names the variable |
 
 ### Files
@@ -72,7 +73,7 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 | `substrate.supported_versions` | `>=1.0.0 <1.1.0` | The Substrate versions `doctor` accepts |
 | `substrate.identity.issuer` | `https://idp.ate-system.svc` | Issuer of the actor tokens. Make it unique per cluster |
 | `substrate.identity.audience` | `defenseclaw` | Audience of actor tokens |
-| `substrate.identity.token_lifetime_seconds` | `900` | Lifetime of the token the egress gateway adds |
+| `substrate.identity.token_lifetime_seconds` | `300` | Lifetime of the token the egress gateway adds. Fixed at 300 s: egress caches the token by actor name, so a recreated actor with the same name is refused until the old token expires. |
 | `substrate.identity.oidc.issuer`, `.client_id`, `.groups_claim` | none, none, `groups` | The OIDC provider people sign in with. Unset on an open-source cluster to accept Kubernetes identities (`login --kube`) instead. Managed installs require it |
 | `substrate.identity.workload_oidc` | `[]` | Issuers accepted for CI workloads: `issuer`, `audience` |
 | `substrate.services.actor`, `.admin` | `defenseclaw-actor...svc`, `defenseclaw-admin...svc` | Service names (the chart fills them) |
@@ -96,7 +97,18 @@ The `substrate` section of the DefenseClaw configuration. On a cluster it comes 
 
 Profile keys for Substrate: `profile_assignments[].match.substrate` (`atespaces`, `templates`, `workloads`). The `sandbox` section of a profile is the same as for OpenShell (`required_for`, `allowed_harnesses`, `egress_allow_only`, `allow_unblock`, `user_approvals` and the rest). See [Managed enterprise](/docs/substrate/enterprise).
 
-{/* TODO(substrate): per-profile `runtimes`, `sandbox_class`, `idle_suspend_after`, `unattended_asks` and `actor_secrets` are planned (PLAN 7.3) and are not in the config yet. Add them here when they land. */}
+Keys of the `sandbox` section (and of `substrate.admin`) for the runtime:
+
+| Key | Values | Meaning | How a profile tightens `substrate.admin` |
+|---|---|---|---|
+| `runtimes` | `[openshell, substrate]` | Where the profile's agents may run. Left out: both. Without `substrate`, its actors get no policy | Intersection |
+| `sandbox_class` | `gvisor`, `microvm` | The weakest isolation an actor may run in. Unset: `substrate.default_sandbox_class` | `microvm` wins |
+| `idle_suspend_after` | Go duration, 1m or more | Replaces `substrate.idle_suspend_after` | The minimum |
+| `unattended_asks` | `deny`, `queue` | What an unattended run's ask does. Unset: `substrate.unattended.asks` | `deny` wins |
+| `ask_timeout` | Go duration, 1m to 24h | How long a queued ask waits before it is denied. Unset: `substrate.unattended.ask_timeout` | The minimum |
+| `actor_secrets` | key names | Values a program inside the actor may read, keys of the Secret in `callout.actorSecrets.secretName`. Matched by exact value on prompts and egress | Intersection |
+
+`openshell.admin` refuses `sandbox_class`, `idle_suspend_after`, `unattended_asks`, `ask_timeout` and `actor_secrets`. `substrate.admin` refuses `allow_mount`, `allow_host_ports`, `process_tree`, `driver_fallback`, `require_copy_for` and locked `workdir.*` keys.
 
 ## Chart values
 
@@ -110,7 +122,7 @@ The signed chart is `oci://ghcr.io/cisco-ai-defense/charts/defenseclaw-substrate
 | `substrate.namespace`, `substrate.apiAddress` | Where Substrate runs |
 | `gateway.hpa.*`, `gateway.pdb.*` | Scaling and disruption budget of the gateway |
 | `leader.store.size`, `leader.store.keepOnUninstall` | The leader's volume |
-| `callout.judge.tokenSecret` | Turns on the MCP verdict route for the callout |
+| `callout.judge.tokenSecret` | The callout's token for the MCP tool-rules route. Default `defenseclaw-callout-judge`, which the chart creates. `""` turns the route off: MCP tool calls then raise an alert, and a managed install refuses them |
 | `networkPolicy.adminFrom`, `adminIngress.*` | Who can reach the admin Service |
 | `metrics.prometheusRule.enabled` | Install the alert rules |
 | `observability.local.enabled` | A local collector for trying the chart |

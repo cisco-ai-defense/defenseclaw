@@ -63,7 +63,7 @@ func signinFixture(t *testing.T, managed bool, connector string) (*substrateFixt
 			}
 			return out
 		}
-		c.Profiles = func(_ identity.Person, requested string) (string, string, error) {
+		c.Profiles = func(_ identity.Person, requested, _ string, _ bool) (string, string, error) {
 			if requested != "eng" {
 				return "", "", errors.New("no")
 			}

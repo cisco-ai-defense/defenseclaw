@@ -50,23 +50,75 @@ type SubstrateConfig struct {
 	// RequireAttestedTemplates (nil = true) gives no network to an actor
 	// whose template digest has no valid DefenseClaw attestation.
 	RequireAttestedTemplates *bool `mapstructure:"require_attested_templates" yaml:"require_attested_templates,omitempty"`
+	// Templates is how the controller verifies template attestations.
+	Templates SubstrateTemplatesConfig `mapstructure:"templates" yaml:"templates,omitempty"`
 	// DefaultSandboxClass is gvisor (default) or microvm.
 	DefaultSandboxClass string `mapstructure:"default_sandbox_class" yaml:"default_sandbox_class,omitempty"`
 	// IdleSuspendAfter is a Go duration (default 30m; "0s" turns idle
 	// suspend off).
-	IdleSuspendAfter string                    `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
-	Unattended       SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
-	RateLimits       SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
-	Extproc          SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
-	LLM              SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
-	Egress           SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Secrets          []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
+	IdleSuspendAfter string `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
+	// WorkspaceMaxBytes caps a workspace upload through the admin
+	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
+	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
+	Unattended        SubstrateUnattendedConfig `mapstructure:"unattended"         yaml:"unattended,omitempty"`
+	RateLimits        SubstrateRateLimitsConfig `mapstructure:"rate_limits"        yaml:"rate_limits,omitempty"`
+	Extproc           SubstrateExtprocConfig    `mapstructure:"extproc"            yaml:"extproc,omitempty"`
+	LLM               SubstrateLLMConfig        `mapstructure:"llm"                yaml:"llm,omitempty"`
+	Egress            SubstrateEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Secrets           []SubstrateSecret         `mapstructure:"secrets"            yaml:"secrets,omitempty"`
 	// AllowPassthroughFor lists hosts forwarded without inspection
 	// (certificate pinning). A secret is never bound to one.
 	AllowPassthroughFor []string `mapstructure:"allow_passthrough_for" yaml:"allow_passthrough_for,omitempty"`
 	// Admin is the organization floor for Substrate actors, the same keys
 	// as openshell.admin; guardrail profiles tighten it.
 	Admin OpenShellAdminConfig `mapstructure:"admin" yaml:"admin,omitempty"`
+	// Bundles is signed policy bundles (substrate_bundles.go).
+	Bundles SubstrateBundlesConfig `mapstructure:"bundles" yaml:"bundles,omitempty"`
+}
+
+// SubstrateTemplatesConfig is how the controller admits templates (PLAN
+// §5.3, §6.6): every container image must be pinned by digest and carry a
+// DefenseClaw attestation signed by a key in the trust anchors, and its
+// repository must be one the allow lists name.
+type SubstrateTemplatesConfig struct {
+	// TrustAnchors is the PEM trust bundle (an admin-only Secret mount;
+	// DefaultSubstrateTemplateAnchors when empty). It is re-read when it
+	// changes, so a rotation or revocation applies at the next poll.
+	TrustAnchors string `mapstructure:"trust_anchors" yaml:"trust_anchors,omitempty"`
+	// MinPolicyGeneration refuses templates scanned under an older policy.
+	MinPolicyGeneration int64 `mapstructure:"min_policy_generation" yaml:"min_policy_generation,omitempty"`
+	// MaxAge refuses templates built longer ago (Go duration; empty = no limit).
+	MaxAge string `mapstructure:"max_age" yaml:"max_age,omitempty"`
+	// AllowUnverifiedBase admits a template whose base image is neither
+	// allowlisted nor attested (default false).
+	AllowUnverifiedBase bool `mapstructure:"allow_unverified_base" yaml:"allow_unverified_base,omitempty"`
+	// AllowedImages are repository globs ("registry/team/*") an attested
+	// container image must match; empty allows any attested image.
+	AllowedImages []string `mapstructure:"allowed_images" yaml:"allowed_images,omitempty"`
+	// ProfileImages narrows AllowedImages per DefenseClaw profile: an actor
+	// whose profile is listed may run only images matching its globs.
+	ProfileImages map[string][]string `mapstructure:"profile_images" yaml:"profile_images,omitempty"`
+	// VolumeImages are repository globs a template may mount as read-only
+	// image volumes without an attestation; any other image volume refuses
+	// the template.
+	VolumeImages []string `mapstructure:"volume_images" yaml:"volume_images,omitempty"`
+	// PlainHTTPRegistries are registry host:port names reached over plain
+	// HTTP (an in-cluster dev registry only).
+	PlainHTTPRegistries []string `mapstructure:"plain_http_registries" yaml:"plain_http_registries,omitempty"`
+	// RevokedDigests are image digests (sha256:...) never admitted again,
+	// whatever their attestation says.
+	RevokedDigests []string `mapstructure:"revoked_digests" yaml:"revoked_digests,omitempty"`
+}
+
+// EffectiveTrustAnchors is TrustAnchors or the chart's Secret mount path.
+func (t SubstrateTemplatesConfig) EffectiveTrustAnchors() string {
+	return orDefault(t.TrustAnchors, DefaultSubstrateTemplateAnchors)
+}
+
+// EffectiveMaxAge is MaxAge, zero when empty or invalid (Validate refuses
+// an invalid one).
+func (t SubstrateTemplatesConfig) EffectiveMaxAge() time.Duration {
+	return durationOr(t.MaxAge, 0)
 }
 
 // SubstrateAPIConfig is how DefenseClaw reaches ate-api-server.
@@ -107,6 +159,13 @@ type SubstrateOIDCConfig struct {
 type SubstrateWorkloadOIDCConfig struct {
 	Issuer   string `mapstructure:"issuer"   yaml:"issuer"`
 	Audience string `mapstructure:"audience" yaml:"audience"`
+	// Subject and Claims bind the entry to the workloads it trusts; at
+	// least one is required, since a CI issuer signs tokens for every
+	// repository (GAP-0043). Subject is exact, or a prefix when it ends
+	// in "*"; Claims are top-level string claims compared exactly (for
+	// GitHub Actions: repository, ref, environment).
+	Subject string            `mapstructure:"subject" yaml:"subject,omitempty"`
+	Claims  map[string]string `mapstructure:"claims"  yaml:"claims,omitempty"`
 }
 
 // SubstrateServicesConfig names the gateway's two Services (D15).
@@ -227,6 +286,12 @@ func MCPHostName(entry string) string {
 type SubstrateLLMConfig struct {
 	Providers  []string                     `mapstructure:"providers"  yaml:"providers,omitempty"`
 	Credential SubstrateLLMCredentialConfig `mapstructure:"credential" yaml:"credential,omitempty"`
+	// BedrockModels, when set, are the Bedrock model IDs actors may call
+	// through /llm/bedrock. A call naming another model (for example the
+	// opus and sonnet probes Claude Code sends at start, GAP-0008) goes to
+	// the first entry instead, through the same guardrails. Empty serves
+	// the model the call names.
+	BedrockModels []string `mapstructure:"bedrock_models" yaml:"bedrock_models,omitempty"`
 }
 
 // SubstrateLLMCredentialConfig is where the proxy reads provider keys.
@@ -270,8 +335,11 @@ const (
 	DefaultSubstrateAPIAddress        = "api.ate-system.svc:443"
 	DefaultSubstrateSupportedVersions = ">=1.0.0 <1.1.0"
 	DefaultSubstrateAudience          = "defenseclaw"
-	DefaultSubstrateTokenLifetime     = 900
-	DefaultSubstrateActorCertOID      = "1.3.6.1.4.1.11129.2.12.2"
+	// DefaultSubstrateTokenLifetime is also the most: egress caches an actor JWT
+	// by actor name, so a recreated same-name actor gets the old one until
+	// it expires (GAP-0133); 300 s is the upstream minimum.
+	DefaultSubstrateTokenLifetime = 300
+	DefaultSubstrateActorCertOID  = "1.3.6.1.4.1.11129.2.12.2"
 	// The Service defaults are fully qualified: the egress DNS relay answers
 	// only names an actor's policy lists, so the rule, the kit's URLs and
 	// the request Host must all be this one spelling (GAP-0023).
@@ -282,6 +350,9 @@ const (
 	DefaultSubstratePerActorRPS      = 20
 	DefaultSubstratePerAtespaceRPS   = 500
 	DefaultSubstrateBodyMaxBytes     = 1 << 20
+	// DefaultSubstrateTemplateAnchors is where the chart mounts the
+	// admin-only template trust anchors Secret.
+	DefaultSubstrateTemplateAnchors = "/etc/defenseclaw/substrate/template-anchors/anchors.pem"
 
 	SubstrateSandboxGVisor  = "gvisor"
 	SubstrateSandboxMicroVM = "microvm"
@@ -317,6 +388,18 @@ func (s SubstrateConfig) EffectiveSandboxClass() string {
 }
 
 // EffectiveIdleSuspendAfter is the idle suspend delay; zero means off.
+// DefaultSubstrateWorkspaceMaxBytes is the workspace upload cap, the relay's
+// own default (1 GiB).
+const DefaultSubstrateWorkspaceMaxBytes int64 = 1 << 30
+
+// EffectiveWorkspaceMaxBytes is WorkspaceMaxBytes or its default.
+func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
+	if s.WorkspaceMaxBytes > 0 {
+		return s.WorkspaceMaxBytes
+	}
+	return DefaultSubstrateWorkspaceMaxBytes
+}
+
 func (s SubstrateConfig) EffectiveIdleSuspendAfter() time.Duration {
 	return durationOr(s.IdleSuspendAfter, DefaultSubstrateIdleSuspendAfter)
 }
@@ -339,6 +422,20 @@ func (s SubstrateConfig) EffectiveActorService() string {
 
 func (s SubstrateConfig) EffectiveAdminService() string {
 	return orDefault(s.Services.Admin, DefaultSubstrateAdminService)
+}
+
+// ActorGatewayURL is the actor listener base URL a kit image posts to: plain
+// HTTP to the actor Service FQDN (egress re-originates the in-cluster hop and
+// adds the actor JWT; substrate-1 GAP-0023 and GAP-0042).
+func (s SubstrateConfig) ActorGatewayURL() string {
+	return "http://" + strings.TrimSpace(s.EffectiveActorService())
+}
+
+// RelaySessionIssuer is the iss of the relay session tokens the gateway
+// signs, https://<admin Service>. Template builds bake the same value into
+// the relay (substrate-1 GAP-0147), so both sides take it from here.
+func (s SubstrateConfig) RelaySessionIssuer() string {
+	return "https://" + strings.TrimSpace(s.EffectiveAdminService())
 }
 
 // EffectiveAudience and EffectiveTokenLifetime shape the actor JWT.
@@ -383,15 +480,6 @@ func (s SubstrateConfig) LauncherAtespace(atespace string) (string, bool) {
 	return "", false
 }
 
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	slices.Sort(out)
-	return out
-}
-
 var (
 	substrateOIDRe          = regexp.MustCompile(`^[0-2](\.(0|[1-9][0-9]*))+$`)
 	substratePlaceholderRe  = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
@@ -434,8 +522,8 @@ func (s *SubstrateConfig) Validate() error {
 	if s.Enabled && id.Issuer == "" {
 		bad("identity.issuer", "is required when substrate is enabled (unique per cluster)")
 	}
-	if l := id.TokenLifetimeSeconds; l != 0 && (l < 300 || l > 3600) {
-		bad("identity.token_lifetime_seconds", "%d is outside 300-3600", l)
+	if l := id.TokenLifetimeSeconds; l != 0 && l != DefaultSubstrateTokenLifetime {
+		bad("identity.token_lifetime_seconds", "%d must be 300: egress caches the actor token by actor name, so a recreated actor would get the old one longer (GAP-0133)", l)
 	}
 	if aud := id.Audience; aud != "" && len(aud) > 512 {
 		bad("identity.audience", "is longer than 512 bytes")
@@ -457,6 +545,15 @@ func (s *SubstrateConfig) Validate() error {
 		}
 		if strings.TrimSpace(w.Audience) == "" {
 			bad(fmt.Sprintf("identity.workload_oidc[%d].audience", i), "is required (use one unique to this install)")
+		}
+		if strings.Trim(strings.TrimSpace(w.Subject), "*") == "" && len(w.Claims) == 0 {
+			bad(fmt.Sprintf("identity.workload_oidc[%d]", i),
+				"needs subject or claims naming the trusted workloads (for example claims: {repository: acme/web}); the issuer signs tokens for every repository")
+		}
+		for k, v := range w.Claims {
+			if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
+				bad(fmt.Sprintf("identity.workload_oidc[%d].claims", i), "keys and values must not be empty")
+			}
 		}
 	}
 
@@ -622,8 +719,91 @@ func (s *SubstrateConfig) Validate() error {
 		}
 	}
 
+	s.validateTemplates(bad)
+
+	s.Bundles.validate(bad)
 	if err := s.Admin.validateAs("admin"); err != nil {
 		errs = append(errs, err)
+	}
+	if err := s.Admin.substrateScopeError("admin"); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (s *SubstrateConfig) validateTemplates(bad func(key, format string, a ...any)) {
+	t := s.Templates
+	if g := t.MinPolicyGeneration; g < 0 {
+		bad("templates.min_policy_generation", "%d must not be negative", g)
+	}
+	if v := strings.TrimSpace(t.MaxAge); v != "" {
+		if d, err := time.ParseDuration(v); err != nil || d < 0 {
+			bad("templates.max_age", "%q must be a Go duration of 0 or more", t.MaxAge)
+		}
+	}
+	globs := func(key string, list []string) {
+		for i, g := range list {
+			slash := strings.LastIndex(g, "/")
+			if slash <= 0 || strings.ContainsAny(g, "@ ") || strings.Contains(g[slash:], ":") {
+				bad(fmt.Sprintf("%s[%d]", key, i), "%q must be a repository glob (registry/path, no tag or digest)", g)
+				continue
+			}
+			if _, err := path.Match(g, ""); err != nil {
+				bad(fmt.Sprintf("%s[%d]", key, i), "%q is not a valid glob", g)
+			}
+		}
+	}
+	globs("templates.allowed_images", t.AllowedImages)
+	for i, g := range t.AllowedImages {
+		if host, _, _ := strings.Cut(g, "/"); strings.ContainsAny(host, "*?[") {
+			bad(fmt.Sprintf("templates.allowed_images[%d]", i), "%q: name the registry host exactly (the controller connects only to named hosts); globs go in the path", g)
+		}
+	}
+	globs("templates.volume_images", t.VolumeImages)
+	for _, p := range sortedKeys(t.ProfileImages) {
+		if !substrateProfileRe.MatchString(p) {
+			bad("templates.profile_images", "%q is not a profile name", p)
+		}
+		if len(t.ProfileImages[p]) == 0 {
+			bad("templates.profile_images."+p, "needs at least one repository glob")
+		}
+		globs("templates.profile_images."+p, t.ProfileImages[p])
+	}
+	for i, d := range t.RevokedDigests {
+		if !substrateDigestRe.MatchString(strings.ToLower(strings.TrimSpace(d))) {
+			bad(fmt.Sprintf("templates.revoked_digests[%d]", i), "%q must be sha256:<64 hex>", d)
+		}
+	}
+	for i, h := range t.PlainHTTPRegistries {
+		if host, port, err := net.SplitHostPort(h); err != nil || host == "" || port == "" {
+			bad(fmt.Sprintf("templates.plain_http_registries[%d]", i), "%q must be host:port", h)
+		}
+	}
+}
+
+var substrateDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// ValidateManaged applies the managed-enterprise rules (D8): the callout
+// always fails closed (extproc.failure_mode and extproc.chain.failure_mode
+// open are refused; chain auto already means closed there, GAP-0063 and
+// GAP-0090), templates are always attested, and the template registries are
+// named (GAP-0131).
+func (s *SubstrateConfig) ValidateManaged(deploymentMode string) error {
+	if s == nil || !strings.EqualFold(strings.TrimSpace(deploymentMode), string(DeploymentModeManagedEnterprise)) {
+		return nil
+	}
+	var errs []error
+	if strings.EqualFold(strings.TrimSpace(s.Extproc.FailureMode), SubstrateFailOpen) {
+		errs = append(errs, errors.New(`extproc.failure_mode: "open" is not allowed in managed_enterprise (the callout always fails closed)`))
+	}
+	if strings.EqualFold(strings.TrimSpace(s.Extproc.Chain.FailureMode), SubstrateFailOpen) {
+		errs = append(errs, errors.New("extproc.chain.failure_mode: open is not allowed with deployment_mode managed_enterprise: the callout fails closed there (use auto or closed)"))
+	}
+	if s.Enabled && !s.AttestationRequired() {
+		errs = append(errs, errors.New("require_attested_templates: false is not allowed in managed_enterprise"))
+	}
+	if s.Enabled && len(s.Templates.AllowedImages) == 0 {
+		errs = append(errs, errors.New("templates.allowed_images: managed_enterprise names the template registries and repositories"))
 	}
 	return errors.Join(errs...)
 }

@@ -46,6 +46,11 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 : "${E2E_EGRESS_PROBE_HOST:=example.com}"
 # 1 makes a missing chart a failure (CI); 0 skips the DefenseClaw phase with a notice.
 : "${E2E_REQUIRE_DEFENSECLAW:=0}"
+# Where the chart installs, and the gateway image it runs. E2E_GATEWAY_IMAGE=repo:tag@sha256:... uses an image
+# that is already in a registry the cluster reads; empty builds one from this checkout.
+: "${E2E_DC_NAMESPACE:=defenseclaw-system}"
+: "${E2E_DC_LAUNCH_ATESPACE:=dc-e2e-launch}"
+: "${E2E_GATEWAY_IMAGE:=}"
 # Kubernetes context kubectl and kubectl-ate use. In create mode it is kind-<cluster>.
 : "${E2E_CONTEXT:=}"
 
@@ -103,7 +108,7 @@ diagnostics() {
   K get workerpool,pods -n "$E2E_NAMESPACE" -o yaml >"$d/lane-ns.yaml" 2>&1
   ATE get actor -a "$E2E_ATESPACE" -o yaml >"$d/actors.yaml" 2>&1
   local ns p
-  for ns in ate-system "$E2E_NAMESPACE" defenseclaw-system; do
+  for ns in ate-system "$E2E_NAMESPACE" "$E2E_DC_NAMESPACE"; do
     for p in $(K -n "$ns" get pods -o name 2>/dev/null); do
       K -n "$ns" logs --tail=200 --all-containers "$p" >"$d/log-${ns}-${p#pod/}.txt" 2>&1
     done
@@ -144,6 +149,26 @@ phase_tools() {
   pass "tools present, Substrate $E2E_SUBSTRATE_VERSION client available"
 }
 
+# kube_user_setup adds a Kubernetes user to the kind API server for the launcher create flow. The gateway
+# checks a person's Kubernetes bearer with a TokenReview and refuses a ServiceAccount token (a pod is not a
+# person), so the test cluster gets a user with a static token (tests only; the token is random and never
+# printed). The token reaches the later phases in E2E_KUBE_TOKEN.
+kube_user_setup() {
+  local node="${E2E_KIND_CLUSTER}-control-plane" tok csv="$E2E_WORKDIR/e2e-tokens.csv"
+  tok=$(head -c 32 /dev/urandom | base64 | tr -d '/+=\n')
+  (umask 077; printf '%s,e2e-user,e2e-user-uid,"e2e-users"\n' "$tok" >"$csv")
+  if ! docker cp "$csv" "$node:/etc/kubernetes/pki/e2e-tokens.csv" >>"$E2E_ARTIFACTS/kube-user.log" 2>&1 ||
+    ! docker exec "$node" sed -i 's|^    - kube-apiserver$|    - kube-apiserver\n    - --token-auth-file=/etc/kubernetes/pki/e2e-tokens.csv|' /etc/kubernetes/manifests/kube-apiserver.yaml >>"$E2E_ARTIFACTS/kube-user.log" 2>&1; then
+    fail "add a Kubernetes user with a static token to the kind API server"; return 1
+  fi
+  rm -f "$csv"
+  # kubelet restarts the API server pod from the changed manifest.
+  sleep 5
+  if ! retry 240 4 kubectl $(kctx) get --raw /readyz; then fail "the kind API server is ready after adding the test user"; return 1; fi
+  export E2E_KUBE_TOKEN="$tok"
+  pass "the kind API server knows a Kubernetes user for the launcher create flow"
+}
+
 # ---- phase: substrate ----
 phase_substrate() {
   log "substrate"
@@ -174,6 +199,7 @@ YAML
     # registry on localhost:5001); it also probes /dev/kvm and mounts it when there is one.
     if (cd "$E2E_SUBSTRATE_SRC" && KIND_CLUSTER_NAME="$E2E_KIND_CLUSTER" hack/create-kind-cluster.sh) >"$E2E_ARTIFACTS/kind-create.log" 2>&1; then
       pass "kind cluster $E2E_KIND_CLUSTER created"
+      kube_user_setup || return 1
     else
       tail -n 30 "$E2E_ARTIFACTS/kind-create.log"
       fail "kind cluster $E2E_KIND_CLUSTER created"
@@ -248,6 +274,7 @@ containers:
   image: $stub_image
   env:
   - {name: SSL_CERT_FILE, value: /run/ate/trust-bundle.pem}
+  - {name: STUB_HOOK_URL, value: "http://defenseclaw-actor.$E2E_DC_NAMESPACE.svc.cluster.local/api/v1/substrate/hook/claudecode"}
   volumeMounts:
   - {name: system-info, mountPath: /run/ate}
   wakeupProbe:
@@ -273,7 +300,7 @@ YAML
 
 # proxy_actor <actor> <local-port>: forward the stub agent's port 8080.
 proxy_actor() {
-  setsid nohup kubectl-ate $(kctx) proxy actor "$1" "$2:8080" -a "$E2E_ATESPACE" >"$E2E_ARTIFACTS/proxy-$1.log" 2>&1 </dev/null &
+  setsid nohup kubectl-ate $(kctx) proxy actor "$1" "$2:8080" -a "${3:-$E2E_ATESPACE}" >"$E2E_ARTIFACTS/proxy-$1.log" 2>&1 </dev/null &
   PROXY_PIDS+=("$!")
   retry 60 1 curl -sf -m 2 "http://127.0.0.1:$2/readyz"
 }
@@ -318,13 +345,16 @@ YAML
     fail "egress is denied again after the policy is removed"
   fi
   stop_proxies
+  # The DefenseClaw controller manages this atespace once the chart is installed: leave no actor of the
+  # plain-Substrate phase behind for it.
+  ATE delete actor "$actor" -a "$E2E_ATESPACE" >/dev/null 2>&1
 }
 
 # ---- phase: defenseclaw ----
 phase_defenseclaw() {
   log "DefenseClaw on Substrate"
   local chart="$ROOT/deploy/helm/defenseclaw-substrate"
-  if [ ! -d "$chart" ] || [ ! -x "$HERE/defenseclaw.sh" ]; then
+  if [ ! -d "$chart" ] || [ ! -f "$HERE/defenseclaw.sh" ]; then
     if [ "$E2E_REQUIRE_DEFENSECLAW" = 1 ]; then
       fail "the DefenseClaw chart and test/substrate-e2e/defenseclaw.sh exist"
     else
@@ -336,7 +366,7 @@ phase_defenseclaw() {
   # with the helpers above (check, retry, ATE, K, proxy_actor, fetch_code).
   # shellcheck disable=SC1091
   . "$HERE/defenseclaw.sh"
-  dc_install && dc_actor_policy && dc_hook_deny
+  dc_install && dc_actor_policy && dc_hook_deny && dc_launcher_hook
 }
 
 phase_uninstall() {
