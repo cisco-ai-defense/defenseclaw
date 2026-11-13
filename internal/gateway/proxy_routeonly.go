@@ -53,6 +53,7 @@ type routeOnlyServer struct {
 	mu        sync.Mutex
 	inflight  map[string]int
 	heldBytes int64
+	signers   bedrockSigners
 }
 
 func newRouteOnlyServer(router *engineRouter, cfg func() *config.Config, dataDir string) *routeOnlyServer {
@@ -169,6 +170,22 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "routing.route_only.upstreams."+connector+" is not set; run the routing enable step again")
 		return
 	}
+	// Gateway signing (DESIGN 7.3, 15.6): the agent sends no AWS credential
+	// and every upstream attempt is signed here.
+	var signer *bedrockSigner
+	if bedrockGatewaySigning(upstream.Bedrock) {
+		if strings.HasPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "AWS4-HMAC-SHA256") {
+			routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "the agent signed this Bedrock request itself (for the loopback host); set CLAUDE_CODE_SKIP_BEDROCK_AUTH=1 by running the routing enable step again")
+			return
+		}
+		sg, err := s.signers.get(cfg, upstream.Bedrock, upstream.BaseURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[routing] route-only %s: gateway Bedrock signing unavailable: %v\n", connector, err)
+			routeOnlyError(w, http.StatusServiceUnavailable, "api_error", "gateway Bedrock signing is not ready for routing.route_only.upstreams."+connector+".bedrock; run defenseclaw doctor")
+			return
+		}
+		signer = sg
+	}
 	subject := strconv.Itoa(s.ownerUID)
 	if !s.acquire(subject) {
 		routeOnlyError(w, http.StatusTooManyRequests, "rate_limit_error", "too many concurrent model calls through DefenseClaw")
@@ -176,7 +193,7 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.release(subject)
 
-	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true}
+	original := routeOnlyAttempt{base: upstream.BaseURL, native: native, keepInbound: true, signer: signer}
 	if r.Method != http.MethodPost {
 		s.forward(w, r, original, nil, nil)
 		return
@@ -207,11 +224,14 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	family := routeOnlyAPIFamily(native)
 	inClass := routeOnlyCredentialClass(r.Header, family)
+	if signer != nil {
+		inClass = engine.CredentialGateway
+	}
 	if inClass == "sigv4" {
-		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "a SigV4-signed Bedrock request cannot pass through the gateway; configure the agent with a Bedrock API key")
+		routeOnlyError(w, http.StatusBadRequest, "invalid_request_error", "a SigV4-signed Bedrock request cannot pass through the gateway; use a Bedrock API key, or gateway signing (bedrock.auth profile, instance_role or iam_credentials)")
 		return
 	}
-	attempt, routedOutcome, originalAllowed := s.decide(r, connector, native, family, upstream, inClass, body)
+	attempt, routedOutcome, originalAllowed := s.decide(r, cfg, connector, native, family, upstream, inClass, signer, body)
 	if routedOutcome.Result == SemanticRouteDenied {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
@@ -283,6 +303,7 @@ type routeOnlyAttempt struct {
 	keepInbound bool   // forward the agent credential and headers
 	auth        string // gateway-held credential (header form set by authHeader)
 	provider    string
+	signer      *bedrockSigner // gateway SigV4 signing (nil: none)
 }
 
 // routeOnlyAPIFamily names the routable API family of a native path.
@@ -464,7 +485,7 @@ func routeOnlyConversationID(h http.Header) string {
 // decide asks the router and returns the routed attempt (nil: send the
 // original), the outcome, and whether the admin gate allows the original
 // request as a fallback target.
-func (s *routeOnlyServer) decide(r *http.Request, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, body []byte) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector, native, family string, upstream config.RoutingUpstreamConfig, inClass string, signer *bedrockSigner, body []byte) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
 	if s.router == nil {
 		return nil, SemanticRouteOutcome{}, true
 	}
@@ -555,10 +576,31 @@ func (s *routeOnlyServer) decide(r *http.Request, connector, native, family stri
 		a.body = patchModelInBody(body, d.Model)
 	}
 	if d.APIKey == "" && sameProvider && strings.EqualFold(origin, originOf(upstream.BaseURL)) {
-		a.keepInbound = true
+		a.keepInbound, a.signer = true, signer
 	} else {
 		if inClass == engine.CredentialOAuth && d.APIKey == "" {
 			return fallback()
+		}
+		if inClass == engine.CredentialGateway && d.APIKey == "" {
+			// Another Bedrock origin (region or endpoint): the gateway signs
+			// for it with the alias block when that one signs, else with the
+			// upstream credentials for the target host region.
+			if !strings.EqualFold(d.Provider, "bedrock") {
+				return fallback()
+			}
+			block := upstream.Bedrock
+			if out.Route != nil && out.Route.Backend != nil && bedrockGatewaySigning(out.Route.Backend.Bedrock) {
+				block = out.Route.Backend.Bedrock
+			} else if bedrockRegionFromURL(base) != "" {
+				cp := *block
+				cp.Region = ""
+				block = &cp
+			}
+			sg, err := s.signers.get(cfg, block, base)
+			if err != nil {
+				return fallback()
+			}
+			a.signer = sg
 		}
 		a.auth = d.APIKey
 	}
@@ -658,7 +700,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err != nil {
-		routeOnlyError(w, http.StatusBadGateway, "api_error", "the routed model is unreachable")
+		routeOnlySendError(w, err, "the routed model is unreachable")
 		return
 	}
 	copyRouteOnlyResponse(w, resp)
@@ -667,7 +709,7 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
 	resp, _, err := s.send(r, a, body, rest)
 	if err != nil {
-		routeOnlyError(w, http.StatusBadGateway, "api_error", "the model upstream is unreachable")
+		routeOnlySendError(w, err, "the model upstream is unreachable")
 		return
 	}
 	copyRouteOnlyResponse(w, resp)
@@ -710,6 +752,16 @@ func (s *routeOnlyServer) send(r *http.Request, a routeOnlyAttempt, body []byte,
 	}
 	req.ContentLength = length
 	routeOnlyForwardHeaders(req.Header, r.Header, a)
+	if a.signer != nil {
+		// Signed after the model id swap and the body patch, over the exact
+		// bytes and path sent; every attempt (and the retry) signs anew.
+		if rest != nil {
+			return nil, false, errBedrockSignTooLarge
+		}
+		if err := a.signer.sign(r.Context(), req, payload); err != nil {
+			return nil, false, err
+		}
+	}
 	resp, err := s.client.Do(req)
 	return resp, wrote, err
 }
@@ -776,11 +828,18 @@ func routeOnlySetupFor(cfg *config.Config, connectorName, apiAddr string) *conne
 	route := &connector.RouteOnlySetup{BaseURL: "http://" + apiAddr + routeOnlyPrefix + connectorName, Token: token}
 	if up.API == config.RoutingAPIConverse || up.API == config.RoutingAPIInvoke {
 		route.Bedrock = true
-		if up.Bedrock != nil && up.Bedrock.Auth != "" && up.Bedrock.Auth != config.RoutingBedrockAuthPassthrough {
-			// Gateway SigV4 signing is a later S1 slice: do not point the
-			// agent at a listener that cannot sign yet.
-			fmt.Fprintf(os.Stderr, "[routing] route-only for %s needs gateway Bedrock signing (auth %s), which this build does not have; use a Bedrock API key (auth passthrough)\n", connectorName, up.Bedrock.Auth)
-			return nil
+		if bedrockGatewaySigning(up.Bedrock) {
+			// The agent skips its own AWS auth only when the gateway can
+			// sign; a signer that cannot start leaves the agent direct.
+			region, err := bedrockSigningRegion(up.Bedrock, up.BaseURL)
+			if err == nil {
+				_, err = newBedrockSigner(cfg, up.Bedrock, region)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[routing] route-only for %s not rendered: gateway Bedrock signing cannot start: %v\n", connectorName, err)
+				return nil
+			}
+			route.GatewaySigning = true
 		}
 	}
 	return route

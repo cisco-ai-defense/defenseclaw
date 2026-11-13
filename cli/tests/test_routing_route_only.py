@@ -57,14 +57,25 @@ def test_enable_records_claude_upstream_and_disable_clears(homes: Path, tmp_path
     assert "route_only" not in yaml.safe_load(path.read_text(encoding="utf-8"))["routing"]
 
 
-def test_bedrock_needs_an_api_key(homes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bedrock_iam_uses_gateway_signing_and_bearer_passes_through(homes: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for k in ("AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"):
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
-    with pytest.raises(ro.RouteOnlyError, match="Bedrock API key"):
-        ro.detect_upstream("claudecode")
-    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "x")
     monkeypatch.setenv("AWS_REGION", "us-west-2")
+    # IAM credentials (no Bedrock API key): the gateway signs with the profile.
     up = ro.detect_upstream("claudecode")
     assert up is not None and up.base_url == "https://bedrock-runtime.us-west-2.amazonaws.com" and up.api == "invoke"
+    assert up.to_config()["bedrock"] == {"auth": "profile", "profile": "default", "region": "us-west-2"}
+    (homes / "claude" / "settings.json").write_text(json.dumps({"env": {"AWS_PROFILE": "bedrock-dev"}}), encoding="utf-8")
+    up = ro.detect_upstream("claudecode")
+    assert up is not None and up.to_config()["bedrock"] == {"auth": "profile", "profile": "bedrock-dev", "region": "us-west-2"}
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "x")
+    up = ro.detect_upstream("claudecode")
+    assert up is not None and up.to_config() == {
+        "base_url": "https://bedrock-runtime.us-west-2.amazonaws.com",
+        "api": "invoke",
+        "bedrock": {"auth": "passthrough", "region": "us-west-2"},
+    }
 
 
 def test_codex_upstreams(homes: Path) -> None:

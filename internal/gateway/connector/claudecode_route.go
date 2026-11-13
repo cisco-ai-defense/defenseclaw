@@ -77,6 +77,7 @@ func (c *ClaudeCodeConnector) ApplyRouteOnly(opts SetupOpts, route *RouteOnlySet
 				env = map[string]interface{}{}
 			}
 			if route == nil {
+				adoptLostSkipBedrock(env, &backup)
 				restoreAllRouteEnv(env, claudeCodeRouteHeaders, &backup)
 			} else {
 				applyRouteEnv(env, claudeCodeRouteEnv(route), claudeCodeRouteHeaders, &backup)
@@ -123,3 +124,19 @@ func lostClaudeRouteRecord() routeEnvBackup {
 }
 
 const lostRecordMarker = "\x00lost-record"
+
+// adoptLostSkipBedrock treats CLAUDE_CODE_SKIP_BEDROCK_AUTH=1 as ours on a
+// lost-record restore only when our own Bedrock base URL render sits next
+// to it: left behind, it would send unsigned calls straight to Bedrock. A
+// skip the user set for another gateway stays.
+func adoptLostSkipBedrock(env map[string]interface{}, b *routeEnvBackup) {
+	if b.Applied[claudeCodeRouteBedrockBaseURL] != lostRecordMarker {
+		return
+	}
+	base, _ := env[claudeCodeRouteBedrockBaseURL].(string)
+	skip, _ := env[claudeCodeRouteSkipBedrock].(string)
+	if isOwnRouteValue(base) && skip == "1" {
+		b.Original[claudeCodeRouteSkipBedrock] = nil
+		b.Applied[claudeCodeRouteSkipBedrock] = "1"
+	}
+}

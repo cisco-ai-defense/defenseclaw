@@ -154,3 +154,30 @@ func TestClaudeCodeRouteOnlyLostRecordAndUserEdit(t *testing.T) {
 		t.Fatalf("restore = %v, want the user value", got)
 	}
 }
+
+func TestClaudeCodeRouteOnlyBedrockGatewaySigningLostRecord(t *testing.T) {
+	path, opts := routeSettingsFixture(t, "{\n  \"env\": {\n    \"CLAUDE_CODE_USE_BEDROCK\": \"1\"\n  }\n}")
+	c := NewClaudeCodeConnector()
+	route := &RouteOnlySetup{BaseURL: "http://127.0.0.1:4100/r/claudecode", Token: "t", Bedrock: true, GatewaySigning: true}
+	if err := c.ApplyRouteOnly(opts, route); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(routeBackupPath(opts.DataDir, "claudecode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	env := readEnv(t, path)
+	if env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] != nil || env["ANTHROPIC_BEDROCK_BASE_URL"] != nil || env["CLAUDE_CODE_USE_BEDROCK"] != "1" {
+		t.Fatalf("lost-record restore left %v (an unsigned direct Bedrock config)", env)
+	}
+	// A skip the user set for another gateway is not ours.
+	path, opts = routeSettingsFixture(t, "{\n  \"env\": {\n    \"CLAUDE_CODE_SKIP_BEDROCK_AUTH\": \"1\",\n    \"ANTHROPIC_BEDROCK_BASE_URL\": \"https://llm-gw.corp.example\",\n    \"ANTHROPIC_CUSTOM_HEADERS\": \"X-DC-Route-Auth: dcr1-x\"\n  }\n}")
+	if err := c.ApplyRouteOnly(opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if env := readEnv(t, path); env["CLAUDE_CODE_SKIP_BEDROCK_AUTH"] != "1" || env["ANTHROPIC_BEDROCK_BASE_URL"] != "https://llm-gw.corp.example" {
+		t.Fatalf("restore removed a user skip: %v", env)
+	}
+}

@@ -35,11 +35,14 @@ class Upstream:
     base_url: str
     api: str
     bedrock_auth: str = ""
+    bedrock_profile: str = ""
+    bedrock_region: str = ""
 
     def to_config(self) -> dict[str, Any]:
         out: dict[str, Any] = {"base_url": self.base_url, "api": self.api}
         if self.bedrock_auth:
-            out["bedrock"] = {"auth": self.bedrock_auth}
+            bedrock = {"auth": self.bedrock_auth, "profile": self.bedrock_profile, "region": self.bedrock_region}
+            out["bedrock"] = {k: v for k, v in bedrock.items() if v}
         return out
 
 
@@ -70,13 +73,16 @@ def detect_upstream(connector: str) -> Upstream | None:
             base = env.get("ANTHROPIC_BEDROCK_BASE_URL", "").strip()
             if _ROUTE_PREFIX + "claudecode" in base:
                 return None
-            if not env.get("AWS_BEARER_TOKEN_BEDROCK"):
-                raise RouteOnlyError(
-                    "Claude Code on Bedrock needs a Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) for route-only; "
-                    "gateway signing is not available in this build"
-                )
-            region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
-            return Upstream(base or f"https://bedrock-runtime.{region}.amazonaws.com", "invoke", "passthrough")
+            region = (env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1").strip()
+            upstream = base.rstrip("/") or f"https://bedrock-runtime.{region}.amazonaws.com"
+            if env.get("AWS_BEARER_TOKEN_BEDROCK"):
+                # A Bedrock API key is not bound to the path: passed through.
+                return Upstream(upstream, "invoke", "passthrough", bedrock_region=region)
+            # IAM credentials: the agent skips its own AWS auth and the
+            # gateway signs with the same profile (its SigV4 would name the
+            # loopback host).
+            profile = (env.get("AWS_PROFILE") or "").strip() or "default"
+            return Upstream(upstream, "invoke", "profile", bedrock_profile=profile, bedrock_region=region)
         base = env.get("ANTHROPIC_BASE_URL", "").strip()
         if _ROUTE_PREFIX + "claudecode" in base:
             return None
