@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -91,6 +92,13 @@ type ToolInspectRequest struct {
 	// BoundedPrefixReview is set by the per-user shell inspect hooks on the
 	// bounded review of a call over their size cap (markOversizeUninspected).
 	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
+	// ArgsPartial is set by a caller that cut the call down to fit the request
+	// body limit (the OpenClaw plugin replaces an attachment's bytes with its
+	// size and hash, and shortens a very long text to its head and tail): the
+	// part that was not sent is unread, so the call is truncated and judged at
+	// least at the unknown tier of the policy (rel-1-0-10:GAP-0356). It can
+	// only make a verdict stricter.
+	ArgsPartial bool `json:"args_partial,omitempty"`
 	// toolUseID is set by a connector adapter, never from the wire (see
 	// contentScope below).
 	toolUseID string
@@ -2369,6 +2377,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if !installBlocked {
 		if req.BoundedPrefixReview {
 			verdict.markOversizeUninspected()
+		}
+		if req.ArgsPartial && !slices.ContainsFunc(verdict.Findings, func(f string) bool {
+			return strings.HasPrefix(f, evaluationLimitRuleID) && strings.Contains(f, bounded.ReasonCode)
+		}) {
+			verdict.floorBoundedTruncated(bounded.Of(bounded.Bytes), a.boundedTier(r.Context(), serverConnector))
 		}
 		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
 		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)

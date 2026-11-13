@@ -234,6 +234,17 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(body).not.toHaveProperty("direction");
     });
 
+    it("cuts an attachment over the body limit down to its descriptor and says the call is partial (GAP-0356)", async () => {
+      mockDaemonClient.postRaw.mockResolvedValue(allow());
+      const params = { to: "+1", message: "photo", buffer: "AAEC".repeat((4 << 20) / 4) };
+      await listeners.before_tool_call({ toolName: "message", params }, ctx);
+      expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
+      const body = sent();
+      expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(1 << 20);
+      expect(body).toMatchObject({ tool: "message", content: expect.stringContaining("photo"), args_partial: true });
+      expect((body.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent: 4194304 characters/);
+    });
+
     it("sends a message call with no params at all", async () => {
       mockDaemonClient.postRaw.mockResolvedValue(allow());
       await listeners.before_tool_call({ toolName: "message" }, ctx);

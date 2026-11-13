@@ -79,6 +79,7 @@ import type {
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
 import { extractMessage } from "./message-text.js";
+import { fitInspectBody } from "./inspect-body-limit.js";
 import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor, MODEL_OUTAGE_WARNING } from "./fetch-interceptor.js";
@@ -544,7 +545,9 @@ export default function (api: DefenseClawPluginHost) {
     // The check goes over a connection that proved it reaches this account's
     // gateway, and its verdict comes back on that connection (GAP-0594). The
     // budget counts from the proven connection, so the proof does not use it.
-    const res = await daemonClient.postRaw("/api/v1/inspect/tool", bodyPayload, {
+    // A call over the gateway body limit is cut down first (GAP-0356): an
+    // attachment sends its size and hash, and the request says it is partial.
+    const res = await daemonClient.postRaw("/api/v1/inspect/tool", fitInspectBody(bodyPayload).payload, {
       timeoutMs: INSPECT_TIMEOUT_MS,
       correlation: { runId: toolCtx?.runId, sessionId },
     });

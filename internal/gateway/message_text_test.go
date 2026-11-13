@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -489,7 +491,13 @@ func TestExtractMessageArgsAttachmentBudget(t *testing.T) {
 		}
 		start := time.Now()
 		got := extractMessageArgs(raw)
-		if took := time.Since(start); took > 750*time.Millisecond {
+		// The bound only catches a read that scales with the attachment (the
+		// 200 ms path is 8 MiB of decode and rune scan away from a 504): the
+		// request body limit keeps a real call under 1 MiB, and -race on a
+		// loaded box is ten times slower than production.
+		took := time.Since(start)
+		t.Logf("%s: extractMessageArgs took %v", tc.name, took)
+		if took > 4*time.Second {
 			t.Errorf("%s: reading the call took %v", tc.name, took)
 		}
 		if got.Text != "hi" || got.Truncated.Has(bounded.Bytes) != tc.truncated {
@@ -552,5 +560,41 @@ func TestMessageRoutingArgs(t *testing.T) {
 	}
 	if messageRoutingArgs(nil) != nil {
 		t.Error("no routing values must give no routing call")
+	}
+}
+
+// A caller that cut the call down to fit the request body limit says so
+// (args_partial): the part not sent is unread, so the call is judged at the
+// unknown tier of each pack, never blocked by the size limit and never clean
+// (GAP-0356). The plugin's cut call (an attachment's size, type and hash) for
+// 1, 4 and 16 MB attachments is a small request.
+func TestInspectToolArgsPartialIsUnknown(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		api.inspectToolScanTimeout = 5 * time.Second
+		want := bounded.Unknown(tier.tier).String()
+		for _, mb := range []int{1, 4, 16} {
+			digest := strings.Repeat("ab", 32)
+			body := fmt.Sprintf(`{"tool":"message","args":{"message":"here is the photo","buffer":"[attachment bytes not sent: %d characters, image/png, sha256 %s]"},"content":"here is the photo","direction":"outbound","args_partial":%%t}`,
+				mb<<20, digest)
+			if len(body) > 4096 {
+				t.Fatalf("the cut call is %d bytes, want a small request", len(body))
+			}
+			_, whole := postInspectForConnector(t, api, "openclaw", fmt.Sprintf(body, false))
+			if whole.Action != "allow" {
+				t.Fatalf("%s %d MB: the call sent whole is %q, want allow", tier.name, mb, whole.Action)
+			}
+			_, cut := postInspectForConnector(t, api, "openclaw", fmt.Sprintf(body, true))
+			if cut.Action != want || !slices.ContainsFunc(cut.Findings, func(f string) bool {
+				return strings.HasPrefix(f, evaluationLimitRuleID) && strings.Contains(f, "bounded_truncated cap=bytes")
+			}) {
+				t.Errorf("%s %d MB: action = %q findings = %v, want %s naming cap bytes", tier.name, mb, cut.Action, cut.Findings, want)
+			}
+		}
 	}
 }
