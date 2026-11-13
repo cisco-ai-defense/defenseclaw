@@ -317,7 +317,9 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 		if !policy.existed {
 			return nil
 		}
-		if expectedHook != "" && !sameWindowsEnterprisePath(parsed.HookExecutable, expectedHook) {
+		// A policy an older launch image of this install wrote is this
+		// deployment's until the guardian rewrites it (GAP-0751).
+		if expectedHook != "" && !sameWindowsManagedHookImage(parsed.HookExecutable, expectedHook) {
 			return errors.New("enterprise hooks: active Claude Code policy executable does not match the installed hook")
 		}
 		active = true
@@ -749,7 +751,9 @@ func RestoreWindowsClaudeManagedPolicySnapshot(
 	if err != nil {
 		return err
 	}
-	if priorOpts.HookExecutable != allowedOpts.HookExecutable ||
+	// A snapshot taken before an upgrade names the earlier hook image of
+	// this install (GAP-0751); another install's hook is still refused.
+	if !sameWindowsManagedHookImageExact(priorOpts.HookExecutable, allowedOpts.HookExecutable) ||
 		priorOpts.GatewayServiceName != allowedOpts.GatewayServiceName {
 		return errors.New(
 			"enterprise hooks: Claude lifecycle snapshot changed the protected hook or service identity",
@@ -906,7 +910,9 @@ func validateWindowsClaudeManagedPolicyIdentitySubset(
 	allowed []string,
 ) error {
 	if state.SchemaVersion != 2 ||
-		state.HookExecutable != opts.HookExecutable ||
+		// A policy an older launch image of this install wrote is still
+		// this lifecycle's identity (GAP-0751).
+		!sameWindowsManagedHookImageExact(state.HookExecutable, opts.HookExecutable) ||
 		state.GatewayAddr != opts.GatewayAddr ||
 		state.GatewayServiceName != opts.GatewayServiceName ||
 		!windowsClaudeTargetSIDSubset(state.TargetSIDs, allowed) {
@@ -977,7 +983,9 @@ func validateWindowsClaudeManagedPolicyTeardownState(
 	expected []string,
 ) error {
 	if state.SchemaVersion != 2 ||
-		state.HookExecutable != opts.HookExecutable ||
+		// A policy an older launch image of this install wrote is still
+		// this lifecycle's identity (GAP-0751).
+		!sameWindowsManagedHookImageExact(state.HookExecutable, opts.HookExecutable) ||
 		state.GatewayAddr != opts.GatewayAddr ||
 		state.GatewayServiceName != opts.GatewayServiceName ||
 		!equalWindowsClaudeTargetSIDs(state.TargetSIDs, expected) {
@@ -1174,7 +1182,13 @@ func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolic
 	if !strings.EqualFold(filepath.Base(target.hookExecutable), "defenseclaw-hook.exe") {
 		return fmt.Errorf("enterprise hooks: managed Claude policy names a noncanonical hook executable: %s", target.hookExecutable)
 	}
-	gatewayPath := filepath.Join(filepath.Dir(target.hookExecutable), "defenseclaw-gateway.exe")
+	// The gateway is the hook's sibling; for a launch image under
+	// bin\hooks\<16 hex> it sits in that install bin (GAP-0751).
+	bin := filepath.Dir(target.hookExecutable)
+	if location, ok := winpath.ParseEnterpriseHookImagePath(target.hookExecutable); ok && location.Versioned() {
+		bin = location.Bin
+	}
+	gatewayPath := filepath.Join(bin, "defenseclaw-gateway.exe")
 	if err := windowsEnterpriseHookTrustCheck(gatewayPath); err != nil {
 		return fmt.Errorf("enterprise hooks: managed Claude gateway executable trust check failed: %w", err)
 	}
@@ -1721,9 +1735,15 @@ func installWindowsClaudeManagedPolicyUnlocked(
 	if err != nil {
 		return "", nil, err
 	}
+	// A policy an earlier hook image of this install published (the
+	// transition image, or an earlier launch folder) is this deployment's and
+	// is rewritten for the current image: that is the switch (GAP-0751).
+	moved := !sameWindowsEnterprisePath(existingState.HookExecutable, opts.HookExecutable) &&
+		sameWindowsManagedHookImage(existingState.HookExecutable, opts.HookExecutable)
 	// The published body matches its ownership state here, so keeping it
-	// keeps what this deployment published last.
-	if keep != nil && policySnapshot.existed && !recoverMissingPolicy && keep(policySnapshot.data) {
+	// keeps what this deployment published last, unless it names an earlier
+	// image.
+	if keep != nil && policySnapshot.existed && !recoverMissingPolicy && !moved && keep(policySnapshot.data) {
 		body = policySnapshot.data
 		*bodyRef = body
 	}
@@ -1732,7 +1752,7 @@ func installWindowsClaudeManagedPolicyUnlocked(
 	// direct command even when every enrolled account is signed out.
 	if targetSID == nil && policySnapshot.existed {
 		if existingState.SchemaVersion != 2 ||
-			!sameWindowsEnterprisePath(existingState.HookExecutable, opts.HookExecutable) ||
+			!sameWindowsManagedHookImage(existingState.HookExecutable, opts.HookExecutable) ||
 			existingState.GatewayAddr != opts.APIAddr ||
 			existingState.GatewayServiceName != os.Getenv(connector.WindowsGatewayServiceNameEnv) {
 			return "", nil, errors.New("enterprise hooks: existing Claude machine policy belongs to another protected deployment")
@@ -1745,19 +1765,27 @@ func installWindowsClaudeManagedPolicyUnlocked(
 				if renderErr != nil {
 					return "", nil, renderErr
 				}
-				if bytes.Equal(policySnapshot.data, current) {
-					return path, nil, nil
-				}
 				previous, renderErr := renderWindowsClaudeRecordedPolicy(existingState, contract, lock, true)
 				if renderErr != nil {
 					return "", nil, renderErr
 				}
-				if bytes.Equal(policySnapshot.data, previous) {
-					body = current
-					*bodyRef = body
-					upgrade = true
-					break searchPolicy
+				if !bytes.Equal(policySnapshot.data, current) && !bytes.Equal(policySnapshot.data, previous) {
+					continue
 				}
+				if moved {
+					// The same contract and lock, for the current image.
+					next := existingState
+					next.HookExecutable = filepath.Clean(opts.HookExecutable)
+					if current, renderErr = renderWindowsClaudeRecordedPolicy(next, contract, lock); renderErr != nil {
+						return "", nil, renderErr
+					}
+				} else if bytes.Equal(policySnapshot.data, current) {
+					return path, nil, nil
+				}
+				body = current
+				*bodyRef = body
+				upgrade = true
+				break searchPolicy
 			}
 		}
 		if !upgrade {
@@ -1974,6 +2002,23 @@ func validateExistingWindowsManagedPolicyOwnership(policy, state windowsManagedF
 	return parsed, nil
 }
 
+// windowsClaudeRecordedPolicyDigestMatches reports that digest is the
+// SHA-256 of a policy DefenseClaw renders for record (any recorded contract,
+// with or without the managed-hooks-only lock, current or previous form).
+func windowsClaudeRecordedPolicyDigestMatches(record windowsClaudeManagedPolicyState, digest string) bool {
+	for _, contract := range windowsClaudeRecordedPolicyContracts() {
+		for _, lock := range []bool{true, false} {
+			for _, previous := range []bool{false, true} {
+				rendered, err := renderWindowsClaudeRecordedPolicy(record, contract, lock, previous)
+				if err == nil && windowsManagedPolicyDigest(rendered) == digest {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func validateWindowsClaudeMissingPolicyRecovery(
 	expectedPolicy []byte,
 	opts connector.SetupOpts,
@@ -2005,14 +2050,20 @@ func validateWindowsClaudeMissingPolicyRecovery(
 			"enterprise hooks: missing-policy recovery ownership metadata has a noncanonical target set",
 		)
 	}
-	if parsed.PolicySHA256 != windowsManagedPolicyDigest(expectedPolicy) {
+	expectedHook := filepath.Clean(opts.HookExecutable)
+	// Ownership metadata an earlier hook image of this install recorded
+	// authenticates the policy rendered for that image; the recovery then
+	// publishes it for the current one (GAP-0751).
+	moved := parsed.HookExecutable != expectedHook && filepath.IsAbs(expectedHook) &&
+		sameWindowsManagedHookImageExact(parsed.HookExecutable, expectedHook) &&
+		windowsClaudeRecordedPolicyDigestMatches(parsed, parsed.PolicySHA256)
+	if !moved && parsed.PolicySHA256 != windowsManagedPolicyDigest(expectedPolicy) {
 		return windowsClaudeManagedPolicyState{}, errors.New(
 			"enterprise hooks: missing-policy recovery ownership metadata does not authenticate the freshly rendered policy",
 		)
 	}
-	expectedHook := filepath.Clean(opts.HookExecutable)
 	if !filepath.IsAbs(expectedHook) ||
-		parsed.HookExecutable != expectedHook {
+		parsed.HookExecutable != expectedHook && !moved {
 		return windowsClaudeManagedPolicyState{}, errors.New(
 			"enterprise hooks: missing-policy recovery hook executable identity mismatch",
 		)

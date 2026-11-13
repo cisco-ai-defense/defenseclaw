@@ -28,8 +28,10 @@ var (
 	endManagedArtifactChangeEpoch     = endWindowsManagedArtifactChangeEpoch
 )
 
-// managedEnterpriseHookBinaryPath reports whether path is the hook binary of
-// this managed enterprise deployment (managedEnterpriseWindowsHookBinary):
+// managedEnterpriseHookBinaryPath reports whether path is a hook image of
+// this managed enterprise deployment: the hook managedEnterpriseWindowsHookBinary
+// resolves, or another hook image of the same install bin (the transition
+// image the guardian keeps, or a launch folder under bin\hooks, GAP-0751),
 // an administrator-owned file that no untrusted account can write, on a
 // fixed NTFS volume. Per-user files, agent executables and repository
 // builds are never memoized.
@@ -39,7 +41,14 @@ func managedEnterpriseHookBinaryPath(path string) bool {
 		return false
 	}
 	hook := managedEnterpriseWindowsHookBinary(executable)
-	return hook != "" && strings.EqualFold(filepath.Clean(hook), filepath.Clean(path))
+	if hook == "" {
+		return false
+	}
+	if strings.EqualFold(filepath.Clean(hook), filepath.Clean(path)) {
+		return true
+	}
+	return winpath.SameEnterpriseHookImageFamily(filepath.Clean(path), hook) &&
+		managed.ValidateExecutableFilePath(path, "enterprise hook executable") == nil
 }
 
 // managedEnterpriseHookCopyPath limits the no-backstop memo to the protected
