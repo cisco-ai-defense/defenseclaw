@@ -1645,6 +1645,13 @@ rules:
     severity: HIGH
     confidence: 0.8
     tags: [privilege-escalation]
+  - id: CMD-PRIV-PATH-HIJACK
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Privileged program run with a writable directory first in PATH"
+    severity: HIGH
+    confidence: 0.85
+    tags: [privilege-escalation]
   - id: MCP-SQL-DESTRUCTIVE
     tool_call_only: true
     pattern: 'a^'

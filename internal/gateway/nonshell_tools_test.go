@@ -127,6 +127,7 @@ func TestShellToolFindings(t *testing.T) {
 		"aws iam get-access-key":                                      "CMD-SECRET-LOOKUP",
 		"git show HEAD:config/secrets.yaml":                           "CMD-GIT-SHOW-SECRET",
 		"chmod u+s /tmp/x":                                            "CMD-PRIV-SETUID",
+		"PATH=/tmp/badpath:$PATH pkexec true":                         "CMD-PRIV-PATH-HIJACK",
 		"echo '0 3 * * * root /home/u/x.sh' | sudo tee /etc/cron.d/x": "CMD-PERSIST-SYSTEM-SCHEDULE",
 		"cat /home/u/.vault-token":                                    "PATH-CRED-STORE-USER",
 		"echo 'svc:x:0:0::/:/bin/sh' | sudo tee -a /etc/passwd":       "PATH-ETC-PASSWD",
@@ -147,7 +148,7 @@ func TestShellToolFindings(t *testing.T) {
 	quiet := []string{
 		"ls -la", "chmod 644 /tmp/x", "chmod +x run.sh", "vault status", "aws s3 ls",
 		"git show main:stack/scripts/tool_gating.env.sh", "git show HEAD:README.md", "git show HEAD:internal/gateway/user_scoped_credentials.go",
-		"cat /run/secrets/redis_auth", "echo 'git:x:1000:1000::/home/git:/bin/bash' >> /etc/passwd",
+		"cat /run/secrets/redis_auth", "PATH=/usr/local/bin:$PATH make test", "PATH=/tmp/x:$PATH ls", "echo 'git:x:1000:1000::/home/git:/bin/bash' >> /etc/passwd",
 		"echo '@reboot root /opt/app/worker.py' > /etc/cron.d/worker",
 		"cat /etc/passwd", "cp a.txt /etc/hosts", "echo hi > /tmp/x",
 	}

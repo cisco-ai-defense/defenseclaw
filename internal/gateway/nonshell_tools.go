@@ -268,6 +268,9 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		}
 		out = append(out, nonShellFinding(rule, note, request.Input.Tool, hard))
 	}
+	for _, id := range toolshape.TextRules(command) {
+		add(id, "")
+	}
 	for _, c := range facts.Commands {
 		for _, id := range toolshape.CommandRules(c.Program, c.Argv) {
 			add(id, "")

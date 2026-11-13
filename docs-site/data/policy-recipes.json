@@ -5144,6 +5144,29 @@
       ]
     },
     {
+      "id": "RECIPE-CMD-PRIV-PATH-HIJACK",
+      "title": "Privileged program run with a writable directory first in PATH",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PRIV-PATH-HIJACK",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Privileged program run with a writable directory first in PATH",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "privilege-escalation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege-escalation"
+      ]
+    },
+    {
       "id": "RECIPE-MCP-SQL-DESTRUCTIVE",
       "title": "Destructive SQL in a tool call",
       "kind": "rule:command",

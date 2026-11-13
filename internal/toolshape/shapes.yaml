@@ -112,5 +112,8 @@ command_rules:
   - {id: CMD-SECRET-LOOKUP, program: [aws], any_argv: [create-access-key, get-access-key]}
   - {id: CMD-GIT-SHOW-SECRET, program: [git], all_argv: [show], colon_path_re: "(?i)(^|/)([.]env([.][a-z0-9_-]+)?|id_(rsa|ed25519|ecdsa|dsa)|[.](netrc|npmrc|pypirc|pgpass)|credentials([.](json|ya?ml|xml|ini|toml))?|secrets?[.](json|ya?ml|toml|env|ini|enc)|[^/]*[.](pem|key|p12|pfx|jks|keystore))$"}
   - {id: CMD-PRIV-SETUID, program: [chmod], any_argv: ["u+s", "g+s", "ug+s", "a+s", "+s", "u=rwxs", "4755", "6755", "2755", "4750", "4711", "4700", "4777", "4555"]}
+# Rules on the text of a shell call (a shape the parsed facts do not carry).
+text_rules:
+  - {id: CMD-PRIV-PATH-HIJACK, re: "(?i)(^|[;&|][[:space:]]*)PATH=(/tmp|/var/tmp|/dev/shm)[^[:space:]:]*:[$][{]?PATH[}]?[[:space:]]+(sudo|pkexec|su|doas)([[:space:]]|$)"}
 # A shell text without one of these words is not parsed again for the rules above.
-shell_triggers: ["/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron"]
+shell_triggers: ["path=", "/etc/", "/run/secrets", "/var/lib/jenkins", "keytab", ".azure", ".config/gh", ".my.cnf", ".pgpass", ".vault-token", "--show-secrets", "--reveal", "vault ", "-access-key", "chmod ", "git show", "/var/spool/cron"]

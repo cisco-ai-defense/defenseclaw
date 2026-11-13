@@ -137,6 +137,7 @@ type table struct {
 	PathRules     []PathRule    `yaml:"path_rules"`
 	CommandRules  []CommandRule `yaml:"command_rules"`
 	ShellTriggers []string      `yaml:"shell_triggers"`
+	TextRules     []TextRule    `yaml:"text_rules"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool

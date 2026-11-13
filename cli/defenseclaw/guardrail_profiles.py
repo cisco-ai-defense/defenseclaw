@@ -80,7 +80,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule ids.
-            "f4341eb25e05413cd586a35b813e69e5033e650eaa97d0ea7d212aa411037571",
+            "071c10027025c7355cc622f229e8b68f2cf9c99acc8948b29fcabfb56052665c",
         }
     ),
     "permissive": frozenset(
@@ -117,7 +117,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule ids.
-            "442d1f7aade9aa067cb95e25dfec542ff0a453bd6dacec810e08db327c3b4d1e",
+            "1e618bd6893f079367c6908fde1096dde258a7a9abc87a20085e92b1096790d5",
         }
     ),
     "strict": frozenset(
@@ -153,7 +153,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
             # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule ids.
-            "b351b73a5fbd49869e723970ae047dded63cb38c330048c1a591d85a16fd9a5a",
+            "b633d0a58b0a3017ee73c35d534333d88368385d61c61eb6d012cbb632076c5e",
         }
     ),
 }

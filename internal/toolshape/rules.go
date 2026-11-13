@@ -33,6 +33,14 @@ type CommandRule struct {
 	colonPath   *regexp.Regexp
 }
 
+// TextRule is a rule on the text of a shell call, for a shape the parsed
+// facts do not carry (an environment assignment in front of a command).
+type TextRule struct {
+	ID    string `yaml:"id"`
+	Regex string `yaml:"re"`
+	re    *regexp.Regexp
+}
+
 // compileRules is called once by load.
 func (t *table) compileRules() error {
 	for i := range t.PathRules {
@@ -47,6 +55,14 @@ func (t *table) compileRules() error {
 				return fmt.Errorf("toolshape: path rule %s text: %w", r.ID, err)
 			}
 		}
+	}
+	for i := range t.TextRules {
+		r := &t.TextRules[i]
+		re, err := regexp.Compile(r.Regex)
+		if err != nil {
+			return fmt.Errorf("toolshape: text rule %s: %w", r.ID, err)
+		}
+		r.re = re
 	}
 	for i := range t.CommandRules {
 		r := &t.CommandRules[i]
@@ -184,4 +200,19 @@ func anyIn(want, argv []string) bool {
 		}
 	}
 	return false
+}
+
+// TextRules returns the ids of the text rules a shell command matches.
+func TextRules(text string) []string {
+	t, err := load()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, r := range t.TextRules {
+		if r.re.MatchString(text) {
+			out = append(out, r.ID)
+		}
+	}
+	return out
 }
