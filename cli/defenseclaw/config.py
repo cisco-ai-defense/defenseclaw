@@ -3755,7 +3755,9 @@ def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | Non
 
 _SANDBOX_ACTOR_SECRET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 # The egress ask keys (Go sandbox_ask_keys.go).
-_SANDBOX_HOST_PATTERN_RE = re.compile(r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+_SANDBOX_HOST_PATTERN_RE = re.compile(
+    r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"
+)
 _SANDBOX_HTTP_METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
 _SANDBOX_URL_RULE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
