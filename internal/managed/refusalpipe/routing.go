@@ -55,7 +55,7 @@ func ValidRoutingReadPath(path string) bool {
 		return u.RawQuery == ""
 	case strings.HasPrefix(rest, "explain/"):
 		id := strings.TrimPrefix(rest, "explain/")
-		return u.RawQuery == "" && id != "" && !strings.ContainsAny(id, "/\\%")
+		return u.RawQuery == "" && id != "" && id != "." && id != ".." && !strings.ContainsAny(id, "/\\%")
 	}
 	return false
 }

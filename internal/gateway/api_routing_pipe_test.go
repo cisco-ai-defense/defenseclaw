@@ -29,6 +29,9 @@ func TestRoutingPipeCallerKeyIsTheSID(t *testing.T) {
 	if a.routingPipeAnswer(context.Background(), "", "/api/v1/routing/budgets") != nil {
 		t.Fatal("no SID, no answer")
 	}
+	if serveRoutingPipe(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("x") }), &routingPipeResponse{header: http.Header{}}, httptest.NewRequest(http.MethodGet, "/", nil)) {
+		t.Fatal("a handler panic is recovered and reported")
+	}
 	w := &routingPipeResponse{header: http.Header{}, status: 200}
 	_, _ = w.Write(make([]byte, refusalpipe.MaxRoutingAnswerBytes))
 	if !w.over {

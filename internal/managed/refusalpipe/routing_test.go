@@ -15,7 +15,7 @@ func TestRoutingReadPaths(t *testing.T) {
 			t.Fatalf("%s round trip: %q %v", ok, path, valid)
 		}
 	}
-	for _, bad := range []string{"/api/v1/routing/test", "/api/v1/usage", "/api/v1/routing/effective?user=x", "/api/v1/routing/explain/../x",
+	for _, bad := range []string{"/api/v1/routing/test", "/api/v1/usage", "/api/v1/routing/effective?user=x", "/api/v1/routing/explain/../x", "/api/v1/routing/explain/..",
 		"/api/v1/routing/explain/a%2Fb", "http://h/api/v1/routing/budgets", "/api/v1/routing/budgets?x=1", "/api/v1/routing/"} {
 		if _, err := RoutingRequest(bad); err == nil {
 			t.Fatalf("%s must be refused", bad)

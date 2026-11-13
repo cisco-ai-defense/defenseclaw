@@ -42,16 +42,20 @@ func (a *APIServer) registerRoutingRoutes(mux *http.ServeMux) {
 // administrator. ok is false for a caller who may read nothing (a managed
 // device's TCP API without the administrator token).
 func (a *APIServer) routingAPICaller(r *http.Request, cfg *config.Config) (key string, admin, ok bool) {
+	if sid, viaPipe := routingPipeCallerFromContext(r.Context()); viaPipe {
+		// The Windows own-status pipe: the account its client token names,
+		// never an administrator, whatever the configuration says.
+		if cfg != nil && cfg.Routing.Admin != nil && cfg.Routing.Admin.Visibility.EffectiveUsersSee() == config.RoutingUsersSeeNone {
+			return "", false, false
+		}
+		return sid, false, true
+	}
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return routingadmin.OwnerKey, true, true
 	}
 	admin = a.healthAdministratorCaller(r, cfg)
 	if peer, viaHookSocket := managedHookPeerFromContext(r.Context()); viaHookSocket {
 		key = strconv.Itoa(peer.UID)
-	}
-	if sid, viaPipe := routingPipeCallerFromContext(r.Context()); viaPipe {
-		// The Windows own-status pipe: the account its client token names.
-		key, admin = sid, false
 	}
 	if !admin && cfg.Routing.Admin != nil && cfg.Routing.Admin.Visibility.EffectiveUsersSee() == config.RoutingUsersSeeNone {
 		// routing.admin.visibility.users_see none: only administrators read.

@@ -45,11 +45,26 @@ func (a *APIServer) routingPipeAnswer(ctx context.Context, sid, path string) []b
 	mux := http.NewServeMux()
 	a.registerRoutingRoutes(mux)
 	w := &routingPipeResponse{header: http.Header{}, status: http.StatusOK}
-	mux.ServeHTTP(w, req)
+	if !serveRoutingPipe(mux, w, req) {
+		return refusalpipe.EncodeRoutingAnswer(http.StatusInternalServerError, []byte(`{"error":"the routing read failed"}`))
+	}
 	if w.over {
 		return refusalpipe.EncodeRoutingAnswer(http.StatusInsufficientStorage, []byte(`{"error":"the routing answer is too large for the pipe; ask for fewer recent decisions"}`))
 	}
 	return refusalpipe.EncodeRoutingAnswer(w.status, w.body.Bytes())
+}
+
+// serveRoutingPipe runs the handler and reports false when it panicked: any
+// standard account can send a pipe read, so a handler panic must not stop
+// the gateway service (the HTTP server recovers the same way).
+func serveRoutingPipe(h http.Handler, w http.ResponseWriter, r *http.Request) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	h.ServeHTTP(w, r)
+	return true
 }
 
 // routingPipeResponse buffers one routing answer, bounded.
