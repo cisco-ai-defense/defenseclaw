@@ -84,6 +84,19 @@ func substrateAge(t time.Time, now time.Time) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
+// substrateAskRun is the RUN column of approvals: "unattended" for an ask
+// an unattended run queued (with the time left before it is denied), else
+// "attached".
+func substrateAskRun(a api.Ask, now time.Time) string {
+	if !a.Unattended {
+		return "attached"
+	}
+	if a.Expires.IsZero() {
+		return "unattended"
+	}
+	return "unattended, " + substrateAge(now, a.Expires) + " left"
+}
+
 func substrateDash(s string) string {
 	if s == "" {
 		return "-"
@@ -428,8 +441,9 @@ func newSubstrateApprovalsCmd() *cobra.Command {
 		Short: "List what your agents are waiting for you to approve",
 		Long: `Lists the questions your agents asked that nobody has answered yet. Answer with
 "defenseclaw substrate approve ID" or "defenseclaw substrate reject ID". An agent attached to your
-terminal shows the same question on its last line. An unattended run (--task) never waits:
-its asks are denied.`,
+terminal shows the same question on its last line. An unattended run (--task, --batch)
+denies its asks unless its profile sets unattended_asks: queue; a queued ask is marked
+"unattended" in the RUN column and is denied when its time runs out.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := out.wantJSON()
@@ -457,9 +471,10 @@ its asks are denied.`,
 			now := time.Now()
 			rows := make([][]string, 0, len(asks))
 			for _, a := range asks {
-				rows = append(rows, []string{a.ID, substrateDash(a.Actor), substrateDash(a.Summary), substrateDash(a.Severity), substrateAge(a.Created, now)})
+				rows = append(rows, []string{a.ID, substrateDash(a.Actor), substrateDash(a.Summary), substrateDash(a.Severity),
+					substrateAge(a.Created, now), substrateAskRun(a, now)})
 			}
-			substrateTable(w, []string{"ID", "AGENT", "WHAT", "SEVERITY", "AGE"}, rows)
+			substrateTable(w, []string{"ID", "AGENT", "WHAT", "SEVERITY", "AGE", "RUN"}, rows)
 			fmt.Fprintln(w, "\nAnswer with: defenseclaw substrate approve ID   or   defenseclaw substrate reject ID")
 			return nil
 		},

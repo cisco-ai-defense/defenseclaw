@@ -27,7 +27,7 @@ keywords:
 | `undo <name> [--to ID]` | Return the actor to its last checkpoint, or to a given one |
 | `delete <name>... \| --batch ID` | Delete actors, their allow lists and their snapshots |
 | `migrate <name>` | Move an actor with an old kit to a rebuilt template |
-| `approvals`, `approve <id> [--always]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs |
+| `approvals`, `approve <id> [--always]`, `reject <id> [--reason]` | Answer asks, including for detached and unattended runs. An ask an unattended run queued shows `unattended` and the time left in the RUN column |
 | `usage [--batch ID]` | Your own usage and cost. Admins can read the fleet |
 | `secrets list [--mine]`, `set NAME (--stdin \| --from-env VAR)`, `rm NAME`, `test NAME` | Names of your secrets and their bindings. Values are never shown |
 | `policy explain NAME`, `show`, `test NAME` | Your own effective policy and where each value comes from; `test` asks whether a host, method or tool would be allowed |
