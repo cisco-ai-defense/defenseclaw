@@ -4439,6 +4439,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				placedLinkCalls[call] = true
 			}
 		case slices.Contains(copyPrograms, program):
+			words, static := copyGlobOperandsAsNames(args, words, static)
 			_, topLevelPlaced := linkDirs[call]
 			_, nestedPlaced := nestedCopyDirs[call]
 			var globDestinations []string
@@ -7468,9 +7469,11 @@ func (l *shellLinks) record(source, name string, literal, symbolic bool, cwd str
 			text = relative
 		}
 	}
-	l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	if !linkPointsIntoItself(name, target) {
+		l.aliases = append(l.aliases, linkAlias{name: name, target: target, text: text})
+	}
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
-		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
+		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name && !linkPointsIntoItself(resolved, target) {
 			l.aliases = append(l.aliases, linkAlias{name: resolved, target: target, text: text})
 		}
 	}
