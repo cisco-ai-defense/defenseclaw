@@ -99,7 +99,10 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			for _, class := range e.SQL {
 				switch class.Class {
 				case toolshape.SQLDrop, toolshape.SQLTruncate, toolshape.SQLDeleteAll:
-					add(mcpSQLDestructiveRuleID, "SQL "+class.Class)
+					// The exact SQL-mutation owner already judged this call.
+					if !slices.ContainsFunc(out, func(f RuleFinding) bool { return f.RuleID == sqlDestructiveMutationRuleID }) {
+						add(mcpSQLDestructiveRuleID, "SQL "+class.Class)
+					}
 				case toolshape.SQLPrivilege:
 					add(mcpSQLPrivilegeRuleID, "SQL privilege change")
 				case toolshape.SQLAuditOff:

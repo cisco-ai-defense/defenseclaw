@@ -6,6 +6,8 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -49,6 +51,9 @@ func TestNonShellToolFindingsByEffect(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && strings.Contains(c.args, `"/`) {
+				t.Skip("the case names a POSIX path; the Windows spelling is covered by the native file-tool tests")
+			}
 			got := nonShellToolFindings(context.Background(), nonShellReq(c.tool, c.args, false), nil)
 			f, ok := findingByID(got, c.rule)
 			if !ok {
@@ -112,6 +117,9 @@ func TestNonShellToolFindingsNotCapableAddsNothing(t *testing.T) {
 }
 
 func TestShellToolFindings(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the cases are POSIX shell commands on POSIX paths")
+	}
 	loud := map[string]string{
 		"pulumi stack output --show-secrets --stack a/b/c --json": "CMD-SECRET-REVEAL",
 		"op item get 'X' --reveal --format=json":                  "CMD-SECRET-REVEAL",
