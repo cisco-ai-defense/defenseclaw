@@ -29,14 +29,23 @@ func signinRefusal(status int, body []byte) (string, bool) {
 		Reason  string `json:"reason"`
 		Message string `json:"message"`
 	}
-	if json.Unmarshal(body, &v) != nil || !signin.IsRefusalCode(v.Reason) {
+	if json.Unmarshal(body, &v) != nil || (!signin.IsRefusalCode(v.Reason) && v.Reason != MCPRefusedCode) {
 		return "", false
 	}
-	if v.Message == "" {
+	switch {
+	case v.Message != "":
+	case v.Reason == MCPRefusedCode:
+		v.Message = "DefenseClaw refused this MCP server: the runtime MCP scan blocked it."
+	default:
 		v.Message = "DefenseClaw refused this actor: its agent signs in to a vendor account, which a managed deployment does not allow."
 	}
 	return v.Message, true
 }
+
+// MCPRefusedCode is the gateway's 403 reason for a call of, or a call that
+// adds, an MCP server the runtime MCP scan refused (E20, GAP-0185): the kit
+// answers the agent's own closed deny, in every fail mode.
+const MCPRefusedCode = "substrate_mcp_refused"
 
 // maxPayloadBytes is the agent event cap, the host hooks' 1 MiB
 // (hookexec.DefaultMaxBody): a larger event is refused closed.
@@ -132,7 +141,7 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	}
 	var skillsSent map[string]string
 	var skillsAttached []string
-	if skillScanEvents[call.Event] {
+	if skillScanEvents[call.Event] || (env.Facts != nil && env.Facts.readsSkill) {
 		skillsSent, skillsAttached = o.attachSkills(&env, payload)
 	}
 	body, err := json.Marshal(env)

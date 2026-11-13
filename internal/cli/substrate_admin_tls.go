@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,7 +40,8 @@ func init() {
 }
 
 // substrateAdminTLS is the admin listener's TLS: the serving config, or a
-// key pair re-read when its files change (a Secret rotation).
+// key pair re-read when its files change (a Secret rotation) for external
+// names, with the serving certificate kept for in-cluster Service names.
 func substrateAdminTLS(serving *tls.Config) (*tls.Config, error) {
 	cert, key := substrateAdminTLSFlags.cert, substrateAdminTLSFlags.key
 	if cert == "" && key == "" {
@@ -52,7 +54,15 @@ func substrateAdminTLS(serving *tls.Config) (*tls.Config, error) {
 	if _, err := r.get(); err != nil {
 		return nil, err
 	}
-	return &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return r.get() }}, nil
+	return &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		// In-cluster clients (the callout's judge and ask client) dial the
+		// Service name and trust the cluster CA: they get the pod serving
+		// certificate, everyone else the operator's (GAP-0186).
+		if serving != nil && serving.GetCertificate != nil && substrateInClusterServerName(hello.ServerName) {
+			return serving.GetCertificate(hello)
+		}
+		return r.get()
+	}}, nil
 }
 
 type reloadingKeyPair struct {
@@ -85,4 +95,17 @@ func (r *reloadingKeyPair) get() (*tls.Certificate, error) {
 	}
 	r.pair, r.mod = &pair, fi.ModTime()
 	return r.pair, nil
+}
+
+// substrateInClusterServerName reports whether a TLS client named an
+// in-cluster Service spelling ("<svc>.<ns>.svc", with or without
+// ".cluster.local"). The callout's judge and ask client dial the admin
+// Service that way and trust only the cluster CA, so those names get the
+// pod serving certificate even when --admin-tls-cert holds an external one
+// (GAP-0186).
+func substrateInClusterServerName(sni string) bool {
+	s := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(sni), "."))
+	s = strings.TrimSuffix(s, ".cluster.local")
+	name, ok := strings.CutSuffix(s, ".svc")
+	return ok && strings.Count(name, ".") == 1 && !strings.HasPrefix(name, ".") && !strings.HasSuffix(name, ".")
 }

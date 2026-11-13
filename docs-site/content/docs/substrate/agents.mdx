@@ -20,8 +20,8 @@ keywords:
 | Agent | Headless (`run --task`) | Model route | In an actor today |
 |---|---|---|---|
 | Claude Code | `claude -p` | DefenseClaw gateway | **Proven.** Interactive and headless, on a real model, from macOS and Linux laptops. Windows laptops are being re-checked |
-| Codex | `codex exec` | DefenseClaw gateway (`/llm/openai`) | Hooks, headless and interactive proven in an actor, on a real model, in the lab. **Model route:** the shipped gateway serves Codex through the OpenAI provider and needs an OpenAI key in `defenseclaw-llm`. The Bedrock (Mantle) route used in the lab is not in the shipped gateway yet |
-| GitHub Copilot CLI | `copilot -p` | DefenseClaw gateway | Hooks and a real model proven in an actor, in the lab. **Model route:** the Bedrock route the lab used is not in the shipped gateway yet, so it has no working model route there today |
+| Codex | `codex exec` | DefenseClaw gateway (`/llm/bedrock/openai` or `/llm/openai`) | Hooks, headless and interactive proven in an actor, on a real model, in the lab. **Model route:** GPT-5.6 Luna on Bedrock (`us.openai.gpt-5.6-luna`) through the gateway's Bedrock OpenAI-compatible route, or OpenAI with a key in `defenseclaw-llm`. `template build --provider bedrock` or `openai` picks one |
+| GitHub Copilot CLI | `copilot -p` | DefenseClaw gateway (`/llm/bedrock/openai`) | Hooks and a real model proven in an actor, in the lab. **Model route:** Bedrock only, through the gateway's OpenAI-compatible route |
 | Hermes | `hermes chat -q` | DefenseClaw gateway | Same as Copilot CLI |
 | OpenCode | `opencode run` | DefenseClaw gateway | Same as Copilot CLI. `defenseclaw substrate run opencode` starts it: its plugin sends its hook events through the actor kit |
 | Kiro CLI | `kiro-cli chat --no-interactive` | Vendor sign-in only | Hooks, tamper checks and refusals proven. **No model run:** it needs a vendor sign-in or `KIRO_API_KEY` |
@@ -34,7 +34,7 @@ keywords:
 
 "Proven" means a person drove it in a real terminal, or a headless task ran, with DefenseClaw's hooks firing and a real model answering through the gateway. Only Claude Code has been driven through the launcher; the others were driven through the kit and a lab gateway. "No model run" means the vendor offers no key or sign-in the test cluster could use, so only the parts that need no model were checked.
 
-`defenseclaw substrate run` starts `claude`, `codex`, `copilot`, `hermes`, `kiro` and `antigravity`. For the rest it stops with "NAME is not verified yet, so it does not run" and says why.
+`defenseclaw substrate run` starts all ten agents. For Amp it first prints that Amp's WebSocket connections are not passed through yet, so it may not reach its model. Cursor, Kiro, Antigravity, Devin and Amp follow the sign-in rules below.
 
 Each connector has a headless command; a connector that cannot run one is interactive only, and `run --task` says so. The full command lines the relay runs are:
 
@@ -53,7 +53,9 @@ Each connector has a headless command; a connector that cannot run one is intera
 
 The "skip permissions" flags only silence the agent's own prompts, because a headless run has nobody to answer them. DefenseClaw's hooks still decide every tool call, and a hook deny holds even under `--yolo`.
 
-**Images.** `template build` builds `claudecode` and `codex` images. The other agents' kit images come from the same kit generator in the repository (`deploy/images/actor-kit`) and are built by the platform team. An agent needs its kit image before it can run.
+**Images.** `template build --connector NAME` builds the image for any of the ten agents (`claudecode`, `codex`, `opencode`, `copilot`, `hermes`, `kiro`, `antigravity`, `cursor`, `amp`, `devin`) and refuses any other name. An agent needs its kit image before it can run.
+
+**Model replies.** OpenAI-style models on Bedrock (Codex, OpenCode, Copilot CLI, Hermes) get prompt inspection and the model allowlist. The proxy does not yet inspect the tool calls in the model's reply; the hook stops them when they run. See [the threat model](/docs/substrate/threat-model).
 
 ## Vendor sign-in
 

@@ -81,7 +81,7 @@ defenseclaw substrate setup --install-file install.yaml --namespace defenseclaw-
 defenseclaw substrate verify --install-file install.yaml
 ```
 
-`verify` reads the cluster with `kubectl` and checks that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster, that the snapshot bucket is private and encrypted, that DefenseClaw holds the access it needs, that the egress callout is registered, and that nobody else can reach agents through the router. A failed check names the fix.
+`verify` reads the cluster with `kubectl` and checks that the Substrate version is in the tested range, that the actor-token issuer is unique to this cluster, that DefenseClaw holds the access it needs, that the egress callout is registered, and that nobody else can reach agents through the router. A failed check names the fix. `verify` does not read the snapshot bucket yet: that check reports `skipped`. Check yourself that the bucket is private, encrypted and expires old objects.
 
 </Step>
 
@@ -89,13 +89,24 @@ defenseclaw substrate verify --install-file install.yaml
 
 ### Sign in
 
-With your own cluster and no identity provider, use your Kubernetes identity. The launcher sends your current kubeconfig credentials and the gateway checks them with a Kubernetes TokenReview (or your client certificate through the API server). You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`. For this the chart makes its one cluster-wide grant: a ClusterRoleBinding of the gateway's service account to `system:auth-delegator` (TokenReviews are cluster-scoped), named by `gateway.authDelegatorBinding` (default `defenseclaw-auth-delegator-<namespace>-<release>`). It is not rendered when an OIDC issuer is set, on a managed install, or when the gateway runs with `--no-kube-sign-in`, and `helm uninstall` removes it.
+With your own cluster and no identity provider, use your Kubernetes identity. With `--kube`, the launcher signs you in with your kubeconfig, and the gateway checks who you are itself, with a Kubernetes TokenReview. It never trusts what the launcher says. You are then the Kubernetes user, and events record that as a user ID of kind `k8s_user`. For this the chart makes its one cluster-wide grant: a ClusterRoleBinding of the gateway's service account to `system:auth-delegator` (TokenReviews are cluster-scoped), named by `gateway.authDelegatorBinding` (default `defenseclaw-auth-delegator-<namespace>-<release>`). It is not rendered when an OIDC issuer is set, on a managed install, or when the gateway runs with `--no-kube-sign-in`, and `helm uninstall` removes it.
+
+What the launcher sends depends on your kubeconfig:
+
+- **A token user** (a static token, or an exec plugin such as a cloud provider's): the launcher sends that token.
+- **A client certificate** (the kubeconfig `kind create cluster` writes): the gateway can't check a certificate it never sees. So the launcher uses the certificate only toward the Kubernetes API server, to get a 15-minute token for a ServiceAccount, and signs you in as that ServiceAccount (`system:serviceaccount:NAMESPACE:NAME`). By default that's `defenseclaw-launcher` in the namespace DefenseClaw runs in; `--kube-service-account NAMESPACE/NAME` picks another. You need `create` on `serviceaccounts/token` for it, and the ServiceAccount must exist.
+- **A ServiceAccount token from `kubectl create token`** is refused: it's issued for the API server, as a pod's token is. Use `--kube-service-account` instead, and the launcher gets one issued for DefenseClaw.
+
+Name the namespace DefenseClaw runs in with `--kube-namespace` the first time you sign in. The launcher reads the launcher endpoint record only there, and signs in only if that record names your `--admin-url`. If you leave it out, the launcher looks for the record and tells you the namespace, with the command to run. It signs you in to nothing, sends no credential to the address, and gets no token. It doesn't pick the namespace for you: anyone who can create a ConfigMap in some namespace could publish a record for an address.
 
 ```bash
-defenseclaw substrate login --kube --admin-url https://defenseclaw-admin.example.test
+kubectl -n defenseclaw-system create serviceaccount defenseclaw-launcher
+defenseclaw substrate login --kube --kube-namespace defenseclaw-system --admin-url https://defenseclaw-admin.example.test --admin-ca-file ca.pem
 ```
 
-`--kube-context` and `--kubeconfig` pick a different context or file. Nothing is stored: the launcher reads your kubeconfig each time.
+`--kube-context` and `--kubeconfig` pick a different context or file. The launcher stores no token: it reads your kubeconfig each time, and a minted token lasts 15 minutes, after which the launcher gets a new one by itself. When your kubeconfig signs in with a client certificate, login prints one line saying you are signed in as the ServiceAccount.
+
+Limits: the Kubernetes sign-in is for open source only (a managed install needs OIDC), and a kubeconfig whose exec plugin returns only a client certificate is still refused.
 
 With an OIDC provider, sign in with the device flow instead:
 

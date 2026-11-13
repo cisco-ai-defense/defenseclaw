@@ -16,6 +16,10 @@ Start with `defenseclaw substrate doctor`. It checks your computer and your sign
 
 - `you are not signed in; run: defenseclaw substrate login`. Add the reason in brackets when the issuer ended it: `you are not signed in (the issuer ended the sign-in: Session not active); run: defenseclaw substrate login`. Exit code 4.
 - `the cluster did not accept your sign-in (token refused). Sign in again with: defenseclaw substrate login`.
+- `the cluster did not accept your sign-in (subject)` after `login --kube` with a ServiceAccount token: the token was issued for the API server. Sign in with `--kube-service-account NAMESPACE/NAME` instead.
+- `the ServiceAccount NS/defenseclaw-launcher does not exist ...` (`login --kube`): your kubeconfig signs in with a client certificate. Run `kubectl -n NS create serviceaccount defenseclaw-launcher`, or name another with `--kube-service-account`.
+- `the launcher endpoint record that names ... is in namespace NS; nothing was sent to it ...` (exit code 2): you left out `--kube-namespace`. If DefenseClaw runs in NS, run the command the message prints, which adds `--kube-namespace NS`.
+- `the kubeconfig user ... may not list ConfigMaps in every namespace ...`: you left out `--kube-namespace`, and you may not list ConfigMaps across namespaces. Give `--kube-namespace NAME` (ask your administrator for the namespace).
 - `the cluster certificate is not trusted; give the certificate authority with: defenseclaw substrate login --admin-ca-file FILE`. A private CA also needs `--issuer-ca-file` for the sign-in server. Your browser may show its own certificate warning on the sign-in page; that is the browser, not the launcher.
 - **macOS, over SSH or with the keychain locked:** `the macOS keychain is locked and this session cannot ask you to unlock it (for example over SSH); unlock it with: security unlock-keychain`. If you declined the question: `you declined the macOS keychain request; run the command again and allow DefenseClaw`.
 - **Linux without a keyring:** `token_store: no OS keychain is usable: secret-tool is not on PATH; install it (package libsecret-tools or libsecret) with a running Secret Service such as GNOME Keyring; or set DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file`. Set the variable in every shell, or in CI. The sign-in itself still needs a browser on some machine: `login --no-browser` prints the address and code.
@@ -47,13 +51,14 @@ The gateway answered `403` with the reason `template_attestation_unreadable`. On
 - `that group of agents is not open to you; ask your administrator` (`atespace_not_allowed`).
 - The reason `connector_mismatch` (`400`): you named an agent that differs from the one the template runs. Leave the agent name out of the request or use the template that matches. `connector_required` means neither the template nor the request names an agent.
 - The reason `subscription_signin_refused` (`403`), on a managed cluster: the agent signs in with a vendor account, so its token would sit in the actor and its snapshots. The message tells the user to ask an administrator to bind the agent's key (for example `CURSOR_API_KEY`) as a Substrate secret, or to use an agent that runs through the DefenseClaw model route. `agent_hook_tamper_refused` is the same for Amp, whose hook registration can't be protected. See [Agents and features](/docs/substrate/agents#vendor-sign-in). Nothing is created: the refusal comes before the actor.
-- `NAME is not verified yet, so it does not run`: the launcher only starts agents it has verified. See [Agents and features](/docs/substrate/agents#agents).
+- `NAME is not verified yet, so it does not run`: the launcher starts only the ten agents the kit builds images for. See [Agents and features](/docs/substrate/agents#agents).
 
 ### My agent can't reach anything
 
 An actor with no allow list has no network. The usual causes:
 
 - **The template isn't attested.** The template was made with plain `kubectl ate`, or its attestation doesn't match, or its signing key was revoked. `doctor --cluster` lists it with the reason (the events say `untrusted_signer` or `no_attestation`, and `sandbox.template_unverified`). Rebuild it with `defenseclaw substrate template build`, or `template verify`.
+- **The template is attested but its registry is private.** The controller and the gateway read the attestation from the registry and get HTTP 401, so the template is refused as `sandbox.template_unverified`. Give them a registry login: see [Attested templates in a private registry](/docs/substrate/eks#attested-templates-in-a-private-registry).
 - **The controller is down.** Existing actors keep their policy; new ones have none. Check `kubectl -n defenseclaw-system get deploy defenseclaw-controller`.
 - **The profile has no matching assignment.** You get `default_profile`. `policy explain NAME` shows which one.
 - **Someone else made the actor.** An actor in a launcher atespace that DefenseClaw didn't create is removed from policy (`sandbox.foreign_actor`, `sandbox.policy.removed`).
@@ -86,13 +91,17 @@ DefenseClaw 1.0.10 is tested with Substrate `>=1.0.0 <1.1.0`. Other versions may
 
 The default actor-token issuer is the same on every cluster. Give each cluster its own with `substrate.identity.issuer`, and redeploy Substrate's API server with the matching `--actor-jwt-issuer`.
 
-### `verify` warns about the snapshot bucket
+### `verify` skips the snapshot bucket
 
-Snapshots hold everything an actor held, so the bucket should be encrypted, private, region-correct and have a retention rule. Fix the bucket, or accept the warning knowingly. `delete` removes an agent's snapshots.
+`verify` lists the `snapshot_bucket` check as `skipped` with "no object-storage snapshot location to check". It does not read the bucket yet, on any object store. Snapshots hold everything an actor held, so check yourself that the bucket is encrypted, private, in the cluster's region and has a retention rule. `delete` removes an agent's snapshots.
 
 ### Model calls to Bedrock fail through a VPC endpoint
 
 A Bedrock interface endpoint with private DNS resolves to a private address, and the guardrail proxy refuses private upstreams by default. Add the endpoint's address to `guardrail.allow_private_upstreams` (individual IPs, not ranges). The endpoint's security group must also admit the node security group on 443, or calls time out with a 503.
+
+### The first start on a new node fails once
+
+The first agent on a node that has never run the template can fail once with a message that says the resume failed. The start timed out while the node pulled the template image (about 1.6 GiB) and fetched the golden snapshot, and the agent is removed. Run the command again. Pulling the image beforehand is not needed.
 
 ### A new actor is briefly offline
 

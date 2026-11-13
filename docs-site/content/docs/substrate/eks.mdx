@@ -41,8 +41,36 @@ For microVM actors, the kind-only asset step doesn't work on EKS. Assemble the a
 
 - One S3 bucket with server-side encryption, public access blocked and a lifecycle rule. Snapshots under `snapshots/`, assets under `microvm-assets/`.
 - Give the node role a policy limited to that bucket: list, get, put, delete and multipart. With S3 there is no per-actor storage credential, unlike Google Cloud Storage.
-- An ActorTemplate image must be pinned by digest. A tag fails with `must be pinned by digest`. For ECR, push and use the digest.
+- An ActorTemplate image must be pinned by digest. A tag fails with `must be pinned by digest`. For ECR, push and use the digest. `template publish` to ECR needs `--registry-auth-host HOST --registry-user AWS --registry-password-file FILE`: the login goes only to a host named there.
+- The controller and the gateway read each template's attestation from its registry. For ECR and other private registries they need a login: see [Attested templates in a private registry](#attested-templates-in-a-private-registry). `template publish` still takes its own `--registry-*` flags, as above.
 - Upstream demo images aren't published. Use your own.
+
+## Attested templates in a private registry
+
+By default the controller and the gateway read attestations without a login. Against a private registry that gets HTTP 401, and create is refused as `sandbox.template_unverified`. Give them a login. Each login is sent only to its own registry host, after that host asks for it, and never to another registry or to a token service the login does not name.
+
+**Amazon ECR.** No password is stored, and the token is renewed before it expires.
+
+1. List the registry in `config.substrate.templates.registry_auth.ecr_hosts`: `[<account>.dkr.ecr.<region>.amazonaws.com]`.
+2. Give the gateway and controller ServiceAccounts an IAM role, never the callout's. In the chart: `serviceAccounts.componentAnnotations.gateway` and `.controller` set to `{eks.amazonaws.com/role-arn: arn:aws:iam::<account>:role/<name>}`.
+3. The role trusts the cluster's OIDC provider for `system:serviceaccount:<namespace>:defenseclaw-gateway` and `:defenseclaw-controller`, with audience `sts.amazonaws.com`. Its permissions are `ecr:GetAuthorizationToken` (resource `*`) and `ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer` and `ecr:BatchCheckLayerAvailability` on the template repositories.
+
+IRSA reaches STS on 443, which the chart already allows. EKS Pod Identity works too, but also needs a `networkPolicy.egress.extra` rule to `169.254.170.23/32` port 80.
+
+**Other private registries** (Google Artifact Registry, Harbor, GHCR): create a Docker registry Secret and name it in the chart.
+
+```bash
+kubectl -n defenseclaw-system create secret docker-registry dc-template-registry --docker-server=REGISTRY_HOST --docker-username=USER --docker-password-file=FILE
+helm upgrade defenseclaw-substrate CHART --reuse-values --set controller.templateRegistrySecret=dc-template-registry
+```
+
+The Secret is mounted read-only in the controller and the gateway (`substrate.templates.registry_auth.docker_config`). An update applies within about a minute.
+
+**A private OIDC issuer.** If people sign in with an identity provider on a private CA, give the gateway the CA from a ConfigMap or a Secret with `gateway.oidcCA.configMap` or `gateway.oidcCA.secret` (and `gateway.oidcCA.key`, default `ca.crt`); the chart mounts it and sets `--oidc-ca-file`. The issuer's security group must also admit the node and pod subnets. Name administrator groups with `config.substrate.identity.admin_groups` or `gateway.adminGroups`, and add other gateway flags with `gateway.extraArgs`.
+
+## Reaching the admin listener
+
+The chart exposes the admin Service on a ClusterIP only. For laptops, set `admin.expose.type` to `LoadBalancer` or `Ingress`. A `LoadBalancer` needs `admin.expose.loadBalancer.sourceRanges` (the client ranges allowed) and takes `admin.expose.loadBalancer.annotations`, for example the ones that make an internal network load balancer. Set `admin.url` to the https address laptops use (required for `LoadBalancer`; `login --kube` sends a credential only to that address) and `admin.tlsSecretName` to a `kubernetes.io/tls` Secret for that name. Without a Secret the listener presents its in-cluster certificate, which laptops don't trust for other names, so give them `--admin-ca-file`.
 
 ## Egress and credentials
 

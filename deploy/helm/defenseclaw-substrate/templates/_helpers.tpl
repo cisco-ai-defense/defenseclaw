@@ -53,6 +53,16 @@ relay, which answers only the names in its policy, so the short
 */}}
 {{- define "dc.actorHost" -}}defenseclaw-actor.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
 {{- define "dc.adminHost" -}}defenseclaw-admin.{{ .Release.Namespace }}.svc.cluster.local{{- end -}}
+{{/*
+The admin listener's TLS name for clients inside the cluster. Its serving
+certificate is the Substrate servicedns pod certificate, which names each
+Service as "<svc>.<ns>.svc" only, never ".svc.cluster.local" (GAP-0186).
+Every client that verifies that certificate uses this name: the callout's
+judge and ask client, and the launcher endpoint's in-cluster default. Pods
+resolve it through the search path; actors never reach the admin Service,
+so the fully qualified rule above does not apply to it.
+*/}}
+{{- define "dc.adminTLSHost" -}}defenseclaw-admin.{{ .Release.Namespace }}.svc{{- end -}}
 {{- define "dc.calloutService" -}}{{ .Release.Namespace }}/defenseclaw-callout:{{ .Values.callout.port }}{{- end -}}
 
 {{/*
@@ -95,8 +105,26 @@ reads them from the same directory as the callout (F3, fa2fb4c476). */ -}}
 {{- if not (hasKey $x "actor_secrets_dir") }}{{ $_ := set $x "actor_secrets_dir" (include "dc.actorSecretsDir" .) }}{{ end -}}
 {{- $_ := set $sub "extproc" $x -}}
 {{- end -}}
+{{- /* Template registry logins (GAP-0190) point at the chart's mount
+unless config names a file. */ -}}
+{{- if .Values.controller.templateRegistrySecret -}}
+{{- $t := get $sub "templates" | default dict -}}
+{{- $ra := get $t "registry_auth" | default dict -}}
+{{- if not (hasKey $ra "docker_config") }}{{ $_ := set $ra "docker_config" (include "dc.templateRegistryFile" .) }}{{ end -}}
+{{- $_ := set $t "registry_auth" $ra -}}
+{{- $_ := set $sub "templates" $t -}}
+{{- end -}}
 {{- if and .Values.bundles.enabled (not (hasKey $sub "bundles")) -}}
 {{- $_ := set $sub "bundles" (dict "enabled" true "anchors_file" "/etc/defenseclaw-substrate/bundle-anchors/bundle-anchors.json" "inbox" .Values.bundles.inbox) -}}
+{{- end -}}
+{{- /* The actor token key set (GAP-0194): chart values fill
+identity.keys_url and keys_ca_file unless config sets them. */ -}}
+{{- $keys := .Values.substrate.actorKeys | default dict -}}
+{{- if or $keys.url $keys.caConfigMap -}}
+{{- $id := get $sub "identity" | default dict -}}
+{{- if and $keys.url (not (hasKey $id "keys_url")) }}{{ $_ := set $id "keys_url" $keys.url }}{{ end -}}
+{{- if and $keys.caConfigMap (not (hasKey $id "keys_ca_file")) }}{{ $_ := set $id "keys_ca_file" "/etc/defenseclaw-substrate/actor-keys-ca/ca.crt" }}{{ end -}}
+{{- $_ := set $sub "identity" $id -}}
 {{- end -}}
 {{- $_ := set $cfg "substrate" $sub -}}
 {{- with .Values.deploymentMode }}{{ $_ := set $cfg "deployment_mode" . }}{{ end -}}
@@ -283,6 +311,15 @@ initContainers:
             podcert.ate.dev/canarying: live
         path: trust-bundle.pem
 {{- end }}
+{{- if and .ctx.Values.substrate.actorKeys.caConfigMap (eq .component "gateway") }}
+- name: actor-keys-ca
+  configMap:
+    name: {{ .ctx.Values.substrate.actorKeys.caConfigMap }}
+    items:
+    - key: ca.crt
+      path: ca.crt
+    defaultMode: 0444
+{{- end }}
 {{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
 - name: bundle-anchors
   secret:
@@ -320,6 +357,11 @@ initContainers:
 {{- if and .ctx.Values.podCertificates.enabled .serving }}
 - name: servicedns
   mountPath: /run/servicedns.podcert.ate.dev
+  readOnly: true
+{{- end }}
+{{- if and .ctx.Values.substrate.actorKeys.caConfigMap (eq .component "gateway") }}
+- name: actor-keys-ca
+  mountPath: /etc/defenseclaw-substrate/actor-keys-ca
   readOnly: true
 {{- end }}
 {{- if and .ctx.Values.bundles.enabled (has .component (list "controller" "gateway")) }}
@@ -477,6 +519,30 @@ reaches the file in about a minute and both re-read it.
   mountPath: /etc/defenseclaw/substrate/template-anchors
   readOnly: true
 {{- end }}
+{{- end -}}
+
+{{/*
+The template registry logins (controller.templateRegistrySecret, a
+kubernetes.io/dockerconfigjson Secret): mounted read-only in the controller
+and the gateway, the two readers of attestations (GAP-0190). The file is
+re-read when the Secret changes.
+*/}}
+{{- define "dc.templateRegistryFile" -}}/etc/defenseclaw/substrate/registry-auth/config.json{{- end -}}
+
+{{- define "dc.templateRegistryMount" -}}
+- name: template-registry-auth
+  mountPath: /etc/defenseclaw/substrate/registry-auth
+  readOnly: true
+{{- end -}}
+
+{{- define "dc.templateRegistryVolume" -}}
+- name: template-registry-auth
+  secret:
+    secretName: {{ .Values.controller.templateRegistrySecret }}
+    optional: true
+    defaultMode: 0440
+    items:
+    - {key: .dockerconfigjson, path: config.json}
 {{- end -}}
 
 {{- define "dc.templateAnchorsVolume" -}}

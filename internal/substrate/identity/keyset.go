@@ -56,12 +56,20 @@ const (
 	DefaultFetchTimeout = 5 * time.Second
 )
 
-// KeySetOptions configures a key set read through OIDC discovery.
+// KeySetOptions configures a key set: read from KeysURL when it is set,
+// else through the issuer's OIDC discovery document.
 type KeySetOptions struct {
 	// Issuer is the trusted issuer: https:// and a host, an optional port,
 	// and an optional path for a person issuer (actor issuers have none).
+	// Tokens must name it exactly in iss.
 	Issuer string
-	// CAFile is a PEM trust bundle for the issuer (the projected
+	// KeysURL is the JWK set URL. When set, the keys are fetched from it
+	// and no discovery document is read, so the issuer is only a string
+	// and need not resolve: a per-cluster actor issuer such as
+	// https://cluster-a.idp.example is verified with the keys of the
+	// in-cluster idp Service (GAP-0194). Empty uses discovery.
+	KeysURL string
+	// CAFile is a PEM trust bundle for the key server (the projected
 	// ClusterTrustBundle in cluster). Empty uses the system roots.
 	CAFile string
 	// HTTPClient replaces the client (tests). It must verify TLS itself.
@@ -90,22 +98,22 @@ type publicKey struct {
 	alg string // the JWK alg, or "" when the JWK names none
 }
 
-// KeySet holds an issuer's verification keys, fetched through its OIDC
-// discovery document. It is safe for concurrent use.
+// KeySet holds an issuer's verification keys, fetched from its keys URL or
+// through its OIDC discovery document. It is safe for concurrent use.
 type KeySet struct {
-	issuer   string
-	client   *http.Client
-	refetch  time.Duration
-	maxAge   time.Duration
-	now      func() time.Time
-	fetchMu  sync.Mutex // one fetch at a time
-	mu       sync.RWMutex
-	keys     map[string]publicKey
-	fetched  time.Time // last successful fetch
-	tried    time.Time // last fetch attempt
-	fetches  int
-	lastErr  error
-	jwksHost string
+	issuer  string
+	keysURL string
+	client  *http.Client
+	refetch time.Duration
+	maxAge  time.Duration
+	now     func() time.Time
+	fetchMu sync.Mutex // one fetch at a time
+	mu      sync.RWMutex
+	keys    map[string]publicKey
+	fetched time.Time // last successful fetch
+	tried   time.Time // last fetch attempt
+	fetches int
+	lastErr error
 }
 
 // NewKeySet validates opts and returns a key set that fetches lazily.
@@ -113,6 +121,11 @@ func NewKeySet(opts KeySetOptions) (*KeySet, error) {
 	iss, err := validIssuer(opts.Issuer)
 	if err != nil {
 		return nil, err
+	}
+	if opts.KeysURL != "" {
+		if err := ValidKeysURL(opts.KeysURL); err != nil {
+			return nil, err
+		}
 	}
 	client := opts.HTTPClient
 	if client == nil {
@@ -122,7 +135,7 @@ func NewKeySet(opts KeySetOptions) (*KeySet, error) {
 		}
 	}
 	ks := &KeySet{
-		issuer: iss, client: client,
+		issuer: iss, keysURL: opts.KeysURL, client: client,
 		refetch: opts.RefetchInterval, maxAge: opts.MaxAge, now: opts.Now,
 	}
 	if ks.refetch <= 0 {
@@ -145,6 +158,16 @@ func validIssuer(raw string) (string, error) {
 		return "", fmt.Errorf("identity: issuer %q must be https://host[:port][/path] with no trailing slash, query or fragment", raw)
 	}
 	return raw, nil
+}
+
+// ValidKeysURL requires an https URL with a host and no user info, query
+// or fragment.
+func ValidKeysURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("identity: keys URL %q must be https://host[:port]/path with no query or fragment", raw)
+	}
+	return nil
 }
 
 func tlsClient(caFile string) (*http.Client, error) {
@@ -178,6 +201,44 @@ func tlsClient(caFile string) (*http.Client, error) {
 
 // Issuer returns the trusted issuer.
 func (ks *KeySet) Issuer() string { return ks.issuer }
+
+// KeysURL returns the keys URL ("" when the keys come through discovery).
+func (ks *KeySet) KeysURL() string { return ks.keysURL }
+
+// Probe fetches the key set now, outside the refetch limit and without
+// changing the cached keys, and returns how many signing keys it holds.
+// It is for administrator checks (doctor, verify), not the request path.
+func (ks *KeySet) Probe(ctx context.Context) (int, error) {
+	keys, err := ks.fetch(ctx)
+	if err != nil {
+		return 0, reasonf(ReasonKeysetFailed, "%v", err)
+	}
+	return len(keys), nil
+}
+
+// ServedIssuer reads the discovery document the key server publishes at
+// its own origin (ate-idp-server serves it at
+// https://idp.<namespace>.svc whatever the issuer is) and returns the
+// issuer it names: the value ate-api-server puts in iss. A difference
+// from Issuer means every actor token is refused. It is for administrator
+// checks; with no keys URL it reads the issuer's own document.
+func (ks *KeySet) ServedIssuer(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, DefaultFetchTimeout)
+	defer cancel()
+	origin := ks.issuer
+	if ks.keysURL != "" {
+		u, err := url.Parse(ks.keysURL)
+		if err != nil {
+			return "", err
+		}
+		origin = u.Scheme + "://" + u.Host
+	}
+	var doc discovery
+	if err := ks.getJSON(ctx, origin+"/.well-known/openid-configuration", &doc); err != nil {
+		return "", fmt.Errorf("discovery: %w", err)
+	}
+	return doc.Issuer, nil
+}
 
 // Fetches returns how many key-set fetches were attempted (tests, metrics).
 func (ks *KeySet) Fetches() int {
@@ -237,14 +298,14 @@ func (ks *KeySet) refresh(ctx context.Context) error {
 	ks.tried = ks.now()
 	ks.fetches++
 	ks.mu.Unlock()
-	keys, host, err := ks.fetch(ctx)
+	keys, err := ks.fetch(ctx)
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
 	if err != nil {
 		ks.lastErr = reasonf(ReasonKeysetFailed, "%v", err)
 		return ks.lastErr
 	}
-	ks.keys, ks.fetched, ks.lastErr, ks.jwksHost = keys, ks.now(), nil, host
+	ks.keys, ks.fetched, ks.lastErr = keys, ks.now(), nil
 	return nil
 }
 
@@ -253,28 +314,34 @@ type discovery struct {
 	JWKSURI string `json:"jwks_uri"`
 }
 
-func (ks *KeySet) fetch(ctx context.Context) (map[string]publicKey, string, error) {
+// fetch reads the key set from the keys URL, or from the jwks_uri of the
+// issuer's discovery document when there is none.
+func (ks *KeySet) fetch(ctx context.Context) (map[string]publicKey, error) {
 	ctx, cancel := context.WithTimeout(ctx, DefaultFetchTimeout)
 	defer cancel()
-	var doc discovery
-	if err := ks.getJSON(ctx, ks.issuer+"/.well-known/openid-configuration", &doc); err != nil {
-		return nil, "", fmt.Errorf("discovery: %w", err)
-	}
-	if doc.Issuer != ks.issuer {
-		return nil, "", errors.New("discovery: the document names another issuer")
-	}
-	ju, err := url.Parse(doc.JWKSURI)
-	if err != nil || ju.Scheme != "https" || ju.Host == "" {
-		return nil, "", errors.New("discovery: jwks_uri is not an https URL")
+	jwksURL := ks.keysURL
+	if jwksURL == "" {
+		var doc discovery
+		if err := ks.getJSON(ctx, ks.issuer+"/.well-known/openid-configuration", &doc); err != nil {
+			return nil, fmt.Errorf("discovery: %w", err)
+		}
+		if doc.Issuer != ks.issuer {
+			return nil, errors.New("discovery: the document names another issuer")
+		}
+		ju, err := url.Parse(doc.JWKSURI)
+		if err != nil || ju.Scheme != "https" || ju.Host == "" {
+			return nil, errors.New("discovery: jwks_uri is not an https URL")
+		}
+		jwksURL = doc.JWKSURI
 	}
 	var set struct {
 		Keys []jwk `json:"keys"`
 	}
-	if err := ks.getJSON(ctx, doc.JWKSURI, &set); err != nil {
-		return nil, "", fmt.Errorf("key set: %w", err)
+	if err := ks.getJSON(ctx, jwksURL, &set); err != nil {
+		return nil, fmt.Errorf("key set: %w", err)
 	}
 	if len(set.Keys) == 0 || len(set.Keys) > maxKeys {
-		return nil, "", fmt.Errorf("key set: %d keys", len(set.Keys))
+		return nil, fmt.Errorf("key set: %d keys", len(set.Keys))
 	}
 	keys := make(map[string]publicKey, len(set.Keys))
 	for _, k := range set.Keys {
@@ -288,9 +355,9 @@ func (ks *KeySet) fetch(ctx context.Context) (map[string]publicKey, string, erro
 		keys[k.Kid] = publicKey{key: pk, alg: k.Alg}
 	}
 	if len(keys) == 0 {
-		return nil, "", errors.New("key set: no usable signing key")
+		return nil, errors.New("key set: no usable signing key")
 	}
-	return keys, ju.Host, nil
+	return keys, nil
 }
 
 func (ks *KeySet) getJSON(ctx context.Context, rawURL string, v any) error {

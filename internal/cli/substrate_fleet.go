@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -269,26 +270,34 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 			}
 		}
 	}
+	var keysCfg config.SubstrateConfig
 	if cfgText != "" {
 		var doc struct {
 			Substrate struct {
 				Supported string `yaml:"supported_versions"`
 				Identity  struct {
-					Issuer string `yaml:"issuer"`
+					Issuer  string `yaml:"issuer"`
+					KeysURL string `yaml:"keys_url"`
 				} `yaml:"identity"`
+				API struct {
+					Address string `yaml:"address"`
+				} `yaml:"api"`
 			} `yaml:"substrate"`
 		}
 		if err := yaml.Unmarshal([]byte(cfgText), &doc); err == nil {
 			o.Issuer = doc.Substrate.Identity.Issuer
+			keysCfg.Identity.KeysURL, keysCfg.API.Address = doc.Substrate.Identity.KeysURL, doc.Substrate.API.Address
 			if doc.Substrate.Supported != "" {
 				o.SupportedVersions = doc.Substrate.Supported
 			}
 		}
 	}
-	if settings[setup.KeyActorJWTIssuer] != "" && o.Issuer == "" {
-		o.Issuer = settings[setup.KeyActorJWTIssuer]
+	o.InstallIssuer = settings[setup.KeyActorJWTIssuer]
+	if o.InstallIssuer != "" && o.Issuer == "" {
+		o.Issuer = o.InstallIssuer
 	}
 	o.Clusters = 1
+	readActorKeys(cctx, f, &o, keysCfg.EffectiveKeysURL())
 
 	// The Substrate release: the tag of the API server image.
 	subs, err := kubeGetList(cctx, f, "get", "deployments", "-n", f.substrateNS)
@@ -307,6 +316,72 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	r.ProductVersion = appVersion
 	r.Now = time.Now()
 	return o, r, nil
+}
+
+// readActorKeys reads the actor token key set the gateway uses, and the
+// idp discovery document at the same origin, through the API server's
+// Service proxy: the idp Service is not reachable from an administrator's
+// machine (GAP-0194). A keys URL that is not a Service of this cluster is
+// left to the gateway-side doctor.
+func readActorKeys(ctx context.Context, f *substrateClusterFlags, o *fleet.Observed, keysURL string) {
+	o.KeysURL = keysURL
+	proxy, ok := serviceProxyPath(keysURL)
+	if !ok {
+		o.KeysNote = "it is not a Service of this cluster"
+		return
+	}
+	raw, err := substrateKubectl(ctx, f, "get", "--raw", proxy.keys)
+	if err != nil {
+		if strings.Contains(err.Error(), "forbidden") || strings.Contains(err.Error(), "Forbidden") {
+			o.KeysNote = "this identity may not use the Service proxy"
+			return
+		}
+		zero := 0
+		o.Keys, o.KeysErr = &zero, firstLineOf(err.Error())
+		return
+	}
+	var set struct {
+		Keys []json.RawMessage `json:"keys"`
+	}
+	n := 0
+	if json.Unmarshal(raw, &set) == nil {
+		n = len(set.Keys)
+	}
+	o.Keys = &n
+	if n == 0 {
+		o.KeysErr = "the answer holds no keys"
+		return
+	}
+	if raw, err := substrateKubectl(ctx, f, "get", "--raw", proxy.discovery); err == nil {
+		var d struct {
+			Issuer string `json:"issuer"`
+		}
+		if json.Unmarshal(raw, &d) == nil {
+			o.ServedIssuer = d.Issuer
+		}
+	}
+}
+
+type serviceProxy struct{ keys, discovery string }
+
+// serviceProxyPath maps https://SVC.NS.svc[.cluster.local][:PORT]/PATH to
+// the API server's Service proxy paths for PATH and the discovery document.
+func serviceProxyPath(raw string) (serviceProxy, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return serviceProxy{}, false
+	}
+	host := strings.TrimSuffix(u.Hostname(), ".cluster.local")
+	parts := strings.Split(host, ".")
+	if len(parts) != 3 || parts[2] != "svc" || parts[0] == "" || parts[1] == "" {
+		return serviceProxy{}, false
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	base := "/api/v1/namespaces/" + parts[1] + "/services/https:" + parts[0] + ":" + port + "/proxy"
+	return serviceProxy{keys: base + u.EscapedPath(), discovery: base + "/.well-known/openid-configuration"}, true
 }
 
 func imageTag(image string) string {

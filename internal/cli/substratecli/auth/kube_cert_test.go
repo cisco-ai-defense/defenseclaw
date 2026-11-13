@@ -27,6 +27,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -136,9 +137,14 @@ func TestKubeClientCertificateSignIn(t *testing.T) {
 	o := KubeOptions{Kubeconfig: dir + "/config"}
 	ctx := context.Background()
 
-	pin, err := KubeVerifyEndpoint(ctx, o, admin, "")
+	// No --kube-namespace: the launcher names the namespace and stops.
+	var found *KubeNamespaceFound
+	if _, err := KubeVerifyEndpoint(ctx, o, admin, ""); !errors.As(err, &found) || found.Namespace != "dc" || a.minted != 0 {
+		t.Fatalf("endpoint record without --kube-namespace: %v (minted %d)", err, a.minted)
+	}
+	pin, err := KubeVerifyEndpoint(ctx, o, admin, "dc")
 	if err != nil {
-		t.Fatalf("endpoint record without --kube-namespace: %v", err)
+		t.Fatalf("endpoint record in dc: %v", err)
 	}
 	if pin.AdminURL != admin {
 		t.Fatalf("pin %+v", pin)
@@ -196,15 +202,10 @@ func TestKubeEndpointDiscovery(t *testing.T) {
 		}
 	}
 	api.fn = list(rec("other", "https://other.example.test:8445"), rec("dc", admin.srv.URL))
-	pin, err := KubeVerifyEndpoint(context.Background(), o, admin.srv.URL, "")
-	if err != nil || pin.Namespace != "dc" {
-		t.Fatalf("found: %+v %v", pin, err)
-	}
-	if c := (Context{}).WithKubePin(pin); c.KubeNamespace != "dc" {
-		t.Fatalf("the found namespace is not recorded: %+v", c)
-	}
-	if c := (Context{KubeNamespace: "mine"}).WithKubePin(pin); c.KubeNamespace != "mine" {
-		t.Fatalf("a named namespace was replaced: %+v", c)
+	var found *KubeNamespaceFound
+	if _, err := KubeVerifyEndpoint(context.Background(), o, admin.srv.URL, ""); !errors.As(err, &found) || found.Namespace != "dc" ||
+		!strings.Contains(err.Error(), "--kube-namespace dc") || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("found: %v", err)
 	}
 	api.fn = list(rec("dc", admin.srv.URL), rec("dc2", admin.srv.URL))
 	if _, err := KubeVerifyEndpoint(context.Background(), o, admin.srv.URL, ""); err == nil || !strings.Contains(err.Error(), "dc, dc2") || !strings.Contains(err.Error(), "--kube-namespace") {
@@ -247,5 +248,56 @@ func TestKubeNamedServiceAccountFromAToken(t *testing.T) {
 		if CheckKubeServiceAccount(bad) == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// GAP-0192, lane R5 (fail-before: r5_gap0192_test.go on a19704967c, both
+// tests failed): a record someone published in their own namespace for a
+// listener they run is never pinned. Login names the namespace and stops:
+// the listener gets nothing, nothing is minted, and the context it would
+// have made hands out no credential.
+func TestKubeDiscoveryNeverPinsANamespace(t *testing.T) {
+	dir := t.TempDir()
+	api, attacker := newRecorder(t), newRecorder(t)
+	ca := certPEM(api.srv.Certificate().Raw)
+	cfg := writeFile(t, dir, "config", apiKubeconfig(api.srv.URL, "    certificate-authority-data: "+base64.StdEncoding.EncodeToString(ca)+"\n"))
+	o := KubeOptions{Kubeconfig: cfg, Env: emptyEnv}
+	api.fn = func(w http.ResponseWriter, r *http.Request) {
+		rec := map[string]any{"metadata": map[string]any{"name": KubeEndpointConfigMap, "namespace": "team-m"},
+			"data": map[string]string{"admin_url": attacker.srv.URL}}
+		switch r.URL.Path {
+		case "/api/v1/configmaps":
+			writeJSON(w, 200, map[string]any{"items": []any{rec}})
+		case "/api/v1/namespaces/team-m/configmaps/" + KubeEndpointConfigMap:
+			writeJSON(w, 200, rec)
+		default:
+			http.Error(w, "no", 404)
+		}
+	}
+	pin, err := KubeVerifyEndpoint(context.Background(), o, attacker.srv.URL, "")
+	var found *KubeNamespaceFound
+	if !errors.As(err, &found) || found.Namespace != "team-m" || pin != (KubePin{}) {
+		t.Fatalf("discovery: %+v %v", pin, err)
+	}
+	api.mu.Lock()
+	paths := append([]string(nil), api.paths...)
+	api.mu.Unlock()
+	if len(paths) != 1 || paths[0] != "/api/v1/configmaps" {
+		t.Fatalf("discovery did more than list the records: %q", paths)
+	}
+	if attacker.count() != 0 {
+		t.Fatal("the listener the record names was contacted")
+	}
+	// The context such a login would leave has no pin: no credential.
+	c := Context{AdminURL: attacker.srv.URL, Kube: true, Kubeconfig: cfg}.WithKubePin(pin)
+	if _, err := NewSource("x", c, nil, SourceOptions{Kube: &KubeOptions{Kubeconfig: cfg, Env: emptyEnv}}).Token(context.Background()); err == nil {
+		t.Fatal("an unpinned context handed out the bearer")
+	}
+	if c.KubeNamespace != "" {
+		t.Fatalf("WithKubePin set the namespace %q", c.KubeNamespace)
+	}
+	// And a mint has no namespace to use.
+	if _, _, err := kubeServiceAccount(c.KubeOptions()); err == nil || !strings.Contains(err.Error(), "needs its namespace") {
+		t.Fatalf("mint namespace: %v", err)
 	}
 }

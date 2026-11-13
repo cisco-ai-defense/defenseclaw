@@ -12,7 +12,7 @@ authenticated user may read this one ConfigMap and nothing else.
 {{- else if eq $x.type "LoadBalancer" -}}
 {{- fail "admin.url is required with admin.expose.type LoadBalancer: the https URL laptops use (the load balancer's DNS name, matching admin.tlsSecretName)" -}}
 {{- else -}}
-{{- $url = printf "https://%s" (include "dc.adminHost" .) -}}
+{{- $url = printf "https://%s" (include "dc.adminTLSHost" .) -}}
 {{- end -}}
 {{- end -}}
 {{- if not (hasPrefix "https://" $url) }}{{ fail "admin.url must be an https URL" }}{{ end -}}

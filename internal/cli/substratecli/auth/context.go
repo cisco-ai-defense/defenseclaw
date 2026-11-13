@@ -57,7 +57,7 @@ type Context struct {
 	// KubeContext is the kubeconfig context; empty is its current-context.
 	KubeContext string `json:"kube_context,omitempty"`
 	// KubeNamespace is where the cluster publishes its launcher endpoint
-	// record; login --kube finds it when none is given and records it.
+	// record (login --kube --kube-namespace; required).
 	KubeNamespace string `json:"kube_namespace,omitempty"`
 	// KubeServiceAccount ("NAMESPACE/NAME" or "NAME") is the ServiceAccount
 	// the launcher mints the gateway's token for (GAP-0192); a client

@@ -18,9 +18,8 @@ package extproc
 
 import (
 	"errors"
-	"net/url"
-	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // errAmbiguousPath is a path an origin may read in more than one way: an
@@ -39,7 +38,8 @@ var errAmbiguousPath = errors.New("ambiguous path encoding")
 //     slash, a backslash, NUL, "%" (double encoding), ";" or a control
 //     character, a malformed escape, a raw backslash or a raw control
 //     character is errAmbiguousPath, so no origin can read the request as a
-//     different path than the one matched;
+//     different path than the one matched; so is a segment that is not
+//     UTF-8 once decoded (%c0%ae is an overlong "." to old decoders);
 //   - empty segments are merged (//a is /a) and "." segments removed,
 //     escaped spellings included;
 //   - a ".." segment, literal or escaped, is errAmbiguousPath: origins and
@@ -100,6 +100,9 @@ func decodeSegment(s string) (string, error) {
 				return "", errAmbiguousPath
 			}
 		}
+		if !utf8.ValidString(s) {
+			return "", errAmbiguousPath
+		}
 		return s, nil
 	}
 	var b strings.Builder
@@ -120,6 +123,9 @@ func decodeSegment(s string) (string, error) {
 			return "", errAmbiguousPath
 		}
 		b.WriteByte(c)
+	}
+	if !utf8.ValidString(b.String()) {
+		return "", errAmbiguousPath
 	}
 	return b.String(), nil
 }
@@ -144,69 +150,6 @@ func pathOnly(p string) string {
 		return p[:i]
 	}
 	return p
-}
-
-// methodOverrideHeaders are the headers some origins (and frameworks in
-// front of them) read as the request's real method (GAP-0046).
-var methodOverrideHeaders = []string{"x-http-method-override", "x-http-method", "x-method-override"}
-
-// methodOverrideParam is the query parameter frameworks read as the real
-// method (Laravel, Rails, Express method-override's query getter).
-const methodOverrideParam = "_method"
-
-// requestMethods is the request's method plus every method an override
-// names, upper-cased: each value of an override header (a comma list
-// counts value by value: Express takes the first, others the last) and
-// of a _method query parameter (GAP-0046).
-func requestMethods(req *Request) []string {
-	out := []string{strings.ToUpper(req.Method)}
-	for _, h := range req.Headers {
-		for _, name := range methodOverrideHeaders {
-			if h.Name == name {
-				out = appendMethods(out, h.Value)
-			}
-		}
-	}
-	if i := strings.IndexByte(req.Path, '?'); i >= 0 {
-		q := req.Path[i+1:]
-		if j := strings.IndexByte(q, '#'); j >= 0 {
-			q = q[:j]
-		}
-		out = append(out, overrideParams(q)...)
-	}
-	return out
-}
-
-// formMethods is every method a form body's _method names
-// (application/x-www-form-urlencoded).
-func formMethods(body []byte) []string {
-	return overrideParams(string(body))
-}
-
-// overrideParams reads _method from a query or form string leniently, as
-// frameworks do: a malformed pair elsewhere does not hide it, and the key
-// is matched in any case and any escaping.
-func overrideParams(q string) []string {
-	var out []string
-	for _, pair := range strings.FieldsFunc(q, func(r rune) bool { return r == '&' || r == ';' }) {
-		k, v, _ := strings.Cut(pair, "=")
-		if dk, err := url.QueryUnescape(k); err == nil && strings.EqualFold(strings.TrimSpace(dk), methodOverrideParam) {
-			if dv, err := url.QueryUnescape(v); err == nil {
-				out = appendMethods(out, dv)
-			}
-		}
-	}
-	return out
-}
-
-// appendMethods adds each comma-separated value of v, upper-cased.
-func appendMethods(out []string, v string) []string {
-	for _, m := range strings.Split(v, ",") {
-		if m = strings.ToUpper(strings.TrimSpace(m)); m != "" && !slices.Contains(out, m) {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // pathHasPrefix matches a canonical path against a canonical rule prefix on

@@ -35,10 +35,11 @@ const (
 	CheckIngressClients   = "ingress_clients"
 	CheckActorRoutes      = "actor_service_routes"
 	CheckAPIAccess        = "api_access_label"
+	CheckActorKeys        = "actor_keys"
 )
 
 // CheckIDs lists every check in the order doctor prints them.
-var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckBucket, CheckGrants, CheckCallout,
+var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckBucket, CheckGrants, CheckCallout,
 	CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
 
 // Check is one result. Message is for the admin (kept on the cluster);
@@ -82,6 +83,20 @@ type Observed struct {
 	SubstrateNamespace string
 	OtherIssuers       []string
 	Clusters           int
+
+	// The actor token key set (GAP-0194). KeysURL is the effective
+	// substrate.identity.keys_url. Keys is the result of reading it: nil
+	// when it was not read (KeysNote says why), else the signing key
+	// count, 0 with KeysErr when it did not answer. ServedIssuer is the
+	// issuer the idp's discovery document names (what ate-api-server puts
+	// in iss; "" when not read), InstallIssuer the install file's
+	// actorJWT.issuer ("" when unset).
+	KeysURL       string
+	Keys          *int
+	KeysErr       string
+	KeysNote      string
+	ServedIssuer  string
+	InstallIssuer string
 
 	// Bucket is nil when the install keeps no snapshots in object storage
 	// the CLI can read (kind with a local store).
@@ -140,7 +155,7 @@ var defaultIssuerShape = regexp.MustCompile(`^https://idp\.[a-z0-9-]+\.svc(\.clu
 // RunChecks runs every check over o.
 func RunChecks(o Observed) []Check {
 	return []Check{
-		CheckVersion(o), CheckIssuerUnique(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
+		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
 		CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
 	}
 }
@@ -183,6 +198,37 @@ func CheckIssuerUnique(o Observed) Check {
 		return result(CheckIssuer, Warn, "E13", "the default issuer %s is fine for one cluster; set a unique one before adding another", o.Issuer)
 	}
 	return result(CheckIssuer, Pass, "E13", "the actor JWT issuer is unique to this cluster")
+}
+
+// CheckActorKeysVerify: the gateway verifies actor tokens with the keys at
+// the keys URL and compares iss with substrate.identity.issuer as a
+// string. The keys URL must answer, and Substrate must sign with that
+// issuer, or every actor token is refused (GAP-0194).
+func CheckActorKeysVerify(o Observed) Check {
+	// The messages name settings, never the issuer or the keys URL: the
+	// status document leaves the cluster (the issuer only as a digest).
+	refused := ": every actor token is refused, so no hook or model call of any agent runs"
+	switch {
+	case o.Issuer == "":
+		return result(CheckActorKeys, Skip, "", "substrate.identity.issuer is not set")
+	case o.InstallIssuer != "" && o.InstallIssuer != o.Issuer:
+		return result(CheckActorKeys, Fail, "", "the install file's actorJWT.issuer differs from substrate.identity.issuer%s; "+
+			"set the same value in both", refused)
+	case o.Keys == nil:
+		return result(CheckActorKeys, Warn, "", "the keys URL (substrate.identity.keys_url) was not read from here (%s); "+
+			"defenseclaw substrate admin doctor checks it from the gateway", o.KeysNote)
+	case *o.Keys == 0:
+		return result(CheckActorKeys, Fail, "", "the keys URL (substrate.identity.keys_url) does not answer (%s)%s; set it "+
+			"(chart value substrate.actorKeys.url) to the idp Service key set", o.KeysErr, refused)
+	case o.ServedIssuer == "":
+		return result(CheckActorKeys, Warn, "", "the keys URL answers (%d keys), but the idp discovery document could not be "+
+			"read to compare the issuer Substrate signs with", *o.Keys)
+	case o.ServedIssuer != o.Issuer:
+		return result(CheckActorKeys, Fail, "", "Substrate signs actor tokens with another issuer than substrate.identity.issuer%s; "+
+			"run ate-setup deploy with the issuer from setup --issuer, or fix the config", refused)
+	}
+	return result(CheckActorKeys, Pass, "", "the keys URL answers (%d keys) and Substrate signs actor tokens with substrate.identity.issuer",
+		*o.Keys)
 }
 
 // CheckSnapshotBucket: snapshots hold everything an actor had in memory and
