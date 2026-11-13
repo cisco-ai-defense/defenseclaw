@@ -230,6 +230,14 @@ EXPECTED_STRUCTURED_TYPE_IDS: Final = (
     "defenseclaw.inventory.agent_identifiers",
     "defenseclaw.inventory.agent_metadata_item",
     "defenseclaw.inventory.agent_metadata",
+    "defenseclaw.health.reason",
+    "defenseclaw.health.reasons",
+    "defenseclaw.health.subsystem_item",
+    "defenseclaw.health.subsystems",
+    "defenseclaw.health.hook_connector",
+    "defenseclaw.health.hook_connectors",
+    "defenseclaw.health.failing_target",
+    "defenseclaw.health.failing_targets",
 )
 EXPECTED_STRUCTURED_BINDINGS: Final = (
     ("gen_ai.input.messages", "gen_ai.input_messages", "sealed_typed", "native_json"),
@@ -273,6 +281,15 @@ EXPECTED_STRUCTURED_BINDINGS: Final = (
         "native_json",
     ),
     ("defenseclaw.inventory.agent.metadata", "defenseclaw.inventory.agent_metadata", "sealed_typed", "native_json"),
+    ("defenseclaw.health.reasons", "defenseclaw.health.reasons", "sealed_typed", "native_json"),
+    ("defenseclaw.health.subsystems", "defenseclaw.health.subsystems", "sealed_typed", "native_json"),
+    ("defenseclaw.health.hooks.connectors", "defenseclaw.health.hook_connectors", "sealed_typed", "native_json"),
+    (
+        "defenseclaw.health.hooks.failing_targets",
+        "defenseclaw.health.failing_targets",
+        "sealed_typed",
+        "native_json",
+    ),
 )
 EXPECTED_GO_SYMBOL_POLICY: Final = {
     "version": 1,
@@ -417,7 +434,7 @@ _GO_RESERVED_IDENTIFIERS: Final = frozenset(
         "uintptr",
     }
 )
-EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "9736265ad7a56d3ca7f6bc50c34dc8c7a312711fc790b7204fe10f1914e9b623"
+EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "5ad2d91ff890e665dd219c5aaa9f7361b729b3a6b1282215f7e9c7954f9c33bf"
 EXPECTED_MESSAGE_PART_VARIANTS: Final = (
     ("text", "gen_ai.text_part"),
     ("tool_call", "gen_ai.tool_call_request_part"),
@@ -516,6 +533,34 @@ EXPECTED_STRUCTURED_OBJECT_FIELDS: Final = {
         ("version", False, "scalar", "string"),
         ("probe_status", True, "scalar", "string"),
     ),
+    "defenseclaw.health.reason": (
+        ("code", True, "scalar", "string"),
+        ("component", True, "scalar", "string"),
+        ("severity", True, "scalar", "string"),
+        ("connector", False, "scalar", "string"),
+    ),
+    "defenseclaw.health.subsystem_item": (
+        ("name", True, "scalar", "string"),
+        ("state", True, "scalar", "string"),
+        ("since", False, "scalar", "string"),
+        ("error_class", False, "scalar", "string"),
+    ),
+    "defenseclaw.health.hook_connector": (
+        ("connector", True, "scalar", "string"),
+        ("targets", True, "scalar", "int64"),
+        ("ok", True, "scalar", "int64"),
+        ("failed", True, "scalar", "int64"),
+        ("pending", True, "scalar", "int64"),
+        ("last_activity_at", False, "scalar", "string"),
+        ("tool_inspection_mode", False, "scalar", "string"),
+    ),
+    "defenseclaw.health.failing_target": (
+        ("connector", True, "scalar", "string"),
+        ("user.id", False, "scalar", "string"),
+        ("user.id_kind", False, "scalar", "string"),
+        ("error_class", True, "scalar", "string"),
+        ("pending", True, "scalar", "boolean"),
+    ),
 }
 EXPECTED_SEALED_STRUCTURED_OBJECTS: Final = frozenset(
     {
@@ -526,6 +571,10 @@ EXPECTED_SEALED_STRUCTURED_OBJECTS: Final = frozenset(
         "defenseclaw.inventory.mcp_metadata_item",
         "defenseclaw.inventory.agent_identifier",
         "defenseclaw.inventory.agent_metadata_item",
+        "defenseclaw.health.reason",
+        "defenseclaw.health.subsystem_item",
+        "defenseclaw.health.hook_connector",
+        "defenseclaw.health.failing_target",
     }
 )
 EXPECTED_STRUCTURED_ARRAYS: Final = {
@@ -539,6 +588,10 @@ EXPECTED_STRUCTURED_ARRAYS: Final = {
     "defenseclaw.inventory.mcp_metadata": ("defenseclaw.inventory.mcp_metadata_item", 0, 256),
     "defenseclaw.inventory.agent_identifiers": ("defenseclaw.inventory.agent_identifier", 0, 64),
     "defenseclaw.inventory.agent_metadata": ("defenseclaw.inventory.agent_metadata_item", 0, 64),
+    "defenseclaw.health.reasons": ("defenseclaw.health.reason", 0, 32),
+    "defenseclaw.health.subsystems": ("defenseclaw.health.subsystem_item", 0, 16),
+    "defenseclaw.health.hook_connectors": ("defenseclaw.health.hook_connector", 0, 16),
+    "defenseclaw.health.failing_targets": ("defenseclaw.health.failing_target", 0, 16),
 }
 # The pinned OTel GenAI schema requires finish_reason, while DefenseClaw also
 # accepts provider responses that legitimately omit it.  Keep the imported
@@ -10552,6 +10605,10 @@ def compile_registry(root: Path) -> RegistryIR:
         "defenseclaw.inventory.mcp.metadata": ("metadata", "internal"),
         "defenseclaw.inventory.agent.identifiers": ("identifier", "internal"),
         "defenseclaw.inventory.agent.metadata": ("metadata", "internal"),
+        "defenseclaw.health.reasons": ("metadata", "internal"),
+        "defenseclaw.health.subsystems": ("metadata", "internal"),
+        "defenseclaw.health.hooks.connectors": ("metadata", "internal"),
+        "defenseclaw.health.hooks.failing_targets": ("identifier", "sensitive"),
     }
     for binding in structured_bindings:
         local = local_attributes.get(binding.attribute)
