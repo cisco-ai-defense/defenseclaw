@@ -215,6 +215,8 @@ func (p *parser) parseStatement(s stopSet) Statement {
 			return p.parseFlow(lw)
 		case lw == "class" || lw == "enum":
 			return p.parseClassLike(lw)
+		case lw == "using":
+			return p.parseUsing()
 		}
 	}
 	return p.parsePipelineChainOrAssignment(s)
@@ -349,9 +351,45 @@ func (p *parser) parseClassLike(kw string) Statement {
 	}
 	var bodies []*ScriptBlockExpr
 	if p.at(TokLBrace) {
-		bodies = append(bodies, p.parseScriptBlock())
+		if kw == "enum" {
+			p.skipBalancedBraces() // enum members are not commands
+		} else {
+			bodies = append(bodies, p.parseScriptBlock())
+		}
 	}
 	return &Block{span: span{start, p.prevEnd()}, Keyword: kw, Name: name, Bodies: bodies}
+}
+
+// parseUsing consumes a `using namespace|module|assembly ...` statement, which
+// is a declaration, not a command.
+func (p *parser) parseUsing() Statement {
+	start := p.cur().Start
+	p.advance() // using
+	for !p.at(TokEOF) && !p.at(TokNewline) && !p.at(TokSemi) {
+		p.advance()
+	}
+	return &Block{span: span{start, p.prevEnd()}, Keyword: "using"}
+}
+
+// skipBalancedBraces consumes a { ... } group without parsing its contents.
+func (p *parser) skipBalancedBraces() {
+	if !p.at(TokLBrace) {
+		return
+	}
+	depth := 0
+	for !p.at(TokEOF) {
+		switch p.kind() {
+		case TokLBrace:
+			depth++
+		case TokRBrace:
+			depth--
+			if depth == 0 {
+				p.advance()
+				return
+			}
+		}
+		p.advance()
+	}
 }
 
 func (p *parser) parseNamedBlock(kw string) Statement {

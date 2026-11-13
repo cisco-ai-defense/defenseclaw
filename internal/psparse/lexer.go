@@ -394,7 +394,10 @@ func (l *lexer) lexDash() {
 			if c == '\n' {
 				break
 			}
-			if q == 0 && (c == '|' || c == '&') { // unquoted | / && / || ends the tail
+			if q == 0 && c == '|' { // unquoted | or || ends the tail
+				break
+			}
+			if q == 0 && c == '&' && l.peek(1) == '&' { // && ends the tail; a lone & (2>&1) is verbatim
 				break
 			}
 			if q == 0 && (c == '\'' || c == '"') {

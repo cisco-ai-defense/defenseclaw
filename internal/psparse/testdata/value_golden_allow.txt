@@ -12,9 +12,6 @@ V3JpdGUtT3V0cHV0IOKAmGHigJnigJhi4oCZ	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IEDigJgKeArigJlA	pending step-3: smart-quote value
 V3JpdGUtT3V0cHV0IOKAk+KAk3g=	pending step-3: fused/glued token should stay one literal argument
 V3JpdGUtT3V0cHV0IC0tIC0tJSBh	pending step-3: --% verbatim tail as elements
-V3JpdGUtT3V0cHV0IC0tJSBhIDI+JjE=	pending step-3: --% verbatim tail as elements
-dXNpbmcgbmFtZXNwYWNlIFN5c3RlbS5JTzsgUmVtb3ZlLUl0ZW0gQzpceA==	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
-ZW51bSBFIHsgQTsgQiB9OyBSZW1vdmUtSXRlbSBDOlx4	pending step-3: top-level keyword statement (using/enum/data/requires) over-produces commands
 ZnVuY3Rpb24gZiB7IHBhcmFtKFtQYXJhbWV0ZXIoVmFsdWVGcm9tUGlwZWxpbmUpXSRpKSBwcm9jZXNzIHsgUmVtb3ZlLUl0ZW0gJGkgfSB9	pending step-3: param/attribute block command recursion
 V3JpdGUtT3V0cHV0IDB4RkZGRkZGRkY=	pending step-3: number value formatting (int width / suffix / decimal)
 V3JpdGUtT3V0cHV0IDB4ODAwMDAwMDA=	pending step-3: number value formatting (int width / suffix / decimal)
