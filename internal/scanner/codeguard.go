@@ -334,8 +334,9 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-CRED-001",
 		severity:    SeverityHigh,
 		title:       "Hardcoded API key or secret",
-		pattern:     regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key)\s*[:=]\s*["'][^\s"']{16,}["']`),
+		pattern:     hardcodedCredentialAssignment,
 		remediation: "Move credentials to environment variables or a secrets manager",
+		view:        hardcodedCredentialView,
 	},
 	{
 		id:          "CG-CRED-002",
