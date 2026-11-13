@@ -402,8 +402,8 @@ func (a *APIServer) substrateCreateActor(st *substrateState) http.HandlerFunc {
 				_ = st.cfg.Actions.Delete(ctx, created.Atespace, created.Name)
 				reg.Deleted = true
 				_ = st.cfg.Registrations.Put(ctx, reg)
-				fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s refused and removed: %v\n", created.Atespace, created.Name, err)
-				writeSubstrateJSONError(w, http.StatusForbidden, "actor_refused")
+				fmt.Fprintf(os.Stderr, "[substrate] actor %s/%s uid %s refused and removed: %v\n", created.Atespace, created.Name, created.UID, err)
+				writeSubstrateActorRefusal(w, created.Atespace, created.Name, created.UID, err)
 				return
 			}
 			// GAP-0167: an actor that never ran holds nothing the person

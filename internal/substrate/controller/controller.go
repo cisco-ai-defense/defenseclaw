@@ -179,6 +179,12 @@ type actorState struct {
 	// lastForeign is the last foreign change seen while in conflict.
 	lastForeign time.Time
 	refused     string
+	// refusedMsg is refused's reason in words (EnsurePolicy's answer).
+	refusedMsg string
+	// hold is why the last reconcile wrote no policy without refusing the
+	// actor (RefusalRegistrationPending, RefusalNotManaged,
+	// RefusalPolicyWriteRace), "" otherwise; EnsurePolicy names it.
+	hold string
 	// pendingLife are lifecycle events not yet delivered to the leader.
 	pendingLife []chainstate.LifecycleEvent
 	lifeWarned  bool
@@ -485,33 +491,116 @@ func createdAt(md *ateapi.ResourceMetadata, st *actorState) time.Time {
 
 // EnsurePolicy reconciles one actor now, for a caller (the launcher's
 // create path) that resumes the actor only after its policy is written. It
-// returns ErrRefused (wrapped with the reason) when the actor gets no
-// policy.
+// returns a *RefusedError (it matches ErrRefused) when the actor gets no
+// policy. The create path wrote the actor's registration just before, so a
+// registration the leader does not show yet is waited for briefly.
 func (c *Controller) EnsurePolicy(ctx context.Context, ref *ateapi.ObjectRef) error {
-	a, err := c.o.Client.GetActor(ctx, ref)
-	if err != nil {
-		return err
+	for try := 1; ; try++ {
+		a, err := c.o.Client.GetActor(ctx, ref)
+		if err != nil {
+			return err
+		}
+		md := a.GetMetadata()
+		uid := md.GetUid()
+		c.mu.Lock()
+		st, ok := c.actors[uid]
+		if !ok {
+			st = &actorState{uid: uid, key: ateapi.Key(ref), firstSeen: c.o.Now()}
+			c.actors[uid] = st
+		}
+		c.mu.Unlock()
+		if err := c.reconcileActor(ctx, a); err != nil {
+			return err
+		}
+		st.mu.Lock()
+		written, refused, msg, hold := st.written, st.refused, st.refusedMsg, st.hold
+		st.mu.Unlock()
+		re := &RefusedError{Atespace: md.GetAtespace(), Name: md.GetName(), UID: uid}
+		switch {
+		case refused != "":
+			re.Code, re.Reason = refused, msg
+		case written:
+			return nil
+		case hold == RefusalRegistrationPending && try < ensurePendingTries:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(ensurePendingWait):
+			}
+			continue
+		case hold == RefusalRegistrationPending:
+			re.Code, re.Reason = hold, "the actor's registration is not readable from the leader yet"
+		case hold == RefusalNotManaged:
+			re.Code, re.Reason = hold, "no profile assignment makes DefenseClaw manage this actor"
+		case hold == RefusalPolicyWriteRace:
+			re.Code, re.Reason = hold, "the actor's egress policy changed under every write"
+		default:
+			re.Code, re.Reason = RefusalNoPolicy, "the actor has no DefenseClaw egress policy"
+		}
+		if re.Reason == "" {
+			re.Reason = re.Code
+		}
+		return re
 	}
-	uid := a.GetMetadata().GetUid()
-	c.mu.Lock()
-	st, ok := c.actors[uid]
-	if !ok {
-		st = &actorState{uid: uid, key: ateapi.Key(ref), firstSeen: c.o.Now()}
-		c.actors[uid] = st
+}
+
+// RefusedError is EnsurePolicy's answer for an actor left without a policy:
+// a closed code, the reason in words and the actor, so the create path logs
+// it and tells the person why (GAP-0182). It matches ErrRefused.
+type RefusedError struct {
+	Atespace, Name, UID string
+	// Code is the controller event type of the refusal (for example
+	// sandbox.foreign_actor) or one of the Refusal* codes.
+	Code string
+	// Reason is the refusal in words.
+	Reason string
+}
+
+func (e *RefusedError) Error() string {
+	return fmt.Sprintf("%s: %s (%s), actor %s/%s uid %s", ErrRefused, e.Reason, e.Code, e.Atespace, e.Name, e.UID)
+}
+
+// Is makes errors.Is(err, ErrRefused) hold.
+func (e *RefusedError) Is(target error) bool { return target == ErrRefused }
+
+// Codes of an EnsurePolicy refusal that no controller event names.
+const (
+	RefusalRegistrationPending = "registration_pending"
+	RefusalNotManaged          = "not_managed"
+	RefusalPolicyWriteRace     = "policy_write_race"
+	RefusalNoPolicy            = "no_policy"
+)
+
+// ensurePendingTries and ensurePendingWait bound how long EnsurePolicy waits
+// for a registration the create path wrote but the leader does not show yet
+// (the GAP-0145 hold), about 0.75 s.
+var (
+	ensurePendingTries = 4
+	ensurePendingWait  = 250 * time.Millisecond
+)
+
+// errWriteRace is a policy write that lost to another writer (ALREADY_EXISTS
+// on create, ABORTED on update): apply reads the policy again at once.
+var errWriteRace = errors.New("the egress policy changed under the write")
+
+// maxApplyTries bounds apply's read-compare-write tries in one reconcile.
+const maxApplyTries = 3
+
+// apply writes or confirms DefenseClaw's policy. A write that loses to
+// another writer (the gateway's create path and the controller deployment
+// both write a new actor's policy, GAP-0182) is decided again in the same
+// call: EnsurePolicy has no next pass to leave it to.
+func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, profile render.Profile, base Event) error {
+	for try := 1; ; try++ {
+		err := c.applyOnce(ctx, a, st, reg, profile, base)
+		if !errors.Is(err, errWriteRace) {
+			return err
+		}
+		if try == maxApplyTries {
+			st.hold = RefusalPolicyWriteRace
+			return nil // the next pass decides again
+		}
 	}
-	c.mu.Unlock()
-	if err := c.reconcileActor(ctx, a); err != nil {
-		return err
-	}
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	switch {
-	case st.refused != "":
-		return fmt.Errorf("%w: %s", ErrRefused, st.refused)
-	case !st.written:
-		return fmt.Errorf("%w: not managed by DefenseClaw", ErrRefused)
-	}
-	return nil
 }
 
 func (c *Controller) state(uid string) *actorState {
@@ -560,6 +649,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 	st.rid = rid
 	c.flushLifecycle(ctx, st, base)
 
+	st.hold = ""
 	_, launcher := c.o.LauncherAtespaces[md.GetAtespace()]
 	reg, refuse, err := c.attribution(ctx, a, st, launcher, base)
 	if err != nil {
@@ -579,6 +669,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 		// Unregistered and just created in a launcher atespace: no
 		// inventory, alert or policy change until the registration is
 		// read or the grace ends (GAP-0145).
+		st.hold = RefusalRegistrationPending
 		return nil
 	}
 	if !st.inventoried {
@@ -604,6 +695,7 @@ func (c *Controller) reconcileActor(ctx context.Context, a *ateapi.Actor) error 
 			// launcher_atespaces or its profile assignment went away) must
 			// not keep DefenseClaw's allow list, JWT and secret rules with
 			// nothing enforcing them: remove a DefenseClaw policy once.
+			st.hold = RefusalNotManaged
 			return c.unmanaged(ctx, a, st, base)
 		}
 		st.unmanagedChecked = false
@@ -907,6 +999,7 @@ func (c *Controller) Attestor() Attestor { return c.o.Attestor }
 // refuseOnce records why an actor gets no policy, emitting the event (and
 // a shadow AI signal when signalID is set) once per reason.
 func (c *Controller) refuseOnce(st *actorState, base Event, typ, msg, signalID, version string) {
+	st.refusedMsg = msg
 	if st.refused == typ {
 		return
 	}
@@ -948,8 +1041,9 @@ func (c *Controller) removePolicy(ctx context.Context, a *ateapi.Actor, st *acto
 	return nil
 }
 
-func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, profile render.Profile, base Event) error {
-	st.refused = ""
+// applyOnce is one read-compare-write of the actor's policy (apply).
+func (c *Controller) applyOnce(ctx context.Context, a *ateapi.Actor, st *actorState, reg Registration, profile render.Profile, base Event) error {
+	st.refused, st.refusedMsg = "", ""
 	ref := ateapi.RefOf(a.GetMetadata())
 	res, err := render.EgressPolicy(render.Input{Settings: c.o.Settings, Profile: profile, Person: reg.Person, Approved: reg.Approved, Secrets: c.o.Secrets})
 	if err != nil {
@@ -974,7 +1068,7 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 	if ateapi.IsNotFound(err) {
 		created, err := c.o.Client.CreateActorEgressPolicy(ctx, ref, want)
 		if ateapi.IsAlreadyExists(err) {
-			return nil // another pass or writer won; the next pass compares
+			return errWriteRace // another writer won: read it again and compare
 		}
 		if err != nil {
 			c.fail(base, "create policy: "+err.Error())
@@ -1011,7 +1105,8 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 	now := c.o.Now()
 	foreign := st.ourVersion != 0 && !ours
 	enter := false
-	if foreign && !st.conflict {
+	counted := foreign && !st.conflict
+	if counted {
 		st.reverts = append(st.reverts, now)
 		cut := now.Add(-c.o.ConflictWindow)
 		kept := st.reverts[:0]
@@ -1028,11 +1123,12 @@ func (c *Controller) apply(ctx context.Context, a *ateapi.Actor, st *actorState,
 	upd := &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Uid: m.GetUid(), Version: m.GetVersion()}, Rules: want.GetRules()}
 	updated, err := c.o.Client.UpdateActorEgressPolicy(ctx, ref, upd)
 	if ateapi.IsConflict(err) {
-		if enter {
-			st.conflict = false // decide again on the next pass
+		if counted {
+			// Decided again on the next try: this revert did not happen.
+			st.conflict = false
 			st.reverts = st.reverts[:len(st.reverts)-1]
 		}
-		return nil // changed under us; the next pass decides again
+		return errWriteRace // changed under us: read again and decide again
 	}
 	if err != nil {
 		if enter {
