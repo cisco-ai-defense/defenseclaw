@@ -73,7 +73,7 @@ func skipCTE(stmt string) string {
 	if !reWith.MatchString(stmt) {
 		return stmt
 	}
-	depth, last := 0, -1
+	depth := 0
 	var quote byte
 	for i := 0; i < len(stmt); i++ {
 		c := stmt[i]
@@ -94,8 +94,7 @@ func skipCTE(stmt string) string {
 					continue
 				}
 				if reMainVerb.MatchString(rest) {
-					last = i + 1
-					return strings.TrimSpace(stmt[last:])
+					return strings.TrimSpace(stmt[i+1:])
 				}
 			}
 		}
