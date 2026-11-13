@@ -7,6 +7,7 @@ package actionfacts
 
 import (
 	"path"
+	"slices"
 	"strings"
 )
 
@@ -21,11 +22,12 @@ func GitCloneThenRunOrAdHocPush(facts Facts) bool {
 	if facts.Parse.Dialect != DialectPOSIX {
 		return false
 	}
-	for _, command := range facts.Commands {
+	for index, command := range facts.Commands {
 		if command.Kind != CommandKindProcess || gitProgram(command) != "git" {
 			continue
 		}
-		if subcommand, rest := gitSubcommand(command.Argv); subcommand == "push" && gitPushNamesAdHocRemote(rest) {
+		if subcommand, rest := gitSubcommand(command.Argv); subcommand == "push" &&
+			gitPushNamesAdHocRemote(rest, gitRemoteDefinitions(facts.Commands[:index+1])) {
 			return true
 		}
 	}
@@ -53,14 +55,89 @@ func gitSubcommand(argv []string) (string, []string) {
 	return "", nil
 }
 
-func gitPushNamesAdHocRemote(args []string) bool {
-	for _, argument := range args {
-		if strings.HasPrefix(argument, "-") {
+// gitPushValueOptions are the push options that take a separate value, so the
+// value is not the remote.
+var gitPushValueOptions = []string{"-o", "--push-option", "--receive-pack", "--exec"}
+
+// gitPushRemote returns the repository operand of a push: the value of --repo,
+// or the first operand once options and their values are skipped.
+func gitPushRemote(args []string) (string, bool) {
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		switch {
+		case argument == "--repo" && index+1 < len(args):
+			return args[index+1], true
+		case strings.HasPrefix(argument, "--repo="):
+			return strings.TrimPrefix(argument, "--repo="), true
+		case strings.HasPrefix(argument, "-"):
+			if !strings.Contains(argument, "=") && slices.Contains(gitPushValueOptions, argument) {
+				index++
+			}
+		default:
+			return argument, true
+		}
+	}
+	return "", false
+}
+
+func gitPushNamesAdHocRemote(args []string, defined map[string]string) bool {
+	remote, ok := gitPushRemote(args)
+	if !ok {
+		return false
+	}
+	if url, named := defined[remote]; named {
+		remote = url
+	}
+	return isAdHocGitRemote(remote)
+}
+
+// gitRemoteDefinitions collects the remotes the action itself defines before
+// a push: git remote add or set-url NAME URL, and git -c remote.NAME.url=URL.
+// A push by such a name is a push to the inline address under a name.
+func gitRemoteDefinitions(commands []CommandFact) map[string]string {
+	defined := map[string]string{}
+	for _, command := range commands {
+		if command.Kind != CommandKindProcess || gitProgram(command) != "git" {
 			continue
 		}
-		return isAdHocGitRemote(argument)
+		for index := 1; index+1 < len(command.Argv) && command.Argv[index] != "remote"; index++ {
+			if command.Argv[index] != "-c" {
+				continue
+			}
+			key, value, found := strings.Cut(command.Argv[index+1], "=")
+			if name, isURL := remoteURLKey(key); found && isURL {
+				defined[name] = value
+			}
+		}
+		if subcommand, rest := gitSubcommand(command.Argv); subcommand == "remote" && len(rest) > 0 &&
+			(rest[0] == "add" || rest[0] == "set-url") {
+			var operands []string
+			for _, argument := range rest[1:] {
+				if !strings.HasPrefix(argument, "-") {
+					operands = append(operands, argument)
+				}
+			}
+			if len(operands) >= 2 {
+				defined[operands[0]] = operands[1]
+			}
+		}
 	}
-	return false
+	return defined
+}
+
+// remoteURLKey returns the remote name of a remote.<name>.url or
+// remote.<name>.pushurl config key.
+func remoteURLKey(key string) (string, bool) {
+	rest, ok := strings.CutPrefix(key, "remote.")
+	if !ok {
+		return "", false
+	}
+	for _, suffix := range []string{".pushurl", ".url"} {
+		if name, found := strings.CutSuffix(rest, suffix); found && name != "" {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // isAdHocGitRemote reports a push destination given inline instead of as a
@@ -87,11 +164,20 @@ func isAdHocGitRemote(value string) bool {
 		}
 		return parsesAsUntrustedAddress(host)
 	}
-	at, colon := strings.IndexByte(value, '@'), strings.IndexByte(value, ':')
-	if at <= 0 || colon <= at {
+	// The scp form [user@]host:path: a colon before any slash.
+	colon := strings.IndexByte(value, ':')
+	if colon <= 0 || strings.ContainsRune(value[:colon], '/') {
 		return false
 	}
-	return !knownCodeForge(value[at+1 : colon])
+	host := value[:colon]
+	if at := strings.LastIndexByte(host, '@'); at >= 0 {
+		host = host[at+1:]
+	}
+	// A single letter is a drive, not a host.
+	if len(host) < 2 {
+		return false
+	}
+	return !knownCodeForge(host)
 }
 
 func knownCodeForge(host string) bool {
@@ -120,8 +206,14 @@ func gitCloneThenRunsClonedFile(facts Facts) bool {
 func runsFileAfterClone(facts Facts, cloneIndex int, directory string) bool {
 	inside := false
 	for _, later := range facts.Commands[cloneIndex+1:] {
-		if later.Program == "cd" && len(later.Argv) == 2 && cleanRelative(later.Argv[1]) == directory {
-			inside = true
+		if later.Program == "cd" && len(later.Argv) == 2 {
+			target := later.Argv[1]
+			switch {
+			case cleanRelative(target) == directory:
+				inside = true
+			case strings.HasPrefix(target, "/") || strings.HasPrefix(target, "~") || strings.HasPrefix(target, ".."):
+				inside = false
+			}
 			continue
 		}
 		if len(later.Argv) > 0 && strings.HasPrefix(cleanRelative(later.Argv[0]), directory+"/") {

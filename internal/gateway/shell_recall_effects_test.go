@@ -67,6 +67,35 @@ func shellRecallFixtureCommand(t *testing.T, fixture, caseSuffix string) string 
 	return ""
 }
 
+func shellRecallEffectsFixtureCommand(t *testing.T, id string) string {
+	t.Helper()
+	_, selfPath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve caller path")
+	}
+	file, err := os.Open(filepath.Join(filepath.Dir(selfPath), "..", "actionfacts", "testdata", "shell-recall-effects-v1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 1<<20), 1<<20)
+	for scanner.Scan() {
+		var row struct {
+			ID      string `json:"id"`
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
+			t.Fatal(err)
+		}
+		if row.ID == id {
+			return row.Command
+		}
+	}
+	t.Fatalf("fixture case %s not found", id)
+	return ""
+}
+
 func TestShellRecallEffectRulesAreAlertOnlyAndNeverBlock(t *testing.T) {
 	for _, id := range shellRecallEffectRuleIDs {
 		contract, ok := exactFallbackContracts[id]
@@ -77,14 +106,18 @@ func TestShellRecallEffectRulesAreAlertOnlyAndNeverBlock(t *testing.T) {
 	}
 	const connector = "shell-recall-effects-test"
 	installDefaultProfileConnector(t, connector)
+	// the five canonical commands: one from the shared download-then-execute
+	// fixture, four from the shell-recall effects fixture (reserved example hosts)
 	commands := map[string]string{
-		// the shared download-then-execute fixture, fetch and run as one action
 		"exec.download_then_run_fetched_file": shellRecallFixtureCommand(t, "download-execute-chain-v1.jsonl", "/public-ip-absolute"),
-		// placeholders: reserved example hosts only
-		"exec.escaped_binary_write":                   `printf '` + strings.Repeat(`\x41`, 40) + `' >> /tmp/f`,
-		"account.literal_password_change_via_stdin":   `echo -e "user\nsecret\nsecret" | passwd | bash`,
-		"source_control.clone_then_run_or_adhoc_push": `git push user@example.org:o/r main`,
-		"exec.inline_code_network_and_exec":           `python3 -c "import urllib.request,subprocess; subprocess.call(['id']); urllib.request.urlopen('https://example.org/x')"`,
+	}
+	for id, rule := range map[string]string{
+		"escaped-binary-append":    "exec.escaped_binary_write",
+		"literal-password-stdin":   "account.literal_password_change_via_stdin",
+		"adhoc-ssh-push":           "source_control.clone_then_run_or_adhoc_push",
+		"inline-code-network-exec": "exec.inline_code_network_and_exec",
+	} {
+		commands[rule] = shellRecallEffectsFixtureCommand(t, "shell-recall-effects-v1/"+id)
 	}
 	if len(commands) != len(shellRecallEffectRuleIDs) {
 		t.Fatalf("commands cover %d of %d rules", len(commands), len(shellRecallEffectRuleIDs))

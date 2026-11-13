@@ -8,8 +8,10 @@ package actionfacts
 import (
 	"net/netip"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // This file holds the staged-file effects of the shell recall work: bytes
@@ -19,96 +21,151 @@ import (
 // authority: the first cannot know the file is later executed, the second
 // cannot know the fetch succeeded or that control flow reaches the run.
 
-var (
-	escapedByteRunPattern = lazyMustCompile(
-		`(?:\\x[0-9a-fA-F]{2}|\\0?[0-7]{3})+`,
-	)
-	escapeTokenPattern  = lazyMustCompile(`\\x[0-9a-fA-F]{2}|\\0?[0-7]{3}`)
-	bareIPv4HostPattern = lazyMustCompile(
-		`(?:^|[/@=\s'"])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]{1,5})?(?:[/?#\s'"]|$)`,
-	)
+var bareIPv4HostPattern = lazyMustCompile(
+	`(?:^|[/@=\s'"])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]{1,5})?(?:[/?#\s'"]|$)`,
 )
 
-// A run of escaped bytes is reported only when it cannot be a key, a digest
-// or a short fixture, by structure and not by a threshold fitted to a corpus:
+// escapedMinProgramBytes is the shortest decoded write that can start with a
+// program or script header (the longest magic is four bytes).
+const escapedMinProgramBytes = 4
+
+// EscapedBinaryFileWrite reports a direct echo or printf whose operands decode,
+// through hex or octal byte escapes, to bytes that are not text, written to a
+// file (a write or append redirect, or a pipe into tee with a file operand),
+// when the write is also shaped like staging a program:
 //
-//   - it is longer than the longest ordinary key or digest, which is 32 bytes
-//     (an AES-256 key, a SHA-256 digest; the common smaller sizes 16, 20, 24
-//     and 28 are below it). A run of 33 bytes or more is program or payload
-//     bytes, not key material; or
 //   - it begins with the magic of an executable or a script (ELF, PE, Mach-O,
-//     a "#!" line) and is at least escapedMagicRunBytes long, a header and not
-//     two stray bytes. This covers the first chunk of a binary at any size.
+//     "#!"): the first chunk of a binary, or a script written out in escapes; or
+//   - it appends to the file (">>", "tee -a"): droppers write a binary one
+//     chunk at a time, so a later chunk has no magic but is an append; or
+//   - the same action then makes the file executable or runs it.
 //
-// Chunks of exactly 32 bytes or fewer without a magic are left alone: they
-// are indistinguishable from a key, which is the cost of not alerting on
-// every fixture write.
-const (
-	escapedLongestKeyBytes = 32
-	escapedMagicRunBytes   = 8
-)
-
-// EscapedBinaryFileWrite reports a direct echo or printf whose operand holds
-// a run of byte escapes (hex or octal) and whose output goes to a file (a
-// write or append redirect, or a pipe into tee with a file operand), where the
-// run is longer than any key or digest or starts with an executable or script
-// magic (see above). The bytes are not text and the escape form hides them
-// from content scanning. Dropper chains append a binary one chunk at a time,
-// so the test is per call and does not need the first chunk (the magic) to be
-// present.
+// "Not text" is a decision on the decoded bytes of the whole operand, not on
+// runs of escapes or their length: the bytes are not valid UTF-8, or hold a NUL
+// or a control byte other than tab, newline, carriage return and escape (so
+// color codes and a byte order mark stay text). A single plain write of a key
+// or a digest into a fixture file is binary but is none of the above, so it
+// stays quiet.
 func EscapedBinaryFileWrite(facts Facts) bool {
 	if facts.Parse.Dialect != DialectPOSIX {
 		return false
 	}
-	for _, command := range facts.Commands {
+	for index, command := range facts.Commands {
 		if command.Dialect != DialectPOSIX || command.Kind != CommandKindProcess ||
-			(command.Program != "echo" && command.Program != "printf") ||
-			!hasEscapedByteRun(command) {
+			(command.Program != "echo" && command.Program != "printf") {
 			continue
 		}
-		if commandRedirectsToFile(command) || commandPipesToTeeFile(facts, command) {
+		decoded, escaped := decodeEscapedOperands(command)
+		magic := len(decoded) >= escapedMinProgramBytes && hasProgramMagic(decoded)
+		if escaped == 0 || (!magic && !isBinaryContent(decoded)) {
+			continue
+		}
+		target, appends, ok := escapedWriteTarget(facts, command)
+		if !ok {
+			continue
+		}
+		if appends || magic || fileMadeExecutableOrRunLater(facts, index, target) {
 			return true
 		}
 	}
 	return false
 }
 
-func hasEscapedByteRun(command CommandFact) bool {
+// decodeEscapedOperands decodes the operands of an echo or printf: hex and
+// octal escapes become bytes, the common one-letter escapes become their byte,
+// everything else stays as written. It returns the bytes and the count of hex
+// and octal escapes it decoded.
+func decodeEscapedOperands(command CommandFact) ([]byte, int) {
+	var decoded []byte
+	escaped := 0
 	for index, argument := range command.Argv {
-		if index == 0 {
+		if index == 0 || isEchoOptionWord(argument) {
 			continue
 		}
-		for _, run := range escapedByteRunPattern.FindAllString(argument, -1) {
-			decoded := decodeEscapedRun(run)
-			if len(decoded) > escapedLongestKeyBytes ||
-				(len(decoded) >= escapedMagicRunBytes && hasProgramMagic(decoded)) {
-				return true
+		for i := 0; i < len(argument); i++ {
+			if argument[i] != '\\' || i+1 >= len(argument) {
+				decoded = append(decoded, argument[i])
+				continue
+			}
+			i++
+			switch c := argument[i]; {
+			case c == 'x':
+				value, width := parseEscapeDigits(argument[i+1:], 16, 2)
+				if width == 0 {
+					decoded = append(decoded, '\\', 'x')
+					continue
+				}
+				decoded = append(decoded, byte(value))
+				escaped++
+				i += width
+			case c >= '0' && c <= '7':
+				digits := argument[i:]
+				if c == '0' {
+					digits = argument[i+1:]
+					i++
+				}
+				value, width := parseEscapeDigits(digits, 8, 3)
+				if width == 0 {
+					decoded = append(decoded, 0)
+					escaped++
+					continue
+				}
+				decoded = append(decoded, byte(value))
+				escaped++
+				i += width - 1
+			case c == 'n':
+				decoded = append(decoded, '\n')
+			case c == 't':
+				decoded = append(decoded, '\t')
+			case c == 'r':
+				decoded = append(decoded, '\r')
+			case c == 'e' || c == 'E':
+				decoded = append(decoded, 0x1b)
+			case c == '\\' || c == '"' || c == '\'':
+				decoded = append(decoded, c)
+			default:
+				decoded = append(decoded, '\\', c)
 			}
 		}
 	}
-	return false
+	return decoded, escaped
 }
 
-func decodeEscapedRun(run string) []byte {
-	tokens := escapeTokenPattern.FindAllString(run, -1)
-	decoded := make([]byte, 0, len(tokens))
-	for _, token := range tokens {
-		var value uint64
-		var err error
-		switch {
-		case token[1] == 'x':
-			value, err = strconv.ParseUint(token[2:], 16, 8)
-		case len(token) == 5: // \0ooo
-			value, err = strconv.ParseUint(token[2:], 8, 16)
-		default: // \ooo
-			value, err = strconv.ParseUint(token[1:], 8, 16)
-		}
-		if err != nil || value > 255 {
+func isEchoOptionWord(argument string) bool {
+	if len(argument) < 2 || argument[0] != '-' {
+		return false
+	}
+	return strings.Trim(argument[1:], "neE") == ""
+}
+
+// parseEscapeDigits reads up to maxWidth digits of the base and returns the
+// value (kept to a byte) and the number of digits read.
+func parseEscapeDigits(text string, base, maxWidth int) (uint64, int) {
+	var value uint64
+	width := 0
+	for width < len(text) && width < maxWidth {
+		digit, err := strconv.ParseUint(text[width:width+1], base, 8)
+		if err != nil {
 			break
 		}
-		decoded = append(decoded, byte(value))
+		value = value*uint64(base) + digit
+		width++
 	}
-	return decoded
+	return value & 0xff, width
+}
+
+// isBinaryContent reports bytes that are not text: not valid UTF-8, or a NUL or
+// a control byte other than tab, newline, carriage return and escape.
+func isBinaryContent(data []byte) bool {
+	if !utf8.Valid(data) {
+		return true
+	}
+	for _, b := range data {
+		if (b < 0x20 && b != '\t' && b != '\n' && b != '\r' && b != 0x1b) || b == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 func hasProgramMagic(data []byte) bool {
@@ -127,25 +184,21 @@ func hasProgramMagic(data []byte) bool {
 	return false
 }
 
-func commandRedirectsToFile(command CommandFact) bool {
+// escapedWriteTarget returns the file the command writes (a write or append
+// redirect, or a tee operand it pipes into) and whether the write appends.
+func escapedWriteTarget(facts Facts, command CommandFact) (string, bool, bool) {
 	for _, redirect := range command.Redirects {
-		if redirect.Access != PathAccessWrite && redirect.Access != PathAccessAppend {
+		if (redirect.Access != PathAccessWrite && redirect.Access != PathAccessAppend) ||
+			redirect.Target == "" || strings.HasPrefix(redirect.Target, "/dev/") {
 			continue
 		}
-		if redirect.Target == "" || strings.HasPrefix(redirect.Target, "/dev/") {
-			continue
-		}
-		return true
+		return redirect.Target, redirect.Access == PathAccessAppend, true
 	}
-	return false
-}
-
-func commandPipesToTeeFile(facts Facts, source CommandFact) bool {
-	if source.PipelineID == 0 {
-		return false
+	if command.PipelineID == 0 {
+		return "", false, false
 	}
 	for _, flow := range facts.DataFlows {
-		if flow.FromCommandID != source.ID || flow.From != DataStdout || flow.To != DataStdin {
+		if flow.FromCommandID != command.ID || flow.From != DataStdout || flow.To != DataStdin {
 			continue
 		}
 		for _, sink := range facts.Commands {
@@ -156,8 +209,30 @@ func commandPipesToTeeFile(facts Facts, source CommandFact) bool {
 				if candidate.CommandID == sink.ID &&
 					(candidate.Access == PathAccessWrite || candidate.Access == PathAccessAppend) &&
 					!strings.HasPrefix(candidate.Value, "/dev/") {
-					return true
+					return candidate.Value, candidate.Access == PathAccessAppend, true
 				}
+			}
+		}
+	}
+	return "", false, false
+}
+
+// fileMadeExecutableOrRunLater reports a later command of the action that
+// changes the mode of the file or runs it.
+func fileMadeExecutableOrRunLater(facts Facts, index int, target string) bool {
+	clean := cleanRelative(target)
+	for _, later := range facts.Commands[index+1:] {
+		if len(later.Argv) > 0 && cleanRelative(later.Argv[0]) == clean {
+			return true
+		}
+		if later.Program == "chmod" && slices.ContainsFunc(later.Argv[1:], func(argument string) bool {
+			return cleanRelative(argument) == clean
+		}) {
+			return true
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == later.ID && candidate.Access == PathAccessExecute && cleanRelative(candidate.Value) == clean {
+				return true
 			}
 		}
 	}

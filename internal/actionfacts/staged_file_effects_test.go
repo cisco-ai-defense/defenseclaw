@@ -18,32 +18,50 @@ func srFacts(command string) Facts {
 	return Analyze(Input{Tool: "shell", Command: command, DialectHint: DialectPOSIX})
 }
 
+// escapes returns n hex escapes of one non-text byte, followed by the same byte
+// in octal form when octal is set.
+func escapes(n int, octal bool) string {
+	if octal {
+		return strings.Repeat(`\245`, n)
+	}
+	return strings.Repeat(`\xa5`, n)
+}
+
 func TestEscapedBinaryFileWrite(t *testing.T) {
-	run := strings.Repeat(`\x41`, 40)
-	short := strings.Repeat(`\x41`, 32) // a SHA-256 digest or an AES-256 key is this long
-	justOver := strings.Repeat(`\x41`, 33)
-	octal := strings.Repeat(`\101`, 40)
 	elf := `\x7f\x45\x4c\x46\x02\x01\x01\x00`
 	shebang := `\x23\x21\x2f\x62\x69\x6e\x2f\x73\x68\x0a`
-	key := strings.Repeat(`\x1f`, 16)
 	for _, test := range []struct {
 		name, command string
 		want          bool
 	}{
-		{"echo append", `echo -ne "` + run + `" >> drop`, true},
-		{"echo truncate no space", `echo -ne '` + run + `'>./drop`, true},
-		{"printf octal", `printf '` + octal + `' >> /tmp/f`, true},
-		{"tee", `echo -ne "` + run + `" | tee -a /tmp/f`, true},
-		{"executable magic needs only eight", `printf '` + elf + `' > f`, true},
-		{"non-executable eight bytes", `printf '` + strings.Repeat(`\x41`, 8) + `' > f`, false},
-		{"sixteen byte key fixture", `printf '` + key + `' > /app/key`, false},
-		{"script magic needs only eight", `printf '` + shebang + `' > f`, true},
-		{"thirty-two bytes is a key or digest size", `echo -ne "` + short + `" >> drop`, false},
-		{"thirty-three bytes is not key material", `echo -ne "` + justOver + `" >> drop`, true},
-		{"no file", `echo -ne "` + run + `"`, false},
-		{"device", `echo -ne "` + run + `" > /dev/null`, false},
+		// a chunk of a staged binary: appended, or the first chunk with a magic
+		{"echo append", `echo -ne "` + escapes(40, false) + `" >> drop`, true},
+		{"echo append of a short chunk", `echo -ne "` + escapes(8, false) + `" >> drop`, true},
+		{"printf octal append", `printf '` + escapes(40, true) + `' >> /tmp/f`, true},
+		{"tee append", `echo -ne "` + escapes(40, false) + `" | tee -a /tmp/f`, true},
+		{"elf magic on a plain write", `printf '` + elf + `' > f`, true},
+		{"script magic on a plain write", `printf '` + shebang + `' > f`, true},
+		{"write then chmod", `printf '` + escapes(40, false) + `' > drop; chmod +x drop`, true},
+		{"write then run", `printf '` + escapes(40, false) + `' > drop; ./drop`, true},
+		// SHREV2-12: a printable byte between short runs, and a first chunk under eight bytes
+		{"literal bytes between short runs, appended", `printf '` + strings.Repeat(escapes(30, false)+`Q`, 3) + `' >> drop`, true},
+		{"short magic chunk", `printf '\x7f\x45\x4c\x46' > f`, true},
+		// not staging: a fixture, a key or a digest written once
+		{"sixteen byte key fixture", `printf '` + escapes(16, false) + `' > /app/key`, false},
+		{"thirty-two byte key fixture", `printf '` + escapes(32, false) + `' > testdata/key.bin`, false},
+		// SHREV2-11: digests of every common size, written once
+		{"sha-384 digest fixture", `printf '` + escapes(48, false) + `' > testdata/digest.bin`, false},
+		{"sha-512 digest fixture", `printf '` + escapes(64, true) + `' > testdata/digest.bin`, false},
+		{"single large plain write", `printf '` + escapes(128, false) + `' > blob`, false},
+		// text, whatever the escapes
+		{"ascii escapes appended", `printf '` + strings.Repeat(`\x41`, 40) + `' >> notes.txt`, false},
+		{"color codes appended", `printf '\033[1;31mred\033[0m\n' >> log`, false},
+		{"byte order mark appended", `printf '\xef\xbb\xbfhello' >> out.txt`, false},
+		{"utf-8 text appended", `printf '\xc3\xa9\xc3\xa8' >> out.txt`, false},
+		{"no file", `echo -ne "` + escapes(40, false) + `"`, false},
+		{"device", `echo -ne "` + escapes(40, false) + `" >> /dev/null`, false},
 		{"plain text", `echo hello >> notes.txt`, false},
-		{"escape in a comment", `cat notes.txt # ` + run, false},
+		{"escape in a comment", `cat notes.txt # ` + escapes(40, false), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := EscapedBinaryFileWrite(srFacts(test.command)); got != test.want {
