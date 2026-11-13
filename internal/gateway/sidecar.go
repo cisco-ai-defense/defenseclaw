@@ -2363,6 +2363,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		if err != nil {
 			return err
 		}
+		nextJudge.inheritToolJudgeContext(s.sharedJudge())
 	}
 
 	if judgeChanged {
@@ -2373,6 +2374,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// The cascade-2 judge (decision model, no LLM) follows the same inputs.
 	if judgeChanged || previousGen == nil {
 		nextGen.decisionJudge = newDecisionOnlyJudge(&next)
+		if previousGen != nil {
+			nextGen.decisionJudge.inheritToolJudgeContext(previousGen.decisionJudge)
+		}
 	} else {
 		nextGen.decisionJudge = previousGen.decisionJudge
 	}
