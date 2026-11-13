@@ -221,6 +221,13 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
+			// The connector-hook facts local readers need, now that a benign
+			// per-user allow keeps only this row (#1384, registry v4).
+			DefenseClawHookRulePackDir:          hookV8OptionalText(env.RulePackDir, 8192),
+			DefenseClawHookRawOrigin:            hookDecisionV8RawOrigin(env.RawOrigin),
+			DefenseClawHookRawEventIds:          hookDecisionV8RuleIDs(env.RawEventIDs),
+			DefenseClawHookBodyBytes:            observability.Present(max(env.BodyBytes, 0)),
+			DefenseClawHookBoundedPrefixReview:  hookDecisionV8BoundedPrefixReview(env),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
 			DefenseClawSandboxDriver:            managed.Driver,
@@ -247,6 +254,20 @@ func (a *APIServer) emitHookDecisionLogV8(
 		return hookDecisionLogUnbuildable
 	}
 	return hookDecisionLogFailed
+}
+
+func hookDecisionV8RawOrigin(origin string) observability.Optional[string] {
+	if origin != "hook" {
+		return observability.Absent[string]()
+	}
+	return observability.Present(origin)
+}
+
+func hookDecisionV8BoundedPrefixReview(env HookAuditEnvelope) observability.Optional[bool] {
+	if env.Extra["bounded_prefix_review"] != "true" {
+		return observability.Absent[bool]()
+	}
+	return observability.Present(true)
 }
 
 // hookDecisionResult is the result every sink of a hook decision carries:
