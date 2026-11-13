@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
@@ -37,7 +38,11 @@ func (s *Sidecar) modelUsage() *modelUsageRuntime {
 	if s.cfg != nil {
 		dataDir = s.cfg.DataDir
 	}
-	store := modelusage.NewStore(filepath.Join(dataDir, modelUsageDBDir, modelUsageDBName))
+	storePath := "" // no data_dir: the store is refused, never relative to the working directory
+	if strings.TrimSpace(dataDir) != "" {
+		storePath = filepath.Join(dataDir, modelUsageDBDir, modelUsageDBName)
+	}
+	store := modelusage.NewStore(storePath)
 	sink := newModelUsageV8Sink(
 		func() sidecarRuntimeEmitter { return s.observabilityV8Emitter() },
 		func() hookLifecycleMetricV8Runtime {
@@ -65,6 +70,7 @@ func (s *Sidecar) applyModelUsage(cfg *config.Config) {
 	}
 	rt := s.modelUsage()
 	tok, price := cfg.Observability.Tokenomics, cfg.Observability.Pricing
+	setNativeUsageSuppression(cfg)
 	wantStore := tok.Enabled && tok.LocalStore.Enabled
 	if err := rt.store.Configure(wantStore, tok.UsageRetentionDays()); err != nil {
 		fmt.Fprintf(os.Stderr, "[modelusage] local usage store unavailable: %v\n", err)
@@ -77,6 +83,7 @@ func (s *Sidecar) stopModelUsage() {
 	if s == nil {
 		return
 	}
+	setNativeUsageSuppression(nil)
 	if rt := s.modelUsageRT.Load(); rt != nil {
 		rt.engine.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
 		_ = rt.store.Configure(false, 0)

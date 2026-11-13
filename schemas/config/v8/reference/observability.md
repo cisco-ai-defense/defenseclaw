@@ -105,7 +105,7 @@ Constraints that span fields are enforced by the compiler in addition to JSON Sc
 | `observability.tokenomics.cost.currency` | constant | `"USD"` | `"USD"` |  |
 | `observability.tokenomics.cost.keep_reported` | boolean | `true` |  | Keep a per-call provider or agent reported cost and mark its basis as reported. |
 | `observability.tokenomics.local_store` | object |  |  |  |
-| `observability.tokenomics.local_store.enabled` | boolean | `false` |  | Keep an hourly usage aggregate in <data_dir>/model_usage.db for the usage API and status. |
+| `observability.tokenomics.local_store.enabled` | boolean | `false` |  | Keep an hourly usage aggregate in <data_dir>/model_usage/model_usage.db for the usage API and status. |
 | `observability.tokenomics.local_store.retention_days` | integer | `30` |  |  |
 | `observability.tokenomics.local_store.granularity` | constant | `"hour"` | `"hour"` |  |
 | `observability.tokenomics.metrics` | object |  |  |  |

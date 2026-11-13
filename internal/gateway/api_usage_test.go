@@ -43,7 +43,7 @@ func usageAPI(t *testing.T, standalone bool) (*APIServer, *modelusage.Store) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Configure(false, 30) })
-	api.SetModelUsage(store)
+	api.SetModelUsageQuerier(store)
 	store.Emit(context.Background(), usageRecord("1001", []string{"eng"}, 0.5))
 	store.Emit(context.Background(), usageRecord("1002", []string{"ops"}, 2))
 	return api, store
@@ -65,7 +65,7 @@ func TestUsageEndpointOffReportsDisabled(t *testing.T) {
 	if code != http.StatusOK || body["enabled"] != false {
 		t.Fatalf("%d %v", code, body)
 	}
-	api.SetModelUsage(modelusage.NewStore(filepath.Join(t.TempDir(), "x.db"))) // bound but closed
+	api.SetModelUsageQuerier(modelusage.NewStore(filepath.Join(t.TempDir(), "x.db"))) // bound but closed
 	if _, body = getUsage(t, api, context.Background(), ""); body["enabled"] != false {
 		t.Fatalf("%v", body)
 	}

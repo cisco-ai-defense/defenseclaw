@@ -8,6 +8,7 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -188,10 +189,14 @@ func TestMachineLayoutApplyPatchIsSelfProtection(t *testing.T) {
 		for _, managed := range []bool{false, true} {
 			for _, connectorName := range []string{"codex", "copilot"} {
 				f := newAbsolutePatchFixture(t)
+				// The profile pack is installed once per cell, not once
+				// per call (a pack load and CEL compile is about 0.25 s of
+				// CPU under -race; it was 96 percent of the test).
+				installToolCallCorpusProfileConnector(t, connectorName, profile)
 				for _, file := range machineLayoutProtected {
 					for _, patch := range []string{updatePatch(file), "*** Begin Patch\n*** Add File: " + file + "\n+x\n*** End Patch\n",
 						"*** Begin Patch\n*** Delete File: " + file + "\n*** End Patch\n"} {
-						if got, out := postApplyPatch(t, f, connectorName, profile, managed, patch); got != "block" || !strings.Contains(out, "tamper.detector_state_write") {
+						if got, out := postInstalledApplyPatch(t, f, connectorName, profile, managed, patch); got != "block" || !strings.Contains(out, "tamper.detector_state_write") {
 							t.Errorf("%s/%s managed=%t patch of %s = %s, want protected block: %.300s", profile, connectorName, managed, file, got, out)
 						}
 					}
@@ -201,12 +206,59 @@ func TestMachineLayoutApplyPatchIsSelfProtection(t *testing.T) {
 				}
 				for _, file := range machineLayoutOrdinary {
 					file = strings.ReplaceAll(file, "{P}", f.project)
-					if got, out := postApplyPatch(t, f, connectorName, profile, managed, updatePatch(file)); got == "block" {
+					if got, out := postInstalledApplyPatch(t, f, connectorName, profile, managed, updatePatch(file)); got == "block" {
 						t.Errorf("%s/%s managed=%t patch of %s = block, want allow: %.300s", profile, connectorName, managed, file, out)
 					}
 				}
 			}
 		}
+	}
+}
+
+// postInstalledApplyPatch is postApplyPatch for a cell whose profile pack
+// the caller has already installed for connectorName with
+// installToolCallCorpusProfileConnector: the same request, headers and
+// decision, without loading the pack again for every call.
+func postInstalledApplyPatch(t *testing.T, f absolutePatchFixture, connectorName, profile string, managed bool, patch string) (string, string) {
+	t.Helper()
+	var body map[string]any
+	if connectorName == "codex" {
+		body = map[string]any{"session_id": "gap0361", "hook_event_name": "PreToolUse", "cwd": f.project, "permission_mode": "default",
+			"tool_name": "apply_patch", "tool_use_id": "toolu_gap0361", "tool_input": map[string]any{"command": patch}}
+	} else {
+		body = map[string]any{"sessionId": "gap0361", "timestamp": 1790483549431, "cwd": f.project, "toolName": "apply_patch", "toolArgs": patch}
+	}
+	raw := string(mustJSON(t, body))
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connectorName
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connectorName+"/hook", strings.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	if connectorName == "copilot" {
+		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+		req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector("copilot", "", "preToolUse", []byte(raw)))
+	} else {
+		req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(raw)))
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	if managed {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
+	}
+	recorder := httptest.NewRecorder()
+	api.handleAgentHook(connectorName).ServeHTTP(recorder, req)
+	out := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d: %.400s", recorder.Code, out)
+	}
+	switch {
+	case strings.Contains(out, `"action":"block"`) || strings.Contains(out, `"permissionDecision":"deny"`):
+		return "block", out
+	case strings.Contains(out, `"action":"alert"`):
+		return "alert", out
+	default:
+		return "allow", out
 	}
 }
 

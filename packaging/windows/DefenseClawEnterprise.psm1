@@ -22725,6 +22725,40 @@ function Remove-DefenseClawStandaloneScannerRuntimeLeftover {
     }
 }
 
+# The shipped rule pack root (ProgramData\Cisco\DefenseClaw-RulePacks, beside
+# the lifecycle folder, #1445) is DefenseClaw's own and holds no record; the Go
+# step removes it after an uninstall that left no deployment, after this
+# script returned. A purge removes it here first, as it does the scanner
+# runtime, so the Cisco folder and its record go in the same run. Only a real
+# folder whose writers are SYSTEM, Administrators or TrustedInstaller is
+# removed, never through a link; anything else stays for the Go step.
+function Remove-DefenseClawStandaloneShippedRulePacksLeftover {
+    param([Parameter(Mandatory)][string]$LifecycleFolder)
+    try {
+        $root = [IO.Path]::Combine([IO.Path]::GetDirectoryName($LifecycleFolder), 'DefenseClaw-RulePacks')
+        if (-not (Test-DefenseClawPathPresentNoFollow -Path $root)) {
+            return
+        }
+        $null = Assert-DefenseClawNoReparsePath -Path $root
+        Assert-DefenseClawPathAcl `
+            -Path $root `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        $remaining = [Collections.Generic.List[string]]::new()
+        foreach ($child in @([IO.Directory]::GetFileSystemEntries($root))) {
+            $null = Remove-DefenseClawNoFollowTree -Path ([string]$child) -Remaining $remaining
+        }
+        if ($remaining.Count -eq 0) {
+            [IO.Directory]::Delete($root, $false)
+        }
+        else {
+            Microsoft.PowerShell.Utility\Write-Verbose "shipped rule packs stay: $($remaining[0])"
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "shipped rule packs stay: $($_.Exception.Message)"
+    }
+}
+
 # Runs under the lifecycle lock (Remove-DefenseClawStandaloneLifecycleLockLeftover
 # holds it exclusively), once no deployment of any scope is left, no
 # self-uninstall finalizer is pending and the lifecycle folder holds nothing
@@ -22774,6 +22808,7 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
     # folder the Cisco folder can still hold: it goes first, so the Cisco
     # folder and its record go with it in this run.
     Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle
+    Remove-DefenseClawStandaloneShippedRulePacksLeftover -LifecycleFolder $lifecycle
     $records = @(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)
     $lifecycleFull = [IO.Path]::GetFullPath($lifecycle).TrimEnd('\')
     $deferred = [Collections.Generic.List[object]]::new()
@@ -34940,6 +34975,89 @@ function Register-DefenseClawRestoredConfigGeneration {
 # the helper fail; then only the selector files it resolved are deleted raw
 # and the helper runs again. Pruned selectors are garbage, so rollback never
 # restores them; the evidence is kept in the transaction directory.
+function Install-DefenseClawStandaloneShippedRulePacks {
+    <#
+        Standalone only (#1445). Runs the installed gateway's hidden
+        `enterprise windows shipped-rule-packs`, which writes the strict and
+        permissive rule packs the binary embeds to
+        <ProgramData>\Cisco\DefenseClaw-RulePacks\<digest16> (Administrators
+        and LocalSystem write it, services read it) and checks every file. A
+        folder that already holds exactly those files is left as it is, so a
+        repeated ensure changes nothing. The root sits beside the state root,
+        like the scanner runtime, so the install-tree and state-root checks
+        never walk it. A failed write stops the run only when the config it
+        applies selects strict or permissive (the helper's required flag);
+        a deployment on the default pack goes on with a warning, and the
+        next run that selects one writes them. Secure Client never calls it.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments @('enterprise', 'windows', 'shipped-rule-packs', '--json') `
+        -Capture `
+        -AllowFailure
+    $reports = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($probe.output)) {
+        $text = ([string]$line).Trim()
+        if (-not $text.StartsWith('{', [StringComparison]::Ordinal)) {
+            continue
+        }
+        try {
+            $reports.Add(($text | Microsoft.PowerShell.Utility\ConvertFrom-Json))
+        }
+        catch {
+            throw "shipped rule packs: the gateway emitted malformed JSON: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $text)"
+        }
+    }
+    if ($reports.Count -ne 1) {
+        throw "shipped rule packs: the gateway emitted $($reports.Count) JSON reports; expected exactly one: $(ConvertTo-DefenseClawBoundedDiagnostic -Value (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim()))"
+    }
+    $report = $reports[0]
+    if ([int]$report.schema_version -ne 1) {
+        throw "unsupported shipped rule packs report schema: $($report.schema_version)"
+    }
+    $ok = $report.PSObject.Properties['ok']
+    if ($null -eq $ok -or $ok.Value -isnot [bool]) {
+        throw 'shipped rule packs report is missing boolean ok'
+    }
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$ok.Value) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$report.error)
+        $required = $report.PSObject.Properties['required']
+        if ([bool]$ok.Value -or $null -eq $required -or $required.Value -isnot [bool] -or [bool]$required.Value) {
+            throw "the rule packs this release ships could not be written, and the config selects one of them: $detail"
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'shipped-rule-packs'
+            reason    = "the strict and permissive rule packs this release ships could not be written; the config selects neither, so the run goes on, and the next run whose config selects one writes them: $detail"
+        }
+        Microsoft.PowerShell.Utility\Write-Warning -Message ('shipped rule packs were not written: {0}' -f $detail)
+        return
+    }
+    $folder = [IO.Path]::GetFullPath([string]$report.folder).TrimEnd('\')
+    $expectedRoot = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw-RulePacks')
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($folder),
+            [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw "the shipped rule packs were written outside $expectedRoot`: $folder"
+    }
+    $notes = $report.PSObject.Properties['notes']
+    if ($null -ne $notes -and $null -ne $notes.Value) {
+        foreach ($note in @($notes.Value)) {
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                'shipped rule packs: {0}' -f (ConvertTo-DefenseClawBoundedDiagnostic -Value ([string]$note))
+            )
+        }
+    }
+    Microsoft.PowerShell.Utility\Write-Verbose (
+        'stage=shipped-rule-packs folder={0} changed={1}' -f $folder, [bool]$report.changed
+    )
+}
+
 function Invoke-DefenseClawOrphanedSelectorPrune {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -50427,6 +50545,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -PathType Leaf)) {
                 throw "required managed artifact is missing after $Action policy staging: $requiredPath"
             }
+        }
+        if (Test-DefenseClawStandaloneProfile) {
+            # The strict and permissive rule packs this release ships
+            # (#1445), written by the gateway just installed once the config
+            # this run applies is in place, and before the target runtimes,
+            # the config check and the first start read them. A rollback
+            # needs nothing restored: each folder is named by its packs'
+            # digest and a release reads only its own.
+            Install-DefenseClawStandaloneShippedRulePacks `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
         }
         if ($Action -eq 'Install' -and -not $priorDeploymentActive) {
             # Before any target runtime is prepared or the Guardian can

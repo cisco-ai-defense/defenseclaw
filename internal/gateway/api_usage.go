@@ -18,15 +18,6 @@ import (
 // usageQuerierBox lets the API server hold any modelusage.Querier atomically.
 type usageQuerierBox struct{ q modelusage.Querier }
 
-// SetModelUsage binds the local usage store the /usage endpoint reads.
-func (a *APIServer) SetModelUsage(store *modelusage.Store) {
-	if store == nil {
-		a.SetModelUsageQuerier(nil)
-		return
-	}
-	a.SetModelUsageQuerier(store)
-}
-
 // SetModelUsageQuerier binds the source of /usage and of the own-status usage
 // block: the local store by default, or a leader-backed one on Substrate.
 func (a *APIServer) SetModelUsageQuerier(q modelusage.Querier) {

@@ -712,6 +712,10 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
         ("output-tokens-v1", "gen_ai.usage.output_tokens", ["output_tokens"]),
         ("cached-input-tokens-v1", "$derived_cached_input_tokens", ["cached_input_tokens"]),
         ("log-duration-seconds-v1", "$derived_duration_seconds", ["duration_seconds"]),
+        ("reasoning-tokens-v1", "$derived_reasoning_tokens", ["reasoning_token_count"]),
+        ("claudecode-uncached-input-tokens-v1", "$derived_uncached_input_tokens", ["input_tokens"]),
+        ("claudecode-cache-read-tokens-v1", "$derived_cache_read_tokens", ["cache_read_tokens"]),
+        ("claudecode-cache-creation-tokens-v1", "$derived_cache_creation_tokens", ["cache_creation_tokens"]),
     )
     aliases = [
         {
@@ -911,6 +915,15 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
             ],
         ),
         binding(
+            "otlp.claudecode.api_request.v1",
+            "logs",
+            ["claudecode"],
+            "import",
+            {"kind": "singleton", "primary_family": "fixture.log.0"},
+            [predicate("leaf_attribute", "event.name", "equals", values=["api_request"])],
+            aliases=["conversation-id-v1", "claudecode-uncached-input-tokens-v1", "output-tokens-v1"],
+        ),
+        binding(
             "otlp.claudecode.token_usage.v1",
             "metrics",
             ["claudecode"],
@@ -1028,6 +1041,7 @@ def _fixture_inbound_bindings() -> dict[str, Any]:
         "otlp.codex.tool_result.v1",
         "otlp.claudecode.user_prompt.v1",
         "otlp.codex.response_completed.v1",
+        "otlp.claudecode.api_request.v1",
         "otlp.claudecode.token_usage.v1",
         "otlp.codex.token_usage.v1",
         "otlp.genai.duration.metric.v1",
