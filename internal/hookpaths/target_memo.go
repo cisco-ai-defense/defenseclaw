@@ -27,9 +27,9 @@ import (
 // them see the same answer. A nil memo reads the file system every time.
 type TargetMemo struct {
 	mu sync.Mutex
-	// excuseReads makes the mention scan leave a protected name alone when
-	// the statement that holds it only reads (ActionMentionsOnlyReads).
-	excuseReads bool
+	// excuseNonWrites makes the mention scan leave a protected name alone when
+	// the statement that holds it only reads (ActionMentionsNoWriteRole).
+	excuseNonWrites bool
 	// prefixes is the write-target walk state after each absolute path
 	// prefix (walkWritePathMemo).
 	prefixes map[string]walkState
@@ -253,6 +253,6 @@ func (m *TargetMemo) resolveWriteTarget(path string) (string, bool) {
 	return resolved, ok
 }
 
-// readsExcused is set for the scan ActionMentionsOnlyReads runs; a nil memo
+// nonWritesExcused is set for the scan ActionMentionsNoWriteRole runs; a nil memo
 // (a scan that carries none) never excuses.
-func (m *TargetMemo) readsExcused() bool { return m != nil && m.excuseReads }
+func (m *TargetMemo) nonWritesExcused() bool { return m != nil && m.excuseNonWrites }

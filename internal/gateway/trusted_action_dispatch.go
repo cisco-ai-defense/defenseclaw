@@ -252,11 +252,11 @@ type trustedActionRequest struct {
 	// (rel-1-0-10:GAP-0013). The operand is empty when no one operand was
 	// at fault (a directory walk or a pattern the shell expands).
 	unprovenTarget *unprovenWrite
-	// readsOnlyMention, when set, is told that the target scan held the call
+	// nonWriteMention, when set, is told that the target scan held the call
 	// only on words of statements that read a protected file, in a per-user
-	// default or permissive install (ActionMentionsOnlyReads): the finding
+	// default or permissive install (ActionMentionsNoWriteRole): the finding
 	// alerts, it does not block (rel-1-0-10:GAP-0018).
-	readsOnlyMention *bool
+	nonWriteMention *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.

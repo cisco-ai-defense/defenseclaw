@@ -70,6 +70,27 @@ func CommandMayMakeLink(command string) bool {
 	return tactics.RunsProgram(command, "eval", "source", ".", "sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd", "busybox", "toybox")
 }
 
+// CommandNamesLinkMaking reports a command that names a link-making program,
+// a copy with a link option, or link-making code of an interpreter or Windows
+// (the old CommandMayMakeLink also read code it does not see - a command
+// substitution, eval, source and a nested shell - as a link maker, which made
+// every script with $(date) an unknown write that blocked). A write held as unknown in a
+// command that names a link maker can land anywhere the link points; one in a
+// command that only has code the scan does not read is unknown, not named
+// (rel-1-0-10:GAP-0018).
+func CommandNamesLinkMaking(command string) bool {
+	if command == "" {
+		return false
+	}
+	if opaqueLink.MatchString(command) || linkCallText.MatchString(command) {
+		return true
+	}
+	if tactics.RunsProgram(command, linkPrograms...) || tactics.RunsProgram(command, multicallPrograms...) {
+		return true
+	}
+	return tactics.RunsProgram(command, copyPrograms...) && copyLinkOption.MatchString(command)
+}
+
 // The classes of an authorized-keys proof that found no protected file but
 // could not show the write is ordinary (rel-1-0-10:GAP-0013).
 const (

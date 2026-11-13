@@ -43,7 +43,8 @@ func gap0013EveryCell(t *testing.T, connectorName string) {
 	const keys = "persistence.ssh_authorized_keys_command"
 	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow"}
 	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block"}
-	warn := map[string]string{"default": "alert", "permissive": "alert", "strict": "block", "managed": "block"}
+	// The pack decides, not the install: the default pack alerts on unknown, managed or not.
+	warn := map[string]string{"default": "alert", "permissive": "alert", "strict": "block", "managed": "alert"}
 	a, b := filepath.Join(data, "a.dat"), filepath.Join(data, "b.dat")
 	rows := []struct {
 		name, cwd, command string

@@ -229,6 +229,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			word *syntax.Word
 			cwd  string
 			vals actionValues
+			// enters: the statement changes the directory (cd ~/.ssh), which
+			// decides what the statements after it write.
+			enters bool
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
@@ -348,6 +351,14 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					}
 				}
 				for _, assign := range call.Assigns {
+					// A variable only holds the text: where it is used decides, and
+					// the use is judged with its value (actionUpdateValues).
+					if memo.nonWritesExcused() && len(call.Args) == 0 && !actionWordMayBePattern(assign.Value) {
+						if assign.Value != nil {
+							judgedWords = append(judgedWords, assign.Value)
+						}
+						continue
+					}
 					if assign.Value != nil && checkWord(assign.Value) {
 						found = true
 						return false
@@ -378,11 +389,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
-				if !readOnly && !stateOnly && memo.readsExcused() {
-					// The redirects of the statement were judged above, each on
-					// its own word; a reader that sends its output to an
-					// ordinary file still only reads what it names.
-					readOnly = actionStatementReadsOnly(stmt, home)
+				if !readOnly && !stateOnly && memo.nonWritesExcused() {
+					// A shell body or an ssh remote command that only reads.
+					readOnly = actionKnownReadOnlyShellMode(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home, 0, true)
 				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
@@ -395,7 +404,24 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					found = true
 					return false
 				}
+				roleUnknown := memo.nonWritesExcused() && actionCallRoleUnknown(call, home)
+				// A statement that only reads, outside a pipeline and not a cd, names
+				// the file to read it: its words leave the text scan too (a quoted
+				// remote command, a shell body), as a read-only statement's hit words
+				// are judged above. The walk keeps the old reading when a link is
+				// removed or replaced (a word then names a removed entry).
+				blankReads := memo.nonWritesExcused() && readOnly && direct[stmt] && !actionCallChangesDirectory(call, home)
 				for _, word := range call.Args {
+					if blankReads && len(removedEntries) == 0 && len(replacedEntries) == 0 {
+						judgedWords = append(judgedWords, word)
+					}
+					if roleUnknown {
+						// A word handed to a program the scan has no model of is
+						// data of unknown role, not a write target: ActionMentionsNoWriteRole
+						// leaves it out of this walk and of the text scan.
+						judgedWords = append(judgedWords, word)
+						continue
+					}
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
 						continue
@@ -420,14 +446,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						continue
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
-						if readOnly && direct[stmt] && memo.readsExcused() && !actionCallChangesDirectory(call, home) {
-							// ActionMentionsOnlyReads asks whether every protected
-							// name sits in a statement that only reads.
-							judgedWords = append(judgedWords, word)
-							continue
-						}
 						if readOnly && direct[stmt] {
-							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values)})
+							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), enters: actionCallChangesDirectory(call, home)})
 							judgedWords = append(judgedWords, word)
 							continue
 						}
@@ -445,6 +465,11 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		for _, read := range pendingReads {
 			if found {
 				break
+			}
+			if memo.nonWritesExcused() && !read.enters && len(removedEntries) == 0 && len(replacedEntries) == 0 {
+				// ActionMentionsNoWriteRole: no link was removed or replaced, so a
+				// statement that only reads names the file to read it.
+				continue
 			}
 			found = !actionReplacedEntryWord(read.word, read.vals, read.cwd, home, removedEntries)
 		}
@@ -2704,6 +2729,15 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 }
 
 func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bool {
+	return actionKnownReadOnlyShellMode(file, home, depth, false)
+}
+
+// actionKnownReadOnlyShellMode is actionKnownReadOnlyShellDepth; bodies also
+// reads a shell given a literal -c body and an ssh remote command as the
+// readers they run, one level deeper. The whole-command rule keeps its
+// stricter reading (TestR104StructuralProtectedNamedPOSIX pins sh -c cat
+// KEYS as a protected-target); ActionMentionsNoWriteRole asks the wider one.
+func actionKnownReadOnlyShellMode(file *syntax.File, home string, depth int, bodies bool) bool {
 	if depth >= 8 {
 		return false
 	}
@@ -2843,9 +2877,9 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 		case "ssh":
 			// The remote command line runs on another machine; it is judged
 			// as if it ran here, which can only be stricter.
-			if body, ok := actionSSHRemoteBody(call, home); ok && depth+1 < 8 {
+			if body, ok := actionSSHRemoteBody(call, home); ok && bodies && depth+1 < 8 {
 				child, parsed := parseShell(body)
-				safe = parsed && actionKnownReadOnlyShellDepth(child, home, depth+1)
+				safe = parsed && actionKnownReadOnlyShellMode(child, home, depth+1, bodies)
 			} else {
 				safe = false
 			}
@@ -2857,9 +2891,9 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			case slices.Contains(actionBodyShells, base):
 				// A shell given a literal -c (or -lc) body is read-only when
 				// the body it runs is (rel-1-0-10:GAP-0018).
-				if body, ok := actionShellBodyOfCall(call, home); ok && depth+1 < 8 {
+				if body, ok := actionShellBodyOfCall(call, home); ok && bodies && depth+1 < 8 {
 					child, parsed := parseShell(body)
-					safe = parsed && actionKnownReadOnlyShellDepth(child, home, depth+1)
+					safe = parsed && actionKnownReadOnlyShellMode(child, home, depth+1, bodies)
 				} else {
 					safe = base == "bash" && actionReadOnlyBashCLaunch(call, home, depth)
 				}
@@ -2922,15 +2956,6 @@ func actionCallChangesDirectory(call *syntax.CallExpr, home string) bool {
 		return true
 	}
 	return false
-}
-
-// actionStatementReadsOnly is actionKnownReadOnlyShell for one statement
-// whose own output redirects are left to the redirect check (the walk judges
-// every redirect word of a statement before its arguments).
-func actionStatementReadsOnly(stmt *syntax.Stmt, home string) bool {
-	bare := *stmt
-	bare.Redirs = nil
-	return actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{&bare}}, home)
 }
 
 func actionReadOnlyBashCLaunch(call *syntax.CallExpr, home string, depth int) bool {
@@ -5423,6 +5448,20 @@ func actionSSHSetupAndReadsOnly(file *syntax.File, cwd, home string) bool {
 func actionPathHasDotComponent(word string) bool {
 	for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == '/' || r == '\\' }) {
 		if part == "." || part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+// actionWordMayBePattern reports a word with an unquoted pattern character: the
+// shell expands it to the names it selects, which may be a protected file.
+func actionWordMayBePattern(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[") {
 			return true
 		}
 	}

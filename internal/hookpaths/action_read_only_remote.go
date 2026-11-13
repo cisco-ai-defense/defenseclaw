@@ -61,10 +61,9 @@ func actionShellBodyOfCall(call *syntax.CallExpr, home string) (string, bool) {
 		return "", false
 	}
 	body, known := StaticWord(call.Args[2], home)
-	// The inner shell expands $ and backquotes itself, in the home of the
-	// user it runs as; only a body with none of them is exactly what is read
-	// here (the stricter rule of actionReadOnlyBashCLaunch).
-	return body, known && body != "" && !strings.ContainsAny(body, "$`")
+	// The inner shell expands what is left in the word ($p, $HOME) itself; the
+	// walk judges the statements of the body, the substitutions in them too.
+	return body, known && body != ""
 }
 
 // actionSSHRemoteBody returns the remote command line of an ssh call that
@@ -80,42 +79,52 @@ func actionSSHRemoteBody(call *syntax.CallExpr, home string) (string, bool) {
 	if program, known := staticProgramWord(call.Args[0], home); !known || programBase(program) != "ssh" {
 		return "", false
 	}
-	var words []string
-	for _, arg := range call.Args[1:] {
-		word, known := StaticWord(arg, home)
-		if !known {
-			return "", false
-		}
-		words = append(words, word)
-	}
-	host := ""
-	for i := 0; i < len(words); i++ {
-		word := words[i]
-		if host != "" {
+	host := false
+	var remote []string
+	for i := 1; i < len(call.Args); i++ {
+		word, known := StaticWord(call.Args[i], home)
+		if host {
 			// Everything after the host is the remote command line.
-			return strings.Join(words[i:], " "), true
+			if !known {
+				return "", false
+			}
+			remote = append(remote, word)
+			continue
+		}
+		if !known {
+			// The host may be named by a variable ($H): it is a host word, but
+			// no option can be one that is not read.
+			host = true
+			continue
 		}
 		if !strings.HasPrefix(word, "-") || word == "-" {
-			host = word
+			host = true
 			continue
 		}
 		switch {
 		case slices.Contains(actionSSHFlags, word):
 		case slices.Contains(actionSSHValueFlags, word):
 			i++
-			if i >= len(words) {
+			if i >= len(call.Args) {
 				return "", false
 			}
 		case word == actionSSHSettingFlag:
 			i++
-			if i >= len(words) || !actionSSHSafeOption(words[i]) {
+			if i >= len(call.Args) {
+				return "", false
+			}
+			setting, known := StaticWord(call.Args[i], home)
+			if !known || !actionSSHSafeOption(setting) {
 				return "", false
 			}
 		default:
 			return "", false
 		}
 	}
-	return "", false
+	if !host || len(remote) == 0 {
+		return "", false
+	}
+	return strings.Join(remote, " "), true
 }
 
 // actionSSHSafeOption reports a -o setting that neither runs a local program

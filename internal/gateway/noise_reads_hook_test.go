@@ -12,8 +12,8 @@ import (
 
 // A command that only reads the keys file (checksum, listing, a state test,
 // over ssh or inside a shell body) is not a key write: alone it is allowed,
-// beside other work it alerts in a per-user default install, and a write of
-// the file in the same command still blocks (rel-1-0-10:GAP-0018).
+// beside other work it alerts in the default pack, and a write of the file in
+// the same command still blocks (rel-1-0-10:GAP-0018).
 func TestGAP0018KeyReadersAreNotKeyWrites(t *testing.T) {
 	home, cwd := r104ReviewHome(t)
 	if err := os.WriteFile(filepath.Join(cwd, "keys.sum"), []byte("x\n"), 0o600); err != nil {
@@ -25,13 +25,15 @@ func TestGAP0018KeyReadersAreNotKeyWrites(t *testing.T) {
 		name, command string
 		block         bool
 	}{
-		{"checksum to a report", `sha256sum ~/.ssh/authorized_keys > keys.sum`, false},
-		{"checksum to a report then a listing", `sha256sum ~/.ssh/authorized_keys > keys.sum; ls -l keys.sum`, false},
-		{"remote listing", `ssh -n -F ~/.ssh/config builder 'sudo ls -la ~/.ssh/authorized_keys 2>&1' | head -3`, false},
+		{"remote listing", `ssh -n builder 'sudo ls -la ~/.ssh/authorized_keys'`, false},
+		{"remote listing beside an echo", `echo before; ssh -n builder 'sudo ls -la ~/.ssh/authorized_keys'; echo after`, false},
 		{"state test", `test ! -e ~/.ssh/authorized_keys && echo absent`, false},
 		{"listing printed by sed", `ls ~/.ssh | sed -n 1,5p`, false},
 		{"login shell body", `sudo -iu builder bash -lc "sha256sum ~/.ssh/authorized_keys"`, false},
 		{"state test or true", `test -e ~/.ssh/authorized_keys || true`, false},
+		// A statement with an output redirect is no plain read (owner ruling, GAP-2590):
+		// the copy of the file's content into another file stays a block.
+		{"checksum to a report", `sha256sum ~/.ssh/authorized_keys > keys.sum`, true},
 		// A write in the same command, or any way to write, still blocks.
 		{"checksum then keys write", `sha256sum ~/.ssh/authorized_keys; echo x >> ~/.ssh/authorized_keys`, true},
 		{"remote write", `ssh -n builder 'echo x >> ~/.ssh/authorized_keys'`, true},
