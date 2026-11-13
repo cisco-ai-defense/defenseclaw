@@ -92,7 +92,7 @@ func run(name, out string, uid, gid int, gateway, failMode, provider, model, ver
 	if !ok {
 		return fmt.Errorf("unknown connector %q", name)
 	}
-	ctx, err := image.NewContext(image.BuildSpec{Harness: h, UID: uid, GID: gid, IngressPort: 18970,
+	ctx, err := image.NewContext(image.BuildSpec{Harness: h, HarnessVersion: kit.HarnessRelease(name), UID: uid, GID: gid, IngressPort: 18970,
 		DefenseClawVersion: version, Owner: "0000000000000000"})
 	if err != nil {
 		return err

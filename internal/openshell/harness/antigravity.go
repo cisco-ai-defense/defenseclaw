@@ -39,6 +39,20 @@ type antigravityRelease struct {
 
 // antigravityReleases maps a pinned version to its tarball per `uname -m`.
 var antigravityReleases = map[string]map[string]antigravityRelease{
+	// 1.5.8: the Agent Substrate actor kit's release (lane K1). The cert hosts
+	// run 1.5.7, whose versioned download Google no longer lists; 1.5.8 is the
+	// manifest's current build (hooks-v2 covers 1.1.8 and later). SHA-512 of
+	// the manifests' tarballs, read 2026-11-13.
+	"1.5.8": {
+		"aarch64": {
+			url:    "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.8-4602374149505024/linux-arm/cli_linux_arm64.tar.gz",
+			sha512: "7b040bfb8fb96f7550a8a66cd0ac28cb3e6e40e427f1e9810bfe1bf23c417cb9b363e36b2fc8ed645fe1ee518b0106f50f03de7084e95ede4591a893527360d1",
+		},
+		"x86_64": {
+			url:    "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.8-4602374149505024/linux-x64/cli_linux_x64.tar.gz",
+			sha512: "f08faaee588327dba8722bdc60f26a14f6915a8f2d756ed7959cde0a706d4e62fd9f831ab1a077dace5f947caaa6e851457df5023180bb8d3f54386804a3787f",
+		},
+	},
 	"1.2.12": {
 		"aarch64": {
 			url:    "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.12-5784551402897408/linux-arm/cli_linux_arm64.tar.gz",

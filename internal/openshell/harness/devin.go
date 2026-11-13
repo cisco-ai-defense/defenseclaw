@@ -36,6 +36,21 @@ var devinPin = tarballPin{
 	DigestSource: "Devin versioned release manifest",
 }
 
+// devinPinSubstrate is the Devin CLI release of the Agent Substrate actor kit
+// (lane K1): the cert hosts' release, 3000.12.57 (above every devin-hooks-v1
+// pin, so an "untested newer version" warning). The digests are the ones
+// static.devin.ai/cli/3000.12.57/manifest.json publishes.
+var devinPinSubstrate = tarballPin{
+	Version: "3000.12.57",
+	Archives: map[string]tarballArchive{
+		"aarch64": {URL: "https://static.devin.ai/cli/3000.12.57/devin-3000.12.57-aarch64-unknown-linux.tar.gz", SHA256: "e0f03ce263e30940122547f73e1c57d4f163391553fd37c6c856b366463d766f"},
+		"x86_64":  {URL: "https://static.devin.ai/cli/3000.12.57/devin-3000.12.57-x86_64-unknown-linux.tar.gz", SHA256: "0946784ef886d716e82a8026f76933bf0a6e4f0a804a23722bb62047e8c07d4a"},
+	},
+	DigestSource: "Devin versioned release manifest",
+}
+
+var devinPins = tarballPins{devinPin, devinPinSubstrate}
+
 // Devin is the Devin CLI harness. Its hooks live in the user config.json
 // (tamper tier user); the launcher restores them from a root-owned template
 // on every start and skips Devin's workspace trust check, whose declined
@@ -67,7 +82,7 @@ var Devin = register(&Spec{
 	},
 	install: func(version string) ([]InstallStep, error) {
 		root := InstallRootBase + "/devin"
-		run, err := devinPin.installRun(root, version)
+		run, err := devinPins.installRun(root, version)
 		if err != nil {
 			return nil, err
 		}

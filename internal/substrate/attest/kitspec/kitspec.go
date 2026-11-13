@@ -82,7 +82,7 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	if !ok {
 		return zero, attest.TemplateInfo{}, "", fmt.Errorf("kit spec: unknown connector %q", o.Connector)
 	}
-	ictx, err := image.NewContext(image.BuildSpec{Harness: h, UID: o.UID, GID: o.GID, IngressPort: 18970,
+	ictx, err := image.NewContext(image.BuildSpec{Harness: h, HarnessVersion: kit.HarnessRelease(o.Connector), UID: o.UID, GID: o.GID, IngressPort: 18970,
 		DefenseClawVersion: o.KitVersion, Owner: "0000000000000000"})
 	if err != nil {
 		return zero, attest.TemplateInfo{}, "", err
@@ -190,11 +190,40 @@ func Spec(o Options) (attest.KitSpec, attest.TemplateInfo, string, error) {
 	for _, d := range dl {
 		spec.Files = append(spec.Files, attest.LayerFile{Path: d, Mode: 0o755, Dir: true})
 	}
+	// The folders the overlay names: the image user's (UserDirs, e.g. the tool
+	// folders under the root-owned XDG config home of Devin) and root's
+	// (RootDirs, e.g. ~/.gemini and ~/.gemini/config of Antigravity, GAP-0117,
+	// and the XDG config home, GAP-0136). kitgen applies the same in its
+	// Dockerfile; without them the template build refused Antigravity (its
+	// hooks.json sat in a user-owned folder) and gave Devin no tool folders.
+	// A root folder wins over a user folder of the same path, as in kitgen.
+	for _, d := range ov.UserDirs {
+		spec.Files = append(spec.Files, attest.LayerFile{Path: d, Mode: 0o755, UID: o.UID, GID: o.GID, Dir: true})
+	}
+	for _, d := range ov.RootDirs {
+		spec.Files = append(spec.Files, attest.LayerFile{Path: d, Mode: 0o755, Dir: true})
+	}
 	for _, d := range []struct {
 		p    string
 		mode int64
 	}{{Home, 0o755}, {Home + "/.cache", 0o700}, {Home + "/.cache/tmp", 0o700}, {Home + "/.defenseclaw", 0o700}, {Workdir, 0o755}} {
 		spec.Files = append(spec.Files, attest.LayerFile{Path: d.p, Mode: d.mode, UID: o.UID, GID: o.GID, Dir: true})
+	}
+
+	// A root-owned file or folder inside the image user's home (Antigravity's
+	// ~/.gemini/config/hooks.json, GAP-0117) sits below a folder the user owns,
+	// which the user can rename or replace whatever the owner of what is
+	// below: the build's "root-owned all the way up" check cannot hold for it
+	// (GAP-0120, the connector has no managed hooks tier). It stays root-owned
+	// in the layer, so the agent cannot edit or delete it in place, and the
+	// kit's root-owned start wrapper compares it with the canonical copy
+	// outside the home at every start; that canonical copy
+	// (/usr/local/lib/defenseclaw/...) is the file the build checks. Such
+	// paths are listed with the user's files, so they are not expected.
+	for _, f := range spec.Files {
+		if f.UID == 0 && f.GID == 0 && strings.HasPrefix(f.Path, Home+"/") {
+			spec.UserFiles[f.Path] = true
+		}
 	}
 
 	// The switches the image must carry (E7).
