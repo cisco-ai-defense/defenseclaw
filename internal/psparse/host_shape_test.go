@@ -11,9 +11,11 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf16"
 )
 
@@ -42,7 +44,6 @@ var hostShapeRows = []struct {
 	{"ps-command/exec", []string{"-Exec", "Bypass", "-c", "Write-Output a"}},
 	{"ps-command/w", []string{"-w", "hidden", "-c", "Write-Output a"}},
 	{"ps-command/WindowStyle", []string{"-WindowStyle", "Hidden", "-c", "Write-Output a"}},
-	{"ps-command/wd", []string{"-wd", "/tmp", "-c", "Write-Output a"}},
 	{"ps-command/if-of", []string{"-if", "text", "-of", "text", "-c", "Write-Output a"}},
 	{"ps-command/all-opts", []string{"-NoProfile", "-nologo", "-noni", "-ep", "Bypass", "-w", "hidden", "-c", "Write-Output a"}},
 	{"ps-encoded/e", []string{"-e", r6enc("Write-Output a")}},
@@ -208,7 +209,7 @@ var hostShapeNotStatic = []struct {
 	{"long-command", `pwsh --command 'Get-Date'`, ReasonHostOption},
 	{"en-dash-c", "pwsh \u2013c 'Get-Date'", ReasonHostOption},
 	{"unknown-switch", `pwsh -foo -c 'Get-Date'`, ReasonHostOption},
-	{"version", `pwsh -Version 2 -c 'Get-Date'`, ReasonHostOption},
+	{"version", `pwsh -Version 2 -c 'Get-Date'`, ReasonNonLiteral}, // 2 is a number literal: not a certain word
 	{"noexit", `pwsh -noexit -c 'Get-Date'`, ReasonHostOption},
 	{"abbrev-enc", `pwsh -encod ` + "ZQBjAGgAbwA=", ReasonHostOption},
 	{"slash-enc", `pwsh /enc ` + "ZQBjAGgAbwA=", ReasonHostOption},
@@ -222,6 +223,26 @@ var hostShapeNotStatic = []struct {
 	{"enc-missing", `pwsh -enc`, ReasonHostShape},
 	// value-taking option without a value
 	{"ep-missing", `pwsh -ep`, ReasonHostShape},
+	// review 9 (GAP-0191..0194): working directory, cmd payload quoting, native argv
+	{"W03", `pwsh -wd /tmp -c 'Remove-Item x'`, ReasonHostOption},
+	{"W04", `pwsh -WorkingDirectory /tmp -command 'Remove-Item x'`, ReasonHostOption},
+	{"P01", `cmd /c rd /s /q 'C:\Program Files\dcx'`, ReasonCmdArgv},
+	{"P02", `cmd /c '"rd /s /q C:\dcx"'`, ReasonCmdArgv},
+	{"P04", `cmd /c echo 'a b' 'c d'`, ReasonCmdArgv},
+	{"P05", `cmd /c 'echo a' 'b c'`, ReasonCmdArgv},
+	{"P06", `cmd /c echo ''`, ReasonCmdArgv},
+	{"P07", `cmd /c echo 'say "hi"'`, ReasonCmdArgv},
+	{"cmd-quoted-payload", `cmd /c "dir C:\x"`, ReasonCmdArgv},
+	{"Q06", `pwsh -c'Write-Output a'`, ReasonNonLiteral},
+	{"Q41", `pwsh -nop -c Write-Output 1e3 0x10 1kb`, ReasonNonLiteral},
+	{"V2", `pwsh -c a'Write-Output "x"'`, ReasonNonLiteral},
+	{"V6", `pwsh -c a"b c"`, ReasonNonLiteral},
+	{"V3", `cmd /c del a'"C:\a b"'`, ReasonNonLiteral},
+	{"trailing-colon", `pwsh -c:`, ReasonNonLiteral},
+	{"glued-opt", `pwsh -nop'x' -c Get-Date`, ReasonNonLiteral},
+	{"here-string", "pwsh -c @'\nGet-Date\n'@", ReasonNonLiteral},
+	{"R9-5-more", `pwsh -c - extra`, ReasonHostOption},
+	{"R9-5-dash", `pwsh -c - -x`, ReasonHostOption},
 	// cmd shapes outside the table (R7-2, R8-4)
 	{"D01", `cmd /crd /s /q C:\Windows`, ReasonCmdArgv},
 	{"D14", `cmd ' /c' 'rd /s /q C:\Windows'`, ReasonCmdArgv},
@@ -257,13 +278,14 @@ type refWord struct {
 	colon  bool
 }
 
-// The reference matcher below is an independent statement of the table in
-// host_shapes.go: it shares no code and no data with it, so a Static result that
-// the gate lets through by mistake (or a new Static path that bypasses the gate)
-// is caught here.
+// The reference below is an independent statement of the table in
+// host_shapes.go AND of the source-to-argv conversion: it shares no code and no
+// data with it (not hostWords, not LiteralString), so a Static result that the
+// gate lets through by mistake, a new Static path that bypasses the gate, or a
+// word model that is more generous than the real native argv is caught here.
 var (
 	refNoVal   = []string{"-noprofile", "-nop", "-noninteractive", "-noni", "-nologo", "-nol", "-sta", "-mta"}
-	refWithVal = []string{"-executionpolicy", "-ep", "-exec", "-windowstyle", "-w", "-inputformat", "-if", "-outputformat", "-of", "-workingdirectory", "-wd"}
+	refWithVal = []string{"-executionpolicy", "-ep", "-exec", "-windowstyle", "-w", "-inputformat", "-if", "-outputformat", "-of"}
 	refCmdSw   = []string{"-c", "-command"}
 	refEncSw   = []string{"-e", "-ec", "-enc", "-encodedcommand"}
 	refCmdOpts = []string{"/q", "/d", "/s", "/a", "/u", "/x", "/y", "/e:on", "/e:off", "/v:on", "/v:off", "/f:on", "/f:off"}
@@ -276,6 +298,46 @@ func refIn(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// refWordOf is the only kind of argument the reference trusts as one native argv
+// word: a quoted or bare string literal that is a single token.
+func refWordOf(e Expr, colon bool) refWord {
+	if sl, ok := e.(*StringLit); ok && sl.Static && !sl.Fused && sl.Kind != StrHereSingle && sl.Kind != StrHereDouble {
+		return refWord{text: sl.Value, static: true, colon: colon}
+	}
+	return refWord{colon: colon} // numbers, lists, variables, fused atoms, ...: uncertain
+}
+
+// refArgv models the native argv of a host command from its elements: switches
+// as written, one word per single-token string, nothing certain for a trailing
+// colon, a glued neighbour or any other expression.
+func refArgv(c *Command) []refWord {
+	var out []refWord
+	prevStart, prevEnd := 0, -1
+	for _, el := range c.Elements {
+		s0, s1 := el.Span()
+		start := len(out)
+		switch e := el.(type) {
+		case *Parameter:
+			trailingColon := e.HasColon && e.Colon == nil
+			out = append(out, refWord{text: e.Raw, static: e.Raw != "" && !trailingColon})
+			if e.Colon != nil {
+				out = append(out, refWordOf(e.Colon, true))
+			}
+		case *Arg:
+			out = append(out, refWordOf(e.Value, false))
+		case Expr:
+			out = append(out, refWordOf(e, false))
+		}
+		if prevEnd >= 0 && s0 == prevEnd {
+			for k := prevStart; k < len(out); k++ {
+				out[k].static = false
+			}
+		}
+		prevStart, prevEnd = start, s1
+	}
+	return out
 }
 
 // refPS returns the script text a tested powershell shape resolves to, or ok=false.
@@ -309,7 +371,7 @@ func refPS(words []refWord, stop bool) (text string, ok bool) {
 			i += 2
 		case refIn(refCmdSw, l):
 			rest := words[i+1:]
-			if len(rest) == 0 || (len(rest) == 1 && rest[0].text == "-") {
+			if len(rest) == 0 || rest[0].text == "-" {
 				return "", false
 			}
 			parts := make([]string, len(rest))
@@ -335,37 +397,31 @@ func refPS(words []refWord, stop bool) (text string, ok bool) {
 
 // refCmd returns the script text of the tested cmd-run shape, or ok=false.
 func refCmd(c *Command) (text string, ok bool) {
-	var words []string
-	for _, el := range c.Elements {
-		a, isArg := el.(*Arg)
-		if !isArg {
-			return "", false
-		}
-		v, isLit := LiteralString(a.Value)
-		if !isLit {
-			return "", false
-		}
-		words = append(words, v)
-	}
 	if c.StopParsing != "" {
 		return "", false
 	}
+	words := refArgv(c)
 	for i, w := range words {
-		if w == "--%" || w == "" || strings.TrimSpace(w) != w {
+		if !w.static || w.colon || w.text == "--%" || w.text == "" || strings.TrimSpace(w.text) != w.text {
 			return "", false
 		}
-		l := strings.ToLower(w)
+		l := strings.ToLower(w.text)
 		if l == "/c" || l == "/k" || l == "/r" {
 			rest := words[i+1:]
 			if len(rest) == 0 {
 				return "", false
 			}
-			for _, r := range rest {
-				if r == "--%" {
+			parts := make([]string, len(rest))
+			for k, r := range rest {
+				// one native argv word the caller passes through unquoted: no
+				// whitespace and no quote character
+				if !r.static || r.colon || r.text == "" || r.text == "--%" ||
+					strings.ContainsAny(r.text, "\"'") || strings.IndexFunc(r.text, unicode.IsSpace) >= 0 {
 					return "", false
 				}
+				parts[k] = r.text
 			}
-			return strings.Join(rest, " "), true
+			return strings.Join(parts, " "), true
 		}
 		if !refIn(refCmdOpts, l) {
 			return "", false
@@ -394,12 +450,7 @@ func checkStaticImpliesShape(t testing.TB, src string, d Dialect) {
 		var want string
 		var in bool
 		if isPSHost(name) {
-			var ws []refWord
-			for _, w := range hostWords(cmd) {
-				ws = append(ws, refWord(w))
-			}
-			stop := cmd.StopParsing != ""
-			want, in = refPS(ws, stop)
+			want, in = refPS(refArgv(cmd), cmd.StopParsing != "")
 		} else if baseName(name) == "cmd" {
 			want, in = refCmd(cmd)
 		} else {
@@ -428,11 +479,11 @@ type genWord struct {
 
 var (
 	genHosts   = []string{"pwsh", "powershell", "PowerShell.EXE", "pwsh.exe", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, "& pwsh", "& 'powershell.exe'"}
-	genNoVal   = []string{"-NoProfile", "-nop", "-NOP", "-noni", "-NonInteractive", "-NoLogo", "-nol", "-sta", "-mta", "-noexit", "-login", "-l", "-nop:", "-foo", "/nop", "--nop", "\u2013nop"}
-	genWithVal = [][]string{{"-ep", "Bypass"}, {"-ExecutionPolicy", "Bypass"}, {"-w", "hidden"}, {"-WindowStyle", "Hidden"}, {"-Version", "2"}, {"-wd", "/tmp"}, {"-if", "text"}, {"-of", "xml"}, {"-File", "x.ps1"}, {"-foo", "bar"}, {"-ep", ""}, {"-ep", " Bypass"}, {"-ep"}}
-	genCmdSw   = []string{"-c", "-Command", "-command", "-C", "-comm", "-co", "/c", "--command", "\u2013c", "-cwa", "-c:"}
+	genNoVal   = []string{"-NoProfile", "-nop", "-NOP", "-noni", "-NonInteractive", "-NoLogo", "-nol", "-sta", "-mta", "-noexit", "-login", "-l", "-nop:", "-foo", "/nop", "--nop", "\u2013nop", "\u2014nop", "\u2015nop", "\t-nop", "\u00a0-nop"}
+	genWithVal = [][]string{{"-ep", "Bypass"}, {"-ExecutionPolicy", "Bypass"}, {"-w", "hidden"}, {"-WindowStyle", "Hidden"}, {"-Version", "2"}, {"-wd", "/tmp"}, {"-WorkingDirectory", "/tmp"}, {"-if", "text"}, {"-of", "xml"}, {"-File", "x.ps1"}, {"-foo", "bar"}, {"-ep", ""}, {"-ep", " Bypass"}, {"-ep"}}
+	genCmdSw   = []string{"-c", "-Command", "-command", "-C", "-comm", "-co", "/c", "--command", "\u2013c", "\u2014c", "-cwa", "-c:"}
 	genEncSw   = []string{"-e", "-ec", "-enc", "-EncodedCommand", "-en", "-encodedc", "/e", "-e:", "-ea"}
-	genPayload = []string{"Get-Date", `Remove-Item C:\x`, "Write-Output 'a b'", `Write-Output "x"`, "-", "--%", "", " ", `a\ b\`, "$x", "x;y", "Write-Output a", "-nop"}
+	genPayload = []string{"Get-Date", `Remove-Item C:\x`, "Write-Output 'a b'", `Write-Output "x"`, "-", "--%", "", " ", `a\ b\`, "$x", "x;y", "Write-Output a", "-nop", "1e3", "0x10", "1kb", "C:\\Program Files\\x", "say \"hi\"", "ver", "dir"}
 	genB64     = []string{r6enc("Write-Output a"), r6enc("Remove-Item C:\\x"), r6enc(""), "abc", " " + r6enc("x"), r6enc("x") + " ", "@@@@", r6enc("Write-Output a")[:8]}
 	genCmdOpts = []string{"/q", "/d", "/s", "/a", "/u", "/x", "/y", "/e:on", "/V:OFF", "/f:on", "/z", "foo", " /q", "/c"}
 	genCmdSw2  = []string{"/c", "/C", "/k", "/K", "/r", "/crd", "/d/c", " /c", "/c "}
@@ -504,11 +555,20 @@ func genBare(s string) bool {
 }
 
 func (g *hostGen) render(host string, words []genWord) string {
+	return host + g.renderArgs(words)
+}
+
+// renderArgs renders the words after the host, choosing per word a quoting form
+// and sometimes gluing a word to its neighbour with no space.
+func (g *hostGen) renderArgs(words []genWord) string {
 	var b strings.Builder
-	b.WriteString(host)
+	glue := false
 	for i := 0; i < len(words); i++ {
 		w := words[i]
-		b.WriteByte(' ')
+		if !glue {
+			b.WriteByte(' ')
+		}
+		glue = false
 		if w.raw {
 			b.WriteString(w.text)
 			continue
@@ -530,6 +590,10 @@ func (g *hostGen) render(host string, words []genWord) string {
 			continue
 		}
 		b.WriteString(tok)
+		// glue the next word on with no space (-c'x', a'b' c)
+		if i+1 < len(words) && !words[i+1].raw && g.coin(5) {
+			glue = true
+		}
 	}
 	return b.String()
 }
@@ -575,4 +639,118 @@ func FuzzHostShape(f *testing.F) {
 			checkStaticImpliesShape(t, src, d)
 		}
 	})
+}
+
+// TestHostArgvOracle is the missing half of the differential: it starts from
+// PowerShell SOURCE, not from argv. Each case runs in a pwsh 7.7 caller whose
+// host is a shim that records the argv it receives, and every call whose words
+// psparse reports as certain must receive exactly those words.
+func TestHostArgvOracle(t *testing.T) {
+	pwsh := os.Getenv("PSPARSE_ORACLE")
+	if pwsh == "" {
+		t.Skip("PSPARSE_ORACLE unset")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "argvshim")
+	record := filepath.Join(dir, "argv.out")
+	script := "#!/bin/sh\n{ for a in \"$@\"; do printf '%s\\0' \"$a\"; done; printf '\\001\\0'; } >> \"$ARGV_OUT\"\n"
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	type kase struct{ src, shimSrc string }
+	var cases []kase
+	for _, r := range hostShapeRows {
+		cases = append(cases, kase{hostShapeSource("pwsh", r.argv), hostShapeSource("& '"+shim+"'", r.argv)})
+	}
+	g := &hostGen{r: rand.New(rand.NewSource(11))}
+	for n := 0; n < 500; n++ {
+		host, words, _ := g.argv()
+		args := g.renderArgs(words)
+		cases = append(cases, kase{host + args, "& '" + shim + "'" + args})
+	}
+	lines := filepath.Join(dir, "lines.b64")
+	var lb strings.Builder
+	for _, c := range cases {
+		lb.WriteString(base64.StdEncoding.EncodeToString([]byte(c.shimSrc)) + "\n")
+	}
+	if err := os.WriteFile(lines, []byte(lb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	caller := filepath.Join(dir, "caller.ps1")
+	ps := `param($f, $shim)
+foreach ($l in [IO.File]::ReadAllLines($f)) {
+  $t = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($l))
+  & $shim '@@CASE'
+  try { Invoke-Expression $t *>$null } catch {}
+}
+`
+	if err := os.WriteFile(caller, []byte(ps), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-File", caller, lines, shim)
+	cmd.Env = append(os.Environ(), "ARGV_OUT="+record)
+	cmd.Stdin = nil
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Logf("caller: %v %s", err, out)
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// group records per case: a "@@CASE" record starts a new case
+	byCase := make([][][]string, 0, len(cases))
+	for _, rec := range strings.Split(string(raw), "\x01\x00") {
+		if rec == "" {
+			continue
+		}
+		args := strings.Split(strings.TrimSuffix(rec, "\x00"), "\x00")
+		if len(args) == 1 && args[0] == "@@CASE" {
+			byCase = append(byCase, nil)
+			continue
+		}
+		if len(byCase) > 0 {
+			byCase[len(byCase)-1] = append(byCase[len(byCase)-1], args)
+		}
+	}
+	if len(byCase) != len(cases) {
+		t.Fatalf("recorded %d cases, ran %d", len(byCase), len(cases))
+	}
+	checked := 0
+	for i, c := range cases {
+		sc, _ := Parse(c.src, Options{Dialect: DialectUnknown})
+		var host *Command
+		WalkCommands(sc, func(cm *Command) {
+			if n, ok := LiteralString(cm.Name); ok && host == nil && (isPSHost(n) || baseName(n) == "cmd") {
+				host = cm
+			}
+		})
+		if host == nil || host.StopParsing != "" {
+			continue
+		}
+		words := hostWords(host)
+		certain := true
+		for _, w := range words {
+			if !w.static || w.colon || w.text == "--%" {
+				certain = false
+			}
+		}
+		if !certain || len(byCase[i]) == 0 {
+			continue
+		}
+		got := byCase[i][0]
+		want := make([]string, len(words))
+		for k, w := range words {
+			want[k] = w.text
+		}
+		checked++
+		if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+			t.Errorf("case %d %q:\n psparse words %q\n native argv   %q", i, c.src, want, got)
+		}
+	}
+	if checked < 100 {
+		t.Errorf("only %d cases had certain words; the argv oracle is too thin", checked)
+	}
+	t.Logf("argv oracle: %d of %d cases compared", checked, len(cases))
 }

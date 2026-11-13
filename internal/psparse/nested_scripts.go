@@ -229,15 +229,7 @@ func nestedFromCommand(c *Command) []NestedScript {
 	case isPSHost(name):
 		return psHostNested(c)
 	case baseName(name) == "cmd":
-		if ns, ok := cmdCScript(c); ok {
-			if ns.Static {
-				// Static only for the tested cmd-run shape (host_shapes.go).
-				if reason := cmdShapeReject(c); reason != "" {
-					ns.Static, ns.Text, ns.Reason = false, "", reason
-				}
-			}
-			return []NestedScript{ns}
-		}
+		return cmdHostNested(c)
 	case isIEX(name):
 		if ns, ok := iexArgScript(c); ok {
 			return []NestedScript{ns}
@@ -275,30 +267,63 @@ type hostWord struct {
 
 func hostWords(c *Command) []hostWord {
 	var out []hostWord
+	prevStart, prevEnd := 0, -1
 	for _, el := range c.Elements {
+		s0, s1 := el.Span()
+		start := len(out)
 		switch e := el.(type) {
 		case *Parameter:
 			// gate the parameter name on the strict class too (review 5 R5-11):
 			// a name with a backtick / non-ASCII / control rune is not a trusted
-			// static word, so a positional join or host parse fails closed.
+			// static word, so a positional join or host parse fails closed. The
+			// switch keeps the dash character as written. A trailing-colon switch
+			// (-c: then a space) is handed over differently from its source text,
+			// so it is not a certain word either (review 9 R9-4).
 			text := "-" + e.Name
 			if e.Raw != "" {
-				text = e.Raw // keep the dash character as written (-c vs en-dash c)
+				text = e.Raw
 			}
-			out = append(out, hostWord{text: text, static: safeStaticLiteral(e.Name)})
+			trailingColon := e.HasColon && e.Colon == nil
+			out = append(out, hostWord{text: text, static: safeStaticLiteral(e.Name) && !trailingColon})
 			if e.Colon != nil {
-				v, ok := LiteralString(e.Colon)
+				v, ok := nativeWord(e.Colon)
 				out = append(out, hostWord{text: v, static: ok, colon: true})
 			}
 		case *Arg:
-			v, ok := LiteralString(e.Value)
+			v, ok := nativeWord(e.Value)
 			out = append(out, hostWord{text: v, static: ok})
 		case Expr:
-			v, ok := LiteralString(e)
+			v, ok := nativeWord(e)
 			out = append(out, hostWord{text: v, static: ok})
 		}
+		// An element glued to its neighbour (-c'x', a'b' c) is merged by the caller
+		// into one native argument or split in a way the AST does not show: neither
+		// word is certain (review 9 R9-4).
+		if prevEnd >= 0 && s0 == prevEnd {
+			for k := prevStart; k < len(out); k++ {
+				out[k].static = false
+			}
+		}
+		prevStart, prevEnd = start, s1
 	}
 	return out
+}
+
+// nativeWord returns the one native argv word an argument expression becomes,
+// or ok=false when the mapping is not certain: a number literal (the parser's
+// formatted value is not the source text), a here-string, or several atoms
+// fused into one word (inner quotes are kept by the caller, not by the parsed
+// value) -- review 9 R9-4.
+func nativeWord(e Expr) (string, bool) {
+	switch v := e.(type) {
+	case *Number:
+		return "", false
+	case *StringLit:
+		if v.Fused || v.Kind == StrHereSingle || v.Kind == StrHereDouble {
+			return "", false
+		}
+	}
+	return LiteralString(e)
 }
 
 // powerShellHostScripts applies the pwsh CLI parameter rules to a

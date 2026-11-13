@@ -40,6 +40,9 @@ func TestMeasureHostStatic(t *testing.T) {
 			}
 			reasons[n.Reason]++
 			if c, ok := n.Source.(*Command); ok {
+				reasons["  cause:"+measureCause(c)]++
+			}
+			if c, ok := n.Source.(*Command); ok {
 				shapes[measureSig(c)]++
 			}
 		}
@@ -113,4 +116,53 @@ func measureCommands(path string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// measureCause names why a host call's words are not all certain, for the
+// cost report: a number literal, a fused (compound) word, a glued neighbour, a
+// quoted/whitespace cmd payload word, or something else (a variable, ...).
+func measureCause(c *Command) string {
+	causes := map[string]bool{}
+	prevEnd := -1
+	for _, el := range c.Elements {
+		s0, s1 := el.Span()
+		if prevEnd >= 0 && s0 == prevEnd {
+			causes["glued"] = true
+		}
+		prevEnd = s1
+		var v Expr
+		switch e := el.(type) {
+		case *Arg:
+			v = e.Value
+		case Expr:
+			v = e
+		}
+		switch x := v.(type) {
+		case *Number:
+			causes["number"] = true
+		case *StringLit:
+			if x.Fused {
+				causes["fused"] = true
+			}
+			if !x.Static {
+				causes["dynamic"] = true
+			}
+			if x.Static && strings.ContainsAny(x.Value, " \t\"'") {
+				causes["quoted-or-spaced-word"] = true
+			}
+		case nil:
+		default:
+			causes["expr"] = true
+		}
+	}
+	out := ""
+	for _, k := range []string{"number", "fused", "glued", "quoted-or-spaced-word", "dynamic", "expr"} {
+		if causes[k] {
+			out += k + ","
+		}
+	}
+	if out == "" {
+		out = "other"
+	}
+	return out
 }
