@@ -232,6 +232,7 @@ func main() {
 	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the /llm proxy GuardrailInspector, direction prompt; the connector UserPromptSubmit answer goes to extra) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision) | session (whole sessions in order, one session id per case: PreToolUse then, with -post, PostToolUse carrying the event's result; both answers recorded per step, the PostToolUse one in post_*)")
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
+	secretFlow := flag.String("secret-flow", "", "secret flow tracking (builds that carry it): off | shadow (records hits in flow_hits, never changes an answer); empty keeps the config default")
 	flag.Parse()
 	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" && *surface != "session" {
 		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt, tool-result or session")
@@ -325,6 +326,7 @@ func main() {
 	}
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
+	gateway.S7ApplyFlow(cfg, *secretFlow)
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
