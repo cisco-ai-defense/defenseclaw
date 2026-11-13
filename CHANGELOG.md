@@ -20,6 +20,8 @@ for current behavior.
 - **CodeGuard custom rules are compiled once per rule-folder content**, not for every inspected write.
 
 ### Fixed
+- **An ACP agent that updated itself no longer needs a full setup to start again.** After `kiro-cli` 2.35.1 to 3.3.0 (or any agent update in place), the Zed + `defenseclaw-acp` pair refused to start with "agent executable digest does not match". `defenseclaw acp refresh --agent <agent>` (and `defenseclaw doctor --fix`) re-pins the updated agent at the path setup pinned, once only your account or an administrator can change it, and records the change; `acp status`, `acp verify`, `doctor` and the editor message say so (rel-1-0-10:GAP-0250).
+- **A rollback to 1.0.0-1.0.7 no longer leaves Windows Kiro hooks the older release cannot remove.** The rollback rewrote the per-user Kiro hooks into the 1.0.8 form, so the older release kept them after Kiro left the guarded set and every Kiro call failed closed. The rollback now writes the form the target release owns, and each boot removes the DefenseClaw hooks of a connector this install once set up but no longer guards (rel-1-0-10:GAP-0275).
 - **A Kiro, Devin or other non-Claude-Code, non-Codex shell call on a per-user Windows gateway that does not answer is blocked again**, as the fail-mode contract and `status` say; only Claude Code and Codex take the ordinary late-call path (rel-1-0-10 GAP-0030).
 
 ### Security
