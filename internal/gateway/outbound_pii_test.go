@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -15,19 +16,26 @@ import (
 
 func TestTrustedActionSendToolName(t *testing.T) {
 	for tool, want := range map[string]bool{
-		"mcp__bench__send_email":    true,
-		"mcp__mail__send":           true,
-		"mcp__slack__post_message":  true,
-		"slack.publish":             true,
-		"mcp__x__forward_message":   true,
-		"mcp__bench__get_email":     false,
-		"mcp__mail__read_inbox":     false,
-		"mcp__mail__search_emails":  false,
-		"mcp__mail__list_messages":  false,
-		"mcp__bench__create_entity": false,
-		"Bash":                      false,
-		"Write":                     false,
-		"mcp__mail__draft_email":    false,
+		"mcp__bench__send_email":       true,
+		"mcp__mail__send":              true,
+		"mcp__slack__post_message":     true,
+		"slack.publish":                true,
+		"mcp__x__forward_message":      true,
+		"mcp__bench__get_email":        false,
+		"mcp__mail__read_inbox":        false,
+		"mcp__mail__search_emails":     false,
+		"mcp__mail__list_messages":     false,
+		"mcp__bench__create_entity":    false,
+		"Bash":                         false,
+		"Write":                        false,
+		"mcp__mail__draft_email":       false,
+		"mcp__mail__sendEmail":         true,
+		"mcp__slack__chat_postMessage": true,
+		"mcp__mail__mail_send":         true,
+		"mcp__chat__message_history":   false,
+		"mcp__mail__getEmail":          false,
+		"mcp__mail__get_email":         false,
+		"mcp__chat__messageHistory":    false,
 	} {
 		if got := trustedActionSendToolName(tool); got != want {
 			t.Errorf("trustedActionSendToolName(%q) = %v, want %v", tool, got, want)
@@ -88,5 +96,52 @@ func TestOutboundPIIFindingsAlertOnLabelledCardAndPassport(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// P3-5: the walk is in a fixed order and has no cap that could hide a field:
+// the same call is judged the same way every time, however much text sits in
+// front of the field that carries the number.
+func TestOutboundPIIFindingsDoNotDependOnMapOrderOrSize(t *testing.T) {
+	args := map[string]any{}
+	for i := 0; i < 40; i++ {
+		args["pad"+string(rune('a'+i%26))+string(rune('a'+i/26))] = strings.Repeat("lorem ipsum dolor sit amet ", 80)
+	}
+	args["note"] = "Passport Number: HGK137803"
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) < 64<<10 {
+		t.Fatalf("test input is %d bytes, want more than 64 KiB", len(raw))
+	}
+	for run := 0; run < 60; run++ {
+		findings := outboundPIIFindings(trustedActionRequest{
+			Input:              actionfacts.Input{Tool: "mcp__mail__send_email", Args: raw},
+			EnforcementCapable: true,
+		}, nil)
+		if len(findings) != 1 || findings[0].RuleID != "PII-PASSPORT-LABELED" {
+			t.Fatalf("run %d: findings = %+v, want PII-PASSPORT-LABELED", run, findings)
+		}
+	}
+	// One string longer than the old cap, number at the end (P07).
+	long, err := json.Marshal(map[string]any{"body": strings.Repeat("x ", 80<<10) + "Passport Number: HGK137803"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := outboundPIIFindings(trustedActionRequest{
+		Input:              actionfacts.Input{Tool: "mcp__mail__sendEmail", Args: long},
+		EnforcementCapable: true,
+	}, nil)
+	if len(findings) != 1 {
+		t.Fatalf("a number after 160 KiB of text was not found: %+v", findings)
+	}
+}
+
+func TestOutboundPIIStringsAreInKeyOrder(t *testing.T) {
+	raw := json.RawMessage(`{"b":"2","a":["x",{"z":"4","y":"3"}],"c":"5"}`)
+	got := strings.Join(outboundPIIStrings(raw), ",")
+	if got != "x,3,4,2,5" {
+		t.Fatalf("strings = %q, want x,3,4,2,5", got)
 	}
 }
