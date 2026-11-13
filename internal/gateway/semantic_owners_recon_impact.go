@@ -255,7 +255,7 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	},
 	"CMD-CHMOD-WORLD": alertOnlyReconImpactOwnerWithAliases(
 		actionfacts.OperationPermissionChange,
-		accessControlMutationDisposition,
+		worldWritableModeDisposition,
 		"CMD-CHOWN-ROOT",
 	),
 	"CMD-DD-IF": {
@@ -974,6 +974,94 @@ func accessControlMutationDisposition(
 	default:
 		return false, false
 	}
+}
+
+// worldWritableModeDisposition is the CMD-CHMOD-WORLD reading of chmod
+// (rel-1-0-10:GAP-0104): a mode that grants write to others (an octal others
+// digit with bit 2, o+w, a+w) on any path that is not a fixture, a setuid or
+// setgid bit on an absolute path, or read for others on private security
+// material (chmod 644 /etc/shadow). Group or other execute and read on
+// ordinary paths (chmod 750, 640, 660, a+rX) grant no write and do not count;
+// a bare +w or =w is filtered by the umask and does not reach others. A
+// change of DefenseClaw state or a hook config is the tamper rules' finding.
+// Every other program (chown, setfacl, setcap, icacls, install -m) keeps the
+// access-control reading.
+func worldWritableModeDisposition(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) (bool, bool) {
+	if !strings.EqualFold(command.Program, "chmod") {
+		return accessControlMutationDisposition(facts, command)
+	}
+	mode, ok := firstPOSIXPermissionOperand(command.Argv)
+	if !ok {
+		return false, false
+	}
+	var setID, othersWrite, othersRead bool
+	if parsed, err := strconv.ParseUint(mode, 8, 16); err == nil {
+		if len(mode) < 3 || len(mode) > 4 {
+			return false, false
+		}
+		setID, othersWrite, othersRead = parsed&06000 != 0, parsed&0002 != 0, parsed&0004 != 0
+	} else {
+		var valid bool
+		if setID, othersWrite, othersRead, valid = symbolicOthersAccess(mode); !valid {
+			return false, false
+		}
+	}
+	owns := func(match func(actionfacts.PathFact) bool) bool {
+		return commandOwnsPath(facts, command.ID, actionfacts.PathAccessMetadata, match)
+	}
+	switch {
+	case setID && owns(func(candidate actionfacts.PathFact) bool {
+		return candidate.Absolute && !isDefiniteFixturePath(facts, candidate)
+	}):
+		return true, true
+	case othersWrite && owns(func(candidate actionfacts.PathFact) bool {
+		return !isDefiniteFixturePath(facts, candidate)
+	}):
+		return true, true
+	case othersRead && owns(func(candidate actionfacts.PathFact) bool {
+		return privateSecurityMaterial(facts, candidate)
+	}):
+		return true, true
+	}
+	return false, true
+}
+
+// symbolicOthersAccess reads a symbolic chmod mode: whether a clause sets a
+// setuid or setgid bit, and whether one grants others (o or a) write or
+// read. A clause with no who letters is filtered by the umask and is not
+// read as reaching others.
+func symbolicOthersAccess(mode string) (setID, othersWrite, othersRead, valid bool) {
+	if mode == "" {
+		return false, false, false, false
+	}
+	for _, clause := range strings.Split(mode, ",") {
+		operator := strings.IndexAny(clause, "+-=")
+		if operator < 0 || operator == len(clause)-1 {
+			return false, false, false, false
+		}
+		who := clause[:operator]
+		if strings.Trim(who, "ugoa") != "" {
+			return false, false, false, false
+		}
+		permissions := clause[operator+1:]
+		if strings.Trim(permissions, "rwxXst") != "" {
+			return false, false, false, false
+		}
+		if clause[operator] == '-' {
+			continue
+		}
+		if strings.ContainsRune(permissions, 's') && (who == "" || strings.ContainsAny(who, "uga")) {
+			setID = true
+		}
+		if strings.ContainsAny(who, "oa") {
+			othersWrite = othersWrite || strings.ContainsRune(permissions, 'w')
+			othersRead = othersRead || strings.ContainsRune(permissions, 'r')
+		}
+	}
+	return setID, othersWrite, othersRead, true
 }
 
 func symbolicPermissionRisk(mode string) (setID, publicReadWrite, valid bool) {

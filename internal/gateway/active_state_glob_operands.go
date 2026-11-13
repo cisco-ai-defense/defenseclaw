@@ -243,7 +243,11 @@ func globbedStateCommandMutates(command actionfacts.CommandFact, words []string,
 		// An option value spelled as its own word (`--exclude cache/`) is
 		// not a source.
 		rsyncOperands, rsyncOptions := rsyncStateOperands(words)
-		if len(rsyncOperands) < 2 {
+		// A dry run or a listing writes nothing (`sudo rsync -anrc --delete
+		// x/ ~/.defenseclaw/hooks/`: the wrapper keeps the call whole, so
+		// the preview reading of the rsync fact never applied;
+		// rel-1-0-10:GAP-0104).
+		if len(rsyncOperands) < 2 || slices.ContainsFunc(rsyncOptions, rsyncPreviewOption) {
 			return false
 		}
 		destination := rsyncOperands[len(rsyncOperands)-1]
@@ -354,6 +358,27 @@ func rsyncStateOperands(words []string) (operands, options []string) {
 		}
 	}
 	return operands, options
+}
+
+// rsyncPreviewOption reports --dry-run, --list-only, or a short cluster
+// with n before its first letter that takes a value (-anrc, -naci; not
+// -essh-n, whose n is part of the -e value).
+func rsyncPreviewOption(option string) bool {
+	if option == "--dry-run" || option == "--list-only" {
+		return true
+	}
+	if strings.HasPrefix(option, "--") || !strings.HasPrefix(option, "-") {
+		return false
+	}
+	for index := 1; index < len(option); index++ {
+		switch {
+		case option[index] == 'n':
+			return true
+		case strings.IndexByte("efTBM@", option[index]) >= 0:
+			return false
+		}
+	}
+	return false
 }
 
 // rsyncShortValueIsNextWord reads a short option cluster left to right:

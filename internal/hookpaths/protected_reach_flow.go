@@ -57,8 +57,18 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 	if !registrationWriteCapable(file, home) || !registrationHasFlow(file, home) {
 		return named
 	}
+	// A name counts only where it can reach a write (registrationReachTexts):
+	// sha256sum CONFIG; echo done > log names CONFIG in a reader and writes
+	// only log (rel-1-0-10:GAP-0104). The parent folder of a base name may
+	// be named anywhere (cd ~/.claude; ... > settings.json).
 	text := registrationHomeText(command, home)
-	words := registrationStaticWords(file, home)
+	reachTexts, words, blanket := registrationReachTexts(file, command, home)
+	reach := text
+	if blanket {
+		words = registrationStaticWords(file, home)
+	} else {
+		reach = registrationHomeText(strings.Join(reachTexts, "\n"), home)
+	}
 	for index, entry := range protected {
 		if registrationIsFolder(entry, protected) {
 			continue
@@ -66,9 +76,9 @@ func registrationFlowMembers(file *syntax.File, command, cwd, home string, prote
 		path := entry.path
 		base, parent := filepath.Base(path), filepath.Dir(path)
 		switch {
-		case registrationMentions(text, path, false):
+		case registrationMentions(reach, path, false):
 			named[index] = true
-		case registrationMentions(text, base, true) &&
+		case registrationMentionsRelative(reach, base) &&
 			(cwd == parent || registrationMentions(text, parent, false)):
 			named[index] = true
 		default:
@@ -141,6 +151,36 @@ func registrationMentions(text, name string, component bool) bool {
 			continue
 		}
 		if end < len(text) && registrationPathChar(text[end]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// registrationMentionsRelative reports whether text spells name as a
+// relative path (settings.json, ./settings.json): the base name of a file in
+// another folder (/var/tmp/backup/settings.json) is not that file
+// (rel-1-0-10:GAP-0104).
+func registrationMentionsRelative(text, name string) bool {
+	if name == "" || name == "." {
+		return false
+	}
+	for from := 0; from < len(text); {
+		at := strings.Index(text[from:], name)
+		if at < 0 {
+			return false
+		}
+		start, end := from+at, from+at+len(name)
+		from = start + 1
+		if end < len(text) && registrationPathChar(text[end]) {
+			continue
+		}
+		if start > 0 && registrationPathChar(text[start-1]) {
+			continue
+		}
+		if start > 0 && text[start-1] == '/' &&
+			!(start >= 2 && text[start-2] == '.' && (start == 2 || !registrationPathChar(text[start-3]) && text[start-3] != '/')) {
 			continue
 		}
 		return true

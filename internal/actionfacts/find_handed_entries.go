@@ -6,6 +6,8 @@ package actionfacts
 import (
 	"regexp"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // HandedEntries is what the programs a find -exec/-execdir/-ok/-okdir or an
@@ -117,8 +119,11 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 		}
 		return mayChange
 	case "sh", "bash", "dash", "ksh", "mksh", "ash":
-		// `bash -n {}` reads the script and runs none of it (GAP-2404).
-		only = shellOnlyParses(args)
+		// `bash -n {}` reads the script and runs none of it (GAP-2404). A
+		// -c body that only runs readers (`sh -c 'for f do sha256sum
+		// "$f"; done' sh {} +`) changes no handed entry either
+		// (rel-1-0-10:GAP-0104).
+		only = shellOnlyParses(args) || shellBodyOnlyReads(args)
 	case "uniq":
 		only = len(handedOperands(args, "fsw")) <= 1
 	case "xxd":
@@ -131,6 +136,11 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 	case "awk", "gawk", "mawk", "nawk":
 		only = awkOnlyPrints(args)
 	case "python", "python3":
+		// `python3 -c CODE {}` whose code opens files only to read them
+		// writes nothing (rel-1-0-10:GAP-0104).
+		if len(args) >= 2 && args[0] == "-c" && PythonCodeOnlyReads(args[1]) {
+			return HandedEntries{}
+		}
 		return jsonToolHandedEntries(args, inEntryDir)
 	case "cp", "rsync":
 		return copyHandedEntries(program, args, inEntryDir)
@@ -204,6 +214,113 @@ func shellOnlyParses(args []string) bool {
 		options = false
 	}
 	return noexec
+}
+
+// shellBodyOnlyReads reports the arguments of a POSIX shell whose -c body
+// (after single-letter options that neither read a script nor run code
+// before it) runs only programs that, handed names, only read them
+// (handedEntriesOf), with no output redirect other than /dev/null or a
+// descriptor copy, and no function, eval, source or alias that could run
+// text the check does not read. A word the body expands is passed to the
+// program as a handed entry. The handed entries are arguments ($0, $1, ...).
+func shellBodyOnlyReads(args []string) bool {
+	body := ""
+	for index, arg := range args {
+		if arg == "-c" || len(arg) > 2 && arg[0] == '-' && strings.Trim(arg[1:], "ceuxv") == "" && strings.ContainsRune(arg, 'c') {
+			if index+1 < len(args) {
+				body = args[index+1]
+			}
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || strings.Trim(arg[1:], "euxv") != "" {
+			return false
+		}
+	}
+	if body == "" || len(body) > 4096 {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(body), "")
+	if err != nil {
+		return false
+	}
+	reads := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !reads {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.CoprocClause:
+			reads = false
+		case *syntax.Redirect:
+			switch node.Op {
+			case syntax.RdrIn, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc, syntax.DplIn:
+			case syntax.DplOut:
+				target := handedWordLiteral(node.Word)
+				reads = target == "-" || target != "" && strings.Trim(target, "0123456789") == ""
+			default:
+				reads = handedWordLiteral(node.Word) == "/dev/null"
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				return true
+			}
+			words := make([]string, 0, len(node.Args))
+			for _, word := range node.Args {
+				literal := handedWordLiteral(word)
+				if literal == "" {
+					literal = "{}"
+				}
+				words = append(words, literal)
+			}
+			reads = handedWordLiteral(node.Args[0]) != "" && shellBodyCallReads(words)
+		}
+		return reads
+	})
+	return reads
+}
+
+// shellBodyReadBuiltins are shell builtins that read or print and change no
+// file.
+var shellBodyReadBuiltins = map[string]bool{
+	":": true, "echo": true, "printf": true, "test": true, "[": true, "true": true, "false": true,
+	"read": true, "shift": true, "exit": true, "return": true, "break": true, "continue": true,
+	"set": true, "local": true, "cd": true, "pwd": true,
+}
+
+func shellBodyCallReads(words []string) bool {
+	program := words[0][strings.LastIndex(words[0], "/")+1:]
+	if shellBodyReadBuiltins[program] {
+		return true
+	}
+	return !handedEntriesOf(words, false).Writes()
+}
+
+// handedWordLiteral is the text of a word made only of literal and quoted
+// literal parts; "" for a word that expands anything.
+func handedWordLiteral(word *syntax.Word) string {
+	if word == nil {
+		return ""
+	}
+	var out strings.Builder
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			out.WriteString(part.Value)
+		case *syntax.SglQuoted:
+			out.WriteString(part.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range part.Parts {
+				lit, ok := inner.(*syntax.Lit)
+				if !ok {
+					return ""
+				}
+				out.WriteString(lit.Value)
+			}
+		default:
+			return ""
+		}
+	}
+	return out.String()
 }
 
 // handedOperands are the words that are not options or option values;
