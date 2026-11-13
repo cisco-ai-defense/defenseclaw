@@ -58,8 +58,8 @@ const (
 	// MaxChainOperators bounds the | && and || nodes of the parse tree.
 	// The parser builds one nested node for each, left-deep, and every
 	// recursive reader recurses once per node. The costliest family (a
-	// pipeline of command substitutions) costs 77 ms and 24 MiB at 512 and
-	// 250 ms and 80 MiB at 1024; the largest real call has 38.
+	// pipeline of command substitutions) costs 64 to 270 ms and 24 MiB at 512
+	// (quiet box to loaded box) and 250 ms and 80 MiB at 1024; the largest real call has 38.
 	MaxChainOperators = 512
 
 	// MaxParsedNodes bounds the nodes of the tree (every node, of every
