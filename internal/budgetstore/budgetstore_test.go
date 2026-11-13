@@ -13,81 +13,255 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 )
 
-func testKeys(t *testing.T, fill byte) Keys {
+const (
+	aliceSID = "S-1-5-21-1-2-3-1001"
+	bobUPN   = "bob@dclab.test"
+	engGroup = `DCLAB\eng`
+)
+
+var testBudgets = []config.RoutingBudget{
+	{ID: "daily", Scope: "user", Subject: "*", Period: "day", LimitUSD: 10},
+	{ID: "eng", Scope: "group", Subject: engGroup, Period: "day", LimitUSD: 5},
+	{ID: "codex", Scope: "connector", Subject: "codex", Period: "day", LimitUSD: 50},
+}
+
+func subjectKey(t *testing.T, fill byte) SubjectKey {
 	t.Helper()
-	k, err := DeriveKeys(bytes.Repeat([]byte{fill}, SecretBytes))
+	k, err := NewSubjectKey(bytes.Repeat([]byte{fill}, SecretBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return k
 }
 
-// serve starts an HTTPS store and returns a client trusting its certificate.
-func serve(t *testing.T, keys Keys) (*Client, *Store, *httptest.Server) {
+type fixture struct {
+	t       *testing.T
+	store   *Store
+	srv     *httptest.Server
+	caPEM   []byte
+	subject SubjectKey
+	dir     string
+}
+
+func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "store.db"))
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "store.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	srv := httptest.NewTLSServer(&Handler{Store: store, Keys: serverKeys(t, keys)})
+	store.SetBudgets(map[string]Budget{"eng": {LimitUSD: 5, Period: "day"}, "codex": {LimitUSD: 50, Period: "day"}})
+	srv := httptest.NewTLSServer(&Handler{Store: store})
 	t.Cleanup(srv.Close)
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	client, err := NewClient(srv.URL, keys, caPEM, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return client, store, srv
+	return &fixture{t: t, store: store, srv: srv, subject: subjectKey(t, 1), dir: dir,
+		caPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})}
 }
 
-func TestPushAndTotalsAcrossWriters(t *testing.T) {
-	keys := testKeys(t, 1)
-	client, _, _ := serve(t, keys)
+// device issues and registers one device and returns its credential and client.
+func (f *fixture) device(users, groups []string, capUSD float64) (Credential, *Client) {
+	f.t.Helper()
+	cred, rec, err := Issue(f.subject, IssueInput{Budgets: testBudgets, Users: users, Groups: groups, CapUSD: capUSD})
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if err := f.store.AddDevice(context.Background(), rec); err != nil {
+		f.t.Fatal(err)
+	}
+	key, err := cred.Key()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	client, err := NewClient(f.srv.URL, key, f.caPEM, 5*time.Second)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return cred, client
+}
+
+func userKey(c Credential, budget string, i int) string {
+	return "user:" + budget + ":*:" + c.Users[i].ID
+}
+
+func groupKey(c Credential) string {
+	for _, fleet := range c.Keys {
+		if strings.HasPrefix(fleet, "group:eng:") {
+			return fleet
+		}
+	}
+	return ""
+}
+
+func today() string { return time.Now().UTC().Format(time.DateOnly) }
+
+func sum(rows []routingadmin.SeedRow) map[string]float64 {
+	out := map[string]float64{}
+	for _, r := range rows {
+		out[r.Key] += r.USD
+	}
+	return out
+}
+
+func TestOneUserAcrossDevicesSeesOtherWritersOnly(t *testing.T) {
+	f := newFixture(t)
 	ctx := context.Background()
-	today := time.Now().UTC().Format(time.DateOnly)
-	key := "user:daily:*:ak1:1:0123456789abcdef0123456789abcdef"
-	group := "group:eng:" + keys.SubjectHash(`DCLAB\eng`)
-	if err := client.Push(ctx, "dev1-a", []routingadmin.SeedRow{{Day: today, Key: key, USD: 2}, {Day: today, Key: group, USD: 1}}); err != nil {
+	credA, a := f.device([]string{aliceSID}, nil, 0)
+	credB, b := f.device([]string{aliceSID, bobUPN}, nil, 0)
+	alice := userKey(credA, "daily", 0)
+	if alice != userKey(credB, "daily", 0) {
+		t.Fatal("one user has one fleet id on every device")
+	}
+	if err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: alice, USD: 2}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.Push(ctx, "dev1-a", []routingadmin.SeedRow{{Day: today, Key: key, USD: 3}}); err != nil { // absolute
+	if err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: alice, USD: 3}}); err != nil { // absolute
 		t.Fatal(err)
 	}
-	if err := client.Push(ctx, "dev2-b", []routingadmin.SeedRow{{Day: today, Key: key, USD: 4}}); err != nil {
+	if err := b.Push(ctx, "eb", []routingadmin.SeedRow{{Day: today(), Key: alice, USD: 4}}); err != nil {
 		t.Fatal(err)
 	}
 	since := time.Now().AddDate(0, 0, -7)
-	rows, err := client.Totals(ctx, "dev2-b", since, []string{key, group})
+	rows, err := a.Totals(ctx, "ea", since, []string{alice})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := map[string]float64{}
-	for _, r := range rows {
-		got[r.Key] += r.USD
+	if got := sum(rows); got[alice] != 4 {
+		t.Fatalf("device A sees device B's spend only: %v", got)
 	}
-	if got[key] != 3 || got[group] != 1 {
-		t.Fatalf("other writers only, absolute totals: %v", got)
-	}
-	rows, _ = client.Totals(ctx, "dev3-c", since, []string{key})
-	if len(rows) != 1 || rows[0].USD != 7 {
-		t.Fatalf("a new writer sees both devices: %+v", rows)
+	rows, _ = b.Totals(ctx, "eb2", since, []string{alice})
+	if got := sum(rows); got[alice] != 7 {
+		t.Fatalf("a restarted writer sees both: %v", got)
 	}
 }
 
-func post(t *testing.T, srv *httptest.Server, keys Keys, path string, body []byte, at time.Time) (int, string) {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(body))
-	req.Header.Set(HeaderTime, strconv.FormatInt(at.Unix(), 10))
-	req.Header.Set(HeaderSignature, keys.Sign(http.MethodPost, path, at, body))
-	resp, err := srv.Client().Do(req)
-	if err != nil {
+// A3-FORGE: a device cannot add spend to a user or group it was not issued.
+func TestForgedAddIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, a := f.device([]string{aliceSID}, nil, 0)
+	credB, _ := f.device([]string{bobUPN}, []string{engGroup}, 0)
+	for _, key := range []string{userKey(credB, "daily", 0), groupKey(credB)} {
+		err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 100}})
+		if err == nil || !strings.Contains(err.Error(), "key_not_allowed") {
+			t.Fatalf("forged add of %s: %v", key, err)
+		}
+	}
+	var n int
+	_ = f.store.db.QueryRow(`SELECT COUNT(*) FROM spend`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("a refused push stores nothing: %d rows", n)
+	}
+}
+
+// A3-XREAD: a device cannot read another user's spend.
+func TestCrossUserReadIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, a := f.device([]string{aliceSID}, nil, 0)
+	credB, b := f.device([]string{bobUPN}, nil, 0)
+	bob := userKey(credB, "daily", 0)
+	if err := b.Push(ctx, "eb", []routingadmin.SeedRow{{Day: today(), Key: bob, USD: 3}}); err != nil {
 		t.Fatal(err)
+	}
+	_, err := a.Totals(ctx, "ea", time.Now().AddDate(0, 0, -1), []string{bob})
+	if err == nil || !strings.Contains(err.Error(), "key_not_allowed") {
+		t.Fatalf("cross-user read: %v", err)
+	}
+}
+
+func TestPooledKeysAnswerExceededOnly(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	credA, a := f.device([]string{aliceSID}, []string{engGroup}, 0)
+	_, b := f.device([]string{bobUPN}, []string{engGroup}, 0)
+	group := groupKey(credA)
+	if err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: group, USD: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := b.Totals(ctx, "eb", time.Now().AddDate(0, 0, -1), []string{group})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("under the limit nothing is sent (no pooled totals): %+v %v", rows, err)
+	}
+	if err := b.Push(ctx, "eb", []routingadmin.SeedRow{{Day: today(), Key: group, USD: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = b.Totals(ctx, "eb", time.Now().AddDate(0, 0, -1), []string{group})
+	if err != nil || len(rows) != 1 || rows[0].USD != ExceededUSD || rows[0].Key != group {
+		t.Fatalf("over the limit: one exceeded row: %+v %v", rows, err)
+	}
+}
+
+// A3-REVOKE: a revoked device is refused and its spend stays.
+func TestRevokedDeviceIsRefused(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID}, nil, 0)
+	key := userKey(cred, "daily", 0)
+	if err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.RevokeDevice(ctx, cred.Device); err != nil {
+		t.Fatal(err)
+	}
+	err := a.Push(ctx, "ea", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 2}})
+	if err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("revoked push: %v", err)
+	}
+	if _, err := a.Totals(ctx, "ea", time.Now(), []string{key}); err == nil {
+		t.Fatal("a revoked device reads nothing")
+	}
+	devices, _ := f.store.Devices(ctx)
+	if len(devices) != 1 || devices[0].Status != DeviceRevoked {
+		t.Fatalf("devices %+v", devices)
+	}
+	report, _ := f.store.Report(ctx, today())
+	if len(report) != 1 || report[0].USD != 1 {
+		t.Fatalf("its spend stays: %+v", report)
+	}
+	if err := f.store.RevokeDevice(ctx, "d000000000000000000000000"); err == nil {
+		t.Fatal("revoking an unknown device must fail")
+	}
+}
+
+func TestDeviceDailyCapClamps(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID}, nil, 10)
+	key := userKey(cred, "daily", 0)
+	if err := a.Push(ctx, "e1", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Push(ctx, "e2", []routingadmin.SeedRow{{Day: today(), Key: key, USD: 5}}); err != nil {
+		t.Fatal(err)
+	}
+	report, _ := f.store.Report(ctx, today())
+	if len(report) != 1 || report[0].USD != 10 {
+		t.Fatalf("one device adds at most its cap per day: %+v", report)
+	}
+	devices, _ := f.store.Devices(ctx)
+	if devices[0].OverCapDay != today() || devices[0].CapUSD != 10 {
+		t.Fatalf("over-cap day recorded: %+v", devices[0])
+	}
+}
+
+// post sends a hand-made request for device id with key k.
+func (f *fixture) post(id string, k DeviceKey, path string, body []byte, at time.Time) (int, string) {
+	f.t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, f.srv.URL+path, bytes.NewReader(body))
+	req.Header.Set(HeaderDevice, id)
+	req.Header.Set(HeaderTime, strconv.FormatInt(at.Unix(), 10))
+	req.Header.Set(HeaderSignature, k.Sign(http.MethodPost, path, at, body))
+	resp, err := f.srv.Client().Do(req)
+	if err != nil {
+		f.t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	var e ErrorResponse
@@ -96,157 +270,165 @@ func post(t *testing.T, srv *httptest.Server, keys Keys, path string, body []byt
 }
 
 func TestAuthFailuresAndReplayAreRefused(t *testing.T) {
-	keys := testKeys(t, 1)
-	_, _, srv := serve(t, keys)
-	today := time.Now().UTC().Format(time.DateOnly)
-	body, _ := json.Marshal(PushRequest{Epoch: "e1", Seq: 5, Rows: []Row{{Day: today, Key: "connector:c:codex", USD: 1}}})
-	if code, _ := post(t, srv, keys, PathPush, body, time.Now()); code != http.StatusOK {
+	f := newFixture(t)
+	cred, _ := f.device([]string{aliceSID}, nil, 0)
+	key, _ := cred.Key()
+	body, _ := json.Marshal(PushRequest{Epoch: "e1", Seq: 5, Rows: []Row{{Day: today(), Key: userKey(cred, "daily", 0), USD: 1}}})
+	if code, _ := f.post(cred.Device, key, PathPush, body, time.Now()); code != http.StatusOK {
 		t.Fatalf("signed push: %d", code)
 	}
-	if code, reason := post(t, srv, keys, PathPush, body, time.Now()); code != http.StatusConflict || reason != "replayed" {
+	if code, reason := f.post(cred.Device, key, PathPush, body, time.Now()); code != http.StatusConflict || reason != "replayed" {
 		t.Fatalf("replay: %d %s", code, reason)
 	}
-	if code, reason := post(t, srv, testKeys(t, 2), PathPush, body, time.Now()); code != http.StatusUnauthorized || reason != "unauthorized" {
-		t.Fatalf("another tenant secret: %d %s", code, reason)
+	other, _ := NewDeviceKey(cred.Device, bytes.Repeat([]byte{9}, SecretBytes))
+	unknown, _ := NewDeviceKey("d111111111111111111111111", cred.Secret)
+	for name, c := range map[string]struct {
+		id string
+		k  DeviceKey
+		at time.Time
+	}{
+		"wrong secret":   {cred.Device, other, time.Now()},
+		"unknown device": {unknown.ID(), unknown, time.Now()},
+		"old request":    {cred.Device, key, time.Now().Add(-10 * time.Minute)},
+		"no device":      {"", key, time.Now()},
+	} {
+		if code, reason := f.post(c.id, c.k, PathPush, body, c.at); code != http.StatusUnauthorized || reason != "unauthorized" {
+			t.Fatalf("%s: %d %s", name, code, reason)
+		}
 	}
-	if code, reason := post(t, srv, keys, PathPush, body, time.Now().Add(-10*time.Minute)); code != http.StatusUnauthorized || reason != "unauthorized" {
-		t.Fatalf("old request: %d %s", code, reason)
-	}
-	bad, _ := json.Marshal(PushRequest{Epoch: "e2", Seq: 1, Rows: []Row{{Day: today, Key: "user:Alice Smith", USD: 1}}})
-	if code, _ := post(t, srv, keys, PathPush, bad, time.Now()); code != http.StatusBadRequest {
+	bad, _ := json.Marshal(PushRequest{Epoch: "e2", Seq: 1, Rows: []Row{{Day: today(), Key: "user:Alice Smith", USD: 1}}})
+	if code, _ := f.post(cred.Device, key, PathPush, bad, time.Now()); code != http.StatusBadRequest {
 		t.Fatalf("a key that is not a charge key: %d", code)
-	}
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+PathPush, bytes.NewReader(body))
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unsigned: %d", resp.StatusCode)
 	}
 }
 
 func TestClientRefusesPlaintextAndUntrustedCertificates(t *testing.T) {
-	keys := testKeys(t, 1)
+	key, _ := NewDeviceKey("d000000000000000000000001", bytes.Repeat([]byte{1}, SecretBytes))
 	for _, raw := range []string{"http://store:8443", "https://user:pw@store", "https://store/path", "https://store?x=1", "store:8443"} {
-		if _, err := NewClient(raw, keys, nil, time.Second); err == nil {
+		if _, err := NewClient(raw, key, nil, time.Second); err == nil {
 			t.Fatalf("%s must be refused", raw)
 		}
 	}
-	_, _, srv := serve(t, keys)
-	untrusted, err := NewClient(srv.URL, keys, nil, 2*time.Second) // system roots only
+	f := newFixture(t)
+	cred, _ := f.device([]string{aliceSID}, nil, 0)
+	k, _ := cred.Key()
+	untrusted, err := NewClient(f.srv.URL, k, nil, 2*time.Second) // system roots only
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := untrusted.Push(context.Background(), "e1", []routingadmin.SeedRow{{Day: "2026-11-12", Key: "connector:c:codex", USD: 1}}); err == nil {
+	if err := untrusted.Push(context.Background(), "e1", []routingadmin.SeedRow{{Day: today(), Key: userKey(cred, "daily", 0), USD: 1}}); err == nil {
 		t.Fatal("a certificate no trusted CA signed must fail")
 	}
 }
 
-func TestStoreFileHoldsNoNames(t *testing.T) {
-	keys := testKeys(t, 1)
-	dir := t.TempDir()
-	store, err := OpenStore(filepath.Join(dir, "store.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewTLSServer(&Handler{Store: store, Keys: serverKeys(t, keys)})
-	defer srv.Close()
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	client, _ := NewClient(srv.URL, keys, caPEM, 5*time.Second)
-	today := time.Now().UTC().Format(time.DateOnly)
-	names := []string{`DCLAB\eng`, "alice@dclab.test"}
-	if err := client.Push(context.Background(), "e1", []routingadmin.SeedRow{
-		{Day: today, Key: "group:eng:" + keys.SubjectHash(names[0]), USD: 1},
-		{Day: today, Key: "user:named:=" + keys.SubjectHash(names[1]), USD: 1},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	_ = store.Close()
-	for _, f := range []string{"store.db", "store.db-wal"} {
-		data, err := os.ReadFile(filepath.Join(dir, f))
-		if err != nil {
-			continue
-		}
-		for _, name := range []string{"eng", "alice", "dclab"} {
-			if bytes.Contains(bytes.ToLower(data), []byte(`dclab\`+name)) || bytes.Contains(bytes.ToLower(data), []byte(name+"@")) {
-				t.Fatalf("%s holds %q", f, name)
-			}
-		}
-	}
-	if keys.SubjectHash(names[0]) == testKeys(t, 2).SubjectHash(names[0]) {
-		t.Fatal("the subject hash must depend on the tenant secret")
-	}
-}
-
-func TestPruneDropsOldDays(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "store.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	old := time.Now().UTC().AddDate(0, 0, -RetentionDays-1).Format(time.DateOnly)
-	ctx := context.Background()
-	if err := store.Push(ctx, PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: old, Key: "connector:c:codex", USD: 1}}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Prune(ctx); err != nil {
-		t.Fatal(err)
-	}
-	rows, _ := store.Totals(ctx, TotalsRequest{Epoch: "e2", Since: "2000-01-01", Keys: []string{"connector:c:codex"}})
-	if len(rows) != 0 {
-		t.Fatalf("pruned: %+v", rows)
-	}
-}
-
-func TestRateLimiter(t *testing.T) {
-	limit := RateLimiter(2)
-	if !limit("a") || !limit("a") || limit("a") || !limit("b") {
-		t.Fatal("two per minute per host")
-	}
-}
-
-// serverKeys are the store's keys: the auth key only.
-func serverKeys(t *testing.T, device Keys) Keys {
-	t.Helper()
-	k, err := AuthKeys(device.AuthKey())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if k.SubjectHash("x") != "" {
-		t.Fatal("the store must not hold the subject key")
-	}
-	return k
-}
-
-func TestClientRefusesAnUnsignedOrRewrittenAnswer(t *testing.T) {
-	keys := testKeys(t, 1)
-	store, err := OpenStore(filepath.Join(t.TempDir(), "store.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	inner := &Handler{Store: store, Keys: serverKeys(t, keys)}
-	rewrite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func TestClientRefusesARewrittenAnswer(t *testing.T) {
+	f := newFixture(t)
+	cred, _ := f.device([]string{aliceSID}, nil, 0)
+	key := userKey(cred, "daily", 0)
+	inner := &Handler{Store: f.store}
+	rewrite := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := httptest.NewRecorder()
 		inner.ServeHTTP(rec, r)
 		for k, v := range rec.Header() {
 			w.Header()[k] = v
 		}
 		w.WriteHeader(rec.Code)
-		_, _ = w.Write(bytes.Replace(rec.Body.Bytes(), []byte(`"rows":null`), []byte(`"rows":[{"day":"2026-11-12","key":"connector:c:codex","usd":9999}]`), 1))
-	})
-	srv := httptest.NewTLSServer(rewrite)
-	defer srv.Close()
-	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
-	client, _ := NewClient(srv.URL, keys, caPEM, 5*time.Second)
-	if _, err := client.Totals(context.Background(), "e1", time.Now().AddDate(0, 0, -1), []string{"connector:c:codex"}); err == nil {
+		_, _ = w.Write(bytes.Replace(rec.Body.Bytes(), []byte(`"rows":null`), []byte(`"rows":[{"day":"`+today()+`","key":"`+key+`","usd":9999}]`), 1))
+	}))
+	defer rewrite.Close()
+	k, _ := cred.Key()
+	client, _ := NewClient(rewrite.URL, k, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rewrite.Certificate().Raw}), 5*time.Second)
+	if _, err := client.Totals(context.Background(), "e1", time.Now().AddDate(0, 0, -1), []string{key}); err == nil {
 		t.Fatal("a rewritten answer must be refused")
 	}
 }
 
-func TestPushRefusesDaysOutsideTheWindow(t *testing.T) {
+// A3-NONAMES: neither the credential's store record nor the store file
+// carries a user or group name, and the pseudonyms depend on the tenant secret.
+func TestStoreHoldsNoNames(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, a := f.device([]string{aliceSID, bobUPN}, []string{engGroup}, 0)
+	if err := a.Push(ctx, "e1", []routingadmin.SeedRow{
+		{Day: today(), Key: userKey(cred, "daily", 0), USD: 1},
+		{Day: today(), Key: userKey(cred, "daily", 1), USD: 1},
+		{Day: today(), Key: groupKey(cred), USD: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.store.Close()
+	for _, name := range []string{"store.db", "store.db-wal"} {
+		data, err := os.ReadFile(filepath.Join(f.dir, name))
+		if err != nil {
+			continue
+		}
+		lower := bytes.ToLower(data)
+		for _, s := range []string{"bob@", "dclab", "s-1-5-21"} {
+			if bytes.Contains(lower, []byte(s)) {
+				t.Fatalf("%s holds %q", name, s)
+			}
+		}
+	}
+	other, _, _ := Issue(subjectKey(t, 2), IssueInput{Budgets: testBudgets, Users: []string{aliceSID}})
+	if other.Users[0].ID == cred.Users[0].ID {
+		t.Fatal("fleet ids must depend on the tenant secret")
+	}
+}
+
+func TestCredentialRoundTripAndScope(t *testing.T) {
+	f := newFixture(t)
+	cred, rec, err := Issue(f.subject, IssueInput{Budgets: append(testBudgets,
+		config.RoutingBudget{ID: "named", Scope: "user", Subject: bobUPN, Period: "day", LimitUSD: 1},
+		config.RoutingBudget{ID: "anyconn", Scope: "connector", Subject: "*", Period: "day", LimitUSD: 1}),
+		Users: []string{aliceSID}, Groups: []string{"DCLAB\\other"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := DecodeCredential(cred.Encode())
+	if err != nil || back.Device != cred.Device || len(back.Users) != 1 || !bytes.Equal(back.Secret, rec.Secret) {
+		t.Fatalf("round trip: %v", err)
+	}
+	for _, k := range rec.Keys {
+		if strings.HasPrefix(k, "user:named:") || strings.HasPrefix(k, "group:") {
+			t.Fatalf("a budget the device's users are not in is not allowed: %s", k)
+		}
+	}
+	if len(rec.ConnectorBudgets) != 1 || rec.ConnectorBudgets[0] != "anyconn" {
+		t.Fatalf("connector * budgets: %v", rec.ConnectorBudgets)
+	}
+	for _, bad := range []string{"", "not base64!", cred.Encode()[:20]} {
+		if _, err := DecodeCredential(bad); err == nil {
+			t.Fatalf("%q must be refused", bad)
+		}
+	}
+	if _, _, err := Issue(f.subject, IssueInput{Budgets: testBudgets, Users: []string{"alice"}}); err == nil {
+		t.Fatal("a user that is neither a UPN nor a SID must be refused")
+	}
+}
+
+func TestPruneDropsOldDaysAndIdleWriters(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	cred, _ := f.device([]string{aliceSID}, nil, 0)
+	dev := f.store.device(ctx, cred.Device)
+	key := userKey(cred, "daily", 0)
+	old := time.Now().UTC().AddDate(0, 0, -RetentionDays-1).Format(time.DateOnly)
+	if err := f.store.Push(ctx, dev, PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: old, Key: key, USD: 1}, {Day: today(), Key: key, USD: 2}}}); err != nil {
+		t.Fatal(err)
+	}
+	f.store.now = func() time.Time { return time.Now().Add(WriterIdle + time.Minute) }
+	if err := f.store.Prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var writers int
+	_ = f.store.db.QueryRow(`SELECT COUNT(*) FROM writers`).Scan(&writers)
+	report, _ := f.store.Report(ctx, "2000-01-01")
+	if writers != 0 || len(report) != 1 || report[0].USD != 2 {
+		t.Fatalf("writers %d report %+v", writers, report)
+	}
+}
+
+func TestRequestBounds(t *testing.T) {
 	now := time.Now()
 	for _, day := range []string{"9999-12-31", now.AddDate(0, 0, -RetentionDays-2).Format(time.DateOnly)} {
 		req := PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: day, Key: "connector:c:codex", USD: 1}}}
@@ -257,36 +439,15 @@ func TestPushRefusesDaysOutsideTheWindow(t *testing.T) {
 	if (PushRequest{Epoch: "e1", Seq: 1 << 63}).validate(now) == nil {
 		t.Fatal("a sequence above 2^63-1 must be refused")
 	}
-}
-
-func TestClientKeyGroupsIPv6ByPrefix(t *testing.T) {
-	if clientKey("[2001:db8:1:2:aaaa::1]:443") != clientKey("[2001:db8:1:2:bbbb::9]:443") {
-		t.Fatal("one /64 is one client")
+	limit := RateLimiter(2)
+	if !limit("a") || !limit("a") || limit("a") || !limit("b") {
+		t.Fatal("two per minute per key")
 	}
-	if clientKey("192.0.2.1:443") != "192.0.2.1" {
-		t.Fatal("IPv4 by address")
+	if clientKey("[2001:db8:1:2:aaaa::1]:443") != clientKey("[2001:db8:1:2:bbbb::9]:443") || clientKey("192.0.2.1:443") != "192.0.2.1" {
+		t.Fatal("IPv4 by address, IPv6 by /64")
 	}
-}
-
-func TestIdleWritersArePrunedButTheirSpendStays(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "store.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	ctx := context.Background()
-	today := time.Now().UTC().Format(time.DateOnly)
-	if err := store.Push(ctx, PushRequest{Epoch: "e1", Seq: 1, Rows: []Row{{Day: today, Key: "connector:c:codex", USD: 2}}}); err != nil {
-		t.Fatal(err)
-	}
-	store.now = func() time.Time { return time.Now().Add(WriterIdle + time.Minute) }
-	if err := store.Prune(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var writers int
-	_ = store.db.QueryRow(`SELECT COUNT(*) FROM writers`).Scan(&writers)
-	rows, _ := store.Totals(ctx, TotalsRequest{Epoch: "e2", Since: today, Keys: []string{"connector:c:codex"}})
-	if writers != 0 || len(rows) != 1 || rows[0].USD != 2 {
-		t.Fatalf("writers %d rows %+v", writers, rows)
+	if periodStart("week", time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) != "2026-11-09" ||
+		periodStart("month", time.Date(2026, 11, 12, 9, 0, 0, 0, time.UTC)) != "2026-11-01" {
+		t.Fatal("weeks start on Monday, months on the 1st")
 	}
 }

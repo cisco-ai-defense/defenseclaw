@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/budgetstore"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
@@ -25,6 +26,10 @@ const (
 	routingTestPromptMax = 8 << 10
 	routingRecentMax     = 50
 )
+
+// routingAPIPrefix is the path prefix of the routing API (also reachable on
+// the managed hook socket for any kernel-verified account).
+const routingAPIPrefix = "/api/v1/routing/"
 
 func (a *APIServer) registerRoutingRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/routing/effective", a.handleRoutingEffective)
@@ -43,6 +48,10 @@ func (a *APIServer) routingAPICaller(r *http.Request, cfg *config.Config) (key s
 	admin = a.healthAdministratorCaller(r, cfg)
 	if peer, viaHookSocket := managedHookPeerFromContext(r.Context()); viaHookSocket {
 		key = strconv.Itoa(peer.UID)
+	}
+	if !admin && cfg.Routing.Admin != nil && cfg.Routing.Admin.Visibility.EffectiveUsersSee() == config.RoutingUsersSeeNone {
+		// routing.admin.visibility.users_see none: only administrators read.
+		return "", false, false
 	}
 	return key, admin, admin || key != ""
 }
@@ -99,6 +108,13 @@ func routingBudgetViews(cfg *config.Config, key string, admin bool, now time.Tim
 		case b.Scope == config.RoutingBudgetScopeUser && b.Subject == config.RoutingBudgetSubjectAll && key != "":
 			spend, known = ledger.Spend("user:"+b.ID+":*:"+key, b.Period, now)
 		default:
+			continue
+		}
+		if known && spend >= budgetstore.ExceededUSD/2 {
+			// The fleet store answers a pooled budget with over the limit
+			// only, never its total.
+			view.Exceeded = true
+			views = append(views, view)
 			continue
 		}
 		if known {

@@ -340,7 +340,7 @@ func (p *Policy) applyBudgets(req Request, ledger *Ledger, now time.Time, v *Ver
 				continue
 			}
 			if b.action == config.RoutingBudgetOnExceedDeny {
-				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "A recent model call of yours could not be priced, so budget " + b.ID + " cannot tell how much is left. Try again within the hour, or ask your administrator to add the model to observability.pricing."}
+				v.Deny = &Deny{Code: "budget_cost_unknown:" + b.ID, Message: "A recent model call of yours could not be priced, so budget " + b.ID + " cannot tell how much is left. Try again in a few minutes; if it keeps happening, ask your administrator to add the model to observability.pricing."}
 				return
 			}
 			if b.action == config.RoutingBudgetOnExceedWarn {
@@ -533,6 +533,10 @@ func intersect(a, b []string) []string {
 	}
 	return out
 }
+
+// LocalSubjectHash is the device-local form of a budget subject in charge
+// keys (budget-store device issue maps it to the fleet form).
+func LocalSubjectHash(s string) string { return shortHash(s) }
 
 func shortHash(s string) string {
 	sum := sha256.Sum256([]byte(s))

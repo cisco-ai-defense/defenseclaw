@@ -24,27 +24,30 @@ import (
 )
 
 // Client is the device side of the store: a routingadmin.SpendCounter over
-// HTTPS. It sends charge keys, days and amounts only.
+// HTTPS with the device's own credential.
 type Client struct {
 	base *url.URL
-	keys Keys
+	key  DeviceKey
 	http *http.Client
 }
 
-// pushSeq is the push sequence of this process: one counter for every client
-// built, so a rebuilt client (a reload) never goes below the store's last
-// sequence of this process's epoch.
-var pushSeq atomic.Uint64
-
-func init() { pushSeq.Store(randomSeqStart()) }
-
 var _ routingadmin.SpendCounter = (*Client)(nil)
 
-// NewClient returns the client of rawURL (https only). caPEM, when set, is
-// the only trusted CA (a private store certificate); otherwise the system
-// roots. Proxies from the environment are never used and redirects are
-// refused, so requests reach only the configured host.
-func NewClient(rawURL string, keys Keys, caPEM []byte, timeout time.Duration) (*Client, error) {
+// pushSeq is the push sequence of this process: one counter for every client
+// built, so a rebuilt client (a reload) never goes below the store's last
+// sequence of this process's writer.
+var pushSeq atomic.Uint64
+
+func init() {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	pushSeq.Store(binary.BigEndian.Uint64(b[:]) >> 2)
+}
+
+// NewClient returns the client of rawURL (https only) for one device. caPEM,
+// when set, is the only trusted CA; otherwise the system roots. Proxies from
+// the environment are never used and redirects are refused.
+func NewClient(rawURL string, key DeviceKey, caPEM []byte, timeout time.Duration) (*Client, error) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
 		return nil, errors.New("budget store url must be https://host[:port] with no path, query or credentials")
@@ -64,13 +67,13 @@ func NewClient(rawURL string, keys Keys, caPEM []byte, timeout time.Duration) (*
 		MaxIdleConns: 2, IdleConnTimeout: time.Minute, TLSHandshakeTimeout: timeout}
 	return &Client{
 		base: &url.URL{Scheme: "https", Host: u.Host},
-		keys: keys,
+		key:  key,
 		http: &http.Client{Transport: transport, Timeout: timeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}, nil
 }
 
-// Push sends this epoch's absolute totals.
+// Push sends this writer's absolute totals.
 func (c *Client) Push(ctx context.Context, epoch string, rows []routingadmin.SeedRow) error {
 	req := PushRequest{Epoch: epoch, Seq: pushSeq.Add(1), Rows: make([]Row, 0, len(rows))}
 	for _, r := range rows {
@@ -78,10 +81,15 @@ func (c *Client) Push(ctx context.Context, epoch string, rows []routingadmin.See
 			req.Rows = append(req.Rows, Row{Day: r.Day, Key: r.Key, USD: r.USD})
 		}
 	}
+	if len(req.Rows) == 0 {
+		return nil
+	}
 	return c.do(ctx, PathPush, req, nil)
 }
 
-// Totals reads every other epoch's spend for keys since the given day.
+// Totals reads the fleet spend of keys since the given day: numbers for the
+// device's own users, and an over-the-limit row (ExceededUSD today) for each
+// pooled key the store says is exceeded.
 func (c *Client) Totals(ctx context.Context, epoch string, since time.Time, keys []string) ([]routingadmin.SeedRow, error) {
 	req := TotalsRequest{Epoch: epoch, Since: since.UTC().Format(time.DateOnly)}
 	for _, k := range keys {
@@ -96,10 +104,20 @@ func (c *Client) Totals(ctx context.Context, epoch string, since time.Time, keys
 	if err := c.do(ctx, PathTotals, req, &resp); err != nil {
 		return nil, err
 	}
-	out := make([]routingadmin.SeedRow, 0, len(resp.Rows))
+	asked := map[string]bool{}
+	for _, k := range req.Keys {
+		asked[k] = true
+	}
+	out := make([]routingadmin.SeedRow, 0, len(resp.Rows)+len(resp.Exceeded))
 	for _, r := range resp.Rows {
-		if ValidKey(r.Key) && validDay(r.Day) && validUSD(r.USD) {
+		if asked[r.Key] && !pooled(r.Key) && validDay(r.Day) && validUSD(r.USD) {
 			out = append(out, routingadmin.SeedRow{Day: r.Day, Key: r.Key, USD: r.USD})
+		}
+	}
+	today := time.Now().UTC().Format(time.DateOnly)
+	for _, k := range resp.Exceeded {
+		if asked[k] && pooled(k) {
+			out = append(out, routingadmin.SeedRow{Day: today, Key: k, USD: ExceededUSD})
 		}
 	}
 	return out, nil
@@ -120,8 +138,9 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 		return err
 	}
 	now := time.Now()
-	sig := c.keys.Sign(http.MethodPost, path, now, body)
+	sig := c.key.Sign(http.MethodPost, path, now, body)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(HeaderDevice, c.key.ID())
 	req.Header.Set(HeaderTime, fmt.Sprint(now.Unix()))
 	req.Header.Set(HeaderSignature, sig)
 	resp, err := c.http.Do(req)
@@ -130,13 +149,11 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
-	if resp.StatusCode == http.StatusOK && !c.keys.VerifyResponse(sig, resp.StatusCode, data, resp.Header.Get(HeaderResponse)) {
-		// Not the store's answer (a TLS-inspecting middlebox or a forged
-		// response): use none of it.
+	if resp.StatusCode == http.StatusOK && !c.key.VerifyResponse(sig, resp.StatusCode, data, resp.Header.Get(HeaderResponse)) {
 		return errors.New("budget store answer is not signed by the store (a proxy between the device and the store?)")
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		return errors.New("budget store refused the request: unauthorized (wrong tenant secret, or the clocks differ by more than 5 minutes)")
+		return errors.New("budget store refused this device: unknown or revoked device credential, or the clocks differ by more than 5 minutes")
 	}
 	if resp.StatusCode != http.StatusOK {
 		var e ErrorResponse
@@ -153,12 +170,4 @@ func (c *Client) do(ctx context.Context, path string, in, out any) error {
 		}
 	}
 	return nil
-}
-
-// randomSeqStart starts the push sequence at a random point in the lower
-// half of the range, so a clock step cannot make it repeat.
-func randomSeqStart() uint64 {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return binary.BigEndian.Uint64(b[:]) >> 2
 }

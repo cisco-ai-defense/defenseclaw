@@ -45,7 +45,13 @@ func (e *Engine) chargeBudgets(f CallFacts, rec Record) {
 	if usd == nil {
 		usd = rec.Cost.USD
 	}
+	// A stream cancelled after the provider started answering, before the
+	// final usage, was billed by the provider for output nobody counted:
+	// its cost is unknown, never the input-only (or zero) total.
+	cutShort := rec.Outcome == "cancelled" && rec.TTFB > 0 && rec.Usage.Has&HasOutput == 0
 	switch {
+	case cutShort:
+		box.sink.Add(id, f.ChargeKeys, 0, false, rec.EndedAt)
 	case usd != nil:
 		box.sink.Add(id, f.ChargeKeys, *usd, true, rec.EndedAt)
 	case rec.Usage.Has != 0:

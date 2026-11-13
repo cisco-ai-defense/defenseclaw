@@ -72,8 +72,9 @@ func (l *Ledger) Charge(keys []string, usd float64, at time.Time) {
 	}
 }
 
-// UnknownTTL is how long one call of unknown cost keeps a budget unknown.
-const UnknownTTL = time.Hour
+// UnknownTTL is how long one call of unknown cost keeps the caller's own
+// budget unknown (a stream cut short, usage no price covers).
+const UnknownTTL = 10 * time.Minute
 
 // MarkUnknown records a call whose usage no price covers. Only the caller's
 // own keys (user:) are marked: one person's unpriced call never blocks a
