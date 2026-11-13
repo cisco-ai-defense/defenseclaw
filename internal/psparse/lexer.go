@@ -684,6 +684,16 @@ func (l *lexer) lexBareword() {
 	for l.i < len(l.runes) {
 		r := l.cur()
 		if r == '`' {
+			if l.peek(1) == 'u' && l.peek(2) == '{' { // `u{hex} escape stays in the word
+				l.i += 3
+				for l.i < len(l.runes) && l.cur() != '}' {
+					l.i++
+				}
+				if l.cur() == '}' {
+					l.i++
+				}
+				continue
+			}
 			l.i += 2
 			continue
 		}

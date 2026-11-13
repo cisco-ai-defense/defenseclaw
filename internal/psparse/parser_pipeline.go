@@ -4,7 +4,10 @@
 
 package psparse
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // parsePipelineChainOrAssignment parses a statement that is a pipeline, a
 // pipeline chain (&& / ||), a background job (trailing &), or an assignment.
@@ -277,6 +280,19 @@ func nameValue(raw string) string {
 	var b strings.Builder
 	for i := 0; i < len(rs); i++ {
 		if rs[i] == '`' && i+1 < len(rs) {
+			if rs[i+1] == 'u' && i+2 < len(rs) && rs[i+2] == '{' {
+				j := i + 3
+				for j < len(rs) && rs[j] != '}' {
+					j++
+				}
+				if j < len(rs) {
+					if cp, err := strconv.ParseInt(string(rs[i+3:j]), 16, 32); err == nil && cp >= 0 && cp <= 0x10FFFF {
+						b.WriteRune(rune(cp))
+						i = j
+						continue
+					}
+				}
+			}
 			b.WriteRune(backtickEscape(rs[i+1]))
 			i++
 			continue
