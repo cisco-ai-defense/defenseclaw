@@ -2088,6 +2088,10 @@ var migrations = []migration{
 		description: sparseKeyIndexesMigrationDescription,
 		apply:       migrateSparseKeyIndexes,
 	},
+	{
+		description: rejectedRecordsMigrationDescription,
+		apply:       migrateRejectedRecords,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

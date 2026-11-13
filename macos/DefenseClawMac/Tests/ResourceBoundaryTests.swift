@@ -52,6 +52,7 @@ struct ResourceBoundaryTests {
         try await eventReaderRejectsOversizedRecords()
         try await eventReaderEnforcesAggregateRetainedByteLimit()
         try await gatewayProjectsAppliedPolicy()
+        try await gatewayDecodesV8Destinations()
         try await gatewayAcceptsLegitimateResponse()
         try await gatewayRefusesUntrustedListenerAndProtectsToken()
         gatewayListenerOwnershipRules()
@@ -274,15 +275,63 @@ struct ResourceBoundaryTests {
         StubGatewayURLProtocol.headers = [:]
         // Both routes deliberately receive the same fixture; only the typed
         // allowlisted projections may leave GatewayClient.
-        StubGatewayURLProtocol.body = Data(#"{"policy":{"effective_digest":"digest-v9","generation":9},"profile":"engineers","effective":{"mode":"action","block_at":"HIGH","alert_at":"LOW","rule_pack":"default","secret":"never project"},"token":"never project"}"#.utf8)
+        StubGatewayURLProtocol.body = Data(#"{"policy":{"effective_digest":"digest-v9","generation":1,"config_generation":9},"profile":"engineers","effective":{"mode":"action","block_at":"HIGH","alert_at":"LOW","rule_pack":"default","secret":"never project"},"token":"never project"}"#.utf8)
         let client = gatewayClient(maximumResponseBytes: 4096)
         let fields = try await client.appliedPolicy(user: "fixture", connector: "codex", resolveProfile: true)
         expect(fields["Policy digest"] == "digest-v9" && fields["Generation"] == "9", "effective policy identity is projected")
         expect(fields["Profile"] == "engineers" && fields["Block at"] == "HIGH", "effective account profile is projected")
         expect(!fields.values.contains("never project"), "non-display response fields never reach the overview")
+        StubGatewayURLProtocol.body = Data(#"{"policy":{"effective_digest":"digest-v9","generation":120}}"#.utf8)
+        let unknown = try await client.appliedPolicy(user: "fixture", connector: "codex", resolveProfile: false)
+        expect(unknown["Generation"] == nil, "a restart-local counter must not stand in for missing config generation")
+        StubGatewayURLProtocol.body = Data(#"{"policy":{"effective_digest":"digest-v9"},"profile":"default","lookup_error":"directory  unreachable","effective":{"mode":"observe"}}"#.utf8)
+        let fallback = try await client.appliedPolicy(user: "fixture", connector: "codex", resolveProfile: true)
+        expect(fallback["Profile"] == "unknown (user lookup failed)" && fallback["Lookup error"]?.contains("directory unreachable") == true,
+               "a failed account lookup is not shown as the chosen profile (GAP-1271)")
         StubGatewayURLProtocol.body = Data("{}".utf8)
         do { _ = try await client.appliedPolicy(user: "fixture", connector: "codex", resolveProfile: true); fail("missing profile must not look healthy") }
         catch GatewayError.badResponse { }
+    }
+
+    private static func gatewayDecodesV8Destinations() async throws {
+        StubGatewayURLProtocol.statusCode = 200
+        StubGatewayURLProtocol.headers = [:]
+        StubGatewayURLProtocol.body = Data(#"""
+        {"telemetry":{"state":"degraded","details":{"destination_count":2,"retention_state":"Warning","retention_failure":"cap_shortfall","destinations":[
+          {"name":"local-sqlite","kind":"sqlite","enabled":true,"state":"healthy","reason":"activated","signals":["logs"],
+           "counters":{"accepted":12,"delivered":12}},
+          {"name":"local-observability","kind":"otlp","enabled":true,"state":"degraded",
+           "signals":["logs","traces","metrics"],"reason":"delivery_failed","circuit_state":"open",
+           "counters":{"accepted":20,"delivered":2,"dropped":3,"rejected":4,"retried":5},
+           "queue":{"items":6,"max_items":4096,"bytes":512,"max_bytes":1048576}}]}}}
+        """#.utf8)
+        var config = DefenseClawConfig()
+        config.raw = MiniYAML.parse("""
+        observability:
+          destinations:
+            - name: local-observability
+              endpoint: http://collector.example:4318/path?credential=private-value
+        """)
+        let snapshot = try await gatewayClient(maximumResponseBytes: 8192, config: config).health()
+        expect(snapshot.observabilityRows.count == 2, "v8 destinations are retained")
+        let local = snapshot.observabilityRows[0]
+        let exporter = snapshot.observabilityRows[1]
+        expect(local.kind == "sqlite" && local.scope == "local" && local.signals == "logs", "SQLite must not appear as OTLP")
+        expect(local.healthReason.isEmpty && local.endpoint == "local audit database", "routine recovery is quiet and local storage remains identifiable")
+        expect(EntityState.classify("failing") == .blocked, "failed delivery is an error state")
+        expect(exporter.state == "degraded" && exporter.policyState == "enabled", "enabled policy is distinct from unhealthy delivery")
+        expect(exporter.signals == "logs,traces,metrics", "signal arrays are decoded")
+        expect(exporter.routing.contains("rejected 4") && exporter.routing.contains("dropped 3"), "delivery losses are visible")
+        expect(exporter.queue.contains("6 / 4096") && exporter.circuit == "open", "bounded queue and circuit state are retained")
+        expect(exporter.detail.contains("delivery_failed"), "destination health reason reaches the detail")
+        expect(!exporter.endpoint.contains("private-value") && exporter.endpoint.contains("collector.example"), "config endpoints are redacted")
+        expect(snapshot.telemetryDetail.contains("local-observability (degraded)"), "service summary reflects live destination health")
+        expect(snapshot.retentionState == "warning" && snapshot.retentionFailure == "cap_shortfall", "the retention controller state is read and normalized")
+
+        StubGatewayURLProtocol.body = Data(#"{"telemetry":{"details":{"retention_state":"<b>bogus</b>","destinations":[{"name":"old","enabled":true,"signals":"traces","preset":"legacy"}]}}}"#.utf8)
+        let legacy = try await gatewayClient(maximumResponseBytes: 4096).health()
+        expect(legacy.observabilityRows.first?.signals == "traces" && legacy.observabilityRows.first?.kind == "legacy", "legacy destination shape remains readable")
+        expect(legacy.retentionState.isEmpty && legacy.retentionFailure.isEmpty, "an unknown controller state is not shown")
     }
 
     private static func gatewayAcceptsLegitimateResponse() async throws {
@@ -380,6 +429,24 @@ struct ResourceBoundaryTests {
         expect(snapshot.planesNotRunning.first?.reason == "permission unavailable", "blind reason preserved")
         expect(snapshot.findings.first?.findingID == "a", "findings sorted by severity")
         expect(snapshot.unattributedShare == 1, "untrusted counters cannot overflow percentage rendering")
+        var limited = AIRuntimeSnapshot()
+        limited.enabled = true
+        limited.scannedAt = Date()
+        limited.degraded = true
+        limited.degradedReasons = ["shadow egress partially covered: this account only"]
+        expect(limited.healthLabel == "WATCHING", "running planes with stated coverage limits are watching")
+        limited.degradedReasons.append("agent actions unavailable: permission denied")
+        expect(limited.healthLabel == "DEGRADED", "an unavailable selected plane remains degraded")
+        limited.scannedAt = nil
+        expect(limited.healthLabel == "STARTING", "before the first poll is starting")
+        limited.enabled = false
+        expect(limited.healthLabel == "OFF", "disabled coverage stays off")
+        let partial = AIRuntimePlane(plane: "egress", name: "Egress", available: true, running: true,
+                                     mechanism: "sockets", reason: "this account only")
+        expect(partial.badge == "partial" && partial.summary.contains("this account only"), "running coverage limits are visible")
+        let off = AIRuntimePlane(plane: "host", name: "Host", available: true, running: false,
+                                 reason: "not selected in ai_discovery.runtime.planes")
+        expect(off.badge == "off", "unselected opt-in plane is off rather than failed")
         let hostile = AIRuntimeDecoding.snapshot(from: [
             "findings": [
                 ["finding_id": "same", "cmdline": #"worker --token "private value""#],

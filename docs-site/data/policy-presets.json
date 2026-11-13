@@ -895,9 +895,9 @@
                 {
                   "id": "credential.directory_ticket_request",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
                   "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
-                  "title": "Exact Kerberos ticket request",
+                  "title": "Exact Kerberos ticket request or domain-service credential use (NetExec)",
                   "severity": "HIGH",
                   "confidence": 0.99,
                   "tags": [
@@ -4819,9 +4819,9 @@
                 {
                   "id": "credential.directory_ticket_request",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
                   "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
-                  "title": "Exact Kerberos ticket request",
+                  "title": "Exact Kerberos ticket request or domain-service credential use (NetExec)",
                   "severity": "HIGH",
                   "confidence": 0.99,
                   "tags": [
@@ -8839,9 +8839,9 @@
                 {
                   "id": "credential.directory_ticket_request",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
                   "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
-                  "title": "Exact Kerberos ticket request",
+                  "title": "Exact Kerberos ticket request or domain-service credential use (NetExec)",
                   "severity": "HIGH",
                   "confidence": 0.99,
                   "tags": [

@@ -3789,6 +3789,621 @@ attributes:
       max_utf8_bytes: 65536
     notes: Source-backed health failure text retained until central route redaction
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.health.report_id
+  type: string
+  brief: Unique identity of one endpoint health report
+  examples: ['0f8fad5b-d9cb-469f-a165-70867728950e']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 36
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    notes: Lower-case UUID minted per report
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.sequence
+  type: int64
+  brief: Monotonic per-installation endpoint health report sequence
+  examples: [1234]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative; persisted across gateway restarts
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.trigger
+  type: string
+  brief: Why the endpoint health report was built
+  examples: [scheduled]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - startup
+      - scheduled
+      - config_reload
+    notes: startup|scheduled|config_reload
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.observed_at
+  type: string
+  brief: Endpoint clock time at which the health snapshot was taken
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.report_interval_s
+  type: int64
+  brief: Effective endpoint health report interval in seconds
+  examples: [1800]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 60
+      max: 86400
+    notes: Effective interval including the operator override
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.status
+  type: string
+  brief: Overall endpoint health status
+  examples: [degraded]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - healthy
+      - degraded
+      - unhealthy
+      - starting
+    notes: Worst severity across reasons; healthy when there are none
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.reasons
+  type: array
+  brief: Ordered reason codes that explain the overall endpoint health status
+  examples: [[{code: HOOKS_PARTIAL, component: hooks, severity: degraded, connector: codex}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 9216, max_item_utf8_bytes: 288, max_items: 160, max_depth: 2, max_properties: 128}
+    notes: Sealed typed array of at most 32 reason records sorted by severity then code
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.reasons_truncated
+  type: boolean
+  brief: Whether the reason list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.version.product
+  type: string
+  brief: Installed DefenseClaw product version
+  examples: ['1.0.9']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z.+_-]{1,64}$'
+    notes: Version token only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.version.policy_bundle
+  type: string
+  brief: Applied managed policy bundle version
+  examples: ['42']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z.+_:-]{1,64}$'
+    notes: Version token only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.version.avc
+  type: string
+  brief: Version of the host Secure Client AVC module
+  examples: ['5.1.21.4204']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z.+_-]{1,64}$'
+    notes: Version token only; omitted when unreadable
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.os.version
+  type: string
+  brief: Operating system version of the endpoint
+  examples: ['15.5']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$'
+    notes: Version token only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.gateway.started_at
+  type: string
+  brief: Time the gateway process started
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.gateway.uptime_s
+  type: int64
+  brief: Gateway process uptime in seconds
+  examples: [86400]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.gateway.configuration
+  type: string
+  brief: Overall gateway configuration readiness
+  examples: [ready]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.subsystems
+  type: array
+  brief: Present gateway subsystems and their states
+  examples: [[{name: guardrail, state: running, since: '2026-07-11T00:00:00Z'}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 4608, max_item_utf8_bytes: 288, max_items: 80, max_depth: 2, max_properties: 64}
+    notes: Sealed typed array of at most 16 subsystem records; error text is mapped to an error class
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.subsystems_truncated
+  type: boolean
+  brief: Whether the subsystem list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.guardian.state
+  type: string
+  brief: Hook guardian liveness state
+  examples: [running]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - running
+      - stale
+      - absent
+    notes: running|stale|absent
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.guardian.last_pass_at
+  type: string
+  brief: Time of the last completed hook guardian pass
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.targets
+  type: int64
+  brief: Hook targets known to the guardian
+  examples: [12]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.ok
+  type: int64
+  brief: Hook targets wired and verified
+  examples: [10]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.failed
+  type: int64
+  brief: Hook targets that failed to wire
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.pending
+  type: int64
+  brief: Hook targets awaiting wiring
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.connectors
+  type: array
+  brief: Per-connector hook target counts
+  examples: [[{connector: claude_code, targets: 4, ok: 4, failed: 0, pending: 0}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 6144, max_item_utf8_bytes: 384, max_items: 128, max_depth: 2, max_properties: 112}
+    notes: Sealed typed array of at most 16 connector records
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.connectors_truncated
+  type: boolean
+  brief: Whether the hook connector list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.failing_targets
+  type: array
+  brief: Hook targets that are failing or pending, with the affected user identity
+  examples: [[{connector: codex, user.id: S-1-5-21-1-2-3-1001, user.id_kind: windows_sid, error_class: CONFIG_WRITE_DENIED, pending: false}]]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: bounded
+  normalization:
+    id: structured-content-v1
+    overrides: {max_utf8_bytes: 7168, max_item_utf8_bytes: 448, max_items: 96, max_depth: 2, max_properties: 80}
+    notes: Sealed typed array of at most 16 records; carries user.id and its namespace, never email
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.hooks.failing_targets_truncated
+  type: boolean
+  brief: Whether the failing hook target list was capped
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Boolean
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.ai_defense
+  type: string
+  brief: Cisco AI Defense inspection availability
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - ok
+      - unavailable
+      - unknown
+      - disabled
+    notes: ok|unavailable|unknown|disabled
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.unavailable_code
+  type: string
+  brief: Bounded code explaining why AI Defense inspection is unavailable
+  examples: [aid_unavailable]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$'
+    notes: Closed code only; error text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.cmid_token
+  type: string
+  brief: CMID bearer token availability
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - ok
+      - unavailable
+    notes: ok|unavailable
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.cmid_last_success_at
+  type: string
+  brief: Time a CMID token was last obtained
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.inspection.fail_open_since_last
+  type: int64
+  brief: Fail-open inspection decisions since the previous report
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.state
+  type: string
+  brief: Health state of the managed AI Defense delivery destination
+  examples: [healthy]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.circuit
+  type: string
+  brief: Circuit state of the managed AI Defense delivery destination
+  examples: [closed]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.consecutive_failures
+  type: int64
+  brief: Consecutive delivery failures to the managed AI Defense destination
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.last_success_at
+  type: string
+  brief: Time of the last successful managed AI Defense delivery
+  examples: ['2026-07-11T00:00:00Z']
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: high
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$'
+    notes: RFC3339 timestamp only
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.last_failure_class
+  type: string
+  brief: Bounded class of the last managed AI Defense delivery failure
+  examples: [transient]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.cloud_delivery.dropped_since_last
+  type: int64
+  brief: Records dropped by the managed AI Defense destination since the previous report
+  examples: [0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides:
+      min: 0
+      max: 9223372036854775807
+    notes: Nonnegative count
+  introduced_in: telemetry-registry-v3
+- id: defenseclaw.health.local_store.audit_store
+  type: string
+  brief: Local audit store availability
+  examples: [ok]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 32
+      pattern: '^[a-z][a-z0-9_]{0,31}$'
+    notes: Bounded lower-case state token; free-form text is forbidden
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.schema.error_code
   type: string
   brief: Stable schema error code
@@ -6861,6 +7476,92 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.schema.error_code
     requirement_level: recommended
+- id: body.endpoint.health
+  type: body_group
+  brief: Bounded periodic endpoint health report; states, codes, counts, timestamps and versions only.
+  stability: stable
+  introduced_in: telemetry-registry-v3
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.health.report_id
+    requirement_level: required
+  - ref: defenseclaw.health.sequence
+    requirement_level: required
+  - ref: defenseclaw.health.trigger
+    requirement_level: required
+  - ref: defenseclaw.health.observed_at
+    requirement_level: required
+  - ref: defenseclaw.health.report_interval_s
+    requirement_level: required
+  - ref: defenseclaw.health.status
+    requirement_level: required
+  - ref: defenseclaw.health.reasons
+    requirement_level: recommended
+  - ref: defenseclaw.health.reasons_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.version.product
+    requirement_level: recommended
+  - ref: defenseclaw.health.version.policy_bundle
+    requirement_level: recommended
+  - ref: defenseclaw.health.version.avc
+    requirement_level: recommended
+  - ref: defenseclaw.health.os.version
+    requirement_level: recommended
+  - ref: defenseclaw.health.gateway.started_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.gateway.uptime_s
+    requirement_level: recommended
+  - ref: defenseclaw.health.gateway.configuration
+    requirement_level: recommended
+  - ref: defenseclaw.health.subsystems
+    requirement_level: recommended
+  - ref: defenseclaw.health.subsystems_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.guardian.state
+    requirement_level: recommended
+  - ref: defenseclaw.health.guardian.last_pass_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.targets
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.ok
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.failed
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.pending
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.connectors
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.connectors_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.failing_targets
+    requirement_level: recommended
+  - ref: defenseclaw.health.hooks.failing_targets_truncated
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.ai_defense
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.unavailable_code
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.cmid_token
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.cmid_last_success_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.inspection.fail_open_since_last
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.state
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.circuit
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.consecutive_failures
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.last_success_at
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.last_failure_class
+    requirement_level: recommended
+  - ref: defenseclaw.health.cloud_delivery.dropped_since_last
+    requirement_level: recommended
+  - ref: defenseclaw.health.local_store.audit_store
+    requirement_level: recommended
 - id: body.diagnostic
   type: body_group
   brief: Explicitly enabled diagnostic message/snapshot body.
@@ -7723,6 +8424,27 @@ groups:
     event_name: ai.runtime.activity
   x-defenseclaw:
     bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.endpoint.health_reported
+  type: log
+  brief: Periodic managed-endpoint health report delivered to Cisco AI Defense.
+  stability: stable
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.endpoint.health
+  attributes: []
+  body_fields: []
+  log:
+    event_name: endpoint.health_reported
+  x-defenseclaw:
+    bucket: platform.health
     family_schema_version: 1
     outcome_requirement: required
     allowed_outcomes:
@@ -16028,6 +16750,20 @@ producer_mappings:
     introduced_in: telemetry-registry-v1
     disposition: translate_to_v8
   allowed_context_identity_set: identity_set.ai_discovery
+- producer: gateway_event
+  key: endpoint_health
+  source: internal/gatewaylog/events.go
+  event_name_policy: fixed
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+  default_identity:
+    event_name: endpoint.health_reported
+    bucket: platform.health
+    family: log.endpoint.health_reported
 - producer: audit_action
   key: acknowledge-alerts
   source: internal/audit/actions.go

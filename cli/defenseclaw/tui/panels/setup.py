@@ -158,6 +158,7 @@ class SetupWizard(IntEnum):
     GUARDRAIL_ACTIONS = 19
     REDACTION = 20
     ACP_GUARD = 21
+    SEMANTIC_ROUTING = 22
 
 
 WIZARD_NAMES: tuple[str, ...] = (
@@ -183,6 +184,7 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Guardrail Actions",
     "Redaction Policy",
     "ACP Guard",
+    "Semantic routing",
 )
 
 WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
@@ -219,6 +221,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.GUARDRAIL_ACTIONS: ("guardrail", "status"),
     SetupWizard.REDACTION: ("setup", "redaction"),
     SetupWizard.ACP_GUARD: ("acp", "setup"),
+    SetupWizard.SEMANTIC_ROUTING: ("routing", "setup"),
 }
 
 # First argv words the Setup tasks run ("setup", "keys", "guardrail", "agent"
@@ -297,6 +300,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Turn the guardrail on or off, set fail mode and approvals.",
     "Choose what is hidden from logs and exports.",
     "Protect an ACP agent in Zed or JetBrains.",
+    "Route model calls to the model you choose, by task, user and budget.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -330,6 +334,7 @@ WIZARD_HOW_TO: tuple[str, ...] = (
         "advanced bucket, profile, destination, and ordered-route setting."
     ),
     "Runs: defenseclaw acp setup. Choose an editor client, ACP agent, profile, and observe or action mode.",
+    "Runs: defenseclaw routing setup --yes --classifier <rules|systemone|vllm_sr>. Uses the models in routing.models.",
 )
 
 OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
@@ -2255,6 +2260,53 @@ def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
+def _routing_wizard_fields() -> tuple[WizardFormField, ...]:
+    return (
+        WizardFormField(
+            "Classifier",
+            "choice",
+            "--classifier",
+            value="rules",
+            default="rules",
+            options=("rules", "systemone", "vllm_sr"),
+            required=True,
+            hint="rules is built in; systemone uses a decision model; vllm_sr the vLLM Semantic Router.",
+        ),
+        WizardFormField(
+            "First model",
+            "text",
+            "--model",
+            value="",
+            default="",
+            hint="Optional when routing.models has one: ALIAS=PROVIDER/MODEL, for example fast=anthropic/claude-haiku-4-5.",
+        ),
+    )
+
+
+def _routing_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "rules",
+            "Route by task with built-in rules",
+            summary="Use the models in routing.models and turn routing on, then test one prompt.",
+            presets={"--classifier": "rules"},
+            fields=("Classifier", "First model"),
+        ),
+    )
+
+
+def _build_routing_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    args = ["routing", "setup", "--yes"]
+    classifier = wizard_field_value(fields, "Classifier").strip()
+    if classifier:
+        args.extend(("--classifier", classifier))
+    model = wizard_field_value(fields, "First model").strip()
+    if model:
+        args.extend(("--model", model))
+    return tuple(args)
+
+
 def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
     def managed(values: Mapping[str, str]) -> bool:
         return values.get("managed_enrollment") == "yes"
@@ -3271,6 +3323,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
     SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
+    SetupWizard.SEMANTIC_ROUTING: lambda cfg=None: _routing_wizard_fields(),
     SetupWizard.SANDBOX: lambda cfg=None: sandbox_wizard_fields(cfg),
 }
 
@@ -4378,6 +4431,7 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: _guardrail_actions_goals,
     SetupWizard.REDACTION: _redaction_goals,
     SetupWizard.ACP_GUARD: _acp_goals,
+    SetupWizard.SEMANTIC_ROUTING: _routing_goals,
 }
 
 
@@ -5926,6 +5980,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL_ACTIONS: lambda fields: _build_guardrail_actions_args(fields),
     SetupWizard.REDACTION: lambda fields: _build_redaction_args(fields),
     SetupWizard.ACP_GUARD: lambda fields: _build_acp_args(fields),
+    SetupWizard.SEMANTIC_ROUTING: lambda fields: _build_routing_args(fields),
 }
 
 

@@ -212,6 +212,8 @@ type enterpriseHookWorkerOptions struct {
 	HookCredentialIdentity             string `json:"hook_credential_identity,omitempty"`
 	ForeignHookGuardBinary             string `json:"foreign_hook_guard_binary,omitempty"`
 	ManagedHookBinary                  string `json:"managed_hook_binary,omitempty"`
+	// RouteOnly is the route-only rendering of the target (nil: none).
+	RouteOnly *connector.RouteOnlySetup `json:"route_only,omitempty"`
 	// ProductCredentials are the digests of the product credentials a
 	// remove_user_native_otlp target knows an exporter by; the credentials
 	// themselves never reach a process that runs as the user.
@@ -1518,6 +1520,7 @@ func (o enterpriseHookWorkerOptions) installOptions(registry *connector.Registry
 		HookCredentialIdentity:             o.HookCredentialIdentity,
 		ForeignHookGuardBinary:             o.ForeignHookGuardBinary,
 		ManagedHookBinary:                  o.ManagedHookBinary,
+		RouteOnly:                          o.RouteOnly,
 	}
 }
 
@@ -1546,6 +1549,7 @@ func enterpriseHookWorkerOptionsFrom(opts enterprisehooks.InstallOptions) enterp
 		HookCredentialIdentity:             opts.HookCredentialIdentity,
 		ForeignHookGuardBinary:             opts.ForeignHookGuardBinary,
 		ManagedHookBinary:                  opts.ManagedHookBinary,
+		RouteOnly:                          opts.RouteOnly,
 	}
 }
 
