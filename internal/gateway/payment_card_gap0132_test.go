@@ -120,13 +120,20 @@ func TestPaymentCardBenignCorpusNoCardFindings(t *testing.T) {
 
 func TestPaymentCardTestPANsStillDetected(t *testing.T) {
 	inspector := NewGuardrailInspector("local", nil, nil)
+	// Load and compile the four rules once: alertFatigueRule parses the whole
+	// rule pack on every call, which made this test run for minutes under -race
+	// (rel-1-0-10:GAP-0090).
+	rules := make([]PatternRule, 0, len(paymentCardRuleIDs))
+	for _, id := range paymentCardRuleIDs {
+		rules = append(rules, alertFatigueRule(t, "default", id))
+	}
 	for _, c := range testcorpus.Cards() {
 		if !cardRegexScope(c) {
 			continue
 		}
 		matched := false
-		for _, id := range paymentCardRuleIDs {
-			if firstAcceptedRuleMatch(alertFatigueRule(t, "default", id), c.Text) != nil {
+		for _, rule := range rules {
+			if firstAcceptedRuleMatch(rule, c.Text) != nil {
 				matched = true
 			}
 		}
@@ -249,6 +256,20 @@ func TestPaymentCardLabeledRuleRejectsUUIDDigits(t *testing.T) {
 	} {
 		if firstAcceptedRuleMatch(rule, text) != nil {
 			t.Errorf("labeled rule matched non-card digits: %q", text)
+		}
+	}
+}
+
+// BenchmarkPaymentCardHookPath measures the per-call cost of the production
+// card detection on the hook path (triage plus the ENT-CC rule match). All
+// card regexes are compiled at package init, so nothing compiles per call
+// (rel-1-0-10:GAP-0090).
+func BenchmarkPaymentCardHookPath(b *testing.B) {
+	text := "Please charge card 4000 0566 5566 5556, exp 12/30, cvv 123."
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if !triageHasCard(text) {
+			b.Fatal("card not detected")
 		}
 	}
 }
