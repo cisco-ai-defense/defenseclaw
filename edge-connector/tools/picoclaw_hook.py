@@ -524,10 +524,9 @@ INJECTION_PATTERNS = [
 # ---------------------------------------------------------------------------
 
 def _luhn_check(number: str) -> bool:
-    """Validate a number string using the Luhn algorithm (ISO/IEC 7812-1).
-    Used to reduce false positives in credit card detection."""
+    """Validate a number string using the Luhn algorithm (ISO/IEC 7812-1)."""
     digits = [int(d) for d in number if d.isdigit()]
-    if len(digits) < 13:
+    if not digits:
         return False
     checksum = 0
     for i, d in enumerate(reversed(digits)):
@@ -537,6 +536,94 @@ def _luhn_check(number: str) -> bool:
                 d -= 9
         checksum += d
     return checksum % 10 == 0
+
+
+# Issuer prefixes and PAN lengths: (prefix_len, low, high, allowed lengths).
+# Mirrors internal/paymentcard in the Go gateway.
+_CARD_SCHEMES = (
+    (1, 4, 4, (13, 16, 19)),                    # Visa
+    (2, 51, 55, (16,)),                         # Mastercard
+    (4, 2221, 2720, (16,)),                     # Mastercard 2-series
+    (2, 34, 34, (15,)), (2, 37, 37, (15,)),     # American Express
+    (4, 6011, 6011, tuple(range(16, 20))),      # Discover
+    (3, 644, 649, tuple(range(16, 20))),
+    (2, 65, 65, tuple(range(16, 20))),
+    (2, 62, 62, tuple(range(16, 20))),          # UnionPay
+    (4, 3528, 3589, tuple(range(16, 20))),      # JCB
+    (3, 300, 305, tuple(range(14, 20))),        # Diners Club
+    (2, 36, 36, tuple(range(14, 20))),
+    (2, 38, 39, tuple(range(16, 20))),
+    (4, 2200, 2204, tuple(range(16, 20))),      # Mir
+    (4, 5018, 5018, tuple(range(12, 20))), (4, 5020, 5020, tuple(range(12, 20))),
+    (4, 5038, 5038, tuple(range(12, 20))), (4, 5893, 5893, tuple(range(12, 20))),
+    (4, 6304, 6304, tuple(range(12, 20))), (4, 6759, 6759, tuple(range(12, 20))),
+    (4, 6761, 6763, tuple(range(12, 20))),      # Maestro
+)
+
+# Printed layouts of a grouped PAN, by group length.
+_CARD_GROUPINGS = ((4, 4, 4, 4), (4, 4, 4, 4, 3), (4, 6, 5), (4, 6, 4), (4, 4, 5), (6, 13))
+
+
+def _card_scheme_ok(digits: str) -> bool:
+    for prefix_len, low, high, allowed in _CARD_SCHEMES:
+        if len(digits) >= prefix_len and low <= int(digits[:prefix_len]) <= high:
+            if len(digits) in allowed:
+                return True
+    return False
+
+
+def _card_grouped(value: str) -> bool:
+    """Digits alone, or card-layout groups joined by ONE consistent separator.
+    The tail of a UUID ("4444-555555555555") is not a card layout."""
+    seps = {c for c in value if c in " -."}
+    if any(not (c.isdigit() and c.isascii()) and c not in " -." for c in value):
+        return False
+    if not seps:
+        return True
+    if len(seps) != 1:
+        return False
+    groups = value.split(seps.pop())
+    if any(g == "" for g in groups):
+        return False
+    return tuple(len(g) for g in groups) in _CARD_GROUPINGS
+
+
+def _ascii_alnum(c: str) -> bool:
+    return c.isascii() and c.isalnum()
+
+
+def _card_embedded(text: str, start: int, end: int) -> bool:
+    """True when text[start:end] is glued to a longer token: a UUID or
+    Kubernetes uid, a hash or trace id, a versioned or decimal number."""
+    if start > 0:
+        before = text[start - 1]
+        if _ascii_alnum(before) and not (start > 1 and text[start - 2] == "\\"):
+            return True
+        if before in "-_." and start > 1 and _ascii_alnum(text[start - 2]):
+            return True
+    if end < len(text):
+        after = text[end]
+        if _ascii_alnum(after):
+            return True
+        if after in "-_." and end + 1 < len(text) and _ascii_alnum(text[end + 1]):
+            return True
+    return False
+
+
+def _is_card_number_at(text: str, start: int, end: int) -> bool:
+    """A digit run is a card number only when it passes Luhn, matches a real
+    scheme prefix and length, has a card layout, and is not part of a longer
+    token. Context words are never required and never sufficient."""
+    value = text[start:end]
+    digits = "".join(c for c in value if c.isdigit())
+    if not 12 <= len(digits) <= 19:
+        return False
+    return (
+        _card_grouped(value)
+        and _card_scheme_ok(digits)
+        and _luhn_check(digits)
+        and not _card_embedded(text, start, end)
+    )
 
 
 def _is_valid_ssn(match_str: str) -> bool:
@@ -582,9 +669,9 @@ def _scan_pii(text: str) -> list[str]:
             findings.append("SSN")
             break  # one finding per type is enough
 
-    # Credit card with Luhn validation
+    # Credit card: Luhn + scheme + card layout + token boundaries
     for m in _CC_RE.finditer(text):
-        if _luhn_check(m.group()):
+        if _is_card_number_at(text, m.start(), m.end()):
             findings.append("CREDIT_CARD")
             break
 

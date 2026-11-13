@@ -188,6 +188,105 @@ static void scan_secrets(const char *content, uint16_t content_len, dclaw_scan_c
 
 #endif /* !DCLAW_AC_DFA_AVAILABLE (keyword scanners) */
 
+/* ---- payment card validation (shared rules, see internal/paymentcard) ---- */
+
+static bool cc_ascii_alnum(char c) {
+    unsigned char u = (unsigned char)c;
+    return u < 0x80 && isalnum(u);
+}
+
+static bool cc_joiner(char c) { return c == '-' || c == '_' || c == '.'; }
+
+/* True when content[start:end) is glued to a longer token. */
+static bool cc_embedded(const char *s, uint16_t len, uint16_t start, uint16_t end) {
+    if (start > 0) {
+        char before = s[start - 1];
+        if (cc_ascii_alnum(before) && !(start > 1 && s[start - 2] == '\\')) return true;
+        if (cc_joiner(before) && start > 1 && cc_ascii_alnum(s[start - 2])) return true;
+    }
+    if (end < len) {
+        char after = s[end];
+        if (cc_ascii_alnum(after)) return true;
+        if (cc_joiner(after) && end + 1 < len && cc_ascii_alnum(s[end + 1])) return true;
+    }
+    return false;
+}
+
+static bool cc_luhn(const char *d, int n) {
+    int sum = 0;
+    bool dbl = false;
+    for (int i = n - 1; i >= 0; i--) {
+        int v = d[i] - '0';
+        if (dbl) { v *= 2; if (v > 9) v -= 9; }
+        sum += v;
+        dbl = !dbl;
+    }
+    return n > 0 && sum % 10 == 0;
+}
+
+static int cc_prefix(const char *d, int k) {
+    int v = 0;
+    for (int i = 0; i < k; i++) v = v * 10 + (d[i] - '0');
+    return v;
+}
+
+static bool cc_scheme(const char *d, int n) {
+    int p1 = cc_prefix(d, 1), p2 = cc_prefix(d, 2), p3 = cc_prefix(d, 3), p4 = cc_prefix(d, 4);
+    if (p1 == 4) return n == 13 || n == 16 || n == 19;                      /* Visa */
+    if ((p2 >= 51 && p2 <= 55) || (p4 >= 2221 && p4 <= 2720)) return n == 16; /* Mastercard */
+    if (p2 == 34 || p2 == 37) return n == 15;                                /* Amex */
+    if (p4 == 5018 || p4 == 5020 || p4 == 5038 || p4 == 5893 || p4 == 6304 ||
+        p4 == 6759 || (p4 >= 6761 && p4 <= 6763)) return n >= 12 && n <= 19; /* Maestro */
+    if (p4 == 6011 || (p3 >= 644 && p3 <= 649) || p2 == 65 || p2 == 62 ||
+        (p4 >= 3528 && p4 <= 3589) || (p4 >= 2200 && p4 <= 2204) ||
+        p2 == 38 || p2 == 39) return n >= 16 && n <= 19;                     /* Discover, UnionPay, JCB, Mir, Diners */
+    if ((p3 >= 300 && p3 <= 305) || p2 == 36) return n >= 14 && n <= 19;    /* Diners */
+    return false;
+}
+
+static const uint8_t cc_layouts[][6] = {
+    /* count, groups... */
+    {5, 4, 4, 4, 4, 3}, {4, 4, 4, 4, 4, 0}, {3, 4, 6, 5, 0, 0},
+    {3, 4, 6, 4, 0, 0}, {3, 4, 4, 5, 0, 0}, {2, 6, 13, 0, 0, 0},
+};
+
+static bool cc_valid(const char *s, uint16_t len, uint16_t start, uint16_t end, const char *d, int n) {
+    if (end < len && isdigit((unsigned char)s[end])) return false;
+    return n >= 12 && n <= 19 && cc_scheme(d, n) && cc_luhn(d, n) && !cc_embedded(s, len, start, end);
+}
+
+/* Returns the end offset of a card number starting at i, or 0. */
+static uint16_t cc_match_at(const char *s, uint16_t len, uint16_t i) {
+    char d[20];
+    uint16_t run = 0;
+    while (i + run < len && isdigit((unsigned char)s[i + run]) && run < 20) run++;
+    if (run >= 12 && run <= 19) {
+        memcpy(d, s + i, run);
+        if (cc_valid(s, len, i, (uint16_t)(i + run), d, run)) return (uint16_t)(i + run);
+    }
+    for (size_t l = 0; l < sizeof(cc_layouts) / sizeof(cc_layouts[0]); l++) {
+        uint8_t groups = cc_layouts[l][0];
+        uint32_t pos = i;
+        int n = 0;
+        char sep = 0;
+        bool ok = true;
+        for (uint8_t g = 0; g < groups && ok; g++) {
+            if (g > 0) {
+                if (pos >= len || (s[pos] != ' ' && s[pos] != '-')) { ok = false; break; }
+                if (sep == 0) sep = s[pos];
+                else if (s[pos] != sep) { ok = false; break; }
+                pos++;
+            }
+            for (uint8_t k = 0; k < cc_layouts[l][g + 1]; k++) {
+                if (pos >= len || !isdigit((unsigned char)s[pos]) || n >= 19) { ok = false; break; }
+                d[n++] = s[pos++];
+            }
+        }
+        if (ok && cc_valid(s, len, i, (uint16_t)pos, d, n)) return (uint16_t)pos;
+    }
+    return 0;
+}
+
 /**
  * Scan for PII patterns (SSN, email, phone, credit card).
  *
@@ -262,50 +361,19 @@ static void scan_pii(const char *content, uint16_t content_len, dclaw_scan_conte
         }
     }
 
-    /* Credit card detection: matches both continuous 16-digit strings
-     * (4111111111111111) and grouped formats (4111-1111-1111-1111).
-     * Grouped format requires at least 2 separators to reduce false
-     * positives on phone numbers. */
-    {
-        uint8_t digit_run = 0;
-        uint8_t groups = 0;
-        uint8_t separators = 0;
-        uint16_t cc_start = 0;
-        uint8_t continuous_digits = 0;
-        uint16_t cont_start = 0;
-        for (uint16_t i = 0; i < content_len; i++) {
-            if (isdigit((unsigned char)content[i])) {
-                /* Track continuous digit run for 16-digit detection */
-                if (continuous_digits == 0) cont_start = i;
-                continuous_digits++;
-                if (continuous_digits == 16) {
-                    add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_HIGH, cont_start);
-                    if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
-                    continuous_digits = 0;
-                }
-                /* Track grouped format */
-                if (digit_run == 0 && groups == 0) cc_start = i;
-                digit_run++;
-                if (digit_run == 4) {
-                    groups++;
-                    digit_run = 0;
-                    if (groups == 4 && separators >= 2) {
-                        add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_HIGH, cc_start);
-                        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
-                        groups = 0;
-                        separators = 0;
-                    }
-                }
-            } else if ((content[i] == '-' || content[i] == ' ') && digit_run == 0 && groups > 0) {
-                separators++;
-                continuous_digits = 0;
-            } else {
-                digit_run = 0;
-                groups = 0;
-                separators = 0;
-                continuous_digits = 0;
-            }
-        }
+    /* Credit card detection: a digit run counts as a card number only when
+     * it passes Luhn, its issuer prefix and length match a real scheme, it
+     * is digits alone or a printed card layout with one consistent
+     * separator, and it is not glued to a longer token (UUID, hash, trace
+     * id, decimal, versioned id). Mirrors internal/paymentcard. */
+    for (uint16_t i = 0; i < content_len; i++) {
+        if (!isdigit((unsigned char)content[i])) continue;
+        if (i > 0 && isdigit((unsigned char)content[i - 1])) continue;
+        uint16_t end = cc_match_at(content, content_len, i);
+        if (end == 0) continue;
+        add_finding(ctx, DCLAW_CONTENT_CATEGORY_PII, DCLAW_SEV_HIGH, i);
+        if (ctx->finding_count >= DCLAW_MAX_SCAN_FINDINGS) return;
+        i = (uint16_t)(end - 1);
     }
 }
 

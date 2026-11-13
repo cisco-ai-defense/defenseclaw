@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
@@ -237,8 +238,8 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
-		return func(text, match string, start, _ int) bool {
-			return validPaymentCardCandidate(match) && !decimalFractionAt(text, start)
+		return func(text, match string, start, end int) bool {
+			return validPaymentCardCandidateAt(text, match, start, end)
 		}
 	case "ENT-IBAN":
 		return func(_, match string, _, _ int) bool { return validIBAN(match) }
@@ -711,18 +712,10 @@ func acceptedLocalPIIMatchAt(text, match string, start, end int) bool {
 	if len(digits) == 9 && strings.Count(match, "-") == 2 {
 		return credibleSSNContext(text, start, end)
 	}
-	if len(digits) >= 13 && len(digits) <= 19 && decimalFractionAt(text, start) {
+	if len(digits) >= 13 && len(digits) <= 19 && paymentcard.Embedded(text, start, end) {
 		return false
 	}
 	return true
-}
-
-// decimalFractionAt reports a match that starts right after the decimal
-// point of a number ("9.371449635398431"): the digits of a float, not a card
-// number. Claude Code's ~/.claude.json holds such floats (GAP-2062).
-func decimalFractionAt(text string, start int) bool {
-	return start >= 2 && start <= len(text) && text[start-1] == '.' &&
-		text[start-2] >= '0' && text[start-2] <= '9'
 }
 
 func credibleSSNContext(text string, start, end int) bool {
@@ -1309,24 +1302,19 @@ func validUSSSN(value string) bool {
 	return area > 0 && area != 666 && area < 900 && group > 0 && serial > 0
 }
 
+// validPaymentCardCandidate reports whether value alone is a payment card
+// number under the shared paymentcard rules (Luhn, a real scheme prefix and
+// length, a card layout). The six canonical public test PANs that fill
+// provider documentation are not treated as cards.
 func validPaymentCardCandidate(value string) bool {
-	digits := decimalDigits(value)
-	if len(digits) < 13 || len(digits) > 19 || knownPublicTestPAN(digits) {
-		return false
-	}
-	sum := 0
-	parity := len(digits) % 2
-	for index, char := range digits {
-		digit := int(char - '0')
-		if index%2 == parity {
-			digit *= 2
-			if digit > 9 {
-				digit -= 9
-			}
-		}
-		sum += digit
-	}
-	return sum%10 == 0
+	return paymentcard.Valid(value) && !knownPublicTestPAN(paymentcard.Digits(value))
+}
+
+// validPaymentCardCandidateAt adds the token-boundary check: a digit run glued
+// to a longer token (UUID, hash, trace id, decimal, versioned id) is not a
+// card (substrate-1:GAP-0132).
+func validPaymentCardCandidateAt(text, match string, start, end int) bool {
+	return validPaymentCardCandidate(match) && !paymentcard.Embedded(text, start, end)
 }
 
 func knownPublicTestPAN(digits string) bool {
