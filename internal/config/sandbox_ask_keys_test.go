@@ -85,3 +85,31 @@ func TestSandboxAskKeysGAP0171(t *testing.T) {
 		t.Fatalf("openshell.admin: %v", err)
 	}
 }
+
+// TestSandboxURLRuleNamesAreUniqueGAP0177: the approval key is the rule's
+// name, so two rules with one name are refused at load, in one section and
+// after the floors are combined; a rule repeated word for word is one rule,
+// and unnamed rules never collide.
+func TestSandboxURLRuleNamesAreUniqueGAP0177(t *testing.T) {
+	post := SandboxURLRule{Name: "uploads", Hosts: []string{"a.example"}, Methods: []string{"POST"}, Action: "ask"}
+	del := SandboxURLRule{Name: "uploads", Hosts: []string{"a.example"}, Methods: []string{"DELETE"}, Action: "deny"}
+	cfg := SandboxAdminConfig{URLRules: []SandboxURLRule{post, del}}
+	err := cfg.validateAskKeys("sandbox")
+	if err == nil || !strings.Contains(err.Error(), `sandbox.url_rules[1].name "uploads" is already the name of url_rules[0]`) {
+		t.Fatalf("two rules named uploads: %v", err)
+	}
+	unnamed := SandboxAdminConfig{URLRules: []SandboxURLRule{
+		{Hosts: []string{"a.example"}, Action: "ask"}, {Hosts: []string{"b.example"}, Action: "deny"}}}
+	if err := unnamed.validateAskKeys("sandbox"); err != nil {
+		t.Fatalf("unnamed rules: %v", err)
+	}
+
+	floor := SandboxAdminConfig{URLRules: []SandboxURLRule{post}}
+	if _, err := TightenSandboxAdmin(floor, &SandboxAdminConfig{URLRules: []SandboxURLRule{del}}); err == nil ||
+		!strings.Contains(err.Error(), `url_rules name "uploads"`) {
+		t.Fatalf("a profile rule that reuses the name of another rule: %v", err)
+	}
+	if _, err := TightenSandboxAdmin(floor, &SandboxAdminConfig{URLRules: []SandboxURLRule{post}}); err != nil {
+		t.Fatalf("a rule repeated word for word: %v", err)
+	}
+}

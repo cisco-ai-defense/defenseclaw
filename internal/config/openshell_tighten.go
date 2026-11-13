@@ -386,6 +386,12 @@ func TightenSandboxAdmin(base SandboxAdminConfig, overlay *SandboxAdminConfig) (
 		out.DriverFallback = o.DriverFallback
 	}
 	tightenAskKeys(&out, o)
+	if name := duplicateURLRuleName(out.URLRules); name != "" {
+		return SandboxAdminConfig{}, &SandboxPolicyContradictionError{
+			Field:   "url_rules",
+			Message: fmt.Sprintf("sandbox: url_rules name %q names two different rules once the floors are combined; an approval is keyed by the name, so names must be unique", name),
+		}
+	}
 	if err := tightenRuntimeKeys(&out, o); err != nil {
 		return SandboxAdminConfig{}, err
 	}
