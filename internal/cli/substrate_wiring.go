@@ -90,7 +90,9 @@ func substrateEnsurer(ctl *controller.Controller) gateway.SubstratePolicyEnsurer
 	return func(ctx context.Context, atespace, name string) error {
 		err := ctl.EnsurePolicy(ctx, ateapi.Ref(atespace, name))
 		if errors.Is(err, controller.ErrRefused) {
-			return fmt.Errorf("%w: %v", gateway.ErrSubstrateActorRefused, err)
+			// Keep the controller's *RefusedError in the chain: the create
+			// path answers with its code, reason and actor UID (GAP-0182).
+			return fmt.Errorf("%w: %w", gateway.ErrSubstrateActorRefused, err)
 		}
 		return err
 	}

@@ -137,6 +137,12 @@ type Error struct {
 	// Reason is the gateway's closed reason (for example profile_not_allowed).
 	Reason string
 	Path   string
+	// Refusal, Detail, Actor and ActorUID come with an actor_refused answer:
+	// the controller's refusal code and reason, and the refused actor.
+	Refusal  string
+	Detail   string
+	Actor    string
+	ActorUID string
 }
 
 func (e *Error) Error() string {
@@ -210,10 +216,15 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	if resp.StatusCode >= 300 {
 		e := &Error{Status: resp.StatusCode, Path: path}
 		var d struct {
-			Reason string `json:"reason"`
+			Reason   string `json:"reason"`
+			Refusal  string `json:"refusal"`
+			Detail   string `json:"detail"`
+			Actor    string `json:"actor"`
+			ActorUID string `json:"actor_uid"`
 		}
 		if json.Unmarshal(raw, &d) == nil {
 			e.Reason = d.Reason
+			e.Refusal, e.Detail, e.Actor, e.ActorUID = d.Refusal, d.Detail, d.Actor, d.ActorUID
 		}
 		return e
 	}

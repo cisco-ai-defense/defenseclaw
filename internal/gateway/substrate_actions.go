@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -221,4 +222,27 @@ func substrateActorName(principal, subject string) string {
 	buf := make([]byte, 3)
 	_, _ = rand.Read(buf)
 	return prefix + "-" + hex.EncodeToString(buf)
+}
+
+// maxRefusalDetail bounds the refusal reason sent to the launcher.
+const maxRefusalDetail = 300
+
+// writeSubstrateActorRefusal answers a create the controller refused: the closed
+// reason actor_refused, the refusal code and its reason in words, and the
+// actor with its UID, so the launcher says why and the administrator finds
+// the controller's log line by that UID (GAP-0182).
+func writeSubstrateActorRefusal(w http.ResponseWriter, atespace, name, uid string, err error) {
+	out := map[string]any{"error": http.StatusText(http.StatusForbidden), "reason": "actor_refused",
+		"actor": atespace + "/" + name, "actor_uid": uid}
+	var re *controller.RefusedError
+	if errors.As(err, &re) {
+		detail := re.Reason
+		if len(detail) > maxRefusalDetail {
+			detail = detail[:maxRefusalDetail] + "..."
+		}
+		out["refusal"], out["detail"] = re.Code, detail
+	} else {
+		out["refusal"], out["detail"] = controller.RefusalNoPolicy, "the controller gave the actor no egress policy"
+	}
+	writeSubstrateJSON(w, http.StatusForbidden, out)
 }
