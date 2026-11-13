@@ -778,6 +778,11 @@ from defenseclaw.commands.cmd_setup_redaction import redaction  # noqa: E402
 
 setup.add_command(redaction)
 
+# Per-call model usage and cost (observability.tokenomics / observability.pricing).
+from defenseclaw.commands.cmd_setup_tokenomics import tokenomics  # noqa: E402
+
+setup.add_command(tokenomics)
+
 # Register the first-class Galileo cloud/self-hosted setup workflow. It writes
 # a named OTLP destination through the shared observability writer, so Galileo
 # can coexist with local-observability and every other OTLP backend.
@@ -17608,7 +17613,7 @@ def _agent_not_on_path_hint(connector: str) -> str:
     finds neither on PATH nor in its documented install folders was reported
     only as a roster mismatch.
     """
-    if not connector or connector in {"openclaw", "openhands"}:
+    if not connector or connector == "openclaw":
         return ""
     try:
         spec = agent_discovery._SPECS.get(connector)

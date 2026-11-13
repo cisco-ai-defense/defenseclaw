@@ -52,6 +52,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -1663,6 +1664,35 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	setPassthroughUpstreamAuth(upstreamReq.Header, provider, upstreamAuth)
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
+	{
+		requestedProvider, selectedProvider := provider, provider
+		requestedModel, selectedModel := partial.Model, partial.Model
+		if routed {
+			requestedProvider = routeRequestedProvider(r.Header.Get("X-DC-Target-URL"), r.URL.RequestURI(), requestProviderRegistry(r.Context()), provider)
+			if routeOutcome.Decision != nil {
+				selectedModel = routeOutcome.Decision.Model
+			}
+		}
+		if f := passthroughAPIFamily(r.URL.Path); f == config.RoutingAPIConverse || f == config.RoutingAPIInvoke {
+			requestedModel = bedrockModelFromPath(r.URL.Path)
+			if !routed {
+				selectedModel = requestedModel
+			}
+		}
+		var chargeKeys []string
+		if routeOutcome.Route != nil {
+			chargeKeys = routeOutcome.Route.ChargeKeys
+		}
+		var finishUsage func(error)
+		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
+			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: usageAPIFamily(r.URL.Path),
+			CallRole: modelusage.RoleAgent, Streaming: usageStreaming(r.URL.Path, body, partial.Stream),
+			RequestedProvider: requestedProvider, RequestedModel: requestedModel,
+			SelectedProvider: selectedProvider, SelectedModel: selectedModel,
+			Route: usageDecision(usageRouteFacts(routeOutcome, p.routerActive(r.Context())), routed), ChargeKeys: chargeKeys,
+		})
+		defer finishUsage(nil)
+	}
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
 		if msg, ok := privateUpstreamReply(err); ok {
@@ -3169,7 +3199,10 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// This runs AFTER guardrails (reuses their signals) and BEFORE the
 	// upstream forward. A nil return gracefully falls through.
 	var routedDecision *ModelRouterDecision
-	if p.routerActive(r.Context()) {
+	usageRequestedModel := req.Model
+	usageRouterOn := p.routerActive(r.Context())
+	var usageRoute SemanticRouteOutcome
+	if usageRouterOn {
 		routerMeta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		var routerTools []interface{}
 		if len(req.Tools) > 0 {
@@ -3202,6 +3235,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
 		}
 		p.applyRouteGate(r.Context(), &routeOutcome, routerInput.RequestedProvider, req.Model)
+		usageRoute = routeOutcome
 		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
 		if routeOutcome.Result == SemanticRouteDenied {
 			p.recordRouteDeny(r.Context(), r.URL.Path, routeOutcome.Deny)
@@ -3307,6 +3341,26 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	routedProvider := ""
 	if routedDecision != nil {
 		routedProvider = routedDecision.Provider
+	}
+	// S10 usage record of the forwarded call (all chat forwarding paths).
+	{
+		selectedProvider := routedProvider
+		if selectedProvider == "" {
+			selectedProvider = promptProviderName
+		}
+		var chargeKeys []string
+		if usageRoute.Route != nil {
+			chargeKeys = usageRoute.Route.ChargeKeys
+		}
+		var finishUsage func(error)
+		w, finishUsage = beginUsage(r.Context(), w, modelusage.CallFacts{
+			Listener: engine.ListenerGuardrail, Connector: p.connectorName(), APIFamily: modelusage.FamilyChat,
+			CallRole: modelusage.RoleAgent, Streaming: req.Stream,
+			RequestedProvider: promptProviderName, RequestedModel: usageRequestedModel,
+			SelectedProvider: selectedProvider, SelectedModel: req.Model,
+			Route: usageRouteFacts(usageRoute, usageRouterOn), ChargeKeys: chargeKeys,
+		})
+		defer finishUsage(nil)
 	}
 	if req.TargetURL != "" {
 		// Revalidate the router-selected URL before forwarding.
@@ -3726,6 +3780,9 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	})
+	// Bifrost parsed the usage (it always asks for include_usage): hand it
+	// to the usage record of this call.
+	recordChatUsage(w, usage)
 	upstreamDuration := time.Since(llmStartTime)
 	// Flush any remaining initial buffer (short streams that completed
 	// before reaching the buffer threshold). Run a guardrail check first.
@@ -5861,6 +5918,12 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 		forwardBody = req.RawBody
 	}
 	forwardBody = applyProviderRequestOverrides(forwardBody, upstreamURL, req.providers)
+	if req.Stream {
+		var added bool
+		if forwardBody, added = withStreamIncludeUsage(forwardBody); added {
+			r = r.WithContext(context.WithValue(r.Context(), includeUsageKey{}, true))
+		}
+	}
 
 	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
 	if err != nil {
@@ -6101,6 +6164,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	streamResponseModel := ""
 	streamFinishReasons := []string{}
 	var streamUsage *ChatUsage
+	stripUsageChunk, _ := r.Context().Value(includeUsageKey{}).(bool)
 	// A well-formed stream reaches finalization at [DONE] and then EOF. Keep
 	// guardrail evaluation and its canonical telemetry exactly once.
 	finalTextInspected := false
@@ -6261,6 +6325,12 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return true
 		}
 
+		if stripUsageChunk {
+			if payloads := rawForwardSSEDataPayloads(frame); len(payloads) == 1 && isUsageOnlyChunk(payloads[0]) {
+				// The gateway asked for this chunk; the client did not.
+				return true
+			}
+		}
 		_, _ = w.Write(frame)
 		flusher.Flush()
 		return true

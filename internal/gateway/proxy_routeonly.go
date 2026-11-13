@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
 )
 
@@ -225,7 +227,31 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// every attempt uses a gateway-held credential.
 		inClass = engine.CredentialGateway
 	}
+	original.usage = routeOnlyUsageFacts(connector, native, family, body)
+	// The verified caller (OSS gateway owner or managed kernel peer).
+	original.usage.Subject = subject
 	attempt, routedOutcome, originalAllowed := s.decide(r, connector, native, family, upstream, inClass, body, engine.Caller{Verified: true, Key: subject, Source: subjectSourceKernelPeer})
+	original.usage.Route = usageDecision(usageRouteFacts(routedOutcome, true), false)
+	if routedOutcome.Result == "" {
+		original.usage.Route.Decision = modelusage.DecisionPassthrough
+	}
+	if routedOutcome.Route != nil {
+		// Unrouted calls are charged too (S11 budgets).
+		original.usage.ChargeKeys = routedOutcome.Route.ChargeKeys
+	}
+	if attempt != nil {
+		attempt.usage = original.usage
+		attempt.usage.Route = usageRouteFacts(routedOutcome, true)
+		attempt.usage.SelectedProvider = attempt.provider
+		if routedOutcome.Decision != nil {
+			attempt.usage.SelectedModel = routedOutcome.Decision.Model
+		}
+		if routedOutcome.Route != nil {
+			attempt.usage.ChargeKeys = routedOutcome.Route.ChargeKeys
+		}
+		// The retry of the original is a fallback record (DESIGN 17.3).
+		original.usage.Route.Decision = modelusage.DecisionFallback
+	}
 	if routedOutcome.Result == SemanticRouteDenied {
 		routeOnlyError(w, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
@@ -300,6 +326,7 @@ type routeOnlyAttempt struct {
 	keepInbound bool   // forward the agent credential and headers
 	auth        string // gateway-held credential (header form set by authHeader)
 	provider    string
+	usage       modelusage.CallFacts
 }
 
 // routeOnlyAPIFamily names the routable API family of a native path.
@@ -661,7 +688,12 @@ func retryableRouteStatus(status int, crossProvider bool) bool {
 // twice; 500, 502 and 504 are never retried.
 func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Request, routed routeOnlyAttempt, original *routeOnlyAttempt, body []byte) {
 	started := time.Now()
+	routed.usage.RequestID = RequestIDFromContext(r.Context())
+	call := usageRecorder().Begin(r.Context(), routed.usage)
 	resp, wrote, err := s.send(r, routed, body, nil)
+	if resp != nil {
+		call.UpstreamHeader(resp.StatusCode, resp.Header)
+	}
 	cross := !strings.EqualFold(routed.provider, routeOnlyProvider(routeOnlyAPIFamily(routed.native)))
 	retryable := (err != nil && !wrote) || (err == nil && retryableRouteStatus(resp.StatusCode, cross))
 	if original != nil && retryable && r.Context().Err() == nil && time.Since(started) < routeOnlyRetryWindow {
@@ -669,25 +701,36 @@ func (s *routeOnlyServer) forwardWithRetry(w http.ResponseWriter, r *http.Reques
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
 		}
+		call.End(errRouteOnlyRetried)
 		fmt.Fprintf(os.Stderr, "[routing] route-only: routed call failed before its first byte; sending the original request\n")
 		w.Header().Set("X-Semantic-Router", "fallback")
 		s.forward(w, r, *original, body, nil)
 		return
 	}
 	if err != nil {
+		call.End(err)
 		routeOnlyError(w, http.StatusBadGateway, "api_error", "the routed model is unreachable")
 		return
 	}
-	copyRouteOnlyResponse(w, resp)
+	call.End(copyRouteOnlyResponse(w, resp, call, routed.usage.Streaming))
 }
 
 func (s *routeOnlyServer) forward(w http.ResponseWriter, r *http.Request, a routeOnlyAttempt, body []byte, rest io.Reader) {
+	var call modelusage.Call = modelusage.Noop.Begin(r.Context(), a.usage)
+	if a.usage.Listener != "" {
+		// Calls without facts (GET models, bodies streamed unbuffered) are
+		// not model calls with usage the gateway can attribute.
+		a.usage.RequestID = RequestIDFromContext(r.Context())
+		call = usageRecorder().Begin(r.Context(), a.usage)
+	}
 	resp, _, err := s.send(r, a, body, rest)
 	if err != nil {
+		call.End(err)
 		routeOnlyError(w, http.StatusBadGateway, "api_error", "the model upstream is unreachable")
 		return
 	}
-	copyRouteOnlyResponse(w, resp)
+	call.UpstreamHeader(resp.StatusCode, resp.Header)
+	call.End(copyRouteOnlyResponse(w, resp, call, a.usage.Streaming))
 }
 
 // routeOnlyBoundaryQuery are the query keys kept across a credential
@@ -731,8 +774,9 @@ func (s *routeOnlyServer) send(r *http.Request, a routeOnlyAttempt, body []byte,
 	return resp, wrote, err
 }
 
-// copyRouteOnlyResponse streams the upstream answer with a flush per read.
-func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response) {
+// copyRouteOnlyResponse streams the upstream answer with a flush per read,
+// feeding the usage call (chunks when streaming, the body otherwise).
+func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response, call modelusage.Call, streaming bool) error {
 	defer resp.Body.Close()
 	for k, vs := range resp.Header {
 		ck := http.CanonicalHeaderKey(k)
@@ -742,21 +786,65 @@ func copyRouteOnlyResponse(w http.ResponseWriter, resp *http.Response) {
 		w.Header()[ck] = slices.Clone(vs)
 	}
 	w.WriteHeader(resp.StatusCode)
+	if !streaming && strings.Contains(resp.Header.Get("Content-Type"), "event-stream") {
+		streaming = true
+	}
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 32<<10)
+	var body []byte
+	over := false
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			if streaming {
+				call.Chunk(buf[:n])
+			} else if !over {
+				if len(body)+n > usageBodyCap {
+					over, body = true, nil
+				} else {
+					body = append(body, buf[:n]...)
+				}
+			}
 			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
+				return werr
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
-			return
+			if !streaming && len(body) > 0 {
+				call.Body(body)
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
+	}
+}
+
+var errRouteOnlyRetried = errors.New("routed attempt retried on the original upstream")
+
+// routeOnlyUsageFacts are the usage facts of a route-only request before
+// routing (the original upstream).
+func routeOnlyUsageFacts(connector, native, family string, body []byte) modelusage.CallFacts {
+	var probe struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	model := probe.Model
+	if family == config.RoutingAPIConverse || family == config.RoutingAPIInvoke {
+		model = bedrockModelFromPath(native)
+	}
+	fam := usageAPIFamily(native)
+	provider := routeOnlyProvider(family)
+	return modelusage.CallFacts{
+		Listener: engine.ListenerRouteOnly, Connector: connector, APIFamily: fam, CallRole: modelusage.RoleAgent,
+		Streaming:         usageStreaming(native, body, probe.Stream),
+		RequestedProvider: provider, RequestedModel: model, SelectedProvider: provider, SelectedModel: model,
+		Subject: routeOwner(), SubjectKind: "route_credential", IdentityVerified: true,
 	}
 }
 

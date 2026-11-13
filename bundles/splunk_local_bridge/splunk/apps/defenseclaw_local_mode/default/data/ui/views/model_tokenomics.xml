@@ -1,0 +1,235 @@
+<form version="1.1" theme="dark">
+  <label>Model Tokenomics</label>
+  <description>Per-call model cost and tokens from model.usage records: spend by model, route, connector and profile, token kinds, cache-read and reasoning shares, calls with absent cost, routed against requested model and top users by cost. The dropped-record counter is a metric; see the Grafana Tokenomics dashboard.</description>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="dropdown" token="connector" searchWhenChanged="true">
+      <label>Connector</label>
+      <choice value="*">All</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+      <search>
+        <query>`defenseclaw_model_usage_events` | stats count by connector | sort - count</query>
+        <earliest>$time.earliest$</earliest>
+        <latest>$time.latest$</latest>
+      </search>
+      <fieldForLabel>connector</fieldForLabel>
+      <fieldForValue>connector</fieldForValue>
+    </input>
+    <input type="text" token="model" searchWhenChanged="true">
+      <label>Routed model</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>Known cost (USD)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats sum(cost_usd) as value | eval value=round(value, 4)</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">calls with absent cost add nothing</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Model calls</title>
+      <single>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats count as value</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">model.usage records</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Tokens</title>
+      <single>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats sum(total_tokens) as value</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">input + output (cache and reasoning are subsets)</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Cache-read share of input</title>
+      <single>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats sum(cache_read_tokens) as num sum(input_tokens) as den | eval share=round(100*num/den, 2) | fields share</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">percent of input tokens read from the provider cache</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Reasoning share of output</title>
+      <single>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats sum(reasoning_tokens) as num sum(output_tokens) as den | eval share=round(100*num/den, 2) | fields share</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">percent of output tokens spent reasoning</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Calls with absent cost</title>
+      <single>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats count(eval(cost_basis="none")) as num count as den | eval share=round(100*num/den, 2) | fields share</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="underLabel">percent with cost.basis none (no price entry or no usage)</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Cost by routed model</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | timechart span=1h sum(cost_usd) by selected_model limit=10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Cost by route decision</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | timechart span=1h sum(cost_usd) by route_decision limit=10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Cost by connector</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | timechart span=1h sum(cost_usd) by connector limit=10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Cost by guardrail profile</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | timechart span=1h sum(cost_usd) by profile limit=10</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Tokens by kind</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | timechart span=1h sum(uncached_input_tokens) as input sum(cache_read_tokens) as cache_read sum(cache_creation_tokens) as cache_creation sum(eval(output_tokens-coalesce(reasoning_tokens, 0))) as output sum(reasoning_tokens) as reasoning</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Cache-read and reasoning share over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | timechart span=1h sum(cache_read_tokens) as cr sum(input_tokens) as ti sum(reasoning_tokens) as rs sum(output_tokens) as tout | eval cache_read_share=round(100*cr/ti, 2), reasoning_share=round(100*rs/tout, 2) | fields _time cache_read_share reasoning_share</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.legend.placement">bottom</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Routed vs requested model</title>
+      <table>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats count as calls sum(cost_usd) as known_cost_usd sum(total_tokens) as tokens by requested_model selected_model provider route_decision route_source | eval known_cost_usd=round(known_cost_usd, 4) | sort - calls | head 50</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Top users by cost</title>
+      <table>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | stats sum(cost_usd) as known_cost_usd count as calls sum(total_tokens) as tokens by model_user | eval known_cost_usd=round(known_cost_usd, 4) | sort - known_cost_usd | head 20</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Models with absent cost</title>
+      <table>
+        <search>
+          <query>`defenseclaw_model_usage_events` | search connector="$connector$" selected_model="$model$" | where cost_basis="none" | stats count as calls by selected_model provider | sort - calls | head 20</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>
