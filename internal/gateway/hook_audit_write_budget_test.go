@@ -132,13 +132,16 @@ func TestClaudeCodePreToolUseAuditCommitBudget(t *testing.T) {
 		totalFrames += frames
 	}
 	t.Logf("per PreToolUse: %.1f commits, %.1f WAL frames", float64(totalCommits)/measured, float64(totalFrames)/measured)
-	if got := (rows("audit_events") - auditRows) / measured; got != 5 {
-		t.Fatalf("audit rows per call = %d, want 5", got)
+	// 4, not 5: the requested tool call is in the hook_decision row and is
+	// exported only (S8 R3a, #1384).
+	if got := (rows("audit_events") - auditRows) / measured; got != 4 {
+		t.Fatalf("audit rows per call = %d, want 4", got)
 	}
-	// 6, not 19: the metrics of the call write no observation row of their
-	// own (S8 R1, #1384); the log records keep theirs.
-	if got := (rows("correlation_observations") - observationRows) / measured; got != 6 {
-		t.Fatalf("correlation observations per call = %d, want 6", got)
+	// 5, not 19: the metrics of the call write no observation row of their
+	// own (S8 R1) and the requested tool call no row at all (S8 R3a, #1384);
+	// the other log records keep theirs.
+	if got := (rows("correlation_observations") - observationRows) / measured; got != 5 {
+		t.Fatalf("correlation observations per call = %d, want 5", got)
 	}
 	// rel-1-0-3 GAP-0320: the unique keys a hook call writes are time
 	// ordered, so each lands at the end of its index instead of on a random
