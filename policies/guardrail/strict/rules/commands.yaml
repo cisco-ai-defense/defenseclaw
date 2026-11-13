@@ -326,6 +326,24 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, active-directory, kerberos, bounded-grammar]
+  - id: credential.directory_service_credential_use
+    tool_call_only: true
+    # A complete NetExec / CrackMapExec invocation that authenticates to a
+    # domain service with a credential on the command line (rel-1-0-10:GAP-0014).
+    # HIGH, so default alerts and strict blocks; the opt-in
+    # active-directory-protection pack ships it CRITICAL to block in default too.
+    # The code-owned prerequisite (directoryServiceCredentialUsePrerequisite)
+    # proves the NetExec credentialed form and gates enforcement; there is no
+    # benign use of these offensive tools against a domain service.
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['nxc', 'netexec', 'crackmapexec'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: 'a^'
+    title: "Authenticate to a domain service with a password or hash (NetExec)"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, netexec, bounded-grammar]
   - id: credential.pkcs12_private_key_extract
     tool_call_only: true
     expression: >-

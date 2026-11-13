@@ -79,6 +79,9 @@ var semanticProtectiveProfileOwners = map[string]semanticOwner{
 		prerequisite:     infrastructureAsCodeFullDestroyPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
+	// Shipped built-in (default alerts / strict blocks, HIGH) and escalated to
+	// CRITICAL by the opt-in active-directory-protection pack. The owner is
+	// registered globally, so it backs the rule under either severity.
 	"credential.directory_service_credential_use": {
 		prerequisite:     directoryServiceCredentialUsePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
