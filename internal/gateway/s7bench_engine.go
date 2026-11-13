@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,6 +49,8 @@ type S7Engine struct {
 	guardDone chan struct{}
 	passes    atomic.Int64
 	peakWAL   atomic.Int64
+	inspOnce  sync.Once
+	insp      *GuardrailInspector
 }
 
 // S7NewEngine boots the sidecar generation for cfg and returns the
@@ -105,6 +108,31 @@ func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (
 
 // HookFor answers one hook payload through the named connector's handler.
 // headers (name, value pairs) are set on the request, e.g. the hook's answer wait.
+func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (int, []byte) {
+	h, ok := e.hooks[connectorName]
+	if !ok {
+		h, connectorName = e.hook, e.connector
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+connectorName, bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
+	if connectorName == "codex" {
+		// Codex hooks are installer-bound: the hook command passes the event and the protected contract id out of band.
+		var probe struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		req.Header.Set("X-DefenseClaw-Hook-Event", probe.Event)
+		req.Header.Set("X-DefenseClaw-Hook-Contract", e.api.hookProfileForRequest(ctx, "codex").ContractID)
+	}
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	return rec.Code, rec.Body.Bytes()
+}
+
+// HookFor answers one hook payload through the named connector's handler.
 func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (int, []byte) {
 	h, ok := e.hooks[connectorName]
 	if !ok {
@@ -323,4 +351,25 @@ func (e *S7Engine) Stats(ctx context.Context) S7Stats {
 		}
 	}
 	return out
+}
+
+// InspectText runs one text through the /llm proxy's guardrail inspector (direction prompt or completion) with this
+// generation's rule pack, posture thresholds, detection strategy and judge, as handleChatCompletion does for a user turn.
+func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *ScanVerdict {
+	e.inspOnce.Do(func() {
+		cfg := e.sc.currentConfig()
+		g := NewGuardrailInspector("local", nil, e.sc.sharedJudge())
+		g.SetPosture(e.profile)
+		gr := cfg.Guardrail
+		g.SetDetectionStrategy(gr.DetectionStrategy, gr.DetectionStrategyPrompt, gr.DetectionStrategyCompletion, gr.DetectionStrategyToolCall, gr.JudgeSweep)
+		e.insp = g
+	})
+	// Pin the generation as the proxy does for every request (proxy.go withPinnedGeneration), so the content rules and
+	// thresholds come from the pack under test, not the process-wide rule set.
+	ctx = withPinnedGeneration(ctx, e.sc.Generation())
+	v := e.insp.Inspect(ctx, direction, text, []ChatMessage{{Role: "user", Content: text}}, "s7bench", "action")
+	if v == nil {
+		v = &ScanVerdict{Action: "allow", Severity: "NONE"}
+	}
+	return v
 }

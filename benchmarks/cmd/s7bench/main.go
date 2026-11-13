@@ -40,6 +40,8 @@ type event struct {
 	CWD      string          `json:"cwd"`
 	Dialect  string          `json:"dialect"`
 	Outcome  string          `json:"outcome"`
+	// Result is the tool output (tool-result surface corpora); sent as the PostToolUse tool_response with -surface tool-result.
+	Result string `json:"result"`
 }
 
 type payload struct {
@@ -47,6 +49,8 @@ type payload struct {
 	Events []event `json:"events"`
 	Intent string  `json:"user_intent"`
 	Prompt string  `json:"user_prompt"`
+	// Content is case-v1 payload.content: the user's request (AgentDojo, MCPTox, InjecAgent, agent-trace) or, for prompt corpora, the user turn.
+	Content string `json:"content"`
 }
 
 type corpusCase struct {
@@ -218,8 +222,14 @@ func main() {
 	walGuard := flag.Bool("wal-guard", true, "run the product audit WAL guard pass every 500 ms (false reproduces the unbounded WAL growth; measurement only, keep -scratch-cap-mb low)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
+	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the /llm proxy GuardrailInspector, direction prompt; the connector UserPromptSubmit answer goes to extra) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
+	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
+	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" {
+		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt or tool-result")
+		os.Exit(2)
+	}
 	if *corpus == "" || *out == "" || *policyDir == "" {
 		fmt.Fprintln(os.Stderr, "need -corpus -out -policy-dir")
 		os.Exit(2)
@@ -396,7 +406,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				runCase(engine, c, *connectorFlag, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
+				runCase(engine, c, *connectorFlag, *surface, *promptFromContent, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
 				if n := done.Add(1); n%1000 == 0 {
 					fmt.Fprintf(os.Stderr, "[s7bench] %d cases %d decisions %.0fs\n", n, decisions.Load(), time.Since(start).Seconds())
 				}
@@ -445,7 +455,7 @@ type hookResp struct {
 	RuleIDs    []string `json:"rule_ids"`
 }
 
-func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
+func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, promptFromContent, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
 	conn := connectorOf(connectorFlag, c.Strata.Provider)
 	legacy := connectorFlag == "claudecode"
 	h := sha256.Sum256([]byte(c.ID))
@@ -456,7 +466,25 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det,
 		events = []event{c.Payload.event}
 	}
 	cwd := "/home/bench/work"
-	if intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt); intent != "" {
+	if surface == "prompt" {
+		text := firstNonEmpty(c.Payload.Content, c.Payload.Prompt, c.Payload.Intent, c.Payload.Command)
+		v := e.InspectText(ctx, "prompt", text)
+		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": text, "transcript_path": ""})
+		st, hb := e.HookFor(ctx, conn, body)
+		var hr hookResp
+		_ = json.Unmarshal(hb, &hr)
+		r := record{Case: c.ID, Connector: conn, N: 1, SrcTool: "__prompt__", Tool: "UserPromptSubmit", Mapped: "prompt", Status: st,
+			Action: v.Action, RawAction: v.Action, Severity: v.Severity, Findings: v.Findings,
+			Extra: map[string]string{"hook_action": hr.Action, "hook_raw_action": hr.RawAction, "hook_sev": hr.Severity, "hook_findings": strings.Join(hr.Findings, ",")}}
+		decisions.Add(1)
+		emit(r)
+		return
+	}
+	intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt)
+	if intent == "" && promptFromContent {
+		intent = c.Payload.Content
+	}
+	if intent != "" {
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": intent, "transcript_path": ""})
 		e.HookFor(ctx, conn, body)
 	}
@@ -534,11 +562,27 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag string, post, det,
 			dm, jv := e.Layers(ctx, sid, tool, string(input), wantDM, wantJudge)
 			r.DM, r.Judge = &dm, &jv
 		}
-		if post && ev.Outcome == "succeeded" {
+		if (post && ev.Outcome == "succeeded") || surface == "tool-result" {
+			var resp any = map[string]any{"stdout": "", "stderr": "", "interrupted": false}
+			if surface == "tool-result" {
+				resp = ev.Result
+			}
 			pb, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": sid, "cwd": ecwd,
-				"tool_name": tool, "tool_input": input, "tool_response": map[string]any{"stdout": "", "stderr": "", "interrupted": false},
+				"tool_name": tool, "tool_input": input, "tool_response": resp,
 				"transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
-			r.PostStatus, _ = e.HookFor(ctx, conn, pb)
+			var pbody []byte
+			r.PostStatus, pbody = e.HookFor(ctx, conn, pb)
+			if surface == "tool-result" {
+				// The decision on this surface is the PostToolUse answer; the PreToolUse answer moves to extra.
+				var pr hookResp
+				_ = json.Unmarshal(pbody, &pr)
+				if r.Extra == nil {
+					r.Extra = map[string]string{}
+				}
+				r.Extra["pre_action"], r.Extra["pre_raw_action"] = r.Action, r.RawAction
+				r.Action, r.RawAction, r.Severity, r.Findings, r.RuleIDs = pr.Action, pr.RawAction, pr.Severity, pr.Findings, pr.RuleIDs
+				r.Mapped = "tool-result"
+			}
 		}
 		decisions.Add(1)
 		emit(r)
