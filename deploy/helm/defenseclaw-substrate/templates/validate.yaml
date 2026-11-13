@@ -20,3 +20,13 @@
 {{- fail "config.substrate.templates.allowed_images is required with deployment_mode managed_enterprise (name the template registries)" -}}
 {{- end -}}
 {{- end -}}
+
+{{- range (dig "secrets" list $sub) -}}
+{{- $src := toString (.source | default "") -}}
+{{- if hasPrefix "ate-secret://k8s.io/" $src -}}
+{{- $parts := splitList "/" (trimPrefix "ate-secret://k8s.io/" $src) -}}
+{{- if and (eq (len $parts) 4) (or (eq (index $parts 1) $.Release.Namespace) (eq (index $parts 1) $.Values.substrate.namespace)) -}}
+{{- fail (printf "config.substrate.secrets %s: a Kubernetes source must not be in the release or Substrate namespace (the gateway may write Secrets in a source namespace, and DefenseClaw's own Secrets live in the release namespace)" (toString .name)) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
