@@ -55,9 +55,13 @@ var (
 	scopeEmailRe   = lazyregexp.New(`(?i)\b[a-z0-9._%+-]+@([a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,})\b`)
 	scopeDomainRe  = lazyregexp.New(`(?i)\b([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,})\b`)
 	scopePathRe    = lazyregexp.New(`(?:^|[\s"'(])((?:~|\.{1,2})?/[A-Za-z0-9._@%+=,~/-]{2,})`)
-	// A shell command that sends: curl or wget with a body or an upload, or a
-	// transfer or mail program. The destination is read from the same text.
-	scopeShellSendRe = lazyregexp.New(`(?i)\b(?:curl|wget|http|https|xh)\b[^\n]*?(?:\s-X\s*(?:POST|PUT|PATCH)\b|\s--request\s*(?:POST|PUT|PATCH)\b|\s-d\b|\s--data\b|\s--data-[a-z]+\b|\s-F\b|\s--form\b|\s-T\b|\s--upload-file\b|\s--json\b)|\b(?:scp|rsync|sftp|ncat|netcat|nc|mail|mailx|sendmail|swaks|aws\s+s3\s+(?:cp|sync|mv)|gsutil\s+(?:cp|rsync)|az\s+storage\s+blob\s+upload)\b`)
+	// The text pattern for a shell command the parser cannot read (an unterminated
+	// quote, a command past the reading bounds): curl or wget with a body or an
+	// upload in the same command, or a transfer or mail program. The destination is
+	// read from the same text. A command the parser reads goes through
+	// shellSendDestinations instead (GAP-0363: this pattern read "https://" as the
+	// httpie program, -f and -t as -F and -T, and ran across ; && and |).
+	scopeShellSendRe = lazyregexp.New(`(?:^|[\s;&|(])(?i:curl|wget|xh|xhs)\b[^\n;&|]*?(?:\s-X\s*(?i:POST|PUT|PATCH)\b|\s--request[\s=]\s*(?i:POST|PUT|PATCH)\b|\s-d\b|\s--data\b|\s--data-[a-z]+\b|\s-F\b|\s--form\b|\s-T\b|\s--upload-file\b|\s--json\b)|(?:^|[\s;&|(])(?i:scp|rsync|sftp|ncat|netcat|nc|mail|mailx|sendmail|swaks|aws\s+s3\s+(?:cp|sync|mv)|gsutil\s+(?:cp|rsync)|az\s+storage\s+blob\s+upload)\b`)
 )
 
 // scopeSendSegments and scopeReadSegments classify a tool name by its words
@@ -282,15 +286,11 @@ func scopeToolVerb(toolName string) (sends, reads bool) {
 func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []scopeDest {
 	toolSends, toolReads := scopeToolVerb(toolName)
 	values := scopeStrings(args, trunc)
-	var texts []string
-	shell := false
+	var texts, shellTexts []string
 	for _, v := range values {
 		switch {
 		case v.key == "command" || v.key == "cmd" || v.key == "script" || v.key == "code" || v.key == "":
-			if scopeShellSendRe.MatchString(v.value) {
-				shell = true
-				texts = append(texts, v.value)
-			}
+			shellTexts = append(shellTexts, v.value)
 		case scopeSinkKeys[v.key]:
 			if !toolReads || toolSends {
 				texts = append(texts, v.value)
@@ -300,12 +300,6 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 				texts = append(texts, v.value)
 			}
 		}
-	}
-	if !shell && !toolSends && len(texts) == 0 {
-		return nil
-	}
-	if !shell && toolReads && !toolSends {
-		return nil
 	}
 	seen := map[string]bool{}
 	var out []scopeDest
@@ -320,19 +314,26 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) []sco
 			out = append(out, d)
 		}
 	}
+	// A shell command is read by its commands: a send is a command that sends.
+	shell := false
+	for _, t := range shellTexts {
+		if shellSendDestinations(t, trunc, add) {
+			shell = true
+		}
+	}
+	if !shell && !toolSends && len(texts) == 0 {
+		return nil
+	}
+	if !shell && toolReads && !toolSends {
+		return nil
+	}
 	for _, t := range texts {
-		shellText := scopeShellSendRe.MatchString(t)
-		mailCommand := shellText && scopeMailProgramRe.MatchString(t)
 		// One match past the cap is enough to know the cap is hit.
 		for _, m := range scopeURLHostRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
 			add(scopeDest{host: strings.ToLower(m[1])})
 		}
 		for _, m := range scopeEmailRe.FindAllStringSubmatch(t, maxScopeDestinations+1) {
-			if shellText && !mailCommand {
-				add(scopeDest{host: strings.ToLower(m[1])})
-			} else {
-				add(scopeDest{mailbox: strings.ToLower(m[0])})
-			}
+			add(scopeDest{mailbox: strings.ToLower(m[0])})
 		}
 		if !strings.Contains(t, "://") && !strings.Contains(t, "@") && !strings.ContainsAny(t, " \t\n/\\") {
 			// a bare host or domain in a destination key
