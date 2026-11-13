@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,9 +22,6 @@ import (
 // agent then starts in the clone. A real git HTTP server (git http-backend)
 // stands in for the repository host.
 func TestCloneInTheActor(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the relay exec runs in a Linux actor")
-	}
 	git, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("git not installed")
