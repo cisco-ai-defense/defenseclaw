@@ -487,6 +487,20 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = analyzeWithPatchHeaderAnswers(&request)
 		analyzed = true
+		if command, known := trustedBashCommandInput(request.Input); known && actionfacts.CommandTextOverLimit(command) {
+			// A shell call over the string limit of the analysis has no
+			// commands to judge (input_limit): unless its padding is white
+			// space or comments only, so the bounded twin below reads the
+			// whole call, what the call holds past the limit was not read.
+			// It is truncated (GAP-0382, the class of GAP-0345): judged at
+			// the unknown tier, with the raw-text state check, and what the
+			// rules and the twins prove still decides.
+			if _, twin := overLimitCommandBoundedTwinRequest(request, facts); !twin {
+				defer func() {
+					findings = withBoundedTruncation(withBudgetStateBlock(request, findings), bounded.Of(bounded.Bytes), request)
+				}()
+			}
+		}
 		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is

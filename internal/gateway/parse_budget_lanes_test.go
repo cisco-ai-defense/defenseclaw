@@ -27,7 +27,11 @@ func init() {
 			gen: boundedShellLane(boundedArithChain, boundedMultiCap(boundedArithChain)), seen: boundedShellSeenCall},
 		boundedLaneCap{lane: "shell-parse tokens", cap: bounded.Items, limit: budgetLimit(boundedQuotedWords, shellparse.MaxTokens+10),
 			gen: boundedShellLane(boundedQuotedWords, boundedMultiCap(boundedQuotedWords)), seen: boundedShellSeenCall},
-		boundedLaneCap{lane: "shell-parse bytes", cap: bounded.Bytes, limit: shellparse.MaxCommandBytes - len("echo "),
+		// The text past the string limit of the analysis (64 KiB,
+		// actionfacts.CommandTextOverLimit) is read by no analyser: one word
+		// past it is truncated (GAP-0382). The reading budget's own limit of
+		// the text (shellparse.MaxCommandBytes) is exact in TestHardBoundsRefuseWithoutAParse.
+		boundedLaneCap{lane: "shell analysis input", cap: bounded.Bytes, limit: 64<<10 - len("echo "),
 			gen: boundedShellLane(boundedOneWord, boundedMultiCap(boundedOneWord)), seen: boundedShellSeenCall},
 	)
 }

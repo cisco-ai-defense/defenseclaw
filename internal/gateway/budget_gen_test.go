@@ -36,6 +36,9 @@ var budgetShapes = []budgetShape{
 	{"assign-pipe", "x=1 a|", "a", budgetChainSizes},
 	{"unparsed-pipe", "a|", "fi", budgetChainSizes},
 	{"nest", "(", ")", budgetChainSizes},
+	{"bigword", "", "", []int{70000, 200000}},
+	{"keys-comment", "", "", []int{8192, 70000}},
+	{"keys-comment-ops", "", "", []int{8192, 70000}},
 	{"arith", "echo $((1", ")) ", budgetChainSizes},
 	{"flat-words", "a ", "", budgetFlatSizes},
 	{"flat-stmts", "a;", "a", budgetFlatSizes},
@@ -45,6 +48,14 @@ var budgetShapes = []budgetShape{
 // command builds the text of the shape at n units.
 func (s budgetShape) command(n int) string {
 	switch s.name {
+	case "bigword":
+		return strings.Repeat("a", n)
+	case "keys-comment":
+		// A write the hook blocks on its own, then a comment: not an operand
+		// and no part of what the shell runs (GAP-0381).
+		return "sed -i 's/a/b/' ~/.ssh/authorized_keys\n# " + strings.Repeat("x", n)
+	case "keys-comment-ops":
+		return "sed -i 's/a/b/' ~/.ssh/authorized_keys\n# " + strings.Repeat("|&;( ", n/5)
 	case "nest":
 		return strings.Repeat("(", n) + "true" + strings.Repeat(")", n)
 	case "arith":

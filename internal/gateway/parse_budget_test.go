@@ -58,6 +58,30 @@ func TestParseBudgetCallsTakeTheEvaluationLimitPath(t *testing.T) {
 	readingBoundCells(t, rows, 0)
 }
 
+// TestShellCallPastTheAnalysisLimitIsTruncated pins GAP-0382: one word past
+// the string limit of the analysis (64 KiB) leaves no command to judge, and
+// is no padding the bounded twin can shorten: it is truncated, an alert
+// outside the strict pack and a block in strict, with the state check of the
+// raw text. A write the hook blocks stays a block whatever comment follows
+// it, whether or not the comment holds shell operators (GAP-0381).
+func TestShellCallPastTheAnalysisLimitIsTruncated(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX homes and a mode 0 homes folder")
+	}
+	var rows []readingBoundRow
+	for _, n := range budgetShapeNamed("bigword").sizes {
+		rows = append(rows, readingBoundRow{fmt.Sprintf("one word of %d bytes", n), "Bash", budgetShapeNamed("bigword").command(n), guardrailActionAlert})
+	}
+	readingBoundCells(t, rows, 0)
+	var keys []readingBoundRow
+	for _, name := range []string{"keys-comment", "keys-comment-ops"} {
+		for _, n := range budgetShapeNamed(name).sizes {
+			keys = append(keys, readingBoundRow{fmt.Sprintf("%s %d", name, n), "Bash", budgetShapeNamed(name).command(n), guardrailActionBlock})
+		}
+	}
+	readingBoundCells(t, keys, 0)
+}
+
 // TestParseBudgetReasonIsExplicit pins the reason and the profile mapping of
 // the finding: the bound rule's reason with the cap, then parse_budget_exceeded;
 // an alert in the default tier and in a managed install whose pack is not
@@ -112,6 +136,8 @@ func TestParseBudgetKeepsTheStateWriteProof(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	rows := append([]overBudget{
 		{"pipe", 100}, {"and", 100}, {"pipe", shellparse.MaxChainOperators}, {"nest", shellparse.MaxNestingDepth},
+		// One word past the string limit of the analysis (GAP-0382).
+		{"bigword", 70000},
 	}, overBudgetRows...)
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, mode := range []string{"observe", "action"} {
