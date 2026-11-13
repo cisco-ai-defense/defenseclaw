@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
 
@@ -54,21 +55,25 @@ func TestPassthroughBedrockStreamForwardsWholeFramesAtEverySplit(t *testing.T) {
 	ends := frameEnds(frames)
 	const path = "/model/us.anthropic.claude-haiku-4-5-20251001-v1:0/invoke-with-response-stream"
 
-	serve := func(cuts []int) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
-			f, _ := w.(http.Flusher)
-			prev := 0
-			for _, c := range append(cuts, len(frames)) {
-				_, _ = w.Write(frames[prev:c])
-				f.Flush()
-				prev = c
-			}
-		}))
-	}
-	run := func(t *testing.T, cuts []int, block bool) *flushRecorder {
-		up := serve(cuts)
-		defer up.Close()
+	// One upstream and one proxy per verdict serve every split: the cuts of the
+	// next reply are set before each request.
+	var mu sync.Mutex
+	var cuts []int
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		cs := append(append([]int(nil), cuts...), len(frames))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+		f, _ := w.(http.Flusher)
+		prev := 0
+		for _, c := range cs {
+			_, _ = w.Write(frames[prev:c])
+			f.Flush()
+			prev = c
+		}
+	}))
+	defer up.Close()
+	newProxy := func(block bool) *GuardrailProxy {
 		proxy, insp := bedrockPassthroughProxy(t, up)
 		if proxy.cfg != nil {
 			proxy.cfg.StreamBufferBytes = 1 // flush early, so the later reads take the post-flush path
@@ -77,6 +82,17 @@ func TestPassthroughBedrockStreamForwardsWholeFramesAtEverySplit(t *testing.T) {
 			insp.setVerdict("completion", &ScanVerdict{Action: "block", Severity: "HIGH", Reason: "test marker"})
 		} else {
 			insp.setVerdict("completion", allowVerdict("mock"))
+		}
+		return proxy
+	}
+	allowProxy, blockProxy := newProxy(false), newProxy(true)
+	run := func(t *testing.T, cs []int, block bool) *flushRecorder {
+		mu.Lock()
+		cuts = cs
+		mu.Unlock()
+		proxy := allowProxy
+		if block {
+			proxy = blockProxy
 		}
 		rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 		proxy.handlePassthrough(rec, bedrockRequest(up.URL, path))
@@ -99,11 +115,11 @@ func TestPassthroughBedrockStreamForwardsWholeFramesAtEverySplit(t *testing.T) {
 	}
 
 	// One byte per read.
-	cuts := make([]int, 0, len(frames))
+	every := make([]int, 0, len(frames))
 	for c := 1; c < len(frames); c++ {
-		cuts = append(cuts, c)
+		every = append(every, c)
 	}
-	rec := run(t, cuts, false)
+	rec := run(t, every, false)
 	if !bytes.Equal(rec.Body.Bytes(), frames) {
 		t.Fatalf("byte-by-byte: the allowed stream changed (%d of %d bytes)", rec.Body.Len(), len(frames))
 	}
