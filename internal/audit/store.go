@@ -256,6 +256,8 @@ type Store struct {
 	// secureClientSchema keeps the tables, columns and indexes main creates
 	// (WithSecureClientSchema).
 	secureClientSchema bool
+	// hookLoneTracked: the store keeps audit_hook_lone (ensureHookLoneTracking).
+	hookLoneTracked bool
 
 	// fieldClassSets: rows name their field class set (field_class_sets.go);
 	// fieldClassSetCount is the number of sets, for the table bound.
@@ -2279,7 +2281,7 @@ func (s *Store) Init() error {
 	if err := s.trimUnreadAuditIndexes(); err != nil {
 		return err
 	}
-	if err := s.ensureHookRowTracking(); err != nil {
+	if err := s.ensureHookLoneTracking(); err != nil {
 		return err
 	}
 	if err := s.keepSecureClientSparseKeyIndexes(); err != nil {

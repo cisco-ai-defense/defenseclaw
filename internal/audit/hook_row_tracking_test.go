@@ -4,6 +4,8 @@
 package audit
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -13,11 +15,10 @@ import (
 	"time"
 )
 
-// hookRowForTest inserts one hook row the way any writer does, with an
-// explicit column list (a 1.0.9 binary writes the same columns). sid ""
-// leaves the projected record without a semantic event; pad grows the
-// projected record past a page so a reader that parses it pays overflow I/O.
-func hookRowForTest(t *testing.T, store *Store, id, action, sid string, pad int) {
+// hookRowForTest inserts one hook row with an explicit column list, the way
+// any writer does. sid "" leaves the projected record without a semantic
+// event; pad grows the record past a page.
+func hookRowForTest(t *testing.T, db *sql.DB, id, action, sid string, pad int) {
 	t.Helper()
 	record := map[string]any{"body": map[string]any{"pad": strings.Repeat("x", pad)}}
 	if sid != "" {
@@ -27,21 +28,49 @@ func hookRowForTest(t *testing.T, store *Store, id, action, sid string, pad int)
 	if err != nil {
 		t.Fatal(err)
 	}
-	eventName := "legacy.audit.connector.hook"
-	if action == hookDecisionEventName {
-		eventName = hookDecisionEventName
-	}
-	if _, err := store.db.Exec(`INSERT INTO audit_events (id, timestamp, action, details, severity, connector,
-		event_name, payload_json, projected_record_json)
-		VALUES (?, ?, ?, 'hook row', 'INFO', 'claudecode', ?, NULL, ?)`,
-		id, time.Now().UTC().Format(time.RFC3339Nano), action, eventName, string(projected)); err != nil {
+	if _, err := db.Exec(`INSERT INTO audit_events (id, timestamp, action, details, severity, connector,
+		event_name, projected_record_json) VALUES (?, ?, ?, 'hook row', 'INFO', 'claudecode', ?, ?)`,
+		id, time.Now().UTC().Format(time.RFC3339Nano), action, action, string(projected)); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func loneHookDecisionIDsForTest(t *testing.T, store *Store, tracked bool) []string {
+// trackForTest runs the gateway's own bookkeeping for one written row
+// (trackHookRowTx), lone or not, in its own transaction.
+func trackForTest(t *testing.T, store *Store, action, id, sid string, lone bool) {
 	t.Helper()
-	rows, err := store.db.Query(`SELECT id FROM audit_events WHERE ` + LoneHookDecisionSQL("", tracked))
+	trackModeForTest(t, store, action, id, sid, map[bool]string{true: "record", false: ""}[lone])
+}
+
+// trackModeForTest: mode "record" (row of record), "awaiting" (fail-mode
+// decision), "report" (a failure-report connector-hook row), "" plain.
+func trackModeForTest(t *testing.T, store *Store, action, id, sid, mode string) {
+	t.Helper()
+	ctx := context.Background()
+	switch mode {
+	case "record":
+		ctx = WithLoneHookDecision(ctx)
+	case "awaiting":
+		ctx = WithLoneHookDecisionAwaitingReport(ctx)
+	case "report":
+		ctx = withHookFailureReport(ctx)
+	}
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.trackHookRowTx(ctx, tx, action, id, sid); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func loneHookDecisionIDsForTest(t *testing.T, db *sql.DB, tracked bool) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT id FROM audit_events WHERE ` + LoneHookDecisionSQL("", tracked))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,75 +103,9 @@ func newHookRowTrackingStoreForTest(t *testing.T, options ...StoreOption) *Store
 	return store
 }
 
-// TestLoneHookDecisionsComeFromTheHookRowTable: a store keeps
-// audit_hook_rows, so the lone hook_decision rule is two index lookups per
-// row and the same rows as the projected-record rule, in every order the
-// rows of a decision are written; a deleted audit row takes its hook row
-// with it (retention), and a row written with a plain INSERT, as a 1.0.9
-// binary writes it, is tracked too (rel-1-0-10:GAP-0316).
-func TestLoneHookDecisionsComeFromTheHookRowTable(t *testing.T) {
-	store := newHookRowTrackingStoreForTest(t)
-	if tracked, err := HookRowsTracked(store.db); err != nil || !tracked {
-		t.Fatalf("HookRowsTracked = %t, %v; the store must keep audit_hook_rows", tracked, err)
-	}
-	hookRowForTest(t, store, "lone", hookDecisionEventName, "sid-lone", 0)
-	hookRowForTest(t, store, "pair-ch", string(ActionConnectorHook), "sid-pair", 0)
-	hookRowForTest(t, store, "pair-hd", hookDecisionEventName, "sid-pair", 0)
-	// The failure report writes the connector-hook row of a call after its
-	// fail-mode hook_decision row.
-	hookRowForTest(t, store, "late-hd", hookDecisionEventName, "sid-late", 0)
-	hookRowForTest(t, store, "late-report", string(ActionConnectorHook), "sid-late", 0)
-	hookRowForTest(t, store, "stop-syn", string(ActionConnectorHookSynthetic), "sid-stop", 0)
-	hookRowForTest(t, store, "stop-hd", hookDecisionEventName, "sid-stop", 0)
-	hookRowForTest(t, store, "no-semantic", hookDecisionEventName, "", 0)
-	want := []string{"lone"}
-	for _, tracked := range []bool{true, false} {
-		if got := loneHookDecisionIDsForTest(t, store, tracked); fmt.Sprint(got) != fmt.Sprint(want) {
-			t.Fatalf("lone hook_decision rows (tracked %t) = %v, want %v", tracked, got, want)
-		}
-	}
-
-	if _, err := store.db.Exec(`DELETE FROM audit_events WHERE id = 'lone'`); err != nil {
-		t.Fatal(err)
-	}
-	var left int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_hook_rows WHERE audit_event_id = 'lone'`).Scan(&left); err != nil {
-		t.Fatal(err)
-	}
-	if left != 0 {
-		t.Fatalf("a deleted audit row left %d hook rows", left)
-	}
-
-	// The plan: the hook row table by its keys, never the hook rows'
-	// records (the projected-record rule built its set from every
-	// connector-hook record and parsed every hook_decision record).
-	plan := explainForTest(t, store, `SELECT COUNT(*) FROM audit_events WHERE `+LoneHookDecisionSQL("", true))
-	if !strings.Contains(plan, "audit_hook_rows") || strings.Contains(plan, "LIST SUBQUERY") ||
-		strings.Contains(plan, "hook_sibling USING INDEX idx_audit_action") {
-		t.Fatalf("lone rule plan %q, want lookups in audit_hook_rows only", plan)
-	}
-
-	// Opening the store again keeps the table and its rows.
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened, err := NewStore(store.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	if err := reopened.Init(); err != nil {
-		t.Fatal(err)
-	}
-	hookRowForTest(t, reopened, "lone-2", hookDecisionEventName, "sid-lone-2", 0)
-	if got := loneHookDecisionIDsForTest(t, reopened, true); fmt.Sprint(got) != "[lone-2]" {
-		t.Fatalf("lone rows after a reopen = %v, want [lone-2]", got)
-	}
-}
-
-func explainForTest(t *testing.T, store *Store, query string) string {
+func explainForTest(t *testing.T, db *sql.DB, query string) string {
 	t.Helper()
-	rows, err := store.db.Query(`EXPLAIN QUERY PLAN ` + query)
+	rows, err := db.Query(`EXPLAIN QUERY PLAN ` + query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,12 +122,104 @@ func explainForTest(t *testing.T, store *Store, query string) string {
 	return strings.Join(steps, " | ")
 }
 
+// TestLoneHookDecisionsComeFromTheLoneTable: the store keeps
+// audit_hook_lone; the lone rule reads it by key and agrees with the
+// projected-record rule when the writer lists exactly the rows it wrote
+// alone; a connector-hook row written later for the same semantic event
+// (the failure report) removes the entry; retention on a connection without
+// foreign_keys=ON removes the entry of a deleted row; a stale entry whose
+// row is gone never counts (rel-1-0-10:GAP-0316).
+func TestLoneHookDecisionsComeFromTheLoneTable(t *testing.T) {
+	store := newHookRowTrackingStoreForTest(t)
+	if tracked, err := HookRowsTracked(store.db); err != nil || !tracked {
+		t.Fatalf("HookRowsTracked = %t, %v; the store must keep audit_hook_lone", tracked, err)
+	}
+	write := func(id, action, sid string, lone bool) {
+		hookRowForTest(t, store.db, id, action, sid, 0)
+		trackForTest(t, store, action, id, sid, lone)
+	}
+	write("lone", hookDecisionEventName, "sid-lone", true)
+	write("pair-ch", string(ActionConnectorHook), "sid-pair", false)
+	write("pair-hd", hookDecisionEventName, "sid-pair", false)
+	write("stop-syn", string(ActionConnectorHookSynthetic), "sid-stop", false)
+	write("stop-hd", hookDecisionEventName, "sid-stop", false)
+	hookRowForTest(t, store.db, "late-hd", hookDecisionEventName, "sid-late", 0)
+	trackModeForTest(t, store, hookDecisionEventName, "late-hd", "sid-late", "awaiting")
+	for _, tracked := range []bool{true, false} {
+		if got := loneHookDecisionIDsForTest(t, store.db, tracked); fmt.Sprint(got) != "[late-hd lone]" {
+			t.Fatalf("lone rows (tracked %t) = %v, want [late-hd lone]", tracked, got)
+		}
+	}
+	// The failure report writes the call's connector-hook row afterwards.
+	hookRowForTest(t, store.db, "late-report", string(ActionConnectorHook), "sid-late", 0)
+	trackModeForTest(t, store, string(ActionConnectorHook), "late-report", "sid-late", "report")
+	for _, tracked := range []bool{true, false} {
+		if got := loneHookDecisionIDsForTest(t, store.db, tracked); fmt.Sprint(got) != "[lone]" {
+			t.Fatalf("lone rows after the report (tracked %t) = %v, want [lone]", tracked, got)
+		}
+	}
+
+	plain, err := sql.Open("sqlite", "file:"+store.dbPath+"?_pragma=foreign_keys(0)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Exec(`DELETE FROM audit_events WHERE id = 'lone'`); err != nil {
+		t.Fatal(err)
+	}
+	_ = plain.Close()
+	var left int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_hook_lone`).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("audit_hook_lone keeps %d entries after its rows were deleted or paired, want 0", left)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_hook_lone VALUES ('gone', NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if got := loneHookDecisionIDsForTest(t, store.db, true); len(got) != 0 {
+		t.Fatalf("a stale entry counted: %v", got)
+	}
+
+	plan := explainForTest(t, store.db, `SELECT COUNT(*) FROM audit_events WHERE `+LoneHookDecisionSQL("", true))
+	if !strings.Contains(plan, "hook_lone") || !strings.Contains(plan, "PRIMARY KEY") || strings.Contains(plan, "LIST SUBQUERY") {
+		t.Fatalf("lone rule plan %q, want a key lookup in audit_hook_lone", plan)
+	}
+}
+
+// TestNonLoneHookRowsWriteNothing: a hook_decision row written without the
+// lone mark and a connector-hook row of a semantic event with no entry
+// leave audit_hook_lone empty: the managed path and every paired decision
+// pay no insert.
+func TestNonLoneHookRowsWriteNothing(t *testing.T) {
+	store := newHookRowTrackingStoreForTest(t)
+	// A connector-hook row that is not the failure report's leaves a listed
+	// fail-mode decision alone: only the report pairs it.
+	hookRowForTest(t, store.db, "wait-hd", hookDecisionEventName, "sid-wait", 0)
+	trackModeForTest(t, store, hookDecisionEventName, "wait-hd", "sid-wait", "awaiting")
+	trackForTest(t, store, string(ActionConnectorHook), "other-ch", "sid-wait", false)
+	if got := loneHookDecisionIDsForTest(t, store.db, true); fmt.Sprint(got) != "[wait-hd]" {
+		t.Fatalf("lone rows = %v, want [wait-hd]", got)
+	}
+	if _, err := store.db.Exec(`DELETE FROM audit_events WHERE id = 'wait-hd'`); err != nil {
+		t.Fatal(err)
+	}
+	trackForTest(t, store, string(ActionConnectorHook), "ch", "sid-1", false)
+	trackForTest(t, store, hookDecisionEventName, "hd", "sid-1", false)
+	trackForTest(t, store, hookDecisionEventName, "no-sid", "", true)
+	var entries int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_hook_lone`).Scan(&entries); err != nil {
+		t.Fatal(err)
+	}
+	if entries != 0 {
+		t.Fatalf("audit_hook_lone has %d entries, want 0", entries)
+	}
+}
+
 // TestLoneHookDecisionCountDoesNotReadTheRecords: the lone count costs the
-// same whether each hook row's projected record is 100 B or 32 KB (several
-// overflow pages), because it reads audit_hook_rows only
-// (rel-1-0-10:GAP-0316). The projected-record rule parsed every hook row's
-// record, so on a grown store (3.3-3.6 KB records, 325,000 hook rows) it read
-// about 1.1 GB with a cold cache.
+// same with 100 B or 32 KB records (several overflow pages), because it
+// reads audit_hook_lone only (rel-1-0-10:GAP-0316). The projected-record
+// rule parsed every hook row's record.
 func TestLoneHookDecisionCountDoesNotReadTheRecords(t *testing.T) {
 	if testing.Short() {
 		t.Skip("writes a 70 MB store")
@@ -194,7 +249,7 @@ func TestLoneHookDecisionCountDoesNotReadTheRecords(t *testing.T) {
 		best := time.Duration(1 << 62)
 		for range 5 {
 			started := time.Now()
-			if got := loneHookDecisionIDsForTest(t, store, true); len(got) != 0 {
+			if got := loneHookDecisionIDsForTest(t, store.db, true); len(got) != 0 {
 				t.Fatalf("lone rows in a store of pairs = %d, want 0", len(got))
 			}
 			best = min(best, time.Since(started))
@@ -208,20 +263,37 @@ func TestLoneHookDecisionCountDoesNotReadTheRecords(t *testing.T) {
 	}
 }
 
-// TestSecureClientStoreHasNoHookRowTable: a Secure Client store keeps main's
-// schema (#1092) and every connector-hook row, so it has no audit_hook_rows
-// and no trigger, and the export falls back to the record rule.
-func TestSecureClientStoreHasNoHookRowTable(t *testing.T) {
+// TestSecureClientStoreHasNoLoneTable: a Secure Client store keeps main's
+// schema (#1092) and every connector-hook row: no audit_hook_lone, no
+// trigger, and the bookkeeping writes nothing.
+func TestSecureClientStoreHasNoLoneTable(t *testing.T) {
 	store := newHookRowTrackingStoreForTest(t, WithSecureClientSchema())
 	if tracked, err := HookRowsTracked(store.db); err != nil || tracked {
 		t.Fatalf("HookRowsTracked on a Secure Client store = %t, %v; want false", tracked, err)
 	}
 	var triggers int
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name = ?`,
-		hookRowsTrigger).Scan(&triggers); err != nil {
+		hookLoneTrigger).Scan(&triggers); err != nil {
 		t.Fatal(err)
 	}
 	if triggers != 0 {
-		t.Fatal("a Secure Client store has the hook row trigger")
+		t.Fatal("a Secure Client store has the lone-row trigger")
+	}
+	trackForTest(t, store, hookDecisionEventName, "hd", "sid-1", true)
+}
+
+// TestRowOfRecordEntryIsItsKeyAlone: a row of record's entry stores no
+// semantic event and adds nothing to the partial index, so it costs its key
+// alone (the benign PreToolUse budget, hookStoreBudgetPerBenignPreToolUse).
+func TestRowOfRecordEntryIsItsKeyAlone(t *testing.T) {
+	store := newHookRowTrackingStoreForTest(t)
+	hookRowForTest(t, store.db, "of-record", hookDecisionEventName, "sid-r", 0)
+	trackForTest(t, store, hookDecisionEventName, "of-record", "sid-r", true)
+	var sid sql.NullString
+	if err := store.db.QueryRow(`SELECT semantic_event_id FROM audit_hook_lone WHERE audit_event_id = 'of-record'`).Scan(&sid); err != nil {
+		t.Fatal(err)
+	}
+	if sid.Valid {
+		t.Fatalf("a row of record's entry stores semantic event %q, want NULL", sid.String)
 	}
 }

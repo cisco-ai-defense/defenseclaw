@@ -48,26 +48,22 @@ def _projected(sid: str, body: dict | None = None) -> str:
     return json.dumps(record)
 
 
-# The table and trigger a 1.0.10 gateway adds when it opens the store
-# (internal/audit/hook_row_tracking.go, rel-1-0-10:GAP-0316); a store no
-# 1.0.10 gateway has opened has neither, and the readers fall back to the
+# The table a 1.0.10 gateway adds when it opens the store; the gateway lists
+# in it, with each row, the hook_decision rows it writes alone
+# (internal/audit/hook_row_tracking.go, rel-1-0-10:GAP-0316). A store no
+# 1.0.10 gateway has opened has no table, and the readers fall back to the
 # projected records. Every reader test below runs on both kinds of store.
-_HOOK_ROW_TRACKING_DDL = """
-CREATE TABLE IF NOT EXISTS audit_hook_rows (
-    audit_event_id TEXT PRIMARY KEY REFERENCES audit_events(id) ON DELETE CASCADE,
-    semantic_event_id TEXT NOT NULL,
-    connector_hook INTEGER NOT NULL CHECK (connector_hook IN (0, 1))
+_HOOK_LONE_DDL = """
+CREATE TABLE IF NOT EXISTS audit_hook_lone (
+    audit_event_id TEXT PRIMARY KEY,
+    semantic_event_id TEXT
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS idx_audit_hook_rows_semantic ON audit_hook_rows(semantic_event_id, connector_hook);
-CREATE TRIGGER IF NOT EXISTS trg_audit_hook_rows_insert AFTER INSERT ON audit_events
-    WHEN NEW.action IN ('hook_decision','connector-hook','connector-hook-synthetic')
-     AND (CASE WHEN json_valid(COALESCE(NEW.projected_record_json,''))
-          THEN json_extract(NEW.projected_record_json,'$.correlation.semantic_event_id') END) IS NOT NULL
+CREATE INDEX IF NOT EXISTS idx_audit_hook_lone_semantic ON audit_hook_lone(semantic_event_id)
+    WHERE semantic_event_id IS NOT NULL;
+CREATE TRIGGER IF NOT EXISTS trg_audit_hook_lone_delete AFTER DELETE ON audit_events
+    WHEN OLD.action = 'hook_decision'
     BEGIN
-        INSERT OR REPLACE INTO audit_hook_rows (audit_event_id, semantic_event_id, connector_hook)
-        VALUES (NEW.id, (CASE WHEN json_valid(COALESCE(NEW.projected_record_json,''))
-                THEN json_extract(NEW.projected_record_json,'$.correlation.semantic_event_id') END),
-                NEW.action <> 'hook_decision');
+        DELETE FROM audit_hook_lone WHERE audit_event_id = OLD.id;
     END;
 """
 
@@ -81,7 +77,7 @@ def store(tmp_path, request):
         if column not in columns:
             db.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
     if request.param == "hook-row-table":
-        db.db.executescript(_HOOK_ROW_TRACKING_DDL)
+        db.db.executescript(_HOOK_LONE_DDL)
     yield db
     db.close()
 
@@ -100,7 +96,7 @@ def _insert_connector_hook(store: Store, row_id: str, sid: str, at: datetime, ac
 
 
 def _insert_hook_decision(store: Store, row_id: str, sid: str | None, at: datetime, body: dict, *,
-                          enforced=None, payload: bool = True) -> None:
+                          enforced=None, payload: bool = True, lone: bool = False) -> None:
     projected = _projected(sid, body) if sid else json.dumps({"body": body})
     store.db.execute(
         """INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, connector, enforced,
@@ -109,14 +105,23 @@ def _insert_hook_decision(store: Store, row_id: str, sid: str | None, at: dateti
                'guardrail.evaluation', 'hook_decision', ?, ?)""",
         (row_id, at.isoformat(), enforced, json.dumps(body) if payload else None, projected),
     )
+    if lone and sid and _tracked(store):
+        # What the gateway writes with a row it writes alone.
+        store.db.execute("INSERT OR REPLACE INTO audit_hook_lone VALUES (?, ?)", (row_id, sid))
+
+
+def _tracked(store: Store) -> bool:
+    return store.db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_hook_lone'"
+    ).fetchone() is not None
 
 
 def _seed(store: Store) -> None:
     # 1.0.10 benign per-user allow: the hook_decision row alone.
-    _insert_hook_decision(store, "lone-allow", "sid-a", _BASE, _body("allow", "allow"))
+    _insert_hook_decision(store, "lone-allow", "sid-a", _BASE, _body("allow", "allow"), lone=True)
     # The same, with its body only in the projected record.
     _insert_hook_decision(store, "lone-allow-projected", "sid-d", _BASE + timedelta(seconds=1),
-                          _body("allow", "allow"), payload=False)
+                          _body("allow", "allow"), payload=False, lone=True)
     # A block keeps both rows.
     _insert_connector_hook(store, "block-ch", "sid-b", _BASE + timedelta(seconds=2), "block", enforced=1)
     _insert_hook_decision(store, "block-hd", "sid-b", _BASE + timedelta(seconds=2, milliseconds=3),
@@ -242,10 +247,13 @@ def test_a_report_row_written_after_the_decision_pairs_it(store: Store) -> None:
     fail-mode hook_decision row: from then on the call counts once, from the
     report row (rel-1-0-10:GAP-0316, any write order)."""
 
-    _insert_hook_decision(store, "late-hd", "sid-late", _BASE, _body("allow", "alert"))
+    _insert_hook_decision(store, "late-hd", "sid-late", _BASE, _body("allow", "alert"), lone=True)
     store.db.commit()
     assert store.connector_hook_event_stats()["claudecode"]["calls"] == 1
     _insert_connector_hook(store, "late-report", "sid-late", _BASE + timedelta(seconds=9), "alert")
+    if _tracked(store):
+        # What the gateway does when it writes the report row.
+        store.db.execute("DELETE FROM audit_hook_lone WHERE semantic_event_id = 'sid-late'")
     store.db.commit()
     assert store.connector_hook_event_stats()["claudecode"]["calls"] == 1
 
@@ -264,7 +272,7 @@ class _CapturingConnection:
 
 
 def test_overview_counter_reads_the_hook_row_table_not_the_records(tmp_path) -> None:
-    """With audit_hook_rows the Overview counter finds lone hook_decision
+    """With audit_hook_lone the Overview counter finds lone hook_decision
     rows through that table: no pass over every hook row's projected record
     (on a grown 6.4 GB store that pass read about 1.1 GB, rel-1-0-10:GAP-0316)."""
 
@@ -274,7 +282,7 @@ def test_overview_counter_reads_the_hook_row_table_not_the_records(tmp_path) -> 
     for column in ("event_name", "payload_json", "projected_record_json", "bucket"):
         if column not in columns:
             db.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
-    db.db.executescript(_HOOK_ROW_TRACKING_DDL)
+    db.db.executescript(_HOOK_LONE_DDL)
     _seed(db)
     connection = db.db
     capture = _CapturingConnection(connection)
@@ -287,6 +295,29 @@ def test_overview_counter_reads_the_hook_row_table_not_the_records(tmp_path) -> 
     assert counter, "the hook counter statement was not captured"
     sql, args = counter[0]
     plan = " | ".join(row[3] for row in connection.execute("EXPLAIN QUERY PLAN " + sql, *args))
-    assert "audit_hook_rows" in plan, plan
+    assert "hook_lone" in plan, plan
     assert "LIST SUBQUERY" not in plan, plan
     db.close()
+
+
+def test_retention_on_any_connection_keeps_the_lone_count_exact(store: Store) -> None:
+    """Retention deletes audit rows on a connection with or without
+    foreign_keys=ON: the lone decision it removes is gone from the counts
+    with its audit_hook_lone entry (rel-1-0-10:GAP-0316)."""
+
+    import sqlite3
+
+    _seed(store)
+    store.db.commit()
+    before = store.connector_hook_event_stats()["claudecode"]["calls"]
+    path = store.db.execute("PRAGMA database_list").fetchone()[2]
+    other = sqlite3.connect(path)
+    other.execute("PRAGMA foreign_keys=OFF")
+    other.execute("DELETE FROM audit_events WHERE id = 'lone-allow'")
+    other.commit()
+    other.close()
+    assert store.connector_hook_event_stats()["claudecode"]["calls"] == before - 1
+    assert "lone-allow" not in {event.id for event in store.list_connector_hook_event_summaries(10)}
+    if _tracked(store):
+        left = store.db.execute("SELECT COUNT(*) FROM audit_hook_lone WHERE audit_event_id = 'lone-allow'").fetchone()[0]
+        assert left == 0

@@ -921,7 +921,7 @@ class Store:
         ][:limit]
 
     def _hook_rows_tracked(self) -> bool:
-        """Whether the store has audit_hook_rows (a 1.0.10 gateway opened it)."""
+        """Whether the store has audit_hook_lone (a 1.0.10 gateway opened it)."""
 
         return self.db.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (HOOK_ROWS_TABLE,)
@@ -937,7 +937,7 @@ class Store:
         columns, _ = self._audit_projection_schema()
         lone_hook_decisions = ""
         if {"payload_json", "projected_record_json"}.issubset(columns) and self._hook_rows_tracked():
-            # The lone rows come from audit_hook_rows, so only their own
+            # The lone rows come from audit_hook_lone, so only their own
             # records are read (rel-1-0-10:GAP-0316).
             body = hook_decision_body_sql("lone.payload_json", "lone.projected_record_json")
             lone_hook_decisions = f"""UNION ALL

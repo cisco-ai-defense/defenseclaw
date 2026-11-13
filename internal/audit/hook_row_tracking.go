@@ -4,81 +4,166 @@
 package audit
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 )
 
-// audit_hook_rows names the correlation semantic event of every local hook
-// row (hook_decision, connector-hook, connector-hook-synthetic), keyed by the
-// row's audit_events id. The readers that count a decision once find the
-// hook_decision rows that are their decision's only local hook row (a benign
-// per-user allow since 1.0.10, #1384) here, with two index lookups per row,
-// instead of reading the projected record of every hook row of the store.
-// On a grown managed store (670,000 audit rows, 4 GiB) the projected-record
-// form read about 1.1 GB that 1.0.9 never read, and a cold-cache Overview
-// count took 89-262 s instead of 17 s (rel-1-0-10:GAP-0316).
+// audit_hook_lone lists the hook_decision rows that are their decision's
+// only local hook row (a benign per-user allow since 1.0.10, #1384, or the
+// fail-mode decision of a call whose connector-hook row could not be
+// stored), keyed by the row's audit_events id. The readers that count a
+// decision once (LoneHookDecisionSQL, the Python Overview counter) read
+// these rows by key instead of the projected record of every hook row of the
+// store: on a grown managed store (670,000 audit rows, 4 GiB) that pass read
+// about 1.1 GB with a cold page cache (rel-1-0-10:GAP-0316).
 //
-// A trigger keeps the table, so it holds every hook row written since the
-// store first opened with it, by any writer: this gateway, the Python CLI,
-// and a 1.0.9 binary after a rollback (the trigger lives in the schema). The
-// foreign key removes a row with its audit row, so retention needs no change
-// (every audit connection runs with foreign_keys=ON, 1.0.9 too). Rows
-// written before the table existed are not in it; they are 1.0.9 rows, and
-// 1.0.9 always kept the connector-hook row of a decision, so none of them is
-// ever its decision's only hook row (the lone count of the grown 1.0.9 store
-// is 0). No index over audit_events is built and no row is rewritten, so the
-// upgrade costs one CREATE TABLE, one CREATE INDEX on the empty table and one
-// CREATE TRIGGER: about 90 ms on the 6.4 GB store. A 1.0.9 binary opens the
-// store as before: it applies migrations only up to its own count and reads
-// columns and tables by name. A Secure Client store keeps main's schema (and
-// keeps every connector-hook row), so it has neither the table nor the
-// trigger, and no hook_decision row is ever alone there.
+// The gateway writes the entry itself, in the transaction of its row, only
+// for such a row (WithLoneHookDecision, WithLoneHookDecisionAwaitingReport),
+// so a hook call that keeps its connector-hook row, every managed call
+// among them, pays nothing; a lone row pays one small insert, and nothing
+// parses a record. The failure report's connector-hook row of a call whose
+// audit write failed removes that call's entry in its own transaction, so
+// the call counts once, from that row. A delete trigger
+// removes the entry with its audit row on any connection, so retention needs
+// no change. Rows written before the table existed are not listed: 1.0.9
+// always kept a decision's connector-hook row, so none of its rows is ever
+// alone (the lone count of a grown 1.0.9 store is 0), and nothing is
+// backfilled. A 1.0.9 binary after a rollback writes no entries and needs
+// none (it writes no lone rows); it opens the store as before, since it
+// applies migrations only up to its own count and names its tables. The
+// upgrade costs one CREATE TABLE, one CREATE INDEX on the empty table and
+// one CREATE TRIGGER; no index over audit_events is built and no row is
+// rewritten. A Secure Client store keeps main's schema and every
+// connector-hook row, so it has neither the table nor the trigger.
 const (
-	hookRowsTable   = "audit_hook_rows"
-	hookRowsIndex   = "idx_audit_hook_rows_semantic"
-	hookRowsTrigger = "trg_audit_hook_rows_insert"
+	hookLoneTable   = "audit_hook_lone"
+	hookLoneIndex   = "idx_audit_hook_lone_semantic"
+	hookLoneTrigger = "trg_audit_hook_lone_delete"
 )
 
-var hookRowTrackingDDL = []string{
-	`CREATE TABLE IF NOT EXISTS ` + hookRowsTable + ` (
-		audit_event_id TEXT PRIMARY KEY REFERENCES audit_events(id) ON DELETE CASCADE,
-		semantic_event_id TEXT NOT NULL,
-		connector_hook INTEGER NOT NULL CHECK (connector_hook IN (0, 1))
+var hookLoneDDL = []string{
+	// semantic_event_id is set only for a fail-mode decision that waits for
+	// the failure report's connector-hook row (the partial index holds just
+	// those); a row of record stores its key alone, about 57 B.
+	`CREATE TABLE IF NOT EXISTS ` + hookLoneTable + ` (
+		audit_event_id TEXT PRIMARY KEY,
+		semantic_event_id TEXT
 	) WITHOUT ROWID`,
-	`CREATE INDEX IF NOT EXISTS ` + hookRowsIndex + ` ON ` + hookRowsTable + `(semantic_event_id, connector_hook)`,
-	`CREATE TRIGGER IF NOT EXISTS ` + hookRowsTrigger + ` AFTER INSERT ON audit_events
-		WHEN NEW.action IN ('` + hookDecisionEventName + `','` + string(ActionConnectorHook) + `','` +
-		string(ActionConnectorHookSynthetic) + `') AND ` + hookRowSemanticEventSQL("NEW.projected_record_json") + ` IS NOT NULL
+	`CREATE INDEX IF NOT EXISTS ` + hookLoneIndex + ` ON ` + hookLoneTable + `(semantic_event_id)
+		WHERE semantic_event_id IS NOT NULL`,
+	`CREATE TRIGGER IF NOT EXISTS ` + hookLoneTrigger + ` AFTER DELETE ON audit_events
+		WHEN OLD.action = '` + hookDecisionEventName + `'
 		BEGIN
-			INSERT OR REPLACE INTO ` + hookRowsTable + ` (audit_event_id, semantic_event_id, connector_hook)
-			VALUES (NEW.id, ` + hookRowSemanticEventSQL("NEW.projected_record_json") + `,
-				NEW.action <> '` + hookDecisionEventName + `');
+			DELETE FROM ` + hookLoneTable + ` WHERE audit_event_id = OLD.id;
 		END`,
 }
 
-// ensureHookRowTracking creates audit_hook_rows and its trigger after the
-// migrations, without moving the schema version (as trimUnreadAuditIndexes
-// does), or drops them on a Secure Client store.
-func (s *Store) ensureHookRowTracking() error {
+// ensureHookLoneTracking creates audit_hook_lone and its delete trigger
+// after the migrations, without moving the schema version (as
+// trimUnreadAuditIndexes does), or drops them on a Secure Client store.
+func (s *Store) ensureHookLoneTracking() error {
 	if present, err := tableExists(s.db, "audit_events"); err != nil {
 		return err
 	} else if !present {
 		return nil
 	}
-	statements := hookRowTrackingDDL
+	statements := hookLoneDDL
 	if s.secureClientSchema {
-		statements = []string{"DROP TRIGGER IF EXISTS " + hookRowsTrigger, "DROP TABLE IF EXISTS " + hookRowsTable}
+		statements = []string{"DROP TRIGGER IF EXISTS " + hookLoneTrigger, "DROP TABLE IF EXISTS " + hookLoneTable}
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(statement); err != nil {
-			return fmt.Errorf("audit: hook row tracking: %w", err)
+			return fmt.Errorf("audit: lone hook decision tracking: %w", err)
 		}
 	}
+	s.hookLoneTracked = !s.secureClientSchema
 	return nil
 }
 
-// HookRowsTracked reports whether db has audit_hook_rows, the table
+// HookRowsTracked reports whether db has audit_hook_lone, the table
 // LoneHookDecisionSQL reads.
 func HookRowsTracked(db *sql.DB) (bool, error) {
-	return tableExists(db, hookRowsTable)
+	return tableExists(db, hookLoneTable)
+}
+
+type loneHookDecisionKey struct{}
+
+// loneHookDecisionMode is how a hook_decision record written with a ctx is
+// listed in audit_hook_lone.
+type loneHookDecisionMode int
+
+const (
+	loneHookDecisionNone loneHookDecisionMode = iota
+	// loneHookDecisionOfRecord: the row of record of a benign per-user
+	// allow. No connector-hook row ever follows it.
+	loneHookDecisionOfRecord
+	// loneHookDecisionAwaitingReport: the fail-mode decision of a call whose
+	// connector-hook row could not be stored. The failure report writes that
+	// row later (WithHookFailureReport), which pairs it.
+	loneHookDecisionAwaitingReport
+)
+
+type hookFailureReportKey struct{}
+
+// WithLoneHookDecision marks the hook_decision record written with ctx as
+// the row of record of its decision: its event-history row is listed in
+// audit_hook_lone in the same transaction.
+func WithLoneHookDecision(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	return context.WithValue(ctx, loneHookDecisionKey{}, loneHookDecisionOfRecord)
+}
+
+// WithLoneHookDecisionAwaitingReport marks the hook_decision record written
+// with ctx as the fail-mode decision of a call whose connector-hook row
+// could not be stored: it is listed until the failure report writes that
+// row.
+func WithLoneHookDecisionAwaitingReport(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	return context.WithValue(ctx, loneHookDecisionKey{}, loneHookDecisionAwaitingReport)
+}
+
+// withHookFailureReport marks the connector-hook rows the failure report
+// writes: each pairs the listed fail-mode decision of its semantic event.
+func withHookFailureReport(ctx context.Context) context.Context {
+	return context.WithValue(ctx, hookFailureReportKey{}, true)
+}
+
+// trackHookRowTx keeps audit_hook_lone for one event-history row written in
+// tx: a lone hook_decision row is listed, and a failure-report connector-hook
+// row removes the listed fail-mode decision of its semantic event. Every
+// other row, the whole managed hook path among them, runs no statement.
+func (s *Store) trackHookRowTx(ctx context.Context, tx *sql.Tx, action, recordID, semanticEventID string) error {
+	// A hook row without a semantic event is never alone (the gateway keeps
+	// the connector-hook row of an uncorrelated call), as in the record rule.
+	if s == nil || !s.hookLoneTracked || ctx == nil || semanticEventID == "" {
+		return nil
+	}
+	switch action {
+	case hookDecisionEventName:
+		mode, _ := ctx.Value(loneHookDecisionKey{}).(loneHookDecisionMode)
+		switch mode {
+		case loneHookDecisionOfRecord:
+			_, err := txExecContextObserved(ctx, tx, "audit_hook_lone_insert", s.sqliteBusyObservabilityV8(),
+				`INSERT OR REPLACE INTO `+hookLoneTable+` (audit_event_id, semantic_event_id) VALUES (?, NULL)`, recordID)
+			return err
+		case loneHookDecisionAwaitingReport:
+			_, err := txExecContextObserved(ctx, tx, "audit_hook_lone_insert", s.sqliteBusyObservabilityV8(),
+				`INSERT OR REPLACE INTO `+hookLoneTable+` (audit_event_id, semantic_event_id) VALUES (?, ?)`,
+				recordID, semanticEventID)
+			return err
+		}
+	case string(ActionConnectorHook), string(ActionConnectorHookSynthetic):
+		if report, _ := ctx.Value(hookFailureReportKey{}).(bool); !report {
+			return nil
+		}
+		_, err := txExecContextObserved(ctx, tx, "audit_hook_lone_pair", s.sqliteBusyObservabilityV8(),
+			`DELETE FROM `+hookLoneTable+` WHERE semantic_event_id = ?`, semanticEventID)
+		return err
+	}
+	return nil
 }

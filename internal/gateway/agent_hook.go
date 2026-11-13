@@ -1686,6 +1686,12 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// and was written in the audit section with the connector-hook record
 	// export only (#1384); AuditPersisted is then its commit.
 	decisionInAudit := false
+	// connectorRowMissing: the audit section ran and stored no connector-hook
+	// row for this call (its write failed, or the row of record was
+	// abandoned), so the fail-mode decision written below is the decision's
+	// only local hook row (rel-1-0-10:GAP-0316). A panicked section is left
+	// out: a connector-hook row it queued may still commit.
+	connectorRowMissing := false
 	if !replay {
 		var auditErr error
 		safeSection("audit", func() {
@@ -1753,6 +1759,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		// verdict the agent never saw. An unjournaled occurrence keeps its
 		// record IDs but nothing recovers it.
 		recoverable := req.pendingJournaled
+		connectorRowMissing = !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured)
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
@@ -1857,6 +1864,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 					decisionBaseCtx = renewed
 					defer cancel()
 				}
+			}
+			if connectorRowMissing && !panicked {
+				decisionBaseCtx = audit.WithLoneHookDecisionAwaitingReport(decisionBaseCtx)
 			}
 			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
 			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)

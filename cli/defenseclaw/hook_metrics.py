@@ -499,37 +499,30 @@ def hook_decision_body_sql(payload: str = "payload_json", projected: str = "proj
     )
 
 
-# audit_hook_rows: the semantic event of every local hook row, kept by a
-# trigger a 1.0.10 gateway adds (internal/audit/hook_row_tracking.go,
-# rel-1-0-10:GAP-0316). It answers the lone rule by index instead of a pass
-# over every hook row's projected record.
-HOOK_ROWS_TABLE = "audit_hook_rows"
-
-
-def _lone_hook_row_entry_sql(own: str) -> str:
-    return (
-        f"{own}.connector_hook = 0 AND NOT EXISTS (SELECT 1 FROM {HOOK_ROWS_TABLE} AS hook_sibling"
-        f" WHERE hook_sibling.semantic_event_id = {own}.semantic_event_id AND hook_sibling.connector_hook = 1)"
-    )
+# audit_hook_lone: the hook_decision rows that are their decision's only
+# local hook row, written by a 1.0.10 gateway with the row
+# (internal/audit/hook_row_tracking.go, rel-1-0-10:GAP-0316). It answers the
+# lone rule by key instead of a pass over every hook row's projected record.
+HOOK_ROWS_TABLE = "audit_hook_lone"
 
 
 def lone_hook_decision_rows_sql(alias: str = "lone") -> str:
-    """``FROM ... WHERE ...`` of the lone hook_decision rows, driven from audit_hook_rows.
+    """``FROM ... WHERE ...`` of the lone hook_decision rows, driven from audit_hook_lone.
 
     Columns of the rows are ``{alias}.<column>``. Use only on a store that has
     the table (:func:`lone_hook_decision_sql` otherwise).
     """
 
     return (
-        f"FROM {HOOK_ROWS_TABLE} AS hook_own CROSS JOIN audit_events AS {alias} ON {alias}.id = hook_own.audit_event_id"
-        f" WHERE {alias}.action = '{HOOK_DECISION_ACTION}' AND {_lone_hook_row_entry_sql('hook_own')}"
+        f"FROM {HOOK_ROWS_TABLE} AS hook_lone CROSS JOIN audit_events AS {alias} ON {alias}.id = hook_lone.audit_event_id"
+        f" WHERE {alias}.action = '{HOOK_DECISION_ACTION}'"
     )
 
 
 def lone_hook_decision_sql(alias: str = "", table: str = "audit_events", tracked: bool = False) -> str:
     """SQL predicate: the row is a hook_decision row that is its decision's only hook row.
 
-    ``tracked`` reads audit_hook_rows (two index lookups per row). Without it,
+    ``tracked`` reads audit_hook_lone (one key lookup per row). Without it,
     on a store no 1.0.10 gateway has opened, the connector-hook ids of the
     subquery are computed once per statement (an uncorrelated ``NOT IN``), so a
     scan costs one pass over each kind's projected records.
@@ -539,8 +532,8 @@ def lone_hook_decision_sql(alias: str = "", table: str = "audit_events", tracked
     if tracked:
         row = f"{alias}.id" if alias else f"{table}.id"
         return (
-            f"({prefix}action = '{HOOK_DECISION_ACTION}' AND EXISTS (SELECT 1 FROM {HOOK_ROWS_TABLE} AS hook_own"
-            f" WHERE hook_own.audit_event_id = {row} AND {_lone_hook_row_entry_sql('hook_own')}))"
+            f"({prefix}action = '{HOOK_DECISION_ACTION}' AND EXISTS (SELECT 1 FROM {HOOK_ROWS_TABLE} AS hook_lone"
+            f" WHERE hook_lone.audit_event_id = {row}))"
         )
     own = hook_semantic_event_id_sql(f"{prefix}projected_record_json")
     sibling = hook_semantic_event_id_sql("sibling.projected_record_json")
