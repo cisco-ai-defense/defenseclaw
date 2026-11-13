@@ -33,7 +33,12 @@
 //  2. DefenseClaw's own hosts (the actor listener): allowed without
 //     inspection, never body-buffered;
 //  3. the live actor UID (UIDResolver, cached; Control API outages follow
-//     the failure mode after the stale window);
+//     the failure mode after the stale window). A decision made on a
+//     cached entry stands only once the leader confirmed the incarnation:
+//     the chain check (7) answers only the name's live incarnation, and a
+//     refusal or unchecked step no chain answer confirmed resolves the name
+//     again; a changed registration decides the request again from the
+//     start (GAP-0234, GAP-0237);
 //  4. the egress feeds and the profile's host lists, through the OpenShell
 //     egress Decider (internal/openshell/egress), not a fork of it;
 //  5. the profile's URL and method rules;

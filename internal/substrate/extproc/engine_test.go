@@ -363,26 +363,26 @@ func TestUIDCacheStaleAndInvalidate(t *testing.T) {
 	c := NewUIDCache(f, 10*time.Second, 60*time.Second)
 	c.now = func() time.Time { return now }
 	a := ActorRef{Atespace: "s", Name: "n"}
-	if rec, err := c.Resolve(context.Background(), a); rec.UID != "u1" || err != nil {
+	if rec, _, err := c.Resolve(context.Background(), a); rec.UID != "u1" || err != nil {
 		t.Fatal(rec, err)
 	}
 	now = now.Add(5 * time.Second)
-	_, _ = c.Resolve(context.Background(), a)
+	_, _, _ = c.Resolve(context.Background(), a)
 	if f.calls != 1 {
 		t.Fatalf("fresh entry re-resolved: %d", f.calls)
 	}
 	f.err = errors.New("down")
 	now = now.Add(30 * time.Second)
-	if rec, err := c.Resolve(context.Background(), a); rec.UID != "u1" || err != nil {
+	if rec, _, err := c.Resolve(context.Background(), a); rec.UID != "u1" || err != nil {
 		t.Fatalf("stale entry not served: %+v %v", rec, err)
 	}
 	now = now.Add(60 * time.Second)
-	if _, err := c.Resolve(context.Background(), a); err == nil {
+	if _, _, err := c.Resolve(context.Background(), a); err == nil {
 		t.Fatal("entry past stale_max served")
 	}
 	f.err, f.uid = nil, "u2"
 	c.Invalidate("s", "n")
-	if rec, _ := c.Resolve(context.Background(), a); rec.UID != "u2" {
+	if rec, _, _ := c.Resolve(context.Background(), a); rec.UID != "u2" {
 		t.Fatalf("recreated actor kept old UID: %+v", rec)
 	}
 }
@@ -395,21 +395,21 @@ func TestUIDCacheMissIsShort(t *testing.T) {
 	c := NewUIDCache(f, 60*time.Second, 60*time.Second)
 	c.now = func() time.Time { return now }
 	a := ActorRef{Atespace: "s", Name: "n"}
-	if rec, err := c.Resolve(context.Background(), a); rec.UID != "" || err != nil {
+	if rec, _, err := c.Resolve(context.Background(), a); rec.UID != "" || err != nil {
 		t.Fatal(rec, err)
 	}
 	f.uid = "u1"
 	now = now.Add(uidMissTTL / 2)
-	if rec, _ := c.Resolve(context.Background(), a); rec.UID != "" || f.calls != 1 {
+	if rec, _, _ := c.Resolve(context.Background(), a); rec.UID != "" || f.calls != 1 {
 		t.Fatalf("miss not reused: %+v calls %d", rec, f.calls)
 	}
 	now = now.Add(uidMissTTL)
-	if rec, _ := c.Resolve(context.Background(), a); rec.UID != "u1" {
+	if rec, _, _ := c.Resolve(context.Background(), a); rec.UID != "u1" {
 		t.Fatalf("registration not seen after the miss TTL: %+v", rec)
 	}
 	f.live, f.uid = false, ""
 	c.Invalidate("s", "n")
-	if _, err := c.Resolve(context.Background(), a); !errors.Is(err, ErrActorNotLive) {
+	if _, _, err := c.Resolve(context.Background(), a); !errors.Is(err, ErrActorNotLive) {
 		t.Fatalf("deleted actor: %v", err)
 	}
 }

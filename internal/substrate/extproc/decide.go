@@ -203,6 +203,9 @@ func NewEngine(o Options) (*Engine, error) {
 	}
 	e.uids = NewUIDCache(o.UIDs, cfg.UID.CacheTTL, cfg.UID.StaleMax)
 	e.uids.now = e.now
+	if cfg.Chain.CheckBudget > 0 {
+		e.uids.refreshBudget = cfg.Chain.CheckBudget
+	}
 	e.secrets = newSecretValues(cfg.ActorSecretsDir)
 	e.secrets.now = e.now
 	e.red = newRedactor(cfg, e.secrets)
@@ -256,15 +259,6 @@ func (e *Engine) closedAuto() bool {
 	return e.cfg.Managed && e.cfg.FailureMode == FailureClosed && e.cfg.BodyInspection == BodyAuto
 }
 
-// InvalidateActor drops an actor's cached UID. Nothing in the callout
-// process calls it: lifecycle events reach the gateway, not this process, so
-// the cache's own age limit (UIDCache) bounds how long a same-name actor
-// that was deleted and created again keeps its predecessor's UID. In that
-// window its verdict calls carry the old UID and the gateway, which finds
-// the old registration deleted or none, refuses them (closed, never wrongly
-// allowed). Tests use it to stand for the age limit passing.
-func (e *Engine) InvalidateActor(atespace, name string) { e.uids.Invalidate(atespace, name) }
-
 // ChainDropped is how many observed_egress steps the full queue dropped.
 func (e *Engine) ChainDropped() uint64 { return e.chain.droppedCount() }
 
@@ -297,6 +291,91 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 			v = e.failure(Verdict{}, CategoryCalloutError, "The DefenseClaw egress callout hit an internal error.")
 		}
 	}()
+	begin := e.now()
+	var p pass
+	v = e.decideHeaders(ctx, req, &p)
+	switch {
+	case p.stale:
+		// The cache entry is dropped: the name is resolved again.
+		p = pass{last: true}
+		v = e.decideHeaders(ctx, req, &p)
+	case !p.confirmed:
+		switch e.uids.Refresh(ctx, req.Actor, policyRefusal(v), begin) {
+		case RefreshChanged:
+			p = pass{last: true, refreshed: true}
+			v = e.decideHeaders(ctx, req, &p)
+		case RefreshSame:
+			p.confirmed = true
+		case RefreshUnreachable:
+			// The leader can't be reached: nobody can say the actor was
+			// deleted or recreated, the same limit as a lookup outage. The
+			// pass stands as chain.failure_mode decided it (GAP-0090,
+			// GAP-0188, GAP-0245).
+			p.confirmed = true
+			if v.Allow {
+				v.Alert = true
+				v.Findings = append(v.Findings, "registration_unavailable")
+			}
+		}
+	}
+	if !p.confirmed && !policyRefusal(v) {
+		// Not even a refusal of the policy stages to stand on: an unchecked
+		// step or a cached delete, and the leader did not confirm the
+		// incarnation in time. Never chain.failure_mode's allow (GAP-0243).
+		v = deny(v, CategoryChainUnchecked, sourceIdentity, uncheckedUnconfirmed,
+			"DefenseClaw could not confirm this actor's registration in time.")
+		v.Retryable = true
+	}
+	return v
+}
+
+// policyRefusal is a refusal that does not need the incarnation confirmed
+// to stand: not an allow, an unchecked step or a delete (GAP-0243).
+func policyRefusal(v Verdict) bool {
+	return !v.Allow && v.Category != CategoryChainUnchecked && v.Category != CategoryActorNotLive
+}
+
+// pass is one decideHeaders pass over a request.
+//
+// The UID cache gets no lifecycle events, so a cached entry can name an
+// incarnation that was deleted, or replaced by a same-name actor created
+// again (GAP-0234). No decision stands on such an entry: a pass is
+// confirmed when the leader confirmed the incarnation during it (the
+// name was resolved now, or the chain check, which the leader answers only
+// for the name's live incarnation, came back clear or hit), or when the
+// decision did not use the registration. An unconfirmed pass (a refusal
+// by the host, URL or DLP stages, or an unchecked chain step, on a cached
+// entry) resolves the name again, and a changed registration decides the
+// request again; a stale chain answer drops the entry and decides it
+// again. So a recreated actor is decided under its own profile and UID,
+// never its predecessor's (GAP-0237). The last pass decides as it is.
+//
+// A refresh is bounded (GAP-0243): one lookup per name in flight, and a
+// request waits a short budget for it. Unconfirmed, a refusal of the policy
+// stages stands (it is a refusal), and only such a refusal may stand on a
+// refresh made within refusalReuse.
+//
+// An unreachable leader has one rule (GAP-0245): when the lookup gets no
+// answer from the leader (a transport error or a timeout), nobody can say
+// the actor was deleted, so chain.failure_mode decides, from the first
+// request of the outage, as it does once the entry ages out (an alert on an
+// attended OSS install; refused on a managed install or for an unattended
+// actor). While the leader is reachable, an unchecked step or a cached
+// delete needs its answer: one that misses this request's budget is
+// refused, retryable (registration_unconfirmed), and a stale or not-live
+// answer refuses.
+type pass struct {
+	last bool
+	// refreshed: the entry was resolved by Refresh for this request.
+	refreshed bool
+	confirmed bool
+	stale     bool
+}
+
+// decideHeaders is one pass of DecideHeaders under its budget.
+func (e *Engine) decideHeaders(ctx context.Context, req *Request, p *pass) (v Verdict) {
+	// Nothing before the registration lookup uses it.
+	p.confirmed = true
 	if req.IdentityErr != nil {
 		return deny(v, CategoryUnattributed, sourceIdentity, "",
 			"The request carries no actor identity from the Substrate egress gateway, so DefenseClaw can't tell whose it is.")
@@ -324,7 +403,11 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 	// attendance; with none, nobody can say a person watches the actor, so
 	// it counts as unattended, and under auto its unchecked egress is
 	// refused, retryable (D8, GAP-0188).
-	rec, err := e.uids.Resolve(ctx, req.Actor)
+	rec, src, err := e.uids.Resolve(ctx, req.Actor)
+	// A cached entry is confirmed by the chain check below, or resolved
+	// again. Nothing is learned from a second lookup during an outage, and
+	// an entry with no registration lives uidMissTTL only.
+	p.confirmed = p.refreshed || src != fromCache || (err == nil && rec.UID == "")
 	lookupDown := false
 	switch {
 	case errors.Is(err, ErrActorNotLive):
@@ -398,6 +481,27 @@ func (e *Engine) DecideHeaders(ctx context.Context, req *Request) (v Verdict) {
 		Method: req.Method, Allowed: true, Time: e.now()})
 	if lookupDown && e.checker != nil {
 		outcome, chainWhy = chainUnchecked, uncheckedLookup
+	}
+	switch outcome {
+	case chainClear, chainHit:
+		if e.checker != nil && req.Actor.UID != "" {
+			p.confirmed = true
+		}
+	case chainStale:
+		// The leader, which keeps the registrations, says the cached UID is
+		// no longer the actor's.
+		e.uids.Invalidate(req.Actor.Atespace, req.Actor.Name)
+		if !p.last {
+			p.stale = true
+			return v
+		}
+		// Stale again under the name's fresh registration: it changed again
+		// meanwhile. A new actor's UID comes from its registration and is
+		// never stale, so refusing loses nothing (GAP-0234).
+		v = deny(v, CategoryChainUnchecked, sourceChain, uncheckedStale,
+			"DefenseClaw's registrations for this actor changed while the request was checked.")
+		v.Retryable = true
+		return v
 	}
 	switch outcome {
 	case chainHit:
