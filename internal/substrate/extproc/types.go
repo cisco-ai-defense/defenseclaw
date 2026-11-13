@@ -74,8 +74,8 @@ type AskResult struct {
 }
 
 // AskSink raises an ask, or finds the one already open or decided for the
-// same actor and host, and waits for its outcome until ctx ends. A2
-// implements it against the leader's ask store.
+// same actor and host, and waits for its outcome until ctx ends.
+// AskClient implements it against the gateway callout ask route.
 type AskSink interface {
 	Ask(ctx context.Context, req AskRequest) (AskResult, error)
 }
