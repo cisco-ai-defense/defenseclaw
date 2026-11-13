@@ -62,7 +62,7 @@ Flags:
   --builder-id ID                 builder id recorded in the attestation
   --provider NAME                 model route (claudecode: bedrock or anthropic; codex: openai or bedrock-mantle)
   --model ID                      default model id
-  --gateway-url URL               actor listener URL (default the in-cluster Service)
+  --gateway-url URL               actor listener URL (default http://<substrate.services.actor> of --config)
   --fail-mode MODE                interactive outage mode: open or closed
   --no-mcp-static                 do not run mcp-scanner over tool descriptions
   --mcp-analyzers LIST            mcp-scanner analyzers (default yara)

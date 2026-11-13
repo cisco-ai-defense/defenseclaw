@@ -200,3 +200,15 @@ func TestKitSpecRefusesARelayThatWouldNotStart(t *testing.T) {
 		t.Fatal("a verify URL that is not http(s) was accepted")
 	}
 }
+
+// The install's actor URL without a config is the kit's default, so a build
+// with and without --config agree for the default namespace (GAP-0023).
+func TestActorGatewayURLDefaultIsTheKitDefault(t *testing.T) {
+	if got := (config.SubstrateConfig{}).ActorGatewayURL(); got != kit.DefaultGatewayURL {
+		t.Fatalf("config default %q, kit default %q", got, kit.DefaultGatewayURL)
+	}
+	c := config.SubstrateConfig{Services: config.SubstrateServicesConfig{Actor: "defenseclaw-actor.dc.svc.cluster.local"}}
+	if got := c.ActorGatewayURL(); got != "http://defenseclaw-actor.dc.svc.cluster.local" {
+		t.Fatalf("custom %q", got)
+	}
+}

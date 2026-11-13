@@ -268,7 +268,7 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		builder       = fs.String("builder-id", "", "builder id recorded in the attestation")
 		provider      = fs.String("provider", "", "model route (claudecode: bedrock|anthropic; codex: openai|bedrock-mantle)")
 		model         = fs.String("model", "", "default model id")
-		gateway       = fs.String("gateway-url", "", "actor listener URL (default the in-cluster Service)")
+		gateway       = fs.String("gateway-url", "", "actor listener URL (default http://<substrate.services.actor> of --config, the in-cluster Service)")
 		failMode      = fs.String("fail-mode", "", "interactive outage mode: open or closed")
 		noMCP         = fs.Bool("no-mcp-static", false, "do not run mcp-scanner over tool descriptions")
 		analyzers     = fs.String("mcp-analyzers", "yara", "mcp-scanner analyzers")
@@ -338,6 +338,11 @@ func runBuild(ctx context.Context, args []string, stdout io.Writer) (int, error)
 		} else if agent, err = kit.FetchAgent(context.Background(), nil, *connectorName, "amd64"); err != nil {
 			return ExitUsageError, err
 		}
+	}
+	// The hook posts to the install's actor Service by its FQDN (GAP-0023):
+	// the same name the controller renders the egress rule for.
+	if strings.TrimSpace(*gateway) == "" {
+		*gateway = cfg.Substrate.ActorGatewayURL()
 	}
 	spec, tpl, harnessVersion, err := kitspec.Spec(kitspec.Options{Connector: *connectorName, KitVersion: *kitVersion, GatewayURL: *gateway,
 		FailMode: *failMode, Provider: *provider, Model: *model, HookBinary: hook, RelayBinary: relay, SessionKeys: keys,

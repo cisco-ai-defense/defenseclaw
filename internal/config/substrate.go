@@ -341,6 +341,13 @@ func (s SubstrateConfig) EffectiveAdminService() string {
 	return orDefault(s.Services.Admin, DefaultSubstrateAdminService)
 }
 
+// ActorGatewayURL is the actor listener base URL a kit image posts to: plain
+// HTTP to the actor Service FQDN (egress re-originates the in-cluster hop and
+// adds the actor JWT; substrate-1 GAP-0023 and GAP-0042).
+func (s SubstrateConfig) ActorGatewayURL() string {
+	return "http://" + strings.TrimSpace(s.EffectiveActorService())
+}
+
 // RelaySessionIssuer is the iss of the relay session tokens the gateway
 // signs, https://<admin Service>. Template builds bake the same value into
 // the relay (substrate-1 GAP-0147), so both sides take it from here.
