@@ -498,8 +498,7 @@ func sandboxHookManagedV8(ctx context.Context) audit.SandboxManagedV8 {
 // sandbox identity and the agent host tag for one request's hook audit
 // envelope.
 func hookRequestAuditExtra(ctx context.Context, profile connector.HookProfile) map[string]string {
-	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), sandboxHookAuditExtra(ctx))
-	extra = mergeHookEnvelopeExtra(extra, substrateHookAuditExtra(ctx))
+	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), hookActorAuditExtra(ctx))
 	extra = mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
 	extra = mergeHookEnvelopeExtra(extra, coworkSurfaceAuditExtra(ctx))
 	if reason := resolvedWritesFromContext(ctx)[hookpaths.UnprovenReasonKey]; hookpaths.UnprovenWriteTitle(reason) != "" {

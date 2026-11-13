@@ -7,9 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestInstructionStartupSurvivesNonterminalSessionError(t *testing.T) {
+	testenv.IsolateAccount(t)
 	// The startup snapshot also lists the user's own instruction files
 	// (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md); a box that has them must not
 	// change what this test sees: the same-host home is os.UserHomeDir.

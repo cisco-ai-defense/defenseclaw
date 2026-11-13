@@ -13,6 +13,11 @@ from pathlib import Path
 
 import pytest
 
+# startcheck runs in the Linux actor image and drives the agent through a pty:
+# it imports pty and termios, which a Windows interpreter does not have. Skip
+# the whole module there, before the fixture loads the script.
+pytest.importorskip("termios", reason="startcheck is a Linux image tool (pty and termios)")
+
 SCRIPT = Path(__file__).resolve().parents[2] / "deploy" / "images" / "actor-kit" / "startcheck.py"
 SH = SCRIPT.with_suffix(".sh")
 

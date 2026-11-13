@@ -134,6 +134,14 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	if !json.Valid(payload) {
 		return refuse("DefenseClaw could not read the hook event: it is not JSON")
 	}
+	// A refused skill folder the kit could not take out of reach still loads:
+	// deny the tool call until it is gone (GAP-0039).
+	if preToolEvents[call.Event] {
+		if stuck := stuckSkillsInReach(o.home()); len(stuck) > 0 {
+			call.FailMode = "closed"
+			return refuse("DefenseClaw refused these skill folders and could not take them out of the agent's reach: " + strings.Join(stuck, ", ") + "; remove them")
+		}
+	}
 	env := HookEnvelope{
 		V: EnvelopeVersion, Connector: o.Connector, Event: call.Event, HookContract: call.HookContractID,
 		Mode: mode, KitVersion: o.Config.KitVersion, Payload: json.RawMessage(payload),
@@ -169,6 +177,13 @@ func RunHook(ctx context.Context, o HookOptions) int {
 	if err == nil && resp.Status >= 200 && resp.Status < 300 && skillsSent != nil {
 		if moved := applySkillAnswer(o.home(), resp.Body, skillsSent, skillsAttached, time.Now()); len(moved) > 0 {
 			fmt.Fprintf(o.Stderr, "defenseclaw: blocked skill folders taken out of the agent's reach: %s\n", strings.Join(moved, ", "))
+		}
+		// A refused folder that could not be taken out of reach is still
+		// loadable and nothing else denies it: refuse this call (GAP-0039).
+		if stuck := skillsStillInReach(resp.Body, skillsSent); len(stuck) > 0 {
+			recordStuckSkills(o.home(), stuck)
+			call.FailMode = "closed"
+			return refuse("DefenseClaw refused skill folders it could not take out of the agent's reach: " + strings.Join(stuck, ", "))
 		}
 	}
 	call.FailMode = outageMode(call.FailMode, resp, mode)

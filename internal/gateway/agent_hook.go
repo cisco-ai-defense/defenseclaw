@@ -908,7 +908,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// The panic is on the row either way (the hook's panic
 					// capture); only a fail-mode verdict is a panic verdict.
 					finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
-						connectorName, req, resp, rawEventIDs, b, elapsed, answered == nil, sandboxHookAuditExtra(ctx), answered != nil)
+						connectorName, req, resp, rawEventIDs, b, elapsed, answered == nil, hookActorAuditExtra(ctx), answered != nil)
 					if finalization.Panicked {
 						enrichAgentHookSpanPanic(ctx)
 					}

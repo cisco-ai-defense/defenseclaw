@@ -325,7 +325,8 @@
           "maxLength": 63
         },
         "llmCredentialsSecret": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "extraArgs": {
           "$ref": "#/definitions/args"

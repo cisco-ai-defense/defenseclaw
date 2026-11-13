@@ -282,25 +282,35 @@ func TestUseASCII(t *testing.T) {
 }
 
 func TestTerminalUTF8(t *testing.T) {
-	for env, want := range map[string]bool{
-		"":                           true,
-		"LANG=C":                     true,
-		"LANG=POSIX":                 true,
-		"LANG=en_US.UTF-8":           true,
-		"LANG=de_DE.utf8@euro":       true,
-		"LANG=en_US":                 true,
-		"LANG=en_US.ISO-8859-1":      false,
-		"LANG=ja_JP.eucJP":           false,
-		"LC_ALL=C.UTF-8 LANG=x.big5": true,
-		"LC_CTYPE=en_US.ISO8859-15 LANG=en_US.UTF-8": false,
+	for _, tc := range []struct {
+		env, goos string
+		want      bool
+	}{
+		{"", "linux", false},
+		{"", "darwin", false},
+		{"", "windows", true},
+		{"LANG=C", "linux", false},
+		{"LANG=POSIX", "linux", false},
+		{"LC_ALL=C", "linux", false},
+		{"LC_ALL=C LANG=en_US.UTF-8", "linux", false},
+		{"LANG=C", "windows", false},
+		{"LANG=C.UTF-8", "linux", true},
+		{"LANG=en_US.UTF-8", "linux", true},
+		{"LANG=de_DE.utf8@euro", "linux", true},
+		{"LANG=en_US", "linux", false},
+		{"LANG=en_US.ISO-8859-1", "linux", false},
+		{"LANG=ja_JP.eucJP", "linux", false},
+		{"LC_ALL=C.UTF-8 LANG=x.big5", "linux", true},
+		{"LC_CTYPE=en_US.ISO8859-15 LANG=en_US.UTF-8", "linux", false},
+		{"LC_CTYPE=en_US.UTF-8 LANG=C", "linux", true},
 	} {
 		m := map[string]string{}
-		for _, kv := range strings.Fields(env) {
+		for _, kv := range strings.Fields(tc.env) {
 			k, v, _ := strings.Cut(kv, "=")
 			m[k] = v
 		}
-		if got := TerminalUTF8(func(k string) string { return m[k] }); got != want {
-			t.Errorf("%q: TerminalUTF8 = %v, want %v", env, got, want)
+		if got := terminalUTF8(func(k string) string { return m[k] }, tc.goos); got != tc.want {
+			t.Errorf("%q on %s: TerminalUTF8 = %v, want %v", tc.env, tc.goos, got, tc.want)
 		}
 	}
 }
