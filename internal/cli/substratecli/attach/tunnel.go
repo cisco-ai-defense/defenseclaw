@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/defenseclaw/defenseclaw/internal/cli/substratecli/api"
 )
 
 const handshakeTimeout = 45 * time.Second
@@ -396,7 +398,7 @@ func (b bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tu.mapRelayPath(r)
 	r.Header.Set("Authorization", "Bearer "+tok)
 	// The admin listener refuses a write without the client tag (its CSRF gate).
-	r.Header.Set("X-DefenseClaw-Client", "substrate-launcher")
+	api.SetClientHeaders(r.Header)
 	resp, err := tu.tr.RoundTrip(r)
 	if err != nil {
 		return nil, tu.netError(err)

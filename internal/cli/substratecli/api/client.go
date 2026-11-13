@@ -45,6 +45,13 @@ const (
 	clientTag = "substrate-launcher"
 )
 
+// SetClientHeaders marks a request as coming from the launcher: the client
+// tag the admin listener requires on every write (its CSRF gate, GAP-0102).
+// It goes on every request, so a GET that becomes a write needs no change.
+// The API client and the attach tunnel both call it. The JSON content type
+// is set by the API client only: the attach route takes the relay types.
+func SetClientHeaders(h http.Header) { h.Set("X-DefenseClaw-Client", clientTag) }
+
 // TokenFunc returns the bearer for one request.
 type TokenFunc func(ctx context.Context) (string, error)
 
@@ -166,20 +173,25 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	u := *c.base
 	u.Path = prefix + strings.TrimLeft(path, "/")
 	u.RawQuery = q.Encode()
-	tok, err := c.token(ctx)
-	if err != nil {
-		return err
+	tok := ""
+	if ctx.Value(noTokenKey{}) == nil {
+		var err error
+		if tok, err = c.token(ctx); err != nil {
+			return err
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", c.ua)
 	// The admin listener refuses a write that does not carry the client tag
 	// and a JSON content type, even a DELETE with no body (its CSRF gate).
-	req.Header.Set("X-DefenseClaw-Client", clientTag)
+	SetClientHeaders(req.Header)
 	if method != http.MethodGet && method != http.MethodHead {
 		req.Header.Set("Content-Type", "application/json")
 	}
