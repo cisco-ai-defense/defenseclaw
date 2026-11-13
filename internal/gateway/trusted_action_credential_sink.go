@@ -53,7 +53,10 @@ func trustedActionPersistsCredentialLiteral(facts actionfacts.Facts) bool {
 		}
 		return !wrote
 	case strings.HasPrefix(tool, "mcp__") || strings.HasPrefix(tool, "mcp."):
-		return trustedActionMutatingToolName(tool)
+		return trustedActionMutatingToolName(tool) && !trustedActionCredentialStoreTool(tool)
+	case trustedActionSendToolName(tool):
+		// A send tool hands its message to someone else.
+		return !trustedActionCredentialStoreTool(tool)
 	}
 	return trustedActionShellPersistsLiteral(facts)
 }
@@ -176,6 +179,34 @@ func trustedActionFixtureTarget(p string) bool {
 	} {
 		if strings.Contains(base, marker) {
 			return true
+		}
+	}
+	return false
+}
+
+// trustedActionCredentialStoreTool reports a tool whose job is to keep a
+// credential: save_password, store_credential, vault.write, keychain set.
+// Handing it a credential is the use it is for.
+func trustedActionCredentialStoreTool(tool string) bool {
+	leaf := tool
+	if i := strings.LastIndex(leaf, "__"); i >= 0 {
+		leaf = leaf[i+2:]
+	} else if i := strings.LastIndexByte(leaf, '.'); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	server := strings.TrimPrefix(tool, "mcp__")
+	if i := strings.Index(server, "__"); i >= 0 {
+		server = server[:i]
+	}
+	for _, name := range []string{leaf, server} {
+		for _, word := range strings.FieldsFunc(name, func(r rune) bool {
+			return r == '_' || r == '-' || r == '.' || r == ' '
+		}) {
+			switch word {
+			case "password", "passwords", "credential", "credentials", "vault", "keychain", "keyring",
+				"secretsmanager", "1password", "bitwarden", "lastpass", "keepass":
+				return true
+			}
 		}
 	}
 	return false

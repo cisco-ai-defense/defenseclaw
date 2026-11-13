@@ -69,6 +69,9 @@ func TestCredentialLiteralDispositionFollowsWhatTheCallDoesWithIt(t *testing.T) 
 		{"memory entity", "mcp__memory__create_entities", map[string]any{"entities": []any{map[string]any{"name": "t", "observations": []any{"Password: " + password}}}}, credAlert},
 		{"memory observation", "mcp__memory__add_observations", map[string]any{"observations": []any{map[string]any{"entityName": "t", "contents": []any{"key " + stripe}}}}, credAlert},
 		{"database write", "mcp__sqlite__write_query", map[string]any{"query": "INSERT INTO s VALUES ('smtp','password','" + password + "')"}, credAlert},
+		{"send tool message", "mcp__chat__post_message", map[string]any{"text": "use this key: " + stripe}, credAlert},
+		{"password manager", "mcp__browser__save_password", map[string]any{"password": password, "url_pattern": "https://example.test"}, credAudit},
+		{"credential vault write", "mcp__vault__write_secret", map[string]any{"key": "app", "value": stripe}, credAudit},
 		{"database read", "mcp__sqlite__read_query", map[string]any{"query": "select '" + stripe + "'"}, credAudit},
 		{"directory listing", "mcp__fs__list_directory", map[string]any{"path": "/work/" + github}, credAudit},
 		{"echo into a file", "Bash", map[string]any{"command": "echo " + github + " > /work/n.txt"}, credAlert},
@@ -99,6 +102,22 @@ func TestCredentialLiteralDispositionFollowsWhatTheCallDoesWithIt(t *testing.T) 
 	}
 }
 
+func TestAWSDocumentedExampleSecretIsNotAFinding(t *testing.T) {
+	example := runtimeDetectorSignature("wJalrXUtnFEMI/K7MDENG/", "bPxRfiCYEXAMPLEKEY")
+	for _, text := range []string{
+		"aws_secret_access_key = " + example,
+		// What shell normalization leaves of the key and the lines after it.
+		"aws_secret_access_key = wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEYnnnn",
+	} {
+		if acceptedCredentialMatch("SEC-AWS-SECRET", text) {
+			t.Errorf("documented AWS example accepted: %q", text)
+		}
+	}
+	if !acceptedCredentialMatch("SEC-AWS-SECRET", "aws_secret_access_key = "+runtimeDetectorSignature("q9Zr4Vx2", "Lm7Kp3Wd8Yt5Bn1Cs6Gh0Jf2Qa4Eu9Rv3Xi8")) {
+		t.Error("a random 40-character secret was rejected")
+	}
+}
+
 func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -125,6 +144,10 @@ func TestSecretAssignmentRuleAcceptsOnlyRandomLookingValues(t *testing.T) {
 		{"is flag", "is_secret: Kj7mNp2Qr9sVw4xYz6bCdE", false},
 		{"path value", "secret_path: /var/run/secrets/kubernetes.io/token1", false},
 		{"dotted host", "password: db1.internal.example.corp", false},
+		{"words and a year", "password: SalesDemo2026", false},
+		{"word with dot digits", "password: Password.123", false},
+		{"passphrase of words", "admin password to SecureNewPass#2025!", false},
+		{"newline artifact", "nntotal_tokens = 0nscience_count", false},
 		{"function call", "password: get_password_from_vault2(", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

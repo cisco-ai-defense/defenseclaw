@@ -1238,7 +1238,9 @@ func knownPublicCredentialExample(ruleID, candidate string) bool {
 	case "SEC-AWS-KEY":
 		return strings.EqualFold(candidate, "IOSFODNN7EXAMPLE")
 	case "SEC-AWS-SECRET":
-		return candidate == "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+		// AWS documents its example secret key by name; a shell-normalized
+		// copy of it loses the slashes and may run into the text after it.
+		return strings.Contains(strings.ToUpper(candidate), "EXAMPLEKEY")
 	default:
 		return false
 	}

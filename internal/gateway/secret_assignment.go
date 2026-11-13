@@ -95,8 +95,8 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 	value := strings.TrimSpace(raw)
 	// The value runs to the first character a secret does not use.
 	if end := strings.IndexFunc(value, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' ||
-			strings.ContainsRune("_-+/=.!@#$%^&*~", r))
+		letterOrDigit := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		return !letterOrDigit && !strings.ContainsRune("_-+/.!@#$%^&*~", r)
 	}); end >= 0 {
 		// A name followed by "(" is a call, not a value.
 		if value[end] == '(' {
@@ -123,6 +123,35 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 	// A path, a host name or a file name is not a secret.
 	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "~") ||
 		strings.Contains(value, "//") || secretAssignmentDotted.MatchString(value) || secretAssignmentIdentifier(value) {
+		return false
+	}
+	// A value built from short underscore- or dash-separated pieces
+	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
+	// with separators still carries one long random piece.
+	if segments := strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' }); len(segments) > 1 {
+		longest := 0
+		for _, segment := range segments {
+			longest = max(longest, len(segment))
+		}
+		if longest < 10 {
+			return false
+		}
+	}
+	// A value made mostly of words (SalesDemo2026, Password.123) is a phrase
+	// a person chose, not a generated secret: a generated one has no long
+	// run of letters. Words of five letters or more count against it.
+	wordLetters, run := 0, 0
+	for _, r := range value + " " {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			run++
+			continue
+		}
+		if run >= 5 {
+			wordLetters += run
+		}
+		run = 0
+	}
+	if wordLetters*10 >= len(value)*6 {
 		return false
 	}
 	var letters, upper, lowerCount, digits, symbols int
