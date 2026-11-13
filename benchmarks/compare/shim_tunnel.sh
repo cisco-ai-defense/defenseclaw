@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start llmshim.py on defenseclaw-dev (AWS credentials live there, the bench boxes have none) and forward its port to a bench box,
+# Start llmshim.py on the host with the AWS credentials (the bench boxes have none) and forward its port to a bench box,
 # so an adapter on the box reaches Bedrock at http://127.0.0.1:$PORT/v1. Stops both when the given run command ends.
 #   bash shim_tunnel.sh <box> <port> <cap-usd> <log> -- <command to run on the box>
 set -euo pipefail

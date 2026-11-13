@@ -1,14 +1,14 @@
 #!/bin/bash
 # DefenseClaw configs (c) rules + System One and (d) rules + System One + Gemma 4 31B judge on the compare HOLDOUT sets (public data
 # only), with the s7-sysone bench harness (answer cache keyed by sha256 of the exact request body, reused where bodies match).
-# Run on defenseclaw-dev (the Gemini key and the AWS credentials live there).
+# Run on the host that holds the Gemini key and the AWS credentials; the harness runs on the bench box BOX (an ssh alias).
 #   bash dc_cascade.sh <label> <c|d> <box path of a harness binary built with -tags s7bench> <box path of its policies dir>
 # Rate: <= 250 RPM and <= 150k input tokens/min to gemini-decision-1 in all (2 harness processes x 125 RPM x 75k TPM), own
 # request budget file, cap 30,000 requests. Judge (d): Gemma 4 31B on Bedrock through s7proxy.py, cap USD 10, own ledger.
 # Both: the user's task is sent as UserPromptSubmit (-prompt-from-content) so intent-aware layers see what AlignmentCheck sees.
 set -euo pipefail
 L=$1 MODE=$2 BIN=$3 POL=$4
-CFG=$HOME/dc-eh/ssh/config; BOX=${BOX:-dc-s7-bench2}
+CFG=$HOME/dc-eh/ssh/config; BOX=${BOX:?set BOX to the bench box ssh alias}
 B() { ssh -n -F $CFG -o BatchMode=yes -o ControlPath=none $BOX "$@"; }
 ALLOW=$(B "python3 -c 'import json; print(\"+\".join(json.load(open(\"/home/ubuntu/s7c/corpora_compare_h.json\"))))'")
 B "umask 077; mkdir -p -m 700 ~/s7c/secrets ~/s7c/sysone/cache/go"
