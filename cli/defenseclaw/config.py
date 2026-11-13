@@ -2733,8 +2733,8 @@ class JudgeConfig:
     # client hang up before a verdict lands).
     hook_timeout: float = 0.0
     # What the tool judge does with a call that sends data to a destination the
-    # user's task does not name (Go ``JudgeConfig.IntentScope``): ``"alert"``,
-    # ``"shadow"`` (record only) or ``"off"``; empty is the built-in default.
+    # user's task does not name (Go ``JudgeConfig.IntentScope``): ``"shadow"``
+    # (record only, the built-in default) or ``"off"``.
     intent_scope: str = ""
     # Most judge calls sent to the judge model at once (Go
     # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
