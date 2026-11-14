@@ -142,7 +142,7 @@ func TestUnroutedGateCostsNothingWithoutAnAdminPolicy(t *testing.T) {
 		t.Fatalf("no router: %+v", o)
 	}
 	denied := SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: &engine.DenyReason{Code: "x"}}
-	if got := p.gateOriginal(context.Background(), denied, "anthropic", "claude"); got.Result != SemanticRouteDenied || got.Deny.Code != "x" {
+	if got := p.gateOriginal(context.Background(), denied, "anthropic", "claude", "test"); got.Result != SemanticRouteDenied || got.Deny.Code != "x" {
 		t.Fatalf("a denied outcome stays denied: %+v", got)
 	}
 }
