@@ -91,6 +91,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
             "09f044aa6791dab5e73c031c65d7217098cef576c5f8d16a02ce059d4da5a7a2",
+            # 1.0.10 (s7/g605: rel/1.0.10 52df5211d7 merged with s7/toolresult 684c1debef; no rule change of its own).
+            "09404e2124c7d44af636f7c661f89b21ac3802cef5a81424bcaa376c5d2daeab",
         }
     ),
     "permissive": frozenset(
@@ -138,6 +140,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
             "d86064891b13281853484ff4f038b6e2c7c88c6aa049437ad631675b6e77f828",
+            # 1.0.10 (s7/g605: rel/1.0.10 52df5211d7 merged with s7/toolresult 684c1debef; no rule change of its own).
+            "aaff50b7d7ab9c950ed51ba38c74aac9d2648e77fef86a7f263a06697c1a30e1",
         }
     ),
     "strict": frozenset(
@@ -184,6 +188,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
             "d907a3f35099a86d92ebbf062e92fdb3ee4eee38a7ff9b3b75be6f05a70fc12b",
+            # 1.0.10 (s7/g605: rel/1.0.10 52df5211d7 merged with s7/toolresult 684c1debef; no rule change of its own).
+            "0a78ca977094fa33e23f2f291f80be9b0222071bf7a555f2b83a0092315ecd85",
         }
     ),
 }
