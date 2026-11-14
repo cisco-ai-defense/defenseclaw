@@ -100,6 +100,13 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "09f044aa6791dab5e73c031c65d7217098cef576c5f8d16a02ce059d4da5a7a2",
             # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
             "9e5cf4bf0de1a18894339fc034783a15c7b5f915f6318c8d0d894b3ec8598d2f",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and command rule ids.
+            "b10430a9f09cf9341d1810047bdc4db50be2987e2f27584af20e579e13e20b09",
+            # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
+            # ids.
+            "bae849da47c25cb44132971419ea52e8c7a87b0bd994fece05d1f98bccda2392",
+            # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
+            "a86801cc5e8efd1c6c8c4b88164c9bcd608fad5200371e7cc0632e297309bd7a",
         }
     ),
     "permissive": frozenset(
@@ -156,6 +163,13 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "d86064891b13281853484ff4f038b6e2c7c88c6aa049437ad631675b6e77f828",
             # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
             "7c603db086fabe815139fa17af5660ed9747071cef721d0978de39126e36fb9e",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and command rule ids.
+            "2fc01f00e12d004a400b70939788dda568c097ba4ef895f5392735f698238142",
+            # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
+            # ids.
+            "e37c3a00b671321ae3e047606610d2fe08083a6282e8ed8778f2b1aac82959a4",
+            # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
+            "6632604f57eb9a3d0618857cadeaa1ffa53b031115492e82799e917b7d21cc50",
         }
     ),
     "strict": frozenset(
@@ -211,6 +225,13 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "d907a3f35099a86d92ebbf062e92fdb3ee4eee38a7ff9b3b75be6f05a70fc12b",
             # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
             "21f1a85da146fc1998dd013f9e06f7a734217a62933de9895900a5b70723cbfb",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and command rule ids.
+            "80a72f2d44b59278db1dec7d86ec2c26709638f4f56de6948de7f4040b5802d6",
+            # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
+            # ids.
+            "d7e4600212678a341448694e23e271de3dce897e0897dde4d7eaf9f4a12f8e23",
+            # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
+            "b70be45b7d2384a6b05eeb85893ad80926d19207e7a6896390e16aadb06a551b",
         }
     ),
 }
