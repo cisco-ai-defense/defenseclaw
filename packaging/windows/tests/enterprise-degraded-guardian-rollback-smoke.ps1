@@ -159,6 +159,15 @@ try {
     Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Dana Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'Secure Client: degraded reconcile with a spaced Windows account label'
     Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1001)') -Allow) $false 'Secure Client: degraded reconcile naming another SID'
     Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel)) $false 'Secure Client: user (SID) row without -AllowFailedTargets'
+    # The signed-out wording is read on Secure Client too (GAP-0601): it
+    # only ever excuses a row that already failed.
+    $signedOut = New-Report -Failures 1
+    $signedOut.errors = @($signedOut.errors | Where-Object { -not ([string]$_).StartsWith('last guardian reconcile failed for') }) +
+        'claudecode for dana (S-1-5-21-1-2-3-1003) is pending until that account signs in: an earlier DefenseClaw release protected it'
+    Assert-Result (Test-Coverage $signedOut -Allow) $true 'Secure Client: signed-out line for the failed row'
+    $signedOut.errors = @($signedOut.errors | Select-Object -SkipLast 1) +
+        'claudecode for dana (S-1-5-21-1-2-3-1001) is pending until that account signs in: x'
+    Assert-Result (Test-Coverage $signedOut -Allow) $false 'Secure Client: signed-out line for a healthy SID'
 }
 finally {
     $script:SmokeStandalone = $true

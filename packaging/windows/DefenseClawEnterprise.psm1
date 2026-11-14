@@ -29137,6 +29137,13 @@ function Copy-DefenseClawRecordedHookPreimage {
                 "verified hook (sha256 $replacementDigest), and the hook record is written again " +
                 "when this run commits (GAP-0601)")
             Write-DefenseClawLifecyclePhase -Stage "notice: $notice"
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_boundary -Fields @{
+                path     = [string]$Layout.HookPath
+                artifact = 'hook'
+                reason   = 'the installed hook is not the recorded one and no protected copy is; this run replaces it'
+                pinned   = $expected
+                live     = $(if ($liveProblem) { 'unreadable' } else { $live })
+            }
             Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
                 subsystem = 'hook'
                 path      = [string]$Layout.HookPath
@@ -34366,11 +34373,18 @@ function Complete-DefenseClawDeferredRecoveryActivation {
     # GAP-0601: what the restored release ran before the transaction, so a
     # requested lifecycle that then fails can start it again
     # (Restart-DefenseClawDeferredRecoveryRelease).
+    $restoredVersion = ''
+    foreach ($run in @($script:DefenseClawRecoveryGatewayRuns)) {
+        if ($null -ne $run -and [string]$run['action'] -ceq 'service-reactivation') {
+            $restoredVersion = [string]$run['staged_version']
+        }
+    }
     $script:DefenseClawDeferredRecoveryServices = [pscustomobject]@{
         services = @($Snapshot.services)
         gateway_service = [string]$Snapshot.gateway_service
         guardian_service = [string]$Snapshot.guardian_service
         sensor_helper = [string]$SensorHelper
+        restored_version = $restoredVersion
     }
     if (-not [string]::IsNullOrEmpty($SensorHelper)) {
         Stop-DefenseClawService -Name $SensorHelper
@@ -34396,7 +34410,9 @@ function Restart-DefenseClawDeferredRecoveryRelease {
         does not come is reported, not a reason to stop the services again:
         a running gateway and guardian enforce the installed policy, and the
         guardian repairs what it can. Returns the note for the result, or ''
-        when this run deferred nothing.
+        when this run deferred nothing, or when the deployment in place is no
+        longer the restored release (the requested lifecycle committed: an
+        upgrade recorded its own release, an uninstall removed the record).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout
@@ -34406,6 +34422,20 @@ function Restart-DefenseClawDeferredRecoveryRelease {
         $null -eq $deferred -or
         -not (Test-DefenseClawStandaloneProfile) -or
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath)) {
+        return ''
+    }
+    $installedVersion = ''
+    try {
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+        if ($null -ne $metadata -and $null -ne $metadata.PSObject.Properties['product_version']) {
+            $installedVersion = [string]$metadata.product_version
+        }
+    }
+    catch {
+        $installedVersion = ''
+    }
+    if ([string]::IsNullOrEmpty([string]$deferred.restored_version) -or
+        $installedVersion -cne [string]$deferred.restored_version) {
         return ''
     }
     $script:DefenseClawDeferredRecoveryServices = $null
@@ -50803,14 +50833,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$DeferredConfig,
         [switch]$NoStart
     )
-    # Both profiles activate degraded when the Guardian's fresh, digest-bound
+    # Both profiles activate degraded (-AllowFailedTargets and
+    # -AcceptDegradedTargets below) when the Guardian's fresh, digest-bound
     # reconcile completed with failed user targets: one account's foreign hook
     # file or signed-out profile is that account's failure, named in the
     # result and logged as defenseclaw_degraded, never the machine's.
     # Standalone used to require every target, so one such account failed
     # the upgrade with 1603, and the rollback over the same account left every
     # service stopped and disabled (GAP-0601).
-    $acceptDegradedTargets = $true
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
     $priorDeferredConfigPending = [bool](
         $null -ne $metadata -and
@@ -51801,7 +51831,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
-                    -AllowFailedTargets:$acceptDegradedTargets)
+                    -AllowFailedTargets)
             }
             finally {
                 if (Test-DefenseClawStandaloneProfile) {
@@ -51853,7 +51883,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$acceptDegradedTargets
+                -AllowFailedTargets
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -51863,7 +51893,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
                 -PendingTransaction `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
             Set-DefenseClawVerifiedServiceBootPolicy `
@@ -51876,7 +51906,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets
             if ($priorDeferredConfigPending) {
                 # Keep the authenticated activation marker set through every
                 # mutable policy/runtime step and the complete live readiness
@@ -52023,7 +52053,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AcceptDegradedTargets:$acceptDegradedTargets
+        -AcceptDegradedTargets
     if ($NoStart) {
         $result.ok = $true
     }
@@ -57760,11 +57790,6 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     catch {
         Add-DefenseClawRecoveryEvidenceToError -ErrorRecord $_ -Layout $layout
-        # GAP-0601: never end with the restored release stopped and disabled.
-        $restarted = Restart-DefenseClawDeferredRecoveryRelease -Layout $layout
-        if (-not [string]::IsNullOrEmpty($restarted)) {
-            throw ('{0}; {1}' -f [string]$_.Exception.Message, $restarted)
-        }
         if ($Action -ceq 'Uninstall') {
             # GAP-1042: a committed uninstall whose clean-up met a held file ends 1618, naming it.
             $committedHeld = ConvertTo-DefenseClawCommittedUninstallHeldMessage -Layout $layout -Message ([string]$_.Exception.Message)
@@ -57775,6 +57800,20 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             if ($null -ne $committedJournal) {
                 throw $committedJournal
             }
+        }
+        # GAP-0601: never end with the restored release stopped and disabled.
+        # The failure keeps its message start and its recovery evidence
+        # (Exception.Data); the note follows the message.
+        $restarted = Restart-DefenseClawDeferredRecoveryRelease -Layout $layout
+        if (-not [string]::IsNullOrEmpty($restarted)) {
+            $original = $_.Exception
+            $combined = [InvalidOperationException]::new(
+                ('{0}; {1}' -f [string]$original.Message, $restarted), $original)
+            foreach ($key in @($original.Data.Keys)) {
+                $combined.Data[$key] = $original.Data[$key]
+            }
+            $combined.Data['deferred_recovery_restart'] = $restarted
+            throw $combined
         }
         throw
     }

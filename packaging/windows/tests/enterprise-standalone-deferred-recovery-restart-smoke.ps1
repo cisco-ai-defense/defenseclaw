@@ -51,6 +51,12 @@ function Wait-DefenseClawEnterpriseReadiness {
     $script:Calls.Add("ready:allow=$([bool]$AllowFailedTargets)")
     if ($script:ReadinessFails) { throw 'guardian coverage not proven' }
 }
+$script:InstalledVersion = '1.0.9'
+function Get-DefenseClawDeploymentMetadata {
+    param($Layout)
+    if ($null -eq $script:InstalledVersion) { return $null }
+    return [pscustomobject]@{ product_version = $script:InstalledVersion }
+}
 function Get-DefenseClawTransactionServiceStates {
     param($Services, $GatewayServiceName, $GuardianServiceName)
     $states = @{}
@@ -80,7 +86,9 @@ function Set-Deferred {
         gateway_service = 'gw'
         guardian_service = 'guardian'
         sensor_helper = 'sensor'
+        restored_version = '1.0.9'
     }
+    $script:InstalledVersion = '1.0.9'
     $script:Calls.Clear()
 }
 try {
@@ -133,6 +141,20 @@ try {
         throw 'restarted while a transaction is pending'
     }
     Remove-Item -LiteralPath $layout.PendingPath
+
+    # The requested lifecycle committed: an upgrade recorded its own release,
+    # or an uninstall removed the record. The services are not the restored
+    # release's any more.
+    Set-Deferred
+    $script:InstalledVersion = '1.0.10'
+    if ((Restart-DefenseClawDeferredRecoveryRelease -Layout $layout) -ne '' -or $script:Calls.Count -ne 0) {
+        throw 'restarted after the upgrade committed'
+    }
+    Set-Deferred
+    $script:InstalledVersion = $null
+    if ((Restart-DefenseClawDeferredRecoveryRelease -Layout $layout) -ne '' -or $script:Calls.Count -ne 0) {
+        throw 'restarted after the uninstall committed'
+    }
 
     # Secure Client never defers, and is never restarted here.
     Set-Deferred

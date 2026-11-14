@@ -1986,6 +1986,11 @@ func applyWindowsEnterpriseInstallerReport(
 		enrollment, err := readWindowsEnterpriseStandaloneEnrollment()
 		if err == nil {
 			result.Enrollment = enrollment
+			if enrollment.Failed > 0 {
+				// A degraded activation (GAP-0601) leaves the guardian ready;
+				// the failed targets still mean not every target is covered.
+				result.MarkCoverageIncomplete("enrollment_failed")
+			}
 			if result.Action == "status" || result.Action == "verify" || result.Action == "ensure" {
 				appendWindowsClaudeUserSettingsWarnings(result, enrollment.Accounts)
 			}
@@ -4337,6 +4342,21 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	return enrollment, nil
 }
 
+// windowsEnterpriseEnrollmentRowFailed reports a guardian row that leaves its
+// target unprotected for a reason no sign-in or account clean-up resolves:
+// not ok, not pending, not waiting for the account's sign-in, and not a row
+// of a removed account or an account folder link (the rows status excuses).
+// Since a standalone install or upgrade activates on a complete reconcile
+// with such rows (GAP-0601), they are counted, so coverage_complete is not
+// true while one of them stands.
+func windowsEnterpriseEnrollmentRowFailed(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending && !row.Removed &&
+		!enterpriseHookAwaitingSignInError(row) &&
+		!enterpriseHookRemovedAccountRow(row) &&
+		!enterpriseHookAccountLinkRowStandalone(row) &&
+		!enterpriseHookAccountForeignLinkRow(row)
+}
+
 // windowsEnterpriseHookRollbackCopyRederived is the warning code of a run
 // whose hook rollback copy is the Setup's own hook (GAP-0601).
 const windowsEnterpriseHookRollbackCopyRederived = "hook_rollback_copy_rederived"
@@ -4375,6 +4395,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 			// with an older hook matrix, not pending (GAP-2463).
 			if enterpriseHookAwaitingSignInError(row) && !enterpriseHookEarlierMatrixRow(row) {
 				enrollment.Pending++
+			}
+			if windowsEnterpriseEnrollmentRowFailed(row) {
+				enrollment.Failed++
 			}
 		}
 		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
