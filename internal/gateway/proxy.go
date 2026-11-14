@@ -1907,7 +1907,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 			lastScanLen = accumulated.Len()
 			keep := len(initialBuf)
-			if !atEnd && !(holding && overText) {
+			if !atEnd && (!holding || !overText) {
 				keep = min(unread(), len(initialBuf))
 			}
 			send(initialBuf[:len(initialBuf)-keep])
