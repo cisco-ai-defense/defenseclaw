@@ -86,8 +86,12 @@ func TestBootRemovesHooksOfAConnectorTheInstallNoLongerGuards(t *testing.T) {
 			t.Fatalf("boot %d: the unguarded Kiro hooks are still there", boot)
 		}
 	}
-	if _, err := os.Lstat(script); !os.IsNotExist(err) {
-		t.Fatalf("the hook script of the unguarded connector is still there: %v", err)
+	// The script goes, or stays as the disabled tombstone while a Kiro
+	// process of this account may still call the cached path.
+	if body, err := os.ReadFile(script); err == nil && !strings.Contains(string(body), "(disabled tombstone)") {
+		t.Fatal("the hook script of the unguarded connector is still a live script")
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
 	write(script, "#!/bin/sh\nexit 0\n")
 
