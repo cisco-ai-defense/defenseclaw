@@ -269,10 +269,15 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if content == "" {
 		content = string(req.Payload)
 	}
-	verdict := a.inspectMessageContent(scanCtx, &ToolInspectRequest{
-		Tool: "message", Content: content, Direction: direction,
-		Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
-	})
+	verdict := func() (verdict *ToolInspectVerdict) {
+		// A check that fails internally answers "unavailable", which the
+		// ACP client resolves by the profile's fail mode (GAP-0437).
+		defer recoverGatewayGoroutine("acp evaluate", func() { verdict = nil })
+		return a.inspectMessageContent(scanCtx, &ToolInspectRequest{
+			Tool: "message", Content: content, Direction: direction,
+			Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
+		})
+	}()
 	if verdict == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP inspection unavailable"})
 		return
