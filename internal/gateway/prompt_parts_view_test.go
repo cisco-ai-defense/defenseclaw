@@ -422,8 +422,155 @@ func TestUnionRuleFindingsKeepsOneFindingPerRule(t *testing.T) {
 	if v.Severity != "CRITICAL" || !slices.Equal(v.Findings, []string{"A:a", "C:c"}) || v.Action != guardrailFallbackActionForSeverity("CRITICAL") {
 		t.Fatalf("local union = %+v", v)
 	}
+	// rel-1-0-10:GAP-0527: a view with no new finding name can still find the
+	// same rule stronger. The verdict is the higher of the two; this used to
+	// be pinned the other way.
 	same := &ScanVerdict{Action: "alert", Severity: "MEDIUM", Findings: []string{"A:a"}}
-	if unionLocalPatternVerdicts(same, &ScanVerdict{Severity: "CRITICAL", Findings: []string{"A:a"}}) != same {
-		t.Fatal("a view with no new finding must leave the verdict as it is")
+	raised := unionLocalPatternVerdicts(same, &ScanVerdict{Severity: "CRITICAL", Findings: []string{"A:a"}})
+	if raised.Severity != "CRITICAL" || raised.Action != guardrailFallbackActionForSeverity("CRITICAL") || !slices.Equal(raised.Findings, []string{"A:a"}) {
+		t.Fatalf("a stronger view with no new finding: %+v, want CRITICAL", raised)
 	}
+	if same.Severity != "MEDIUM" || same.Action != "alert" {
+		t.Fatalf("the union changed its base: %+v", same)
+	}
+	if unionLocalPatternVerdicts(same, &ScanVerdict{Severity: "LOW", Findings: []string{"A:a"}}) != same {
+		t.Fatal("a view that adds nothing and is no stronger must leave the verdict as it is")
+	}
+}
+
+// rel-1-0-10:GAP-0527: two scans of one message keep, per rule and profile
+// member, the stronger finding (strongerRuleFinding): enforceable over
+// alert-only over detection-only, then severity, then confidence. Ties keep the
+// first scan's finding.
+func TestUnionRuleFindingsKeepsTheStrongerFinding(t *testing.T) {
+	demoted := RuleFinding{RuleID: "D", Severity: "LOW", Confidence: 0.4, Evidence: "weak", enforcement: findingEnforcementDetectionOnly}
+	full := RuleFinding{RuleID: "D", Severity: "CRITICAL", Confidence: 0.8, Evidence: "strong"}
+	lowAlert := RuleFinding{RuleID: "D", Severity: "LOW", Evidence: "alert", enforcement: findingEnforcementAlertOnly}
+	lowEnforce := RuleFinding{RuleID: "D", Severity: "LOW", Evidence: "enforce"}
+	lowSure := RuleFinding{RuleID: "D", Severity: "LOW", Confidence: 0.9, Evidence: "sure"}
+	otherProfile := RuleFinding{RuleID: "D", Severity: "CRITICAL", Evidence: "member", profile: "p2"}
+	for _, tc := range []struct {
+		name       string
+		base, view []RuleFinding
+		want       []string
+	}{
+		{"view stronger", []RuleFinding{demoted}, []RuleFinding{full}, []string{"/strong"}},
+		{"base stronger", []RuleFinding{full}, []RuleFinding{demoted}, []string{"/strong"}},
+		{"enforceable over detection-only", []RuleFinding{demoted}, []RuleFinding{lowEnforce}, []string{"/enforce"}},
+		{"alert-only over detection-only", []RuleFinding{demoted}, []RuleFinding{lowAlert}, []string{"/alert"}},
+		{"enforceable over alert-only", []RuleFinding{lowAlert}, []RuleFinding{lowEnforce}, []string{"/enforce"}},
+		{"confidence last", []RuleFinding{lowEnforce}, []RuleFinding{lowSure}, []string{"/sure"}},
+		{"tie keeps base", []RuleFinding{lowSure}, []RuleFinding{lowSure, lowEnforce}, []string{"/sure"}},
+		{"profile members apart", []RuleFinding{demoted}, []RuleFinding{otherProfile}, []string{"/weak", "p2/member"}},
+	} {
+		base := slices.Clone(tc.base)
+		var got []string
+		for _, f := range unionRuleFindings(base, tc.view) {
+			got = append(got, f.profile+"/"+f.Evidence)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: union = %v, want %v", tc.name, got, tc.want)
+		}
+		if !slices.EqualFunc(base, tc.base, func(a, b RuleFinding) bool { return a.Evidence == b.Evidence }) {
+			t.Errorf("%s: the union changed its base", tc.name)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0527: trust-literal context demotes some rules to LOW
+// detection-only by their surroundings, so a line feed placed at a seam can
+// leave a demoted match where the text read as one string is enforceable.
+// For every regex-corpus prompt row where a demotable rule is enforceable as
+// one string, every two-part split whose line-feed join is demoted must still
+// give the one-string finding (rule level) and the one-string verdict
+// (regex_only proxy route), on the proxy, hook and session-message routes.
+// Rows are corpus rows; cut points are searched, nothing is written out.
+func TestPromptSplitTrustLiteralKeepsTheStrongerFinding(t *testing.T) {
+	inspector := newPartJoinInspector(t, "regex_only")
+	generation := snapshotRulePackGeneration("")
+	finding := func(text, rule string) *RuleFinding {
+		for _, f := range scanContentRuleCategoryWithGeneration(generation, text, "", ruleContentScopeUntrusted, "") {
+			if f.RuleID == rule {
+				return &f
+			}
+		}
+		return nil
+	}
+	strong := func(f *RuleFinding) bool { return f != nil && f.contributesToEnforcement() }
+	verdictOf := func(messages []ChatMessage) string {
+		raw := promptInspectText(messages)
+		v := inspectPromptWithRawRecheck(context.Background(), inspector, promptInspectionText(raw), raw, messages, "model", "action")
+		if v == nil {
+			return "NONE/allow"
+		}
+		return v.Severity + "/" + v.Action
+	}
+	localOf := func(v *ScanVerdict) string {
+		if v == nil {
+			return "NONE/allow"
+		}
+		return v.Severity + "/" + v.Action
+	}
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "hermes"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"})
+	hook := func(message any) agentHookResponse {
+		t.Helper()
+		return api.evaluateAgentHook(t.Context(), normalizeAgentHookRequestWithProfile("hermes", map[string]interface{}{
+			"hook_event_name": "pre_llm_call", "session_id": "sess-partjoin", "prompt": message,
+		}, profile))
+	}
+	splits := 0
+	for _, rule := range []string{"TRUST-DELIMITER", "TRUST-PROMPT-EXTRACT", "TRUST-FICTIONAL"} {
+		for _, row := range readJSONL[regexCase](t, "regex", "corpus.jsonl") {
+			if row.Direction != "" && row.Direction != "prompt" {
+				continue
+			}
+			whole := finding(row.Content, rule)
+			if !strong(whole) {
+				continue
+			}
+			wholeVerdict := verdictOf([]ChatMessage{{Role: "user", Content: row.Content}})
+			wholeLocal := localOf(scanLocalPatternsWithActivation("prompt", row.Content, generation, nil))
+			wholeHook := hook(row.Content)
+			for i := 1; i < len(row.Content); i++ {
+				if !utf8.RuneStart(row.Content[i]) {
+					continue
+				}
+				if f := finding(row.Content[:i]+"\n"+row.Content[i:], rule); f == nil || strong(f) {
+					continue
+				}
+				splits++
+				parts := []string{row.Content[:i], row.Content[i:]}
+				messages := partJoinChatMessages(t, string(mustJSON(t, []map[string]any{{"role": "user", "content": partJoinBlocks("text", parts)}})))
+				raw := promptInspectText(messages)
+				var got *RuleFinding
+				for _, f := range scanProxyContentRules(withPromptPartsView(context.Background(), "prompt", raw, messages), raw) {
+					if f.RuleID == rule {
+						got = &f
+					}
+				}
+				if !strong(got) || got.Severity != whole.Severity {
+					t.Errorf("%s %s cut %d: proxy rule scan keeps %+v, one string is %s", rule, row.ID, i, got, whole.Severity)
+				}
+				if v := verdictOf(messages); v != wholeVerdict {
+					t.Errorf("%s %s cut %d: proxy verdict %s, one string %s", rule, row.ID, i, v, wholeVerdict)
+				}
+				blocks := string(mustJSON(t, partJoinBlocks("text", parts)))
+				if v := localOf(sessionPromptLocalVerdict(blocks, generation, nil)); v != wholeLocal {
+					t.Errorf("%s %s cut %d: session verdict %s, one string %s", rule, row.ID, i, v, wholeLocal)
+				}
+				if got := hook(partJoinBlocks("text", parts)); got.Severity != wholeHook.Severity || got.Action != wholeHook.Action {
+					t.Errorf("%s %s cut %d: hook %s/%s, one string %s/%s", rule, row.ID, i, got.Severity, got.Action, wholeHook.Severity, wholeHook.Action)
+				}
+			}
+		}
+	}
+	if splits == 0 {
+		t.Fatal("no split leaves a demoted line-feed match; the search no longer covers GAP-0527")
+	}
+	t.Logf("demoted line-feed splits checked: %d", splits)
 }
