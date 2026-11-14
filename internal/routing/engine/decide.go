@@ -35,6 +35,7 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 	}
 	pol := e.policyFor(req)
 	signals := e.matcher.Match(req.Text)
+	sens := e.beginSensitive(ctx, req, signals)
 	categories := make([]string, 0, len(pol.Categories))
 	for c := range pol.Categories {
 		categories = append(categories, c)
@@ -73,17 +74,9 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		}
 	}
 
-	// 3. Sensitive narrowing: guardrail severity or a sensitive signal.
-	if s := e.sensitive; s != nil && len(s.Aliases) > 0 {
-		hit := s.SeverityAtLeast != "" && req.Severity != "" && rankOf(req.Severity) >= rankOf(s.SeverityAtLeast)
-		for _, name := range s.Signals {
-			hit = hit || signals[name]
-		}
-		if hit {
-			pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
-			d.FilteredBy = "sensitive"
-		}
-	}
+	// 3. Sensitive narrowing: the guardrail or signal floor, else the
+	// decision-model check (sensitive.go).
+	e.applySensitive(&pol, &d, sens, req)
 	d.PolicyDigest = pol.Digest()
 
 	// 4. First eligible alias: Force, user override, classifier, defaults.

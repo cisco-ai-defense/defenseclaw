@@ -25,6 +25,9 @@ type Options struct {
 	// Sticky is the conversation cache shared across generations (nil = a
 	// private one). It is used only with classifier systemone.
 	Sticky *StickyCache
+	// SensitiveChecker answers routing.sensitive.check (decision model or
+	// judge); nil means regex-only narrowing.
+	SensitiveChecker SensitiveChecker
 }
 
 // Engine is built once per config generation and is safe for concurrent
@@ -46,6 +49,7 @@ type Engine struct {
 	managed       bool
 	credentialOK  func(Backend, Request) bool
 	sticky        *StickyCache
+	checker       SensitiveChecker
 	// capabilityFilter is off for vllm_sr, whose 1.0.9 configs used
 	// free-form capabilities.
 	capabilityFilter bool
@@ -78,7 +82,10 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
 	}
-	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {
+	if r.Sensitive != nil && r.Sensitive.CheckEnabled() && len(r.Sensitive.Aliases) > 0 {
+		e.checker = opts.SensitiveChecker
+	}
+	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne || e.checker != nil {
 		e.sticky = opts.Sticky
 		if e.sticky == nil {
 			e.sticky = NewStickyCache()

@@ -53,7 +53,21 @@ func newSystemOneClassifier(cfg *config.Config, dotenv string) *systemOneClassif
 	if cfg == nil {
 		return nil
 	}
+	return newSystemOneEndpoint(cfg, dotenv, true, time.Duration(cfg.Routing.SystemOne.EffectiveTimeoutMs())*time.Millisecond)
+}
+
+// newSystemOneEndpoint builds a decision-model client. viaRouting true
+// reads routing.systemone (which by default reuses decision_model); false
+// takes the decision model itself and needs decision_model.enabled, the
+// source of the sensitivity check when the classifier is not systemone.
+func newSystemOneEndpoint(cfg *config.Config, dotenv string, viaRouting bool, timeout time.Duration) *systemOneClassifier {
+	if cfg == nil || (!viaRouting && !cfg.DecisionModel.Enabled) {
+		return nil
+	}
 	s := cfg.Routing.SystemOne
+	if !viaRouting {
+		s = &config.RoutingSystemOneConfig{}
+	}
 	endpoint, model := "", ""
 	key := ""
 	protocol := config.DecisionModelProtocolSystemOne
@@ -76,7 +90,6 @@ func newSystemOneClassifier(cfg *config.Config, dotenv string) *systemOneClassif
 	if endpoint == "" || model == "" || config.ValidateDecisionModelURL(endpoint) != nil {
 		return nil
 	}
-	timeout := time.Duration(s.EffectiveTimeoutMs()) * time.Millisecond
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	return &systemOneClassifier{
 		model: model, endpoint: endpoint, protocol: protocol, apiKey: key, timeout: timeout, now: time.Now,
@@ -117,26 +130,43 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 	if len(in.Categories) == 0 {
 		return none, classifierErr(engine.FailureConfig, errors.New("systemone needs routing.categories"))
 	}
-	if c.breakerOpen() {
-		return none, classifierErr(engine.FailureBreakerOpen, errors.New("systemone breaker open"))
-	}
 	criteria := make(map[string]string, len(in.Categories))
 	for _, cat := range in.Categories {
 		criteria[cat] = "The request is " + strings.ReplaceAll(cat, "_", " ") + " work."
 	}
-	body, err := decisionWireBody(c.protocol, c.model,
+	raw, err := c.post(ctx,
 		map[string]any{"user_request": in.Text, "connector": in.Connector, "api_family": in.APIFamily, "has_tools": in.HasTools},
 		map[string]any{"route_category": map[string]any{
 			"type": "choice", "instructions": systemOneRoutePolicy, "criteria": criteria,
 		}})
 	if err != nil {
-		return none, classifierErr(engine.FailureConfig, err)
+		return none, err
+	}
+	res, err := parseSystemOneRoute(raw, in.Categories)
+	c.record(err != nil)
+	if err != nil {
+		return none, classifierErr(engine.FailureDecode, err)
+	}
+	return res, nil
+}
+
+// post sends one decision-model request (the state and the named choice
+// questions) and returns the raw 200 body, or an engine.ClassifierError
+// with a closed failure code. The caller records the breaker outcome of
+// a decoded answer with record.
+func (c *systemOneClassifier) post(ctx context.Context, state, questions map[string]any) ([]byte, error) {
+	if c.breakerOpen() {
+		return nil, classifierErr(engine.FailureBreakerOpen, errors.New("systemone breaker open"))
+	}
+	body, err := decisionWireBody(c.protocol, c.model, state, questions)
+	if err != nil {
+		return nil, classifierErr(engine.FailureConfig, err)
 	}
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return none, classifierErr(engine.FailureConfig, err)
+		return nil, classifierErr(engine.FailureConfig, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	setDecisionWireAuth(req, c.protocol, c.apiKey)
@@ -144,9 +174,9 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 	if err != nil {
 		c.record(true)
 		if reqCtx.Err() != nil {
-			return none, classifierErr(engine.FailureTimeout, errors.New("systemone timed out"))
+			return nil, classifierErr(engine.FailureTimeout, errors.New("systemone timed out"))
 		}
-		return none, classifierErr(engine.FailureConfig, fmt.Errorf("systemone unreachable: %s", redactDecisionModelError(err)))
+		return nil, classifierErr(engine.FailureConfig, fmt.Errorf("systemone unreachable: %s", redactDecisionModelError(err)))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
@@ -156,23 +186,18 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 			// A safety refusal is a healthy answer the content chose
 			// (GAP-0343): no category, but no breaker failure either.
 			c.record(false)
-			return none, classifierErr(engine.FailureUpstreamStatus, herr)
+			return nil, classifierErr(engine.FailureUpstreamStatus, herr)
 		}
 	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		c.record(true)
-		return none, classifierErr(engine.FailureUpstreamStatus, fmt.Errorf("systemone returned HTTP %d", resp.StatusCode))
+		return nil, classifierErr(engine.FailureUpstreamStatus, fmt.Errorf("systemone returned HTTP %d", resp.StatusCode))
 	}
 	if len(raw) > maxDecisionModelResponseBytes {
 		c.record(true)
-		return none, classifierErr(engine.FailureDecode, errors.New("systemone answer exceeds 64 KiB"))
+		return nil, classifierErr(engine.FailureDecode, errors.New("systemone answer exceeds 64 KiB"))
 	}
-	res, err := parseSystemOneRoute(raw, in.Categories)
-	c.record(err != nil)
-	if err != nil {
-		return none, classifierErr(engine.FailureDecode, err)
-	}
-	return res, nil
+	return raw, nil
 }
 
 // parseSystemOneRoute reads the route_category answer; anything outside

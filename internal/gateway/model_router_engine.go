@@ -34,6 +34,11 @@ type engineRouter struct {
 	// admin, when set (tests), is used for every generation instead of
 	// the routing.admin evaluator compiled per generation (adminFor).
 	admin engine.AdminEvaluator
+	// judge returns the shared guardrail judge (the sensitivity check of
+	// routing.sensitive.check: judge); logger writes the audit row of a
+	// check that fired or could not answer. Both are set once at start.
+	judge  func() *LLMJudge
+	logger *audit.Logger
 
 	mu sync.Mutex
 	// cache keeps the engines of the last two generations, so requests
@@ -58,6 +63,22 @@ func (r *engineRouter) SetAdminEvaluator(a engine.AdminEvaluator) {
 	defer r.mu.Unlock()
 	r.admin = a
 	r.cache = [2]*engineCacheEntry{}
+}
+
+// SetJudgeSource installs the source of the guardrail judge model used by
+// routing.sensitive.check judge. Engines built after the call use it.
+func (r *engineRouter) SetJudgeSource(f func() *LLMJudge) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.judge = f
+	r.cache = [2]*engineCacheEntry{}
+}
+
+// SetAuditLogger installs the audit logger of sensitivity-check rows.
+func (r *engineRouter) SetAuditLogger(l *audit.Logger) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.logger = l
 }
 
 // engineFor returns the engine and config of the generation ctx pinned
@@ -91,11 +112,12 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	} else {
 		var err error
 		eng, err = engine.New(cfg, engine.Options{
-			Classifier:   classifier,
-			Admin:        r.adminFor(cfg),
-			Managed:      cfg != nil && cfg.StandaloneEnterprise(),
-			Sticky:       r.sticky,
-			CredentialOK: func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
+			Classifier:       classifier,
+			Admin:            r.adminFor(cfg),
+			Managed:          cfg != nil && cfg.StandaloneEnterprise(),
+			Sticky:           r.sticky,
+			SensitiveChecker: r.sensitiveCheckerFor(cfg),
+			CredentialOK:     func(b engine.Backend, _ engine.Request) bool { return r.backendCredentialOK(cfg, b) },
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)
@@ -186,7 +208,10 @@ func (r *engineRouter) RouteDetailed(ctx context.Context, in *ModelRouterInput) 
 		out.Latency = time.Since(started)
 		return normalizeSemanticRouteOutcome(out)
 	}
-	d := eng.Decide(ctx, engineRequest(in))
+	req := engineRequest(in)
+	sensitiveRequestFields(&req, in, cfg)
+	d := eng.Decide(ctx, req)
+	r.noteSensitiveDecision(ctx, in, &d)
 	recordRoutingDecision(ctx, in, &d, cfg != nil && cfg.StandaloneEnterprise())
 	out.Route = &d
 	out.Latency = time.Since(started)

@@ -68,6 +68,15 @@ type Request struct {
 	HasImages         bool
 	LongContext       bool
 	ConversationID    string
+	// SensitiveText is the bounded text the decision-model check reads
+	// (user and tool turns, newest first; never system prompts), and
+	// SensitiveTruncated says a cap cut it (ONE BOUND RULE). StrictTier is
+	// the posture of the caller guardrail profile: a truncated input is
+	// judged at least at the unknown tier, which routes local only under
+	// strict.
+	SensitiveText      string
+	SensitiveTruncated bool
+	StrictTier         bool
 	// Profiles are the guardrail profiles the caller resolved to, in
 	// assignment order (several when the profile meet combined them).
 	Profiles      []string
@@ -143,6 +152,8 @@ type Decision struct {
 	ChargeKeys   []string
 	PolicyDigest string
 	Latency      time.Duration
+	// Sensitive records how the sensitive-data narrowing was decided.
+	Sensitive SensitiveOutcome
 
 	verdict AdminVerdict
 }
@@ -193,3 +204,42 @@ func (e *ClassifierError) Error() string {
 }
 
 func (e *ClassifierError) Unwrap() error { return e.Err }
+
+// Sources of a sensitive narrowing (SensitiveOutcome.Source).
+const (
+	SensitiveSourceNone      = ""
+	SensitiveSourceGuardrail = "guardrail"
+	SensitiveSourceSignal    = "signal"
+	SensitiveSourceSticky    = "sticky"
+)
+
+// SensitiveOutcome says what decided the sensitive narrowing of one
+// request. Source is empty when nothing narrowed; otherwise guardrail (the
+// regex and rule floor), signal (a routing keyword signal), sticky (an
+// earlier positive of the conversation), or the checker name
+// (decision_model or judge). Reason is positive, unavailable:<code>,
+// truncated or clear. Checked is true when the checker ran.
+type SensitiveOutcome struct {
+	Source       string
+	Reason       string
+	Checked      bool
+	CheckFailure string
+	CheckLatency time.Duration
+}
+
+// SensitiveInput is what a sensitivity checker sees: bounded text, no
+// identity, no credentials.
+type SensitiveInput struct {
+	Text       string
+	Truncated  bool
+	Definition string
+	Connector  string
+}
+
+// SensitiveChecker answers one question: does the text hold sensitive
+// data. It returns a ClassifierError with a closed failure code when it
+// cannot answer; the engine then applies routing.sensitive.on_unavailable.
+type SensitiveChecker interface {
+	Name() string
+	Check(ctx context.Context, in SensitiveInput) (bool, error)
+}

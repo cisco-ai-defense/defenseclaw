@@ -62,6 +62,9 @@ func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.
 	if d.Deny != nil {
 		entry.Reasons = append(entry.Reasons, d.Deny.Code)
 	}
+	if d.Sensitive.Source != "" || d.Sensitive.Checked {
+		entry.Reasons = append(entry.Reasons, "sensitive:"+boundedRouterLabel(d.Sensitive.Source, 32)+":"+boundedRouterLabel(d.Sensitive.Reason, 64))
+	}
 	routingAdminRuntime.Decisions().Record(entry)
 }
 
