@@ -15,6 +15,19 @@ package main
 // and transport errors are retried with backoff so a benchmark records real
 // answers, not rate-limit failures. Only the answer is stored, never the
 // request, so the cache holds no corpus content.
+//
+// Fill mode (-dm-fill, rel-1-0-10:GAP-0555) fills the cache without the
+// product's hook timing in the way. The relay answers a miss at once with a
+// fixed, valid, unsure answer that is never stored, so the product's
+// decision-model client sees a healthy fast answer: no timeout, no breaker
+// trip, no skipped call (the breaker is the product's and is unchanged). The
+// real answer is fetched upstream afterwards by this process's own paced
+// workers, with its own long retries, and stored. The run's own decisions
+// are void (they were made with the unsure answer); a later cache-only
+// replay reads the stored answers. One pass completes every distinct request
+// body of the corpus, because a request body does not depend on earlier
+// answers (the history holds prompts, calls and results only). A fill ends
+// non-zero when a request is still unanswered.
 
 import (
 	"bytes"
@@ -56,6 +69,13 @@ type dmCache struct {
 	bg                           chan struct{}
 	legacyHits                   atomic.Int64
 	background                   atomic.Int64
+	// fill: answer a miss at once with fillStub and fetch the real answer in
+	// the background (see the file comment). fillPending holds the shas
+	// queued, fillWG the fetches in flight.
+	fill                                  bool
+	fillPending                           sync.Map
+	fillWG                                sync.WaitGroup
+	fillQueued, fillStubs, fillUnanswered atomic.Int64
 	// tpm paces upstream calls to this many input tokens per minute (0:
 	// none); the key's quota is shared with other lanes.
 	tpm, rpm int
@@ -75,14 +95,17 @@ type dmFlight struct {
 }
 
 // startDMCache starts the relay and returns its loopback URL.
-func startDMCache(upstream, protocol, dir string, only bool, inflight, tpm, rpm int, budgetFile string, budget int64, logPath string) (string, *dmCache, error) {
+func startDMCache(upstream, protocol, dir string, only, fill bool, inflight, tpm, rpm int, budgetFile string, budget int64, logPath string) (string, *dmCache, error) {
 	if inflight < 1 {
 		inflight = 8
+	}
+	if fill && only {
+		return "", nil, fmt.Errorf("-dm-fill and -dm-cache-only exclude each other: a fill sends upstream, a replay never does")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", nil, err
 	}
-	c := &dmCache{upstream: upstream, protocol: protocol, key: os.Getenv("DEFENSECLAW_DECISION_MODEL_KEY"), dir: dir, only: only,
+	c := &dmCache{upstream: upstream, protocol: protocol, key: os.Getenv("DEFENSECLAW_DECISION_MODEL_KEY"), dir: dir, only: only, fill: fill,
 		sem: make(chan struct{}, inflight), bg: make(chan struct{}, 4), tpm: tpm, rpm: rpm, budgetFile: budgetFile, budget: budget,
 		client: &http.Client{Timeout: 120 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -167,6 +190,10 @@ func (c *dmCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.logLine(map[string]any{"sha": sha, "offline_miss": true})
 		http.Error(w, "cache miss (offline replay)", http.StatusServiceUnavailable)
 		return
+	} else if c.fill {
+		c.fillEnqueue(sha, body)
+		e = &dmCacheEntry{V: 1, Status: http.StatusOK, Body: json.RawMessage(dmFillStub)}
+		c.fillStubs.Add(1)
 	} else {
 		e = c.fetchOnce(sha, body)
 	}
@@ -177,6 +204,44 @@ func (c *dmCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Status)
 	_, _ = w.Write(e.Body)
+}
+
+// dmFillStub is the answer a fill run gives the product: valid for both
+// protocols (a choice with probabilities that sum to one, and a risk score),
+// confirm so that nothing is decided on it, and never stored.
+const dmFillStub = `{"answers":{"disposition":{"type":"choice","choice":"confirm","probabilities":{"allow":0.1,"confirm":0.8,"block":0.1}},"risk":{"type":"score","score":1.0}}}`
+
+// fillEnqueue queues the upstream fetch of one request body, once per body
+// (a body already queued or stored is not queued again).
+func (c *dmCache) fillEnqueue(sha string, body []byte) {
+	if _, loaded := c.fillPending.LoadOrStore(sha, struct{}{}); loaded {
+		return
+	}
+	c.fillQueued.Add(1)
+	c.fillWG.Add(1)
+	go func() {
+		defer c.fillWG.Done()
+		if c.fetch(sha, body, dmFill) == nil {
+			c.fillUnanswered.Add(1)
+		}
+	}()
+}
+
+// fillWait blocks until every queued fetch has ended, printing progress to
+// w each minute, and returns the number of requests still unanswered.
+func (c *dmCache) fillWait(w io.Writer) int64 {
+	done := make(chan struct{})
+	go func() { c.fillWG.Wait(); close(done) }()
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return c.fillUnanswered.Load()
+		case <-tick.C:
+			fmt.Fprintf(w, "[s7bench] dm fill: queued=%d stored=%d unanswered=%d upstream_calls=%d\n", c.fillQueued.Load(), c.stored.Load(), c.fillUnanswered.Load(), c.upstreamCalls.Load())
+		}
+	}
 }
 
 // fetchOnce collapses concurrent misses of one key in this process.
@@ -214,6 +279,10 @@ func (c *dmCache) fetchOnce(sha string, body []byte) *dmCacheEntry {
 const (
 	dmInWindow   = 1200 * time.Millisecond
 	dmBackground = 90 * time.Second
+	// dmFill is the retry time of a fill fetch, dmFillAttempts its attempt
+	// cap: a fill waits out rate limits (Retry-After) instead of giving up.
+	dmFill         = 20 * time.Minute
+	dmFillAttempts = 40
 )
 
 // takeBudget records one upstream request in the shared budget file and
@@ -261,7 +330,7 @@ func (c *dmCache) waitPace(bodyBytes int) {
 }
 
 func (c *dmCache) fetch(sha string, body []byte, window time.Duration) *dmCacheEntry {
-	if window <= dmInWindow {
+	if window != dmBackground {
 		c.sem <- struct{}{}
 		defer func() { <-c.sem }()
 	}
@@ -269,7 +338,11 @@ func (c *dmCache) fetch(sha string, body []byte, window time.Duration) *dmCacheE
 	n429, attempts := 0, 0
 	var lastStatus int
 	var lastErr string
-	for attempts < 12 && (attempts == 0 || time.Since(start) < window) {
+	maxAttempts := 12
+	if window == dmFill {
+		maxAttempts = dmFillAttempts
+	}
+	for attempts < maxAttempts && (attempts == 0 || time.Since(start) < window) {
 		attempts++
 		c.waitPace(len(body))
 		if !c.takeBudget() {
@@ -357,8 +430,9 @@ func (c *dmCache) summary() string {
 	for i := 0; i < 600 && len(c.bg) > 0; i++ {
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Sprintf("dm-cache hits=%d legacy_hits=%d misses=%d upstream_calls=%d rate_limited=%d gave_up=%d offline_misses=%d stored=%d background=%d",
-		c.hits.Load(), c.legacyHits.Load(), c.misses.Load(), c.upstreamCalls.Load(), c.rateLimited.Load(), c.failed.Load(), c.offlineMisses.Load(), c.stored.Load(), c.background.Load())
+	return fmt.Sprintf("dm-cache hits=%d legacy_hits=%d misses=%d upstream_calls=%d rate_limited=%d gave_up=%d offline_misses=%d stored=%d background=%d fill_queued=%d fill_stubs=%d fill_unanswered=%d",
+		c.hits.Load(), c.legacyHits.Load(), c.misses.Load(), c.upstreamCalls.Load(), c.rateLimited.Load(), c.failed.Load(), c.offlineMisses.Load(), c.stored.Load(), c.background.Load(),
+		c.fillQueued.Load(), c.fillStubs.Load(), c.fillUnanswered.Load())
 }
 
 // dmLegacyKey is the cache key of body with the pre-1.0.10

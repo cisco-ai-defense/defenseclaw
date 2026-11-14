@@ -234,6 +234,7 @@ func main() {
 	dmProtocol := flag.String("dm-protocol", "", "decision_model.protocol: system-one or gemini-decisions (empty: product default)")
 	dmCacheDir := flag.String("dm-cache-dir", "", "bench-only answer cache: a loopback relay in front of -dm-url stores every answer under sha256(request body) in this dir and replays hits")
 	dmCacheOnly := flag.Bool("dm-cache-only", false, "with -dm-cache-dir: replay only, a miss fails the call (offline, no key needed)")
+	dmFill := flag.Bool("dm-fill", false, "with -dm-cache-dir: cache fill mode (rel-1-0-10:GAP-0555). The relay answers a miss at once with a fixed unsure answer that is never stored, so the product's decision-model client never times out and its breaker never trips; the real answers are fetched upstream by the relay's own paced workers (-dm-cache-inflight, -dm-cache-rpm, -dm-cache-tpm) after the cases, with long retries, and stored. The run's own decisions are void. Exit 4 when a request is still unanswered")
 	dmCacheInflight := flag.Int("dm-cache-inflight", 8, "with -dm-cache-dir: upstream requests in flight per harness process")
 	dmCacheTPM := flag.Int("dm-cache-tpm", 0, "with -dm-cache-dir: input tokens per minute this process may send upstream (0: no pacing)")
 	dmCacheRPM := flag.Int("dm-cache-rpm", 0, "with -dm-cache-dir: upstream requests per minute this process may send (0: no pacing)")
@@ -265,7 +266,7 @@ func main() {
 	startArrivalMS := flag.Int("session-start-arrival-ms", 0, "how long the first call of a session waits for its SessionStart to arrive before judging the start in its place (product default 1000). The corpora hold no SessionStart event, so any wait is a constant added to every case: 0 measures the hook work (rel-1-0-10:GAP-0261)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
-	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the /llm proxy GuardrailInspector, direction prompt; the connector UserPromptSubmit answer goes to extra) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
+	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the connector UserPromptSubmit hook; the scored decision is the hook answer, the /llm proxy GuardrailInspector text inspection goes to extra.inspect_* for comparison) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
@@ -384,6 +385,10 @@ func main() {
 		cfg.Guardrail.Judge.MaxParallelExplicit = true
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
+	if *dmFill && (*dmCacheDir == "" || *dmURL == "") {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL: -dm-fill needs -dm-url and -dm-cache-dir")
+		os.Exit(2)
+	}
 	var dmc *dmCache
 	if *dmURL != "" {
 		baseURL := *dmURL
@@ -392,13 +397,13 @@ func main() {
 			if logPath == "" {
 				logPath = filepath.Join(filepath.Dir(filepath.Clean(*dmCacheDir)), "log", fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405"), os.Getpid()))
 			}
-			u, c, err := startDMCache(*dmURL, (config.DecisionModelConfig{Protocol: *dmProtocol}).EffectiveProtocol(), *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudgetFile, *dmCacheBudget, logPath)
+			u, c, err := startDMCache(*dmURL, (config.DecisionModelConfig{Protocol: *dmProtocol}).EffectiveProtocol(), *dmCacheDir, *dmCacheOnly, *dmFill, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudgetFile, *dmCacheBudget, logPath)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "[s7bench] FATAL: dm cache:", err)
 				os.Exit(2)
 			}
 			baseURL, dmc = u, c
-			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v inflight=%d tpm=%d rpm=%d budget=%d\n", *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudget)
+			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v fill=%v inflight=%d tpm=%d rpm=%d budget=%d\n", *dmCacheDir, *dmCacheOnly, *dmFill, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudget)
 		}
 		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
 			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock, BlockRiskScore: *dmBlockRiskScore}
@@ -520,6 +525,12 @@ func main() {
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintf(os.Stderr, "[s7bench] done cases=%d decisions=%d in %.1fs\n", done.Load(), decisions.Load(), time.Since(start).Seconds())
+	var fillUnanswered int64
+	if dmc != nil && *dmFill {
+		// The cases are done; the real answers are still being fetched. Wait for every one before the run ends.
+		fmt.Fprintf(os.Stderr, "[s7bench] dm fill: cases done, %d requests queued upstream, waiting for them\n", dmc.fillQueued.Load())
+		fillUnanswered = dmc.fillWait(os.Stderr)
+	}
 	if dmc != nil {
 		fmt.Fprintf(os.Stderr, "[s7bench] %s\n", dmc.summary())
 	}
@@ -528,9 +539,18 @@ func main() {
 	stats := engine.Stats(context.Background())
 	wall := time.Since(startRun).Seconds()
 	rs := map[string]any{"cases": casesTotal.Load(), "decisions": decisionsTotal.Load(), "wall_s": wall, "decisions_per_s": float64(decisionsTotal.Load()) / wall,
-		"scratch_peak_bytes": scratchPeak.Load(), "scratch_cap_mb": *scratchCapMB, "load1_at_end": loadAvg(), "audit": stats, "pack": *pack, "connector_flag": *connectorFlag, "gomaxprocs": runtime.GOMAXPROCS(0)}
+		"scratch_peak_bytes": scratchPeak.Load(), "scratch_cap_mb": *scratchCapMB, "load1_at_end": loadAvg(), "audit": stats, "pack": *pack, "connector_flag": *connectorFlag, "gomaxprocs": runtime.GOMAXPROCS(0), "dm_fill": *dmFill, "dm_fill_unanswered": fillUnanswered}
 	if b, err := json.MarshalIndent(rs, "", " "); err == nil {
 		_ = os.WriteFile(*out+".runstats.json", b, 0o644)
+	}
+	if fillUnanswered > 0 {
+		fmt.Fprintf(os.Stderr, "[s7bench] dm fill INCOMPLETE: %d requests unanswered; run the fill again (answered requests are cached and not sent again)\n", fillUnanswered)
+		w.Flush()
+		cleanup()
+		os.Exit(4)
+	}
+	if *dmFill {
+		fmt.Fprintln(os.Stderr, "[s7bench] dm fill COMPLETE: every request answered and stored; this run's own decisions are void (made with the fill stub); replay with -dm-cache-only")
 	}
 }
 
@@ -561,16 +581,20 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 	cwd := "/home/bench/work"
 	if surface == "prompt" {
 		text := firstNonEmpty(c.Payload.Content, c.Payload.Prompt, c.Payload.Intent, c.Payload.Command)
+		// The scored answer is the UserPromptSubmit hook's answer, the one a coding agent gets (rel-1-0-10:GAP-0554). The proxy's text
+		// inspection (InspectText) runs first, as before, and is kept only as the diagnostic columns extra.inspect_*.
 		v := e.InspectText(ctx, "prompt", text)
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": text, "transcript_path": ""})
 		st, hb := e.HookFor(ctx, conn, body)
-		var hr hookResp
-		_ = json.Unmarshal(hb, &hr)
-		r := record{Case: c.ID, Connector: conn, N: 1, SrcTool: "__prompt__", Tool: "UserPromptSubmit", Mapped: "prompt", Status: st,
-			Action: v.Action, RawAction: v.Action, Severity: v.Severity, Findings: v.Findings,
-			Extra: map[string]string{"hook_action": hr.Action, "hook_raw_action": hr.RawAction, "hook_sev": hr.Severity, "hook_findings": strings.Join(hr.Findings, ",")}}
+		fallback := ""
+		if st >= 400 && conn != "claudecode" {
+			// The connector's handler refused the claudecode-shaped body: ask the Claude Code handler instead and say so in the record, so a
+			// refused shape is never scored as an allow (same rule as the tool-call path).
+			fallback = fmt.Sprintf("%s:%d", conn, st)
+			st, hb = e.HookFor(ctx, "claudecode", body)
+		}
 		decisions.Add(1)
-		emit(r)
+		emit(promptRecord(c.ID, conn, st, hb, v, fallback))
 		return
 	}
 	intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt)
@@ -686,6 +710,33 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 		decisions.Add(1)
 		emit(r)
 	}
+}
+
+// promptRecord is the prompt-surface decision of one case: the UserPromptSubmit hook answer (hb, HTTP status st) is the scored action,
+// severity and findings; the proxy text inspection v rides along in extra.inspect_* for comparison only (rel-1-0-10:GAP-0554). A hook that
+// answered no JSON, or not HTTP 200, is an error row and never an allow.
+func promptRecord(id, conn string, st int, hb []byte, v *gateway.ScanVerdict, fallback string) record {
+	var hr hookResp
+	r := record{Case: id, Connector: conn, N: 1, SrcTool: "__prompt__", Tool: "UserPromptSubmit", Mapped: "prompt", Status: st}
+	if err := json.Unmarshal(hb, &hr); err != nil {
+		r.Err = "decode: " + err.Error()
+	} else if st != 200 {
+		r.Err = fmt.Sprintf("http %d", st)
+	}
+	r.Action, r.RawAction, r.Severity, r.WouldBlock, r.RuleIDs, r.Findings = hr.Action, hr.RawAction, hr.Severity, hr.WouldBlock, hr.RuleIDs, hr.Findings
+	r.DetOnly = strings.HasPrefix(hr.Reason, "detection-only")
+	if len(hr.Reason) > 240 {
+		hr.Reason = hr.Reason[:240]
+	}
+	r.Reason = hr.Reason
+	r.Extra = map[string]string{"scored_via": "hook"}
+	if v != nil {
+		r.Extra["inspect_action"], r.Extra["inspect_sev"], r.Extra["inspect_findings"] = v.Action, v.Severity, strings.Join(v.Findings, ",")
+	}
+	if fallback != "" {
+		r.Extra["connector_fallback"] = fallback
+	}
+	return r
 }
 
 func firstNonEmpty(v ...string) string {
