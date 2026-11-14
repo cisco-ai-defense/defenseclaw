@@ -1784,7 +1784,7 @@ attributes:
   introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.filtered_by
   type: string
-  brief: "What narrowed the routing choices: sensitive, or other (a rule, budget or admin filter)"
+  brief: "What narrowed the routing choices: sensitive, unknown_alias, policy, api, capability or credential; any other filter is reported as other"
   examples:
   - "sensitive"
   stability: stable
@@ -1812,7 +1812,7 @@ attributes:
   introduced_in: telemetry-registry-v4
 - id: defenseclaw.route.deny_reason
   type: string
-  brief: "Closed class of a routing refusal: budget_exceeded, budget_unavailable, budget_cost_unknown, budget_downgrade_unavailable, routing_admin_denied, routing_sensitive_local_unavailable or other"
+  brief: "Closed class of a routing refusal: budget_exceeded, budget_unavailable, budget_cost_unknown, budget_downgrade_unavailable, rule_deny, identity_unconfirmed, routing_admin_denied, routing_sensitive_local_unavailable or other"
   examples:
   - "budget_exceeded"
   stability: stable

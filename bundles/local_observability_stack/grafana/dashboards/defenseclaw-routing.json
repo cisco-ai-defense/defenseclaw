@@ -281,8 +281,8 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Narrowed to a local model (sensitive)",
-      "description": "Decisions narrowed by routing.sensitive (a sensitive keyword or guardrail severity), which keeps the call on a local model.",
+      "title": "Sensitive requests kept local",
+      "description": "Requests narrowed by routing.sensitive (a sensitive keyword or guardrail severity) that were routed to a local model.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -299,7 +299,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "(sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\"} offset $__range))) or 0 * sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))",
+          "expr": "(sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"} offset $__range))) or 0 * sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))",
           "refId": "A",
           "instant": true
         }
@@ -953,7 +953,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Refusals by reason (managed)",
-      "description": "Requests a managed gateway refused, by closed reason: budget_exceeded, budget_unavailable, budget_cost_unknown, budget_downgrade_unavailable, routing_admin_denied, routing_sensitive_local_unavailable.",
+      "description": "Requests a managed gateway refused, by closed reason: budget_exceeded, budget_unavailable, budget_cost_unknown, budget_downgrade_unavailable, rule_deny (an administrator deny rule), identity_unconfirmed, routing_admin_denied, routing_sensitive_local_unavailable; anything else is other.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1009,7 +1009,7 @@
       "id": 21,
       "type": "stat",
       "title": "Sensitive requests refused (fail closed)",
-      "description": "Requests narrowed to a local model that no local model could serve, refused instead of sent to a cloud model. 0 = none happened. A gateway that does not yet fail closed here never counts them, so a 0 on an older gateway is not proof of safety.",
+      "description": "Requests narrowed to a local model that no local model could serve, refused instead of sent to a cloud model. 0 = none happened. A gateway that does not yet fail closed never counts them here: on such a gateway read Sensitive requests that went to the original model, which is where those requests show up.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1070,8 +1070,8 @@
     {
       "id": 22,
       "type": "stat",
-      "title": "Sensitive requests sent to a local model",
-      "description": "Requests narrowed by routing.sensitive that were routed (result applied).",
+      "title": "Sensitive requests that went to the original model",
+      "description": "Requests narrowed by routing.sensitive for which no local model was usable, so the call fell back to the ORIGINAL (usually cloud) model. This is the leak path: a gateway that fails closed (GAP-0576) refuses these instead and counts them under Sensitive requests refused.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1088,7 +1088,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "(sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"applied\"} offset $__range))) or 0 * sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))",
+          "expr": "(sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"fallback\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"fallback\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"fallback\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"fallback\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\",filtered_by=\"sensitive\",result=\"fallback\"} offset $__range))) or 0 * sum((((increase(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) * 0)) and defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range) or (last_over_time(defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"}[$__range]) unless defenseclaw_semantic_routing_decision_total{connector=~\"$connector\",host_name=~\"$host\"} offset $__range))))",
           "refId": "A",
           "instant": true
         }
@@ -1103,6 +1103,10 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
               }
             ]
           },
@@ -1921,7 +1925,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "count(sum by (budget_id) (defenseclaw_budget_subjects_exceeded{host_name=~\"$host\"}) > 0) or vector(0)",
+          "expr": "count(sum by (budget_id) (defenseclaw_budget_subjects_exceeded{host_name=~\"$host\"}) > 0) or 0 * count(count by (budget_id) (defenseclaw_budget_subjects_exceeded{host_name=~\"$host\"}))",
           "refId": "A",
           "instant": true
         }
@@ -2234,7 +2238,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "100 * max by (budget_id, scope) (defenseclaw_budget_peak_subject_spend_USD{budget_id=~\"$budget\",host_name=~\"$host\"} / on (budget_id, scope, period, host_name) defenseclaw_budget_limit_USD{budget_id=~\"$budget\",host_name=~\"$host\"})",
+          "expr": "100 * max by (budget_id, scope) (max by (budget_id, scope, period, host_name) (defenseclaw_budget_peak_subject_spend_USD{budget_id=~\"$budget\",host_name=~\"$host\"}) / on (budget_id, scope, period, host_name) max by (budget_id, scope, period, host_name) (defenseclaw_budget_limit_USD{budget_id=~\"$budget\",host_name=~\"$host\"}))",
           "refId": "A",
           "legendFormat": "{{budget_id}} ({{scope}})",
           "instant": true
@@ -2904,7 +2908,7 @@
       "id": 53,
       "type": "bargauge",
       "title": "Group budgets: spend against the limit (%)",
-      "description": "Pooled group budgets only. Directory group names never leave the endpoint, so a group is named by its budget id.",
+      "description": "Pooled group budgets only. Directory group names never leave the endpoint, so a group is named by its budget id. Under a fleet budget store a device cannot know a pooled budget's total (the store answers over the limit only), so its spend is left out and the bar stays empty; the Budgets table still shows the subjects over the limit.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -2921,7 +2925,7 @@
             "type": "prometheus",
             "uid": "defenseclaw-prometheus"
           },
-          "expr": "100 * max by (budget_id) (defenseclaw_budget_spend_USD{scope=\"group\",budget_id=~\"$group\",host_name=~\"$host\"} / on (budget_id, scope, period, host_name) defenseclaw_budget_limit_USD{scope=\"group\",budget_id=~\"$group\",host_name=~\"$host\"})",
+          "expr": "100 * max by (budget_id) (max by (budget_id, scope, period, host_name) (defenseclaw_budget_spend_USD{scope=\"group\",budget_id=~\"$group\",host_name=~\"$host\"}) / on (budget_id, scope, period, host_name) max by (budget_id, scope, period, host_name) (defenseclaw_budget_limit_USD{scope=\"group\",budget_id=~\"$group\",host_name=~\"$host\"}))",
           "refId": "A",
           "legendFormat": "{{budget_id}}",
           "instant": true
@@ -3387,7 +3391,7 @@
         "sort": 1,
         "multi": true,
         "includeAll": true,
-        "allValue": ".+",
+        "allValue": ".*",
         "current": {
           "text": [
             "All"

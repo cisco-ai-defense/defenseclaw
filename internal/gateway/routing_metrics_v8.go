@@ -8,12 +8,15 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/budgetstore"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
+	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 )
 
 const routingMetricsV8Producer = "gateway.routing"
@@ -21,6 +24,37 @@ const routingMetricsV8Producer = "gateway.routing"
 // routeLabelPattern bounds the free-form routing labels (a category, a budget
 // id): a value that does not fit becomes "other" instead of a new series.
 var routeLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// maxRouteCategoryLabels bounds the distinct route categories one gateway
+// process puts on a metric. A category can come from a remote classifier, so
+// its values are not trusted to stay few: the first ones seen are kept, any
+// later one is reported as other.
+const maxRouteCategoryLabels = 32
+
+type boundedLabelSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+	max  int
+}
+
+var routeCategoryLabels = &boundedLabelSet{seen: map[string]struct{}{}, max: maxRouteCategoryLabels}
+
+func (s *boundedLabelSet) bound(v string) string {
+	v = routeBoundedLabel(v)
+	if v == "" || v == "other" {
+		return v
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.seen[v]; ok {
+		return v
+	}
+	if len(s.seen) >= s.max {
+		return "other"
+	}
+	s.seen[v] = struct{}{}
+	return v
+}
 
 func routeBoundedLabel(v string) string {
 	v = strings.TrimSpace(v)
@@ -101,7 +135,8 @@ func routeDenyClass(d *engine.DenyReason) (class, budgetID string) {
 	switch code {
 	case "budget_exceeded", "budget_unavailable", "budget_cost_unknown", "budget_downgrade_unavailable":
 		return code, routeBoundedLabel(id)
-	case "routing_admin_denied", "routing_sensitive_local_unavailable":
+	case "routing_admin_denied", "routing_sensitive_local_unavailable", "rule_deny", "identity_unconfirmed":
+		// rule_deny:<rule id> and identity_unconfirmed:<fact> keep the class only.
 		return code, ""
 	}
 	return "other", ""
@@ -127,7 +162,7 @@ func recordSemanticRoutingDecisionMetricsV8(
 	}
 	var source, category, filteredBy string
 	if d := outcome.Route; d != nil {
-		source, category, filteredBy = routeSourceLabel(d.Source), routeBoundedLabel(d.Category), routeFilteredByLabel(d.FilteredBy)
+		source, category, filteredBy = routeSourceLabel(d.Source), routeCategoryLabels.bound(d.Category), routeFilteredByLabel(d.FilteredBy)
 	}
 	var denyReason, budgetID string
 	if outcome.Result == SemanticRouteDenied {
@@ -187,11 +222,20 @@ func recordSemanticRoutingDecisionMetricsV8(
 // "over the limit" only, is left out, never reported as 0. Subjects and
 // groups never appear: a budget is named by its administrator-chosen id.
 func (s *Sidecar) budgetMetricBatch(ctx context.Context, observedAt time.Time) []observabilityruntime.GeneratedMetricBatchItem {
-	cfg := s.currentConfig()
+	return budgetMetricBatchFor(ctx, observedAt, s.currentConfig(), routingAdminRuntime.Ledger())
+}
+
+func budgetMetricBatchFor(
+	ctx context.Context,
+	observedAt time.Time,
+	cfg *config.Config,
+	ledger *routingadmin.Ledger,
+) []observabilityruntime.GeneratedMetricBatchItem {
 	if cfg == nil || cfg.Routing.Admin == nil || len(cfg.Routing.Admin.Budgets) == 0 {
 		return nil
 	}
-	ledger := routingAdminRuntime.Ledger()
+	store := cfg.Routing.Admin.BudgetStore
+	storeOn := store != nil && strings.TrimSpace(store.URL) != ""
 	item := func(family string, build hookV8MetricRecordBuilder) observabilityruntime.GeneratedMetricBatchItem {
 		return newGatewayGeneratedMetricItem(ctx, observedAt, observability.SourceSystem, "", routingMetricsV8Producer, observability.EventName(family), build)
 	}
@@ -209,7 +253,11 @@ func (s *Sidecar) budgetMetricBatch(ctx context.Context, observedAt time.Time) [
 		if !known {
 			continue
 		}
-		pooledOnly := snap.Peak >= budgetstore.ExceededUSD/2
+		// A fleet store answers a pooled budget (a group or a connector, whose
+		// spend adds up across devices) with "over the limit" only, never its
+		// total: this device's share would read as the whole, so no spend is
+		// reported for it; the subjects-over count still is.
+		pooledOnly := snap.Peak >= budgetstore.ExceededUSD/2 || (storeOn && b.Scope != config.RoutingBudgetScopeUser)
 		if pooledOnly {
 			// The fleet store answers a pooled budget with over the limit only.
 			snap.Exceeded = max(snap.Exceeded, 1)
@@ -237,7 +285,7 @@ func (s *Sidecar) budgetMetricBatch(ctx context.Context, observedAt time.Time) [
 				})
 			}))
 	}
-	if store := cfg.Routing.Admin.BudgetStore; store != nil && strings.TrimSpace(store.URL) != "" {
+	if storeOn {
 		age, synced, healthy := ledger.StoreStatus(observedAt)
 		ok := int64(0)
 		if healthy {

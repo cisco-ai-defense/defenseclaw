@@ -272,20 +272,22 @@ func emitModelUsageMetricsV8(ctx context.Context, runtime hookLifecycleMetricV8R
 	// The routing counterfactual: what the same tokens cost on the requested
 	// model, next to what those same calls cost. Both count only when both
 	// are known, so their difference is the saving of exactly those calls.
-	if c.USD != nil && c.BaselineUSD != nil && *c.BaselineUSD > 0 && !math.IsNaN(*c.BaselineUSD) && !math.IsInf(*c.BaselineUSD, 0) &&
+	if c.USD != nil && c.BaselineUSD != nil && *c.BaselineUSD >= 0 && !math.IsNaN(*c.BaselineUSD) && !math.IsInf(*c.BaselineUSD, 0) &&
 		!math.IsNaN(*c.USD) && !math.IsInf(*c.USD, 0) {
 		baseline, actual := *c.BaselineUSD, *c.USD
-		add(observability.TelemetryInstrumentDefenseClawModelCostBaseline, func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
-			return b.BuildMetricDefenseClawModelCostBaseline(observability.MetricDefenseClawModelCostBaselineInput{
-				Envelope: e, Value: baseline,
-				DefenseClawConnectorSource:      labelValue(rec, "connector"),
-				GenAIProviderName:               labelValue(rec, "provider"),
-				DefenseClawCostPriceEntry:       labelValue(rec, "model"),
-				DefenseClawRouteDecision:        labelValue(rec, "route_decision"),
-				DefenseClawCallRole:             labelValue(rec, "call_role"),
-				DefenseClawGuardrailProfileName: labelValue(rec, "profile"),
+		if baseline > 0 {
+			add(observability.TelemetryInstrumentDefenseClawModelCostBaseline, func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
+				return b.BuildMetricDefenseClawModelCostBaseline(observability.MetricDefenseClawModelCostBaselineInput{
+					Envelope: e, Value: baseline,
+					DefenseClawConnectorSource:      labelValue(rec, "connector"),
+					GenAIProviderName:               labelValue(rec, "provider"),
+					DefenseClawCostPriceEntry:       labelValue(rec, "model"),
+					DefenseClawRouteDecision:        labelValue(rec, "route_decision"),
+					DefenseClawCallRole:             labelValue(rec, "call_role"),
+					DefenseClawGuardrailProfileName: labelValue(rec, "profile"),
+				})
 			})
-		})
+		}
 		if actual > 0 {
 			add(observability.TelemetryInstrumentDefenseClawModelCostCompared, func(b *observability.FamilyBuilder, e observability.FamilyEnvelopeInput) (observability.Record, error) {
 				return b.BuildMetricDefenseClawModelCostCompared(observability.MetricDefenseClawModelCostComparedInput{

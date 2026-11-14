@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/routing/engine"
+	"github.com/defenseclaw/defenseclaw/internal/routingadmin"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -132,102 +134,184 @@ func TestRouteOnlyRecordsItsRoutingDecision(t *testing.T) {
 	}
 }
 
-func budgetSidecar(cfg *config.Config) *Sidecar {
-	s := &Sidecar{cfg: cfg}
-	return s
+func budgetTestConfig(store bool) *config.Config {
+	cfg := routingAPIConfig()
+	if store {
+		cfg.Routing.Admin.BudgetStore = &config.RoutingBudgetStoreConfig{URL: "https://store.example.test"}
+	}
+	return cfg
 }
 
-func TestBudgetGaugesReportEachBudgetAndNeverZeroForUnknownSpend(t *testing.T) {
-	cfg := routingAPIConfig()
-	cfg.Routing.Admin.BudgetStore = &config.RoutingBudgetStoreConfig{URL: "https://store.example.test"}
-	if routingAdminRuntime.For(cfg) == nil {
-		t.Fatal("evaluator")
-	}
-	now := time.Now().UTC()
+func recordBudgetBatch(t *testing.T, cfg *config.Config, ledger *routingadmin.Ledger, now time.Time) *proxyCanonicalCapture {
+	t.Helper()
 	runtime, capture := newProxyGeneratedMetricRuntime(t)
-	s := budgetSidecar(cfg)
-
-	// Before the remote spend is read: limits are known, spend is absent.
-	loaded := func(id string) bool { return routingAdminRuntime.Ledger().Seeded(id) }
-	if loaded("daily") {
-		t.Skip("shared ledger already seeded by another test")
-	}
-	items := s.budgetMetricBatch(t.Context(), now)
+	items := budgetMetricBatchFor(t.Context(), now, cfg, ledger)
 	if _, err := runtime.RecordGeneratedMetricBatch(t.Context(), items); err != nil {
 		t.Fatal(err)
 	}
+	return capture
+}
+
+func budgetValue(t *testing.T, capture *proxyCanonicalCapture, name, id string) (float64, bool) {
+	t.Helper()
+	for _, m := range capturedMetrics(capture, name) {
+		if fmt.Sprint(m.Attributes()["defenseclaw.budget.id"]) != id {
+			continue
+		}
+		if v, ok := m.Value().Double(); ok {
+			return v, true
+		}
+		if v, ok := m.Value().Int64(); ok {
+			return float64(v), true
+		}
+	}
+	return 0, false
+}
+
+func TestBudgetGaugesReportEachBudgetAndNeverZeroForUnknownSpend(t *testing.T) {
+	cfg := budgetTestConfig(false)
+	ledger := routingadmin.NewLedger()
+	now := time.Now().UTC()
+
+	// Before the remote spend is read: the limits are known, the spend is absent.
+	capture := recordBudgetBatch(t, cfg, ledger, now)
 	if n := len(capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetLimit)); n != 2 {
 		t.Fatalf("limit gauges = %d, want 2", n)
 	}
-	if n := len(capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetSpend)); n != 0 {
-		t.Fatalf("spend must be absent while loading, got %d series", n)
+	for _, name := range []string{
+		observability.TelemetryInstrumentDefenseClawBudgetSpend, observability.TelemetryInstrumentDefenseClawBudgetPeakSubjectSpend,
+		observability.TelemetryInstrumentDefenseClawBudgetSubjectsExceeded,
+	} {
+		if n := len(capturedMetrics(capture, name)); n != 0 {
+			t.Fatalf("%s must be absent while spend loads, got %d series", name, n)
+		}
 	}
 
-	routingAdminRuntime.Ledger().ApplyRemote([]string{"daily", "eng"}, nil, now)
-	routingAdminRuntime.Charge([]string{"user:daily:*:1001"}, 4, now)
-	routingAdminRuntime.Charge([]string{"user:daily:*:1002"}, 11, now)
-	runtime2, capture2 := newProxyGeneratedMetricRuntime(t)
-	if _, err := runtime2.RecordGeneratedMetricBatch(t.Context(), s.budgetMetricBatch(t.Context(), now)); err != nil {
-		t.Fatal(err)
-	}
-	spend := capturedMetrics(capture2, observability.TelemetryInstrumentDefenseClawBudgetSpend)
-	peak := capturedMetrics(capture2, observability.TelemetryInstrumentDefenseClawBudgetPeakSubjectSpend)
-	exceeded := capturedMetrics(capture2, observability.TelemetryInstrumentDefenseClawBudgetSubjectsExceeded)
-	if len(spend) != 2 || len(peak) != 2 || len(exceeded) != 2 {
-		t.Fatalf("series spend/peak/exceeded = %d/%d/%d, want 2 each", len(spend), len(peak), len(exceeded))
-	}
-	for _, m := range spend {
-		attrs := m.Attributes()
-		if fmt.Sprint(attrs["defenseclaw.budget.id"]) != "daily" {
-			continue
-		}
-		if v, ok := m.Value().Double(); !ok || v != 15 {
-			t.Fatalf("daily spend = %v, want 15 (4+11)", m.Value())
-		}
-	}
-	for _, m := range exceeded {
-		if fmt.Sprint(m.Attributes()["defenseclaw.budget.id"]) == "daily" {
-			if v, ok := m.Value().Int64(); !ok || v != 1 {
-				t.Fatalf("daily subjects over the 10 USD limit = %v, want 1", m.Value())
-			}
+	ledger.ApplyRemote([]string{"daily", "eng"}, nil, now)
+	ledger.Charge([]string{"user:daily:*:1001"}, 4, now)
+	ledger.Charge([]string{"user:daily:*:1002"}, 11, now)
+	ledger.Charge([]string{"group:eng:" + `DCLAB\eng` + ":pool"}, 7, now)
+	capture = recordBudgetBatch(t, cfg, ledger, now)
+	for _, want := range []struct {
+		name, id string
+		value    float64
+	}{
+		{observability.TelemetryInstrumentDefenseClawBudgetSpend, "daily", 15},
+		{observability.TelemetryInstrumentDefenseClawBudgetPeakSubjectSpend, "daily", 11},
+		{observability.TelemetryInstrumentDefenseClawBudgetSubjectsExceeded, "daily", 1}, // the 10 USD limit: only the 11 USD user
+		{observability.TelemetryInstrumentDefenseClawBudgetSpend, "eng", 7},
+		{observability.TelemetryInstrumentDefenseClawBudgetSubjectsExceeded, "eng", 0}, // 7 of 100 USD: a real 0, spend is known
+	} {
+		if got, ok := budgetValue(t, capture, want.name, want.id); !ok || got != want.value {
+			t.Errorf("%s{%s} = %v (present %v), want %v", want.name, want.id, got, ok, want.value)
 		}
 	}
 	// No subject, user id or group name is a label anywhere.
-	for _, m := range append(append(spend, peak...), exceeded...) {
+	for _, m := range capture.metricSnapshot() {
 		for k, v := range m.Attributes() {
 			if strings.Contains(fmt.Sprint(v), "1001") || strings.Contains(fmt.Sprint(v), "DCLAB") || strings.Contains(k, "subject") {
 				t.Fatalf("budget gauge leaked a subject: %v", m.Attributes())
 			}
 		}
 	}
-	// Store gauges: configured store, no sync error.
-	if n := len(capturedMetrics(capture2, observability.TelemetryInstrumentDefenseClawBudgetStoreHealthy)); n != 1 {
+	// No store configured: no store gauges.
+	for _, name := range []string{observability.TelemetryInstrumentDefenseClawBudgetStoreHealthy, observability.TelemetryInstrumentDefenseClawBudgetStoreSyncAge} {
+		if n := len(capturedMetrics(capture, name)); n != 0 {
+			t.Fatalf("%s without a fleet store: %d series", name, n)
+		}
+	}
+}
+
+func TestBudgetGaugesPooledMarkerIsNotAnExportedSpend(t *testing.T) {
+	cfg := budgetTestConfig(false)
+	ledger := routingadmin.NewLedger()
+	now := time.Now().UTC()
+	ledger.ApplyRemote([]string{"daily", "eng"}, nil, now)
+	// The fleet store answers a pooled budget with over the limit only.
+	ledger.Charge([]string{"group:eng:" + `DCLAB\eng` + ":pool"}, budgetstore.ExceededUSD, now)
+	capture := recordBudgetBatch(t, cfg, ledger, now)
+	if _, ok := budgetValue(t, capture, observability.TelemetryInstrumentDefenseClawBudgetSpend, "eng"); ok {
+		t.Fatal("a pooled over-the-limit marker must not be exported as a spend")
+	}
+	if got, ok := budgetValue(t, capture, observability.TelemetryInstrumentDefenseClawBudgetSubjectsExceeded, "eng"); !ok || got != 1 {
+		t.Fatalf("a marked pooled budget is over its limit: got %v present %v", got, ok)
+	}
+}
+
+func TestBudgetGaugesUnderAFleetStore(t *testing.T) {
+	cfg := budgetTestConfig(true)
+	ledger := routingadmin.NewLedger()
+	now := time.Now().UTC()
+	ledger.ApplyRemote([]string{"daily", "eng"}, nil, now)
+	ledger.Charge([]string{"user:daily:*:1001"}, 4, now)
+	ledger.Charge([]string{"group:eng:" + `DCLAB\eng` + ":pool"}, 7, now) // this device's share only
+	capture := recordBudgetBatch(t, cfg, ledger, now)
+	if _, ok := budgetValue(t, capture, observability.TelemetryInstrumentDefenseClawBudgetSpend, "eng"); ok {
+		t.Fatal("under a fleet store a pooled budget's spend is this device's share only and must stay absent")
+	}
+	if got, ok := budgetValue(t, capture, observability.TelemetryInstrumentDefenseClawBudgetSpend, "daily"); !ok || got != 4 {
+		t.Fatalf("a per-user budget keeps its spend under a store: %v %v", got, ok)
+	}
+	// The store never answered: healthy, but no sync age yet (never a made-up 0).
+	if n := len(capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetStoreHealthy)); n != 1 {
 		t.Fatalf("store healthy gauges = %d", n)
 	}
-	if n := len(capturedMetrics(capture2, observability.TelemetryInstrumentDefenseClawBudgetStoreSyncAge)); n != 1 {
-		t.Fatalf("store sync age gauges = %d (a sync just worked)", n)
+	if n := len(capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetStoreSyncAge)); n != 0 {
+		t.Fatalf("sync age before the fleet ever answered = %d series, want absent", n)
 	}
-	// The fleet store answers a pooled budget with over the limit only: no spend, one exceeded.
-	routingAdminRuntime.Charge([]string{"group:eng:*:" + "pool"}, budgetstore.ExceededUSD, now)
-	runtime3, capture3 := newProxyGeneratedMetricRuntime(t)
-	if _, err := runtime3.RecordGeneratedMetricBatch(t.Context(), s.budgetMetricBatch(t.Context(), now)); err != nil {
-		t.Fatal(err)
+	// The fleet answers: the age starts at 0 and grows.
+	ledger.MarkFleetRead(now)
+	capture = recordBudgetBatch(t, cfg, ledger, now.Add(90*time.Second))
+	age := capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetStoreSyncAge)
+	if len(age) != 1 {
+		t.Fatalf("sync age series = %d", len(age))
 	}
-	for _, m := range capturedMetrics(capture3, observability.TelemetryInstrumentDefenseClawBudgetSpend) {
-		if fmt.Sprint(m.Attributes()["defenseclaw.budget.id"]) == "eng" {
-			t.Fatalf("a pooled over-the-limit marker must not be exported as a spend: %v", m.Value())
-		}
+	if v, ok := age[0].Value().Double(); !ok || v != 90 {
+		t.Fatalf("sync age = %v, want 90 s", age[0].Value())
+	}
+	// The store goes down: ApplyRemote from the device's own store must not refresh the age,
+	// and the failure turns healthy to 0.
+	ledger.ApplyRemote([]string{"daily", "eng"}, nil, now.Add(120*time.Second))
+	ledger.SyncFailed(errors.New("store unreachable"))
+	capture = recordBudgetBatch(t, cfg, ledger, now.Add(300*time.Second))
+	age = capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetStoreSyncAge)
+	if len(age) != 1 {
+		t.Fatalf("sync age series = %d", len(age))
+	}
+	if v, _ := age[0].Value().Double(); v != 300 {
+		t.Fatalf("sync age during an outage = %v, want 300 s (the last fleet answer, not the last fallback)", v)
+	}
+	healthy := capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetStoreHealthy)
+	if len(healthy) != 1 {
+		t.Fatalf("store healthy gauges = %d", len(healthy))
+	}
+	if v, _ := healthy[0].Value().Int64(); v != 0 {
+		t.Fatalf("healthy during an outage = %v, want 0", v)
 	}
 }
 
 func TestBudgetGaugesCostNothingWithoutBudgets(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Routing.Admin = &config.RoutingAdminConfig{}
-	if items := budgetSidecar(cfg).budgetMetricBatch(t.Context(), time.Now()); items != nil {
+	if items := budgetMetricBatchFor(t.Context(), time.Now(), cfg, routingadmin.NewLedger()); items != nil {
 		t.Fatalf("no budgets must emit nothing, got %d items", len(items))
 	}
-	if items := budgetSidecar(&config.Config{}).budgetMetricBatch(t.Context(), time.Now()); items != nil {
+	if items := budgetMetricBatchFor(t.Context(), time.Now(), &config.Config{}, nil); items != nil {
 		t.Fatalf("no routing.admin must emit nothing, got %d items", len(items))
+	}
+}
+
+func TestRouteCategoryLabelIsBoundedWhateverTheClassifierSays(t *testing.T) {
+	set := &boundedLabelSet{seen: map[string]struct{}{}, max: 4}
+	var got []string
+	for _, v := range []string{"coding", "chat", "coding", "a", "b", "c", "has spaces", ""} {
+		got = append(got, set.bound(v))
+	}
+	want := []string{"coding", "chat", "coding", "a", "b", "other", "other", ""}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("bound #%d = %q, want %q (all %v)", i, got[i], want[i], got)
+		}
 	}
 }
 
@@ -237,6 +321,7 @@ func baselinePricing() config.PricingConfig {
 		Models: []config.PriceEntryConfig{
 			{Provider: "anthropic", Model: "claude-haiku-4-5*", PriceRatesConfig: config.PriceRatesConfig{InputPerMTok: usageF64(1), OutputPerMTok: usageF64(5)}},
 			{Provider: "anthropic", Model: "claude-sonnet-4-5*", PriceRatesConfig: config.PriceRatesConfig{InputPerMTok: usageF64(3), OutputPerMTok: usageF64(15)}},
+			{Provider: "ollama", Model: "qwen*", PriceRatesConfig: config.PriceRatesConfig{InputPerMTok: usageF64(0), OutputPerMTok: usageF64(0)}},
 		},
 	}
 }
@@ -327,5 +412,38 @@ func TestModelUsageLogCarriesTheFallbackCauseOnlyOnAFallback(t *testing.T) {
 		if got := routeFallbackReasonLabel(in, "fallback"); got != want {
 			t.Errorf("routeFallbackReasonLabel(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestModelUsageSinkAFreeRequestedModelStillCountsTheCompareSide(t *testing.T) {
+	engine, capture := newUsageTestEngine(t, []string{"logs", "metrics"}, baselinePricing())
+	call := engine.Begin(context.Background(), modelusage.CallFacts{
+		RequestID: "req-base-3", Connector: "codex", APIFamily: modelusage.FamilyMessages, CallRole: modelusage.RoleAgent,
+		RequestedProvider: "ollama", RequestedModel: "qwen2.5:1.5b",
+		SelectedProvider: "anthropic", SelectedModel: "claude-sonnet-4-5",
+		Route: modelusage.RouteFacts{Decision: modelusage.DecisionApplied},
+	})
+	call.Usage(modelusage.ParsedUsage{Input: 1000, Output: 500, Has: modelusage.HasInput | modelusage.HasOutput})
+	rec := call.End(nil)
+	if rec.Cost.USD == nil || rec.Cost.BaselineUSD == nil || *rec.Cost.BaselineUSD != 0 || *rec.Cost.USD <= 0 {
+		t.Fatalf("free requested model: %+v", rec.Cost)
+	}
+	body, _ := usageLogBody(t, capture, true)
+	if v, present := body["defenseclaw.cost.baseline_usd"].(float64); !present || v != 0 {
+		t.Fatalf("a free requested model has a known baseline of 0: %v", body)
+	}
+	var names map[string]struct{}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		_, metrics := capture.snapshot()
+		names = hookModelV8CapturedMetricNames(metrics)
+		if _, ok := names[observability.TelemetryInstrumentDefenseClawModelCostCompared]; ok {
+			break
+		}
+	}
+	if _, ok := names[observability.TelemetryInstrumentDefenseClawModelCostCompared]; !ok {
+		t.Fatalf("the spend on a call a free model would have served must reach compared: %v", names)
+	}
+	if _, ok := names[observability.TelemetryInstrumentDefenseClawModelCostBaseline]; ok {
+		t.Fatal("a baseline of 0 adds nothing to the baseline counter")
 	}
 }

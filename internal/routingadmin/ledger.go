@@ -31,10 +31,13 @@ type Ledger struct {
 	// price covers (UnknownTTL).
 	unknown map[string]time.Time
 	// seeded holds the budget ids whose remote spend has been read once.
-	seeded    map[string]bool
-	syncErr   string
-	pushErr   string
-	lastSync  time.Time
+	seeded   map[string]bool
+	syncErr  string
+	pushErr  string
+	lastSync time.Time
+	// lastFleet is when the fleet counter last answered (a fallback to this
+	// device's own store does not count), for the store gauges.
+	lastFleet time.Time
 	lastPrune int32
 	now       func() time.Time
 }
@@ -429,9 +432,19 @@ func (l *Ledger) Snapshot(prefix, period string, limit float64, now time.Time) (
 	return snap, true
 }
 
+// MarkFleetRead records that the fleet counter answered at the given time.
+func (l *Ledger) MarkFleetRead(at time.Time) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.lastFleet = at
+	l.mu.Unlock()
+}
+
 // StoreStatus is the state of the fleet counter for the store gauges: how
-// long ago a sync last worked (ok false: none yet) and whether the last sync
-// and the last push both worked.
+// long ago the fleet counter last answered (synced false: it never has) and
+// whether the last sync and the last push both worked.
 func (l *Ledger) StoreStatus(now time.Time) (age time.Duration, synced, healthy bool) {
 	if l == nil {
 		return 0, false, false
@@ -439,8 +452,8 @@ func (l *Ledger) StoreStatus(now time.Time) (age time.Duration, synced, healthy 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	healthy = l.syncErr == "" && l.pushErr == ""
-	if l.lastSync.IsZero() {
+	if l.lastFleet.IsZero() {
 		return 0, false, healthy
 	}
-	return now.Sub(l.lastSync), true, healthy
+	return now.Sub(l.lastFleet), true, healthy
 }
