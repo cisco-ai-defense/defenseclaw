@@ -22,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -41,19 +40,20 @@ const calloutBudget = 20 * time.Millisecond
 // file; the worker records the step afterwards.
 func TestEgressCheckNeedsNoStoreGAP0179(t *testing.T) {
 	h := newHarness(t, t.TempDir(), Options{})
-	// The worker records nothing here, so the only store would be the
+	// The disk does not answer: the worker (and any check that touched the
+	// store) waits in the disk hook, so the only store would be the
 	// check's own.
-	h.svc.egress.stop()
-	h.svc.startEgressWorkerWith(func(context.Context, EgressRequest) error { return nil })
-	ctx, cancel := context.WithTimeout(context.Background(), calloutBudget)
-	defer cancel()
-	v, err := h.svc.Egress(ctx, EgressRequest{Actor: actorA, Host: "github.com", Method: "GET"})
+	unblock := blockDisk(t, h, nil)
+	v, err := guardedEgress(t, h, EgressRequest{Actor: actorA, Host: "github.com", Method: "GET"}, false)
 	if err != nil || v.Deny {
 		t.Fatalf("first egress of a new actor: %+v %v", v, err)
 	}
 	if _, err := os.Stat(h.svc.dbPath(actorA)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the check opened a store (%v)", err)
 	}
+	unblock()
+	ctx, cancel := context.WithTimeout(context.Background(), calloutBudget)
+	defer cancel()
 	// After a secret read, the memo denies at once, with no store read.
 	h.hook(actorA, "s1", projection(t, guardrail.ToolChainSecretReadThenEgress, 1))
 	h.advance(time.Second)
@@ -182,60 +182,115 @@ func TestEgressCheckSkipsAPurgeOnTheVolumeGAP0179(t *testing.T) {
 	}
 }
 
-// TestEgressCheckLoadSlowDiskGAP0179 is the load test: 50 checks a second
-// for 4 s across five actors, through the real leader transport, with the
-// worker's store writes slowed to 200 ms each. p99 of the check stays
-// within the callout's 20 ms budget, and nothing blocks behind the writes.
-func TestEgressCheckLoadSlowDiskGAP0179(t *testing.T) {
-	if testing.Short() {
-		t.Skip("load test")
+// blockDisk makes every disk operation of h's service (a store open or
+// access, a state file write, a purge) wait until the returned function is
+// called (also at cleanup, before the service closes). entered, if set, gets
+// a signal when an operation reaches the block.
+func blockDisk(t *testing.T, h *harness, entered chan<- string) func() {
+	t.Helper()
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock) // runs before the harness closes the service
+	hook := func(op string) {
+		if entered != nil {
+			select {
+			case entered <- op:
+			default:
+			}
+		}
+		<-release
 	}
+	h.svc.diskHook.Store(&hook)
+	return unblock
+}
+
+// diskGuard only stops a hang: a check that touches the blocked disk never
+// returns, and the guard fails the test instead of the package timeout.
+const diskGuard = 10 * time.Second
+
+// guardedEgress makes one egress check, over the transport or in process,
+// and fails the test if it does not return within diskGuard.
+func guardedEgress(t *testing.T, h *harness, in EgressRequest, transport bool) (EgressVerdict, error) {
+	t.Helper()
+	type res struct {
+		v   EgressVerdict
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		if transport {
+			v, err := h.client.CheckEgress(context.Background(), in)
+			ch <- res{v, err}
+			return
+		}
+		v, err := h.svc.Egress(context.Background(), in)
+		ch <- res{v, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.v, r.err
+	case <-time.After(diskGuard):
+		t.Fatal("an egress check waited on the blocked disk")
+	}
+	return EgressVerdict{}, nil
+}
+
+// GAP-0179, GAP-0247: the egress check never touches the disk. Every disk
+// operation of the service (a store open or access, under recordEgress and
+// every other store use; a state file write; a purge) blocks until the test
+// lets it go, so a check that touches the store at all, inline or through
+// the worker, hangs. With the worker blocked inside its store access,
+// checks over the transport and more checks than the worker queue holds all
+// return, answered from the memo: a secret read still refuses, other actors
+// are allowed, and the full queue drops the step instead of waiting. The
+// signal is the blocked operation itself, not a latency percentile on a
+// shared host; the 10 s guard only stops a hang.
+func TestEgressCheckNeverWaitsOnABlockedDiskGAP0179(t *testing.T) {
 	h := newHarness(t, t.TempDir(), Options{})
-	// A slow disk: every store write the worker makes takes 200 ms more.
-	const writeDelay = 200 * time.Millisecond
-	h.svc.egress.stop()
-	h.svc.startEgressWorkerWith(func(ctx context.Context, in EgressRequest) error {
-		time.Sleep(writeDelay)
-		return h.svc.recordEgress(ctx, in)
-	})
-	actors := make([]Actor, 5)
-	for i := range actors {
-		actors[i] = Actor{Atespace: "eng-web", UID: fmt.Sprintf("2e8d6260-7d31-4e56-b416-%012d", i+1)}
-		// Some actors have windows (a hook), so the worker really writes.
-		if i%2 == 0 {
-			h.hook(actors[i], "s1", projection(t, reverseShell, 1))
+	secret, other := actorA, actorB
+	h.hook(secret, "s1", secretRead(t))
+	h.hook(other, "s1", projection(t, reverseShell, 1))
+	h.settle()
+	entered := make(chan string, 1)
+	unblock := blockDisk(t, h, entered)
+	check := func(a Actor, transport bool) EgressVerdict {
+		t.Helper()
+		v, err := guardedEgress(t, h, EgressRequest{Actor: a, Host: "registry.npmjs.org", Method: "GET"}, transport)
+		if err != nil {
+			t.Fatalf("check of %s: %v", a.UID, err)
+		}
+		return v
+	}
+	// An allowed check hands its step to the worker, whose store access
+	// blocks.
+	if v := check(other, true); v.Deny {
+		t.Fatalf("other actor: %+v", v)
+	}
+	select {
+	case op := <-entered:
+		if op != "store" {
+			t.Fatalf("the worker blocked in %q, want its store access", op)
+		}
+	case <-time.After(diskGuard):
+		t.Fatal("the worker never reached the store")
+	}
+	// The disk is blocked now. Checks still answer, from the memo.
+	for range 20 {
+		if v := check(secret, true); !v.Deny {
+			t.Fatalf("secret read, disk blocked: %+v, want deny", v)
+		}
+		if v := check(other, true); v.Deny {
+			t.Fatalf("other actor, disk blocked: %+v", v)
 		}
 	}
-	const rate, seconds = 50, 4
-	var mu sync.Mutex
-	var lat []time.Duration
-	var wg sync.WaitGroup
-	tick := time.NewTicker(time.Second / rate)
-	defer tick.Stop()
-	for n := 0; n < rate*seconds; n++ {
-		<-tick.C
-		wg.Add(1)
-		go func(a Actor) {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-			start := time.Now()
-			_, err := h.client.CheckEgress(ctx, EgressRequest{Actor: a, Host: "registry.npmjs.org", Method: "GET"})
-			d := time.Since(start)
-			if err != nil {
-				t.Errorf("check: %v", err)
-			}
-			mu.Lock()
-			lat = append(lat, d)
-			mu.Unlock()
-		}(actors[n%len(actors)])
+	// More checks than the worker queue holds: the full queue drops the
+	// step (counted) and the check still answers.
+	for range egressQueueSize + 16 {
+		check(other, false)
 	}
-	wg.Wait()
-	sort.Slice(lat, func(i, j int) bool { return lat[i] < lat[j] })
-	p50, p99 := lat[len(lat)/2], lat[len(lat)*99/100]
-	t.Logf("%d checks at %d/s, worker writes %s each: p50 %s, p99 %s, max %s, dropped %d",
-		len(lat), rate, writeDelay, p50, p99, lat[len(lat)-1], h.svc.EgressDropped())
-	if p99 > calloutBudget {
-		t.Fatalf("p99 %s over the callout budget %s", p99, calloutBudget)
+	if h.svc.EgressDropped() == 0 {
+		t.Fatal("the full queue dropped nothing: a check would have waited for room")
 	}
+	unblock()
 }

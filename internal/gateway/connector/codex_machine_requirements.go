@@ -21,6 +21,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -334,6 +335,11 @@ type codexMachineRequirementsLayout struct {
 	// is not the exact one under hooks.<event>, so reconcile replaces it
 	// instead of adding the exact group next to it.
 	owned func(event string, raw interface{}) bool
+	// ownedManagedDir, when set, recognizes a managed directory this install
+	// wrote for an earlier hook image of its own bin (the transition bin or
+	// another bin\hooks\<16 hex> launch folder, GAP-0751): reconcile replaces
+	// it with managedDir instead of refusing it as the administrator's.
+	ownedManagedDir func(value string) bool
 }
 
 // windowsCodexBoundManagedHookCommand is the standalone command of one
@@ -437,6 +443,9 @@ func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) code
 		layout.owned = func(event string, raw interface{}) bool {
 			return windowsCodexOwnedHookGroup(raw, event, opts.HookBinary)
 		}
+		layout.ownedManagedDir = func(value string) bool {
+			return winpath.SameEnterpriseHookImageDirFamily(value, opts.ManagedDir)
+		}
 	}
 	return layout
 }
@@ -455,7 +464,10 @@ func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) code
 // argument), or DefenseClaw's group edited with another matcher, timeout or
 // handler key, or moved under another event. Reconcile, removal, the
 // stale-layout strip and inference leave it alone, and its reference to the
-// launcher keeps the binary removal unsafe.
+// launcher keeps the binary removal unsafe. A command rendered, byte for
+// byte, for an earlier hook image of the same install bin (the transition
+// image or another launch folder, GAP-0751) is DefenseClaw's too: the
+// upgrade that moved the launch image replaces it instead of running both.
 func windowsCodexOwnedHookGroup(raw interface{}, event, hookBinary string) bool {
 	group, ok := raw.(map[string]interface{})
 	if !ok {
@@ -470,16 +482,41 @@ func windowsCodexOwnedHookGroup(raw interface{}, event, hookBinary string) bool 
 		return false
 	}
 	command, _ := handler["command"].(string)
-	boundEvent, contract, ok := windowsCodexRenderedHookCommand(command, hookBinary)
-	if !ok || boundEvent != "" && boundEvent != event {
-		return false
-	}
-	for _, shape := range windowsCodexRenderedGroupShapes(event, contract) {
-		if windowsCodexMachineGroupHasCommand(raw, shape, command) {
-			return true
+	for _, candidate := range windowsCodexHookImageCandidates(command, hookBinary) {
+		boundEvent, contract, ok := windowsCodexRenderedHookCommand(command, candidate)
+		if !ok || boundEvent != "" && boundEvent != event {
+			continue
+		}
+		for _, shape := range windowsCodexRenderedGroupShapes(event, contract) {
+			if windowsCodexMachineGroupHasCommand(raw, shape, command) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// windowsCodexHookImageCandidates is hookBinary followed by every other hook
+// image path of the same install bin that command names, in its plain text
+// or in its decoded -EncodedCommand script (GAP-0751). Ownership is still
+// the byte-for-byte equality with the command rendered for one candidate.
+func windowsCodexHookImageCandidates(command, hookBinary string) []string {
+	candidates := []string{hookBinary}
+	texts := []string{command}
+	prefix := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand "
+	if strings.HasPrefix(command, prefix) {
+		if script, decoded := powershellDecodedCommand(strings.TrimPrefix(command, prefix)); decoded {
+			texts = append(texts, script)
+		}
+	}
+	for _, text := range texts {
+		for _, path := range winpath.EnterpriseHookImagePathsIn(text) {
+			if !slices.Contains(candidates, path) && winpath.SameEnterpriseHookImageFamily(path, hookBinary) {
+				candidates = append(candidates, path)
+			}
+		}
+	}
+	return candidates
 }
 
 // windowsCodexRenderedGroupShapes is every group shape (matcher and timeout)
@@ -714,7 +751,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 		// that adoption could not prove DefenseClaw's): refuse, never
 		// overwrite it (GAP-0015). windowsCodexAdoptRequirements strips a
 		// prior DefenseClaw layout's directory before reconcile runs.
-		if !l.samePath(value, l.managedDir) {
+		if !l.samePath(value, l.managedDir) && (l.ownedManagedDir == nil || !l.ownedManagedDir(value)) {
 			if !l.reclaimStaleManagedDir || managed.TrustStrictAncestors() {
 				return fmt.Errorf(
 					"hooks.%s=%q conflicts with protected managed directory %q",
@@ -1057,7 +1094,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			// when the baseline holds it (GAP-0907).
 			if !baseHadHooks || !baselineManagedDir || windowsCodexOwnedGroupsRecognized(opts) {
 				if value, ok := hooks["windows_managed_dir"].(string); ok &&
-					sameWindowsCodexMachinePath(value, opts.ManagedDir) {
+					windowsCodexOwnManagedDir(value, opts) {
 					delete(hooks, "windows_managed_dir")
 				}
 			}
@@ -1243,7 +1280,20 @@ func windowsCodexRequirementsHoldOwnedLeftovers(raw []byte, opts WindowsCodexMac
 		}
 	}
 	dir, ok := hooks["windows_managed_dir"].(string)
-	return ok && !windowsCodexHooksHaveManagedEntries(hooks) && sameWindowsCodexMachinePath(dir, opts.ManagedDir), nil
+	return ok && !windowsCodexHooksHaveManagedEntries(hooks) && windowsCodexOwnManagedDir(dir, opts), nil
+}
+
+// windowsCodexOwnManagedDir reports a hooks.windows_managed_dir value that is
+// this install's own: ManagedDir, or on the standalone profile the folder of
+// another hook image of the same install bin (the transition bin or a launch
+// folder an earlier release of this install named, GAP-0751). Secure Client
+// keeps the exact comparison.
+func windowsCodexOwnManagedDir(value string, opts WindowsCodexMachineRequirementsOptions) bool {
+	if sameWindowsCodexMachinePath(value, opts.ManagedDir) {
+		return true
+	}
+	return !opts.SecureClient && strings.TrimSpace(opts.HookContractID) != "" &&
+		winpath.SameEnterpriseHookImageDirFamily(value, opts.ManagedDir)
 }
 
 func windowsCodexHooksHaveManagedEntries(hooks map[string]interface{}) bool {
@@ -1279,8 +1329,10 @@ func windowsCodexOwnedPathReferenceCount(
 	if !ok {
 		return 0, nil
 	}
-	needles := make([]string, 0, 4)
-	for _, path := range []string{opts.ManagedDir, opts.HookBinary} {
+	needles := make([]string, 0, 6)
+	// The install bin covers the transition image and every launch folder
+	// under bin\hooks (GAP-0751); before 1.0.10 ManagedDir was that bin.
+	for _, path := range []string{opts.ManagedDir, opts.HookBinary, winpath.EnterpriseHookImageBin(opts.HookBinary)} {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			continue

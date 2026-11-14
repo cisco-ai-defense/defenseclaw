@@ -60,15 +60,16 @@ var substrateExtprocOpts substrateExtprocFlags
 // the leader (chainstate ChainEgress). The check also records the observed
 // egress step in the actor window, so the callout sets no ChainSink. The
 // engine calls it only for an actor with a UID (an unregistered one is
-// unchecked there, GAP-0090).
+// unchecked there, GAP-0090). The leader answers only for the name's live
+// incarnation; a deleted or replaced UID is answered stale (GAP-0234).
 type substrateChainChecker struct{ client *chainstate.Client }
 
 func (c substrateChainChecker) CheckEgress(ctx context.Context, step extproc.ChainStep) (extproc.ChainVerdict, error) {
 	v, err := c.client.CheckEgress(ctx, chainstate.EgressRequest{
-		Actor: chainstate.Actor{Atespace: step.Actor.Atespace, UID: step.Actor.UID},
-		Host:  step.Host, Method: step.Method,
+		Actor: chainstate.Actor{Atespace: step.Actor.Atespace, UID: step.Actor.UID}, Name: step.Actor.Name,
+		Host: step.Host, Method: step.Method,
 	})
-	return extproc.ChainVerdict{Deny: v.Deny, Rule: v.Rule, Reason: v.Reason}, err
+	return extproc.ChainVerdict{Stale: v.Stale, Deny: v.Deny, Rule: v.Rule, Reason: v.Reason, Detected: v.Detected}, err
 }
 
 // substrateActorDirectory resolves the actor name atenet-egress gives the

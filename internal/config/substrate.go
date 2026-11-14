@@ -57,6 +57,13 @@ type SubstrateConfig struct {
 	// IdleSuspendAfter is a Go duration (default 30m; "0s" turns idle
 	// suspend off).
 	IdleSuspendAfter string `mapstructure:"idle_suspend_after" yaml:"idle_suspend_after,omitempty"`
+	// ChainEgressAction is what a request that leaves the cluster after a
+	// secret read gets at the egress callout: block (the default, in every
+	// mode, because actors are unattended) refuses it; alert, an opt-in,
+	// lets it through with an alert. The leader answers the callout's chain
+	// check with it; the gateway and the leader read it from the same
+	// config (GAP-0250).
+	ChainEgressAction string `mapstructure:"chain_egress_action" yaml:"chain_egress_action,omitempty"`
 	// WorkspaceMaxBytes caps a workspace upload through the admin
 	// listener's attach route (E23; 0 = DefaultSubstrateWorkspaceMaxBytes).
 	WorkspaceMaxBytes int64                     `mapstructure:"workspace_max_bytes" yaml:"workspace_max_bytes,omitempty"`
@@ -455,6 +462,21 @@ func (s SubstrateConfig) EffectiveWorkspaceMaxBytes() int64 {
 	return DefaultSubstrateWorkspaceMaxBytes
 }
 
+// Chain egress actions (substrate.chain_egress_action).
+const (
+	SubstrateChainEgressBlock = "block"
+	SubstrateChainEgressAlert = "alert"
+)
+
+// EffectiveChainEgressAction is substrate.chain_egress_action, block when
+// unset.
+func (s SubstrateConfig) EffectiveChainEgressAction() string {
+	if v := strings.ToLower(strings.TrimSpace(s.ChainEgressAction)); v != "" {
+		return v
+	}
+	return SubstrateChainEgressBlock
+}
+
 func (s SubstrateConfig) EffectiveIdleSuspendAfter() time.Duration {
 	return durationOr(s.IdleSuspendAfter, DefaultSubstrateIdleSuspendAfter)
 }
@@ -582,6 +604,11 @@ func (s *SubstrateConfig) Validate() error {
 		errs = append(errs, fmt.Errorf("%s: %s", key, fmt.Sprintf(format, a...)))
 	}
 
+	switch s.EffectiveChainEgressAction() {
+	case SubstrateChainEgressBlock, SubstrateChainEgressAlert:
+	default:
+		bad("chain_egress_action", "%q is not block or alert", s.ChainEgressAction)
+	}
 	if a := s.API.Address; a != "" {
 		if _, port, err := net.SplitHostPort(a); err != nil || port == "" {
 			bad("api.address", "%q must be host:port", a)

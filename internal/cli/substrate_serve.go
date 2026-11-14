@@ -108,9 +108,8 @@ var serveFlags struct {
 	calloutPeerIDs    []string
 	controllerPeerIDs []string
 	// Chain state (lane A13).
-	chainKeyFile      string
-	chainEgressAction string
-	chainRetention    time.Duration
+	chainKeyFile   string
+	chainRetention time.Duration
 }
 
 // sidecarSubstrateBuild, when set, makes runSidecar serve the Substrate
@@ -170,7 +169,6 @@ func init() {
 	f.BoolVar(&serveFlags.actorPlainHTTP, "actor-plain-http", false,
 		"serve the actor listener as plain HTTP (egress reaches it on an http rule; the actor JWT authenticates); the admin listener and the leader RPC keep TLS")
 	f.StringVar(&serveFlags.chainKeyFile, "chain-key-file", "/var/run/secrets/defenseclaw-chain-key/key", "value lineage key every gateway replica shares (gateway)")
-	f.StringVar(&serveFlags.chainEgressAction, "chain-egress-action", chainstate.EgressBlock, "block or alert a secret read followed by egress at the callout (leader)")
 	f.DurationVar(&serveFlags.chainRetention, "chain-retention", chainstate.DefaultRetention, "how long a suspended actor's chain windows count as live (leader)")
 	rootCmd.AddCommand(serveCmd)
 }
@@ -223,6 +221,14 @@ func runServe(cmd *cobra.Command, args []string) error {
 				sources = append(sources, substrateBundleActivation(cfg))
 			}
 			gateway.SetSubstrateClusterActivation(gateway.SubstrateActivationSources(sources...))
+		}
+		// A verified actor's hook refuses egress after a secret read by the
+		// same setting as the callout: config substrate.chain_egress_action,
+		// which the gateway and the leader read from the same ConfigMap
+		// (owner decision 2026-11-13; GAP-0250).
+		chainAction, chainSource := gatewayRoleChainEgressAction(cfg)
+		if err := gateway.SetSubstrateChainEgressAction(chainAction); err != nil {
+			return fmt.Errorf("serve: chain egress action (%s): %w", chainSource, err)
 		}
 		sidecarSubstrateBuild = substrateGatewayBuilder(cfg, &ready)
 		return runSidecar(cmd, args)
@@ -678,26 +684,12 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	}
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
-	chains, err := chainstate.New(chainstate.Options{Dir: serveFlags.storeDir,
-		EgressAction: serveFlags.chainEgressAction, Retention: serveFlags.chainRetention,
-		// A fork starts from its parent windows the first time the leader
-		// sees it; the parent comes from the verified registration (GAP-0091).
-		ParentOf: func(ctx context.Context, atespace, uid string) (string, error) {
-			reg, ok, err := store.Get(ctx, atespace, uid)
-			if err != nil || !ok {
-				return "", err
-			}
-			return reg.ParentUID, nil
-		},
-		// A delete purges only a registration the controller marked
-		// deleted (or an actor never registered) (GAP-0142).
-		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
-			reg, ok, err := store.Get(ctx, atespace, uid)
-			if err != nil {
-				return false, err
-			}
-			return !ok || reg.Deleted, nil
-		}})
+	chainOpts := substrateChainRegistrations(store)
+	action, source := leaderChainEgressAction(cfg)
+	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
+		action, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[action])
+	chainOpts.Dir, chainOpts.EgressAction, chainOpts.Retention = serveFlags.storeDir, action, serveFlags.chainRetention
+	chains, err := chainstate.New(chainOpts)
 	if err != nil {
 		return err
 	}
@@ -949,4 +941,63 @@ func substrateLifecycleClosesAsks(next func(context.Context, chainstate.Lifecycl
 		}
 		return res, nil
 	}
+}
+
+// substrateChainRegistrations is what the leader's chain state reads from
+// the registrations.
+func substrateChainRegistrations(store registry.Store) chainstate.Options {
+	return chainstate.Options{
+		// A fork starts from its parent windows the first time the leader
+		// sees it; the parent comes from the verified registration (GAP-0091).
+		ParentOf: func(ctx context.Context, atespace, uid string) (string, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil || !ok {
+				return "", err
+			}
+			return reg.ParentUID, nil
+		},
+		// A delete purges only a registration the controller marked
+		// deleted (or an actor never registered) (GAP-0142).
+		Deleted: func(ctx context.Context, atespace, uid string) (bool, error) {
+			reg, ok, err := store.Get(ctx, atespace, uid)
+			if err != nil {
+				return false, err
+			}
+			return !ok || reg.Deleted, nil
+		},
+		// The callout's egress chain check is answered only for the name's
+		// live incarnation, never for a deleted or replaced UID it still
+		// caches (GAP-0234).
+		Current: func(ctx context.Context, atespace, name, uid string) (bool, error) {
+			return registry.Current(ctx, store, atespace, name, uid)
+		},
+	}
+}
+
+// substrateChainEgressAction is the leader's chain egress action and where
+// it came from (GAP-0250): config substrate.chain_egress_action, the one
+// source, which the gateway and the leader read from the same ConfigMap
+// (default block).
+func substrateChainEgressAction(c *config.Config) (action, source string) {
+	if c == nil || strings.TrimSpace(c.Substrate.ChainEgressAction) == "" {
+		return chainstate.EgressBlock, "default"
+	}
+	return c.Substrate.EffectiveChainEgressAction(), "config substrate.chain_egress_action"
+}
+
+// gatewayRoleChainEgressAction is the chain egress action the gateway role
+// hands to gateway.SetSubstrateChainEgressAction: the verified actor's hook
+// disposition after a secret read. leaderChainEgressAction is the one the
+// leader puts in chainstate.Options.EgressAction: the egress callout's
+// verdict. Each role's serve path calls its own function, and both read
+// config substrate.chain_egress_action through substrateChainEgressAction, so
+// the hook and the callout cannot disagree on one rendered ConfigMap
+// (GAP-0252; TestSubstrateChainEgressActionGatewayAndLeaderAgree calls both).
+func gatewayRoleChainEgressAction(c *config.Config) (action, source string) {
+	return substrateChainEgressAction(c)
+}
+
+// leaderChainEgressAction: see gatewayRoleChainEgressAction.
+func leaderChainEgressAction(c *config.Config) (action, source string) {
+	return substrateChainEgressAction(c)
 }
