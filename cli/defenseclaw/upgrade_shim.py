@@ -409,7 +409,8 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
     rc = 1
     try:
-        rc = _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun, wait=released)
+        args = (["--yes"] if yes else []) + extra
+        rc = _run_installer(installer, args, workdir, newer=newer, rerun=rerun, wait=released)
     finally:
         if released and was_running:
             # The installed gateway: the older one after a success, this
@@ -450,7 +451,7 @@ def _route_only_rendered() -> list[str]:
     return found
 
 
-class _RouteOnlyPartlyRestored(ShimError):
+class _RouteOnlyPartlyRestoredError(ShimError):
     """Some agent settings were put back, others were not."""
 
     changed_nothing = False
@@ -481,7 +482,9 @@ def _release_route_only(target: str, *, yes: bool) -> tuple[bool, bool]:
                 f"DefenseClaw {target} has no route-only, so the {names} model settings route-only changed must be "
                 "put back first; run this command again with --yes"
             )
-        answer = input(f"  ? DefenseClaw {target} has no route-only: put back the {names} model settings and downgrade? [y/N] ")
+        answer = input(
+            f"  ? DefenseClaw {target} has no route-only: put back the {names} model settings and downgrade? [y/N] "
+        )
         if answer.strip().lower() not in ("y", "yes"):
             raise ShimError("downgrade cancelled")
     from defenseclaw.gateway_path import canonical_install_path, path_gateway
@@ -495,7 +498,7 @@ def _release_route_only(target: str, *, yes: bool) -> tuple[bool, bool]:
     if left:
         restarted = not was_running or _gateway_call(gateway, "start") == 0
         disable = " && ".join(f"defenseclaw routing disable --connector {name}" for name in left)
-        error = ShimError if left == rendered and restarted else _RouteOnlyPartlyRestored
+        error = ShimError if left == rendered and restarted else _RouteOnlyPartlyRestoredError
         raise error(
             f"the {', '.join(left)} settings still point at the DefenseClaw route-only listener, which DefenseClaw "
             f"{target} does not have, so the agent would get 401 on every call. Run: {disable}, then run this "
@@ -1051,7 +1054,9 @@ def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: dict[s
         time.sleep(_INSTALLER_LOG_POLL)
 
 
-def _run_installer(path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None, wait: bool = False) -> int:
+def _run_installer(
+    path: str, args: list[str], workdir: str, *, rerun: str, newer: str | None = None, wait: bool = False
+) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
     configured = _configured_update_source()
@@ -1416,9 +1421,12 @@ def _tls_context() -> ssl.SSLContext:
 def _download(url: str, destination: str) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "defenseclaw-upgrade"})
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT, context=_tls_context()) as response, open(  # noqa: S310
-            destination, "wb"
-        ) as out:
+        with (
+            urllib.request.urlopen(request, timeout=_TIMEOUT, context=_tls_context()) as response,
+            open(  # noqa: S310
+                destination, "wb"
+            ) as out,
+        ):
             shutil.copyfileobj(response, out)
     except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
         raise ShimError(f"could not download {url}: {exc}") from None
@@ -1448,9 +1456,7 @@ def latest_version(repo: str | None = None, *, timeout: float = _TIMEOUT) -> str
 
 
 def _latest_from_redirect(repo: str, method: str, timeout: float) -> str | None:
-    opener = urllib.request.build_opener(
-        _NoRedirect, urllib.request.HTTPSHandler(context=_tls_context())
-    )
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=_tls_context()))
     request = urllib.request.Request(
         f"{_source_url(repo)}/releases/latest",
         method=method,

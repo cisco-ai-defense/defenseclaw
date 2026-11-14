@@ -278,8 +278,7 @@ def test_installer_handoff_keeps_relative_retired_config_paths_bound_to_the_call
     monkeypatch.setattr(
         upgrade_shim.subprocess,
         "Popen",
-        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]})
-        or _child(lambda: 0),
+        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]}) or _child(lambda: 0),
     )
 
     assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged), rerun="defenseclaw upgrade") == 0
@@ -396,9 +395,7 @@ def test_explicit_version_may_reinstall_or_go_back(
     assert len(execs) == 1
 
 
-def test_windows_starts_the_installer_detached(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_windows_starts_the_installer_detached(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.__version__", "1.0.0")
     release = tmp_path / "release"
     release.mkdir()
@@ -452,7 +449,7 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
     err = capsys.readouterr().err
     assert "no desktop (SSH session)" in err and "Nothing was changed." in err
     command = next(line.strip() for line in err.splitlines() if line.strip().startswith("powershell "))
-    assert command.endswith("install.ps1\" -Rollback -Yes"), command
+    assert command.endswith('install.ps1" -Rollback -Yes'), command
     staged = command.split('"')[1]
     assert os.path.isfile(staged) and staged != str(home / "installer" / "install.ps1")
 
@@ -1123,7 +1120,9 @@ def test_notice_never_creates_the_data_directory(tmp_path: Path, monkeypatch: py
     assert not missing.exists()
 
 
-def test_notice_reads_update_check_from_defenseclaw_config(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_notice_reads_update_check_from_defenseclaw_config(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     external = tmp_path / "elsewhere.yaml"
     external.write_text("config_version: 9\nupdate:\n  check: false\n")
     monkeypatch.setenv("DEFENSECLAW_CONFIG", str(external))
@@ -1220,9 +1219,7 @@ def test_notice_swallows_ctrl_c(monkeypatch: pytest.MonkeyPatch) -> None:
     update_notice.maybe_print(["status"])
 
 
-def test_shim_output_survives_a_console_that_cannot_encode_it(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_shim_output_survives_a_console_that_cannot_encode_it(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import io
 
     stream = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
@@ -1306,6 +1303,7 @@ def test_a_download_without_cosign_says_the_signature_was_not_checked(
     upgrade_shim._verify_release_signature("cisco-ai-defense/defenseclaw", "1.0.1", None, str(tmp_path), "")
 
     assert "checked against checksums.txt only" in capsys.readouterr().out
+
 
 # ---- managed hosts: per-user upgrades, installs and notices stay out of the way
 
@@ -1433,9 +1431,11 @@ def test_install_sh_environment_cannot_replace_the_platform_descriptor(tmp_path:
     platform = tmp_path / "managed-runtime.json"
     platform.write_text("{}", encoding="utf-8")
     assert "/etc/defenseclaw/managed-runtime.json" in block
-    script = 'die() { echo "DIE: $*"; exit 1; }\nOS=linux\n' + block.replace(
-        "/etc/defenseclaw/managed-runtime.json", str(platform)
-    ) + "\necho proceeded\n"
+    script = (
+        'die() { echo "DIE: $*"; exit 1; }\nOS=linux\n'
+        + block.replace("/etc/defenseclaw/managed-runtime.json", str(platform))
+        + "\necho proceeded\n"
+    )
     for override in (str(tmp_path / "missing.json"), ""):
         completed = subprocess.run(
             ["bash", "-c", script],
@@ -1513,7 +1513,6 @@ def test_downgrade_sets_aside_the_keys_the_older_release_lacks(
         assert _set_aside(home).stat().st_mode & 0o777 == 0o600
 
 
-
 # guardrail.chains (1.0.6, root-scope chains, issue #1391): 1.0.5 and 1.0.4
 # refuse the block itself, so a downgrade sets it aside whole.
 @pytest.mark.parametrize("target", ["1.0.5", "1.0.4"])
@@ -1566,7 +1565,6 @@ def test_downgrade_sets_aside_the_connectors_block(
     }
 
 
-
 def test_a_downgrade_that_would_leave_opencode_v2_unguarded_is_refused_before_anything_changes(
     home: Path,
     execs: list[list[str]],
@@ -1579,8 +1577,12 @@ def test_a_downgrade_that_would_leave_opencode_v2_unguarded_is_refused_before_an
 
     seen: list[tuple[str, str]] = []
     monkeypatch.setattr("defenseclaw.__version__", "1.0.6")
-    monkeypatch.setattr(migrations, "_opencode_configured", lambda data_dir: seen.append(("configured", data_dir)) or True)
-    monkeypatch.setattr(migrations, "_installed_opencode", lambda _data_dir: ("opencode v2.2.5", "/u/.npm/bin/opencode"))
+    monkeypatch.setattr(
+        migrations, "_opencode_configured", lambda data_dir: seen.append(("configured", data_dir)) or True
+    )
+    monkeypatch.setattr(
+        migrations, "_installed_opencode", lambda _data_dir: ("opencode v2.2.5", "/u/.npm/bin/opencode")
+    )
     (home / "config.yaml").write_text(_DOMAINS_CONFIG, encoding="utf-8")
     monkeypatch.setenv(upgrade_shim.LOCAL_DIR_ENV, str(_release_dir(tmp_path, "1.0.5")))
 
@@ -1612,6 +1614,7 @@ def test_a_downgrade_goes_on_when_the_check_cannot_load(
 
     assert upgrade_shim.run(["upgrade", "--version", "1.0.5", "--yes"]) == 0
     assert len(execs) == 1
+
 
 @pytest.mark.parametrize(("installed", "target"), [("1.0.3", "1.0.4"), ("1.0.4", "1.0.3")])
 def test_upgrade_keeps_keys_the_target_release_has(
@@ -1726,7 +1729,9 @@ def test_a_downgrade_drops_the_hook_helper_this_release_left_and_restarts_the_ga
     restarts: list[list[str]] = []
     monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
     monkeypatch.setattr(upgrade_shim.subprocess, "call", lambda argv, **kw: restarts.append(list(argv)) or 0)
-    monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: pytest.fail("a downgrade must wait for its installer"))
+    monkeypatch.setattr(
+        upgrade_shim.os, "execv", lambda path, argv: pytest.fail("a downgrade must wait for its installer")
+    )
 
     assert upgrade_shim.run(["upgrade", "--version", "1.0.2", "--yes"]) == 0
 
@@ -1768,7 +1773,9 @@ def test_a_downgrade_keeps_a_hook_helper_it_did_not_leave(
         (home / "hooks" / "_hardening.sh").write_bytes(live)
         (home / "previous" / "data" / "hooks").mkdir(parents=True, exist_ok=True)
         (home / "previous" / "data" / "hooks" / "_hardening.sh").write_bytes(b"v10\n")
-        (home / "previous" / "VERSION").write_text("1.0.4\n" if case == "previous-not-newer" else "1.0.5\n", encoding="utf-8")
+        (home / "previous" / "VERSION").write_text(
+            "1.0.4\n" if case == "previous-not-newer" else "1.0.5\n", encoding="utf-8"
+        )
         return 1 if case == "installer-failed" else 0
 
     monkeypatch.setattr(upgrade_shim, "_wait_for_installer", installer)
@@ -1844,9 +1851,7 @@ def test_rollback_refuses_a_saved_installer_the_install_did_not_save(
 
 
 @pytest.mark.parametrize("platform", ["posix", "nt"])
-def test_rollback_runs_the_recorded_saved_installer(
-    home: Path, monkeypatch: pytest.MonkeyPatch, platform: str
-) -> None:
+def test_rollback_runs_the_recorded_saved_installer(home: Path, monkeypatch: pytest.MonkeyPatch, platform: str) -> None:
     from defenseclaw import __version__
 
     name = "install.ps1" if platform == "nt" else "install.sh"
@@ -1854,7 +1859,9 @@ def test_rollback_runs_the_recorded_saved_installer(
     _record(home, saved)
     ran: list[tuple[str, list[str], bytes]] = []
     monkeypatch.setattr(
-        upgrade_shim, "_run_installer", lambda path, args, workdir, *, rerun: ran.append((path, args, Path(path).read_bytes())) or 0
+        upgrade_shim,
+        "_run_installer",
+        lambda path, args, workdir, *, rerun: ran.append((path, args, Path(path).read_bytes())) or 0,
     )
     monkeypatch.setattr(upgrade_shim.os, "name", platform)
 
@@ -1880,7 +1887,14 @@ def test_rollback_checks_a_previous_installer_only_when_it_was_recorded(home: Pa
 
 @pytest.mark.parametrize(
     "value",
-    ["http://127.0.0.1:8765/defenseclaw", "ftp://mirror.example/dc", "justaname", "a/b/c", "owner/na me", "file:///tmp/dc"],
+    [
+        "http://127.0.0.1:8765/defenseclaw",
+        "ftp://mirror.example/dc",
+        "justaname",
+        "a/b/c",
+        "owner/na me",
+        "file:///tmp/dc",
+    ],
 )
 def test_a_bad_defenseclaw_repo_is_refused_with_the_https_requirement(
     home: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], value: str
@@ -1931,7 +1945,9 @@ def _routed_claude() -> Path:
     return settings
 
 
-def _fake_gateway(monkeypatch: pytest.MonkeyPatch, settings: Path, *, restores: bool, running: bool = True) -> list[list[str]]:
+def _fake_gateway(
+    monkeypatch: pytest.MonkeyPatch, settings: Path, *, restores: bool, running: bool = True
+) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def call(argv: list[str], **_kw: object) -> int:
@@ -1954,7 +1970,11 @@ def _downgrade_to_1_0_9(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
 
 
 def test_downgrade_puts_the_route_only_settings_back_with_the_gateway_stopped(
-    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    home: Path,
+    tmp_path: Path,
+    execs: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     settings = _routed_claude()
     calls = _fake_gateway(monkeypatch, settings, restores=True)
@@ -1983,7 +2003,11 @@ def test_a_failed_downgrade_starts_the_gateway_again(
 
 
 def test_downgrade_refuses_when_the_route_only_settings_stay(
-    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    home: Path,
+    tmp_path: Path,
+    execs: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     settings = _routed_claude()
     calls = _fake_gateway(monkeypatch, settings, restores=False)
@@ -2024,7 +2048,11 @@ def test_a_downgrade_with_the_gateway_stopped_leaves_it_stopped(
 
 
 def test_downgrade_without_yes_and_no_terminal_changes_nothing(
-    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    home: Path,
+    tmp_path: Path,
+    execs: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     settings = _routed_claude()
     calls = _fake_gateway(monkeypatch, settings, restores=True)
