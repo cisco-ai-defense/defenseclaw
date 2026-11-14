@@ -291,6 +291,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// pythonTierNested marks a request derived from one already dispatched:
+	// only the outermost call applies the unknown tier for python code that
+	// is not proven read-only (withPythonUnknownStateTier).
+	pythonTierNested bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -372,6 +376,12 @@ func dispatchTrustedAction(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	// The unknown tier is for the call's final findings only: a twin or a
+	// simple-command pass inside it is a proof the outer call reads as proven.
+	if outermost := !request.pythonTierNested; outermost {
+		request.pythonTierNested = true // every twin and pass below is a copy of this request
+		defer func() { findings = withPythonUnknownStateTier(parent, request, findings) }()
+	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
 	if ManagedEnterpriseActive() {
@@ -11384,4 +11394,98 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 		return nil
 	}
 	return cwds
+}
+
+// uncertainPythonCodes lists the inline python code strings of a call that
+// the read grammar does not prove read-only, wherever a runner carries them
+// (the words of any command, find -exec children included).
+func uncertainPythonCodes(facts actionfacts.Facts) []string {
+	var codes []string
+	for _, command := range facts.Commands {
+		for i, word := range command.Argv {
+			base := strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/")))
+			if base != "python" && !strings.HasPrefix(base, "python3") && base != "python2" {
+				continue
+			}
+			if code, _, ok := actionfacts.PythonInlineCode(command.Argv[i+1:]); ok && !actionfacts.PythonCodeOnlyReads(code) &&
+				!slices.Contains(codes, code) {
+				codes = append(codes, code)
+			}
+		}
+	}
+	return codes
+}
+
+// withPythonUnknownStateTier gives inline python code that is not proven
+// read-only the pack's unknown tier on DefenseClaw state (rel-1-0-10:GAP-0244,
+// GAP-0365). When that code is the only thing that reaches active state (the
+// same call with the code swapped for a read-only print produces no state
+// finding), the state finding is HIGH: an alert in the default and
+// permissive packs, a block in strict. Any other mutation of state keeps the
+// CRITICAL finding in every pack.
+func withPythonUnknownStateTier(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	const ruleID = "tamper.detector_state_write"
+	enforcing := func(list []RuleFinding) bool {
+		return slices.ContainsFunc(list, func(f RuleFinding) bool {
+			return f.RuleID == ruleID && f.contributesToEnforcement()
+		})
+	}
+	if !enforcing(findings) {
+		return findings
+	}
+	command, known := trustedBashCommandInput(request.Input)
+	if !known {
+		return findings
+	}
+	facts := actionfacts.Analyze(request.Input)
+	codes := uncertainPythonCodes(facts)
+	if len(codes) == 0 {
+		return findings
+	}
+	// A pipeline into xargs is judged through its twins, whose proven state
+	// findings the call merges as proven: it keeps the strong finding.
+	if slices.ContainsFunc(facts.Commands, func(c actionfacts.CommandFact) bool {
+		return strings.EqualFold(path.Base(c.Program), "xargs")
+	}) {
+		return findings
+	}
+	sanitized := command
+	for _, code := range codes {
+		// The code as written in the text: plain, or with its double quotes
+		// escaped inside a double-quoted shell body (sh -c "python3 -c '...'").
+		replaced := false
+		for _, spelling := range []string{code, strings.ReplaceAll(code, `"`, `\"`)} {
+			if strings.Contains(sanitized, spelling) {
+				sanitized, replaced = strings.ReplaceAll(sanitized, spelling, "print(1)"), true
+				break
+			}
+		}
+		if !replaced {
+			return findings // spelled another way: not proven python-only
+		}
+	}
+	input := request.Input
+	input.Command, input.Args, input.Argv = sanitized, nil, nil
+	sanitizedRequest := request
+	sanitizedRequest.Input = input
+	// Fresh memos: the simple-command split of this call must not answer for
+	// the sanitized text.
+	sanitizedRequest.targetMemo, sanitizedRequest.simpleMemo = nil, nil
+	if enforcing(dispatchTrustedAction(parent, sanitizedRequest)) {
+		return findings
+	}
+	if request.StrictPolicy {
+		return findings // strict blocks what it cannot prove read-only
+	}
+	for index := range findings {
+		if findings[index].RuleID == ruleID && findings[index].contributesToEnforcement() {
+			// A possible write, not a proven one: an alert in the default and
+			// permissive packs (the finding stays visible, the call runs).
+			findings[index].Severity = "HIGH"
+			findings[index].Confidence = 0.80
+			findings[index].Title = "Inline code that may write DefenseClaw security state"
+			findings[index].enforcement = findingEnforcementAlertOnly
+		}
+	}
+	return findings
 }
