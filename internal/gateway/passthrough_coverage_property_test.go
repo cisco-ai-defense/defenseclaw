@@ -716,20 +716,29 @@ func TestPassthroughCoverageHeartbeatSkipsOnlyItself(t *testing.T) {
 	})
 }
 
-// A client keeps earlier turns in its history: a blocked prompt in the
-// history is not re-inspected as the current turn (the proxy refused it when
-// it was new), so one blocked prompt does not block the whole session.
+// A client keeps earlier turns in its history: a prompt the proxy refused as
+// the current turn keeps that verdict when the client sends it back as
+// history, and is not inspected again, so one blocked prompt does not block
+// the whole session (GAP-0244: history is inspected once per actor or
+// session; proxy_history_inspect_test.go has the full matrix).
 func TestPassthroughCoverageHistoryIsNotReinspected(t *testing.T) {
 	covAllowPrivate(t)
 	up := newCovUpstream(t)
-	proxy := covProxy(t, up, "openai", &covInspector{})
+	insp := &covInspector{}
+	proxy := covProxy(t, up, "openai", insp)
+	proxy.gatewayToken = "cov-gateway-token"
+	hdr := map[string]string{"X-DC-Auth": "Bearer cov-gateway-token", "X-Conversation-ID": "cov-history"}
+	up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
+	covPost(proxy, up, "/v1/responses", covJSON(t, map[string]any{"model": "dc-test-model", "input": covMarker}), hdr)
+	if up.count() != 0 {
+		t.Fatalf("the marker as the current turn was not refused")
+	}
 	body := map[string]any{"model": "dc-test-model", "input": []any{
 		map[string]any{"type": "message", "role": "user", "content": covMarker},
 		map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "[DefenseClaw] blocked"}}},
 		map[string]any{"type": "message", "role": "user", "content": "a harmless sentence"},
 	}}
-	up.set("application/json", "", []byte(`{"id":"r1"}`), 0)
-	covPost(proxy, up, "/v1/responses", covJSON(t, body), nil)
+	covPost(proxy, up, "/v1/responses", covJSON(t, body), hdr)
 	if up.count() != 1 {
 		t.Errorf("a blocked turn in the history blocked a benign new turn (%d hits)", up.count())
 	}

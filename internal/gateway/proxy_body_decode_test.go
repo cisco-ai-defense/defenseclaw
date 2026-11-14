@@ -194,7 +194,7 @@ func TestPromptWalkHistoryAndAllowlist(t *testing.T) {
 	if got := passthroughPromptFor([]byte(deep.String()), false, 0); got.Unreadable == "" {
 		t.Error("a body nested past the cap is read")
 	}
-	if got := passthroughPromptFor([]byte("plain text"), false, 0); got.Unreadable != "" || got.Text != "plain text" {
+	if got := passthroughPromptFor([]byte("plain text"), false, 0); got.Unreadable != "" || strings.Join(got.Segments, "\n") != "plain text" {
 		t.Errorf("a text body that is not JSON is inspected as text: %+v", got)
 	}
 	if got := passthroughPromptFor([]byte{0x89, 'P', 'N', 'G', 0, 1, 2}, false, 0); got.Unreadable == "" {

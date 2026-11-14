@@ -20,7 +20,9 @@ import (
 // text.
 //
 // One rule, for the body and for each message: only the exact canonical
-// sentences are left out, wherever they sit in a text. Everything else in the
+// sentences are left out, wherever they sit in the text of a user turn (the
+// only place OpenClaw sends them; GAP-0251). In a tool result, a system,
+// developer or instructions text they are inspected like any other text. Everything else in the
 // same message (a messaging-bridge banner, a time footer, an envelope, and any
 // text an attacker put next to the probe) is inspected like any other text. A
 // message is never skipped as a whole, whatever its length or shape, and a
@@ -71,11 +73,16 @@ func stripCanonicalProbes(text string) (string, bool) {
 	return strings.TrimSpace(text), true
 }
 
-// probeFreeMessages is messages with the canonical probes left out of their
-// text, for the inspectors that read the messages instead of the joined text.
+// probeFreeMessages is messages with the canonical probes left out of the
+// text of their user turns, for the inspectors that read the messages
+// instead of the joined text. OpenClaw sends the probes as user turns only;
+// a system, developer, assistant or tool message keeps them (GAP-0251).
 func probeFreeMessages(msgs []ChatMessage) []ChatMessage {
 	var out []ChatMessage
 	for i, m := range msgs {
+		if !strings.EqualFold(m.Role, "user") {
+			continue
+		}
 		if rest, ok := stripCanonicalProbes(m.Content); ok {
 			if out == nil {
 				out = append([]ChatMessage(nil), msgs...)

@@ -120,6 +120,10 @@ type GuardrailProxy struct {
 	// is nil in every production proxy.
 	streamReadForTest func(total int)
 
+	// history is the inspect-once record of request history (substrate-1
+	// GAP-0244, proxy_history_seen.go).
+	history historySeen
+
 	// kernelPeer names the verified caller of a request from the kernel
 	// (managed hosts with routing on, S1 DESIGN 15.2 Q3); nil or false
 	// leaves authentication as it was.
@@ -1483,12 +1487,39 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		side = passthroughSidePrompt{Unreadable: bodyUndecodable}
 	}
 	// The OpenClaw heartbeat and session-startup prompts are left out as the
-	// exact canonical sentences only (guardrail_probe.go); everything else in
-	// the same message, and in the rest of the body (system, developer,
-	// instructions, tool results, tool definitions), is inspected.
+	// exact canonical sentences of a user turn only (guardrail_probe.go,
+	// GAP-0251); everything else in the same message, and the rest of the body
+	// (system, developer, instructions, tool results, tool definitions, where
+	// the probe wording is inspected too), is inspected.
 	inspectRaw, _ = stripCanonicalProbes(inspectRaw)
-	inspectRaw = joinPromptSegments(inspectRaw, side.Segments)
+	// The history the client sent: each segment this caller has not had
+	// inspected, in the same inspection (GAP-0244, proxy_history_seen.go). A
+	// turn of a request the proxy refused is removed before the body goes on
+	// (GAP-0254); a body that cannot be rewritten is refused while it carries
+	// one.
+	historyCaller, historyScope := p.historyScope(r, mode)
+	freshHistory, refusedHistory := p.history.fresh(historyScope, side.History)
+	var redactedBody []byte
+	var redactions []historyRedaction
+	if len(refusedHistory) > 0 {
+		if !requestBodyIsSigned(r) {
+			redactedBody, redactions, _ = redactRefusedHistory(body, p.maxBodyValues(), refusedHistory)
+		}
+		if redactions == nil {
+			v := refusedHistoryVerdict()
+			fmt.Fprintf(os.Stderr, "[guardrail] request refused %s: %s\n", label, v.Reason)
+			p.recordTelemetry(r.Context(), "prompt", label, v, 0, mode, true)
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, blockMessage(customBlockMsg, "prompt", v.Reason))
+			return
+		}
+		partial.Messages = redactHistoryMessages(partial.Messages, refusedHistory)
+	}
+	inspectedSegs := promptSegments(side.Segments, freshHistory)
+	inspectRaw = joinPromptSegments(inspectRaw, inspectedSegs)
 	inspectMessages := probeFreeMessages(partial.Messages)
+	// A stage of the inspection that fails open marks it degraded: what it
+	// allowed is not recorded as inspected (GAP-0255).
+	inspectCtx, inspectDegraded := withInspectDegraded(r.Context())
 	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
@@ -1525,7 +1556,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, inspectMessages, label, mode)
+		verdict := inspectPromptWithRawRecheck(inspectCtx, p.inspector, inspectionText, inspectRaw, inspectMessages, label, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -1543,6 +1574,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		auditClosed := p.promptAuditFailedClosed(r.Context(), verdict, mode, overlay.evaluationLogErr)
 		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			// The current scope and the block text keep this verdict for when
+			// the client sends them back as history; the new history of a
+			// refused request is inspected again (GAP-0244).
+			p.history.record(historyCaller, historyScope, promptSegments(side.Segments, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
 			// or any other session) carries the authoritative
@@ -1561,6 +1596,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
 			return
 		}
+		p.history.record(historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
+	}
+	if redactedBody != nil {
+		body = redactedBody
+		p.auditHistoryRedactions(r, redactions)
 	}
 
 	// --- Launder prior DefenseClaw-generated assistant turns ---
@@ -2615,6 +2655,13 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	p.rtMu.RUnlock()
 	mode, customBlockMsg = p.profileModeFor(r.Context(), mode, customBlockMsg)
 
+	// The current turn is read from the messages the client sent, as the
+	// passthrough and the body walker read them: once a block turn is
+	// laundered out, the refused prompt before it would join the new user
+	// turn and block it again. What is before the current turn is history,
+	// inspected once (GAP-0244).
+	turnMessages := req.Messages
+
 	// --- Launder prior DefenseClaw-generated assistant turns ---
 	//
 	// See launderInboundHistory in handlePassthrough for the full
@@ -2682,16 +2729,47 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
-	inspectText := promptInspectText(req.Messages)
+	inspectText := promptInspectText(turnMessages)
 	// Every prompt-side text of the body, as on the passthrough: system and
 	// developer turns after the user turn and the tool results sent since
 	// the model's last turn (GAP-0196). The original body, before
 	// DefenseClaw adds its own notice.
 	chatSide := passthroughPromptFor(body, true, p.maxBodyValues())
 	// The heartbeat and session-startup prompts: the exact canonical sentences
-	// only, never the rest of the message or of the body.
+	// only, never the rest of the message or of the body. When the text is a
+	// system or developer fallback, the walker segment of that turn keeps the
+	// probe wording and is inspected (GAP-0251).
 	inspectText, _ = stripCanonicalProbes(inspectText)
-	inspectText = joinPromptSegments(inspectText, chatSide.Segments)
+	// The history the client sent, as on the passthrough (GAP-0244); a turn
+	// of a request the proxy refused is removed from the body it forwards
+	// (GAP-0254).
+	historyCaller, historyScope := p.historyScope(r, mode)
+	freshHistory, refusedHistory := p.history.fresh(historyScope, chatSide.History)
+	var redactions []historyRedaction
+	if len(refusedHistory) > 0 {
+		var redacted []byte
+		if len(req.RawBody) > 0 && !requestBodyIsSigned(r) {
+			redacted, redactions, _ = redactRefusedHistory(req.RawBody, p.maxBodyValues(), refusedHistory)
+		}
+		var rebuilt struct {
+			Messages []ChatMessage `json:"messages"`
+		}
+		if redactions == nil || json.Unmarshal(redacted, &rebuilt) != nil {
+			v := refusedHistoryVerdict()
+			fmt.Fprintf(os.Stderr, "[guardrail] request refused %s: %s\n", req.Model, v.Reason)
+			p.recordTelemetry(r.Context(), "prompt", req.Model, v, 0, mode, true)
+			msg := blockMessage(customBlockMsg, "prompt", v.Reason)
+			if req.Stream {
+				p.writeBlockedStream(w, req.Model, msg)
+			} else {
+				p.writeBlockedResponse(w, req.Model, msg)
+			}
+			return
+		}
+		req.RawBody, req.Messages = redacted, rebuilt.Messages
+	}
+	inspectedSegs := promptSegments(chatSide.Segments, freshHistory)
+	inspectText = joinPromptSegments(inspectText, inspectedSegs)
 	inspectMessages := probeFreeMessages(req.Messages)
 	if chatSide.Unreadable != "" && p.uninspectablePrompt(r.Context(), req.Model, mode, chatSide.Unreadable) {
 		msg := blockMessage(customBlockMsg, "prompt", "the request could not be inspected: "+chatSide.Unreadable)
@@ -2743,7 +2821,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, inspectMessages, req.Model, mode)
+		inspectCtx, inspectDegraded := withInspectDegraded(agentCtx)
+		verdict := inspectPromptWithRawRecheck(inspectCtx, p.inspector, inspectionText, inspectText, inspectMessages, req.Model, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {
@@ -2779,6 +2858,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
+			p.history.record(historyCaller, historyScope, promptSegments(chatSide.Segments, []string{msg}), verdict, true, inspectDegraded.degraded(), p.historySeenMax())
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
 			rememberOpenClawPromptBlock(msg, AgentIdentityFromContext(r.Context()), verdict)
 			if req.Stream {
@@ -2788,7 +2868,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			return
 		}
+		p.history.record(historyCaller, historyScope, inspectedSegs, verdict, false, inspectDegraded.degraded(), p.historySeenMax())
 	}
+	p.auditHistoryRedactions(r, redactions)
 
 	// --- Semantic Model Router ---
 	// When an embedded model router is configured, evaluate signals and
