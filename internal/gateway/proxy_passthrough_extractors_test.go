@@ -234,64 +234,64 @@ func TestExtractPassthroughToolCalls_NoCallsReturnsNil(t *testing.T) {
 
 // --- SSE chunk extractors --------------------------------------------------
 
-func TestExtractSSEChunkText_Anthropic(t *testing.T) {
+func TestModelStreamEvent_Anthropic(t *testing.T) {
 	chunk := `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`
-	got := extractSSEChunkText(chunk, "anthropic")
+	got := joinLaneTexts(modelStreamEvent(chunk, "anthropic", &modelStreamState{}))
 	if got != "hello" {
 		t.Fatalf("anthropic SSE: got %q, want %q", got, "hello")
 	}
 }
 
-func TestExtractSSEChunkText_Gemini(t *testing.T) {
+func TestModelStreamEvent_Gemini(t *testing.T) {
 	chunk := `{"candidates":[{"content":{"parts":[{"text":"alpha"},{"text":"-beta"}]}}]}`
-	got := extractSSEChunkText(chunk, "gemini")
+	got := joinLaneTexts(modelStreamEvent(chunk, "gemini", &modelStreamState{}))
 	if got != "alpha-beta" {
 		t.Fatalf("gemini SSE: got %q, want %q", got, "alpha-beta")
 	}
 }
 
-func TestExtractSSEChunkText_BedrockConverse(t *testing.T) {
+func TestModelStreamEvent_BedrockConverse(t *testing.T) {
 	chunk := `{"contentBlockDelta":{"delta":{"text":"bed"}}}`
-	got := extractSSEChunkText(chunk, "bedrock")
+	got := joinLaneTexts(modelStreamEvent(chunk, "bedrock", &modelStreamState{}))
 	if got != "bed" {
 		t.Fatalf("bedrock SSE: got %q, want %q", got, "bed")
 	}
 }
 
-func TestExtractSSEChunkText_OllamaChat(t *testing.T) {
+func TestModelStreamEvent_OllamaChat(t *testing.T) {
 	chunk := `{"message":{"role":"assistant","content":"frag"}}`
-	got := extractSSEChunkText(chunk, "ollama")
+	got := joinLaneTexts(modelStreamEvent(chunk, "ollama", &modelStreamState{}))
 	if got != "frag" {
 		t.Fatalf("ollama chat SSE: got %q, want %q", got, "frag")
 	}
 }
 
-func TestExtractSSEChunkText_OllamaGenerate(t *testing.T) {
+func TestModelStreamEvent_OllamaGenerate(t *testing.T) {
 	chunk := `{"response":"gen-frag"}`
-	got := extractSSEChunkText(chunk, "ollama")
+	got := joinLaneTexts(modelStreamEvent(chunk, "ollama", &modelStreamState{}))
 	if got != "gen-frag" {
 		t.Fatalf("ollama generate SSE: got %q, want %q", got, "gen-frag")
 	}
 }
 
-func TestExtractSSEChunkText_OpenAIResponses(t *testing.T) {
+func TestModelStreamEvent_OpenAIResponses(t *testing.T) {
 	chunk := `{"type":"response.output_text.delta","delta":"chunk-text"}`
-	got := extractSSEChunkText(chunk, "openai")
+	got := joinLaneTexts(modelStreamEvent(chunk, "openai", &modelStreamState{}))
 	if got != "chunk-text" {
 		t.Fatalf("openai responses SSE: got %q, want %q", got, "chunk-text")
 	}
 }
 
-func TestExtractSSEChunkText_OpenAIChatFallback(t *testing.T) {
+func TestModelStreamEvent_OpenAIChatFallback(t *testing.T) {
 	chunk := `{"choices":[{"delta":{"content":"chat-frag"}}]}`
-	got := extractSSEChunkText(chunk, "openai")
+	got := joinLaneTexts(modelStreamEvent(chunk, "openai", &modelStreamState{}))
 	if got != "chat-frag" {
 		t.Fatalf("openai chat SSE: got %q, want %q", got, "chat-frag")
 	}
 }
 
-func TestExtractSSEChunkText_UnknownChunkReturnsEmpty(t *testing.T) {
-	got := extractSSEChunkText(`{"unrelated":"frame"}`, "anthropic")
+func TestModelStreamEvent_UnknownChunkReturnsEmpty(t *testing.T) {
+	got := joinLaneTexts(modelStreamEvent(`{"unrelated":"frame"}`, "anthropic", &modelStreamState{}))
 	if got != "" {
 		t.Fatalf("unknown chunk should yield empty; got %q", got)
 	}

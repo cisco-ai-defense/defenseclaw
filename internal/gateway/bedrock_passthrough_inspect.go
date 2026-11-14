@@ -82,10 +82,13 @@ type bedrockEventStreamText struct {
 	dec    *eventstream.Decoder
 	broken bool
 	model  string
+	// state is the stream's event state (tool calls); the passthrough
+	// stream shares its own (streamPassthroughReply).
+	state *modelStreamState
 }
 
 func newBedrockEventStreamText() *bedrockEventStreamText {
-	return &bedrockEventStreamText{dec: eventstream.NewDecoder()}
+	return &bedrockEventStreamText{dec: eventstream.NewDecoder(), state: &modelStreamState{}}
 }
 
 // Broken reports a stream the decoder could not frame.
@@ -162,7 +165,7 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 				s.model = start.Message.Model
 			}
 		}
-		if t := extractSSEChunkText(string(inner), "anthropic"); t != "" {
+		if t := joinLaneTexts(anthropicStreamEvent(inner, s.state)); t != "" {
 			return t
 		}
 		var other struct {
@@ -173,17 +176,20 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		if json.Unmarshal(inner, &other) == nil {
 			return other.Generation + other.OutputText + other.Completion
 		}
-	case "contentBlockDelta":
+	case "contentBlockStart", "contentBlockDelta":
 		// ConverseStream: the event type names the frame, the payload is
-		// {"contentBlockIndex":0,"delta":{"text":"..."}}.
-		var d struct {
-			Delta struct {
-				Text string `json:"text"`
-			} `json:"delta"`
-		}
-		if json.Unmarshal(msg.Payload, &d) == nil {
-			return d.Delta.Text
-		}
+		// {"contentBlockIndex":0,"delta":{"text":"..."}} (text, reasoning
+		// text or tool input) or the start of a tool use.
+		return joinLaneTexts(converseStreamEvent(etype, msg.Payload, s.state))
 	}
 	return ""
+}
+
+// joinLaneTexts is the text of a single-lane stream event.
+func joinLaneTexts(texts []streamLaneText) string {
+	var b strings.Builder
+	for _, t := range texts {
+		b.WriteString(t.text)
+	}
+	return b.String()
 }

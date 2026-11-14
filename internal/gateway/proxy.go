@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"io"
 	"net"
 	"net/http"
@@ -1831,100 +1832,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		w.WriteHeader(resp.StatusCode)
 
-		flusher, _ := w.(http.Flusher)
-		streamResponseModel := ""
-		buf := make([]byte, 4096)
-		var lineBuf []byte
-		// A line longer than this is forwarded as it is: it carries no text
-		// the guard could read before its end arrives.
-		const maxPendingLineBytes = 1 << 20
-		bedrockStreamReported := false
-
-		guard := newCompletionStreamGuard(p.streamGuardCheck(r.Context(), r, label, mode), p.streamGuardScanEvery())
-		var blocked *ScanVerdict
-		refused := false
-		push := func(line []byte) {
-			text := ""
-			if data, ok := strings.CutPrefix(strings.TrimSpace(string(line)), "data: "); ok && data != "[DONE]" {
-				if streamResponseModel == "" {
-					streamResponseModel = responseModelFromRawJSON([]byte(data))
-				}
-				text = extractSSEChunkText(data, provider)
-			}
-			units, verdict := guard.Push(text, line)
-			if verdict != nil {
-				blocked = verdict
-				return
-			}
-			writeStreamUnits(w, flusher, units)
-		}
-
-		for blocked == nil && !refused {
-			n, readErr := resp.Body.Read(buf)
-			if n > 0 {
-				if bedrockStream != nil {
-					text := bedrockStream.Feed(buf[:n])
-					if streamResponseModel == "" {
-						streamResponseModel = bedrockStream.Model()
-					}
-					if bedrockStream.Broken() && !bedrockStreamReported {
-						bedrockStreamReported = true
-						if p.uninspectableReply(r.Context(), label, mode, "the event stream could not be framed") {
-							// Nothing more reaches the caller; what the guard
-							// still holds is dropped.
-							refused = true
-							break
-						}
-					}
-					units, verdict := guard.Push(text, append([]byte(nil), buf[:n]...))
-					if verdict != nil {
-						blocked = verdict
-						break
-					}
-					writeStreamUnits(w, flusher, units)
-					if readErr != nil {
-						break
-					}
-					continue
-				}
-				lineBuf = append(lineBuf, buf[:n]...)
-				for blocked == nil {
-					i := bytes.IndexByte(lineBuf, '\n')
-					if i < 0 {
-						break
-					}
-					push(append([]byte(nil), lineBuf[:i+1]...))
-					lineBuf = lineBuf[i+1:]
-				}
-				if blocked == nil && len(lineBuf) > maxPendingLineBytes {
-					push(append([]byte(nil), lineBuf...))
-					lineBuf = nil
-				}
-			}
-			if readErr != nil {
-				break
-			}
-		}
-		if refused {
+		stream, ok := p.streamPassthroughReply(w, r, resp.Body, bedrockStream, provider, label, mode, partial.Model, customBlockMsg)
+		if !ok {
 			return
 		}
-		if blocked == nil && len(lineBuf) > 0 {
-			push(append([]byte(nil), lineBuf...))
-		}
-		if blocked == nil {
-			units, verdict := guard.Finish()
-			if verdict != nil {
-				blocked = verdict
-			} else {
-				writeStreamUnits(w, flusher, units)
-			}
-		}
-		if blocked != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (%d bytes held back and not sent)\n",
-				blocked.Severity, logDisplayReason(blocked.Reason), guard.Held())
-			p.recordTelemetry(r.Context(), "completion", label, blocked, 0, mode, true)
-			return
-		}
+		guard, streamResponseModel := stream.guard, stream.state.model
 
 		// Final post-stream inspection on the full accumulated content.
 		// Use a detached context — the request context may be cancelled after streaming.
@@ -1943,6 +1855,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, label, mode)
 			postCancel()
 			p.resolveConfirm(r.Context(), r, verdict, "completion", label, mode)
+			verdict = withStreamTruncation(verdict, guard.Truncated())
 			elapsed := time.Since(t0)
 			p.logPostCall(label, content, verdict, elapsed, nil)
 			p.recordTelemetry(r.Context(), "completion", label, verdict, elapsed, mode, false)
@@ -2265,112 +2178,6 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 		return nil
 	}
 	return encoded
-}
-
-// extractSSEChunkText extracts the assistant text delta from a single SSE
-// data JSON object in a streaming provider-native response.
-//
-// Avarice F-1187: pre-fix the default branch only parsed OpenAI Chat
-// Completions `choices[].delta.content`, so OpenAI Responses streams
-// (`response.output_text.delta`), Bedrock Converse streams
-// (`contentBlockDelta`), and Ollama native streams (`message.content`)
-// returned an empty string for every chunk. Empty deltas skipped both
-// the initial-buffer flush and the final completion scan, and the
-// stream was delivered to the client unchanged. The new branches
-// keep the streaming inspector in lockstep with the non-streaming
-// extractor.
-func extractSSEChunkText(data string, provider string) string {
-	switch provider {
-	case "anthropic":
-		// Anthropic streaming: {"type":"content_block_delta","delta":{"type":"text_delta","text":"..."}}
-		var chunk struct {
-			Type  string `json:"type"`
-			Delta struct {
-				Text string `json:"text"`
-			} `json:"delta"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil && chunk.Type == "content_block_delta" {
-			return chunk.Delta.Text
-		}
-
-	case "gemini":
-		// Gemini streaming: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
-		var chunk struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct {
-						Text string `json:"text"`
-					} `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Candidates) > 0 {
-			var sb strings.Builder
-			for _, p := range chunk.Candidates[0].Content.Parts {
-				sb.WriteString(p.Text)
-			}
-			return sb.String()
-		}
-
-	case "bedrock":
-		// F-1187: Bedrock Converse streaming uses contentBlockDelta frames
-		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
-		var chunk struct {
-			ContentBlockDelta struct {
-				Delta struct {
-					Text string `json:"text"`
-				} `json:"delta"`
-			} `json:"contentBlockDelta"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil {
-			return chunk.ContentBlockDelta.Delta.Text
-		}
-
-	case "ollama":
-		// F-1187: Ollama native streaming chat: {"message":{"content":"..."}}
-		// generate: {"response":"..."}
-		var chunk struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-			Response string `json:"response"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil {
-			if chunk.Message.Content != "" {
-				return chunk.Message.Content
-			}
-			return chunk.Response
-		}
-
-	default:
-		// F-1187: OpenAI Responses API streaming uses event-shaped frames
-		// keyed by `type`, e.g.:
-		//   {"type":"response.output_text.delta","delta":"..."}
-		// Pre-fix the default branch only parsed Chat Completions, so
-		// every Responses chunk yielded an empty string. Detect the
-		// Responses shape first, then fall back to Chat Completions.
-		var rspChunk struct {
-			Type  string `json:"type"`
-			Delta string `json:"delta"`
-		}
-		if json.Unmarshal([]byte(data), &rspChunk) == nil &&
-			strings.HasPrefix(rspChunk.Type, "response.") &&
-			strings.Contains(rspChunk.Type, ".delta") {
-			return rspChunk.Delta
-		}
-		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content string `json:"content"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 {
-			return chunk.Choices[0].Delta.Content
-		}
-	}
-	return ""
 }
 
 // handleHealth answers the proxy liveness probe. Outside the Secure Client
@@ -3725,7 +3532,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 
 	// Every chunk reaches the client only after the guardrail checked its
 	// text (completionStreamGuard, rel-1-0-10:GAP-0212).
-	guard := newCompletionStreamGuard(p.streamGuardCheck(llmCtx, r, aliasModel, mode), p.streamGuardScanEvery())
+	guard := p.newProxyStreamGuard(llmCtx, r, aliasModel, mode)
+	toolsCapped := false
 	blockStream := func(verdict *ScanVerdict) {
 		fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back and not sent)\n",
 			verdict.Severity, logDisplayReason(verdict.Reason), guard.Held())
@@ -3748,43 +3556,60 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		}
 		chunk.Model = aliasModel
 
-		text := ""
-		hasToolCalls := false
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil {
-			text = chunk.Choices[0].Delta.Content
-			if len(chunk.Choices[0].Delta.ToolCalls) > 0 {
-				tcAcc.Merge(chunk.Choices[0].Delta.ToolCalls)
-				hasToolCalls = true
-			}
-		}
+		// Every choice is its own lane: an n>1 stream interleaves them token
+		// by token, and a secret in one is never split by another's tokens.
+		var texts []streamLaneText
+		hasToolCalls, isToolCallFinish := false, false
 		for _, c := range chunk.Choices {
+			if c.Delta != nil {
+				if c.Delta.Content != "" {
+					texts = append(texts, streamLaneText{lane: c.Index, text: c.Delta.Content})
+				}
+				if len(c.Delta.ToolCalls) > 0 {
+					tcAcc.MergeChoice(c.Index, c.Delta.ToolCalls)
+					hasToolCalls = true
+				}
+			}
 			if c.FinishReason != nil && *c.FinishReason != "" {
 				streamFinishReasons = append(streamFinishReasons, *c.FinishReason)
+				isToolCallFinish = isToolCallFinish || *c.FinishReason == "tool_calls"
 			}
 		}
 
 		data, _ := json.Marshal(chunk)
 
-		isToolCallFinish := len(chunk.Choices) > 0 && chunk.Choices[0].FinishReason != nil &&
-			*chunk.Choices[0].FinishReason == "tool_calls"
-		if mode == "action" && (hasToolCalls || isToolCallFinish || len(bufferedTCChunks) > 0) {
+		if mode == "action" && !toolsCapped && (hasToolCalls || isToolCallFinish || len(bufferedTCChunks) > 0) {
 			bufferedTCSize += len(data)
-			if bufferedTCSize > maxBufferedTCBytes {
-				fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK buffered tool-call data exceeds %d bytes\n", maxBufferedTCBytes)
-				streamBlocked = true
-				streamCancel()
-				return
-			}
 			bufferedTCChunks = append(bufferedTCChunks, data)
 			// The chunk is released after the post-stream tool-call check; its
 			// text is still checked with the rest of the completion.
-			if _, verdict := guard.Push(text, nil); verdict != nil {
+			if _, verdict := pushStreamTexts(guard, texts, nil); verdict != nil {
 				blockStream(verdict)
+				return
+			}
+			if bufferedTCSize > maxBufferedTCBytes {
+				// Past the bound the calls are judged as read: the pack's
+				// unknown tier blocks (strict) or alerts, and the rest of
+				// the stream is no longer held (one bound rule).
+				if verdict := guard.Truncate(bounded.Bytes); verdict != nil {
+					blockStream(verdict)
+					return
+				}
+				if verdict := p.inspectToolCalls(r.Context(), tcAcc.JSON()); verdict != nil && verdict.Action == "block" {
+					blockStream(verdict)
+					return
+				}
+				toolsCapped = true
+				for _, buffered := range bufferedTCChunks {
+					fmt.Fprintf(w, "data: %s\n\n", buffered)
+				}
+				flusher.Flush()
+				bufferedTCChunks, bufferedTCSize = nil, 0
 			}
 			return
 		}
 
-		units, verdict := guard.Push(text, []byte("data: "+string(data)+"\n\n"))
+		units, verdict := pushStreamTexts(guard, texts, []byte("data: "+string(data)+"\n\n"))
 		if verdict != nil {
 			blockStream(verdict)
 			return
@@ -3871,6 +3696,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
+		verdict = withStreamTruncation(verdict, guard.Truncated())
 		elapsed := time.Since(t0)
 
 		var tokIn, tokOut *int64
@@ -6152,7 +5978,8 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 	const maxBufferedTCBytes = 10 << 20
 	// Every frame reaches the client only after the guardrail checked its
 	// text (completionStreamGuard, rel-1-0-10:GAP-0212).
-	guard := newCompletionStreamGuard(p.streamGuardCheck(llmCtx, r, req.Model, mode), p.streamGuardScanEvery())
+	guard := p.newProxyStreamGuard(llmCtx, r, req.Model, mode)
+	toolsCapped := false
 	var tcAcc toolCallAccumulator
 	var bufferedTCFrames [][]byte
 	bufferedTCSize := 0
@@ -6203,6 +6030,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			[]ChatMessage{{Role: "assistant", Content: content}}, req.Model, mode)
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", req.Model, mode)
+		verdict = withStreamTruncation(verdict, guard.Truncated())
 		enforced := verdict != nil && verdict.Action == "block" && mode == "action"
 		overlay := p.recordTelemetry(llmCtx, "completion", req.Model, verdict, 0, mode, enforced)
 		modelTrace.AddGuardrailOverlay(overlay)
@@ -6258,13 +6086,13 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		frameDone := false
 		frameHasToolCalls := false
 		frameToolCallFinish := false
-		frameText := ""
+		var frameTexts []streamLaneText
 		for _, payload := range payloads {
 			if payload == "[DONE]" {
 				frameDone = true
 				break
 			}
-			text, toolCallDeltas, finishReasons := parseRawForwardSSEPayload(payload)
+			texts, toolCallDeltas, finishReasons := parseRawForwardSSEPayload(payload)
 			var chunk StreamChunk
 			if json.Unmarshal([]byte(payload), &chunk) == nil {
 				if streamResponseID == "" {
@@ -6278,7 +6106,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 					streamUsage = &usageCopy
 				}
 			}
-			frameText += text
+			frameTexts = append(frameTexts, texts...)
 			if len(toolCallDeltas) > 0 {
 				for _, delta := range toolCallDeltas {
 					tcAcc.MergeChoice(delta.choiceIndex, delta.toolCalls)
@@ -6294,7 +6122,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 		}
 
 		if frameDone {
-			if _, verdict := guard.Push(frameText, nil); verdict != nil {
+			if _, verdict := pushStreamTexts(guard, frameTexts, nil); verdict != nil {
 				blockText(verdict)
 				return false
 			}
@@ -6311,20 +6139,30 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 			return true
 		}
 
-		if mode == "action" && (frameHasToolCalls || frameToolCallFinish || len(bufferedTCFrames) > 0) {
+		if mode == "action" && !toolsCapped && (frameHasToolCalls || frameToolCallFinish || len(bufferedTCFrames) > 0) {
 			bufferedTCSize += len(frame)
-			if bufferedTCSize > maxBufferedTCBytes {
-				blockStream(fmt.Sprintf("tool call blocked — buffered tool-call data exceeds %d bytes", maxBufferedTCBytes))
-				return false
-			}
 			bufferedTCFrames = append(bufferedTCFrames, append([]byte(nil), frame...))
 			// A finish_reason applies to one choice, not necessarily the whole
 			// response. Keep every subsequent frame buffered until [DONE]/EOF so
 			// a later choice cannot append uninspected arguments after an earlier
 			// choice reports tool_calls. Its text is still checked with the rest.
-			if _, verdict := guard.Push(frameText, nil); verdict != nil {
+			if _, verdict := pushStreamTexts(guard, frameTexts, nil); verdict != nil {
 				blockText(verdict)
 				return false
+			}
+			if bufferedTCSize > maxBufferedTCBytes {
+				// Past the bound the calls are judged as read: the pack's
+				// unknown tier blocks (strict) or alerts, and the rest of the
+				// stream is no longer held (one bound rule).
+				if verdict := guard.Truncate(bounded.Bytes); verdict != nil {
+					blockText(verdict)
+					return false
+				}
+				if !inspectBufferedToolCalls() {
+					return false
+				}
+				toolsCapped = true
+				flushBufferedToolCalls()
 			}
 			return true
 		}
@@ -6335,7 +6173,7 @@ func (p *GuardrailProxy) rawForwardChatCompletionStream(
 				return true
 			}
 		}
-		units, verdict := guard.Push(frameText, append([]byte(nil), frame...))
+		units, verdict := pushStreamTexts(guard, frameTexts, append([]byte(nil), frame...))
 		if verdict != nil {
 			blockText(verdict)
 			return false
@@ -6693,7 +6531,10 @@ type rawForwardToolCallDelta struct {
 	toolCalls   json.RawMessage
 }
 
-func parseRawForwardSSEPayload(payload string) (string, []rawForwardToolCallDelta, []string) {
+// parseRawForwardSSEPayload reads one raw-forward chunk: the model text of
+// each choice (answer, refusal and reasoning text, the fields the client
+// receives), the tool-call deltas and the finish reasons.
+func parseRawForwardSSEPayload(payload string) ([]streamLaneText, []rawForwardToolCallDelta, []string) {
 	var chunk struct {
 		Choices []struct {
 			Index        int          `json:"index"`
@@ -6703,13 +6544,28 @@ func parseRawForwardSSEPayload(payload string) (string, []rawForwardToolCallDelt
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-		return "", nil, nil
+		return nil, nil, nil
 	}
+	var reasoning struct {
+		Choices []struct {
+			Delta struct {
+				ReasoningContent string `json:"reasoning_content"`
+				Reasoning        string `json:"reasoning"`
+				Refusal          string `json:"refusal"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	_ = json.Unmarshal([]byte(payload), &reasoning)
 
-	var out strings.Builder
+	var texts []streamLaneText
 	toolCallDeltas := make([]rawForwardToolCallDelta, 0, len(chunk.Choices))
 	finishReasons := make([]string, 0, len(chunk.Choices))
-	for _, ch := range chunk.Choices {
+	for i, ch := range chunk.Choices {
+		var out strings.Builder
+		if i < len(reasoning.Choices) {
+			d := reasoning.Choices[i].Delta
+			out.WriteString(d.ReasoningContent + d.Reasoning + d.Refusal)
+		}
 		if ch.Delta != nil {
 			out.WriteString(ch.Delta.Content)
 			if len(ch.Delta.ToolCalls) > 0 {
@@ -6729,8 +6585,11 @@ func parseRawForwardSSEPayload(payload string) (string, []rawForwardToolCallDelt
 		if ch.FinishReason != nil && *ch.FinishReason != "" {
 			finishReasons = append(finishReasons, *ch.FinishReason)
 		}
+		if out.Len() > 0 {
+			texts = append(texts, streamLaneText{lane: ch.Index, text: out.String()})
+		}
 	}
-	return out.String(), toolCallDeltas, finishReasons
+	return texts, toolCallDeltas, finishReasons
 }
 
 // applyProviderRequestOverrides merges the request_overrides of the

@@ -4,8 +4,10 @@
 
 package gateway
 
-// s7-resprev (review round 1 of s7/response 7f8d355c83) repros. Each test
-// asserts the behaviour the branch claims; a failure is a finding. Secrets
+// Regression tests from the s7-resprev review round 1 of s7/response
+// (7f8d355c83; RESPONSE-REVIEW.md R1-R10). Each test asserts the behaviour
+// the branch claims; they failed on that head and pass with the round 2
+// fixes (GAP-0368, GAP-0369, GAP-0370, GAP-0371, review P3-1..P3-3, P4-4). Secrets
 // come from the existing rule fixtures (secretRuleTruePositives); no new
 // attack text. Output never prints a fixture value.
 
@@ -264,34 +266,6 @@ func TestResprevRawForwardReasoningIsChecked(t *testing.T) {
 	}
 }
 
-// R7: an unclosed private-key header holds the rest of the stream (up to the
-// 64 KiB PEM bound) and every check rescans from the header: cost and held
-// bytes against the same stream without the header.
-func TestResprevOpenPEMHeaderHoldAndCost(t *testing.T) {
-	header := resprevPEMHeader(t)
-	check, _ := streamGuardTestCheck()
-	filler := streamGuardFiller(60 << 10)
-	for _, name := range []string{"plain", "open header"} {
-		text := "Example key layout:\n" + filler
-		if name == "open header" {
-			text = "Example key layout:\n" + header + filler
-		}
-		guard := newCompletionStreamGuard(check, streamGuardScanEvery)
-		start := time.Now()
-		maxHeld := 0
-		for off := 0; off < len(text); off += 24 {
-			end := min(off+24, len(text))
-			_, v := guard.Push(text[off:end], []byte(text[off:end]))
-			if v != nil {
-				t.Fatalf("%s blocked", name)
-			}
-			maxHeld = max(maxHeld, guard.Held())
-		}
-		_, _ = guard.Finish()
-		t.Logf("%s: %d bytes, %d scans, max held %d bytes, %v", name, len(text), guard.Scans(), maxHeld, time.Since(start))
-	}
-}
-
 // R8: the five removed proxy-only shapes (base guardrail.go
 // secretPatternDetectors) with synthetic values: does the rule pack find each
 // one on a completion and on a hook prompt? Inputs of the removed tests
@@ -485,8 +459,19 @@ func TestResprevPromptParityDivergences(t *testing.T) {
 			sev[fmt.Sprintf("proxy %s hook %s rules %v local %d", v.Severity, hook.Severity, hr, len(local))]++
 		}
 	}
-	t.Logf("%d cases; rule-id divergences %v", n, ids)
+	// Pinned (review P4-4): the same rule IDs on both prompt checks; the only
+	// severity differences are the proxy prompt floor for a detection-only
+	// weak literal (TRUST-FICTIONAL MEDIUM against the hook LOW; GAP-0172,
+	// GAP-0175 owns whether it stays) and the operator-overridable local PII
+	// request floor (HIGH on the proxy, no hook rule). Any other drift fails.
+	if len(ids) != 0 {
+		t.Errorf("%d cases; rule-id divergences %v", n, ids)
+	}
 	for k, c := range sev {
-		t.Logf("severity divergence x%d: %s", c, k)
+		switch k {
+		case "proxy MEDIUM hook LOW rules [TRUST-FICTIONAL] local 0", "proxy HIGH hook NONE rules [] local 1":
+		default:
+			t.Errorf("severity divergence x%d: %s", c, k)
+		}
 	}
 }
