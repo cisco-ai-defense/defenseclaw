@@ -175,6 +175,13 @@ type trustedActionRequest struct {
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
 	// the call carried.
 	conflictSource *conflictingToolArgumentSource
+	// capFloor is the cap floor of the hook call (withCapFloor), shared by
+	// the call and its piece twins; capFloorSeen marks a request whose
+	// floor is already registered (every other twin of it inherits that),
+	// and capFloorDepth counts the piece twins above it.
+	capFloor      *capFloorState
+	capFloorSeen  bool
+	capFloorDepth int
 	// DowngradeReadOnlyDataArgs is advisory-only. Bare executable names and
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
@@ -421,6 +428,18 @@ func dispatchTrustedAction(
 	// binding; the other tiers follow the top-level statements before it.
 	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
+	if !request.capFloorSeen {
+		// After every path below, the budget and limit paths included: a
+		// block proven on a statement the cap did not take still decides
+		// (withCapFloor, rel-1-0-10:GAP-0312, GAP-0360, GAP-0435, GAP-0381,
+		// GAP-0532).
+		request.capFloorSeen = true
+		if request.capFloor == nil {
+			request.capFloor = &capFloorState{}
+		}
+		floorRequest := request
+		defer func() { findings = withCapFloor(parent, floorRequest, findings) }()
+	}
 	bound := trustedActionCommandBound(request.Input)
 	if bound == shellReadingBudget {
 		// Past the reading budget (shellparse.BudgetExceeded): no reader

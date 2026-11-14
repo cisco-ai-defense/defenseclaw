@@ -144,18 +144,17 @@ var boundedLanes []boundedLaneCap
 
 func registerBoundedLane(caps ...boundedLaneCap) { boundedLanes = append(boundedLanes, caps...) }
 
-// The shell reading bounds on rel/1.0.10. Nesting and statements (lane
-// s7/parselimits) still take the evaluation-limit path
-// (trustedActionLimitFindings); the operand bound goes through
-// withBoundedTruncation (rel-1-0-10:GAP-0313).
+// The shell reading bounds on rel/1.0.10. Nesting and statements still take
+// the evaluation-limit path (trustedActionLimitFindings), and the cap floor
+// (withCapFloor) keeps a write proven before or after the cap a block
+// (rel-1-0-10:GAP-0312); the operand bound goes through withBoundedTruncation
+// (rel-1-0-10:GAP-0313).
 func init() {
 	registerBoundedLane(
 		boundedLaneCap{lane: "shell-parse nesting", cap: bounded.Depth, limit: shellparse.MaxNestingDepth,
 			gen:  boundedShellLane(boundedNestedSubshells, boundedNestedAssignments),
 			seen: boundedShellSeenCall,
-			path: boundedLegacyShellReading,
-			open: map[string]string{"default/seen": "rel-1-0-10:GAP-0312", "permissive/seen": "rel-1-0-10:GAP-0312",
-				"managed/seen": "rel-1-0-10:GAP-0312"}},
+			path: boundedLegacyShellReading},
 		boundedLaneCap{lane: "shell-parse statements", cap: bounded.Items, limit: boundedShellStatements,
 			gen:  boundedShellLane(gap0568Assignments, boundedListStatements),
 			seen: boundedShellSeenCall,
