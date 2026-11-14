@@ -1,6 +1,5 @@
 {
-  "$comment": "The request body limit of POST /api/v1/inspect/tool and the share of it the OpenClaw plugin spends (rel-1-0-10:GAP-0402). One place for both numbers: internal/gateway (apiRequestBodyMaxBytes) and extensions/defenseclaw/src/inspect-body-limit.ts each assert their constants against this file in a test.",
+  "$comment": "The request body limit of the local API (POST /api/v1/inspect/tool among its routes) and what the OpenClaw plugin keeps in reserve. One source: the gateway reads body_max_bytes from this embedded file (internal/gateway apiRequestBodyMaxBytes) and the plugin build copies the file next to its sources (make plugin) and sends a call whole up to body_max_bytes - plugin_envelope_margin_bytes (rel-1-0-10:GAP-0402, GAP-0436).",
   "body_max_bytes": 1048576,
-  "plugin_envelope_margin_bytes": 8192,
-  "plugin_budget_bytes": 1040384
+  "plugin_envelope_margin_bytes": 1024
 }

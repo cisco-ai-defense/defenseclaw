@@ -78,7 +78,6 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
-import { extractMessage } from "./message-text.js";
 import { fitInspectBody } from "./inspect-body-limit.js";
 import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
@@ -613,16 +612,16 @@ export default function (api: DefenseClawPluginHost) {
     trackToolContext(ctx);
 
     // GAP-0177: a message call keeps its text in any string field of the
-    // params (content, body, text, message, caption, nested blocks, ...). Read
-    // them all. A call with no text at all is not skipped: it takes the generic
-    // inspection below, where the gateway applies the tool policy to its args.
-    const content = event.toolName === "message" ? extractMessage(event.params).text : "";
-    if (content) {
+    // params (message, text, caption, nested blocks, ...). The plugin sends
+    // the params as they are and the gateway reads them: the text, the
+    // recipients and the attachments (GAP-0436). Nothing is read, cut or
+    // copied here unless the call does not fit the gateway's request limit
+    // (fitInspectBody).
+    if (event.toolName.toLowerCase() === "message") {
       const verdict = await inspectTool(
         {
           tool: "message",
           args: event.params,
-          content,
           direction: "outbound",
           ...toolCallIdOf(event),
         },

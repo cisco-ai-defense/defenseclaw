@@ -655,6 +655,7 @@ start: gateway
 plugin: _checkout-write-preflight
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cp schemas/inspect-tool-request-limits.json $(PLUGIN_DIR)/src/inspect-tool-request-limits.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
@@ -1212,6 +1213,7 @@ py-connector-matrix-test: pycli
 
 ts-test:
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cp schemas/inspect-tool-request-limits.json $(PLUGIN_DIR)/src/inspect-tool-request-limits.json
 	cd $(PLUGIN_DIR) && \
 		if [ ! -x node_modules/.bin/vitest ]; then \
 			NODE_ENV=development npm ci --include=dev; \
@@ -1301,6 +1303,7 @@ check-provider-coverage: sync-openclaw-extension
 	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
 	@echo "==> provider coverage (TS)"
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cp schemas/inspect-tool-request-limits.json $(PLUGIN_DIR)/src/inspect-tool-request-limits.json
 	cd $(PLUGIN_DIR) && \
 		if [ ! -x node_modules/.bin/vitest ]; then \
 			NODE_ENV=development npm ci --include=dev; \

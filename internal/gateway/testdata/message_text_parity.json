@@ -1,5 +1,5 @@
 {
- "comment": "Cases shared by internal/gateway/message_text_test.go and extensions/defenseclaw/src/__tests__/message-text.test.ts: the plugin and the gateway read a message call's params the same way (GAP-0177, GAP-0290..0292). gen builds a large input: leaves N strings in blocks, depth N nested objects around one string, depth_empty N nested objects around an empty array (a limit hit counts whatever the value holds), body of N a's and text of N z's. Routing keys are dotted paths; a repeated path gets #2, #3. Synthetic values only. Also gen: nodes N empty objects in one array followed by one string; multibyte N two-byte characters in text. text_len counts UTF-8 bytes. valid_utf8 asserts no cut character. Numbers are text, read as their JSON literal in Go and String(n) in the plugin, so the fixture holds integers and short decimals only. Also gen: strings N short strings in blocks; table N rows of two cells; payload_buffer N base64 characters under buffer, payload_dataurl N behind a data:...;base64, prefix under media (message hi beside each); plainbuf N repeats of five-character words under buffer; routing_strings N recipients in to beside text x. Routing is Go-only (the plugin does not build it): the plugin test ignores it. Attachment rows: payload_* use base64 of three bytes 00 01 02 repeated (binary) unless named payload_text*; payload_then_text N base64 characters plus ' tail words' in buffer; dataurl_message N groups behind data:image/png;base64, in message; nested_buffer N groups under attachments[0].Buffer; payload_text* decode to 'abc ' x N (Go reads a text attachment, the plugin never decodes: go_only rows run in Go only). Also gen: nodes_empty N empty objects in one array; payload_hidden: a buffer whose decoded bytes are 9000 binary bytes then a sentence (Go-only). Blank means ASCII white space only on both sides.",
+ "comment": "Cases for extractMessageArgs in internal/gateway/message_text_test.go (the gateway reads a message call's params; the OpenClaw plugin sends them and cuts nothing it does not have to). rel-1-0-10:GAP-0177, GAP-0290..0292, GAP-0436. gen builds a large input: strings N short strings in blocks; table N rows of two cells; nodes N empty objects in one array followed by one string; nodes_empty N empty objects; depth N nested objects around one string; depth_empty N nested objects around an empty array; pad N: body of N a's and text of N z's; multibyte N two-byte characters in text; plainbuf N repeats of five-character words under buffer; routing_strings N recipients in to beside text x; payload_buffer N / payload_dataurl N base64 characters of binary bytes under buffer / behind a data URL under media (message hi beside each); payload_then_text N base64 characters plus ' tail words' in buffer; dataurl_message N groups behind a data URL in message; nested_buffer N groups under attachments[0].Buffer; payload_text N / payload_text_dataurl N / payload_hidden: attachments that decode to text. Routing keys are dotted paths; a repeated path gets #2, #3. text_len counts UTF-8 bytes. Blank means ASCII white space only. Synthetic values only.",
  "cases": [
   {
    "name": "content",
@@ -202,12 +202,11 @@
    "text_len": 0
   },
   {
-   "name": "text past the size limit keeps head and tail",
+   "name": "text of 280 KB is read whole",
    "gen": {
     "pad": 140000
    },
-   "text_len": 262145,
-   "over_cap": true,
+   "text_len": 280001,
    "head": "aaa",
    "tail": "zzz"
   },
@@ -360,12 +359,11 @@
    "valid_utf8": true
   },
   {
-   "name": "multibyte text over the byte limit is cut on a character",
+   "name": "multibyte text over 256 KiB is read whole, no character cut",
    "gen": {
     "multibyte": 140000
    },
-   "text_len": 262145,
-   "over_cap": true,
+   "text_len": 280000,
    "valid_utf8": true
   },
   {
@@ -397,12 +395,11 @@
    "text": "hi"
   },
   {
-   "name": "a plain-text buffer over the byte limit is text",
+   "name": "a plain-text buffer of 300 KB is text, read whole",
    "gen": {
     "plainbuf": 60000
    },
-   "text_len": 262145,
-   "over_cap": true
+   "text_len": 300000
   },
   {
    "name": "a short base64 buffer is text",
@@ -454,7 +451,6 @@
    "gen": {
     "payload_text": 300
    },
-   "go_only": true,
    "text_len": 1203,
    "head": "hi\nabc ",
    "tail": "abc "
@@ -464,7 +460,6 @@
    "gen": {
     "payload_text_dataurl": 300
    },
-   "go_only": true,
    "text_len": 1203,
    "head": "hi\nabc ",
    "tail": "abc "
@@ -518,7 +513,6 @@
    "gen": {
     "payload_hidden": 1
    },
-   "go_only": true,
    "text": "hi\nkey words here and more text"
   }
  ]

@@ -204,7 +204,9 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       mockDaemonClient.postRaw.mockResolvedValue(allow());
       await listeners.before_tool_call({ toolName: "message", params }, ctx);
       expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
-      expect(sent()).toMatchObject({ tool: "message", content: "hello one", direction: "outbound", args: params });
+      // The gateway reads the text out of the params: nothing is copied into content.
+      expect(sent()).toMatchObject({ tool: "message", direction: "outbound", args: params });
+      expect(sent()).not.toHaveProperty("content");
     });
 
     it("blocks an outbound message whose secret is not in content or body", async () => {
@@ -223,15 +225,14 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       }
     });
 
-    it("sends a call with no text to the generic inspection instead of skipping it", async () => {
+    it("sends a call with no text too: the gateway applies the tool policy to its args", async () => {
       mockDaemonClient.postRaw.mockResolvedValue(allow());
       const params = { action: "send", to: "+1", silent: true, count: null };
       await listeners.before_tool_call({ toolName: "message", toolCallId: "call_9", params }, ctx);
       expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
       const body = sent();
-      expect(body).toMatchObject({ tool: "message", args: params, tool_call_id: "call_9" });
+      expect(body).toMatchObject({ tool: "message", args: params, tool_call_id: "call_9", direction: "outbound" });
       expect(body).not.toHaveProperty("content");
-      expect(body).not.toHaveProperty("direction");
     });
 
     it("cuts an attachment over the body limit down to its descriptor and says the call is partial (GAP-0356)", async () => {
@@ -241,7 +242,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(mockDaemonClient.postRaw).toHaveBeenCalledTimes(1);
       const body = sent();
       expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(1 << 20);
-      expect(body).toMatchObject({ tool: "message", content: expect.stringContaining("photo"), args_partial: true });
+      expect(body).toMatchObject({ tool: "message", args_partial: true });
+      expect((body.args as Record<string, string>).message).toBe("photo");
       expect((body.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent: 4194304 characters/);
     });
 

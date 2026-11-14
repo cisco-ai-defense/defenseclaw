@@ -31,33 +31,31 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
-// The "message" tool call of OpenClaw (GAP-0177, GAP-0290..0292).
+// The "message" tool call of OpenClaw (GAP-0177, GAP-0290..0292, GAP-0436).
 //
 // OpenClaw channels name the message text differently: content, body, text,
-// message, caption, or text nested in blocks and attachments. The gateway used
-// to read only content and body from the call's args, and the OpenClaw plugin
-// skipped the call when it found neither, so a call that carried its text
-// anywhere else was never inspected. extractMessageArgs reads every string in
-// the args instead. It mirrors extractMessage in
-// extensions/defenseclaw/src/message-text.ts, which the plugin runs first and
-// sends as the call's content (testdata/message_text_parity.json pins the two
-// to the same answers). The gateway reads the args itself and its answer
-// decides, so the limits and the routing values below never depend on the
-// caller.
+// message, caption, or text nested in blocks and attachments. extractMessageArgs
+// reads every string in the args, once: the text, the routing values (the
+// recipient, target, channel ...) and the attachments. The OpenClaw plugin
+// reads none of it: it sends the params as they are, and cuts them only when
+// they do not fit the request body limit (extensions/defenseclaw/src/
+// inspect-body-limit.ts). The gateway's reading decides.
 //
 // A message call takes three checks, in this order:
 //  1. the tool's static block list and MCP block, as for every tool call;
-//  2. its text, through the message lane (rules, AI Defense, judge);
+//  2. its text, through the message lane (rules, AI Defense, judge): the rules
+//     read all of the text that arrived, the judge at most messageJudgeMaxBytes;
 //  3. its routing values (the recipient, target, channel ...), through the
 //     tool-policy lane like the destination of any other send tool.
 //
-// Text past the read limits is unknown, never clean (the bound rule,
-// internal/guardrail/bounded): the call is judged at least at the unknown tier.
+// Text past the read limits (nodes, depth, an attachment too long to decode) is
+// unknown, never clean (the bound rule, internal/guardrail/bounded): the call is
+// judged at least at the unknown tier of the policy.
 
 const (
-	// messageTextMaxBytes bounds the text returned. A longer text keeps its
-	// head and its tail.
-	messageTextMaxBytes = 256 * 1024
+	// messageJudgeMaxBytes is the most of a message's text the judge is sent
+	// (head and tail past it). The rules read all of the text that arrived.
+	messageJudgeMaxBytes = 256 * 1024
 	// messageTextMaxDepth is the nesting depth below the args object.
 	messageTextMaxDepth = 8
 	// messageTextMaxNodes is the number of values of any kind walked in one
@@ -113,8 +111,9 @@ type messageExtract struct {
 	Text string
 	// Truncated holds the read limits the call hit with text left unread: a
 	// value past the node limit (nodes), a value below the depth limit (depth),
-	// a text past the size limit (bytes), or an attachment too long to decode
-	// (bytes). A limit that drops nothing but empty containers is not a hit.
+	// or an attachment too long to decode (bytes). A limit that drops nothing
+	// but empty containers is not a hit. The text itself is read whole: the
+	// request body limit bounds it.
 	Truncated bounded.CapSet
 	// Routing holds the strings under routing keys, by dotted key path.
 	Routing map[string]interface{}
@@ -141,20 +140,6 @@ func extractMessageArgs(raw json.RawMessage) messageExtract {
 	w := messageWalk{routing: map[string]interface{}{}, routingSeen: map[string]int{}}
 	w.walk(value, 0, "")
 	text := strings.Join(w.parts, "\n")
-	if len(text) > messageTextMaxBytes {
-		// Head and tail, each cut at the start of a character.
-		half := messageTextMaxBytes / 2
-		head := half
-		for head > 0 && !utf8.RuneStart(text[head]) {
-			head--
-		}
-		tail := len(text) - half
-		for tail < len(text) && !utf8.RuneStart(text[tail]) {
-			tail++
-		}
-		text = text[:head] + "\n" + text[tail:]
-		w.trunc.Hit(bounded.Bytes)
-	}
 	out.Text, out.Truncated = text, w.trunc.Set()
 	if len(w.routing) > 0 {
 		out.Routing = w.routing
@@ -520,16 +505,14 @@ func (r *messageBase64Reader) Read(p []byte) (int, error) {
 // messageStreamTextRuns reads decoded data in chunks and returns the runs of
 // at least messageRunMinBytes text bytes (printable characters and white space
 // of valid UTF-8) joined by newlines: all of a text file, the text of a binary
-// file. The text returned is bounded by messageTextMaxBytes, past it the
-// reading stops.
+// file. The reading is bounded by the call's payload budget, not by a cap on
+// the text.
 func messageStreamTextRuns(r io.Reader) string {
 	var out []string
 	var run []byte
-	total := 0
 	flush := func() {
 		if len(run) >= messageRunMinBytes {
 			out = append(out, string(run))
-			total += len(run) + 1
 		}
 		run = run[:0]
 	}
@@ -573,9 +556,6 @@ func messageStreamTextRuns(r io.Reader) string {
 			i += size
 		}
 		buf = append(buf[:0], buf[end:]...)
-		if total+len(run) > messageTextMaxBytes {
-			break
-		}
 		if final {
 			break
 		}
@@ -686,6 +666,25 @@ var messagePrintableASCII = func() (t [utf8.RuneSelf]bool) {
 	return t
 }()
 
+// messageJudgeText is the text the judge is sent: all of it up to
+// messageJudgeMaxBytes, else its head and its tail around a newline, each cut
+// at the start of a character.
+func messageJudgeText(text string) string {
+	if len(text) <= messageJudgeMaxBytes {
+		return text
+	}
+	half := messageJudgeMaxBytes / 2
+	head := half
+	for head > 0 && !utf8.RuneStart(text[head]) {
+		head--
+	}
+	tail := len(text) - half
+	for tail < len(text) && !utf8.RuneStart(text[tail]) {
+		tail++
+	}
+	return text[:head] + "\n" + text[tail:]
+}
+
 // messageRoutingArgs is the args the tool-policy lane reads for a message
 // call's routing values: the recipient, target and channel strings under
 // their own keys. Nothing is left out of the call; text is read by the
@@ -728,6 +727,8 @@ func (a *APIServer) inspectMessageCall(ctx context.Context, req *ToolInspectRequ
 	}
 	textReq := *req
 	textReq.Content = text
+	// The rules read all of the text; the judge reads at most its cap of it.
+	textReq.judgeContent = messageJudgeText(text)
 	verdict := a.inspectMessageContent(ctx, &textReq)
 	if routing := messageRoutingArgs(ex.Routing); routing != nil {
 		// The routing values are not text, but they are not skipped: a secret

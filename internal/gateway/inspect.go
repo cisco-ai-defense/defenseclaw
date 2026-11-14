@@ -137,6 +137,10 @@ type ToolInspectRequest struct {
 	// lanes still scan it and the event is still recorded. Set only by a
 	// connector adapter, never from the public inspect wire.
 	skipJudge bool
+	// judgeContent is the part of a long message the judge is sent, when the
+	// rules read more than the judge takes (messageJudgeText). Set only by the
+	// message lane, never from the wire.
+	judgeContent string
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -1583,6 +1587,15 @@ func withoutBlockMessageEcho(cfg *config.Config, connector, content string) stri
 // ordinary words from scanned text.
 const minEchoedBlockMessageLen = 16
 
+// messageJudgeContent is the text the judge reads: the message lane's capped
+// copy of a long text, else the content the rules read.
+func messageJudgeContent(req *ToolInspectRequest, content string) string {
+	if req.judgeContent != "" {
+		return req.judgeContent
+	}
+	return content
+}
+
 // inspectMessageContent scans outbound message content for secrets, PII,
 // and data exfiltration patterns. Uses the same rule engine.
 func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
@@ -1672,7 +1685,7 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// LLM round-trip when the local lanes were already decisive.
 	if req.skipJudge {
 		// No judge round-trip (see ToolInspectRequest.skipJudge).
-	} else if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
+	} else if jv := a.hookJudgeInspect(ctx, req, messageJudgeContent(req, content), verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
 	if req.contentScope == ruleContentScopeSource {

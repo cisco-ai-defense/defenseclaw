@@ -34,10 +34,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
-// parityCase is one row of testdata/message_text_parity.json. The OpenClaw
-// plugin's extractMessage (message-text.test.ts) runs the same rows, so the
-// plugin and the gateway read a message call's params the same way
-// (GAP-0177, GAP-0290..0292).
+// parityCase is one row of testdata/message_text_parity.json: what the
+// gateway reads of a message call's params (GAP-0177, GAP-0290..0292,
+// GAP-0436). The OpenClaw plugin reads nothing of them: it sends them.
 type parityCase struct {
 	Name    string          `json:"name"`
 	Params  json.RawMessage `json:"params"`
@@ -49,8 +48,6 @@ type parityCase struct {
 	Routing *map[string]interface{} `json:"routing"`
 	Head    string                  `json:"head"`
 	Tail    string                  `json:"tail"`
-	// GoOnly rows are not run by the plugin, which never decodes an attachment.
-	GoOnly bool `json:"go_only"`
 	// ValidUTF8 asserts the text has no cut character.
 	ValidUTF8 bool `json:"valid_utf8"`
 }
@@ -293,15 +290,13 @@ func TestInspectToolMessageOverCapIsUnknown(t *testing.T) {
 		items[i] = `"ok"`
 	}
 	nodes := `{"blocks":[` + strings.Join(items, ",") + `]}`
-	pad := strings.Repeat("a", 140*1024)
-	size := `{"body":"` + pad + `","text":"` + pad + `"}`
 	deep := `{"x":{"x":{"x":{"x":{"x":{"x":{"x":{"x":{"x":{"x":"text"}}}}}}}}}}`
 	hasLimit := func(findings []string, cap string) bool {
 		return slices.ContainsFunc(findings, func(f string) bool {
 			return strings.HasPrefix(f, evaluationLimitRuleID) && strings.Contains(f, "bounded_truncated cap="+cap)
 		})
 	}
-	for name, tc := range map[string]struct{ args, cap string }{"nodes": {nodes, "nodes"}, "size": {size, "bytes"}, "depth": {deep, "depth"}} {
+	for name, tc := range map[string]struct{ args, cap string }{"nodes": {nodes, "nodes"}, "depth": {deep, "depth"}} {
 		for _, withContent := range []bool{false, true} {
 			api := testAPIServerWithConfig(t, "action")
 			body := `{"tool":"message","args":` + tc.args + `,"direction":"outbound"`
@@ -361,9 +356,10 @@ func init() {
 			connector: "openclaw", decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
 				return map[string]any{"text": "x", "to": slices.Repeat([]any{"r"}, size-3)}
 			})},
-		boundedLaneCap{lane: "openclaw message bytes", cap: bounded.Bytes, limit: messageTextMaxBytes,
-			connector: "openclaw", decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen, gen: boundedMessageCall(func(size int) map[string]any {
-				return map[string]any{"text": strings.Repeat("a", size-len(boundedMessageCaption)-1)}
+		boundedLaneCap{lane: "openclaw message attachment bytes", cap: bounded.Bytes, limit: messagePayloadMaxChars,
+			connector: "openclaw", decide: boundedDecideOpenClawMessage, judge: boundedJudgeOpenClawMessage, seen: boundedMessageSeen,
+			gen: boundedMessageCall(func(size int) map[string]any {
+				return map[string]any{"buffer": strings.Repeat("A", size)}
 			})},
 	)
 }
@@ -713,9 +709,8 @@ func TestExtractMessageArgsAttachmentTailIsChecked(t *testing.T) {
 	}
 }
 
-// The plugin's budget is the gateway's request body limit less a margin: the
-// numbers sit in one file and the Go side checks its constant against it (the
-// plugin's test checks its own, GAP-0402).
+// The request body limit has one source, the embedded limits file the plugin
+// build copies too (GAP-0402): the gateway reads it from there.
 func TestInspectToolRequestLimitsFile(t *testing.T) {
 	raw, err := os.ReadFile("../../schemas/inspect-tool-request-limits.json")
 	if err != nil {
@@ -724,13 +719,12 @@ func TestInspectToolRequestLimitsFile(t *testing.T) {
 	var limits struct {
 		BodyMax int64 `json:"body_max_bytes"`
 		Margin  int64 `json:"plugin_envelope_margin_bytes"`
-		Budget  int64 `json:"plugin_budget_bytes"`
 	}
 	if err := json.Unmarshal(raw, &limits); err != nil {
 		t.Fatal(err)
 	}
-	if limits.BodyMax != apiRequestBodyMaxBytes || limits.Budget != limits.BodyMax-limits.Margin {
-		t.Errorf("limits file %+v does not match apiRequestBodyMaxBytes %d", limits, apiRequestBodyMaxBytes)
+	if limits.BodyMax != apiRequestBodyMaxBytes || limits.Margin <= 0 || limits.Margin >= limits.BodyMax/100 {
+		t.Errorf("limits file %+v, gateway limit %d: want the same body limit and a small positive margin", limits, apiRequestBodyMaxBytes)
 	}
 }
 
@@ -747,9 +741,9 @@ func TestInspectToolArgsPartialNoteKeepsTheText(t *testing.T) {
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		api.inspectToolScanTimeout = 5 * time.Second
-		body := func(content string) string {
-			b, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args_partial": true, "content": content,
-				"args": map[string]any{"to": "+15550001111", "note": "call too large to send"}})
+		body := func(text string) string {
+			b, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args_partial": true,
+				"args": map[string]any{"to": "+15550001111", "text": text, "note": "call too large to send"}})
 			return string(b)
 		}
 		_, withKey := postInspectForConnector(t, api, "openclaw", body("status "+messageTestSecret))
@@ -839,5 +833,42 @@ func TestInspectToolMessageLargeNumberTableStillBlocksTheKey(t *testing.T) {
 		if got.Action != "block" || !slices.ContainsFunc(got.Findings, func(f string) bool { return strings.HasPrefix(f, "SEC-ANTHROPIC") }) {
 			t.Errorf("%s: action = %q findings = %v, want a block naming the key", tier.name, got.Action, got.Findings)
 		}
+	}
+}
+
+// The rules read all of the text that arrived, not its first and last 128 KiB
+// (GAP-0436): a key in the middle of a 300 KB message blocks in every pack, as
+// it does on rel, and the judge is sent at most 256 KiB of it.
+func TestInspectToolMessageLongTextIsReadWhole(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	for _, kb := range []int{250, 300, 900} {
+		half := strings.Repeat("filler words go here. ", kb*1024/2/22)
+		body, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound",
+			"args": map[string]any{"message": half + " key: " + messageTestSecret + " " + half}})
+		clean, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound",
+			"args": map[string]any{"message": half + half}})
+		for _, tier := range boundedTestTiers {
+			api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+			api.inspectToolScanTimeout = 10 * time.Second
+			_, got := postInspectForConnector(t, api, "openclaw", string(body))
+			if got.Action != "block" || len(got.Findings) == 0 {
+				t.Errorf("%s %d KB: action = %q findings = %v, want a block on the key in the middle", tier.name, kb, got.Action, got.Findings)
+			}
+			_, none := postInspectForConnector(t, api, "openclaw", string(clean))
+			if none.Action != "allow" || slices.ContainsFunc(none.Findings, func(f string) bool { return strings.HasPrefix(f, evaluationLimitRuleID) }) {
+				t.Errorf("%s %d KB clean: action = %q findings = %v, want a plain allow (no size alert)", tier.name, kb, none.Action, none.Findings)
+			}
+		}
+	}
+	long := strings.Repeat("é", messageJudgeMaxBytes)
+	if got := messageJudgeText(long); len(got) > messageJudgeMaxBytes+1 || !utf8.ValidString(got) {
+		t.Errorf("the judge text is %d bytes, valid UTF-8 = %v", len(got), utf8.ValidString(got))
+	}
+	if short := "a short text"; messageJudgeText(short) != short {
+		t.Error("a short text must go to the judge whole")
 	}
 }

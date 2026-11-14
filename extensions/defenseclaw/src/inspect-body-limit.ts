@@ -17,46 +17,71 @@
  */
 
 import { createHash } from "node:crypto";
-import { BASE64_ALL, ROUTING_KEYS } from "./message-text.js";
+// Copied from schemas/inspect-tool-request-limits.json by `make plugin`: the
+// gateway reads its request body limit from the same file.
+import limits from "./inspect-tool-request-limits.json" with { type: "json" };
 
 /**
- * Fits a call to the gateway's request body limit (GAP-0356).
+ * Fits a message call to the gateway's request body limit
+ * (rel-1-0-10:GAP-0356, GAP-0402, GAP-0436).
  *
- * The gateway refuses an inspect request over 1 MiB, and base64 inflates an
- * attachment past that at about 770 KB, so a photo send failed closed. A call
- * over the budget below is cut down before it is sent: an attachment's bytes
- * become its size, media type and SHA-256, and any other very long string
- * keeps its head and its tail. The request then carries `args_partial: true`:
- * the part that was not sent is unread, and the gateway judges the call at
- * least at the unknown tier of its policy (alert in the default and permissive
- * packs, block in strict). A call that fits is sent as it is.
+ * The plugin sends a message call as it is, the params and nothing else: the
+ * gateway reads the text, the recipients and the attachments out of them, and
+ * judges them as the rules of its pack say. It cuts a call only when it does
+ * not fit the gateway's request body limit (less a small margin for the
+ * envelope), and then as little as it must:
  *
- * Decision (lead, GAP-0356): a message over the limit gets the unknown tier of
- * the pack, not a block in every pack. Any other tool is never cut here: the
- * gateway refuses it, as it always has, and the check fails closed.
+ *  1. an attachment's bytes become its size, media type and SHA-256;
+ *  2. the longest strings are cut to one common length (head and tail around a
+ *     marker), the shorter ones are left alone, each cut at most once;
+ *  3. a call that still does not fit is sent as a note: its routing values
+ *     (the recipient, target, channel ...) and its strings, cut to the room.
+ *
+ * A cut call carries `args_partial: true`: the part that was not sent is
+ * unread, and the gateway judges the call at least at the unknown tier of its
+ * policy (alert in the default and permissive packs, block in strict), not a
+ * block for its size. Any other tool is never cut here: the gateway refuses it
+ * as it always has and the check fails closed, as the shell hooks do.
  */
 
-/** The gateway's request body limit for /api/v1/inspect/tool (apiRequestBodyMaxBytes). */
-export const GATEWAY_BODY_LIMIT_BYTES = 1 << 20;
-/** What the request carries beyond the call: its envelope fields and the flag. */
-export const ENVELOPE_MARGIN_BYTES = 8 * 1024;
-/**
- * The body a call may take and still be sent as it is: the gateway's limit
- * less the margin. A call the gateway reads whole is sent whole
- * (rel-1-0-10:GAP-0402). schemas/inspect-tool-request-limits.json holds both
- * numbers for the tests of the two sides.
- */
-export const INSPECT_BODY_BUDGET_BYTES = GATEWAY_BODY_LIMIT_BYTES - ENVELOPE_MARGIN_BYTES;
+/** The body a call may take and still be sent as it is, which is what the gateway reads whole. */
+export const INSPECT_BODY_BUDGET_BYTES = limits.body_max_bytes - limits.plugin_envelope_margin_bytes;
+
 /** Cut strings never go below this (characters). */
 const MIN_CUT_CHARS = 128;
 /** Room for the "not sent" marker inside a cut string (characters). */
 const MARKER_CHARS = 64;
-/** Share of the room left for the strings that the cut aims at, for the JSON escapes it cannot foresee. */
-const CUT_SAFETY = 0.95;
+/**
+ * Shares of the room the cut aims at, tried in turn on a fresh copy of the
+ * call: the first leaves only the rounding of the JSON escapes, the others
+ * allow for a call whose escapes cost more than the length suggests.
+ */
+const CUT_SAFETIES = [0.9995, 0.99, 0.9];
 /** An attachment field's value this long is replaced by its descriptor. */
 const ATTACHMENT_MIN_CHARS = 4096;
 
-const ATTACHMENT_KEYS = new Set(["buffer", "media"]);
+/** The fields that carry an attachment, at any depth. */
+export const ATTACHMENT_KEYS = new Set(["buffer", "media"]);
+
+/**
+ * Routing and control fields: where a message goes, not what it says. The
+ * gateway reads them as routing values (messageRoutingKeys).
+ */
+export const ROUTING_KEYS = new Set([
+  "action", "channel", "provider", "accountid", "account", "to", "target",
+  "targets", "from", "recipient", "recipients", "replyto", "threadid",
+  "messageid", "chatid", "id", "type", "kind", "mode", "format", "parsemode",
+  "silent", "dryrun", "timeoutms", "besteffort", "gatewayurl",
+  "gatewaytoken",
+]);
+
+/**
+ * A value of base64 characters (either alphabet) and padding, wrapped at line
+ * breaks, all through. A value with a space or a tab in it is not one here: the
+ * gateway reads it as text as well as decoding it (messageLenientBase64), so
+ * the plugin cuts it as text.
+ */
+export const BASE64_ALL = /^[A-Za-z0-9+/_=\n\r\f\v-]*$/;
 
 export interface FittedPayload {
   payload: Record<string, unknown>;
@@ -81,7 +106,7 @@ interface Slot {
   length: number;
 }
 
-/** Collects the long strings of a value, with where each sits. */
+/** Collects the strings of a value, with where each sits. */
 function collect(value: unknown, out: Slot[], seen: Set<unknown>, depth: number): void {
   if (value === null || typeof value !== "object" || seen.has(value) || depth > 64) return;
   seen.add(value);
@@ -113,7 +138,7 @@ function isBase64Payload(value: string): boolean {
   return BASE64_ALL.test(payload);
 }
 
-/** Keeps the routing values of a call (the recipient, target, channel ...): strings and lists of strings. */
+/** The routing values of a call (the recipient, target, channel ...): strings and lists of strings. */
 function collectRouting(args: unknown): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   let nodes = 0;
@@ -135,6 +160,9 @@ function collectRouting(args: unknown): Record<string, unknown> {
           let name = key;
           for (let n = 2; name in out; n++) name = `${key}#${n}`;
           out[name] = keep;
+        } else if (keep === undefined) {
+          // A routing key that holds an object (a target with its own fields).
+          visit(item, depth + 1);
         }
       } else {
         visit(item, depth + 1);
@@ -145,31 +173,76 @@ function collectRouting(args: unknown): Record<string, unknown> {
   return out;
 }
 
+/** The strings of a call outside its routing values, in order, joined by newlines. */
+function collectText(args: unknown): string {
+  const parts: string[] = [];
+  let nodes = 0;
+  const visit = (value: unknown, depth: number): void => {
+    if (nodes++ > 100_000 || depth > 64) return;
+    if (typeof value === "string") {
+      if (value.trim() !== "") parts.push(value);
+    } else if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+    } else if (value !== null && typeof value === "object") {
+      for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (!ROUTING_KEYS.has(key.toLowerCase())) visit(item, depth + 1);
+      }
+    }
+  };
+  visit(args, 0);
+  return parts.join("\n");
+}
+
 /**
- * Returns the payload to send. `args` and `content` are the fields that carry
- * the call; the payload is copied before it is cut.
- *
- * Only a message call is cut: any other tool keeps the answer an oversize call
- * has always had (the gateway refuses it and the check fails closed), as the
- * shell hooks do. The work is bounded and every string is cut at most once: the
- * attachments are replaced by their descriptors, then every long string is cut
- * once to its share of the room left (proportional to its length), and a call
- * that still does not fit is sent as a note.
+ * Cuts the longest strings to one common length so that the call fits, the
+ * shorter ones untouched: the length is the largest the room allows. Returns
+ * false when nothing can be cut to fit.
+ */
+function cutLongest(out: Record<string, unknown>, slots: Slot[], budget: number, safety: number): boolean {
+  const read = (s: Slot) => (s.container as Record<string, unknown>)[s.key as string] as string;
+  const cuttable = slots.filter((s) => s.length > MIN_CUT_CHARS);
+  if (cuttable.length === 0) return false;
+  const bytes = cuttable.map((s) => Buffer.byteLength(JSON.stringify(read(s))));
+  const total = bytes.reduce((a, b) => a + b, 0);
+  const room = (budget - (size(out) - total)) * safety;
+  const floor = cuttable.length * (MIN_CUT_CHARS + MARKER_CHARS);
+  if (room < floor) return false;
+  // The largest byte length C such that every string over C is cut to C fits.
+  let lo = MIN_CUT_CHARS;
+  let hi = Math.max(...bytes);
+  const fits = (c: number) => bytes.reduce((a, b) => a + Math.min(b, c), 0) <= room;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (fits(mid)) lo = mid;
+    else hi = mid - 1;
+  }
+  cuttable.forEach((slot, i) => {
+    if (bytes[i] > lo) {
+      const limit = Math.max(MIN_CUT_CHARS, Math.floor((slot.length * lo) / bytes[i]));
+      (slot.container as Record<string, unknown>)[slot.key as string] = cutString(read(slot), limit);
+    }
+  });
+  return true;
+}
+
+/**
+ * Returns the payload to send. The payload is copied before it is cut. The work
+ * is bounded: one pass for the attachments, one cut, one note.
  */
 export function fitInspectBody(payload: Record<string, unknown>, budget = INSPECT_BODY_BUDGET_BYTES): FittedPayload {
   if (String(payload.tool).toLowerCase() !== "message" || size(payload) <= budget) return { payload, partial: false };
   const out: Record<string, unknown> = { ...payload };
+  const hasArgs = out.args !== null && typeof out.args === "object";
   const slots: Slot[] = [];
-  if (out.args !== null && typeof out.args === "object") {
+  if (hasArgs) {
+    // The gateway reads the text from the params, so a copy of it in content is not needed.
+    delete out.content;
     out.args = structuredClone(out.args);
     collect(out.args, slots, new Set(), 0);
+  } else if (typeof out.content === "string") {
+    slots.push({ container: out, key: "content", length: out.content.length });
   }
-  if (typeof out.content === "string") slots.push({ container: out, key: "content", length: out.content.length });
   const read = (s: Slot) => (s.container as Record<string, unknown>)[s.key as string] as string;
-  const write = (s: Slot, v: string) => {
-    (s.container as Record<string, unknown>)[s.key as string] = v;
-    s.length = v.length;
-  };
   // First the attachments: their bytes are no text anyone reads. A value in an
   // attachment field that is not base64 is text and is cut like any other.
   for (const slot of slots) {
@@ -178,40 +251,36 @@ export function fitInspectBody(payload: Record<string, unknown>, budget = INSPEC
       typeof slot.key === "string" && ATTACHMENT_KEYS.has(slot.key.toLowerCase()) &&
       value.length >= ATTACHMENT_MIN_CHARS && isBase64Payload(value)
     ) {
-      write(slot, describeAttachment(value));
+      (slot.container as Record<string, unknown>)[slot.key as string] = describeAttachment(value);
+      slot.length = read(slot).length;
     }
   }
-  // Then every string over the minimum is cut once, to its share of the room
-  // left: its share of the bytes the strings take now, scaled to what fits.
-  if (size(out) > budget) {
-    const cuttable = slots.filter((s) => s.length > MIN_CUT_CHARS);
-    const bytes = cuttable.map((s) => Buffer.byteLength(JSON.stringify(read(s))));
-    const total = bytes.reduce((a, b) => a + b, 0);
-    const room = budget - (size(out) - total);
-    if (room > 0 && total > 0) {
-      const ratio = Math.min(1, (room / total) * CUT_SAFETY);
-      for (const slot of cuttable) {
-        const limit = Math.max(MIN_CUT_CHARS, Math.floor(slot.length * ratio));
-        if (limit < slot.length) write(slot, cutString(read(slot), limit));
+  // Then the longest strings, once, as little as the call needs. Each attempt
+  // cuts a fresh copy of the call, so no string is cut twice.
+  if (size(out) > budget && hasArgs) {
+    for (const safety of CUT_SAFETIES) {
+      const trial: Record<string, unknown> = { ...out, args: structuredClone(out.args) };
+      const trialSlots: Slot[] = [];
+      collect(trial.args, trialSlots, new Set(), 0);
+      if (cutLongest(trial, trialSlots, budget, safety) && size(trial) <= budget) {
+        return { payload: { ...trial, args_partial: true }, partial: true };
       }
     }
+  } else if (size(out) > budget) {
+    cutLongest(out, slots, budget, CUT_SAFETIES[1]);
   }
-  // A call that still does not fit (numbers and short values past the cut)
-  // keeps what is read: the message text (the plugin's own reading of it, cut
-  // to the room left, head and tail) and the routing values. Only the
-  // attachments and the rest of the structure are dropped. The gateway judges
-  // the call as unknown on top of what it reads.
+  // A call that still does not fit (numbers and short values past the cut) is
+  // sent as a note: its routing values and its text, cut to the room left.
   if (size(out) > budget) {
-    const content = typeof payload.content === "string" ? payload.content : "";
-    out.args = { ...collectRouting(payload.args), note: "call too large to send: attachments and the rest of the structure are not sent" };
-    delete out.content;
-    const room = budget - size(out) - 1024;
-    if (content !== "" && room > MIN_CUT_CHARS) {
-      const bytesPerChar = Math.max(1, Buffer.byteLength(JSON.stringify(content)) / content.length);
-      const limit = Math.floor((room / bytesPerChar) * CUT_SAFETY);
-      out.content = limit >= content.length ? content : cutString(content, Math.max(limit, MIN_CUT_CHARS));
-      if (size(out) > budget) delete out.content;
-    }
+    const note = "call too large to send: attachments and the rest of the structure are not sent";
+    const rest = { ...out, args: { ...collectRouting(payload.args), note } };
+    const room = budget - size(rest) - 1024;
+    const text = collectText(payload.args);
+    const bytesPerChar = text === "" ? 1 : Math.max(1, Buffer.byteLength(JSON.stringify(text)) / text.length);
+    const limit = Math.floor((room / bytesPerChar) * CUT_SAFETIES[1]);
+    const kept = text === "" || room <= MIN_CUT_CHARS ? "" : limit >= text.length ? text : cutString(text, Math.max(limit, MIN_CUT_CHARS));
+    out.args = { ...collectRouting(payload.args), ...(kept === "" ? {} : { text: kept }), note };
+    if (size(out) > budget && kept !== "") out.args = { ...collectRouting(payload.args), note };
   }
   out.args_partial = true;
   return { payload: out, partial: true };
