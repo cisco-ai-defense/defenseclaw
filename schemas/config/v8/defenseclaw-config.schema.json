@@ -5641,8 +5641,33 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["aliases"],
-          "anyOf": [{"required": ["severity_at_least"]}, {"required": ["signals"]}],
+          "anyOf": [{"required": ["severity_at_least"]}, {"required": ["signals"]}, {"required": ["check"], "properties": {"check": {"enum": ["auto", "decision_model", "judge"]}}}],
           "properties": {
+            "check": {
+              "type": "string",
+              "enum": ["off", "auto", "decision_model", "judge"],
+              "description": "One bounded yes/no sensitive-data question per request to the decision model or the judge, besides the regex floor (off by default)."
+            },
+            "on_unavailable": {
+              "type": "string",
+              "enum": ["local", "ignore"],
+              "description": "A check that failed or timed out: local (default) routes to the sensitive aliases, ignore keeps the floor-only decision. Never a block."
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 50,
+              "maximum": 5000
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 256,
+              "maximum": 65536
+            },
+            "definition": {
+              "type": "string",
+              "maxLength": 1024,
+              "pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f]*$"
+            },
             "signals": {
               "type": "array",
               "minItems": 1,

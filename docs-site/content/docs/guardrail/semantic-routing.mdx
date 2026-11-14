@@ -98,6 +98,10 @@ With `routing.sensitive` set (`aliases` plus `severity_at_least` and/or `signals
 - **Size bounds.** With `routing.sensitive` set, the route-only listener refuses a body over 64 MiB (HTTP 413) and answers HTTP 503 with `Retry-After` while its shared request buffer is full, instead of sending the request unchecked.
 - **Keyless local models.** A model with its own loopback `base_url` and no `api_key_env` or `credential` (Ollama, vLLM on this host) is called with no credential, also when the agent signs in with a login or a Bedrock bearer key. A sensitive request tries its local models this way at any address.
 
+### Ask the decision model too
+
+The regex floor finds structured data (card and ID numbers, keys, tokens) but misses personal data written in prose: diagnoses, HR cases, unreleased numbers. Set `routing.sensitive.check: auto` (or `decision_model` or `judge`) to also ask the decision model one yes/no question per request; a positive from either keeps the request local. On the 555-prompt router evaluation set, the regex floor alone kept 45% of the sensitive prompts local; the floor plus a check by a Nova Lite-class model kept 99% (1 of 80 leaked on the default profile), and sent 0.4 to 0.6% of the other prompts local. The check adds about 0.4 s (p50) and 0.5 s (p95) to every routed request, because the route waits for it. A check that fails or times out routes local (`on_unavailable: local`), never blocks. A profile whose `allowed_aliases` are local models only leaks nothing in any mode: use that for regulated groups. On a managed host the administrator sets and locks `routing.sensitive` in the bundle.
+
 ## Disable routing
 
 ```bash
