@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -108,6 +109,21 @@ func gap0437AssertTier(t *testing.T, where string, p gap0437Pack, out map[string
 	}
 }
 
+// gap0437PowerShellExec reports whether the OpenClaw exec call is read in
+// PowerShell (native Windows), where the POSIX arithmetic text is ordinary
+// text: the call is judged on what PowerShell would do with it (the
+// protected write blocks), not on the POSIX reading.
+func gap0437PowerShellExec(command string, out map[string]any, t *testing.T, p gap0437Pack) bool {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return false
+	}
+	if strings.Contains(command, "authorized_keys") && out["action"] != "block" {
+		t.Errorf("inspect/tool %s on Windows: the protected write is %v, want block: %v", p.name, out["action"], out)
+	}
+	return true
+}
+
 func gap0437NoFault(t *testing.T, before int64, where string) {
 	t.Helper()
 	if n := evaluatorFaults.Load() - before; n != 0 {
@@ -144,6 +160,9 @@ func TestGAP0437ParserFaultInspectToolByPack(t *testing.T) {
 				out := gap0437Serve(t, a.handleInspectTool, "/api/v1/inspect/tool", map[string]any{
 					"tool": "exec", "connector": "openclaw", "args": map[string]any{"command": command, "workdir": dir},
 				})
+				if gap0437PowerShellExec(command, out, t, p) {
+					continue
+				}
 				gap0437AssertTier(t, "inspect/tool", p, out)
 				gap0437NoFault(t, before, "inspect/tool "+p.name)
 			}
@@ -176,7 +195,13 @@ func TestGAP0437ParserFaultApprovalIsResolved(t *testing.T) {
 			t.Fatalf("approval %q: RPC %q, want exec.approval.resolve", command, rpc.Method)
 		}
 		// The approval route has no alert: an evaluation-limit reading is
-		// an enforceable CRITICAL finding, so the approval is denied.
+		// an enforceable CRITICAL finding, so the approval is denied. On
+		// native Windows OpenClaw's exec is PowerShell, where the text is
+		// no arithmetic: only the protected write is denied there.
+		if runtime.GOOS == "windows" && !strings.Contains(command, "authorized_keys") {
+			gap0437NoFault(t, before, "approval")
+			continue
+		}
 		if !strings.Contains(string(rpc.Params), `"decision":"deny"`) {
 			t.Errorf("approval %q: resolve %s, want a denial", command, rpc.Params)
 		}
