@@ -39,6 +39,10 @@ func isolateHookTestHost() func() {
 	}
 	standalone, marker, secureClient, descriptor := ManagedHostWindowsStandalone, ManagedHostWindowsMarkerUncertain, SecureClientHost, ManagedHostDescriptorPath
 	layout := WindowsManagedLayout
+	offRoster := WindowsConnectorOffRosterRead
+	// The off-roster marker of the computer is not this run (as in the
+	// internal/cli sandbox).
+	WindowsConnectorOffRosterRead = func(string) (bool, error) { return false, nil }
 	ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	ManagedHostWindowsMarkerUncertain = func() bool { return false }
 	SecureClientHost = func() bool { return false }
@@ -62,6 +66,7 @@ func isolateHookTestHost() func() {
 	return func() {
 		ManagedHostWindowsStandalone, ManagedHostWindowsMarkerUncertain, SecureClientHost, ManagedHostDescriptorPath = standalone, marker, secureClient, descriptor
 		WindowsManagedLayout = layout
+		WindowsConnectorOffRosterRead = offRoster
 		for name, value := range previousTemp {
 			if value == nil {
 				_ = os.Unsetenv(name)

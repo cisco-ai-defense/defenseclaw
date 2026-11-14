@@ -31,11 +31,17 @@ import (
 // call starts the hook, so each of them costs start CPU per call.
 var slimHookForbidden = []string{
 	"github.com/defenseclaw/defenseclaw/internal/audit",
+	"github.com/defenseclaw/defenseclaw/internal/audit/",
 	"github.com/defenseclaw/defenseclaw/internal/cli",
+	"github.com/defenseclaw/defenseclaw/internal/cli/",
 	"github.com/defenseclaw/defenseclaw/internal/gateway",
+	"github.com/defenseclaw/defenseclaw/internal/gateway/",
 	"github.com/defenseclaw/defenseclaw/internal/openshell",
+	"github.com/defenseclaw/defenseclaw/internal/openshell/",
 	"github.com/defenseclaw/defenseclaw/internal/guardrail",
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/",
 	"github.com/defenseclaw/defenseclaw/internal/telemetry",
+	"github.com/defenseclaw/defenseclaw/internal/telemetry/",
 	"github.com/google/cel-go/",
 	"go.opentelemetry.io/otel/sdk",
 	"google.golang.org/protobuf/",
@@ -43,6 +49,13 @@ var slimHookForbidden = []string{
 	"github.com/maximhq/bifrost/",
 	"github.com/open-policy-agent/opa/v1/rego",
 	"github.com/open-policy-agent/opa/v1/topdown",
+}
+
+// slimHookAllowed are the light packages under a forbidden prefix the hook
+// needs: the connector hook runtime and the bounded readers of the guardrail.
+var slimHookAllowed = []string{
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector",
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded",
 }
 
 // slimHookKnownHeavy are the heavy packages the hook still links in 1.0.10
@@ -85,6 +98,9 @@ func TestSlimHookLinksNoGatewayPackages(t *testing.T) {
 			linked := map[string]bool{}
 			for _, dep := range deps {
 				linked[dep] = true
+				if slimHookAllowedPackage(dep) {
+					continue
+				}
 				for _, bad := range slimHookForbidden {
 					if dep == bad || (strings.HasSuffix(bad, "/") && strings.HasPrefix(dep, bad)) {
 						t.Errorf("defenseclaw-hook links %s", dep)
@@ -139,4 +155,13 @@ func TestSlimHookSizeBudget(t *testing.T) {
 			t.Logf("%s/%s: %d bytes", target.goos, target.goarch, info.Size())
 		})
 	}
+}
+
+func slimHookAllowedPackage(dep string) bool {
+	for _, allowed := range slimHookAllowed {
+		if dep == allowed || strings.HasPrefix(dep, allowed+"/") {
+			return true
+		}
+	}
+	return false
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/pythoninert"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
@@ -1533,10 +1534,6 @@ func pythonHomePathAssignment(statement, home string) (string, bool) {
 	return "", false
 }
 
-// PythonInertTextMasked is supplied by guardrail, which imports hookpaths.
-// With no callback, every byte remains potentially executable.
-var PythonInertTextMasked func(code, cwd string) string
-
 func pythonCallSetsImportPath(call *syntax.CallExpr) bool {
 	for _, assignment := range call.Assigns {
 		if assignment.Name == nil {
@@ -1554,9 +1551,10 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 		return "interpreter-path", true
 	}
 	scan := code
-	if maskInert && PythonInertTextMasked != nil &&
-		(language == "python" || strings.HasPrefix(language, "python3")) {
-		if masked := PythonInertTextMasked(code, cwd); len(masked) == len(code) {
+	if maskInert && (language == "python" || strings.HasPrefix(language, "python3")) {
+		// The string text no string of the program can run is blanked
+		// (pythoninert); the hook binary and the gateway mask alike.
+		if masked := pythoninert.InertTextMasked(code, cwd); len(masked) == len(code) {
 			scan = masked
 		}
 	}

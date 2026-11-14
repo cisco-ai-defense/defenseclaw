@@ -482,10 +482,10 @@ func OpenCursorHookInputFile(hookDir, path string) (*os.File, error) {
 		return nil, fmt.Errorf("inspect Cursor hook input: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("Cursor hook input must be a regular file")
+		return nil, fmt.Errorf("Cursor hook input must be a regular file") //nolint:staticcheck // Preserve the product name in this hook diagnostic.
 	}
 	if info.Size() > CursorHookInputMaxBytes {
-		return nil, fmt.Errorf("Cursor hook input exceeds %d bytes", CursorHookInputMaxBytes)
+		return nil, fmt.Errorf("Cursor hook input exceeds %d bytes", CursorHookInputMaxBytes) //nolint:staticcheck // Preserve the product name in this hook diagnostic.
 	}
 	input, err := os.Open(cleanPath)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -29,6 +30,10 @@ func init() {
 	// review finding 5). Every binary that renders or runs hooks links this
 	// package: the gateway (internal/cli) and the slim defenseclaw-hook.
 	connector.SecureClientDeploymentVerified = func() bool { return SecureClientHost() }
+	// The recovery chain of a per-user hook refusal also returns the agent
+	// config files and folders a root-run gateway wrote in the account home
+	// (GAP-0848).
+	daemon.RegisterRootOwnedAgentConfigPaths(connector.RootOwnedAgentConfigPaths)
 }
 
 // ManagedHostDescriptorPath is where a standalone managed deployment

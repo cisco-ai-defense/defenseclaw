@@ -49,7 +49,11 @@ func TestHookStartupInitBudget(t *testing.T) {
 	}
 	lines := regexp.MustCompile(`(?m)^init github\.com/defenseclaw/defenseclaw/internal/[a-z0-9/]+ @[^\n]*?, ([0-9]+) bytes,`)
 	var total int64
-	for _, match := range lines.FindAllSubmatch(output, -1) {
+	matches := lines.FindAllSubmatch(output, -1)
+	if len(matches) == 0 {
+		t.Fatalf("no DefenseClaw package init trace in the helper output: GODEBUG=inittrace=1 did not report\n%s", output)
+	}
+	for _, match := range matches {
 		bytes, err := strconv.ParseInt(string(match[1]), 10, 64)
 		if err != nil {
 			t.Fatal(err)
