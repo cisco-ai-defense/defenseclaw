@@ -166,8 +166,8 @@ const maxLauncherTextWords = 64
 // `cmd /c "<script>"` as the Codex shell tool sends it on a Windows host
 // (rel-1-0-10:GAP-0735), read from the launcher's own grammar like
 // ShellLauncherBody. The line is split into words as PowerShell splits it
-// (single quotes with ” for a quote, double quotes with `" or "" for a
-// quote) up to its first statement or redirect operator outside quotes
+// (single quotes, in which a doubled quote is one quote, and double quotes,
+// in which a backtick quote or a doubled quote is one quote) up to its first statement or redirect operator outside quotes
 // (newline, ; | & < >): what follows is the rest of the call, which the
 // call's own analysis reads. A leading call operator & is skipped.
 func ShellLauncherBodyOfText(text string) (body string, dialect Dialect, ok bool) {
