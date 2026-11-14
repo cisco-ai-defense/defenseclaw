@@ -119,16 +119,49 @@ func classifyTarArchiveProducer(out *parseOutput, command *CommandFact) {
 	addOperation(command, OperationWrite)
 	appendCommandPath(out, command, PathAccessWrite, file)
 	appendArchiveArtifact(out, command.ID, ArtifactProduce, file)
+	appendArchiveSourceReads(out, command, tarCreateSources(command.Argv))
 }
 
-func tarCreateArchiveFile(argv []string) (file string, created, complete bool) {
+// appendArchiveSourceReads records the files an archive producer packs.
+func appendArchiveSourceReads(out *parseOutput, command *CommandFact, sources []string) {
+	for _, source := range sources {
+		if source == "" || strings.HasPrefix(source, "-") || strings.HasPrefix(source, "@") {
+			continue
+		}
+		addOperation(command, OperationRead)
+		appendCommandPath(out, command, PathAccessRead, source)
+	}
+}
+
+// tarCreateSources are the member operands of a complete tar -c: the
+// non-option operands after the archive file.
+func tarCreateSources(argv []string) []string {
 	if len(argv) < 2 {
-		return "", false, false
+		return nil
 	}
 	if !strings.HasPrefix(argv[1], "-") {
-		return traditionalTarCreateArchiveFile(argv)
+		cluster := argv[1]
+		operandIndex := 2
+		for i := 0; i < len(cluster); i++ {
+			switch cluster[i] {
+			case 'f':
+				operandIndex++
+			case 'C', 'X':
+				// Members are relative to another directory, or excluded
+				// by a list: not the operands as written.
+				return nil
+			}
+		}
+		if operandIndex > len(argv) {
+			return nil
+		}
+		return argv[operandIndex:]
 	}
-	parsed := parseOwnedPOSIXOptions(
+	return tarOwnedOptions(argv).positionals
+}
+
+func tarOwnedOptions(argv []string) ownedPOSIXOptionParse {
+	return parseOwnedPOSIXOptions(
 		argv,
 		exactOptionSet("-f", "--file"),
 		exactOptionSet(
@@ -140,6 +173,16 @@ func tarCreateArchiveFile(argv []string) (file string, created, complete bool) {
 		),
 		exactOptionSet("--help", "--version"),
 	)
+}
+
+func tarCreateArchiveFile(argv []string) (file string, created, complete bool) {
+	if len(argv) < 2 {
+		return "", false, false
+	}
+	if !strings.HasPrefix(argv[1], "-") {
+		return traditionalTarCreateArchiveFile(argv)
+	}
+	parsed := tarOwnedOptions(argv)
 	if parsed.preview {
 		return "", false, true
 	}
@@ -232,6 +275,16 @@ func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
 	addOperation(command, OperationWrite)
 	appendCommandPath(out, command, PathAccessWrite, file)
 	appendArchiveArtifact(out, command.ID, ArtifactProduce, file)
+	appendArchiveSourceReads(out, command, zipSourceOperands(parsed, file))
+}
+
+// zipSourceOperands are the files zip packs: every operand, except the
+// archive when it is the first operand rather than an --out/-O value.
+func zipSourceOperands(parsed ownedPOSIXOptionParse, archive string) []string {
+	if len(parsed.positionals) > 0 && parsed.positionals[0] == archive {
+		return parsed.positionals[1:]
+	}
+	return parsed.positionals
 }
 
 func zipProducedArchive(parsed ownedPOSIXOptionParse) (string, bool) {

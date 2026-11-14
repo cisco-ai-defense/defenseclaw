@@ -342,6 +342,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "less", "more":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
+	case "tac", "nl", "od", "strings", "cut", "sort", "hexdump":
+		// Standard programs that read the files named in their arguments,
+		// like cat and head. A Windows or PowerShell program of the same
+		// name (sort.exe, Sort-Object) has another grammar.
+		if requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+			classifyPOSIXFileReader(out, command, posixFileReaderSpecs[program])
+		}
 	case "type":
 		switch command.Dialect {
 		case DialectCMD:
@@ -808,6 +815,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
 
+	if program == "xargs" && (command.Dialect == DialectPOSIX || command.Dialect == DialectArgv) {
+		// xargs -a FILE reads its input items from FILE. The program it runs
+		// is read on its own words (classifyEmbeddedPrograms), so the parse
+		// stays as partial as it was.
+		classifyPOSIXFileReader(out, command, posixFileReaderSpecs[program])
+	}
 	classifyRedirects(out, command)
 }
 

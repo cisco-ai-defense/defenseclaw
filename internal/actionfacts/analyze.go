@@ -470,7 +470,8 @@ func analyzeStructuredArgv(
 		nestedDialect = DialectNone
 	)
 	switch program {
-	case "env", "sudo", "command", "builtin", "exec", "nsenter", "chroot":
+	case "env", "sudo", "command", "builtin", "exec", "nsenter", "chroot",
+		"nice", "time", "timeout", "nohup":
 		nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(argv, program)
 		if uncertain {
 			out.markUnsupported(IssueUnsupportedConstruct)

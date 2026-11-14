@@ -45,6 +45,12 @@ type credentialFileShape struct {
 	class CredentialFileClass
 	// relative: trailing path components, matched at a component boundary.
 	relative string
+	// folder: a trailing folder (matched at a component boundary) with the
+	// files anywhere beneath it, narrowed by suffixes when set
+	// (".aws/sso/cache" with ".json": every token cache file in it). It
+	// names the cache and per-account folders whose file names are not
+	// fixed.
+	folder string
 	// base: an exact file name, anywhere.
 	base string
 	// basePrefix: a file name prefix; with dir, only directly inside a
@@ -122,6 +128,72 @@ var credentialFileShapes = [...]credentialFileShape{
 	{class: CredentialFileCloudCLI, relative: ".azure/tokencache.dat"},
 	{class: CredentialFileCloudCLI, dir: ".azure", basePrefix: "msal_token_cache", suffixes: []string{".json", ".bin"}},
 
+	// Login and token files of developer CLIs and agents (S7 secret-read
+	// table). Each row names the path the tool's public documentation gives.
+	//
+	// Claude Code: ~/.claude/.credentials.json (Linux, Windows, the macOS
+	// keychain fallback), or .credentials.json under CLAUDE_CONFIG_DIR:
+	// https://code.claude.com/docs/en/authentication#credential-management
+	{class: CredentialFileCloudCLI, base: ".credentials.json"},
+	// OpenAI Codex CLI: "~/.codex/auth.json" caches the login:
+	// https://developers.openai.com/codex/auth (moved to
+	// https://learn.chatgpt.com/docs/auth)
+	{class: CredentialFileCloudCLI, relative: ".codex/auth.json"},
+	// Google Gemini CLI: the cached OAuth login is oauth_creds.json in the
+	// ~/.gemini folder (OAUTH_FILE in
+	// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/config/storage.ts;
+	// the public docs only say the login is cached locally,
+	// https://geminicli.com/docs/get-started/authentication/).
+	{class: CredentialFileCloudCLI, relative: ".gemini/oauth_creds.json"},
+	// GitHub Copilot CLI: the plaintext token fallback is ~/.copilot/config.json:
+	// https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli
+	{class: CredentialFileCloudCLI, relative: ".copilot/config.json"},
+	// GitHub Copilot editor plugins: hosts.json and apps.json hold the OAuth
+	// token (the plugins' own behavior; docs.github.com does not name them).
+	{class: CredentialFileCloudCLI, relative: ".config/github-copilot/hosts.json"},
+	{class: CredentialFileCloudCLI, relative: ".config/github-copilot/apps.json"},
+	{class: CredentialFileCloudCLI, relative: "appdata/local/github-copilot/hosts.json"},
+	{class: CredentialFileCloudCLI, relative: "appdata/local/github-copilot/apps.json"},
+
+	// git-credential-store's second file, $XDG_CONFIG_HOME/git/credentials
+	// (default $HOME/.config/git/credentials):
+	// https://git-scm.com/docs/git-credential-store#FILES
+	{class: CredentialFileDeveloperToken, relative: ".config/git/credentials", strongUpload: true},
+	// HashiCorp Vault's token helper file ~/.vault-token:
+	// https://developer.hashicorp.com/vault/docs/commands/token-helper
+	{class: CredentialFileDeveloperToken, base: ".vault-token"},
+	// Terraform CLI credentials: ~/.terraform.d/credentials.tfrc.json, on
+	// Windows %APPDATA%\terraform.d\credentials.tfrc.json:
+	// https://developer.hashicorp.com/terraform/cli/config/config-file#credentials
+	{class: CredentialFileDeveloperToken, relative: ".terraform.d/credentials.tfrc.json"},
+	{class: CredentialFileDeveloperToken, relative: "appdata/roaming/terraform.d/credentials.tfrc.json"},
+	// Cargo: $CARGO_HOME/credentials.toml, and the older credentials name
+	// without the extension, both read and written:
+	// https://doc.rust-lang.org/cargo/reference/config.html#credentials
+	{class: CredentialFileDeveloperToken, relative: ".cargo/credentials.toml"},
+	{class: CredentialFileDeveloperToken, relative: ".cargo/credentials"},
+	// RubyGems: gem push and gem signin keep the API key in ~/.gem/credentials:
+	// https://guides.rubygems.org/command-reference/#gem-push
+	{class: CredentialFileDeveloperToken, relative: ".gem/credentials"},
+	// podman login: ${XDG_RUNTIME_DIR}/containers/auth.json on Linux,
+	// $HOME/.config/containers/auth.json on macOS and Windows:
+	// https://docs.podman.io/en/latest/markdown/podman-login.1.html
+	{class: CredentialFilePackageRegistry, relative: "containers/auth.json"},
+
+	// AWS CLI: IAM Identity Center tokens are cached under ~/.aws/sso/cache
+	// and assumed-role credentials under ~/.aws/cli/cache, one .json file
+	// each:
+	// https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sso.html#cli-configure-sso-login
+	// https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-role.html#cli-configure-role-cache
+	{class: CredentialFileCloudCLI, folder: ".aws/sso/cache", suffixes: []string{".json"}},
+	{class: CredentialFileCloudCLI, folder: ".aws/cli/cache", suffixes: []string{".json"}},
+	// gcloud: the per-account folder of legacy credentials (adc.json, .boto)
+	// in the configuration directory, ~/.config/gcloud
+	// (https://cloud.google.com/sdk/docs/configurations; the folder name
+	// comes from the Cloud SDK, not from a public documentation page).
+	{class: CredentialFileCloudCLI, folder: ".config/gcloud/legacy_credentials"},
+	{class: CredentialFileCloudCLI, folder: "appdata/roaming/gcloud/legacy_credentials"},
+
 	// Private key files known only by name: a .key file or a keystore, and
 	// a .pem whose name says key (server-key.pem, privkey.pem), not a
 	// certificate, a chain or a public key.
@@ -173,6 +245,12 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 	for _, row := range credentialFileShapes {
 		var relative string
 		switch {
+		case row.folder != "":
+			index := folderIndex(value, row.folder)
+			if index < 0 || len(row.suffixes) != 0 && !hasAnySuffix(base, row.suffixes) {
+				continue
+			}
+			relative = value[index:]
 		case row.relative != "":
 			if value != row.relative && !strings.HasSuffix(value, "/"+row.relative) {
 				continue
@@ -218,6 +296,18 @@ func MatchCredentialFileShape(value string) (CredentialFileShape, bool) {
 		}, true
 	}
 	return CredentialFileShape{}, false
+}
+
+// folderIndex is where folder starts in value as whole path components, with
+// at least one more component after it, or -1.
+func folderIndex(value, folder string) int {
+	if strings.HasPrefix(value, folder+"/") {
+		return 0
+	}
+	if index := strings.Index(value, "/"+folder+"/"); index >= 0 {
+		return index + 1
+	}
+	return -1
 }
 
 func hasAnySuffix(value string, suffixes []string) bool {

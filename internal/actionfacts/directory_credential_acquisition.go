@@ -115,6 +115,11 @@ func projectDirectoryCredentialAcquisitions(
 		if !ok {
 			continue
 		}
+		if command.Program == "timeout" && directoryCredentialWrapperHasChild(facts.Commands, command.ID) {
+			// The shared wrapper unwrap projects the program timeout runs as a
+			// child command; that child is the acquisition, not its wrapper.
+			continue
+		}
 		addOperation(command, OperationCredentialRead)
 		result = append(result, DirectoryCredentialAcquisitionFact{
 			CommandID: command.ID,
@@ -130,6 +135,15 @@ func projectDirectoryCredentialAcquisitions(
 		result = append(result, detectionOnlyBashLoginCredentialAcquisitions(facts)...)
 	}
 	return result
+}
+
+func directoryCredentialWrapperHasChild(commands []CommandFact, id int64) bool {
+	for _, command := range commands {
+		if command.ParentCommandID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func detectionOnlyBashLoginCredentialAcquisitions(
