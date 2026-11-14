@@ -32,9 +32,11 @@ func routeContext(eng *engine.Engine, in *ModelRouterInput, req *engine.Request)
 // reminders stripped, bounded, and "" when the agent wrote it
 // (engine.InjectedUserText: instruction files, command output, compaction
 // summaries, IDE and environment context).
+// The OpenClaw "Sender (untrusted metadata):" envelope is removed and its
+// heartbeat and session-startup probes give "" (the guardrail detectors).
 func routerUserText(s string) string {
-	t := capText(stripReminders(s))
-	if engine.InjectedUserText(t) {
+	t := capText(strings.TrimSpace(stripOpenClawUntrustedEnvelope(stripReminders(s))))
+	if engine.InjectedUserText(t) || isHeartbeatMessage(t, nil) || isSessionStartupMessage(t) {
 		return ""
 	}
 	return t
@@ -45,6 +47,68 @@ func routerUserText(s string) string {
 // text anyway), so a reminder followed by typed text keeps the typed text.
 func injectedBlock(text string) bool {
 	return engine.InjectedUserText(text) && engine.InjectedUserText(stripReminders(text))
+}
+
+// userBlockFilter filters the text blocks of one user message, in order.
+// A Claude Code slash command block (command-name or command-message) gives
+// what the user typed after the command (its command-args), and the next
+// typed-looking block of the message is the expanded command file, which is
+// skipped, unless local command output follows first (a built-in command
+// such as /model, which has no expanded file).
+type userBlockFilter struct{ commandBody bool }
+
+// keep returns the router text of one block and whether to add it; an
+// empty block is kept as is (the joined text keeps its line breaks).
+func (f *userBlockFilter) keep(text string) (string, bool) {
+	t := strings.TrimSpace(text)
+	switch {
+	case t == "" || (engine.StartsWithTag(t, "system-reminder") && stripReminders(t) == ""):
+		// Empty, or reminders only (the message text drops them): kept as
+		// is, and it does not count as the expanded command file.
+		return text, true
+	case engine.StartsWithTag(t, "command-name") || engine.StartsWithTag(t, "command-message"):
+		f.commandBody = true
+		args := commandArgs(t)
+		return args, args != ""
+	case engine.StartsWithTag(t, "local-command-stdout") || engine.StartsWithTag(t, "local-command-stderr"):
+		f.commandBody = false
+		return "", false
+	case injectedBlock(text):
+		return "", false
+	case f.commandBody:
+		f.commandBody = false
+		return "", false
+	}
+	return text, true
+}
+
+// commandArgs is the text of the command-args element of a slash command
+// block ("" when there is none).
+func commandArgs(t string) string {
+	const open, closeTag = "<command-args>", "</command-args>"
+	i := strings.Index(t, open)
+	if i < 0 {
+		return ""
+	}
+	rest := t[i+len(open):]
+	if j := strings.Index(rest, closeTag); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// passthroughRouterText is the router text of a passthrough body: the newest
+// user message with typed text, block by block (the scan of the route-only
+// listener), never the joined guardrail text. fallback (the guardrail text)
+// is used only when the body does not scan.
+func passthroughRouterText(family string, body []byte, fallback string) string {
+	s := humanTextScan{responses: family == config.RoutingAPIResponses}
+	s.dec = json.NewDecoder(bytes.NewReader(body))
+	s.dec.UseNumber()
+	if !s.document() {
+		return routerUserText(fallback)
+	}
+	return s.text
 }
 
 // routerMessageText is the router text of one parsed user message: its
@@ -62,16 +126,18 @@ func routerMessageText(m *ChatMessage) string {
 		return routerUserText(m.Content)
 	}
 	var b strings.Builder
+	var f userBlockFilter
 	for _, bl := range blocks {
 		switch bl.Type {
 		case "text", "input_text", "":
-			if injectedBlock(bl.Text) {
+			t, ok := f.keep(bl.Text)
+			if !ok {
 				continue
 			}
 			if b.Len() > 0 {
 				b.WriteByte(0x0a)
 			}
-			b.WriteString(bl.Text)
+			b.WriteString(t)
 		}
 	}
 	return routerUserText(b.String())

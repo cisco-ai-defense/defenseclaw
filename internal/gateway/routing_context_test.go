@@ -59,7 +59,7 @@ func TestRouteContextReadsOnlyHumanTextAndToolNames(t *testing.T) {
 {"role":"user","content":"first task: deploy api"},
 {"role":"assistant","content":[{"type":"text","text":"ASSISTANT_TEXT"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"SECRET_ARG"}}]},
 {"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"TOOL_OUTPUT"}]},
-{"role":"user","content":[{"type":"text","text":"<system-reminder>REMINDER</system-reminder>"},{"type":"text","text":"second ask"}]},
+{"role":"user","content":[{"type":"text","text":"<system-reminder>REMINDER</system-reminder>second ask"}]},
 {"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]},
 {"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"FILE_CONTENTS"}]}]},
 {"role":"user","content":"third ask"}]}`, []string{"second ask", "first task: deploy api"}, []string{"Bash", "Read"}},

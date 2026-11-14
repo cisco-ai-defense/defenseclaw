@@ -69,7 +69,8 @@ type humanTextMessage struct {
 	name       string // Responses item name (*_call items), read for ctx only
 	parts      humanTextParts
 	images     bool
-	toolResult bool // a "tool_result" string anywhere in its content
+	toolResult bool            // a "tool_result" string anywhere in its content
+	filter     userBlockFilter // per-block router filter (routing_context.go)
 }
 
 func (m *humanTextMessage) text() string { return routerUserText(m.parts.String()) }
@@ -333,7 +334,7 @@ func (s *humanTextScan) nestedName(name *string) bool {
 // blocks are joined; tool_result and other blocks give no text.
 func (s *humanTextScan) content(m *humanTextMessage, collect bool) bool {
 	m.parts.reset()
-	m.images, m.toolResult = false, false
+	m.images, m.toolResult, m.filter = false, false, userBlockFilter{}
 	if !collect && !s.ctx.WantsTools() {
 		// Another role: only a tool_result string in it matters.
 		return skipJSONValue(s.dec, &m.toolResult)
@@ -345,8 +346,10 @@ func (s *humanTextScan) content(m *humanTextMessage, collect bool) bool {
 	switch v := tok.(type) {
 	case string:
 		m.toolResult = v == "tool_result"
-		if collect && !injectedBlock(v) {
-			m.parts.add(v)
+		if collect {
+			if t, ok := m.filter.keep(v); ok {
+				m.parts.add(t)
+			}
 		}
 		return true
 	case json.Delim:
@@ -413,17 +416,20 @@ func (s *humanTextScan) block(m *humanTextMessage, collect bool) bool {
 	}
 	// Agent-written blocks in a user message (command output, instruction
 	// files, environment context) are not text the user typed.
-	injected := injectedBlock(text)
 	switch kind {
 	case "text", "input_text":
-		if collect && !injected {
-			m.parts.add(text)
+		if collect {
+			if t, ok := m.filter.keep(text); ok {
+				m.parts.add(t)
+			}
 		}
 	case "image", "input_image", "image_url":
 		m.images = true
 	case "":
-		if collect && text != "" && !injected {
-			m.parts.add(text)
+		if collect && text != "" {
+			if t, ok := m.filter.keep(text); ok {
+				m.parts.add(t)
+			}
 		}
 	}
 	return true
@@ -590,27 +596,44 @@ func skipJSONRest(dec *json.Decoder, first json.Token, note *bool) bool {
 	return true
 }
 
-// stripReminders removes <system-reminder> blocks in one pass. The input
-// is bounded first (four times the classifier cap), so a large paste costs
-// linear time on a bounded string.
+// stripReminders removes <system-reminder> blocks (any case) in one pass.
+// The input is bounded first (four times the classifier cap), so a large
+// paste costs linear time on a bounded string.
 func stripReminders(in string) string {
 	in = truncateUTF8(in, 4*routeOnlyTextCap)
 	const open, closeTag = "<system-reminder>", "</system-reminder>"
+	lower := asciiLowerString(in) // same length as in, so indexes carry over
 	var b strings.Builder
 	for {
-		i := strings.Index(in, open)
+		i := strings.Index(lower, open)
 		if i < 0 {
 			b.WriteString(in)
 			break
 		}
 		b.WriteString(in[:i])
-		j := strings.Index(in[i:], closeTag)
+		j := strings.Index(lower[i:], closeTag)
 		if j < 0 {
 			break
 		}
-		in = in[i+j+len(closeTag):]
+		in, lower = in[i+j+len(closeTag):], lower[i+j+len(closeTag):]
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// asciiLowerString lowercases ASCII letters only, so the result has the same byte
+// length as s; s itself when it has none.
+func asciiLowerString(s string) string {
+	i := strings.IndexFunc(s, func(r rune) bool { return r >= 0x41 && r <= 0x5a })
+	if i < 0 {
+		return s
+	}
+	b := []byte(s)
+	for k := i; k < len(b); k++ {
+		if c := b[k]; c >= 0x41 && c <= 0x5a {
+			b[k] = c + 0x20
+		}
+	}
+	return string(b)
 }
 
 func capText(s string) string { return truncateUTF8(s, routeOnlyTextCap) }

@@ -89,7 +89,7 @@ func (p *GuardrailProxy) routePassthrough(r *http.Request, in passthroughRouteIn
 	input := &ModelRouterInput{
 		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
 		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
-		ConversationID: r.Header.Get("X-DC-Session-Id"), Text: in.Text, Caller: caller, Profiles: profiles,
+		ConversationID: r.Header.Get("X-DC-Session-Id"), Text: passthroughRouterText(in.APIFamily, in.Body, in.Text), Caller: caller, Profiles: profiles,
 		Body: in.Body,
 	}
 	if hasTools {
