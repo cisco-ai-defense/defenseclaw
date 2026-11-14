@@ -52,6 +52,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	previousAccountHome := OutageAccountHome
+	realOutageAccountHome = previousAccountHome
 	OutageAccountHome = func() string { return accountHome }
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	restoreHost := isolateHookTestHost()
@@ -69,3 +70,7 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(code)
 }
+
+// realOutageAccountHome is the account-database lookup TestMain replaces, for
+// the test of that lookup itself.
+var realOutageAccountHome func() string

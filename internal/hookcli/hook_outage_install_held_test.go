@@ -214,7 +214,7 @@ func TestOutageAccountHomeIgnoresTheInheritedHome(t *testing.T) {
 	fake := t.TempDir()
 	t.Setenv("HOME", fake)
 	t.Setenv("USERPROFILE", fake)
-	home := OutageAccountHome()
+	home := realOutageAccountHome()
 	if home == "" {
 		t.Skip("the account database does not list this account")
 	}

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 )
 
@@ -33,12 +34,20 @@ func TestOutageModeGoldenMatchesTheFullCLIHook(t *testing.T) {
 	}
 	// The machine signals are not what this golden compares: a test host
 	// that is itself managed answers closed for every shape.
+	// Nor is the account the test runs as: its own ~/.defenseclaw (an
+	// install lock, a config) and the deployment pin of its environment.
 	secure, standalone, uncertain, descriptor := hookcli.SecureClientHost, hookcli.ManagedHostWindowsStandalone,
 		hookcli.ManagedHostWindowsMarkerUncertain, hookcli.ManagedHostDescriptorPath
+	account, installed := hookcli.OutageAccountHome, hookcli.OutageInstalledDataRoot
 	t.Cleanup(func() {
 		hookcli.SecureClientHost, hookcli.ManagedHostWindowsStandalone = secure, standalone
 		hookcli.ManagedHostWindowsMarkerUncertain, hookcli.ManagedHostDescriptorPath = uncertain, descriptor
+		hookcli.OutageAccountHome, hookcli.OutageInstalledDataRoot = account, installed
 	})
+	accountHome := t.TempDir()
+	hookcli.OutageAccountHome = func() string { return accountHome }
+	hookcli.OutageInstalledDataRoot = func() (string, bool) { return "", false }
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	hookcli.SecureClientHost = func() bool { return false }
 	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	hookcli.ManagedHostWindowsMarkerUncertain = func() bool { return false }
@@ -83,5 +92,20 @@ func TestOutageGoldenSeesTheLinkSetOfTheMain(t *testing.T) {
 			continue
 		}
 		t.Errorf("only the tests of cmd/defenseclaw-hook link %s: it could register a check the main does not have", pkg)
+	}
+}
+
+// The config-load checks the hook needs register in the init of packages
+// the slim main must link (rel-1-0-10:GAP-0603): checked directly, so an
+// unlinking fails here even for a config shape the golden lacks.
+func TestSlimHookRegistersTheConfigLoadChecks(t *testing.T) {
+	if config.SandboxProfilePackCheck == nil {
+		t.Error("config.SandboxProfilePackCheck is not registered: internal/openshell/packs is not linked")
+	}
+	if config.SandboxMachinePolicyRoute == nil {
+		t.Error("config.SandboxMachinePolicyRoute is not registered: internal/enterprisepolicy is not linked")
+	}
+	if !config.CustomRulePackValidatorRegistered() {
+		t.Error("the custom rule pack validator is not registered: internal/guardrail is not linked")
 	}
 }

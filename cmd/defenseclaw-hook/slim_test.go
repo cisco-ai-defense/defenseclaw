@@ -38,6 +38,7 @@ var slimHookForbidden = []string{
 	"github.com/defenseclaw/defenseclaw/internal/gateway/",
 	"github.com/defenseclaw/defenseclaw/internal/openshell",
 	"github.com/defenseclaw/defenseclaw/internal/openshell/",
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/",
 	"github.com/defenseclaw/defenseclaw/internal/telemetry",
 	"github.com/defenseclaw/defenseclaw/internal/telemetry/",
 	"go.opentelemetry.io/otel/sdk",
@@ -55,6 +56,10 @@ var slimHookAllowed = []string{
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector",
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs",
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress",
+	// The rule loader verdict on a custom pack (GAP-0603) and what it uses.
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded",
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic",
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb",
 }
 
 // slimHookKnownHeavy are the heavy packages the hook links in 1.0.10 (the
@@ -166,7 +171,7 @@ func TestSlimHookSizeBudget(t *testing.T) {
 
 func slimHookAllowedPackage(dep string) bool {
 	for _, allowed := range slimHookAllowed {
-		if dep == allowed || strings.HasPrefix(dep, allowed+"/") {
+		if dep == allowed || (!strings.Contains(allowed, "/guardrail/") && strings.HasPrefix(dep, allowed+"/")) {
 			return true
 		}
 	}
