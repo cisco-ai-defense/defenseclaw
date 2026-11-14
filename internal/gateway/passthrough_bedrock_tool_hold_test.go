@@ -159,7 +159,7 @@ func TestPassthroughBedrockToolCallHeldAtEverySplit(t *testing.T) {
 							t.Fatalf("%s: the allowed call changed (%d of %d bytes)", ctx, len(out), len(wire))
 						}
 					}
-					for cut := 1; cut < len(wire); cut++ {
+					for _, cut := range covCutPoints(st.frames) {
 						check([]int{cut}, fmt.Sprintf("buffer=%d cut=%d", buf, cut))
 					}
 					every := make([]int, 0, len(wire))

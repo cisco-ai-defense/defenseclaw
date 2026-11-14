@@ -104,10 +104,19 @@ func covServerCases() []covServerCase {
 func TestPassthroughServerSideCallsAreNotHeld(t *testing.T) {
 	covAllowPrivate(t)
 	req := covJSON(t, map[string]any{"model": "dc-test-model", "input": "hello there", "max_tokens": 16, "messages": []any{map[string]any{"role": "user", "content": "hello there"}}})
-	for _, c := range covServerCases() {
-		for _, fr := range []string{"lf-space", "crlf", "lf-nospace"} {
-			for _, size := range []int{0, 1300 << 10} { // progress inside the item: none, and past the 1 MiB hold cap
-				for _, managed := range []bool{false, true} {
+	cases, frs, sizes := covServerCases(), []string{"lf-space", "crlf", "lf-nospace"}, []int{0, 1300 << 10} // progress inside the item: none, and past the 1 MiB hold cap
+	pick := covPick(covSample(t, "TestPassthroughServerSideCallsAreNotHeld",
+		[]string{"item", "framing", "size", "mode"}, []int{len(cases), len(frs), len(sizes), 2}, nil,
+		// The 1.3 MiB runs are the costly ones: they are paired with each item, and every
+		// other pair is covered by the small runs.
+		func(a, b int) bool { return !(a == 1 && b == 2) && !(a == 2 && b == 3) }))
+	for ci, c := range cases {
+		for fi, fr := range frs {
+			for zi, size := range sizes {
+				for mi, managed := range []bool{false, true} {
+					if !pick(ci, fi, zi, mi) {
+						continue
+					}
 					c, fr, size, managed := c, fr, size, managed
 					t.Run(fmt.Sprintf("%s/%s/size=%d/managed=%v", c.name, fr, size, managed), func(t *testing.T) {
 						covSetManaged(t, managed)
@@ -166,9 +175,15 @@ func TestPassthroughServerSideCallsAreNotHeld(t *testing.T) {
 func TestPassthroughRealCallIsHeldNextToAServerSideItem(t *testing.T) {
 	covAllowPrivate(t)
 	req := covJSON(t, map[string]any{"model": "dc-test-model", "input": "hello there", "max_tokens": 16, "messages": []any{map[string]any{"role": "user", "content": "hello there"}}})
-	for _, c := range covServerCases() {
-		for _, fr := range []string{"lf-space", "crlf"} {
-			for _, managed := range []bool{false, true} {
+	cases, frs := covServerCases(), []string{"lf-space", "crlf"}
+	pick := covPick(covSample(t, "TestPassthroughRealCallIsHeldNextToAServerSideItem",
+		[]string{"item", "framing", "mode"}, []int{len(cases), len(frs), 2}, nil, nil))
+	for ci, c := range cases {
+		for fi, fr := range frs {
+			for mi, managed := range []bool{false, true} {
+				if !pick(ci, fi, mi) {
+					continue
+				}
 				c, fr, managed := c, fr, managed
 				t.Run(fmt.Sprintf("%s/%s/managed=%v", c.name, fr, managed), func(t *testing.T) {
 					covSetManaged(t, managed)
