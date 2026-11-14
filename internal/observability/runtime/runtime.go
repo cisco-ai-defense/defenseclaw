@@ -167,8 +167,15 @@ type EmitContext struct {
 }
 
 func (snapshot EmitContext) Plan() *config.ObservabilityV8Plan { return snapshot.plan }
-func (snapshot EmitContext) Digest() string                    { return snapshot.digest }
-func (snapshot EmitContext) Generation() uint64                { return snapshot.generation }
+
+// NewEmitContextForTest is an EmitContext bound to plan, for a test emitter
+// that routes a builder's record on a chosen plan. Production emit contexts
+// come only from the runtime.
+func NewEmitContextForTest(plan *config.ObservabilityV8Plan) EmitContext {
+	return EmitContext{plan: plan}
+}
+func (snapshot EmitContext) Digest() string     { return snapshot.digest }
+func (snapshot EmitContext) Generation() uint64 { return snapshot.generation }
 
 // InboundLocalTraceResource returns the sealed local resource prepared from the
 // same provider generation that admitted an imported trace target. Ordinary
