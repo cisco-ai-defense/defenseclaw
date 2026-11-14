@@ -134,6 +134,30 @@ func slotClose(open byte) byte {
 	return 0
 }
 
+// generatedPiece reports a piece of eight characters or more, split at the
+// characters a name holds besides letters and digits, that mixes upper case,
+// lower case and digits: a generated string, not a name (GAP-0671). A slot
+// that wraps one ([Wq7mz2LpK9xt]) wraps a password, not a variable.
+func generatedPiece(s string) bool {
+	for _, piece := range strings.FieldsFunc(s, func(r rune) bool { return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') }) {
+		upper, lower, digit := false, false, false
+		for i := 0; i < len(piece); i++ {
+			switch c := piece[i]; {
+			case c >= 'A' && c <= 'Z':
+				upper = true
+			case c >= 'a' && c <= 'z':
+				lower = true
+			default:
+				digit = true
+			}
+		}
+		if len(piece) >= 8 && upper && lower && digit {
+			return true
+		}
+	}
+	return false
+}
+
 // nameExpression reports text that names something: it starts with a
 // letter or _ and holds only name and index characters (db_password,
 // ENV[DB_PASS], vault.db-password).
@@ -189,7 +213,7 @@ func templateSlotValue(v string) bool {
 			if depth == 0 {
 				inner := strings.Trim(s[1:n], string([]byte{open, closer}))
 				rest := s[n+1:]
-				if !nameExpression(inner) {
+				if !nameExpression(inner) || generatedPiece(inner) {
 					return false
 				}
 				return rest == "" || sigil == '%' && len(rest) == 1 && unicode.IsLetter(rune(rest[0]))
@@ -279,10 +303,16 @@ func schemeReferenceValue(v string) bool {
 }
 
 // relativePathValue reports a relative path: two or more names joined by /
-// (packages/core, src/components/forms), each name of letters, digits,
-// dots, dashes and _ with a letter in it.
+// (packages/core, src/components/forms, src/components/LoginForm), each
+// component of letters, digits, dots, dashes and _ with a letter in it. The
+// value is weighed by its characters with the same helper as the
+// SEC-SECRET-ASSIGN path rule (weighPath, GAP-0671): ids are at most a
+// quarter of its letters and digits, so a base64 password that holds a slash
+// (random case, digits, no word) is not a path, and a piece that mixes upper
+// case, lower case and digits is an id.
 func relativePathValue(v string) bool {
-	parts := strings.Split(strings.TrimSuffix(v, "/"), "/")
+	trimmed := strings.TrimSuffix(v, "/")
+	parts := strings.Split(trimmed, "/")
 	if len(parts) < 2 {
 		return false
 	}
@@ -296,7 +326,7 @@ func relativePathValue(v string) bool {
 			}
 		}
 	}
-	return true
+	return weighPath(trimmed, true).namesOnly()
 }
 
 // valueNamesItsKey reports a fill-in that names its own key: words only,
