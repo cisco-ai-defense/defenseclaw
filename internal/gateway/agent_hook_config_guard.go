@@ -1435,6 +1435,26 @@ func agentHookConfigGitNewBranchOnly(sub string, args []string) bool {
 	return false
 }
 
+// agentHookConfigPathspecFolderHolds reports a registration file that a
+// pathspec naming its folder (git checkout -- ., git restore src) can
+// rewrite. guard.files lists every name a registration file could have from
+// the cwd up to the home, so a folder pathspec reaches one only where the
+// file is there: a checkout of a folder rewrites the tracked files in it
+// and recreates no file that is absent from the tree under a pathspec that
+// does not name it, as the whole-tree rewrite below reads it
+// (rel-1-0-10:GAP-0572). A pathspec that names the file itself is read as
+// before. Where the folder cannot be read (a gateway behind ProtectHome, a
+// closed folder) the file is not known absent and is counted.
+func agentHookConfigPathspecFolderHolds(folder, path string) bool {
+	if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+		return true
+	}
+	if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
+		return true
+	}
+	return false
+}
+
 func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGuard) bool {
 	pattern := spec
 	top := false
@@ -1668,7 +1688,8 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 				return arg
 			}
 			for _, file := range guard.files {
-				if file.Path == candidate || strings.HasPrefix(file.Path, candidate+string(filepath.Separator)) {
+				if file.Path == candidate || strings.HasPrefix(file.Path, candidate+string(filepath.Separator)) &&
+					agentHookConfigPathspecFolderHolds(candidate, file.Path) {
 					return arg
 				}
 			}

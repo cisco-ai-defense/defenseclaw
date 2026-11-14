@@ -229,9 +229,16 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			word *syntax.Word
 			cwd  string
 			vals actionValues
+			// read: the word only names a file a reader statement reads
+			// (actionPlainReadStatements), so it is no write target.
+			read bool
 		}
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
+		var plainReads map[*syntax.Stmt]bool
+		if !stateOnly {
+			plainReads = actionPlainReadStatements(file, home)
+		}
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
 		// POSIX home; a Windows-spelled home reads them as wildcards.
 		literalReading := !spelledWindows && !actionPosixWindowsHome(home)
@@ -414,8 +421,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 						continue
 					}
 					if actionExpandedWordGlob(word, values, effectiveCWD, home, check) || checkBraceFields(word, false) || checkWord(word) {
-						if readOnly && direct[stmt] {
-							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values)})
+						read := readOnly && plainReads[stmt] && !actionWordHasUnquotedGlob(word, command)
+						if readOnly && (direct[stmt] || read) {
+							pendingReads = append(pendingReads, pendingRead{word: word, cwd: effectiveCWD, vals: maps.Clone(values), read: read})
 							judgedWords = append(judgedWords, word)
 							continue
 						}
@@ -433,6 +441,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		for _, read := range pendingReads {
 			if found {
 				break
+			}
+			if read.read {
+				continue
 			}
 			found = !actionReplacedEntryWord(read.word, read.vals, read.cwd, home, removedEntries)
 		}
@@ -470,6 +481,76 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 	}
 	return false
+}
+
+// actionPlainReadStatements are the statements whose words name files only
+// for a reader to read them (rel-1-0-10:GAP-0570): a known reader statement
+// (actionKnownReadOnlyShell: ls, cat, stat, grep ...) at the top of the call
+// or in an && or || list, and each stage of such a pipeline whose stages are
+// all readers (ls -la ~/.ssh | head -5). Such a statement prints to the
+// terminal or to /dev/null: it writes no file and hands no name to the other
+// statements, so a protected path it names is not a write target of the
+// call, whatever the others run (ssh -V, make). A statement that changes
+// folder (cd, pushd, popd) is not one: the folder decides what later
+// relative names reach. A call that reads $_ (the last word of the
+// statement before) can pass a name on, so it has none.
+func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	if file == nil {
+		return nil
+	}
+	lastWord := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if parameter, ok := node.(*syntax.ParamExp); ok && parameter.Param != nil && parameter.Param.Value == "_" {
+			lastWord = true
+		}
+		return !lastWord
+	})
+	if lastWord {
+		return nil
+	}
+	reads := map[*syntax.Stmt]bool{}
+	var stages func(stmt *syntax.Stmt) bool
+	stages = func(stmt *syntax.Stmt) bool {
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			if binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {
+				return false
+			}
+			return stages(binary.X) && stages(binary.Y)
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return false
+		}
+		if program, known := staticProgramWord(call.Args[0], home); !known || slices.Contains(cdPrograms, programBase(program)) {
+			return false
+		}
+		reads[stmt] = true
+		return true
+	}
+	// The statements actionDirectStatements reads, and the pipelines in
+	// the same places, which it leaves out.
+	var visit func(stmt *syntax.Stmt)
+	visit = func(stmt *syntax.Stmt) {
+		if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && (binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt) {
+			visit(binary.X)
+			visit(binary.Y)
+			return
+		}
+		if !actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home) {
+			return
+		}
+		marked := maps.Clone(reads)
+		if !stages(stmt) {
+			reads = marked
+		}
+	}
+	for _, stmt := range file.Stmts {
+		visit(stmt)
+	}
+	return reads
 }
 
 // actionInterpreterSSHName and actionInterpreterKeysName match the two
