@@ -229,15 +229,25 @@ func secretAssignmentRejection(raw string) string {
 	if strings.ContainsAny(value, "_-./") && secretAssignmentNameShaped(value) {
 		return "name"
 	}
+	// A long relative path (a file in a source tree, a migration, a temporary
+	// directory) is a path even when one or two of its pieces are ids.
+	if strings.Contains(value, "/") && secretAssignmentPathShaped(value) {
+		return "path"
+	}
 	// A value built from short underscore- or dash-separated pieces
 	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
 	// with separators still carries one long random piece.
 	if segments := strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' }); len(segments) > 1 {
-		longest := 0
+		longest, counterDigits := 0, 0
 		for _, segment := range segments {
 			longest = max(longest, len(segment))
+			if strings.Trim(segment, "0123456789") == "" {
+				counterDigits += len(segment)
+			}
 		}
-		if longest < 10 {
+		// Short pieces are a phrase; several digit groups that run past a
+		// date and a time are a number a program drew (GAP-0563).
+		if longest < 10 && counterDigits <= maxSecretAssignmentCounterDigits {
 			return "pieces"
 		}
 	}
@@ -361,11 +371,17 @@ func secretAssignmentCodeChar(c byte) bool {
 	return secretAssignmentIdentStart(c) || c >= '0' && c <= '9' || strings.IndexByte(".+-*/=&!", c) >= 0
 }
 
+// maxSecretAssignmentCounterDigits is the digits of short counters in one value
+// that weigh nothing: a date (8) and a time (4) with a digit to spare.
+const maxSecretAssignmentCounterDigits = 13
+
 // secretAssignmentNameShaped reports a value a person composed: words and
 // numbers joined by _, -, . or / (a relative path), where the letters and digits of the value that
 // do not sit in a word-shaped run of three letters or more are under three
-// tenths. A separator-delimited number of nine digits or fewer is a counter or
-// a year and weighs nothing; so does ONE number of ten or thirteen digits,
+// tenths. Separator-delimited numbers of nine digits or fewer are counters or
+// years and weigh nothing up to 13 digits in all (a date and a time, build_20261113_1530,
+// fit); further ones count as digits, so several random groups do not pass as
+// a name (GAP-0563). ONE number of ten or thirteen digits weighs nothing too,
 // which is a timestamp in seconds or milliseconds (dr_secret_key_1700000000),
 // and ONE version token (python3dot11, md5sum2024). Any other digit counts
 // against the name, so a random token that holds digits, or words followed by
@@ -373,12 +389,14 @@ func secretAssignmentCodeChar(c byte) bool {
 func secretAssignmentNameShaped(value string) bool {
 	letters, digits, wordLetters := 0, 0, 0
 	sawTimestamp, sawVersion := false, false
+	shortCounterDigits := 0
 	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == '/' }) {
 		if secretAssignmentCounter(segment) {
 			if len(segment) < 10 {
-				continue
-			}
-			if !sawTimestamp {
+				if shortCounterDigits += len(segment); shortCounterDigits <= maxSecretAssignmentCounterDigits {
+					continue
+				}
+			} else if !sawTimestamp {
 				sawTimestamp = true
 				continue
 			}
@@ -398,6 +416,18 @@ func secretAssignmentNameShaped(value string) bool {
 		digits += secretAlnumCount(segment) - countLetters(segment)
 	}
 	return letters > 0 && wordLetters*10 >= (letters+digits)*7
+}
+
+// secretAssignmentPathShaped reports a relative path told by the structure of
+// the whole value: four or more components joined by /, none empty, made of
+// names with only a few ids among them. The value is weighed by its letters
+// and digits, not by its pieces (GAP-0665), by weighPath (path_shape.go), the
+// helper SEC-PASSWORD-ASSIGN uses too (GAP-0671): it is a path when it has at
+// least six words and the ids are at most a quarter of its letters and
+// digits. The secret rule weighs plain names only (camel off).
+func secretAssignmentPathShaped(value string) bool {
+	w := weighPath(value, false)
+	return w.components >= 4 && w.words >= 6 && w.namesOnly()
 }
 
 // secretAssignmentVersionToken reports a segment that is a version or a year
@@ -421,53 +451,6 @@ func secretAssignmentVersionToken(segment string) bool {
 		return false
 	}
 	return len(parts[0]) >= 2 && len(parts[1]) <= 2 && len(parts[3]) <= 4 && secretAssignmentWordShaped(parts[2], 3)
-}
-
-// secretAssignmentTokenLike reports a segment of eight characters or more
-// that turns from letters to digits or back three times or more
-// (7f8a9b0c1d2e): a generated token, where a name has its digits in one run
-// (summer2026, v2).
-func secretAssignmentTokenLike(segment string) bool {
-	if len(segment) < 8 {
-		return false
-	}
-	turns, prev := 0, byte(0)
-	for i := 0; i < len(segment); i++ {
-		class := byte('l')
-		if segment[i] >= '0' && segment[i] <= '9' {
-			class = 'd'
-		} else if !secretAssignmentLetter(segment[i]) {
-			continue
-		}
-		if prev != 0 && class != prev {
-			turns++
-		}
-		prev = class
-	}
-	return turns >= 3
-}
-
-// secretAssignmentCounter reports a segment that is only digits and is short
-// or the length of an epoch in milliseconds.
-func secretAssignmentCounter(segment string) bool {
-	if segment == "" || strings.Trim(segment, "0123456789") != "" {
-		return false
-	}
-	return len(segment) <= 10 || len(segment) == 13
-}
-
-func secretAssignmentLetter(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-}
-
-func countLetters(value string) int {
-	n := 0
-	for i := 0; i < len(value); i++ {
-		if secretAssignmentLetter(value[i]) {
-			n++
-		}
-	}
-	return n
 }
 
 // secretAssignmentWordLetters counts the letters of value that sit in
