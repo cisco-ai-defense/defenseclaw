@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -227,6 +228,11 @@ type trustedActionRequest struct {
 	patchHostView   bool
 	record          func(actionfacts.Facts, []RuleFinding)
 	recordTelemetry func(trustedActionTelemetry)
+	// recordEffectShadow receives the answer of the live shadow run of the
+	// effect lane (guardrail.cascade.lanes.effects=shadow). Only the hook route sets it;
+	// the dispatch takes it once, at the outermost call, and clears it so a
+	// twin or child request never runs the lane again.
+	recordEffectShadow func(EffectShadowResult)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
 	// stateProofOnly limits the judgment to the rule that proves a write to
@@ -272,9 +278,14 @@ type trustedActionRequest struct {
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
 	// windowsDialectReadings is set by the Windows hooks, which choose one shell
-	// dialect per call: a call whose chosen reading is not complete is also judged
-	// as the other shell and as its readable statements (windowsReadingTwinRequests).
+	// dialect per call: a call whose PowerShell reading is partial is also judged
+	// as its readable statements (windowsReadingTwinRequests), never as another
+	// shell.
 	windowsDialectReadings bool
+	// windowsPowerShellReading is the PowerShell reading the hook's dialect
+	// selection made of a call it placed in no dialect; the readings above
+	// reuse it instead of parsing the call again. nil: none.
+	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
 	// generation is the rule generation the call is judged with; nil: the
@@ -380,6 +391,34 @@ func dispatchTrustedAction(
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
+	// Effect-model rule lane (S7). Compute once at the outermost dispatch.
+	// In ON the verdict participates; in shadow/off nothing is appended, so
+	// the live answer is unchanged. The benchmark measures shadow through
+	// EvaluateDeterministicAction, not here.
+	if octx, outermost := markOutermostEffectDispatch(parent); outermost {
+		parent = octx
+		switch mode := effectsRulesModeFor(); mode {
+		case effectRulesOn:
+			effectRequest := request
+			defer func() {
+				findings = append(findings, effectShadowFindings(computeEffectShadow(effectRequest, mode, effectsRulesTierFor()), mode)...)
+			}()
+		case effectRulesShadow:
+			// Shadow: compute and record beside today's rules, off the hook's
+			// path and verdict-neutral (effect_shadow_live.go, GAP-0256).
+			scheduleEffectShadow(request, mode, effectsRulesTierFor(), request.recordEffectShadow)
+		}
+		request.recordEffectShadow = nil
+		// Secret flow tracking (S7). It keeps a bounded per-session state and
+		// alerts (default) or blocks (strict/managed) when a labeled secret
+		// reaches an external sink. Shadow records the hit and never changes the
+		// answer; the lane runs at most once per call.
+		fctx := parent
+		freq := request
+		defer func() {
+			findings = append(findings, runSecretFlowShadow(fctx, freq)...)
+		}()
+	}
 	if ManagedEnterpriseActive() {
 		return nil
 	}
@@ -500,6 +539,18 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+			(facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell) {
+			// A CMD or PowerShell reading stopped at a cap of its own
+			// (commands, tokens, nesting) under the statement budget: what
+			// it read still decides, and the call is never judged below the
+			// unknown tier of its pack (the one bound rule). A CMD reading
+			// capped at 127 to 257 statements had no limit finding at all
+			// and was allowed in strict (rel-1-0-10:GAP-0426). A POSIX
+			// reading keeps its statement budget (ShellStatementsOverBudget),
+			// under which an ordinary long script stays allowed.
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
+		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
@@ -566,10 +617,14 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
-	for _, twin := range windowsReadingTwinRequests(request, facts) {
+	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
+	for _, twin := range windowsTwins {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
+	}
+	if windowsTwinCut.Any() {
+		defer func() { findings = withBoundedTruncation(findings, windowsTwinCut, request) }()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
@@ -5484,6 +5539,69 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return actionfacts.ExactPKRootSetuidShell(facts)
 		},
 		requiresExactDetectionProof: true,
+	},
+	"exec.escaped_binary_write": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.EscapedBinaryFileWrite(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.EscapedBinaryFileWrite(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"account.literal_password_change_via_stdin": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.LiteralStdinPasswordChange(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.LiteralStdinPasswordChange(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"exec.download_then_run_fetched_file": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.BareAddressDownloadThenRunFetchedFile(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.BareAddressDownloadThenRunFetchedFile(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"source_control.clone_then_run_or_adhoc_push": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.GitCloneThenRunOrAdHocPush(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.GitCloneThenRunOrAdHocPush(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"exec.inline_code_network_and_exec": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.InlineCodeNetworkAndExec(facts) || actionfacts.RemoteRunnerURL(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.InlineCodeNetworkAndExec(facts) || actionfacts.RemoteRunnerURL(facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
 	},
 	"exec.remote_ip_download_execute_same_artifact": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {

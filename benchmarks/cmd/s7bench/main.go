@@ -224,6 +224,7 @@ func main() {
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
 	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the /llm proxy GuardrailInspector, direction prompt; the connector UserPromptSubmit answer goes to extra) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
+	effectsRules := flag.String("cascade-effects", "", "guardrail.cascade.lanes.effects: off|shadow|on (empty keeps the config default; on bypasses validation, harness only)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
 	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" {
@@ -318,6 +319,9 @@ func main() {
 	}
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
+	if *effectsRules != "" {
+		cfg.Guardrail.Cascade.Lanes.Effects = *effectsRules
+	}
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true

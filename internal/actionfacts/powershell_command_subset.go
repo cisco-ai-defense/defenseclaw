@@ -24,6 +24,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -250,7 +251,7 @@ func powerShellScriptSubset(input Input, facts Facts) (Facts, bool) {
 		}
 		source = extracted.command
 	}
-	segments, ok := scanPowerShellSegments(source, 0, true)
+	segments, ok := scanPowerShellSegments(source, 0, true, nil)
 	if !ok {
 		return Facts{}, false
 	}
@@ -512,7 +513,7 @@ func decodePowerShellCommand(value string) (string, bool) {
 // contributes a stdout redirect, so it is represented as > in the view.
 // Both transformations omit information; the subset rule must be monotone.
 func staticPowerShellSegments(source string, depth int) ([]string, bool) {
-	scanned, ok := scanPowerShellSegments(source, depth, false)
+	scanned, ok := scanPowerShellSegments(source, depth, false, nil)
 	if !ok {
 		return nil, false
 	}
@@ -527,13 +528,18 @@ func staticPowerShellSegments(source string, depth int) ([]string, bool) {
 // leading set, a construct it does not model ends the scan instead of failing
 // it, and the statements and stages before that construct are returned: each
 // is complete, and nothing after it changes it.
-func scanPowerShellSegments(source string, depth int, leading bool) ([]powerShellSegment, bool) {
+//
+// At most maxCommands segments are read. With bound set, they are counted
+// there (internal/guardrail/bounded), so a caller learns that the scan stopped
+// at the cap instead of at a construct it does not model; nil keeps the plain
+// count.
+func scanPowerShellSegments(source string, depth int, leading bool, bound *bounded.Counter) ([]powerShellSegment, bool) {
 	if depth > maxWrapperDepth || len(source) > maxCommandBytes {
 		return nil, false
 	}
 	source = strings.TrimSpace(source)
 	if inner, ok := exactPowerShellScriptBlock(source); ok {
-		return scanPowerShellSegments(inner, depth+1, leading)
+		return scanPowerShellSegments(inner, depth+1, leading, bound)
 	}
 	runes := []rune(source)
 	var part strings.Builder
@@ -549,7 +555,14 @@ func scanPowerShellSegments(source string, depth int, leading bool) ([]powerShel
 	flush := func() bool {
 		segment := strings.TrimSpace(part.String())
 		part.Reset()
-		if segment == "" || len(segments) >= maxCommands {
+		if segment == "" {
+			return false
+		}
+		if bound != nil {
+			if !bound.Take() {
+				return false
+			}
+		} else if len(segments) >= maxCommands {
 			return false
 		}
 		segments = append(segments, powerShellSegment{text: segment, piped: piped})

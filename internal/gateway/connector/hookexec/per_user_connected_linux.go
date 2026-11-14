@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sockdiag"
 )
 
 // procSelfNet holds this network namespace's socket tables. /proc/net is
@@ -380,9 +382,18 @@ func threadHasOwnIDs(threadDir string) bool {
 // the kernel may report UID 0 for it (sock_i_uid without a socket file), so
 // that row proves nothing, not even for a root caller. Only an accepted
 // row's real owner is proof; a foreign owner after accept is final.
+//
+// The kernel reads a row's owner and inode apart (sock_i_uid, then
+// sock_i_ino, each under its own lock), and on kernels whose sock_i_uid
+// gives the root UID to a socket without a file (RHEL 9) a row read while
+// accept() gives the socket its file can show root beside the real inode.
+// A root owner on an accepted row is therefore read again, up to
+// settledRootReads times, before it is final (rel-1-0-10 GAP-0395: a busy
+// gateway's benign calls were refused as another account's listener).
 func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int, error)) error {
 	lastErr := errConnectedSocketNotFound
 	attempt := 0
+	rootReads := 0
 	for {
 		if ctx.Err() != nil {
 			return lastErr
@@ -391,8 +402,11 @@ func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int,
 		switch {
 		case err == nil && uid == self:
 			return nil
+		case err == nil && uid == 0 && rootReads+1 < settledRootReads:
+			rootReads++
+			lastErr = errConnectedSocketForeign
 		case err == nil:
-			return errors.New("connected gateway socket belongs to another account")
+			return errConnectedSocketForeign
 		case errors.Is(err, errConnectedSocketNotFound), errors.Is(err, errConnectedSocketNotAccepted):
 			lastErr = err
 		default:
@@ -405,6 +419,13 @@ func awaitPerUserLinuxSocket(ctx context.Context, self int, inspect func() (int,
 		}
 	}
 }
+
+// settledRootReads is how many reads of an accepted row owned by root it
+// takes before that owner is final for a caller that is not root.
+const settledRootReads = 3
+
+// errConnectedSocketForeign is an accepted server socket of another account.
+var errConnectedSocketForeign = errors.New("connected gateway socket belongs to another account")
 
 // errConnectedSocketNotAccepted is an exact accepted reverse tuple the
 // gateway has not accept()ed yet: its owner is provisional.
@@ -422,6 +443,14 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	if err != nil || serverTable != clientTable {
 		return -1, errors.New("connected gateway endpoints have different address families")
 	}
+	if procNet == procSelfNet {
+		if sock, ok := exactAcceptedSocket(client, server); ok {
+			if sock.Inode == 0 {
+				return -1, errConnectedSocketNotAccepted
+			}
+			return int(sock.UID), nil
+		}
+	}
 	uid, err := readConnectedTCPUID(procNet, serverTable, clientKey, serverKey)
 	if err == nil || !errors.Is(err, errConnectedSocketNotFound) || serverTable != "tcp" {
 		return uid, err
@@ -430,6 +459,23 @@ func findConnectedTCPUID(procNet string, client, server *net.TCPAddr) (int, erro
 	// using IPv4-mapped addresses, even though this client dialed tcp4.
 	return readConnectedTCPUID(procNet, "tcp6", mappedTCP6Endpoint(client), mappedTCP6Endpoint(server))
 }
+
+// exactAcceptedSocket is the kernel's exact lookup of the server end of
+// client->server in this network namespace (sockdiag): the socket whose local
+// end is server and whose remote end is client, ESTABLISHED, with the owner
+// and inode its procfs row prints. ok is false for any answer that is not
+// that socket (none, a listener or TIME_WAIT entry, netlink unavailable or
+// refused, a malformed reply): the caller then reads the procfs tables as
+// before, so the proof never rests on a doubtful netlink answer. It replaces
+// a read of every TCP socket of the host on each call.
+func exactAcceptedSocket(client, server *net.TCPAddr) (sockdiag.Socket, bool) {
+	sock, err := exactEstablishedTCP(server, client)
+	return sock, err == nil
+}
+
+// exactEstablishedTCP is sockdiag.EstablishedTCP; a test replaces it to make
+// the netlink lookup fail.
+var exactEstablishedTCP = sockdiag.EstablishedTCP
 
 func readConnectedTCPUID(procNet, table, clientKey, serverKey string) (int, error) {
 	file, err := os.Open(filepath.Join(procNet, table))

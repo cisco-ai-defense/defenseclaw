@@ -1620,3 +1620,153 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [integrity, kernel, procfs, mount, bounded-grammar]
+  # Staged-file, literal-credential and inline-code effects (rel-1-0-10 S7 shell recall). Each rule is selected by
+  # the code-owned effect proof in internal/actionfacts (semantic owner and exact-fallback contract); all are alert-only.
+  - id: exec.escaped_binary_write
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-escaped-binary-write^'
+    title: "Binary bytes written to a file through shell escapes"
+    severity: HIGH
+    confidence: 0.9
+    tags: [execution, staging, obfuscation]
+  - id: account.literal_password_change_via_stdin
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-account-literal-password-change-via-stdin^'
+    title: "Account password set from literal stdin"
+    severity: HIGH
+    confidence: 0.9
+    tags: [persistence, account, credential]
+  - id: exec.download_then_run_fetched_file
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-download-then-run-fetched-file^'
+    title: "File fetched from a bare IP address and then run"
+    severity: HIGH
+    confidence: 0.9
+    tags: [execution, download-exec]
+  - id: source_control.clone_then_run_or_adhoc_push
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-source-control-clone-then-run-or-adhoc-push^'
+    title: "Git clone whose files are then run, or push to an ad-hoc remote"
+    severity: MEDIUM
+    confidence: 0.8
+    tags: [execution, source-control, exfiltration]
+  - id: exec.inline_code_network_and_exec
+    tool_call_only: true
+    # No CEL expression: the semantic rule count is capped (partner headroom). The code-owned proof in
+    # internal/actionfacts selects this rule; the regex is inert.
+    # Inert anchor: never matches, and carries a required literal so the regex prefilter skips it.
+    pattern: 'inert-exec-inline-code-network-and-exec^'
+    title: "Interpreter one-liner asks for network and process-exec capabilities, or a runner executes a URL"
+    severity: HIGH
+    confidence: 0.85
+    tags: [execution, network, opaque-code]
+  - id: CMD-SECRET-REVEAL
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Command prints a stored secret"
+    severity: HIGH
+    confidence: 0.8
+    tags: [credential, secret-reveal]
+  - id: CMD-SECRET-LOOKUP
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Command reads a stored secret or issues a credential"
+    severity: HIGH
+    confidence: 0.8
+    tags: [credential, secret-reveal]
+  - id: CMD-GIT-SHOW-SECRET
+    tool_call_only: true
+    pattern: 'a^'
+    title: "git show prints a committed secret file"
+    severity: HIGH
+    confidence: 0.75
+    tags: [credential, secret-reveal]
+  - id: CMD-PERSIST-SYSTEM-SCHEDULE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Write to a system schedule or sudoers drop-in"
+    severity: HIGH
+    confidence: 0.85
+    tags: [persistence, privilege-escalation]
+  - id: CMD-PRIV-SETUID
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Set-id bit set with chmod"
+    severity: HIGH
+    confidence: 0.8
+    tags: [privilege-escalation]
+  - id: CMD-PRIV-PATH-HIJACK
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Privileged program run with a writable directory first in PATH"
+    severity: HIGH
+    confidence: 0.85
+    tags: [privilege-escalation]
+  - id: MCP-SQL-DESTRUCTIVE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Destructive SQL in a tool call"
+    severity: HIGH
+    confidence: 0.8
+    tags: [destructive, database, mcp]
+  - id: MCP-SQL-PRIVILEGE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Privilege-changing SQL in a tool call"
+    severity: HIGH
+    confidence: 0.8
+    tags: [privilege-escalation, database, mcp]
+  - id: MCP-SQL-AUDIT-OFF
+    tool_call_only: true
+    pattern: 'a^'
+    title: "SQL switches an audit or logging setting off"
+    severity: HIGH
+    confidence: 0.8
+    tags: [defense-evasion, database, mcp]
+  - id: MCP-SQL-CREDENTIAL
+    tool_call_only: true
+    pattern: 'a^'
+    title: "SQL sets a credential column"
+    severity: MEDIUM
+    confidence: 0.7
+    tags: [credential, database, mcp]
+  - id: MCP-SEND-REDIRECT
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Tool call copies or redirects its output to another party"
+    severity: HIGH
+    confidence: 0.75
+    tags: [exfiltration, network, mcp]
+  - id: MCP-SEND-COLLECTOR
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Tool call sends to a paste, file-drop or webhook-catcher host"
+    severity: HIGH
+    confidence: 0.85
+    tags: [exfiltration, network, mcp]
+  - id: MCP-SETTING-DOWNGRADE
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Tool call turns a security control off"
+    severity: HIGH
+    confidence: 0.8
+    tags: [defense-evasion, configuration, mcp]
+  - id: MCP-CODE-DECODE-EXEC
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Code tool runs decoded text"
+    severity: HIGH
+    confidence: 0.85
+    tags: [execution, obfuscation, mcp]

@@ -27,6 +27,7 @@ func newEnvironment() (*cel.Env, error) {
 	return cel.NewEnv(
 		cel.Types(root),
 		cel.Variable("f", cel.ObjectType(fullName)),
+		effectFunctions(),
 		cel.ParserExpressionSizeLimit(maxExpressionRunes),
 		cel.ParserRecursionLimit(maxParserRecursion),
 		cel.ParserErrorRecoveryLimit(maxParserRecoveries),

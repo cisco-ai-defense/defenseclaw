@@ -61,3 +61,28 @@ func TestMayMatchNeverSkipsAMatchingText(t *testing.T) {
 		t.Fatal("a text missing a required literal of the concatenation was not skipped")
 	}
 }
+
+func TestNeverMatchingExpressionsAreSkipped(t *testing.T) {
+	big := strings.Repeat("alpha beta gamma delta xy ", 400)
+	for _, c := range []struct {
+		pattern string
+		never   bool
+	}{
+		{`a^`, true},
+		{`(?i)ab^`, true},
+		{`x+^y`, true},
+		{`^a`, false},
+		{`a|^b`, false},
+		{`(?m)^a`, false},
+		{`a$`, false},
+		{`\b`, false},
+	} {
+		re := regexp.MustCompile(c.pattern)
+		if got := !MayMatch(re, big); got != c.never {
+			t.Errorf("MayMatch(%q) skipped = %v, want %v", c.pattern, got, c.never)
+		}
+		if c.never && re.MatchString(big) {
+			t.Errorf("%q matched, so it is not unsatisfiable", c.pattern)
+		}
+	}
+}
