@@ -555,12 +555,21 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
-		if cut := trustedReadingCut(request.Input, facts); cut.Any() {
-			// The reading of the call stopped at a cap of its own under the
-			// statement budget: the call is TRUNCATED (the one bound rule),
-			// never judged below the unknown tier of its pack, and what was
-			// read still decides (trustedReadingCut).
-			defer func() { findings = withBoundedTruncation(findings, cut, request) }()
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+			(facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell) {
+			// A CMD or PowerShell reading stopped at its command cap under the
+			// statement budget is truncated (the one bound rule): the call is
+			// never judged below the unknown tier of its pack. A CMD reading
+			// capped at 127 to 257 statements had no limit finding and was
+			// allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell
+			// one: one `$o = & git rev-parse HEAD` statement is two commands,
+			// so about 64 statements fill the cap, and a registry write beside
+			// 100 such lines was found but allowed in every pack
+			// (rel-1-0-10:GAP-0589). A POSIX reading is not truncated by its
+			// command cap: its per-statement split (SimpleCommands) reads every
+			// statement up to the statement budget (ShellStatementsOverBudget),
+			// and each is judged.
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
 			if facts.Parse.Dialect == actionfacts.DialectPowerShell && !request.readingTwin {
 				// The statements of the call are also read in runs that fit
 				// under the cap, so a block proven on a run keeps its own
@@ -9468,53 +9477,6 @@ func stateGlobTwinRequest(request trustedActionRequest) (trustedActionRequest, b
 		return trustedActionRequest{}, false
 	}
 	return bashReadingRequest(request, command, rewritten), true
-}
-
-// trustedReadingCut is the cap at which the reading of a shell call stopped
-// under the statement budget, the one point every dialect's limit_exceeded
-// reaches (the one bound rule): such a call is TRUNCATED.
-//   - The input bound of a shell command line (actionfacts.MaxCommandBytes),
-//     in every dialect, cap=bytes (a native write or read tool past the
-//     bound keeps its own bounded readings, over_limit_write_targets.go):
-//     a Windows-hook command padded past 64 KiB
-//     was read in no dialect and was a clean allow in every pack, with no
-//     limit finding (rel-1-0-10:GAP-0611). Its bounded twin (comments and
-//     padding removed, overLimitCommandBoundedTwinRequest) still proves
-//     what the text holds.
-//   - The command cap of a CMD or PowerShell reading, cap=items: a CMD
-//     reading capped at 127 to 257 statements had no limit finding and was
-//     allowed in strict (rel-1-0-10:GAP-0426), and so was a PowerShell one:
-//     one `$o = & git rev-parse HEAD` statement is two commands, so about 64
-//     statements fill the cap, and a registry write beside 100 such lines was
-//     found but allowed in every pack (rel-1-0-10:GAP-0589). The statements
-//     of a capped PowerShell reading are read again in runs under the cap
-//     (actionfacts.PowerShellCappedRuns).
-//
-// A POSIX reading is not truncated by its command cap: its per-statement
-// split (SimpleCommands) reads every statement up to the statement budget
-// (ShellStatementsOverBudget), and each is judged.
-func trustedReadingCut(input actionfacts.Input, facts actionfacts.Facts) bounded.CapSet {
-	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
-		return bounded.CapSet{}
-	}
-	if command, known := trustedBashCommandInput(input); known && len(command) > actionfacts.MaxCommandBytes &&
-		trustedShellCommandTool(input.Tool) {
-		return bounded.Of(bounded.Bytes)
-	}
-	if facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell {
-		return bounded.Of(bounded.Items)
-	}
-	return bounded.CapSet{}
-}
-
-// trustedShellCommandTool reports a tool whose input is a shell command
-// line: a POSIX, PowerShell or CMD execution tool.
-func trustedShellCommandTool(tool string) bool {
-	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "cmd", "cmd.exe":
-		return true
-	}
-	return trustedBashExecutionTool(tool) || trustedPowerShellExecutionTool(tool)
 }
 
 // trustedStatementBudgetExceeded reports whether a shell call whose

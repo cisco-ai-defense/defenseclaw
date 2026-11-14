@@ -280,8 +280,7 @@ func overLimitTwinDialect(request trustedActionRequest, input actionfacts.Input)
 		return claudeCodeWindowsShellDialect(input)
 	}
 	if len(input.Args) == 0 {
-		dialect, _ := selectWindowsShellDialectReading(input.Tool, input.Command, input)
-		return dialect
+		return selectWindowsShellDialect(input.Tool, input.Command, input)
 	}
 	return agentHookWindowsShellDialect(input)
 }
