@@ -39,8 +39,6 @@ func r106PerUserVerdict(t *testing.T, connector string, payload []byte, header s
 		return "block"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
-	case strings.HasPrefix(body, `{"action":"alert"`):
-		return "alert"
 	}
 	return fmt.Sprintf("status %d body %.200s", recorder.Code, body)
 }

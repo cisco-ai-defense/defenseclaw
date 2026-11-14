@@ -1364,7 +1364,7 @@ func TestTrustedToolCallDynamicEvalAlerts(t *testing.T) {
 	for _, command := range []string{
 		`eval \"$(echo true)\"`,
 		`eval \"$PAYLOAD\"`,
-		`cd /tmp && eval \"$(echo true)\"`,
+		`cd /tmp && eval \"$(ssh-agent -s)\"`,
 	} {
 		findings := scanTrustedToolArgs(t, "Bash", `{"command":"`+command+`"}`)
 		index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == "CMD-EVAL" })
