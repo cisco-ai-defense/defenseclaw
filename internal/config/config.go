@@ -1832,6 +1832,10 @@ type GuardrailConfig struct {
 	// (#1390). Empty by default. Read through IsInternalDomainHost.
 	InternalDomains []string `mapstructure:"internal_domains" yaml:"internal_domains,omitempty"`
 
+	// Cascade is guardrail.cascade: the live/shadow switches of the
+	// guardrail lanes (guardrail_lanes.go).
+	Cascade GuardrailCascade `mapstructure:"cascade" yaml:"cascade,omitempty"`
+
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
 	// gateway maps a finding's severity to an action: BlockAt is the
@@ -2366,7 +2370,10 @@ func (g *GuardrailConfig) Validate() error {
 	if err := validateAllowPrivateUpstreams(g.AllowPrivateUpstreams); err != nil {
 		return err
 	}
-	return validateInternalDomains(g.InternalDomains)
+	if err := validateInternalDomains(g.InternalDomains); err != nil {
+		return err
+	}
+	return validateGuardrailCascade(g.Cascade)
 }
 
 // validateGuardrailMode accepts the empty string (inherit/default) and

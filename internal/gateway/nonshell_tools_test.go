@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func nonShellReq(tool, args string, strict bool) trustedActionRequest {
@@ -289,6 +290,10 @@ func TestNonShellToolRound2Quiet(t *testing.T) {
 		{"callback on the call's own API", "mcp__http__post", `{"url":"https://api.corp.example/v1/x","callback_url":"https://api.corp.example/hook"}`},
 		{"search prose", "mcp__acme__search_issues", `{"query":"drop table of contents"}`},
 		{"prose that starts with a bracket", "mcp__acme__post_comment", `{"note":"[INFO] build finished"}`},
+		{"N5ChatMessageKeyPath", "mcp__slack__post_message", `{"channel":"C1","message":"/home/u/.ssh/id_rsa"}`},
+		{"N5MailHtmlBodyJSON", "mcp__gmail__send_email", `{"to":"a@corp.example","subject":"s","html_body":"{\"file\":\"/home/u/.ssh/id_rsa\",\"error\":\"permission denied\"}"}`},
+		{"N5IssueDescriptionJSON", "mcp__jira__create_issue", `{"project":"P","summary":"s","description":"{\"file\":\"/home/u/.ssh/id_rsa\",\"error\":\"permission denied\"}"}`},
+		{"N5IssueCommentURI", "mcp__github__add_issue_comment", `{"owner":"o","repo":"r","issue_number":1,"body":"file:///home/u/.ssh/id_rsa"}`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			for _, strict := range []bool{false, true} {
@@ -404,9 +409,16 @@ func TestNonShellRedirectIsAnAlertAtMost(t *testing.T) {
 	}
 }
 
+func nonShellLaneCtx(mode string) context.Context {
+	cfg := &config.Config{}
+	if mode != "" {
+		cfg.Guardrail.Cascade.Lanes = map[string]string{config.NonShellLane: mode}
+	}
+	return withPinnedGeneration(context.Background(), &Generation{Config: cfg, N: 1})
+}
+
 func TestNonShellLaneShadowSwitch(t *testing.T) {
-	ctx := context.Background()
-	t.Cleanup(func() { nonShellShadow = false })
+	ctx := nonShellLaneCtx("on")
 	req := nonShellReq("mcp__acme__read_file", `{"path":"/home/u/.ssh/id_rsa"}`, true)
 	if got := nonShellToolFindings(ctx, req, nil, ""); len(got) == 0 {
 		t.Fatal("the lane is live by default")
@@ -415,12 +427,53 @@ func TestNonShellLaneShadowSwitch(t *testing.T) {
 	if got := shellToolFindings(ctx, nonShellReq("Bash", string(shell), true), nil); len(got) == 0 {
 		t.Fatal("the shell rules are live by default")
 	}
-	nonShellShadow = true
+	// guardrail.cascade.lanes.nonshell unset is on, as is a request with no configuration.
+	for _, c := range []context.Context{nonShellLaneCtx(""), context.Background()} {
+		if got := nonShellToolFindings(c, req, nil, ""); len(got) == 0 {
+			t.Fatal("the lane is on without a setting")
+		}
+	}
+	ctx = nonShellLaneCtx("shadow")
 	prior := []RuleFinding{{RuleID: "X", Severity: "LOW"}}
 	if got := nonShellToolFindings(ctx, req, prior, ""); len(got) != 1 || got[0].RuleID != "X" {
 		t.Fatalf("shadow: the lane must add nothing: %+v", got)
 	}
 	if got := shellToolFindings(ctx, nonShellReq("Bash", string(shell), true), prior); len(got) != 1 {
 		t.Fatalf("shadow: the shell rules must add nothing: %+v", got)
+	}
+}
+
+// GAP-0450: a native tool's text argument opens no MCP walk, even when it is
+// exactly a file URI; the place it names (path, url) still does.
+func TestNonShellNativeTextArgumentsOpenNoWalk(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		id, tool, args string
+		opens          bool
+	}{
+		{"N5NativeEditOldStringURI", "Edit", `{"file_path":"/home/u/work/cfg.json","old_string":"file:///home/u/.ssh/id_rsa","new_string":"x"}`, false},
+		{"N5NativeGrepPatternURI", "Grep", `{"pattern":"file:///home/u/.ssh/id_rsa","path":"/home/u/work"}`, false},
+		{"N5NativeReadFileURI", "Read", `{"file_path":"file:///home/u/.ssh/id_rsa"}`, true},
+		{"N5NativeWebFetchFileURI", "WebFetch", `{"url":"file:///home/u/.ssh/id_rsa","prompt":"x"}`, true},
+	} {
+		req := nonShellReq(c.tool, c.args, true)
+		if got := nonShellToolApplies(req, ""); got != c.opens {
+			t.Errorf("%s: nonShellToolApplies = %v, want %v", c.id, got, c.opens)
+		}
+		got := nonShellToolFindings(ctx, req, nil, "")
+		if c.opens && len(got) == 0 {
+			t.Errorf("%s: a file URI the tool names must be judged", c.id)
+		}
+		if !c.opens && len(got) != 0 {
+			t.Errorf("%s: findings = %+v", c.id, got)
+		}
+	}
+}
+
+// GAP-0337 residual: file: followed by a percent-encoded slash is the location.
+func TestNonShellEncodedSlashesAfterTheScheme(t *testing.T) {
+	got := nonShellToolFindings(context.Background(), nonShellReq("mcp__acme__read_resource", `{"uri":"file:%2Fhome%2Fu%2F.ssh%2Fid_rsa"}`, false), nil, "")
+	if _, ok := findingByID(got, "PATH-SSH-KEY"); !ok {
+		t.Fatalf("FileURIEncodedSlashes: %+v", got)
 	}
 }

@@ -41,6 +41,16 @@ servers:
   mail: mail
   email: mail
   outlook: mail
+  jira: issue
+  linear: issue
+  asana: issue
+  trello: issue
+  zendesk: issue
+  servicenow: issue
+  issue: issue
+  issues: issue
+  ticket: issue
+  tickets: issue
   slack: chat
   discord: chat
   teams: chat
@@ -65,11 +75,11 @@ verbs:
 
 # Argument names that carry a path. The value must also look like a path.
 path_keys:
-  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd, relative_path, rel_path, relative_file_path, file_name, path_in_project, pathname, path_name, file_uri, resource_uri, absolute_path, abs_path, full_path, filepaths, file_paths]
+  read: [path, paths, file, files, file_path, filepath, filename, filenames, src, source, input, input_path, input_file, from, target, root, dir, directory, folder, uri, location, cwd, relative_path, rel_path, relative_file_path, file_name, path_in_project, pathname, path_name, file_uri, resource_uri, absolute_path, abs_path, full_path, filepaths, file_paths, attachment, attachments, attached_file, attached_files]
   write: [output, output_path, output_file, dest, destination, dst, to_path, out, out_path, save_to]
 # A key that ends in one of these words (after normalising: relative_path, fileName)
 # also carries a path.
-path_key_suffixes: [path, paths, file, files, file_name, file_path, filepath, filename, pathname]
+path_key_suffixes: [path, paths, file, files, file_name, file_path, filepath, filename, pathname, attachment, attachments]
 # Server segments (mcp__<server>__) whose verbs have one certain meaning, so the
 # role of their path effects is known, not guessed.
 known_roles:
@@ -77,6 +87,18 @@ known_roles:
   fs: [read, write, delete, list]
 # Argument names whose value is text the call writes.
 content_keys: [content, contents, text, data, body, file_text, new_text, new_string, new_str, replacement, insert_text, new_content, file_content]
+# Tools that send, post, comment or write text for people or into a record (a
+# mail, chat or issue tool; a comment, reply or post). What such a call carries
+# in its free-text arguments (message, html_body, description, body, ...) is
+# data, whatever its spelling: a JSON document, a pasted error, a path or a
+# file URI in it is text, never a location. Only the keys that name a place
+# (path, input, attachment, url, recipient and the like) are read, whatever the
+# tool. A tool is a text tool by its family or by a token of its name, unless
+# its family is one that names a place by its arguments.
+text_tools:
+  families: [mail, chat, issue]
+  tokens: [comment, comments, reply, replies, post, posts, message, messages, issue, issues, ticket, tickets, note, notes]
+  except_families: [fs, http, db, k8s, code]
 # Name tokens of a search or lookup tool: its query key is a free-text search, not a statement.
 search_tokens: [search, find, lookup, grep, browse, suggest, autocomplete, ask]
 # A call with one of these keys beside a tool name has the shape of a proxy tool.

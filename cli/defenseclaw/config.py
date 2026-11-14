@@ -3090,6 +3090,10 @@ class GuardrailConfig:
     # under one does not start the download-then-execute alert (#1390).
     # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
     internal_domains: list[str] = field(default_factory=list)
+    # guardrail.cascade, kept as written: today only ``lanes`` (``nonshell``:
+    # ``shadow`` | ``on``, default on). The gateway validates it. Mirrors
+    # ``GuardrailConfig.Cascade`` in internal/config/config.go.
+    cascade: dict[str, Any] = field(default_factory=dict)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``
     # | ``HIGH`` | ``MEDIUM`` | ``LOW``). Empty keeps the rule pack's
     # profile levels (strict: MEDIUM / LOW, permissive: CRITICAL / HIGH,
@@ -5721,6 +5725,8 @@ def _serialize_v9_guardrail_keys(guardrail: Any) -> None:
         guardrail.pop("cisco_trust_level", None)
     if not guardrail.get("internal_domains"):
         guardrail.pop("internal_domains", None)
+    if not guardrail.get("cascade"):
+        guardrail.pop("cascade", None)
     judge = guardrail.get("judge")
     if isinstance(judge, dict) and not judge.get("trace"):
         judge.pop("trace", None)
@@ -7011,6 +7017,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
         cisco_trust_level=str(raw.get("cisco_trust_level", "") or ""),
         internal_domains=_string_list(raw.get("internal_domains")),
+        cascade=dict(raw["cascade"]) if isinstance(raw.get("cascade"), dict) else {},
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
         connector=raw.get("connector", ""),

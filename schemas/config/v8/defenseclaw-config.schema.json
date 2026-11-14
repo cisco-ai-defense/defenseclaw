@@ -2188,6 +2188,24 @@
           },
           "description": "The organization's own domains. A download from a host equal to or under one does not start the download-then-execute alert."
         },
+        "cascade": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "guardrail.cascade: the live/shadow switches of the guardrail lanes.",
+          "properties": {
+            "lanes": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "nonshell": {
+                  "type": "string",
+                  "enum": ["shadow", "on"],
+                  "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow computes nothing and adds nothing, so the verdicts are those of a build without the lane."
+                }
+              }
+            }
+          }
+        },
         "detection_strategy": {
           "$ref": "#/$defs/detectionStrategy"
         },
