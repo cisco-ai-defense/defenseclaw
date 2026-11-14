@@ -98,29 +98,46 @@ func isSyntaxTailUnread(simple SimpleCommand) bool {
 // EvaluationFailureSyntax marker for the part that was not read. A statement
 // keeps the readings it has alone, a limit included.
 func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
-	result := make([]SimpleCommand, 0, len(tail.Statements)+1)
+	result := make([]SimpleCommand, 0, len(tail.Statements)+2)
 	emitted := make(map[SimpleCommand]bool, len(tail.Statements))
+	capped := tail.Truncated.Any()
 	add := func(command SimpleCommand) bool {
+		if len(result) >= maxSimpleEvaluations {
+			capped = true
+			return false
+		}
 		if !emitted[command] {
 			emitted[command] = true
 			result = append(result, command)
 		}
-		return len(result) <= maxSimpleEvaluations
+		return true
 	}
+read:
 	for _, statement := range tail.Statements {
 		piece := input
 		piece.Command, piece.Args, piece.Argv = statement, nil, nil
+		// The statement as written is judged whatever its own reading
+		// finds: its raw-text and whole-call readers run on it.
 		if !add(SimpleCommand{Text: statement, CWD: input.CWD}) {
-			return []SimpleCommand{{EvaluationFailure: "limit"}}
+			break
 		}
 		for _, command := range simpleCommands(piece, Analyze(piece), depth+1, interpreter, inherited, guess, nil) {
+			if command.EvaluationFailure == "limit" {
+				// A statement whose own reading is past the statement
+				// budget is a capped reading of the text, not a refusal of
+				// the call: what was read is judged and the cap adds the
+				// evaluation-limit finding (the bound rule,
+				// rel-1-0-10:GAP-0744).
+				capped = true
+				continue
+			}
 			if !add(command) {
-				return []SimpleCommand{{EvaluationFailure: "limit"}}
+				break read
 			}
 		}
 	}
 	result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
-	if tail.Truncated.Any() {
+	if capped {
 		// The reading stopped at a cap: the call is at least the unknown
 		// tier of the pack, and the statements read before the cap are
 		// still judged (the bound rule).

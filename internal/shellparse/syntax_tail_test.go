@@ -114,3 +114,22 @@ func FuzzReadSyntaxTail(f *testing.F) {
 		}
 	})
 }
+
+// rel-1-0-10:GAP-0745: a statement longer than the run window, and a
+// prefix cut back past its tries, are caps the reading reports; a quote in a
+// comment opens nothing; a here-document body stays in its statement.
+func TestReadSyntaxTailReportsItsWindowsAndKeepsCommentsAndHereDocs(t *testing.T) {
+	long := "fi\nif true\n" + strings.Repeat("then\n", maxSyntaxTailRun+2) + "x"
+	if tail, ok := ReadSyntaxTail(long); !ok || !tail.Truncated.Has(bounded.Items) {
+		t.Errorf("a statement past the run window: ok %v truncated %q, want the items cap", ok, tail.Truncated.Reason())
+	}
+	comment := "fi\n# it's a note\necho b"
+	if tail, ok := ReadSyntaxTail(comment); !ok || !slices.Contains(tail.Statements, "echo b") {
+		t.Errorf("a quote in a comment: %q, want the statement after it read", tail.Statements)
+	}
+	heredoc := "fi\ncat <<'EOF'\n" + strings.Repeat("echo data\n", maxSyntaxTailRun+3) + "EOF\necho c"
+	tail, ok := ReadSyntaxTail(heredoc)
+	if !ok || slices.Contains(tail.Statements, "echo data") || !slices.Contains(tail.Statements, "echo c") {
+		t.Errorf("a here-document after the error: %q, want its body kept as data and the next statement read", tail.Statements)
+	}
+}

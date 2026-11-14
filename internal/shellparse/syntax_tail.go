@@ -132,7 +132,14 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	}
 	// The error is inside the statement after the complete ones: the text
 	// up to it, cut back word by word, is the longest prefix that parses.
-	for at, tries := errorAt, 0; at > end && tries < maxSyntaxTailRun*2; tries++ {
+	// Past the tries the cut stops and the reading says so
+	// (rel-1-0-10:GAP-0745).
+	cutCapped := false
+	for at, tries := errorAt, 0; at > end; tries++ {
+		if tries >= maxSyntaxTailRun*2 {
+			cutCapped = true
+			break
+		}
 		if prefix := trimSeparators(command[:at]); prefix != "" && parsesAlone(prefix, &budget) {
 			end = at
 			break
@@ -147,9 +154,11 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 	if !split {
 		trunc.Hit(bounded.Items)
 	}
+	runCapped := false
 	for start := 0; start < len(pieces) && !trunc.Set().Any(); {
 		next := start + 1
-		for stop := start; stop < len(pieces) && stop < start+maxSyntaxTailRun; stop++ {
+		stop := start
+		for ; stop < len(pieces) && stop < start+maxSyntaxTailRun; stop++ {
 			run := trimSeparators(rest[pieces[start].from:pieces[stop].to])
 			if run == "" {
 				break
@@ -160,7 +169,15 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 				break
 			}
 		}
+		if next == start+1 && stop == start+maxSyntaxTailRun && stop < len(pieces) {
+			// No run of up to maxSyntaxTailRun pieces from here parses: a
+			// statement longer than that is not read (GAP-0745).
+			runCapped = true
+		}
 		start = next
+	}
+	if cutCapped || runCapped {
+		trunc.Hit(bounded.Items)
 	}
 	tail.Truncated = trunc.Set(&budget, &statements)
 	return tail, true
@@ -227,11 +244,15 @@ func parsesAlone(statement string, budget *bounded.Counter) bool {
 type tokenPiece struct{ from, to int }
 
 // tokenPieces splits text at newlines and at the ; & | operators outside
-// single quotes, double quotes and backslash escapes. ok is false past
+// single quotes, double quotes and backslash escapes. A comment runs to the
+// end of its line (a quote in it opens nothing), and a here-document body
+// stays in the piece of the statement that opens it, through its delimiter
+// line: its lines are data (rel-1-0-10:GAP-0745, GAP-0746). ok is false past
 // maxSyntaxTailPieces (the pieces before the cap are returned).
 func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 	from := 0
 	var quote byte
+	var pending []heredocMark
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		switch {
@@ -251,6 +272,22 @@ func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 		case c == '\'' || c == '"':
 			quote = c
 			continue
+		case c == '#' && (i == from || strings.IndexByte(" \t\n;&|(", text[i-1]) >= 0):
+			for i+1 < len(text) && text[i+1] != '\n' {
+				i++
+			}
+			continue
+		case c == '<' && strings.HasPrefix(text[i:], "<<") && !strings.HasPrefix(text[i:], "<<<"):
+			if mark, next, found := heredocMarkAt(text, i+2); found {
+				pending = append(pending, mark)
+				i = next - 1
+			}
+			continue
+		case c == '\n' && len(pending) > 0:
+			// The bodies start on the next line: the piece runs through the
+			// last delimiter line (or to the end of the text).
+			i = heredocBodiesEnd(text, i+1, pending) - 1
+			pending = nil
 		case c != '\n' && c != ';' && c != '&' && c != '|':
 			continue
 		}
@@ -267,6 +304,83 @@ func tokenPieces(text string) (pieces []tokenPiece, ok bool) {
 		pieces = append(pieces, tokenPiece{from, len(text)})
 	}
 	return pieces, true
+}
+
+// heredocMark is the delimiter of one here-document; dash strips leading
+// tabs from its lines (<<-).
+type heredocMark struct {
+	word string
+	dash bool
+}
+
+// heredocMarkAt reads the delimiter word after a << at offset at: an optional
+// -, blanks, then the word with its quotes removed. next is the offset after
+// the word.
+func heredocMarkAt(text string, at int) (mark heredocMark, next int, found bool) {
+	if at < len(text) && text[at] == '-' {
+		mark.dash = true
+		at++
+	}
+	for at < len(text) && (text[at] == ' ' || text[at] == '\t') {
+		at++
+	}
+	var word strings.Builder
+	var quote byte
+	for ; at < len(text); at++ {
+		c := text[at]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			} else {
+				word.WriteByte(c)
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			continue
+		}
+		if c == '\\' && at+1 < len(text) {
+			at++
+			word.WriteByte(text[at])
+			continue
+		}
+		if strings.IndexByte(" \t\n;&|<>()", c) >= 0 {
+			break
+		}
+		word.WriteByte(c)
+	}
+	mark.word = word.String()
+	return mark, at, mark.word != ""
+}
+
+// heredocBodiesEnd is the offset after the delimiter line of the last of
+// marks, whose bodies start at offset at, or len(text) when one is not closed.
+func heredocBodiesEnd(text string, at int, marks []heredocMark) int {
+	for _, mark := range marks {
+		for {
+			if at >= len(text) {
+				return len(text)
+			}
+			end := strings.IndexByte(text[at:], '\n')
+			line := text[at:]
+			if end >= 0 {
+				line = text[at : at+end]
+			}
+			if mark.dash {
+				line = strings.TrimLeft(line, "\t")
+			}
+			if end < 0 {
+				at = len(text)
+			} else {
+				at += end + 1
+			}
+			if line == mark.word {
+				break
+			}
+		}
+	}
+	return at
 }
 
 // trimSeparators drops the space, operators and newlines around a run.
