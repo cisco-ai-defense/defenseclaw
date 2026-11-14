@@ -56,6 +56,24 @@ func dmCorpusAllowed(endpoint, corpus, allow string) error {
 // dmKeyFromEnv checks the secret the gateway client reads (DEFENSECLAW_DECISION_MODEL_KEY); the value is never printed.
 func dmKeyPresent() bool { return os.Getenv("DEFENSECLAW_DECISION_MODEL_KEY") != "" }
 
+// parseLayers is the one reading of -layers: entries are "dm" and "judge", separated by a comma, a plus, a semicolon or a space. The -dm-fill
+// guard and the harness both call it, so they cannot disagree on what a value turns on. The harness used a substring test before, which read
+// "dm;judge" as both layers while the guard (which split on commas) read it as neither; and an entry it does not know ("judges", "DM") is now
+// an error instead of a layer that silently stays off.
+func parseLayers(layers string) (dm, judge bool, err error) {
+	for _, l := range strings.FieldsFunc(layers, func(r rune) bool { return r == ',' || r == '+' || r == ';' || r == ' ' }) {
+		switch l {
+		case "dm":
+			dm = true
+		case "judge":
+			judge = true
+		default:
+			return false, false, fmt.Errorf("-layers: unknown entry %q (use dm, judge)", l)
+		}
+	}
+	return dm, judge, nil
+}
+
 // dmFillJudgeRefused is the -dm-fill guard (rel-1-0-10:GAP-0617). A fill run answers every cache miss with a fixed unsure answer so the
 // real answers can be fetched later; the product escalates an unsure System One answer to the hook judge, so a fill run that has a judge
 // configured would send every miss to the paid judge for decisions that are void. A fill run therefore takes no judge: -judge-model,
@@ -64,6 +82,10 @@ func dmFillJudgeRefused(fill bool, judgeModel, judgeURL, layers string) error {
 	if !fill {
 		return nil
 	}
+	_, wantJudge, err := parseLayers(layers)
+	if err != nil {
+		return err
+	}
 	var set []string
 	if strings.TrimSpace(judgeModel) != "" {
 		set = append(set, "-judge-model")
@@ -71,11 +93,8 @@ func dmFillJudgeRefused(fill bool, judgeModel, judgeURL, layers string) error {
 	if strings.TrimSpace(judgeURL) != "" {
 		set = append(set, "-judge-url")
 	}
-	for _, l := range strings.FieldsFunc(layers, func(r rune) bool { return r == ',' || r == '+' || r == ' ' }) {
-		if l == "judge" {
-			set = append(set, "-layers judge")
-			break
-		}
+	if wantJudge {
+		set = append(set, "-layers judge")
 	}
 	if len(set) == 0 {
 		return nil
