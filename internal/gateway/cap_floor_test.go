@@ -98,15 +98,17 @@ func init() {
 }
 
 // The analysis depth bound is a lane of the bound rule (rel-1-0-10:GAP-0547)
-// for a call that may name a protected target or the state: its plain input
-// lists the state folder inside the nest (a call that names none keeps the
-// verdict of the readers, TestCapFloorCapAloneKeepsItsVerdict). Its limit is
-// the deepest subshell nest the action analysis still reads.
+// for a call that may write a protected target or the state: its plain input
+// is a write to a home file named at run time inside the nest (alone it is an
+// ordinary write, allowed; past the bound the readers no longer see it). A
+// call that writes none keeps the verdict of the readers
+// (TestCapFloorCapAloneKeepsItsVerdict). Its limit is the deepest subshell nest
+// the action analysis still reads.
 func init() {
 	fill := func(size int) string {
-		return strings.Repeat("(", size) + "ls ~/.defenseclaw" + strings.Repeat(")", size)
+		return strings.Repeat("(", size) + `printf done > "$HOME/$OUT"` + strings.Repeat(")", size)
 	}
-	registerBoundedLane(boundedLaneCap{lane: "shell analysis depth", cap: bounded.Depth, limit: capFloorAnalysisDepthLimit(),
+	registerBoundedLane(boundedLaneCap{lane: "shell analysis depth", cap: bounded.Depth, limit: capFloorAnalysisDepthLimit(fill),
 		gen: func(size int, shape boundedShape) (boundedLaneCall, bool) {
 			if shape.nested || shape.multi {
 				return boundedLaneCall{}, false
@@ -120,10 +122,10 @@ func init() {
 var capFloorDepthOnly = map[string]bool{}
 
 // capFloorAnalysisDepthLimit is the largest n for which the action analysis
-// reads n nested subshells.
-func capFloorAnalysisDepthLimit() int {
+// reads fill(n).
+func capFloorAnalysisDepthLimit(fill func(int) string) int {
 	for n := 1; n < shellparse.MaxNestingDepth; n++ {
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: boundedNestedSubshells(n)})
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "Bash", Command: fill(n)})
 		if capFloorAnalysisCaps(facts).Any() {
 			return n - 1
 		}
@@ -259,9 +261,10 @@ func TestCapFloorCapAloneKeepsItsVerdict(t *testing.T) {
 		for _, f := range capFloorFillers {
 			for _, id := range []string{f.name, f.name + "/listing"} {
 				want := bounded.Unknown(tier.tier)
-				if capFloorDepthOnly[f.name] && id == f.name {
-					// Past the analysis depth only, naming no protected
-					// target: the readers' verdict, as on rel (allow).
+				if capFloorDepthOnly[f.name] {
+					// Past the analysis depth only, writing no protected
+					// target (a listing is a read): the readers' verdict, as
+					// on rel (allow).
 					want = bounded.Allow
 				}
 				action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(commands[id]))

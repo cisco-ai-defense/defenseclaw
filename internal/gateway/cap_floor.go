@@ -74,19 +74,18 @@ type capFloorState struct {
 // (capFloorAnalysisCaps): it stopped at its syntax depth or node bound and
 // holds no path of the call (rel-1-0-10:GAP-0547: a state write inside 30
 // nested subshells was allowed in every tier, with no finding). Such a call
-// whose text may name a protected target or the state
-// (hookpaths.BoundCallMayNameProtected) is truncated in the sense of the bound
-// rule: it gets the evaluation-limit finding naming the cap
-// (withBoundedTruncation, at least the unknown tier of the pack), and its
-// pieces are judged as for every other cap. The bound is a syntax-tree depth:
-// 30 terms of a pipe or && list reach it, and the owner traces hold benign
-// scripts of that depth that name no protected target; they keep the verdict
-// of the readers that did read them.
+// that may write a protected target or the state (capFloorMayWriteProtected)
+// is truncated in the sense of the bound rule: it gets the evaluation-limit
+// finding naming the cap (withBoundedTruncation, at least the unknown tier of
+// the pack), and its pieces are judged as for every other cap. The bound is a
+// syntax-tree depth: 30 terms of a pipe or && list reach it, and the owner
+// traces hold benign scripts of that depth that name the DefenseClaw tree in a
+// read or a print; they keep the verdict of the readers that did read them.
 func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet) []RuleFinding {
 	if request.capFloor == nil {
 		return findings
 	}
-	if analyzed.Any() && capFloorMayNameProtected(request, false) {
+	if analyzed.Any() && capFloorMayWriteProtected(request) {
 		findings = withBoundedTruncation(findings, analyzed, request)
 	}
 	if request.capFloorDepth > capFloorMaxDepth ||
@@ -100,7 +99,7 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 	}
 	cwd, home := request.Input.CWD, request.Input.ActiveHome
 	capped := boundedLimitIndex(findings) >= 0
-	if !capped && !strings.Contains(command, "<<") || !capFloorMayNameProtected(request, true) {
+	if !capped && !strings.Contains(command, "<<") || !capFloorMayNameProtected(request) {
 		// A call whose text names no protected target or state has no
 		// piece worth judging: one pass over the text the cut would read,
 		// no cut.
@@ -609,19 +608,49 @@ func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 	return set
 }
 
+// capFloorMayWriteProtected reports a call that may write a protected target
+// or the DefenseClaw state the readers can name: the state-write mention scan
+// of the hook path (hookpaths.ActionStateTargetMention) holds, a write operand
+// the writer readers list (hookpaths.LiteralWriteOperands) may name a
+// protected target however it is spelled (hookpaths.BoundCallMayNameProtected),
+// or a write argument the shell builds at run time may select one
+// (hookpaths.UnprovenProtectedWrite, class dynamic-argument). A command the
+// shell picks at run time (dynamic-command) names no target: the owner traces
+// hold benign scripts of that kind past the depth bound.
+func capFloorMayWriteProtected(request trustedActionRequest) bool {
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || command == "" {
+		return false
+	}
+	cwd, home := request.Input.CWD, request.Input.ActiveHome
+	if request.targetMemo.ActionStateTargetMention(command, cwd, home) {
+		return true
+	}
+	for _, operand := range hookpaths.LiteralWriteOperands(command, cwd, home) {
+		if hookpaths.BoundCallMayNameProtected(operand, cwd, home) {
+			return true
+		}
+	}
+	return hookpaths.UnprovenProtectedWrite(command, cwd, home) == capFloorDynamicArgument
+}
+
+// capFloorDynamicArgument is the unproven-write class of a write argument the
+// shell builds at run time (hookpaths.UnprovenReasonKey values).
+const capFloorDynamicArgument = "dynamic-argument"
+
 // capFloorMayNameProtected reports a call whose command text may name a
 // protected target or the DefenseClaw state, however it is quoted
-// (hookpaths.BoundCallMayNameProtected). windowed reads only the start and
-// the end the cut reads (capFloorPieces) of a call over
-// capFloorHeadScan+capFloorTailScan bytes.
-func capFloorMayNameProtected(request trustedActionRequest, windowed bool) bool {
+// (hookpaths.BoundCallMayNameProtected), in the start and the end the cut
+// reads (capFloorPieces) of a call over capFloorHeadScan+capFloorTailScan
+// bytes.
+func capFloorMayNameProtected(request trustedActionRequest) bool {
 	command := request.Input.Command
 	if command == "" {
 		if field, present, valid := trustedTopLevelCommandField(request.Input.Args); valid && present {
 			command = field
 		}
 	}
-	if windowed && len(command) > capFloorHeadScan+capFloorTailScan {
+	if len(command) > capFloorHeadScan+capFloorTailScan {
 		command = command[:capFloorHeadScan] + "\n" + command[len(command)-capFloorTailScan:]
 	}
 	return command != "" && hookpaths.BoundCallMayNameProtected(command, request.Input.CWD, request.Input.ActiveHome)
