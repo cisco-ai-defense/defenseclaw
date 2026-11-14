@@ -8778,6 +8778,26 @@
         }
       ],
       "since": "1.0.10"
+    },
+    {
+      "name": "DEFENSECLAW_PROPERTY_FULL",
+      "category": "test_fixture",
+      "purpose": "Set to 1 to run the full sweep of the gateway's passthrough and proxy property tests; unset, they run a deterministic pairwise-covering sample.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/property_sample_test.go",
+          "description": "Go test reader (covPropertyFullEnv)"
+        }
+      ],
+      "since": "1.0.10"
     }
   ]
 }

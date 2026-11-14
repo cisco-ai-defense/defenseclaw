@@ -367,7 +367,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 155 test-only variables">
+<Accordion title="Show the 156 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -459,6 +459,7 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_PROCESS_TREE_MARKER`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Marker path written by the managed-breakaway process-tree fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
 | `DEFENSECLAW_PROCESS_TREE_PID_FILE`<br/>Default: `unset`<br/>Values: `absolute test PID path`, `unset`<br/>Managed host: `ignore` | PID-record path shared with the process-tree cancellation fixture.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
 | `DEFENSECLAW_PROCESS_TREE_RELEASE`<br/>Default: `unset`<br/>Values: `test release-event token`, `unset`<br/>Managed host: `ignore` | Release-event token that tells the native Windows process-tree fixture helpers when to exit, so the test controls their lifetime by event instead of by sleep.<br/>**Read by:** `internal/processutil/command_windows_test.go` |
+| `DEFENSECLAW_PROPERTY_FULL`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Set to 1 to run the full sweep of the gateway's passthrough and proxy property tests; unset, they run a deterministic pairwise-covering sample.<br/>**Read by:** `internal/gateway/property_sample_test.go` |
 | `DEFENSECLAW_REQUIRE_PARTITION_MANIFESTS`<br/>Default: `unset` (partition metadata optional in the external regression)<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Requires partition metadata when the external strict normalization-manifest regression is enabled.<br/>**Read by:** `benchmarks/internal/benchmark/manifest_external_test.go` |
 | `DEFENSECLAW_SANDBOX_RENDER_DIR`<br/>Default: `unset`<br/>Values: `absolute-path`, `unset`<br/>Managed host: `ignore` | Names a directory TestSandboxArtifactsGolden writes each harness's rendered sandbox overlay under (&lt;dir>/&lt;connector>/&lt;in-image path>), so a manifest drift can be reviewed by diffing the trees two revisions render.<br/>**Read by:** `internal/gateway/connector/sandbox_artifacts_test.go` |
 | `DEFENSECLAW_SENSOR_HELPER_TEST_PROCESS`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Turns the sensor-helper test binary into the helper itself when a version test re-runs it to check --version and the flag handling of main().<br/>**Read by:** `cmd/defenseclaw-sensor-helper/version_test.go` |
