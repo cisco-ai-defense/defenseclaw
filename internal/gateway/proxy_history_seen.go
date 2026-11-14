@@ -342,34 +342,70 @@ func (p *GuardrailProxy) auditHistoryRedactions(r *http.Request, reds []historyR
 	}
 }
 
-// historyBlameMax is the most current-turn segments a refusal is attributed
-// among, one inspection each; with more, every segment is recorded refused.
+// historyBlameMax is the most attribution inspections one refusal makes
+// (one more judge or AI Defense call each).
 const historyBlameMax = 8
 
 // refusedSegments is what a refused request records as refused (GAP-0257):
 // only the segments the refusal is attributed to, so the text sent next to
 // a refused one (a benign co-turn, a tool result) is not removed when the
-// client sends it back.
+// client sends it back. The candidates are every segment the request had
+// inspected for the first time: its current turns and its fresh history
+// (GAP-0300). A text can first reach the proxy as history (the model's own
+// reply quoting an injection it declined, a compaction summary); blaming
+// only the current turn left that text unrecorded, so it was inspected and
+// refused again on every later request and the session was locked.
 //
 //   - A refusal that is not a guardrail block (an audit that failed closed)
 //     is attributed to nothing: the guardrail allowed the text.
-//   - One current-turn segment (the walker's Turn: not a leading system or
-//     developer turn, the instructions or the tool definitions; a system or
-//     developer turn among the current turns is one, GAP-0265): that one,
-//     with no further inspection. It is the only text of the request the
-//     client can send back as history, and a refusal keeps managed AI
-//     Defense at one call.
-//   - Two to historyBlameMax: each is inspected alone, once, and the ones
-//     the guardrail blocks alone are blamed. This runs only on a refusal
-//     with several current turns (one more AI Defense call each, managed).
-//   - None blamed, no current turn, or too many: the refusal cannot be
-//     attributed and every current-scope segment is recorded refused, as
-//     before (fail safe).
-func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, current, turn []string, label, mode string) []string {
+//   - No fresh history: among the current turns, as before. One current
+//     turn (the walker's Turn: not a leading system or developer turn, the
+//     instructions or the tool definitions, GAP-0265) is blamed with no
+//     further inspection, so a refusal keeps managed AI Defense at one call;
+//     two to historyBlameMax are each inspected alone and the ones that block
+//     alone are blamed; none blamed, none, or more: the current scope is
+//     recorded refused (fail safe).
+//   - Fresh history: the current turns are inspected first, as one group.
+//     When they block alone, the refusal is attributed among them as above
+//     and the history is not blamed. When they do not, the refusal came from
+//     the fresh history (or from the text inspected on every request): a
+//     benign current turn is not blamed. The fresh history is split, in
+//     order, into at most historyBlameMax-1 groups of consecutive segments
+//     and inspected newest group first; the groups that block alone are
+//     blamed. When every group but the oldest is allowed, the oldest is
+//     blamed without its own inspection (by elimination: one call fewer, and
+//     the history text that went first is the one a client wrote before the
+//     model answered). In all, at most historyBlameMax attribution calls.
+func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, current, turn, fresh []string, label, mode string) []string {
 	if v == nil || v.Action != "block" {
 		return nil
 	}
 	cands := uniqueSegments(turn)
+	hist := uniqueSegments(fresh)
+	if len(hist) == 0 || p.inspector == nil {
+		return p.blameAmong(ctx, cands, current, label, mode)
+	}
+	if len(cands) > 0 && p.blocksAlone(ctx, cands, label, mode) {
+		return p.blameAmong(ctx, cands, current, label, mode)
+	}
+	if len(hist) == 1 {
+		return hist
+	}
+	groups := historyGroups(hist, historyBlameMax-1)
+	var blamed []string
+	for i := len(groups) - 1; i >= 1; i-- {
+		if p.blocksAlone(ctx, groups[i], label, mode) {
+			blamed = append(blamed, groups[i]...)
+		}
+	}
+	if len(blamed) == 0 || p.blocksAlone(ctx, groups[0], label, mode) {
+		blamed = append(blamed, groups[0]...)
+	}
+	return blamed
+}
+
+// blameAmong attributes a refusal among the current turns cands (GAP-0257).
+func (p *GuardrailProxy) blameAmong(ctx context.Context, cands, current []string, label, mode string) []string {
 	if len(cands) == 1 {
 		return cands
 	}
@@ -378,7 +414,7 @@ func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, cu
 	}
 	var blamed []string
 	for _, s := range cands {
-		if alone := p.inspector.Inspect(ctx, "prompt", promptInspectionText(s), nil, label, mode); alone != nil && alone.Action == "block" {
+		if p.blocksAlone(ctx, []string{s}, label, mode) {
 			blamed = append(blamed, s)
 		}
 	}
@@ -386,6 +422,46 @@ func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, cu
 		return current
 	}
 	return blamed
+}
+
+// blocksAlone inspects segs alone, as one text, once.
+func (p *GuardrailProxy) blocksAlone(ctx context.Context, segs []string, label, mode string) bool {
+	v := p.inspector.Inspect(ctx, "prompt", promptInspectionText(strings.Join(segs, "\n")), nil, label, mode)
+	return v != nil && v.Action == "block"
+}
+
+// historyGroups splits segs, in order, into at most n groups of consecutive
+// segments.
+func historyGroups(segs []string, n int) [][]string {
+	size := (len(segs) + n - 1) / n
+	var out [][]string
+	for i := 0; i < len(segs); i += size {
+		out = append(out, segs[i:min(i+size, len(segs))])
+	}
+	return out
+}
+
+// historyRequestPrint names a whole request (every segment it carries, in
+// order): a refused request records it, so the same request sent again is
+// refused again rather than redacted (GAP-0244), while a session that went
+// on after the refusal has its refused turns removed (GAP-0300).
+func historyRequestPrint(segments, history []string) string {
+	sum := sha256.New()
+	for _, part := range [][]string{segments, history} {
+		for _, s := range part {
+			sum.Write([]byte(s))
+			sum.Write([]byte{0})
+		}
+		sum.Write([]byte{1})
+	}
+	return "\x00defenseclaw-refused-request\x00" + string(sum.Sum(nil))
+}
+
+// retried reports that scope recorded the request named print as refused:
+// the client sends the refused request again.
+func (s *historySeen) retried(ctx context.Context, scope, print string) bool {
+	_, refused := s.fresh(ctx, scope, []string{print})
+	return len(refused) > 0
 }
 
 func uniqueSegments(segs []string) []string {
