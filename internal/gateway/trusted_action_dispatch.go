@@ -378,6 +378,10 @@ func dispatchTrustedAction(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	defer recoverTrustedActionFault(request, &findings)
+	if trustedActionFaultHook != nil {
+		trustedActionFaultHook(request)
+	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
 	if ManagedEnterpriseActive() {

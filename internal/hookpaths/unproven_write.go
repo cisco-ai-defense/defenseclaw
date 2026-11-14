@@ -4,12 +4,14 @@
 package hookpaths
 
 import (
+	"errors"
 	"io"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -132,6 +134,9 @@ type unprovenParseBudget struct {
 	bytes   int
 	calls   int
 	bounded bool
+	// trunc records a recovered parse the parser could not finish
+	// (shellparse.ParseRecovering); bounded is set with it.
+	trunc bounded.Truncated
 }
 
 func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *unprovenParseBudget) string {
@@ -466,7 +471,14 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		budget.bounded = true
 		return true // Beyond the command proof bound, effects are unknown.
 	}
-	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
+	file, err := shellparse.ParseRecovering(command, 8, &budget.trunc)
+	if errors.Is(err, shellparse.ErrParserFault) {
+		// The parser failed internally on this text (rel-1-0-10:GAP-0437).
+		// The reading is truncated (budget.trunc): nothing proves its
+		// effects, so it is past the proof bound, the pack's unknown tier.
+		budget.bounded = true
+		return true
+	}
 	if file == nil {
 		return strings.Contains(command, ">") ||
 			unprovenWriter.MatchString(command) && protectedReachFromText(command, cwd, home)

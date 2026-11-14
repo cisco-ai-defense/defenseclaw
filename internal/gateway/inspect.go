@@ -2312,6 +2312,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	} else {
 		workerDone := a.inspectToolWorkerDone
 		go func() {
+			// This goroutine is outside net/http's handler recovery: a
+			// panic here would end the gateway process (GAP-0437). A
+			// failed check answers block unless a verdict was already sent.
+			defer recoverGatewayGoroutine("inspect/tool", func() {
+				select {
+				case ch <- verdictResult{toolCheckFaultVerdict()}:
+				default:
+				}
+			})
 			if workerDone != nil {
 				defer workerDone()
 			}
