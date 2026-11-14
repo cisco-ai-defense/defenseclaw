@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -356,6 +357,44 @@ func TestToolResultDataRuleSkippedByTag(t *testing.T) {
 	} {
 		if got := toolResultDataRuleSkipped(tc.tags); got != tc.skip {
 			t.Errorf("tags %v: skipped=%v, want %v", tc.tags, got, tc.skip)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0461: an email address in a tool's own output (a CRM
+// record, a calendar event, a mail search) is not an alert, in every pack.
+// The email rules carry the contact tag, so the tool-result path leaves them
+// out; the same text in a prompt or in a tool call's arguments (an outbound
+// send) is still checked.
+func TestEmailRulesOffToolOutputStillOnPromptsAndCalls(t *testing.T) {
+	for _, profile := range []string{"default", "strict", "permissive"} {
+		for _, id := range []string{"PII-EMAIL-FIELD", "PII-EMAIL-LIST", "ENT-EMAIL-BULK"} {
+			if rule := alertFatigueRule(t, profile, id); !toolResultDataRuleSkipped(rule.Tags) {
+				t.Errorf("%s %s: tags %v, want a contact tag (left out of tool output)", profile, id, rule.Tags)
+			}
+		}
+	}
+	field := `{"customer":"Test User","email":"test.user@corp-mail.test","status":"active"}`
+	var list strings.Builder
+	for i := 0; i < 6; i++ {
+		fmt.Fprintf(&list, "user%d@corp-mail.test, ", i)
+	}
+	gen := snapshotRulePackGeneration("")
+	for name, text := range map[string]string{"field": field, "list": list.String()} {
+		out := toolResultRuleIDs(toolResultRuleFindings(gen, text, ruleContentScopeUntrusted, true))
+		in := toolResultRuleIDs(scanContentRulesWithOptions(gen, text, "message", ruleContentScopeUntrusted, ruleScanOptions{}))
+		call := toolResultRuleIDs(ScanAllRules(text, "send_email"))
+		for _, id := range []string{"PII-EMAIL-FIELD", "PII-EMAIL-LIST", "ENT-EMAIL-BULK"} {
+			if out[id] != "" {
+				t.Errorf("%s: %s on a tool result (%v), want it left out", name, id, out)
+			}
+		}
+		want := map[string]string{"field": "PII-EMAIL-FIELD", "list": "PII-EMAIL-LIST"}[name]
+		if in[want] == "" {
+			t.Errorf("%s: prompt text lost %s: %v", name, want, in)
+		}
+		if call[want] == "" {
+			t.Errorf("%s: tool-call arguments lost %s: %v", name, want, call)
 		}
 	}
 }

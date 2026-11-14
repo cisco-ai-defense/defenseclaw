@@ -52,11 +52,17 @@ The checks:
   judges every result the rules did not already block, `judge_first` every
   result.
 
-Not checked on tool output: the contact and payment rules of enterprise-data
-(email addresses, phone numbers, card numbers, IBANs). In a tool's output
-those are the data you asked the tool for. The regulated identifiers (Social
-Security, passport, licence and NHS numbers, medical records, dates of birth)
-stay checked. The PII judge likewise reads a tool's output only when
+Not checked on tool output: the enterprise-data rules tagged `contact`, `pci`
+or `financial`, that is email addresses (`ENT-EMAIL-BULK`, `PII-EMAIL-FIELD`,
+`PII-EMAIL-LIST`), phone numbers (`ENT-US-PHONE`, `ENT-PHONE-E164`), card
+numbers and IBANs. In a tool's output (an inbox, a contact list, a calendar
+event, a CRM record) those are the data you asked the tool for. The same
+rules still run on prompts, model replies and tool-call arguments, so an
+address the agent sends out in a call is still checked. The regulated
+identifiers (Social Security, passport, licence and NHS numbers, medical
+records, dates of birth), the bulk SSN and account-record rules and your own
+rules stay checked; a rule of yours is left out only if you tag it `contact`,
+`pci` or `financial`. The PII judge likewise reads a tool's output only when
 the pack lists the tool in `sensitive-tools.yaml` with `judge_result: true`.
 To alert on personal data in the output of particular tools, list them there
 (`result_inspection`, `min_entities_for_alert`). Command and path rules
