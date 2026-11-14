@@ -132,6 +132,10 @@ With `routing.sensitive` set (`aliases` plus `severity_at_least` and/or `signals
 - **Size bounds.** With `routing.sensitive` set, the route-only listener refuses a body over 64 MiB (HTTP 413) and answers HTTP 503 with `Retry-After` while its shared request buffer is full, instead of sending the request unchecked.
 - **Keyless local models.** A model with its own loopback `base_url` and no `api_key_env` or `credential` (Ollama, vLLM on this host) is called with no credential, also when the agent signs in with a login or a Bedrock bearer key. A sensitive request tries its local models this way at any address.
 
+## Going back to a release before 1.0.10
+
+A release before 1.0.10 has no route-only listener, so the Claude Code and Codex model settings route-only changed go back first. `defenseclaw rollback` (and `defenseclaw upgrade --version` on Windows) does it in the installer, after its prompt, with the gateway stopped. On Linux and macOS, `defenseclaw upgrade --version 1.0.9` asks first (or takes `--yes`), stops the gateway and puts them back; if they cannot be put back, or the older installer fails, the gateway of this release starts again and writes them again. Restart the agent afterwards. When you run an older release's installer yourself (`install.sh --version 1.0.9`), run `defenseclaw routing disable --connector <name>` for each route-only connector first.
+
 ## Disable routing
 
 ```bash

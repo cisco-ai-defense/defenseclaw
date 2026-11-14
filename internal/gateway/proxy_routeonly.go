@@ -389,6 +389,15 @@ func routeOnlyOverloaded(w http.ResponseWriter) {
 	routeOnlyError(w, http.StatusServiceUnavailable, "overloaded_error", "DefenseClaw is holding too many request bodies to sign; retry shortly")
 }
 
+// enrolledRouteUsers counts the enrolled accounts of connector whose route
+// credential the managed gateway accepts (readiness, GAP-0568).
+func (s *routeOnlyServer) enrolledRouteUsers(connector string) (int, bool) {
+	if s == nil || s.api == nil || s.api.userScopedCredentials == nil {
+		return 0, false
+	}
+	return s.api.userScopedCredentials.routeEnrolledCount(connector)
+}
+
 func (s *routeOnlyServer) acquire(subject string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1018,7 +1027,7 @@ func ManagedRouteOnlySetup(cfg *config.Config, connectorName, apiAddr, token str
 
 // RouteOnlyRouted reports whether config.yaml routes connector route-only.
 func RouteOnlyRouted(cfg *config.Config, connectorName string) bool {
-	return cfg != nil && cfg.Routing.Enabled && slices.Contains(cfg.Routing.RouteOnly.Connectors, connectorName)
+	return cfg.RouteOnlyRouted(connectorName)
 }
 
 // routeOnlySetupBase is the rendering without its credential, or nil.

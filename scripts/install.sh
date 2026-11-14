@@ -1519,6 +1519,16 @@ if [[ "${ROLLBACK}" == true ]]; then
     elif [[ -z "${current}" ]] || ! version_lt "${current}" "${back_to}"; then
         convert_hooks_for_rollback
     fi
+    # rel-1-0-10 GAP-0602: a release before 1.0.10 has no route-only
+    # listener; an agent left pointing at it gets 401 on every call.
+    if [[ -n "${back_to}" ]] && version_lt "${back_to}" 1.0.10 && route_only_left; then
+        # This install stays; its gateway start writes back any hook entries
+        # the conversion above changed.
+        if [[ "${was_running}" == true || -n "${LEGACY_TORN_DOWN:-}" ]]; then
+            start_gateway || true
+        fi
+        die "The Claude Code or Codex settings still point at the DefenseClaw route-only listener, which ${back_to} does not have; run 'defenseclaw routing disable --connector claudecode' (and codex), or remove the DefenseClaw base URL and route header from those settings by hand, then roll back again. DefenseClaw ${current:-} stays installed"
+    fi
     swapped=0
     swap_with_previous || swapped=$?
     if [[ "${swapped}" -ne 0 ]]; then
@@ -3331,6 +3341,15 @@ undo_rollback() {
 # GAP-1284) outlived that release's uninstall. This install's gateway rewrites
 # those entries in the shape the older release removes; rolling forward runs
 # setup, which writes the current shape again.
+# route_only_left: true when Claude Code or Codex settings still hold a
+# route-only render (the gateway route URL or route header).
+route_only_left() {
+    local claude="${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/settings.json" codex="${CODEX_HOME:-${HOME}/.codex}/config.toml"
+    { [[ -f "${claude}" ]] && grep -qE '/r/claudecode|X-DC-Route-Auth' "${claude}"; } && return 0
+    { [[ -f "${codex}" ]] && grep -q 'defenseclaw_route' "${codex}"; } && return 0
+    return 1
+}
+
 convert_hooks_for_rollback() {
     local gateway="${BIN_DIR}/defenseclaw-gateway" help
     [[ -x "${gateway}" ]] || return 0
@@ -3341,7 +3360,7 @@ convert_hooks_for_rollback() {
     help="$("${gateway}" connector prepare-rollback --help 2>/dev/null || true)"
     [[ "${help}" != *--to-version* || -z "${back_to:-}" ]] || to=(--to-version "${back_to}")
     "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" ${to[@]+"${to[@]}"} 2>>"${LOG}" \
-        || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+        || warn "Could not rewrite the agent hook entries, or put back the route-only model settings, of DefenseClaw ${current:-?} for ${back_to} (see ${LOG}); a route-only agent then gets 401 until you remove the DefenseClaw base URL and route header from its settings by hand; after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
 }
 
 # drop_newer_hook_helper LEFT_DATA: remove the live hooks/_hardening.sh when
