@@ -36,9 +36,15 @@ func TestClaudeCodeReadResultSecretIsAdvisoryInEveryMode(t *testing.T) {
 			ToolResponse:  map[string]interface{}{"type": "text", "file": map[string]interface{}{"content": awsExampleSecretEnv}},
 			CWD:           "/Users/alice/Desktop/cowork-test",
 		})
-		if resp.Action != "allow" || resp.RawAction != "block" || !resp.WouldBlock || resp.Severity != "CRITICAL" {
-			t.Fatalf("%s: action=%q raw=%q would_block=%v severity=%q, want allow/block/true/CRITICAL",
-				mode, resp.Action, resp.RawAction, resp.WouldBlock, resp.Severity)
+		// A tool result never blocks in the default pack (HIGH at most): in
+		// action mode the secret is an alert, in observe mode advisory.
+		wantAction := "alert"
+		if mode == "observe" {
+			wantAction = "allow"
+		}
+		if resp.Action != wantAction || resp.RawAction != "alert" || resp.WouldBlock || resp.Severity != "HIGH" {
+			t.Fatalf("%s: action=%q raw=%q would_block=%v severity=%q, want %s/alert/false/HIGH",
+				mode, resp.Action, resp.RawAction, resp.WouldBlock, resp.Severity, wantAction)
 		}
 		if !strings.Contains(strings.Join(resp.Findings, " "), "SEC-AWS-SECRET") {
 			t.Fatalf("%s: findings=%v, want SEC-AWS-SECRET", mode, resp.Findings)

@@ -873,15 +873,22 @@ func scanContentRuleCategoryWithGeneration(
 	scope ruleContentScope,
 	category string,
 ) []RuleFinding {
+	return scanContentRulesWithOptions(generation, text, toolName, scope, ruleScanOptions{onlyCategory: category})
+}
+
+// scanContentRulesWithOptions is scanContentRuleCategoryWithGeneration with
+// the caller's category options (the content scope is set from scope).
+func scanContentRulesWithOptions(
+	generation *compiledRulePackCategories,
+	text, toolName string,
+	scope ruleContentScope,
+	options ruleScanOptions,
+) []RuleFinding {
 	if scope == ruleContentScopeSource {
 		text = neutralizeKnownFixtureDataLiterals(text)
 	}
-	findings := scanRuleGeneration(
-		generation,
-		text,
-		toolName,
-		ruleScanOptions{contentScope: scope, onlyCategory: category},
-	)
+	options.contentScope = scope
+	findings := scanRuleGeneration(generation, text, toolName, options)
 	if scope == ruleContentScopeSource {
 		// Physically verified test, fixture, and bundled rule sources are useful
 		// telemetry, but their contents are not an action by the agent. Keeping

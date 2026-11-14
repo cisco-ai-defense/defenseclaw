@@ -233,9 +233,21 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 // never take the first-match shortcut.
 func ruleMatchValidator(ruleID string) func(text, match string, start, end int) bool {
 	switch ruleID {
-	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
+	case "ENT-BULK-SSN":
 		return func(text, match string, start, end int) bool {
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
+		}
+	case "ENT-BULK-SSN-NOHYPHEN":
+		// The pattern carries its label (rel-1-0-10 GAP-0171: nine bare digits
+		// are table cells, ids and timestamp fractions; 346 strict benign DTap
+		// tool-output hits had none). The match ends with the nine digits.
+		return func(text, match string, start, _ int) bool {
+			digits := decimalDigits(match)
+			if len(digits) < 9 {
+				return false
+			}
+			digitStart := start + strings.LastIndexAny(match, "0123456789") - 8
+			return validUSSSN(digits[len(digits)-9:]) && !ssnNonRecordContext(text, digitStart)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
 		return func(text, match string, start, end int) bool {
@@ -839,23 +851,10 @@ func credibleSSNContext(text string, start, end int) bool {
 	if hasDelimitedSSNColumnHeader(text, start) {
 		return true
 	}
-	windowStart := start - 80
-	if windowStart < 0 {
-		windowStart = 0
+	if ssnNonRecordContext(text, start) {
+		return false
 	}
-	prefix := strings.ToLower(text[windowStart:start])
-	for _, nonRecordContext := range []string{
-		"ssn_hash", "ssn-hash", "ssn hash", "hashed ssn",
-		"ssn_digest", "ssn-digest", "ssn digest",
-		"example ssn", "ssn example", "ssn_example", "sample ssn", "ssn sample",
-		"placeholder ssn", "ssn placeholder", "ssn schema", "ssn format",
-		"ssn regex", "ssn pattern",
-	} {
-		if index := strings.LastIndex(prefix, nonRecordContext); index >= 0 &&
-			ssnImmediateLabelTail(prefix[index+len(nonRecordContext):]) {
-			return false
-		}
-	}
+	prefix := strings.ToLower(text[max(0, start-80):start])
 	for _, label := range []string{
 		"ssn", "social security", "taxpayer id", "taxpayer identification",
 	} {
@@ -867,6 +866,26 @@ func credibleSSNContext(text string, start, end int) bool {
 }
 
 const maxDelimitedSSNContextBytes = 64 * 1024
+
+// ssnNonRecordContext reports a hash, example, placeholder or schema label
+// just before an SSN candidate: the value describes the field, it is not a
+// record.
+func ssnNonRecordContext(text string, start int) bool {
+	prefix := strings.ToLower(text[max(0, start-80):start])
+	for _, nonRecordContext := range []string{
+		"ssn_hash", "ssn-hash", "ssn hash", "hashed ssn",
+		"ssn_digest", "ssn-digest", "ssn digest",
+		"example ssn", "ssn example", "ssn_example", "sample ssn", "ssn sample",
+		"placeholder ssn", "ssn placeholder", "ssn schema", "ssn format",
+		"ssn regex", "ssn pattern",
+	} {
+		if index := strings.LastIndex(prefix, nonRecordContext); index >= 0 &&
+			ssnImmediateLabelTail(prefix[index+len(nonRecordContext):]) {
+			return true
+		}
+	}
+	return false
+}
 
 func hasDelimitedSSNColumnHeader(text string, candidateStart int) bool {
 	if candidateStart <= 0 || candidateStart > len(text) {
