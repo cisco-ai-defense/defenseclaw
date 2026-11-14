@@ -569,7 +569,8 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 			visit(binary.Y)
 			return
 		}
-		if !actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home) {
+		alone := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
+		if !actionKnownReadOnlyShell(alone, home) || !actionReadersAreSystemPrograms(alone, home, 0) {
 			return
 		}
 		marked := maps.Clone(reads)
@@ -581,6 +582,40 @@ func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]
 		visit(stmt)
 	}
 	return reads
+}
+
+// actionReadersAreSystemPrograms reports that every program a plain reader
+// statement runs is one the shell finds on its trusted PATH or a fixed system
+// path: a bare name (ls, cat) or a program in /bin, /usr/bin or
+// /usr/local/bin (readerDirectories). A program named by any other path
+// (./ls, /tmp/x/ls, ~/bin/cat) can be a file the call or an earlier call put
+// there under a reader's name, so it is an unknown program, not a reader
+// (rel-1-0-10:GAP-0715). A bash -c body is read the same way.
+func actionReadersAreSystemPrograms(file *syntax.File, home string, depth int) bool {
+	if depth >= 8 {
+		return false
+	}
+	trusted := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || !trusted || len(call.Args) == 0 {
+			return trusted
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		if !known || strings.Contains(program, "\\") ||
+			strings.Contains(program, "/") && !slices.Contains(readerDirectories, filepath.Dir(program)) {
+			trusted = false
+			return false
+		}
+		if programBase(program) == "bash" && len(call.Args) == 3 {
+			if child, parsed := parseShell(actionWordLiteralText(call.Args[2])); parsed &&
+				!actionReadersAreSystemPrograms(child, home, depth+1) {
+				trusted = false
+			}
+		}
+		return trusted
+	})
+	return trusted
 }
 
 // actionInterpreterSSHName and actionInterpreterKeysName match the two

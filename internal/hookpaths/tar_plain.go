@@ -61,7 +61,9 @@ func (b *boundedReader) Read(p []byte) (int, error) {
 // fact and its own read of the archive. Anything else keeps the opaque
 // reading. A process outside the command can still replace the archive
 // between the check and the run, as it can any file a disk walk reads.
-func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool) bool {
+// plain is the reading of the archive (archiveReading): members of plain
+// kind that land on none of the protected names.
+func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, command string, plain func(string) bool, facts map[string]string, record bool) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -73,7 +75,7 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 		strings.Count(command, filepath.Base(archive)) != 1 {
 		return false
 	}
-	return archivePlainWithFacts(OperandPath(archive, cwd), tarArchivePlain, facts, record)
+	return archivePlainWithFacts(OperandPath(archive, cwd), plain, facts, record)
 }
 
 // archivePlainWithFacts reads the archive at path with plain and keeps the
@@ -108,13 +110,17 @@ func archivePlainWithFacts(path string, plain func(string) bool, facts map[strin
 // the extraction folder in the home was an opaque link scope, and the call
 // blocked as an SSH key write in every pack.
 func archiveExtractionHoldsNoLink(file *syntax.File, call *syntax.CallExpr, program string, args []string, static []bool, cwd, command, home string, facts map[string]string, record bool) bool {
+	plain, ok := archiveReading(program, args, static, cwd, home)
+	if !ok {
+		return false
+	}
 	if onlyDirectoryStatementsBefore(file, call, home) {
-		if tarArchiveHoldsNoLink(program, args, static, cwd, command, facts, record) {
+		if tarArchiveHoldsNoLink(program, args, static, cwd, command, plain, facts, record) {
 			return true
 		}
 		if archive, ok := extractionArchive(program, args, static, cwd); ok && program == "unzip" &&
 			strings.Count(command, filepath.Base(archive)) == 1 {
-			return archivePlainWithFacts(archive, zipArchivePlain, facts, record)
+			return archivePlainWithFacts(archive, plain, facts, record)
 		}
 		return false
 	}
@@ -135,11 +141,139 @@ func archiveExtractionHoldsNoLink(file *syntax.File, call *syntax.CallExpr, prog
 			return false
 		}
 	}
-	plain := tarArchivePlain
-	if program == "unzip" {
-		plain = zipArchivePlain
-	}
 	return archivePlainWithFacts(source, plain, facts, record)
+}
+
+// archiveReading is the reading of the archive an extraction call opens: a
+// tar or zip whose members are all plain files and folders with relative
+// names (archiveMembers), and none of whose files lands, below the folder
+// the call extracts into, on a protected name (archiveLandsProtected;
+// rel-1-0-10:GAP-0717). The members decide what an extraction writes, so a
+// proof that no member is a link must also tell where the files go: a plain
+// file named .ssh/authorized_keys, .bashrc or .claude/settings.json is no
+// link and is a write of that file. ok is false for a call whose extraction
+// folder or program the words do not tell.
+func archiveReading(program string, args []string, static []bool, cwd, home string) (func(string) bool, bool) {
+	folder, wide, ok := extractionFolder(program, args, static, cwd)
+	if !ok {
+		return nil, false
+	}
+	read := tarArchiveMembers
+	if program == "unzip" {
+		read = zipArchiveMembers
+	}
+	return func(path string) bool {
+		members, ok := read(path)
+		return ok && !archiveLandsProtected(members, folder, home, wide)
+	}, true
+}
+
+// extractionFolder is the absolute folder a static tar or unzip call
+// extracts into, and whether it can move a member up a level: tar
+// --strip-components or unzip -j (wide), so a member lands at any suffix of
+// its name. ok is false for any other program and for a word that is not
+// static.
+func extractionFolder(program string, args []string, static []bool, cwd string) (folder string, wide, ok bool) {
+	if !filepath.IsAbs(cwd) {
+		return "", false, false
+	}
+	folder = cwd
+	switch {
+	case strings.HasSuffix(program, "tar"):
+		var scanned bool
+		if folder, _, _, scanned = tarScan(args, static, cwd); !scanned {
+			return "", false, false
+		}
+		for _, arg := range args {
+			if name, long := strings.CutPrefix(arg, "--"); long {
+				name, _, _ = strings.Cut(name, "=")
+				wide = wide || name != "" && strings.HasPrefix("strip-components", name)
+			}
+		}
+	case program == "unzip":
+		for i := 0; i < len(args); i++ {
+			if !staticAt(static, i) {
+				return "", false, false
+			}
+			arg := args[i]
+			if len(arg) < 2 || !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			cluster := arg[1:]
+			for j := 0; j < len(cluster); j++ {
+				switch cluster[j] {
+				case 'd', 'P', 'I', 'O':
+					value := cluster[j+1:]
+					if value == "" {
+						if i++; i >= len(args) || !staticAt(static, i) {
+							return "", false, false
+						}
+						value = args[i]
+					}
+					if cluster[j] == 'd' {
+						folder = value
+					}
+					j = len(cluster)
+				case 'j':
+					wide = true
+				}
+			}
+		}
+	default:
+		return "", false, false
+	}
+	if !filepath.IsAbs(folder) {
+		folder = filepath.Join(cwd, folder)
+	}
+	return filepath.Clean(folder), wide, true
+}
+
+// archiveShellStartupNames are the shell startup files of a home folder.
+var archiveShellStartupNames = map[string]bool{
+	".bashrc": true, ".bash_profile": true, ".bash_login": true, ".bash_aliases": true, ".profile": true,
+	".zshenv": true, ".zprofile": true, ".zshrc": true, ".zlogin": true,
+}
+
+// archiveLandsProtected reports a member file that lands on a protected
+// name below folder: a protected file (authorized keys, the SSH control and
+// key files, the DefenseClaw state, as protectedReachPath reads them), a
+// shell startup file of the home, a hook settings file or Git hook (a
+// boundFolderNames name in a boundAgentFolders folder) or a sudoers file. A
+// wide extraction (tar --strip-components, unzip -j) can drop leading
+// components, so every suffix of the member name is tried.
+func archiveLandsProtected(members []string, folder, home string, wide bool) bool {
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	for _, member := range members {
+		parts := strings.Split(member, "/")
+		for start := 0; start < len(parts); start++ {
+			target := filepath.Join(folder, filepath.Join(parts[start:]...))
+			if protectedReachPath(target, protected, ssh) || archiveNamesProtected(target, home) {
+				return true
+			}
+			if !wide {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// archiveNamesProtected reads a landing path by its names.
+func archiveNamesProtected(target, home string) bool {
+	if archiveShellStartupNames[strings.ToLower(filepath.Base(target))] && filepath.Dir(target) == filepath.Clean(home) {
+		return true
+	}
+	components := strings.Split(strings.ToLower(filepath.ToSlash(target)), "/")
+	for i, component := range components {
+		if component == "sudoers" || component == "sudoers.d" {
+			return true
+		}
+		if i+1 < len(components) && boundAgentFolders[component] && boundFolderNames[components[i+1]] {
+			return true
+		}
+	}
+	return false
 }
 
 // extractionArchive is the absolute path of the one archive file a static
@@ -289,39 +423,44 @@ func stagedArchiveSource(file *syntax.File, call *syntax.CallExpr, command, home
 	return "", "", false
 }
 
-// zipArchivePlain reads the zip archive at path and reports that every
-// member is a regular file or a folder with a relative name and no ..
-// component, within the tar bounds.
-func zipArchivePlain(path string) bool {
+// zipArchiveMembers reads the zip archive at path and returns its regular
+// files, as the slash names they are stored under, when every member is a
+// regular file or a folder with a relative name and no .. component, within
+// the tar bounds.
+func zipArchiveMembers(path string) ([]string, bool) {
 	info, err := pathStat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTarPlainBytes {
-		return false
+		return nil, false
 	}
 	file, err := pathOpen(path)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	defer file.Close()
 	reader, err := zip.NewReader(file, info.Size())
 	if err != nil || len(reader.File) == 0 || len(reader.File) > maxTarPlainMembers {
-		return false
+		return nil, false
 	}
+	var files []string
 	for _, member := range reader.File {
 		mode := member.Mode()
 		if !mode.IsRegular() && !mode.IsDir() {
-			return false
+			return nil, false
 		}
 		name := member.Name
 		if name == "" || strings.HasPrefix(name, "/") || filepath.IsAbs(name) || strings.Contains(name, "\\") {
-			return false
+			return nil, false
 		}
 		for _, part := range strings.Split(strings.TrimSuffix(name, "/"), "/") {
 			if part == ".." {
-				return false
+				return nil, false
 			}
 		}
+		if mode.IsRegular() {
+			files = append(files, strings.TrimSuffix(name, "/"))
+		}
 	}
-	return true
+	return files, true
 }
 
 // tarArchiveWord returns the one archive operand of a tar call: -f FILE,
@@ -382,17 +521,18 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 	return archive, found == 1
 }
 
-// tarArchivePlain reads the archive at path and reports that every member
-// is a regular file or a directory with a relative name and no ..
-// component, within the bounds.
-func tarArchivePlain(path string) bool {
+// tarArchiveMembers reads the archive at path and returns its regular
+// files, as the slash names they are stored under, when every member is a
+// regular file or a directory with a relative name and no .. component,
+// within the bounds.
+func tarArchiveMembers(path string) ([]string, bool) {
 	info, err := pathStat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTarPlainBytes {
-		return false
+		return nil, false
 	}
 	file, err := pathOpen(path)
 	if err != nil {
-		return false
+		return nil, false
 	}
 	defer file.Close()
 	buffered := bufio.NewReader(io.LimitReader(file, maxTarPlainBytes))
@@ -402,7 +542,7 @@ func tarArchivePlain(path string) bool {
 	case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
 		zipped, err := gzip.NewReader(buffered)
 		if err != nil {
-			return false
+			return nil, false
 		}
 		defer zipped.Close()
 		stream = zipped
@@ -411,30 +551,34 @@ func tarArchivePlain(path string) bool {
 	}
 	reader := tar.NewReader(&boundedReader{r: stream, n: maxTarPlainBytes})
 	members := 0
+	var files []string
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
-			return members > 0
+			return files, members > 0
 		}
 		if err != nil {
-			return false
+			return nil, false
 		}
 		if members++; members > maxTarPlainMembers {
-			return false
+			return nil, false
 		}
 		switch header.Typeflag {
 		case tar.TypeReg, tar.TypeDir:
 		default:
-			return false
+			return nil, false
 		}
 		name := filepath.ToSlash(header.Name)
 		if name == "" || strings.HasPrefix(name, "/") || filepath.IsAbs(header.Name) || strings.Contains(name, "\\") {
-			return false
+			return nil, false
 		}
 		for _, part := range strings.Split(name, "/") {
 			if part == ".." {
-				return false
+				return nil, false
 			}
+		}
+		if header.Typeflag == tar.TypeReg {
+			files = append(files, strings.TrimSuffix(name, "/"))
 		}
 	}
 }
