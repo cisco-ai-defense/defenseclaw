@@ -39,10 +39,17 @@ func readingBoundNest(levels int, body string) string {
 type readingBoundRow struct {
 	name, tool, command string
 	// want is the action in the default tier; the strict tier blocks every
-	// row whose default action is not allow. alert|block accepts either: at
-	// least the evaluation limit, and a block where the cap floor proves a
-	// protected write on its own statement (rel-1-0-10:GAP-0435).
+	// row whose default action is not allow (readingBoundFloorBlocks lists
+	// the cells where the cap floor makes a row block).
 	want string
+}
+
+// readingBoundFloorBlocks lists, by row name, the cells (connector/tier/user
+// kind) where the cap floor proves a protected write on its own statement
+// and the row blocks in the default tier (rel-1-0-10:GAP-0435). Each cell is
+// pinned, so a floor regression shows.
+var readingBoundFloorBlocks = map[string][]string{
+	"protected ~/.ssh/authorized_keys": {"codex/default/managed"},
 }
 
 // readingBoundCells judges each row through the hook client evidence and
@@ -90,6 +97,9 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 		name := cell.connector + "/" + cell.tier + map[bool]string{false: "/per-user", true: "/managed"}[cell.managed]
 		for _, row := range rows {
 			want := row.want
+			if slices.Contains(readingBoundFloorBlocks[row.name], name) {
+				want = guardrailActionBlock
+			}
 			if cell.tier == config.HookPolicyTierStrict && want != guardrailActionAllow {
 				want = guardrailActionBlock
 			}
@@ -102,7 +112,7 @@ func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Durat
 			if took := time.Since(start); window > 0 && took > window {
 				t.Errorf("%s %s (%d bytes): decided in %s", name, row.name, len(row.command), took)
 			}
-			if !slices.Contains(strings.Split(want, "|"), got) {
+			if got != want {
 				t.Errorf("%s %s: action=%s, want %s", name, row.name, got, want)
 			}
 		}
@@ -130,7 +140,7 @@ func TestGAP0534RecoveredParseBoundAlertsOutsideStrict(t *testing.T) {
 		"~/.defenseclaw/config.yaml", "~/.ssh/authorized_keys", "~/.claude/settings.json", "~/.codex/hooks.json",
 		"CLAUDE.md", "~/.bashrc", "/etc/sudoers", "$HOME",
 	} {
-		rows = append(rows, readingBoundRow{"protected " + target, "PowerShell", prefixes[index%2] + "Remove-Item -Recurse -Force " + target, guardrailActionAlert + "|" + guardrailActionBlock})
+		rows = append(rows, readingBoundRow{"protected " + target, "PowerShell", prefixes[index%2] + "Remove-Item -Recurse -Force " + target, guardrailActionAlert})
 	}
 	rows = append(rows, readingBoundRow{"known protected value", "PowerShell",
 		`$p = "~/.ssh"; ` + prefixes[1] + "Remove-Item -Recurse -Force $p", guardrailActionBlock})

@@ -87,7 +87,6 @@ var capFloorFillers = []struct {
 func init() {
 	// GAP-0547: the analysis depth bound, under the shell nesting budget.
 	for _, n := range []int{30, 64, 128, 256, 512} {
-		capFloorDepthOnly[fmt.Sprintf("nest-paren/%d", n)] = true
 		capFloorFillers = append(capFloorFillers, struct {
 			name  string
 			build func(inner string) string
@@ -97,12 +96,10 @@ func init() {
 	}
 }
 
-// The analysis depth bound is a lane of the bound rule (rel-1-0-10:GAP-0547)
-// for a call that may write a protected target or the state: its plain input
-// is a write to a home file named at run time inside the nest (alone it is an
-// ordinary write, allowed; past the bound the readers no longer see it). A
-// call that writes none keeps the verdict of the readers
-// (TestCapFloorCapAloneKeepsItsVerdict). Its limit is the deepest subshell nest
+// The analysis depth bound is a lane of the bound rule (rel-1-0-10:GAP-0547,
+// GAP-0688) for every call: its plain input is a write to a home file named at
+// run time inside the nest (alone it is an ordinary write, allowed; past the
+// bound the readers no longer see it). Its limit is the deepest subshell nest
 // the action analysis still reads.
 func init() {
 	fill := func(size int) string {
@@ -117,9 +114,6 @@ func init() {
 		},
 		seen: boundedShellSeenCall})
 }
-
-// capFloorDepthOnly are the fillers past the analysis depth bound only.
-var capFloorDepthOnly = map[string]bool{}
 
 // capFloorAnalysisDepthLimit is the largest n for which the action analysis
 // reads fill(n).
@@ -260,13 +254,10 @@ func TestCapFloorCapAloneKeepsItsVerdict(t *testing.T) {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		for _, f := range capFloorFillers {
 			for _, id := range []string{f.name, f.name + "/listing"} {
+				// Every cap, the analysis depth bound included, is the unknown
+				// tier of the pack for a call that names no target, and a read
+				// beside it is not a block (GAP-0688).
 				want := bounded.Unknown(tier.tier)
-				if capFloorDepthOnly[f.name] {
-					// Past the analysis depth only, writing no protected
-					// target (a listing is a read): the readers' verdict, as
-					// on rel (allow).
-					want = bounded.Allow
-				}
 				action, findings := boundedDecideClaudeCode(t, api, env, boundedShellCommand(commands[id]))
 				if got := boundedParse(action); got != want {
 					t.Errorf("%s %s: action=%s, want %s; findings=%v", tier.name, id, action, want, findings)
@@ -300,11 +291,11 @@ func TestCapFloorPieces(t *testing.T) {
 		command string
 		want    []string // statements; a shell script is prefixed "body:", one fed on standard input "fed:"
 	}{
-		{"a; b && c || d | e & f", []string{"a", "b", "c", "d", "e", "f"}},
+		{"a; b && c || d | e & f", []string{"a", "b", "c", "d", "d | e", "e", "f"}},
 		{"( ( x ) ); { y; }", []string{"x", "y"}},
 		{"echo $(y $(z))", []string{"echo", "y", "z"}},
 		{"echo `y`", []string{"echo", "y"}},
-		{"x 2>&1 | y &> z", []string{"x 2>&1", "y &> z"}},
+		{"x 2>&1 | y &> z", []string{"x 2>&1", "x 2>&1 | y &> z", "y &> z"}},
 		{"echo ${HOME}/a a{b,c}", []string{"echo ${HOME}/a a{b,c}"}},
 		{"echo 'a; b' \"c; d\"", []string{"echo 'a; b' \"c; d\""}},
 		{"a # b; c\nd", []string{"a", "d"}},
@@ -322,7 +313,7 @@ func TestCapFloorPieces(t *testing.T) {
 		{"cat <<< 'p; q'", []string{"cat <<< 'p; q'"}},
 	} {
 		var got []string
-		head, _ := capFloorPieces(tc.command)
+		head, _ := capFloorPieces(tc.command, "")
 		for _, piece := range head {
 			text := piece.text(tc.command)
 			switch {

@@ -6,7 +6,6 @@ package gateway
 import (
 	"context"
 	"maps"
-	"path"
 	"slices"
 	"strings"
 
@@ -27,20 +26,21 @@ import (
 // full readers judge it on its own, as the call it is (a cap piece twin). A
 // block they prove there counts for the call, with its rule ids, whatever the
 // cap did to the rest of it. The pieces are cut from the text, never parsed:
-// at ; & | && || ( ) $( ` a line end and the { and } words, never inside a
+// at ; & | && || ( ) $( ` a line end (a pipeline is also one piece) and the { and } words, never inside a
 // quoted string, a comment or a here-document body. The static body of a shell
 // program (bash -c '...', a here-document fed to a shell) is a piece of its
 // own, judged as the script it is; a body that hits a cap is cut again.
 //
-// A here-document fed to a shell is the script the shell runs whether or not
+// A here-document fed to a shell (the shell is the command word of its
+// statement) is the script the shell runs whether or not
 // a cap was hit: the readers read its words for path rules but the state
 // proof does not read it (GAP-0532, at every size), so its body is judged as a
 // call too.
 //
 // The floor only adds findings the twin proves (an authoritative proof that is
 // not itself an evaluation limit or a parse failure), so it never lowers a
-// verdict, and a call that names no protected target or state gets no twin:
-// a cap alone keeps the evaluation-limit verdict it has on rel.
+// verdict, and a call that names no protected target or state gets no twin.
+// Every limit of its own (below) is reported as a cap of the call.
 const (
 	// capFloorMaxTwins bounds the pieces judged for one hook call, nested
 	// bodies included: half from the start of the call, half from its end,
@@ -65,51 +65,96 @@ const (
 // capFloorState is the shared state of one hook call's cap floor.
 type capFloorState struct {
 	twins int // pieces judged so far, for capFloorMaxTwins
+	// stopped holds the caps the floor itself stopped at, in the call or in
+	// any of its pieces: a piece it left unjudged that may name a target
+	// (more than capFloorMaxTwins of them, a nest past capFloorMaxDepth, a
+	// statement or a body past its size bound, the middle of a call too big
+	// to cut), or a piece whose own analysis hit a bound. The call owner
+	// reports them as one truncation (the bound rule), so no limit of the
+	// floor is a silent allow (rel-1-0-10:GAP-0690).
+	stopped bounded.CapSet
 }
 
 // withCapFloor adds to the findings of the call in request the blocks its cap
 // pieces prove (see the comment above).
 //
 // analyzed is the cap set of the action analysis of the call
-// (capFloorAnalysisCaps): it stopped at its syntax depth or node bound and
-// holds no path of the call (rel-1-0-10:GAP-0547: a state write inside 30
-// nested subshells was allowed in every tier, with no finding). Such a call
-// that may write a protected target or the state (capFloorMayWriteProtected)
-// is truncated in the sense of the bound rule: it gets the evaluation-limit
-// finding naming the cap (withBoundedTruncation, at least the unknown tier of
-// the pack), and its pieces are judged as for every other cap. The bound is a
-// syntax-tree depth: 30 terms of a pipe or && list reach it, and the owner
-// traces hold benign scripts of that depth that name the DefenseClaw tree in a
-// read or a print; they keep the verdict of the readers that did read them.
+// (capFloorAnalysisCaps): it stopped at a bound of its own (syntax depth or
+// nodes, wrappers, facts, input) and holds no, or not all, of the paths and
+// commands of the call (rel-1-0-10:GAP-0547: a state write inside 30 nested
+// subshells was allowed in every tier, with no finding; GAP-0688: so was the
+// delete of the home folder). Every such call is truncated in the sense of
+// the bound rule, whatever it names: it gets the evaluation-limit finding
+// naming the cap (withBoundedTruncation, at least the unknown tier of the
+// pack), and its pieces are judged as for every other cap. The bound is a
+// syntax-tree depth: 30 terms of a pipe or && list reach it, so a long benign
+// script alerts at the unknown tier like any call the readers did not finish.
+//
+// The floor reports its own limits the same way: a piece that names a target
+// and is left unjudged (past capFloorMaxTwins, a nest past capFloorMaxDepth, a
+// statement or body past its size bound, the middle of a call too big to cut)
+// is a cap of the call (capFloorState.stopped), never a silent allow
+// (GAP-0690).
 //
 // statementsOnly (a call past the nested-body bound, decided at once by the
 // owner rule of GAP-0677) judges only the statements, never a shell body: a
 // body is what took the readers seconds there.
 func withCapFloor(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet, statementsOnly bool) []RuleFinding {
-	if request.capFloor == nil {
+	state := request.capFloor
+	if state == nil {
 		return findings
 	}
-	if analyzed.Any() && capFloorMayWriteProtected(request) {
-		findings = withBoundedTruncation(findings, analyzed, request)
+	findings = capFloorJudge(parent, request, findings, analyzed, statementsOnly)
+	if request.capFloorDepth == 0 && state.stopped.Any() {
+		// A limit of the floor itself, or of a piece, is the call's: at
+		// least the unknown tier, whatever the pieces proved.
+		findings = withBoundedTruncation(findings, state.stopped, request)
 	}
-	if request.capFloorDepth > capFloorMaxDepth ||
-		!trustedBashExecutionTool(request.Input.Tool) ||
-		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX {
-		return findings
+	return findings
+}
+
+// capFloorJudge is withCapFloor for one call or piece twin: it judges the
+// pieces and records the caps it stops at in the shared state.
+func capFloorJudge(parent context.Context, request trustedActionRequest, findings []RuleFinding, analyzed bounded.CapSet, statementsOnly bool) []RuleFinding {
+	state := request.capFloor
+	owner := request.capFloorDepth == 0
+	if analyzed.Any() {
+		// The analysis bound is a bound-rule cap for every call, whatever
+		// it names (rel-1-0-10:GAP-0688): the readers saw nothing of it
+		// past the bound, so a proven finding of the text before the bound
+		// still decides (the pieces below) and the rest is the unknown tier
+		// of the pack. A piece of the call reports it to the call.
+		if owner {
+			findings = withBoundedTruncation(findings, analyzed, request)
+		} else {
+			state.stopped = state.stopped.Union(analyzed)
+		}
 	}
 	command, known := trustedBashCommandInput(request.Input)
-	if !known || command == "" {
+	if !trustedBashExecutionTool(request.Input.Tool) ||
+		request.Input.DialectHint != "" && request.Input.DialectHint != actionfacts.DialectPOSIX ||
+		!known || command == "" {
 		return findings
 	}
-	cwd, home := request.Input.CWD, request.Input.ActiveHome
-	capped := boundedLimitIndex(findings) >= 0
-	if !capped && !strings.Contains(command, "<<") || !capFloorMayNameProtected(request) {
+	capped := boundedLimitIndex(findings) >= 0 || analyzed.Any()
+	if !capped && !strings.Contains(command, "<<") || !analyzed.Any() && !capFloorMayNameProtected(request) {
 		// A call whose text names no protected target or state has no
 		// piece worth judging: one pass over the text the cut would read,
 		// no cut.
 		return findings
 	}
-	head, tail := capFloorPieces(command)
+	head, tail := capFloorPieces(command, request.Input.ActiveHome)
+	if request.capFloorDepth > capFloorMaxDepth {
+		// A piece nested past the bound is judged as it is but never cut
+		// again: what a cut would judge is unread.
+		if capped || capFloorHasBody(head) || capFloorHasBody(tail) {
+			state.stopped = state.stopped.Union(bounded.Of(bounded.Depth))
+		}
+		return findings
+	}
+	if tail != nil {
+		state.stopped = state.stopped.Union(bounded.Of(bounded.Bytes))
+	}
 	if statementsOnly {
 		head, tail = slices.DeleteFunc(head, capFloorPiece.isBody), slices.DeleteFunc(tail, capFloorPiece.isBody)
 	}
@@ -119,19 +164,31 @@ func withCapFloor(parent context.Context, request trustedActionRequest, findings
 		notFed := func(p capFloorPiece) bool { return !p.fedBody }
 		head, tail = slices.DeleteFunc(head, notFed), slices.DeleteFunc(tail, notFed)
 	}
+	cwd, home := request.Input.CWD, request.Input.ActiveHome
 	whole := strings.TrimSpace(command)
-	for _, piece := range capFloorPick(head, tail, command, cwd, home, capFloorMaxTwins-request.capFloor.twins) {
+	picked, more := capFloorPick(head, tail, command, cwd, home, analyzed.Any(), capFloorMaxTwins-state.twins)
+	if more {
+		state.stopped = state.stopped.Union(bounded.Of(bounded.Items))
+	}
+	for _, piece := range picked {
 		text := piece.text(command)
-		if text == "" || text == whole || len(text) > capFloorPieceBytes && !piece.isBody() || len(text) > capFloorBodyBytes {
+		if text == "" || text == whole {
 			continue
 		}
-		if request.capFloor.twins >= capFloorMaxTwins {
-			break
+		if len(text) > capFloorPieceBytes && !piece.isBody() || len(text) > capFloorBodyBytes {
+			state.stopped = state.stopped.Union(bounded.Of(bounded.Bytes))
+			continue
 		}
-		request.capFloor.twins++
+		state.twins++
 		findings = withTwinProvenBlocks(findings, capFloorProven(dispatchTrustedAction(parent, capFloorTwin(request, text))))
 	}
 	return findings
+}
+
+// capFloorHasBody reports a shell script among the pieces: a body of a shell
+// (-c, a here-document fed to it).
+func capFloorHasBody(pieces []capFloorPiece) bool {
+	return slices.ContainsFunc(pieces, capFloorPiece.isBody)
 }
 
 // capFloorTwin is request with text as its whole command, judged by every
@@ -194,23 +251,34 @@ func (p capFloorPiece) text(command string) string {
 // head again when the call was cut whole). The pieces that name one are found
 // by halving: a range of pieces whose text names none is dropped whole, so a
 // call of thousands of statements costs a pass over its text for each level
-// of the halving.
-func capFloorPick(head, tail []capFloorPiece, command, cwd, home string, limit int) []capFloorPiece {
-	if limit <= 0 {
-		return nil
-	}
-	front := newCapFloorRegion(head, command, cwd, home)
+// of the halving. more reports a piece that names one and is left unjudged
+// at the limit: the floor stopped there (a bound the call owner reports).
+func capFloorPick(head, tail []capFloorPiece, command, cwd, home string, anyPath bool, limit int) (picked []capFloorPiece, more bool) {
+	front := newCapFloorRegion(head, command, cwd, home, anyPath)
 	back := front
 	if tail != nil {
-		back = newCapFloorRegion(tail, command, cwd, home)
+		back = newCapFloorRegion(tail, command, cwd, home, anyPath)
 	}
-	front.find(0, len(head), true, (limit+1)/2)
-	back.find(0, len(back.pieces), false, limit-len(front.picked)+len(back.picked))
-	out := front.chosen()
-	if tail != nil {
-		out = append(out, back.chosen()...)
+	if limit > 0 {
+		front.find(0, len(head), true, (limit+1)/2)
+		back.find(0, len(back.pieces), false, limit-len(front.picked)+len(back.picked))
+		picked = front.chosen()
+		if tail != nil {
+			picked = append(picked, back.chosen()...)
+		}
 	}
-	return out
+	// One more search each way: a piece naming a target past the limit.
+	if len(picked) >= limit {
+		n := len(front.picked)
+		front.find(0, len(head), true, n+1)
+		more = len(front.picked) > n
+		if tail != nil && !more {
+			n = len(back.picked)
+			back.find(0, len(back.pieces), false, n+1)
+			more = len(back.picked) > n
+		}
+	}
+	return picked, more
 }
 
 // capFloorRegion is the halving search over the pieces of one cut region.
@@ -218,11 +286,12 @@ type capFloorRegion struct {
 	pieces    []capFloorPiece
 	command   string
 	cwd, home string
+	anyPath   bool
 	reach     []int
 	picked    map[int]bool
 }
 
-func newCapFloorRegion(pieces []capFloorPiece, command, cwd, home string) *capFloorRegion {
+func newCapFloorRegion(pieces []capFloorPiece, command, cwd, home string, anyPath bool) *capFloorRegion {
 	// Pieces are in the order of their start; a body lies inside the
 	// statement that runs it, so a range of pieces spans up to the furthest
 	// end before its last piece (reach).
@@ -233,7 +302,7 @@ func newCapFloorRegion(pieces []capFloorPiece, command, cwd, home string) *capFl
 			reach[i] = reach[i-1]
 		}
 	}
-	return &capFloorRegion{pieces: pieces, command: command, cwd: cwd, home: home, reach: reach, picked: map[int]bool{}}
+	return &capFloorRegion{pieces: pieces, command: command, cwd: cwd, home: home, anyPath: anyPath, reach: reach, picked: map[int]bool{}}
 }
 
 func (r *capFloorRegion) names(lo, hi int) bool {
@@ -243,7 +312,17 @@ func (r *capFloorRegion) names(lo, hi int) bool {
 	} else {
 		text = r.command[r.pieces[lo].start:max(r.reach[hi-1], r.pieces[lo].start)]
 	}
-	return text != "" && hookpaths.BoundCallMayNameProtected(text, r.cwd, r.home)
+	return text != "" && (hookpaths.BoundCallMayNameProtected(text, r.cwd, r.home) || r.anyPath && capFloorMayNamePath(text))
+}
+
+// capFloorMayNamePath reports a text that may name a path or a value built at
+// run time (a slash, a tilde, a variable): the pieces of a call the action
+// analysis stopped on that are worth judging whatever they name, since the
+// analysis proved nothing of them (GAP-0688: the delete of a folder, a
+// credential read piped out). A piece of plain words (true, echo done) names
+// none.
+func capFloorMayNamePath(text string) bool {
+	return strings.ContainsAny(text, "/~$%\\")
 }
 
 // find picks, in order (forward from the start, else from the end), the
@@ -280,9 +359,9 @@ func (r *capFloorRegion) chosen() []capFloorPiece {
 // whole command, or, for a command of more than
 // capFloorHeadScan+capFloorTailScan bytes, its start, and tail its end, each
 // cut from a statement boundary (nil when the command was cut whole).
-func capFloorPieces(command string) (head, tail []capFloorPiece) {
+func capFloorPieces(command, home string) (head, tail []capFloorPiece) {
 	if len(command) <= capFloorHeadScan+capFloorTailScan {
-		return capFloorCut(command, 0, len(command)), nil
+		return capFloorCut(command, home, 0, len(command)), nil
 	}
 	headEnd := capFloorHeadScan
 	if i := strings.LastIndexAny(command[:headEnd], ";\n"); i > 0 {
@@ -292,7 +371,7 @@ func capFloorPieces(command string) (head, tail []capFloorPiece) {
 	if i := strings.IndexAny(command[tailStart:], ";\n"); i >= 0 {
 		tailStart += i + 1
 	}
-	return capFloorCut(command, 0, headEnd), capFloorCut(command, tailStart, len(command))
+	return capFloorCut(command, home, 0, headEnd), capFloorCut(command, home, tailStart, len(command))
 }
 
 // capFloorHeredoc is a here-document whose body starts after the next line
@@ -305,7 +384,7 @@ type capFloorHeredoc struct {
 
 // capFloorCut cuts command[from:to] into statements and shell bodies, reading
 // the text once.
-func capFloorCut(command string, from, to int) []capFloorPiece {
+func capFloorCut(command, home string, from, to int) []capFloorPiece {
 	var pieces []capFloorPiece
 	var pending []capFloorHeredoc
 	// open holds the open double quotes (") and subshells or command
@@ -313,7 +392,25 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 	// code again, and its ) returns to the string.
 	var open []byte
 	start := from
+	// pipeFrom is the start of the pipeline in progress (-1 for none): a
+	// pipeline is judged whole as well as stage by stage, since what it
+	// proves (a download run by a shell, a credential piped out) needs the
+	// stages together (GAP-0688).
+	pipeFrom := -1
 	cut := func(end, next int) {
+		if pipeFrom >= 0 && end > pipeFrom {
+			pieces = append(pieces, capFloorPiece{start: pipeFrom, end: end})
+		}
+		pipeFrom = -1
+		if end > start {
+			pieces = append(pieces, capFloorPiece{start: start, end: end})
+		}
+		start = next
+	}
+	cutPipe := func(end, next int) {
+		if pipeFrom < 0 {
+			pipeFrom = start
+		}
 		if end > start {
 			pieces = append(pieces, capFloorPiece{start: start, end: end})
 		}
@@ -360,7 +457,7 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 				i = to
 				continue
 			}
-			if capFloorShellDashC(command[start:i]) {
+			if capFloorShellDashC(command[start:i], home) {
 				pieces = append(pieces, capFloorPiece{start: i, end: end, body: body})
 			}
 			i = end
@@ -385,7 +482,7 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 		case c == '<' && strings.HasPrefix(command[i:to], "<<"):
 			doc, end, ok := capFloorHeredocAt(command, i, to)
 			if ok {
-				doc.fed = capFloorShellStdin(command[start:i])
+				doc.fed = capFloorShellStdin(command[start:i], home)
 				pending = append(pending, doc)
 				i = end
 				continue
@@ -447,7 +544,11 @@ func capFloorCut(command string, from, to int) []capFloorPiece {
 			if next < to && command[next] == c {
 				next++
 			}
-			cut(i, next)
+			if c == '|' && next == i+1 {
+				cutPipe(i, next)
+			} else {
+				cut(i, next)
+			}
 			i = next
 			continue
 		case (c == '{' || c == '}') && wordStart(i) && wordEnd(i):
@@ -531,26 +632,21 @@ func capFloorHeredocAt(command string, i, to int) (doc capFloorHeredoc, end int,
 	return doc, min(j, to), doc.delimiter != ""
 }
 
-// capFloorShellWords are the words of a statement prefix with their quotes
-// removed.
-func capFloorShellWords(prefix string) []string {
-	words := strings.Fields(prefix)
-	for i, word := range words {
-		words[i] = strings.Trim(word, `'"`)
-	}
-	return words
-}
+// capFloorShells are the POSIX shell programs: a program that reads its
+// script from a file or from standard input.
+var capFloorShells = []string{"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"}
 
-// capFloorShellAt is the index of the first POSIX shell program word of
-// words (bash, /bin/sh, behind sudo, env, nohup or any other word), or -1.
-func capFloorShellAt(words []string) int {
-	for i, word := range words {
-		switch path.Base(word) {
-		case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
-			return i
-		}
-	}
-	return -1
+// capFloorConsumer reads the program a statement prefix runs, the one that
+// takes the here-document or the quoted word that follows (the real consumer
+// of the data): its COMMAND word, behind the wrappers that pass the rest of
+// argv on (sudo, env NAME=value, nohup, exec, nice, command, time,
+// timeout...), with its static argument words ("" for a word built at run
+// time). known is false when the prefix cannot be read to that point (a
+// program built at run time, an unknown wrapper option): the caller then
+// judges as if the consumer were a shell, since a here-document that may be
+// a script is read, never skipped (the bound rule).
+func capFloorConsumer(prefix, home string) (program string, args []string, known bool) {
+	return hookpaths.StatementProgram(capFloorStripKeywords(strings.TrimSpace(prefix)), home)
 }
 
 // capFloorDashCOption reports a shell option word that takes the script from
@@ -561,24 +657,29 @@ func capFloorDashCOption(word string) bool {
 }
 
 // capFloorShellDashC reports a statement prefix that ends with a shell and its
-// -c option: the quoted word that follows is the script it runs.
-func capFloorShellDashC(prefix string) bool {
-	words := capFloorShellWords(prefix)
-	at := capFloorShellAt(words)
-	return at >= 0 && at+1 < len(words) && capFloorDashCOption(words[len(words)-1])
+// -c option: the quoted word that follows is the script it runs. The shell
+// is the command word of the statement, not any word of it (GAP-0691).
+func capFloorShellDashC(prefix, home string) bool {
+	program, args, known := capFloorConsumer(prefix, home)
+	return known && slices.Contains(capFloorShells, program) && len(args) > 0 && capFloorDashCOption(args[len(args)-1])
 }
 
-// capFloorShellStdin reports a statement prefix that runs a shell with no
-// script operand and no -c: the shell reads its script from standard input,
-// so a here-document of the statement is that script.
-func capFloorShellStdin(prefix string) bool {
-	words := capFloorShellWords(prefix)
-	at := capFloorShellAt(words)
-	if at < 0 {
+// capFloorShellStdin reports a statement prefix whose command word is a shell
+// with no script operand and no -c: the shell reads its script from standard
+// input, so a here-document of the statement is that script. A program the
+// prefix does not let us read is taken as a shell; grep, which, echo, cat,
+// an interpreter or ssh with a word "bash" among its operands is not one: its
+// data is not a shell script run here.
+func capFloorShellStdin(prefix, home string) bool {
+	program, args, known := capFloorConsumer(prefix, home)
+	if !known {
+		return true
+	}
+	if !slices.Contains(capFloorShells, program) {
 		return false
 	}
-	for _, word := range words[at+1:] {
-		if !strings.HasPrefix(word, "-") || capFloorDashCOption(word) {
+	for _, word := range args {
+		if word != "" && (!strings.HasPrefix(word, "-") || capFloorDashCOption(word)) {
 			return false
 		}
 	}
@@ -599,54 +700,32 @@ func capFloorStripKeywords(text string) string {
 	}
 }
 
-// capFloorAnalysisCaps is the cap set of an action analysis that stopped at
-// its syntax depth or node bound (actionfacts StatusLimitExceeded with
-// depth_limit or node_limit): its facts hold no path of the call.
+// capFloorAnalysisCaps is the cap set of an action analysis of a shell call
+// that stopped at a bound of its own (actionfacts StatusLimitExceeded): its
+// syntax depth or node bound, the wrapper bound or the fact bound. The facts
+// of such a call hold no, or only some of the, paths and commands of the
+// text, so no reader proved what the call does (rel-1-0-10:GAP-0688,
+// GAP-0689). The input bound is not here: it is the size of one script the
+// shell reading budget grades by target (the owner rule of GAP-0677, a benign
+// 10 KB `bash -c` script is allowed), and a call past the byte bound is
+// truncated by s7/posix-cap (GAP-0382). Other tools keep their own bounds.
 func capFloorAnalysisCaps(facts actionfacts.Facts) bounded.CapSet {
 	var set bounded.CapSet
-	if facts.Parse.Status != actionfacts.StatusLimitExceeded {
+	if facts.Parse.Status != actionfacts.StatusLimitExceeded || !trustedBashExecutionTool(facts.Tool) {
 		return set
 	}
 	for _, issue := range facts.Parse.Issues {
 		switch issue {
-		case actionfacts.IssueDepthLimit:
+		case actionfacts.IssueDepthLimit, actionfacts.IssueWrapperLimit:
 			set = set.Union(bounded.Of(bounded.Depth))
 		case actionfacts.IssueNodeLimit:
 			set = set.Union(bounded.Of(bounded.Nodes))
+		case actionfacts.IssueFactLimit:
+			set = set.Union(bounded.Of(bounded.Items))
 		}
 	}
 	return set
 }
-
-// capFloorMayWriteProtected reports a call that may write a protected target
-// or the DefenseClaw state the readers can name: the state-write mention scan
-// of the hook path (hookpaths.ActionStateTargetMention) holds, a write operand
-// the writer readers list (hookpaths.LiteralWriteOperands) may name a
-// protected target however it is spelled (hookpaths.BoundCallMayNameProtected),
-// or a write argument the shell builds at run time may select one
-// (hookpaths.UnprovenProtectedWrite, class dynamic-argument). A command the
-// shell picks at run time (dynamic-command) names no target: the owner traces
-// hold benign scripts of that kind past the depth bound.
-func capFloorMayWriteProtected(request trustedActionRequest) bool {
-	command, known := trustedBashCommandInput(request.Input)
-	if !known || command == "" {
-		return false
-	}
-	cwd, home := request.Input.CWD, request.Input.ActiveHome
-	if request.targetMemo.ActionStateTargetMention(command, cwd, home) {
-		return true
-	}
-	for _, operand := range hookpaths.LiteralWriteOperands(command, cwd, home) {
-		if hookpaths.BoundCallMayNameProtected(operand, cwd, home) {
-			return true
-		}
-	}
-	return hookpaths.UnprovenProtectedWrite(command, cwd, home) == capFloorDynamicArgument
-}
-
-// capFloorDynamicArgument is the unproven-write class of a write argument the
-// shell builds at run time (hookpaths.UnprovenReasonKey values).
-const capFloorDynamicArgument = "dynamic-argument"
 
 // capFloorMayNameProtected reports a call whose command text may name a
 // protected target or the DefenseClaw state, however it is quoted

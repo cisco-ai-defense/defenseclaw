@@ -85,7 +85,8 @@ nested-body bound: every call that carries `ACTION-COMPOUND-LIMIT`) is also cut
 into pieces in `internal/gateway/cap_floor.go` (`withCapFloor`, one place, run
 after every dispatch path). The cut reads the text once and never parses: it
 splits at `;`, `&`, `|`, `&&`, `||`, `(`, `)`, `$(`, a backquote, a line end
-and the `{` and `}` words, never inside a quoted string, a comment or a
+and the `{` and `}` words (a pipeline is a piece of its own as well as its
+stages, so what needs its stages together is judged), never inside a quoted string, a comment or a
 here-document body. The static script of a shell (`bash -c` with a
 single-quoted script, a here-document fed to a shell on standard input) is a
 piece of its own. A piece whose text may name a protected target or the
@@ -97,41 +98,54 @@ still blocks before, after or inside the padding that hit the cap, in every
 tier, and a state write still blocks in observe (rel-1-0-10:GAP-0312,
 GAP-0360, GAP-0435, GAP-0381).
 
-The action analysis has a bound of its own: a syntax tree deeper than 64
-levels or past its node bound (`actionfacts` `limit_exceeded`, issue
-`depth_limit` or `node_limit`) yields no path facts, which on rel let a state
-write inside 30 to 512 nested subshells through in every tier
-(rel-1-0-10:GAP-0547). Such a call that may write a protected target or the
-state the readers can name (the state-write mention scan, a listed write
-operand that may name a protected target, or a write argument built at run
-time, unproven class `dynamic-argument`) is truncated in the sense of the
-bound rule: it gets the evaluation-limit finding with the reason
-`bounded_truncated cap=depth` (or `nodes`), so at least the unknown tier of
-the pack, and its pieces are judged as above. The bound is a tree depth, which
-30 terms of a pipe or `&&` list reach; benign scripts of that depth that only
-read or print what names the DefenseClaw tree (the owner traces hold some)
-keep the verdict of the readers that read them.
+The action analysis has bounds of its own: a syntax tree deeper than 64
+levels or past its node bound, more than four nested wrappers, or more facts
+than it keeps (`actionfacts` `limit_exceeded`, issue `depth_limit`,
+`node_limit`, `wrapper_limit` or `fact_limit`, on a shell tool) yields no, or
+not all, path facts, which on rel let a state write, the delete of the home
+folder, a download run by a shell or a credential sent out inside 30 to 512
+nested subshells through in every tier (rel-1-0-10:GAP-0547, GAP-0688,
+GAP-0689). Every such call is truncated in the sense of the bound rule,
+whatever it names: it gets the evaluation-limit finding with the reason
+`bounded_truncated cap=depth` (or `nodes`, `items`), so at least the unknown
+tier of the pack (an alert in the default and permissive packs, managed
+included; a block in strict), and its pieces are judged as above, so a
+destructive or protected statement the readers prove on its own keeps its
+block (for such a call every piece that names a path, a home spelling or a
+variable is judged, not only those that name a protected target). The bound
+is a tree depth, which 30 terms of a pipe or `&&` list reach:
+a long benign script alerts in the default pack like any call the readers did
+not finish. The input bound (one script over its size) is not here: the shell
+reading budget grades it by target (GAP-0677).
 
-A call that names no protected target or state gets no piece and keeps the
-evaluation-limit verdict, so a cap alone is not a new block. Reads beside a
-cap stay reads: a piece is judged by the same rules as the call it is.
+A call that names no protected target or state gets no piece, and a cap alone
+adds no block. Reads beside a cap stay reads: a piece is judged by the same
+rules as the call it is.
 
-A here-document fed to a shell is that shell's script whether or not a cap is
-hit; its body is judged as a piece of every such call (GAP-0532: a state write
-in it was allowed at any size).
+A here-document is a shell's script when the COMMAND word of its statement is
+a shell (behind sudo, env, nohup, exec, nice, command, time or timeout
+wrappers), whether or not a cap is hit; its body is judged as a piece of every
+such call (GAP-0532: a state write in it was allowed at any size). Data given
+to grep, which, echo, cat or an interpreter, or the shell with a script file,
+is not a script (GAP-0691); a program the statement does not let the readers
+name is taken for a shell.
 
 A call past the nested-body bound is decided at once (the owner rule of
 GAP-0677): the floor judges only its statements of at most 4 KiB there, never
 a shell body, so a protected write beside the bodies still keeps its block
 (GAP-0381) and the decision stays inside the hook window.
 
-The floor has bounds of its own, each of which leaves the call at the unknown
-tier it already has: 16 pieces per hook call (half from the start of the call,
-half from its end, bodies included), a statement of at most 4 KiB, a shell
-body of at most 256 KiB, a body cut again at most twice, and of a call over
-96 KiB only the first 64 KiB and the last 32 KiB are cut. The pieces that name
-a target are found by halving, so a call of thousands of statements costs a
-pass over its text per level of the halving.
+The floor has bounds of its own, and each of them is a cap of the call, never
+a silent allow (GAP-0690): 16 pieces per hook call (half from the start of the
+call, half from its end, bodies included), a statement of at most 4 KiB, a
+shell body of at most 256 KiB, a body cut again at most twice, and of a call
+over 96 KiB only the first 64 KiB and the last 32 KiB are cut. A call whose
+text may name a target and that reaches one of them (a here-document nested
+four deep, the 9th to 12th of 20 here-documents, a piece too big to judge) is
+truncated: `bounded_truncated cap=depth`, `items` or `bytes`, the unknown tier
+of the pack, and the block of every piece it did judge. The pieces that name a
+target are found by halving, so a call of thousands of statements costs a pass
+over its text per level of the halving.
 
 ## Cost curve
 
