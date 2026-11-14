@@ -717,24 +717,34 @@ func (a *APIServer) applyAgentHookToolChains(
 	return resp, finalization
 }
 
-// blockedSecretReadPredecessor is the secret-read step of a blocked pre-tool
-// proposal, with its own join digests and nothing else, or false when the
-// proposal has no secret-read step.
+// blockedSecretReadPredecessor is the secret-read steps of a blocked pre-tool
+// proposal, with their own join digests and nothing else, or false when the
+// proposal has none. Two steps: the secret-read chain, and the value-lineage
+// chain whose step 1 the success result's value digests attach to
+// (resolvePendingTx refuses a success that carries value digests when the
+// pending row lacks that step, which lost the chain, GAP-0549).
 func blockedSecretReadPredecessor(
 	projection guardrail.ToolChainProjection,
 ) (guardrail.ToolChainProjection, bool) {
 	out := guardrail.ToolChainProjection{ParseStatus: projection.ParseStatus}
-	bit, ok := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
-	index, indexed := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
-	if !ok || !indexed || projection.DetectionStepMask&bit == 0 {
-		return out, false
+	kept := false
+	for _, id := range []string{
+		guardrail.ToolChainSecretReadThenEgress,
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	} {
+		bit, ok := guardrail.ToolChainStepMask(id, 1)
+		index, indexed := guardrail.ToolChainIndexByID(id)
+		if !ok || !indexed || projection.DetectionStepMask&bit == 0 {
+			continue
+		}
+		kept = true
+		out.DetectionStepMask |= bit
+		out.EnforcementStepMask |= projection.EnforcementStepMask & bit
+		out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
+		out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
+		out.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
 	}
-	out.DetectionStepMask = bit
-	out.EnforcementStepMask = projection.EnforcementStepMask & bit
-	out.EnforcementJoinDigests[index] = projection.EnforcementJoinDigests[index]
-	out.EnforcementOutputJoinDigests[index] = projection.EnforcementOutputJoinDigests[index]
-	out.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
-	return out, true
+	return out, kept
 }
 
 // toolChainProjectionForPolicyPosture keeps useful but proximity-only chain
