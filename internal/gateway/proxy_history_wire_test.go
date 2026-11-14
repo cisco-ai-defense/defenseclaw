@@ -86,13 +86,6 @@ type f16Wire struct {
 	build                            func(items []f14Item, stream bool) map[string]any
 }
 
-func (w f16Wire) url(stream bool) string {
-	if stream && w.streamPath != "" {
-		return w.streamPath
-	}
-	return w.path
-}
-
 const f16PNG = "iVBORw0KGgo="
 
 func f16AnthropicTurns(items []f14Item) []any {
