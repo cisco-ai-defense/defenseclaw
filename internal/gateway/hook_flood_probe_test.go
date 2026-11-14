@@ -124,8 +124,11 @@ func TestHookFloodKeepsPendingIdentityPerCall(t *testing.T) {
 		return audit.CorrelationOperationStatus(got)
 	}
 	terminal("flood-session-01", "toolu_00")
-	if got := status("flood-session-01", "toolu_00"); got != audit.CorrelationOperationCompleted {
-		t.Fatalf("exact session terminal left status %s, want completed", got)
+	// The exact session's operation is resolved, which deletes it (S8 R5).
+	var resolvedLeft int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations WHERE session_id=? AND operation_id=?`,
+		"flood-session-01", "toolu_00").Scan(&resolvedLeft); err != nil || resolvedLeft != 0 {
+		t.Fatalf("exact session terminal left %d operations (err %v), want 0", resolvedLeft, err)
 	}
 	if got := status("flood-session-00", "toolu_00"); got != audit.CorrelationOperationActive {
 		t.Fatalf("another session's operation changed to %s", got)
@@ -158,13 +161,19 @@ func TestHookFloodKeepsPendingIdentityPerCall(t *testing.T) {
 	if startRecorder.Code != http.StatusOK {
 		t.Fatalf("sessionless start status=%d answer=%s", startRecorder.Code, startRecorder.Body.String())
 	}
+	var sessionlessStarts int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations WHERE session_id IS NULL AND operation_id='sessionless-tool' AND status='active'`).Scan(&sessionlessStarts); err != nil || sessionlessStarts != 1 {
+		t.Fatalf("sessionless start operations=%d err=%v, want 1", sessionlessStarts, err)
+	}
 	terminal("reported-session", "sessionless-tool")
-	var sessionlessStatus string
-	if err := database.QueryRow(`SELECT status FROM correlation_pending_operations WHERE session_id IS NULL AND operation_id='sessionless-tool'`).Scan(&sessionlessStatus); err != nil {
+	// No other scope holds the ID, so the terminal resolved the start by
+	// deleting it (S8 R5).
+	var sessionlessLeft int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations WHERE operation_id='sessionless-tool'`).Scan(&sessionlessLeft); err != nil {
 		t.Fatal(err)
 	}
-	if sessionlessStatus != string(audit.CorrelationOperationCompleted) {
-		t.Fatalf("sessionless start with reported-session terminal status=%s, want completed", sessionlessStatus)
+	if sessionlessLeft != 0 {
+		t.Fatalf("sessionless start with reported-session terminal left %d operations, want 0", sessionlessLeft)
 	}
 }
 

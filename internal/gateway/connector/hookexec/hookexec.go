@@ -2197,8 +2197,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 
 	case styleHookDecisionStderr:
-		// Mirror kiro-hook.sh: stdout stays empty, and a hook_output
-		// decision of deny or block is reported on stderr with exit 2.
+		// Mirror kiro-hook.sh: a hook_output decision of deny or block is
+		// reported on stderr with exit 2, and stdout stays empty except for
+		// the v3 prompt note (KiroV3PromptCheckedNote).
 		if output != "" {
 			if d := decodeDecision(output); d == "deny" || d == "block" {
 				if reason := decodeReason(output); reason != "" {
@@ -2206,6 +2207,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 				}
 				return blockExit
 			}
+		}
+		if kiroV3PromptNote(opts) {
+			fmt.Fprintln(opts.Stdout, KiroV3PromptCheckedNote)
 		}
 		return 0
 

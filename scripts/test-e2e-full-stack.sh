@@ -143,29 +143,6 @@ wait_for_url() {
     return 1
 }
 
-derive_proxy_master_key() {
-    python3 - <<'PY'
-import hashlib
-import os
-
-key_file = os.path.join(os.environ["DEFENSECLAW_HOME"], "device.key")
-try:
-    with open(key_file, "rb") as f:
-        data = f.read()
-except OSError:
-    print("")
-else:
-    digest = hashlib.pbkdf2_hmac(
-        "sha256",
-        data,
-        b"defenseclaw-proxy-master-key",
-        100_000,
-        dklen=32,
-    ).hex()
-    print(f"sk-dc-{digest}")
-PY
-}
-
 start_openclaw_gateway() {
     if is_full_live; then
         openclaw gateway start
@@ -298,19 +275,13 @@ sync_gateway_token_env_from_dotenv() {
         export DEFENSECLAW_GATEWAY_TOKEN="$dc_token"
         synced=true
     fi
+    # OPENCLAW_GATEWAY_TOKEN is the OpenClaw WebSocket credential only. It is
+    # never the DefenseClaw API token (R-TOK), so it never fills the cache.
     if [ -n "$oc_token" ]; then
         export OPENCLAW_GATEWAY_TOKEN="$oc_token"
-        synced=true
-    elif [ -n "$dc_token" ]; then
-        export OPENCLAW_GATEWAY_TOKEN="$dc_token"
-        synced=true
     fi
-    if [ "$synced" = true ]; then
-        if [ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
-            GATEWAY_TOKEN_CACHE="$DEFENSECLAW_GATEWAY_TOKEN"
-        elif [ -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]; then
-            GATEWAY_TOKEN_CACHE="$OPENCLAW_GATEWAY_TOKEN"
-        fi
+    if [ "$synced" = true ] && [ -n "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
+        GATEWAY_TOKEN_CACHE="$DEFENSECLAW_GATEWAY_TOKEN"
     fi
 }
 
@@ -403,16 +374,13 @@ PY
         GATEWAY_TOKEN_CACHE="${DEFENSECLAW_GATEWAY_TOKEN:-}"
     fi
 
-    # Strategy 4: legacy OpenClaw token from the current process env.
-    if [ -z "$GATEWAY_TOKEN_CACHE" ]; then
-        GATEWAY_TOKEN_CACHE="${OPENCLAW_GATEWAY_TOKEN:-}"
-    fi
-
-    # Strategy 5: read token_env name from config, then check that env var.
+    # Strategy 4: read token_env name from config, then check that env var.
+    # A token_env naming OPENCLAW_GATEWAY_TOKEN (1.0.9 configs) is skipped:
+    # that variable is the OpenClaw credential, not the DefenseClaw token.
     if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$DC_HOME/config.yaml" ]; then
         local token_env_name
         token_env_name=$(grep 'token_env:' "$DC_HOME/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
-        if [ -n "$token_env_name" ]; then
+        if [ -n "$token_env_name" ] && [ "$token_env_name" != "OPENCLAW_GATEWAY_TOKEN" ]; then
             GATEWAY_TOKEN_CACHE="${!token_env_name:-}"
         fi
     fi
@@ -2825,7 +2793,7 @@ phase_guardrail() {
     fi
     pass "guardrail proxy reachable"
 
-    local master_key response content err request_model gateway_token
+    local response content err request_model gateway_token
     request_model="${GUARDRAIL_REQUEST_MODEL:-}"
     if [ -z "$request_model" ]; then
         request_model=$(python3 - <<'PY'
@@ -2844,40 +2812,7 @@ PY
         return
     fi
 
-    master_key="$(derive_proxy_master_key)"
-
     gateway_token="$(get_gateway_token)"
-
-    # ── 6a. Master key auth (legacy path) ──
-    if [ -n "$master_key" ]; then
-        response=$(curl -sS --max-time 45 \
-            -H "Authorization: Bearer $master_key" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
-            "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-
-        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if [ -n "$err" ] && echo "$err" | grep -Eqi '429|rate|overload|overloaded|too many requests|busy'; then
-            echo "  Retrying guardrail request after transient provider error..."
-            sleep 5
-            response=$(curl -sS --max-time 45 \
-                -H "Authorization: Bearer $master_key" \
-                -H "Content-Type: application/json" \
-                -d "$(jq -cn --arg model "$request_model" '{model: $model, messages: [{role: "user", content: "Reply with exactly: E2E_OK"}], max_tokens: 20}')" \
-                "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout or connection refused"}')
-        fi
-
-        echo "$response" | jq '.' 2>/dev/null || echo "$response"
-        content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-        err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
-            pass "guardrail round-trip (master key): LLM responded"
-        else
-            fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
-        fi
-    else
-        skip "guardrail round-trip (master key)" "device key is unavailable"
-    fi
 
     # ── 6b. X-DC-Auth header auth (hardened auth path) ──
     if [ -n "$gateway_token" ]; then
@@ -2897,7 +2832,7 @@ PY
             fail "guardrail round-trip (X-DC-Auth): LLM responded" "err='$err' response='$response'"
         fi
     else
-        skip "guardrail round-trip (X-DC-Auth)" "no OPENCLAW_GATEWAY_TOKEN configured"
+        skip "guardrail round-trip (X-DC-Auth)" "no DEFENSECLAW_GATEWAY_TOKEN configured"
     fi
 
     # ── 6c. Auth rejection: invalid token must return 401 ──
@@ -2910,8 +2845,8 @@ PY
     if [ "$response" = "401" ]; then
         pass "guardrail auth rejection: invalid token returns 401"
     else
-        # When neither token nor masterKey is configured the proxy is open (returns 200).
-        if [ -z "$gateway_token" ] && [ -z "$master_key" ]; then
+        # When no gateway token is configured the proxy is open (returns 200).
+        if [ -z "$gateway_token" ]; then
             skip "guardrail auth rejection" "no auth configured — proxy is open"
         else
             fail "guardrail auth rejection: invalid token returns 401" "got HTTP $response"
@@ -2926,7 +2861,7 @@ PY
             pt_model=$(echo "$request_model" | sed 's|^.*/||')
             sleep 2
             response=$(curl -sS --max-time 60 \
-                -H "Authorization: Bearer $master_key" \
+                -H "X-DC-Auth: Bearer $gateway_token" \
                 -H "X-DC-Target-URL: https://api.anthropic.com" \
                 -H "X-AI-Auth: Bearer $anthropic_key" \
                 -H "Content-Type: application/json" \
@@ -2960,8 +2895,7 @@ phase_provider_detection() {
     echo "=== Phase 6B: Provider Detection & Multi-Provider Auth [API] ==="
     phase_timer_start
 
-    local master_key response http_code gateway_token
-    master_key="$(derive_proxy_master_key)"
+    local response http_code gateway_token
     gateway_token="$(get_gateway_token)"
 
     # Guardrail proxy must be running for these tests.
@@ -2987,7 +2921,7 @@ phase_provider_detection() {
         local pname purl ppath
         IFS='|' read -r pname purl ppath <<< "$entry"
         http_code=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "X-DC-Target-URL: $purl" \
             -H "X-AI-Auth: Bearer dummy-key-e2e" \
             -H "Content-Type: application/json" \
@@ -3078,7 +3012,7 @@ PY
     # For Anthropic target, upstream should get x-api-key ONLY.
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         response=$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "X-DC-Target-URL: https://api.anthropic.com" \
             -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
@@ -3158,7 +3092,7 @@ PY
         fi
         sleep 1
         response=$(curl -sS --max-time 45 \
-            -H "Authorization: Bearer $master_key" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "Content-Type: application/json" \
             -d "$(jq -cn --arg model "$bmodel" '{model: $model, messages: [{role: "user", content: "Reply with exactly: BIFROST_OK"}], max_tokens: 20}')" \
             "$GUARDRAIL_URL/v1/chat/completions" 2>/dev/null || echo '{"error":"timeout"}')
@@ -3177,7 +3111,7 @@ PY
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
         sleep 1
         response=$(curl -sS --max-time 45 \
-            -H "X-DC-Auth: Bearer ${gateway_token:-$master_key}" \
+            -H "X-DC-Auth: Bearer $gateway_token" \
             -H "X-AI-Auth: Bearer ${ANTHROPIC_API_KEY}" \
             -H "Content-Type: application/json" \
             -d '{"model":"anthropic/claude-haiku-4-5-20251001","messages":[{"role":"user","content":"Reply: HEADER_KEY_OK"}],"max_tokens":20}' \

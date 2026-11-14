@@ -193,6 +193,9 @@ func UserNativeOTLPConfigPathFor(connectorName, home string) string {
 // UserNativeOTLPReadLimit bounds every file the native OTLP check reads.
 const UserNativeOTLPReadLimit = userNativeOTLPReadLimit
 
+// ErrUserNativeOTLPFileTooLarge is wrapped by UserNativeOTLPFileTooLarge.
+var ErrUserNativeOTLPFileTooLarge = errUserNativeOTLPFileTooLarge
+
 // UserNativeOTLPFileTooLarge is the error for a file over
 // UserNativeOTLPReadLimit; it names the base name only.
 func UserNativeOTLPFileTooLarge(name string) error {

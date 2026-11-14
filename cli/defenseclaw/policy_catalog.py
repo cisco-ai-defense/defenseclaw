@@ -904,6 +904,7 @@ _PROTECTION_ORDER = (
     "infrastructure-destruction-protection",
     "kubernetes-production-protection",
     "ssh-authorized-keys-protection",
+    "active-directory-protection",
 )
 
 #: Short "what it covers" phrase per pack for a table cell (<= 40 chars).
@@ -914,6 +915,7 @@ _PROTECTION_COVERS = {
     "infrastructure-destruction-protection": "Disk wipes, IaC destroy, kernel binds",
     "kubernetes-production-protection": "Secret reads, namespace and bulk deletes",
     "ssh-authorized-keys-protection": "Unapproved SSH authorized_keys writes",
+    "active-directory-protection": "AD credential attacks, bulk LDAP enum",
 }
 COVERS_MAX_CHARS = 40
 

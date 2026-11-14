@@ -1883,7 +1883,7 @@ def _echo_provider_enforcement_legend(app: AppContext) -> None:
             ux.dim("  No agent connector configured; a bound provider can serve DefenseClaw's judge/aux model only.")
         )
         return
-    if platform_support.is_proxy_connector(connector):
+    if platform_support.uses_guardrail_proxy(connector):
         click.echo(
             ux.dim(
                 f"  Active connector {connector!r} is a proxy connector: a bound "

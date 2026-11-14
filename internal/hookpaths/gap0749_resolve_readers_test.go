@@ -31,6 +31,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	MayNameState(command)
 	StateNamingReading(command, home, false)
+	BudgetStateReading(command)
 	if twin, _, ok := actionfacts.ActiveUserTildeTwin(command, home, clientLogin()); ok {
 		command = twin
 	}
@@ -114,7 +115,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 // TestGAP0749ResolveReadersCoverResolve fails when the two differ.
 var gap0749ResolveReaderCalls = []string{
 	"ActionCommandAuditReasonWithDialect", "ActionCommandDecision", "AdjacentAssignedWriteOperands",
-	"BoundCommandOperands", "BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
+	"BoundCommandOperands", "BudgetStateReading", "BoundedGlobLoopCopyDestinations", "BoundedLoopCopyDestinations", "BoundedShellWriteOperands",
 	"CopySourceGlobDestinations", "DeclaredRedirectWriteOperands", "LinkWalkFacts", "LiteralWriteOperands",
 	"MayNameState", "NoDereferenceTouchShape", "QuotedDynamicCopyDestinations",
 	"SafeShellRedirectOccurrencesWithFacts", "ShellDirectoryWriteOperands", "ShellWriteOperands",

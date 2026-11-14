@@ -43,9 +43,14 @@ const (
 )
 
 // claudeCodeSandboxProviderEnv are the settings-env variables through which a
-// settings file can move Claude Code 2.1.156 to another model endpoint: the
-// provider switches (CLAUDE_CODE_USE_*), each provider's base URL, and the
-// bearer and extra headers every request carries. The per-run drop-in pins
+// settings file can move the pinned Claude Code (2.1.311) to another model
+// endpoint: the provider switches (CLAUDE_CODE_USE_*, including the host
+// gateway hand-off), each provider's base URL (the binary's own list of them
+// is ANTHROPIC_BASE_URL, _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL and the
+// Bedrock, Vertex, Foundry, AWS, Google Cloud and Bedrock Mantle base URLs),
+// Claude Code's API base URL, and the bearer and extra headers every request
+// carries. 2.1.311 added the Anthropic-on-Google-Cloud provider
+// (CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD, ANTHROPIC_GOOGLE_CLOUD_BASE_URL). The per-run drop-in pins
 // each one to the value the run uses, or to "" (Claude reads an empty value
 // as unset) when the run does not use it, so a repository's committed
 // .claude/settings.json, or a user settings file the workload wrote, cannot
@@ -60,12 +65,17 @@ var claudeCodeSandboxProviderEnv = []string{
 	"ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
 	"ANTHROPIC_CUSTOM_HEADERS",
 	"ANTHROPIC_FOUNDRY_BASE_URL",
+	"ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
 	"ANTHROPIC_VERTEX_BASE_URL",
+	"CLAUDE_CODE_API_BASE_URL",
 	"CLAUDE_CODE_USE_ANTHROPIC_AWS",
+	"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
 	"CLAUDE_CODE_USE_BEDROCK",
 	"CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_GATEWAY",
 	"CLAUDE_CODE_USE_MANTLE",
 	"CLAUDE_CODE_USE_VERTEX",
+	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
 }
 
 // ClaudeCodeSandboxProviderEnv lists the model-provider variables the
@@ -75,7 +85,7 @@ func ClaudeCodeSandboxProviderEnv() []string {
 }
 
 // claudeCodeSandboxModelEnv are the settings-env variables that choose
-// Claude Code 2.1.156's model: the main model and the models the Opus,
+// the pinned Claude Code's model: the main model and the models the Opus,
 // Sonnet and Haiku aliases (the /model picker) and background tasks resolve
 // to. The per-run drop-in pins each one the run sets (a provider that
 // serves the models under other ids, such as Bedrock Mantle), so a settings
@@ -121,7 +131,7 @@ func (c *ClaudeCodeConnector) SandboxRunEnv() []string {
 //   - with project servers allowed and servers imported, the file the
 //     launcher merges into ~/.claude.json.
 //
-// The run drop-in is checked against the 2.1.156 settings schema for every
+// The run drop-in is checked against the 2.1.311 settings schema for every
 // key it sets. The replacement is checked against the image's drop-in, and
 // their merged managed tier must retain the image's controls.
 func (c *ClaudeCodeConnector) SandboxRunFiles(target SandboxRenderTarget, run SandboxRunConfig) ([]SandboxFile, error) {
@@ -270,11 +280,13 @@ func claudeCodeSandboxMCPConfig(servers []SandboxMCPServer) ([]byte, error) {
 	return append(body, '\n'), nil
 }
 
-// claudeCodeServerNamePattern is the 2.1.156 allowlist serverName pattern.
+// claudeCodeServerNamePattern is the 2.1.311 allowlist serverName pattern
+// (unchanged since 2.1.156).
 var claudeCodeServerNamePattern = lazyregexp.New(`^[a-zA-Z0-9_-]+$`)
 
 // validateClaudeCodeRunSettingsSchema checks the per-run drop-in against the
-// Claude Code 2.1.156 settings schema (zod) for every key DefenseClaw sets,
+// Claude Code 2.1.311 settings schema (zod) for every key DefenseClaw sets
+// (re-read for 2.1.311; each type is the one 2.1.156 had),
 // read from the Claude Code binary:
 //
 //	env                               record(string, coerce.string)

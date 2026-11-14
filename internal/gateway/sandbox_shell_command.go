@@ -147,6 +147,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 		ShellStartup:                  action.ShellStartup,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
+		windowsDialectReadings:        action.windowsDialectReadings,
 	})
 	if plain, ok := codexPlainShellCommand(a.decisionConfig(ctx), connectorName, req, action, commandTool); ok {
 		// Codex runs the command in PowerShell here, but the text may be
@@ -178,6 +179,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 				SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 				ResolvedWriteTargets:          action.ResolvedWriteTargets,
 				SandboxGuestCWD:               action.SandboxGuestCWD,
+				windowsDialectReadings:        action.windowsDialectReadings,
 			}))
 		}
 	}

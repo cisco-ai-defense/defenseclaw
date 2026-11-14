@@ -16,11 +16,13 @@ from scripts.go_test_shards import (
     check_exact_cover,
     discover_test_files,
     match_test_files,
+    package_test_seconds,
     partition_packages,
     partition_test_files,
     regex_names,
     run_shards,
     shard_regex,
+    shard_timeout_seconds,
 )
 
 
@@ -337,59 +339,6 @@ def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None
     assert max(weights) < 480
 
 
-def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
-    root = Path(__file__).resolve().parents[2]
-    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
-    seconds = timings["tests"]["internal/gateway"]
-    files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 40, seconds)
-
-    # These are top-level elapsed seconds from the red shard 20 CI artifact.
-    # Unrecorded tests used to weigh 0.22 seconds and all landed with an
-    # already slow test, exhausting the existing 11-minute Go test budget.
-    observed = {
-        "TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood": 344.1,
-        "TestGAP0503HandlerHeldSQLiteReportsDroppedToolRows": 22.8,
-        "TestGAP0568ObserveOverBudgetStateWriteBlocks": 77.7,
-        "TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost": 80.3,
-    }
-    assert all(name in seconds for name in observed)
-    holders = {name: next(i for i, shard in enumerate(shards) if name in shard) for name in observed}
-    # The cluster was the 344 s flood test with the others: it keeps a shard
-    # apart from them. The other three may share one when the shard still
-    # fits (two 80 s tests in a 420 s shard is a balanced plan).
-    flood = holders.pop("TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood")
-    assert flood not in holders.values(), holders
-    for index in {flood, *holders.values()}:
-        projected = sum(observed.get(name, float(seconds.get(name, seconds["*"]))) for name in shards[index])
-        assert projected * 1.3 < 660, (index, projected)
-
-
-def test_linux_gateway_cowork_corpus_replay_shard_stays_inside_the_budget() -> None:
-    root = Path(__file__).resolve().parents[2]
-    seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
-        "internal/gateway"
-    ]
-    files = discover_test_files(root / "internal/gateway")
-    shards = partition_test_files(files, 40, seconds)
-
-    # Unrecorded, the corpus replay weighed 0.21 seconds and joined a full
-    # shard 15, which then ran 657 and 660 seconds into the 11-minute Go test
-    # budget (rel/1.0.8 after the Cowork merge, when it ran 401.5 seconds).
-    # On the rel/1.0.9 runs 42876219880 to 42915503355 it ran 158.7 to 255.0
-    # seconds: weighed with its slowest time there, its shard keeps the
-    # hosted-runner spread inside the budget.
-    observed = {
-        "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts": 255.0,
-        "TestRecoveredHookFailModeByDeployment": 97.4,
-    }
-    assert all(name in seconds for name in observed)
-    corpus = next(shard for shard in shards if "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts" in shard)
-    projected = sum(observed.get(name, float(seconds.get(name, seconds["*"]))) for name in corpus)
-    assert projected * 1.3 < 660, projected
-    assert "TestRecoveredHookFailModeByDeployment" not in corpus
-
-
 def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
     root = Path(__file__).resolve().parents[2]
     seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
@@ -400,6 +349,66 @@ def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
     names = [name for _, file_names in files for name in file_names]
     assert check_exact_cover(shards, names) == []
     assert sum("TestAgentHookDispatch_BlockFiresOnBlock" in shard for shard in shards) == 1
+
+
+def test_linux_gateway_shard_timeouts_fit_the_job() -> None:
+    root = Path(__file__).resolve().parents[2]
+    seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
+        "internal/gateway"
+    ]
+    # Substrate (#1456) added these before rel carried them: unrecorded, each
+    # weighed the 0.24 s of "*", and together (186 s) they took shard 15 662 s
+    # into the flat 11m -timeout (run 43510035024). The refresh of 11-13 ran
+    # in a Substrate checkout, so rel weighs them before the hand-off. The
+    # same failure twice before (the 344 s GAP-0503 flood test with three slow
+    # tests in shard 20; the 401 s Cowork corpus replay in a full shard 15)
+    # had their own pinned checks; both tests now run in 6 to 20 s, so the
+    # check below, on every shard, replaces those pins.
+    for name in (
+        "TestGAP0013ProtectedTargetBlocksOnlyWhenKnownClaudeCode",
+        "TestGAP0013ProtectedTargetBlocksOnlyWhenKnownCodex",
+        "TestRouteOnlyHumanTextMatchesTheFullDecodeRandom",
+    ):
+        assert seconds[name] > 30, name
+    files = discover_test_files(root / "internal/gateway")
+    weigh = go_test_shards.test_weigher(seconds)
+    for index, shard in enumerate(partition_test_files(files, 40, seconds)):
+        planned = sum(weigh(name) for name in shard)
+        # No shard reaches the cap: each keeps its 1.5x headroom.
+        wanted = planned * go_test_shards.TIMEOUT_HEADROOM + go_test_shards.TIMEOUT_PAD_SECONDS
+        assert wanted < go_test_shards.TIMEOUT_CAP_SECONDS, (index, planned)
+        assert shard_timeout_seconds(shard, seconds) >= planned * go_test_shards.TIMEOUT_HEADROOM
+
+
+def test_shard_timeout_is_the_planned_time_with_headroom_inside_floor_and_cap(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    seconds = {"TestA": 300.0, "TestB": 100.0, "TestC": 10.0, "*": 0.5}
+    assert shard_timeout_seconds(["TestA", "TestB"], seconds) == 660  # 400 x 1.5 + 60
+    assert shard_timeout_seconds(["TestC", "TestUnrecorded"], seconds) == 240  # floor
+    assert shard_timeout_seconds(["TestA", "TestB", "TestA2"], {**seconds, "TestA2": 300.0}) == 720  # cap
+
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text("package a\nfunc TestA(t *testing.T) {}\n", encoding="utf-8")
+    (package / "b_test.go").write_text(
+        "package a\nfunc TestB(t *testing.T) {}\nfunc TestC(t *testing.T) {}\n", encoding="utf-8"
+    )
+    timings = tmp_path / "go-linux.json"
+    timings.write_text(json.dumps({"tests": {"pkg/a": seconds}}), encoding="utf-8")
+    monkeypatch.setattr(go_test_shards, "ROOT", tmp_path)
+    argv = ["go_test_shards.py", "--package-dir", str(package), "--shard-count", "2", "--timings", str(timings)]
+    for index, want in ((0, "510s"), (1, "240s")):  # TestA alone; TestB + TestC (110 s) at the floor
+        monkeypatch.setattr(sys, "argv", [*argv, "--shard-index", str(index), "--timeout"])
+        assert go_test_shards.main() == 0
+        assert capsys.readouterr().out.strip() == want
+
+    # Without recorded times there is no plan to time.
+    monkeypatch.setattr(sys, "argv", [*argv[:-2], "--shard-index", "0", "--timeout"])
+    with pytest.raises(SystemExit) as exc:
+        go_test_shards.main()
+    assert exc.value.code == 2
+    assert "--timeout needs --timings" in capsys.readouterr().err
 
 
 OPERATOR_COLLECTOR_PARTS = tuple(
@@ -464,6 +473,48 @@ def test_match_keeps_the_tests_a_run_pattern_selects_and_still_covers_them(tmp_p
     assert check_exact_cover(shards, ["TestHookOne", "TestModeThree", "TestSetupTwo"]) == []
     with pytest.raises(ValueError):
         match_test_files(files, "Hook/sub")
+
+
+def test_test_mode_weighs_the_first_timings_that_record_the_package(tmp_path: Path, monkeypatch, capsys) -> None:
+    # The macOS gateway parts pass go-darwin.json, then go-linux.json: the
+    # Linux times plan the parts until a refresh records the package's macOS
+    # times, which then win. A file without the package is skipped.
+    darwin_without = {"tests": {"pkg/other": {"TestA": 50.0}}}
+    darwin_with = {"tests": {"pkg/a": {"TestA": 1.0, "TestB": 90.0, "*": 0.1}}}
+    linux = {"tests": {"pkg/a": {"TestA": 80.0, "TestB": 1.0, "*": 0.1}}}
+    assert package_test_seconds([darwin_without, linux], "pkg/a") == linux["tests"]["pkg/a"]
+    assert package_test_seconds([darwin_with, linux], "pkg/a") == darwin_with["tests"]["pkg/a"]
+    assert package_test_seconds([darwin_without], "pkg/a") is None
+
+    package = tmp_path / "pkg" / "a"
+    package.mkdir(parents=True)
+    (package / "a_test.go").write_text(
+        "package sample\nfunc TestA(t *testing.T) {}\nfunc TestB(t *testing.T) {}\n", encoding="utf-8"
+    )
+    (package / "b_test.go").write_text("package sample\nfunc TestC(t *testing.T) {}\n", encoding="utf-8")
+    timings = tmp_path / "go-darwin.json"
+    other = tmp_path / "go-linux.json"
+    other.write_text(json.dumps(linux), encoding="utf-8")
+    monkeypatch.setattr(go_test_shards, "ROOT", tmp_path)
+    argv = ["go_test_shards.py", "--package-dir", str(package), "--shard-count", "2", "--shard-index", "0"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--timings", str(timings), "--timings", str(other)])
+    for darwin, heaviest in ((darwin_without, "TestA"), (darwin_with, "TestB")):
+        timings.write_text(json.dumps(darwin), encoding="utf-8")
+        assert go_test_shards.main() == 0
+        assert capsys.readouterr().out.strip() == shard_regex([heaviest])
+
+    listing = tmp_path / "packages.txt"
+    listing.write_text("example.com/a\nexample.com/b\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["go_test_shards.py", "--packages-file", str(listing), "--shard-count", "1", "--shard-index", "0"]
+        + ["--timings", str(timings), "--timings", str(other)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        go_test_shards.main()
+    assert exc.value.code == 2
+    assert "package mode takes one --timings" in capsys.readouterr().err
 
 
 def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> None:

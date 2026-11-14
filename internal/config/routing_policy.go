@@ -93,7 +93,8 @@ type RoutingPolicyConfig struct {
 }
 
 // RoutingAdminConfig is routing.admin, the organization floor. Profiles
-// only tighten it. S11 adds rules, budgets and visibility.
+// only tighten it. Rules, Budgets and Visibility are the per-subject policy
+// of routing_admin_rules.go.
 type RoutingAdminConfig struct {
 	AllowedAliases    []string          `mapstructure:"allowed_aliases"     yaml:"allowed_aliases,omitempty"`
 	DeniedProviders   []string          `mapstructure:"denied_providers"    yaml:"denied_providers,omitempty"`
@@ -103,6 +104,12 @@ type RoutingAdminConfig struct {
 	// Locked names keys (RoutingLockableKeys) that profiles may not set and
 	// that the CLI shows as locked.
 	Locked []string `mapstructure:"locked" yaml:"locked,omitempty"`
+	// Rules, Budgets and Visibility: routing_admin_rules.go.
+	Rules      []RoutingAdminRule `mapstructure:"rules"      yaml:"rules,omitempty"`
+	Budgets    []RoutingBudget    `mapstructure:"budgets"    yaml:"budgets,omitempty"`
+	Visibility *RoutingVisibility `mapstructure:"visibility" yaml:"visibility,omitempty"`
+	// BudgetStore is the opt-in fleet budget store (routing_admin_rules.go).
+	BudgetStore *RoutingBudgetStoreConfig `mapstructure:"budget_store" yaml:"budget_store,omitempty"`
 }
 
 // Policy returns the floor part of routing.admin.
