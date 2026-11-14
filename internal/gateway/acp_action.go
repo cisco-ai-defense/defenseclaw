@@ -57,14 +57,21 @@ type acpFrameAction struct {
 	// verdict is then raised to the unknown tier of the pack
 	// (internal/guardrail/bounded), never below.
 	trunc bounded.CapSet
+	// reportBlocked: the guard says this gateway judged a report of the call
+	// the permission names a block, or one that would have blocked, when the
+	// guard forwarded it (acp.ToolCallTracker). The permission is never judged
+	// below that block: what the guard kept of the call may have been cut or
+	// dropped since, and the report was judged whole.
+	reportBlocked bool
 }
 
 // acpMaxFrameToolCalls bounds the locations of one frame that are judged one
 // by one (a permission naming many). A frame that names more has its first
 // ones judged and is then judged at the unknown tier of the pack: alert in
 // the default and permissive packs, which the editor shows as the permission
-// it asks the user, and block in strict (rel-1-0-10:GAP-0296, GAP-0331).
-const acpMaxFrameToolCalls = 64
+// it asks the user, and block in strict (rel-1-0-10:GAP-0296, GAP-0331). The
+// guard keeps as many of the first locations of a call it cuts for size.
+const acpMaxFrameToolCalls = acp.MaxToolCallLocations
 
 // acpFrameToolCalls is the action of one ACP frame. ok is false for a frame
 // that performs none (a prompt, agent text, a terminal's lifecycle, a
@@ -91,9 +98,9 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 		if json.Unmarshal(msg.Params, &params) != nil || !acpJSONObject(params.ToolCall) {
 			return acpFrameAction{calls: []acpToolCall{{unread: true}}, enforceable: true}, true
 		}
-		toolCall, merged := acpMergeToolCall(req.ToolCallState, params.ToolCall)
+		toolCall, merged, reportBlocked := acpMergeToolCall(req.ToolCallState, params.ToolCall)
 		calls, prose, read := acpToolCallUpdateCalls(toolCall, goos, true, merged)
-		return acpFrameAction{calls: calls, enforceable: true, prose: prose, trunc: merged.Union(read)}, true
+		return acpFrameAction{calls: calls, enforceable: true, prose: prose, trunc: merged.Union(read), reportBlocked: reportBlocked}, true
 	case "session/update":
 		var params struct {
 			Update json.RawMessage `json:"update"`
@@ -114,7 +121,7 @@ func acpFrameToolCalls(req acp.Evaluation, goos string) (acpFrameAction, bool) {
 			// A report that carries the kind, input or locations of the call
 			// is the call as the editor merges it onto the earlier reports;
 			// a status or output update alone names no action.
-			update2, merged = acpMergeToolCall(req.ToolCallState, update2)
+			update2, merged, _ = acpMergeToolCall(req.ToolCallState, update2)
 		}
 		calls, prose, read := acpToolCallUpdateCalls(update2, goos, false, merged)
 		if len(calls) == 0 {
@@ -219,7 +226,9 @@ func acpFileCall(method string, raw json.RawMessage) acpToolCall {
 // (rel-1-0-10:GAP-0373). A call without a kind (the field is optional in an
 // update, and the kind may have come only in the first report, which the guard
 // merges in) is read by the shape of its input: a command is a shell call, text
-// to write or a replacement is a Write or Edit of its location. A location or
+// to write or a replacement is a Write or Edit of its location, and an input
+// with both (Kiro's write tools name their operation in command) is judged as
+// both. A location or
 // input that shows no action at all is unknown: judged as a read and raised to
 // the unknown tier of the pack, never a write the input does not show
 // (rel-1-0-10:GAP-0330, GAP-0375).
@@ -297,11 +306,16 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool, c
 	oldText, hasOld := acpInputTextOf(input, "old_string", "old_str", "oldStr", "oldString")
 	newText, hasNew := acpInputTextOf(input, "new_string", "new_str", "newStr", "newString")
 	kind := call.Kind
+	alsoWrite := false
 	if kind == "" {
 		_, hasCommand := acpInputCommandKey(input)
 		switch {
 		case hasCommand:
-			kind = "execute"
+			// A command is a shell call. With a path and text to write it is
+			// also the write of that path (Kiro's create, str_replace and
+			// append name their operation in command), and the stronger
+			// verdict decides.
+			kind, alsoWrite = "execute", len(paths) > 0 && (hasContent || hasNew)
 		case len(paths) > 0 && (hasContent || hasOld && hasNew):
 			kind = "edit"
 		case len(paths) > 0:
@@ -327,35 +341,48 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool, c
 		}
 	}
 	write := func(path string) map[string]string { return map[string]string{"file_path": path} }
-	switch kind {
-	case "execute":
-		command, ok := acpInputCommand(input, goos)
-		if !ok {
-			// A shell call with no command the gateway can read: judged as
-			// the hook path judges it (unverifiedShellCommandFinding).
-			args := call.RawInput
-			if !hasInput {
-				args = json.RawMessage(`{}`)
-			}
-			return []acpToolCall{{tool: "shell", args: args}}, prose, trunc.Set()
-		}
-		return []acpToolCall{{tool: "shell", args: acpCommandArgs(command),
-			cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}}, prose, trunc.Set()
-	case "read":
-		addPaths("Read", write)
-	case "edit":
+	// addEdits judges each path as a Write, the first one with the text the
+	// input writes (an Edit for a replacement). A new_str with no old_str is
+	// the text itself: Kiro's append, insert and create with a null file_text
+	// write it, and the hook judges it as the written content
+	// (connector.kiroRequiredWriteFileView; ACP review round 5, P4-1).
+	addEdits := func() {
+		first := len(calls)
 		addPaths("Write", func(path string) map[string]string {
 			switch {
 			case hasOld && hasNew && path == paths[0]:
 				return map[string]string{"file_path": path, "old_string": oldText, "new_string": newText}
 			case hasContent && path == paths[0]:
 				return map[string]string{"file_path": path, "content": content}
+			case hasNew && !hasOld && path == paths[0]:
+				return map[string]string{"file_path": path, "content": newText}
 			}
 			return write(path)
 		})
-		if hasOld && hasNew && len(calls) > 0 {
-			calls[0].tool = "Edit"
+		if hasOld && hasNew && len(calls) > first {
+			calls[first].tool = "Edit"
 		}
+	}
+	switch kind {
+	case "execute":
+		shell := acpToolCall{tool: "shell", args: call.RawInput}
+		if command, ok := acpInputCommand(input, goos); ok {
+			shell = acpToolCall{tool: "shell", args: acpCommandArgs(command),
+				cwd: acpInputString(input, "cwd", "workdir", "working_directory", "directory")}
+		} else if !hasInput {
+			// A shell call with no command the gateway can read: judged as
+			// the hook path judges it (unverifiedShellCommandFinding).
+			shell.args = json.RawMessage(`{}`)
+		}
+		calls = append(calls, shell)
+		if alsoWrite {
+			addEdits()
+		}
+		return calls, prose, trunc.Set()
+	case "read":
+		addPaths("Read", write)
+	case "edit":
+		addEdits()
 	case "delete":
 		addPaths("delete_file", func(path string) map[string]string { return map[string]string{"path": path} })
 	case "move":
@@ -376,8 +403,13 @@ func acpToolCallUpdateCalls(raw json.RawMessage, goos string, permission bool, c
 			}
 		}
 	case "fetch":
+		// A fetch reads its url and writes what it names: the locations of a
+		// call are the files it affects, so a fetch that names one downloads
+		// to it (rel-1-0-10:GAP-0422). With no url it is judged as any other
+		// kind, below.
 		if url := acpInputString(input, "url", "uri"); url != "" {
 			calls = append(calls, acpToolCall{tool: "WebFetch", args: acpMarshal(map[string]string{"url": url})})
+			addPaths("Write", write)
 		}
 	}
 	if len(calls) > 0 {
@@ -441,10 +473,12 @@ func acpUpdateNamesAnAction(raw json.RawMessage) bool {
 // kept of the call it names (state, Evaluation.ToolCallState), as the editor
 // does: a field own holds replaces the kept one. A field the guard cut or left
 // out of the state for size, or a state it dropped to make room, is a cap hit.
-func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapSet) {
+// reportBlocked is the guard's mark that a report of the call was judged a
+// block (acpFrameAction.reportBlocked).
+func acpMergeToolCall(state, own json.RawMessage) (merged json.RawMessage, caps bounded.CapSet, reportBlocked bool) {
 	var trunc bounded.Truncated
 	if len(state) == 0 {
-		return own, trunc.Set()
+		return own, trunc.Set(), false
 	}
 	var kept struct {
 		Kind      json.RawMessage `json:"kind"`
@@ -453,10 +487,11 @@ func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapS
 		Locations json.RawMessage `json:"locations"`
 		Truncated bool            `json:"truncated"`
 		Dropped   bool            `json:"dropped"`
+		Flagged   bool            `json:"flagged"`
 	}
 	var fields map[string]json.RawMessage
 	if len(state) > acp.MaxFrameBytes || json.Unmarshal(state, &kept) != nil || json.Unmarshal(own, &fields) != nil || fields == nil {
-		return own, trunc.Set()
+		return own, trunc.Set(), false
 	}
 	if kept.Truncated {
 		trunc.Hit(bounded.Bytes)
@@ -472,7 +507,7 @@ func acpMergeToolCall(state, own json.RawMessage) (json.RawMessage, bounded.CapS
 			fields[name] = value
 		}
 	}
-	return acpMarshal(fields), trunc.Set()
+	return acpMarshal(fields), trunc.Set(), kept.Flagged
 }
 
 // acpToolCallProse is the text of a ToolCall other than its rawInput and
@@ -544,7 +579,9 @@ func acpInputTextOf(input map[string]json.RawMessage, keys ...string) (string, b
 
 func acpInputText(input map[string]json.RawMessage, key string) (string, bool) {
 	raw, ok := input[key]
-	if !ok {
+	if !ok || strings.TrimSpace(string(raw)) == "null" {
+		// A null text is not given: Kiro's create with a null file_text
+		// writes its new_str (connector.kiroWriteView).
 		return "", false
 	}
 	var value string
@@ -669,6 +706,9 @@ func (a *APIServer) inspectACPFrameAction(
 	// in the default and permissive packs (the editor still asks the user a
 	// permission), block in strict.
 	verdict.floorBoundedTruncated(trunc.Set(), tier)
+	if action.reportBlocked && (verdict == nil || normalizeCodexAction(verdict.Action) != "block") {
+		verdict = strongerACPVerdict(verdict, acpReportBlockedVerdict(connectorName))
+	}
 	if verdict != nil && !action.enforceable {
 		if decided := normalizeCodexAction(verdict.Action); decided == "block" || decided == "confirm" {
 			capped := *verdict
@@ -758,6 +798,28 @@ func acpUnreadToolCallVerdict(connectorName string) *ToolInspectVerdict {
 		Findings: []string{hookToolCallUnparsedRuleID},
 		DetailedFindings: []RuleFinding{{
 			RuleID: hookToolCallUnparsedRuleID, Title: "tool call in the ACP frame could not be read",
+			Severity: "HIGH", Confidence: 1.0, Tags: []string{"tool-arguments"},
+		}},
+	}
+}
+
+// acpReportBlockedRuleID is the finding of a permission for a tool call whose
+// report this gateway already judged a block.
+const acpReportBlockedRuleID = "ACP-TOOL-CALL-REPORT-BLOCKED"
+
+// acpReportBlockedVerdict blocks a permission for a tool call whose report was
+// judged a block (acpFrameAction.reportBlocked).
+func acpReportBlockedVerdict(connectorName string) *ToolInspectVerdict {
+	agent := "the agent"
+	if unparsedToolCallReasonConnector.MatchString(connectorName) {
+		agent = connectorName
+	}
+	return &ToolInspectVerdict{
+		Action: "block", Severity: "HIGH", Confidence: 1.0,
+		Reason:   "DefenseClaw judged " + agent + "'s earlier report of this tool call a block, so it blocks the permission for it too.",
+		Findings: []string{acpReportBlockedRuleID},
+		DetailedFindings: []RuleFinding{{
+			RuleID: acpReportBlockedRuleID, Title: "a report of this tool call was judged a block",
 			Severity: "HIGH", Confidence: 1.0, Tags: []string{"tool-arguments"},
 		}},
 	}

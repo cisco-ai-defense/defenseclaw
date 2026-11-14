@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // What the guard keeps of the tool calls an agent reports, and the bounds on
@@ -21,21 +23,31 @@ const (
 	// sent with {"dropped":true}.
 	MaxTrackedToolCalls = 256
 	// MaxToolCallStateBytes bounds the state kept and sent for one call. A
-	// rawInput over it is cut to a prefix of its text values (so a command
-	// that was seen is still judged) and the state says {"truncated":true};
-	// when nothing useful fits, rawInput is left out.
+	// state over it has its title and the text values of its rawInput cut to
+	// a prefix (so a command that was seen is still judged) and says
+	// {"truncated":true}; locations past the bound are cut to the first ones
+	// that fit (at most MaxToolCallLocations); when nothing useful fits,
+	// rawInput is left out, and then all but the kind and the marks.
 	MaxToolCallStateBytes = 64 << 10
+	// MaxToolCallLocations is how many locations of one call the gateway
+	// judges one by one: a frame that names more has the first ones judged
+	// and is raised to the unknown tier of the pack. A kept state cut for
+	// size keeps at most this many of its first locations.
+	MaxToolCallLocations = 64
 
-	maxToolCallInputText = 8 << 10
-	maxDroppedKeysKept   = 1024
+	maxToolCallInputText  = 8 << 10
+	maxToolCallSmallValue = 1 << 10
+	maxDroppedKeysKept    = 1024
 )
 
 // ToolCallTracker keeps the state of the tool calls of one guard. The zero
 // value is ready to use. It is not safe for concurrent use: the proxy holds
 // its own lock around it.
 type ToolCallTracker struct {
-	calls   *lruMap[json.RawMessage]
-	dropped *lruMap[struct{}]
+	calls *lruMap[json.RawMessage]
+	// dropped are the calls whose state was dropped to make room, true for
+	// one with a report the gateway judged a block (toolCallFields.Flagged).
+	dropped *lruMap[bool]
 }
 
 // toolCallFields are the fields of a tool call the guard keeps and sends.
@@ -48,6 +60,11 @@ type toolCallFields struct {
 	// state of the call was dropped to make room for others.
 	Truncated bool `json:"truncated,omitempty"`
 	Dropped   bool `json:"dropped,omitempty"`
+	// Flagged says the gateway judged a report of the call that the guard
+	// forwarded a block, or one that would have blocked. The gateway never
+	// judges a permission for the call below a block: what the guard kept of
+	// it may have been cut or dropped since (ACP review round 4, P3-1).
+	Flagged bool `json:"flagged,omitempty"`
 }
 
 // toolCallOf reads the tool call a session/update (tool_call and
@@ -90,7 +107,8 @@ func toolCallKey(session, id string) string { return session + "\x00" + id }
 // Evaluation.ToolCallState: nil for a frame that names no call, for the first
 // report of one (the editor takes it as the call, it does not merge it) and
 // for a call the guard has not seen; {"dropped":true} for a call whose state
-// was dropped. It changes nothing but the order of use.
+// was dropped (with "flagged":true when a report of it was judged a block).
+// It changes nothing but the order of use.
 func (t *ToolCallTracker) Peek(msg Message) json.RawMessage {
 	session, id, first, _, ok := toolCallOf(msg)
 	if !ok || first {
@@ -102,8 +120,13 @@ func (t *ToolCallTracker) Peek(msg Message) json.RawMessage {
 			return state
 		}
 	}
-	if t.dropped != nil && t.dropped.has(key) {
-		return json.RawMessage(`{"dropped":true}`)
+	if t.dropped != nil {
+		if flagged, found := t.dropped.peek(key); found {
+			if flagged {
+				return json.RawMessage(`{"dropped":true,"flagged":true}`)
+			}
+			return json.RawMessage(`{"dropped":true}`)
+		}
 	}
 	return nil
 }
@@ -111,8 +134,10 @@ func (t *ToolCallTracker) Peek(msg Message) json.RawMessage {
 // Commit applies a frame the guard forwarded to the state: the first report
 // of a call replaces what was kept, an update replaces the fields it holds
 // (null does not). A frame the guard refused is never committed: the editor
-// did not see it.
-func (t *ToolCallTracker) Commit(msg Message) {
+// did not see it. blocked says the gateway judged the frame a block or one
+// that would have blocked (Verdict.JudgedBlock); it stays with the call for
+// as long as the guard knows the call, its state dropped or not.
+func (t *ToolCallTracker) Commit(msg Message, blocked bool) {
 	session, id, first, fields, ok := toolCallOf(msg)
 	if !ok {
 		return
@@ -122,11 +147,11 @@ func (t *ToolCallTracker) Commit(msg Message) {
 		t.calls = newLRUMap[json.RawMessage](MaxTrackedToolCalls)
 	}
 	var state toolCallFields
-	if !first {
-		if before, found := t.calls.get(key); found {
-			_ = json.Unmarshal(before, &state)
-		}
+	before, found := t.calls.get(key)
+	if found && !first {
+		_ = json.Unmarshal(before, &state)
 	}
+	state.Flagged = blocked || t.flagged(before, found, key)
 	set := func(dst *json.RawMessage, name string) {
 		if raw, present := fields[name]; present && string(bytes.TrimSpace(raw)) != "null" {
 			*dst = raw
@@ -138,25 +163,147 @@ func (t *ToolCallTracker) Commit(msg Message) {
 	set(&state.Locations, "locations")
 	merged, err := json.Marshal(state)
 	if err == nil && len(merged) > MaxToolCallStateBytes {
+		// The title is cut as the input's text is: claude-code-acp titles a
+		// shell call with its command (ACP review round 5, GAP-0462).
+		state.Title = shrinkToolCallTitle(state.Title)
 		state.RawInput, state.Truncated = shrinkToolCallInput(state.RawInput), true
 		merged, err = json.Marshal(state)
 	}
+	// The locations past the bound are cut to the first ones that fit, as
+	// an input keeps the start of its text: what was seen first is still
+	// judged. Then the input goes, and the first locations that fit without
+	// it stay.
+	locations := state.Locations
 	if err == nil && len(merged) > MaxToolCallStateBytes {
-		state.RawInput, state.Locations = nil, nil
+		state.Locations = firstToolCallLocations(locations, toolCallLocationRoom(state))
+		merged, err = json.Marshal(state)
+	}
+	if err == nil && len(merged) > MaxToolCallStateBytes {
+		state.RawInput = nil
+		state.Locations = firstToolCallLocations(locations, toolCallLocationRoom(state))
 		merged, err = json.Marshal(state)
 	}
 	if err != nil || len(merged) > MaxToolCallStateBytes {
-		return
+		// Nothing useful fits. The call is still kept, cut: never the state
+		// before this frame, which the editor no longer shows, and never
+		// without the report's block mark (ACP review round 5, GAP-0462).
+		merged = minimalToolCallState(state.Kind, state.Flagged)
 	}
-	if evicted, ok := t.calls.put(key, merged); ok {
+	if evicted, evictedState, ok := t.calls.put(key, merged); ok {
 		if t.dropped == nil {
-			t.dropped = newLRUMap[struct{}](maxDroppedKeysKept)
+			t.dropped = newLRUMap[bool](maxDroppedKeysKept)
 		}
-		t.dropped.put(evicted, struct{}{})
+		var gone toolCallFields
+		_ = json.Unmarshal(evictedState, &gone)
+		t.dropped.put(evicted, gone.Flagged)
 	}
 	if t.dropped != nil {
 		t.dropped.remove(key)
 	}
+}
+
+// flagged reports that a report of the call under key was judged a block: in
+// its kept state (before, when found), or in the record of its drop.
+func (t *ToolCallTracker) flagged(before json.RawMessage, found bool, key string) bool {
+	if found {
+		var state toolCallFields
+		return json.Unmarshal(before, &state) == nil && state.Flagged
+	}
+	if t.dropped == nil {
+		return false
+	}
+	flagged, _ := t.dropped.peek(key)
+	return flagged
+}
+
+// toolCallLocationRoom is how many bytes of locations fit in the bound beside
+// the other fields of state.
+func toolCallLocationRoom(state toolCallFields) int {
+	state.Locations = nil
+	others, err := json.Marshal(state)
+	if err != nil {
+		return 0
+	}
+	return MaxToolCallStateBytes - len(others) - len(`,"locations":`)
+}
+
+// firstToolCallLocations keeps the first locations of raw that fit in room
+// bytes, at most MaxToolCallLocations: the ones the gateway judges first.
+// Nothing when raw is not a list or none fits. The caller marks the state
+// truncated, which the gateway reads as the bound rule's cap hit.
+func firstToolCallLocations(raw json.RawMessage, room int) json.RawMessage {
+	var all []json.RawMessage
+	if json.Unmarshal(raw, &all) != nil {
+		return nil
+	}
+	var trunc bounded.Truncated
+	count := bounded.NewCounter(&trunc, bounded.Locations, MaxToolCallLocations)
+	size := bounded.NewCounter(&trunc, bounded.Bytes, room-len(`[]`))
+	kept := make([]json.RawMessage, 0, min(len(all), MaxToolCallLocations))
+	for _, location := range all {
+		if !count.Take() || !size.TakeN(len(location)+len(`,`)) {
+			break
+		}
+		kept = append(kept, location)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	out, err := json.Marshal(kept)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// minimalToolCallState is the state kept for a call when nothing useful fits
+// in the bound: its kind (when that is small), the truncated mark the gateway
+// reads as the bound rule's cap hit, and the report's block mark.
+func minimalToolCallState(kind json.RawMessage, flagged bool) json.RawMessage {
+	state := toolCallFields{Truncated: true, Flagged: flagged}
+	if len(kind) <= maxToolCallSmallValue {
+		state.Kind = kind
+	}
+	if out, err := json.Marshal(state); err == nil {
+		return out
+	}
+	state.Kind = nil
+	out, _ := json.Marshal(state) // only bools: it cannot fail
+	return out
+}
+
+// cutToolCallText keeps the prefix of text that fits in maxToolCallInputText
+// bytes, cut at the start of a rune (a command that was seen is still
+// judged). The cut is recorded in trunc.
+func cutToolCallText(trunc *bounded.Truncated, text string) string {
+	size := bounded.NewCounter(trunc, bounded.Bytes, maxToolCallInputText)
+	if size.TakeN(len(text)) {
+		return text
+	}
+	cut := maxToolCallInputText
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
+}
+
+// shrinkToolCallTitle cuts a title that is too large: a text title to its
+// prefix, any other value that is not small goes. The caller marks the state
+// truncated.
+func shrinkToolCallTitle(raw json.RawMessage) json.RawMessage {
+	var title string
+	if json.Unmarshal(raw, &title) != nil {
+		if len(raw) <= maxToolCallSmallValue {
+			return raw
+		}
+		return nil
+	}
+	var trunc bounded.Truncated
+	out, err := json.Marshal(cutToolCallText(&trunc, title))
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 // shrinkToolCallInput keeps of a rawInput that is too large the prefix of each
@@ -167,21 +314,15 @@ func shrinkToolCallInput(raw json.RawMessage) json.RawMessage {
 	if json.Unmarshal(raw, &input) != nil || input == nil {
 		return nil
 	}
+	var trunc bounded.Truncated
 	kept := make(map[string]json.RawMessage, len(input))
 	for name, value := range input {
 		var text string
 		if json.Unmarshal(value, &text) == nil {
-			if len(text) > maxToolCallInputText {
-				cut := maxToolCallInputText
-				for cut > 0 && !utf8.RuneStart(text[cut]) {
-					cut--
-				}
-				text = text[:cut]
-			}
-			if encoded, err := json.Marshal(text); err == nil {
+			if encoded, err := json.Marshal(cutToolCallText(&trunc, text)); err == nil {
 				kept[name] = encoded
 			}
-		} else if len(value) <= 1<<10 {
+		} else if len(value) <= maxToolCallSmallValue {
 			kept[name] = value
 		}
 	}
