@@ -9070,8 +9070,18 @@ func classifyParsedWgetTransfer(out *parseOutput, command *CommandFact) {
 			hasDownloadFile = true
 		}
 	} else if !parsed.Spider {
-		// Wget derives a file name from the response without -O.
-		out.markPartial(IssueUnknownOperandGrammar)
+		// Wget derives a file name from the response without -O. For one
+		// plain upload of a file or data to one static URL that name is
+		// known (the working directory, last URL segment); anything else
+		// leaves the destination unknown. A wget --post-file without -O was
+		// a partial parse, so its exact upload was never enforceable
+		// (GAP-0595).
+		if name, ok := wgetPlainUploadResponseName(command.Argv, parsed); ok {
+			appendPath(out, command.ID, PathAccessWrite, name)
+			hasDownloadFile = true
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	}
 	if parsed.Complete && parsed.LogOutputSet && parsed.LogOutput != "-" {
 		access := PathAccessWrite
@@ -9292,4 +9302,63 @@ func curlOutputHasUnmodeledGlobReference(value string) bool {
 		}
 	}
 	return false
+}
+
+// wgetPlainUploadResponseName is the file a plain wget upload saves its
+// response to when it has no -O: the last segment of the URL path, or
+// index.html for an empty path, in the working directory. It reads only the
+// closed set of options that leave that name alone (quiet switches, the
+// certificate switch and the upload source or body itself). Any other
+// option (-P, -r, -x, -N, -c, -E, --content-disposition ...), a query or
+// fragment in the URL, a body-less call or more than one URL leaves the name
+// unknown.
+func wgetPlainUploadResponseName(argv []string, parsed wgetArgvParse) (string, bool) {
+	if !parsed.Complete || len(parsed.Targets) != 1 ||
+		!(parsed.PostDataSet || parsed.PostFileSet || parsed.BodyDataSet || parsed.BodyFileSet) {
+		return "", false
+	}
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if arg == "--" {
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			continue
+		}
+		switch arg {
+		case "-q", "--quiet", "-nv", "--no-verbose", "-S", "--server-response",
+			"--no-check-certificate":
+			continue
+		case "--post-file", "--body-file", "--post-data", "--body-data":
+			i++
+			continue
+		}
+		if name, _, found := strings.Cut(arg, "="); found {
+			switch name {
+			case "--post-file", "--body-file", "--post-data", "--body-data":
+				continue
+			}
+		}
+		return "", false
+	}
+	raw := parsed.Targets[0]
+	if raw == "" || strings.ContainsAny(raw, "?#") {
+		return "", false
+	}
+	candidate := raw
+	if !strings.Contains(candidate, "://") {
+		candidate = "http://" + strings.TrimPrefix(candidate, "//")
+	}
+	target, err := url.Parse(candidate)
+	if err != nil || target.Hostname() == "" {
+		return "", false
+	}
+	if target.Path == "" || strings.HasSuffix(target.Path, "/") {
+		return "index.html", true
+	}
+	name := target.Path[strings.LastIndexByte(target.Path, '/')+1:]
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "%\\\x00") {
+		return "", false
+	}
+	return name, true
 }

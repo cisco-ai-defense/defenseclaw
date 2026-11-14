@@ -57,6 +57,10 @@ const (
 	// SenderUnprojected is a sender in a shell part the projection did not
 	// read.
 	SenderUnprojected SenderOrigin = "unprojected"
+	// SenderInlineCode is an interpreter one-liner (python -c, node -e ...)
+	// whose code asks for a network capability: the code is opaque to the
+	// projection, so where it sends is not read (GAP-0595).
+	SenderInlineCode SenderOrigin = "inline_code"
 )
 
 // SenderFact is one command of a call that sends data to a network sink.
@@ -162,6 +166,7 @@ const maxSenderDepth = 3
 func ReadSenders(facts Facts) SendReading {
 	var reading SendReading
 	readProjectedSenders(facts, &reading, 0)
+	readInlineCodeSenders(facts, &reading)
 	if facts.Parse.Status != StatusComplete && facts.Parse.Status != StatusNotApplicable {
 		reading.Unread = true
 		readUnprojectedSenders(facts, &reading)
@@ -927,4 +932,28 @@ func appendHost(hosts []string, host string) []string {
 		}
 	}
 	return append(hosts, host)
+}
+
+// readInlineCodeSenders reads interpreter one-liners whose code names a
+// network capability (the capability table of inline_capabilities.go, the
+// same rows the opaque-code rule reads): the destination is inside code the
+// projection does not read, so the sender has an unknown destination. Code
+// whose destinations are all loopback literals is not a network capability.
+func readInlineCodeSenders(facts Facts, reading *SendReading) {
+	for _, command := range facts.Commands {
+		row, argv, ok := inlineProgramRow(command)
+		if !ok {
+			continue
+		}
+		source := inlineCodeOperands(row, argv[1:])
+		if source == "" || !inlineSourceNetwork(row, source) {
+			continue
+		}
+		reading.Senders = append(reading.Senders, SenderFact{
+			CommandID:          command.ID,
+			Program:            senderProgramName(argv[0]),
+			Origin:             SenderInlineCode,
+			DestinationUnknown: true,
+		})
+	}
 }
