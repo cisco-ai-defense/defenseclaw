@@ -96,7 +96,7 @@ func TestSetupConnectorsIsolated_ActiveOpenCodeNotV2StopsOnlyOpenCode(t *testing
 			after := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 
 			transaction, err := s.setupConnectorsIsolatedTransaction(context.Background(),
-				[]connector.Connector{before, openCode, after}, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+				[]connector.Connector{before, openCode, after}, "tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache())
 
 			if plugin, readErr := os.ReadFile(pluginPath); readErr != nil || !bytes.Equal(plugin, priorPlugin) {
 				t.Errorf("the earlier OpenCode plugin changed: %q (%v)", plugin, readErr)

@@ -90,10 +90,10 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, event := range []string{
-		"tool_start", "tool.invocation.requested",
-		"tool_end", "tool.invocation.completed",
-	} {
+	// A PreToolUse keeps its tool call in its hook_decision row; its
+	// tool_start and tool.invocation.requested records are exported only
+	// (#1384). The completion keeps its tool_end and completed rows.
+	for _, event := range []string{"tool_end", "tool.invocation.completed"} {
 		var count int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_name = ?`, event).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -101,6 +101,15 @@ func TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood(t *testing.T) {
 		if count != pairs {
 			t.Errorf("%s rows = %d, want %d", event, count, pairs)
 		}
+	}
+	var requested int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT json_extract(projected_record_json,'$.correlation.tool_invocation_id')) FROM audit_events WHERE event_name = 'hook_decision'
+		AND json_extract(projected_record_json,'$.body."defenseclaw.hook.event"') = 'PreToolUse'
+		`).Scan(&requested); err != nil {
+		t.Fatal(err)
+	}
+	if requested != pairs {
+		t.Errorf("PreToolUse hook_decision rows naming their tool call = %d, want %d", requested, pairs)
 	}
 }
 

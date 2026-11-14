@@ -93,6 +93,11 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 		}
 	}
 
+	// The matrix columns describe the Linux and macOS topology; native
+	// Windows OpenClaw (no proxy, no shims) is its windowsSupport row.
+	prevGOOS := openClawHooksGOOS
+	openClawHooksGOOS = "linux"
+	t.Cleanup(func() { openClawHooksGOOS = prevGOOS })
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir()}
 	for _, conn := range newBuiltinConnectors() {
 		row, exists := rows[conn.Name()]

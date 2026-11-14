@@ -50,6 +50,16 @@ func (a *APIServer) emitHookLifecycleEvent(ctx context.Context, meta llmEventMet
 	}
 
 	eventName, bucket := hookLifecycleV8Identity(meta.LifecycleEvent)
+	if meta.LifecycleEvent == "tool_start" && !a.managedAIDOnly() && a.hookDecisionRecordsKept() {
+		// The hook_decision row of the call holds the same lifecycle facts
+		// (execution, phase, sequence, lineage) and the tool call id: inside
+		// an open call batch tool_start is exported only, and a restart
+		// restores the session cursor from the hook_decision row
+		// (LatestLifecycleProjection). One local row per decision (#1384);
+		// Secure Client keeps every row (#1092), and so does a plan that
+		// keeps no hook_decision records.
+		ctx = observability.WithExportOnlyInCall(ctx)
+	}
 	producerKey := observability.ProducerKey(gatewaylog.EventLifecycle)
 	if bucket == observability.BucketToolActivity {
 		producerKey = observability.ProducerKey(gatewaylog.EventToolInvocation)

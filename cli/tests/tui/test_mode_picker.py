@@ -59,18 +59,19 @@ def test_mode_picker_hint_is_built_from_visible_rows() -> None:
     for choice in mac.choices:
         assert choice.hotkey in hint
 
-    # Windows: proxy connectors are hidden, so their hotkeys must NOT be
-    # advertised as jump keys.
+    # Windows: ZeptoClaw (proxy only) is hidden, so its hotkey must NOT be
+    # advertised as a jump key; OpenClaw runs native plugin hooks there.
     win = ModePickerScreen(os_name="windows")
     jump_keys = "/".join(c.hotkey for c in win.choices)
-    assert "o" not in jump_keys.split("/")
+    assert "o" in jump_keys.split("/")
     assert "z" not in jump_keys.split("/")
 
 
 def test_mode_picker_hotkey_resolves_against_visible_rows_only() -> None:
     win = ModePickerScreen(os_name="windows")
-    # openclaw/zeptoclaw are hidden on Windows -> their hotkeys are no-ops.
-    assert win._visible_choice_for_hotkey("o") is None
+    # zeptoclaw is hidden on Windows -> its hotkey is a no-op; openclaw
+    # (native plugin hooks) resolves.
+    assert win._visible_choice_for_hotkey("o").wire == "openclaw"
     assert win._visible_choice_for_hotkey("z") is None
     # A supported connector still resolves.
     assert win._visible_choice_for_hotkey("c").wire == "codex"
@@ -84,9 +85,9 @@ def test_mode_picker_default_never_fabricates_hidden_connector() -> None:
     assert ModePickerScreen("", os_name="darwin").current_wire == ""
     assert ModePickerScreen("garbage-connector").current_wire == ""
     assert "(active)" not in _choice_action(MODE_PICKER_CHOICES[0], current_wire="").label
-    # On Windows OpenClaw is hidden, so an old OpenClaw current value cannot
+    # On Windows ZeptoClaw is hidden, so an old ZeptoClaw current value cannot
     # become an active first visible connector either.
-    win = ModePickerScreen("openclaw", os_name="windows")
+    win = ModePickerScreen("zeptoclaw", os_name="windows")
     assert win.current_wire == ""
     assert "Choose a connector" in preview_for_switch("", "")
     with pytest.raises(ValueError, match="unknown connector"):
@@ -98,7 +99,7 @@ async def test_mode_picker_windows_hidden_hotkey_is_noop() -> None:
     app = ModePickerHarness("claudecode", os_name="windows")
 
     async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("o")  # openclaw is hidden on Windows -> no-op
+        await pilot.press("z")  # zeptoclaw is hidden on Windows -> no-op
         await pilot.pause()
         assert app.result is None
         assert isinstance(app.screen, ModePickerScreen)  # still open

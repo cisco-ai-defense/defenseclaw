@@ -1,25 +1,34 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""GAP-0847: an adopted gateway token copy never shadows the token the operator saved."""
+"""R-TOK: the OpenClaw gateway token is never the DefenseClaw master token.
+
+DefenseClaw 1.0.9 and earlier copied the token OpenClaw holds in openclaw.json
+under both gateway-token names and marked the copy with a comment (GAP-0847).
+From 1.0.10 OPENCLAW_GATEWAY_TOKEN is only the credential the gateway presents
+to the OpenClaw WebSocket, and DEFENSECLAW_GATEWAY_TOKEN is a separate value.
+"""
 
 from __future__ import annotations
 
 import os
+import re
 from types import SimpleNamespace
 
 import click
 import pytest
 from defenseclaw import config as config_module
-from defenseclaw import credential_provenance, gateway_token_adoption
+from defenseclaw import credential_provenance
 from defenseclaw.commands import cmd_doctor, cmd_setup
-from defenseclaw.commands.cmd_setup import _save_adopted_gateway_token, _save_secret_to_dotenv
+from defenseclaw.commands.cmd_setup import _ensure_master_gateway_token, _save_secret_to_dotenv
 from defenseclaw.file_permissions import MAX_DOTENV_BYTES
 
-# The line the Go gateway writes for the token "adopted"
-# (internal/envvars/gateway_token_adoption_test.go asserts the same text).
-GO_MARKER = "# defenseclaw: adopted gateway token sha256=5d4686f6ad6a5e224c3961e4d3ed3c65f192697ec734fa02b244e42df5900a84"
+# The comment line 1.0.9 wrote after an adoption: only a comment now.
+OLD_MARKER = (
+    "# defenseclaw: adopted gateway token sha256=5d4686f6ad6a5e224c3961e4d3ed3c65f192697ec734fa02b244e42df5900a84"
+)
 NAMES = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
+MINTED = re.compile(r"^[0-9a-f]{64}$")
 
 
 @pytest.fixture(autouse=True)
@@ -33,158 +42,191 @@ def clean_env(monkeypatch):
     credential_provenance._reset_for_tests()
 
 
-def _resolve(tmp_path, body: str) -> str:
-    (tmp_path / ".env").write_text(body)
-    (tmp_path / ".env").chmod(0o600)
+def _seed(tmp_path, body: bytes):
+    path = tmp_path / ".env"
+    path.write_bytes(body)
+    path.chmod(0o600)
+    return path
+
+
+def _resolve(tmp_path, body: str, **gateway) -> str:
+    _seed(tmp_path, body.encode())
     config_module._load_dotenv_into_os(str(tmp_path))
-    return config_module.GatewayConfig().resolved_token()
+    return config_module.GatewayConfig(**gateway).resolved_token()
 
 
-def test_marker_matches_the_go_gateway():
-    assert gateway_token_adoption.marker_line("adopted") == GO_MARKER.encode()
+def _dotenv(tmp_path) -> dict[str, str]:
+    out = {}
+    for line in (tmp_path / ".env").read_text().splitlines():
+        key, sep, value = line.partition("=")
+        if sep and not key.startswith("#"):
+            out[key] = value
+    return out
 
 
 @pytest.mark.parametrize(
     ("body", "want"),
     [
-        (f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=edited\n{GO_MARKER}\n", "edited"),
-        (f"DEFENSECLAW_GATEWAY_TOKEN=\"edited\"\nOPENCLAW_GATEWAY_TOKEN=adopted\n{GO_MARKER}\n", "edited"),
-        # Unedited adopted copies, no marker, or a marker for another value: the earlier spelling wins as before.
-        (f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n{GO_MARKER}\n", "adopted"),
-        ("DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=edited\n", "adopted"),
-        (f"DEFENSECLAW_GATEWAY_TOKEN=one\nOPENCLAW_GATEWAY_TOKEN=two\n{GO_MARKER}\n", "one"),
-        (f"OPENCLAW_GATEWAY_TOKEN=adopted\n{GO_MARKER}\n", "adopted"),
+        ("OPENCLAW_GATEWAY_TOKEN=oc\n", ""),
+        ("DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=oc\n", "master"),
+        ("OPENCLAW_GATEWAY_TOKEN=oc\nDEFENSECLAW_GATEWAY_TOKEN=master\n", "master"),
+        # A 1.0.9 adoption: the OpenClaw token under both names is no master.
+        (f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n{OLD_MARKER}\n", ""),
+        (f"DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=adopted\n{OLD_MARKER}\n", "master"),
     ],
 )
-def test_resolved_token_prefers_the_value_the_operator_saved(tmp_path, body, want):
+def test_resolved_token_never_returns_the_openclaw_token(tmp_path, body, want):
     assert _resolve(tmp_path, body) == want
 
 
-def test_a_reload_drops_the_adopted_copy_an_earlier_load_injected(tmp_path):
-    # The TUI loads .env once, then the operator edits one spelling and it loads again.
-    assert _resolve(tmp_path, f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n{GO_MARKER}\n") == "adopted"
-    assert _resolve(tmp_path, f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=edited\n{GO_MARKER}\n") == "edited"
-    assert "DEFENSECLAW_GATEWAY_TOKEN" not in os.environ
+def test_a_token_env_naming_the_openclaw_credential_is_skipped(tmp_path):
+    body = "DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=oc\n"
+    assert _resolve(tmp_path, body, token_env="OPENCLAW_GATEWAY_TOKEN") == "master"
+    os.environ.pop("DEFENSECLAW_GATEWAY_TOKEN")
+    assert _resolve(tmp_path, "OPENCLAW_GATEWAY_TOKEN=oc\n", token_env="OPENCLAW_GATEWAY_TOKEN") == ""
+
+
+def test_the_openclaw_name_compares_like_the_platform(monkeypatch):
+    assert config_module.is_openclaw_gateway_token_env("OPENCLAW_GATEWAY_TOKEN")
+    assert config_module.is_openclaw_gateway_token_env(" OPENCLAW_GATEWAY_TOKEN ")
+    assert not config_module.is_openclaw_gateway_token_env("DEFENSECLAW_GATEWAY_TOKEN")
+    if os.name != "nt":
+        assert not config_module.is_openclaw_gateway_token_env("openclaw_gateway_token")
+    monkeypatch.setattr(config_module.os, "name", "nt")
+    assert config_module.is_openclaw_gateway_token_env("openclaw_gateway_token")
+
+
+def test_a_literal_equal_to_the_openclaw_token_is_skipped(monkeypatch):
+    monkeypatch.setenv("OPENCLAW_GATEWAY_TOKEN", "oc")
+    assert config_module.GatewayConfig(token="oc").resolved_token() == ""
+    assert config_module.GatewayConfig(token="literal").resolved_token() == "literal"
+    monkeypatch.setenv("CUSTOM_TOKEN", "oc")
+    assert config_module.GatewayConfig(token_env="CUSTOM_TOKEN").resolved_token() == ""
 
 
 def test_a_shell_export_still_beats_the_file(tmp_path, monkeypatch):
     monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "from-shell")
-    body = f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=edited\n{GO_MARKER}\n"
-    assert _resolve(tmp_path, body) == "from-shell"
+    assert _resolve(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=oc\n") == "from-shell"
 
 
-def test_setup_records_the_token_it_copied_and_a_later_edit_wins(tmp_path):
-    (tmp_path / ".env").write_text("DEFENSECLAW_LLM_KEY=keep\nDEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n")
-    (tmp_path / ".env").chmod(0o600)
-    _save_adopted_gateway_token(list(NAMES), "adopted", str(tmp_path))
-    _save_adopted_gateway_token(list(NAMES), "adopted", str(tmp_path))
-    body = (tmp_path / ".env").read_text()
-    assert body.count(GO_MARKER) == 1
-    assert "DEFENSECLAW_LLM_KEY=keep" in body
-    edited = body.replace("OPENCLAW_GATEWAY_TOKEN=adopted", "OPENCLAW_GATEWAY_TOKEN=edited")
-    for name in NAMES:  # the save also set this process environment; the next process starts without it
-        os.environ.pop(name, None)
-    assert _resolve(tmp_path, edited) == "edited"
+def test_the_old_marker_no_longer_drops_the_openclaw_credential(tmp_path):
+    body = f"DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=adopted\n{OLD_MARKER}\n"
+    assert _resolve(tmp_path, body) == "master"
+    assert os.environ["OPENCLAW_GATEWAY_TOKEN"] == "adopted"
 
 
-@pytest.mark.parametrize("edited", NAMES)
-def test_doctor_picks_the_token_the_runtime_resolves(tmp_path, edited):
-    # Doctor authenticates with this answer; it must be the one the daemon starts with.
-    values = {name: "adopted" for name in NAMES}
-    values[edited] = "edited"
-    body = "".join(f"{name}={values[name]}\n" for name in NAMES) + GO_MARKER + "\n"
-    runtime = _resolve(tmp_path, body)
+def test_doctor_picks_the_token_the_runtime_resolves(tmp_path):
+    runtime = _resolve(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=oc\n")
     cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=config_module.GatewayConfig())
-    assert cmd_doctor._daemon_effective_gateway_token(cfg)[0] == runtime == "edited"
+    assert cmd_doctor._daemon_effective_gateway_token(cfg)[:2] == (runtime, "DEFENSECLAW_GATEWAY_TOKEN")
 
 
-def test_doctor_keeps_an_unedited_adopted_token(tmp_path):
-    body = f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n{GO_MARKER}\n"
-    assert _resolve(tmp_path, body) == "adopted"
+def test_doctor_does_not_count_a_master_equal_to_the_openclaw_token(tmp_path):
+    assert _resolve(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=oc\nOPENCLAW_GATEWAY_TOKEN=oc\n") == ""
     cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=config_module.GatewayConfig())
-    token, name, _ = cmd_doctor._daemon_effective_gateway_token(cfg)
-    assert (token, name) == ("adopted", "DEFENSECLAW_GATEWAY_TOKEN")
+    assert cmd_doctor._daemon_effective_gateway_token(cfg)[0] == ""
+    assert "holds the OpenClaw gateway token" in cmd_doctor._missing_gateway_token_detail(cfg)
 
 
-OLD_TOKEN = "old-token"
-NEW_TOKEN = "new-token-one-byte-longer"
-OLD_TOKENS = f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\nOPENCLAW_GATEWAY_TOKEN={OLD_TOKEN}\n"
-
-
-def _dotenv_whose_adoption_is(tmp_path, size: int, ending: bytes) -> bytes:
-    """Write a .env that the NEW_TOKEN adoption turns into exactly *size* bytes; return it."""
-    # Longer token under both spellings, the marker line, and the final newline a file without one gains.
-    gain = 2 * (len(NEW_TOKEN) - len(OLD_TOKEN)) + len(gateway_token_adoption.marker_line(NEW_TOKEN)) + 1
-    if not ending:
-        gain += 1
-    padding = b"#" + b"x" * (size - gain - len(OLD_TOKENS) - 1 - len(ending)) + ending
-    original = OLD_TOKENS.encode() + padding
-    path = tmp_path / ".env"
-    path.write_bytes(original)
-    path.chmod(0o600)
-    return original
-
-
-def _resolved_after_load(tmp_path) -> str:
+def _setup_openclaw(tmp_path, monkeypatch, detected: str) -> list:
+    """Run the setup openclaw token step against tmp_path; return keep_running_gateway_token calls."""
+    calls: list = []
+    monkeypatch.setattr(cmd_setup, "_detect_openclaw_gateway_token", lambda *_a, **_k: detected)
+    monkeypatch.setattr(cmd_setup, "keep_running_gateway_token", lambda *a: calls.append(a))
     config_module._load_dotenv_into_os(str(tmp_path))
-    return config_module.GatewayConfig().resolved_token()
-
-
-@pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
-def test_adoption_that_lands_exactly_on_the_limit_is_published_and_readable(tmp_path, ending):
-    _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES, ending)
-    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
-    assert (tmp_path / ".env").stat().st_size == MAX_DOTENV_BYTES
-    assert _resolved_after_load(tmp_path) == NEW_TOKEN
-
-
-@pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
-def test_adoption_one_byte_over_the_limit_changes_nothing_and_names_the_cause(tmp_path, ending):
-    original = _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES + 1, ending)
-    with pytest.raises(click.ClickException, match=r"over the \d+-byte limit"):
-        _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
-    assert (tmp_path / ".env").read_bytes() == original
-    assert _resolved_after_load(tmp_path) == OLD_TOKEN
-    assert "DEFENSECLAW_GATEWAY_TOKEN" not in os.environ or os.environ["DEFENSECLAW_GATEWAY_TOKEN"] == OLD_TOKEN
-
-
-@pytest.mark.parametrize("excess", [0, 1], ids=["exact-limit", "one-byte-over"])
-def test_setup_adoption_checks_the_complete_dotenv_before_gateway_stop(tmp_path, monkeypatch, excess):
-    original = _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES + excess, b"\n")
-    path = tmp_path / ".env"
-    before = path.stat()
-    events: list[str] = []
     app = SimpleNamespace(
         cfg=SimpleNamespace(
             data_dir=str(tmp_path),
             claw=SimpleNamespace(config_file="unused"),
-            gateway=SimpleNamespace(resolved_token=lambda: OLD_TOKEN, token_env=""),
+            gateway=config_module.GatewayConfig(),
         ),
         logger=None,
     )
-    monkeypatch.setattr(cmd_setup, "_detect_openclaw_gateway_token", lambda *_args, **_kwargs: NEW_TOKEN)
-    monkeypatch.setattr(cmd_setup, "_stop_gateway_before_token_swap", lambda _dir: events.append("stop") or True)
-    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda _dir: events.append("restart"))
+    cmd_setup._adopt_openclaw_gateway_token(app)
+    return calls
 
-    if excess:
-        with pytest.raises(click.ClickException, match=r"over the \d+-byte limit"):
-            cmd_setup._adopt_openclaw_gateway_token(app, restart=True)
-        after = path.stat()
-        assert events == []
-        assert path.read_bytes() == original
-        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
-    else:
-        cmd_setup._adopt_openclaw_gateway_token(app, restart=True)
-        assert events == ["stop", "restart"]
-        assert path.stat().st_size == MAX_DOTENV_BYTES
+
+def test_setup_openclaw_saves_only_the_openclaw_credential(tmp_path, monkeypatch):
+    _seed(tmp_path, b"DEFENSECLAW_LLM_KEY=keep\nDEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=old-oc\n")
+    calls = _setup_openclaw(tmp_path, monkeypatch, "new-oc")
+    assert _dotenv(tmp_path) == {
+        "DEFENSECLAW_LLM_KEY": "keep",
+        "DEFENSECLAW_GATEWAY_TOKEN": "master",
+        "OPENCLAW_GATEWAY_TOKEN": "new-oc",
+    }
+    assert calls == []  # the master did not change, so a running gateway keeps working
+    assert config_module.GatewayConfig().resolved_token() == "master"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"OPENCLAW_GATEWAY_TOKEN=oc\n",
+        b"DEFENSECLAW_GATEWAY_TOKEN=oc\nOPENCLAW_GATEWAY_TOKEN=oc\n" + OLD_MARKER.encode() + b"\n",
+    ],
+    ids=["empty", "openclaw-only", "1.0.9-adoption"],
+)
+def test_setup_openclaw_gives_the_gateway_a_master_of_its_own(tmp_path, monkeypatch, body):
+    _seed(tmp_path, body)
+    _setup_openclaw(tmp_path, monkeypatch, "oc")
+    saved = _dotenv(tmp_path)
+    assert saved["OPENCLAW_GATEWAY_TOKEN"] == "oc"
+    assert MINTED.match(saved["DEFENSECLAW_GATEWAY_TOKEN"])
+    assert config_module.GatewayConfig().resolved_token() == saved["DEFENSECLAW_GATEWAY_TOKEN"]
+    before = (tmp_path / ".env").read_bytes()
+    _setup_openclaw(tmp_path, monkeypatch, "oc")
+    assert (tmp_path / ".env").read_bytes() == before
+
+
+def test_ensure_master_keeps_a_usable_one_and_an_exported_one(tmp_path, monkeypatch):
+    _seed(tmp_path, b"DEFENSECLAW_GATEWAY_TOKEN=master\nOPENCLAW_GATEWAY_TOKEN=oc\n")
+    assert not _ensure_master_gateway_token(str(tmp_path))
+    assert _ensure_master_gateway_token(str(tmp_path), openclaw_token="master")  # openclaw.json holds it
+    _seed(tmp_path, b"OPENCLAW_GATEWAY_TOKEN=oc\n")
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_TOKEN", "exported")
+    assert not _ensure_master_gateway_token(str(tmp_path))
+    assert "DEFENSECLAW_GATEWAY_TOKEN" not in _dotenv(tmp_path)
+
+
+OLD_TOKEN = "old-token"
+NEW_TOKEN = "new-token-one-byte-longer"
+OLD_TOKENS = f"DEFENSECLAW_GATEWAY_TOKEN=master-token\nOPENCLAW_GATEWAY_TOKEN={OLD_TOKEN}\n"
+
+
+def _dotenv_whose_adoption_is(tmp_path, size: int, ending: bytes) -> bytes:
+    """Write a .env that the NEW_TOKEN adoption turns into exactly *size* bytes; return it."""
+    # The longer OpenClaw token, and the final newline a file without one gains.
+    gain = len(NEW_TOKEN) - len(OLD_TOKEN)
+    if not ending:
+        gain += 1
+    padding = b"#" + b"x" * (size - gain - len(OLD_TOKENS) - 1 - len(ending)) + ending
+    original = OLD_TOKENS.encode() + padding
+    _seed(tmp_path, original)
+    return original
+
+
+@pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
+def test_adoption_that_lands_exactly_on_the_limit_is_published(tmp_path, monkeypatch, ending):
+    _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES, ending)
+    _setup_openclaw(tmp_path, monkeypatch, NEW_TOKEN)
+    assert (tmp_path / ".env").stat().st_size == MAX_DOTENV_BYTES
+    assert _dotenv(tmp_path)["OPENCLAW_GATEWAY_TOKEN"] == NEW_TOKEN
+
+
+@pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
+def test_adoption_one_byte_over_the_limit_changes_nothing_and_names_the_cause(tmp_path, monkeypatch, ending):
+    original = _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES + 1, ending)
+    with pytest.raises(click.ClickException, match=r"over the \d+-byte limit"):
+        _setup_openclaw(tmp_path, monkeypatch, NEW_TOKEN)
+    assert (tmp_path / ".env").read_bytes() == original
 
 
 def test_a_single_secret_save_one_byte_over_the_limit_changes_nothing(tmp_path):
     key, value = "DEFENSECLAW_LLM_KEY", "sk-test"
     line = f"{key}={value}\n".encode()
     original = b"#" + b"x" * (MAX_DOTENV_BYTES - len(line) - 2) + b"\n"
-    (tmp_path / ".env").write_bytes(original)
-    (tmp_path / ".env").chmod(0o600)
+    _seed(tmp_path, original)
     _save_secret_to_dotenv(key, value, str(tmp_path))
     assert (tmp_path / ".env").stat().st_size == MAX_DOTENV_BYTES
     (tmp_path / ".env").write_bytes(original)
@@ -193,10 +235,11 @@ def test_a_single_secret_save_one_byte_over_the_limit_changes_nothing(tmp_path):
     assert (tmp_path / ".env").read_bytes() == original
 
 
-def test_the_two_token_save_is_one_publish_and_an_interrupted_one_leaves_the_file_as_it_was(tmp_path, monkeypatch):
-    path = tmp_path / ".env"
-    path.write_text("DEFENSECLAW_LLM_KEY=keep\n" + OLD_TOKENS)
-    path.chmod(0o600)
+def test_the_mint_is_one_publish_and_an_interrupted_one_leaves_the_file_as_it_was(tmp_path, monkeypatch):
+    path = _seed(
+        tmp_path,
+        f"DEFENSECLAW_LLM_KEY=keep\nDEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\nOPENCLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode(),
+    )
     original = path.read_bytes()
     real = cmd_setup.atomic_write_private_bytes
 
@@ -205,7 +248,7 @@ def test_the_two_token_save_is_one_publish_and_an_interrupted_one_leaves_the_fil
 
     monkeypatch.setattr(cmd_setup, "atomic_write_private_bytes", interrupted)
     with pytest.raises(OSError, match="interrupted"):
-        _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+        _ensure_master_gateway_token(str(tmp_path))
     assert path.read_bytes() == original
     assert os.environ.get("DEFENSECLAW_GATEWAY_TOKEN") is None
 
@@ -216,142 +259,9 @@ def test_the_two_token_save_is_one_publish_and_an_interrupted_one_leaves_the_fil
         return real(target, body, *args, **kwargs)
 
     monkeypatch.setattr(cmd_setup, "atomic_write_private_bytes", counting)
-    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    assert _ensure_master_gateway_token(str(tmp_path))
     assert len(published) == 1
-    # The file keeps the line ending it had (write_text gives CRLF on Windows),
-    # so the lines are compared without it.
-    lines = published[0].decode().splitlines()
-    assert lines.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
-    assert lines.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
-    assert "DEFENSECLAW_LLM_KEY=keep" in lines
-    assert _resolved_after_load(tmp_path) == NEW_TOKEN
-
-
-@pytest.mark.parametrize("ending", [b"\n", b"\r\n"], ids=["lf", "crlf"])
-def test_the_token_save_writes_one_line_ending_whatever_the_os(tmp_path, ending):
-    path = tmp_path / ".env"
-    path.write_bytes(ending.join([b"DEFENSECLAW_LLM_KEY=keep", f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}".encode(), b""]))
-    path.chmod(0o600)
-    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
-    body = path.read_bytes()
-    assert body.endswith(ending)
-    assert body.count(b"\n") == body.count(ending)
-    lines = body.decode().split(ending.decode())[:-1]
-    assert lines.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
-    assert lines.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
-    assert _resolved_after_load(tmp_path) == NEW_TOKEN
-
-
-# The earlier Go writer left a CRLF .env with LF on the lines it replaced or added.
-MIXED_ENV = (
-    b"DEFENSECLAW_LLM_KEY=keep\r\n"
-    + f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode()
-    + b"OTHER=1\r\nLAST=2\n"
-)
-
-
-def _one_ending(body: bytes, ending: bytes) -> bool:
-    # A replace-in-place keeps a missing final newline; every line break there is is the one ending.
-    return body.count(b"\n") == body.count(ending)
-
-
-def _seed(tmp_path, body: bytes):
-    path = tmp_path / ".env"
-    path.write_bytes(body)
-    path.chmod(0o600)
-    return path
-
-
-def _write_with(writer: str, tmp_path, path):
-    from defenseclaw import migrations
-    from defenseclaw.commands import cmd_keys
-    from defenseclaw.dotenv_utils import persist_env_var
-
-    if writer == "adoption":
-        _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
-    elif writer == "secret-save":
-        _save_secret_to_dotenv("DEFENSECLAW_LLM_KEY", "changed", str(tmp_path))
-    elif writer == "rotation":
-        cmd_setup._rotate_token_atomic_write(str(path), NEW_TOKEN)
-    elif writer == "keys-remove":
-        assert cmd_keys._remove_dotenv_key(str(path), "OTHER")
-    elif writer == "secret-ref-cleanup":
-        assert cmd_setup._drop_secret_ref_gateway_tokens_at(str(path))
-    elif writer == "rewrite-all":
-        cmd_setup._write_dotenv(str(path), {"DEFENSECLAW_LLM_KEY": "changed", "OTHER": "1"})
-    elif writer == "migration-update":
-        assert migrations._dotenv_update_keys(str(path), updates={"DEFENSECLAW_LLM_KEY": "changed"})
-    elif writer == "migration-remove":
-        assert migrations._dotenv_update_keys(str(path), removes=("OTHER",))
-    else:
-        persist_env_var(path, "DEFENSECLAW_LLM_KEY", "changed")
-
-
-WRITERS = [
-    "adoption",
-    "secret-save",
-    "rotation",
-    "keys-remove",
-    "secret-ref-cleanup",
-    "rewrite-all",
-    "migration-update",
-    "migration-remove",
-    "persist-env-var",
-]
-SECRET_REF_ENV = MIXED_ENV.replace(
-    f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode(),
-    b"DEFENSECLAW_GATEWAY_TOKEN={'source': 'env', 'id': 'SOME_REF'}\n",
-)
-
-
-@pytest.mark.parametrize("final_newline", [True, False], ids=["final-newline", "no-final-newline"])
-@pytest.mark.parametrize("writer", WRITERS)
-def test_every_python_writer_normalizes_a_mixed_dotenv_to_one_lf_ending(tmp_path, writer, final_newline):
-    seed = SECRET_REF_ENV if writer == "secret-ref-cleanup" else MIXED_ENV
-    path = _seed(tmp_path, seed if final_newline else seed.rstrip(b"\n"))
-    _write_with(writer, tmp_path, path)
-    body = path.read_bytes()
-    assert b"\r" not in body and body.endswith(b"\n")
-    lines = body.decode().split("\n")
-    if writer not in ("rewrite-all", "keys-remove", "migration-remove"):
-        assert "OTHER=1" in lines
-    if writer != "keys-remove":
-        assert "LAST=2" in lines or writer == "rewrite-all"
-    if writer in ("secret-save", "migration-update", "persist-env-var"):
-        assert "DEFENSECLAW_LLM_KEY=changed" in lines
-    elif writer in ("adoption", "rotation"):
-        assert f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}" in lines
-        assert _resolved_after_load(tmp_path) == NEW_TOKEN
-    elif writer == "keys-remove":
-        assert "OTHER=1" not in lines and "LAST=2" in lines and "DEFENSECLAW_LLM_KEY=keep" in lines
-    elif writer == "secret-ref-cleanup":
-        assert not any(line.startswith("DEFENSECLAW_GATEWAY_TOKEN=") for line in lines)
-        assert "DEFENSECLAW_LLM_KEY=keep" in lines and "OTHER=1" in lines
-    elif writer == "migration-remove":
-        assert "OTHER=1" not in lines and "DEFENSECLAW_LLM_KEY=keep" in lines
-
-
-@pytest.mark.parametrize("writer", WRITERS)
-def test_every_python_writer_keeps_an_entirely_crlf_dotenv_crlf(tmp_path, writer):
-    seed = SECRET_REF_ENV if writer == "secret-ref-cleanup" else MIXED_ENV
-    path = _seed(tmp_path, seed.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-    _write_with(writer, tmp_path, path)
-    body = path.read_bytes()
-    assert body.endswith(b"\r\n")
-    assert body.count(b"\n") == body.count(b"\r\n")
-
-
-@pytest.mark.parametrize("writer", WRITERS)
-def test_every_python_writer_keeps_an_lf_dotenv_lf(tmp_path, writer):
-    seed = SECRET_REF_ENV if writer == "secret-ref-cleanup" else MIXED_ENV
-    path = _seed(tmp_path, seed.replace(b"\r\n", b"\n"))
-    _write_with(writer, tmp_path, path)
-    assert b"\r" not in path.read_bytes()
-
-
-def test_keys_remove_leaves_one_ending_in_a_mixed_dotenv(tmp_path):
-    from defenseclaw.commands import cmd_keys
-
-    path = _seed(tmp_path, MIXED_ENV)
-    assert cmd_keys._remove_dotenv_key(str(path), "OTHER")
-    assert path.read_bytes() == b"DEFENSECLAW_LLM_KEY=keep\n" + f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode() + b"LAST=2\n"
+    saved = _dotenv(tmp_path)
+    assert saved["OPENCLAW_GATEWAY_TOKEN"] == OLD_TOKEN and saved["DEFENSECLAW_LLM_KEY"] == "keep"
+    assert MINTED.match(saved["DEFENSECLAW_GATEWAY_TOKEN"])
+    assert os.environ["DEFENSECLAW_GATEWAY_TOKEN"] == saved["DEFENSECLAW_GATEWAY_TOKEN"]

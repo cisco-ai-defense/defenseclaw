@@ -45,7 +45,6 @@ from defenseclaw.config import (
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.guardrail import (
     _backup,
-    _derive_master_key,
     _remove_from_plugins_allow,
     _unregister_plugin_from_config,
     detect_api_key_env,
@@ -349,7 +348,7 @@ class TestPatchOpenclawConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
-            prev = patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            prev = patch_openclaw_config(path, "claude-opus", 4000, "")
 
             self.assertEqual(prev, "anthropic/claude-opus-4-5")
 
@@ -366,18 +365,18 @@ class TestPatchOpenclawConfig(unittest.TestCase):
     def test_creates_backup(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
             self.assertTrue(os.path.isfile(path + ".bak"))
 
     def test_missing_file_returns_none(self):
-        result = patch_openclaw_config("/nonexistent.json", "x", 4000, "k", "")
+        result = patch_openclaw_config("/nonexistent.json", "x", 4000, "")
         self.assertIsNone(result)
 
     def test_adds_defenseclaw_to_plugins_allow(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
 
             with open(path) as f:
                 cfg = json.load(f)
@@ -389,8 +388,8 @@ class TestPatchOpenclawConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
 
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
-            patch_openclaw_config(path, "claude-opus", 4000, "sk-dc-test", "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
+            patch_openclaw_config(path, "claude-opus", 4000, "")
 
             with open(path) as f:
                 cfg = json.load(f)
@@ -401,7 +400,7 @@ class TestPatchOpenclawConfig(unittest.TestCase):
         """model_name parameter is accepted but no longer used."""
         with tempfile.TemporaryDirectory() as tmpdir:
             path = self._make_openclaw_json(tmpdir)
-            result = patch_openclaw_config(path, "", 4000, "sk-dc-test", "")
+            result = patch_openclaw_config(path, "", 4000, "")
             # Should succeed without error regardless of empty model_name
             self.assertIsNotNone(result)
 
@@ -596,39 +595,6 @@ class TestUnregisterPluginFromConfig(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _derive_master_key
-# ---------------------------------------------------------------------------
-
-
-class TestDeriveMasterKey(unittest.TestCase):
-    def test_derives_from_device_key(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            key_file = os.path.join(tmpdir, "device.key")
-            with open(key_file, "wb") as f:
-                f.write(b"test-device-key-data")
-
-            key = _derive_master_key(key_file)
-            self.assertTrue(key.startswith("sk-dc-"))
-            self.assertEqual(len(key), 6 + 64)  # PBKDF2-SHA256, 32 bytes encoded as hex
-
-    def test_deterministic(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            key_file = os.path.join(tmpdir, "device.key")
-            with open(key_file, "wb") as f:
-                f.write(b"stable-content")
-
-            key1 = _derive_master_key(key_file)
-            key2 = _derive_master_key(key_file)
-            self.assertEqual(key1, key2)
-
-    @patch("defenseclaw.llm_keys.Path")
-    def test_raises_when_file_missing(self, mock_path):
-        mock_path.home.return_value = Path("/nonexistent-home")
-        with self.assertRaises(RuntimeError):
-            _derive_master_key("/nonexistent/device.key")
-
-
-# ---------------------------------------------------------------------------
 # _backup
 # ---------------------------------------------------------------------------
 
@@ -780,12 +746,13 @@ class TestReadPickedConnector(unittest.TestCase):
 
 
 # These cases run `setup guardrail --non-interactive` with no connector, so
-# setup configures the implied OpenClaw default. Native Windows is hook-only
-# and refuses OpenClaw (platform_support), which
-# test_non_interactive_windows_refuses_the_implied_openclaw covers on every OS.
+# setup configures the implied OpenClaw default with its guardrail proxy.
+# Native Windows runs OpenClaw in native hook mode without the proxy;
+# test_non_interactive_windows_passes_the_openclaw_platform_check covers its
+# platform check on every OS.
 _IMPLIED_OPENCLAW_POSIX_ONLY = unittest.skipIf(
     os.name == "nt",
-    "the implied OpenClaw connector is unsupported on native Windows",
+    "these cases cover the OpenClaw guardrail proxy, which native Windows does not host",
 )
 
 
@@ -838,32 +805,20 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertIn("Disabling", result.output)
         self.assertIn("Config saved", result.output)
 
-    def test_non_interactive_windows_refuses_the_implied_openclaw(self):
-        # Native Windows is hook-only: the implied OpenClaw default is refused
-        # with its reason before anything is written.
+    def test_non_interactive_windows_passes_the_openclaw_platform_check(self):
+        # Native Windows runs OpenClaw in native hook mode (1.0.10): the
+        # implied OpenClaw default passes the platform check there.
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
-        config = os.path.join(self.tmp_dir, "config.yaml")
-
-        def saved() -> bytes | None:
-            if not os.path.exists(config):
-                return None
-            with open(config, "rb") as handle:
-                return handle.read()
-
-        before = saved()
         with patch("defenseclaw.platform_support.host_os", return_value="windows"):
             result = self.runner.invoke(
                 setup,
                 ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
                 obj=self.app,
             )
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("connector 'openclaw' is unsupported on windows", result.output)
-        self.assertIn("OpenClaw integration requires the guardrail proxy", result.output)
-        self.assertNotIn("Config saved", result.output)
-        self.assertEqual(saved(), before)
+        self.assertNotIn("unsupported on windows", result.output)
+        self.assertNotIn("requires the guardrail proxy", result.output)
 
     @_IMPLIED_OPENCLAW_POSIX_ONLY
     def test_non_interactive_with_model(self):

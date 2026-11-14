@@ -1932,14 +1932,23 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// ordinary text (colour escapes, brackets) is not shell
 				// (RV-p4-1).
 				if shellparse.PastReadingBounds(command) {
-					if !isApplyPatchToolName(tool) {
+					if isApplyPatchToolName(tool) {
+						// An apply_patch command is a patch envelope whose
+						// targets are read from the envelope below; deep text
+						// in it is file content, not shell, and no shell
+						// reader parses it (GAP-2561).
+						break
+					}
+					// No reader parses such a call, so the map says it is
+					// incomplete, and lists the DefenseClaw state it may
+					// write: an empty map must never read as "no state
+					// touched" (BudgetStateReading, GAP-0281).
+					reduced, reducedOK := BudgetStateReading(command)
+					if !reducedOK {
 						return incompleteEvidence(cwd)
 					}
-					// An apply_patch command is a patch envelope whose
-					// targets are read from the envelope below; deep text
-					// in it is file content, not shell, and no shell
-					// reader parses it (GAP-2561).
-					break
+					command = reduced
+					truncated = true
 				}
 				// A POSIX call over the statement budget (more than 128
 				// statements) is refused by the gateway before any reader
@@ -2062,6 +2071,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
 				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				literalOperands = append(literalOperands, quotedGlobNameWriteOperands(command, cwd, home, facts.Paths)...)
 				if concreteOperands.ready {
 					literalOperands = append(literalOperands, concreteOperands.loop...)
 					literalOperands = append(literalOperands, concreteOperands.sourceGlob...)

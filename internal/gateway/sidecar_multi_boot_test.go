@@ -62,7 +62,7 @@ func (b *bootStubConnector) Teardown(context.Context, connector.SetupOpts) error
 	return nil
 }
 
-func (b *bootStubConnector) SetCredentials(string, string) { b.credsSet = true }
+func (b *bootStubConnector) SetCredentials(string) { b.credsSet = true }
 
 type hookBootStubConnector struct{ bootStubConnector }
 
@@ -406,7 +406,7 @@ func TestSetupOneConnector_SetupErrorReturnsWithoutRollback(t *testing.T) {
 	cache := guardrail.NewRulePackCache()
 
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	err := s.setupOneConnector(context.Background(), conn, opts, "master", cache)
+	err := s.setupOneConnector(context.Background(), conn, opts, cache)
 	if err == nil {
 		t.Fatal("expected error from failing Setup, got nil")
 	}
@@ -429,7 +429,7 @@ func TestSetupOneConnector_SuccessNoTeardown(t *testing.T) {
 	cache := guardrail.NewRulePackCache()
 
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	if err := s.setupOneConnector(context.Background(), conn, opts, "master", cache); err != nil {
+	if err := s.setupOneConnector(context.Background(), conn, opts, cache); err != nil {
 		t.Fatalf("expected nil error on clean setup, got %v", err)
 	}
 	if conn.teardownCalls != 0 {
@@ -452,7 +452,7 @@ func TestSetupOneConnector_ActionModeUnverifiedContractSkips(t *testing.T) {
 	cache := guardrail.NewRulePackCache()
 
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	err := s.setupOneConnector(context.Background(), conn, opts, "master", cache)
+	err := s.setupOneConnector(context.Background(), conn, opts, cache)
 	if err == nil {
 		t.Fatal("expected action-mode unverified contract to be refused, got nil")
 	}
@@ -472,7 +472,7 @@ func TestSetupOneConnector_ObserveModeUnsupportedVersionSkipsBeforeSetup(t *test
 	opts.AgentVersion = "opencode 1.18.9" // V1 is no longer supported in any mode.
 
 	err := s.setupOneConnector(
-		context.Background(), conn, opts, "master", guardrail.NewRulePackCache(),
+		context.Background(), conn, opts, guardrail.NewRulePackCache(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "OpenCode V2 is required") {
 		t.Fatalf("error = %v, want observe-mode unsupported-version refusal", err)
@@ -490,7 +490,7 @@ func TestSetupOneConnector_PeerObserveModeUnknownVersionStillRuns(t *testing.T) 
 	opts.AgentVersion = "codex 0.123.0"
 
 	err := s.setupOneConnector(
-		context.Background(), conn, opts, "master", guardrail.NewRulePackCache(),
+		context.Background(), conn, opts, guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("peer observe-mode unknown version should retain warning-and-run behavior: %v", err)
@@ -511,7 +511,7 @@ func TestSetupOneConnector_ActionModeContractDriftOverride(t *testing.T) {
 	cache := guardrail.NewRulePackCache()
 
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	if err := s.setupOneConnector(context.Background(), conn, opts, "master", cache); err != nil {
+	if err := s.setupOneConnector(context.Background(), conn, opts, cache); err != nil {
 		t.Fatalf("drift override must allow setup, got %v", err)
 	}
 	if conn.setupCalls != 1 {
@@ -535,7 +535,7 @@ func TestSetupOneConnector_ObserveOverrideIgnoresGlobalActionContractGate(t *tes
 	if opts.AgentVersion != "" {
 		t.Fatalf("test requires an unversioned connector, got %q", opts.AgentVersion)
 	}
-	if err := s.setupOneConnector(context.Background(), conn, opts, "master", guardrail.NewRulePackCache()); err != nil {
+	if err := s.setupOneConnector(context.Background(), conn, opts, guardrail.NewRulePackCache()); err != nil {
 		t.Fatalf("observe override should allow hook refresh despite global action mode: %v", err)
 	}
 	if conn.setupCalls != 1 {
@@ -592,7 +592,7 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{existing, added},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+		"tok", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -618,7 +618,7 @@ func TestSetupConnectorsIsolated_AllSucceed(t *testing.T) {
 		&bootStubConnector{stubConnector: stubConnector{name: "codex"}},
 		&bootStubConnector{stubConnector: stubConnector{name: "claudecode"}},
 	}
-	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache())
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
 	}
@@ -636,7 +636,7 @@ func TestSetupConnectorsIsolated_UnsafeLockFailsBeforeSetup(t *testing.T) {
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{conn}, "tok", "a", "b", "master",
+		context.Background(), []connector.Connector{conn}, "tok", "a", "b",
 		guardrail.NewRulePackCache(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "capture pre-setup hook contract lock") {
@@ -668,7 +668,7 @@ func TestSetupConnectorsIsolated_FailurePreservesPriorRoster(t *testing.T) {
 	}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{failed}, "tok", "a", "b", "master",
+		context.Background(), []connector.Connector{failed}, "tok", "a", "b",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -737,7 +737,7 @@ func TestSetupConnectorsIsolated_FailedRefreshPreservesGuardsAndFails(t *testing
 				var setupErr error
 				if mode == "multi" {
 					transaction, setupErr = s.setupConnectorsIsolatedTransaction(context.Background(),
-						[]connector.Connector{peer, failed}, "tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+						[]connector.Connector{peer, failed}, "tok", "127.0.0.1:0", "127.0.0.1:0",
 						guardrail.NewRulePackCache())
 				} else {
 					authority, err := captureSingleConnectorRollbackAuthority(opts, failed)
@@ -817,7 +817,7 @@ func TestSetupConnectorsIsolated_OpenCodeFailureRestoresPluginAndLock(t *testing
 			}
 
 			got, err := s.setupConnectorsIsolated(
-				context.Background(), []connector.Connector{failed}, "tok", "a", "b", "master",
+				context.Background(), []connector.Connector{failed}, "tok", "a", "b",
 				guardrail.NewRulePackCache(),
 			)
 			if (err != nil) != active {
@@ -889,7 +889,7 @@ func TestSetupConnectorsIsolated_OpenCodeExecutableDriftPreservesPriorState(t *t
 	}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{conn}, "tok", "a", "b", "master",
+		context.Background(), []connector.Connector{conn}, "tok", "a", "b",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -922,7 +922,7 @@ func TestSetupConnectorsIsolated_OpenCodeRestoreFailureAbortsSurvivors(t *testin
 	survivor := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{survivor, failed}, "tok", "a", "b", "master",
+		context.Background(), []connector.Connector{survivor, failed}, "tok", "a", "b",
 		guardrail.NewRulePackCache(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "per-connector rollback incomplete") ||
@@ -958,7 +958,7 @@ func TestSetupConnectorsIsolated_PriorLockRestoreFailureAbortsSurvivors(t *testi
 	survivor := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{failed, survivor}, "tok", "a", "b", "master",
+		context.Background(), []connector.Connector{failed, survivor}, "tok", "a", "b",
 		guardrail.NewRulePackCache(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "per-connector rollback incomplete") ||
@@ -984,7 +984,7 @@ func TestSetupConnectorsIsolated_CleanupResidueAbortsAndRollsBackSurvivors(t *te
 	}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{survivor, failed}, "tok", "a", "b", "master",
+		context.Background(), []connector.Connector{survivor, failed}, "tok", "a", "b",
 		guardrail.NewRulePackCache(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "per-connector rollback incomplete") ||
@@ -1067,7 +1067,7 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{applied},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -1174,7 +1174,7 @@ func TestMultiConnectorActivePublicationFailureRestoresCursorModeAndHILTPosture(
 
 			transaction, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{applied},
-				"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+				"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 				guardrail.NewRulePackCache(),
 			)
 			if err != nil {
@@ -1248,7 +1248,7 @@ func TestMultiConnectorActivePublicationFailureRestoresExactOpenCodeTransaction(
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{connector.NewOpenCodeConnector()},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -1326,7 +1326,7 @@ func TestMultiConnectorActivePublicationReportsIncompleteRollback(t *testing.T) 
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{applied},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -1687,7 +1687,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
 	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		hookLockState,
 	)
 	if len(unavailable) != 0 || len(candidates) != 1 {
@@ -1709,7 +1709,7 @@ func TestMultiConnectorPublicationFailureRestoresSuccessfullyRemovedConnector(t 
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{survivor},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(), seed,
 	)
 	if err != nil {
@@ -1813,7 +1813,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	seed := multiConnectorSetupTransaction{activeState: activeState, hookLockState: hookLockState}
 	candidates, unavailable, _ := s.removedConnectorRollbackCandidates(
 		registry, []string{"cursor"}, []string{"claudecode"},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		hookLockState,
 	)
 	if len(unavailable) != 0 || len(candidates) != 1 {
@@ -1830,7 +1830,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{survivor},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(), seed,
 	)
 	if err != nil {
@@ -1871,7 +1871,7 @@ func TestMultiConnectorPublicationRollbackKeepsConnectorRemovedWhenItsCredential
 	}
 	candidates, unavailable, _ = s.removedConnectorRollbackCandidates(
 		registry, connector.LoadActiveConnectors(s.cfg.DataDir), []string{"claudecode"},
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		retryLock,
 	)
 	if len(unavailable) != 0 || len(candidates) != 1 {
@@ -1942,7 +1942,7 @@ func TestSingleConnectorSwitchFailureRestoresExactPriorConnector(t *testing.T) {
 	}
 	if err := s.teardownPreviousConnectorTransaction(
 		context.Background(), registry, requested,
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		&authority,
 	); err != nil {
 		t.Fatalf("transactional prior teardown: %v", err)
@@ -2042,7 +2042,7 @@ func TestSingleConnectorSwitchTearsDownRemovedPeerBesideSurvivingPrimary(t *test
 	}
 	if err := s.teardownPreviousConnectorTransaction(
 		context.Background(), registry, survivor,
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 		&authority,
 	); err != nil {
 		t.Fatalf("transactional peer teardown: %v", err)
@@ -2129,7 +2129,7 @@ func TestSingleConnectorSwitchOpenCodeSnapshotFailureLeavesPriorConnectorUntouch
 
 	_, err = s.prepareSingleConnectorSetupTransaction(
 		context.Background(), registry, requestedOpts, requested,
-		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0", "synthetic master key",
+		"synthetic gateway token", "127.0.0.1:0", "127.0.0.1:0",
 	)
 	if err == nil || !strings.Contains(err.Error(), "connector opencode rollback snapshot failed before setup") {
 		t.Fatalf("OpenCode snapshot preflight error = %v", err)
@@ -2170,7 +2170,7 @@ func TestSetupConnectorsIsolated_DN1_MiddleFailsOthersSurvive(t *testing.T) {
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{first, middle, last},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+		"tok", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -2203,7 +2203,7 @@ func TestSetupConnectorsIsolated_SlowVersionProbeKeepsExistingHooks(t *testing.T
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{slow, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
@@ -2229,7 +2229,7 @@ func TestSetupConnectorsIsolated_ChangedExecutableSkipsOnlyThatConnector(t *test
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{changed, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolatedTransaction: %v", err)
@@ -2256,7 +2256,7 @@ func TestSetupConnectorsIsolated_RefusedUnchangedSetupKeepsExistingHooks(t *test
 	peer := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	got, err := s.setupConnectorsIsolated(
 		context.Background(), []connector.Connector{refused, peer},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
@@ -2297,7 +2297,7 @@ func TestSetupConnectorsIsolated_AllFailReturnsEmpty(t *testing.T) {
 		&bootStubConnector{stubConnector: stubConnector{name: "codex"}, setupErr: errors.New("x")},
 		&bootStubConnector{stubConnector: stubConnector{name: "cursor"}, setupErr: errors.New("y")},
 	}
-	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache())
+	got, err := s.setupConnectorsIsolated(context.Background(), conns, "tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache())
 	if err != nil {
 		t.Fatalf("setupConnectorsIsolated: %v", err)
 	}
@@ -2321,7 +2321,7 @@ func TestSetupConnectorsIsolated_InvalidRulePackDoesNotBlockValidPeer(t *testing
 	got, err := s.setupConnectorsIsolated(
 		context.Background(),
 		[]connector.Connector{invalid, valid},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+		"tok", "127.0.0.1:0", "127.0.0.1:0",
 		guardrail.NewRulePackCache(),
 	)
 	if err != nil {
@@ -2373,7 +2373,7 @@ func TestManagedMultiConnectorAllInvalidRulePacksReturnsErrorWithoutPanic(t *tes
 		context.Background(),
 		registry,
 		[]connector.Connector{first, second},
-		"gateway-token", "127.0.0.1:0", "127.0.0.1:0", "master",
+		"gateway-token", "127.0.0.1:0", "127.0.0.1:0",
 	)
 	if err == nil || !strings.Contains(err.Error(), "all 2 configured connectors") {
 		t.Fatalf("managed all-invalid error = %v", err)
@@ -2402,7 +2402,7 @@ func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 	second := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "cursor"}}}
 
 	got, err := s.setupConnectorsIsolated(
-		context.Background(), []connector.Connector{first, second}, "gateway-token", "a", "b", "master", guardrail.NewRulePackCache(),
+		context.Background(), []connector.Connector{first, second}, "gateway-token", "a", "b", guardrail.NewRulePackCache(),
 	)
 	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
 		t.Fatalf("setupConnectorsIsolated error = %v, want scoped-token failure", err)
@@ -2510,7 +2510,7 @@ func TestManagedMultiHookGuardrailFailsClosedWhenScopedTokenFails(t *testing.T) 
 		health: NewSidecarHealth(),
 	}
 
-	err := s.runManagedEnterpriseMultiHookGuardrail(context.Background(), reg, []connector.Connector{conn}, "gateway-token", "a", "b", "master")
+	err := s.runManagedEnterpriseMultiHookGuardrail(context.Background(), reg, []connector.Connector{conn}, "gateway-token", "a", "b")
 	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
 		t.Fatalf("runManagedEnterpriseMultiHookGuardrail error = %v, want scoped-token failure", err)
 	}
@@ -2539,7 +2539,7 @@ func TestManagedMultiHookGuardrailPreflightsAllScopedTokens(t *testing.T) {
 	}
 
 	err := s.runManagedEnterpriseMultiHookGuardrail(
-		context.Background(), reg, []connector.Connector{first, second}, "gateway-token", "a", "b", "master",
+		context.Background(), reg, []connector.Connector{first, second}, "gateway-token", "a", "b",
 	)
 	if err == nil || !strings.Contains(err.Error(), "scoped hook token") {
 		t.Fatalf("runManagedEnterpriseMultiHookGuardrail error = %v, want scoped-token failure", err)
@@ -2664,6 +2664,8 @@ func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 // bind only one guardrail proxy port, so openclaw alongside codex is a config
 // error we surface loudly.
 func TestRunGuardrailMulti_FailFastProxyGuard(t *testing.T) {
+	// OpenClaw needs the proxy binding on Linux/macOS (native Windows has none).
+	t.Cleanup(connector.PinOpenClawHooksGOOSForTest("linux"))
 	s := &Sidecar{
 		cfg: &config.Config{
 			DataDir: t.TempDir(),

@@ -2161,6 +2161,8 @@ func windowsClassifyNativeProgram(
 		windowsClassifyLSASSDump(command, args, builder)
 	case "ntdsutil", "ntdsutil.exe":
 		windowsClassifyNTDSIFMDump(command, args, builder)
+	case "nxc", "netexec", "crackmapexec":
+		windowsClassifyNetExec(command, builder)
 	case "fsutil", "fsutil.exe":
 		windowsClassifyFSUtil(command, args, builder)
 	case "vssadmin", "vssadmin.exe":
@@ -4908,7 +4910,7 @@ func windowsClassifyWeb(
 		// PowerShell's unqualified wget alias owns Invoke-WebRequest
 		// parameters such as -InFile. Only a literal real wget executable argv
 		// can inherit the independently closed GNU Wget grammar.
-		if !windowsNativeWebArgvUncertain(command) &&
+		if !windowsPowerShellNativeArgvUncertain(command) &&
 			windowsExactNativeWebArgv(command, args) {
 			parsed := parseWgetArgv(command.Argv)
 			if parsed.ConfigDisabled &&
@@ -5093,7 +5095,7 @@ func windowsClassifyCurl(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
-	if windowsNativeWebArgvUncertain(command) {
+	if windowsPowerShellNativeArgvUncertain(command) {
 		// Windows PowerShell 5.1 reserializes native argv through a legacy
 		// quoting layer. Literal double quotes, standalone empty arguments,
 		// and unquoted expression delimiters can therefore change the argv
@@ -5113,7 +5115,11 @@ func windowsClassifyCurl(
 	windowsClassifyCurlRecovery(command, args, builder)
 }
 
-func windowsNativeWebArgvUncertain(command *CommandFact) bool {
+// windowsPowerShellNativeArgvUncertain reports a PowerShell native-command argv
+// that Windows PowerShell 5.1 can reserialize: a literal double quote, a quoted
+// empty argument, or an unquoted expression delimiter. The argv the native
+// child receives is then not the one the lexer saw.
+func windowsPowerShellNativeArgvUncertain(command *CommandFact) bool {
 	if command == nil || command.Dialect != DialectPowerShell {
 		return false
 	}
@@ -5138,11 +5144,6 @@ func windowsExactNativeWebArgv(command *CommandFact, args []windowsWord) bool {
 		argument := command.Arguments[index]
 		if argument.Expands || argument.Quote == QuoteMixed ||
 			argument.Value != command.Argv[index] {
-			return false
-		}
-		if command.Dialect == DialectPowerShell &&
-			(strings.ContainsRune(argument.Value, '"') ||
-				argument.Value == "" && argument.Quote != QuoteNone) {
 			return false
 		}
 	}
@@ -5777,4 +5778,19 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 		return "", "", 0, false
 	}
 	return scheme, host, port, true
+}
+
+// windowsClassifyNetExec gives a NetExec / CrackMapExec call under PowerShell or
+// cmd the same closed recognizers as the POSIX classifier
+// (rel-1-0-10:GAP-0051): an NTDS dump, or a complete statically credentialed
+// domain-service call, adds a credential-read operation; anything else stays
+// partial. A NetExec installed per user (pipx under the profile, C:\Tools) is
+// the same family: netExecProgramFamily is applied where Program is derived.
+func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
+	if _, ok := exactDirectoryCredentialCommand(*command); ok ||
+		ExactNetExecDomainServiceAuth(*command) {
+		windowsAddOperation(command, OperationCredentialRead)
+		return
+	}
+	builder.out.markPartial(IssueUnknownOperandGrammar)
 }
