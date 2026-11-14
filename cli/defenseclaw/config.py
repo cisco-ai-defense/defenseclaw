@@ -1875,7 +1875,9 @@ class DecisionModelConfig:
         if self.flow_guard is not None and not isinstance(self.flow_guard, bool):
             return f"flow_guard must be true or false, got {self.flow_guard!r}"
         if self.history_turns is not None and (
-            isinstance(self.history_turns, bool) or not isinstance(self.history_turns, int) or not 0 <= self.history_turns <= 100
+            isinstance(self.history_turns, bool)
+            or not isinstance(self.history_turns, int)
+            or not 0 <= self.history_turns <= 100
         ):
             return f"history_turns must be between 0 and 100, got {self.history_turns!r}"
         if not 0 <= self.block_risk_score <= 2:
