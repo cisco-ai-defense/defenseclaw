@@ -93,8 +93,8 @@ func shellSendDestinations(toolName, rawArgs string, commands []string, trunc *b
 // too: a value or a body the projection dropped (a second shell value, a
 // function that is called, a trap string) is then read, and a sender the
 // projection did not account for is an unreadable send, never "no sender"
-// (GAP-0491). It returns the sender programs the projection covered, by name and
-// count, so a caller reading a wrapped command adds them to its own.
+// (GAP-0491). It returns the senders the projection covered (scopeCountsAsSender),
+// by name and count, so a caller reading a wrapped command adds them to its own.
 func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, depth int) map[string]int {
 	// A value past shellparse's reading bounds is read by no reader: actionfacts
 	// projects none of its commands (its status is then partial or
@@ -117,14 +117,22 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, 
 	}
 	// actionfacts did not read everything: the syntax reader reads every shell
 	// value, and a sender it finds that the projection does not account for is an
-	// unreadable send. If it cannot finish either, the call is incomplete.
+	// unreadable send. If it cannot finish either, the call is incomplete. Both
+	// sides count over the whole call (covered spans every value actionfacts
+	// projected) and with the same test, scopeCountsAsSender: a sender in one
+	// value is not hidden by a projected one in another, and a projected GET does
+	// not hide a sending curl the projection dropped (GAP-0491, review round 9).
+	found := map[string]int{}
 	for _, command := range readable {
 		res := scopeSyntaxRead(command, 0)
 		r.incomplete = r.incomplete || res.unknown
 		for prog, n := range res.senders {
-			if n > covered[prog] {
-				r.sends, r.unreadable = true, true
-			}
+			found[prog] += n
+		}
+	}
+	for prog, n := range found {
+		if n > covered[prog] {
+			r.sends, r.unreadable = true, true
 		}
 	}
 	return covered
@@ -171,7 +179,7 @@ func (r *shellSendReader) readProjected(facts actionfacts.Facts, depth int) map[
 		if len(args) > 0 && scopeProgram(args[0]) == prog {
 			args = args[1:]
 		}
-		if scopeSenderPrograms[prog] {
+		if scopeCountsAsSender(prog, args) {
 			progs[prog]++
 		}
 		switch prog {
@@ -425,6 +433,13 @@ func (r *shellSendReader) readObjectCopy(args []string, scheme string) {
 	}
 }
 
+// scopeCountsAsSender is the one sender test both readers of a call count with
+// (readProjected and scopeSyntaxNode, compared in readFacts): a sending program
+// whose static arguments may send and do not name a remote end in static words.
+func scopeCountsAsSender(prog string, args []string) bool {
+	return scopeSenderPrograms[prog] && scopeMaySend(prog, args) && !scopeHasRemoteOperand(prog, args)
+}
+
 // scopeMaySend reports whether the arguments the parse could read leave open that
 // the command sends: curl and wget only with a visible body, upload or POST
 // option; the programs that exist to send always.
@@ -561,8 +576,7 @@ func scopeShellBoundCap(command string) bounded.Cap {
 
 // scopeSyntaxResult is what the syntax reader made of one shell value.
 type scopeSyntaxResult struct {
-	// senders counts, by program name, the commands whose name is a sending
-	// program and whose static arguments may send.
+	// senders counts, by program name, the commands scopeCountsAsSender counts.
 	senders map[string]int
 	// unknown is set when part of the value cannot be read: a program name the
 	// shell builds, a string it evaluates (eval, trap, a shell's -c body) that is
@@ -683,7 +697,7 @@ func scopeSyntaxNode(root syntax.Node, depth int) scopeSyntaxResult {
 				res.merge(scopeSyntaxRead(body, depth+1))
 			}
 		}
-		if scopeSenderPrograms[prog] && scopeMaySend(prog, args) && !scopeHasRemoteOperand(prog, args) {
+		if scopeCountsAsSender(prog, args) {
 			res.senders[prog]++
 		}
 		return true
