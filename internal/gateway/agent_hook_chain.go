@@ -203,7 +203,7 @@ func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest)
 func placeSecretReadPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
 	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
 		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
-		!hasUnplacedRelativePath(facts) || callMayChangeDirectory(facts) {
+		!hasUnplacedRelativePath(facts) || !callProvenToKeepDirectory(facts) {
 		return facts
 	}
 	reported = path.Clean(reported)
@@ -2162,6 +2162,43 @@ func callWritesAnyFile(facts actionfacts.Facts) bool {
 	return false
 }
 
+// directoryKeepingPrograms are the programs, besides the reader table, that
+// cannot change the directory the next command runs in: external programs
+// the chain reads or sends with, and the shell builtins that only print or
+// test. A cd, pushd, popd, source, `.`, eval, trap, alias, a function call or
+// any program not named here is not proven (GAP-0418).
+var directoryKeepingPrograms = map[string]struct{}{
+	"cat": {}, "head": {}, "tail": {}, "less": {}, "more": {}, "grep": {}, "egrep": {}, "fgrep": {},
+	"rg": {}, "uniq": {}, "tr": {}, "wc": {}, "base64": {}, "openssl": {}, "sed": {}, "awk": {},
+	"cp": {}, "mv": {}, "ln": {}, "rm": {}, "mkdir": {}, "touch": {}, "tee": {}, "dd": {}, "install": {},
+	"tar": {}, "zip": {}, "unzip": {}, "gzip": {}, "gunzip": {}, "bzip2": {}, "xz": {},
+	"rsync": {}, "scp": {}, "curl": {}, "wget": {}, "jq": {}, "yq": {}, "find": {}, "ls": {}, "stat": {}, "file": {},
+	"echo": {}, "printf": {}, "true": {}, "false": {}, ":": {}, "test": {}, "[": {}, "sleep": {}, "date": {},
+	"pwd": {}, "whoami": {}, "id": {}, "uname": {}, "hostname": {},
+}
+
+// callProvenToKeepDirectory reports a call proven not to change the
+// directory its commands run in: a complete parse in which every command is a
+// known program that cannot change it (the reader table, an upload or copy
+// tool, a printing builtin) and none may (callMayChangeDirectory). Anything
+// else (a function or alias the call defines, `.`, `source`, `eval`, `trap`,
+// an unknown program that may be a function of the agent's shell, a call the
+// parser cannot finish) is not proven: a relative operand in it is unnamed and
+// the chain joins on the marker (GAP-0418).
+func callProvenToKeepDirectory(facts actionfacts.Facts) bool {
+	if facts.Parse.Status != actionfacts.StatusComplete || callMayChangeDirectory(facts) {
+		return false
+	}
+	for _, command := range facts.Commands {
+		program := command.Program
+		if _, ok := directoryKeepingPrograms[program]; ok || actionfacts.StandardFileReaderProgram(program) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // callMayChangeDirectory reports a call in which a command may change the
 // directory the later commands run in: cd, pushd, popd, or tar -C. An env -C
 // or sudo -D is not listed: the wrapper unwrap refuses it, so no read or
@@ -2192,11 +2229,11 @@ func callMayChangeDirectory(facts actionfacts.Facts) bool {
 }
 
 // secretReadPathIdentity is exactPathIdentity, except that a relative
-// operand in a call that changes directory (cd, pushd, popd) is no exact file:
-// the path fact keeps the call's starting directory, not the one the command
-// ran in.
+// operand is an exact file only when the call is PROVEN not to change
+// directory (callProvenToKeepDirectory): the path fact keeps the call's
+// starting directory, not the one the commands ran in (GAP-0409, GAP-0418).
 func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
-	if !candidate.Absolute && callMayChangeDirectory(facts) {
+	if !candidate.Absolute && !callProvenToKeepDirectory(facts) {
 		return "", false
 	}
 	return exactPathIdentity(candidate)

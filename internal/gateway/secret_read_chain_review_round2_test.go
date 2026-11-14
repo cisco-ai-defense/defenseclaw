@@ -141,23 +141,30 @@ func TestSecretReadChainReviewRound2ProbesLocalCwd(t *testing.T) {
 }
 
 // srd2Round2Chain is the verdict of each round 2 probe id. True rows join.
-// False rows are limits that hold at the base a5c569fd1d as well:
-//   - C3, C6, C7, C15, C26, C27, UC3, UC7, UC26: a directory change the parser
-//     does not see as a cd command (a function, a sourced script, a trap, an
-//     alias, an unknown program): substrate-1:GAP-0418, Part B of the round 3
-//     fix turns these true.
-//   - P5, P6, P7: a combined redirect operator and a redirect on a group or a
-//     subshell are not recorded by the parser.
+// A relative path is named in the reported directory only when the call is
+// proven not to change it (callProvenToKeepDirectory), so every directory
+// change the parser does not see as a cd command (C3, C6, C7, C15, C26, C27,
+// UC3, UC7, UC26: a function, a sourced script, an unknown program, a trap, an
+// alias) leaves it unnamed and the chain joins (substrate-1:GAP-0418). False
+// rows are limits that hold at the base a5c569fd1d as well:
+//   - P5: a combined redirect operator is not parsed. (P6 and P7, a redirect on
+//     a group or a subshell, join now: the call is unproven, so the read is
+//     unnamed.)
 //   - RS1, RS5: an rsync whose ssh command line presents a key records no read;
 //     RS6 (scp) and RS7 (a whole directory) record none either.
-//   - F6: a named read and an unrelated named upload; B1: env -C records no read.
+//   - F6: a named read and an unrelated named upload.
+//
+// B1 (an env -C child elsewhere in the call, then an unrelated upload) joins
+// now: a call with an unknown program is unproven, so the read is unnamed and
+// joins any upload. That is the cost of PROVEN-or-UNCERTAIN (GAP-0418).
 var srd2Round2Chain = func() map[string]bool {
 	want := map[string]bool{}
 	for _, id := range []string{
-		"C1", "C2", "C4", "C5", "C8", "C9", "C10", "C11", "C13", "C14", "C16", "C18", "C21", "C23", "C28", "C29",
-		"UC4", "UC29",
-		"P1", "P1a", "P2", "P3", "P4", "P8", "P9", "P11", "P13", "P16", "P18", "P19", "P20",
-		"RS2", "RS2a", "RS3", "F6b", "F6c", "B2",
+		"C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "C10", "C11", "C13", "C14", "C15", "C16", "C18", "C21", "C23",
+		"C26", "C27", "C28", "C29",
+		"UC3", "UC4", "UC7", "UC26", "UC29",
+		"P1", "P1a", "P2", "P3", "P4", "P6", "P7", "P8", "P9", "P11", "P13", "P16", "P18", "P19", "P20",
+		"RS2", "RS2a", "RS3", "F6b", "F6c", "B1", "B2",
 	} {
 		want[id] = true
 	}

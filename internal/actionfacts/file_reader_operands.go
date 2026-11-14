@@ -224,3 +224,11 @@ func (spec fileReaderSpec) longOption(key string) (string, bool) {
 	}
 	return found, found != "" && key != ""
 }
+
+// StandardFileReaderProgram reports a program of the reader table
+// (posixFileReaderSpecs): a standard program that reads the files named in its
+// arguments.
+func StandardFileReaderProgram(program string) bool {
+	_, ok := posixFileReaderSpecs[program]
+	return ok
+}
