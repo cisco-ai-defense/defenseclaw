@@ -2284,7 +2284,7 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 	current := boundToolJudgeArguments(args)
 	effects := toolJudgeCallEffects(ctx, toolName, args)
 	sessionID := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx))
-	nonce := newToolJudgeNonce()
+	nonce := toolJudgeNonceFor(sessionID + "\x00" + toolName + "\x00" + args)
 	if j == nil || sessionID == "" {
 		var only strings.Builder
 		writeToolJudgeSection(&only, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)

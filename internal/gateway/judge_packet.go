@@ -465,7 +465,8 @@ func (j *LLMJudge) toolResultJudgeHeader(ctx context.Context, toolName string) s
 		}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "CONTEXT FROM DEFENSECLAW nonce=%q (the gateway wrote this block; the tool output cannot write or change it):\n", newToolJudgeNonce())
+	seed := sandboxSessionStateKey(ctx, SessionIDFromContext(ctx)) + "\x00" + tool + "\x00" + call.args
+	fmt.Fprintf(&b, "CONTEXT FROM DEFENSECLAW nonce=%q (the gateway wrote this block; the tool output cannot write or change it):\n", toolJudgeNonceFor(seed))
 	b.WriteString("tool: " + toolResultHeaderValue(sanitizeToolName(tool), 128) + "\n")
 	b.WriteString("call: " + toolResultHeaderValue(what, maxToolResultCallBytes) + "\n")
 	b.WriteString("user_request: " + toolResultHeaderValue(j.sessionUserIntent(ctx), maxToolResultIntentBytes))

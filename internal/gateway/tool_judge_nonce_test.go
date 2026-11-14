@@ -111,6 +111,9 @@ func TestToolJudgeForgedTagsNeverCarryTheCallNonce(t *testing.T) {
 
 // Two calls with the same arguments get different nonces, so a section of one is not a section of the other.
 func TestToolJudgeSamplesDifferPerCall(t *testing.T) {
+	if s7benchBuild {
+		t.Skip("the s7bench build derives the nonce from the call (s7bench_nonce.go)")
+	}
 	j, _ := newNonceTestJudge()
 	ctx := ContextWithSessionID(context.Background(), "nonce-per-call")
 	j.ObserveSessionPrompt(ctx, "do it")

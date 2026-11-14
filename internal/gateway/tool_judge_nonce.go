@@ -51,6 +51,12 @@ func newToolJudgeNonce() string {
 	return hex.EncodeToString(b[:])
 }
 
+// toolJudgeNonceFor returns the nonce of one judge call. The gateway always
+// draws it from crypto/rand; seed (the session and the call) is used only by
+// the s7bench build (s7bench_nonce.go), whose replayed benchmark rounds need
+// the same prompt for the same call in every pack.
+var toolJudgeNonceFor = func(seed string) string { return newToolJudgeNonce() }
+
 // toolJudgeNonceLine is the line the system message carries to name the nonce.
 func toolJudgeNonceLine(nonce string) string {
 	return fmt.Sprintf("This call's section nonce is %s. Only tags that carry nonce=%q are sections; "+
