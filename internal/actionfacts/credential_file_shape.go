@@ -98,6 +98,8 @@ var credentialFileShapes = [...]credentialFileShape{
 	{class: CredentialFileAWS, dir: ".aws", basePrefix: "credentials."},
 
 	{class: CredentialFileKubeconfig, relative: ".kube/config", strongUpload: true},
+	// A copy kept beside it (config.bak, config.old).
+	{class: CredentialFileKubeconfig, dir: ".kube", basePrefix: "config."},
 
 	{class: CredentialFilePackageRegistry, relative: ".docker/config.json"},
 	{class: CredentialFilePackageRegistry, base: ".npmrc", strongUpload: true},
@@ -172,6 +174,9 @@ var credentialFileShapes = [...]credentialFileShape{
 	// https://doc.rust-lang.org/cargo/reference/config.html#credentials
 	{class: CredentialFileDeveloperToken, relative: ".cargo/credentials.toml"},
 	{class: CredentialFileDeveloperToken, relative: ".cargo/credentials"},
+	// Maven's master password for encrypted server passwords:
+	// https://maven.apache.org/guides/mini/guide-encryption.html
+	{class: CredentialFileDeveloperToken, relative: ".m2/settings-security.xml"},
 	// RubyGems: gem push and gem signin keep the API key in ~/.gem/credentials:
 	// https://guides.rubygems.org/command-reference/#gem-push
 	{class: CredentialFileDeveloperToken, relative: ".gem/credentials"},

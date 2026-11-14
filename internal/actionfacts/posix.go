@@ -1380,7 +1380,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		program := commandProgram(command.Executable)
 		var child parseOutput
-		switch program {
+		switch posixStaticWrapperSwitchKey(program) {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 			if structuralPOSIXPipelineStdinInterpreter(out, &command) ||
 				exactPOSIXShellPreviewInvocation(&command) {
@@ -1438,8 +1438,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
-		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot",
-			"nice", "time", "timeout", "nohup":
+		case posixStaticWrapperKey:
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
@@ -1516,6 +1515,28 @@ var (
 		"-b": {}, "--background": {},
 	}
 )
+
+// staticPOSIXWrapperPrograms are the programs staticPOSIXWrapperArgv unwraps:
+// the one list of the pass-through wrappers, read by both places that
+// expand them (expandStaticPOSIXWrappers and analyzeStructuredArgv) through
+// posixStaticWrapperSwitchKey.
+var staticPOSIXWrapperPrograms = map[string]struct{}{
+	"env": {}, "sudo": {}, "command": {}, "builtin": {}, "exec": {},
+	"nsenter": {}, "chroot": {}, "nice": {}, "time": {}, "timeout": {}, "nohup": {},
+}
+
+// posixStaticWrapperKey is the switch key of a program in
+// staticPOSIXWrapperPrograms.
+const posixStaticWrapperKey = "\x00static-posix-wrapper"
+
+// posixStaticWrapperSwitchKey maps a pass-through wrapper to
+// posixStaticWrapperKey and any other program to itself.
+func posixStaticWrapperSwitchKey(program string) string {
+	if _, ok := staticPOSIXWrapperPrograms[program]; ok {
+		return posixStaticWrapperKey
+	}
+	return program
+}
 
 func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool) {
 	if len(argv) < 2 {

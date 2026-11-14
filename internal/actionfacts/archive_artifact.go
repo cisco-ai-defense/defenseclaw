@@ -112,6 +112,10 @@ func classifyTarArchiveProducer(out *parseOutput, command *CommandFact) {
 	if !created {
 		return
 	}
+	if file == "-" {
+		// The archive goes to stdout: the members are still read.
+		appendArchiveSourceReads(out, command, tarCreateSources(command.Argv))
+	}
 	if !staticArchiveArtifactPath(file) {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
@@ -155,7 +159,21 @@ func tarCreateSources(argv []string) []string {
 		if operandIndex > len(argv) {
 			return nil
 		}
-		return argv[operandIndex:]
+		// A -C or --directory among the members (with its directory) is no
+		// member: the members after it are relative to that directory, which
+		// the chain reads as "may change directory" (callMayChangeDirectory).
+		var members []string
+		for index := operandIndex; index < len(argv); index++ {
+			switch operand := argv[index]; {
+			case operand == "-C" || operand == "--directory":
+				index++
+			case strings.HasPrefix(operand, "--directory=") ||
+				len(operand) > 2 && strings.HasPrefix(operand, "-C"):
+			default:
+				members = append(members, operand)
+			}
+		}
+		return members
 	}
 	return tarOwnedOptions(argv).positionals
 }
@@ -163,7 +181,7 @@ func tarCreateSources(argv []string) []string {
 func tarOwnedOptions(argv []string) ownedPOSIXOptionParse {
 	return parseOwnedPOSIXOptions(
 		argv,
-		exactOptionSet("-f", "--file"),
+		exactOptionSet("-f", "--file", "-C", "--directory"),
 		exactOptionSet(
 			"-c", "--create", "-t", "--list", "-x", "--extract",
 			"-r", "--append", "-u", "--update", "-d", "--diff", "--compare",

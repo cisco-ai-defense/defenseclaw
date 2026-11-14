@@ -30,9 +30,11 @@ type fileReaderSpec struct {
 	// long: long options that take a value (--name=value or --name value).
 	// A unique prefix of a name stands for it, as in GNU getopt_long.
 	long map[string]fileOptionRole
-	// operandsAreFiles: every non-option word is a file the program reads
-	// (false for xargs, whose operands are the program it starts).
+	// operandsAreFiles: every non-option word is a file the program reads.
 	operandsAreFiles bool
+	// startsProgram: the first non-option word is a program the tool starts
+	// (xargs), not a file; the program is read on its own words.
+	startsProgram bool
 }
 
 func fileOptions(letters string, role fileOptionRole, into map[byte]fileOptionRole) map[byte]fileOptionRole {
@@ -119,6 +121,18 @@ var posixFileReaderSpecs = map[string]fileReaderSpec{
 				"delimiter", "max-args", "max-procs", "max-chars",
 				"process-slot-var"),
 			"arg-file"),
+		startsProgram: true,
+	},
+	// diff (GNU diffutils): both operands are read, as are the files its
+	// -S, -X and --from-file/--to-file options name.
+	"diff": {
+		short: fileOptions("SX", fileOptionReadsFile,
+			fileOptions("xILUCWFD", fileOptionValue, nil)),
+		long: longFileOptions(fileOptionReadsFile,
+			longFileOptions(fileOptionValue, nil,
+				"exclude", "label", "ignore-matching-lines", "show-function-line", "width"),
+			"starting-file", "exclude-from", "from-file", "to-file"),
+		operandsAreFiles: true,
 	},
 }
 

@@ -203,7 +203,7 @@ func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest)
 func placeSecretReadPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
 	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
 		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
-		!hasUnplacedRelativePath(facts) {
+		!hasUnplacedRelativePath(facts) || callMayChangeDirectory(facts) {
 		return facts
 	}
 	reported = path.Clean(reported)
@@ -1200,7 +1200,7 @@ func projectTrustedActionChainSteps(
 	// the home-path rules name only the account's own copy
 	// (substrate-1:GAP-0210).
 	secretRead := hasAnyFinding(secretReadIDs...) || credentialFileContentRead(facts)
-	secretReadDigest, secretReadIdentityExact := exactSingleReadPathDigest(facts)
+	secretReadDigest, secretReadIdentityExact := exactSecretReadChainDigest(facts)
 	secretReadExact := secretRead && secretReadIdentityExact &&
 		facts.Authoritative() && facts.EnforcementEligible()
 	addToolChainStep(
@@ -1212,9 +1212,10 @@ func projectTrustedActionChainSteps(
 	)
 	if secretReadExact {
 		joinDigest := secretReadDigest
-		if credentialFileReadByCopy(facts) {
-			// The copy holds the secret too: the file that is uploaded later
-			// may be the source or the copy (substrate-1:GAP-0388).
+		if credentialFileReadDerivesFile(facts) {
+			// The read's bytes also land in another file (a copy, a move, a
+			// redirect, an archive): the file that is uploaded later may be
+			// the source or the derived one (substrate-1:GAP-0388, GAP-0410).
 			joinDigest = guardrail.ToolChainFileUnknownDigest
 		}
 		setToolChainEnforcementJoinDigest(
@@ -2107,21 +2108,81 @@ func credentialFileContentReadCommand(
 	}
 	command, ok := integrityCommandByID(facts, candidate.CommandID)
 	if !ok || command.Effect != actionfacts.EffectExecute ||
-		sshIdentityConsumer(command) ||
+		sshIdentityConsumer(command) && command.Program != "rsync" ||
 		!hasAnyOperation(command, actionfacts.OperationRead,
 			actionfacts.OperationSearch, actionfacts.OperationCopy) {
+		// rsync is no key consumer here: its local sources are copied, and
+		// its remote operands carry no path fact.
 		return actionfacts.CommandFact{}, false
 	}
 	return command, true
 }
 
-// credentialFileReadByCopy reports a credentials-file read that is a copy or
-// a move: the destination holds the same bytes.
-func credentialFileReadByCopy(facts actionfacts.Facts) bool {
+// credentialFileReadDerivesFile reports a credentials-file read whose bytes
+// also go to another file: a copy or a move, a command that writes (an
+// archive, rsync), a redirect of its output to a file, or a tee in the call.
+// The derived file holds the secret too, so a later upload of it joins the
+// read (GAP-0388, GAP-0410).
+func credentialFileReadDerivesFile(facts actionfacts.Facts) bool {
+	read := false
 	for _, candidate := range facts.Paths {
 		command, ok := credentialFileContentReadCommand(facts, candidate)
-		if ok && hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+		if !ok {
+			continue
+		}
+		read = true
+		if hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove,
+			actionfacts.OperationWrite) {
 			return true
+		}
+		for _, redirect := range command.Redirects {
+			if redirect.Access == actionfacts.PathAccessWrite && redirect.FD != 2 &&
+				redirect.Target != "" && redirect.Target != "/dev/null" &&
+				!strings.HasPrefix(redirect.Target, "&") {
+				return true
+			}
+		}
+	}
+	if !read {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if command.Program == "tee" {
+			return true
+		}
+	}
+	return false
+}
+
+// callMayChangeDirectory reports a call in which a command may change the
+// directory the later commands run in: cd, pushd, popd, or a wrapper with a
+// directory option (env -C, sudo -D). A relative operand in such a call is
+// not the file the path fact names: the fact keeps the call's starting
+// directory (GAP-0409).
+func callMayChangeDirectory(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		switch command.Program {
+		case "cd", "pushd", "popd", "chdir", "set-location", "push-location", "sl":
+			return true
+		case "tar", "bsdtar":
+			// -C or --directory (a traditional bundle such as cf names it
+			// with a C): the members are relative to that directory.
+			for index, argument := range command.Argv[1:] {
+				if argument == "-C" || argument == "--directory" ||
+					strings.HasPrefix(argument, "--directory=") ||
+					len(argument) > 2 && strings.HasPrefix(argument, "-C") ||
+					index == 0 && !strings.HasPrefix(argument, "-") && strings.ContainsRune(argument, 'C') {
+					return true
+				}
+			}
+		case "env", "sudo", "nsenter", "chroot":
+			for _, argument := range command.Argv[1:] {
+				if argument == "-C" || argument == "-D" || argument == "--chdir" ||
+					strings.HasPrefix(argument, "--chdir=") ||
+					len(argument) > 2 && (strings.HasPrefix(argument, "-C") || strings.HasPrefix(argument, "-D")) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -2132,15 +2193,20 @@ func credentialFileReadByCopy(facts actionfacts.Facts) bool {
 // the path fact keeps the call's starting directory, not the one the command
 // ran in.
 func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
-	if !candidate.Absolute {
-		for _, command := range facts.Commands {
-			switch command.Program {
-			case "cd", "pushd", "popd", "chdir":
-				return "", false
-			}
-		}
+	if !candidate.Absolute && callMayChangeDirectory(facts) {
+		return "", false
 	}
 	return exactPathIdentity(candidate)
+}
+
+// exactSecretReadChainDigest is exactSingleReadPathDigest for the
+// secret-read chain: the identity of a relative operand in a call that may
+// change directory is not exact (GAP-0409).
+func exactSecretReadChainDigest(facts actionfacts.Facts) (string, bool) {
+	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {
+		return candidate.Access == actionfacts.PathAccessRead &&
+			matchesAnySensitivePathCandidate(semanticPathValue(candidate))
+	}, secretReadPathIdentity)
 }
 
 // externalUploadProofDigest proves an external upload in a call whose
@@ -2204,10 +2270,6 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 			return "", false
 		}
 		found = true
-		if hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
-			exact = false
-			continue
-		}
 		identity, ok := secretReadPathIdentity(facts, candidate)
 		if !ok || selected != "" && selected != identity {
 			exact = false
@@ -2218,7 +2280,7 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	switch {
 	case !found:
 		return "", false
-	case exact && selected != "":
+	case exact && selected != "" && !credentialFileReadDerivesFile(facts):
 		return pathIdentityDigest(selected), true
 	default:
 		return guardrail.ToolChainFileUnknownDigest, true
@@ -2261,22 +2323,32 @@ func exactExternalUploadPathDigest(facts actionfacts.Facts) (string, bool) {
 	if len(externalUploadCommands) == 0 {
 		return "", false
 	}
-	return exactSinglePathDigest(facts, func(candidate actionfacts.PathFact) bool {
+	return exactSinglePathDigestBy(facts, func(candidate actionfacts.PathFact) bool {
 		_, uploadCommand := externalUploadCommands[candidate.CommandID]
 		return uploadCommand && candidate.Access == actionfacts.PathAccessRead
-	})
+	}, secretReadPathIdentity)
 }
 
 func exactSinglePathDigest(
 	facts actionfacts.Facts,
 	selectPath func(actionfacts.PathFact) bool,
 ) (string, bool) {
+	return exactSinglePathDigestBy(facts, selectPath, func(_ actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
+		return exactPathIdentity(candidate)
+	})
+}
+
+func exactSinglePathDigestBy(
+	facts actionfacts.Facts,
+	selectPath func(actionfacts.PathFact) bool,
+	identityOf func(actionfacts.Facts, actionfacts.PathFact) (string, bool),
+) (string, bool) {
 	var selected string
 	for _, candidate := range facts.Paths {
 		if !selectPath(candidate) {
 			continue
 		}
-		identity, ok := exactPathIdentity(candidate)
+		identity, ok := identityOf(facts, candidate)
 		if !ok {
 			return "", false
 		}
