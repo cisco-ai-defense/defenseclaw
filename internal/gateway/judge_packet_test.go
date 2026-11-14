@@ -117,7 +117,7 @@ func TestJudgePacketTargetHistory(t *testing.T) {
 	history := map[string]judgeTargetSeen{}
 	var b strings.Builder
 	for i := 0; i < maxJudgeTargetHistory+10; i++ {
-		recordJudgeTargets(&b, history, i+1, judgeCallEffects{targets: []judgeTarget{{access: "read", path: fmt.Sprintf("/p/%d", i)}}})
+		history = recordJudgeTargets(&b, history, i+1, judgeCallEffects{targets: []judgeTarget{{access: "read", path: fmt.Sprintf("/p/%d", i)}}})
 	}
 	if len(history) != maxJudgeTargetHistory {
 		t.Fatalf("history not bounded: %d", len(history))

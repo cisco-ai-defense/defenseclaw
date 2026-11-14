@@ -329,10 +329,19 @@ func TestHookJudge_ClaudeCodeToolResultCarriesCallContext(t *testing.T) {
 	if system == "" {
 		t.Fatalf("no tool-result judge call with the context block (%d calls)", len(mock.captured))
 	}
-	for _, want := range []string{"\ntool: Read\n", "\ncall: read ", filepath.Join("testdata", "cases.json"), "\nuser_request: update the parser fixtures"} {
+	for _, want := range []string{"\ntool: Read\n", "\ncall: read ", filepath.Join("testdata", "cases.json")} {
 		if !strings.Contains(system, want) {
 			t.Errorf("system message lacks %q:\n%s", want, system)
 		}
+	}
+	var user string
+	for _, req := range mock.captured {
+		if strings.Contains(req.Messages[0].Content, "CONTEXT FROM DEFENSECLAW") {
+			user = req.Messages[1].Content
+		}
+	}
+	if !strings.HasPrefix(user, "USER_REQUEST") || !strings.Contains(user, "update the parser fixtures") {
+		t.Errorf("user message lacks the session's request before the sample: %.200q", user)
 	}
 }
 

@@ -31,6 +31,41 @@ func init() {
 	})
 }
 
+// The tool judge's own stages (rel-1-0-10:GAP-0636) are registered lanes as
+// well, settable per connector and profile. They act only where
+// guardrail.judge is on for the connector, which is opt-in and off by
+// default, so with the judge off they change nothing. Each ships on: it is
+// the judge as measured (BENCH-gemma4). shadow is accepted as for every lane
+// and acts as off: these stages add or skip a judge question and have no
+// verdict of their own to record.
+const (
+	// CascadeLaneJudgeReadSkip: with regex_judge, a call the rules did not
+	// flag and the parser proves only reads is not sent to the judge.
+	CascadeLaneJudgeReadSkip = "judge_read_skip"
+	// CascadeLaneJudgeUnmodeledAlert: in the default pack a lone needs_review
+	// finding on a call the parser does not model (MCP and other tools)
+	// keeps its alert (GAP-0397); off makes it audit-only like a modeled call.
+	CascadeLaneJudgeUnmodeledAlert = "judge_unmodeled_alert"
+	// CascadeLaneJudgeToolResultContext: the tool-result judges get the tool,
+	// what its call did and the user's request next to the output.
+	CascadeLaneJudgeToolResultContext = "judge_tool_result_context"
+)
+
+func init() {
+	RegisterCascadeLane(CascadeLane{
+		Name: CascadeLaneJudgeReadSkip, Default: CascadeLaneOn,
+		Description: "LLM judge (when on for the connector, regex_judge): do not ask about a call the rules did not flag and the parser proves only reads; off asks about every call the rules leave open",
+	})
+	RegisterCascadeLane(CascadeLane{
+		Name: CascadeLaneJudgeUnmodeledAlert, Default: CascadeLaneOn,
+		Description: "LLM judge (when on for the connector): a lone needs_review finding on a call the parser does not model keeps its alert in the default pack; off records it without an alert",
+	})
+	RegisterCascadeLane(CascadeLane{
+		Name: CascadeLaneJudgeToolResultContext, Default: CascadeLaneOn,
+		Description: "LLM judge (when on for the connector): the tool-result judges see the tool, what its call did (arguments redacted) and the user's request next to the output; off judges the output alone",
+	})
+}
+
 // CascadeLaneValues is a scope's guardrail.cascade.lanes: lane name to off,
 // shadow or on. A lane it does not name keeps its shipped default.
 type CascadeLaneValues map[string]string

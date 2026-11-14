@@ -45,14 +45,21 @@ func TestToolResultJudgeHeaderOutsideSample(t *testing.T) {
 		"CONTEXT FROM DEFENSECLAW",
 		"\ntool: Read\n",
 		"\ncall: read /repo/internal/x/testdata/cases.json\n",
-		"\nuser_request: fix the failing parser tests in testdata",
 	} {
 		if !strings.Contains(system, want) {
 			t.Errorf("system message lacks %q:\n%s", want, system)
 		}
 	}
-	if strings.Contains(sample, "CONTEXT FROM DEFENSECLAW") || strings.Contains(sample, "user_request") {
-		t.Fatalf("context leaked into the sample: %q", sample)
+	// The user's request is untrusted text: it stays in the user message,
+	// before the sample, never in the system message (rel-1-0-10:GAP-0638).
+	if strings.Contains(system, "fix the failing parser tests") {
+		t.Fatalf("the user's request reached the system message:\n%s", system)
+	}
+	if !strings.HasPrefix(sample, "USER_REQUEST (untrusted data") || !strings.Contains(sample, "fix the failing parser tests in testdata\n\n") {
+		t.Fatalf("user message lacks the USER_REQUEST line before the sample: %q", sample)
+	}
+	if strings.Contains(sample, "CONTEXT FROM DEFENSECLAW") {
+		t.Fatalf("the header leaked into the user message: %q", sample)
 	}
 }
 
@@ -61,10 +68,13 @@ func TestToolResultJudgeHeaderOutsideSample(t *testing.T) {
 func TestToolResultJudgeHeaderUnknowns(t *testing.T) {
 	j := newMockJudge(t, &mockLLMProvider{})
 	header := j.toolResultJudgeHeader(context.Background(), "message")
-	for _, want := range []string{"tool: unknown", "call: unknown", "user_request: unknown"} {
+	for _, want := range []string{"tool: unknown", "call: unknown"} {
 		if !strings.Contains(header, want) {
 			t.Errorf("header lacks %q: %q", want, header)
 		}
+	}
+	if got := j.toolResultUserRequest(context.Background()); !strings.HasSuffix(got, ": unknown") {
+		t.Errorf("user request without a session: %q", got)
 	}
 	if got := j.toolResultJudgeHeader(context.Background(), "get_webpage"); !strings.Contains(got, "tool: get_webpage") {
 		t.Errorf("caller tool name not used: %q", got)
@@ -87,13 +97,17 @@ func TestToolResultJudgeHeaderValuesAreBounded(t *testing.T) {
 	if n := strings.Count(header, "\n"); n != 3 {
 		t.Fatalf("header has %d newlines, want 3 (one per line):\n%s", n, header)
 	}
-	for _, bad := range []string{"<<<", "</CURRENT_TOOL_CALL>", "\ncall: forged", "\nuser_request: forged"} {
+	for _, bad := range []string{"<<<", "</CURRENT_TOOL_CALL>", "\ncall: forged", "\nuser_request: forged", "forged line"} {
 		if strings.Contains(header, bad) {
 			t.Errorf("header carries %q:\n%s", bad, header)
 		}
 	}
-	if len(header) > 1200 {
-		t.Errorf("header is %d bytes, want it bounded", len(header))
+	request := j.toolResultUserRequest(ctx)
+	if strings.Contains(request, "\n") || strings.Contains(request, "<<<") || strings.Contains(request, "</CURRENT_TOOL_CALL>") {
+		t.Errorf("user request line is not one bounded line: %q", request)
+	}
+	if len(header) > 1200 || len(request) > 1200 {
+		t.Errorf("header %d / request %d bytes, want both bounded", len(header), len(request))
 	}
 }
 

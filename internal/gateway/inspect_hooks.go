@@ -392,7 +392,10 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		// shipped default (regex_only) ⇒ no judge call.
 		// ToolResponseInspectRequest carries no connector field, so the gate
 		// resolves the process connector via connectorName().
-		judgeCtx := withToolResultCall(r.Context(), req.Tool, nil)
+		judgeCtx := r.Context()
+		if judgeLaneOn(a.decisionConfig(judgeCtx), a.connectorName(), config.CascadeLaneJudgeToolResultContext) {
+			judgeCtx = withToolResultCall(judgeCtx, req.Tool, nil)
+		}
 		if cfg := a.decisionConfig(judgeCtx); cfg != nil && cfg.SecureClientIntegration() {
 			judgeCtx = context.WithoutCancel(judgeCtx)
 		}
