@@ -104,6 +104,33 @@ func TestChainBytesFollowTheParser(t *testing.T) {
 	}
 }
 
+// TestBracketsInCommentsAreNotNesting pins GAP-0381 for the nesting bound: a
+// comment full of brackets is not nesting, and real nesting still is, in a
+// single-quoted string or a here-document body too (it may be the script a
+// shell is given).
+func TestBracketsInCommentsAreNotNesting(t *testing.T) {
+	brackets := strings.Repeat("([{", 2000)
+	for name, command := range map[string]string{
+		"comment":          "echo a # " + brackets + "\necho b",
+		"escaped brackets": "echo " + strings.Repeat("\\(", MaxNestingDepth+10),
+	} {
+		if reason := BudgetExceeded(command); reason != "" {
+			t.Errorf("%s: BudgetExceeded=%q", name, reason)
+		}
+	}
+	for name, command := range map[string]string{
+		"real nesting":       strings.Repeat("(", MaxNestingDepth+1) + "a",
+		"nesting after data": "echo a # (\n" + strings.Repeat("(", MaxNestingDepth+1) + "a",
+		"raw nesting bound":  "echo a # " + strings.Repeat("(", maxRawNesting+1),
+		"in single quotes":   "bash -c '" + strings.Repeat("(", MaxNestingDepth+1) + "a'",
+		"in a here-document": "bash <<'EOF'\n" + strings.Repeat("(", MaxNestingDepth+1) + "a\nEOF\n",
+	} {
+		if reason := BudgetExceeded(command); reason != BudgetNesting {
+			t.Errorf("%s: BudgetExceeded=%q, want %q", name, reason, BudgetNesting)
+		}
+	}
+}
+
 // TestUnparsedChainIsOverTheBudget pins GAP-0284: a chain past the soft
 // bound that cannot be parsed (a syntax error, a wrapper that fails) has no
 // tree to measure and is over the budget, not within it.

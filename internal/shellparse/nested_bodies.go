@@ -80,22 +80,26 @@ func NestedBodyWeight(command string) int {
 				return true
 			}
 		}
-		if depth >= nestedBodyMaxDepth || nestingBound(text) != "" {
+		if depth >= nestedBodyMaxDepth {
 			return false
 		}
 		// A body is a command the readers parse: it is under the reading
 		// budget like the call that carries it, and the measure does not
-		// parse a body past it (the first stage reads a single-quoted body as
-		// data, so the body is the one place the budget sees its tokens and
-		// nodes). A body a shell is given (bash -c, eval) that is past the
-		// budget is past the nested bound; any other candidate (an argument
-		// of echo, a here-document: text a program reads) is not parsed and
-		// not counted.
-		if depth > 0 && BudgetExceeded(text) != "" {
+		// parse a body past it. The first stage reads a single-quoted body as
+		// data (its brackets are not nesting, its words are no tokens), so
+		// the body is the one place the budget sees what it holds. A body a
+		// shell is given (bash -c, eval) that is past the budget, nesting
+		// included, is past the nested bound; any other candidate (an
+		// argument of echo, a here-document: text a program reads) is not
+		// parsed and not counted.
+		if depth > 0 && (nestingBound(text) != "" || BudgetExceeded(text) != "") {
 			if code {
 				work = MaxNestedBodyBytes + 1
 				return true
 			}
+			return false
+		}
+		if nestingBound(text) != "" {
 			return false
 		}
 		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")

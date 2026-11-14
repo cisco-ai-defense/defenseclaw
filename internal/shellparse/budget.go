@@ -251,40 +251,63 @@ func computeBudget(command string) string {
 	return measureTree(file)
 }
 
+// maxRawNesting bounds the nesting of ( { [ counted in every byte, comments
+// and all. The nesting bound proper (MaxNestingDepth) counts them outside
+// comments, so a comment full of brackets is not nesting (GAP-0381). This one
+// is the stop when this pass reads the grammar differently from the parser: the mvdan parser
+// takes about 6 KB of stack for a level, so 32,768 levels are 200 MB of a 1 GB
+// goroutine stack (GAP-2537 overflowed at 180,000).
+const maxRawNesting = 64 * MaxNestingDepth
+
 // scanCounts is the one linear pass over the raw bytes: the nesting of ( {
 // [ (whose overflow it returns as the reason) and the two counts, raw and
 // aware of data.
 func scanCounts(command string) (raw, aware budgetCounts, braces bool, reason string) {
-	depth := 0
+	depth, rawDepth := 0, 0
 	var pending []heredocSpec
-	dataUntil := 0
+	dataUntil, commentUntil := 0, 0
 	for i := 0; i < len(command); i++ {
 		c := command[i]
+		data := i < dataUntil
+		if !data {
+			if end := dataSpan(command, i, &pending); end > i {
+				dataUntil, data = end, true
+				if c == '#' || c == '\\' {
+					commentUntil = end
+				}
+			}
+		}
+		// Only a comment and an escaped byte are certainly no code. A single-quoted string or a
+		// here-document body may be the script a shell is given (bash -c,
+		// eval, a shell reading its standard input), so its brackets count as
+		// nesting, as they did before the budget.
+		code := !data || i >= commentUntil
 		switch c {
 		case '(', '{', '[':
-			if depth++; depth > MaxNestingDepth {
+			if rawDepth++; rawDepth > maxRawNesting {
 				return raw, aware, braces, BudgetNesting
+			}
+			if code {
+				if depth++; depth > MaxNestingDepth {
+					return raw, aware, braces, BudgetNesting
+				}
 			}
 			braces = braces || c == '{'
 		case ')', '}', ']':
-			if depth > 0 {
+			if rawDepth > 0 {
+				rawDepth--
+			}
+			if code && depth > 0 {
 				depth--
 			}
 		}
-		if i < dataUntil {
+		raw.feed(command, i)
+		if data {
 			// Data the shell does not parse: only the raw count sees it.
-			raw.feed(command, i)
-			aware.inWord = true
-			continue
-		}
-		if end := dataSpan(command, i, &pending); end > i {
-			dataUntil = end
-			raw.feed(command, i)
 			aware.inWord = true
 			continue
 		}
 		aware.feed(command, i)
-		raw.feed(command, i)
 	}
 	return raw, aware, braces, ""
 }
