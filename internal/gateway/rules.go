@@ -98,6 +98,13 @@ type RuleFinding struct {
 	// file. It is private and value-free; guardrailActionForProfile keeps its
 	// block in every profile.
 	omittedOperand bool
+	// evaluationFault marks the finding of a call the evaluation failed on:
+	// the shell parser failed on its text (shellparse.ErrParserFault) or a
+	// reader panicked (recoverTrustedActionFault). Nothing proves what the
+	// call does, so it blocks in every pack; on the hook routes observe mode
+	// enforces it too, as the failed-check answer of the hook recovery did
+	// (rel-1-0-10:GAP-0486). Private and value-free.
+	evaluationFault bool
 }
 
 type findingEnforcement uint8
