@@ -94,6 +94,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ab20b275b3c44a0ade2cc47942dbe18d40a4cadb5626315ecb097b905f110f76",
             # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
             "b5cd7987ebc0047977727d2ce6ed58bee849229f4b6b6e3a5e07f3d3e6275e79",
+            # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
+            # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
+            "09f044aa6791dab5e73c031c65d7217098cef576c5f8d16a02ce059d4da5a7a2",
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
+            "9e5cf4bf0de1a18894339fc034783a15c7b5f915f6318c8d0d894b3ec8598d2f",
         }
     ),
     "permissive": frozenset(
@@ -144,6 +149,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "33c8403eee2442fcde01f22d118261ac3e8ded4d6652875d335ffaef70d823bc",
             # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
             "2bc8b27f12facb6c1b1356c52801fc529a39f63110e4d8ac6742acc9c3e25b41",
+            # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
+            # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
+            "d86064891b13281853484ff4f038b6e2c7c88c6aa049437ad631675b6e77f828",
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
+            "7c603db086fabe815139fa17af5660ed9747071cef721d0978de39126e36fb9e",
         }
     ),
     "strict": frozenset(
@@ -193,6 +203,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "5353b7ce79f3fc38085c93b43cae0075973d4f38f34a0ebd7bc11b065f870caa",
             # 1.0.10 (s7/secret-recall delta sr6, merged with rel/1.0.10 a75abaec78): the profile with SEC-SECRET-ASSIGN and the batch 9 shell recall rules.
             "67d67ccace7e9cac5dfdf024d9492b92917af77ca6795bd5f194765ec95814b7",
+            # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
+            # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
+            "d907a3f35099a86d92ebbf062e92fdb3ee4eee38a7ff9b3b75be6f05a70fc12b",
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
+            "21f1a85da146fc1998dd013f9e06f7a734217a62933de9895900a5b70723cbfb",
         }
     ),
 }
