@@ -17,6 +17,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -69,7 +70,19 @@ func runHookPerUserOpenLoop(t *testing.T, sessions, perSecond int) {
 		{"serial", 1, false, perUserOpenLoopDuration},
 		{"grouped", 0, true, perUserOpenLoopDuration},
 	}
+	// Diagnosis only: a longer stream (S8_OPEN_LOOP_SECONDS) shows the writer
+	// time that grows with the length of a session, and S8_OPEN_LOOP_LEG
+	// runs one leg, so two binaries or legs can be interleaved.
+	if seconds, err := strconv.Atoi(os.Getenv("S8_OPEN_LOOP_SECONDS")); err == nil && seconds > 0 {
+		for i := range legs {
+			legs[i].duration = time.Duration(seconds) * time.Second
+		}
+	}
+	only := os.Getenv("S8_OPEN_LOOP_LEG")
 	for _, leg := range legs {
+		if only != "" && only != leg.name {
+			continue
+		}
 		t.Run(leg.name, func(t *testing.T) {
 			if leg.occurrences > 0 {
 				setHookCorrelationGroupOccurrences(t, leg.occurrences)
