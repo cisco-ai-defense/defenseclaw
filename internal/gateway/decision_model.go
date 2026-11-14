@@ -147,6 +147,8 @@ type decisionModel struct {
 	// time left rather than a quarter of it.
 	alone  bool
 	client *http.Client
+	// inflight is the request semaphore (decisionMaxInflight).
+	inflight chan struct{}
 
 	// The breaker stops calling a model that keeps failing, so an outage
 	// costs the judge no time and the log one line per outage.
@@ -166,6 +168,11 @@ const (
 	decisionBudgetShare = 4
 	// decisionMinBudget: below this the model is not called at all.
 	decisionMinBudget = 50 * time.Millisecond
+	// decisionMaxInflight bounds the requests one decision model has in
+	// flight: the 100 hook calls/s target at a p99 of about 0.6 s is 60. A
+	// call past it skips the model, as when the breaker is open (review
+	// round 4, P4-2).
+	decisionMaxInflight = 64
 )
 
 // newDecisionModel builds the decision model from cfg, or returns nil when
@@ -203,6 +210,7 @@ func newDecisionModel(cfg *config.Config, dotenvPath string) *decisionModel {
 		historyResults:      dm.HistoryToolResults,
 		flowGuard:           dm.EffectiveFlowGuard(),
 		questions:           decisionQuestionsFor(dm.EffectiveFlowGuard()),
+		inflight:            make(chan struct{}, decisionMaxInflight),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   timeout,
@@ -241,18 +249,29 @@ type decisionModelResponse struct {
 }
 
 // budget is the time the model may take for this call: its timeout, capped
-// at a quarter of what is left before the hook answer window or the judge
-// deadline ends.
+// at a quarter of what is left before the hook answer window, the judge
+// deadline or the hook's shared judge budget ends (all of it alone, in
+// cascade 2). A call with none of them (a legacy curl hook, a Copilot
+// envelope without progress reports, an in-process caller) is capped as if
+// the hook's default answer window had just started, so it never waits the
+// whole decision_model.timeout (review round 4, P4-1).
 func (d *decisionModel) budget(ctx context.Context) time.Duration {
 	limit, share := d.timeout, time.Duration(decisionBudgetShare)
 	if d.alone {
 		share = 1
 	}
+	bounded := false
 	if end, ok := hookJudgeAnswerEnd(ctx); ok {
-		limit = min(limit, time.Until(end)/share)
+		limit, bounded = min(limit, time.Until(end)/share), true
 	}
 	if dl, ok := ctx.Deadline(); ok {
-		limit = min(limit, time.Until(dl)/share)
+		limit, bounded = min(limit, time.Until(dl)/share), true
+	}
+	if end, ok := ctx.Value(hookJudgeBudgetKey{}).(time.Time); ok {
+		limit, bounded = min(limit, time.Until(end)/share), true
+	}
+	if !bounded {
+		limit = min(limit, hookJudgeAnswerWindow/share)
 	}
 	return limit
 }
@@ -315,6 +334,19 @@ func (d *decisionModel) decide(ctx context.Context, state decisionModelState) de
 		res.failureCause = "skipped: no time left before the judge"
 		res.skipped = true
 		return res
+	}
+	if d.inflight != nil {
+		select {
+		case d.inflight <- struct{}{}:
+			defer func() { <-d.inflight }()
+		default:
+			// At capacity: skip the model for this call, as for an open
+			// breaker (the judge decides, or the rule verdict stands).
+			res.failure = gatewaylog.JudgeFailureProvider
+			res.failureCause = "skipped: decision model at capacity"
+			res.skipped = true
+			return res
+		}
 	}
 	cctx, cancel := context.WithTimeout(ctx, budget)
 	choice, probs, score, flow, err := d.call(cctx, state)
