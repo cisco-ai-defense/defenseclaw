@@ -1859,6 +1859,8 @@ class DecisionModelConfig:
                 f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
                 f"block_threshold ({self.effective_block_threshold()})"
             )
+        if self.escalate_rule_flagged is not None and not isinstance(self.escalate_rule_flagged, bool):
+            return f"escalate_rule_flagged must be true or false, got {self.escalate_rule_flagged!r}"
         if not 0 <= self.block_risk_score <= 2:
             return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
@@ -1945,10 +1947,9 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
         block_risk_score=_num("block_risk_score"),
-        escalate_rule_flagged=(
-            None if raw.get("escalate_rule_flagged") is None
-            else raw.get("escalate_rule_flagged") is True or str(raw.get("escalate_rule_flagged")).strip().lower() == "true"
-        ),
+        # Strict: a YAML bool or nothing; anything else is kept as given so
+        # validation_error reports it (Go refuses it at load too).
+        escalate_rule_flagged=raw.get("escalate_rule_flagged"),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 

@@ -130,8 +130,7 @@ def test_enabled_block_round_trips(home):
         "base_url": "https://dm.example/v1/systemone",
         "api_key_env": "DM_TOKEN",
         "allow_threshold": 0.2,
-        "on_confident_block": "decide",
-    }
+    }  # on_confident_block decide is retired: setup never writes it
     again = config_module.load().decision_model
     assert again.active() and again.effective_block_threshold() == 0.75
     # Turning it off keeps the staged settings, minus the switch.
@@ -755,3 +754,33 @@ def test_safer_routing_defaults_round_trip_and_validation(home):
     rows = dict(dmod.summary_rows(cfg))
     assert rows["decision_model.on_confident_block"].startswith("decide (retired")
     assert rows["decision_model.block_risk_score"] == "1.20" and rows["decision_model.escalate_rule_flagged"] == "false"
+
+
+def test_retired_decide_is_not_written_and_doctor_warns(home):
+    (home / "config.yaml").write_text(
+        "config_version: 9\ndecision_model:\n  enabled: true\n  model: m\n  base_url: http://127.0.0.1:1/x\n  on_confident_block: decide\n"
+    )
+    cfg = config_module.load()
+    dmod.apply_settings(cfg, on_confident_block="decide")
+    assert cfg.decision_model.on_confident_block == ""
+    from defenseclaw.commands import cmd_doctor
+
+    class _R:
+        def __init__(self):
+            self.rows = []
+
+    seen = []
+    orig = cmd_doctor._emit
+    cmd_doctor._emit = lambda status, name, detail, **kw: seen.append((status, name, detail))
+    try:
+        cmd_doctor._check_decision_model(config_module.load(), _R())
+    finally:
+        cmd_doctor._emit = orig
+    assert any(s == "warn" and "retired" in d for s, _n, d in seen), seen
+
+
+def test_escalate_rule_flagged_is_strict(home):
+    (home / "config.yaml").write_text("config_version: 9\ndecision_model:\n  escalate_rule_flagged: \"yes\"\n")
+    dm = config_module.load().decision_model
+    assert "escalate_rule_flagged must be true or false" in dm.validation_error()
+    assert DecisionModelConfig(escalate_rule_flagged=False).validation_error() == ""

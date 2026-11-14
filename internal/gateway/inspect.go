@@ -1980,6 +1980,16 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	// verdict (an escalated fail-closed refusal included) into current while
 	// a late judge is still running.
 	ruleFloor := rulesFlagged(current)
+	// A decision-model floor set while the judge runs is the answer when
+	// the judge is late (GAP-0392).
+	floorSlot := &decisionFloorSlot{}
+	ctx = withDecisionFloorSlot(ctx, floorSlot)
+	lateVerdict := func() *ScanVerdict {
+		if v := floorSlot.get(); v != nil {
+			return judgeReviewOnlyAudit(cfg, connector, ruleFloor, hookJudgeLaneVerdict(cfg, connector, strategyDirection, v))
+		}
+		return nil
+	}
 	call := func(callCtx context.Context) *ScanVerdict {
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
@@ -2036,7 +2046,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge late (hook answer window spent) connector=%s direction=%s; keeping regex/AID verdict\n",
 			connector, strategyDirection)
 		fallback(judgeFallbackLate)
-		return nil
+		return lateVerdict()
 	}
 	wait := time.NewTimer(left)
 	defer wait.Stop()
@@ -2051,7 +2061,9 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict\n",
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
-	return nil
+	// A decision-model floor already set stands (the late judge can only
+	// have added to it).
+	return lateVerdict()
 }
 
 // claudeCodeNoEffectTools are Claude Code built-ins whose call acts on nothing
