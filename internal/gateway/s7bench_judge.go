@@ -122,3 +122,9 @@ func (e *S7Engine) TakeJudgeCalls(sessionID string) []S7JudgeCall {
 	delete(e.judgeRec.calls, sessionID)
 	return out
 }
+
+// S7CallEffectsModeled reports whether the gateway's parser models the effects of a tool call, the property that decides
+// the tool judge's CALL_EFFECTS section and the default-pack review-only mapping (judgeReviewOnlyAudit).
+func S7CallEffectsModeled(toolName, args string) bool {
+	return toolJudgeCallEffects(context.Background(), toolName, args).modeled
+}
