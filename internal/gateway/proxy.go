@@ -51,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/modelusage"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -1832,6 +1833,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		defer holdTimer.stop()
 		midBlocked := false
 		streamTruncated := false
+		// overText: a line or frame read since the last bound check carried
+		// more than streamLineMaxText bytes of text (GAP-0624).
+		overText := false
+		// lastRead is when the upstream last sent a byte: an unfinished line
+		// is held while it goes on sending.
+		var lastRead time.Time
 		released := 0
 		send := func(b []byte) {
 			if len(b) == 0 {
@@ -1900,7 +1907,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 			lastScanLen = accumulated.Len()
 			keep := len(initialBuf)
-			if !atEnd {
+			if !atEnd && !(holding && overText) {
 				keep = min(unread(), len(initialBuf))
 			}
 			send(initialBuf[:len(initialBuf)-keep])
@@ -1944,15 +1951,21 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}()
 
-		// truncatePartial ends the hold of a line or frame whose text cannot
-		// be read within the bound: TRUNCATED. The text read so far is
-		// checked first, then the unknown tier of the pack decides. False:
-		// the stream is cut.
-		truncatePartial := func(why string) bool {
-			if !checkHeld() {
+		// truncateHeld is a hold bound: TRUNCATED. For an unfinished line or
+		// frame (partial), whose text cannot be read, the held bytes before
+		// it are checked and sent first; for a line whose text is over
+		// streamLineMaxText the whole text is checked before any of it is
+		// sent. Then the unknown tier of the pack decides. False: the stream
+		// is cut.
+		truncateHeld := func(c bounded.Cap, why string, partial bool) bool {
+			if partial {
+				if !checkHeld() {
+					return false
+				}
+			} else if !scanText() {
 				return false
 			}
-			tv := p.streamTailTruncatedVerdict(r.Context(), why)
+			tv := p.streamTailTruncatedVerdict(r.Context(), c, why)
 			p.recordTelemetry(r.Context(), "completion", label, tv, 0, mode, tv.Action == "block")
 			if tv.Action == "block" {
 				fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK %s (%d bytes already forwarded to client, %d held back)\n",
@@ -1960,9 +1973,19 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				return false
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-TRUNCATED %s: forwarded with an alert\n", logDisplayReason(tv.Reason))
-			streamTruncated = true
-			send(hold.take(len(hold.buf), time.Now()))
+			if partial {
+				// Its bytes go out unread, so the line buffer no longer
+				// matches the hold: nothing after it is held as unread.
+				streamTruncated = true
+				send(hold.take(len(hold.buf), time.Now()))
+			}
+			// A line over the text bound was read: its bytes go on through
+			// the hold, so the final check still covers the tail.
 			return true
+		}
+		truncateOverText := func() bool {
+			overText = false
+			return truncateHeld(bounded.Bytes, fmt.Sprintf("a reply stream line or frame with over %d bytes of text", streamLineMaxText), false)
 		}
 
 		for {
@@ -1971,7 +1994,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				if len(hold.buf) > unread() {
 					deadline = hold.since.Add(streamHoldMaxAge)
 				} else {
-					deadline = hold.since.Add(streamHoldMaxPartialAge)
+					since := hold.since
+					if lastRead.After(since) {
+						since = lastRead
+					}
+					deadline = since.Add(streamHoldMaxPartialAge)
 				}
 			}
 			due := holdTimer.wait(deadline, time.Now())
@@ -1982,7 +2009,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				if len(hold.buf) > unread() {
 					midBlocked = !checkHeld()
 				} else if len(hold.buf) > 0 {
-					midBlocked = !truncatePartial(fmt.Sprintf("a reply stream line or frame unfinished for %s", streamHoldMaxPartialAge))
+					midBlocked = !truncateHeld(bounded.Time, fmt.Sprintf("a reply stream line or frame unfinished, no new byte for %s", streamHoldMaxPartialAge), true)
 				}
 			}
 			if midBlocked {
@@ -1997,6 +2024,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			n, readErr := len(rd.b), rd.err
 			if n > 0 || (readErr != nil && bedrockStream == nil && lineBuf.Len() > 0) {
 				chunk := rd.b
+				if n > 0 {
+					lastRead = time.Now()
+				}
+				// One read completes at most the line or frame in progress
+				// plus 4 KiB of others, so the text it adds is that line's.
+				textBefore := accumulated.Len()
 
 				// Parse SSE text (or eventstream frames) for inspection
 				// regardless of buffer state.
@@ -2022,7 +2055,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 						lineBuf.WriteByte('\n')
 					}
 				}
-				for bedrockStream == nil {
+				// A line ends only at a newline of this chunk (or at the end
+				// of the stream): a long unfinished line is not searched again
+				// on every read.
+				for bedrockStream == nil && (readErr != nil || bytes.IndexByte(chunk, '\n') >= 0) {
 					line, rest, found := strings.Cut(lineBuf.String(), "\n")
 					if !found {
 						break
@@ -2046,6 +2082,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 						accumulated.WriteString(text)
 					}
 				}
+				if accumulated.Len()-textBefore > streamLineMaxText {
+					overText = true
+				}
 
 				if !initialFlushed {
 					initialBuf = append(initialBuf, chunk...)
@@ -2063,6 +2102,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				} else {
 					now := time.Now()
 					hold.add(chunk, now)
+					// A line over the text bound is decided before any of it
+					// is sent.
+					if overText && !truncateOverText() {
+						midBlocked = true
+						break
+					}
 					// At the end of the stream the final check reads the tail.
 					if readErr == nil && (accumulated.Len()-lastScanLen >= scanInterval ||
 						len(hold.buf)-unread() >= streamHoldMaxBytes || hold.due(now)) {
@@ -2071,12 +2116,18 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 							break
 						}
 					}
-					if readErr == nil && unread() > streamHoldMaxPartial {
-						if !truncatePartial(fmt.Sprintf("a reply stream line or frame over %d bytes", streamHoldMaxPartial)) {
+					if readErr == nil && unread() > streamHoldMaxLine {
+						if !truncateHeld(bounded.Bytes, fmt.Sprintf("a reply stream line or frame unfinished at %d bytes", streamHoldMaxLine), true) {
 							midBlocked = true
 							break
 						}
 					}
+				}
+				// The initial buffer was sent this read (its over-bound line
+				// stays held for this decision).
+				if holding && initialFlushed && overText && !truncateOverText() {
+					midBlocked = true
+					break
 				}
 			}
 			if readErr != nil {
@@ -2090,6 +2141,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			if !flushInitialBuf(true) {
 				return
 			}
+		}
+		if holding && !midBlocked && overText && !truncateOverText() {
+			midBlocked = true
 		}
 		// The tail gets the mid-stream check every byte before it got, then
 		// the final check.

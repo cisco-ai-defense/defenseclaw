@@ -7,9 +7,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	mrand "math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The tail of a streamed completion (rel-1-0-10:GAP-0212): the bytes after
@@ -25,6 +30,8 @@ import (
 // post-stream check is enforced in action mode, observe mode changes
 // nothing, and the hold is bounded in time and bytes. The finding is a
 // benign marker that a stub inspector flags, so no detection text is needed.
+// Every passthrough format: Anthropic, OpenAI Responses, Gemini SSE and the
+// Bedrock eventstream (rel-1-0-10:GAP-0629).
 
 const streamTailMarker = "zq-tail-marker-7f3a"
 
@@ -57,12 +64,18 @@ func (i *streamTailInspector) InspectMidStream(_ context.Context, direction, con
 	return i.verdict(direction, content, i.mid)
 }
 
-// streamTailFormat is one SSE wire format of a provider-native stream.
+const (
+	streamTailSSE         = "text/event-stream"
+	streamTailEventStream = "application/vnd.amazon.eventstream"
+)
+
+// streamTailFormat is one wire format of a provider-native stream (SSE, or
+// the binary Bedrock eventstream held in a string).
 type streamTailFormat struct {
-	name, provider, path string
-	head, tail           string // events before the first and after the last text delta
-	terminal             string // the event that ends the stream
-	delta                func(text string) string
+	name, provider, path, ctype string
+	head, tail                  string // events before the first and after the last text delta
+	terminal                    string // the event that ends the stream
+	delta                       func(text string) string
 }
 
 func streamTailJSON(v any) string {
@@ -70,9 +83,32 @@ func streamTailJSON(v any) string {
 	return string(b)
 }
 
+// streamTailFrame is one Bedrock InvokeModelWithResponseStream chunk frame
+// carrying an Anthropic event.
+func streamTailFrame(event string) string {
+	var buf bytes.Buffer
+	payload, _ := json.Marshal(map[string]string{"bytes": base64.StdEncoding.EncodeToString([]byte(event))})
+	_ = eventstream.NewEncoder().Encode(&buf, eventstream.Message{Headers: eventstream.Headers{
+		{Name: ":message-type", Value: eventstream.StringValue("event")},
+		{Name: ":event-type", Value: eventstream.StringValue("chunk")},
+		{Name: ":content-type", Value: eventstream.StringValue("application/json")},
+	}, Payload: payload})
+	return buf.String()
+}
+
+// streamTailGeminiEvent is one Gemini streamGenerateContent SSE event with
+// the given parts for candidate index (CRLF framing, as the API sends).
+func streamTailGeminiEvent(index int, parts []any, extra map[string]any) string {
+	cand := map[string]any{"content": map[string]any{"role": "model", "parts": parts}, "index": index}
+	for k, v := range extra {
+		cand[k] = v
+	}
+	return "data: " + streamTailJSON(map[string]any{"candidates": []any{cand}}) + "\r\n\r\n"
+}
+
 var streamTailFormats = []streamTailFormat{
 	{
-		name: "anthropic", provider: "anthropic", path: "/v1/messages",
+		name: "anthropic", provider: "anthropic", path: "/v1/messages", ctype: streamTailSSE,
 		head: "event: message_start\ndata: " + streamTailJSON(map[string]any{"type": "message_start", "message": map[string]any{"id": "msg_1", "model": "claude-test"}}) + "\n\n" +
 			"event: content_block_start\ndata: " + streamTailJSON(map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}}) + "\n\n",
 		tail: "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
@@ -83,7 +119,7 @@ var streamTailFormats = []streamTailFormat{
 		},
 	},
 	{
-		name: "openai-responses", provider: "openai", path: "/v1/responses",
+		name: "openai-responses", provider: "openai", path: "/v1/responses", ctype: streamTailSSE,
 		head:     "event: response.created\ndata: " + streamTailJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": "resp_1", "model": "gpt-test"}}) + "\n\n",
 		tail:     "event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"item_id\":\"msg_1\"}\n\n",
 		terminal: "event: response.completed\ndata: " + streamTailJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": "resp_1", "status": "completed"}}) + "\n\n",
@@ -91,17 +127,40 @@ var streamTailFormats = []streamTailFormat{
 			return "event: response.output_text.delta\ndata: " + streamTailJSON(map[string]any{"type": "response.output_text.delta", "item_id": "msg_1", "delta": text}) + "\n\n"
 		},
 	},
+	{
+		name: "gemini", provider: "gemini", path: "/v1beta/models/gemini-test:streamGenerateContent?alt=sse", ctype: streamTailSSE,
+		terminal: streamTailGeminiEvent(0, []any{map[string]any{"text": ""}}, map[string]any{"finishReason": "STOP"}),
+		delta: func(text string) string {
+			return streamTailGeminiEvent(0, []any{map[string]any{"text": text}}, nil)
+		},
+	},
+	{
+		name: "bedrock", provider: "bedrock", path: "/model/anthropic.claude-test-v1:0/invoke-with-response-stream", ctype: streamTailEventStream,
+		head:     streamTailFrame(`{"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`),
+		tail:     streamTailFrame(`{"type":"content_block_stop","index":0}`) + streamTailFrame(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`),
+		terminal: streamTailFrame(`{"type":"message_stop"}`),
+		delta: func(text string) string {
+			return streamTailFrame(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":` + streamTailJSON(text) + `}}`)
+		},
+	},
 }
 
-// streamTailText is benign prose of n bytes cut into deltas of size bytes,
+// streamTailFormatNamed is the format named name.
+func streamTailFormatNamed(t *testing.T, name string) streamTailFormat {
+	t.Helper()
+	for _, f := range streamTailFormats {
+		if f.name == name {
+			return f
+		}
+	}
+	t.Fatalf("no stream format %q", name)
+	return streamTailFormat{}
+}
+
+// streamTailDeltas is benign prose of n bytes cut into deltas of size bytes,
 // with extra appended as the last delta(s).
 func streamTailDeltas(n, size int, extra ...string) []string {
-	const prose = "the stream carries plain words about lists and maps and loops. "
-	var sb strings.Builder
-	for sb.Len() < n {
-		sb.WriteString(prose)
-	}
-	text := sb.String()[:n]
+	text := streamTailProse(n)
 	var out []string
 	for len(text) > 0 {
 		k := min(size, len(text))
@@ -109,6 +168,12 @@ func streamTailDeltas(n, size int, extra ...string) []string {
 		text = text[k:]
 	}
 	return append(out, extra...)
+}
+
+// streamTailProse is n bytes of benign prose.
+func streamTailProse(n int) string {
+	const prose = "the stream carries plain words about lists and maps and loops. "
+	return strings.Repeat(prose, n/len(prose)+1)[:n]
 }
 
 // streamTailUpstream serves one stream: head, the deltas, tail and terminal.
@@ -123,7 +188,7 @@ func streamTailUpstream(t *testing.T, f streamTailFormat, deltas []string, gap t
 	}
 	whole.WriteString(f.tail + f.terminal)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Type", f.ctype)
 		w.WriteHeader(http.StatusOK)
 		fl := w.(http.Flusher)
 		write := func(s string) {
@@ -150,6 +215,23 @@ func streamTailUpstream(t *testing.T, f streamTailFormat, deltas []string, gap t
 	return srv, whole.String()
 }
 
+// streamTailRawUpstream serves body as the format's stream in pieces of
+// piece bytes.
+func streamTailRawUpstream(t *testing.T, f streamTailFormat, body string, piece int) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", f.ctype)
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		for i := 0; i < len(body); i += piece {
+			_, _ = io.WriteString(w, body[i:min(i+piece, len(body))])
+			fl.Flush()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func streamTailProxy(t *testing.T, provider string, insp ContentInspector, mode string) *GuardrailProxy {
 	t.Helper()
 	orig := providerDomains
@@ -172,26 +254,192 @@ func streamTailRequest(t *testing.T, f streamTailFormat, base, upstream string) 
 	return req
 }
 
+// streamTailTiers are the five tiers of the bound rule. The unknown tier
+// follows the pack; a managed install with the default pack alerts.
+var streamTailTiers = []struct {
+	name, pack string
+	managed    bool
+	blocks     bool
+}{
+	{"default", "default", false, false},
+	{"permissive", "permissive", false, false},
+	{"strict", "strict", false, true},
+	{"managed", "default", true, false},
+	{"managed-strict", "strict", true, true},
+}
+
+// streamTailWithTier pins a generation whose config runs pack (on a managed
+// install when managedInstall).
+func streamTailWithTier(r *http.Request, pack string, managedInstall bool) *http.Request {
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePack = pack
+	if managedInstall {
+		cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		cfg.Enterprise.Profile = managed.ProfileStandalone
+	}
+	return r.WithContext(withPinnedGeneration(r.Context(), &Generation{N: 1, Config: cfg}))
+}
+
 func streamTailServe(t *testing.T, proxy *GuardrailProxy, f streamTailFormat, upstream string) (string, string) {
 	t.Helper()
-	req := streamTailRequest(t, f, "", upstream)
+	return streamTailServeReq(t, proxy, streamTailRequest(t, f, "", upstream))
+}
+
+func streamTailServeReq(t *testing.T, proxy *GuardrailProxy, req *http.Request) (string, string) {
+	t.Helper()
 	rec := httptest.NewRecorder()
 	log := captureStderr(t, func() { proxy.handlePassthrough(rec, req) })
 	return rec.Body.String(), log
 }
 
+// streamTailReceivedText is the reply text a client reads from out.
+func streamTailReceivedText(f streamTailFormat, out string) string {
+	var sb strings.Builder
+	if f.ctype == streamTailEventStream {
+		// The frames carry Anthropic events; a trailing partial frame is
+		// no event to the client.
+		dec, r := eventstream.NewDecoder(), strings.NewReader(out)
+		for {
+			msg, err := dec.Decode(r, nil)
+			if err != nil {
+				return sb.String()
+			}
+			var chunk struct {
+				Bytes []byte `json:"bytes"`
+			}
+			if json.Unmarshal(msg.Payload, &chunk) == nil {
+				sb.WriteString(streamTailEventText("anthropic", string(chunk.Bytes)))
+			}
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if d, ok := strings.CutPrefix(strings.TrimSpace(line), "data: "); ok && d != "[DONE]" {
+			sb.WriteString(streamTailEventText(f.provider, d))
+		}
+	}
+	return sb.String()
+}
+
+// streamTailEventText is the text of one event of the test formats (read
+// here, not with the product extractor, so the tests stay independent of
+// it): an Anthropic text delta, a Responses output_text delta, Gemini parts.
+func streamTailEventText(provider, data string) string {
+	var ev struct {
+		Type  string          `json:"type"`
+		Delta json.RawMessage `json:"delta"`
+		Cands []struct {
+			Content struct {
+				Parts []struct {
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if json.Unmarshal([]byte(data), &ev) != nil {
+		return ""
+	}
+	var sb strings.Builder
+	switch provider {
+	case "anthropic":
+		var d struct {
+			Text string `json:"text"`
+		}
+		if ev.Type == "content_block_delta" && json.Unmarshal(ev.Delta, &d) == nil {
+			sb.WriteString(d.Text)
+		}
+	case "openai":
+		var d string
+		if ev.Type == "response.output_text.delta" && json.Unmarshal(ev.Delta, &d) == nil {
+			sb.WriteString(d)
+		}
+	case "gemini":
+		for _, c := range ev.Cands {
+			for _, p := range c.Content.Parts {
+				sb.WriteString(p.Text)
+			}
+		}
+	}
+	return sb.String()
+}
+
+// streamTailAtomicEnd makes the upstream reply from the first occurrence of
+// end onward reach the proxy as one read that also returns io.EOF, so no
+// hold tick can fall between the last delta and the end of the stream
+// (rel-1-0-10:GAP-0626: on a slow host a 100 ms tick released the last
+// delta after the stub's mid-stream check allowed it, before the final
+// check, and the test read that as a leak).
+func streamTailAtomicEnd(t *testing.T, end string) {
+	t.Helper()
+	orig := providerHTTPClient
+	c := *orig
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	c.Transport = streamTailEndTransport{base: base, end: end}
+	providerHTTPClient = &c
+	t.Cleanup(func() { providerHTTPClient = orig })
+}
+
+type streamTailEndTransport struct {
+	base http.RoundTripper
+	end  string
+}
+
+func (rt streamTailEndTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	cut := bytes.Index(body, []byte(rt.end))
+	if cut < 0 {
+		cut = len(body)
+	}
+	resp.Body = &streamTailEndBody{head: body[:cut], end: body[cut:]}
+	resp.ContentLength = -1
+	return resp, nil
+}
+
+// streamTailEndBody reads head in pieces, then end in one read with io.EOF.
+type streamTailEndBody struct{ head, end []byte }
+
+func (b *streamTailEndBody) Read(p []byte) (int, error) {
+	if len(b.head) > 0 {
+		n := copy(p, b.head[:min(len(b.head), 512)])
+		b.head = b.head[n:]
+		return n, nil
+	}
+	if len(b.end) > len(p) {
+		return 0, fmt.Errorf("stream end of %d bytes does not fit one %d-byte read", len(b.end), len(p))
+	}
+	n := copy(p, b.end)
+	b.end = nil
+	return n, io.EOF
+}
+
+func (b *streamTailEndBody) Close() error { return nil }
+
 // The final check covers the tail and is enforced: the marker in the last
 // delta (after the last 500-byte scan) is never sent and the stream ends
-// without its terminal event, as a mid-stream block ends it.
+// without its terminal event, as a mid-stream block ends it. The last
+// delta arrives with the end of the stream, so the case does not depend on
+// the clock (GAP-0626).
 func TestStreamTailFinalCheckWithholdsTail(t *testing.T) {
+	last := "and then " + streamTailMarker + " ends"
 	for _, f := range streamTailFormats {
 		for _, mid := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/mid=%v", f.name, mid), func(t *testing.T) {
 				insp := &streamTailInspector{mockInspector: newMockInspector(), final: true, mid: mid}
-				up, _ := streamTailUpstream(t, f, streamTailDeltas(2400, 24, "and then "+streamTailMarker+" ends"), 0, nil)
+				up, _ := streamTailUpstream(t, f, streamTailDeltas(2400, 24, last), 0, nil)
+				streamTailAtomicEnd(t, f.delta(last))
 				proxy := streamTailProxy(t, f.provider, insp, "action")
 				out, log := streamTailServe(t, proxy, f, up.URL)
-				if strings.Contains(out, streamTailMarker) {
+				if strings.Contains(streamTailReceivedText(f, out), streamTailMarker) || strings.Contains(out, f.delta(last)) {
 					t.Fatalf("the tail marker reached the client")
 				}
 				if strings.Contains(out, f.terminal) {
@@ -427,41 +675,150 @@ func (s *streamTailStallProvider) ChatCompletionStream(ctx context.Context, _ *C
 	return &ChatUsage{}, nil
 }
 
-// An SSE line that has not ended is held up to streamHoldMaxPartial; past it
-// the stream is TRUNCATED (bound rule): the default pack alerts and sends
-// it, the strict pack blocks it.
+// streamTailImage is a benign base64 image of about 1.6 MB.
+func streamTailImage() string {
+	raw := make([]byte, 1200<<10)
+	mrand.New(mrand.NewSource(7)).Read(raw)
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+// The text bound of a held line applies to the text the check reads, not to
+// the raw bytes (rel-1-0-10:GAP-0624). A benign line of about 1.6 MB that
+// carries an image result (Responses image_generation_call, Gemini
+// inlineData) and little text is read whole once it ends and passes in
+// every tier, byte for byte, with no alert. A line whose text is over
+// streamLineMaxText is TRUNCATED (bound rule): its text is checked, then
+// the default, permissive and managed tiers alert and send it, and the
+// strict tiers block it before any of it is sent. A line just under the
+// text bound passes.
+func TestStreamTailBigLine(t *testing.T) {
+	img := streamTailImage()
+	if len(img) <= 1<<20 {
+		t.Fatalf("image of %d bytes is not over 1 MiB (setup)", len(img))
+	}
+	responses := streamTailFormatNamed(t, "openai-responses")
+	gemini := streamTailFormatNamed(t, "gemini")
+	images := []struct {
+		name string
+		f    streamTailFormat
+		line string
+	}{
+		{"responses/image_generation_call", responses, "event: response.output_item.done\ndata: " + streamTailJSON(map[string]any{
+			"type": "response.output_item.done", "output_index": 1,
+			"item": map[string]any{"type": "image_generation_call", "id": "ig_1", "status": "completed", "result": img},
+		}) + "\n\n"},
+		{"responses/partial_image", responses, "event: response.image_generation_call.partial_image\ndata: " + streamTailJSON(map[string]any{
+			"type": "response.image_generation_call.partial_image", "item_id": "ig_1", "partial_image_index": 0, "partial_image_b64": img,
+		}) + "\n\n"},
+		{"gemini/inlineData", gemini, streamTailGeminiEvent(0, []any{
+			map[string]any{"text": "here is the picture"},
+			map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": img}},
+		}, nil)},
+	}
+	for _, im := range images {
+		for _, tier := range streamTailTiers {
+			t.Run("benign/"+im.name+"/"+tier.name, func(t *testing.T) {
+				f := im.f
+				body := f.head + f.delta(streamTailProse(1440)) + im.line + f.delta(streamTailProse(700)) + f.tail + f.terminal
+				up := streamTailRawUpstream(t, f, body, 32<<10)
+				insp := &streamTailInspector{mockInspector: newMockInspector(), final: true, mid: true}
+				proxy := streamTailProxy(t, f.provider, insp, "action")
+				out, log := streamTailServeReq(t, proxy, streamTailWithTier(streamTailRequest(t, f, "", up.URL), tier.pack, tier.managed))
+				if out != body {
+					t.Fatalf("a benign image line changed the stream: got %d bytes, want %d", len(out), len(body))
+				}
+				if strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") || strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
+					t.Fatalf("a benign image line alerted or blocked: %s", log)
+				}
+			})
+		}
+	}
+
+	over := streamTailProse(streamLineMaxText + 100)
+	under := streamTailProse(streamLineMaxText - 4096)
+	for _, f := range streamTailFormats {
+		tiers := streamTailTiers
+		if f.name != "anthropic" {
+			tiers = []struct {
+				name, pack string
+				managed    bool
+				blocks     bool
+			}{streamTailTiers[0], streamTailTiers[2]}
+		}
+		for _, first := range []bool{false, true} {
+			if first && f.name != "anthropic" {
+				continue
+			}
+			lead := f.delta(streamTailProse(1440))
+			if first {
+				// The over-bound line is the first text: it ends while the
+				// initial buffer still holds it.
+				lead = ""
+			}
+			for _, tier := range tiers {
+				t.Run(fmt.Sprintf("text-over-bound/%s/first=%v/%s", f.name, first, tier.name), func(t *testing.T) {
+					body := f.head + lead + f.delta(over) + f.delta(streamTailProse(700)) + f.tail + f.terminal
+					up := streamTailRawUpstream(t, f, body, 32<<10)
+					insp := &streamTailInspector{mockInspector: newMockInspector(), final: true, mid: true}
+					proxy := streamTailProxy(t, f.provider, insp, "action")
+					out, log := streamTailServeReq(t, proxy, streamTailWithTier(streamTailRequest(t, f, "", up.URL), tier.pack, tier.managed))
+					if tier.blocks {
+						if strings.Contains(out, f.delta(over)) || strings.Contains(out, f.terminal) {
+							t.Fatalf("the %s tier sent a line over the text bound: %d bytes", tier.name, len(out))
+						}
+						if !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
+							t.Fatalf("no block line: %s", log)
+						}
+						return
+					}
+					if out != body {
+						t.Fatalf("the %s tier did not send the stream: got %d bytes, want %d", tier.name, len(out), len(body))
+					}
+					if !strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") {
+						t.Fatalf("no truncation log line: %s", log)
+					}
+					alerts, err := proxy.store.ListAlerts(50)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(fmt.Sprintf("%+v", alerts), "bounded_truncated cap=bytes") {
+						t.Fatalf("no truncation alert row naming the cap: %+v", alerts)
+					}
+				})
+			}
+		}
+		t.Run("text-under-bound/"+f.name+"/strict", func(t *testing.T) {
+			body := f.head + f.delta(streamTailProse(1440)) + f.delta(under) + f.tail + f.terminal
+			up := streamTailRawUpstream(t, f, body, 32<<10)
+			insp := &streamTailInspector{mockInspector: newMockInspector(), final: true, mid: true}
+			proxy := streamTailProxy(t, f.provider, insp, "action")
+			out, log := streamTailServeReq(t, proxy, streamTailWithTier(streamTailRequest(t, f, "", up.URL), "strict", false))
+			if out != body || strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") || strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
+				t.Fatalf("a line under the text bound changed the stream (%d of %d bytes) or alerted: %s", len(out), len(body), log)
+			}
+		})
+	}
+}
+
+// An SSE line that never ends within streamHoldMaxLine raw bytes is
+// TRUNCATED (bound rule, cap bytes): the default pack alerts and sends it,
+// the strict pack blocks it.
 func TestStreamTailPartialLineBound(t *testing.T) {
-	f := streamTailFormats[0] // a passthrough format (chat paths take handleChatCompletion)
-	// Twice the bound, so the cap is crossed long before the line ends
-	// (whatever the reads coalesce).
-	long := "data: " + strings.Repeat("x", 2*streamHoldMaxPartial)
+	f := streamTailFormats[0] // an SSE passthrough format; an eventstream frame over the bound breaks framing first
+	long := "data: " + strings.Repeat("x", streamHoldMaxLine+(64<<10))
 	for _, strict := range []bool{false, true} {
 		t.Run(fmt.Sprintf("strict=%v", strict), func(t *testing.T) {
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				fl := w.(http.Flusher)
-				_, _ = io.WriteString(w, f.head+f.delta(strings.Repeat("plain words ", 120)))
-				fl.Flush()
-				for i := 0; i < len(long); i += 32 << 10 {
-					_, _ = io.WriteString(w, long[i:min(i+32<<10, len(long))])
-					fl.Flush()
-				}
-				_, _ = io.WriteString(w, "\n\n"+f.terminal)
-			}))
-			defer up.Close()
+			body := f.head + f.delta(streamTailProse(1440)) + long + "\n\n" + f.terminal
+			up := streamTailRawUpstream(t, f, body, 32<<10)
 			insp := &streamTailInspector{mockInspector: newMockInspector(), final: true, mid: true}
 			proxy := streamTailProxy(t, f.provider, insp, "action")
 			req := streamTailRequest(t, f, "", up.URL)
 			if strict {
-				cfg := &config.Config{}
-				cfg.Guardrail.RulePack = "strict"
-				req = req.WithContext(withPinnedGeneration(req.Context(), &Generation{N: 1, Config: cfg}))
+				req = streamTailWithTier(req, "strict", false)
 			}
-			rec := httptest.NewRecorder()
-			log := captureStderr(t, func() { proxy.handlePassthrough(rec, req) })
-			out := rec.Body.String()
+			out, log := streamTailServeReq(t, proxy, req)
 			if strict {
-				if strings.Contains(out, long[:streamHoldMaxPartial]) || strings.Contains(out, f.terminal) {
+				if strings.Contains(out, long[:streamHoldMaxLine]) || strings.Contains(out, f.terminal) {
 					t.Fatalf("strict pack sent a truncated line: %d bytes", len(out))
 				}
 				if !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
@@ -469,8 +826,8 @@ func TestStreamTailPartialLineBound(t *testing.T) {
 				}
 				return
 			}
-			if !strings.Contains(out, long) || !strings.HasSuffix(out, f.terminal) {
-				t.Fatalf("default pack did not send the stream: %d bytes", len(out))
+			if out != body {
+				t.Fatalf("default pack did not send the stream: got %d bytes, want %d", len(out), len(body))
 			}
 			if !strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") {
 				t.Fatalf("no truncation log line")
@@ -487,19 +844,21 @@ func TestStreamTailPartialLineBound(t *testing.T) {
 	}
 }
 
-// An upstream that stops inside an SSE line and stays open: the unfinished
-// line is held at most streamHoldMaxPartialAge, then the stream is TRUNCATED
-// (bound rule, cap time): the default pack alerts and sends what it held,
-// the strict pack ends the stream. Every passthrough format.
+// An upstream that stops inside a line or frame and stays open: the
+// unfinished line is held at most streamHoldMaxPartialAge after its last
+// byte, then the stream is TRUNCATED (bound rule, cap time): the default
+// pack alerts and sends what it held, the strict pack ends the stream.
+// Every passthrough format.
 func TestStreamTailStalledPartialLine(t *testing.T) {
 	for _, f := range streamTailFormats {
 		for _, strict := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/strict=%v", f.name, strict), func(t *testing.T) {
-				const partial = "event: x\ndata: {\"type\":\"unfinished"
+				unfinished := f.delta("an unfinished delta of plain words")
+				partial := unfinished[:len(unfinished)/2]
 				stall := make(chan struct{})
 				defer close(stall)
 				up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Content-Type", f.ctype)
 					fl := w.(http.Flusher)
 					_, _ = io.WriteString(w, f.head+f.delta(strings.Repeat("plain words ", 120)))
 					fl.Flush()
@@ -516,9 +875,7 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 				proxy := streamTailProxy(t, f.provider, insp, "action")
 				front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if strict {
-						cfg := &config.Config{}
-						cfg.Guardrail.RulePack = "strict"
-						r = r.WithContext(withPinnedGeneration(r.Context(), &Generation{N: 1, Config: cfg}))
+						r = streamTailWithTier(r, "strict", false)
 					}
 					proxy.handlePassthrough(w, r)
 				}))
@@ -554,5 +911,46 @@ func TestStreamTailStalledPartialLine(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A long line that the upstream sends slowly but steadily is held while it
+// arrives, past streamHoldMaxPartialAge in total, and passes whole: the time
+// bound counts from the last byte (GAP-0624, a large image on a slow link).
+func TestStreamTailSlowLongLineIsNotTruncated(t *testing.T) {
+	f := streamTailFormatNamed(t, "gemini")
+	line := streamTailGeminiEvent(0, []any{map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": streamTailImage()[:256<<10]}}}, nil)
+	const pieces = 3
+	gap := streamHoldMaxPartialAge/2 + 200*time.Millisecond // total > streamHoldMaxPartialAge
+	head := f.head + f.delta(streamTailProse(1440))
+	body := head + line + f.delta(streamTailProse(300)) + f.tail + f.terminal
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", f.ctype)
+		fl := w.(http.Flusher)
+		_, _ = io.WriteString(w, head)
+		fl.Flush()
+		step := len(line)/pieces + 1
+		for i := 0; i < len(line); i += step {
+			_, _ = io.WriteString(w, line[i:min(i+step, len(line))])
+			fl.Flush()
+			if i+step < len(line) {
+				select {
+				case <-time.After(gap):
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
+		_, _ = io.WriteString(w, body[len(head)+len(line):])
+	}))
+	defer up.Close()
+	insp := &streamTailInspector{mockInspector: newMockInspector(), final: true, mid: true}
+	proxy := streamTailProxy(t, f.provider, insp, "action")
+	out, log := streamTailServeReq(t, proxy, streamTailWithTier(streamTailRequest(t, f, "", up.URL), "strict", false))
+	if out != body {
+		t.Fatalf("a slow benign line changed the stream: got %d bytes, want %d", len(out), len(body))
+	}
+	if strings.Contains(log, "PASSTHROUGH-STREAM-TRUNCATED") || strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
+		t.Fatalf("a slow benign line alerted or blocked: %s", log)
 	}
 }

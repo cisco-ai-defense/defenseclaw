@@ -6,7 +6,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
@@ -28,15 +27,24 @@ import (
 // connection), so it never waits for the final event. In bytes: held bytes
 // whose text was read are checked and sent at streamHoldMaxBytes. The bytes
 // of one SSE line or eventstream frame that has not ended (their text cannot
-// be read, and they are no event to the client yet either) are held up to
-// streamHoldMaxPartial bytes or streamHoldMaxPartialAge; past either the
-// stream is TRUNCATED: the text read so far is still checked, then the
-// unknown tier of the pack decides (alert and send in the default and
-// permissive packs, block in the strict pack), never a silent release.
+// be read, and they are no event to the client yet either) are held until
+// it ends, up to streamHoldMaxLine bytes, and while the upstream goes on
+// sending: streamHoldMaxPartialAge without a new byte ends the hold. Past
+// either the stream is TRUNCATED: the text read so far is still checked,
+// then the unknown tier of the pack decides (alert and send in the default
+// and permissive packs, block in the strict pack), never a silent release.
+//
+// The text bound applies to the text the check reads, not to the raw bytes
+// (rel-1-0-10:GAP-0624): a line or frame that carries a large payload the
+// reply extractor does not read (a base64 image result, inlineData) is read
+// whole once it ends and passes like any other line. One whose extracted
+// text is over streamLineMaxText is TRUNCATED the same way: its text is
+// checked, then the unknown tier decides.
 const (
 	streamHoldMaxAge        = 100 * time.Millisecond
 	streamHoldMaxBytes      = 64 << 10
-	streamHoldMaxPartial    = 1 << 20
+	streamHoldMaxLine       = bedrockStreamMaxFrame
+	streamLineMaxText       = 1 << 20
 	streamHoldMaxPartialAge = 5 * time.Second
 )
 
@@ -104,16 +112,12 @@ func (s *streamHoldTimer) stop() {
 }
 
 // streamTailTruncatedVerdict is the verdict of a stream whose held line or
-// frame passed a hold bound before it ended (why names the bound):
-// TRUNCATED (cap bytes or time), the unknown tier of the request's pack. The
-// caller has already checked the text read before the bound.
-func (p *GuardrailProxy) streamTailTruncatedVerdict(ctx context.Context, why string) *ScanVerdict {
+// frame passed a hold bound (cap, why names it): TRUNCATED, the unknown tier
+// of the request's pack. The caller has already checked the text read
+// before the bound.
+func (p *GuardrailProxy) streamTailTruncatedVerdict(ctx context.Context, cap bounded.Cap, why string) *ScanVerdict {
 	var trunc bounded.Truncated
-	if strings.Contains(why, "unfinished") {
-		trunc.Hit(bounded.Time)
-	} else {
-		trunc.Hit(bounded.Bytes)
-	}
+	trunc.Hit(cap)
 	set := trunc.Set()
 	tier := bounded.TierDefault
 	if cfg := proxyDecisionConfig(ctx); cfg != nil {
