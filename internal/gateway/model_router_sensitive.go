@@ -9,6 +9,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -209,6 +210,28 @@ func sensitiveRequestFields(req *engine.Request, in *ModelRouterInput, cfg *conf
 	req.StrictTier = bounded.TierOf(cfg.HookPolicyTierForConnector(config.NormalizeConnectorName(in.Connector))) == bounded.TierStrict
 }
 
+// sensitiveAuditLimiter lets one unavailable or truncated row per
+// connector and reason through each minute.
+var sensitiveAuditLimiter = &sensitiveRowLimiter{last: map[string]time.Time{}}
+
+type sensitiveRowLimiter struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func (l *sensitiveRowLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if t, ok := l.last[key]; ok && now.Sub(t) < time.Minute {
+		return false
+	}
+	if len(l.last) > 1024 {
+		l.last = map[string]time.Time{}
+	}
+	l.last[key] = now
+	return true
+}
+
 // noteSensitiveDecision writes the audit row of a check that fired or could
 // not answer: the source and the reason, no text.
 func (r *engineRouter) noteSensitiveDecision(ctx context.Context, in *ModelRouterInput, d *engine.Decision) {
@@ -222,6 +245,11 @@ func (r *engineRouter) noteSensitiveDecision(ctx context.Context, in *ModelRoute
 	connector := ""
 	if in != nil {
 		connector = config.NormalizeConnectorName(in.Connector)
+	}
+	if o.Reason != "positive" && !sensitiveAuditLimiter.allow(connector+"\x00"+o.Reason, time.Now()) {
+		// An outage writes one row per connector and reason a minute, not
+		// one per request.
+		return
 	}
 	_ = r.logger.LogActionCtx(ctx, string(audit.ActionGuardrailWarn), "routing.sensitive",
 		"sensitive data check: source="+boundedRouterLabel(o.Source, 32)+" reason="+boundedRouterLabel(o.Reason, 64)+

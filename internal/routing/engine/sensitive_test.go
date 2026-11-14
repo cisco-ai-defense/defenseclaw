@@ -137,3 +137,17 @@ func TestSensitiveTruncatedFollowsTheTier(t *testing.T) {
 		}
 	}
 }
+
+func TestSensitiveCheckClearAnswerIsReusedForTheSameText(t *testing.T) {
+	f := &fakeChecker{}
+	e := checkEngine(t, config.RoutingSensitiveConfig{Check: "decision_model", Aliases: []string{"local"}}, f)
+	e.Decide(context.Background(), checkReq("benign text"))
+	d := e.Decide(context.Background(), checkReq("benign text"))
+	if f.calls.Load() != 1 || d.Sensitive.Reason != "clear_cached" {
+		t.Fatalf("same text asked again: calls %d %+v", f.calls.Load(), d.Sensitive)
+	}
+	e.Decide(context.Background(), checkReq("new text"))
+	if f.calls.Load() != 2 {
+		t.Fatalf("new text not asked: calls %d", f.calls.Load())
+	}
+}

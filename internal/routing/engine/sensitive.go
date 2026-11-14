@@ -5,6 +5,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
@@ -22,6 +24,11 @@ type sensitiveRun struct {
 	timeout time.Duration
 	started time.Time
 	cancel  context.CancelFunc
+	// clear keys a clear answer for this conversation and text; cached is
+	// set when that answer was reused.
+	clear   stickyKey
+	clearOK bool
+	cached  bool
 }
 
 type sensitiveCheckResult struct {
@@ -48,11 +55,22 @@ func (e *Engine) beginSensitive(ctx context.Context, req Request, signals map[st
 	if e.checker == nil || strings.TrimSpace(req.SensitiveText) == "" {
 		return run
 	}
+	// A tool turn of an agent loop carries the same newest user text as the
+	// turn before: a text already answered clear for this conversation is
+	// not asked again.
+	run.clear, run.clearOK = sensitiveClearKey(req)
+	if run.clearOK && e.marks != nil {
+		if _, hit := e.marks.get(run.clear); hit {
+			run.cached = true
+			return run
+		}
+	}
 	run.timeout = time.Duration(s.EffectiveCheckTimeoutMs()) * time.Millisecond
 	run.started = time.Now()
 	run.ch = make(chan sensitiveCheckResult, 1)
 	// Decide cancels the check when it returns before reading it (a
-	// managed admin deny): the text is not sent for a refused request.
+	// managed admin deny): it stops the wait; the request may already
+	// have been sent.
 	cctx, stop := context.WithCancel(ctx)
 	run.cancel = stop
 	in := SensitiveInput{Text: req.SensitiveText, Truncated: req.SensitiveTruncated, Definition: s.Definition, Connector: req.Connector}
@@ -79,6 +97,9 @@ func (e *Engine) applySensitive(pol *Policy, d *Decision, run *sensitiveRun, req
 	src, reason := run.floor, ""
 	if src != "" {
 		reason = "positive"
+	}
+	if run.cached {
+		reason = "clear_cached"
 	}
 	if run.ch != nil {
 		d.Sensitive.Checked = true
@@ -124,6 +145,9 @@ func (e *Engine) applySensitive(pol *Policy, d *Decision, run *sensitiveRun, req
 			}
 		default:
 			reason = "clear"
+			if run.clearOK && e.marks != nil {
+				e.marks.put(run.clear, ClassifyResult{Category: "clear", Confidence: 1})
+			}
 		}
 	}
 	d.Sensitive.Source, d.Sensitive.Reason = src, reason
@@ -183,6 +207,18 @@ func sensitiveStickyKey(req Request) (stickyKey, bool) {
 		return stickyKey{}, false
 	}
 	return stickyKey{subject: req.Caller.Key, connector: req.Connector, conversation: req.ConversationID, requested: "\x00sensitive"}, true
+}
+
+// sensitiveClearKey keys a clear check answer by conversation and a hash of
+// the checked text (no text is kept).
+func sensitiveClearKey(req Request) (stickyKey, bool) {
+	k, ok := sensitiveStickyKey(req)
+	if !ok {
+		return stickyKey{}, false
+	}
+	sum := sha256.Sum256([]byte(req.SensitiveText))
+	k.requested = "\x00clear:" + hex.EncodeToString(sum[:12])
+	return k, true
 }
 
 func (e *Engine) markSensitiveSticky(req Request) {
