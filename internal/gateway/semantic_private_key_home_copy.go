@@ -402,3 +402,17 @@ func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
 	}
 	return pathWithin(resolved, realHome) && !pathWithin(resolved, realHome+"/.ssh")
 }
+
+// ownSSHFolderLiteralGlob is the text of a word that is literal text and glob
+// characters only (no quote, expansion or substitution), such as /home/u/.ssh/*.
+func ownSSHFolderLiteralGlob(word *syntax.Word) (string, bool) {
+	var text strings.Builder
+	for _, part := range word.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		text.WriteString(literal.Value)
+	}
+	return text.String(), text.Len() > 0 && !strings.ContainsAny(text.String(), "$`")
+}
