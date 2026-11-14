@@ -23,6 +23,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -65,9 +66,20 @@ func installPolicyGateway(t *testing.T, status int, body string, badProof bool) 
 	return srv.Listener.Addr().String(), &calls
 }
 
+// installPolicySourceJSON is the staged folder OpenClaw names, as a JSON
+// string in the host's absolute form (the command refuses a relative one).
+var installPolicySourceJSON = func() string {
+	source := "/tmp/openclaw-stage/root"
+	if runtime.GOOS == "windows" {
+		source = `C:\openclaw-stage\root`
+	}
+	b, _ := json.Marshal(source)
+	return string(b)
+}()
+
 func installPolicyRequest(targetType string) string {
 	return `{"protocolVersion":1,"openclawVersion":"2026.11.3","targetType":"` + targetType +
-		`","targetName":"weather","sourcePath":"/tmp/openclaw-stage/root","sourcePathKind":"directory","origin":{"type":"clawhub"},"request":{"kind":"skill-install","mode":"install"}}`
+		`","targetName":"weather","sourcePath":` + installPolicySourceJSON + `,"sourcePathKind":"directory","origin":{"type":"clawhub"},"request":{"kind":"skill-install","mode":"install"}}`
 }
 
 func runInstallPolicy(t *testing.T, ep openClawInstallPolicyEndpoint, stdin string) openClawInstallPolicyAnswer {
@@ -146,7 +158,7 @@ func TestConnectorOpenClawInstallPolicyBadRequests(t *testing.T) {
 		"no protocol":      strings.Replace(installPolicyRequest("skill"), `"protocolVersion":1,`, "", 1),
 		"oversize":         `{"protocolVersion":1,"pad":"` + strings.Repeat("x", openClawInstallPolicyMaxInput) + `"}`,
 		"unknown target":   installPolicyRequest("hook"),
-		"relative source":  strings.Replace(installPolicyRequest("skill"), "/tmp/openclaw-stage/root", "stage/root", 1),
+		"relative source":  strings.Replace(installPolicyRequest("skill"), installPolicySourceJSON, `"stage/root"`, 1),
 		"credential issue": "",
 	} {
 		t.Run(name, func(t *testing.T) {

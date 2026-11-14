@@ -840,7 +840,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			case ';', '&':
 				if r == '&' && (i+1 >= len(runes) || runes[i+1] != '&') &&
 					!wordActive && windowsPowerShellCallPosition(lexemes) {
-					if !windowsPowerShellQuotedCallTarget(runes, i+1) {
+					if !windowsPowerShellQuotedCallTarget(runes, i+1) &&
+						!windowsPowerShellNetExecCallTarget(runes, i+1) {
 						// A dynamic call target is not an authoritative command
 						// word. Keep its invocation opaque, then continue to a
 						// following statement separator and command.
@@ -1144,6 +1145,7 @@ func windowsBuildCommands(
 		switch lexeme.kind {
 		case windowsWordLexeme:
 			if current.callOperator && len(current.words) == 0 &&
+				!windowsStaticNetExecCommandWord(lexeme.word) &&
 				(lexeme.word.expands || !lexeme.word.quotedOnly ||
 					lexeme.word.quote != QuoteSingle && lexeme.word.quote != QuoteDouble ||
 					lexeme.word.value == "") {
@@ -1992,6 +1994,9 @@ func windowsClassifyPowerShell(
 	case "remove-process":
 		windowsAddOperation(command, OperationProcessKill)
 	case ".":
+		if windowsClassifyDotSourcedNetExec(command, args, builder) {
+			return
+		}
 		windowsAddOperation(command, OperationRead)
 		if !windowsClassifyPowerShellDotSource(command, args, builder) {
 			builder.out.markPartial(IssueUnsupportedConstruct)
@@ -5760,6 +5765,52 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 		return "", "", 0, false
 	}
 	return scheme, host, port, true
+}
+
+// windowsStaticNetExecCommandWord reports an unquoted, static word that names a
+// NetExec executable: after the call operator it is the command (as the quoted
+// form is), not an expression (rel-1-0-10:GAP-0406).
+func windowsStaticNetExecCommandWord(word windowsWord) bool {
+	if word.expands || word.wildcard || word.quote != QuoteNone || word.nativeArgvUncertain {
+		return false
+	}
+	_, ok := netExecProgramFamily(word.value)
+	return ok
+}
+
+// windowsPowerShellNetExecCallTarget reports whether the text after a call
+// operator starts with an unquoted, static word naming a NetExec executable.
+func windowsPowerShellNetExecCallTarget(runes []rune, start int) bool {
+	for start < len(runes) && runes[start] != '\n' && runes[start] != '\r' &&
+		unicode.IsSpace(runes[start]) {
+		start++
+	}
+	end := start
+	for end < len(runes) && !unicode.IsSpace(runes[end]) && !strings.ContainsRune(";|&<>(){}\"'`$*?[],", runes[end]) {
+		end++
+	}
+	if end == start {
+		return false
+	}
+	_, ok := netExecProgramFamily(string(runes[start:end]))
+	return ok
+}
+
+// windowsClassifyDotSourcedNetExec reads `. <netexec path> args` as a call to
+// that program, as the call operator is read: PowerShell runs an executable it
+// is asked to dot-source.
+func windowsClassifyDotSourcedNetExec(command *CommandFact, args []windowsWord, builder *windowsFactBuilder) bool {
+	if len(args) == 0 || !command.ArgvComplete || len(command.Argv) != len(args)+1 ||
+		len(command.Arguments) != len(args)+1 || !windowsStaticNetExecCommandWord(args[0]) {
+		return false
+	}
+	family, _ := netExecProgramFamily(args[0].value)
+	command.Executable = windowsExecutable(args[0].value)
+	command.Program = family
+	command.Arguments = command.Arguments[1:]
+	command.Argv = command.Argv[1:]
+	windowsClassifyNetExec(command, builder)
+	return true
 }
 
 // windowsClassifyNetExec gives a NetExec / CrackMapExec call under PowerShell or

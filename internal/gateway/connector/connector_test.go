@@ -11689,6 +11689,10 @@ func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
 // TestOpenClaw_AgentPaths_Specifics pins OpenClaw's footprint:
 // openclaw.json patched, managed pristine backup captured, extension dir created.
 func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
+	// The PATH shims exist in the Linux/macOS topology only; native Windows
+	// is checked at the end.
+	restore := PinOpenClawHooksGOOSForTest("linux")
+	defer restore()
 	dataDir := t.TempDir()
 	tmpHome := t.TempDir()
 	OpenClawHomeOverride = filepath.Join(tmpHome, ".openclaw")
@@ -11721,6 +11725,15 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 	}
 	if !slices.Contains(paths.GeneratedExecutables, filepath.Join(dataDir, "shims", "curl")) {
 		t.Errorf("GeneratedExecutables = %v, missing curl shim", paths.GeneratedExecutables)
+	}
+
+	restore()
+	defer PinOpenClawHooksGOOSForTest("windows")()
+	native := conn.AgentPaths(SetupOpts{DataDir: dataDir})
+	for _, p := range append(slices.Clone(native.GeneratedFiles), native.GeneratedExecutables...) {
+		if filepath.Dir(p) == filepath.Join(dataDir, "shims") {
+			t.Errorf("native Windows OpenClaw lists shim %q (it writes none)", p)
+		}
 	}
 }
 
