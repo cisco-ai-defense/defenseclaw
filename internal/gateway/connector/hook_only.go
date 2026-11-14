@@ -126,7 +126,7 @@ type hookOnlyConnector struct {
 	pluginArtifactAsset string
 
 	gatewayToken string
-	masterKey    string
+
 	loopbackWarn sync.Once
 }
 
@@ -2634,7 +2634,7 @@ func validManagedPluginOwnershipMarker(marker []byte) bool {
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
-	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.name,
+	return authenticateHookBridgeRequest(r, c.gatewayToken, c.name,
 		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
 		&c.loopbackWarn)
 }
@@ -2649,9 +2649,8 @@ func (c *hookOnlyConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 	}, nil
 }
 
-func (c *hookOnlyConnector) SetCredentials(gatewayToken, masterKey string) {
+func (c *hookOnlyConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {

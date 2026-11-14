@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Native Windows Cursor may evaluate hooks through PowerShell or Git Bash,
@@ -166,10 +167,22 @@ func windowsCursorHooksStrip(adapterPath string) stripFunc {
 }
 
 // windowsCursorAdapterStrip treats an adapter that launches DefenseClaw's
-// hook binary as DefenseClaw's whole file.
+// hook binary as DefenseClaw's whole file: the current image or another hook
+// image of the same install bin an earlier release wrote (GAP-0751).
 func windowsCursorAdapterStrip(opts Options) stripFunc {
 	needle := bytes.ToLower([]byte(opts.HookBinary))
 	return wholeFileStrip(func(current []byte) bool {
-		return len(needle) > 0 && bytes.Contains(bytes.ToLower(current), needle)
+		if len(needle) == 0 {
+			return false
+		}
+		if bytes.Contains(bytes.ToLower(current), needle) {
+			return true
+		}
+		for _, path := range winpath.EnterpriseHookImagePathsIn(string(current)) {
+			if winpath.SameEnterpriseHookImageFamily(path, opts.HookBinary) {
+				return true
+			}
+		}
+		return false
 	})
 }

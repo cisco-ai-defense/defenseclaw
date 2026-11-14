@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -84,7 +85,7 @@ func newTokenClient(t *testing.T, u *url.URL, home, token string) *Client {
 	client, err := NewClient(&config.GatewayConfig{
 		Host:           u.Hostname(),
 		Port:           port,
-		Token:          token,
+		OpenClawToken:  token,
 		ClawHome:       home,
 		DeviceKeyFile:  filepath.Join(dataDir, "device.key"),
 		ReconnectMs:    10,
@@ -108,7 +109,7 @@ func TestConnectWithRetryLoadsAPersistedTokenBeforeTheNextAttempt(t *testing.T) 
 	gw, u := newTokenGateway(t, persisted)
 	home := t.TempDir()
 	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"mode":"token"}}}`)
-	client := newTokenClient(t, u, home, "defenseclaw-own-token")
+	client := newTokenClient(t, u, home, "saved-openclaw-token")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -129,11 +130,11 @@ func TestConnectWithRetryLoadsAPersistedTokenBeforeTheNextAttempt(t *testing.T) 
 	case <-time.After(10 * time.Second):
 		t.Fatal("ConnectWithRetry did not connect after openclaw.json got a token")
 	}
-	if got, want := gw.seen(), []string{"defenseclaw-own-token", persisted}; strings.Join(got, ",") != strings.Join(want, ",") {
+	if got, want := gw.seen(), []string{"saved-openclaw-token", persisted}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("tokens sent = %v, want %v (the persisted token must be the next attempt, not the one after a rejection)", got, want)
 	}
-	if got := client.RefreshedToken(); got != persisted {
-		t.Errorf("RefreshedToken() = %q, want the persisted token", got)
+	if got := client.wsToken(); got != persisted {
+		t.Errorf("wsToken() = %q, want the persisted token", got)
 	}
 }
 
@@ -145,7 +146,7 @@ func TestConnectWithRetryRestartsTheBackoffWhenTheTokenChanges(t *testing.T) {
 	gw, u := newTokenGateway(t, "rotated-token")
 	home := t.TempDir()
 	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"token":"stale-file-token"}}}`)
-	client := newTokenClient(t, u, home, "defenseclaw-own-token")
+	client := newTokenClient(t, u, home, "saved-openclaw-token")
 	client.cfg.ReconnectMs = 1000
 	client.cfg.MaxReconnectMs = 600000
 
@@ -235,8 +236,8 @@ func TestConnectWithRetryAttemptsARotatedPersistedTokenWithoutWaitingOutTheBacko
 	case <-time.After(900 * time.Millisecond):
 		t.Fatalf("the rotated token was not tried within 900ms of a 10ms watch interval; sent %v", gw.seen())
 	}
-	if got := client.RefreshedToken(); got != "fresh-token" {
-		t.Errorf("RefreshedToken() = %q, want the rotated token", got)
+	if got := client.wsToken(); got != "fresh-token" {
+		t.Errorf("wsToken() = %q, want the rotated token", got)
 	}
 }
 
@@ -256,5 +257,51 @@ func TestConnectWithRetryKeepsTheBackoffWhenThePersistedTokenIsUnchanged(t *test
 	}
 	if got := gw.seen(); len(got) != 1 {
 		t.Errorf("attempts = %v, want exactly one while the file token is unchanged", got)
+	}
+}
+
+// R-TOK: the WebSocket connect presents the OpenClaw credential, never the
+// DefenseClaw gateway token. With OPENCLAW_GATEWAY_TOKEN saved it sends that;
+// without it, the openclaw.json gateway.auth.token. cfg.Token (the master)
+// is never sent, so OpenClaw and its plugins never learn it.
+func TestConnectPresentsTheOpenClawCredentialNeverTheMaster(t *testing.T) {
+	for _, tc := range []struct {
+		name, saved, want string
+	}{
+		{"saved OPENCLAW_GATEWAY_TOKEN", "saved-oc-token", "saved-oc-token"},
+		{"openclaw.json gateway.auth.token", "", "json-oc-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gw, u := newTokenGateway(t, tc.want)
+			home := t.TempDir()
+			writeOpenClawJSON(t, home, `{"gateway":{"auth":{"mode":"token","token":"json-oc-token"}}}`)
+			client := newTokenClient(t, u, home, tc.saved)
+			client.cfg.Token = "master-token"
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := client.ConnectWithRetry(ctx); err != nil {
+				t.Fatalf("ConnectWithRetry: %v", err)
+			}
+			for _, sent := range gw.seen() {
+				if sent == "master-token" {
+					t.Fatalf("the DefenseClaw gateway token was sent to OpenClaw: %v", gw.seen())
+				}
+			}
+			if got := gw.seen(); len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("tokens sent = %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+}
+
+// An openclaw.json SecretRef that names DEFENSECLAW_GATEWAY_TOKEN is not
+// resolved: OpenClaw would then hold the DefenseClaw gateway token.
+func TestOpenClawTokenReaderRefusesAReferenceToTheMaster(t *testing.T) {
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "master-token")
+	home := t.TempDir()
+	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"token":{"source":"env","id":"DEFENSECLAW_GATEWAY_TOKEN"}}}}`)
+	token, ok, err := readOpenClawGatewayToken(home)
+	if ok || token != "" || !errors.Is(err, errOpenClawTokenUnreadable) {
+		t.Fatalf("token = %q, ok = %v, err = %v; want the reference refused", token, ok, err)
 	}
 }

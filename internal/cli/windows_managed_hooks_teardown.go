@@ -2918,7 +2918,7 @@ func validateWindowsManagedHooksTeardownJournal(
 		journal.ManifestFingerprint != identity.ManifestFingerprint ||
 		journal.ActivationState != identity.ActivationState ||
 		journal.DeploymentGenerationID != identity.DeploymentGenerationID ||
-		journal.HookBinary != identity.HookBinary ||
+		!sameWindowsManagedHookImage(journal.HookBinary, identity.HookBinary) ||
 		journal.GatewayAddr != identity.GatewayAddr ||
 		journal.GatewayServiceName != identity.GatewayServiceName ||
 		(journal.CodexPolicyActive != identity.CodexPolicyActive &&

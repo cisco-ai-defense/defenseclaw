@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // enterpriseHookManagedInstallLayout derives the installed tree the guardian
@@ -25,6 +26,11 @@ func enterpriseHookManagedInstallLayout(
 	var layout managed.ManagedInstallLayout
 	if strings.TrimSpace(executable) != "" && strings.TrimSpace(programFiles) != "" {
 		bin := filepath.Dir(filepath.Clean(executable))
+		// A hook started from a launch folder (<bin>\hooks\<d16>, GAP-0751)
+		// belongs to the install root of that bin, as one started from bin.
+		if launchBin := winpath.EnterpriseHookImageBin(executable); launchBin != "" {
+			bin = launchBin
+		}
 		root := filepath.Dir(bin)
 		if strings.EqualFold(filepath.Base(bin), "bin") && enterpriseHookPathStrictlyBelow(root, programFiles) {
 			layout.InstallRoot = root

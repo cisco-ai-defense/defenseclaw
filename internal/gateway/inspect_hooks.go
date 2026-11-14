@@ -239,7 +239,18 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
-	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/request", auditAction, "pre-request", auditDetails))
+	if a.logger != nil {
+		if err := a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/request", auditAction, "pre-request", auditDetails)); err != nil {
+			// The tier rule of the hook routes and /inspect/tool (GAP-0593):
+			// a prompt allowed without its audit row is blocked in strict,
+			// managed and sandbox calls and kept with the degraded-audit
+			// warning in default and permissive. The OpenClaw prompt gate
+			// (before_agent_run) uses this route.
+			denied := a.inspectAuditFailureVerdict(r.Context(), connectorName, &ToolInspectRequest{Direction: "prompt"}, verdict)
+			fmt.Fprintf(os.Stderr, "[inspect] pre-request audit persistence failed action=%s denied_for_audit=%t: %v\n",
+				verdict.Action, denied, err)
+		}
+	}
 
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
