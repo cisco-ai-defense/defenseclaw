@@ -77,15 +77,15 @@ type SimpleCommand struct {
 // of a text the shell parser rejects with a syntax error, at the top level or
 // in a static eval or shell -c body (shellparse.ReadSyntaxTail): its
 // readable statements come before it, each judged as any other command, and
-// what was not read is unknown, judged at the unknown tier of the pack
-// (rel-1-0-10:GAP-0526).
+// what was not read is recorded by the gateway as an unread part, which
+// does not raise the verdict (rel-1-0-10:GAP-0526).
 const EvaluationFailureSyntax = "syntax"
 
 // EvaluationFailureUnresolvedBody is the EvaluationFailure of a call that
 // starts a nested shell body the walk cannot resolve statically (a shell
 // option word that may be -c, a dynamic -c body, trap handler or su
-// command): what runs is not known, so the call is judged at the unknown tier
-// of the pack, never allowed for that part (rel-1-0-10:GAP-0535).
+// command): what runs is not known; the gateway records it as an unread part
+// (rel-1-0-10:GAP-0535).
 const EvaluationFailureUnresolvedBody = "unresolved-body"
 
 func isSyntaxTailUnread(simple SimpleCommand) bool {
@@ -119,8 +119,22 @@ func syntaxTailCommands(input Input, tail shellparse.SyntaxTail, depth int, inte
 			}
 		}
 	}
-	return append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
+	result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntax})
+	if tail.Truncated.Any() {
+		// The reading stopped at a cap: the call is at least the unknown
+		// tier of the pack, and the statements read before the cap are
+		// still judged (the bound rule).
+		result = append(result, SimpleCommand{EvaluationFailure: EvaluationFailureSyntaxCap})
+	}
+	return result
 }
+
+// EvaluationFailureSyntaxCap follows EvaluationFailureSyntax when the reading
+// of a text with a syntax error stopped at a cap of shellparse.ReadSyntaxTail:
+// the gateway adds the evaluation-limit finding (the unknown tier of the
+// pack) and still judges every statement read before the cap. It is not the
+// statement-budget refusal ("limit"), which judges none of them.
+const EvaluationFailureSyntaxCap = "syntax-cap"
 
 // EvaluationFailureInternal is the EvaluationFailure of a call whose
 // per-command reading stopped on an internal reader error (a recovered
@@ -209,15 +223,16 @@ func SimpleCommands(input Input, facts Facts) (commands []SimpleCommand) {
 		pieces = new(simplePieces)
 	}
 	result := simpleCommandsOfCall(input, facts, pieces)
+	if argsOnly && slices.ContainsFunc(result, isSyntaxTailUnread) {
+		// A text with a syntax error (syntaxTailCommands): its readings are
+		// all of the call that was read, a cap they stopped at included.
+		return result
+	}
 	if argsOnly {
 		// The POSIX reader rejected the call (a construct only Bash has) and
 		// the shell parse reads it only to add readings (simpleCommands): a
 		// call it cannot read in full keeps the judgment it had without them.
-		// The readings of a text with a syntax error are not such additions:
-		// the call as written was not read, so they are all of it that is.
-		if slices.ContainsFunc(result, func(simple SimpleCommand) bool {
-			return simple.EvaluationFailure != "" && !isSyntaxTailUnread(simple)
-		}) {
+		if slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.EvaluationFailure != "" }) {
 			return nil
 		}
 		// A command that is a piece of the call as written adds nothing: the
@@ -2313,11 +2328,21 @@ func simpleQuotedArgv(argv []string) (string, bool) {
 // resolve is judged where the shell itself reads its options
 // (simpleNestedScriptArgs).
 func simplePotentialShellScript(args []*syntax.Word, vars map[string]string) bool {
-	for _, arg := range args {
-		option, _ := simpleStaticWord(arg, vars)
+	shell := false
+	for index, arg := range args {
+		option, known := simpleStaticWord(arg, vars)
 		if option == "-c" || len(option) > 2 && strings.HasPrefix(option, "-") && option[1] != '-' &&
 			strings.ContainsRune(option[1:], 'c') {
 			return true
+		}
+		if !known && shell && index+1 < len(args) {
+			// A word after a shell program that the walk cannot resolve may
+			// be its -c, with the body after it.
+			return true
+		}
+		switch filepath.Base(option) {
+		case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
+			shell = shell || known
 		}
 	}
 	return false

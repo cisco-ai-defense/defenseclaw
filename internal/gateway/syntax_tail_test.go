@@ -217,39 +217,43 @@ func TestGAP0526BlockedCommandWithSyntaxErrorStillBlocks(t *testing.T) {
 	}
 }
 
-// A command with a syntax error whose readable part is benign is judged at
-// the unknown tier of the pack: an alert in default, permissive and managed
-// (default pack), a block in strict and managed strict, with
-// ACTION-PARSE-FAILURE; never a silent allow. The same text without the
-// error stays allowed.
-func TestGAP0526UnreadSyntaxErrorTakesTheUnknownTier(t *testing.T) {
+// The part of a command with a syntax error that was not read is recorded
+// on the answer (ACTION-PARSE-FAILURE, detection-only), so the call is never
+// a silent allow; it does not raise the verdict by itself (owner traces:
+// unreadPartFindings). A reading cut at a cap of shellparse.ReadSyntaxTail
+// takes the evaluation-limit path: at least the unknown tier of the pack,
+// alert in default, permissive and managed, block in strict and managed
+// strict (the bound rule).
+func TestGAP0526UnreadSyntaxErrorIsRecordedAndCapsTakeTheUnknownTier(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixtures are POSIX shell text")
 	}
+	capped := strings.Repeat("ls\nfi\n", shellparse.MaxSyntaxTailStatements+8)
 	for _, p := range gap0437Packs {
 		t.Run(p.name, func(t *testing.T) {
 			hook := gap0437Server(t, p, "claudecode", "action")
 			inspect := gap0437Server(t, p, "openclaw", "action")
 			cwd := t.TempDir()
-			want := "alert"
-			if p.pack == "strict" {
-				want = "block"
-			}
-			if out := gap0437Hook(t, hook, cwd, p.name+"plain", "ls"); out["action"] != "allow" {
-				t.Fatalf("hook %s: the plain command is %v, want allow: %v", p.name, out["action"], out)
-			}
 			for _, command := range []string{"ls\nfi", "eval " + gap0526Quote("ls\nfi"), "ls; done", "ls\necho 'x"} {
 				for route, out := range map[string]map[string]any{
 					"hook":    gap0437Hook(t, hook, cwd, p.name+command, command),
 					"inspect": gap0437Inspect(t, inspect, cwd, command),
 				} {
-					where := route + " " + p.name + " " + command
-					if out["action"] != want {
-						t.Errorf("%s: action %v, want %s: %v", where, out["action"], want, out)
-					}
 					if !gap0526Names(out, parseFailureRuleID) {
-						t.Errorf("%s: the answer does not name %s: %v", where, parseFailureRuleID, out)
+						t.Errorf("%s %s %q: the answer does not record %s: %v", route, p.name, command, parseFailureRuleID, out)
 					}
+				}
+			}
+			want := "alert"
+			if p.pack == "strict" {
+				want = "block"
+			}
+			for route, out := range map[string]map[string]any{
+				"hook":    gap0437Hook(t, hook, cwd, p.name+"capped", capped),
+				"inspect": gap0437Inspect(t, inspect, cwd, capped),
+			} {
+				if out["action"] != want && out["action"] != "block" {
+					t.Errorf("%s %s capped: action %v, want %s: %v", route, p.name, out["action"], want, out)
 				}
 			}
 		})
@@ -439,9 +443,9 @@ func TestGAP0535QuotedShellOptionSweepNeverAllowsABlockedBody(t *testing.T) {
 }
 
 // A shell call whose option word or -c body the walk cannot resolve is
-// judged at the unknown tier of the pack (alert, strict blocks), never
-// allowed.
-func TestGAP0535UnresolvedShellBodyTakesTheUnknownTier(t *testing.T) {
+// recorded on the answer (ACTION-PARSE-FAILURE, detection-only): what the
+// body runs is not known, and the call is not a silent allow.
+func TestGAP0535UnresolvedShellBodyIsRecorded(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixtures are POSIX shell text")
 	}
@@ -449,19 +453,74 @@ func TestGAP0535UnresolvedShellBodyTakesTheUnknownTier(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			hook := gap0437Server(t, p, "claudecode", "action")
 			cwd := t.TempDir()
-			want := "alert"
-			if p.pack == "strict" {
-				want = "block"
-			}
 			for _, command := range []string{`bash "$o" 'ls'`, `bash -c "$(cat f)"`, `env bash "$o" 'ls'`} {
-				out := gap0437Hook(t, hook, cwd, p.name+command, command)
-				if out["action"] != want && out["action"] != "block" {
-					t.Errorf("%s %q: action %v, want %s: %v", p.name, command, out["action"], want, out)
+				if out := gap0437Hook(t, hook, cwd, p.name+command, command); !gap0526Names(out, parseFailureRuleID) {
+					t.Errorf("%s %q: the answer does not record %s: %v", p.name, command, parseFailureRuleID, out)
 				}
 			}
 			// A shell running a script whose path is dynamic has no -c body.
-			if out := gap0437Hook(t, hook, cwd, p.name+"script", `bash "$f"`); out["action"] == "block" && p.pack != "strict" {
-				t.Errorf("%s: a script run is %v", p.name, out["action"])
+			if out := gap0437Hook(t, hook, cwd, p.name+"script", `bash "$f"`); gap0526Names(out, unresolvedBodyTitle) {
+				t.Errorf("%s: a script run is recorded as an unresolved body: %v", p.name, out)
+			}
+		})
+	}
+}
+
+// gap0548Filler is the GAP-0548 filler: n units of a, a background
+// ampersand, a line continuation and an ampersand. Bash joins the
+// continuation (a && a ...); the shell parser here rejects it.
+func gap0548Filler(n int) string { return strings.Repeat("a&\\\n&", n) + "a" }
+
+// gap0548Differential is the bound-rule state-write fixture
+// (boundedShellSeen) with its append operator split by a line continuation:
+// real bash 5.2 runs it as the plain append (checked on dev in a scratch
+// home with dummy files, s7-syntail 2026-11-14), the shell parser here
+// rejects it.
+func gap0548Differential() string { return strings.Replace(boundedShellSeen, ">>", ">\\\n>", 1) }
+
+// rel-1-0-10:GAP-0548. A proven finding on the readable text of a call the
+// parser rejects decides, at every filler size; a listing of the SSH folder
+// beside the filler is not a keys mutation; and text the parser rejects but
+// a shell runs, writing the DefenseClaw state, is caught by the strict and
+// managed raw-text check of the unread part.
+func TestGAP0548ProvenFindingSurvivesAParseFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	for _, p := range gap0437Packs {
+		t.Run(p.name, func(t *testing.T) {
+			hook := gap0437Server(t, p, "claudecode", "action")
+			home := t.TempDir()
+			for _, n := range []int{3, 128, 256} {
+				command := boundedShellSeen + "; " + gap0548Filler(n)
+				if out := gap0437Hook(t, hook, home, p.name+"seen"+string(rune('a'+n%26)), command); out["action"] != "block" {
+					t.Errorf("%s state write + filler %d: action %v, want block: %v", p.name, n, out["action"], out["rule_ids"])
+				}
+			}
+			for _, command := range []string{"ls ~/.ssh; " + gap0548Filler(3), "ls ~/.ssh; " + gap0548Filler(256), "ls ~/.ssh; a", "a; ls ~/.ssh"} {
+				out := gap0437Hook(t, hook, home, p.name+"ls"+command[len(command)-1:], command)
+				if gap0526Names(out, "persistence.ssh_authorized_keys_command") {
+					t.Errorf("%s listing %q: named a keys mutation: %v", p.name, command[:min(len(command), 20)], out["rule_ids"])
+				}
+			}
+			// A directory change into the folder before an unknown program
+			// keeps its reading.
+			if out := gap0437Hook(t, hook, home, p.name+"cd", "cd ~/.ssh; a"); out["action"] != "block" {
+				t.Errorf("%s cd into the folder: action %v, want block", p.name, out["action"])
+			}
+			differential := gap0437Hook(t, hook, home, p.name+"diff", gap0548Differential())
+			want := "allow"
+			switch {
+			case p.pack == "strict":
+				want = "block"
+			case p.managed:
+				want = "alert"
+			}
+			if got := differential["action"]; got != want && got != "block" {
+				t.Errorf("%s parser differential: action %v, want %s: %v", p.name, got, want, differential["rule_ids"])
+			}
+			if !gap0526Names(differential, parseFailureRuleID) {
+				t.Errorf("%s parser differential: no %s record: %v", p.name, parseFailureRuleID, differential)
 			}
 		})
 	}

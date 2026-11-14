@@ -97,9 +97,17 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	}
 	// A function the command never calls never runs (GAP-1535).
 	var uncalled map[*syntax.FuncDecl]bool
+	var readOnly map[*syntax.Stmt]bool
 	if parsed {
 		uncalled = actionUncalledFunctions(file, command)
 		command = actionBlankFunctions(command, uncalled)
+		readOnly = actionReadOnlyStatements(file, home)
+		command = actionBlankStatements(command, readOnly)
+	} else if !stateOnly {
+		// A text the shell parser rejects (rel-1-0-10:GAP-0526, GAP-0548)
+		// is scanned as text, but a listing among the statements that do
+		// parse is still only a listing.
+		command = actionBlankSyntaxTailListings(command, home)
 	}
 	var nestedBodies []*syntax.Word
 	if parsed {
@@ -290,6 +298,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				return false
 			}
 			if decl, ok := node.(*syntax.FuncDecl); ok && uncalled[decl] {
+				return false
+			}
+			if stmt, ok := node.(*syntax.Stmt); ok && readOnly[stmt] {
 				return false
 			}
 			if iter, ok := node.(*syntax.WordIter); ok {
@@ -971,6 +982,132 @@ func actionBlankFunctions(command string, uncalled map[*syntax.FuncDecl]bool) st
 		}
 	}
 	return string(out)
+}
+
+// actionReadOnlyStatements are the top-level statements the target scan
+// skips (its text scan and its walk): each
+// statement that only lists on its own (ls, dir, stat, du, readlink,
+// realpath, read-only by actionKnownReadOnlyShell, with no write redirect)
+// and leaves the shell as it found it: no directory change and no
+// assignment. Its operands are read, never written, so a
+// protected name among them is not a write target of the call: a listing of
+// the SSH folder before an unrelated command is not an authorized-keys
+// mutation (rel-1-0-10:GAP-0548). Every other statement keeps every
+// mention, and offsets are kept.
+func actionReadOnlyStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
+	if file == nil || len(file.Stmts) < 2 {
+		return nil
+	}
+	var readOnly map[*syntax.Stmt]bool
+	for _, stmt := range file.Stmts {
+		if actionReadOnlyStatementAlone(stmt, home) {
+			if readOnly == nil {
+				readOnly = map[*syntax.Stmt]bool{}
+			}
+			readOnly[stmt] = true
+		}
+	}
+	return readOnly
+}
+
+// actionBlankSyntaxTailListings blanks, in a text the shell parser rejects
+// with a syntax error, each top-level statement of the readings
+// shellparse.ReadSyntaxTail makes that lists only
+// (actionReadOnlyStatementAlone), keeping every offset.
+func actionBlankSyntaxTailListings(command, home string) string {
+	tail, ok := shellparse.ReadSyntaxTail(command)
+	if !ok {
+		return command
+	}
+	var out []byte
+	from := 0
+	for _, statement := range tail.Statements {
+		at := strings.Index(command[from:], statement)
+		if at < 0 {
+			continue
+		}
+		at += from
+		from = at + len(statement)
+		file, parsed := parseShell(statement)
+		if !parsed {
+			continue
+		}
+		for _, stmt := range file.Stmts {
+			start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+			if start < 0 || end > len(statement) || start >= end || !actionReadOnlyStatementAlone(stmt, home) {
+				continue
+			}
+			if out == nil {
+				out = []byte(command)
+			}
+			for i := at + start; i < at+end; i++ {
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+			}
+		}
+	}
+	if out == nil {
+		return command
+	}
+	return string(out)
+}
+
+// actionBlankStatements blanks the statements of command in set, keeping
+// every offset.
+func actionBlankStatements(command string, set map[*syntax.Stmt]bool) string {
+	var out []byte
+	for stmt := range set {
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			continue
+		}
+		if out == nil {
+			out = []byte(command)
+		}
+		for i := start; i < end; i++ {
+			if out[i] != '\n' {
+				out[i] = ' '
+			}
+		}
+	}
+	if out == nil {
+		return command
+	}
+	return string(out)
+}
+
+// actionReadOnlyStatementAlone reports a statement that only reads and
+// leaves the shell state as it was (actionBlankReadOnlyStatements).
+func actionReadOnlyStatementAlone(stmt *syntax.Stmt, home string) bool {
+	if stmt == nil || stmt.Background || stmt.Coprocess || stmt.Negated {
+		return false
+	}
+	keeps := true
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || !keeps {
+			return keeps
+		}
+		if len(call.Assigns) != 0 || len(call.Args) == 0 {
+			keeps = false
+			return false
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		switch programBase(program) {
+		case "ls", "dir", "stat", "du", "readlink", "realpath":
+			// Listers: they read names and metadata, never the content of
+			// a file, so a protected name among their operands is only
+			// listed. A reader of content (cat, grep, head) keeps its
+			// statement in the scan: a link it follows may be the keys file
+			// (TestFixedTextEchoJoinedToAStatementIsVerdictNeutral).
+		default:
+			keeps = false
+		}
+		keeps = keeps && known
+		return keeps
+	})
+	return keeps && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
 }
 
 // actionBlankPatchBodies blanks, in the text scan, the content lines of the

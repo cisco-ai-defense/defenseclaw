@@ -12,9 +12,10 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// The bounds of ReadSyntaxTail. Past one the reading stops: the statements
-// read before it are kept, and the call is judged at the unknown tier as
-// every call with a syntax error is (the bound rule, internal/guardrail/bounded).
+// The bounds of ReadSyntaxTail. Past one the reading stops and says so
+// (SyntaxTail.Truncated): the statements read before it are kept and judged,
+// and the caller judges the call at least at the unknown tier of the pack
+// (the bound rule, internal/guardrail/bounded).
 const (
 	// MaxSyntaxTailStatements bounds the readable statements of one text
 	// (the statement budget of one call).
@@ -56,8 +57,8 @@ type SyntaxTail struct {
 //     operators outside quotes (the token fallback): each shortest run of
 //     pieces that parses on its own.
 //
-// What is left unread is the caller's: the call is judged at the unknown
-// tier of the pack, whatever was read. ok is false for a command that
+// What is left unread is the caller's to record; a reading cut at a cap is
+// at least the unknown tier of the pack. ok is false for a command that
 // parses, one past the reading budget (TooDeep), text that is not valid
 // UTF-8, and one the parser faults on (ErrParserFault): those keep their own
 // paths.
