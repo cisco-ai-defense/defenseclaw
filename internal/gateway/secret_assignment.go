@@ -197,11 +197,10 @@ func secretAssignmentRejection(raw string) string {
 	for strings.HasSuffix(value, ")") && strings.Count(value, ")") > strings.Count(value, "(") {
 		value = strings.TrimRight(strings.TrimSuffix(value, ")"), ".,;!=")
 	}
-	// A name followed by "(" is a call (get_token(x), os.getenv(NAME)), not a
-	// value: what stands before the first "(" is an identifier of word-shaped
-	// letters. A random key that happens to hold a "(" has random runs there.
-	if open := strings.IndexByte(value, '('); open > 0 && secretAssignmentCallee.MatchString(value[:open]) &&
-		secretAssignmentWordLettersMin(value[:open], 3)*10 >= secretAlnumCount(value[:open])*7 {
+	// Code that calls something (get_token(x), uuid.uuid4().hex,
+	// base64.b64encode(os.urandom(32))) generates or fetches a secret and is
+	// not one: it has the shape of a call, read from its structure.
+	if secretAssignmentCallShaped(value) {
 		return "call"
 	}
 	if len(value) < 12 || len(value) > 128 {
@@ -285,26 +284,110 @@ func secretAssignmentRejection(raw string) string {
 	return ""
 }
 
-// secretAssignmentCallee is the text before the "(" of a call: an identifier
-// path (get_token, os.getenv, client.fetchSecret).
-var secretAssignmentCallee = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
+// secretAssignmentCallShaped reports a value that is a call and nothing else:
+// an identifier path (letters, digits and _, joined by . or ::), then a
+// parenthesised argument list that balances, then only more code of the same
+// kind (.attribute, another call) up to the end. The shape is told by its
+// structure, not by how word-like the callee is (uuid4, b64encode and
+// pbkdf2_sha256.hash are calls too). Inside the parentheses the value holds
+// only what code holds (names, digits, dots and arithmetic), so a Django-style
+// key that carries a ( among random punctuation, and the characters after a
+// closing ) that a literal would carry, are not a call. The value is cut at
+// the first space, quote, comma or bracket, so a call whose argument list runs
+// on is read as far as the cut and stays a call while it is still open.
+func secretAssignmentCallShaped(value string) bool {
+	i := secretAssignmentPathEnd(value, 0)
+	if i == 0 || i >= len(value) || value[i] != '(' {
+		return false
+	}
+	depth := 0
+	for ; i < len(value); i++ {
+		switch c := value[i]; {
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+		case depth > 0:
+			if !secretAssignmentCodeChar(c) {
+				return false
+			}
+		case c == '.':
+			end := secretAssignmentPathEnd(value, i+1)
+			if end == i+1 {
+				return false
+			}
+			i = end - 1
+		default:
+			return false
+		}
+		if depth < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// secretAssignmentPathEnd returns the end of the identifier path that starts at
+// start: identifiers joined by "." or "::". It returns start when none starts
+// there.
+func secretAssignmentPathEnd(value string, start int) int {
+	end := start
+	for i := start; i < len(value) && secretAssignmentIdentStart(value[i]); {
+		j := i + 1
+		for j < len(value) && (secretAssignmentIdentStart(value[j]) || value[j] >= '0' && value[j] <= '9') {
+			j++
+		}
+		end = j
+		switch {
+		case j < len(value) && value[j] == '.':
+			i = j + 1
+		case strings.HasPrefix(value[j:], "::"):
+			i = j + 2
+		default:
+			return end
+		}
+	}
+	return end
+}
+
+func secretAssignmentIdentStart(c byte) bool {
+	return secretAssignmentLetter(c) || c == '_'
+}
+
+// secretAssignmentCodeChar reports a character that code holds inside an
+// argument list: a name, a number, a dot or an operator. A secret's own
+// punctuation (@ # $ % ^) is not among them.
+func secretAssignmentCodeChar(c byte) bool {
+	return secretAssignmentIdentStart(c) || c >= '0' && c <= '9' || strings.IndexByte(".+-*/=&!", c) >= 0
+}
 
 // secretAssignmentNameShaped reports a value a person composed: words and
 // numbers joined by _, - or ., where the letters and digits of the value that
 // do not sit in a word-shaped run of three letters or more are under three
-// tenths. A separator-delimited number of ten digits or fewer, or the
-// thirteen digits of an epoch in milliseconds, is a counter, a year or a
-// timestamp and weighs nothing either way (dr_secret_key_1700000000); any
-// other digit counts against the name, so a random token that holds digits, or
-// words followed by a long random number, is not one.
+// tenths. A separator-delimited number of nine digits or fewer is a counter or
+// a year and weighs nothing; so does ONE number of ten or thirteen digits,
+// which is a timestamp in seconds or milliseconds (dr_secret_key_1700000000),
+// and ONE version token (python3dot11, md5sum2024). Any other digit counts
+// against the name, so a random token that holds digits, or words followed by
+// a long random number or by several of them, is not one.
 func secretAssignmentNameShaped(value string) bool {
 	letters, digits, wordLetters := 0, 0, 0
+	sawTimestamp, sawVersion := false, false
 	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
 		if secretAssignmentCounter(segment) {
+			if len(segment) < 10 {
+				continue
+			}
+			if !sawTimestamp {
+				sawTimestamp = true
+				continue
+			}
+		} else if secretAssignmentTokenLike(segment) {
+			if sawVersion || !secretAssignmentVersionToken(segment) {
+				return false
+			}
+			sawVersion = true
 			continue
-		}
-		if secretAssignmentTokenLike(segment) {
-			return false
 		}
 		for _, run := range strings.FieldsFunc(segment, func(r rune) bool {
 			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
@@ -315,6 +398,29 @@ func secretAssignmentNameShaped(value string) bool {
 		digits += secretAlnumCount(segment) - countLetters(segment)
 	}
 	return letters > 0 && wordLetters*10 >= (letters+digits)*7
+}
+
+// secretAssignmentVersionToken reports a segment that is a version or a year
+// inside words: letters, a version of one or two digits, letters, then a
+// number of one to four digits (python3dot11, md5sum2024). It is the one shape
+// of letter and digit turns that a person writes in a name, and the token-like
+// check would call it a token. The letter run after the version must be a word
+// of three letters or more, so a random mix of letters and digits that
+// happens to have this shape is not read as one.
+func secretAssignmentVersionToken(segment string) bool {
+	var parts []string
+	for i := 0; i < len(segment); {
+		j := i
+		for j < len(segment) && secretAssignmentLetter(segment[j]) == secretAssignmentLetter(segment[i]) {
+			j++
+		}
+		parts = append(parts, segment[i:j])
+		i = j
+	}
+	if len(parts) != 4 || !secretAssignmentLetter(segment[0]) {
+		return false
+	}
+	return len(parts[0]) >= 2 && len(parts[1]) <= 2 && len(parts[3]) <= 4 && secretAssignmentWordShaped(parts[2], 3)
 }
 
 // secretAssignmentTokenLike reports a segment of eight characters or more
