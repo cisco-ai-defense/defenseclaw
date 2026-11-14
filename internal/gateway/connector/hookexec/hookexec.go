@@ -1198,7 +1198,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			if gatewayNoAnswer(ctx) {
 				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
-			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), "gateway busy")
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedGatewayBusyRefusal)
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -1208,7 +1208,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
 			// The gateway answered 429: it is up, so no outage applies.
-			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), "gateway busy")
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedGatewayBusyRefusal)
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
@@ -1612,6 +1612,11 @@ const (
 // evaluation, and a slot of the account frees as soon as one of its calls
 // ends.
 var hookCallerBusyRetryDelay = 250 * time.Millisecond
+
+// managedGatewayBusyRefusal is the recorded reason of a call whose resend
+// after a 429 could not fit its answer budget: the gateway runs and is busy.
+// A managed hook names capacity for it (managedStandaloneFailClosedText).
+const managedGatewayBusyRefusal = "gateway busy"
 
 // callerBusyReason is the reason of a 429 for one caller's own budget
 // (hook_caller_limits.go managedHookReasonRateLimited); a full gateway
@@ -4383,12 +4388,17 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		cause, advice = "the DefenseClaw gateway is restarting to apply a change on this computer",
 			"Try again in a few seconds; if this continues, contact your administrator."
 		code = reason
-	case reason == managedGatewayNoAnswerReason:
-		// A restart, an upgrade, a repair or a busy host: the gateway gave
-		// no decision within the tool call's answer budget (GAP-0155).
-		cause, advice = "the DefenseClaw gateway did not answer in time (it may be restarting or busy)",
-			"Try again in a few seconds; if this continues, contact your administrator."
-		code = reason
+	case reason == managedGatewayNoAnswerReason || reason == managedGatewayBusyRefusal:
+		// The gateway gave no decision within the answer budget (GAP-0155),
+		// or kept refusing the call with 429. A stopped or restarting
+		// gateway has its own reason above, so this is a gateway that runs
+		// and is at capacity (or hung): say capacity, not policy, and where
+		// the load shows (owner decision on H1, S8 DESIGN 18).
+		cause, advice = "DefenseClaw on this computer is at capacity or not responding, so it could not finish checking this "+
+			hookEventSubject(event)+" in time. This is not a policy decision",
+			"Try again in a few seconds; if this keeps happening, ask your administrator to check DefenseClaw on this computer: `"+
+				managedStatusCommand(runtime.GOOS)+"` shows the recent hook load."
+		code = managedGatewayNoAnswerReason
 	case reason == managedGatewayPortHeldReason:
 		cause, advice = "another program is using the DefenseClaw gateway's port on this computer, so DefenseClaw cannot check it",
 			"Ask your administrator to check DefenseClaw on this computer: `"+managedStatusCommand(runtime.GOOS)+"` names the program."

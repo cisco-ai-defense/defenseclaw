@@ -30,7 +30,7 @@ const hookCapacityWindow = 60
 
 // hookCapacitySizingDoc is the docs page with the measured max rate per
 // instance type and OS (the H1 sizing table).
-const hookCapacitySizingDoc = "/docs/reference/hook-sizing"
+const hookCapacitySizingDoc = "/docs/support-matrix#hook-sizing"
 
 // Hook capacity outcomes, also the outcome attribute of the telemetry
 // counter.

@@ -212,6 +212,23 @@ After a long flood the gateway on Windows keeps much of the memory the flood use
 
 On a per-user install on Linux, the gateway answered every tool-call hook within 2 seconds with up to 3 interactive agents per vCPU working at once. In 1.0.5 tests on RHEL 9.8 with 4 vCPUs, 6 and then 12 interactive agents (Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode) ran at the same time, with extra CPU load added until the 1-minute load average reached 8 to 14. All 613 tool calls sent through the registered Claude Code and Codex hooks were answered and allowed: median about 1.5 seconds, maximum 1.9 seconds (an idle host answers in 0.1 to 1.1 seconds). Answers get slower as the load grows, so a host with more agents per vCPU waits longer. On a managed host a call that waits out its answer window is blocked ([Hook capacity on managed hosts](#hook-capacity-on-managed-hosts)).
 
+## Hook sizing
+
+How many Claude Code tool calls a second one host can check depends on the operating system, the install type and the instance size. The table gives the highest rate at which every call was answered within its answer budget and no benign call was denied, for 120 seconds of steady calls (1.0.10 measurements; one agent session unless noted). A host with no other DefenseClaw hook running is assumed.
+
+| Install | OS | Instance (vCPU) | Highest rate, all calls answered in time |
+|---|---|---|---|
+| Per-user | RHEL 9 | m6i.xlarge (4) | 70 calls a second (65 with 10 sessions) |
+| Per-user | macOS | mac2.metal, Apple M1 (8) | 100 calls a second answered in time, with a 95th-percentile answer of 0.5 s (2.3 s with 10 sessions) |
+| Per-user | Windows Server 2025 | c5a.4xlarge (16) | about 30 calls a second (see Hook floods on Windows) |
+| Managed | RHEL 9 | m8i.2xlarge (8) | 61 calls a second |
+| Managed | macOS | mac2.metal, Apple M1 (8) | 20 calls a second |
+| Managed | Windows Server 2025 | c5a.2xlarge (8) | 10 calls a second |
+
+One interactive agent makes a few tool calls a second at most, so these rates matter for many agents, or agent loops and scripts, on one host. Past its rate a host answers late: a managed hook then blocks the call and says that DefenseClaw is at capacity, not that a policy blocked it; a per-user hook in the default fail mode lets the call run unchecked after its answer budget and records it.
+
+To see whether a host is over its rate, `defenseclaw status` and `defenseclaw doctor` (per-user) and `enterprise <os> status` and `verify` (managed, warning `hook_over_capacity`) report the tool calls of the last hour that ran out of their answer budget, with the busiest minute. The gateway `/status` document carries the same counts as `hook_capacity`, and telemetry carries the `defenseclaw.hook.deadline_outcomes` counter. If they show calls past their budget, run fewer agents or parallel tool calls at once, or use a larger host.
+
 ## Hook capacity on managed hosts
 
 A managed host fails closed. In 1.0.7, a native tool-call hook gives the gateway up to 3.5 seconds from contact, within a 4-second cap from hook launch, before it blocks with `enterprise_managed_gateway_no_answer`. The 1.0.5 measurements below used a 3.5-second wait from hook launch: when the gateway did not answer, the hook blocked only after that full wait. Under a heavy burst of calls, or with a very large audit store, the gateway could be slow enough that some calls waited out the 3.5 seconds and were denied. Measured in 1.0.5:
