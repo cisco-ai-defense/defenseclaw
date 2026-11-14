@@ -20,6 +20,7 @@ import (
 // rules (GAP-0596). The names are read from the repository, not listed here.
 func TestDefenseClawServiceNamesFollowTheInstallers(t *testing.T) {
 	root := filepath.Join("..", "..")
+	skipWithoutRepo(t, root)
 	var seen int
 	for _, dir := range []string{
 		"packaging/systemd", "packaging/systemd/user", "packaging/launchd", "packaging/launchd-standalone",
@@ -81,6 +82,7 @@ func TestDefenseClawServiceNamesFollowTheInstallers(t *testing.T) {
 // until it is.
 func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
 	root := filepath.Join("..", "..")
+	skipWithoutRepo(t, root)
 	click := regexp.MustCompile(`\.command\(\s*"(stop|disable|uninstall|teardown|remove-all|shutdown|kill)"`)
 	cobra := regexp.MustCompile(`Use:\s+"(stop|disable|uninstall|teardown|remove-all|shutdown|kill)\b`)
 	seen := map[string]bool{}
@@ -115,5 +117,14 @@ func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
 				t.Errorf("registered subcommand %q is treated as read-only", verb)
 			}
 		}
+	}
+}
+
+// skipWithoutRepo skips a test that walks the repository when it runs from a
+// copied test binary (the native Windows runs) without the source tree.
+func skipWithoutRepo(t *testing.T, root string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Skip("no repository tree next to the test binary")
 	}
 }
