@@ -440,19 +440,6 @@ func pipelineNamesDefenseClaw(facts Facts, command CommandFact) bool {
 	return false
 }
 
-func inlineScriptTouchesDefenseClaw(args []string) bool {
-	text := strings.ToLower(strings.Join(args, " "))
-	if !strings.Contains(text, defenseClawNamespace) {
-		return false
-	}
-	for _, verb := range []string{"stop", "disable", "uninstall", "kill", "remove", "delete", "unload", "bootout", "teardown", "mask", "reset", "config", "mode"} {
-		if strings.Contains(text, verb) {
-			return true
-		}
-	}
-	return false
-}
-
 // Verbs of the DefenseClaw CLI and gateway. They are the subcommand names the
 // CLI registers (cli/defenseclaw/commands, internal/cli); a drift test fails
 // when a registered stop, disable, uninstall or teardown command is not
