@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -94,6 +95,17 @@ func TestToolResultJudgeCallIsRedacted(t *testing.T) {
 	}
 	if !strings.Contains(header, "api.example.com") {
 		t.Errorf("redaction removed the endpoint:\n%s", header)
+	}
+	// The user's request (on Hermes and OpenClaw possibly a remote party's
+	// text) is redacted the same way and never reaches the system message.
+	sctx := ContextWithSessionID(context.Background(), "tr-redact-1")
+	j.ObserveSessionPrompt(sctx, "fetch the items, the token is Bearer tok_ZyXwVu9876543210abc")
+	sctx = withToolResultCall(sctx, "fetch_items", json.RawMessage(args))
+	if got := j.toolResultUserRequest(sctx); strings.Contains(got, "tok_ZyXwVu9876543210abc") || !strings.Contains(got, "fetch the items") {
+		t.Errorf("user request line not redacted: %q", got)
+	}
+	if h := j.toolResultJudgeHeader(sctx, "message"); strings.Contains(h, "fetch the items") {
+		t.Errorf("the user's request reached the system header: %q", h)
 	}
 }
 
@@ -183,6 +195,35 @@ func TestToolJudgeEmptyAnswerFallsBackToTheRules(t *testing.T) {
 		cfg.DataDir = t.TempDir()
 		if lane := hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", v); lane != nil {
 			t.Fatalf("answer %q: the hook lane took %+v, want the rule verdict kept", content, lane)
+		}
+	}
+}
+
+// The cascade merge trap (rel-1-0-10:GAP-0636 (a)): the proven-read skip
+// answers before guardrail.cascade.judge.no_verdict, so with no_verdict
+// unknown a proven read the rules did not flag stays an allow and is not sent
+// to the judge, in every pack; a call that is not a proven read still goes to
+// the judge.
+func TestProvenReadSkipBeforeCascadeNoVerdict(t *testing.T) {
+	for _, pack := range []string{"default", "strict"} {
+		judge := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Content: reviewOnlyJudgeMedium}}}}}
+		a := escalationHookServerWith(t, judge, pack, func(cfg *config.Config) {
+			cfg.Guardrail.Cascade.Judge.NoVerdict = config.CascadeNoVerdictUnknown
+		})
+		home := t.TempDir()
+		resp := a.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "s-pr-skip-" + pack, CWD: home, ToolName: "Read",
+			ToolInput: map[string]interface{}{"file_path": filepath.Join(home, "README.md")},
+		})
+		if len(judge.captured) != 0 || resp.RawAction != "allow" {
+			t.Fatalf("%s: proven read: judge calls=%d raw=%q findings=%v, want allow with no judge call", pack, len(judge.captured), resp.RawAction, resp.Findings)
+		}
+		a.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+			HookEventName: "PreToolUse", SessionID: "s-pr-skip-" + pack, CWD: home, ToolName: "Bash",
+			ToolInput: map[string]interface{}{"command": "make -C ./fixtures build"},
+		})
+		if len(judge.captured) != 1 {
+			t.Fatalf("%s: a call that is not a proven read was not judged (calls=%d)", pack, len(judge.captured))
 		}
 	}
 }
