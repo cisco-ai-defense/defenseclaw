@@ -7,6 +7,7 @@ import (
 	"context"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,7 +63,32 @@ func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.
 	if d.Deny != nil {
 		entry.Reasons = append(entry.Reasons, d.Deny.Code)
 	}
+	if d.Sensitive.Source != "" {
+		entry.Reasons = append(entry.Reasons, "sensitive:"+boundedRouterLabel(d.Sensitive.Source, 32)+":"+boundedRouterLabel(d.Sensitive.Reason, 64))
+	}
 	routingAdminRuntime.Decisions().Record(entry)
+}
+
+// amendRoutingDecision rewrites the recorded decision of the request in ctx
+// when the exit changed after the engine decided (a gate refusal, a route
+// attempt that could not be prepared), so `routing explain` and `routing
+// status` show what was done (GAP-0576).
+func amendRoutingDecision(ctx context.Context, o SemanticRouteOutcome) {
+	outcome := engine.OutcomeFallback
+	if o.Result == SemanticRouteDenied {
+		outcome = engine.OutcomeDenied
+	} else if o.Result == SemanticRouteApplied {
+		return
+	}
+	routingAdminRuntime.Decisions().Amend(RequestIDFromContext(ctx), func(e *routingadmin.DecisionEntry) {
+		e.Outcome, e.SelectedAlias, e.SelectedModel = outcome, "", ""
+		if o.Deny != nil && o.Deny.Code != "" && !slices.Contains(e.Reasons, o.Deny.Code) {
+			e.Reasons = append(e.Reasons, o.Deny.Code)
+		}
+		if o.Route != nil {
+			e.Warnings = slices.Clone(o.Route.Warnings)
+		}
+	})
 }
 
 // routingCallerMatcher answers routing.admin identity selectors (groups,
@@ -245,6 +271,7 @@ func (p *GuardrailProxy) gateOriginal(ctx context.Context, o SemanticRouteOutcom
 	}
 	o.Result, o.Decision = SemanticRouteFallback, nil
 	p.applyRouteGate(ctx, &o, provider, model)
+	amendRoutingDecision(ctx, o)
 	return o
 }
 
@@ -265,8 +292,7 @@ func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput)
 		return SemanticRouteOutcome{}
 	}
 	eng, cfg := router.engineFor(ctx)
-	admin := router.adminFor(cfg)
-	if eng == nil || cfg == nil || admin == nil {
+	if eng == nil || cfg == nil {
 		return SemanticRouteOutcome{}
 	}
 	model := passthroughModel(r.URL.Path, in.Model)
@@ -274,8 +300,19 @@ func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput)
 	req := engineRequest(&ModelRouterInput{
 		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
 		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
-		Caller: caller, Profiles: profiles,
+		Text: in.Text, Caller: caller, Profiles: profiles,
 	})
+	if src := eng.SensitiveFloor(req); src != "" {
+		// The router cannot send this request to a local model, and a
+		// sensitive request never goes to the cloud (GAP-0576).
+		deny := engine.SensitiveLocalDeny(src, "DefenseClaw cannot re-route this request (a signed Bedrock body or an API it does not rewrite)")
+		d := engine.Decision{Outcome: engine.OutcomeDenied, Deny: deny, Sensitive: engine.SensitiveOutcome{Source: src, Reason: "positive"}}
+		return SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: deny, Route: &d}
+	}
+	admin := router.adminFor(cfg)
+	if admin == nil {
+		return SemanticRouteOutcome{}
+	}
 	verdict := admin.Evaluate(ctx, engine.Policy{}, req, "", false)
 	d := engine.Decision{Outcome: engine.OutcomeFallback, Warnings: verdict.Warnings, RuleIDs: verdict.RuleIDs, ChargeKeys: verdict.ChargeKeys}
 	o := SemanticRouteOutcome{Result: SemanticRouteFallback, Route: &d}

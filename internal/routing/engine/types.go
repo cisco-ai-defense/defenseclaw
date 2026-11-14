@@ -105,7 +105,27 @@ const (
 	SourceSticky       = "sticky"
 	SourceForce        = "force"
 	SourceDefault      = "default"
+	// SourceSensitive is a routing.sensitive.aliases candidate tried
+	// because the request is sensitive (GAP-0576).
+	SourceSensitive = "sensitive"
 )
+
+// DenyCodeSensitiveLocal refuses a sensitive request that no allowed
+// routing.sensitive.aliases model can serve. Such a request is never sent
+// to the original provider or to another alias (GAP-0576), on OSS and on
+// managed hosts.
+const DenyCodeSensitiveLocal = "routing_sensitive_local_unavailable"
+
+// SensitiveLocalDeny is the refusal of a sensitive request: source is what
+// found it sensitive, cause why no local model can take it.
+func SensitiveLocalDeny(source, cause string) *DenyReason {
+	if source == "" {
+		source = "routing.sensitive"
+	}
+	return &DenyReason{Code: DenyCodeSensitiveLocal, Message: "this request holds sensitive data (found by " + source +
+		"), so routing.sensitive keeps it on a local model (routing.sensitive.aliases); " + cause +
+		", so DefenseClaw refused it instead of sending it to a cloud model"}
+}
 
 // Failure codes (closed set; metric labels).
 const (
@@ -120,7 +140,8 @@ const (
 	FailureNoCandidate    = "no_candidate"
 )
 
-// DenyReason is a managed-only refusal.
+// DenyReason is a routing refusal: a managed admin rule, or a sensitive
+// request no local model can serve (DenyCodeSensitiveLocal, every host).
 type DenyReason struct {
 	Code    string
 	Message string
@@ -143,9 +164,29 @@ type Decision struct {
 	ChargeKeys   []string
 	PolicyDigest string
 	Latency      time.Duration
+	// Sensitive records how the sensitive-data narrowing was decided.
+	Sensitive SensitiveOutcome
 
 	verdict AdminVerdict
 }
+
+// Sources of a sensitive narrowing (SensitiveOutcome.Source).
+const (
+	SensitiveSourceGuardrail = "guardrail"
+	SensitiveSourceSignal    = "signal"
+)
+
+// SensitiveOutcome says what decided the sensitive narrowing of one
+// request: Source is empty when nothing narrowed, else guardrail (the
+// pre-call severity floor) or signal (a routing.sensitive signal).
+type SensitiveOutcome struct {
+	Source string
+	Reason string
+}
+
+// SensitiveNarrowed reports whether routing.sensitive narrowed the decision:
+// its only allowed exits are then the routing.sensitive.aliases models.
+func (d Decision) SensitiveNarrowed() bool { return d.Sensitive.Source != "" }
 
 // ClassifyInput is what a classifier sees: no identity, no credentials.
 type ClassifyInput struct {

@@ -61,6 +61,31 @@ func (d *Decisions) Record(e DecisionEntry) {
 	d.mu.Unlock()
 }
 
+// amendWindow is how many of the newest entries Amend searches; the entry
+// of a request in flight is nearly always among them.
+const amendWindow = 64
+
+// Amend updates the entry of requestID, when it is among the newest
+// entries, with what the request finally did (a routed call that ended as
+// a fallback or a refusal). It reports whether an entry was found.
+func (d *Decisions) Amend(requestID string, update func(*DecisionEntry)) bool {
+	if d == nil || requestID == "" || update == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i := 0; i < d.n && i < amendWindow; i++ {
+		j := (d.next - 1 - i + DecisionsSize) % DecisionsSize
+		if d.buf[j].RequestID == requestID {
+			e := d.buf[j].copy()
+			update(&e)
+			d.buf[j] = e.copy()
+			return true
+		}
+	}
+	return false
+}
+
 // Recent returns up to limit entries, newest first, that the caller may
 // read: all for an administrator, the caller's own otherwise.
 func (d *Decisions) Recent(callerKey string, admin bool, limit int) []DecisionEntry {

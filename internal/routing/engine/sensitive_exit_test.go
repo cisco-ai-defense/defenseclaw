@@ -1,0 +1,82 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package engine
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+)
+
+// GAP-0576: a request that routing.sensitive narrowed never leaves on the
+// original (cloud) request or on an alias outside routing.sensitive.aliases,
+// on OSS and on managed hosts alike.
+
+func sensitiveSignalConfig() *config.Config {
+	cfg := testConfig()
+	cfg.Routing.Sensitive = &config.RoutingSensitiveConfig{Signals: []string{"secret"}, Aliases: []string{"local"}}
+	return cfg
+}
+
+func TestSensitiveNarrowedOriginalIsNeverAnExit(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		e := mustEngine(t, sensitiveSignalConfig(), Options{Managed: managed})
+		d := e.Decide(context.Background(), chat("my key is AKIA1234"))
+		if d.Outcome != OutcomeApplied || d.Backend == nil || d.Backend.Alias != "local" || !d.SensitiveNarrowed() {
+			t.Fatalf("managed=%v decision = %+v", managed, d)
+		}
+		deny := e.Gate(d, GateTarget{Provider: "openai", Model: "gpt-5"})
+		if deny == nil || deny.Code != DenyCodeSensitiveLocal {
+			t.Fatalf("managed=%v: the original request is an allowed exit of a sensitive decision: %+v", managed, deny)
+		}
+		if deny := e.Gate(d, GateTarget{Alias: "claude", Provider: "anthropic", Model: "claude-haiku-4-5"}); deny == nil {
+			t.Fatalf("managed=%v: a cloud alias is an allowed exit of a sensitive decision", managed)
+		}
+		if deny := e.Gate(d, GateTarget{Alias: "local", Provider: "ollama", Model: "llama3.1"}); deny != nil {
+			t.Fatalf("managed=%v: the sensitive alias is refused: %+v", managed, deny)
+		}
+		plain := e.Decide(context.Background(), chat("please refactor this"))
+		if plain.SensitiveNarrowed() || e.Gate(plain, GateTarget{Provider: "openai", Model: "gpt-5"}) != nil {
+			t.Fatalf("managed=%v: a plain request is gated: %+v", managed, plain.Sensitive)
+		}
+	}
+}
+
+func TestSensitiveNarrowedWithNoUsableLocalAliasIsDenied(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		e := mustEngine(t, sensitiveSignalConfig(), Options{Managed: managed, CredentialOK: func(b Backend, _ Request) bool { return b.Alias != "local" }})
+		d := e.Decide(context.Background(), chat("refactor with AKIA1234"))
+		if d.Outcome != OutcomeDenied || d.Deny == nil || d.Deny.Code != DenyCodeSensitiveLocal || d.Backend != nil {
+			t.Fatalf("managed=%v: a sensitive request with no usable local alias = %+v", managed, d)
+		}
+		for _, want := range []string{"sensitive", "local", "credential"} {
+			if !strings.Contains(d.Deny.Message, want) {
+				t.Fatalf("managed=%v: deny message %q does not name %q", managed, d.Deny.Message, want)
+			}
+		}
+	}
+}
+
+func TestSensitiveNarrowedTriesTheSensitiveAliases(t *testing.T) {
+	cfg := sensitiveSignalConfig()
+	// No unconditional default: only the classifier candidates (cloud).
+	cfg.Routing.Decisions = cfg.Routing.Decisions[:3]
+	e := mustEngine(t, cfg, Options{})
+	d := e.Decide(context.Background(), chat("refactor this, key AKIA1234"))
+	if d.Outcome != OutcomeApplied || d.Backend == nil || d.Backend.Alias != "local" || d.Source != SourceSensitive {
+		t.Fatalf("a sensitive request whose candidates are all cloud = %+v", d)
+	}
+}
+
+func TestSensitiveNarrowedWithNoAllowedLocalAliasIsDenied(t *testing.T) {
+	cfg := sensitiveSignalConfig()
+	cfg.Routing.Admin = &config.RoutingAdminConfig{AllowedAliases: []string{"claude", "fast"}}
+	e := mustEngine(t, cfg, Options{})
+	d := e.Decide(context.Background(), chat("AKIA1234"))
+	if d.Outcome != OutcomeDenied || d.Deny == nil || d.Deny.Code != DenyCodeSensitiveLocal {
+		t.Fatalf("a sensitive request with no allowed local alias = %+v", d)
+	}
+}

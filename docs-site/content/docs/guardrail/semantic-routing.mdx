@@ -89,6 +89,10 @@ X-Semantic-Router-Reason: decision=… model=… confidence=…
 
 Each routed request also records one `defenseclaw.semantic_routing.decision` count and a `defenseclaw.semantic_routing.latency` measurement. The labels are a closed set: `result` (`applied` or `fallback`), `error.code` (`none`, `timeout`, `upstream_status`, `decode_failure`, `unknown_alias`, `credential_failure` or `configuration_failure`) and `decision` (`override` or `default`). Prompt text, credentials, endpoints and the header reason string are never labels.
 
+## Sensitive requests stay local
+
+With `routing.sensitive` set (`aliases` plus `severity_at_least` and/or `signals`), a request the guardrail severity or a listed signal marks as sensitive is sent only to a `routing.sensitive.aliases` model. It is never sent to the model the agent asked for, or to another alias, on any install. When no sensitive alias can take it (its key is missing, it does not speak the request API, an administrator rule does not allow it, the route-only listener cannot reach it, or the call is a signed Bedrock body DefenseClaw cannot re-route), DefenseClaw refuses the request with `routing_sensitive_local_unavailable` and a message that names the cause, writes an audit row (target `routing.sensitive`), and `defenseclaw routing explain <id>` shows `denied`. A local model with its own `base_url` and no `api_key_env` or `credential` (Ollama, vLLM) is called with no credential, also when the agent signs in with a login or a Bedrock bearer key.
+
 ## Disable routing
 
 ```bash

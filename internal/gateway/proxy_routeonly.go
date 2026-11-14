@@ -314,11 +314,26 @@ func (s *routeOnlyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		original.usage.Route.Decision = modelusage.DecisionFallback
 	}
 	if routedOutcome.Result == SemanticRouteDenied {
+		auditRouteDeny(r.Context(), s.router.logger, "/r/"+connector, routedOutcome.Deny)
 		routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
 		return
 	}
 	if attempt != nil && custody && attempt.keepInbound && attempt.signer == nil && !s.holdCredential(cfg, attempt, attempt.provider) {
 		attempt = nil
+		if !originalAllowed {
+			// The routed model has no held credential and the original
+			// request is not an allowed exit (a sensitive or admin-bound
+			// decision): refuse rather than send the original.
+			routedOutcome.Result, routedOutcome.Decision = SemanticRouteDenied, nil
+			routedOutcome.Deny = &engine.DenyReason{Code: "routing_route_credential_missing", Message: "the routed model has no gateway-held credential on this managed host (routing.models[].credential), and the original request is not allowed"}
+			if routedOutcome.Route != nil && routedOutcome.Route.SensitiveNarrowed() {
+				routedOutcome.Deny = engine.SensitiveLocalDeny(routedOutcome.Route.Sensitive.Source, "the local model has no gateway-held credential on this managed host (routing.models[].credential)")
+			}
+			amendRoutingDecision(r.Context(), routedOutcome)
+			auditRouteDeny(r.Context(), s.router.logger, "/r/"+connector, routedOutcome.Deny)
+			routeOnlyErrorFor(w, family, http.StatusForbidden, "permission_error", strings.TrimPrefix(routeDenyMessage(routedOutcome), "[DefenseClaw] "))
+			return
+		}
 	}
 	if attempt == nil {
 		s.forward(w, r, original, body, nil)
@@ -495,12 +510,20 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		in.Tools = []interface{}{true}
 	}
 	out := s.router.RouteDetailed(r.Context(), in)
+	recorded := out.Result
+	defer func() {
+		// The decision ring says what was done, not what the engine first
+		// chose (GAP-0576).
+		if out.Result != recorded {
+			amendRoutingDecision(r.Context(), out)
+		}
+	}()
 	originalTarget := engine.GateTarget{Provider: inProvider, Model: model}
-	originalAllowed := s.router.Gate(r.Context(), out, originalTarget) == nil
+	originalDeny := s.router.Gate(r.Context(), out, originalTarget)
+	originalAllowed := originalDeny == nil
 	if noRoute || out.Result != SemanticRouteApplied {
 		if out.Result != SemanticRouteDenied && !originalAllowed {
-			deny := s.router.Gate(r.Context(), out, originalTarget)
-			out.Result, out.Deny, out.Decision = SemanticRouteDenied, deny, nil
+			out.Result, out.Deny, out.Decision = SemanticRouteDenied, originalDeny, nil
 		}
 		return nil, out, originalAllowed
 	}
@@ -512,19 +535,37 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		}
 	}
 	d := out.Decision
-	fallback := func() (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
-		if !originalAllowed {
-			out.Result, out.Deny, out.Decision = SemanticRouteDenied, s.router.Gate(r.Context(), out, originalTarget), nil
+	alias, keyless := d.Model, false
+	if out.Route != nil && out.Route.Backend != nil {
+		alias, keyless = out.Route.Backend.Alias, backendKeyless(*out.Route.Backend)
+	}
+	// fallback ends a routed decision the attempt cannot be prepared for:
+	// a sensitive request is refused with the cause (never sent to the
+	// original provider, GAP-0576); otherwise the original request goes out
+	// when the gate allows it, recorded as a fallback with the cause.
+	fallback := func(code, cause string) (*routeOnlyAttempt, SemanticRouteOutcome, bool) {
+		switch {
+		case out.Route != nil && out.Route.SensitiveNarrowed():
+			out.Result, out.Deny = SemanticRouteDenied, engine.SensitiveLocalDeny(out.Route.Sensitive.Source, "route-only cannot send it to model "+alias+": "+cause)
+		case !originalAllowed:
+			out.Result, out.Deny = SemanticRouteDenied, originalDeny
+		default:
+			out.Result = SemanticRouteFallback
+			if out.Route != nil {
+				out.Route.Warnings = append(out.Route.Warnings, "route_only_fallback:"+code)
+			}
 		}
+		out.Decision = nil
 		return nil, out, originalAllowed
 	}
 	sameProvider := strings.EqualFold(d.Provider, inProvider)
-	if !sameProvider && (inClass == engine.CredentialOAuth || inClass == engine.CredentialBearer) && d.APIKey == "" {
-		// A login token or Bedrock bearer never crosses providers.
-		return fallback()
+	if !sameProvider && (inClass == engine.CredentialOAuth || inClass == engine.CredentialBearer) && d.APIKey == "" && !keyless {
+		// A login token or Bedrock bearer never crosses providers; a
+		// keyless model (no key reference, own base_url) gets no credential.
+		return fallback("credential", "a login token or Bedrock bearer key is never sent to another provider and the model has no key (set its api_key_env, or a base_url for a keyless local model)")
 	}
 	if probe.Previous != "" && !sameProvider {
-		return fallback()
+		return fallback("previous_response", "the call continues a stored response of the original provider (previous_response_id)")
 	}
 	origin := originOf(d.TargetURL)
 	base := strings.TrimRight(strings.TrimSpace(d.TargetURL), "/")
@@ -536,18 +577,18 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 		}
 	}
 	if origin == "" {
-		return fallback()
+		return fallback("origin", "the model has no base_url and its provider no known endpoint")
 	}
 	a := &routeOnlyAttempt{base: base, native: native, provider: firstNonEmptyRouteReason(d.Provider, inProvider)}
 	switch family {
 	case config.RoutingAPIConverse, config.RoutingAPIInvoke:
 		if !strings.EqualFold(d.Provider, "bedrock") {
-			return fallback()
+			return fallback("api", "a Bedrock Converse or InvokeModel call goes only to a Bedrock model")
 		}
 		u := &url.URL{Path: mustUnescape(native), RawPath: native}
 		a.native = swapBedrockPathModel(u, d.Model)
 		if a.native == "" {
-			return fallback()
+			return fallback("path", "the Bedrock model id could not be replaced in the request path")
 		}
 	default:
 		a.body = patchModelInBody(body, d.Model)
@@ -555,15 +596,15 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 	if d.APIKey == "" && sameProvider && strings.EqualFold(origin, originOf(upstream.BaseURL)) {
 		a.keepInbound, a.signer = true, signer
 	} else {
-		if inClass == engine.CredentialOAuth && d.APIKey == "" {
-			return fallback()
+		if inClass == engine.CredentialOAuth && d.APIKey == "" && !keyless {
+			return fallback("credential", "a login token is never sent to another endpoint and the model has no key")
 		}
-		if inClass == engine.CredentialGateway && d.APIKey == "" {
+		if inClass == engine.CredentialGateway && d.APIKey == "" && (!keyless || strings.EqualFold(d.Provider, "bedrock")) {
 			// Another Bedrock origin (region or endpoint): the gateway signs
 			// for it with the alias block when that one signs, else with the
 			// upstream credentials for the target host region.
 			if !strings.EqualFold(d.Provider, "bedrock") {
-				return fallback()
+				return fallback("credential", "the gateway holds no key for the model")
 			}
 			block := upstream.Bedrock
 			if out.Route != nil && out.Route.Backend != nil && bedrockGatewaySigning(out.Route.Backend.Bedrock) {
@@ -575,7 +616,7 @@ func (s *routeOnlyServer) decide(r *http.Request, cfg *config.Config, connector,
 			}
 			sg, err := s.signers.get(cfg, block, base)
 			if err != nil {
-				return fallback()
+				return fallback("signing", "gateway Bedrock signing for the model endpoint is not ready")
 			}
 			a.signer = sg
 		}
