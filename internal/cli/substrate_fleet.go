@@ -262,6 +262,7 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 		}
 	}
 	var keysCfg config.SubstrateConfig
+	adminService := ""
 	if cfgText != "" {
 		var doc struct {
 			Substrate struct {
@@ -269,6 +270,9 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 				Identity  struct {
 					Issuer  string `yaml:"issuer"`
 					KeysURL string `yaml:"keys_url"`
+					OIDC    struct {
+						Issuer string `yaml:"issuer"`
+					} `yaml:"oidc"`
 				} `yaml:"identity"`
 				API struct {
 					Address    string `yaml:"address"`
@@ -276,12 +280,15 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 				} `yaml:"api"`
 				Services struct {
 					Actor string `yaml:"actor"`
+					Admin string `yaml:"admin"`
 				} `yaml:"services"`
 				Launcher map[string][]string `yaml:"launcher_atespaces"`
 			} `yaml:"substrate"`
 		}
 		if err := yaml.Unmarshal([]byte(cfgText), &doc); err == nil {
 			o.Issuer = doc.Substrate.Identity.Issuer
+			o.SignInIssuer = doc.Substrate.Identity.OIDC.Issuer
+			adminService = doc.Substrate.Services.Admin
 			keysCfg.Identity.KeysURL, keysCfg.API.Address = doc.Substrate.Identity.KeysURL, doc.Substrate.API.Address
 			keysCfg.API.ServerName, keysCfg.Services.Actor = doc.Substrate.API.ServerName, doc.Substrate.Services.Actor
 			keysCfg.LauncherAtespaces = doc.Substrate.Launcher
@@ -322,6 +329,9 @@ func collectFleet(ctx context.Context, f *substrateClusterFlags) (fleet.Observed
 	readAccessPolicies(cctx, f, &o, launcherAtespaceList(keysCfg.LauncherAtespaces), cluster, apiErr)
 	readInventory(cctx, &r, o.LauncherAtespaces, o.WritableAtespaces, cluster, apiErr)
 	readActorRoutes(cctx, f, &o, keysCfg.Services.Actor)
+	if o.SignInIssuer != "" {
+		readSignInServer(cctx, f, &o, adminService)
+	}
 	r.ProductVersion = appVersion
 	r.Now = time.Now()
 	return o, r, nil

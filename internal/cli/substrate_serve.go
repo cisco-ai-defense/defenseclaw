@@ -526,6 +526,9 @@ func substrateGatewayBuilder(c *config.Config, ready *atomic.Bool) gateway.Subst
 			SkillReceiptKey:      substrateSkillReceiptKey(chainKey),
 			TemplateSkills:       substrateTemplateSkills(ctl),
 			Info:                 substrateInfo(c),
+			// GAP-0262: the gateway checks the sign-in server it verifies
+			// people with, from its own network.
+			SignInServer: substrateSignInServer(people),
 			// E23: the workspace cap of an upload through attach.
 			WorkspaceMaxBytes: c.Substrate.EffectiveWorkspaceMaxBytes(),
 			Doctor: func(ctx context.Context) []gateway.SubstrateCheck {
@@ -1022,4 +1025,24 @@ func gatewayRoleChainEgressAction(c *config.Config) (action, source string) {
 // leaderChainEgressAction: see gatewayRoleChainEgressAction.
 func leaderChainEgressAction(c *config.Config) (action, source string) {
 	return substrateChainEgressAction(c)
+}
+
+// substrateSignInServer is the OIDC issuer people sign in with, as the
+// person verifier reaches it (its key set, trust bundle and network), or nil
+// with no OIDC issuer (GAP-0262).
+func substrateSignInServer(people gateway.SubstratePersonVerifier) gateway.SubstrateSignInServer {
+	var pv *identity.PersonVerifier
+	switch p := people.(type) {
+	case *identity.PersonVerifier:
+		pv = p
+	case identity.PersonVerifiers:
+		pv, _ = p.OIDC.(*identity.PersonVerifier)
+	}
+	if pv == nil {
+		return nil
+	}
+	if ks := pv.SignInKeySet(); ks != nil {
+		return ks
+	}
+	return nil
 }

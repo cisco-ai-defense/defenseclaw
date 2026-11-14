@@ -36,10 +36,11 @@ const (
 	CheckActorRoutes      = "actor_service_routes"
 	CheckAPIAccess        = "api_access_label"
 	CheckActorKeys        = "actor_keys"
+	CheckSignInServer     = "sign_in_server"
 )
 
 // CheckIDs lists every check in the order doctor prints them.
-var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckBucket, CheckGrants, CheckCallout,
+var CheckIDs = []string{CheckSubstrateVersion, CheckIssuer, CheckActorKeys, CheckSignInServer, CheckBucket, CheckGrants, CheckCallout,
 	CheckIngressClients, CheckActorRoutes, CheckAPIAccess}
 
 // Check is one result. Message is for the admin (kept on the cluster);
@@ -142,6 +143,18 @@ type Observed struct {
 	ActorRoutes     []string
 	ActorRoutesNote string
 
+	// The OIDC sign-in server (GAP-0262). SignInIssuer is
+	// substrate.identity.oidc.issuer ("" with none). SignInRead says the
+	// gateway's /info was read through a port-forward to the admin
+	// Service (SignInNote says why not); SignInCause and SignInSince are
+	// its sign_in_server member: the cause of the gateway's own last check
+	// from its network ("" when it passed).
+	SignInIssuer string
+	SignInRead   bool
+	SignInNote   string
+	SignInCause  string
+	SignInSince  string
+
 	NamespaceLabels map[string]string
 }
 
@@ -170,7 +183,7 @@ var defaultIssuerShape = regexp.MustCompile(`^https://idp\.[a-z0-9-]+\.svc(\.clu
 // RunChecks runs every check over o.
 func RunChecks(o Observed) []Check {
 	return []Check{
-		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
+		CheckVersion(o), CheckIssuerUnique(o), CheckActorKeysVerify(o), CheckSignInServerReach(o), CheckSnapshotBucket(o), CheckOpenFGAGrants(o),
 		CheckCalloutRegistered(o), CheckRouterClients(o), CheckActorListenerRoutes(o), CheckAPIAccessLabel(o),
 	}
 }
@@ -498,4 +511,34 @@ func CheckAPIAccessLabel(o Observed) Check {
 			"to ate-api-server: kubectl label namespace %s %s=true", o.Namespace, APIAccessLabel, o.Namespace, APIAccessLabel)
 	}
 	return result(CheckAPIAccess, Pass, "", "namespace %s may reach ate-api-server", o.Namespace)
+}
+
+// CheckSignInServerReach: the gateway reaches the OIDC sign-in server from
+// its own network: discovery answers, TLS verifies against the gateway's
+// trust bundle and names the issuer, the discovery issuer is the configured
+// one, and the key set loads (the gateway's own check, read from its /info;
+// GAP-0262).
+func CheckSignInServerReach(o Observed) Check {
+	switch {
+	case o.SignInIssuer == "":
+		return result(CheckSignInServer, Skip, "", "no OIDC sign-in server is configured (people sign in with Kubernetes credentials)")
+	case !o.SignInRead:
+		return result(CheckSignInServer, Warn, "", "could not read the gateway's sign-in server check (%s)", o.SignInNote)
+	case o.SignInCause == "":
+		return result(CheckSignInServer, Pass, "", "the gateway reaches the OIDC sign-in server (substrate.identity.oidc.issuer)")
+	}
+	why := map[string]string{
+		"issuer_unreachable":   "the gateway cannot reach it (DNS, connection or timeout); its address may have changed",
+		"issuer_tls_name":      "its certificate does not name the issuer host",
+		"issuer_tls_untrusted": "its certificate does not verify against the gateway's trust bundle",
+		"issuer_http":          "it does not serve its discovery document at the configured address",
+		"issuer_mismatch":      "its discovery document names another issuer than substrate.identity.oidc.issuer",
+		"issuer_keys":          "its key set does not load",
+	}[o.SignInCause]
+	if why == "" {
+		why = o.SignInCause
+	}
+	// The status document carries no issuer URL (only its digest).
+	return result(CheckSignInServer, Fail, "", "nobody can sign in: the OIDC sign-in server (substrate.identity.oidc.issuer) fails from the gateway since %s: %s (%s); "+
+		"the detail is in the gateway log and its doctor (substrate.oidc_issuer)", o.SignInSince, why, o.SignInCause)
 }

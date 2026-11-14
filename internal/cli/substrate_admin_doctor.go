@@ -416,6 +416,8 @@ func fleetCheckFix(id string) string {
 		return "use a Substrate version this DefenseClaw supports, or upgrade DefenseClaw (the message names the range)"
 	case fleet.CheckIssuer:
 		return "give this cluster its own actor token issuer: defenseclaw substrate setup --issuer URL, then ate-setup deploy"
+	case fleet.CheckSignInServer:
+		return "fix the sign-in server address, certificate or trust bundle the line names (kubectl logs deploy/defenseclaw-gateway | grep oidc_issuer shows the detail), then run doctor again"
 	case fleet.CheckBucket:
 		return "turn on encryption and block public access on the snapshot bucket, and set a retention period"
 	case fleet.CheckGrants:

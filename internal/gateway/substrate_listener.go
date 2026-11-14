@@ -187,6 +187,11 @@ type SubstrateConfig struct {
 	// unauthenticated sign-in information (issuer, client_id, sign_in).
 	Doctor func(ctx context.Context) []SubstrateCheck
 	Info   map[string]any
+	// SignInServer is the OIDC issuer people sign in with (nil: none
+	// configured). The gateway checks it from its own network every
+	// signInCheckEvery; /info names a failing cause, /doctor the detail,
+	// and a sign-in the gateway cannot verify names the cause (GAP-0262).
+	SignInServer SubstrateSignInServer
 	// Secrets are substrate.secrets; SecretStore writes Kubernetes-backed
 	// values (nil: list only).
 	Secrets     []config.SubstrateSecret
@@ -244,6 +249,8 @@ type substrateState struct {
 	// the issuer, the control API), which /info reports so a launcher
 	// never calls a task finished whose every call was refused (GAP-0194).
 	tokens actorTokenHealth
+	// signIn is the last check of the OIDC sign-in server (GAP-0262).
+	signIn signInHealth
 
 	actorOnce, adminOnce sync.Once
 	actorHandler         http.Handler
@@ -352,6 +359,9 @@ func (a *APIServer) RunSubstrate(ctx context.Context) error {
 		return errors.New("substrate: no listener address")
 	}
 	a.startPendingHookRecovery(ctx)
+	if st.cfg.SignInServer != nil {
+		go st.watchSignIn(ctx)
+	}
 	errCh := make(chan error, len(list))
 	var servers []*http.Server
 	for _, s := range list {

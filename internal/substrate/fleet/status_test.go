@@ -56,6 +56,7 @@ func healthyCluster() Observed {
 		IngressClients:  []string{setup.IngressClientID("defenseclaw-system")},
 		ActorRoutes:     []string{"/api/v1/substrate/hook/{connector}", "/api/v1/substrate/notify/{connector}", "/api/v1/substrate/inspect/{connector}", "/llm/{provider}", "/v1/logs", "/v1/metrics", "/v1/traces"},
 		NamespaceLabels: map[string]string{APIAccessLabel: "true"},
+		SignInIssuer:    "https://kc.cluster-a.example/realms/dc", SignInRead: true,
 	}
 }
 

@@ -275,3 +275,20 @@ func (v *PersonVerifier) Verify(ctx context.Context, token string) (Person, erro
 	}
 	return p, nil
 }
+
+// SignInKeySet is the key set of the first person issuer (the OIDC issuer
+// people sign in with), nil when there is none: workload issuers are not a
+// sign-in server (GAP-0262).
+func (v *PersonVerifier) SignInKeySet() *KeySet {
+	if v == nil {
+		return nil
+	}
+	for _, list := range v.issuers {
+		for _, i := range list {
+			if i.Kind == PersonHuman && i.KeySet != nil {
+				return i.KeySet
+			}
+		}
+	}
+	return nil
+}

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/substrate/identity"
 	"io"
 	"os"
 	"os/signal"
@@ -231,6 +232,10 @@ func substrateAPIExit(e *api.Error) int {
 // substrateAPIMessage says what the cluster answered in plain words, with
 // the fix where there is one.
 func substrateAPIMessage(e *api.Error) string {
+	if why := signInServerWords(e.Reason); why != "" {
+		// GAP-0262: the cluster gateway cannot verify any sign-in.
+		return "the cluster cannot check your sign-in: " + why + " (" + e.Reason + "). Ask your administrator to run defenseclaw-gateway substrate doctor --cluster"
+	}
 	switch {
 	case e.Unauthorized():
 		return "the cluster did not accept your sign-in (" + orWord(e.Reason, "token refused") + "). Sign in again with: defenseclaw substrate login"
@@ -314,4 +319,24 @@ func init() {
 		newSubstrateDoctorCmd(), newSubstrateVerifyCmd(), newSubstrateSetupCmd(), newSubstrateBundleCmd(), newSubstrateTemplateCmd(),
 	)
 	rootCmd.AddCommand(substrateCmd)
+}
+
+// signInServerWords explains a sign-in server cause the gateway names, ""
+// for any other reason (GAP-0262).
+func signInServerWords(reason string) string {
+	switch reason {
+	case identity.IssuerUnreachable:
+		return "its gateway cannot reach the sign-in server"
+	case identity.IssuerTLSName:
+		return "the sign-in server's certificate does not name its address"
+	case identity.IssuerTLSUntrusted:
+		return "the sign-in server's certificate is not trusted by the gateway"
+	case identity.IssuerHTTP:
+		return "the sign-in server does not answer at its configured address"
+	case identity.IssuerMismatch:
+		return "the sign-in server names another issuer than the gateway is configured with"
+	case identity.IssuerKeys:
+		return "the gateway cannot load the sign-in server's keys"
+	}
+	return ""
 }

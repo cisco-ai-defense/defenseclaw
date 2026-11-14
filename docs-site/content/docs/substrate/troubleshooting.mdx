@@ -115,6 +115,19 @@ Ask your administrator to run `defenseclaw substrate verify` and look at `actor_
 
 `snapshot_bucket` is `skipped` only when the install file names no `s3://` or `gs://` snapshot location. It warns "could not be read from here" when the `aws` or `gcloud` CLI is missing, has no credentials, or your identity may not read the bucket's settings (the permissions are in [the reference](/docs/substrate/reference#what-verify-needs)). Run `verify` again with an identity that can. "does not exist" is a failure: Substrate cannot store snapshots there. On Cloud Storage, a bucket whose public access prevention is inherited gets a warning, because `verify` does not read the organization policy. Snapshots hold everything an actor held, so fix a failure before you run agents. `delete` removes an agent's snapshots.
 
+### Nobody can sign in, and `verify` says `sign_in_server` fails
+
+The gateway checks the OIDC sign-in server (`substrate.identity.oidc.issuer`) from its own network every minute, and `verify`, `status --cluster` and `doctor --install-file` show the result as `sign_in_server`. A sign-in the gateway cannot check is refused with the same cause, so the launcher says which one. The causes:
+
+- `issuer_unreachable`: no answer (DNS, connection or timeout). The issuer's address may have changed, for example after the host restarted with a new public name; set `substrate.identity.oidc.issuer` to the address it answers on now, or see the network policy below.
+- `issuer_tls_name`: the certificate does not name the issuer host. Issue a certificate whose names include it.
+- `issuer_tls_untrusted`: the certificate does not verify against the gateway's trust bundle. Set `gateway.oidcCA` to the CA that signed it, or renew an expired certificate.
+- `issuer_http`: the address does not serve a discovery document. Use the address that ends before `/.well-known` (for Keycloak, `.../realms/REALM`).
+- `issuer_mismatch`: the discovery document names another issuer. Set the issuer to exactly that value.
+- `issuer_keys`: the key set (`jwks_uri`) does not load.
+
+The detail (the address, the certificate's names) is in the gateway log (`kubectl logs deploy/defenseclaw-gateway | grep oidc_issuer`) and in the gateway's `substrate.oidc_issuer` doctor row; people who cannot sign in see only the cause.
+
 ### Sign-in fails with a timeout to the OIDC issuer
 
 The cluster uses a private OIDC issuer (`substrate.identity.oidc.issuer`), and the gateway can't reach it: the launcher can't finish signing in, or the cluster refuses the sign-in right after, and the gateway log shows a timeout to the issuer's address. The chart's default NetworkPolicy lets the gateway reach DNS, the Kubernetes and Substrate APIs, its own Services, OTLP and model providers on 443, and nothing else. Add the issuer's address and port to `networkPolicy.egress.extra` (an example is on [the EKS page](/docs/substrate/eks#attested-templates-in-a-private-registry)), and check that the issuer's security group admits the node and pod subnets. A private CA also needs `gateway.oidcCA`.
