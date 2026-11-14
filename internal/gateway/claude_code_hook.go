@@ -242,12 +242,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 			ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 		}
-		if a.agentHookWindowsDialectHint(ctx) {
+		windowsReadings := a.agentHookWindowsDialectHint(ctx)
+		if windowsReadings {
 			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
 		}
 		if coworkDialect != "" {
 			// The Cowork shell runs in a Linux VM on every host.
 			actionInput.DialectHint = coworkDialect
+			windowsReadings = false
 		}
 		if coworkDeny != nil {
 			verdict = coworkDeny
@@ -263,6 +265,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ShellStartup:                  shellStartupFromContext(ctx),
 				ActiveAgentFileIdentities:     activeAgentContext.identities,
 				SandboxGuestCWD:               req.guestCWD,
+				windowsDialectReadings:        windowsReadings,
 				record:                        toolChainRecorderFromContext(ctx),
 			}, command, commandTool)
 		}

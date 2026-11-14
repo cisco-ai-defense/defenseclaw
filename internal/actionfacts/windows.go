@@ -1687,12 +1687,6 @@ func windowsClassifyCommand(
 	if expectedProgram == "" || command.Program != expectedProgram {
 		// Basenames alone are not enough to trust a path-qualified binary:
 		// C:\tmp\reg.exe does not inherit the grammar of the system reg.exe.
-		// NetExec is the exception: it is installed per user (for example
-		// pipx under %USERPROFILE%), and its recognizer only ever adds a
-		// credential-use finding, never a safe grammar.
-		if windowsClassifyPathQualifiedNetExec(command, builder) {
-			return
-		}
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -4898,7 +4892,7 @@ func windowsClassifyWeb(
 		// PowerShell's unqualified wget alias owns Invoke-WebRequest
 		// parameters such as -InFile. Only a literal real wget executable argv
 		// can inherit the independently closed GNU Wget grammar.
-		if !windowsNativeWebArgvUncertain(command) &&
+		if !windowsPowerShellNativeArgvUncertain(command) &&
 			windowsExactNativeWebArgv(command, args) {
 			parsed := parseWgetArgv(command.Argv)
 			if parsed.ConfigDisabled &&
@@ -5083,7 +5077,7 @@ func windowsClassifyCurl(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
-	if windowsNativeWebArgvUncertain(command) {
+	if windowsPowerShellNativeArgvUncertain(command) {
 		// Windows PowerShell 5.1 reserializes native argv through a legacy
 		// quoting layer. Literal double quotes, standalone empty arguments,
 		// and unquoted expression delimiters can therefore change the argv
@@ -5103,7 +5097,11 @@ func windowsClassifyCurl(
 	windowsClassifyCurlRecovery(command, args, builder)
 }
 
-func windowsNativeWebArgvUncertain(command *CommandFact) bool {
+// windowsPowerShellNativeArgvUncertain reports a PowerShell native-command argv
+// that Windows PowerShell 5.1 can reserialize: a literal double quote, a quoted
+// empty argument, or an unquoted expression delimiter. The argv the native
+// child receives is then not the one the lexer saw.
+func windowsPowerShellNativeArgvUncertain(command *CommandFact) bool {
 	if command == nil || command.Dialect != DialectPowerShell {
 		return false
 	}
@@ -5128,11 +5126,6 @@ func windowsExactNativeWebArgv(command *CommandFact, args []windowsWord) bool {
 		argument := command.Arguments[index]
 		if argument.Expands || argument.Quote == QuoteMixed ||
 			argument.Value != command.Argv[index] {
-			return false
-		}
-		if command.Dialect == DialectPowerShell &&
-			(strings.ContainsRune(argument.Value, '"') ||
-				argument.Value == "" && argument.Quote != QuoteNone) {
 			return false
 		}
 	}
@@ -5773,7 +5766,8 @@ func windowsEndpoint(word windowsWord) (string, string, int64, bool) {
 // cmd the same closed recognizers as the POSIX classifier
 // (rel-1-0-10:GAP-0051): an NTDS dump, or a complete statically credentialed
 // domain-service call, adds a credential-read operation; anything else stays
-// partial.
+// partial. A NetExec installed per user (pipx under the profile, C:\Tools) is
+// the same family: netExecProgramFamily is applied where Program is derived.
 func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
 	if _, ok := exactDirectoryCredentialCommand(*command); ok ||
 		ExactNetExecDomainServiceAuth(*command) {
@@ -5781,26 +5775,4 @@ func windowsClassifyNetExec(command *CommandFact, builder *windowsFactBuilder) {
 		return
 	}
 	builder.out.markPartial(IssueUnknownOperandGrammar)
-}
-
-// windowsClassifyPathQualifiedNetExec classifies C:\Tools\nxc.exe and other
-// path-qualified NetExec binaries as the nxc family, but only when the argv is a
-// recognized credentialed call. Otherwise it leaves the command untouched.
-func windowsClassifyPathQualifiedNetExec(command *CommandFact, builder *windowsFactBuilder) bool {
-	// Program is empty here (the path is untrusted); the executable basename
-	// names the binary.
-	base := path.Base(strings.ReplaceAll(command.Executable, "\\", "/"))
-	family := strings.TrimSuffix(strings.ToLower(base), ".exe")
-	if _, ok := netExecDirectoryPrograms[family]; !ok {
-		return false
-	}
-	candidate := *command
-	candidate.Program = family
-	if _, ok := exactDirectoryCredentialCommand(candidate); !ok &&
-		!ExactNetExecDomainServiceAuth(candidate) {
-		return false
-	}
-	command.Program = family
-	windowsClassifyNetExec(command, builder)
-	return true
 }

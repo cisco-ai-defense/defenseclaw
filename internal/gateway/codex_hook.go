@@ -321,8 +321,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
-		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
-			(cfg == nil || !cfg.SecureClientIntegration()) {
+		windowsReadings := windowsHookHost() && !isSandboxHookRequest(ctx) &&
+			(cfg == nil || !cfg.SecureClientIntegration())
+		if windowsReadings {
 			actionInput.DialectHint = selectWindowsShellDialect(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
@@ -338,6 +339,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
+			windowsDialectReadings:        windowsReadings,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {

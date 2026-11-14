@@ -279,6 +279,12 @@ type trustedActionRequest struct {
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
+	// windowsDialectReadings is set by the Windows hooks, which choose one shell
+	// dialect per call: a call whose chosen reading is not complete is also judged
+	// as the other shell and as its readable statements (windowsReadingTwinRequests).
+	windowsDialectReadings bool
+	// readingTwin marks a request that is itself one of those readings.
+	readingTwin bool
 	// generation is the rule generation the call is judged with; nil: the
 	// request profile's (snapshotRulePackGenerationFor). A caller that
 	// combines several dispatches of one request judges each with each
@@ -571,6 +577,11 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	for _, twin := range windowsReadingTwinRequests(request, facts) {
+		defer func() {
+			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.

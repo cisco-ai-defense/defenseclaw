@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from defenseclaw.audit_time_order import audit_time_order
-from defenseclaw.hook_metrics import connector_hook_decision
+from defenseclaw.hook_metrics import CONNECTOR_HOOK_PAIR_ACTIONS, HOOK_DECISION_ACTION, hook_row_decision
 from defenseclaw.models import ActionEntry, Event
 from defenseclaw.tui.services.event_models import parse_timestamp, timestamp_label
 
@@ -321,6 +321,13 @@ class AuditPanelModel:
                 return f"EVENT: {connector} hook"
             if hook_phase:
                 return f"EVENT: {hook_phase}"
+        if event.action == HOOK_DECISION_ACTION:
+            # The only local row of a benign per-user allow (S8 R4, #1384)
+            # names its call as the connector-hook row did.
+            connector = event_connector(event)
+            hook_phase = event.target or _structured_text(event.structured, "defenseclaw.hook.event")
+            if connector and hook_phase:
+                return f"EVENT: {connector} {hook_phase}"
         return f"EVENT: {event.action}"
 
     def row_views(self) -> tuple[AuditRowView, ...]:
@@ -1110,8 +1117,9 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
             return False
         if event.enforced is True:
             return True
-        if action == "connector-hook":
-            return connector_hook_decision(event.details, event.structured, event.enforced) == "block"
+        if decision := hook_row_decision(action, event.details, event.structured, event.enforced):
+            # Either hook row kind, one classifier (S8 R4, #1384).
+            return decision == "block"
         if _structured_text(event.structured, "defenseclaw.guardrail.effective_action") == "block":
             return True
         if "config" in action and not any(token in action for token in ("block", "deny", "quarantine")):
@@ -1127,25 +1135,35 @@ def _matches_common_filter(event: Event, preset: AuditCommonFilter) -> bool:
 
 
 def _without_duplicate_hook_decisions(events: list[Event]) -> list[Event]:
-    """Drop a ``hook_decision`` row whose call already has a ``connector-hook`` block row.
+    """Drop a ``hook_decision`` row whose call already has a ``connector-hook`` row.
 
     Every hook block is recorded twice (the connector-hook row and its
-    canonical hook_decision); Blocks listed each one twice (GAP-1510).
+    canonical hook_decision); Blocks listed each one twice (GAP-1510). The
+    rows of one decision share a semantic event id, which pairs them exactly
+    (S8 R4, #1384); a hook_decision row alone (a benign per-user allow) stays.
+    A row read without that id falls back to the connector and a 2-second
+    window.
     """
 
-    hook_blocks = [
+    paired = {
+        event.semantic_event_id
+        for event in events
+        if event.action.lower() in CONNECTOR_HOOK_PAIR_ACTIONS and event.semantic_event_id
+    }
+    hook_rows = [
         (event_connector(event).lower(), event.timestamp)
         for event in events
         if event.action.lower() == "connector-hook"
     ]
-    if not hook_blocks:
-        return events
     kept: list[Event] = []
     for event in events:
-        if event.action.lower() == "hook_decision":
-            connector = event_connector(event).lower()
-            if any(
-                name == connector and _seconds_apart(event.timestamp, at) <= 2.0 for name, at in hook_blocks
+        if event.action.lower() == HOOK_DECISION_ACTION:
+            if event.semantic_event_id:
+                if event.semantic_event_id in paired:
+                    continue
+            elif any(
+                name == event_connector(event).lower() and _seconds_apart(event.timestamp, at) <= 2.0
+                for name, at in hook_rows
             ):
                 continue
         kept.append(event)
@@ -1228,8 +1246,8 @@ def _event_decision(event: Event) -> str:
 
     if _matches_common_filter(event, "blocks"):
         return "block"
-    if event.action.lower() == "connector-hook":
-        return (connector_hook_decision(event.details, event.structured, event.enforced) or "").lower()
+    if decision := hook_row_decision(event.action, event.details, event.structured, event.enforced):
+        return decision
     return (_structured_text(event.structured, "defenseclaw.guardrail.effective_action") or "").lower()
 
 
