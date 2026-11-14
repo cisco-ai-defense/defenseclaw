@@ -1605,7 +1605,7 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 	var allFindings []string
 	var allReasons []string
 	totalEntityCount := 0
-	allFailed := true
+	allFailed, anyFailed := true, false
 	findingSeverity := map[string]string{}
 
 	for _, v := range verdicts {
@@ -1624,12 +1624,15 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 		}
 		if !v.JudgeFailed {
 			allFailed = false
+		} else {
+			anyFailed = true
 		}
 	}
 
 	if best.Action == "allow" && len(allFindings) == 0 {
 		v := allowVerdict("llm-judge")
 		v.JudgeFailed = allFailed
+		v.judgeDegraded = anyFailed
 		return v
 	}
 
@@ -1641,6 +1644,7 @@ func mergeJudgeVerdicts(verdicts []*ScanVerdict) *ScanVerdict {
 		EntityCount:     totalEntityCount,
 		Scanner:         "llm-judge",
 		findingSeverity: findingSeverity,
+		judgeDegraded:   anyFailed,
 	}
 }
 

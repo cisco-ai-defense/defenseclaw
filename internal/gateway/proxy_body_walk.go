@@ -391,14 +391,21 @@ type textWalker struct {
 	// calls and results: the canonical OpenClaw probes are left out of user
 	// text only (GAP-0251), the one place OpenClaw sends them; probe is set
 	// when a user text held one.
-	user      int
-	result    int
-	probe     bool
-	ambiguous string // why the body can be read two ways, if it can
-	reply     bool
-	stream    bool // reply event of a stream: calls under delta, item and content_block belong to sseToolCalls
-	skipCalls bool
-	calls     []sseToolCall
+	user   int
+	result int
+	probe  bool
+	// redact, when set, names the refused history segments to remove
+	// (redactRefusedHistory): a turn string whose segment it holds is
+	// replaced in the tree; turn is the index of the turn being read
+	// (-1 outside the turn lists).
+	redact     map[historyHash]historyRefusal
+	redactions []historyRedaction
+	turn       int
+	ambiguous  string // why the body can be read two ways, if it can
+	reply      bool
+	stream     bool // reply event of a stream: calls under delta, item and content_block belong to sseToolCalls
+	skipCalls  bool
+	calls      []sseToolCall
 	// cur is the object whose value is being read and curKey the field it
 	// sits under (media positions); payload counts the free-form payloads
 	// (tool input and results) the walker is inside.
@@ -422,7 +429,8 @@ func isResultType(t string) bool {
 	return strings.HasSuffix(t, "_call_output")
 }
 
-func (w *textWalker) add(s string) {
+// add collects the text s and returns the segment it read ("" for none).
+func (w *textWalker) add(s string) string {
 	if w.user > 0 && w.result == 0 && w.payload == 0 {
 		// The heartbeat and session-startup prompts are left out as the exact
 		// canonical sentences only (guardrail_probe.go); the rest of the text
@@ -433,13 +441,14 @@ func (w *textWalker) add(s string) {
 		}
 	}
 	if strings.TrimSpace(s) == "" {
-		return
+		return ""
 	}
 	if w.history > 0 {
 		w.hist = append(w.hist, s)
-		return
+		return s
 	}
 	w.segs = append(w.segs, s)
+	return s
 }
 
 func (w *textWalker) flag(why string) {
@@ -481,7 +490,12 @@ func (w *textWalker) walk(n *jnode, key string, depth int) {
 		if w.payload == 0 && (walkSkipScalar[normKey(key)] || w.mediaValue(key, n.s)) {
 			return
 		}
-		w.add(n.s)
+		if seg := w.add(n.s); seg != "" && w.redact != nil && w.turn >= 0 {
+			if rf, ok := w.redact[historyHashOf(seg)]; ok {
+				n.s = historyRedactedText
+				w.redactions = append(w.redactions, historyRedaction{Turn: w.turn, Rule: rf.rule})
+			}
+		}
 	case 'a':
 		if w.reply && replyCallKeys[normKey(key)] {
 			for _, c := range n.kids {
@@ -630,7 +644,10 @@ func (w *textWalker) walkTurns(list *jnode) {
 		if user {
 			w.user++
 		}
+		prevTurn := w.turn
+		w.turn = i
 		w.walk(it, "", 1)
+		w.turn = prevTurn
 		if user {
 			w.user--
 		}
@@ -713,6 +730,19 @@ func passthroughPromptFor(body []byte, jsonHint bool, max int) passthroughSidePr
 		seen[f] = true
 	}
 	w.checkKeys(root)
+	w.walkRequest(root)
+	side := passthroughSidePrompt{Segments: w.segs, History: w.hist, Unreadable: w.ambiguous}
+	// A body whose only text is a probe carries a prompt: the probe.
+	if len(w.segs) == 0 && !w.probe && prompt && side.Unreadable == "" {
+		side.Unreadable = "the body carries no prompt text"
+	}
+	return side
+}
+
+// walkRequest reads the fields of a request object: the turn lists by turn
+// (walkTurns), every other field but the bookkeeping ones as text.
+func (w *textWalker) walkRequest(root *jnode) {
+	w.turn = -1
 	for i, k := range root.keys {
 		c := root.kids[i]
 		switch f := foldPromptKey(k); {
@@ -734,12 +764,36 @@ func passthroughPromptFor(body []byte, jsonHint bool, max int) passthroughSidePr
 			}
 		}
 	}
-	side := passthroughSidePrompt{Segments: w.segs, History: w.hist, Unreadable: w.ambiguous}
-	// A body whose only text is a probe carries a prompt: the probe.
-	if len(w.segs) == 0 && !w.probe && prompt && side.Unreadable == "" {
-		side.Unreadable = "the body carries no prompt text"
+}
+
+// historyRedaction is one refused turn string the proxy removed from a
+// request: the index of its turn and the rule that refused it.
+type historyRedaction struct {
+	Turn int
+	Rule string
+}
+
+// redactRefusedHistory rewrites a JSON request body: every turn string whose
+// segment is in refused (the history segments of requests the proxy
+// refused, GAP-0254) is replaced by historyRedactedText. The turns, their
+// roles and order, and every other field stay. ok is false when nothing was
+// replaced (the body is not a JSON object, or holds none of them): the
+// caller then refuses the request.
+func redactRefusedHistory(body []byte, max int, refused map[historyHash]historyRefusal) (out []byte, reds []historyRedaction, ok bool) {
+	trimmed := bytes.TrimSpace(body)
+	if len(refused) == 0 || len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, nil, false
 	}
-	return side
+	root, err := parseJSONTree(trimmed, max)
+	if err != nil || root.kind != 'o' {
+		return nil, nil, false
+	}
+	w := &textWalker{redact: refused}
+	w.walkRequest(root)
+	if len(w.redactions) == 0 {
+		return nil, nil, false
+	}
+	return []byte(root.json()), w.redactions, true
 }
 
 // passthroughPromptForRequest reads a request body by its content type: a

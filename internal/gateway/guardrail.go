@@ -69,6 +69,10 @@ type ScanVerdict struct {
 	ScannerSources []string `json:"scanner_sources,omitempty"`
 	CiscoElapsedMs float64  `json:"cisco_elapsed_ms,omitempty"`
 	JudgeFailed    bool     `json:"-"`
+	// judgeDegraded is set when some, not all, of the judges merged into
+	// the verdict failed (mergeJudgeVerdicts); the inspection is degraded
+	// (GAP-0255). In-process only.
+	judgeDegraded bool
 	// EvaluationID + RuleIDs are populated by the guardrail Inspect
 	// runtime emitter so downstream observers (recordTelemetry,
 	// EventVerdict, BlockEvent) can join this verdict to the
@@ -539,6 +543,7 @@ func (g *GuardrailInspector) SetPanicRecorderFunc(record func(ctx context.Contex
 }
 
 func (g *GuardrailInspector) recordRecoveredPanic(ctx context.Context) {
+	markInspectDegraded(ctx)
 	if g == nil || g.tracer == nil || g.tracer.recordPanic == nil {
 		return
 	}
@@ -909,7 +914,13 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 // what sends tool calls, in a shape it builds itself. client is the caller's
 // currentCiscoInspector snapshot.
 func inspectCisco(ctx context.Context, client Inspector, messages []ChatMessage) *ScanVerdict {
-	return client.Inspect(ctx, withoutAIDToolCalls(messages))
+	v := client.Inspect(ctx, withoutAIDToolCalls(messages))
+	if v == nil {
+		// No verdict (down, timeout, token failure): the request fails open
+		// past AI Defense, so the inspection is degraded (GAP-0255).
+		markInspectDegraded(ctx)
+	}
+	return v
 }
 
 // withoutAIDToolCalls copies messages with ToolCalls cleared, leaving the
@@ -993,6 +1004,8 @@ const (
 // surfaced as a HIGH-severity error by the client's EmitCiscoError; this adds
 // the decision-level fail-open signal on top of that.
 func (g *GuardrailInspector) recordManagedAIDFailOpen(ctx context.Context, reason, direction string) {
+	// AI Defense decided nothing: the inspection is degraded (GAP-0255).
+	markInspectDegraded(ctx)
 	var record func(context.Context, string, string)
 	if g != nil {
 		g.managedAIDFailOpenMu.RLock()
@@ -1249,6 +1262,9 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
+			if judge != nil {
+				markInspectDegraded(ctx)
+			}
 			judgeVerdict = signalsToVerdict(review, "local-triage-fallback")
 			judgeVerdict.Severity = "MEDIUM"
 			judgeVerdict.Action = "alert"
@@ -1261,6 +1277,9 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		sweepCtx, endSweep := g.startPhaseSpan(ctx, "judge.sweep")
 		judgeVerdict = judge.RunJudges(sweepCtx, direction, content, "")
 		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart))
+		if judgeVerdict == nil || judgeVerdict.JudgeFailed || judgeVerdict.judgeDegraded {
+			markInspectDegraded(ctx)
+		}
 	}
 
 	// Cisco AI Defense (if configured).
@@ -1365,6 +1384,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			reason = "judge-failed (scanner=" + judgeRes.verdict.Scanner + ")"
 		}
 		fmt.Fprintf(defaultLogWriter, "  [guardrail] judge_first: judge unavailable (%s dir=%s), falling back to regex_only\n", reason, direction)
+		markInspectDegraded(ctx)
 		fallbackStart := time.Now()
 		_, endFallback := g.startPhaseSpan(ctx, "regex.fallback")
 		localResult := scanLocalPatternsFor(ctx, direction, content)
@@ -1390,6 +1410,10 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	merged := judgeRes.verdict
+	if merged.judgeDegraded {
+		// Some judges failed: their categories fell back to the regex net.
+		markInspectDegraded(ctx)
+	}
 
 	// Always merge the regex safety net — even when the judge succeeded,
 	// it may have missed categories that only regex covers. HIGH_SIGNAL

@@ -5,7 +5,9 @@ package gateway
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,6 +123,26 @@ type f14Rig struct {
 	insp  *covInspector
 	up    *covUpstream
 	prov  *mockProvider
+	// capt is the upstream the requests name: it keeps every body it gets.
+	capt   *httptest.Server
+	cmu    sync.Mutex
+	bodies [][]byte
+}
+
+// lastBody is the body the upstream got last (nil: none).
+func (rg *f14Rig) lastBody() []byte {
+	rg.cmu.Lock()
+	defer rg.cmu.Unlock()
+	if len(rg.bodies) == 0 {
+		return nil
+	}
+	return rg.bodies[len(rg.bodies)-1]
+}
+
+func (rg *f14Rig) hits() int {
+	rg.cmu.Lock()
+	defer rg.cmu.Unlock()
+	return len(rg.bodies)
 }
 
 func newF14Rig(t *testing.T, provider, mode string) *f14Rig {
@@ -145,7 +167,17 @@ func newF14RigWith(t *testing.T, provider, mode string, probe bool) *f14Rig {
 	proxy.gatewayToken = f14GatewayToken
 	prov := &mockProvider{}
 	proxy.resolveProviderFn = func(*ChatRequest) LLMProvider { return prov }
-	return &f14Rig{proxy: proxy, insp: insp, up: up, prov: prov}
+	rg := &f14Rig{proxy: proxy, insp: insp, up: up, prov: prov}
+	rg.capt = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		rg.cmu.Lock()
+		rg.bodies = append(rg.bodies, b)
+		rg.cmu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"r1"}`))
+	}))
+	t.Cleanup(rg.capt.Close)
+	return rg
 }
 
 // f14Caller is who sends a request: a verified host caller (the gateway
@@ -154,6 +186,9 @@ type f14Caller struct {
 	session string
 	actor   *substrateActor
 	owner   bool
+	// edit, when set, changes the request last (a pinned generation, a
+	// signature header).
+	edit func(*http.Request) *http.Request
 }
 
 func (rg *f14Rig) post(t *testing.T, w f14Wire, c f14Caller, items []f14Item, stream bool) (forwarded bool, rec *httptest.ResponseRecorder) {
@@ -168,16 +203,19 @@ func (rg *f14Rig) post(t *testing.T, w f14Wire, c f14Caller, items []f14Item, st
 	}
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-DC-Target-URL", rg.up.srv.URL)
+	req.Header.Set("X-DC-Target-URL", rg.capt.URL)
 	req.Header.Set("X-AI-Auth", "Bearer test-key")
 	if c.owner {
 		req.Header.Set("X-DC-Auth", "Bearer "+f14GatewayToken)
 	}
 	req.RemoteAddr = "127.0.0.1:12345"
+	if c.edit != nil {
+		req = c.edit(req)
+	}
 	rg.prov.mu.Lock()
 	rg.prov.lastReq = nil
 	rg.prov.mu.Unlock()
-	before := rg.up.count()
+	before := rg.hits()
 	rec = httptest.NewRecorder()
 	rg.proxy.handlePassthrough(rec, req)
 	if w.chat {
@@ -186,7 +224,7 @@ func (rg *f14Rig) post(t *testing.T, w f14Wire, c f14Caller, items []f14Item, st
 		rg.prov.mu.Unlock()
 	}
 	// The chat route forwards to X-DC-Target-URL when it is set.
-	forwarded = forwarded || rg.up.count() > before
+	forwarded = forwarded || rg.hits() > before
 	return forwarded, rec
 }
 
@@ -347,7 +385,11 @@ func TestGAP0244BenignChatInspectsEachSegmentOnce(t *testing.T) {
 }
 
 // A prompt refused as the current turn, which the client keeps in its
-// history, does not block the benign turn after it.
+// history, does not block the benign turn after it, and never reaches the
+// upstream either: the proxy replaces its text with the DefenseClaw
+// placeholder, keeping the turn and the role order (GAP-0254). The chat
+// route (OSS) re-blocked on the base and forwarded it on 5d85a15bed.
+// proxy_history_redact_test.go has the full matrix.
 func TestGAP0244OldBlockedTurnDoesNotBlockLaterTurns(t *testing.T) {
 	covAllowPrivate(t)
 	for _, managed := range []bool{false, true} {
@@ -361,9 +403,11 @@ func TestGAP0244OldBlockedTurnDoesNotBlockLaterTurns(t *testing.T) {
 						t.Fatalf("the marker as the current turn was not refused")
 					}
 					next := []f14Item{{"user", covMarker}, {"assistant", "[DefenseClaw] blocked"}, {"user", "a harmless sentence"}}
-					if fwd, rec := rg.post(t, w, c, next, stream); !fwd {
-						t.Errorf("a blocked turn in the history blocked a benign new turn (status %d): %s", rec.Code, rec.Body)
+					fwd, rec := rg.post(t, w, c, next, stream)
+					if !fwd {
+						t.Fatalf("a blocked turn in the history blocked a benign new turn (status %d): %s", rec.Code, rec.Body)
 					}
+					f14CheckRedacted(t, w, rg.lastBody())
 					if n := rg.insp.inspections(covMarker); n != 1 {
 						t.Errorf("the blocked turn was inspected %d times, want 1 (when it was new)", n)
 					}
@@ -374,6 +418,38 @@ func TestGAP0244OldBlockedTurnDoesNotBlockLaterTurns(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// f14CheckRedacted checks what the upstream got for [refused user turn,
+// (laundered block turn), benign user turn]: the refused text is gone, the
+// first turn is still a user turn and holds the placeholder, the benign turn
+// is last.
+func f14CheckRedacted(t *testing.T, w f14Wire, body []byte) {
+	t.Helper()
+	if body == nil {
+		t.Fatal("the upstream got no body")
+	}
+	if bytes.Contains(body, []byte(covMarker)) {
+		t.Fatalf("the refused text reached the upstream: %s", body)
+	}
+	var b map[string]any
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatalf("the upstream got no JSON: %v: %s", err, body)
+	}
+	key := map[string]string{"responses": "input", "chat": "messages", "anthropic": "messages", "gemini": "contents", "converse": "messages"}[w.name]
+	turns, _ := b[key].([]any)
+	if len(turns) < 2 {
+		t.Fatalf("the upstream got %d turns: %s", len(turns), body)
+	}
+	first, _ := json.Marshal(turns[0])
+	last, _ := json.Marshal(turns[len(turns)-1])
+	role, _ := turns[0].(map[string]any)["role"].(string)
+	if role != "user" || !strings.Contains(string(first), "Removed by DefenseClaw policy") {
+		t.Errorf("the refused turn is not a user turn holding the placeholder: %s", first)
+	}
+	if !strings.Contains(string(last), "a harmless sentence") {
+		t.Errorf("the benign turn is not the last one: %s", body)
 	}
 }
 
