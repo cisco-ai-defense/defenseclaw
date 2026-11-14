@@ -285,6 +285,22 @@ var judgeReadOnlyPrograms = map[string]bool{
 	"realpath": true, "readlink": true, "basename": true, "dirname": true, "echo": true, "printf": true, "true": true,
 }
 
+// judgeInputCutKey marks a tool call that reaches the judge cut at a bound,
+// with the unknown-tier floor laid on its verdict afterwards (the ACP
+// guard's kept call state, a frame read relative to no directory). A parse
+// of what was kept proves nothing about what was cut, so such a call is never
+// a proven read and is judged.
+type judgeInputCutKey struct{}
+
+func withJudgeInputCut(ctx context.Context) context.Context {
+	return context.WithValue(ctx, judgeInputCutKey{}, true)
+}
+
+func judgeInputCut(ctx context.Context) bool {
+	cut, _ := ctx.Value(judgeInputCutKey{}).(bool)
+	return cut
+}
+
 // hookJudgeSkipsProvenReadOnly reports a tool call the rules did not flag
 // and the parser proves only reads (ask the judge about the
 // calls the rules leave open, not about reads): the parse is complete and
@@ -295,7 +311,7 @@ var judgeReadOnlyPrograms = map[string]bool{
 // review of a read, and a later call that sends what was read still meets
 // it, because the read is kept in the session history (TARGET_HISTORY).
 func hookJudgeSkipsProvenReadOnly(ctx context.Context, toolName, args string, current *ToolInspectVerdict) bool {
-	if rulesFlagged(current) {
+	if rulesFlagged(current) || judgeInputCut(ctx) {
 		return false
 	}
 	in := actionfacts.Input{Tool: toolName, ActiveHome: hookActiveHome(ctx)}
