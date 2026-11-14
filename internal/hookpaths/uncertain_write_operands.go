@@ -28,6 +28,21 @@ var uncertainWriteVerbs = map[string]bool{
 // files alone, so the pack tier decides it (GAP-0350), never a plain allow.
 // startup is the agent's shell startup (nil: this process's own).
 func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
+	return uncertainWriteReason(command, cwd, home, startup, false)
+}
+
+// UncertainGlobWriteReason is UncertainWriteReason for the operands whose
+// pieces are all known and whose glob reading is what the resolver cannot
+// settle: a glob form it does not model, a glob option the call may have
+// changed, a directory it cannot read, a result past its bound. An operand
+// that holds an unknown variable or a command substitution is left to the
+// dynamic-operand proofs of the gateway, which judge it with the whole
+// command in view (rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380).
+func UncertainGlobWriteReason(command, cwd, home string, startup *ShellStartup) string {
+	return uncertainWriteReason(command, cwd, home, startup, true)
+}
+
+func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, globOnly bool) string {
 	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return ""
 	}
@@ -44,6 +59,9 @@ func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) stri
 	reason := ""
 	check := func(word *syntax.Word) {
 		if reason != "" || word == nil {
+			return
+		}
+		if globOnly && !resolverWordKnown(word, values) {
 			return
 		}
 		reason = resolveWriteWord(word, values, cwd, options).uncertain

@@ -1614,7 +1614,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if readsOnly {
 				enforcement = findingEnforcementAlertOnly
 			}
-			if readsOnly {
+			// A copy of the user's own SSH folder content to a private place of the
+			// same home, with nothing else written, alerts in every pack: it is
+			// no mutation of the keys the user's ssh reads (rel-1-0-10:GAP-0018).
+			ownFolderCopy := !unprovenOnly && !readsOnly && named.ID == rule.ID &&
+				trustedActionOwnSSHFolderCopy(request, input)
+			if ownFolderCopy {
+				enforcement = findingEnforcementAlertOnly
+			}
+			if ownFolderCopy {
+				title = ownSSHFolderCopyTitle
+			} else if readsOnly {
 				title = nonWriteKeyMentionTitle
 			} else if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle

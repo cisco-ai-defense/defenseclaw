@@ -44,7 +44,7 @@ func TestUncertainGlobFormsAreNeverAPlainAllow(t *testing.T) {
 		for name, value := range variant.Env {
 			t.Setenv(name, value)
 		}
-		uncertain := hookpaths.UncertainWriteReason(variant.Command, project, home, nil) != ""
+		uncertain := hookpaths.UncertainGlobWriteReason(variant.Command, project, home, nil) != ""
 		if uncertain {
 			checked++
 			for _, strict := range []bool{false, true} {
