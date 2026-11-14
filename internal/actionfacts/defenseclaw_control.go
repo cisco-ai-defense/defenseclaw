@@ -578,6 +578,8 @@ func (r *controlReader) read(facts Facts, text string, depth int) {
 		// here-documents and here-strings are read as the scripts they are.
 		if commands := bashCommands(text); len(commands) > 0 {
 			facts.Commands = commands
+			// More commands than the bound reads: the rest is unresolved.
+			unresolved = len(commands) >= maxBashCommands
 		}
 		for _, body := range heredocBodies(text) {
 			if containsFold(body, defenseClawNamespace) {
