@@ -122,6 +122,10 @@ A cascade-2 confirmation:
 
 The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3), and a block answer is not confident (`escalate_rule_flagged`): it asks (cascade 2) or goes to the judge (cascade 3). Why both gates: on real work (owner sessions) and the public benchmarks, a block answer alone was wrong often enough to block ordinary commands; requiring the risk score as well cut those false blocks by about two thirds, at a cost in block recall (the calls it no longer blocks still ask or alert). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
 
+### When the judge is late, failing or busy (cascade 3)
+
+The decision model answers before the judge takes one of its slots. A confident block is a HIGH `JUDGE-DECISION-MODEL` finding that stands whenever the judge gives no verdict: it fails, misses the hook answer window, has no free slot, or the hook's judge time is spent. A judge that answers late is ignored; it can never remove the finding. Any other answer (an escalation) keeps the rule verdict when the judge cannot run. The decision model's finding does not replace a fail-closed refusal: under `hook_fail_mode: closed` a call the rules escalated to the judge as CRITICAL is still refused when the judge gives no verdict.
+
 ## When it is down
 
 A decision model that is unreachable, slower than `timeout` (1 second; in cascade 3 never more than a quarter of the time left, about 0.85 s at most on a hook), or answers outside the protocol never allows a call by itself:

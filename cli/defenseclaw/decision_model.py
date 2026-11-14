@@ -111,9 +111,10 @@ def apply_settings(
         updated.allow_threshold = float(allow_threshold)
     if block_threshold is not None:
         updated.block_threshold = float(block_threshold)
-    if on_confident_block is not None:
+    if on_confident_block is not None or (updated.on_confident_block or "").strip().lower() == "decide":
         # decide is retired (it acts as escalate): never write it, and drop
-        # an old one, so the file holds only what the gateway does.
+        # an old one on any setup write, so the file holds only what the
+        # gateway does.
         updated.on_confident_block = ""
     if hook_connectors is not None:
         updated.hook_connectors = parse_connectors(hook_connectors)

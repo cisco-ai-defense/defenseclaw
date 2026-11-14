@@ -608,7 +608,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 	if dm == nil {
 		return j.runToolJudgeLLM(ctx, toolName, args, sample)
 	}
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := j.decideOnce(ctx, sample, toolName, args)
 	if res.failure == "" && res.logLine != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] %s\n", res.logLine)
 	}
@@ -625,14 +625,7 @@ func (j *LLMJudge) runToolDecision(ctx context.Context, toolName, args, sample s
 		emitDecisionModel(ctx, dm.model, toolName, args, res, v)
 		return v
 	case decisionBlock:
-		floor := &ScanVerdict{
-			Action:     "block",
-			Severity:   "HIGH",
-			Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, dm.blockAt, res.riskScore, dm.blockRiskScore),
-			Findings:   []string{decisionModelFindingID},
-			Scanner:    decisionModelScanner,
-			Confidence: res.risk,
-		}
+		floor := dm.blockFloor(res)
 		emitDecisionModel(ctx, dm.model, toolName, args, res, floor)
 		// The hook sees the floor before the judge runs, so a judge that
 		// misses the hook answer window cannot drop it (GAP-0392).
@@ -681,7 +674,7 @@ func newDecisionOnlyJudge(cfg *config.Config) *LLMJudge {
 // is never an allow of its own.
 func (j *LLMJudge) runDecisionAlone(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 	dm := j.decision
-	res := dm.decide(ctx, j.takeDecisionState(sample, toolName, args))
+	res := j.decideOnce(ctx, sample, toolName, args)
 	if res.failure != "" && res.refusal == "" {
 		if res.logLine != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] %s (%s)\n", res.logLine, res.failureCause)
@@ -786,7 +779,10 @@ func decisionConfirmWithoutAsk(verdict *ToolInspectVerdict, action string) strin
 // model's floor is stronger or the judge failed.
 func strongerDecisionVerdict(judged, floor *ScanVerdict) *ScanVerdict {
 	if judged == nil || judged.JudgeFailed {
-		return floor
+		// Only the floor: the judge gave no verdict.
+		out := *floor
+		out.decisionFloorOnly = true
+		return &out
 	}
 	if guardrailSeverityRank(judged.Severity) >= guardrailSeverityRank(floor.Severity) {
 		return judged
@@ -876,6 +872,85 @@ func judgeInputHash(content string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
+// blockFloor is the cascade-3 verdict of a confident block: a HIGH
+// JUDGE-DECISION-MODEL finding the judge can raise and never remove.
+func (d *decisionModel) blockFloor(res decisionResult) *ScanVerdict {
+	return &ScanVerdict{
+		Action:     "block",
+		Severity:   "HIGH",
+		Reason:     fmt.Sprintf("decision-model: confident block (risk %.2f >= %.2f, risk score %.2f >= %.2f)", res.risk, d.blockAt, res.riskScore, d.blockRiskScore),
+		Findings:   []string{decisionModelFindingID},
+		Scanner:    decisionModelScanner,
+		Confidence: res.risk,
+	}
+}
+
+// decisionPrepass is a decision-model answer the hook lane got before it
+// took a judge slot (P3-1, S7 sysone review round 3): the decision model is
+// fast and cheap, so it answers even when the judge cannot run (all slots
+// busy, the hook judge budget spent, a deadline too short), and a
+// confident block then still stands as the HIGH floor. The judge path, when
+// it runs, uses this answer and this sample instead of asking again.
+type decisionPrepass struct {
+	judge  *LLMJudge
+	sample string
+	res    decisionResult
+}
+
+type decisionPrepassKey struct{}
+
+// prepareDecision records the call in the judge's session context, asks the
+// decision model once and keeps the answer on ctx. nil when the call is not
+// eligible for the judge (then no model runs, as before) or the judge has no
+// decision model.
+func (j *LLMJudge) prepareDecision(ctx context.Context, toolName, args string) (context.Context, *decisionPrepass) {
+	if j == nil || j.decision == nil {
+		return ctx, nil
+	}
+	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
+	if !eligible {
+		return ctx, nil
+	}
+	p := &decisionPrepass{judge: j, sample: sample, res: j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))}
+	if p.res.route == decisionBlock && !j.decisionOnly {
+		// Visible to the hook before the judge starts (GAP-0392).
+		decisionFloorSlotFrom(ctx).set(j.decision.blockFloor(p.res))
+	}
+	return context.WithValue(ctx, decisionPrepassKey{}, p), p
+}
+
+// decisionPrepassFrom returns the prepass of ctx made for judge j, or nil.
+func decisionPrepassFrom(ctx context.Context, j *LLMJudge) *decisionPrepass {
+	p, _ := ctx.Value(decisionPrepassKey{}).(*decisionPrepass)
+	if p == nil || p.judge != j {
+		return nil
+	}
+	return p
+}
+
+// decideOnce returns the prepass answer when the hook lane already asked
+// the decision model for this call, else asks it now.
+func (j *LLMJudge) decideOnce(ctx context.Context, sample, toolName, args string) decisionResult {
+	if p := decisionPrepassFrom(ctx, j); p != nil && p.sample == sample {
+		return p.res
+	}
+	return j.decision.decide(ctx, j.takeDecisionState(sample, toolName, args))
+}
+
+type judgeUnavailableKey struct{}
+
+// withJudgeUnavailable marks ctx so the LLM judge is not called: the hook
+// lane has no slot, budget or time for it, and only the decision model's
+// answer (the prepass) decides.
+func withJudgeUnavailable(ctx context.Context) context.Context {
+	return context.WithValue(ctx, judgeUnavailableKey{}, true)
+}
+
+func judgeUnavailableFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(judgeUnavailableKey{}).(bool)
+	return v
+}
+
 // decisionFloorSlot carries a cascade-3 decision-model floor (a confident
 // block on its way to the judge) out of the judge goroutine, so the hook
 // can answer with it when the judge is late or fails (GAP-0392). A late
@@ -918,6 +993,8 @@ func (s *decisionFloorSlot) get() *ScanVerdict {
 		return nil
 	}
 	c := *s.floor
+	// A floor read from the slot stands in for a judge that gave nothing.
+	c.decisionFloorOnly = true
 	return &c
 }
 

@@ -763,6 +763,10 @@ def test_retired_decide_is_not_written_and_doctor_warns(home):
     cfg = config_module.load()
     dmod.apply_settings(cfg, on_confident_block="decide")
     assert cfg.decision_model.on_confident_block == ""
+    # Any setup write drops a retired decide, also without the option.
+    plain = config_module.load()
+    dmod.apply_settings(plain, timeout=2)
+    assert plain.decision_model.on_confident_block == ""
     from defenseclaw.commands import cmd_doctor
 
     class _R:
