@@ -10,28 +10,93 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
 // Releases before 1.0.9 own the per-user Windows Kiro command only in the
-// form without the launcher-start answer (preStartAnswerWindowsKiroHookCommand)
-// and match their entries by exact command. After a rollback to one of them,
-// its setup added its own entry beside this release's, and its teardown left
-// this release's behind; with the launcher gone that entry blocks every Kiro
-// tool call (rel-1-0-6 GAP-0676, the GAP-1284 rule). The rollback converter
-// rewrites this release's entries into the earlier form first, and the
-// restore of an aborted rollback puts them back.
+// form without the launcher-start answer and match their entries by exact
+// command. After a rollback to one of them, its setup added its own entry
+// beside this release's, and its teardown left this release's behind; with
+// the launcher gone that entry blocks every Kiro tool call (rel-1-0-6
+// GAP-0676, the GAP-1284 rule). The rollback converter rewrites this
+// release's entries into the target release's form first, and the restore of
+// an aborted rollback puts them back.
+//
+// That form differs by release (the tags 1.0.0, 1.0.2, 1.0.4 to 1.0.8
+// rendered: testdata/kiro_windows_release_hook_forms.json): 1.0.8 renders
+// preStartAnswerWindowsKiroHookCommand, and 1.0.0 to 1.0.7 render it with the
+// earlier Constrained Language fallback end (legacyWindowsAwaitedHookCommand),
+// which is the only form they own. Writing the 1.0.8 form for a rollback to
+// 1.0.5 left entries 1.0.5 could not remove, which outlived the Kiro
+// connector (rel-1-0-10:GAP-0275). 1.0.8 and later own both forms.
+
+// kiroRollbackTargetOwnsPreStartForm reports whether the rollback target
+// release owns preStartAnswerWindowsKiroHookCommand: 1.0.8 and later. An
+// unknown or unparsable target gets the form every 1.0.x release owns.
+func kiroRollbackTargetOwnsPreStartForm(target string) bool {
+	major, minor, patch, ok := parseKiroReleaseVersion(target)
+	if !ok {
+		return false
+	}
+	return major > 1 || (major == 1 && (minor > 0 || patch >= 8))
+}
+
+// parseKiroReleaseVersion reads a DefenseClaw release number such as
+// "1.0.5", "v1.0.8" or "1.0.6-rc.dm2".
+func parseKiroReleaseVersion(value string) (major, minor, patch int, ok bool) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	if cut := strings.IndexAny(value, "-+ "); cut >= 0 {
+		value = value[:cut]
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	numbers := make([]int, 3)
+	for i, part := range parts {
+		n, err := strconv.Atoi(part)
+		if err != nil || n < 0 {
+			return 0, 0, 0, false
+		}
+		numbers[i] = n
+	}
+	return numbers[0], numbers[1], numbers[2], true
+}
 
 // kiroWindowsHookFormPairs are the per-user Kiro commands this release writes
-// for each launcher, paired with the form releases before 1.0.9 wrote.
-func kiroWindowsHookFormPairs(launchers []string) [][2]string {
+// for each launcher, paired with an earlier form. For a rollback (toEarlier)
+// that is the form the target release renders; for the restore of an aborted
+// rollback both earlier forms are paired, so either comes back.
+func kiroWindowsHookFormPairs(launchers []string, target string, toEarlier bool) [][2]string {
 	var pairs [][2]string
 	for _, launcher := range uniqueNonEmptyStrings(launchers) {
 		for _, surface := range []string{"", KiroHookSurfaceV3} {
 			current := windowsKiroHookCommandForBinary(launcher, surface, false)
-			earlier := preStartAnswerWindowsKiroHookCommand(launcher, surface)
-			if current != earlier {
-				pairs = append(pairs, [2]string{current, earlier})
+			preStart := preStartAnswerWindowsKiroHookCommand(launcher, surface)
+			legacy, hasLegacy := legacyWindowsAwaitedHookCommand(preStart)
+			var earlier []string
+			switch {
+			case !toEarlier:
+				earlier = append(earlier, preStart)
+				if hasLegacy {
+					earlier = append(earlier, legacy)
+				}
+			case kiroRollbackTargetOwnsPreStartForm(target) || !hasLegacy:
+				earlier = append(earlier, preStart)
+			default:
+				earlier = append(earlier, legacy)
+				// A 1.0.8-form entry already in the file (an earlier
+				// rollback, or 1.0.8 itself) is one 1.0.0-1.0.7 cannot
+				// remove either.
+				if preStart != legacy {
+					pairs = append(pairs, [2]string{preStart, legacy})
+				}
+			}
+			for _, form := range earlier {
+				if current != form {
+					pairs = append(pairs, [2]string{current, form})
+				}
 			}
 		}
 	}
