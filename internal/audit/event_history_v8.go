@@ -731,8 +731,17 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 	// such a row (StructuredJSONReadSQL). A legacy.audit.* compatibility row
 	// still writes its own structured_json below, or the payload as before.
 	legacyStructured := any(nil)
+	storedPayload := any(string(payloadJSON))
 	if IsLegacyCompatibilityEventName(string(record.EventName())) {
 		legacyStructured = string(payloadJSON)
+		// A legacy.audit.* compatibility row keeps its body in its own
+		// columns (details, structured_json, actor, target) and in the
+		// signed envelope; payload_json repeated the same bytes once more,
+		// about 2.4 KB per connector hook decision (#1384, bar H1). No
+		// reader takes the body of a compatibility row from payload_json
+		// (StructuredJSONReadSQL reads structured_json for them), and the
+		// integrity fields cover the envelope, not this column.
+		storedPayload = nil
 	}
 	legacySeverity := severityValue
 	legacySchemaVersion := any(version.SchemaVersion)
@@ -816,7 +825,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		nullStr(correlation.AgentID), nullStr(correlation.SidecarInstanceID),
 		nullStr(record.Connector()), legacyStepIndex, legacyEnforced, legacyRulePackDir,
 		string(record.Bucket()), string(record.EventName()), string(record.Source()), string(record.Signal()),
-		record.BucketCatalogVersion(), string(payloadJSON), string(storedEnvelope),
+		record.BucketCatalogVersion(), storedPayload, string(storedEnvelope),
 		record.SchemaVersion(), projectionHash,
 		metadata.RedactionProfile, boolInt(record.Mandatory()),
 		nullStr(correlation.EvaluationID), nullStr(correlation.ScanID),

@@ -136,8 +136,10 @@ func TestCorrelationRetentionIsBoundedGraphAwareAndPreservesActiveState(t *testi
 			t.Fatalf("unreferenced old correlation event %s survived", eventID)
 		}
 	}
+	// The kept relationship's only evidence is the source its from node
+	// implies, which is not stored (S8 R5, impliedCorrelationEvidence).
 	for _, table := range []string{"correlation_connector_instances", "correlation_cursors",
-		"correlation_pending_operations", "correlation_relationships", "correlation_relationship_evidence"} {
+		"correlation_pending_operations", "correlation_relationships"} {
 		if countRetentionRows(t, store.db, table) == 0 {
 			t.Fatalf("active/protected table %s was emptied", table)
 		}

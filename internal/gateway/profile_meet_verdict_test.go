@@ -147,11 +147,22 @@ func TestProfileMeetObserverMainHookFindingCannotEnterEnforcingToolChain(t *test
 					}
 					projection, _ := projectAgentHookToolChains(agentHookRequest{toolChain: capture}, connector.ToolCallLifecycleContract{})
 					step, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
-					if got := projection.DetectionStepMask&step != 0; got != tc.wantStep {
-						t.Fatalf("secret-read chain detection step=%v, want %v; projection=%+v", got, tc.wantStep, projection)
+					// The read of a credentials file arms the chain from the
+					// call's ActionFacts on its own (substrate-1:GAP-0210), so
+					// the step is present in every case. What an observer must
+					// never do is add to it: without an enforcing member's
+					// finding, the chain is exactly the facts-only projection.
+					if projection.DetectionStepMask&step == 0 {
+						t.Fatalf("secret-read chain detection step missing; projection=%+v", projection)
 					}
-					if !tc.wantStep && projection.EnforcementStepMask&step != 0 {
-						t.Fatalf("observer entered enforcing chain: %+v", projection)
+					if !tc.wantStep {
+						factsOnly := guardrail.ToolChainProjection{ParseStatus: capture.facts.Parse.Status}
+						projectTrustedActionChainSteps(&factsOnly, capture.facts, nil)
+						if projection.DetectionStepMask != factsOnly.DetectionStepMask ||
+							projection.EnforcementStepMask != factsOnly.EnforcementStepMask ||
+							projection.EnforcementJoinDigests != factsOnly.EnforcementJoinDigests {
+							t.Fatalf("observer finding changed the chain: %+v, facts only %+v", projection, factsOnly)
+						}
 					}
 				})
 			}

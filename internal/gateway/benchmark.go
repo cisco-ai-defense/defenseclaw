@@ -180,6 +180,20 @@ func EvaluateDeterministicAction(
 	connector string,
 	profile string,
 ) DeterministicActionEvaluation {
+	return evaluateDeterministicAction(ctx, input, legacyText, connector, profile, false)
+}
+
+// evaluateDeterministicAction is EvaluateDeterministicAction, and with
+// windowsReadings the call as a Windows hook judges it: a partial reading is
+// also judged as the other shell and as its readable statements.
+func evaluateDeterministicAction(
+	ctx context.Context,
+	input actionfacts.Input,
+	legacyText string,
+	connector string,
+	profile string,
+	windowsReadings bool,
+) DeterministicActionEvaluation {
 	var captured actionfacts.Facts
 	var capturedFindings []RuleFinding
 	findings := dispatchTrustedAction(ctx, trustedActionRequest{
@@ -187,6 +201,8 @@ func EvaluateDeterministicAction(
 		LegacyText:         legacyText,
 		Connector:          connector,
 		EnforcementCapable: true,
+
+		windowsDialectReadings: windowsReadings,
 		record: func(facts actionfacts.Facts, recorded []RuleFinding) {
 			captured = facts
 			capturedFindings = append([]RuleFinding(nil), recorded...)
