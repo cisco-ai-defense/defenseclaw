@@ -73,6 +73,21 @@ from those files by DefenseClaw with protoc-gen-go and protoc-gen-go-grpc; the
 only change from upstream's generation is the Go package path. Tetragon ships no
 NOTICE file. third_party/tetragon/README.md records the provenance checks.
 
+VENDORED SOURCE: AGENT SUBSTRATE API
+
+third_party/substrate/ carries the control API definition of Agent Substrate,
+which the Substrate controller uses to read actors and write egress policies.
+
+    Copyright 2026 The Agent Substrate Authors
+    https://github.com/agent-substrate/substrate
+    Licensed under the Apache License, Version 2.0
+    Upstream revision: v1.0.0 (commit b34fbee742906494b5eb4f1f36987176bf8770a4)
+
+The .proto file is unmodified. The Go stubs next to it were generated from it
+by DefenseClaw with protoc-gen-go and protoc-gen-go-grpc; the only change from
+upstream's generation is the Go package path. Agent Substrate ships no NOTICE
+file. third_party/substrate/README.md records the provenance checks.
+
 internal/sensor/kernelpolicy/testdata/tracingpolicy-v1.7.0.schema.json is the
 openAPIV3Schema of Tetragon's TracingPolicy CRD from cilium/tetragon v1.7.0
 (pkg/k8s/apis/cilium.io/client/crds/v1alpha1/cilium.io_tracingpolicies.yaml,
@@ -122,6 +137,7 @@ dependencies include:
   - fsnotify (github.com/fsnotify/fsnotify) — BSD-3-Clause
   - gorilla/websocket (github.com/gorilla/websocket) — BSD-2-Clause
   - Tetragon API definitions (github.com/cilium/tetragon/api, vendored) — Apache-2.0
+  - Agent Substrate API definitions (github.com/agent-substrate/substrate, vendored) — Apache-2.0
   - Unicode Character Database 13.0 DerivedAge data — Unicode-DFS-2016
 
 The generated observability redaction repertoire includes data derived from the

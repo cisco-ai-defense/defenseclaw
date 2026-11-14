@@ -98,17 +98,30 @@ func launcherActive() bool {
 	return managedHost
 }
 
-// prepareLauncherRoot cuts root down to the sandbox tree: the other commands
+// prepareLauncherRoot cuts root down to the sandbox and substrate trees: the other commands
 // are removed, the gateway's daemon bootstrap and the sidecar run are
 // replaced by the launcher's help, and the help describes the launcher.
 func prepareLauncherRoot(root *cobra.Command) {
 	var others []*cobra.Command
 	for _, command := range root.Commands() {
-		if command.Name() != "sandbox" {
+		if command.Name() != "sandbox" && command.Name() != "substrate" {
 			others = append(others, command)
 		}
 	}
 	root.RemoveCommand(others...)
+	// The substrate launcher only talks to a cluster, so the user's commands
+	// stay; the administrator tools (setup, bundle, template) are not offered
+	// here, as managedCommands says.
+	if substrate, _, err := root.Find([]string{"substrate"}); err == nil && substrate != root {
+		var admin []*cobra.Command
+		for _, command := range substrate.Commands() {
+			switch command.Name() {
+			case "setup", "bundle", "template":
+				admin = append(admin, command)
+			}
+		}
+		substrate.RemoveCommand(admin...)
+	}
 	if guardrail := newLauncherGuardrailCommand(); guardrail != nil {
 		root.AddCommand(guardrail)
 	}
@@ -127,6 +140,7 @@ your coding agents in sandboxes under the policy your organization set for you:
   defenseclaw sandbox run claude     run Claude Code in a sandbox
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
+  defenseclaw substrate run claude   run Claude Code in your organization's Agent Substrate cluster
 
 "defenseclaw guardrail profile explain" shows the guardrail profile that
 applies to your agents, and "defenseclaw routing status" your own model

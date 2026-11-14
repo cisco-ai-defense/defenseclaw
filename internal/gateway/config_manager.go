@@ -1180,6 +1180,13 @@ func (m *ConfigManager) activationInput() (enterprisebundle.ActivationInput, boo
 // A bundle must verify against installed anchors, or against the anchors
 // staged for that receipt before their first promotion.
 func (m *ConfigManager) startupActivationRefusal(raw []byte) *enterprisebundle.ActivationRefusal {
+	// Agent Substrate (GAP-0135): a managed gateway in a pod has no laptop
+	// lifecycle; its activated config is the one the chart mounts. The
+	// check below is registered only by `serve --substrate` in a cluster, so
+	// every host keeps the lifecycle and signed-bundle rules unchanged.
+	if accept := substrateClusterActivation.Load(); accept != nil && (*accept)(m.path, raw) == nil {
+		return nil
+	}
 	in, anchored := m.activationInput()
 	state, err := configwrite.ReadGenerationState(m.path)
 	recorded := err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw))

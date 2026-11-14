@@ -1,0 +1,162 @@
+# The gateway leader and the controller hold a Lease each; the leader records
+# the store schema in defenseclaw-store-state (read by the rollback check).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+rules:
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [create]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  resourceNames: [{{ .Values.leader.leaseName | quote }}]
+  verbs: [get, update]
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-store-state, defenseclaw-policy-resets]
+  verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: {{ .Release.Namespace }}
+{{- if include "dc.kubeSignIn" . }}
+---
+# The chart's one cluster-wide grant (lead ruling, STEER 2026-11-13 00:32Z):
+# the Kubernetes sign-in (no OIDC issuer, not managed) verifies a person's
+# token with a TokenReview, which is cluster-scoped, so the gateway
+# ServiceAccount is bound to system:auth-delegator (tokenreviews create,
+# subjectaccessreviews come with it). Never rendered with an OIDC issuer.
+# Named by gateway.authDelegatorBinding; helm removes it on uninstall.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dc.authDelegatorBinding" . }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+---
+# The controller reads and clears admin policy_conflict resets (the gateway
+# admin route writes them into defenseclaw-policy-resets).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-controller
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [defenseclaw-policy-resets]
+  verbs: [get, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-controller
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "controller") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-controller
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-controller
+  namespace: {{ .Release.Namespace }}
+
+{{- /*
+The secrets admin API (`secrets set`, `secrets set --mine`) writes the
+Kubernetes sources of config.substrate.secrets with the gateway's token
+(substrate-1 GAP-0183). One Role per source namespace: create (RBAC cannot
+name an object that does not exist yet), and get and patch by name where the
+Secret name has no {person}; with {person} in the name every Secret of the
+namespace, so keep per_person sources in a namespace of their own. RBAC
+cannot select by label: the gateway changes only Secrets it created
+(app.kubernetes.io/managed-by: defenseclaw, checked with a resourceVersion
+precondition). validate.yaml refuses a source in the release or Substrate
+namespace.
+*/ -}}
+{{- $secretNs := dict -}}
+{{- range (dig "substrate" "secrets" list (.Values.config | default dict)) -}}
+{{- $src := toString (.source | default "") -}}
+{{- if hasPrefix "ate-secret://k8s.io/" $src -}}
+{{- $parts := splitList "/" (trimPrefix "ate-secret://k8s.io/" $src) -}}
+{{- if eq (len $parts) 4 -}}
+{{- $ns := index $parts 1 -}}
+{{- $name := index $parts 2 -}}
+{{- if and $ns $name (not (contains "{person}" $ns)) -}}
+{{- if not (hasKey $secretNs $ns) -}}
+{{- $_ := set $secretNs $ns (dict "names" list "any" false) -}}
+{{- end -}}
+{{- $e := get $secretNs $ns -}}
+{{- if contains "{person}" $name -}}
+{{- $_ := set $e "any" true -}}
+{{- else -}}
+{{- $_ := set $e "names" (append $e.names $name | uniq | sortAlpha) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $ns := keys $secretNs | sortAlpha }}
+{{- $e := get $secretNs $ns }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [create]
+- apiGroups: [""]
+  resources: [secrets]
+  {{- if not $e.any }}
+  resourceNames: {{ toJson $e.names }}
+  {{- end }}
+  verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: defenseclaw-gateway-secrets
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" $ "component" "gateway") | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: defenseclaw-gateway-secrets
+subjects:
+- kind: ServiceAccount
+  name: defenseclaw-gateway
+  namespace: {{ $.Release.Namespace }}
+{{- end }}

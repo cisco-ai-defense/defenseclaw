@@ -93,6 +93,9 @@ type modelRouterHealthChecker interface {
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
+	// substrateBuild, set by serve --substrate, makes the API server also
+	// serve the Agent Substrate listeners (substrate_leader.go).
+	substrateBuild SubstrateBuilder
 	// installWatcher is the running install watcher, nil while none runs;
 	// a reload that changes a denied list asks it to rescan (GAP-0627).
 	installWatcher atomic.Pointer[watcher.InstallWatcher]
@@ -1390,6 +1393,13 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		if s.substrateBuild != nil {
+			// serve --substrate runs no host connector guardrail in any
+			// mode: actors use the /llm proxy (substrateLLMProxy), so a
+			// managed pod no longer boots the default openclaw connector
+			// and logs that it is not bundled (GAP-0155).
+			return
+		}
 		if retryGuardrail {
 			// A managed gateway has no operator to re-run setup, so it
 			// retries the guardrail with backoff: a transient sharing or
@@ -9537,6 +9547,10 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		s.health.SetSandbox(StateError, err.Error(), nil)
 	} else if rt != nil {
 		return rt.run(ctx, api.Run)
+	}
+	if s.substrateBuild != nil {
+		// serve --substrate: the actor and admin listeners run with the API.
+		return s.runWithSubstrate(ctx, api, api.Run)
 	}
 	return api.Run(ctx)
 }

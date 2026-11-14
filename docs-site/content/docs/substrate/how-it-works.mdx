@@ -1,0 +1,169 @@
+---
+title: How it works
+description: Where DefenseClaw runs in an Agent Substrate cluster, how a tool call, a model call and a web request are checked, and how agent identity, network policy, state and suspend and resume fit together.
+keywords:
+  - Agent Substrate architecture
+  - DefenseClaw egress callout
+  - actor JWT
+  - leader
+---
+
+{/* Service names and ports checked against the chart README (sub/a8) and the A2 handoff. */}
+
+## The whole picture
+
+```text
+  Laptop or CI
+  defenseclaw substrate  login | run | connect | pull | approvals
+        |   HTTPS, signed in with OIDC (Keycloak, Active Directory, ...)
+        |   or your Kubernetes identity
+        v
+ +- defenseclaw-system namespace ---------------------------------------------+
+ |  GATEWAY  admin listener   create agents, attach the terminal, approvals   |
+ |  GATEWAY  actor listener   tool-call hooks, model proxy (/llm), asks       |
+ |  CALLOUT                   checks every other web request                  |
+ |  CONTROLLER                allow lists, template admission, idle, drift    |
+ |  LEADER                    tool chains, intent, asks, registrations        |
+ +------^---------------^---------------^------------------------+-----------+
+        | terminal      | hooks and     | "may this request      | network allow list
+        | (via router)  | model calls   |  go out?"              | (EgressPolicy), templates
+ +- Agent Substrate (ate-system) ----------------------------------v-----------+
+ |  router  -------->  ACTOR  sandbox (gVisor or microVM)                     |
+ |                     coding agent + DefenseClaw kit (hook, terminal relay)  |
+ |                     no keys, no secrets, no network of its own             |
+ |                          |  every request                                  |
+ |                          v                                                 |
+ |  egress gateway   default deny; adds the actor's signed identity;          |
+ |                   swaps secret placeholders, on bound hosts only           |
+ +--------------------------+-------------------------------------------------+
+                            v
+   allowed hosts: git, packages, APIs       model providers: only through the gateway
+   events to OTLP, Splunk, Grafana, each tagged with the agent, actor UID and person
+```
+
+Read it from the top: you start an agent from your laptop, the gateway creates it in Substrate, and from then on everything the agent does leaves its sandbox through Substrate's egress gateway. Hooks and model calls go to the DefenseClaw gateway, and every other request is checked by the callout first. The controller decides, before the agent first runs, which hosts it may reach at all. The sections below follow each path.
+
+## Where DefenseClaw runs
+
+DefenseClaw doesn't run inside the agent's sandbox. It runs next to Substrate in the cluster, in its own namespace. The agent reaches it the only way an actor can reach anything: through Substrate's egress gateway. This mirrors OpenShell, where DefenseClaw stays on the host and the sandbox calls out to it.
+
+<Flow
+  direction="TB"
+  caption="An Agent Substrate cluster with DefenseClaw. The agent's sandbox has no network of its own: everything leaves through Substrate's egress gateway, which adds a signed agent identity to calls to DefenseClaw and asks the DefenseClaw callout about every other request."
+>
+  <Zone id="actor" label="Actor sandbox (gVisor or microVM)" tone="untrusted">
+    <Node id="agent" kind="agent">{`Coding agent\nClaude Code, Codex, ...`}</Node>
+    <Node id="kit" kind="connector">{`DefenseClaw kit\nhook binary and terminal relay`}</Node>
+  </Zone>
+  <Zone id="ate" label="Agent Substrate (ate-system)" tone="privileged">
+    <Node id="egress" kind="gateway">{`Egress gateway\ndefault deny, adds identity and secrets`}</Node>
+  </Zone>
+  <Zone id="dc" label="DefenseClaw (defenseclaw-system)" tone="restricted">
+    <Node id="gw" kind="gateway">{`Gateway, actor listener\nhooks and guardrail proxy`}</Node>
+    <Node id="cb" kind="policy">{`Egress callout\nchecks each request`}</Node>
+    <Node id="ld" kind="datastore">{`Gateway leader\nchains, intent, asks`}</Node>
+  </Zone>
+  <Node id="net" kind="generic">{`Model providers and the web`}</Node>
+  <Edge from="agent" to="kit" label="runs hooks" />
+  <Edge from="kit" to="egress" label="all traffic" />
+  <Edge from="egress" to="gw" label="hooks, model calls" />
+  <Edge from="egress" to="cb" label="asks about the rest" />
+  <Edge from="gw" to="ld" label="stateful steps" />
+  <Edge from="gw" to="net" label="checked model calls" />
+  <Edge from="egress" to="net" label="if allowed" />
+</Flow>
+
+Separately, the controller decides what each agent may reach at all:
+
+<Flow direction="TB" caption="The controller turns each agent's DefenseClaw profile into Substrate's own network allow list. Substrate enforces it; an agent without one has no network.">
+  <Node id="prof" kind="policy">{`DefenseClaw profile\npack, team, template`}</Node>
+  <Node id="ctl" kind="operator">{`Controller\nrenders the allow list`}</Node>
+  <Node id="api" kind="datastore">{`Substrate control plane\nEgressPolicy per agent`}</Node>
+  <Node id="eg" kind="gateway">{`Egress gateway\nenforces it`}</Node>
+  <Edge from="prof" to="ctl" />
+  <Edge from="ctl" to="api" label="writes" />
+  <Edge from="api" to="eg" label="applies" />
+</Flow>
+
+| Part | What it does |
+|---|---|
+| **Gateway, actor listener** | The same checks as on a laptop: tool-call hooks, model request and reply guardrails, MCP and skill checks, asks. A Deployment with an autoscaler (at least two replicas). Its Service `defenseclaw-actor` is the only DefenseClaw host in an actor's allow list |
+| **Gateway, admin listener** | The launcher and the fleet view. A separate Service `defenseclaw-admin` that is never in an allow list, so an actor cannot reach it |
+| **Gateway leader** | One replica holds a lease and the store volume. It keeps the state that has to survive across stateless calls |
+| **Controller** | Watches agents through Substrate's API. For each agent it writes Substrate's network allow list (`EgressPolicy`) from the agent's DefenseClaw profile, **before the agent first runs**. It also checks templates and handles suspend, resume, fork, idle suspend and drift |
+| **Egress callout** | Plugged into Substrate's egress gateway. It sees each web request the agent makes (method, address, headers, and for MCP calls the body) and can refuse it: block lists, data in URLs and headers, sites that need an ask |
+| **Kit in the image** | A small hook binary and a terminal relay, plus the agent's hook settings. It holds no keys and no policy |
+
+## A tool call
+
+<Sequence
+  caption="Claude Code asks DefenseClaw before running a command. The hook sends a placeholder header; Substrate's egress gateway replaces it with a short-lived token that names the agent, so the agent can't pretend to be another one and holds nothing worth stealing."
+  participants={[
+    { id: 'a', label: 'Agent and hook', kind: 'agent' },
+    { id: 'e', label: 'Egress gateway', kind: 'gateway' },
+    { id: 'g', label: 'DefenseClaw', kind: 'gateway' },
+  ]}
+>
+  <Message from="a" to="e" label="hook call, placeholder identity" />
+  <Message from="e" to="g" label="same call, signed agent identity" />
+  <Message from="g" to="g" label="verify identity and live actor, find profile, check" note />
+  <Message from="g" to="e" kind="return" label="allow, block or ask" />
+  <Message from="e" to="a" kind="return" label="verdict" />
+</Sequence>
+
+The hop from Substrate's egress gateway to the actor Service is plain HTTP on port 80 inside the cluster, because Substrate 1.0.0 verifies an `https` upstream only against public certificate authorities. The Service's NetworkPolicy admits only the egress gateway; see the [threat model](/docs/substrate/threat-model#known-limits).
+
+The gateway believes only the token Substrate adds. Everything else in the request, including the body, session IDs, timestamps and file paths, is a claim from the agent. The token must be unexpired, have the right audience, come from a key the cluster published, and name an actor that is running or resuming with that UID. A worker token, a stale UID or no token gets a `401` with a closed reason and nothing else. The gateway never echoes request headers.
+
+The verdict uses the same code path as a hook on a laptop, so messages, rules and audit records match. If DefenseClaw can't be reached, the hook retries once and then follows the [fail mode](/docs/reference/fail-modes): closed on managed deployments and for unattended runs, open with a warning for interactive agents on default open-source settings.
+
+## A model call
+
+The agent's model address (`ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL` and the like) points at the DefenseClaw guardrail proxy through the same Service, on a path per provider. The provider's own address is never in the agent's allow list, so there's no way around the proxy. The proxy works out who is calling from the signed token, applies routing and the guardrails, adds the real key, which lives only in the cluster, forwards the request, and checks the reply. It records usage and cost against the verified actor and person.
+
+## A web request
+
+- **No allow list, no network.** Substrate refuses DNS and connections for an agent without an `EgressPolicy`. An agent DefenseClaw hasn't approved, from an unattested template for example, can't reach anything. Nothing is ever left open while DefenseClaw catches up.
+- **DefenseClaw writes the list.** It is built from the policy pack and the profile. It always includes DefenseClaw itself, and never the model providers. Allowed sites use Substrate's inspected HTTPS rule, so the callout sees each request. Sites an admin explicitly marks as pass-through are not inspected, never carry a secret, and their events say so.
+- **The callout checks each request.** Block-list feeds, secrets in URLs or headers, and hosts that need an ask. For POSTs to MCP servers and other listed hosts it can read the body, up to 1 MiB, to apply tool rules; a larger body is not read and the event says so. Credential headers are redacted in its logs.
+- **Chains.** Each request adds an `observed_egress` step to the actor's tool chain window. A request that leaves the cluster after a secret read is refused by default in every mode (open source, strict and managed), because actors are unattended. `alert` is an opt-in the operator chooses; see [the secret-read chain](#the-secret-read-chain) for which reads start the chain and the one setting.
+
+  ![An unattended defenseclaw substrate run claude --task that reads ~/.aws/credentials and then repeats a request: the hook records a MEDIUM finding for rule PATH-AWS-CREDS on the read and allows it, the request that follows answers 403, and the cluster's callout log shows log.egress.blocked for GET github.com with category chain_egress, rule chain.secret_read_then_egress and the reason that earlier in this actor's work it read a secret, so DefenseClaw blocks sending data off the cluster after that](/images/substrate/oss/secret-then-egress.png)
+- **Asks.** A refused site raises an ask in your session. An approval updates the agent's list, and Substrate applies it within seconds; the held request is retried for about ten seconds.
+- **What Substrate blocks anyway.** WebSockets from the actor, proxy tunnels, raw TCP, and UDP other than DNS.
+- **If the callout is down.** Closed in managed mode. Open source can choose; `verify` is red either way.
+
+## The secret-read chain
+
+A tool call starts `chain.secret_read_then_egress` when it reads the contents of a credentials file, wherever the file is: in the home, in a project or work directory, or as a copy. A file is a credentials file by its name alone: `.env` or `.env.<name>`; an SSH private key (`id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, `id_ecdsa_sk`, `id_ed25519_sk` anywhere, any other `id_*` directly in an `.ssh` folder); `.aws/credentials` or a copy beside it (`.aws/credentials.<name>`); `.kube/config`; `.docker/config.json`; `.npmrc`; `.pypirc`; `.git-credentials`; `.netrc` or `_netrc`; `.pgpass`; a Hugging Face, Poetry or Kaggle token file; a gcloud, GitHub CLI (`hosts.yml`), Anthropic or Azure CLI token file; a `*.key`, `*.p12` or `*.pfx` file; a `*.pem` file whose name says key (`privkey.pem`, `server-key.pem`). A read is the agent's Read or Grep tool on the file, or a shell command that reads, searches or copies it (for example `cat`, `head`, `grep`, `sed`, `awk`, `base64`, `cp`, PowerShell `Get-Content`), on its own, inside a pipeline, or inside a command list (`;`, `&&`, `||`), as long as every word of that command is known before it runs. The home-path rules (`PATH-*`), `/proc/self/environ`, the cloud and workload-identity credential reads and the browser session stores start it too. These never start it: a template or sample, meaning a name whose last suffix is `example`, `examples`, `sample`, `samples`, `template`, `templates`, `tpl`, `tmpl`, `dist`, `default`, `defaults`, `schema`, `skel`, `j2`, `jinja`, `jinja2`, `md` or `txt` (`.env.example`, `.aws/credentials.template`, `.ssh/id_rsa.sample`); a public key (`*.pub`); a certificate, chain, bundle or public-key `.pem`; any file under a `testdata`, `test-data`, `fixture`, `fixtures`, `example`, `examples`, `docs`, `__tests__`, `__fixtures__` or `__mocks__` folder or inside `node_modules`, `site-packages` or `dist-packages`; an SSH client that only presents a key (`ssh -i`, `scp -i`). An upload to an external host within the next 8 tool calls and 30 minutes of the same session completes the chain; the upload call must parse completely. Not covered yet: a file read only by `jq` or `yq`, by `xargs -a`, by a `while ... done < file` loop, or through a path built when the command runs (`$(pwd)/.env`); the action parser records no file read for these today (substrate-1:GAP-0233).
+
+On Agent Substrate a completed chain refuses the egress by default, in every mode (open source, strict and managed), because actors are unattended: the actor's tool call that uploads is refused by its hook, and its request that leaves the cluster is refused by the egress callout (category `chain_egress`). The one setting is the config key `substrate.chain_egress_action`: `block` (the default) or `alert` (an opt-in that only alerts), set with the chart value `config.substrate.chain_egress_action`, which the gateway and the leader both read. A request counts as a Substrate actor's only with a verified actor token (the actor listener or the callout route). Hooks on a person's own computer or in an OpenShell sandbox keep the rule pack's disposition: an alert in the default pack.
+
+## State across stateless calls
+
+Gateway replicas hold no state, so a finding that spans several calls needs one place to live. The leader keeps tool-chain windows, user intent, asks and registrations, and the other replicas forward to it over mutually authenticated calls that are safe to repeat.
+
+- A chain window is the current call plus up to eight earlier ones, for 30 minutes, **counted in running time**: the clock stops while the actor is suspended.
+- Every call lands in two windows, one per session and one per actor, so rotating session IDs can't empty the window.
+- A fork inherits its parent's windows but not its asks. A revert marks a barrier in the window and keeps earlier findings.
+- When the leader moves, the volume reattaches in about 30 seconds. Stateless checks continue meanwhile; stateful steps follow the fail mode, and unattended runs wait and retry.
+- Findings from different actors are correlated in telemetry and detections only, never used as a blocking proof.
+
+## Identity
+
+- **The agent.** Substrate issues each agent its own certificate and, on request, signed tokens. DefenseClaw trusts only the token Substrate's egress gateway adds. Events carry Substrate's actor UID (`ate.actor.uid`), so DefenseClaw and Substrate records line up. The agent identity (`agt-...`) is derived from the cluster, the person (or the atespace for an unattended workload) and the connector, so a fork is a new sandbox under the same agent.
+- **The person.** When the DefenseClaw launcher starts the agent, the cluster gateway verifies the person's OIDC token and registers the actor with that person **before** it answers. In enterprise, team atespaces only let DefenseClaw create actors, so the registration can't be forged. Actors started some other way are attributed to their atespace and template only.
+- **The relay.** To attach to an actor, the launcher opens a WebSocket (or a long-poll fallback) to the gateway's admin listener. The gateway authenticates the person with OIDC or the Kubernetes identity, checks they own the actor (or are an administrator, audited as themselves), and proxies to the actor's relay through Substrate's router with its own in-cluster identity. The relay accepts only a short-lived session token for that person and actor. The launcher never dials the router and holds no router certificate.
+
+## Suspend, resume, undo, fork
+
+| What happens | What DefenseClaw does |
+|---|---|
+| The agent suspends, then resumes on another machine | Nothing changes. Its approvals, sessions and audit trail carry on. Before it resumes, the controller checks its profile hasn't changed, and the first hook after resume uses a connection the relay opened in advance |
+| You undo to a checkpoint | Same agent, same approvals. The chain window gets a barrier |
+| Someone starts a new agent from a saved snapshot | A new agent with a new UID and fresh approvals. An approval given to one agent can't be copied by cloning it. Actors made from one golden snapshot share the memory the snapshot captured, including the state of any random number generator in a program that started before it. Kernel randomness and IDs differ per actor. The kit starts nothing before the first resume, and partitions its state on the actor UID |
+| The agent is deleted | Its allow list and registration are removed and a tombstone stays in the audit. The snapshots are removed from the bucket |
+
+## What we rely on Substrate for, and what we don't
+
+We rely on Substrate's sandbox, its egress gateway and its identity certificates. We don't defend against a cluster administrator, a node root user or a sandbox escape. See the [threat model](/docs/substrate/threat-model). The integration is tested against one pinned Substrate version at a time, inside the supported range.

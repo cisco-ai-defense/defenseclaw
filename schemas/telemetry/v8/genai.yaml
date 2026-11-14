@@ -371,7 +371,7 @@ attributes:
     overrides:
       max_utf8_bytes: 20
       pattern: '^agt-[0-9a-f]{16}$'
-    notes: derived by the gateway from the machine id, the verified user, the connector and the config root; never a credential and never a metric label
+    notes: derived by the gateway from the machine id, the verified user, the connector and the config root; never a credential and never a metric label. For an Agent Substrate actor it is derived from the string substrate/v1, the cluster UID, the verified person subject (or atespace:<name> for an unattended workload) and the connector, so a fork is a new sandbox under the same agent identity
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.agent.root.id
   type: string
@@ -821,7 +821,9 @@ attributes:
       enum:
       - windows_sid
       - posix_uid
-    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape
+      - oidc_subject
+      - k8s_user
+    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape; on Agent Substrate, oidc_subject is the subject claim of an OIDC person verified by the gateway, scoped by the issuer the gateway trusts, and k8s_user is the Kubernetes user name the gateway verified with a TokenReview (open source clusters without an OIDC provider)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.principal
   type: string
@@ -911,7 +913,7 @@ attributes:
     overrides:
       max_utf8_bytes: 64
       pattern: '^[a-z][a-z0-9_]{0,63}$'
-    notes: bounded lowercase source token such as nss_files, sssd, winbind, nss_ldap, sssd_infopipe, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso or hook_reported
+    notes: bounded lowercase source token such as nss_files, sssd, winbind, nss_ldap, sssd_infopipe, windows_lsa, windows_identity_store, macos_opendirectory, macos_platform_sso or hook_reported; on Agent Substrate oidc (a person verified from an OIDC token) or workload_oidc (a workload identity bound to a live actor UID)
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.principal.assurance
   type: string
@@ -930,7 +932,7 @@ attributes:
       - verified
       - claimed
       - verified_by_connector
-    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; verified_by_connector when a trusted connector named the person and the gateway resolved the facts itself; anything the hook reports is claimed
+    notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; verified_by_connector when a trusted connector named the person and the gateway resolved the facts itself; anything the hook reports is claimed. On Agent Substrate verified is used only for a person or workload the gateway verified and bound to a live actor UID; facts an actor sends about itself are claimed
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.enrollment
   type: string

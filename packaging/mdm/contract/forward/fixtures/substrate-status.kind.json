@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "command": "status",
+  "management_contract": 1,
+  "product_version": "1.0.10",
+  "generated_at": "2026-11-13T15:04:05Z",
+  "cluster": {
+    "cluster_name": "dc-substrate-e1",
+    "namespace": "defenseclaw-system",
+    "issuer_sha256": "4b0f3f5c0a8a5b1e8d2c2f6b0d7f7d8a9e0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a",
+    "issuer_default": true,
+    "substrate_version": "1.0.0",
+    "substrate_version_supported": true,
+    "supported_versions": ">=1.0.0 <1.1.0"
+  },
+  "health": {
+    "state": "healthy",
+    "gateway": {
+      "desired": 2,
+      "ready": 2
+    },
+    "leader": {
+      "ready": true,
+      "lease_held": true,
+      "store_schema": 1
+    },
+    "controller": {
+      "desired": 2,
+      "ready": 2
+    },
+    "callout": {
+      "desired": 2,
+      "ready": 2,
+      "registered": true,
+      "body_mode": "headers_only"
+    }
+  },
+  "atespaces": [
+    {
+      "atespace": "eng-web",
+      "launcher": true,
+      "actors": 3,
+      "states": {
+        "running": 1,
+        "suspended": 2
+      }
+    }
+  ],
+  "inventory": {
+    "actors": 4,
+    "states": {
+      "running": 1,
+      "suspended": 2,
+      "crashed": 1
+    },
+    "templates": 2
+  },
+  "checks": [
+    {
+      "id": "substrate_version",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "issuer_unique",
+      "status": "warn",
+      "message": "the default issuer is fine for one cluster; set a unique one before adding another",
+      "edge_case": "E13"
+    },
+    {
+      "id": "actor_keys",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "snapshot_bucket",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "openfga_grants",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "callout_registered",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "ingress_clients",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "actor_service_routes",
+      "status": "pass",
+      "message": "ok"
+    },
+    {
+      "id": "api_access_label",
+      "status": "pass",
+      "message": "ok"
+    }
+  ]
+}

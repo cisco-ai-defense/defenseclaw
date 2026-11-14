@@ -165,6 +165,7 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 // closed, wins over either (BALANCED-DEFAULTS owner decision 2026-10-23).
 // Every other native hook failure stays closed.
 func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, test := range []struct {
 		name, config, want string
 	}{
@@ -200,6 +201,7 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 // 0.8.x document the release cannot load yet is closed until the migrated
 // config renders the hooks.
 func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
+	isolateHookOutageAccount(t)
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
 	for _, test := range []struct {

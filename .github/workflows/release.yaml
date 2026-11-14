@@ -293,6 +293,86 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The Agent Substrate gateway and kit images and the defenseclaw-substrate
+  # chart (OCI), from this release's Linux gateway archives. A real release
+  # pushes them to ghcr.io and signs every digest with cosign keyless under
+  # the same identity as checksums.txt; a dry run builds them on the runner
+  # only and pushes, signs and logs in to nothing. The chart .tgz and the
+  # digest list join the release assets, so checksums.txt covers them.
+  substrate-images:
+    name: Substrate images and chart
+    if: inputs.operation == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: assets
+          path: dist
+      # Helm from its release, pinned by version and sha256 (the same pin as
+      # the CI chart job).
+      - name: Install Helm
+        env:
+          HELM_VERSION: v3.17.3
+          HELM_SHA256: ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/helm"
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-delay 5 -o "$dir/helm.tar.gz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          echo "${HELM_SHA256}  $dir/helm.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/helm.tar.gz" -C "$dir" --strip-components=1 linux-amd64/helm
+          echo "$dir" >> "$GITHUB_PATH"
+      # Multi-platform builds (linux/amd64 and linux/arm64) need a buildx
+      # builder with the docker-container driver and QEMU for the other
+      # architecture; the default docker driver builds one platform only.
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        if: ${{ !inputs.dry_run }}
+        with:
+          cosign-release: "v2.6.3"
+      - name: Build, push and sign the images and the chart
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          if [[ "$DRY_RUN" == true ]]; then
+            scripts/release/substrate-images.sh --version "$VERSION" --registry "ghcr.io/$owner" --dist dist --out substrate
+            echo "Substrate images and chart built, not pushed or signed (dry run)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # Only the real release of the real repository pushes and signs.
+          [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_REPOSITORY" == cisco-ai-defense/defenseclaw ]] \
+            || { echo "::error::Substrate images are pushed only by the release of cisco-ai-defense/defenseclaw from main"; exit 1; }
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          scripts/release/substrate-images.sh --version "$VERSION" --registry "ghcr.io/$owner" --dist dist --out substrate --push
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main"
+          while IFS= read -r ref; do
+            [[ "$ref" == *@sha256:* ]] || { echo "::error::$ref is not pinned by digest"; exit 1; }
+            cosign sign --yes "$ref"
+            cosign verify --certificate-identity "$identity" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com "$ref" > /dev/null
+            echo "Signed $ref" >> "$GITHUB_STEP_SUMMARY"
+          done < substrate/images.txt
+          mv substrate/images.txt "substrate/defenseclaw-substrate-images-$VERSION.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: substrate
+          path: substrate/
+          if-no-files-found: error
+          retention-days: 7
+
   # Claude Cowork VM sensor packages (packaging/cowork-vm), one per VM
   # architecture, from the gateway and sensor helper of this release's
   # enterprise Linux archives. Signed with the Cowork-only key when the release
@@ -558,7 +638,7 @@ jobs:
   sign:
     name: Checksum and sign
     if: ${{ !inputs.dry_run }}
-    needs: [build, cowork-vm, macos-app, enterprise-windows, enterprise-macos]
+    needs: [build, substrate-images, cowork-vm, macos-app, enterprise-windows, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -598,7 +678,7 @@ jobs:
   dry-run-assets:
     name: Checksum the dry-run assets (unsigned)
     if: inputs.dry_run
-    needs: [build, cowork-vm, macos-app, enterprise-windows, enterprise-windows-signing-proof, enterprise-macos]
+    needs: [build, substrate-images, cowork-vm, macos-app, enterprise-windows, enterprise-windows-signing-proof, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -1,0 +1,95 @@
+---
+title: Unattended and long-running runs
+description: Run coding agents without a terminal attached - one task, a batch from a file, or a job in CI - and what DefenseClaw does differently when nobody is there to answer.
+keywords:
+  - unattended coding agents
+  - batch agents Kubernetes
+  - run --task --detach
+  - CI agent runs
+---
+
+An agent doesn't need your terminal. Give it a task, leave, and read the result later. Every connector that has a headless mode can run this way, in its own actor. The headless command of each is in [Agents and features](/docs/substrate/agents#agents).
+
+## One task
+
+```bash
+defenseclaw substrate run codex --task "make the failing tests in pkg/parser pass" --detach
+defenseclaw substrate logs codex-2c9e41a7 -f
+defenseclaw substrate status codex-2c9e41a7
+```
+
+`--task` runs the connector's headless command (for Codex, `codex exec`) instead of the interactive program. `--detach` returns as soon as the agent is running; without it `run` waits and prints what the agent printed (`--timeout` stops waiting after a while, and the task keeps running). The task text is registered with the cluster when the actor is created, so the guardrails know the user's intent from the start, from a source the agent can't change.
+
+When the task ends, `run` says so, and `logs` shows what the agent printed and its exit code:
+
+```text
+The task finished. Bring changes home with: defenseclaw substrate pull codex-2c9e41a7
+```
+
+![defenseclaw substrate run claude --task finishing in the terminal: Started dc-ops/nightly-528031bf (Claude Code, profile ops), Copying this folder into the agent, the agent's Bash step and its report of three tries (403, 403, then 200), and the closing line The task finished with the defenseclaw substrate pull command to bring changes home](/images/substrate/oss/run-task-finished.png)
+
+```text
+The task ended with exit code 1. Review it with: defenseclaw substrate logs codex-2c9e41a7; bring changes home with: defenseclaw substrate pull codex-2c9e41a7
+```
+
+If the cluster refused the agent's calls, `run` says `The task did not run` instead and exits with code 1 (see [Troubleshooting](/docs/substrate/troubleshooting)).
+
+## A batch
+
+```yaml
+# tasks.yaml
+tasks:
+  - name: fix-parser
+    task: make the failing tests in pkg/parser pass
+  - name: bump-deps
+    task: update the Go dependencies and run the tests
+```
+
+```bash
+defenseclaw substrate run claude --batch tasks.yaml --parallel 8 --clone https://git.example.test/team/app.git --ref 4f1c2ab
+defenseclaw substrate list --batch BATCH
+defenseclaw substrate status --batch BATCH
+defenseclaw substrate delete --batch BATCH
+```
+
+The file is a list of tasks, under `tasks:` or bare. A task is a line of text, or `name`, `task` and `agent` (a task may name its own agent). One batch takes at most 500 tasks. Each task gets its own actor, with a shared batch ID, and `--parallel` (default 4) limits how many run at once. `--clone` and `--ref` start every task from the same commit; without them every task starts from a copy of the same folder. `status --batch` shows each agent's state. `usage --batch` is not available yet: see [Feature coverage](/docs/substrate/features#routing-budgets-and-cost).
+
+## From CI
+
+CI has no person to sign in. The launcher signs in with a **workload identity** instead: a GitHub Actions OIDC token or a Kubernetes service-account token. The cluster accepts the issuers you list in `substrate.identity.workload_oidc`. The "person" on every event is then the workload principal, and a profile picks the policy by its `match.substrate.workloads` entry.
+
+A `workload_oidc` `subject` and a `workloads` entry are exact or end in `:*` or `/*`, for example `repo:acme/web:*`. A raw prefix such as `repo:acme/web*` is refused, because it also matches `repo:acme/web-evil`, and so is a bare `*`.
+
+```bash
+defenseclaw substrate login --workload --workload-token-file "$TOKEN_FILE" --admin-url ... --issuer ... --client-id ...
+defenseclaw substrate run claude --task "triage the open dependabot PRs" --detach --workload-token-file "$TOKEN_FILE"
+```
+
+`run` also accepts `--workload-token-file`, so a job can skip `login` and pass its token directly. Tokens are never printed or logged. In CI without a keychain, set `DEFENSECLAW_SUBSTRATE_TOKEN_STORE=file`.
+
+## What is different when nobody is there
+
+| Situation | What happens |
+|---|---|
+| The gateway can't be reached | Hooks **fail closed**, always, whatever the interactive setting. A hook that waits retries first, then blocks |
+| The agent asks to reach a new site, or a tool needs approval | **Denied by default.** A profile can set `unattended_asks: queue` to hold the ask for a person for up to `ask_timeout` (30 minutes by default). The agent's step pauses, the agent doesn't stop, and a person answers with `defenseclaw substrate approvals` and `approve` or `reject`. A timeout is a deny |
+| The agent has been quiet for a while | **No idle suspend** for `--task` runs unless the profile sets it, and never while an ask is pending. A silent long job isn't mistaken for an idle one: CPU use counts as activity |
+| A step crashes the actor | The actor shows as `crashed`, and pending asks close. Substrate brings a crashed actor back only with a revert (`kubectl ate revert`); DefenseClaw doesn't do it for you |
+| You want to know it is alive | `status`, `list` (it has a `STATE` column) and `logs -f` show it. `checkpoint NAME --every 1h` saves a restore point on that schedule for as long as the command runs |
+| The result | Have the agent push a branch (the git credential is injected on the git host only), or `defenseclaw substrate pull` the changes |
+
+A queued ask shows `unattended` and the time left in the `RUN` column of `approvals`.
+
+A rejected or expired ask is not remembered. If the agent asks for the same site again, a new ask opens at once; there is no cooldown. To stop the asking, refuse the site with a `url_rules` rule (`action: deny`) or leave it off the allow list.
+
+![defenseclaw substrate approvals listing one ask waiting: ID ask-4c49616b8f92eb8c85c8fc2b, agent nightly-528031bf, what GET example.com, age 7s, run unattended with 4m left, and the line with the approve and reject commands; then defenseclaw substrate approve for that ID prints Approved](/images/substrate/oss/approvals.png)
+
+## Telemetry volume
+
+A batch of hundreds of actors produces a lot of events. Set `substrate.unattended.telemetry_sampling` (1.0 keeps everything) to sample the routine ones. Blocks, asks, refusals and lifecycle records are never sampled.
+
+## Limits
+
+- A finished `--task` agent stays until you delete it. Pull its changes first: what is not pulled is gone when you `delete` it.
+- A task runs as the connector's headless mode allows. `run --task` for a connector that cannot run one says so. See [Agents and features](/docs/substrate/agents).
+- The cluster's worker pools bound how many actors run at once. A full pool answers that no worker is free, and `run` starts nothing. See [Troubleshooting](/docs/substrate/troubleshooting#no-free-worker-for-a-new-agent).

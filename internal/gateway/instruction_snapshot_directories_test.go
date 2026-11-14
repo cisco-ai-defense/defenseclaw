@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // A session's instruction-file snapshot is per directory. The instruction
@@ -246,6 +247,7 @@ func TestInstructionProtectionHookSnapshotPerDirectory(t *testing.T) {
 // snapshot on a tool call in a new working directory, and a mid-session
 // session.error neither ends it nor re-takes it.
 func TestInstructionStartupAgentHookReachesNewDirectory(t *testing.T) {
+	testenv.IsolateAccount(t)
 	first, second := t.TempDir(), t.TempDir()
 	existing := writeActiveAgentTestFile(t, second, "AGENTS.md")
 	api := instructionProtectionTestAPI(t, "opencode", "action", "HIGH")

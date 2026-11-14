@@ -426,3 +426,170 @@ cases:
         profiles:
           contractors:
             sandbox: {min_profile: balanced, egress_block: ['*.example.com'], locked: [profile]}
+
+  # PLAN 7.3 runtime keys (lane F3): runtimes on computers and in clusters,
+  # the Agent Substrate keys in profiles and substrate.admin only.
+  - name: profile-valid-runtime-keys
+    valid: true
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          engineering:
+            mode: action
+            sandbox:
+              required_for: [claudecode, codex]
+              runtimes: [substrate]
+              sandbox_class: MicroVM
+              idle_suspend_after: 20m
+              unattended_asks: queue
+              ask_timeout: 45m
+              actor_secrets: [db-password, build.token]
+
+  - name: profile-invalid-runtime
+    valid: false
+    error: 'sandbox.runtimes[1]: "docker" must be openshell or substrate'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {runtimes: [substrate, docker]}
+
+  - name: profile-empty-runtimes
+    valid: false
+    error: "sandbox.runtimes: an empty list is refused; leave the key out for no constraint"
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {runtimes: []}
+
+  - name: profile-invalid-sandbox-class
+    valid: false
+    error: 'sandbox.sandbox_class "kata" must be one of gvisor, microvm'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {sandbox_class: kata}
+
+  - name: profile-idle-suspend-too-short
+    valid: false
+    error: 'sandbox.idle_suspend_after "30s" must be at least 1m'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {idle_suspend_after: 30s}
+
+  - name: profile-ask-timeout-too-long
+    valid: false
+    error: 'sandbox.ask_timeout "36h" must be at most 24h0m0s'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {ask_timeout: 36h}
+
+  - name: profile-invalid-unattended-asks
+    valid: false
+    error: 'sandbox.unattended_asks "allow" must be one of deny, queue'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {unattended_asks: allow}
+
+  - name: profile-ask-keys
+    valid: true
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox:
+              ask_hosts: [uploads.example.com, "*.files.example.com"]
+              url_rules:
+                - {name: no-admin, hosts: [api.example.com], methods: [POST], path_prefix: /admin/, action: deny}
+                - {hosts: [api.example.com], path_prefix: /releases, action: ask}
+
+  - name: profile-invalid-ask-host
+    valid: false
+    error: 'sandbox.ask_hosts[0]: "Uploads.Example.com" must be a lower-case host name or "*.<host>"'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {ask_hosts: [Uploads.Example.com]}
+
+  - name: profile-url-rule-allow-refused
+    valid: false
+    error: 'sandbox.url_rules[0].action "allow" must be one of deny, ask'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox:
+              url_rules:
+                - {hosts: [api.example.com], action: allow}
+
+  - name: profile-url-rule-ambiguous-prefix
+    valid: false
+    error: 'sandbox.url_rules[0].path_prefix "/admin/../x" must start with "/" and have no percent sign, semicolon, backslash or dot segment'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox:
+              url_rules:
+                - {hosts: [api.example.com], path_prefix: /admin/../x, action: deny}
+
+  - name: admin-ask-hosts-refused
+    valid: false
+    error: "openshell: admin.ask_hosts is an Agent Substrate key; set it in substrate.admin or a guardrail profile's sandbox section"
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          ask_hosts: [uploads.example.com]
+
+  - name: profile-invalid-actor-secret
+    valid: false
+    error: 'sandbox.actor_secrets[0]: "../etc/passwd" must be a secret key (letters, digits, ".", "_" and "-")'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {actor_secrets: ['../etc/passwd']}
+
+  - name: admin-substrate-key-refused
+    valid: false
+    error: "openshell: admin.sandbox_class is an Agent Substrate key; set it in substrate.admin or a guardrail profile's sandbox section"
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          sandbox_class: microvm
+
+  - name: profile-runtimes-leave-none
+    valid: false
+    error: "sandbox: combined with openshell.admin, runtimes [substrate] leaves no runtime (openshell.admin allows [openshell])"
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          runtimes: [openshell]
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {runtimes: [substrate]}

@@ -16,6 +16,7 @@ import (
 )
 
 func TestGAP0632PinnedStandaloneHookOutageUsesValidatedPosture(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, source := range []string{"strict", "default", "permissive"} {
 		t.Run(source, func(t *testing.T) {
 			home := t.TempDir()
@@ -67,6 +68,7 @@ func TestGAP0632PinnedStandaloneHookOutageUsesValidatedPosture(t *testing.T) {
 
 // A matching content pin is only sufficient when the selected pack loads.
 func TestGAP0632PinnedStandaloneHookOutageRejectsInvalidPack(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, variant := range []string{"component directory", "invalid YAML with matching pin"} {
 		t.Run(variant, func(t *testing.T) {
 			home := t.TempDir()
@@ -126,6 +128,7 @@ func TestGAP0632PinnedStandaloneHookOutageRejectsInvalidPack(t *testing.T) {
 // standalone hook stays closed whatever the entry's name, and the loaded
 // config names the error. A usable default copy still opens.
 func TestGAP0632BrokenCustomPackIsConfigErrorNotOutage(t *testing.T) {
+	isolateHookOutageAccount(t)
 	for _, variant := range []string{"whitespace path", "empty file set", "missing folder"} {
 		for _, name := range []string{"operator", "default", "strict"} {
 			t.Run(variant+"/"+name, func(t *testing.T) {

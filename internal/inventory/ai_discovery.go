@@ -3131,6 +3131,8 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 		}
 		out = append(out, signal)
 	}
+	// E26: a running Agent Substrate launcher is labelled as such.
+	out = append(out, s.detectSubstrateLaunchers(procs, now)...)
 	return out, nil
 }
 

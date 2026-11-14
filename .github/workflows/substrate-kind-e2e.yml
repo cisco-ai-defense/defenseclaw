@@ -1,0 +1,88 @@
+name: Substrate Kind E2E
+
+# A scripted smoke test of DefenseClaw on Agent Substrate: a kind cluster with the Substrate
+# release images (gVisor only: hosted runners have no KVM), the DefenseClaw chart, a stub
+# agent, a policy written for its actor, a hook deny through the real gateway, default-deny
+# egress, and an uninstall that leaves nothing open. The script is test/substrate-e2e/run.sh;
+# run it on a dev cluster with E2E_CLUSTER_MODE=existing (see test/substrate-e2e/README.md).
+#
+# It runs only when the Substrate integration changes, so it is not a required check:
+# a path-filtered required check would stay pending on every other pull request.
+
+on:
+  pull_request:
+    paths:
+      - 'internal/substrate/**'
+      - 'deploy/helm/defenseclaw-substrate/**'
+      - 'deploy/images/actor-kit/**'
+      - 'test/substrate-e2e/**'
+      - '**/*substrate*.go'
+      - 'schemas/substrate/**'
+      - '.github/workflows/substrate-kind-e2e.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/substrate/**'
+      - 'deploy/helm/defenseclaw-substrate/**'
+      - 'deploy/images/actor-kit/**'
+      - 'test/substrate-e2e/**'
+      - '**/*substrate*.go'
+      - '.github/workflows/substrate-kind-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: substrate-kind-e2e-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  # The Substrate release the integration is tested against (prebuilt images).
+  SUBSTRATE_VERSION: v1.0.0
+
+jobs:
+  substrate-kind-e2e:
+    name: Substrate Kind E2E
+    runs-on: ubuntu-latest
+    # Pull request jobs stay inside 20 minutes (cli/tests/test_ci_workflow_efficiency.py).
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Fetch the Substrate release the client tools are built from
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch "$SUBSTRATE_VERSION" \
+            https://github.com/agent-substrate/substrate.git "$RUNNER_TEMP/substrate"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          # Substrate's own module pins its Go version; ate-setup and kubectl-ate build with it.
+          go-version-file: ${{ runner.temp }}/substrate/go.mod
+          cache: false
+      - name: Build ate-setup and kubectl-ate from the release tag
+        working-directory: ${{ runner.temp }}/substrate
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/substrate-e2e/bin"
+          go build -o "$RUNNER_TEMP/substrate-e2e/bin/ate-setup" ./cmd/ate-setup
+          go build -o "$RUNNER_TEMP/substrate-e2e/bin/kubectl-ate" ./cmd/kubectl-ate
+          echo "$RUNNER_TEMP/substrate-e2e/bin" >> "$GITHUB_PATH"
+      - name: Run the Substrate kind E2E
+        env:
+          E2E_CLUSTER_MODE: create
+          E2E_SUBSTRATE_SRC: ${{ runner.temp }}/substrate
+          E2E_WORKDIR: ${{ runner.temp }}/substrate-e2e
+          E2E_ARTIFACTS: ${{ github.workspace }}/_artifacts/substrate-e2e
+          # The chart and the DefenseClaw phase are part of this change: a missing chart fails.
+          E2E_REQUIRE_DEFENSECLAW: "1"
+        run: bash test/substrate-e2e/run.sh
+      - name: Upload the results and diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: substrate-kind-e2e
+          path: _artifacts/substrate-e2e
+          retention-days: 7
+          if-no-files-found: ignore

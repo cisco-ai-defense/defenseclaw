@@ -1,0 +1,67 @@
+---
+title: Threat model
+description: What DefenseClaw on Agent Substrate defends against, what it trusts, and what it does not defend - trust boundaries, attackers, mitigations and out-of-scope threats.
+keywords:
+  - Agent Substrate threat model
+  - DefenseClaw security boundaries
+  - untrusted agent
+---
+
+The agent is **untrusted**. The whole design follows from that: the checks that matter run outside the sandbox, and nothing the agent says about itself is believed.
+
+The last column of the attacker table says whether a live test on a real cluster, with real agents, has passed for that row. **Yes** names what was tried. **Not yet** means the row is the design, with unit tests, and no passing live run exists yet. The full certification run repeats these checks on the release build.
+
+## Assets
+
+- Model and service credentials.
+- The user's code and data, in the actor and in snapshots.
+- The company policy and the audit trail.
+- The identity of the person and of the agent.
+- Other people's actors and data.
+
+## Trust boundaries
+
+| Boundary | Trusted? | Notes |
+|---|---|---|
+| **B1: actor to DefenseClaw** | Untrusted | Only the token Substrate's egress gateway adds counts, and the gateway verifies it and checks the actor is alive with that UID. Bodies, session IDs, timestamps and paths are claims. No request header is ever echoed |
+| **B2: DefenseClaw to Substrate** | DefenseClaw's own service account | It has the OpenFGA roles to read actors and templates, write egress policies, and create, fork, proxy and suspend actors in launcher atespaces, and nothing more |
+| **B3: administrators** | Trusted for their scope | Chart values and signed policy, checked against trust anchors held in an admin-only Secret |
+| **B4: Agent Substrate** | Trusted for the sandbox, the egress gateway and the identity CA | Not defended against: cluster administrators, node root, a sandbox escape |
+
+## Attackers and what stops them
+
+| Attacker | Goal | What stops it | Checked live |
+|---|---|---|---|
+| A compromised or prompt-injected agent | Exfiltrate data or secrets | Default-deny network; the callout checks every request; secrets are placeholders swapped only on bound hosts; exact-value matching on prompts and egress for any exposed value; tool chains remember a secret read when a later request leaves | Partly. Yes: default deny, a listed feed host refused, secret-shaped tokens and an exposed value caught, no bearer value found in the actor's files. Not yet: the tool-chain check at egress on a chart install |
+| The same agent | Bypass the guardrails | The model provider isn't in its allow list, so every model call passes the proxy; WebSockets, tunnels, raw TCP and non-DNS UDP are blocked by Substrate; hook config is root-owned and the agent runs as an ordinary user | Yes: `/llm` serves only model paths; a WebSocket upgrade is refused (`403`); hook tamper checks pass for Claude Code, Codex, OpenCode, Copilot CLI, Hermes, Kiro, Antigravity and Devin. Amp can't be protected and is refused in managed |
+| The same agent | Pretend to be another actor or person | Identity comes from a Substrate-signed token and a live-UID check, not from anything the agent sends. A worker token, a stale UID or no token is refused. The actor listener serves only actor routes and the admin listener is unreachable | Yes: no token, a forged `x-defenseclaw-actor`, a worker-for-actor token and a wrong audience are refused; a recreated same-name actor's old token is refused; admin paths answer `404` on the actor listener |
+| The same agent | Use another actor's session or ask approval | Approvals are keyed to the actor UID. A fork inherits findings but not approvals. The relay session token is per person and per actor and is verified for the calling actor only | Partly. Yes: the relay refuses a request with no session token and accepts one bound to its own actor; a queued ask is visible to its owner only. Not yet: the fork rule and a token for another actor against a live relay |
+| A user | Loosen their own policy | Policy lives in the cluster. The profile can only tighten the company floor. Users see only their own policy | Partly. Yes: a user naming a profile they aren't mapped to is refused. Not yet: tightening against a live floor |
+| A user | See another user's data | Usage, policy and secret names are own-data only. The fleet view is admin-only on its own listener | Partly. Yes: another person's agent gives the same answer as one that doesn't exist; asks are own-only. Not yet: secret names (usage isn't available yet) |
+| Someone with Kubernetes access | Edit an agent's allow list | The controller reverts the change, records who made it, and stops after three reverts in ten minutes with a `policy_conflict` alert. It never adds access while reverting | Yes: the revert, the conflict rule and an admin `policy reset` |
+| Someone with Kubernetes access | Start agents outside DefenseClaw | Only DefenseClaw can create actors in launcher atespaces. Unattested templates get no network. Foreign actors are reported | Yes: a second identity is refused in a bootstrapped atespace; an unattested or wrong-signer template gets no network; a hand-written policy on a foreign actor is reported |
+| Someone with `kubectl ate proxy` rights | Take over an actor | Substrate's router allow list names who can reach actors; the chart adds DefenseClaw's identity and `verify` warns about any other listed client. Other access is audited as the person who did it | Yes: a proxy by a user without the Kubernetes RBAC is refused. Note that the egress gateway's own client is on the router allow list, which `doctor --cluster` flags |
+| A supply-chain attacker | Replace the agent image or the kit | Templates carry a signed attestation of the image digest, kit version and scan result; the controller admits only attested digests that a profile allows; images are pinned by digest | Yes: a malicious skill or MCP server in an image stops the build; the stored attestation verifies with `cosign`; revoking a signing key removes the template's policy within one controller interval (74 s measured, mostly the Kubernetes Secret sync) |
+| A flood of requests or hooks | Starve other actors | Fair-share rate limits per actor and per atespace answer `429` | Yes: one actor at about 390 requests a second while ten others stayed fast |
+
+## Known limits
+
+- **Cluster administrators, node root and sandbox escapes are out of scope.** They can read memory, snapshots and traffic.
+- **The hop from Substrate's egress gateway to the DefenseClaw actor listener is plain HTTP inside the cluster** in Substrate v1.0.0, because that version verifies an `https` upstream only against public certificate authorities. The token travels in the clear on the cluster network for up to its lifetime (5 minutes). A NetworkPolicy admits only the egress gateway to that port. Use a CNI that encrypts pod traffic where this matters.
+- **The terminal relay has no end-to-end TLS past Substrate's router.** The session token and the terminal and file traffic are plain inside the proxied connection.
+- **The agent and its relay share a user.** A hostile agent can end its own relay or listen on its port, so the person's next connect can land on a listener the agent runs. It cannot reach another actor's relay, and the session token is checked for that actor only.
+- **WebSocket hosts aren't inspected.** Substrate 1.0.0 refuses WebSocket upgrades on inspected (`https`) and `http` rules. An agent that needs a WebSocket host works only if that host is in `allow_passthrough_for`: its traffic is then not inspected, the callout never sees it, and no secret is injected there, so the agent's own credential for it sits in the actor. Amp is the agent this stops.
+- **Headers only on stock Substrate 1.0.0.** The callout cannot read request bodies on the stock egress filter. It still checks hosts, methods, paths and headers, and the hook path covers MCP tool calls. Reading MCP bodies needs a Substrate build that lets the callout ask for them.
+- **The callout sees credentials as placeholders.** On Substrate 1.0.0 the callout sees service credentials before injection (placeholders), and the actor token after. It identifies the actor from Substrate's own identity and a live-UID check.
+- **URL rules match the path as sent.** The callout refuses spellings it can read in more than one way (an encoded slash or semicolon, a `..` segment) with `path_ambiguous` rather than guessing. Every matching `url_rules` rule counts, whatever its order, and the strictest wins: deny, then ask. An approval never lifts a deny, and it covers the rule and the methods it was asked for (a request counts as every method a server framework could run it as, and an ask names them all).
+- **Replies of OpenAI-style models on Bedrock are not inspected for tool calls yet.** For Codex, OpenCode, Copilot CLI and Hermes, the proxy inspects prompts and enforces the model allowlist. A tool call in the model's reply is stopped by the hook when it runs, not by the proxy before.
+- **A new allow list takes about ten seconds to apply** to new connections, and a freshly created or resumed actor outside the launcher has no network until its policy is written.
+- **A private repository can't be proven end to end yet.** `run --clone` of a public repository works on a chart install (checked live). A private repository relies on the egress gateway adding the credential on the git host. That path is built and covered by unit tests, but no live run with a real private repository has passed.
+- **Snapshots hold everything the actor held.** Encrypt and restrict the bucket, and use `delete`. Subscription sign-ins put tokens in snapshots, so managed profiles refuse them.
+- **Skills and MCP servers are not scanned in the cluster.** skill-scanner does not run there. A skill in an attested template is trusted by its digest, because `template build` scanned it and signed the result. A skill added mid-session is not scanned, so it follows the fail mode: managed installs and the strict tier refuse it with an alert; open source allows it with an alert. The agent may read the skill's name and description before the refusal; every model call also goes through the prompt guardrails, which see that text. The gateway does not yet scan an MCP server the agent adds mid-session either (a repository `.mcp.json`, a written MCP config, `mcp add`); tool-call hooks and the egress policy still apply to what it does.
+- **Agents whose hook file the agent can reach.** Antigravity has no managed hooks tier: its hook file is root-owned, but its parent folder can still be renamed by the agent. Hook-silence detection and the egress policy still apply. Amp cannot keep its hook registration root-owned at all, so a managed install refuses it.
+- **Facts from the kit are claims.** Path facts for link-resolving rules come from inside the actor, so a compromised kit can lie. The rule that blocks the action doesn't depend on it, but link-resolving detections can be evaded by a compromised kit.
+- **Random state in a snapshot.** Actors made from one golden snapshot share the memory it captured, including the state of a random number generator in a program that started before it. Identifiers generated after the actor starts are unique per actor (checked on 20 actors of each class).
+- **Telemetry volume.** Sampling for `--task` runs never drops blocks or lifecycle records.
+- **Cross-actor findings are correlation, not proof.** They appear in telemetry and detections, and never block on their own.
+- **Not in this release:** Secure Client, a hosted control plane, process lineage and the kernel feed.

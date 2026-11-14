@@ -396,7 +396,7 @@ func dispatchTrustedAction(
 	if shellReason == hookpaths.UnprovenParserFault {
 		defer func() { findings = withParserFaultFinding(findings, request.EnforcementCapable) }()
 	}
-	if ManagedEnterpriseActive() {
+	if ManagedEnterpriseActive() && !isSubstrateActorRequest(parent) {
 		return nil
 	}
 	// A script body the hook call kept unread because its network share

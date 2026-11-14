@@ -73,6 +73,10 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	cfg.Guardrail.DefaultProfile = "offline-floor"
 	cfg.Enterprise.Enrollment = enrollment
 	f.cfg = cfg
+	// NewAPIServer publishes the fixture's profiles process-wide for the
+	// proxy; put the previous set back afterwards (GAP-0195).
+	prevProfiles := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(prevProfiles) })
 	f.api = NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
 
 	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()

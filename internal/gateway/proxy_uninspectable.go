@@ -48,9 +48,13 @@ func uninspectableEncoding(h http.Header) string {
 }
 
 // proxyRequestConnector is the connector a proxy request is decided for:
-// the proxy own connector on the host proxy. feat/substrate (T6 d8bc7b77db)
-// adds the Agent Substrate actor registration branch here when it merges.
-func (p *GuardrailProxy) proxyRequestConnector(_ context.Context) string {
+// an Agent Substrate actor's registration, else the proxy's.
+func (p *GuardrailProxy) proxyRequestConnector(ctx context.Context) string {
+	if isSubstrateActorRequest(ctx) {
+		if reg, ok := substrateRegistrationFrom(ctx); ok {
+			return config.NormalizeConnectorName(reg.Connector)
+		}
+	}
 	return p.servedConnector()
 }
 

@@ -1,0 +1,100 @@
+{{- /*
+The callout reads only this file (internal/substrate/extproc Config, strict
+YAML: every key below must be one it knows). Everything comes from
+config.yaml (config.substrate) and the chart values, so config.yaml stays
+the single source.
+*/ -}}
+{{- define "dc.calloutConfig" -}}
+{{- $sub := .Values.config.substrate | default dict -}}
+{{- /* config.substrate.extproc uses the callout file's own keys (A3 config,
+A4 extproc.Config); "enabled" is the chart's, not the callout's. */ -}}
+{{- $c := omit (deepCopy ($sub.extproc | default dict)) "enabled" -}}
+{{- $actor := include "dc.actorHost" . -}}
+{{- $admin := include "dc.adminHost" . -}}
+{{- if not (hasKey $c "failure_mode") }}{{ $_ := set $c "failure_mode" "closed" }}{{ end -}}
+{{- if not (hasKey $c "defenseclaw_hosts") -}}
+{{- $_ := set $c "defenseclaw_hosts" (list $actor (trimSuffix ".cluster.local" $actor)) -}}
+{{- end -}}
+{{- /* The admin Service is never a callout-allowed host (D15, GAP-0066): it is
+refused in every spelling, whatever config.yaml says. */ -}}
+{{- $adminShort := trimSuffix ".svc.cluster.local" $admin -}}
+{{- $_ := set $c "internal_hosts" (list $admin (trimSuffix ".cluster.local" $admin) $adminShort (first (splitList "." $adminShort))) -}}
+{{- /* Managed enterprise installs never fail open (D8): the callout gets
+managed true, which makes chain.failure_mode auto mean closed, and open is
+refused here as for extproc.failure_mode (GAP-0063, GAP-0090). */ -}}
+{{- $mode := lower (toString (.Values.config.deployment_mode | default "")) -}}
+{{- if has $mode (list "managed" "managed_enterprise" "managed-enterprise") -}}
+{{- if eq (lower (toString (dig "chain" "failure_mode" "auto" $c))) "open" -}}
+{{- fail "config.substrate.extproc.chain.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout fails closed there (use auto or closed)" -}}
+{{- end -}}
+{{- $_ := set $c "managed" true -}}
+{{- end -}}
+{{- if not (hasKey $c "egress_peers") }}{{ $_ := set $c "egress_peers" (list .Values.substrate.egressSpiffeId) }}{{ end -}}
+{{- if and .Values.callout.judge.tokenSecret (not (hasKey $c "judge")) -}}
+{{- $_ := set $c "judge" (dict "url" (printf "https://%s/api/v1/substrate/callout/verdict" (include "dc.adminTLSHost" .)) "token_file" "/var/run/secrets/defenseclaw-callout-judge/token" "ca_file" "/var/run/ate/ca.crt") -}}
+{{- end -}}
+{{- if and .Values.callout.actorSecrets.secretName (not (hasKey $c "actor_secrets_dir")) -}}
+{{- $_ := set $c "actor_secrets_dir" (include "dc.actorSecretsDir" .) -}}
+{{- end -}}
+{{- $secrets := list -}}
+{{- range ($sub.secrets | default list) -}}
+{{- $s := dict "name" .name "hosts" (.inject.hosts | default list) "header" .inject.header -}}
+{{- with .inject.placeholder }}{{ $_ := set $s "placeholder" . }}{{ end -}}
+{{- $secrets = append $secrets $s -}}
+{{- end -}}
+{{- if $secrets }}{{ $_ := set $c "secrets" $secrets }}{{ end -}}
+{{- /* One profile per launcher profile: its atespaces, the egress allow
+list, the unattended ask mode, the exposed values, and the ask hosts and
+url rules. The profile's
+sandbox section (guardrail.profiles.<p>.sandbox) tightens substrate.admin as
+config.TightenSandboxAdmin does: unattended_asks deny wins (else the
+profile's, else substrate.unattended.asks), actor_secrets intersect. */ -}}
+{{- $profiles := list -}}
+{{- $egress := $sub.egress | default dict -}}
+{{- $asks := ($sub.unattended | default dict).asks | default "deny" -}}
+{{- $floor := $sub.admin | default dict -}}
+{{- $gprofiles := (.Values.config.guardrail | default dict).profiles | default dict -}}
+{{- range $name, $spaces := ($sub.launcher_atespaces | default dict) -}}
+{{- $sb := (get $gprofiles $name | default dict).sandbox | default dict -}}
+{{- $pasks := lower ($sb.unattended_asks | default ($floor.unattended_asks | default $asks)) -}}
+{{- if eq (lower ($floor.unattended_asks | default "")) "deny" }}{{ $pasks = "deny" }}{{ end -}}
+{{- $p := dict "name" $name "atespaces" $spaces "unattended_asks" $pasks -}}
+{{- with $egress.allow }}{{ $_ := set $p "egress" (dict "allow" .) }}{{ end -}}
+{{- $sec := $sb.actor_secrets | default list -}}
+{{- if and $floor.actor_secrets $sb.actor_secrets -}}
+{{- $both := list -}}
+{{- range $sb.actor_secrets }}{{ if has . $floor.actor_secrets }}{{ $both = append $both . }}{{ end }}{{ end -}}
+{{- $sec = $both -}}
+{{- else if $floor.actor_secrets -}}
+{{- $sec = $floor.actor_secrets -}}
+{{- end -}}
+{{- if $sec }}{{ $_ := set $p "actor_secrets" $sec }}{{ end -}}
+{{- /* ask_hosts and url_rules (GAP-0171): substrate.admin's, then the
+profile's added (config.tightenAskKeys). The callout applies them to the
+hosts the actor's egress policy already allows. */ -}}
+{{- $askHosts := list -}}
+{{- range (concat ($floor.ask_hosts | default list) ($sb.ask_hosts | default list)) }}{{ if not (has . $askHosts) }}{{ $askHosts = append $askHosts . }}{{ end }}{{ end -}}
+{{- if $askHosts }}{{ $_ := set $p "ask_hosts" $askHosts }}{{ end -}}
+{{- $rules := list -}}
+{{- range (concat ($floor.url_rules | default list) ($sb.url_rules | default list)) -}}
+{{- $r := dict "hosts" .hosts "action" (lower .action) -}}
+{{- with .name }}{{ $_ := set $r "name" . }}{{ end -}}
+{{- with .methods }}{{ $_ := set $r "methods" . }}{{ end -}}
+{{- with .path_prefix }}{{ $_ := set $r "path_prefix" . }}{{ end -}}
+{{- if not (has $r $rules) }}{{ $rules = append $rules $r }}{{ end -}}
+{{- end -}}
+{{- if $rules }}{{ $_ := set $p "url_rules" $rules }}{{ end -}}
+{{- $profiles = append $profiles $p -}}
+{{- end -}}
+{{- if $profiles }}{{ $_ := set $c "profiles" $profiles }}{{ end -}}
+{{- toYaml $c -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-callout
+  labels:
+    {{- include "dc.componentLabels" (dict "ctx" . "component" "callout") | nindent 4 }}
+data:
+  callout.yaml: |
+    {{- include "dc.calloutConfig" . | nindent 4 }}

@@ -431,6 +431,10 @@ type Config struct {
 	// Connectors holds settings of connectors that install nothing into an
 	// agent, such as the agent-gateway hook route (trusted_connectors.go).
 	Connectors ConnectorsConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+
+	// Substrate is substrate: (PLAN §7.1), DefenseClaw on Agent Substrate.
+	// Off by default and read only in the cluster.
+	Substrate SubstrateConfig `mapstructure:"substrate" yaml:"substrate,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -1768,6 +1772,12 @@ type HILTConfig struct {
 	MinSeverity string `mapstructure:"min_severity" yaml:"min_severity"`
 }
 
+// DefaultMaxBodyValues is the default of guardrail.max_body_values.
+const DefaultMaxBodyValues = 400000
+
+// DefaultHistorySeenMax is the default of guardrail.history_seen_max.
+const DefaultHistorySeenMax = 2048
+
 type GuardrailConfig struct {
 	Enabled     bool   `mapstructure:"enabled"              yaml:"enabled"`
 	Mode        string `mapstructure:"mode"                 yaml:"mode"`
@@ -1809,6 +1819,17 @@ type GuardrailConfig struct {
 	OriginalModel     string `mapstructure:"original_model"       yaml:"original_model,omitempty"`
 	BlockMessage      string `mapstructure:"block_message"        yaml:"block_message"`
 	StreamBufferBytes int    `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	// MaxBodyValues bounds the JSON values (strings, numbers, objects,
+	// array items) the guardrail proxy reads in one request body or reply
+	// event to inspect it. A larger body is not inspected: managed installs
+	// and the strict tier refuse it, the OSS default forwards it with an
+	// alert. A resource bound, not a policy; 0 means DefaultMaxBodyValues.
+	MaxBodyValues int `mapstructure:"max_body_values"      yaml:"max_body_values"`
+	// HistorySeenMax is the most history segments (earlier turns of a
+	// request) the guardrail proxy remembers as inspected per actor or
+	// session: a remembered segment is not inspected again, any other is.
+	// A resource bound, not a policy; 0 means DefaultHistorySeenMax.
+	HistorySeenMax int `mapstructure:"history_seen_max"     yaml:"history_seen_max"`
 	// RulePackDir is a v8 key: migration input for RulePack/CustomPacks,
 	// rejected in a config_version 9 source.
 	RulePackDir string `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
@@ -3394,6 +3415,24 @@ func loadConfigSourceCheckedWithLayout(
 		}
 		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
 	}
+	if subErr := cfg.Substrate.Validate(); subErr != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", subErr))
+	}
+	if err := cfg.Substrate.ValidateManaged(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", settingErrorAt("substrate", err))
+	}
+	if err := cfg.validateSubstrateProfiles(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "substrate_invalid")
+		}
+		return nil, fmt.Errorf("config: substrate: %w", err)
+	}
 
 	// Validate registry source kind/content shapes. The Python CLI
 	// is the authoritative writer for ``registries.sources`` (it
@@ -4139,6 +4178,8 @@ func setDefaultsForPlatform(dataDir, goos string, deterministic bool) {
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)
+	viper.SetDefault("guardrail.max_body_values", DefaultMaxBodyValues)
+	viper.SetDefault("guardrail.history_seen_max", DefaultHistorySeenMax)
 	viper.SetDefault("guardrail.block_message", "")
 	viper.SetDefault("guardrail.rule_pack_dir", join(dataDir, "policies", "guardrail", "default"))
 	viper.SetDefault("guardrail.hilt.enabled", false)
