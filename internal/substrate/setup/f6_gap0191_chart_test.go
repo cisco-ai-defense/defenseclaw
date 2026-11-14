@@ -25,7 +25,7 @@ func TestGAP0191GatewayFlagsAreAppended(t *testing.T) {
 	c := asList(dig(pod, "containers"))[0]
 	args := asList(dig(c, "args"))
 	for _, want := range []any{"serve", "--substrate", "--admin-groups=dc-admins", "--admin-groups=platform-admins",
-		"--oidc-ca-file=/etc/defenseclaw/oidc-ca/ca.crt", "--chain-egress-action=alert"} {
+		"--oidc-ca-file=/etc/defenseclaw/oidc-ca/ca.crt", "--chain-retention=48h"} {
 		if !slices.Contains(args, want) {
 			t.Errorf("args lack %v: %v", want, args)
 		}

@@ -4644,6 +4644,9 @@ class SubstrateConfig:
     templates: SubstrateTemplatesConfig = field(default_factory=SubstrateTemplatesConfig)
     default_sandbox_class: str = ""
     idle_suspend_after: str = ""
+    # block (default) or alert: a request after a secret read at the egress
+    # callout; the leader reads it (GAP-0250).
+    chain_egress_action: str = ""
     # Workspace upload cap through the admin attach route (E23); None = 1 GiB.
     workspace_max_bytes: int | None = None
     unattended: SubstrateUnattendedConfig = field(default_factory=SubstrateUnattendedConfig)
@@ -7941,6 +7944,7 @@ def _merge_substrate(raw: Any) -> SubstrateConfig:
         templates=_merge_substrate_templates(raw.get("templates")),
         default_sandbox_class=str(raw.get("default_sandbox_class", "") or ""),
         idle_suspend_after=_duration_text(raw.get("idle_suspend_after")),
+        chain_egress_action=str(raw.get("chain_egress_action", "") or ""),
         workspace_max_bytes=_optional_number(raw.get("workspace_max_bytes"), int),
         unattended=SubstrateUnattendedConfig(
             asks=str(unattended.get("asks", "") or ""),

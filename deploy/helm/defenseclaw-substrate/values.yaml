@@ -148,7 +148,9 @@ gateway:
   # name; "" is defenseclaw-auth-delegator-<namespace>-<release>.
   authDelegatorBinding: ""
   # Flags appended to the gateway's serve flags (GAP-0191), for example
-  # [--chain-egress-action=alert].
+  # [--chain-retention=48h]. The chain egress action is config, not a flag:
+  # config.substrate.chain_egress_action (block or alert), which the gateway
+  # and the leader read (GAP-0250); --chain-egress-action here is refused.
   extraArgs: []
   # OIDC groups whose members are DefenseClaw administrators (--admin-groups;
   # config.substrate.identity.admin_groups is the same list in config).

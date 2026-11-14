@@ -127,6 +127,10 @@ type ChainVerdict struct {
 	Deny   bool
 	Rule   string
 	Reason string
+	// Detected are the egress chains the step completes that the leader
+	// does not refuse (chain_egress_action alert, or a chain that only
+	// alerts): the request is allowed with an alert (GAP-0250).
+	Detected []string
 }
 
 // ChainChecker reports an egress-type chain (a secret read, then egress)

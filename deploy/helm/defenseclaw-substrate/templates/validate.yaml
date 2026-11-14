@@ -6,6 +6,17 @@
 {{- if and (has $mode (list "managed" "managed_enterprise" "managed-enterprise")) (eq $fail "open") -}}
 {{- fail "config.substrate.extproc.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout always fails closed there" -}}
 {{- end -}}
+{{- /* The chain egress action is one config key the gateway and the leader
+read; a flag on the gateway alone never reached the leader (GAP-0250). */ -}}
+{{- range (concat (.Values.gateway.extraArgs | default list) (.Values.gateway.args | default list)) -}}
+{{- if hasPrefix "--chain-egress-action" (toString .) -}}
+{{- fail "gateway.extraArgs and gateway.args must not set --chain-egress-action: set config.substrate.chain_egress_action (block or alert), which the gateway and the leader both read (GAP-0250)" -}}
+{{- end -}}
+{{- end -}}
+{{- $chainAction := lower (toString (dig "chain_egress_action" "block" $sub)) -}}
+{{- if not (has $chainAction (list "block" "alert")) -}}
+{{- fail (printf "config.substrate.chain_egress_action %q is not block or alert" $chainAction) -}}
+{{- end -}}
 {{- if eq .Values.substrate.credentialProvider.secretsNamespace .Release.Namespace -}}
 {{- fail "substrate.credentialProvider.secretsNamespace must not be the release namespace: the credential provider would hand DefenseClaw's own Secrets to actors" -}}
 {{- end -}}
