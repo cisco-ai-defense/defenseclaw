@@ -47,7 +47,7 @@ func TestEveryCredentialTableRowStartsSecretReadChainGAP0550(t *testing.T) {
 	for _, probe := range probes {
 		for _, root := range credentialStoreRoots {
 			file := path.Join(root, probe)
-			for _, form := range gap0226ReadForms("cat "+file, "/work/f5proj") {
+			for _, form := range credentialStoreReadForms(file) {
 				t.Run(file+"/"+form.form, func(t *testing.T) {
 					facts := gap0226Facts(t, form.tool, form.value, "/work/f5proj")
 					projection := guardrail.ToolChainProjection{ParseStatus: facts.Parse.Status}
@@ -70,6 +70,22 @@ func TestEveryCredentialTableRowStartsSecretReadChainGAP0550(t *testing.T) {
 				t.Fatalf("%q: projection %+v does not start the secret-read chain", windows, projection)
 			}
 		})
+	}
+}
+
+// credentialStoreReadForms are the spellings of a complete read of file: the
+// forms of gap0226ReadForms, with a path that holds a space (the macOS and
+// the GitHub CLI Windows rows) quoted for the shell.
+func credentialStoreReadForms(file string) []struct{ form, tool, value string } {
+	if !strings.Contains(file, " ") {
+		return gap0226ReadForms("cat "+file, "/work/f5proj")
+	}
+	quoted := "cat \"" + file + "\""
+	return []struct{ form, tool, value string }{
+		{"as is", "Bash", quoted},
+		{"pipeline", "Bash", quoted + " | tr a-z A-Z | grep -c ."},
+		{"and list", "Bash", "cd /work/f5proj && " + quoted},
+		{"Read tool", "Read", file},
 	}
 }
 
@@ -165,6 +181,9 @@ func TestEveryCredentialTableRowThenEgressOnTheHookPathGAP0550(t *testing.T) {
 						value := file
 						if tool == "Bash" {
 							value = "cat " + file
+							if strings.Contains(file, " ") {
+								value = "cat \"" + file + "\""
+							}
 						}
 						session := strings.Join([]string{setup.name, tool, root, probe}, "-")
 						got := run(session, tool, value)
