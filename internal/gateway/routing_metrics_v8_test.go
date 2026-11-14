@@ -252,6 +252,10 @@ func TestBudgetGaugesUnderAFleetStore(t *testing.T) {
 	if got, ok := budgetValue(t, capture, observability.TelemetryInstrumentDefenseClawBudgetSpend, "daily"); !ok || got != 4 {
 		t.Fatalf("a per-user budget keeps its spend under a store: %v %v", got, ok)
 	}
+	// This device's 7 of 100 USD share is not "over the limit": only the store's marker says that.
+	if got, ok := budgetValue(t, capture, observability.TelemetryInstrumentDefenseClawBudgetSubjectsExceeded, "eng"); !ok || got != 0 {
+		t.Fatalf("a pooled budget under its limit must not read as exceeded under a store: %v %v", got, ok)
+	}
 	// The store never answered: healthy, but no sync age yet (never a made-up 0).
 	if n := len(capturedMetrics(capture, observability.TelemetryInstrumentDefenseClawBudgetStoreHealthy)); n != 1 {
 		t.Fatalf("store healthy gauges = %d", n)

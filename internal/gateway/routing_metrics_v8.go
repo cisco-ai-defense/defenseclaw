@@ -257,11 +257,13 @@ func budgetMetricBatchFor(
 		// spend adds up across devices) with "over the limit" only, never its
 		// total: this device's share would read as the whole, so no spend is
 		// reported for it; the subjects-over count still is.
-		pooledOnly := snap.Peak >= budgetstore.ExceededUSD/2 || (storeOn && b.Scope != config.RoutingBudgetScopeUser)
-		if pooledOnly {
-			// The fleet store answers a pooled budget with over the limit only.
+		marker := snap.Peak >= budgetstore.ExceededUSD/2
+		if marker {
+			// The store marks a pooled budget that is over its limit with a
+			// huge spend: that is the only signal, and it counts as exceeded.
 			snap.Exceeded = max(snap.Exceeded, 1)
-		} else {
+		}
+		if !marker && !(storeOn && b.Scope != config.RoutingBudgetScopeUser) {
 			total, peak := snap.Total, snap.Peak
 			items = append(items,
 				item(observability.TelemetryInstrumentDefenseClawBudgetSpend,

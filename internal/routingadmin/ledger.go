@@ -131,33 +131,8 @@ func (l *Ledger) Spend(key, period string, now time.Time) (float64, bool) {
 // SpendPrefix sums the spend of every key that starts with prefix
 // (<scope>:<id>: gives all subjects of one budget, for administrators).
 func (l *Ledger) SpendPrefix(prefix, period string, now time.Time) (float64, bool) {
-	if l == nil {
-		return 0, false
-	}
-	today, from := dayNumber(now), windowStart(period, now)
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.seeded[budgetIDOfKey(prefix)] {
-		return 0, false
-	}
-	keys := map[string]bool{}
-	for _, m := range []map[string]map[int32]float64{l.local, l.remote} {
-		for k := range m {
-			if strings.HasPrefix(k, prefix) {
-				keys[k] = true
-			}
-		}
-	}
-	sorted := make([]string, 0, len(keys))
-	for k := range keys {
-		sorted = append(sorted, k)
-	}
-	sort.Strings(sorted)
-	var total float64
-	for _, k := range sorted {
-		total += l.windowLocked(k, from, today)
-	}
-	return total, true
+	snap, ok := l.Snapshot(prefix, period, 0, now)
+	return snap.Total, ok
 }
 
 // windowLocked sums in day order, so the same state gives the same total.

@@ -4339,9 +4339,8 @@ def test_routing_board_prometheus_queries_use_only_registered_series_and_labels(
         grouped = {label.strip() for group in re.findall(r"\b(?:by|on)\s*\(([^)]*)\)", expression) for label in group.split(",")}
         allowed = set().union(*(audit.PROMETHEUS_METRIC_LABELS[name] for name in names)) | {"host_name", "le"}
         assert grouped <= allowed, (title, grouped - allowed)
-        # Absent stays absent: the only fabricated zero is a count of budgets over their limit.
-        if "vector(0)" in expression:
-            assert title == "Budgets with a subject over the limit", title
+        # Absent stays absent: a zero is only ever derived from a series that proves the reporter is alive.
+        assert "vector(0)" not in expression, title
     assert set(_ROUTING_BOARD_METRICS) <= seen
 
 
@@ -4435,3 +4434,25 @@ def test_routing_board_per_user_and_group_panels_keep_identity_out_of_metrics() 
     own = _panel(dashboard, "Own and all")["options"]["content"]
     assert "never leave the endpoint" in own
 
+
+
+def test_routing_board_saving_survives_a_one_sided_counter() -> None:
+    """A call served by a free model has no compared cost; a free requested model has no baseline. Either way
+    the saving must still be computed from the side that exists, never blank."""
+    dashboard = _dashboard("defenseclaw-routing.json")
+    for title in ("Saved (USD)", "Saved (share of counterfactual)", "Saved per interval (USD)", "Saved by routed model (range)", "Saved by route decision (range)"):
+        expression = _panel(dashboard, title)["targets"][0]["expr"]
+        assert "defenseclaw_model_cost_baseline_USD_total" in expression and "defenseclaw_model_cost_compared_USD_total" in expression, title
+        # Both operands are guarded by an `or ... * 0` over the other counter.
+        assert expression.count("* 0)") + expression.count("0 * ") >= 2, title
+
+
+def test_routing_board_fail_closed_panel_is_not_a_made_up_zero() -> None:
+    dashboard = _dashboard("defenseclaw-routing.json")
+    panel = _panel(dashboard, "Sensitive requests refused (fail closed)")
+    expression = panel["targets"][0]["expr"]
+    assert " or 0 * " not in expression and "vector(0)" not in expression
+    assert panel["fieldConfig"]["defaults"]["noValue"] == "not reported by this gateway"
+    # The leak path is visible with its own panel.
+    leak = _panel(dashboard, "Sensitive requests that went to the original model")["targets"][0]["expr"]
+    assert 'filtered_by="sensitive"' in leak and 'result="fallback"' in leak
