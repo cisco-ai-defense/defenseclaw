@@ -1962,7 +1962,9 @@ def test_downgrade_puts_the_route_only_settings_back_with_the_gateway_stopped(
 
     assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
 
-    assert calls == [["stop"], ["connector", "route-restore", "--all"]]
+    # Stopped before the restore, started again (the 1.0.9 gateway) after:
+    # the older installer saw no gateway running and starts none.
+    assert calls == [["stop"], ["connector", "route-restore", "--all"], ["start"]]
     assert "/r/claudecode" not in settings.read_text(encoding="utf-8")
     assert len(waited) == 1 and "--yes" in waited[0] and execs == []
     assert "Put back the claudecode model settings" in capsys.readouterr().out
@@ -1993,6 +1995,32 @@ def test_downgrade_refuses_when_the_route_only_settings_stay(
     assert calls[-1] == ["start"]
     err = capsys.readouterr().err
     assert "defenseclaw routing disable --connector claudecode" in err and "401" in err and "Nothing was changed" in err
+
+
+def test_a_downgrade_whose_installer_cannot_start_starts_the_gateway_again(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch)
+
+    def broken(argv: list[str]) -> int:
+        raise upgrade_shim.ShimError("could not run bash")
+
+    monkeypatch.setattr(upgrade_shim, "_wait_for_installer", broken)
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 1
+    assert calls[-1] == ["start"]
+
+
+def test_a_downgrade_with_the_gateway_stopped_leaves_it_stopped(
+    home: Path, tmp_path: Path, execs: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _routed_claude()
+    calls = _fake_gateway(monkeypatch, settings, restores=True, running=False)
+    _downgrade_to_1_0_9(tmp_path, monkeypatch)
+
+    assert upgrade_shim.run(["upgrade", "--version", "1.0.9", "--yes"]) == 0
+    assert calls == [["connector", "route-restore", "--all"]]
 
 
 def test_downgrade_without_yes_and_no_terminal_changes_nothing(

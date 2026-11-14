@@ -392,36 +392,30 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
     except BaseException:
         shutil.rmtree(workdir, ignore_errors=True)
         raise
-    released = False
+    released, was_running = False, False
     if _key(version) < _key(installed):
         try:
-            released = _release_route_only(version, yes=yes)
+            released, was_running = _release_route_only(version, yes=yes)
             _set_aside_newer_keys(version)
         except BaseException:
             shutil.rmtree(workdir, ignore_errors=True)
-            if released:
-                _undo_route_release()
+            if released and was_running:
+                _start_gateway_again("this release's")
             raise
     # Only a downgrade to a release that keeps the newer hook helper waits
     # for its installer and drops the helper (rel-1-0-4:GAP-2503); one that
-    # put the route-only settings back waits too, to undo that if it fails.
+    # put the route-only settings back waits too: it stopped the gateway, so
+    # the older installer saw none running and does not start one.
     newer = installed if _key(version) < min(_key(installed), HOOK_HELPER_KEPT_BEFORE) else None
-    # The settings were confirmed above: the installer does not ask again.
-    rc = _run_installer(installer, (["--yes"] if yes or released else []) + extra, workdir, newer=newer, rerun=rerun, wait=released)
-    if released and rc != 0:
-        _undo_route_release()
+    rc = 1
+    try:
+        rc = _run_installer(installer, (["--yes"] if yes else []) + extra, workdir, newer=newer, rerun=rerun, wait=released)
+    finally:
+        if released and was_running:
+            # The installed gateway: the older one after a success, this
+            # release's (which writes the route settings again) otherwise.
+            _start_gateway_again(f"DefenseClaw {version}" if rc == 0 else "this release's")
     return rc
-
-
-def _undo_route_release() -> None:
-    """After a failed downgrade, start this release's gateway again: it
-    renders the route-only settings from config.yaml (GAP-0602)."""
-
-    from defenseclaw.gateway_path import canonical_install_path, path_gateway
-
-    gateway = path_gateway(honor_override=False) or canonical_install_path()
-    if _gateway_call(gateway, "start") != 0:
-        print("  ! The gateway did not start again; run: defenseclaw-gateway start", file=sys.stderr)
 
 
 # Route-only (1.0.10) points Claude Code and Codex at the gateway route
@@ -462,12 +456,13 @@ class _RouteOnlyPartlyRestored(ShimError):
     changed_nothing = False
 
 
-def _release_route_only(target: str, *, yes: bool) -> bool:
+def _release_route_only(target: str, *, yes: bool) -> tuple[bool, bool]:
     """Put back the agent model settings route-only changed before the
     installer of ``target``, a release without route-only, runs (a Unix
     downgrade; the older installer cannot do it, and a rollback or a Windows
     downgrade runs this release's installer, whose prepare-rollback step
-    does). Returns whether it stopped the gateway and put settings back.
+    does). Returns whether it put settings back, and whether the gateway
+    was running (the caller starts it again after the installer).
 
     It asks first unless ``yes``, then stops the gateway, so its connector
     repair cannot write the settings again, and checks the files. When they
@@ -475,10 +470,10 @@ def _release_route_only(target: str, *, yes: bool) -> bool:
     """
 
     if os.name == "nt" or (_VERSION.fullmatch(target) and _key(target) >= ROUTE_ONLY_SINCE):
-        return False
+        return False, False
     rendered = _route_only_rendered()
     if not rendered:
-        return False
+        return False, False
     names = ", ".join(rendered)
     if not yes:
         if not sys.stdin.isatty():
@@ -508,7 +503,7 @@ def _release_route_only(target: str, *, yes: bool) -> bool:
         )
     print(f"  → Put back the {names} model settings that route-only changed (DefenseClaw {target} has no route-only).")
     print("    Restart the agent. Installing 1.0.10 or later again routes it again from config.yaml.")
-    return True
+    return True, was_running
 
 
 def _gateway_call(gateway: str, *args: str) -> int:
@@ -516,6 +511,14 @@ def _gateway_call(gateway: str, *args: str) -> int:
         return subprocess.call([gateway, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)  # noqa: S603 - the installed gateway
     except (OSError, subprocess.TimeoutExpired):
         return 1
+
+
+def _start_gateway_again(which: str) -> None:
+    from defenseclaw.gateway_path import canonical_install_path, path_gateway
+
+    gateway = path_gateway(honor_override=False) or canonical_install_path()
+    if _gateway_call(gateway, "start") != 0:
+        print(f"  ! {which} gateway did not start; run: defenseclaw-gateway start", file=sys.stderr)
 
 
 def _refuse_unguarding_downgrade(version: str) -> None:
