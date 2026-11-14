@@ -147,6 +147,32 @@ func (l CascadeLanes) SecretFlowMode() string { return l.value("secret_flow") }
 // shadow or off. Only on is live (shadow and off add nothing).
 func (l CascadeLanes) NonShellMode() string { return l.value("nonshell") }
 
+// checkCascadeLanesSource refuses, with the key named, a lane the source
+// names without a value: `lane:` or `lane: null` for any lane, and `lane: ""`
+// for a string lane. Decoding reads those as no value (the lane's shipped
+// default), but the gateway's schema pass refuses them, so a loader that skips
+// the schema pass (LoadFromFile) must refuse them too: one reading of a config
+// for every consumer (GAP-0545). An empty nonshell value is already refused by
+// Validate, so it is not repeated here.
+func checkCascadeLanesSource(plain map[string]any) error {
+	guardrail, _ := plain["guardrail"].(map[string]any)
+	cascade, _ := guardrail["cascade"].(map[string]any)
+	lanes, _ := cascade["lanes"].(map[string]any)
+	for _, s := range cascadeLaneRegistry {
+		v, present := lanes[s.name]
+		if !present {
+			continue
+		}
+		if v == nil {
+			return fmt.Errorf("config: guardrail.cascade.lanes.%s has no value; set it to one of off, shadow, on or remove the key", s.name)
+		}
+		if str, ok := v.(string); ok && s.name != "nonshell" && str == "" {
+			return fmt.Errorf("config: guardrail.cascade.lanes.%s is empty; set it to one of off, shadow, on or remove the key", s.name)
+		}
+	}
+	return nil
+}
+
 // Validate checks every registered lane that is set: a lane value (off,
 // shadow or on, trimmed, any case), and one this release accepts for that
 // lane. Any other value, an empty one included, is refused with the key named:
