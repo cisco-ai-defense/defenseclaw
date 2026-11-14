@@ -45,23 +45,24 @@ var (
 )
 
 // standaloneEnterpriseHookExecutable reports whether executable is the
-// administrator-owned hook binary of a standalone enterprise deployment:
-// <standalone install root>\bin\defenseclaw-hook.exe under the protected
-// Program Files registration, or a run-scoped certification root. Only
-// administrators can place a file there.
+// administrator-owned hook binary of a standalone enterprise deployment
+// under the protected Program Files registration, or a run-scoped
+// certification root: the transition image <root>\bin\defenseclaw-hook.exe
+// or a launch image <root>\bin\hooks\<16 hex>\defenseclaw-hook.exe
+// (GAP-0751). An agent session that read its hook command before an upgrade
+// starts the older launch image; it is the same managed hook and must never
+// fall back to the per-user runtime. Only administrators can place a file
+// under either path.
 func standaloneEnterpriseHookExecutable(executable string) bool {
 	executable = strings.TrimSpace(executable)
 	if executable == "" || !filepath.IsAbs(executable) {
 		return false
 	}
-	executable = filepath.Clean(executable)
-	if !strings.EqualFold(filepath.Base(executable), nativeHookLauncherName) {
+	image, ok := winpath.ParseEnterpriseHookImagePath(filepath.Clean(executable))
+	if !ok || !strings.EqualFold(image.Name, nativeHookLauncherName) {
 		return false
 	}
-	bin := filepath.Dir(executable)
-	if !strings.EqualFold(filepath.Base(bin), "bin") {
-		return false
-	}
+	bin := image.Bin
 	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return false

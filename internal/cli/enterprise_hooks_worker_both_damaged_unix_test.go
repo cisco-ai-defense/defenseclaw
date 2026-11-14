@@ -101,6 +101,7 @@ func (f bothDamagedFixture) requireIntact(t *testing.T, step string) {
 // when it is sampled after 1 s and after 5 s.
 func TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange(t *testing.T) {
 	scriptElement := "hook runtime file hermes-hook.sh"
+	var repaired []sampledRepair
 	for _, tc := range []struct {
 		name         string
 		sample       bool // sample the files 1 s and 5 s after the repair
@@ -129,8 +130,18 @@ func TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange(t *testing.T) {
 		}, []string{enterprisehooks.HookElementEntry}, []string{enterprisehooks.HookChangeEdited}},
 		{"nothing damaged", false, func(bothDamagedFixture) error { return nil }, nil, nil},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newBothDamagedFixture(t)
+		// A sampled case's files outlive its subtest: the samples of every
+		// sampled case share one 1 s and one 5 s wait below, each taken at
+		// least that long after its repair.
+		var fixture bothDamagedFixture
+		if tc.sample {
+			fixture = newBothDamagedFixture(t)
+		}
+		passed := t.Run(tc.name, func(t *testing.T) {
+			f := fixture
+			if !tc.sample {
+				f = newBothDamagedFixture(t)
+			}
 			if err := tc.tamper(f); err != nil {
 				t.Fatal(err)
 			}
@@ -139,15 +150,25 @@ func TestWorkerRestoresTheScriptAndTheEntryDamagedInOneChange(t *testing.T) {
 				t.Fatalf("answer = %+v, want a healthy target with %v restored (%v)", got, tc.wantElements, tc.wantChanges)
 			}
 			f.requireIntact(t, "after the repair")
-			if !tc.sample {
-				return
-			}
-			time.Sleep(time.Second)
-			f.requireIntact(t, "1 s after")
-			time.Sleep(4 * time.Second)
-			f.requireIntact(t, "5 s after")
 		})
+		if tc.sample && passed {
+			repaired = append(repaired, sampledRepair{tc.name, fixture})
+		}
 	}
+	time.Sleep(time.Second)
+	for _, r := range repaired {
+		r.fixture.requireIntact(t, r.name+": 1 s after")
+	}
+	time.Sleep(4 * time.Second)
+	for _, r := range repaired {
+		r.fixture.requireIntact(t, r.name+": 5 s after")
+	}
+}
+
+// sampledRepair is a repaired case whose files are sampled after the repair.
+type sampledRepair struct {
+	name    string
+	fixture bothDamagedFixture
 }
 
 // A second element damaged a moment after the install read its file is put back

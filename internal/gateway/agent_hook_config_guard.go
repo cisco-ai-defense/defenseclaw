@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1252,7 +1253,7 @@ func agentHookConfigPlacedCommands(command, cwd, home string, depth int) []hookp
 			if body := hookpaths.NestedShellBody(words); body != "" {
 				// A literal assignment on the shell process is inherited by
 				// the agent launched in its -c body.
-				if file, err := syntax.NewParser().Parse(strings.NewReader(statement.Command), ""); err == nil {
+				if file, err := syntax.NewParser().Parse(shellparse.Reader(statement.Command), ""); err == nil {
 					syntax.Walk(file, func(node syntax.Node) bool {
 						call, ok := node.(*syntax.CallExpr)
 						if !ok {
@@ -1297,7 +1298,7 @@ func agentHookConfigGitAssignedCommands(command, home string) [][]string {
 	if !strings.Contains(command, "git") || !strings.Contains(command, "=") {
 		return nil
 	}
-	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser().Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return nil
 	}
@@ -2541,7 +2542,7 @@ func agentHookConfigPrefixOverrideOne(command string, guard *agentHookConfigGuar
 	if len(command) > 8192 || !strings.Contains(command, "=") {
 		return "", ""
 	}
-	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser().Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", ""
 	}

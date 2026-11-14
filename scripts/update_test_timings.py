@@ -15,9 +15,11 @@ weighs an estimate. Refresh after a large test change:
            gh run download <run> --pattern 'go-test-timings-*' --dir t
            scripts/update_test_timings.py go t/*/*.json
          A local run works too (go test -race ... -json ./... > go.json).
-         The darwin connector parts of Unix Standalone Lifecycle upload
-         go-test-timings-darwin-connector-* the same way; --update keeps
-         the other packages of go-darwin.json (internal/enterpriseunix):
+         The darwin connector and gateway parts of Unix Standalone
+         Lifecycle upload go-test-timings-darwin-connector-* and
+         go-test-timings-darwin-gateway-* (the gateway's unix and darwin
+         tests) the same way; --update keeps the other packages of
+         go-darwin.json (internal/enterpriseunix):
            gh run download <run> --pattern 'go-test-timings-darwin-*' --dir t
            scripts/update_test_timings.py go t/*/*.json --update --out scripts/test-timings/go-darwin.json
   python pytest --junitxml reports of the Python suite -> python-linux.json

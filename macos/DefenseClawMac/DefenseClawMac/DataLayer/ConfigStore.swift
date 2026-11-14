@@ -1026,9 +1026,12 @@ actor ConfigStore {
         return out
     }
 
-    /// Upstream precedence ladder (config.py::resolved_token):
+    /// Upstream precedence ladder (config.py::resolved_token, config.go ResolvedToken):
     /// 1. env var named by gateway.token_env  2. DEFENSECLAW_GATEWAY_TOKEN
-    /// 3. OPENCLAW_GATEWAY_TOKEN              4. literal gateway.token
+    /// 3. literal gateway.token
+    /// OPENCLAW_GATEWAY_TOKEN is the OpenClaw WebSocket credential, never the
+    /// DefenseClaw API token: a token_env naming it is skipped, and so is any
+    /// value equal to it (a 1.0.9 install saved the OpenClaw token as both).
     /// Every rung skips SecretRef text (runtime 1.0.7, GatewayTokenLadder).
     private func resolveToken(root: YAMLNode, dotenv: [String: String]) -> String? {
         let processEnvironment = ProcessInfo.processInfo.environment
@@ -1168,14 +1171,24 @@ enum GatewayTokenLadder {
         return pattern.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) != nil
     }
 
+    /// The OpenClaw gateway credential name (connectors.openclaw WebSocket only).
+    static let openClawGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
+
     /// `lookup` answers one environment name (process environment, then
-    /// .env). Returns nil when no usable token is reachable.
+    /// .env). Returns nil when no usable token is reachable. The OpenClaw
+    /// gateway credential is never a rung: a gateway.token_env naming it is
+    /// skipped, and any value equal to it is skipped (config.go ResolvedToken).
     static func resolve(tokenEnvName: String?, literal: String?, lookup: (String) -> String?) -> String? {
-        for name in [tokenEnvName ?? "", "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"] where !name.isEmpty {
-            if let value = lookup(name), !value.isEmpty, !isSecretRefText(value) { return value }
+        let openClawToken = lookup(openClawGatewayTokenEnv).flatMap { $0.isEmpty ? nil : $0 }
+        func usable(_ value: String?) -> String? {
+            guard let value, !value.isEmpty, !isSecretRefText(value) else { return nil }
+            if let openClawToken, openClawToken == value { return nil }
+            return value
         }
-        guard let literal, !literal.isEmpty, !isSecretRefText(literal) else { return nil }
-        return literal
+        for name in [tokenEnvName ?? "", "DEFENSECLAW_GATEWAY_TOKEN"] where !name.isEmpty && name != openClawGatewayTokenEnv {
+            if let value = usable(lookup(name)) { return value }
+        }
+        return usable(literal)
     }
 }
 
