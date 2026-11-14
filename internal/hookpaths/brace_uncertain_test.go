@@ -18,7 +18,11 @@ func TestBraceListOfPlainNamesIsNotUncertain(t *testing.T) {
 		{"cp {mutants.sh,gates.sh} .v/", false},
 		{"cp a{1,2}.txt b/", false},
 		{"cp {a,b[!z]}.txt b/", true},
-		{"cp a b/{x,y}[!z]", true},
+
+		{"sed -n 1,5p a/[!z]*.go", false},
+		{"sed -i s/a/b/ a/[!z]*.go", true},
+		{"sed -ni 1,5p a/[!z]*.go", true},
+		{"sed --in-place s/a/b/ a/[!z]*.go", true},
 	} {
 		got := UncertainGlobWriteReason(test.command, f.project, f.home, nil) != ""
 		if got != test.uncertain {

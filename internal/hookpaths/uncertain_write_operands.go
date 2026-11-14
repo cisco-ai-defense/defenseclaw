@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"strings"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -109,6 +110,9 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 		if !fixed || !uncertainWriteVerbs[programBase(program)] {
 			return true
 		}
+		if globOnly && (programBase(program) == "sed" || programBase(program) == "gsed") && !sedEditsInPlace(call, home) {
+			return true // a sed that does not edit in place writes none of its operands
+		}
 		for _, word := range call.Args[1:] {
 			if text, fixed := StaticWord(word, home); fixed && len(text) > 0 && text[0] == '-' {
 				continue // an option
@@ -118,4 +122,25 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 		return true
 	})
 	return reason
+}
+
+// sedEditsInPlace reports a sed call with -i, --in-place or a short option
+// cluster that holds i (-ni, -Ei): the only calls that write the files they name.
+func sedEditsInPlace(call *syntax.CallExpr, home string) bool {
+	for _, arg := range call.Args[1:] {
+		text, fixed := StaticWord(arg, home)
+		if !fixed {
+			return true
+		}
+		if text == "--" {
+			return false
+		}
+		if strings.HasPrefix(text, "--in-place") {
+			return true
+		}
+		if len(text) > 1 && text[0] == '-' && text[1] != '-' && strings.ContainsRune(text[1:], 'i') {
+			return true
+		}
+	}
+	return false
 }
