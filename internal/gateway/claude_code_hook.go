@@ -186,13 +186,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 			a.observeUserDownloadRequest(ctx, req.Prompt)
 		}
-		promptRequest := claudeCodeContentInspectRequest(claudeCodePromptContent(req), "prompt")
-		if isToolJudgeIntentEvent(req.HookEventName) {
-			// The turn-start event carries what the user typed. The expansion
-			// event carries command text the user did not type.
-			promptRequest.textOrigin = ruleTextOriginUserTyped
-		}
-		verdict = a.inspectMessageContent(ctx, promptRequest)
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+			claudeCodePromptContent(req), "prompt",
+		))
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}

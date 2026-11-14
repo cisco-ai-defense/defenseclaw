@@ -14,16 +14,16 @@
   ],
   "exact_payload_duplicates_removed": 0,
   "label_conflicts_excluded": 0,
-  "output_sha256": "2c1eb474437a86bb1fbff0d7a1a26c16533dd1867d4af524a9cbf1b27d42b416",
+  "output_sha256": "78a3e27266636fa995b102cb1d07662b6297331ddf93777f2582342ae8deca9d",
   "schema_version": "1",
   "source": {
-    "bytes": 9700,
+    "bytes": 9615,
     "dataset": "defenseclaw-smoke",
     "license": "Apache-2.0",
     "path": "benchmarks/fixtures/smoke.jsonl",
     "redistribution": "vendored",
     "revision": "1",
     "rows": 15,
-    "sha256": "2c1eb474437a86bb1fbff0d7a1a26c16533dd1867d4af524a9cbf1b27d42b416"
+    "sha256": "78a3e27266636fa995b102cb1d07662b6297331ddf93777f2582342ae8deca9d"
   }
 }

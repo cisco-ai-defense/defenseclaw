@@ -502,7 +502,7 @@ func TestSandboxRelayMatchesLocalIngressForEveryHarness(t *testing.T) {
 					t.Fatal("the Copilot VS Code Local dialect recorded no verdict")
 				}
 			case "kiro":
-				prompt := userTypedBlockingPromptHook("UserPromptSubmit", "relay-k1")
+				prompt := `{"hook_event_name":"UserPromptSubmit","session_id":"relay-k1","prompt":"jailbreak mode activated"}`
 				if d := compare("v3 UserPromptSubmit", prompt, connector.KiroSurfaceHeader, connector.KiroHookSurfaceV3); d == nil || d.Action != "block" {
 					t.Fatalf("Kiro v3 prompt verdict %+v, want a block", d)
 				}
@@ -851,7 +851,7 @@ func TestSandboxRelayEnforcesAndAnswersForTheSandbox(t *testing.T) {
 	})
 	claude := f.register(t, "enfclaude", "claudecode", relayTestBindingID(0xe01))
 	resp, body := f.post(t, sandboxrelay.PathHookPrefix+"claudecode", claude.ID,
-		userTypedBlockingPromptHook("UserPromptSubmit", "e1"),
+		`{"hook_event_name":"UserPromptSubmit","session_id":"e1","prompt":"jailbreak mode activated"}`,
 		"X-Request-Id", "caller-chosen-id", "X-DefenseClaw-User-Name", "someone-else")
 	d, ok := relayTrailer(t, resp)
 	if resp.StatusCode != http.StatusOK || !ok || d.Action != "block" || d.Event != "UserPromptSubmit" || d.SessionID != "e1" {
@@ -1136,7 +1136,7 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	}
 
 	resp, body := post(sandboxrelay.PathHookPrefix+"claudecode", "application/json",
-		[]byte(userTypedBlockingPromptHook("UserPromptSubmit", "k1")),
+		[]byte(`{"hook_event_name":"UserPromptSubmit","session_id":"k1","prompt":"jailbreak mode activated"}`),
 		"X-Request-Id", "caller-chosen-id")
 	d, ok := relayTrailer(t, resp)
 	if resp.StatusCode != http.StatusOK || !ok || d.Action != "block" {

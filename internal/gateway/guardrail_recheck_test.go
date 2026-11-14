@@ -29,7 +29,7 @@ func TestInspectWithRawRecheckIsOneEvaluation(t *testing.T) {
 	rawOnly := g.Inspect(ctx, "prompt", raw, nil, "gpt-4", "action")
 	starts, ends = 0, 0
 
-	verdict := inspectPromptWithRawRecheck(ctx, g, stripped, raw, nil, nil, "gpt-4", "action")
+	verdict := inspectPromptWithRawRecheck(ctx, g, stripped, raw, nil, "gpt-4", "action")
 	if starts != 1 || ends != 1 {
 		t.Fatalf("evaluation spans started=%d ended=%d, want one", starts, ends)
 	}
@@ -42,7 +42,7 @@ func TestInspectWithRawRecheckIsOneEvaluation(t *testing.T) {
 	}
 
 	starts = 0
-	inspectPromptWithRawRecheck(ctx, g, "hello", "hello", nil, nil, "gpt-4", "action")
+	inspectPromptWithRawRecheck(ctx, g, "hello", "hello", nil, "gpt-4", "action")
 	if starts != 1 {
 		t.Fatalf("unchanged text started %d spans, want one", starts)
 	}

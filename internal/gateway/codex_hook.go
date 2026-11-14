@@ -281,7 +281,6 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:    "prompt",
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
-			textOrigin:   ruleTextOriginUserTyped,
 		})
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{

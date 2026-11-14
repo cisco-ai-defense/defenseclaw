@@ -1285,11 +1285,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// context message after the prompt (GAP-0190, GAP-0243). userText still
 	// drives the heartbeat and session-startup gates.
 	turnText := promptTurnText(partial.Messages)
-	// typed is what the user typed in the current turn, by the request field and
-	// role each text came from (llmPromptSourceOrigins): the instruction-field
-	// fallbacks below (system, instructions, systemInstruction) are not typed, so
-	// a request with only those keeps the unspecified origin (GAP-0408).
-	typed := llmTypedPromptParts(llmFieldMessages, partial.Messages)
 	// A coexisting Ollama /api/generate `prompt` is the user generation
 	// input. Do not let top-level `system` replace it (#718). Anthropic
 	// and other system-only native shapes still fall through here when
@@ -1299,7 +1294,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// inspection instead of falling through to the other native shapes.
 	if userText == "" && strings.TrimSpace(partial.System) != "" && strings.TrimSpace(partial.Prompt) == "" {
 		userText = partial.System
-		typed = llmTypedPromptField(llmFieldSystem, partial.System)
 	}
 	// Responses API: input can be a string or array of message/item objects.
 	if userText == "" && len(partial.Input) > 0 {
@@ -1307,7 +1301,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		case '"':
 			// Plain string input
 			_ = json.Unmarshal(partial.Input, &userText)
-			typed = llmTypedPromptField(llmFieldInput, userText)
 		case '[':
 			// Array of items. The Responses API wraps each turn in an outer
 			// object with "type":"message"; extract the inner content directly.
@@ -1332,7 +1325,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				}
 				userText = lastUserText(inputMsgs)
 				turnText = promptTurnText(inputMsgs)
-				typed = llmTypedPromptParts(llmFieldInput, inputMsgs)
 				if len(partial.Messages) == 0 {
 					partial.Messages = inputMsgs
 				}
@@ -1364,7 +1356,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 			userText = lastUserText(geminiMsgs)
 			turnText = promptTurnText(geminiMsgs)
-			typed = llmTypedPromptParts(llmFieldContents, geminiMsgs)
 			if len(partial.Messages) == 0 {
 				partial.Messages = geminiMsgs
 			}
@@ -1372,7 +1363,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	if userText == "" && len(partial.SystemInstruction) > 0 {
 		userText = extractGeminiSystemInstructionText(partial.SystemInstruction)
-		typed = llmTypedPromptField(llmFieldSystemInstruction, userText)
 	}
 
 	// Ollama /api/generate + legacy completion endpoints: top-level
@@ -1385,7 +1375,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	ollamaSystemText := ""
 	if userText == "" && strings.TrimSpace(partial.Prompt) != "" {
 		userText = partial.Prompt
-		typed = llmTypedPromptField(llmFieldPrompt, partial.Prompt)
 		if strings.TrimSpace(partial.System) != "" {
 			ollamaSystemText = partial.System
 		}
@@ -1401,7 +1390,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// user turn was found — still worth inspecting for prompt injection.
 	if userText == "" && partial.Instructions != "" {
 		userText = partial.Instructions
-		typed = llmTypedPromptField(llmFieldInstructions, userText)
 	}
 
 	passthroughPromptID := ""
@@ -1449,7 +1437,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, typed, partial.Messages, label, mode)
+		verdict := inspectPromptWithRawRecheck(r.Context(), p.inspector, inspectionText, inspectRaw, partial.Messages, label, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
 			// AID directive from this prompt's inspection is now known;
@@ -3163,9 +3151,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
 	inspectText := promptInspectText(req.Messages)
-	// Only the current user turn is typed; system, developer, assistant and tool
-	// text, and the system notice injected above, are not (GAP-0408).
-	typedPrompt := llmTypedPromptParts(llmFieldMessages, req.Messages)
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	pendingRoutedPrompt := false
@@ -3209,7 +3194,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict, as one evaluation
 		// (GAP-2288).
-		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, typedPrompt, req.Messages, req.Model, mode)
+		verdict := inspectPromptWithRawRecheck(agentCtx, p.inspector, inspectionText, inspectText, req.Messages, req.Model, mode)
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		promptEmitContext := r.Context()
 		if deferManagedPrompt {
