@@ -73,9 +73,13 @@ func FuzzUnprovenProtectedWrite(f *testing.F) {
 // parser fault, and no goroutine is left running.
 func TestUnprovenProtectedWriteRecoveringParseHangIsAFault(t *testing.T) {
 	command := fuzzCorpusString(t, "FuzzUnprovenProtectedWrite", "ad64e538f1aab24f")
+	// An absolute home and cwd on this OS (the fuzz target's POSIX paths are
+	// relative on Windows, where the reading stops before the parse).
+	home := t.TempDir()
+	cwd := filepath.Join(home, "work")
 	goroutines := runtime.NumGoroutine()
 	done := make(chan string, 1)
-	go func() { done <- UnprovenProtectedWrite(command, "/home/fuzz/work", "/home/fuzz") }()
+	go func() { done <- UnprovenProtectedWrite(command, cwd, home) }()
 	select {
 	case got := <-done:
 		if got != UnprovenParserFault {

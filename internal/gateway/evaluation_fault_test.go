@@ -186,14 +186,15 @@ func gap0486ControlRule(t *testing.T, where string, out map[string]any) string {
 // gap0437PowerShellExec reports whether the OpenClaw exec call is read in
 // PowerShell (native Windows), where the POSIX arithmetic text is ordinary
 // text: the call is judged on what PowerShell would do with it (the
-// protected write blocks), not on the POSIX reading.
-func gap0437PowerShellExec(command string, out map[string]any, t *testing.T, p gap0437Pack) bool {
+// protected write blocks; observe mode reports it as would_block), not on
+// the POSIX reading.
+func gap0437PowerShellExec(command, mode string, out map[string]any, t *testing.T, p gap0437Pack) bool {
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		return false
 	}
-	if strings.Contains(command, "authorized_keys") && out["action"] != "block" {
-		t.Errorf("inspect/tool %s on Windows: the protected write is %v, want block: %v", p.name, out["action"], out)
+	if strings.Contains(command, "authorized_keys") {
+		gap0437AssertModeBlock(t, "inspect/tool on Windows (protected write)", p, mode, out)
 	}
 	return true
 }
@@ -234,7 +235,7 @@ func TestGAP0437ParserFaultInspectToolBlocksInEveryPack(t *testing.T) {
 				for _, command := range gap0437Commands {
 					before := evaluatorFaults.Load()
 					out := gap0437Inspect(t, a, dir, command)
-					if gap0437PowerShellExec(command, out, t, p) {
+					if gap0437PowerShellExec(command, mode, out, t, p) {
 						continue
 					}
 					gap0437AssertModeBlock(t, "inspect/tool", p, mode, out)
