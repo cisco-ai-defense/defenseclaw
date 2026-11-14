@@ -64,7 +64,7 @@ class RoutingPanelMixin:
             if code == 0:
                 model.apply_status_json(out)
             else:
-                model.set_error(_first_line(err) or "defenseclaw routing status failed; run it in a terminal to see why")
+                model.set_error(_plain_error(err, "defenseclaw routing status failed; run it in a terminal to see why"))
             if model.view == VIEW_USAGE:
                 code, out, err = await _communicate_captured(
                     "defenseclaw", ("routing", "usage", "--json", "--since", model.usage_since())
@@ -72,7 +72,7 @@ class RoutingPanelMixin:
                 if code == 0:
                     model.apply_usage_json(out)
                 else:
-                    model.usage = {"rows": [], "error": _first_line(err) or "usage is not available"}
+                    model.usage = {"rows": [], "error": _plain_error(err, "usage is not available; run defenseclaw routing usage")}
         except Exception as exc:  # noqa: BLE001 - never a stack trace in the TUI
             model.set_error(f"routing status failed: {exc}")
         finally:
@@ -158,9 +158,14 @@ class RoutingPanelMixin:
         tabs.add_tab(Tab("M Routing", id="tab-routing"))
 
 
-def _first_line(stderr: bytes | str) -> str:
+def _plain_error(stderr: bytes | str, fallback: str) -> str:
+    """One plain sentence from a failed command: its Error: line, never a
+    Python traceback line (GAP-0578)."""
     text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or "")
+    if "Traceback (most recent call last)" in text:
+        return fallback
     for line in text.splitlines():
-        if line.strip():
-            return line.strip()[:200]
-    return ""
+        line = line.strip()
+        if line:
+            return line.removeprefix("Error:").strip()[:200] or fallback
+    return fallback

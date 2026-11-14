@@ -107,12 +107,19 @@ func TestManagedRoutingReportsRefusedWritesOnly(t *testing.T) {
 		}
 	}
 	// Linux and macOS: the launcher refuses the writes before the tree runs.
-	for _, args := range [][]string{{"routing", "pricing", "set", "m"}, {"routing", "setup", "--help"}, {"routing", "rules", "list"}} {
+	for _, args := range [][]string{{"routing", "pricing", "set", "m"}, {"routing", "test", "hi"}} {
 		root := &cobra.Command{Use: "defenseclaw"}
-		root.SetErr(io.Discard)
-		if code := executeLauncherInTest(t, root, args); code != 2 {
-			t.Fatalf("%v: exit %d, want the launcher refusal", args, code)
+		var stderr strings.Builder
+		root.SetErr(&stderr)
+		if code := executeLauncherInTest(t, root, args); code != 3 || !strings.Contains(stderr.String(), "is set by your administrator") {
+			t.Fatalf("%v: exit %d %q, want the managed routing answer (3)", args, code, stderr.String())
 		}
+	}
+	// A help request is not a routing write: the launcher help refusal stands.
+	help := &cobra.Command{Use: "defenseclaw"}
+	help.SetErr(io.Discard)
+	if code := executeLauncherInTest(t, help, []string{"routing", "setup", "--help"}); code != 2 {
+		t.Fatalf("routing setup --help: exit %d, want the launcher refusal", code)
 	}
 	if got, want := strings.Join(reported, ","), "routing enable:,routing budgets remove:,routing budgets add:,routing rules add:,routing pricing set:"; got != want {
 		t.Fatalf("reported %q, want %q", got, want)
@@ -160,9 +167,9 @@ func TestLauncherRunsTheRoutingReads(t *testing.T) {
 	}
 }
 
-// The launcher (Linux, macOS) runs the three reads and nothing else of routing.
+// The launcher (Linux, macOS) runs the four reads and nothing else of routing.
 func TestLauncherOffersOnlyTheRoutingReads(t *testing.T) {
-	for _, args := range [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain", "x"}} {
+	for _, args := range [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain", "x"}, {"routing", "rules", "list"}} {
 		if !launcherOffers(args) {
 			t.Errorf("the launcher refuses %v", args)
 		}
@@ -170,6 +177,85 @@ func TestLauncherOffersOnlyTheRoutingReads(t *testing.T) {
 	for _, args := range [][]string{{"routing"}, {"routing", "enable"}, {"routing", "budgets", "add", "b"}, {"routing", "test", "hi"}} {
 		if launcherOffers(args) {
 			t.Errorf("the launcher runs %v", args)
+		}
+	}
+}
+
+// GAP-0573: routing rules list is a read on a managed computer: an
+// administrator sees the rules, a standard account none; the writers and
+// routing test name the key the administrator config owns.
+func TestManagedRoutingRulesListAndNamedRefusals(t *testing.T) {
+	old := managedRoutingRead
+	t.Cleanup(func() { managedRoutingRead = old })
+	for name, tc := range map[string]struct{ body, want string }{
+		"administrator": {`{"admin":true,"rules":[{"id":"r1","action":"deny"}]}`, `"scope": "all"`},
+		"standard user": {`{"admin":false,"budgets":null}`, `"rules": []`},
+		"null rules":    {`{"admin":true,"rules":null}`, `"rules": []`},
+	} {
+		managedRoutingRead = func(_ context.Context, path string) (int, []byte, error) {
+			if path != "/api/v1/routing/effective" {
+				t.Fatalf("%s: read %s", name, path)
+			}
+			return http.StatusOK, []byte(tc.body), nil
+		}
+		root := &cobra.Command{Use: "defenseclaw"}
+		var out strings.Builder
+		root.SetOut(&out)
+		root.SetErr(io.Discard)
+		root.AddCommand(newManagedRoutingCmd())
+		root.SetArgs([]string{"routing", "rules", "list"})
+		if err := root.Execute(); err != nil || !strings.Contains(out.String(), tc.want) {
+			t.Fatalf("%s: err %v out %q", name, err, out.String())
+		}
+	}
+	for words, key := range map[string]string{
+		"enable": "routing.enabled", "models add": "routing.models", "rules add": "routing.admin.rules",
+		"budgets add": "routing.admin.budgets", "pricing set": "observability.pricing", "test": "routing",
+	} {
+		if got := managedRoutingRefusal(strings.Fields(words)); !strings.Contains(got, key+" is set by your administrator") || !strings.Contains(got, "Nothing was changed.") {
+			t.Fatalf("%s: %q", words, got)
+		}
+	}
+}
+
+// The tree (managed Windows defenseclaw.exe) names the key too, not only the launcher.
+func TestManagedRoutingTreeRefusalNamesTheKey(t *testing.T) {
+	for args, key := range map[string]string{
+		"enable": "routing.enabled", "rules add": "routing.admin.rules", "budgets add": "routing.admin.budgets", "pricing set": "observability.pricing",
+	} {
+		root := &cobra.Command{Use: "defenseclaw"}
+		root.SetErr(io.Discard)
+		root.SetOut(io.Discard)
+		root.AddCommand(newManagedRoutingCmd())
+		root.SetArgs(append([]string{"routing"}, strings.Fields(args)...))
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), key+" is set by your administrator") {
+			t.Fatalf("%s: %v", args, err)
+		}
+	}
+}
+
+// The launcher (Linux, macOS) names the key for the writers and the dry run
+// (exit 3); any other routing command it does not offer keeps the generic
+// refusal (exit 2), and a routing read is run, not refused.
+func TestLauncherRoutingExitCodes(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"routing", "enable"}, 3},
+		{[]string{"routing", "models", "add", "x"}, 3},
+		{[]string{"routing", "test", "hi"}, 3},
+		{[]string{"routing", "usage"}, 2},
+		{[]string{"routing", "models", "list"}, 2},
+		{[]string{"routing", "pricing", "show"}, 2},
+		{[]string{"routing", "enable", "--help"}, 2},
+	} {
+		root := &cobra.Command{Use: "defenseclaw"}
+		var stderr strings.Builder
+		root.SetErr(&stderr)
+		if got := executeLauncherInTest(t, root, tc.args); got != tc.code {
+			t.Errorf("%v: exit %d (%q), want %d", tc.args, got, stderr.String(), tc.code)
 		}
 	}
 }

@@ -3388,7 +3388,7 @@ func loadConfigSourceCheckedWithLayout(
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "routing_invalid")
 		}
-		return nil, fmt.Errorf("config: routing: %w", err)
+		return nil, fmt.Errorf("config: %w", &SettingError{Path: "routing", cause: err})
 	}
 	if err := cfg.validateRoutingAdminRules(); err != nil {
 		if ReportConfigLoadError != nil {
