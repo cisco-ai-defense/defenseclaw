@@ -158,8 +158,16 @@ func TestR107Review6ForgedCdEnterableFact(t *testing.T) {
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range rows {
-			if got := postDynamicWordParity(t, home, project, connector, true, row.command, row.edit); !strings.HasPrefix(got, `{"action":"block"`) {
-				t.Errorf("%s managed %s: %.200s, want block", connector, row.name, got)
+			want := `{"action":"block"`
+			if row.name == "locked dir, known word names the keys link, copy then write" {
+				// The copy names no protected spelling and the walk cannot place the
+				// link it copies, so the target is UNCERTAIN: a managed call in the
+				// default pack alerts on it (rel-1-0-10:GAP-0350); a forged fact
+				// changes nothing.
+				want = `{"action":"alert"`
+			}
+			if got := postDynamicWordParity(t, home, project, connector, true, row.command, row.edit); !strings.HasPrefix(got, want) {
+				t.Errorf("%s managed %s: %.200s, want %s", connector, row.name, got, want)
 			}
 		}
 		// Informational: a forged "1" for a missing dir with no decoy write.
