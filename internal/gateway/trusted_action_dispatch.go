@@ -284,8 +284,9 @@ type trustedActionRequest struct {
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
 	// windowsDialectReadings is set by the Windows hooks, which choose one shell
-	// dialect per call: a call whose chosen reading is not complete is also judged
-	// as the other shell and as its readable statements (windowsReadingTwinRequests).
+	// dialect per call: a call whose PowerShell reading is partial is also judged
+	// as its readable statements (windowsReadingTwinRequests), never as another
+	// shell.
 	windowsDialectReadings bool
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
@@ -5536,6 +5537,69 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return actionfacts.ExactPKRootSetuidShell(facts)
 		},
 		requiresExactDetectionProof: true,
+	},
+	"exec.escaped_binary_write": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.EscapedBinaryFileWrite(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.EscapedBinaryFileWrite(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"account.literal_password_change_via_stdin": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.LiteralStdinPasswordChange(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.LiteralStdinPasswordChange(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"exec.download_then_run_fetched_file": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.BareAddressDownloadThenRunFetchedFile(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.BareAddressDownloadThenRunFetchedFile(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"source_control.clone_then_run_or_adhoc_push": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.GitCloneThenRunOrAdHocPush(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.GitCloneThenRunOrAdHocPush(facts)
+		},
+		// Code-owned effect proof over the commands the parser could read; the
+		// catalog regex is inert. Alert-only: the effect cannot prove intent.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"exec.inline_code_network_and_exec": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.InlineCodeNetworkAndExec(facts) || actionfacts.RemoteRunnerURL(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.InlineCodeNetworkAndExec(facts) || actionfacts.RemoteRunnerURL(facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
 	},
 	"exec.remote_ip_download_execute_same_artifact": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
