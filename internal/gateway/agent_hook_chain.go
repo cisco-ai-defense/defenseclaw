@@ -2118,36 +2118,44 @@ func credentialFileContentReadCommand(
 	return command, true
 }
 
-// credentialFileReadDerivesFile reports a credentials-file read whose bytes
-// also go to another file: a copy or a move, a command that writes (an
-// archive, rsync), a redirect of its output to a file, or a tee in the call.
-// The derived file holds the secret too, so a later upload of it joins the
-// read (GAP-0388, GAP-0410).
+// credentialFileReadDerivesFile reports a call that reads a credentials
+// file and also writes, appends, copies, moves or links any file anywhere in
+// the call: in any pipeline stage or list member, by any redirect kind (>,
+// >>, >|, &>, an fd opened by exec), by tee, dd, an archiver, rsync, cp, mv
+// or ln. The read's bytes may be in that file, so a later upload of it joins
+// the read: the read carries the file-unknown marker instead of its own
+// identity (GAP-0410). It errs towards the marker: an unrelated write in the
+// same call gives the marker too, which only joins more.
 func credentialFileReadDerivesFile(facts actionfacts.Facts) bool {
-	read := false
-	for _, candidate := range facts.Paths {
-		command, ok := credentialFileContentReadCommand(facts, candidate)
-		if !ok {
-			continue
+	if !credentialFileContentRead(facts) {
+		return false
+	}
+	return callWritesAnyFile(facts)
+}
+
+// callWritesAnyFile reports a write, an append, a copy, a move or a link of a
+// file by any command of the call or by any of their redirects.
+func callWritesAnyFile(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if hasAnyOperation(command, actionfacts.OperationWrite, actionfacts.OperationAppend,
+			actionfacts.OperationCopy, actionfacts.OperationMove, actionfacts.OperationDiskWrite) {
+			return true
 		}
-		read = true
-		if hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove,
-			actionfacts.OperationWrite) {
+		switch command.Program {
+		case "tee", "ln", "link", "install", "dd":
 			return true
 		}
 		for _, redirect := range command.Redirects {
-			if redirect.Access == actionfacts.PathAccessWrite && redirect.FD != 2 &&
-				redirect.Target != "" && redirect.Target != "/dev/null" &&
+			if (redirect.Access == actionfacts.PathAccessWrite || redirect.Access == actionfacts.PathAccessAppend) &&
+				redirect.FD != 2 && redirect.Target != "" && redirect.Target != "/dev/null" &&
 				!strings.HasPrefix(redirect.Target, "&") {
 				return true
 			}
 		}
 	}
-	if !read {
-		return false
-	}
-	for _, command := range facts.Commands {
-		if command.Program == "tee" {
+	for _, candidate := range facts.Paths {
+		if (candidate.Access == actionfacts.PathAccessWrite || candidate.Access == actionfacts.PathAccessAppend) &&
+			candidate.Value != "/dev/null" {
 			return true
 		}
 	}
@@ -2155,8 +2163,11 @@ func credentialFileReadDerivesFile(facts actionfacts.Facts) bool {
 }
 
 // callMayChangeDirectory reports a call in which a command may change the
-// directory the later commands run in: cd, pushd, popd, or a wrapper with a
-// directory option (env -C, sudo -D). A relative operand in such a call is
+// directory the later commands run in: cd, pushd, popd, or tar -C. An env -C
+// or sudo -D is not listed: the wrapper unwrap refuses it, so no read or
+// upload sits under it and naming the other operands of the call unnamed
+// would only add false joins (PROVEN-or-UNCERTAIN: no read is recorded). A
+// relative operand in such a call is
 // not the file the path fact names: the fact keeps the call's starting
 // directory (GAP-0409).
 func callMayChangeDirectory(facts actionfacts.Facts) bool {
@@ -2172,14 +2183,6 @@ func callMayChangeDirectory(facts actionfacts.Facts) bool {
 					strings.HasPrefix(argument, "--directory=") ||
 					len(argument) > 2 && strings.HasPrefix(argument, "-C") ||
 					index == 0 && !strings.HasPrefix(argument, "-") && strings.ContainsRune(argument, 'C') {
-					return true
-				}
-			}
-		case "env", "sudo", "nsenter", "chroot":
-			for _, argument := range command.Argv[1:] {
-				if argument == "-C" || argument == "-D" || argument == "--chdir" ||
-					strings.HasPrefix(argument, "--chdir=") ||
-					len(argument) > 2 && (strings.HasPrefix(argument, "-C") || strings.HasPrefix(argument, "-D")) {
 					return true
 				}
 			}
