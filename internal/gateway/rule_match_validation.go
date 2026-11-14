@@ -238,22 +238,16 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
 	case "ENT-BULK-SSN-NOHYPHEN":
-		// Nine bare digits are an order number, a numeric id or the fraction
-		// of a timestamp far more often than an SSN, and two of them side by
-		// side are just two numbers: the list path (hasDistinctValidSSNList)
-		// is the hyphenated form's evidence, not this one's. A bare run needs
-		// its label or an aligned column header (rel-1-0-10 GAP-0171: every
-		// one of 346 strict benign DTap tool-output hits was an unlabelled
-		// list of table cells or timestamp fractions).
+		// The pattern carries its label (rel-1-0-10 GAP-0171: nine bare digits
+		// are table cells, ids and timestamp fractions; 346 strict benign DTap
+		// tool-output hits had none). The match ends with the nine digits.
 		return func(text, match string, start, _ int) bool {
-			return validUSSSN(match) && credibleLabeledSSNContext(text, start)
-		}
-	case "ENT-DL-CA":
-		// One letter and seven digits is the shape of most ids and status
-		// codes; as a driver's licence number it needs its label (GAP-0171:
-		// 170 strict benign DTap tool-output hits, none labelled).
-		return func(text, _ string, start, _ int) bool {
-			return labeledDriverLicenceContext(text, start)
+			digits := decimalDigits(match)
+			if len(digits) < 9 {
+				return false
+			}
+			digitStart := start + strings.LastIndexAny(match, "0123456789") - 8
+			return validUSSSN(digits[len(digits)-9:]) && !ssnNonRecordContext(text, digitStart)
 		}
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
 		return func(text, match string, start, end int) bool {
@@ -848,13 +842,6 @@ func credibleSSNContext(text string, start, end int) bool {
 	if hasDistinctValidSSNList(text, start, end) {
 		return true
 	}
-	return credibleLabeledSSNContext(text, start)
-}
-
-// credibleLabeledSSNContext is the SSN evidence that does not rest on the
-// shape of neighbouring numbers: an aligned column header or a label just
-// before the candidate.
-func credibleLabeledSSNContext(text string, start int) bool {
 	// Wide CSV/TSV exports can place the column header hundreds of bytes
 	// before the first value. Preserve that record context by requiring the
 	// candidate's exact column to align with a recognized header on the
@@ -864,23 +851,10 @@ func credibleLabeledSSNContext(text string, start int) bool {
 	if hasDelimitedSSNColumnHeader(text, start) {
 		return true
 	}
-	windowStart := start - 80
-	if windowStart < 0 {
-		windowStart = 0
+	if ssnNonRecordContext(text, start) {
+		return false
 	}
-	prefix := strings.ToLower(text[windowStart:start])
-	for _, nonRecordContext := range []string{
-		"ssn_hash", "ssn-hash", "ssn hash", "hashed ssn",
-		"ssn_digest", "ssn-digest", "ssn digest",
-		"example ssn", "ssn example", "ssn_example", "sample ssn", "ssn sample",
-		"placeholder ssn", "ssn placeholder", "ssn schema", "ssn format",
-		"ssn regex", "ssn pattern",
-	} {
-		if index := strings.LastIndex(prefix, nonRecordContext); index >= 0 &&
-			ssnImmediateLabelTail(prefix[index+len(nonRecordContext):]) {
-			return false
-		}
-	}
+	prefix := strings.ToLower(text[max(0, start-80):start])
 	for _, label := range []string{
 		"ssn", "social security", "taxpayer id", "taxpayer identification",
 	} {
@@ -893,22 +867,25 @@ func credibleLabeledSSNContext(text string, start int) bool {
 
 const maxDelimitedSSNContextBytes = 64 * 1024
 
-// labeledDriverLicenceContext reports a driver's licence label in the 80
-// bytes before a candidate ("driver", "licence"/"license", or a standalone
-// DL token such as "DL:" or "dl_number").
-func labeledDriverLicenceContext(text string, start int) bool {
-	windowStart := start - 80
-	if windowStart < 0 {
-		windowStart = 0
+// ssnNonRecordContext reports a hash, example, placeholder or schema label
+// just before an SSN candidate: the value describes the field, it is not a
+// record.
+func ssnNonRecordContext(text string, start int) bool {
+	prefix := strings.ToLower(text[max(0, start-80):start])
+	for _, nonRecordContext := range []string{
+		"ssn_hash", "ssn-hash", "ssn hash", "hashed ssn",
+		"ssn_digest", "ssn-digest", "ssn digest",
+		"example ssn", "ssn example", "ssn_example", "sample ssn", "ssn sample",
+		"placeholder ssn", "ssn placeholder", "ssn schema", "ssn format",
+		"ssn regex", "ssn pattern",
+	} {
+		if index := strings.LastIndex(prefix, nonRecordContext); index >= 0 &&
+			ssnImmediateLabelTail(prefix[index+len(nonRecordContext):]) {
+			return true
+		}
 	}
-	prefix := strings.ToLower(text[windowStart:start])
-	if strings.Contains(prefix, "driver") || strings.Contains(prefix, "licence") || strings.Contains(prefix, "license") {
-		return true
-	}
-	return driverLicenceTokenPattern.MatchString(prefix)
+	return false
 }
-
-var driverLicenceTokenPattern = lazyregexp.New(`(?:^|[^a-z0-9])dl(?:[^a-z0-9]|$)`)
 
 func hasDelimitedSSNColumnHeader(text string, candidateStart int) bool {
 	if candidateStart <= 0 || candidateStart > len(text) {

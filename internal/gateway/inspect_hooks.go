@@ -87,14 +87,15 @@ func scanWithTimeout(ctx context.Context, text, toolName string, timeout time.Du
 }
 
 // scanToolResultWithTimeout is scanWithTimeout for a tool's output: the
-// tool-result checks (toolResultRuleFindings) under the same deadline.
-func scanToolResultWithTimeout(ctx context.Context, text string, timeout time.Duration) ([]RuleFinding, error) {
+// tool-result checks of the generic route (toolResponseEndpointFindings)
+// under the same deadline.
+func scanToolResultWithTimeout(ctx context.Context, text, toolName string, timeout time.Duration) ([]RuleFinding, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	ch := make(chan []RuleFinding, 1)
 	go func() {
-		ch <- toolResultRuleFindings(snapshotRulePackGenerationFor(ctx, profileRequestConnector(ctx)), text, ruleContentScopeUntrusted, !ManagedEnterpriseActive())
+		ch <- toolResponseEndpointFindings(snapshotRulePackGenerationFor(ctx, profileRequestConnector(ctx)), text, toolName, !ManagedEnterpriseActive())
 	}()
 	select {
 	case findings := <-ch:
@@ -377,7 +378,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
 		)
 	} else {
-		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, inspectScanTimeout)
+		ruleFindings, err := scanToolResultWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})

@@ -1796,7 +1796,7 @@ func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *gu
 // else defaultHookJudgeTimeout) derived from the supplied parent ctx —
 // NEVER the 200ms rule-scan cap (J3-3c). Callers that must escape that
 // cap (the tool lanes) pass a deadline-free context.Background(),
-// mirroring the proxy lane's inspectToolResult; the message lane threads
+// as the proxy's InspectToolResult does; the message lane threads
 // its caller ctx so the generic /inspect/tool endpoint's 200ms deadline
 // still short-circuits the judge here.
 //

@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -87,39 +88,42 @@ func TestCredibleSSNContextAlignsWideDelimitedHeader(t *testing.T) {
 	}
 }
 
-// Bare identifier shapes need their label (rel-1-0-10 GAP-0171): a run of
-// nine digits beside another one, or a letter and seven digits, is an id.
+// Bare identifier shapes need their label, and the label is in the pack's
+// pattern, where operators see it (rel-1-0-10 GAP-0171): a run of nine digits
+// beside another one, a timestamp fraction, or a letter and seven digits in a
+// JSON value or under a licence header is not an SSN or a driver's licence.
+// Strict pack (both rules are disabled in default): the YAML pattern, then the
+// rule's match validator, as the scanner runs them.
 func TestBareIdentifierShapesNeedTheirLabel(t *testing.T) {
-	t.Parallel()
-	noHyphen := ruleMatchValidator("ENT-BULK-SSN-NOHYPHEN")
-	dl := ruleMatchValidator("ENT-DL-CA")
-	accept := func(v func(string, string, int, int) bool, text, match string) bool {
-		start := strings.Index(text, match)
-		if start < 0 {
-			t.Fatalf("fixture %q has no %q", text, match)
+	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "strict"))
+	matches := func(ruleID, text string) bool {
+		pattern := regexp.MustCompile(rulePatternByID(t, pack, ruleID))
+		validator := ruleMatchValidator(ruleID)
+		for _, loc := range pattern.FindAllStringIndex(text, -1) {
+			if validator == nil || validator(text, text[loc[0]:loc[1]], loc[0], loc[1]) {
+				return true
+			}
 		}
-		return v(text, match, start, start+len(match))
+		return false
 	}
-	table := "<tr><td>order</td><td>731428065</td></tr><tr><td>order</td><td>624519873</td></tr>"
-	if accept(noHyphen, table, "731428065") {
-		t.Fatal("two unlabelled nine-digit table cells were read as SSNs")
-	}
-	stamp := "2026-03-26 00:00:24.731428065 and 2026-03-26 00:00:25.624519873"
-	if accept(noHyphen, stamp, "731428065") {
-		t.Fatal("timestamp fractions were read as SSNs")
-	}
-	if !accept(noHyphen, "employee ssn: 731428065", "731428065") {
-		t.Fatal("a labelled bare SSN was not accepted")
-	}
-	if !accept(ruleMatchValidator("ENT-BULK-SSN"), "ids 731-42-8065 624-51-9873", "731-42-8065") {
-		t.Fatal("a hyphenated SSN list lost its list evidence")
-	}
-	if accept(dl, `{"status": "A1234567", "next": "B7654321"}`, "A1234567") {
-		t.Fatal("an unlabelled id was read as a driver's licence")
-	}
-	for _, text := range []string{"Driver licence: A1234567", `{"dl_number": "A1234567"}`, "CA DL A1234567"} {
-		if !accept(dl, text, "A1234567") {
-			t.Fatalf("labelled licence %q was not accepted", text)
+	for _, tc := range []struct {
+		rule, text string
+		want       bool
+	}{
+		{"ENT-BULK-SSN-NOHYPHEN", "<tr><td>order</td><td>731428065</td></tr><tr><td>order</td><td>624519873</td></tr>", false},
+		{"ENT-BULK-SSN-NOHYPHEN", "2026-03-26 00:00:24.731428065 and 2026-03-26 00:00:25.624519873", false},
+		{"ENT-BULK-SSN-NOHYPHEN", "employee ssn: 731428065", true},
+		{"ENT-BULK-SSN-NOHYPHEN", `{"ssn_number": "731428065"}`, true},
+		{"ENT-BULK-SSN-NOHYPHEN", "example ssn: 731428065", false},
+		{"ENT-BULK-SSN-NOHYPHEN", "ssn_hash: 731428065", false},
+		{"ENT-DL-CA", `{"status": "A1234567", "next": "B7654321"}`, false},
+		{"ENT-DL-CA", "SPDX-License-Identifier: Apache-2.0\nbuild A1234567", false},
+		{"ENT-DL-CA", "Driver licence: A1234567", true},
+		{"ENT-DL-CA", `{"dl_number": "A1234567"}`, true},
+		{"ENT-DL-CA", "CA DL A1234567", true},
+	} {
+		if got := matches(tc.rule, tc.text); got != tc.want {
+			t.Errorf("%s on %q: match=%v, want %v", tc.rule, tc.text, got, tc.want)
 		}
 	}
 }

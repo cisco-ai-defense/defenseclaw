@@ -91,6 +91,11 @@ walk:
 			if blocks := anthropicToolResultBlocks(m.RawContent); len(blocks) > 0 && len(rev) == 0 {
 				return blocks
 			}
+			if len(rev) == 0 {
+				// A user text after the last tool messages (the user typed
+				// while the tools ran) does not end the run: walk past it.
+				continue
+			}
 		}
 		break walk
 	}

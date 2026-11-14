@@ -55,21 +55,21 @@ rules:
     title: "Email address in a labeled field"
     severity: CRITICAL
     confidence: 0.80
-    tags: [pii, structured, privacy-high-assurance]
+    tags: [pii, contact, structured, privacy-high-assurance]
 
   - id: PII-EMAIL-LIST
     pattern: '(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
     title: "Five or more email addresses together"
     severity: CRITICAL
     confidence: 0.75
-    tags: [pii, bulk, privacy-high-assurance]
+    tags: [pii, contact, bulk, privacy-high-assurance]
 
   - id: ENT-US-PHONE
     pattern: '(?i)\b(?:phone|telephone|mobile|contact)(?:[\s_-]+(?:number|no\.?))?[\s*_:#=-]{1,12}(?:\+\d{1,3}(?:[\s.-]?\d){7,14}|(?:\+1[\s.-]?)?\d{3}[\s.-]\d{3}[\s.-]\d{4}|\(\d{3}\)[\s.-]?\d{3}[\s.-]\d{4})\b'
     title: "Formatted phone number in a labeled field"
     severity: CRITICAL
     confidence: 0.80
-    tags: [pii, structured, privacy-high-assurance]
+    tags: [pii, contact, structured, privacy-high-assurance]
 
   - id: ENT-MEDICAL-RECORD
     pattern: '(?i)\b(?:mrn|medical[\s_-]*record(?:[\s_-]*number)?|patient[\s_-]*id)s?[\s*_:#=-]{0,12}(?:\d{6,12}|(?:mrn|med)[- ]?[a-z0-9]{5,12}|[a-z]\d{5,11})\b'

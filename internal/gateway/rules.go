@@ -896,12 +896,8 @@ const (
 type ruleScanOptions struct {
 	includeToolCallOnly bool
 	excludeTrustExploit bool
-	// excludeEnterpriseData leaves the enterprise-data category (cards, IBANs,
-	// phone numbers, email addresses) out: the tool-result surface, where
-	// those values are the data the user asked a tool for.
-	excludeEnterpriseData bool
-	excludedRuleIDs       map[string]struct{}
-	onlyRuleIDs           map[string]struct{}
+	excludedRuleIDs     map[string]struct{}
+	onlyRuleIDs         map[string]struct{}
 	// onlyRule, when set, admits only the rules it reports true for.
 	onlyRule     func(ruleID string) bool
 	contentScope ruleContentScope
@@ -929,9 +925,6 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 		return false
 	}
 	if o.excludeTrustExploit && category == "trust-exploit" {
-		return false
-	}
-	if o.excludeEnterpriseData && category == "enterprise-data" {
 		return false
 	}
 	if o.contentScope == ruleContentScopeAll {

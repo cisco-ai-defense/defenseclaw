@@ -315,3 +315,68 @@ func TestToolResultAnswerNamesItsRulesWithoutAuditLogger(t *testing.T) {
 		}
 	}
 }
+
+// A labelled SSN or account record in a tool's output alerts HIGH in the
+// default pack, as on rel (rel-1-0-10 GAP-0412, review probe
+// TestTRRevLabelledSSNRecordOnToolOutput): only contact and payment data rules
+// are left out of tool output. Synthetic, pattern-valid digits.
+func TestToolResultKeepsBulkRecordRules(t *testing.T) {
+	ssn, acct := "219"+"09"+"9999", "0001"+"2345"+"6789"
+	records := map[string]string{
+		"json": `{"name":"Test User","ssn":"` + ssn + `","account_number":"` + acct + `"}`,
+		"csv":  "first_name,last_name,ssn\nTest,User," + ssn + "\n",
+	}
+	a := newHookJudgeAPIServer(t, config.JudgeConfig{}, "regex_only", &mockLLMProvider{})
+	for name, rec := range records {
+		got := toolResultRuleIDs(toolResultRuleFindings(snapshotRulePackGeneration(""), rec, ruleContentScopeUntrusted, true))
+		if got["ENT-BULK-JSON-PII"] == "" && got["ENT-BULK-CSV-PII"] == "" {
+			t.Fatalf("%s record: no bulk record finding on a tool result: %v", name, got)
+		}
+		v := a.inspectMessageContent(t.Context(), &ToolInspectRequest{Tool: "db_query", Direction: "tool_result", Connector: "copilot", Content: rec})
+		if v.Severity != "HIGH" || v.Action == guardrailActionAllow || v.Action == guardrailActionBlock {
+			t.Fatalf("%s record: %s %s %v, want a HIGH alert", name, v.Action, v.Severity, v.Findings)
+		}
+	}
+}
+
+// Only rules tagged contact, pci or financial are left out of tool output;
+// every other data rule, an operator's own included, still runs.
+func TestToolResultDataRuleSkippedByTag(t *testing.T) {
+	for _, tc := range []struct {
+		tags []string
+		skip bool
+	}{
+		{[]string{"pii", "contact"}, true},
+		{[]string{"pii", "pci"}, true},
+		{[]string{"pii", "financial"}, true},
+		{[]string{"pii"}, false},
+		{[]string{"pii", "bulk-data"}, false},
+		{[]string{"pii", "regulated"}, false},
+		{[]string{"acme-internal"}, false},
+	} {
+		if got := toolResultDataRuleSkipped(tc.tags); got != tc.skip {
+			t.Errorf("tags %v: skipped=%v, want %v", tc.tags, got, tc.skip)
+		}
+	}
+}
+
+// The proxy reads the tool outputs of a request whose tool messages are
+// followed by a user text message (review probe
+// TestTRRevProxyToolResultFollowedByUserText); a plain chat turn has none.
+func TestTrailingToolResultsPastUserText(t *testing.T) {
+	var m []ChatMessage
+	raw := `[{"role":"user","content":"hi"},{"role":"assistant","tool_calls":[]},{"role":"tool","tool_call_id":"a","content":"tool output body"},{"role":"user","content":"carry on"}]`
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	if got := trailingToolResults(m, nil, nil); len(got) != 1 || got[0].Content != "tool output body" {
+		t.Fatalf("trailing results = %v, want the tool output", got)
+	}
+	var plain []ChatMessage
+	if err := json.Unmarshal([]byte(`[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"},{"role":"user","content":"thanks"}]`), &plain); err != nil {
+		t.Fatal(err)
+	}
+	if got := trailingToolResults(plain, nil, nil); len(got) != 0 {
+		t.Fatalf("plain chat: trailing results = %v, want none", got)
+	}
+}

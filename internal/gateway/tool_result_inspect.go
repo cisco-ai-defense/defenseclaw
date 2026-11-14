@@ -21,22 +21,22 @@ import (
 // the same content checks, here:
 //
 //   - the content rules a tool's output can carry an attack in: trust-exploit
-//     (prompt injection) and secrets;
-//   - of enterprise-data, only the identifiers tagged regulated or hipaa
-//     (national ids, passports, licences, medical records, dates of birth):
-//     contact and payment data (email addresses, phone numbers, cards, IBANs)
-//     is what an inbox, a contact list or a statement returns by design, and
-//     those rules alerted on ordinary output (strict: 67% of benign AgentDojo
-//     tool outputs). PII in the output of named tools stays covered by the
-//     sensitive-tools result inspection (sensitive-tools.yaml) and the opt-in
-//     PII judge;
+//     (prompt injection), secrets, and the enterprise-data rules except
+//     contact and payment data (rules tagged contact, pci or financial: email
+//     addresses, phone numbers, cards, IBANs). Those are what an inbox, a
+//     contact list or a statement returns by design and alerted on ordinary
+//     output (strict: 67% of benign AgentDojo tool outputs). Regulated
+//     identifiers, bulk SSN/account records and operators' own rules without
+//     those tags stay checked. PII in the output of named tools stays covered
+//     by the sensitive-tools result inspection and the opt-in PII judge;
 //   - the C2 rules (known exfil and tunnel hosts: webhook.site, ngrok, cloud
-//     metadata, ...) as LOW telemetry: an output that names one is recorded,
-//     but the host in a document or a test fixture is not an action (on the
-//     owner's real tool outputs C2 on output alerted or blocked 98 times, all
-//     docs and fixtures, run s7tr-atA); the call to the host is judged at
-//     PreToolUse. The other action categories (command, path, cognitive-file)
-//     judge tool calls and never run on content;
+//     metadata, ...): LOW telemetry on the hook connectors, which never ran
+//     them on output (on the owner's real tool outputs they alerted or blocked
+//     98 times, all docs and fixtures, run s7tr-atA); the generic
+//     /inspect/tool-response route, which ran every rule on output before,
+//     keeps the command, path, cognitive-file and C2 rules at the tool-result
+//     severity (toolResponseEndpointFindings). The call to a host is judged at
+//     PreToolUse;
 //   - the trust-exploit rules again on the tool-result view: string escapes
 //     decoded (tool output is often JSON or YAML in which the text the model
 //     reads is a quoted string) and confusables folded;
@@ -69,24 +69,48 @@ func isToolResultDirection(direction string) bool {
 // one tool output. scanRaw false (managed enterprise) skips the raw rule scan
 // as messageRuleFindings does; the view and the structural checks still run.
 func toolResultRuleFindings(generation *compiledRulePackCategories, content string, scope ruleContentScope, scanRaw bool) []RuleFinding {
+	return toolResultChecks(generation, content, "message", scope, scanRaw, false)
+}
+
+// toolResponseEndpointFindings is toolResultRuleFindings for the generic
+// /api/v1/inspect/tool-response route (shell hooks, sandbox ingress, managed
+// peers). That route ran every rule on a tool's output before 1.0.10; it
+// keeps the command, sensitive-path, cognitive-file and C2 rules, at the
+// tool-result severity (HIGH at most).
+func toolResponseEndpointFindings(generation *compiledRulePackCategories, content, toolName string, scanRaw bool) []RuleFinding {
+	return toolResultChecks(generation, content, toolName, ruleContentScopeUntrusted, scanRaw, true)
+}
+
+// toolResultDataRuleSkipped reports a contact or payment data rule, which a
+// tool's output carries by design (surface comment above).
+func toolResultDataRuleSkipped(tags []string) bool {
+	return hasTag(tags, "contact") || hasTag(tags, "pci") || hasTag(tags, "financial")
+}
+
+func toolResultChecks(generation *compiledRulePackCategories, content, toolName string, scope ruleContentScope, scanRaw, actionRules bool) []RuleFinding {
 	if scope == ruleContentScopeAll {
 		scope = ruleContentScopeUntrusted
 	}
 	var findings, injection []RuleFinding
 	if scanRaw {
-		findings = scanContentRulesWithOptions(generation, content, "message", scope,
-			ruleScanOptions{excludeTrustExploit: true, excludeEnterpriseData: true})
 		for _, f := range scanContentRulesWithOptions(generation, content, "message", scope,
-			ruleScanOptions{onlyCategory: "enterprise-data"}) {
-			if hasTag(f.Tags, "regulated") || hasTag(f.Tags, "hipaa") {
+			ruleScanOptions{excludeTrustExploit: true}) {
+			if !toolResultDataRuleSkipped(f.Tags) {
 				findings = append(findings, f)
 			}
 		}
 		injection = scanContentRulesWithOptions(generation, content, "message", scope,
 			ruleScanOptions{onlyCategory: "trust-exploit"})
-		if scope != ruleContentScopeSource {
+		switch {
+		case scope == ruleContentScopeSource:
+		case actionRules:
+			for _, category := range []string{"command", "sensitive-path", "cognitive-file", "c2"} {
+				findings = append(findings, scanContentRulesWithOptions(generation, content, toolName, ruleContentScopeAll,
+					ruleScanOptions{onlyCategory: category})...)
+			}
+		default:
 			// C2 is an action category, which a content scope leaves out; on a
-			// tool's output it runs on its own, as telemetry (surface comment).
+			// hook connector's tool output it runs as telemetry.
 			for _, f := range scanContentRulesWithOptions(generation, content, "message", ruleContentScopeAll,
 				ruleScanOptions{onlyCategory: "c2"}) {
 				f.Severity = "LOW"
