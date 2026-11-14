@@ -75,11 +75,16 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 		syntax.SplitBraces(&split)
 		alternatives := expand.Braces(&split)
 		if len(alternatives) > 64 {
-			reason = wordUncertainDynamic
-			return
+			return // too long to read: the older tiers judge it
 		}
 		for _, alternative := range alternatives {
 			if !resolverWordKnown(alternative, values) {
+				continue
+			}
+			// Only a word that holds a glob is read here: a known parameter that
+			// field-splits into several words, or an option the resolver does not
+			// place, is not a glob form and keeps the older tiers' reading.
+			if pattern, ok := resolverPattern(alternative, resolverConfig(values, cwd), values["HOME"]); !ok || !resolverPatternActive(pattern) {
 				continue
 			}
 			if reason = resolveWriteWord(alternative, values, cwd, options).uncertain; reason != "" {
