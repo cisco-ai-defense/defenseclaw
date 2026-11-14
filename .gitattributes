@@ -129,3 +129,8 @@ internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace
 # their detached signature over the exact bytes; a Windows CRLF checkout
 # broke the signature (TestClaudeReleaseManifestSignatureAndPlatformChecksum).
 internal/sensor/testdata/** -text
+
+# Go fuzz corpus entries ("go test fuzz v1") are read line by line, some by
+# tests that strconv.Unquote a line (hookpaths fuzzCorpusString); a Windows
+# checkout (core.autocrlf=true) must keep them LF so no line ends in \r.
+internal/**/testdata/fuzz/** text eol=lf
