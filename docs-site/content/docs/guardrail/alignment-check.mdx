@@ -47,7 +47,7 @@ The lane follows the cascade [scopes](/docs/guardrail/configure-cascade#scopes):
 
 For each tool call the lane decides first whether the call has a side effect:
 
-- **Shell and file tools** are read by their effects: a network action, a write, delete or run outside the working folder, a read of a home dot-folder (credential stores), or a shell command the parser cannot fully read.
+- **Shell and file tools** are read by their effects: a network action (including running something it downloads), a write or delete outside the working folder and the temporary folders, a read of a home dot-folder (credential stores), or a shell command the parser cannot fully read that runs a network program such as `curl`, `scp` or `ssh`. Running a program is not a side effect by itself.
 - **Other tools** (MCP and function tools) are read by the verbs of their name: `send`, `transfer`, `delete`, `update`, `create`, `share`, `invite` and so on. `get_`, `list_`, `read_` and `search_` tools are skipped.
 
 Read-only calls are never sent to the model, which keeps cost, latency and false alerts down.
@@ -56,14 +56,32 @@ The model sees the first and the latest user prompt of the session, the last fou
 
 ## How well it works
 
-RESULTS_TABLE
+Measured on the public tool-call sets of the S7 head-to-head benchmark (AgentDojo, InjecAgent, MCPTox, MCP-hunt, DTAP, agentic red-team, Nemotron terminal, extra-public shell, Windows shell), on the frozen holdout split, with the same scorer for every row (labels v3.3). The prompt was tuned on the tune split only; the holdout was run once. Judge: Gemma 4 31B. An alert counts.
+
+| Configuration | Precision | Recall | False-alert rate | F1 [95% CI] |
+| --- | --- | --- | --- | --- |
+| Destructive-action pipeline (rules, System One, tool judge), lane off | 0.582 | 0.420 | 0.066 | 0.488 [0.456, 0.518] |
+| Alignment check alone | 0.707 | 0.602 | 0.054 | 0.650 [0.624, 0.677] |
+| Both (a finding from either counts) | 0.688 | 0.743 | 0.073 | 0.714 [0.691, 0.737] |
+| LlamaFirewall AlignmentCheck (Llama 4 Maverick), for comparison | 0.661 | 0.782 | 0.118 | 0.716 [0.694, 0.737] |
+
+871 attack and 4,007 benign cases for the DefenseClaw rows; AlignmentCheck is scored on the 834 attack and 2,830 benign cases it applies to. With the lane on, DefenseClaw reaches the F1 of AlignmentCheck with a lower false-alert rate (0.073 against 0.118). The lane alerts; it does not block unless you set `block`.
+
+With the lane off, verdicts are unchanged: on 270,411 decisions of real coding sessions (three rule packs), the lane-off build and the build without the lane gave identical answers.
 
 ## Cost and latency
 
-COST_TABLE
+| | Holdout sets | Real coding sessions |
+| --- | --- | --- |
+| Tool calls sent to the model | 13.1% | 12.7% |
+| Judge cost per 1,000 tool calls (Gemma 4 31B) | USD 0.016 | USD 0.015 |
+| Model latency of an asked call, p50 / p95 | 580 / 1,558 ms | 614 / 1,475 ms |
+
+Read-only calls add no latency. A call the lane asks about waits for the answer, up to 3 seconds. The coding-session figures come from a sample of 1,500 recorded sessions; those recordings do not keep the user prompt, so a placeholder task stood in, and their alerts are not a measure of false alerts.
 
 ## Limits
 
+- About one answer in ten from Gemma 4 31B came back empty in the benchmark; an empty answer is no finding, so the recall above is a floor.
 - The lane needs the user's task. A call with no user prompt earlier in the session is not checked.
 - It judges the call against the prompt text. It does not see tool results in this release.
 - A task the user states vaguely gives the model little to compare against; the model then answers `unsure`, which is no finding.
