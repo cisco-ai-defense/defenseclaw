@@ -69,7 +69,10 @@ func uncertainWriteReason(command, cwd, home string, startup *ShellStartup, glob
 		// Bash expands a brace list into its words first; each is then a plain
 		// word or a glob. A list of known alternatives is read word by word, as the
 		// shell passes them; a list that is too long is not read.
-		alternatives := expand.Braces(word)
+		split := *word
+		split.Parts = append([]syntax.WordPart(nil), word.Parts...)
+		syntax.SplitBraces(&split)
+		alternatives := expand.Braces(&split)
 		if len(alternatives) > 64 {
 			reason = wordUncertainDynamic
 			return
