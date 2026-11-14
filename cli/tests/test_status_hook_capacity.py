@@ -41,15 +41,47 @@ class HookCapacityStatusTests(unittest.TestCase):
         )
 
     def test_row_only_when_a_call_ran_out_of_its_budget(self):
+        quiet = _health()
+        quiet["hook_capacity"]["window"]["shed"] = 0
         with mock.patch.object(cmd_status, "_status_row") as row:
-            cmd_status._print_hook_capacity(_health())
+            cmd_status._print_hook_capacity(quiet)
             row.assert_not_called()
             cmd_status._print_hook_capacity(_health(denies=3, late=4))
             row.assert_called_once()
             key, value = row.call_args.args
             self.assertEqual(key, "Hook capacity")
             self.assertIn("3 denied and 4 unchecked", value)
+            self.assertIn("2 call(s) refused by the admission limits", value)
             self.assertIn("not a policy result", value)
+
+    def test_shed_alone_shows_the_row(self):
+        # Review P2-3: shed alone is a capacity signal too.
+        health = _health()
+        health["hook_capacity"]["window"]["shed"] = 5
+        with mock.patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_hook_capacity(health)
+        row.assert_called_once()
+        value = row.call_args.args[1]
+        self.assertIn("5 call(s) refused by the admission limits; their hooks block them when the budget ends", value)
+        self.assertNotIn("unchecked", value)
+
+    def test_status_reads_the_window_from_the_authenticated_status(self):
+        # Review P3-2: a per-user /health needs no credential and no longer
+        # carries the window; status takes it from the token-bound /status.
+        from defenseclaw.commands import cmd_doctor
+
+        trust = mock.Mock(trusted=True, pid=4242)
+        client = mock.Mock()
+        client.status.return_value = {
+            "health": {"gateway": {"state": "running"}},
+            "hook_capacity": _health(denies=1)["hook_capacity"],
+        }
+        with (
+            mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+            mock.patch.object(cmd_doctor, "_authenticated_runtime_matches", return_value=(True, "")),
+        ):
+            health = cmd_status._fetch_runtime_bound_health(client, mock.Mock())
+        self.assertEqual(cmd_status._hook_capacity_status(health)["deadline_denies"], 1)
 
 
 if __name__ == "__main__":

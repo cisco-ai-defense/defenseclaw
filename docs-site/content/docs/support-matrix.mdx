@@ -214,20 +214,20 @@ On a per-user install on Linux, the gateway answered every tool-call hook within
 
 ## Hook sizing
 
-How many Claude Code tool calls a second one host can check depends on the operating system, the install type and the instance size. The table gives the highest rate at which every call was answered within its answer budget and no benign call was denied, for 120 seconds of steady calls (1.0.10 measurements; one agent session unless noted). A host with no other DefenseClaw hook running is assumed.
+How many Claude Code tool calls a second one host can check depends on the operating system, the install type and the instance size. The table gives the highest rate at which every call was answered within its answer budget and no benign call was denied, for 120 seconds of steady calls, one agent session unless noted. A host with no other DefenseClaw hook running is assumed. The numbers were measured on the 1.0.10 pre-release build 52df5211d7 (2026-11-14) unless the row names another build.
 
 | Install | OS | Instance (vCPU) | Highest rate, all calls answered in time |
 |---|---|---|---|
-| Per-user | RHEL 9 | m6i.xlarge (4) | 70 calls a second (65 with 10 sessions) |
-| Per-user | macOS | mac2.metal, Apple M1 (8) | 100 calls a second answered in time, with a 95th-percentile answer of 0.5 s (2.3 s with 10 sessions) |
-| Per-user | Windows Server 2025 | c5a.4xlarge (16) | about 30 calls a second (see Hook floods on Windows) |
-| Managed | RHEL 9 | m8i.2xlarge (8) | 61 calls a second |
-| Managed | macOS | mac2.metal, Apple M1 (8) | 20 calls a second |
-| Managed | Windows Server 2025 | c5a.2xlarge (8) | 10 calls a second |
+| Per-user | RHEL 9 | m6i.xlarge (4) | 85 calls a second, also with 10 sessions; the 95th-percentile answer stays under 0.3 s up to 80 calls a second |
+| Per-user | macOS | mac2.metal, Apple M1 (8) | 100 calls a second (the highest rate tested), also with 10 sessions; 95th-percentile answer 1.1 s (0.45 s with 10 sessions) |
+| Per-user | Windows Server 2025 | c5a.4xlarge (16) | about 30 calls a second, measured on 1.0.5 with the flood method of [Hook floods on Windows](#hook-floods-on-windows); not measured again on 1.0.10 |
+| Managed | RHEL 9 | m8i.2xlarge (8) | 66 calls a second |
+| Managed | macOS | mac2.metal, Apple M1 (8) | 30 calls a second |
+| Managed | Windows Server 2025 | c5a.2xlarge (8) | 10 calls a second (1.0.10 pre-release build 17f58bcec9, 2026-11-13) |
 
 One interactive agent makes a few tool calls a second at most, so these rates matter for many agents, or agent loops and scripts, on one host. Past its rate a host answers late: a managed hook then blocks the call and says that DefenseClaw is at capacity, not that a policy blocked it; a per-user hook in the default fail mode lets the call run unchecked after its answer budget and records it.
 
-To see whether a host is over its rate, `defenseclaw status` and `defenseclaw doctor` (per-user) and `enterprise <os> status` and `verify` (managed, warning `hook_over_capacity`) report the tool calls of the last hour that ran out of their answer budget, with the busiest minute. The gateway `/status` document carries the same counts as `hook_capacity`, and telemetry carries the `defenseclaw.hook.deadline_outcomes` counter. If they show calls past their budget, run fewer agents or parallel tool calls at once, or use a larger host.
+To see whether a host is over its rate, `defenseclaw status` and `defenseclaw doctor` (per-user) and `enterprise <os> status` and `verify` (managed, warning `hook_over_capacity`) report the tool calls of the last hour that ran out of their answer budget or that the admission limits refused, with the busiest minute. The gateway `/status` document carries the same counts as `hook_capacity`, and telemetry carries the `defenseclaw.hook.deadline_outcomes` counter. If they show calls past their budget, run fewer agents or parallel tool calls at once, or use a larger host.
 
 ## Hook capacity on managed hosts
 

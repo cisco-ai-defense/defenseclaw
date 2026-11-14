@@ -1943,10 +1943,13 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if policy, ok := CurrentPolicyHealth(); ok && administrator {
 		body["policy"] = a.policyHealthBody(policy)
 	}
-	if administrator && (cfg == nil || !cfg.SecureClientIntegration()) {
-		// The machine-wide hook load: an ordinary account of a managed host
-		// does not read how many calls the other accounts made. Secure
-		// Client keeps its health body (issue #1092).
+	if administrator && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		// The machine-wide hook load, for the managed lifecycle probes: an
+		// ordinary account of a managed host does not read how many calls
+		// the other accounts made. A per-user /health needs no credential,
+		// so another local account could read this account load there: a
+		// per-user gateway serves it only in the authenticated /status.
+		// Secure Client keeps its health body (issue #1092).
 		body["hook_capacity"] = hookCapacity.snapshot()
 	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {

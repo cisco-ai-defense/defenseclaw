@@ -1274,6 +1274,11 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
     if isinstance(policy, dict):
         # The effective policy the gateway applied, for the Policy row.
         health = {**health, "policy": policy}
+    capacity = document.get("hook_capacity")
+    if isinstance(capacity, dict):
+        # The hook load of the last hour (S8 DESIGN 18): only the
+        # authenticated /status of a per-user gateway carries it.
+        health = {**health, "hook_capacity": capacity}
     # The verified runtime PID, for the Sidecar row (GAP-1789).
     return {**health, "pid": trust.pid} if "pid" not in health else health
 
@@ -1360,12 +1365,14 @@ def _policy_status(health: dict | None) -> dict | None:
 
 
 def _hook_capacity_status(health: dict | None) -> dict | None:
-    """The hook capacity window from /health (S8 DESIGN 18), or None.
+    """The hook capacity window of the gateway (S8 DESIGN 18), or None.
 
     Counts of the last hour: tool calls answered in time, and the ones that
     ran out of their answer budget (deadline denies, late allows) or were
-    refused by the admission limits (shed). Absent on older gateways, on
-    Secure Client and for an ordinary account of a managed host.
+    refused by the admission limits (shed). It comes from the authenticated
+    /status, or the /health a managed gateway gives an administrator. Absent
+    on older gateways, on Secure Client and for an ordinary account of a
+    managed host.
     """
     capacity = (health or {}).get("hook_capacity")
     if not isinstance(capacity, dict):
@@ -1387,16 +1394,28 @@ def _hook_capacity_status(health: dict | None) -> dict | None:
     }
 
 
+def _hook_capacity_clauses(denies: int, late: int, shed: int) -> list[str]:
+    """What the window holds, one clause per kind (shared with doctor)."""
+    clauses = []
+    if denies + late:
+        clauses.append(f"{denies} denied and {late} unchecked tool call(s) ran out of their answer budget")
+    if shed:
+        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+    return clauses
+
+
 def _print_hook_capacity(health: dict | None) -> None:
-    """One row only when a tool call ran out of its answer budget in the window."""
+    """One row only when a call ran out of its answer budget or was refused in the window."""
     capacity = _hook_capacity_status(health)
-    if capacity is None or capacity["deadline_denies"] + capacity["late_allows"] == 0:
+    if capacity is None:
         return
-    denies, late = capacity["deadline_denies"], capacity["late_allows"]
+    clauses = _hook_capacity_clauses(capacity["deadline_denies"], capacity["late_allows"], capacity["shed"])
+    if not clauses:
+        return
     minutes, answered = capacity["window_minutes"], capacity["answered"]
     value = (
-        f"over capacity: {denies} denied and {late} unchecked tool call(s) in the last {minutes} min "
-        f"ran out of their answer budget ({answered} answered in time); not a policy result, see defenseclaw doctor"
+        f"over capacity in the last {minutes} min: " + "; and ".join(clauses) + f" ({answered} answered in time); "
+        "not a policy result, see defenseclaw doctor"
     )
     _status_row("Hook capacity", ux._style(value, fg="yellow"))
 

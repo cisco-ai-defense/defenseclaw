@@ -158,10 +158,12 @@ groups:
           runbook: "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/local-observability/#managed-ai-defense-fail-open-monitoring"
 
       - alert: DefenseClawHookOverCapacity
+        # More than 5 calls of one outcome in each 5-minute window, for 5
+        # minutes: one late call does not page (S8 review P3-7).
         expr: |
           sum by (outcome) (
-            rate(defenseclaw_hook_deadline_outcomes_total{outcome=~"deadline_deny|late_allow"}[5m])
-          ) > 0
+            increase(defenseclaw_hook_deadline_outcomes_total{outcome=~"deadline_deny|late_allow|shed"}[5m])
+          ) > 5
         for: 5m
         labels:
           severity: warning
@@ -172,7 +174,8 @@ groups:
             The host gets more agent tool calls than DefenseClaw can check in
             time. A managed hook blocks such a call (deadline_deny); a per-user
             hook in the default fail mode lets it run unchecked (late_allow).
-            This is capacity, not policy: run fewer agents or parallel tool
+            A call the admission limits keep refusing (shed) is blocked by its
+            hook when its budget ends. This is capacity, not policy: run fewer agents or parallel tool
             calls at once, or use a larger host (see the hook sizing table).
           runbook: "https://cisco-ai-defense.github.io/defenseclaw/docs/support-matrix/#hook-sizing"
 

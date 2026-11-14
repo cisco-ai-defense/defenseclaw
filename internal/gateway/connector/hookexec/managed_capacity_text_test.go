@@ -35,6 +35,18 @@ func TestManagedOverloadDenyNamesCapacityNotPolicy(t *testing.T) {
 			}
 		}
 	}
+	over := managedStandaloneFailClosedText("PreToolUse", "transport", managedCallerOverLimitRefusal)
+	for _, want := range []string{
+		"DefenseClaw blocked this tool call: this account sent more agent hook calls than its DefenseClaw limit allows at once",
+		"This is not a policy decision.", status, "(" + callerBusyReason + ")",
+	} {
+		if !strings.Contains(over, want) {
+			t.Fatalf("account over its budget: text %q lacks %q", over, want)
+		}
+	}
+	if strings.Contains(over, "at capacity") {
+		t.Fatalf("account over its own budget: %q says the computer is at capacity", over)
+	}
 	for _, reason := range []string{managedGatewayNotRunningReason, managedGatewayRestartingReason} {
 		if got := managedStandaloneFailClosedText("PreToolUse", "transport", reason); strings.Contains(got, "capacity") {
 			t.Fatalf("%s: %q names capacity", reason, got)

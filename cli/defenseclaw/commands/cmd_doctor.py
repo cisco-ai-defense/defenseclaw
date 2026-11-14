@@ -7639,7 +7639,6 @@ def _check_windows_gateway_diagnostics(
 
     runtime: dict = {}
     peer_broker = None
-    hook_capacity = None
     if status_code == 200:
         try:
             payload = json.loads(status_body)
@@ -7648,7 +7647,6 @@ def _check_windows_gateway_diagnostics(
                 runtime = candidate
             if isinstance(payload, dict):
                 peer_broker = payload.get("route_peer_broker")
-                hook_capacity = payload.get("hook_capacity")
         except (json.JSONDecodeError, TypeError):
             runtime = {}
 
@@ -7732,13 +7730,28 @@ def _check_windows_gateway_diagnostics(
     else:
         _emit("pass", "Gateway home", "running gateway uses this canonical data home", r=r)
     _emit_route_peer_broker_row(peer_broker, r)
-    _emit_hook_capacity_row(hook_capacity, r)
     return True
 
 
 def _capacity_count(counts, key: str) -> int:
     value = counts.get(key) if isinstance(counts, dict) else None
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _check_hook_capacity(cfg, health: dict | None, r: _DoctorResult) -> None:
+    """The Hook capacity row on every OS (S8 DESIGN 18, review P2-2).
+
+    A managed gateway gives its administrator the window in /health. A
+    per-user gateway serves it only in its authenticated /status, because
+    its /health needs no credential and the counts are this account load
+    (review P3-2), so it is read there with the gateway token, the way the
+    runtime rows are. No row without a credential or on an older gateway.
+    """
+    capacity = health.get("hook_capacity") if isinstance(health, dict) else None
+    if not isinstance(capacity, dict):
+        document, _problem, _checked = _authenticated_gateway_status_document(cfg)
+        capacity = document.get("hook_capacity") if isinstance(document, dict) else None
+    _emit_hook_capacity_row(capacity, r)
 
 
 def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
@@ -7760,21 +7773,37 @@ def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
     carried = _capacity_count(capacity, "answered_per_minute_peak")
     denies, late = _capacity_count(window, "deadline_denies"), _capacity_count(window, "late_allows")
     shed = _capacity_count(window, "shed")
-    if denies + late == 0:
-        detail = f"no tool call ran out of its answer budget in the last {minutes} min (peak {carried} calls answered in one minute)"
-        if shed:
-            detail += f"; {shed} refused by the admission limits and retried"
+    if denies + late + shed == 0:
+        detail = (
+            f"no tool call ran out of its answer budget in the last {minutes} min "
+            f"(peak {carried} calls answered in one minute)"
+        )
         _emit("pass", "Hook capacity", detail, r=r)
         return
     start = str(capacity.get("peak_minute_start") or "")[:40]
     peak_denies = _capacity_count(peak, "deadline_denies")
     peak_late = _capacity_count(peak, "late_allows")
+    peak_shed = _capacity_count(peak, "shed")
     peak_answered = _capacity_count(peak, "answered")
+    clauses = []
+    if denies + late:
+        clauses.append(
+            f"{denies} tool call(s) were denied and {late} ran unchecked "
+            "because DefenseClaw could not check them in time"
+        )
+    if shed:
+        # A refused call is blocked by its hook when its budget ends unless a
+        # resend is admitted (review P2-3).
+        clauses.append(f"{shed} call(s) refused by the admission limits; their hooks block them when the budget ends")
+    verdict = (
+        "This host is over its hook capacity"
+        if denies + late
+        else "An account is over its hook budget or this host is over its hook capacity"
+    )
     detail = (
-        f"in the last {minutes} min {denies} tool call(s) were denied and {late} ran unchecked because "
-        f"DefenseClaw could not check them in time (busiest minute {start}: "
-        f"{peak_denies} denied, {peak_late} unchecked, "
-        f"{peak_answered} answered). This host is over its hook capacity, not a policy result; "
+        f"in the last {minutes} min " + "; and ".join(clauses) + f" (busiest minute {start}: "
+        f"{peak_denies} denied, {peak_late} unchecked, {peak_shed} refused, "
+        f"{peak_answered} answered). {verdict}, not a policy result; "
         f"run fewer agents at once or use a larger host"
     )
     if doc:
@@ -10850,10 +10879,25 @@ _OPENCODE_PLUGIN_SUFFIXES = (".js", ".ts")
 def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
     """The gateway's health from its authenticated ``/status`` document.
 
+    Returns ``(health, "", True)``, or ``(None, reason, checked)`` as
+    ``_authenticated_gateway_status_document`` does.
+    """
+    document, problem, checked = _authenticated_gateway_status_document(cfg)
+    if document is None:
+        return None, problem, checked
+    health = document.get("health")
+    if not isinstance(health, dict):
+        return None, "authenticated status health is malformed", True
+    return health, "", True
+
+
+def _authenticated_gateway_status_document(cfg) -> tuple[dict | None, str, bool]:
+    """The gateway's authenticated ``/status`` document.
+
     The document counts only when the listener is this profile's gateway
     process and the runtime it reports binds back to it, the same trust as
     ``cmd_status._fetch_runtime_bound_health``. Returns
-    ``(health, "", True)``, or ``(None, reason, checked)``: ``checked`` is
+    ``(document, "", True)``, or ``(None, reason, checked)``: ``checked`` is
     False when no gateway runs.
     """
     gateway = getattr(cfg, "gateway", None)
@@ -10889,12 +10933,11 @@ def _authenticated_gateway_health(cfg) -> tuple[dict | None, str, bool]:
         return None, runtime_detail, True
     try:
         document = json.loads(body)
-        health = document.get("health") if isinstance(document, dict) else None
     except (json.JSONDecodeError, TypeError):
-        health = None
-    if not isinstance(health, dict):
+        document = None
+    if not isinstance(document, dict):
         return None, "authenticated status health is malformed", True
-    return health, "", True
+    return document, "", True
 
 
 def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
@@ -16537,6 +16580,7 @@ def doctor(
         _check_guardrail_profile(cfg, r)
         _check_agent_identity_ledger(sidecar_health, r)
         _check_live_audit_store(sidecar_health, r)
+        _check_hook_capacity(cfg, sidecar_health, r)
     _check_policy_state(cfg, r, live_health=sidecar_health)
     _check_policy_evidence_files(cfg, r)
     _check_signature_packs(cfg, r)

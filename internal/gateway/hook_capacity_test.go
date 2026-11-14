@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -91,23 +92,81 @@ func TestHookCapacityCountsOnlyTheDeadlineLinesOfHooks(t *testing.T) {
 	}
 }
 
-func TestHookCapacityManagedCallsCountTheirRecordedOutcome(t *testing.T) {
+// On a managed gateway a deadline is counted only from evidence of one (S8
+// review P2-1): a late or open receipt (the hook says which it did) or a
+// client that left before the answer (by the no-answer fail mode). An
+// unconfirmed row without that evidence (no receipt, an older hook) and the
+// journal-failure 503 are not deadline outcomes in either fail mode: before
+// the fix a default closed host counted them as calls that ran unchecked.
+func TestHookCapacityManagedCallsCountOnlyDeadlineEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		mode string
+		want HookCapacityCounts
+	}{
+		{"closed", HookCapacityCounts{Answered: 3, DeadlineDenies: 2, LateAllows: 1}},
+		{"open", HookCapacityCounts{Answered: 3, DeadlineDenies: 1, LateAllows: 2}},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			withHookCapacity(t, time.Date(2026, 11, 14, 14, 20, 0, 0, time.UTC))
+			cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+			cfg.Guardrail.HookFailMode = tc.mode
+			api := &APIServer{scannerCfg: cfg}
+			ctx := t.Context()
+			receipt := func(line string) context.Context {
+				return context.WithValue(ctx, hookCapacityReceiptContextKey{}, hookCapacityReceipt{line: line})
+			}
+			allow := agentHookResponse{Action: "allow", Mode: "action"}
+			// Answered in time.
+			api.noteHookCallCapacity(ctx, "claudecode", allow, false)
+			api.noteHookCallCapacity(ctx, "claudecode", agentHookResponse{Action: "block", Reason: "policy"}, false)
+			api.noteHookCallCapacity(receipt(hookexec.HookDeliveryReceiptAck), "claudecode", allow, false)
+			// The receipt says what the hook did at its deadline.
+			api.noteHookCallCapacity(receipt(hookexec.HookDeliveryReceiptLate), "claudecode",
+				api.deliveredHookDecision("claudecode", allow, hookexec.HookDeliveryReceiptLate), false)
+			api.noteHookCallCapacity(receipt(hookexec.HookDeliveryReceiptOpen), "claudecode",
+				api.deliveredHookDecision("claudecode", allow, hookexec.HookDeliveryReceiptOpen), false)
+			// No deadline evidence: no receipt for an offered allow or a
+			// policy block, an unreceipted older hook, the journal 503.
+			api.noteHookCallCapacity(receipt(""), "claudecode", api.deliveredHookDecision("claudecode", allow, ""), false)
+			api.noteHookCallCapacity(receipt(""), "claudecode", agentHookResponse{Action: "block", Reason: "policy"}, false)
+			api.noteHookCallCapacity(ctx, "claudecode", unconfirmedHookDelivery(allow), false)
+			api.noteHookCallCapacity(context.WithValue(ctx, hookCapacityExcludedContextKey{}, true), "claudecode",
+				pendingFailureHookDecision(allow), false)
+			// A client that left before the answer follows the fail mode.
+			api.noteHookCallCapacity(ctx, "claudecode", unconfirmedHookDelivery(allow), true)
+			if got := hookCapacity.snapshot().Window; got != tc.want {
+				t.Fatalf("window = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A per-user late call is counted from its hook line, not from the gateway
+// row of the call.
+func TestHookCapacityPerUserCallsCountOnlyTheAnsweredOnes(t *testing.T) {
 	withHookCapacity(t, time.Date(2026, 11, 14, 14, 20, 0, 0, time.UTC))
-	managedAPI := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}}
-	perUserAPI := &APIServer{scannerCfg: &config.Config{}}
+	api := &APIServer{scannerCfg: &config.Config{}}
+	ctx := t.Context()
+	api.noteHookCallCapacity(ctx, "claudecode", agentHookResponse{Action: "allow"}, false)
+	api.noteHookCallCapacity(ctx, "claudecode", agentHookResponse{Action: hookActionUnconfirmed, Reason: hookexec.PerUserGatewayNoAnswerReason}, true)
+	api.noteHookCallCapacity(context.WithValue(ctx, hookCapacityReceiptContextKey{}, hookCapacityReceipt{line: hookexec.HookDeliveryReceiptOpen}),
+		"claudecode", api.deliveredHookDecision("claudecode", agentHookResponse{Action: "allow"}, hookexec.HookDeliveryReceiptOpen), false)
+	if got := hookCapacity.snapshot().Window; got != (HookCapacityCounts{Answered: 1}) {
+		t.Fatalf("window = %+v, want one answered call", got)
+	}
+}
 
-	managedAPI.noteHookCallCapacity(agentHookResponse{Action: "allow"}, false)
-	managedAPI.noteHookCallCapacity(agentHookResponse{Action: "block", Reason: "policy"}, false)
-	managedAPI.noteHookCallCapacity(agentHookResponse{Action: "block", Reason: hookexec.ManagedGatewayNoAnswerReason}, true)
-	managedAPI.noteHookCallCapacity(agentHookResponse{Action: "block", Reason: hookexec.ManagedGatewayNoAnswerReason}, false)
-	managedAPI.noteHookCallCapacity(agentHookResponse{Action: hookActionUnconfirmed, Reason: hookexec.ManagedGatewayNoAnswerReason}, true)
-	// A per-user late call is counted from its hook line, not here.
-	perUserAPI.noteHookCallCapacity(agentHookResponse{Action: "allow"}, false)
-	perUserAPI.noteHookCallCapacity(agentHookResponse{Action: hookActionUnconfirmed, Reason: hookexec.PerUserGatewayNoAnswerReason}, true)
-
-	want := HookCapacityCounts{Answered: 3, DeadlineDenies: 2, LateAllows: 1}
-	if got := hookCapacity.snapshot().Window; got != want {
-		t.Fatalf("window = %+v, want %+v", got, want)
+// A panic of the counter or its telemetry sink is recovered where it
+// happens, so it never reaches the hook answer (S8 review P3-3).
+func TestHookCapacityNotePanicNeverReachesTheCaller(t *testing.T) {
+	withHookCapacity(t, time.Date(2026, 11, 14, 14, 20, 0, 0, time.UTC))
+	hookCapacity.setSink(func(string, uint64) { panic("sink") })
+	api := &APIServer{scannerCfg: &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}}
+	api.noteHookCallCapacity(t.Context(), "claudecode", agentHookResponse{Action: "block"}, true)
+	api.noteHookCallerGoneCapacity("claudecode", true)
+	(&APIServer{}).recordHookDeadlineOutcomeMetric(hookCapacityShed, 1)
+	if got := hookCapacity.snapshot().Window; got != (HookCapacityCounts{DeadlineDenies: 1, Shed: 1}) {
+		t.Fatalf("window = %+v: the counts stay even when the sink panics", got)
 	}
 }
 

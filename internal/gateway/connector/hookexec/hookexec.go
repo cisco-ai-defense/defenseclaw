@@ -334,6 +334,10 @@ type Options struct {
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
+	// callerOverBudget: the last 429 named this account own budget
+	// (callerBusyReason), not a full gateway. A call that ends in its 429
+	// resends then says the account is over its limit (S8 review P3-8).
+	callerOverBudget bool
 	// managedNoAnswerCode is managedNoAnswerReason read once for a call the
 	// watchdog answers, so its answer and its failure row agree.
 	managedNoAnswerCode string
@@ -1158,6 +1162,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if err != nil {
 			return
 		}
+		if resp != nil && resp.StatusCode == http.StatusTooManyRequests && !opts.SecureClient {
+			// Read before the refusal is marked, so the watchdog copy of
+			// opts names it too.
+			opts.callerOverBudget = callerBudgetRefusal(resp)
+		}
 		markManagedAnsweredError(&opts, sp, resp.StatusCode)
 		if resp != nil && !opts.SecureClient &&
 			(resp.StatusCode >= 200 && resp.StatusCode < 300 || managedNativeDecision(opts)) {
@@ -1186,7 +1195,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	for retry := 0; !opts.SecureClient && err == nil && resp.StatusCode == http.StatusTooManyRequests && retry < retries; retry++ {
 		delay := retryAfterDelay(resp.Header.Get("Retry-After"))
-		if !opts.answerBy.IsZero() && callerBudgetRefusal(resp) {
+		if !opts.answerBy.IsZero() && opts.callerOverBudget {
 			delay = min(delay, hookCallerBusyRetryDelay)
 		}
 		_ = resp.Body.Close()
@@ -1198,7 +1207,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			if gatewayNoAnswer(ctx) {
 				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
-			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedGatewayBusyRefusal)
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedBusyRefusal(opts))
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -1208,7 +1217,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
 			// The gateway answered 429: it is up, so no outage applies.
-			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedGatewayBusyRefusal)
+			return failUnreachable(opts, sp, nonOutageFailMode(opts, failMode), managedBusyRefusal(opts))
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
@@ -1556,6 +1565,10 @@ func failAfterErrorStatus(opts Options, sp spec, failMode string, status int) in
 		return failNoAnswer(opts, sp, failMode)
 	}
 	if status == http.StatusTooManyRequests {
+		if opts.callerOverBudget {
+			// One account over its own budget, not the computer at capacity.
+			return failUnreachable(opts, sp, "closed", managedCallerOverLimitRefusal)
+		}
 		return failUnreachable(opts, sp, "closed", managedGatewayNoAnswerReason)
 	}
 	reason := fmt.Sprintf("gateway returned HTTP %d", status)
@@ -1617,6 +1630,22 @@ var hookCallerBusyRetryDelay = 250 * time.Millisecond
 // after a 429 could not fit its answer budget: the gateway runs and is busy.
 // A managed hook names capacity for it (managedStandaloneFailClosedText).
 const managedGatewayBusyRefusal = "gateway busy"
+
+// managedCallerOverLimitRefusal is the recorded reason and the shown code
+// when the last 429 of the resends named the account own budget: one account
+// over its limit, not the whole computer at capacity (S8 review P3-8). It is
+// the documented code of that refusal, and not outage-shaped: the gateway
+// answered.
+const managedCallerOverLimitRefusal = callerBusyReason
+
+// managedBusyRefusal is the reason of a call whose 429 resends ended before
+// its answer budget did.
+func managedBusyRefusal(opts Options) string {
+	if opts.callerOverBudget {
+		return managedCallerOverLimitRefusal
+	}
+	return managedGatewayBusyRefusal
+}
 
 // callerBusyReason is the reason of a 429 for one caller's own budget
 // (hook_caller_limits.go managedHookReasonRateLimited); a full gateway
@@ -4399,6 +4428,15 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 			"Try again in a few seconds; if this keeps happening, ask your administrator to check DefenseClaw on this computer: `"+
 				managedStatusCommand(runtime.GOOS)+"` shows the recent hook load."
 		code = managedGatewayNoAnswerReason
+	case reason == managedCallerOverLimitRefusal:
+		// One account sent more hook calls than its own budget allows (a
+		// loop, many parallel agents): the gateway kept refusing this call
+		// until its answer budget ended. Other accounts are not affected.
+		cause, advice = "this account sent more agent hook calls than its DefenseClaw limit allows at once, so DefenseClaw could not check this "+
+			hookEventSubject(event)+" in time. This is not a policy decision",
+			"Wait a few seconds or run fewer agents or parallel tool calls at once; if this keeps happening, ask your administrator: `"+
+				managedStatusCommand(runtime.GOOS)+"` shows the recent hook load."
+		code = callerBusyReason
 	case reason == managedGatewayPortHeldReason:
 		cause, advice = "another program is using the DefenseClaw gateway's port on this computer, so DefenseClaw cannot check it",
 			"Ask your administrator to check DefenseClaw on this computer: `"+managedStatusCommand(runtime.GOOS)+"` names the program."

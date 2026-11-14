@@ -1201,6 +1201,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// No answer leaves this process unjournaled. The 503
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
+				// A journal failure is a store problem, not load: no
+				// capacity outcome.
 				persistCtx := telemetryPersistenceCtx
 				var cancelPersist context.CancelFunc
 				if persistCtx == nil {
@@ -1212,7 +1214,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						cancelFinalPersistence = cancelPersist
 					}
 				}
-				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
+				finalization := a.finalizeAgentHookAnswer(
+					context.WithValue(a.pendingHookDecidedContext(persistCtx, pending, resp), hookCapacityExcludedContextKey{}, true),
 					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
 				a.settlePendingHook(persistCtx, pending, finalization)
 				if cancelPersist != nil && finalPersistenceCtx == nil {
@@ -1259,6 +1262,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 			return a.unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer, connectorName, req.HookEventName, proposal)
 		}
+		var capacityReceipt *hookCapacityReceipt
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
 			body := a.hookAnswerBody(ctx, profile, connectorName, req,
@@ -1275,6 +1279,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp = unreceipted(resp)
 			} else {
 				resp = a.deliveredHookDecision(connectorName, resp, receipt)
+				capacityReceipt = &hookCapacityReceipt{line: receipt}
 			}
 			delivered := resp
 			answered = &delivered
@@ -1308,6 +1313,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// The receipt decided what the agent got (delivered or
 			// unconfirmed); a hang-up after it is not a missed answer.
 			persistCtx = context.WithValue(persistCtx, hookDeliveryReceiptContextKey{}, true)
+		}
+		if capacityReceipt != nil {
+			// What the receipt said is the deadline evidence of the call.
+			persistCtx = context.WithValue(persistCtx, hookCapacityReceiptContextKey{}, *capacityReceipt)
 		}
 		// A managed answer offered on the receipt channel is already on the
 		// wire: finalization records it as delivered and cannot replace it.
@@ -1583,8 +1592,10 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// acknowledgement is a live answer even though it reuses the pending
 	// occurrence IDs to deduplicate audit writes.
 	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
-	if !req.pendingRecovery {
-		a.noteHookCallCapacity(resp, clientLeft)
+	if live {
+		// The overload signal (DESIGN 18); recovers its own panics, so it
+		// never changes this answer.
+		a.noteHookCallCapacity(ctx, connectorName, resp, clientLeft)
 	}
 	safeSection := func(section string, fn func()) {
 		defer func() {

@@ -5,9 +5,12 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -64,14 +67,17 @@ type HookCapacitySnapshot struct {
 	LastMinute    HookCapacityCounts `json:"last_minute"`
 	Last5Minutes  HookCapacityCounts `json:"last_5_minutes"`
 	Window        HookCapacityCounts `json:"window"`
-	// PeakMinute is the minute of the window with the most deadline
-	// outcomes (denies + late allows); zero when there was none.
+	// PeakMinute is the minute of the window with the most calls that got
+	// no answer in time (deadline denies + late allows + shed); zero when
+	// there was none.
 	PeakMinute      HookCapacityCounts `json:"peak_minute"`
 	PeakMinuteStart *time.Time         `json:"peak_minute_start,omitempty"`
 	// AnsweredPerMinutePeak is the most calls answered in time in one
 	// minute of the window: the rate the host carried.
 	AnsweredPerMinutePeak uint64 `json:"answered_per_minute_peak"`
-	// Overloaded: the window holds a deadline deny or a late allow.
+	// Overloaded: the window holds a deadline deny, a late allow or a call
+	// the admission limits refused (shed: its hook blocks it when the budget
+	// ends unless a resend is admitted).
 	Overloaded bool   `json:"overloaded"`
 	SizingDoc  string `json:"sizing_doc"`
 }
@@ -185,7 +191,7 @@ func (c *hookCapacityCounter) snapshot() HookCapacitySnapshot {
 		if b.minute > now-5 {
 			snap.Last5Minutes.add(counts)
 		}
-		if late := counts.DeadlineDenies + counts.LateAllows; late > peak {
+		if late := counts.DeadlineDenies + counts.LateAllows + counts.Shed; late > peak {
 			peak = late
 			snap.PeakMinute = counts
 			at := time.Unix(b.minute*60, 0).UTC()
@@ -195,46 +201,107 @@ func (c *hookCapacityCounter) snapshot() HookCapacitySnapshot {
 			snap.AnsweredPerMinutePeak = counts.Answered
 		}
 	}
-	snap.Overloaded = snap.Window.DeadlineDenies+snap.Window.LateAllows > 0
+	snap.Overloaded = snap.Window.DeadlineDenies+snap.Window.LateAllows+snap.Window.Shed > 0
 	return snap
 }
+
+// hookCapacityReceiptContextKey carries what the delivery receipt of a
+// managed call said to its finalization (hookCapacityReceipt). Set only for
+// a call whose answer was offered on the receipt channel.
+type hookCapacityReceiptContextKey struct{}
+
+// hookCapacityReceipt is the receipt line of an offered answer: late or
+// open is the hook telling the gateway its answer budget ended first; an
+// empty line is no receipt (a lost connection or an older hook), which
+// proves no deadline.
+type hookCapacityReceipt struct{ line string }
+
+// hookCapacityExcludedContextKey marks a finalization the counter skips: the
+// journal-failure 503 (pendingFailureHookDecision) is a store or disk
+// problem, not load, and must not tell the administrator to run fewer
+// agents.
+type hookCapacityExcludedContextKey struct{}
 
 // noteHookCallCapacity counts one finalized live hook call (DESIGN 18). On a
 // per-user gateway a call that ended at its answer budget is counted from
 // the line the hook logged (noteHookFailureCapacity), so here only the calls
 // answered in time count. On a managed gateway the hook logs to the account
-// folder the gateway does not read, so the recorded outcome of the call is
-// the source: the deadline deny the receipt or the fail mode proves, or the
-// late allow of an open outage mode.
-func (a *APIServer) noteHookCallCapacity(resp agentHookResponse, clientLeft bool) {
-	deadline := resp.Reason == hookexec.ManagedGatewayNoAnswerReason || resp.Reason == hookexec.PerUserGatewayNoAnswerReason
-	if a == nil || (!clientLeft && !deadline) {
-		hookCapacity.note(hookCapacityAnswered, time.Time{}, 1)
+// folder the gateway does not read, so a deadline is counted only from
+// evidence of one: a late or open delivery receipt (the hook says which it
+// did), or a client that left before the answer (its outcome follows the
+// no-answer fail mode, as for a caller gone before admission). A row that is
+// unconfirmed for another reason (no receipt, an older hook) proves no
+// deadline and is not counted either way. A panic here never reaches the
+// answer.
+func (a *APIServer) noteHookCallCapacity(ctx context.Context, connectorName string, resp agentHookResponse, clientLeft bool) {
+	defer recoverHookCapacityNote()
+	if excluded, _ := ctx.Value(hookCapacityExcludedContextKey{}).(bool); excluded {
 		return
 	}
-	if perUserHookInstall(a.scannerCfg) {
+	receipt, offered := ctx.Value(hookCapacityReceiptContextKey{}).(hookCapacityReceipt)
+	lateReceipt := receipt.line == hookexec.HookDeliveryReceiptLate || receipt.line == hookexec.HookDeliveryReceiptOpen
+	noEvidence := resp.Action == hookActionUnconfirmed || resp.Reason == hookexec.ManagedGatewayNoAnswerReason ||
+		resp.Reason == hookexec.PerUserGatewayNoAnswerReason || (offered && receipt.line == "")
+	if a == nil || perUserHookInstall(a.scannerCfg) {
+		if !clientLeft && !lateReceipt && !noEvidence {
+			hookCapacity.note(hookCapacityAnswered, time.Time{}, 1)
+		}
 		return
 	}
-	if resp.Action == "block" {
+	switch {
+	case receipt.line == hookexec.HookDeliveryReceiptLate:
 		hookCapacity.note(hookCapacityDeadlineDeny, time.Time{}, 1)
-		return
+	case receipt.line == hookexec.HookDeliveryReceiptOpen:
+		hookCapacity.note(hookCapacityLateAllow, time.Time{}, 1)
+	case clientLeft:
+		noteHookOutageCapacity(a.decisionConfig(ctx), connectorName)
+	case !noEvidence:
+		hookCapacity.note(hookCapacityAnswered, time.Time{}, 1)
 	}
-	hookCapacity.note(hookCapacityLateAllow, time.Time{}, 1)
 }
 
-// noteHookCallerGoneCapacity counts a managed call the gateway never
-// decided: refused by the admission limits (shed, once per call), or whose
-// client left before admission (its outcome follows the outage fail mode).
-func (a *APIServer) noteHookCallerGoneCapacity(connector string, shed bool) {
-	if shed {
-		hookCapacity.note(hookCapacityShed, time.Time{}, 1)
-		return
-	}
-	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.EffectiveHookOutageFailModeForConnector(connector) == "open" {
+// noteHookOutageCapacity counts a managed call that ended without an answer
+// by the no-answer fail mode of its connector: closed (the default) is a
+// deadline deny, open a late allow.
+func noteHookOutageCapacity(cfg *config.Config, connector string) {
+	if cfg != nil && cfg.EffectiveHookOutageFailModeForConnector(connector) == "open" {
 		hookCapacity.note(hookCapacityLateAllow, time.Time{}, 1)
 		return
 	}
 	hookCapacity.note(hookCapacityDeadlineDeny, time.Time{}, 1)
+}
+
+// noteHookCallerGoneCapacity counts a managed call the gateway never
+// decided: refused by the admission limits (shed, counted by the caller once
+// per call), or whose client left before admission (its outcome follows the
+// outage fail mode).
+func (a *APIServer) noteHookCallerGoneCapacity(connector string, shed bool) {
+	defer recoverHookCapacityNote()
+	if shed {
+		hookCapacity.note(hookCapacityShed, time.Time{}, 1)
+		return
+	}
+	noteHookOutageCapacity(a.runtimeConfigSnapshot(), connector)
+}
+
+// noteSandboxReceiptExpiredCapacity counts once a sandbox proposal whose
+// receipt never came within sandboxHookReceiptWindow: recovery closes it,
+// and the hook took its no-answer fallback.
+func (a *APIServer) noteSandboxReceiptExpiredCapacity(connector string) {
+	defer recoverHookCapacityNote()
+	if a == nil {
+		return
+	}
+	noteHookOutageCapacity(a.runtimeConfigSnapshot(), connector)
+}
+
+// recoverHookCapacityNote keeps a panic of the counter or its telemetry sink
+// off the hook answer: the call is answered as decided, and the panic is
+// logged.
+func recoverHookCapacityNote() {
+	if recovered := recover(); recovered != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] hook capacity note panic (answer unchanged): %v\n", recovered)
+	}
 }
 
 // hookDeadlineOutcomeV8Producer is the producer of the deadline outcome
@@ -245,6 +312,7 @@ const hookDeadlineOutcomeV8Producer = "gateway.hook_capacity"
 // telemetry counter defenseclaw.hook.deadline_outcomes. Best effort: an
 // unbound runtime or a failed export never changes a hook answer.
 func (a *APIServer) recordHookDeadlineOutcomeMetric(outcome string, n uint64) {
+	defer recoverHookCapacityNote()
 	if a == nil || n == 0 {
 		return
 	}

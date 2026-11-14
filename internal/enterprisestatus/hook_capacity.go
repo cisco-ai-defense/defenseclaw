@@ -6,6 +6,7 @@ package enterprisestatus
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // CodeHookOverCapacity warns that managed hook calls ran out of their answer
@@ -16,8 +17,11 @@ const CodeHookOverCapacity = "hook_over_capacity"
 
 // HookCapacityWarning reads the hook_capacity object of a gateway /health or
 // /status document and returns the warning text when the window holds a
-// deadline deny or a late allow. A document without it (an older gateway,
-// an ordinary account) gives no warning.
+// deadline deny, a late allow or a call the admission limits refused (shed):
+// a refused call is blocked by its hook when its budget ends unless a resend
+// is admitted, and the hook tells the user to ask the administrator. A
+// document without it (an older gateway, an ordinary account) gives no
+// warning.
 func HookCapacityWarning(body []byte) (string, bool) {
 	var doc struct {
 		HookCapacity *struct {
@@ -36,17 +40,29 @@ func HookCapacityWarning(body []byte) (string, bool) {
 		return "", false
 	}
 	c := doc.HookCapacity
-	if c.Window.DeadlineDenies+c.Window.LateAllows == 0 {
+	w := c.Window
+	if w.DeadlineDenies+w.LateAllows+w.Shed == 0 {
 		return "", false
 	}
 	minutes := c.WindowMinutes
 	if minutes <= 0 {
 		minutes = 60
 	}
-	message := fmt.Sprintf("in the last %d min %d agent tool call(s) were blocked and %d ran unchecked because DefenseClaw "+
-		"could not check them within their answer budget (%d answered in time, %d refused by the admission limits): "+
-		"this host is over its hook capacity, not a policy result; run fewer agents at once or use a larger host",
-		minutes, c.Window.DeadlineDenies, c.Window.LateAllows, c.Window.Answered, c.Window.Shed)
+	var clauses []string
+	if w.DeadlineDenies+w.LateAllows > 0 {
+		clauses = append(clauses, fmt.Sprintf("%d agent tool call(s) were blocked and %d ran unchecked because DefenseClaw "+
+			"could not check them within their answer budget", w.DeadlineDenies, w.LateAllows))
+	}
+	if w.Shed > 0 {
+		clauses = append(clauses, fmt.Sprintf("%d call(s) refused by the admission limits; their hooks block them when the budget ends", w.Shed))
+	}
+	verdict := "this host is over its hook capacity"
+	if w.DeadlineDenies+w.LateAllows == 0 {
+		// Only refusals: one account over its own budget, or the whole host.
+		verdict = "an account is over its hook budget or this host is over its hook capacity"
+	}
+	message := fmt.Sprintf("in the last %d min %s (%d answered in time): %s, not a policy result; run fewer agents at once or use a larger host",
+		minutes, strings.Join(clauses, "; and "), w.Answered, verdict)
 	if len(c.PeakMinuteStart) > 0 && len(c.PeakMinuteStart) <= 40 {
 		message += "; busiest minute " + c.PeakMinuteStart
 	}
