@@ -42,11 +42,24 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
 		os.Exit(1)
 	}
+	// The account home the outage mode reads comes from the account
+	// database, not HOME: on a build box whose own account has a
+	// ~/.defenseclaw/config.yaml the tests read that config (GAP-0345 class).
+	// Tests that need an account home set their own.
+	accountHome, err := os.MkdirTemp("", "defenseclaw-hookcli-account-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "make the test account home:", err)
+		os.Exit(1)
+	}
+	previousAccountHome := OutageAccountHome
+	OutageAccountHome = func() string { return accountHome }
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	restoreHost := isolateHookTestHost()
 	code := m.Run()
 	restoreHost()
 	restoreChain()
+	OutageAccountHome = previousAccountHome
+	_ = os.RemoveAll(accountHome)
 	cleanupHermes()
 	if err := finishUserRoots(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
