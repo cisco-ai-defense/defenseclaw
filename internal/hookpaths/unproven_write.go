@@ -1573,11 +1573,6 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					if protectedReachPath(destination, protected, ssh) {
 						return "copy-directory", true
 					}
-					if actionGlobDirAway(destination, home, nil) {
-						// No child of a directory away from the protected
-						// targets is one by name (rel-1-0-10:GAP-0270).
-						continue
-					}
 					directory, err := pathOpen(destination)
 					if err != nil {
 						return "copy-directory", true
@@ -1838,13 +1833,13 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 	if _, err := filepath.Match(base, ""); err != nil {
 		return false // An incomplete URL bracket is not a shell glob.
 	}
-	// A pattern under a directory away from the protected targets selects
-	// none of them by name; its directory is not listed (rel-1-0-10:GAP-0270).
-	if actionGlobDirAway(actionGlobLiteralDir(OperandPath(pattern, cwd)), filepath.Dir(ssh), nil) {
-		return false
-	}
+	// A pattern this listing cannot finish (a pattern folder, a folder past
+	// the bound) is decided from its text when the text proves it: the
+	// literal folder is away from every protected target and no component
+	// can match a protected name (rel-1-0-10:GAP-0270, GAP-0398).
+	unfinished := func() bool { return !actionGlobTextDecides(OperandPath(pattern, cwd), filepath.Dir(ssh), nil) }
 	if strings.ContainsAny(parent, "*?[") {
-		return true
+		return unfinished()
 	}
 	directory, err := pathOpen(OperandPath(parent, cwd))
 	if err != nil {
@@ -1852,8 +1847,17 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 	}
 	names, err := directory.Readdirnames(4097)
 	_ = directory.Close()
-	if err != nil && err != io.EOF || len(names) > 4096 {
+	if err != nil && err != io.EOF {
 		return true
+	}
+	if len(names) > 4096 {
+		for _, name := range names {
+			if matched, _ := filepath.Match(base, name); matched &&
+				protectedReachPath(OperandPath(name, OperandPath(parent, cwd)), protected, ssh) {
+				return true
+			}
+		}
+		return unfinished()
 	}
 	for _, name := range names {
 		if matched, _ := filepath.Match(base, name); matched &&

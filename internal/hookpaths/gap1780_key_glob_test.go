@@ -60,7 +60,7 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, ".ssh", "id_ed25519"), filepath.Join(project, "keyl")); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{"head -c 4096 dirlink/id_*", "cat keyl*"} {
+	for _, command := range gap1780AliasRows {
 		if !posixShellPrivateKeyRead(command, project, home) {
 			t.Errorf("posixShellPrivateKeyRead(%q) = false, want a key read through the alias", command)
 		}
@@ -83,3 +83,8 @@ func TestActionPrivateKeyGlobFollowsTheShell(t *testing.T) {
 		}
 	}
 }
+
+// gap1780AliasRows are the GAP-1780 key reads through an alias: K0 through
+// dirlink, a link to the .ssh folder, and K1 through keyl, a link to the key
+// file (also read from a folder away from the home, rel-1-0-10:GAP-0399).
+var gap1780AliasRows = []string{"head -c 4096 dirlink/id_*", "cat keyl*"}

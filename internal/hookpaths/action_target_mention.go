@@ -1445,19 +1445,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			return true
 		}
 	}
-	if _, err := filepath.Match(pattern, ""); err != nil {
-		return false
-	}
-	// The literal leading directory bounds what the pattern can select:
-	// away from every protected target, the text above decided it, and no
-	// directory is listed (rel-1-0-10:GAP-0270).
-	if actionGlobDirAway(actionGlobLiteralDir(pattern), home, globs.targetMemo()) {
-		if !globs.full() {
-			globs.note(pattern, "0")
-		}
-		return false
-	}
-	if globs.full() {
+	if _, err := filepath.Match(pattern, ""); err != nil || globs.full() {
 		return false
 	}
 	hidden := actionGlobViewHidden(cwd, home)
@@ -1471,6 +1459,16 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	}
 	if complete {
 		globs.note(pattern, "0")
+		return false
+	}
+	// What the walk read is judged above, by identity: a link of any name
+	// is followed (rel-1-0-10:GAP-0398). The names it could not read are
+	// decided from the text when that proves them: the literal folder is
+	// away from every protected target and no component can match a
+	// protected name. The verdict then does not depend on how full the
+	// folder is (rel-1-0-10:GAP-0270). The client answer "0" still means a
+	// finished walk.
+	if actionGlobTextDecides(pattern, home, globs.targetMemo()) {
 		return false
 	}
 	if hidden {

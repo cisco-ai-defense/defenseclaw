@@ -1183,7 +1183,7 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		}
 		// On the Windows host itself the pattern is expanded and each match
 		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
-		if runtime.GOOS == "windows" && !actionGlobDirAway(actionGlobLiteralDir(filepath.FromSlash(native)), home, nil) {
+		if runtime.GOOS == "windows" {
 			for _, match := range actionBoundedGlob(filepath.FromSlash(native), dotglob) {
 				if actionPrivateReadPath(match, cwd, home) {
 					return true
@@ -1208,11 +1208,9 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 			return true
 		}
 	}
-	// Away from the protected targets the pattern names no key: its
-	// directory is not listed (rel-1-0-10:GAP-0270).
-	if actionGlobDirAway(actionGlobLiteralDir(pattern), home, nil) {
-		return false
-	}
+	// Every match is resolved, away from the home too: a link of any name
+	// can lead to a key, and a listing only adds a proved key read, never a
+	// block of an unknown target (rel-1-0-10:GAP-0399).
 	for _, match := range actionBoundedGlob(pattern, dotglob) {
 		if actionPrivateReadPath(match, cwd, home) {
 			return true
@@ -1341,11 +1339,6 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 	if !ok || samePathName(physical, ssh) || strings.HasPrefix(physical, ssh+string(filepath.Separator)) {
 		return false
 	}
-	if actionGlobDirAway(parent, home, nil) {
-		// A generated name in a directory away from the protected targets
-		// is none of them; the directory is not listed (rel-1-0-10:GAP-0270).
-		return true
-	}
 	pattern := strings.ReplaceAll(filepath.Base(target), actionGeneratedMarker, "*")
 	directory, err := pathOpen(parent)
 	if err != nil {
@@ -1353,7 +1346,13 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 	}
 	names, err := directory.Readdirnames(4097)
 	_ = directory.Close()
-	if err != nil && err != io.EOF || len(names) > 4096 {
+	if err != nil && err != io.EOF {
+		return false
+	}
+	// Past the bound, the names not read are decided from the text when it
+	// proves them: an away folder and a name that can match no protected
+	// one (rel-1-0-10:GAP-0270, GAP-0398). The names read are judged below.
+	if len(names) > 4096 && !actionGlobTextDecides(strings.TrimSuffix(parent, string(filepath.Separator))+string(filepath.Separator)+pattern, home, nil) {
 		return false
 	}
 	protected := newProtectedFiles(home)

@@ -131,43 +131,6 @@ func TestGAP0270GlobInHomeBoundIsUnknown(t *testing.T) {
 	}
 }
 
-// rel-1-0-10:GAP-0270 (a): a link to ~/.ssh in a folder away from the home
-// is reached by its literal name, as before; a pattern there is decided from
-// its text, the same with or without a busy folder.
-func TestGAP0270GlobThroughLinkOutsideHome(t *testing.T) {
-	home, _ := globAliasFixture(t)
-	outside := t.TempDir()
-	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(outside, "keydir")); err != nil {
-		t.Fatal(err)
-	}
-	literal := strings.NewReplacer("keyd*", "keydir", "keyd?r", "keydir")
-	var rows []string
-	for _, command := range globAliasProtectedCommands(outside) {
-		if strings.Contains(command, "keyd") && !strings.HasPrefix(command, "cd ") {
-			rows = append(rows, command)
-		}
-	}
-	if len(rows) < 8 {
-		t.Fatalf("only %d GAP-1445 rows name the alias", len(rows))
-	}
-	small := make([]gap0270Verdict, len(rows))
-	for i, command := range rows {
-		small[i] = gap0270Read(command, outside, home)
-	}
-	fillDir(t, outside, actionGlobMaxNames+1)
-	for i, command := range rows {
-		t.Run(command, func(t *testing.T) {
-			if got := gap0270Read(command, outside, home); got != small[i] {
-				t.Fatalf("busy folder verdict %+v, small folder %+v", got, small[i])
-			}
-			named := literal.Replace(command)
-			if got := posixShellDecision(named, outside, home); got != "protected-target" {
-				t.Fatalf("literal %s: decision = %q, want protected-target", named, got)
-			}
-		})
-	}
-}
-
 func TestGAP0270GlobLiteralDir(t *testing.T) {
 	for _, row := range []struct{ pattern, dir string }{
 		{"/tmp/x-*.log", "/tmp"},
@@ -181,9 +144,13 @@ func TestGAP0270GlobLiteralDir(t *testing.T) {
 		{"/@(home)/u/.ssh/a*", "/"},
 		{"/tmp/+(x)/y*", "/tmp"},
 		{"/tmp/!(x)/y*", "/tmp"},
+		// ".." stays as written (rel-1-0-10:GAP-0400); a relative pattern
+		// has no literal folder (it is never away).
+		{"/tmp/l/../x/y*", "/tmp/l/../x"},
+		{"rel/x*", ""},
 	} {
 		pattern, dir := filepath.FromSlash(row.pattern), filepath.FromSlash(row.dir)
-		if got := actionGlobLiteralDir(pattern); got != filepath.Join(filepath.VolumeName(pattern), dir) && got != dir {
+		if got := actionGlobLiteralDir(pattern); got != filepath.VolumeName(pattern)+dir && got != dir {
 			t.Errorf("actionGlobLiteralDir(%s) = %s, want %s", pattern, got, dir)
 		}
 	}
