@@ -162,7 +162,7 @@ func Quotings() []Quoting {
 // to (rel-1-0-6 GAP-0389: its behavior differs between implementations),
 // where mv and sed -i replace the symlink.
 func verbEffectOn(v Verb, symlink bool) Effect {
-	if v.ID == "install" && symlink {
+	if symlink && (v.ID == "install" || v.ID == "sed-i") {
 		return Content
 	}
 	return v.Effect

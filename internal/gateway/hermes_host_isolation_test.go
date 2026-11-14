@@ -37,9 +37,17 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
 		os.Exit(1)
 	}
+	// An empty home for the whole process: no test reads the account's
+	// instruction files or agent folders (environment sweep, GAP-0396).
+	restoreHome, err := testenv.IsolateProcessHome()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the account home:", err)
+		os.Exit(1)
+	}
 	restoreChain := connector.UseClaudeCodeChainFixtureForTests()
 	code := m.Run()
 	restoreChain()
+	restoreHome()
 	removeMigratedAuditTemplate()
 	cleanup()
 	if err := finishUserRoots(); err != nil {

@@ -27,6 +27,9 @@ var shadowablePrograms = []string{"touch", "gtouch", "mv", "gmv", "install", "gi
 type ShellStartup struct {
 	File, Other bool
 	Functions   []string
+	// glob are the bash glob options of the agent's environment (BASHOPTS,
+	// SHELLOPTS, GLOBIGNORE), for a gateway that does not run in it.
+	glob shellGlobOptions
 }
 
 // CurrentShellStartup reads the startup from this process's environment.
@@ -55,10 +58,54 @@ func CurrentShellStartup() ShellStartup {
 		}
 	}
 	slices.Sort(s.Functions)
+	s.glob = shellGlobOptionsFromEnv(os.Getenv)
 	return s
 }
 
-// Encode is the header value: f=<0|1>;o=<0|1>;fn=<names>.
+// globLetters are the option letters of the header's g= field.
+var globLetters = []struct {
+	letter byte
+	field  func(*shellGlobOptions) *bool
+}{
+	{'d', func(o *shellGlobOptions) *bool { return &o.dotGlob }},
+	{'c', func(o *shellGlobOptions) *bool { return &o.noCaseGlob }},
+	{'n', func(o *shellGlobOptions) *bool { return &o.nullGlob }},
+	{'f', func(o *shellGlobOptions) *bool { return &o.failGlob }},
+	{'z', func(o *shellGlobOptions) *bool { return &o.noGlob }},
+	{'s', func(o *shellGlobOptions) *bool { return &o.globStar }},
+	{'e', func(o *shellGlobOptions) *bool { return &o.extGlob }},
+	{'i', func(o *shellGlobOptions) *bool { return &o.globIgnore }},
+	{'u', func(o *shellGlobOptions) *bool { return &o.unknown }},
+}
+
+func (o shellGlobOptions) encode() string {
+	var out []byte
+	for _, entry := range globLetters {
+		if *entry.field(&o) {
+			out = append(out, entry.letter)
+		}
+	}
+	return string(out)
+}
+
+func decodeGlobOptions(text string) (shellGlobOptions, bool) {
+	var o shellGlobOptions
+	for i := 0; i < len(text); i++ {
+		found := false
+		for _, entry := range globLetters {
+			if entry.letter == text[i] {
+				*entry.field(&o) = true
+				found = true
+			}
+		}
+		if !found {
+			return o, false
+		}
+	}
+	return o, true
+}
+
+// Encode is the header value: f=<0|1>;o=<0|1>;fn=<names>;g=<glob letters>.
 func (s ShellStartup) Encode() string {
 	flag := func(on bool) string {
 		if on {
@@ -66,7 +113,7 @@ func (s ShellStartup) Encode() string {
 		}
 		return "0"
 	}
-	return "f=" + flag(s.File) + ";o=" + flag(s.Other) + ";fn=" + strings.Join(s.Functions, ",")
+	return "f=" + flag(s.File) + ";o=" + flag(s.Other) + ";fn=" + strings.Join(s.Functions, ",") + ";g=" + s.glob.encode()
 }
 
 // DecodeShellStartup reads Encode's value. A malformed value is not ok.
@@ -76,7 +123,7 @@ func DecodeShellStartup(value string) (ShellStartup, bool) {
 		return s, false
 	}
 	parts := strings.Split(value, ";")
-	if len(parts) != 3 {
+	if len(parts) != 3 && len(parts) != 4 {
 		return s, false
 	}
 	for i, prefix := range []string{"f=", "o=", "fn="} {
@@ -106,12 +153,25 @@ func DecodeShellStartup(value string) (ShellStartup, bool) {
 			}
 		}
 	}
+	if len(parts) == 4 {
+		letters, found := strings.CutPrefix(parts[3], "g=")
+		if !found {
+			return s, false
+		}
+		glob, ok := decodeGlobOptions(letters)
+		if !ok {
+			return s, false
+		}
+		s.glob = glob
+	}
 	return s, true
 }
 
 // UnknownShellStartup is the startup a gateway assumes for a header it
 // cannot read: it withholds every safe proof.
-func UnknownShellStartup() ShellStartup { return ShellStartup{File: true, Other: true} }
+func UnknownShellStartup() ShellStartup {
+	return ShellStartup{File: true, Other: true, glob: shellGlobOptions{unknown: true}}
+}
 
 // mayChange reports a startup that can change what a statement running one
 // of programs does.

@@ -47,7 +47,7 @@ func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 	if !ok || startup.mayChange(name) {
 		return false
 	}
-	options := shellGlobOptionsFromEnv(os.Getenv)
+	options := shellGlobOptionsForCall(command, startup)
 	var operands []string
 	for _, word := range words {
 		if !noDereferenceTouchLiteralWord(word) && (len(word.Parts) != 1 || actionSoleParameter(word) == "") {
@@ -86,11 +86,11 @@ func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 				return false
 			}
 		case info.Mode()&os.ModeSymlink != 0:
-			// mv replaces a symlink and GNU sed -i refuses one, but what
-			// install does with a symlink destination differs between
-			// implementations (GAP-0389 pins it blocked): only a hard-link
-			// name is proved for install.
-			if name == "install" || name == "ginstall" {
+			// mv replaces a symlink everywhere, but what install and sed -i
+			// do with a symlink destination differs between implementations
+			// (GAP-0389 and the command-link tests pin them blocked): only a
+			// hard-link name is proved for them.
+			if name != "mv" && name != "gmv" {
 				return false
 			}
 			if target, serr := pathStat(entry); serr == nil && target.IsDir() {
@@ -169,6 +169,11 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 						return nil, false
 					}
 					i++
+					// The script must be fixed text that is read in full and
+					// holds no command that writes or runs (GAP-0377).
+					if script, fixed := static(args[i]); !fixed || !sedScriptReplaceOnly(script) {
+						return nil, false
+					}
 					haveScript = true
 				case strings.HasPrefix(text, "-i"):
 					inPlace = true
@@ -180,6 +185,9 @@ func replaceVerbOperandWords(program string, args []*syntax.Word, home string) (
 				continue
 			}
 			if !haveScript {
+				if script, fixed := static(word); !fixed || !sedScriptReplaceOnly(script) {
+					return nil, false
+				}
 				haveScript = true
 				continue
 			}
