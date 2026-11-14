@@ -684,8 +684,12 @@ func (g *GuardrailInspector) InspectWithRawRecheck(ctx context.Context, directio
 }
 
 // inspectPromptWithRawRecheck is the F-1265 prompt check for any inspector:
-// one evaluation when the inspector supports it, two otherwise.
-func inspectPromptWithRawRecheck(ctx context.Context, inspector ContentInspector, content, raw string, messages []ChatMessage, model, mode string) *ScanVerdict {
+// one evaluation when the inspector supports it, two otherwise. typed is the
+// text the user typed in the current turn (llmTypedPromptParts); the rest of
+// content and raw, and all of it when typed is empty, has the unspecified
+// origin (rel-1-0-10:GAP-0408).
+func inspectPromptWithRawRecheck(ctx context.Context, inspector ContentInspector, content, raw string, typed []string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	ctx = withLLMTypedPrompt(ctx, typed)
 	if guardrail, ok := inspector.(*GuardrailInspector); ok {
 		return guardrail.InspectWithRawRecheck(ctx, "prompt", content, raw, messages, model, mode)
 	}
@@ -1171,7 +1175,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// actions are evaluated through the tool-call path where execution facts
 	// are available, rather than treating their literal appearance in prose as
 	// an action.
-	ruleFindings := scanProxyContentRules(ctx, content, proxyTextOrigin(direction))
+	ruleFindings := scanProxyContentRules(ctx, direction, content)
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -1415,7 +1419,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// Keep the same content/action boundary as regex_judge. The trusted action
 	// dispatcher remains responsible for command, path, cognitive-file, and C2
 	// enforcement because it can reason over parsed execution facts.
-	ruleFindings := scanProxyContentRules(ctx, content, proxyTextOrigin(direction))
+	ruleFindings := scanProxyContentRules(ctx, direction, content)
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -1838,26 +1842,18 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // its content rules come from the rule pack of the request's profile
 // (proxyRuleGeneration).
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
-	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)))
+	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)), proxyTypedPrompt(ctx, direction))
 }
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
-// request, with the rule pack of its profile (proxyRuleGeneration).
-func scanProxyContentRules(ctx context.Context, content string, origin ruleTextOrigin) []RuleFinding {
+// request, with the rule pack of its profile (proxyRuleGeneration). Only the
+// text the proxy attributed to the current user turn is user-typed
+// (proxyTypedPrompt, scanAttributedContentRules).
+func scanProxyContentRules(ctx context.Context, direction, content string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	return scanUntrustedContentRules(proxyRuleGeneration(ctx), content, origin)
-}
-
-// proxyTextOrigin is the author of the text the guardrail proxy inspects in a
-// direction. The prompt direction is the user turn in progress (promptTurnText);
-// a completion is the model, so it keeps the unspecified origin.
-func proxyTextOrigin(direction string) ruleTextOrigin {
-	if isPromptDirection(direction) {
-		return ruleTextOriginUserTyped
-	}
-	return ruleTextOriginUnspecified
+	return scanAttributedContentRules(proxyRuleGeneration(ctx), content, proxyTypedPrompt(ctx, direction))
 }
 
 // scanUntrustedContentRules is the content rule scan of untrusted text with
@@ -1893,15 +1889,17 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
-	return scanLocalPatternsWithActivation(direction, content, rules, nil)
+	return scanLocalPatternsWithActivation(direction, content, rules, nil, nil)
 }
 
 // scanLocalPatternsWithActivation is scanLocalPatternsWithRules with the
-// local patterns of one generation (nil: the process-wide patterns).
+// local patterns of one generation (nil: the process-wide patterns) and the
+// text of content the user typed (nil: none of it, the unspecified origin).
 func scanLocalPatternsWithActivation(
 	direction, content string,
 	rules *compiledRulePackCategories,
 	activation *localPatternsActivation,
+	typed []string,
 ) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
@@ -2020,7 +2018,7 @@ func scanLocalPatternsWithActivation(
 	// hit is at least MEDIUM, HIGH for the high-signal ones. A rule-pack
 	// finding carries its own severity and nothing else (rel-1-0-10:GAP-0172).
 	maxRuleSev := "NONE"
-	ruleFindings := scanUntrustedContentRules(rules, content, proxyTextOrigin(direction))
+	ruleFindings := scanAttributedContentRules(rules, content, typed)
 	catalogPIIEvidence := make(map[string]struct{})
 	for _, rf := range ruleFindings {
 		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
@@ -2766,17 +2764,23 @@ func recordCrossLayerDisagreement(regex, judge *ScanVerdict) {
 // Message extraction helpers
 // ---------------------------------------------------------------------------
 
-// lastUserText extracts text from the most recent non-whitespace user
-// message. A trailing blank user turn must not hide an earlier real
-// user prompt from inspection. Scanning the full history still causes
-// false positives when a previously flagged message stays in context.
-func lastUserText(messages []ChatMessage) string {
+// lastUserMessage is the most recent non-whitespace user message. A trailing
+// blank user turn must not hide an earlier real user prompt from inspection.
+// Scanning the full history still causes false positives when a previously
+// flagged message stays in context.
+func lastUserMessage(messages []ChatMessage) (ChatMessage, bool) {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			return messages[i].Content
+			return messages[i], true
 		}
 	}
-	return ""
+	return ChatMessage{}, false
+}
+
+// lastUserText is the text of lastUserMessage.
+func lastUserText(messages []ChatMessage) string {
+	msg, _ := lastUserMessage(messages)
+	return msg.Content
 }
 
 // promptSideInstructionText joins non-whitespace system and developer
@@ -2798,46 +2802,78 @@ func promptSideInstructionText(messages []ChatMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// currentTurnUserText joins the user messages after the last assistant or tool
+// currentTurnUserMessages is the user messages after the last assistant or tool
 // message: the turn the model is about to answer. Most clients send one, but
 // OpenClaw 2026.9 appends a synthetic context message after the prompt, so the
 // last message alone would leave the prompt itself unscanned (GAP-0190).
-func currentTurnUserText(messages []ChatMessage) string {
-	var turn []string
-	for i := len(messages) - 1; i >= 0; i-- {
-		role := messages[i].Role
+func currentTurnUserMessages(messages []ChatMessage) []ChatMessage {
+	start := len(messages)
+	for start > 0 {
+		role := messages[start-1].Role
 		if role == "assistant" || role == "tool" {
 			break
 		}
-		if role == "user" && strings.TrimSpace(messages[i].Content) != "" {
-			turn = append(turn, messages[i].Content)
+		start--
+	}
+	var turn []ChatMessage
+	for _, msg := range messages[start:] {
+		if msg.Role == "user" && strings.TrimSpace(msg.Content) != "" {
+			turn = append(turn, msg)
 		}
 	}
-	for i, j := 0, len(turn)-1; i < j; i, j = i+1, j-1 {
-		turn[i], turn[j] = turn[j], turn[i]
-	}
-	return strings.Join(turn, "\n")
+	return turn
 }
 
-// promptTurnText is the user text the proxy inspects before a call: the user
-// turn in progress. Secure Client keeps the source of main, the latest user
-// message, so AI Defense is sent the text it was sent before (issue #1092).
-func promptTurnText(messages []ChatMessage) string {
-	if ManagedEnterpriseActive() {
-		return lastUserText(messages)
+// currentTurnUserText joins the text of currentTurnUserMessages.
+func currentTurnUserText(messages []ChatMessage) string {
+	return joinMessageText(currentTurnUserMessages(messages))
+}
+
+func joinMessageText(messages []ChatMessage) string {
+	parts := make([]string, len(messages))
+	for i, msg := range messages {
+		parts[i] = msg.Content
 	}
-	return currentTurnUserText(messages)
+	return strings.Join(parts, "\n")
+}
+
+// promptTurnMessages is the user turn the proxy inspects before a call: the
+// user turn in progress. Secure Client keeps the source of main, the latest user
+// message, so AI Defense is sent the text it was sent before (issue #1092).
+func promptTurnMessages(messages []ChatMessage) []ChatMessage {
+	if ManagedEnterpriseActive() {
+		if msg, ok := lastUserMessage(messages); ok {
+			return []ChatMessage{msg}
+		}
+		return nil
+	}
+	return currentTurnUserMessages(messages)
+}
+
+// promptTurnText is the text of promptTurnMessages.
+func promptTurnText(messages []ChatMessage) string {
+	return joinMessageText(promptTurnMessages(messages))
+}
+
+// promptInspectMessages is the user messages of the pre-call inspection source
+// (promptInspectText): the user turn in progress, else the latest user message.
+// It is empty when the source is system/developer text.
+func promptInspectMessages(messages []ChatMessage) []ChatMessage {
+	if turn := promptTurnMessages(messages); len(turn) > 0 {
+		return turn
+	}
+	if msg, ok := lastUserMessage(messages); ok {
+		return []ChatMessage{msg}
+	}
+	return nil
 }
 
 // promptInspectText is the pre-call inspection source: the user turn in
 // progress (promptTurnText), else the latest user message, else prompt-side
 // system/developer text.
 func promptInspectText(messages []ChatMessage) string {
-	if text := promptTurnText(messages); strings.TrimSpace(text) != "" {
-		return text
-	}
-	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
-		return text
+	if turn := promptInspectMessages(messages); len(turn) > 0 {
+		return joinMessageText(turn)
 	}
 	return promptSideInstructionText(messages)
 }

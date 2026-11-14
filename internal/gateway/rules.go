@@ -900,9 +900,12 @@ const (
 	// responses, files, and every caller that has not established who wrote it.
 	ruleTextOriginUnspecified ruleTextOrigin = iota
 	// ruleTextOriginUserTyped is the prompt the user typed to the agent: the
-	// /llm prompt path and the turn-start hook of a connector (UserPromptSubmit
-	// and its spellings). It is the principal own instruction, not content that
-	// reached the agent from a third party.
+	// user messages of the current turn of an /llm request, which the proxy
+	// call sites pass in (llmTypedPromptParts), and the prompt of the turn-start
+	// hook of a connector (UserPromptSubmit and its spellings). It is the
+	// principal own instruction, not content that reached the agent from a
+	// third party. System, developer and instruction fields, history, tool
+	// results and OpenClaw context are not typed.
 	ruleTextOriginUserTyped
 )
 

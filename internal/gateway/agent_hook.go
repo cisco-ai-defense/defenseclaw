@@ -156,7 +156,11 @@ type agentHookRequest struct {
 	// refusal). Such a callback is never bound to an earlier call.
 	toolCallShapeUnparsed bool
 	Content               string
-	Direction             string
+	// contentNotPrompt: Content came from a field that is not a prompt (a
+	// task, a description, a tool field or a tool result), so a turn-start
+	// event does not mark it user-typed (GAP-0408).
+	contentNotPrompt bool
+	Direction        string
 	// HookSurface names the connector-owned hook config that invoked this
 	// request, for connectors that install more than one with differing veto
 	// contracts. Setup marks each config's command and the bridge forwards
@@ -3334,19 +3338,29 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			"message",
 			"initial_prompt",
 			"initialPrompt",
-			"task",
-			"description",
-			"custom_instructions",
-			"customInstructions",
 		)
+	}
+	// Only the prompt fields above and tool_info.user_prompt are a prompt. A
+	// task, a description, custom instructions, another tool_info field or a
+	// tool result is not, so a turn-start event whose text comes from one of
+	// them has no prompt the user typed (contentNotPrompt, GAP-0408).
+	contentNotPrompt := false
+	if content == "" {
+		content = firstString(payload, "task", "description", "custom_instructions", "customInstructions")
+		contentNotPrompt = content != ""
 	}
 	if content == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
-			content = firstString(toolInfo, "user_prompt", "content", "command_line", "command", "mcp_result", "response")
+			content = firstString(toolInfo, "user_prompt")
+			if content == "" {
+				content = firstString(toolInfo, "content", "command_line", "command", "mcp_result", "response")
+				contentNotPrompt = content != ""
+			}
 		}
 	}
 	if content == "" {
 		content = stringifyHookValue(firstValue(payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
+		contentNotPrompt = content != ""
 	}
 
 	direction := "tool_call"
@@ -3384,7 +3398,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		CWD: cwd, ToolName: toolName, ToolNameIsLabel: toolNameIsLabel, ToolArgs: json.RawMessage(argBytes),
 		ToolArgsAreHookEnvelope: argsAreEnvelope,
 		Content:                 content, Direction: direction, Payload: payload,
-		AgentIdentityID: agentIdentityID,
+		AgentIdentityID: agentIdentityID, contentNotPrompt: contentNotPrompt,
 	}
 }
 
@@ -3459,6 +3473,7 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 		// replace an explicitly empty tool_output/error/output/result_json/
 		// edits/text/summary value.
 		req.Content = decoded.Content
+		req.contentNotPrompt = false
 	}
 	if decoded.Direction != "" {
 		req.Direction = decoded.Direction
@@ -3612,11 +3627,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			a.observeUserDownloadRequest(ctx, req.Content)
 		}
 		promptRequest := &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName}
-		if isToolJudgeIntentEvent(req.HookEventName) {
+		if isToolJudgeIntentEvent(req.HookEventName) && !req.contentNotPrompt {
 			// The same turn-start events seed the user task above, so the same
 			// events carry text the user typed. BeforeModel, transformed prompts
 			// and subagent starts can hold model or tool text and keep the
-			// unspecified origin.
+			// unspecified origin, and so does a turn-start event with no prompt
+			// field (contentNotPrompt).
 			promptRequest.textOrigin = ruleTextOriginUserTyped
 		}
 		verdict = a.inspectMessageContent(ctx, promptRequest)

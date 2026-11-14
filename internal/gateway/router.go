@@ -815,7 +815,9 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	}
 	start := time.Now()
 
-	verdict := scanLocalPatternsWithActivation("prompt", content, ruleGenerationOf(g, ""), localPatternsOf(g))
+	// A session message is OpenClaw channel text, not a turn the proxy
+	// attributed to the user: it keeps the unspecified origin (GAP-0408).
+	verdict := scanLocalPatternsWithActivation("prompt", content, ruleGenerationOf(g, ""), localPatternsOf(g), nil)
 
 	runJudge := judge != nil && verdict != nil && verdict.Severity == "HIGH"
 	if runJudge {
@@ -1470,7 +1472,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 		payload.Tool, len(payload.Output), stool.JudgeResult && judge != nil)
 
 	// Stage 1: deterministic regex scan. Always runs.
-	verdict := scanLocalPatternsWithActivation("completion", payload.Output, ruleGenerationOf(g, ""), localPatternsOf(g))
+	verdict := scanLocalPatternsWithActivation("completion", payload.Output, ruleGenerationOf(g, ""), localPatternsOf(g), nil)
 
 	// Stage 2: LLM judge, if requested and available. Merge into verdict.
 	// managed_enterprise: the judge is a local decision-maker — disabled so
