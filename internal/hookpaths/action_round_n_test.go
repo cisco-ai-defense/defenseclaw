@@ -96,10 +96,11 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 
 // GAP-1481, the bound form of the same class: a match past the directory
 // read bound was dropped and the name fallback (keyl* names no key)
-// allowed the write. Past the bound the walk is now TRUNCATED (the bound
-// rule, internal/guardrail/bounded; lead decision 2026-11-14 for
-// rel-1-0-10:GAP-0270): never an allow, the gateway floors it at the
-// unknown tier of the pack (TestGAP0270GatewayInHomeBoundNamedUnknown).
+// allowed the write. A walk that stops at the bound before it reads the
+// link is now TRUNCATED (the bound rule, internal/guardrail/bounded; lead
+// decision 2026-11-14 for rel-1-0-10:GAP-0270): never an allow, the gateway
+// floors it at the unknown tier of the pack
+// (TestGAP0270GatewayInHomeBoundNamedUnknown).
 func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 	_, home, cwd := globFactsFixture(t, false)
 	key := filepath.Join(home, ".ssh", "authorized_keys")
@@ -112,8 +113,11 @@ func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
-		if got := globHeldDecision(command, cwd, home, nil); got != globHeld {
-			t.Errorf("%s: ActionCommandDecision = %q, want a truncated walk (%s)", command, got, globHeld)
+		// Which folders the walk reads before its bound depends on the
+		// directory order: the link is found (protected-target) or the walk
+		// is TRUNCATED, never an allow.
+		if got := globHeldDecision(command, cwd, home, nil); got != globHeld && got != "protected-target" {
+			t.Errorf("%s: ActionCommandDecision = %q, want protected-target or a truncated walk (%s)", command, got, globHeld)
 		}
 	}
 	// Within the bound an ordinary pattern stays allowed.
