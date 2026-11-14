@@ -4,7 +4,9 @@
 package bounded
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 )
@@ -49,9 +51,19 @@ func TestCounterRefusesANegativeTake(t *testing.T) {
 	}
 }
 
+// recordMisuse turns the panics off and records the hook calls for one test.
+func recordMisuse(t *testing.T) *[]Misuse {
+	t.Helper()
+	var seen []Misuse
+	PanicOnMisuse(false)
+	OnMisuse(func(m Misuse) { seen = append(seen, m) })
+	t.Cleanup(func() { OnMisuse(nil); PanicOnMisuse(true) })
+	return &seen
+}
+
 // A Counter bound to another Truncated than the reader returns is a panic
-// with PanicOnMisuse on (go test), and its hits are merged in production
-// (review V7).
+// with PanicOnMisuse on (go test); in production the hook is told and the
+// hit, with the misuse mark, lands in this call's result (review V7).
 func TestSetCatchesAMisboundCounter(t *testing.T) {
 	var reader, other Truncated
 	items := NewCounter(&other, Items, 1)
@@ -59,46 +71,57 @@ func TestSetCatchesAMisboundCounter(t *testing.T) {
 	items.Take()
 	func() {
 		defer func() {
-			if recover() == nil {
-				t.Fatal("Set with a Counter bound to another Truncated did not panic with PanicOnMisuse on")
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), MisuseMisbound.String()) {
+				t.Fatalf("Set with a Counter bound to another Truncated: recovered %v, want the misbound panic", r)
 			}
 		}()
 		_ = reader.Set(&items)
 	}()
-	PanicOnMisuse(false)
-	defer PanicOnMisuse(true)
-	if got := reader.Set(&items); !got.Has(Items) {
-		t.Fatalf("production Set lost the misbound Counter's hit: %+v", got)
+	seen := recordMisuse(t)
+	got := reader.Set(&items)
+	if !got.Has(Items) || !got.Misuse() || !strings.HasSuffix(got.Reason(), "; "+MisuseReason) {
+		t.Fatalf("production Set: %+v reason %q, want items and the misuse named", got, got.Reason())
+	}
+	if len(*seen) != 1 || (*seen)[0] != MisuseMisbound {
+		t.Fatalf("hook calls %v, want one misbound", *seen)
 	}
 	bound := NewCounter(&reader, Paths, 0)
 	bound.Take()
-	if got := reader.Set(&bound, nil); got != Of(Paths) {
+	if got := reader.Set(&bound, nil); got != Of(Paths) || got.Misuse() {
 		t.Fatalf("Set(bound counter): %+v", got)
 	}
 }
 
-// A zero Counter (a struct literal, no NewCounter) is never a silent unread
-// (review round 3 P3-1): under go test its first take panics; in production
-// it refuses the take and every Truncated reports the hit (Any and Set), so
-// every call floors.
-func TestZeroCounterIsNeverASilentUnread(t *testing.T) {
+// A zero Counter (a struct literal, no NewCounter) is never a silent unread,
+// and it floors only the call it read (review round 4 P3-1): under go test
+// its first take panics; in production it refuses every take, tells the hook
+// once, and Set(&zero) carries its hit and the misuse mark. Another call's
+// Truncated is not affected.
+func TestZeroCounterFloorsOnlyItsCall(t *testing.T) {
 	var zero Counter
 	func() {
 		defer func() {
-			if recover() == nil {
-				t.Fatal("a take on an unbound Counter did not panic with PanicOnMisuse on")
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), MisuseUnbound.String()) {
+				t.Fatalf("a take on an unbound Counter: recovered %v, want the unbound panic", r)
 			}
 		}()
 		zero.Take()
 	}()
-	PanicOnMisuse(false)
-	t.Cleanup(func() { PanicOnMisuse(true); unboundHits.Store(0) })
-	if zero.Take() {
-		t.Fatal("a zero Counter allowed a take")
+	seen := recordMisuse(t)
+	var reader, otherCall Truncated
+	for i := range 2 {
+		if zero.Take() {
+			t.Fatalf("take %d: a zero Counter allowed a take", i+1)
+		}
 	}
-	var anyReader Truncated
-	if !anyReader.Any() || !anyReader.Set().Has(Items) {
-		t.Fatalf("an unbound Counter's hit is not seen by another reader: any=%t set=%+v", anyReader.Any(), anyReader.Set())
+	if got := reader.Set(&zero); !got.Has(Items) || !got.Misuse() {
+		t.Fatalf("Set(&zero) = %+v, want items and the misuse mark", got)
+	}
+	if otherCall.Any() || otherCall.Set().Any() {
+		t.Fatal("an unbound Counter's hit reached another call")
+	}
+	if len(*seen) != 1 || (*seen)[0] != MisuseUnbound {
+		t.Fatalf("hook calls %v, want one unbound (logged once per Counter)", *seen)
 	}
 }
 
