@@ -733,6 +733,22 @@ const windowsEnterpriseCollectGenerationsVariable = "DEFENSECLAW_STANDALONE_COLL
 
 type windowsEnterpriseCollectGenerationsKey struct{}
 
+// windowsEnterpriseEnsureVerifyDegradedVariable asks the standalone
+// installer's Verify, run by ensure to decide whether to repair, to accept a
+// fresh, complete reconcile whose only failures are user targets the guardian
+// itself reported failed or pending. A repair re-runs that guardian and cannot
+// fix them (a signed-out account, a hook file DefenseClaw did not write), so
+// every rerun of ensure on such a host repaired and stopped the services for
+// minutes (GAP-0601). The administrator's verify stays strict.
+const windowsEnterpriseEnsureVerifyDegradedVariable = "DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED"
+
+type windowsEnterpriseEnsureVerifyDegradedKey struct{}
+
+func windowsEnterpriseEnsureVerifyDegradedRequested(ctx context.Context) bool {
+	requested, _ := ctx.Value(windowsEnterpriseEnsureVerifyDegradedKey{}).(bool)
+	return requested
+}
+
 func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
 	requested, _ := ctx.Value(windowsEnterpriseCollectGenerationsKey{}).(bool)
 	return requested
@@ -749,6 +765,9 @@ func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []st
 	action := windowsEnterpriseInstallerAction(args)
 	if windowsEnterpriseCollectGenerationsRequested(ctx) && action == "Verify" {
 		env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
+	}
+	if windowsEnterpriseEnsureVerifyDegradedRequested(ctx) && action == "Verify" {
+		env = append(env, windowsEnterpriseEnsureVerifyDegradedVariable+"=1")
 	}
 	return env
 }
@@ -4847,7 +4866,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		var verifyRun windowsEnterpriseStandaloneRun
 		var verifyErr error
 		if probeErr == nil {
-			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, verifyScript,
+			verifyReport, verifyRun, verifyErr = runWindowsEnterpriseStandaloneInstaller(
+				context.WithValue(ctx, windowsEnterpriseEnsureVerifyDegradedKey{}, true), cmd, opts, verifyScript,
 				windowsEnterprisePowerShellArgs("verify", verifyOpts))
 		}
 		if verifyErr != nil {
@@ -4961,12 +4981,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 			cursorRepairPending = pending
 		}
-		verifyCtx := ctx
+		verifyCtx := context.WithValue(ctx, windowsEnterpriseEnsureVerifyDegradedKey{}, true)
 		if windowsEnterpriseIsElevated() && !cursorRepairPending {
 			// A compliant deployment runs no retire, so this Verify collects
 			// the old runtime copies a retire left and names each per-user
 			// folder still untrusted (#1105, GAP-0211).
-			verifyCtx = context.WithValue(ctx, windowsEnterpriseCollectGenerationsKey{}, true)
+			verifyCtx = context.WithValue(verifyCtx, windowsEnterpriseCollectGenerationsKey{}, true)
 		}
 		verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(verifyCtx, cmd, opts, script, windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 		if err != nil {

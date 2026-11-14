@@ -56652,7 +56652,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # Standalone Verify only: the Verify of an ensure that found the
         # deployment compliant also collects old managed runtime generations
         # (Invoke-DefenseClawStandaloneRuntimeGenerationCollect, GAP-0211).
-        [switch]$CollectRuntimeGenerations
+        [switch]$CollectRuntimeGenerations,
+        # Standalone Verify only: the Verify an ensure runs to decide whether
+        # to repair accepts a fresh, complete reconcile whose only failures
+        # are user targets the guardian itself reported failed or pending. A
+        # repair re-runs that same guardian and cannot fix them, so every
+        # rerun of ensure repaired, stopping the services for minutes
+        # (GAP-0601). The administrator's verify stays strict.
+        [switch]$AcceptDegradedTargets
     )
     $script:ResilienceEvents.Clear()
     $script:FilePrivilegePrerequisitesReported = $false
@@ -56830,6 +56837,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     if ($CollectRuntimeGenerations -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
         throw '-CollectRuntimeGenerations is valid only with a standalone Verify'
+    }
+    if ($AcceptDegradedTargets -and ($Action -ne 'Verify' -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw '-AcceptDegradedTargets is valid only with a standalone Verify'
     }
     if ($SelfUninstallCallerPID -lt 0 -or
         ($SelfUninstallCallerPID -gt 0 -and $Action -ne 'Uninstall')) {
@@ -57108,7 +57118,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
-            -RequireReadiness
+            -RequireReadiness `
+            -AcceptDegradedTargets:$AcceptDegradedTargets
         if ($CollectRuntimeGenerations) {
             Invoke-DefenseClawStandaloneRuntimeGenerationCollect `
                 -Layout $layout `
@@ -57118,7 +57129,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -Action $Action `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AcceptDegradedTargets:$AcceptDegradedTargets
     }
 
     Assert-DefenseClawAdministrator

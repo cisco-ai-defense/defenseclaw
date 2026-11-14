@@ -33,7 +33,7 @@ SMOKES = {
     "enterprise-nuclear-copilot-policy-smoke.ps1": "nuclear copilot policy smoke passed",
     "enterprise-installer-resilience-smoke.ps1": "installer resilience smoke passed",
     "enterprise-restart-delete-cancel-smoke.ps1": "restart delete cancel smoke passed",
-    "enterprise-standalone-deferred-recovery-restart-smoke.ps1": "deferred recovery restart smoke passed",
+    "enterprise-deferred-recovery-restart-smoke.ps1": "deferred recovery restart smoke passed",
 }
 
 
