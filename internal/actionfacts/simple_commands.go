@@ -613,10 +613,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
 				if nested {
 					if !static {
-						// A shell body, an option word that may be -c, a trap
-						// handler or su command the walk cannot resolve: what
-						// runs is not known (rel-1-0-10:GAP-0535).
-						return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
+						if simplePotentialShellScript(call.Args, effective) {
+							// A shell -c body, or a word that may be the -c
+							// option, the walk cannot resolve: what runs is
+							// not known (rel-1-0-10:GAP-0535).
+							return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
+						}
+						// A wrapper option the walk does not model, a trap
+						// handler: a parse gap, judged as the whole action.
+						return []SimpleCommand{{EvaluationFailure: "parse"}}
 					}
 					if len(script) > maxCommandBytes {
 						return []SimpleCommand{{EvaluationFailure: "parse"}}

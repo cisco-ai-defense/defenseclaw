@@ -9819,10 +9819,8 @@ const syntaxUnreadTitle = "Part of this command has a shell syntax error and cou
 // stays a block (rel-1-0-10:GAP-0526).
 func trustedActionSyntaxUnreadFindings(enforcementCapable, alert bool) []RuleFinding {
 	findings := unreadPartFindings(syntaxUnreadTitle, enforcementCapable)
-	if alert && enforcementCapable {
-		for index := range findings {
-			findings[index].enforcement = findingEnforcementAlertOnly
-		}
+	if alert {
+		findings = unreadPartAlert(findings, enforcementCapable)
 	}
 	return findings
 }
@@ -9916,7 +9914,23 @@ func unreadPartFindings(title string, enforcementCapable bool) []RuleFinding {
 	findings := trustedActionParseFailureFindings(enforcementCapable)
 	for index := range findings {
 		findings[index].Title = title
+		// A record, not a finding about the call: it does not raise the
+		// severity of an allowed answer (the alert variants raise it back).
+		findings[index].Severity = "LOW"
 		findings[index].enforcement = findingEnforcementDetectionOnly
+	}
+	return findings
+}
+
+// unreadPartAlert turns unread-part records into the unknown tier as an
+// alert: CRITICAL, capped below confirm and block (findingEnforcementAlertOnly).
+func unreadPartAlert(findings []RuleFinding, enforcementCapable bool) []RuleFinding {
+	if !enforcementCapable {
+		return findings
+	}
+	for index := range findings {
+		findings[index].Severity = "CRITICAL"
+		findings[index].enforcement = findingEnforcementAlertOnly
 	}
 	return findings
 }
@@ -9931,13 +9945,7 @@ const unresolvedBodyTitle = "This command runs a shell body that could not be re
 // alert in every pack, never a block (lead decision 2026-11-14,
 // rel-1-0-10:GAP-0535).
 func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
-	findings := unreadPartFindings(unresolvedBodyTitle, enforcementCapable)
-	if enforcementCapable {
-		for index := range findings {
-			findings[index].enforcement = findingEnforcementAlertOnly
-		}
-	}
-	return findings
+	return unreadPartAlert(unreadPartFindings(unresolvedBodyTitle, enforcementCapable), enforcementCapable)
 }
 
 // shellReadingBound is the reading bound a command is past
