@@ -23,10 +23,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// uuidV4Pattern loosely matches a v4 UUID so we can assert the
-// mint-path returns something that looks like the intended shape
-// without pinning on a specific library's formatting quirks.
-var uuidV4Pattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
+// uuidV7Pattern matches a time-ordered UUIDv7: a minted request ID is
+// indexed in audit_events (idx_audit_request_id), and a random one put each
+// insert on a random leaf of that index (GAP-0286).
+var uuidV7Pattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 func TestContextWithRequestID_EmptyIsNoOp(t *testing.T) {
 	ctx := context.Background()
@@ -134,10 +134,17 @@ func TestRequestIDFromHeaders_TrimsWhitespace(t *testing.T) {
 	}
 }
 
-func TestMintRequestID_LooksLikeUUID(t *testing.T) {
-	id := mintRequestID()
-	if !uuidV4Pattern.MatchString(id) {
-		t.Fatalf("minted id %q does not look like a v4 UUID", id)
+func TestMintRequestID_IsTimeOrdered(t *testing.T) {
+	previous := ""
+	for range 64 {
+		id := mintRequestID()
+		if !uuidV7Pattern.MatchString(id) {
+			t.Fatalf("minted id %q is not a time-ordered UUIDv7", id)
+		}
+		if id <= previous {
+			t.Fatalf("minted id %q does not sort after the one before it (%q)", id, previous)
+		}
+		previous = id
 	}
 }
 
@@ -154,8 +161,8 @@ func TestRequestIDMiddleware_MintsWhenAbsent(t *testing.T) {
 	if captured == "" {
 		t.Fatal("middleware should have minted a request id")
 	}
-	if !uuidV4Pattern.MatchString(captured) {
-		t.Fatalf("minted id %q does not look like a v4 UUID", captured)
+	if !uuidV7Pattern.MatchString(captured) {
+		t.Fatalf("minted id %q is not a time-ordered UUIDv7", captured)
 	}
 	echoed := rec.Header().Get(RequestIDHeader)
 	if echoed != captured {
