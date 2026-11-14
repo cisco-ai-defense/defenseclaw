@@ -6,6 +6,8 @@
 - A failed service start names SCM's exit codes, including the dependency's.
 - A rollback accepts a restored guardian whose fresh reconcile has failed
   targets, and nothing else that is not ok.
+- A recovery that left the restored release stopped starts it again when
+  the requested lifecycle fails (GAP-0601).
 - A fresh Install's skipped busy profiles are validated and recorded.
 - Permission drift is judged by write authority, and repairs, acceptances
   and recoveries are logged in the format the Go components share.
@@ -31,6 +33,7 @@ SMOKES = {
     "enterprise-nuclear-copilot-policy-smoke.ps1": "nuclear copilot policy smoke passed",
     "enterprise-installer-resilience-smoke.ps1": "installer resilience smoke passed",
     "enterprise-restart-delete-cancel-smoke.ps1": "restart delete cancel smoke passed",
+    "enterprise-standalone-deferred-recovery-restart-smoke.ps1": "deferred recovery restart smoke passed",
 }
 
 
