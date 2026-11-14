@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -45,6 +47,16 @@ const BackupUnresolvedKey = "\x00backup-unresolved"
 // nothing to the verdict of the edit itself: a dynamic operand or directory
 // keeps the verdict the edit has. A word of the script is no part of any
 // path.
+//
+// The words are those bash makes (rel-1-0-10:GAP-0667, GAP-0669): quotes and
+// escapes removed (s''ed, s\ed), unquoted brace lists expanded (sed
+// -i{.bak,keys/*} has two -i words and the last wins; a list past
+// sedBraceWordLimit stays a run-time word), the program named by its word
+// and never by a substring of the raw command. xargs options are read from
+// the GNU and BSD grammars (sedXargsRead); sudo -D and --chdir set the
+// directory like env -C; a shell reading standard input takes the literals an
+// earlier stage of its pipeline prints; a call whose only argument is "$@"
+// may edit in place and is unresolved.
 
 // sedHole stands for the part of a word the shell expands at run time.
 const sedHole = "\x01"
@@ -84,11 +96,11 @@ func actionSedInPlaceReading(command, cwd, home string, memo *TargetMemo) (block
 	if command == "" || home == "" || len(command) > MaxPayloadBytes || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return false, false // an in-place editor is a POSIX path; a Windows home has its own readers
 	}
-	if !strings.Contains(command, "sed") && !strings.Contains(command, "perl") {
-		return false, false
-	}
-	reader := &sedBackupReader{cwd: cwd, home: home, protected: memo.protectedFiles(home),
-		ssh: filepath.Join(home, ".ssh"), memo: memo}
+	// No text test of the command stands in front of the reader: a program
+	// name is what the parser makes of the word (quotes and escapes removed,
+	// braces expanded, wrappers peeled), never a substring of the raw text
+	// (rel-1-0-10:GAP-0667: s''ed, "s"ed and s\ed name sed too).
+	reader := &sedBackupReader{cwd: cwd, home: home, ssh: filepath.Join(home, ".ssh"), memo: memo}
 	reader.read(command, sedBackupScope{dirs: []string{cwd}}, 0)
 	return reader.blocked, reader.unresolved
 }
@@ -96,9 +108,23 @@ func actionSedInPlaceReading(command, cwd, home string, memo *TargetMemo) (block
 type sedBackupReader struct {
 	cwd, home           string
 	protected           protectedFiles
+	haveProtected       bool
 	ssh                 string
 	memo                *TargetMemo
 	blocked, unresolved bool
+	// optionHole is set while a call is read that has a brace list too large
+	// to expand where an option can start: any in-place editor in it may
+	// have an option the words do not show.
+	optionHole bool
+}
+
+// protectedSet is the protected files of the home, read on the first path
+// to judge: a command with no in-place editor never needs them.
+func (r *sedBackupReader) protectedSet() protectedFiles {
+	if !r.haveProtected {
+		r.protected, r.haveProtected = r.memo.protectedFiles(r.home), true
+	}
+	return r.protected
 }
 
 // sedBackupScope is where the calls of a command run: every directory a cd
@@ -119,6 +145,7 @@ func (r *sedBackupReader) read(command string, scope sedBackupScope, depth int) 
 	}
 	values := actionValues{"HOME": r.home, "PWD": r.cwd}
 	scope.dirs = slices.Clone(scope.dirs)
+	pipes := map[*syntax.BinaryCmd]bool{}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if r.blocked {
 			return false
@@ -127,16 +154,26 @@ func (r *sedBackupReader) read(command string, scope sedBackupScope, depth int) 
 		case *syntax.Stmt:
 			r.stdinBody(typed, values, scope, depth)
 		case *syntax.BinaryCmd:
-			if typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll {
-				r.pipedBody(typed, values, scope, depth)
+			if (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) && !pipes[typed] {
+				r.pipeline(typed, pipes, values, scope, depth)
 			}
 		case *syntax.CallExpr:
 			if len(typed.Args) > 0 {
-				words := make([]string, len(typed.Args))
-				for i, arg := range typed.Args {
-					words[i], _ = sedHoledWord(arg, values, r.cwd, r.home)
-				}
+				words, overflow := r.callWords(typed.Args, values)
+				saved := r.optionHole
+				r.optionHole = overflow
 				r.call(words, &scope, depth)
+				// An escaped character (\*, s\ed) is the character itself to
+				// the shell; the word text keeps the backslash, so both
+				// spellings are judged.
+				if slices.ContainsFunc(words, func(word string) bool { return strings.Contains(word, `\`) }) {
+					plain := make([]string, len(words))
+					for i, word := range words {
+						plain[i] = actionUnescapeShell(word)
+					}
+					r.call(plain, &scope, depth)
+				}
+				r.optionHole = saved
 			}
 		}
 		return !r.blocked
@@ -182,6 +219,7 @@ func (r *sedBackupReader) changeDirectory(words []string, scope *sedBackupScope)
 	case !found && programBase(words[0]) == "cd":
 		scope.dirs = append(scope.dirs, r.home)
 	case !found, strings.Contains(target, sedHole),
+		strings.HasPrefix(target, "~"), // ~-, ~+, ~login: a tilde-prefix the words do not resolve (OLDPWD, PWD, a home)
 		programBase(words[0]) == "pushd" && strings.HasPrefix(target, "+"):
 		scope.unknown = true
 	case target != "":
@@ -197,21 +235,20 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 	if len(words) == 0 || strings.Contains(words[0], sedHole) {
 		return
 	}
-	switch program := programBase(words[0]); {
-	case program == "sed" || program == "gsed":
+	switch program := sedProgram(words[0]); {
+	case program == "sed":
 		r.sed(words, scope, implicit)
 	case program == "perl":
+		if r.optionHole {
+			r.unresolved = true
+		}
 		if files, suffix, ok := perlInPlace(words); ok {
 			r.inPlace(sedPerlKind, files, suffix, false, scope, implicit)
+		} else {
+			r.splat(words)
 		}
 	case program == "xargs":
-		if child, replace := sedXargsChild(words); len(child) > 0 {
-			if replace != "" {
-				r.run(sedReplaceWords(child, replace), scope, false, depth)
-			} else {
-				r.run(child, scope, true, depth)
-			}
-		}
+		r.xargs(words, scope, depth)
 	case program == "find":
 		for _, exec := range sedFindExecs(words) {
 			inner := scope
@@ -224,6 +261,35 @@ func (r *sedBackupReader) run(words []string, scope sedBackupScope, implicit boo
 		if body, ok := actionShellCommandBody(words); ok {
 			r.read(body, scope, depth+1)
 		}
+	}
+}
+
+// sedProgram is the program a command word names, as the readers of this
+// file know it: the last element of its path in lower case, with the GNU
+// prefix of the macOS ports (gsed, gxargs, gfind) and the version of perl
+// (perl5.38.2) dropped.
+func sedProgram(word string) string {
+	name := programBase(word)
+	switch {
+	case name == "gsed":
+		return "sed"
+	case name == "gxargs":
+		return "xargs"
+	case name == "gfind":
+		return "find"
+	case strings.HasPrefix(name, "perl") && strings.Trim(name[len("perl"):], "0123456789.") == "":
+		return "perl"
+	}
+	return name
+}
+
+// splat marks a call whose only argument is "$@" or "$*" (a function or
+// script that forwards its own arguments: every word of the call, options
+// included, comes from run time): it may or may not edit in place. A "$@"
+// next to other words is a run-time operand, as any variable is.
+func (r *sedBackupReader) splat(words []string) {
+	if len(words) == 2 && words[1] == sedSplat {
+		r.unresolved = true
 	}
 }
 
@@ -255,24 +321,21 @@ func (r *sedBackupReader) unwrap(words []string, scope sedBackupScope) ([]string
 }
 
 func (r *sedBackupReader) sed(words []string, scope sedBackupScope, implicit bool) {
-	// An escaped character (\*) is the character itself to the shell; the
-	// word text keeps the backslash, so both spellings are judged.
-	variants := [][]string{words}
-	if slices.ContainsFunc(words, func(word string) bool { return strings.Contains(word, `\`) }) {
-		plain := make([]string, len(words))
-		for i, word := range words {
-			plain[i] = actionUnescapeShell(word)
-		}
-		variants = append(variants, plain)
+	if r.optionHole {
+		r.unresolved = true
 	}
 	follow := sedFollowsInPlaceLinks(words)
-	for _, variant := range variants {
-		if files, suffix, ok := sedGNUInPlace(variant); ok {
-			r.inPlace(sedGNUKind, files, suffix, follow, scope, implicit)
-		}
-		if files, suffix, ok := sedBSDInPlace(variant); ok {
-			r.inPlace(sedBSDKind, files, suffix, false, scope, implicit)
-		}
+	found := false
+	if files, suffix, ok := sedGNUInPlace(words); ok {
+		found = true
+		r.inPlace(sedGNUKind, files, suffix, follow, scope, implicit)
+	}
+	if files, suffix, ok := sedBSDInPlace(words); ok {
+		found = true
+		r.inPlace(sedBSDKind, files, suffix, false, scope, implicit)
+	}
+	if !found {
+		r.splat(words)
 	}
 }
 
@@ -347,7 +410,7 @@ func (r *sedBackupReader) judge(name string, dirs []string) {
 		return
 	}
 	for _, dir := range dirs {
-		if protectedReachPathWith(OperandPath(name, dir), r.protected, r.ssh, r.memo) {
+		if protectedReachPathWith(OperandPath(name, dir), r.protectedSet(), r.ssh, r.memo) {
 			r.blocked = true
 			return
 		}
@@ -395,11 +458,155 @@ func sedFollowedName(file, dir string) (string, bool) {
 	return "", false
 }
 
+// sedSplat stands for a word that is all of "$@" or "$*": the shell makes
+// any number of words of it, options among them. It holds a sedHole, so a
+// reader that does not know it reads a run-time word.
+const sedSplat = sedHole + "\x02"
+
+// sedBraceWordLimit and sedBraceCallLimit bound the words the brace lists
+// of one word and of one command expand to; a list past either is run-time
+// text (a hole) and the call that holds it is at least unresolved when it
+// is an in-place editor call.
+const (
+	sedBraceWordLimit = 256
+	sedBraceCallLimit = 1024
+)
+
+// callWords makes the words of a simple command as bash does: each unquoted
+// brace list is expanded first (sed -i{.bak,keys/*} is two -i words, the
+// last wins), then each part the shell expands at run time is a hole.
+// overflow is set when a brace list too large to expand stands where an
+// option can start.
+func (r *sedBackupReader) callWords(args []*syntax.Word, values actionValues) (words []string, overflow bool) {
+	budget := sedBraceCallLimit
+	for _, arg := range args {
+		expanded, over := sedBraceWords(arg, &budget)
+		for _, word := range expanded {
+			text, _ := sedHoledWord(word, values, r.cwd, r.home)
+			words = append(words, text)
+			// A list too large to expand can hide an option only at the
+			// start of a word (-{i,n}{1..999}); inside a file name or a
+			// suffix it is a run-time part the readers already know.
+			if over && strings.HasPrefix(strings.TrimLeft(text, "-"), sedHole) {
+				overflow = true
+			}
+		}
+	}
+	return words, overflow
+}
+
+// sedBraceWords expands the unquoted brace lists of word. A word with none
+// is returned as it is. A list past the limits stays unexpanded (its parts
+// read as holes) and sets overflow.
+func sedBraceWords(word *syntax.Word, budget *int) (words []*syntax.Word, overflow bool) {
+	if !slices.ContainsFunc(word.Parts, func(part syntax.WordPart) bool {
+		lit, ok := part.(*syntax.Lit)
+		return ok && strings.Contains(lit.Value, "{")
+	}) {
+		return []*syntax.Word{word}, false
+	}
+	// SplitBraces rewrites the parts of the word it is given; the tree may be
+	// shared (the parse cache), so it gets a copy.
+	split := &syntax.Word{Parts: slices.Clone(word.Parts)}
+	if !syntax.SplitBraces(split) || !sedHasBraceList(split.Parts) {
+		return []*syntax.Word{word}, false
+	}
+	limit := min(sedBraceWordLimit, *budget)
+	count := sedBraceCount(split.Parts, limit)
+	if count > limit {
+		return []*syntax.Word{split}, true
+	}
+	expanded, ok := sedExpandBraces(split)
+	if !ok {
+		return []*syntax.Word{split}, true
+	}
+	*budget -= len(expanded)
+	return expanded, false
+}
+
+// sedExpandBraces is expand.Braces with a panic of the library read as a
+// word it cannot expand.
+func sedExpandBraces(word *syntax.Word) (words []*syntax.Word, ok bool) {
+	defer func() {
+		if recover() != nil {
+			words, ok = nil, false
+		}
+	}()
+	return expand.Braces(word), true
+}
+
+func sedHasBraceList(parts []syntax.WordPart) bool {
+	return slices.ContainsFunc(parts, func(part syntax.WordPart) bool {
+		_, ok := part.(*syntax.BraceExp)
+		return ok
+	})
+}
+
+// sedBraceCount is an upper bound of the words the brace lists of parts
+// expand to, and limit+1 when it is past limit.
+func sedBraceCount(parts []syntax.WordPart, limit int) int {
+	total := 1
+	for _, part := range parts {
+		list, ok := part.(*syntax.BraceExp)
+		if !ok {
+			continue
+		}
+		count := 0
+		if list.Sequence {
+			count = sedSequenceCount(list, limit)
+		} else {
+			for _, elem := range list.Elems {
+				count += sedBraceCount(elem.Parts, limit)
+				if count > limit {
+					return limit + 1
+				}
+			}
+		}
+		total *= max(count, 1)
+		if total > limit {
+			return limit + 1
+		}
+	}
+	return total
+}
+
+// sedSequenceCount is the size of a {from..to} list: the distance of its
+// ends plus one (the step only makes it smaller), limit+1 for ends that are
+// not small numbers or characters.
+func sedSequenceCount(list *syntax.BraceExp, limit int) int {
+	if len(list.Elems) < 2 {
+		return limit + 1
+	}
+	from, to := list.Elems[0].Lit(), list.Elems[1].Lit()
+	low, errLow := strconv.Atoi(from)
+	high, errHigh := strconv.Atoi(to)
+	if errLow != nil || errHigh != nil {
+		if len(from) != 1 || len(to) != 1 {
+			return limit + 1
+		}
+		low, high = int(from[0]), int(to[0])
+	}
+	distance := high - low
+	if distance < 0 {
+		distance = -distance
+	}
+	if distance < 0 || distance >= limit {
+		return limit + 1
+	}
+	return distance + 1
+}
+
 // sedHoledWord is the text of a command word with each part the shell
 // expands at run time replaced by sedHole; static reports a word with none.
+// A word that is all of "$@" or "$*" is sedSplat.
 func sedHoledWord(word *syntax.Word, values actionValues, cwd, home string) (text string, static bool) {
-	if value, ok := actionWordValueWithGlob(word, values, cwd, home, true); ok {
-		return value, true
+	if sedSplatWord(word) {
+		return sedSplat, false
+	}
+	if !sedHasBraceList(word.Parts) {
+		if value, ok := actionWordValueWithGlob(word, values, cwd, home, true); ok {
+			return value, true
+		}
 	}
 	var out strings.Builder
 	var parts func([]syntax.WordPart)
@@ -407,6 +614,10 @@ func sedHoledWord(word *syntax.Word, values actionValues, cwd, home string) (tex
 		for _, item := range items {
 			if quoted, ok := item.(*syntax.DblQuoted); ok {
 				parts(quoted.Parts)
+				continue
+			}
+			if _, list := item.(*syntax.BraceExp); list {
+				out.WriteString(sedHole)
 				continue
 			}
 			if value, ok := actionWordValueWithGlob(&syntax.Word{Parts: []syntax.WordPart{item}}, values, cwd, home, true); ok {
@@ -418,6 +629,22 @@ func sedHoledWord(word *syntax.Word, values actionValues, cwd, home string) (tex
 	}
 	parts(word.Parts)
 	return out.String(), false
+}
+
+// sedSplatWord reports a word that is all of $@ or $* (quoted or not, with
+// or without a slice): "$@", ${@:2}, $*.
+func sedSplatWord(word *syntax.Word) bool {
+	parts := word.Parts
+	if len(parts) == 1 {
+		if quoted, ok := parts[0].(*syntax.DblQuoted); ok {
+			parts = quoted.Parts
+		}
+	}
+	if len(parts) != 1 {
+		return false
+	}
+	param, ok := parts[0].(*syntax.ParamExp)
+	return ok && param.Param != nil && (param.Param.Value == "@" || param.Param.Value == "*")
 }
 
 // sedWordText is the text of a word the shell may read as a program: its
@@ -434,36 +661,152 @@ func sedWordText(word *syntax.Word, values actionValues, cwd, home string) strin
 	return out.String()
 }
 
-// sedXargsChild is the command xargs runs and its replacement string (-I,
-// -i, --replace): without one, xargs appends the operands it reads.
-func sedXargsChild(words []string) (child []string, replace string) {
-	for i := 1; i < len(words); i++ {
+// sedXargsCandidates bounds the words after an unknown xargs option that are
+// tried as the start of the command.
+const sedXargsCandidates = 16
+
+// xargs reads the command xargs runs. Without a replacement string xargs
+// appends the operands it reads from standard input (implicit). An option
+// the grammar below does not know may take a value, so the command can start
+// at any later word and each is read.
+func (r *sedBackupReader) xargs(words []string, scope sedBackupScope, depth int) {
+	parsed := sedXargsRead(words)
+	starts := []int{parsed.child}
+	if parsed.unknown {
+		starts = starts[:0]
+		end := min(len(words), parsed.child+sedXargsCandidates)
+		for at := parsed.child; at < end; at++ {
+			starts = append(starts, at)
+		}
+		if end < len(words) {
+			r.unresolved = true // the bound rule: the words past the cap are not read
+		}
+	}
+	for _, start := range starts {
+		if start >= len(words) {
+			continue
+		}
+		child := words[start:]
+		if parsed.replace != "" {
+			r.run(sedReplaceWords(child, parsed.replace), scope, false, depth)
+		} else {
+			r.run(child, scope, true, depth)
+		}
+	}
+}
+
+// sedXargs is the reading of an xargs command line: child is the index of
+// the word that starts the command (len(words) for none), replace the
+// replacement string of -I, -J, -i or --replace, and unknown is set when an
+// option of this reading is not in the grammar (child is then the index of
+// that option).
+type sedXargs struct {
+	child   int
+	replace string
+	unknown bool
+}
+
+// The options of xargs, GNU findutils and BSD (FreeBSD, macOS), as getopt
+// reads them: an option stops at the first word that is not an option.
+const (
+	xargsFlags     = "0oprtx"      // GNU and BSD options without a value
+	xargsValued    = "aEIJLnPRSsd" // -a -d (GNU) -E -I -L -n -P -s (both) -J -R -S (BSD): the value is the rest of the word or the next word
+	xargsOptionals = "eil"         // GNU -e, -i, -l: the value is the rest of the word, never the next
+)
+
+type xargsLong struct {
+	name string
+	kind byte // 'f' no value, 'v' a value (=VALUE or the next word), 'o' an optional =VALUE
+	// short is the equivalent short option ('I' for --replace is -i)
+	short byte
+}
+
+var xargsLongOptions = []xargsLong{
+	{"null", 'f', '0'}, {"arg-file", 'v', 'a'}, {"delimiter", 'v', 'd'}, {"eof", 'o', 'e'},
+	{"replace", 'o', 'i'}, {"max-lines", 'o', 'l'}, {"max-args", 'v', 'n'}, {"max-chars", 'v', 's'},
+	{"max-procs", 'v', 'P'}, {"process-slot-var", 'v', 0}, {"interactive", 'f', 'p'},
+	{"no-run-if-empty", 'f', 'r'}, {"open-tty", 'f', 'o'}, {"verbose", 'f', 't'}, {"exit", 'f', 'x'},
+	{"show-limits", 'f', 0}, {"version", 'f', 0}, {"help", 'f', 0},
+}
+
+// sedXargsRead reads the options of an xargs call from its grammar.
+func sedXargsRead(words []string) sedXargs {
+	var parsed sedXargs
+	i := 1
+	for ; i < len(words); i++ {
 		word := words[i]
 		switch {
 		case word == "--":
-			return words[i+1:], replace
+			parsed.child = i + 1
+			return parsed
 		case !strings.HasPrefix(word, "-") || word == "-":
-			return words[i:], replace
-		case word == "-I":
-			if i+1 < len(words) {
-				replace = words[i+1]
+			parsed.child = i
+			return parsed
+		case strings.HasPrefix(word, "--"):
+			name, value, hasValue := strings.Cut(word[2:], "=")
+			option, ok := sedXargsLongOption(name)
+			if !ok {
+				parsed.child, parsed.unknown = i, true
+				return parsed
 			}
-			i++
-		case strings.HasPrefix(word, "-I"):
-			replace = word[2:]
-		case word == "-i" || word == "--replace":
-			replace = "{}"
-		case strings.HasPrefix(word, "-i"), strings.HasPrefix(word, "--replace="):
-			_, value, _ := strings.Cut(word, "=")
-			if value == "" {
-				value = word[2:]
+			if option.kind == 'v' && !hasValue {
+				i++ // the value is the next word
 			}
-			replace = value
-		case slices.Contains([]string{"-a", "-d", "-E", "-L", "-n", "-P", "-s"}, word):
-			i++
+			if option.short == 'i' {
+				parsed.replace = "{}"
+				if value != "" {
+					parsed.replace = value
+				}
+			}
+		default:
+			// A cluster of short options (-0rn1, -I{}, -i, -n 1).
+			for j := 1; j < len(word); j++ {
+				letter := word[j]
+				switch {
+				case strings.IndexByte(xargsFlags, letter) >= 0:
+					continue
+				case strings.IndexByte(xargsOptionals, letter) >= 0:
+					if letter == 'i' {
+						parsed.replace = "{}"
+						if word[j+1:] != "" {
+							parsed.replace = word[j+1:]
+						}
+					}
+				case strings.IndexByte(xargsValued, letter) >= 0:
+					value := word[j+1:]
+					if value == "" && i+1 < len(words) {
+						i++
+						value = words[i]
+					}
+					if letter == 'I' || letter == 'J' {
+						parsed.replace = value
+					}
+				default:
+					parsed.child, parsed.unknown = i, true
+					return parsed
+				}
+				break // the rest of the word was the value
+			}
 		}
 	}
-	return nil, replace
+	parsed.child = i
+	return parsed
+}
+
+// sedXargsLongOption finds the long option of GNU xargs a name stands for:
+// the exact name, else the one option it is the prefix of.
+func sedXargsLongOption(name string) (xargsLong, bool) {
+	var found xargsLong
+	matches := 0
+	for _, option := range xargsLongOptions {
+		if option.name == name {
+			return option, true
+		}
+		if name != "" && strings.HasPrefix(option.name, name) {
+			found, matches = option, matches+1
+		}
+	}
+	return found, matches == 1
 }
 
 // sedReplaceWords is words with the replacement string of xargs -I (the
@@ -502,22 +845,36 @@ func sedFindExecs(words []string) (execs []sedFindExec) {
 	return execs
 }
 
+// sedStdinPath reports a script operand that names standard input.
+func sedStdinPath(word string) bool {
+	switch filepath.Clean(word) {
+	case "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0":
+		return true
+	}
+	return false
+}
+
 // readsShellStdin reports a POSIX shell call that reads its program from
-// standard input: no -c body and no script operand.
+// standard input: no -c body and no script operand (or an operand that is
+// standard input: /dev/stdin), and source or . of standard input.
 func (r *sedBackupReader) readsShellStdin(call *syntax.CallExpr, values actionValues) bool {
-	words := make([]string, len(call.Args))
-	for i, arg := range call.Args {
-		words[i], _ = sedHoledWord(arg, values, r.cwd, r.home)
-	}
+	words, _ := r.callWords(call.Args, values)
 	words, _ = r.unwrap(words, sedBackupScope{})
-	if len(words) == 0 || strings.Contains(words[0], sedHole) || !posixShellProgram(programBase(words[0])) {
+	if len(words) == 0 || strings.Contains(words[0], sedHole) {
 		return false
 	}
-	if _, body := actionShellCommandBody(words); body {
-		return false
+	program := programBase(actionUnescapeShell(words[0]))
+	switch {
+	case program == "source" || program == ".":
+		return len(words) > 1 && sedStdinPath(words[1])
+	case posixShellProgram(program):
+		if _, body := actionShellCommandBody(words); body {
+			return false
+		}
+		script, has := shellScriptOperand(words)
+		return !has || sedStdinPath(script)
 	}
-	_, script := shellScriptOperand(words)
-	return !script
+	return false
 }
 
 // stdinBody reads the program a shell takes from a heredoc or a herestring.
@@ -548,46 +905,84 @@ func sedRedirectBodies(stmt *syntax.Stmt, values actionValues, cwd, home string)
 	return bodies
 }
 
-// pipedBody reads the program a literal piped into a shell: echo, printf or
-// a cat of a heredoc.
-func (r *sedBackupReader) pipedBody(pipe *syntax.BinaryCmd, values actionValues, scope sedBackupScope, depth int) {
-	if pipe.X == nil || pipe.Y == nil || depth >= sedBackupDepth {
-		return
-	}
-	reader, ok := pipe.Y.Cmd.(*syntax.CallExpr)
-	if !ok || len(reader.Args) == 0 || !r.readsShellStdin(reader, values) {
-		return
-	}
-	producer, ok := pipe.X.Cmd.(*syntax.CallExpr)
-	if !ok || len(producer.Args) == 0 {
-		return
-	}
-	program, static := StaticWord(producer.Args[0], r.home)
-	if !static {
-		return
-	}
-	args := make([]string, 0, len(producer.Args)-1)
-	for _, arg := range producer.Args[1:] {
-		args = append(args, sedWordText(arg, values, r.cwd, r.home))
-	}
-	switch programBase(program) {
-	case "echo":
-		for len(args) > 0 && len(args[0]) > 1 && args[0][0] == '-' && strings.Trim(args[0][1:], "neE") == "" {
-			args = args[1:]
+// pipeline reads the programs a pipeline feeds a shell that reads standard
+// input: every literal an earlier stage of it prints (echo, printf, a cat of
+// a heredoc, in any block, loop or branch of that stage), whatever the
+// stages between do with it (a filter may change the text; the literal is
+// the program that can arrive).
+func (r *sedBackupReader) pipeline(top *syntax.BinaryCmd, seen map[*syntax.BinaryCmd]bool, values actionValues, scope sedBackupScope, depth int) {
+	var stages []*syntax.Stmt
+	var flatten func(*syntax.Stmt)
+	flatten = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
 		}
-		r.read(strings.Join(args, " "), scope, depth+1)
-	case "printf":
-		if len(args) > 1 && strings.Contains(args[0], "%") {
-			args = args[1:]
+		if pipe, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && (pipe.Op == syntax.Pipe || pipe.Op == syntax.PipeAll) {
+			seen[pipe] = true
+			flatten(pipe.X)
+			flatten(pipe.Y)
+			return
 		}
-		r.read(strings.Join(args, "\n"), scope, depth+1)
-	case "cat":
-		if len(args) == 0 {
-			for _, text := range sedRedirectBodies(pipe.X, values, r.cwd, r.home) {
-				r.read(text, scope, depth+1)
+		stages = append(stages, stmt)
+	}
+	seen[top] = true
+	flatten(top.X)
+	flatten(top.Y)
+	if depth >= sedBackupDepth {
+		return
+	}
+	for at, stage := range stages {
+		reader, ok := stage.Cmd.(*syntax.CallExpr)
+		if !ok || len(reader.Args) == 0 || !r.readsShellStdin(reader, values) {
+			continue
+		}
+		for _, producer := range stages[:at] {
+			for _, body := range r.producedBodies(producer, values) {
+				r.read(body, scope, depth+1)
 			}
 		}
 	}
+}
+
+// producedBodies lists the program texts the commands of stage print as
+// literals: echo, printf, and cat of a heredoc.
+func (r *sedBackupReader) producedBodies(stage *syntax.Stmt, values actionValues) (bodies []string) {
+	syntax.Walk(stage, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		producer, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(producer.Args) == 0 {
+			return true
+		}
+		program, static := StaticWord(producer.Args[0], r.home)
+		if !static {
+			return true
+		}
+		args := make([]string, 0, len(producer.Args)-1)
+		for _, arg := range producer.Args[1:] {
+			args = append(args, sedWordText(arg, values, r.cwd, r.home))
+		}
+		switch programBase(program) {
+		case "echo":
+			for len(args) > 0 && len(args[0]) > 1 && args[0][0] == '-' && strings.Trim(args[0][1:], "neE") == "" {
+				args = args[1:]
+			}
+			bodies = append(bodies, strings.Join(args, " "))
+		case "printf":
+			if len(args) > 1 && strings.Contains(args[0], "%") {
+				args = args[1:]
+			}
+			bodies = append(bodies, strings.Join(args, "\n"))
+		case "cat":
+			if len(args) == 0 {
+				bodies = append(bodies, sedRedirectBodies(stmt, values, r.cwd, r.home)...)
+			}
+		}
+		return true
+	})
+	return bodies
 }
 
 // actionShellCommandBody returns the -c body of a POSIX shell call (bash -c
