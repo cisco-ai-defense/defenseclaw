@@ -641,6 +641,17 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
+	// Credential material that reaches a sender whose destination is not read
+	// in full (interpreter code that names a credentials file and a network
+	// capability, a credential-named environment variable piped into an
+	// upload) is the unknown tier of the one bound rule: the profile decides,
+	// an alert in the default and permissive packs, a block in strict
+	// (GAP-0595).
+	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
+		defer func() {
+			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)
+		}()
+	}
 	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
 	for _, twin := range windowsTwins {
 		defer func() {
@@ -1159,6 +1170,10 @@ func dispatchTrustedActionWith(
 				finding.enforcement = findingEnforcementDetectionOnly
 			}
 			if request.EnforcementCapable && candidate.owner.alertOnly {
+				finding.enforcement = findingEnforcementAlertOnly
+			}
+			if candidate.owner.strictEnforced && !request.StrictPolicy &&
+				finding.enforcement == findingEnforcementAllowed {
 				finding.enforcement = findingEnforcementAlertOnly
 			}
 			finding = finding.withTrustedActionProof(
@@ -9798,6 +9813,28 @@ func withTrustedActionLimitFinding(findings []RuleFinding, enforcementCapable bo
 		}
 	}
 	return append(findings, trustedActionLimitFindings(enforcementCapable)...)
+}
+
+// withCredentialSenderFinding adds the unknown-tier verdict of a call that
+// hands credential material to a sender whose destination is not read in
+// full. It is the evaluation-limit finding the profile decides, with the
+// reason of the call as its evidence and its own title.
+func withCredentialSenderFinding(
+	findings []RuleFinding,
+	reason actionfacts.CredentialSenderReason,
+	enforcementCapable bool,
+) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == "ACTION-COMPOUND-LIMIT" {
+			return findings
+		}
+	}
+	added := trustedActionLimitFindings(enforcementCapable)
+	for index := range added {
+		added[index].Title = "Credential material reaches a sender whose destination is not read"
+		added[index].Evidence = string(reason)
+	}
+	return append(findings, added...)
 }
 
 // withOmittedOperandLimitFinding adds the over-limit verdict for a named

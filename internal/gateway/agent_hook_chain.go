@@ -772,6 +772,14 @@ func toolChainProjectionForNamedPosture(
 	if posture == "strict" {
 		return projection
 	}
+	// A proven secret-read-then-egress chain blocks only in strict; the
+	// default and permissive tiers keep it as an alert (GAP-0595).
+	if definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSecretReadThenEgress,
+	); ok {
+		projection.EnforcementStepMask &^= definition.Step1Bit | definition.Step2Bit |
+			definition.Step3Bit | definition.Step4Bit | definition.MutationBit
+	}
 
 	definition, ok := guardrail.ToolChainDefinitionByID(
 		guardrail.ToolChainPrivilegeDiscoveryThenElevation,
@@ -1319,12 +1327,18 @@ func projectTrustedActionChainSteps(
 
 	externalEgress := externalDataBearingUpload(facts)
 	uploadDigest, uploadIdentityExact := exactExternalUploadPathDigest(facts)
-	egressDetection := externalEgress || hasAnyFinding(
+	egressDetection := externalEgress || senderReaderEgress(facts) || hasAnyFinding(
 		"CMD-WGET-POST",
 		"CMD-CURL-UPLOAD",
 		"exfil.secret_read_and_egress_oneliner",
 	)
 	egressEnforcement := externalEgress && facts.EnforcementEligible()
+	// A sender the shared reader could not read in full (a function, trap or
+	// coprocess body, interpreter code, a destination the shell builds) is the
+	// unknown tier of the one bound rule for the secret-read chain: it joins
+	// any exact credentials read and, with the strict pack's enforcement bits,
+	// blocks (GAP-0672). The other two egress chains keep their own proofs.
+	unknownSender := !egressEnforcement && senderReaderUnknownDestination(facts)
 	for _, chainID := range []string{
 		guardrail.ToolChainGuardrailsOffThenEgress,
 		guardrail.ToolChainSecretManagerReadThenEgress,
@@ -1333,6 +1347,13 @@ func projectTrustedActionChainSteps(
 		chainEnforcement := egressEnforcement
 		if chainID == guardrail.ToolChainSecretReadThenEgress {
 			chainEnforcement = chainEnforcement && uploadIdentityExact
+			if unknownSender {
+				addToolChainStep(projection, chainID, 2, true, true)
+				setToolChainEnforcementJoinDigest(
+					projection, chainID, guardrail.ToolChainUnreadSenderDigest,
+				)
+				continue
+			}
 		}
 		addToolChainStep(
 			projection,
@@ -2382,6 +2403,37 @@ func systemDiscoveryRoot(value string) bool {
 	default:
 		return false
 	}
+}
+
+// senderReaderEgress reports a sender the shared sender reader
+// (actionfacts.ReadSenders) finds beyond the upload facts
+// externalDataBearingUpload reads, or one whose destination it cannot read:
+// a remote copy (rsync, sftp), a program a find -exec or an xargs runs, a
+// sender in a shell part the projection did not read, an upload to a host
+// the shell builds (GAP-0597, GAP-0598, GAP-0599). It sends to an external
+// host, or to a destination that is not read (never "no sender"). It detects
+// the egress step only: an enforcement proof needs the exact upload.
+func senderReaderEgress(facts actionfacts.Facts) bool {
+	for _, sender := range actionfacts.ReadSenders(facts).Senders {
+		if sender.DestinationUnknown {
+			return true
+		}
+		if sender.Origin == actionfacts.SenderProjected {
+			continue // externalDataBearingUpload reads it
+		}
+		for _, network := range sender.Network {
+			if isExternalNetwork(network) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// senderReaderUnknownDestination reports a sender whose destination the
+// shared sender reader cannot read in full (never "no sender").
+func senderReaderUnknownDestination(facts actionfacts.Facts) bool {
+	return actionfacts.ReadSenders(facts).UnknownDestination()
 }
 
 func externalDataBearingUpload(facts actionfacts.Facts) bool {

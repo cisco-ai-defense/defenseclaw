@@ -2130,8 +2130,7 @@
                   "tags": [
                     "credential",
                     "exfiltration",
-                    "exact-file",
-                    "detection-only"
+                    "exact-file"
                   ]
                 },
                 {
@@ -6342,8 +6341,7 @@
                   "tags": [
                     "credential",
                     "exfiltration",
-                    "exact-file",
-                    "detection-only"
+                    "exact-file"
                   ]
                 },
                 {
@@ -10446,8 +10444,7 @@
                   "tags": [
                     "credential",
                     "exfiltration",
-                    "exact-file",
-                    "detection-only"
+                    "exact-file"
                   ]
                 },
                 {

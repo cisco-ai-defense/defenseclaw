@@ -4242,8 +4242,7 @@
         "tags": [
           "credential",
           "exfiltration",
-          "exact-file",
-          "detection-only"
+          "exact-file"
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
@@ -4253,8 +4252,7 @@
       "tags": [
         "credential",
         "exfiltration",
-        "exact-file",
-        "detection-only"
+        "exact-file"
       ]
     },
     {
