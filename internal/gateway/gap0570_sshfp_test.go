@@ -49,9 +49,9 @@ func TestGAP0570SSHFolderReadsLinksAndCheckoutAreNotKeyOrHookWrites(t *testing.T
 	}
 	t.Setenv("W", work)
 	const keys, hook = "persistence.ssh_authorized_keys_command", "tamper.agent_hook_config_write"
-	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow"}
-	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block"}
-	warn := map[string]string{"default": "alert", "permissive": "alert", "strict": "block", "managed": "alert"}
+	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow", "managed-strict": "allow"}
+	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block", "managed-strict": "block"}
+	warn := map[string]string{"default": "alert", "permissive": "alert", "strict": "block", "managed": "alert", "managed-strict": "block"}
 	rows := []struct {
 		name, cwd, command, rule string
 		want                     map[string]string
@@ -82,10 +82,13 @@ func TestGAP0570SSHFolderReadsLinksAndCheckoutAreNotKeyOrHookWrites(t *testing.T
 		{"hook: checkout naming an absent settings file", repo, "git checkout -- .claude/settings.json", hook, warn},
 	}
 	for _, row := range rows {
-		for _, cell := range []string{"default", "permissive", "strict", "managed"} {
+		for _, cell := range []string{"default", "permissive", "strict", "managed", "managed-strict"} {
 			posture, managed := cell, false
-			if cell == "managed" {
+			switch cell {
+			case "managed":
 				posture, managed = "default", true
+			case "managed-strict":
+				posture, managed = "strict", true
 			}
 			t.Run(fmt.Sprintf("%s %s", cell, row.name), func(t *testing.T) {
 				action, rules := shellProtectedFileRoute(t, home, row.cwd, "claudecode", posture, managed, row.command)
@@ -128,8 +131,8 @@ func TestGAP0593StagedPlainArchiveIsNotAKeyWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	const keys = "persistence.ssh_authorized_keys_command"
-	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow"}
-	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block"}
+	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow", "managed-strict": "allow"}
+	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block", "managed-strict": "block"}
 	rows := []struct {
 		name, command, rule string
 		want                map[string]string
@@ -141,10 +144,13 @@ func TestGAP0593StagedPlainArchiveIsNotAKeyWrite(t *testing.T) {
 		{"staged source is a link, then a write in the folder", "mv ~/Downloads/alias.tar.gz ~/projects/ && tar xzf ~/projects/alias.tar.gz -C ~/projects && echo marker >> ~/projects/p", keys, block},
 	}
 	for _, row := range rows {
-		for _, cell := range []string{"default", "permissive", "strict", "managed"} {
+		for _, cell := range []string{"default", "permissive", "strict", "managed", "managed-strict"} {
 			posture, managed := cell, false
-			if cell == "managed" {
+			switch cell {
+			case "managed":
 				posture, managed = "default", true
+			case "managed-strict":
+				posture, managed = "strict", true
 			}
 			t.Run(fmt.Sprintf("%s %s", cell, row.name), func(t *testing.T) {
 				action, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", posture, managed, row.command)
