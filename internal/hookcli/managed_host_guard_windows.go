@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -25,6 +26,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+func init() {
+	managed.SecureClientHostVerified = func() bool { return SecureClientHost() }
+	managed.SecureClientProcessPathVerified = SecureClientManagedProcessPath
+	// The relaxed-ancestor advisory that status, verify and policy show
+	// print names the account and the fix too, not a raw SID and mask
+	// (GAP-0925). The hook reports the same advisory.
+	managed.DescribeTrustAdvisoryReason = func(reason string) string {
+		if _, standalone := ManagedHostWindowsStandalone(); !standalone {
+			return reason
+		}
+		return WindowsEnterpriseNamePrincipals(reason)
+	}
+}
 
 var SecureClientHost = func() bool {
 	return ClassifySecureClientHost(SecureClientClassificationChecks{
@@ -120,7 +135,7 @@ var ManagedHostWindowsMarkerUncertain = func() bool {
 		!errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
 }
 
-// managedHostStandaloneMarker reports the administrator-written HKLM
+// ManagedHostStandaloneMarker reports the administrator-written HKLM
 // standalone marker.
 func ManagedHostStandaloneMarker() (string, bool) {
 	key, err := registry.OpenKey(
@@ -138,7 +153,7 @@ func ManagedHostStandaloneMarker() (string, bool) {
 	return `HKLM\` + WindowsEnterpriseMarkerKey, true
 }
 
-// managedHostStandaloneRecord reports a trusted or service-confirmed
+// ManagedHostStandaloneRecord reports a trusted or service-confirmed
 // standalone deployment record.
 func ManagedHostStandaloneRecord() (string, bool) {
 	deployment, err := winpath.InspectEnterpriseDeployment(managed.ProfileStandalone)
@@ -157,7 +172,7 @@ func ManagedHostStandaloneRecord() (string, bool) {
 	return "", false
 }
 
-// windowsEnterpriseMarkerStandalone reports whether an administrator-written
+// WindowsEnterpriseMarkerStandalone reports whether an administrator-written
 // marker key names the standalone profile.
 func WindowsEnterpriseMarkerStandalone(key registry.Key) bool {
 	if ValidateWindowsEnterpriseAdminRegistryKey(key) != nil {
@@ -167,7 +182,7 @@ func WindowsEnterpriseMarkerStandalone(key registry.Key) bool {
 	return err == nil && managed.IsStandaloneProfile(profile)
 }
 
-// validateWindowsEnterpriseAdminRegistryKey requires an open key to be owned
+// ValidateWindowsEnterpriseAdminRegistryKey requires an open key to be owned
 // by SYSTEM, Administrators, or TrustedInstaller with no allow ACE that
 // grants anyone else a way to change it.
 func ValidateWindowsEnterpriseAdminRegistryKey(key registry.Key) error {
@@ -231,7 +246,7 @@ func WindowsEnterpriseAdminSID(sid *windows.SID) bool {
 	return err == nil && sid.Equals(trustedInstaller)
 }
 
-// managedHostRecordTrusted accepts a managed-deployment record, or runtime
+// ManagedHostRecordTrusted accepts a managed-deployment record, or runtime
 // descriptor, under %ProgramData% only when an administrator must have
 // written it. A seam for tests.
 var ManagedHostRecordTrusted = func(path string) error {
@@ -247,7 +262,7 @@ var ManagedHostRecordTrusted = func(path string) error {
 	)
 }
 
-// managedHostStandaloneService describes the standalone gateway service when
+// ManagedHostStandaloneService describes the standalone gateway service when
 // the Service Control Manager has it registered to run
 // <Program Files>\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe. Only an
 // administrator can register a service. The lifecycle's service DACL grants
@@ -270,7 +285,7 @@ var ManagedHostStandaloneService = func() (string, error) {
 	return fmt.Sprintf("service %s runs %s", managed.StandaloneWindowsGatewaySvc, gatewayPath), nil
 }
 
-// windowsServiceImagePath reads a service's registered image path with
+// WindowsServiceImagePath reads a service's registered image path with
 // connect and query-config access only, which standard users hold.
 func WindowsServiceImagePath(name string) (string, error) {
 	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
@@ -298,4 +313,31 @@ func WindowsServiceImagePath(name string) (string, error) {
 		return "", fmt.Errorf("query service %s: %w", name, err)
 	}
 	return windows.UTF16PtrToString(configuration.BinaryPathName), nil
+}
+
+// SecureClientManagedProcessPath binds the managed trust exceptions to the
+// installed gateway service or hook executable and the installation's exact
+// state tree. Neither the process home nor its deployment-mode environment
+// pin selects these paths.
+func SecureClientManagedProcessPath(path string) bool {
+	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
+	if err != nil {
+		return false
+	}
+	executable, err := os.Executable()
+	if err != nil || !secureClientManagedLayoutMatches(roots, executable, path, managed.WindowsCurrentProcessIsGatewayService()) {
+		return false
+	}
+	return managed.ValidateTrustedSecureClientHostFile(executable, "Secure Client process executable") == nil
+}
+
+func secureClientManagedLayoutMatches(roots winpath.EnterpriseRoots, executable, path string, gatewayService bool) bool {
+	bin := filepath.Join(roots.InstallRoot, "bin")
+	installed := (gatewayService && strings.EqualFold(filepath.Clean(executable), filepath.Join(bin, "defenseclaw-gateway.exe"))) ||
+		strings.EqualFold(filepath.Clean(executable), filepath.Join(bin, "defenseclaw-hook.exe"))
+	if !installed {
+		return false
+	}
+	state := strings.ToLower(filepath.Clean(roots.StateRoot)) + string(filepath.Separator)
+	return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), state)
 }

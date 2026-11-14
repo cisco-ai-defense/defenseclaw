@@ -1569,11 +1569,11 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Primary env resolution of the hook's gateway API address"
         },
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Sidecar .hookcfg fallback for the same key"
         }
       ],
@@ -2412,7 +2412,7 @@
           "description": "Body-cap enforcement in the native per-user Claude Code hook"
         },
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Body-cap enforcement in the native hook command"
         }
       ],
@@ -2492,7 +2492,7 @@
       "since": "1.0.7",
       "consumers": [
         {
-          "location": "internal/cli/notify.go",
+          "location": "internal/hookcli/notify.go",
           "description": "Native Codex notifier chain guard"
         }
       ]
@@ -6197,7 +6197,7 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Native hook reads it (precedence over TRACEPARENT / OTEL_TRACEPARENT)"
         },
         {
@@ -6225,7 +6225,7 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "internal/cli/hook.go",
+          "location": "internal/hookcli/hook.go",
           "description": "Native hook reads it alongside traceparent"
         },
         {

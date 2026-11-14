@@ -37,7 +37,7 @@ import (
 // applies its own cap to the full stream.
 const hookForeignGuardPayloadLimit = 1 << 20
 
-// hookForeignGuardSummaryPath resolves the standalone public machine policy
+// HookForeignGuardSummaryPath resolves the standalone public machine policy
 // summary. It is replaceable in tests. A host without a standalone layout
 // (Secure Client, unmanaged) has no summary, and the guard is a no-op.
 var HookForeignGuardSummaryPath = func() (string, bool) {
@@ -58,7 +58,7 @@ var hookForeignGuardRecord = enterprisepolicy.RecordForeignHookBlock
 // runs with, for the guardian's cleanup (replaceable in tests).
 var hookForeignGuardRecordEnv = enterprisepolicy.RecordEnvRedirect
 
-// hookForeignGuardAgentProcess names the agent process that runs the hook,
+// HookForeignGuardAgentProcess names the agent process that runs the hook,
 // which keeps the hooks it loaded for its lifetime (replaceable in tests).
 var HookForeignGuardAgentProcess = agentprocess.Identity
 
@@ -70,7 +70,7 @@ var hookAgentHost = agentprocess.Host
 // in tests).
 var hookAgentExecutable = agentprocess.Executable
 
-// hookForeignGuardExchange is replaceable in tests. Production reaches the
+// HookForeignGuardExchange is replaceable in tests. Production reaches the
 // standalone gateway over its authenticated hook transport.
 var HookForeignGuardExchange = exchangeForeignHookSession
 
@@ -78,7 +78,7 @@ var HookForeignGuardExchange = exchangeForeignHookSession
 // cannot answer for the agent session's hook record.
 const foreignHookSessionUnavailableReason = "enterprise_foreign_hook_blocked: DefenseClaw could not check this agent session's hook record with its gateway, so the call is blocked. Retry when the DefenseClaw gateway is running; if the block continues, restart the agent."
 
-// applyEnterpriseForeignHookGuard denies a hook invocation on a standalone
+// ApplyEnterpriseForeignHookGuard denies a hook invocation on a standalone
 // managed host while an unapproved hook that could rewrite the tool call
 // after DefenseClaw checks it is present in the agent's user or project
 // config, and for the rest of an agent session that started while one was
@@ -174,7 +174,7 @@ func ApplyEnterpriseForeignHookGuard(opts *hookexec.Options) {
 	}
 }
 
-// foreignHookGuardedEvent reports whether the guard applies to an event.
+// ForeignHookGuardedEvent reports whether the guard applies to an event.
 // The managed OpenCode plugin sends its load heartbeat, session lifecycle
 // and tool.execute.after telemetry through this hook too; none of them can
 // block, so only tool.execute.before is guarded (the plugin also runs
@@ -198,7 +198,7 @@ func hookForeignGuardHomes(accountHome string) []string {
 	return homes
 }
 
-// foreignHookCheckResult is the JSON the in-agent plugins and the
+// ForeignHookCheckResult is the JSON the in-agent plugins and the
 // standalone Hermes shell hook read from `hook --foreign-hook-check`.
 // Anything but {"deny": false} blocks.
 type ForeignHookCheckResult struct {
@@ -238,7 +238,7 @@ func hermesForeignHookBlockMessage(reason string) string {
 	return "DefenseClaw blocked this tool call: DefenseClaw is not set up correctly on this computer. Contact your administrator. (" + reason + ")"
 }
 
-// runForeignHookCheck evaluates the foreign-hook guard for an in-agent
+// RunForeignHookCheck evaluates the foreign-hook guard for an in-agent
 // plugin (Amp, OpenCode) that calls the gateway directly, or for the
 // standalone Hermes shell hook, which runs it before its gateway request
 // (Hermes runs every registered shell hook, so the guard cannot run inside
@@ -308,11 +308,11 @@ func RunForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 // call let through a gateway outage by the administrator's open fail mode.
 const foreignHookCheckOutageWarning = "the DefenseClaw gateway is not running; your organization's fail mode lets this call run without DefenseClaw checks until it is back"
 
-// hookForeignGuardMaxScan caps the foreign-hook scan; real hook trees
+// HookForeignGuardMaxScan caps the foreign-hook scan; real hook trees
 // take milliseconds.
 const HookForeignGuardMaxScan = 5 * time.Second
 
-// hookForeignGuardScanBudget gives the scan and gateway session exchange a
+// HookForeignGuardScanBudget gives the scan and gateway session exchange a
 // quarter of the request budget each, leaving at least half for the hook's
 // ordinary gateway request.
 func HookForeignGuardScanBudget(connector, event string) time.Duration {
@@ -458,7 +458,7 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 	return decision, accountHome, unavailable
 }
 
-// hookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
+// HookForeignGuardGOOS is runtime.GOOS (replaceable in tests).
 var HookForeignGuardGOOS = runtime.GOOS
 
 // hookForeignGuardCleanSessionOutage reports a failed session exchange that
@@ -483,7 +483,7 @@ func hookForeignGuardCleanSessionOutage(name string, update enterprisepolicy.Ses
 	return HookForeignGuardCleanMirror(update.Key) == nil
 }
 
-// hookForeignGuardCleanMirror checks the gateway's clean-session entry of
+// HookForeignGuardCleanMirror checks the gateway's clean-session entry of
 // key's agent process for the calling account (replaceable in tests).
 var HookForeignGuardCleanMirror = func(key enterprisepolicy.SessionKey) error {
 	layout, _, _, err := StandaloneEnterprisePolicyLayout()
@@ -503,7 +503,7 @@ var HookForeignGuardCleanMirror = func(key enterprisepolicy.SessionKey) error {
 	})
 }
 
-// hookForeignGuardOutageFailsOpen reports whether the administrator's fail
+// HookForeignGuardOutageFailsOpen reports whether the administrator's fail
 // mode lets a guarded --foreign-hook-check call through a proven gateway
 // outage. That path has no hook request after it, so it asks the managed
 // outage rule itself with the options the hook request would use
@@ -653,7 +653,7 @@ func captureHookPayloadFacts(opts *hookexec.Options) hookPayloadFacts {
 	return facts
 }
 
-// perUserOwnedHookCommandsForBinary also owns the per-user commands rendered
+// PerUserOwnedHookCommandsForBinary also owns the per-user commands rendered
 // for the administrator's published hookBinary: the hook process cannot
 // resolve the launcher the guardian registered.
 func PerUserOwnedHookCommandsForBinary(name, home, dataDir, hookBinary string) []string {

@@ -29,7 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
-// newNotifyCmd builds the hidden native counterpart to Codex's historical
+// NewNotifyCmd builds the hidden native counterpart to Codex's historical
 // notify-bridge.sh. Codex appends exactly one JSON payload argument to the
 // configured argv array; forwarding is telemetry-only and always best-effort.
 func NewNotifyCmd() *cobra.Command {

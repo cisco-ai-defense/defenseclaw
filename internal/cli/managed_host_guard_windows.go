@@ -12,16 +12,6 @@
 
 package cli
 
-import (
-	"os"
-	"path/filepath"
-	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/hookcli"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
-)
-
 // managedHostWindowsStandalone reports a standalone managed deployment. Two
 // administrator-written signals count, and nothing a standard user can
 // create does (%ProgramData% lets any user create folders, so a planted
@@ -48,34 +38,3 @@ import (
 // (install\pending.json) stands in for it, so the target enumeration and the
 // helpers the install runs apply the Secure Client rules, as they already do
 // for Repair and Upgrade.
-func init() {
-	managed.SecureClientHostVerified = func() bool { return hookcli.SecureClientHost() }
-	managed.SecureClientProcessPathVerified = secureClientManagedProcessPath
-}
-
-// secureClientManagedProcessPath binds the managed trust exceptions to the
-// installed gateway service or hook executable and the installation's exact
-// state tree. Neither the process home nor its deployment-mode environment
-// pin selects these paths.
-func secureClientManagedProcessPath(path string) bool {
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileSecureClient)
-	if err != nil {
-		return false
-	}
-	executable, err := os.Executable()
-	if err != nil || !secureClientManagedLayoutMatches(roots, executable, path, managed.WindowsCurrentProcessIsGatewayService()) {
-		return false
-	}
-	return managed.ValidateTrustedSecureClientHostFile(executable, "Secure Client process executable") == nil
-}
-
-func secureClientManagedLayoutMatches(roots winpath.EnterpriseRoots, executable, path string, gatewayService bool) bool {
-	bin := filepath.Join(roots.InstallRoot, "bin")
-	installed := (gatewayService && strings.EqualFold(filepath.Clean(executable), filepath.Join(bin, "defenseclaw-gateway.exe"))) ||
-		strings.EqualFold(filepath.Clean(executable), filepath.Join(bin, "defenseclaw-hook.exe"))
-	if !installed {
-		return false
-	}
-	state := strings.ToLower(filepath.Clean(roots.StateRoot)) + string(filepath.Separator)
-	return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), state)
-}

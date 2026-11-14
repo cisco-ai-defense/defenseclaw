@@ -8,11 +8,11 @@ import (
 )
 
 const (
-	// hookColdStartFlag marks a start requested by a connector hook.
+	// HookColdStartFlag marks a start requested by a connector hook.
 	HookColdStartFlag = "hook-cold-start"
 )
 
-// hookInstallInProgress reports an install or upgrade of this account's
+// HookInstallInProgress reports an install or upgrade of this account's
 // DefenseClaw (install.sh or install.ps1 hold .install.lock in the data
 // directory while they run), or an interrupted one whose recovery waits for
 // the next installer run: a start would run the half-done install

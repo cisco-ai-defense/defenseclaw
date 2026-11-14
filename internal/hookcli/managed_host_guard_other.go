@@ -18,7 +18,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// secureClientHost reports a Secure Client DefenseClaw install (macOS only);
+// SecureClientHost reports a Secure Client DefenseClaw install (macOS only);
 // a seam for tests.
 var SecureClientHost = func() bool {
 	if runtime.GOOS != "darwin" {
@@ -27,13 +27,13 @@ var SecureClientHost = func() bool {
 	return managed.ValidateTrustedInstallMarkerDir("/opt/cisco/secureclient/defenseclaw", "Secure Client install marker") == nil
 }
 
-// managedHostWindowsStandalone is Windows-only; unix hosts use the runtime
+// ManagedHostWindowsStandalone is Windows-only; unix hosts use the runtime
 // descriptor.
 var ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 
 // Unix hosts use the runtime descriptor above the per-user hook runtime.
 var ManagedHostWindowsMarkerUncertain = func() bool { return false }
 
-// managedHostRecordTrusted accepts every record outside Windows: the unix
+// ManagedHostRecordTrusted accepts every record outside Windows: the unix
 // descriptor lives in a root-owned directory no standard user can write.
 var ManagedHostRecordTrusted = func(string) error { return nil }

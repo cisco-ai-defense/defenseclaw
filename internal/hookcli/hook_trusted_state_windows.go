@@ -34,7 +34,7 @@ const (
 	hermesDirectStateName   = "hermes-direct-native-state.json"
 )
 
-// hookExecutableOverride is a test seam for an immutable packaged layout.
+// HookExecutableOverride is a test seam for an immutable packaged layout.
 var (
 	HookExecutableOverride           string
 	NativeHookRuntimeReader          = hookruntime.ReadTrustedForExecutable
@@ -375,7 +375,7 @@ var windowsConnectorRemovedFromRoster = func(executable, name string) bool {
 	return err == nil && off
 }
 
-// windowsConnectorOffRosterRead is replaceable in tests.
+// WindowsConnectorOffRosterRead is replaceable in tests.
 var WindowsConnectorOffRosterRead = enterprisehooks.WindowsConnectorOffRoster
 
 // windowsExcludedAccountNoop reports whether a hook call is the call of an

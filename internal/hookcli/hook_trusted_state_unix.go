@@ -182,7 +182,7 @@ var standaloneHookRuntime struct {
 	layout     managed.StandaloneLayout
 	descriptor *managed.RuntimeDescriptor
 	reason     string
-	// secureClientHost marks a macOS Secure Client host, whose
+	// SecureClientHost marks a macOS Secure Client host, whose
 	// --enterprise-managed failures keep their historical results.
 	secureClientHost bool
 }

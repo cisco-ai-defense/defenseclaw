@@ -25,14 +25,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-// standaloneEnterprisePolicyLayout returns the standalone layout and, on
+// StandaloneEnterprisePolicyLayout returns the standalone layout and, on
 // Windows only, the trusted machine roots.
 func StandaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
 	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
 	return layout, "", "", err
 }
 
-// hookForeignGuardAccountHome returns the calling account's home from the
+// HookForeignGuardAccountHome returns the calling account's home from the
 // system account database, never from the agent's environment: the
 // guardian installs DefenseClaw's per-user registrations there. Release
 // builds have no cgo, so os/user sees only /etc/passwd; a directory
@@ -51,7 +51,7 @@ var HookForeignGuardAccountHome = func() string {
 	return ""
 }
 
-// hookForeignGuardEnvHomes lists the homes the agent's environment names
+// HookForeignGuardEnvHomes lists the homes the agent's environment names
 // ($HOME as inherited from the agent), which it may read hook config from.
 // Replaceable in tests.
 var HookForeignGuardEnvHomes = func() []string {

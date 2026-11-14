@@ -9,3 +9,6 @@ import "testing"
 
 // skipIfLocalSystem is a no-op off Windows.
 func skipIfLocalSystem(*testing.T, string) {}
+
+// requireAdministratorTestToken is a no-op off Windows.
+func requireAdministratorTestToken(*testing.T, string) {}

@@ -98,9 +98,9 @@ func TestRepairEnterpriseHookManifestACLRefusesAnUntrustedManifestOnAStandaloneH
 }
 
 func TestRestoredPolicySourcesAreListedInTheResultChanges(t *testing.T) {
-	previous := windowsPrincipalName
-	t.Cleanup(func() { windowsPrincipalName = previous })
-	windowsPrincipalName = func(string) string { return "" }
+	previous := hookcli.WindowsPrincipalName
+	t.Cleanup(func() { hookcli.WindowsPrincipalName = previous })
+	hookcli.WindowsPrincipalName = func(string) string { return "" }
 	result := &enterprisestatus.Result{}
 	note := `the installed config.yaml untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml; ` +
 		`kept it as C:\ProgramData\Cisco\DefenseClaw\etc\rejected-config.yaml and restored config.yaml from Setup's approved copy`

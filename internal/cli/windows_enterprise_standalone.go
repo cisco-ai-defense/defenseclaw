@@ -1331,7 +1331,7 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 			if err != nil {
 				// A custody refusal names the account and the icacls
 				// command that clears it, as the folder case does (GAP-0594).
-				cause = windowsEnterpriseNamePrincipals(err.Error())
+				cause = hookcli.WindowsEnterpriseNamePrincipals(err.Error())
 			}
 			message := "the effective policy the gateway enforces could not be checked: " + cause
 			if result.Action == "verify" {
@@ -2036,7 +2036,7 @@ func applyWindowsEnterpriseInstallerReport(
 			message, enumeratorCode = text, specific
 		}
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
-		message = windowsEnterpriseNamePrincipals(message)
+		message = hookcli.WindowsEnterpriseNamePrincipals(message)
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if enumeratorCode != "" {
 			code = enumeratorCode
@@ -2741,7 +2741,7 @@ func windowsEnterpriseBoundedDiagnostic(message string) string {
 // (GAP-1049).
 func addWindowsEnterpriseRestoredPolicyChanges(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	for _, note := range report.RestoredPolicySources {
-		line := windowsEnterpriseBoundedDiagnostic(windowsEnterpriseNamePrincipals(note))
+		line := windowsEnterpriseBoundedDiagnostic(hookcli.WindowsEnterpriseNamePrincipals(note))
 		if !slices.Contains(result.Changes, line) {
 			result.Changes = append(result.Changes, line)
 		}
@@ -5459,7 +5459,7 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 		return fmt.Errorf("ensure_refused: %s", message)
 	}
 	message += windowsEnterpriseRecordOwnerMismatchNextStep(message)
-	message = windowsEnterpriseNamePrincipals(message)
+	message = hookcli.WindowsEnterpriseNamePrincipals(message)
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
 

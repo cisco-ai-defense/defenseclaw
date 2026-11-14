@@ -20,7 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// standaloneEnterprisePolicyLayout resolves the layout from the protected
+// StandaloneEnterprisePolicyLayout resolves the layout from the protected
 // HKLM machine roots, never from the caller's environment.
 func StandaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, string, error) {
 	programFiles, err := TrustedWindowsEnterpriseProgramFiles()
@@ -35,7 +35,7 @@ func StandaloneEnterprisePolicyLayout() (managed.StandaloneLayout, string, strin
 	return layout, programFiles, programData, err
 }
 
-// hookForeignGuardAccountHome returns the profile directory of the
+// HookForeignGuardAccountHome returns the profile directory of the
 // process token (never the agent's environment): the guardian installs
 // DefenseClaw's per-user registrations there. Replaceable in tests.
 var HookForeignGuardAccountHome = func() string {
@@ -45,7 +45,7 @@ var HookForeignGuardAccountHome = func() string {
 	return ""
 }
 
-// hookForeignGuardEnvHomes lists the homes the agent's environment names
+// HookForeignGuardEnvHomes lists the homes the agent's environment names
 // (USERPROFILE as inherited from the agent), which it may read hook config
 // from. Replaceable in tests.
 var HookForeignGuardEnvHomes = func() []string {

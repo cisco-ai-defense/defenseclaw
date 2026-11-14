@@ -29,7 +29,7 @@ func writeOutageNowConfig(t *testing.T, dir, body string) {
 	}
 }
 
-// hookOutageFailModeNow answers from the config of the hook runtime at the
+// HookOutageFailModeNow answers from the config of the hook runtime at the
 // time of the call, not from what the hooks recorded: a rule pack switched to
 // strict after the gateway stopped closes the outage, and a config this
 // release cannot load, a managed one or none closes it too.

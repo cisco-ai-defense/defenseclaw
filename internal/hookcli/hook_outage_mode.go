@@ -19,7 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
-// hookOutageFailModeNow is the gateway-outage mode the config of the per-user
+// HookOutageFailModeNow is the gateway-outage mode the config of the per-user
 // hook runtime in hookDir gives connectorName's hooks now
 // (config.HookOutageFailMode of its policy tier): "open" only when this
 // release loads that config, the install is neither managed nor Secure
@@ -50,7 +50,7 @@ func HookOutageFailModeNow(connectorName, hookDir string) string {
 	return HookOutageFailModeFor(connectorName, hookDir, false)
 }
 
-// hookOutageFailModeFor is hookOutageFailModeNow; installWindow leaves out
+// HookOutageFailModeFor is hookOutageFailModeNow; installWindow leaves out
 // the install-lock check only (hookOutageInstallHeld). It is the mode an
 // install window gives a call this account's gateway answered: "open" (the
 // default and permissive tiers, or a saved open) lets that answer through

@@ -288,7 +288,7 @@ func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
 		labels := make([]string, 0, len(readers))
 		removals := make([]string, 0, len(readers))
 		for _, sid := range readers {
-			labels = append(labels, windowsPrincipalLabel(sid))
+			labels = append(labels, hookcli.WindowsPrincipalLabel(sid))
 			removals = append(removals, `"*`+sid+`"`)
 		}
 		problems = append(problems, fmt.Sprintf(

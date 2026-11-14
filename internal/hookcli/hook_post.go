@@ -27,7 +27,7 @@ func PostPerUserPluginHook(ctx context.Context, apiAddr string, source io.Reader
 	return writePluginHookReply(output, response, curlOutput)
 }
 
-// postSecureClientPluginHook uses the protected gateway service identity,
+// PostSecureClientPluginHook uses the protected gateway service identity,
 // never the account-wide bearer, to decide whether it may send that bearer.
 func PostSecureClientPluginHook(ctx context.Context, apiAddr string, source io.Reader, output io.Writer) error {
 	if !SecureClientHost() {
@@ -53,7 +53,7 @@ func writePluginHookReply(output io.Writer, response hookexec.PerUserHookReply, 
 	return json.NewEncoder(output).Encode(response)
 }
 
-// newHookPostCmd builds the hidden hook-post command: the per-user shell hooks
+// NewHookPostCmd builds the hidden hook-post command: the per-user shell hooks
 // and plugins send one gateway request through it.
 func NewHookPostCmd() *cobra.Command {
 	var apiAddr string

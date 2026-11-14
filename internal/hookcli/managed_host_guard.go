@@ -18,10 +18,20 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// managedHostDescriptorPath is where a standalone managed deployment
+func init() {
+	// The Secure Client fail-open render defaults (#1163) need an
+	// authenticated Secure Client deployment, the strict host classifier
+	// (SecureClientHost), not a process or config profile alone (main-sync
+	// review finding 5). Every binary that renders or runs hooks links this
+	// package: the gateway (internal/cli) and the slim defenseclaw-hook.
+	connector.SecureClientDeploymentVerified = func() bool { return SecureClientHost() }
+}
+
+// ManagedHostDescriptorPath is where a standalone managed deployment
 // publishes its runtime descriptor on this OS ("" where the check does not
 // apply). A seam for tests.
 var ManagedHostDescriptorPath = func() string {
@@ -32,7 +42,7 @@ var ManagedHostDescriptorPath = func() string {
 	return layout.DescriptorPath
 }
 
-// managedRecordTrusted reports whether a managed-deployment record at path
+// ManagedRecordTrusted reports whether a managed-deployment record at path
 // can only have been written by an administrator. validateFile checks the
 // record and its ancestors; validateDir checks a directory that admits no
 // writer other than an administrator and whose ancestors cannot be replaced.
@@ -65,7 +75,7 @@ func ManagedRecordTrusted(path, stop string, validateFile, validateDir func(stri
 	return fmt.Errorf("%s cannot be inspected and no administrator-only directory below %s holds it: %w", path, stop, err)
 }
 
-// managedStandaloneRecordCounts decides whether a recorded Windows
+// ManagedStandaloneRecordCounts decides whether a recorded Windows
 // standalone deployment disables the per-user gateway, and names what proves
 // it. The record counts when recordTrusted shows that an administrator wrote
 // it. A standard user usually cannot show that. It cannot read the security
@@ -89,7 +99,7 @@ func ManagedStandaloneRecordCounts(record string, recordTrusted func(string) err
 	return "", fmt.Errorf("%w; no administrator-registered standalone gateway service confirms it: %v", recordErr, serviceErr)
 }
 
-// standaloneGatewayServiceImageMatches checks that a service's registered
+// StandaloneGatewayServiceImageMatches checks that a service's registered
 // image path launches exactly gatewayPath. The lifecycle registers the
 // standalone gateway as its quoted executable path. The Secure Client profile
 // uses the same service name with its own executable, so the path is what

@@ -13,7 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// loadHookRuntimeConfig loads configFile as the hook runtime of its folder
+// LoadHookRuntimeConfig loads configFile as the hook runtime of its folder
 // does, and names the data directory it gives that runtime: the one rule
 // hook-outage-mode (whether a hook may open an outage) and hook-data-dir
 // (which folder install.sh locks) share. The load leaves out
@@ -40,7 +40,7 @@ func LoadHookRuntimeConfig(configFile string) (*config.Config, string, error) {
 	return loaded, ConfigDataDir(configFile, loaded.DataDir), nil
 }
 
-// configDataDir is the absolute data directory a data_dir value of the
+// ConfigDataDir is the absolute data directory a data_dir value of the
 // config at configFile names: an absolute value as it is, a relative one
 // from the config's folder; "" without an absolute config path or a value.
 func ConfigDataDir(configFile, dataDir string) string {

@@ -109,7 +109,7 @@ func windowsEnterpriseLeftoverUserStateFolders() []string {
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		labels = append(labels, windowsPrincipalLabel(profile.SID)+": "+folder)
+		labels = append(labels, hookcli.WindowsPrincipalLabel(profile.SID)+": "+folder)
 	}
 	return labels
 }

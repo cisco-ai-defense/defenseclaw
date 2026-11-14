@@ -45,7 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// newHookCmd builds the hidden `hook` subcommand the agent runtime invokes per
+// NewHookCmd builds the hidden `hook` subcommand the agent runtime invokes per
 // event. On Windows most agents invoke the native launcher directly. Cursor's
 // PowerShell transport instead uses a generated adapter and this command's
 // validated --input-file path because its object pipeline cannot preserve JSON
@@ -309,11 +309,11 @@ func hookInvocationStart(secureClient bool) time.Time {
 	return time.Now()
 }
 
-// hookProcessExit ends the hook process with hookexec's connector-native
+// HookProcessExit ends the hook process with hookexec's connector-native
 // status. It is a variable so tests can run the command without exiting.
 var HookProcessExit = os.Exit
 
-// hookRawArgs returns the hook process's own arguments. A flag error stops
+// HookRawArgs returns the hook process's own arguments. A flag error stops
 // parsing before --connector may have been read, so the failure status looks
 // the connector up here. It is a variable for tests, which run the command
 // through SetArgs rather than os.Args.
@@ -330,7 +330,7 @@ func validateHookSurface(connectorName, surface string) error {
 	return fmt.Errorf("--hook-surface %q is not valid for connector %q", surface, connectorName)
 }
 
-// hookFailureContext is what a hook invocation that failed before hookexec
+// HookFailureContext is what a hook invocation that failed before hookexec
 // ran says about itself: the flags parsed before the failure. A flag error
 // stops parsing, so resolve completes them from the raw arguments.
 type HookFailureContext struct {
@@ -350,7 +350,7 @@ func (c HookFailureContext) resolve() HookFailureContext {
 	return c
 }
 
-// hookFailureIO is the hook process's stdin, stdout and stderr for a failure
+// HookFailureIO is the hook process's stdin, stdout and stderr for a failure
 // answered before Run; a variable for tests.
 var HookFailureIO = func() (io.Reader, io.Writer, io.Writer) { return os.Stdin, os.Stdout, os.Stderr }
 
@@ -402,7 +402,7 @@ func answerHookFailureClosed(failure HookFailureContext, err error) (int, bool) 
 	return hookexec.Run(context.Background(), opts), true
 }
 
-// hookPreRunFailsClosed applies the fail-closed boundary before hookexec has
+// HookPreRunFailsClosed applies the fail-closed boundary before hookexec has
 // loaded trusted runtime state. A flag or old sidecar cannot open this path.
 func HookPreRunFailsClosed(_ HookFailureContext) bool {
 	return true
@@ -503,7 +503,7 @@ func OpenCursorHookInputFile(hookDir, path string) (*os.File, error) {
 	return input, nil
 }
 
-// buildHookOptions resolves hook configuration. Source builds and Unix hooks
+// BuildHookOptions resolves hook configuration. Source builds and Unix hooks
 // retain their environment-compatible behavior. A packaged Windows hook binds
 // security-critical values to installer-owned state and accepts inherited
 // environment only when it tightens policy. It is factored out of RunE (which
@@ -737,7 +737,7 @@ func buildHookOptionsForCall(connector, event, apiAddr, _ string, enterpriseMana
 	return opts
 }
 
-// readHookSidecar reads only the gateway address from a per-user hook
+// ReadHookSidecar reads only the gateway address from a per-user hook
 // sidecar. Legacy fail-mode fields are ignored: they cannot grant an outage
 // exception. Malformed JSON is never retried as KEY=value lines.
 func ReadHookSidecar(path string) map[string]string {
@@ -825,7 +825,7 @@ func ReadHookSidecar(path string) map[string]string {
 	return out
 }
 
-// hookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets
+// HookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets
 // the local loopback interface. The hook only ever talks to the local gateway,
 // so any other host is treated as untrusted (see buildHookOptions).
 func HookIsLoopbackAddr(addr string) bool {

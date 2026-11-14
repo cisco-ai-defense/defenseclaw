@@ -10,7 +10,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// windowsManagedLayout is where internal/cli finds this computer's own
+// WindowsManagedLayout is where internal/cli finds this computer's own
 // standalone deployment: its layout (managed.StandaloneWindowsLayout) and
 // its trusted enterprise roots (winpath.TrustedEnterpriseRoots), both
 // resolved from the protected HKLM Program Files and ProgramData

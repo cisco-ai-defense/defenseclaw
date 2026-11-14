@@ -353,7 +353,7 @@ jobs:
           native_build=""
           if grep -qE "^${connector}(\$|"$'\t'")" "$RUNNER_TEMP/go-shard.txt"; then
             mkdir -p "$RUNNER_TEMP/dc-test-gateway/account-home"
-            nice -n 10 go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
+            nice -n 10 go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/hookcli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
               -o "$RUNNER_TEMP/dc-test-gateway/defenseclaw" ./cmd/defenseclaw > "$RUNNER_TEMP/dc-test-gateway/build.log" 2>&1 &
             native_build=$!
           fi
@@ -1463,6 +1463,12 @@ jobs:
             shards: 1
             shard: 0
           - os: macos-latest
+            label: macos-latest darwin hookcli
+            part: darwin-unix
+            package: internal/hookcli
+            shards: 1
+            shard: 0
+          - os: macos-latest
             label: macos-latest darwin connector 1 of 4
             part: darwin-connector
             shard: 0
@@ -1647,7 +1653,7 @@ jobs:
           # Linked to read an empty account home of its own, never the
           # runner account's ~/.defenseclaw (rel-1-0-6:GAP-0345).
           mkdir -p "$RUNNER_TEMP/dc-test-gateway/account-home"
-          go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
+          go build -ldflags "-X github.com/defenseclaw/defenseclaw/internal/hookcli.outageAccountHomeBake=$RUNNER_TEMP/dc-test-gateway/account-home" \
             -o "$RUNNER_TEMP/dc-test-gateway/defenseclaw" ./cmd/defenseclaw
           export DC_TEST_NATIVE_GATEWAY="$RUNNER_TEMP/dc-test-gateway/defenseclaw"
           test_regex="$(python3 scripts/go_test_shards.py \

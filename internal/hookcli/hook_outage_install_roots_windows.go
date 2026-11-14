@@ -14,7 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// outageAccountHome is this account's profile folder from the Profile known
+// OutageAccountHome is this account's profile folder from the Profile known
 // folder, never from USERPROFILE or HOME: the folder install.ps1's default
 // DEFENSECLAW_HOME (%USERPROFILE%\.defenseclaw) is in. It is "" when the
 // lookup fails. Looked up once per process. A variable for tests.
@@ -26,7 +26,7 @@ var OutageAccountHome = sync.OnceValue(func() string {
 	return filepath.Clean(profile)
 })
 
-// outageInstalledDataRoot is the data root of the installed runtime's
+// OutageInstalledDataRoot is the data root of the installed runtime's
 // protected install state (trustedNativeHookHome: install.ps1's
 // DEFENSECLAW_HOME, data_root in defenseclaw-hook-state.json). recognized is
 // false for a source build; a recognized state that cannot be read gives "".

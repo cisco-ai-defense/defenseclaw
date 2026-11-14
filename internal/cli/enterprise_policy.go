@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -521,7 +522,7 @@ func runEnterprisePolicyVerify(cmd *cobra.Command, _ []string) error {
 			UID:         target.UID,
 			GID:         target.GID,
 			Timeout:     enterprisePolicyTimeout,
-			AuditDB:     enterprisePolicyAuditDBPath(),
+			HookRecords: enterprisePolicyHookRecords(enterprisePolicyAuditDBPath()),
 			Credential:  enterprisePolicyLiveCredential(target),
 		})
 		if liveErr != nil {
@@ -765,4 +766,15 @@ func dashIfEmpty(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// enterprisePolicyHookRecords searches the audit database at path for the
+// record of a hook, or is nil when no audit database is configured.
+func enterprisePolicyHookRecords(path string) func(context.Context, audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	return func(ctx context.Context, query audit.HookToolInvocationQuery) (audit.HookToolInvocationEvidence, error) {
+		return audit.FindHookToolInvocation(ctx, path, query)
+	}
 }

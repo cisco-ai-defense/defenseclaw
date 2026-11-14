@@ -3,13 +3,12 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-package cli
+package hookcli
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -17,9 +16,9 @@ import (
 // puts the access mask in words and gives the icacls command that clears
 // it.
 func TestWindowsEnterpriseNamePrincipals(t *testing.T) {
-	original := windowsPrincipalName
-	t.Cleanup(func() { windowsPrincipalName = original })
-	windowsPrincipalName = func(sid string) string {
+	original := WindowsPrincipalName
+	t.Cleanup(func() { WindowsPrincipalName = original })
+	WindowsPrincipalName = func(sid string) string {
 		return map[string]string{"S-1-5-32-545": `BUILTIN\Users`, "S-1-3-0": "CREATOR OWNER", "S-1-5-21-1-2-3-1116": `HOST\dcw-ew3b2`}[sid]
 	}
 	for _, tc := range []struct{ in, want string }{
@@ -30,7 +29,7 @@ func TestWindowsEnterpriseNamePrincipals(t *testing.T) {
 		{`copilot: C:\ProgramData\GitHub\Copilot\policy.d: owner S-1-5-21-1-2-3-1116 is not trusted for machine policy directory; expected Administrators, LocalSystem, or TrustedInstaller`,
 			`owner HOST\dcw-ew3b2 (S-1-5-21-1-2-3-1116) is not trusted for machine policy directory; expected Administrators, LocalSystem, or TrustedInstaller. Fix: icacls "C:\ProgramData\GitHub\Copilot\policy.d" /setowner *S-1-5-32-544`},
 	} {
-		if got := windowsEnterpriseNamePrincipals(tc.in); !strings.Contains(got, tc.want) {
+		if got := WindowsEnterpriseNamePrincipals(tc.in); !strings.Contains(got, tc.want) {
 			t.Errorf("%s\n got %s\nwant %s", tc.in, got, tc.want)
 		}
 	}
@@ -40,20 +39,20 @@ func TestWindowsEnterpriseNamePrincipals(t *testing.T) {
 // print names the account, the mask in words and the icacls fix on a
 // standalone install; elsewhere it is left as it was.
 func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
-	originalName, originalStandalone := windowsPrincipalName, hookcli.ManagedHostWindowsStandalone
-	t.Cleanup(func() { windowsPrincipalName, hookcli.ManagedHostWindowsStandalone = originalName, originalStandalone })
-	windowsPrincipalName = func(sid string) string {
+	originalName, originalStandalone := WindowsPrincipalName, ManagedHostWindowsStandalone
+	t.Cleanup(func() { WindowsPrincipalName, ManagedHostWindowsStandalone = originalName, originalStandalone })
+	WindowsPrincipalName = func(sid string) string {
 		return map[string]string{"S-1-5-32-545": `BUILTIN\Users`}[sid]
 	}
 	raw := `C:\ProgramData\Cisco\DefenseClaw\etc: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`
-	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + hookcli.WindowsEnterpriseMarkerKey, true }
+	ManagedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
 	got := managed.DescribeTrustAdvisoryReason(raw)
 	for _, want := range []string{`BUILTIN\Users (S-1-5-32-545) has write access (modify (0x1301bf))`, `Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\etc" /remove:g *S-1-5-32-545`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("advisory reason %q lacks %q", got, want)
 		}
 	}
-	hookcli.ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
+	ManagedHostWindowsStandalone = func() (string, bool) { return "", false }
 	if got := managed.DescribeTrustAdvisoryReason(raw); got != raw {
 		t.Errorf("non-standalone advisory reason was rewritten: %q", got)
 	}
@@ -62,11 +61,11 @@ func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
 // GAP-1061: the verify message for an untrusted targets.yaml leads with the
 // account and the icacls fix, and never tells the administrator to wait.
 func TestVerifyNamesTheUntrustedManifestAccountFirst(t *testing.T) {
-	previous := windowsPrincipalName
-	t.Cleanup(func() { windowsPrincipalName = previous })
-	windowsPrincipalName = func(sid string) string { return `HOST\dcg` }
+	previous := WindowsPrincipalName
+	t.Cleanup(func() { WindowsPrincipalName = previous })
+	WindowsPrincipalName = func(sid string) string { return `HOST\dcg` }
 	in := `untrusted principal S-1-5-21-1-2-3-1001 has write-like access to managed path: C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`
-	got := windowsEnterpriseNamePrincipals(in)
+	got := WindowsEnterpriseNamePrincipals(in)
 	if !strings.HasPrefix(got, `HOST\dcg (S-1-5-21-1-2-3-1001) has write access to C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml`) ||
 		!strings.Contains(got, `Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml" /remove:g *S-1-5-21-1-2-3-1001`) ||
 		strings.Contains(got, "guardian's next pass") {
@@ -106,7 +105,7 @@ func TestWindowsWriterFixKeepsTheReadOfTheStockReaderGroups(t *testing.T) {
 	}
 	// The rewritten verdict carries it: the read is granted again in the same command.
 	reads, directory = true, true
-	got := windowsEnterpriseNamePrincipals(vendor + `: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`)
+	got := WindowsEnterpriseNamePrincipals(vendor + `: untrusted Windows principal S-1-5-32-545 has write-like access mask 0x1301bf`)
 	if !strings.Contains(got, `Fix: icacls "C:\ProgramData\OpenAI" /remove:g *S-1-5-32-545 /grant "*S-1-5-32-545:(OI)(CI)(RX)"`) {
 		t.Errorf("a verdict on a vendor folder: %q", got)
 	}

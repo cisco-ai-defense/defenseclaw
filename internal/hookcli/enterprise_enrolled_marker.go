@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// enterpriseConnectorEnrolledBefore reports whether the guardian enrolled the
+// EnterpriseConnectorEnrolledBefore reports whether the guardian enrolled the
 // account's connector before: the per-connector hook configuration it writes
 // in the account's own DefenseClaw folder, in the account's session, at
 // enrollment (<data dir>\hooks\.hookcfg.<connector>). It is the one marker the

@@ -10,7 +10,7 @@
 
 //go:build windows
 
-package cli
+package hookcli
 
 import (
 	"errors"
@@ -19,7 +19,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -37,10 +36,10 @@ func TestSecureClientClassificationIgnoresProcessMachineRootEnvironment(t *testi
 	if err != nil || got != want {
 		t.Fatalf("process environment selected Secure Client roots: got=%+v err=%v want=%+v", got, err, want)
 	}
-	if hookcli.SecureClientServiceMatches(got, poison+`\bin\defenseclaw-gateway.exe`) {
+	if SecureClientServiceMatches(got, poison+`\bin\defenseclaw-gateway.exe`) {
 		t.Fatal("user-controlled service path selected Secure Client handling")
 	}
-	if !hookcli.SecureClientServiceMatches(got, `"`+got.InstallRoot+`\bin\defenseclaw-gateway.exe"`) {
+	if !SecureClientServiceMatches(got, `"`+got.InstallRoot+`\bin\defenseclaw-gateway.exe"`) {
 		t.Fatal("registered Secure Client service path not recognized")
 	}
 }
@@ -65,7 +64,7 @@ func TestSecureClientLayoutClassificationWithProtectedMetadata(t *testing.T) {
 		{"spoofed service path", winpath.EnterpriseDeploymentUnknown, `C:\Users\Sample\Controlled\bin\defenseclaw-gateway.exe`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := hookcli.SecureClientLayoutMatches(roots, tc.state, tc.image); got != tc.want {
+			if got := SecureClientLayoutMatches(roots, tc.state, tc.image); got != tc.want {
 				t.Fatalf("Secure Client layout = %v, want %v", got, tc.want)
 			}
 		})
@@ -135,7 +134,7 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			failure := errors.New("fixture lookup failed")
-			checks := hookcli.SecureClientClassificationChecks{
+			checks := SecureClientClassificationChecks{
 				Roots: func(profile string) (winpath.EnterpriseRoots, error) {
 					if profile != winpath.EnterpriseProfileSecureClient {
 						t.Fatalf("requested profile %q", profile)
@@ -203,7 +202,7 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 					return tc.image, nil
 				},
 			}
-			if got := hookcli.ClassifySecureClientHost(checks); got != tc.want {
+			if got := ClassifySecureClientHost(checks); got != tc.want {
 				t.Fatalf("Secure Client host = %v, want %v", got, tc.want)
 			}
 		})
@@ -261,13 +260,13 @@ func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
 	validateFile := func(path string) error { return managed.ValidateTrustedFilePath(path, "managed deployment record") }
 	validateDir := func(dir string) error { return managed.ValidateTrustedRuntimeDir(dir, "managed deployment directory") }
 	stop := filepath.Dir(root)
-	if err := hookcli.ManagedRecordTrusted(record, stop, validateFile, validateDir); err != nil {
+	if err := ManagedRecordTrusted(record, stop, validateFile, validateDir); err != nil {
 		t.Fatalf("an administrator-owned record was not trusted: %v", err)
 	}
 	if err := icacls(record, "/setowner", "*S-1-5-32-545"); err != nil {
 		t.Skip("setting a non-administrator owner needs an elevated shell")
 	}
-	if err := hookcli.ManagedRecordTrusted(record, stop, validateFile, validateDir); err == nil {
+	if err := ManagedRecordTrusted(record, stop, validateFile, validateDir); err == nil {
 		t.Fatal("a record owned by the Users group was trusted")
 	}
 }
@@ -276,10 +275,10 @@ func TestWindowsManagedRecordTrustUsesRealACLs(t *testing.T) {
 // Manager with the caller's token, the way the guard does: a host without the
 // gateway service must not confirm a deployment.
 func TestWindowsStandaloneGatewayServiceLookup(t *testing.T) {
-	if _, err := hookcli.WindowsServiceImagePath(managed.StandaloneWindowsGatewaySvc); !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+	if _, err := WindowsServiceImagePath(managed.StandaloneWindowsGatewaySvc); !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
 		t.Skipf("this host has a DefenseClawGateway service (%v)", err)
 	}
-	if where, err := hookcli.ManagedHostStandaloneService(); err == nil {
+	if where, err := ManagedHostStandaloneService(); err == nil {
 		t.Fatalf("an unregistered gateway service confirmed a standalone deployment: %s", where)
 	}
 }

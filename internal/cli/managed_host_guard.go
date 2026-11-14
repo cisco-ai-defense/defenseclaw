@@ -25,19 +25,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/cliusage"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookcli"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
-
-func init() {
-	// The Secure Client fail-open render defaults (#1163) need an
-	// authenticated Secure Client deployment, the strict host classifier
-	// (secureClientHost), not a process or config profile alone (main-sync
-	// review finding 5). Every binary that renders or runs hooks links this
-	// package.
-	connector.SecureClientDeploymentVerified = func() bool { return hookcli.SecureClientHost() }
-}
 
 // refusePerUserGatewayOnManagedHost keeps a per-user gateway from running
 // on a host whose DefenseClaw is managed by the organization. A per-user

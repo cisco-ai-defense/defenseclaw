@@ -22,7 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hooklayout"
 )
 
-// outageAccountHome is this account's home folder from the account database
+// OutageAccountHome is this account's home folder from the account database
 // (getpwuid), never from HOME: the folder the installer's default
 // DEFENSECLAW_HOME (~/.defenseclaw) is in. Release builds have no cgo, so on
 // Linux os/user reads /etc/passwd only and an account from SSSD, AD or LDAP
@@ -158,7 +158,7 @@ func ownedByUID(info os.FileInfo, uid int) bool {
 // (rel-1-0-6:GAP-0345). Nothing at run time can set it.
 var outageAccountHomeBake string
 
-// outageInstalledDataRoot is the data root of the installed runtime's
+// OutageInstalledDataRoot is the data root of the installed runtime's
 // protected install state. Linux and macOS per-user installs keep none, so
 // install.sh holds a data_dir set apart from DEFENSECLAW_HOME itself
 // (hold_hook_data_dir). A variable for tests.

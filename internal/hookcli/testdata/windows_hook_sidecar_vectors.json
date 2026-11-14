@@ -1,5 +1,5 @@
 {
- "comment": "readHookSidecar (internal/cli/hook.go) and fail_mode.py _read_windows_hook_mode read these hooks/.hookcfg bodies alike: mode is what the native hook runs (nativeHookFailMode), legacy whether status reads it from the unscoped value. kind: missing, dir, link (a symlink to body), oversize (body padded past 64 KiB).",
+ "comment": "ReadHookSidecar (internal/hookcli/hook.go) and fail_mode.py _read_windows_hook_mode read these hooks/.hookcfg bodies alike: mode is what the native hook runs (nativeHookFailMode), legacy whether status reads it from the unscoped value. kind: missing, dir, link (a symlink to body), oversize (body padded past 64 KiB).",
  "vectors": [
   {
    "name": "v2/own-open",
