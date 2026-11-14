@@ -244,7 +244,7 @@ func TestLauncherStartAnswerHookFormsAreOwnedAndConverted(t *testing.T) {
 			t.Fatal("the Antigravity form is not the per-user PreToolUse render, or is not owned")
 		}
 	}
-	kiroPairs := kiroWindowsHookFormPairs([]string{launcher})
+	kiroPairs := kiroWindowsHookFormPairs([]string{launcher}, "", true)
 	for _, command := range forms["kiro"] {
 		converted := false
 		for _, pair := range kiroPairs {
