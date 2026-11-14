@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -1000,8 +1001,13 @@ func agentHookConfigTextMayDisable(text string) bool {
 // turns DefenseClaw off, the write rule for a shell write to a hook file.
 // A rule the active pack does not hold adds nothing.
 func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !request.EnforcementCapable ||
-		request.SkipLocalFilesystemResolution || isSandboxHookRequest(ctx) {
+	if !request.EnforcementCapable {
+		return findings
+	}
+	if isSandboxHookRequest(ctx) {
+		return sandboxAgentHookConfigFindings(ctx, request, findings)
+	}
+	if request.SkipLocalFilesystemResolution {
 		return findings
 	}
 	managed := ManagedEnterpriseActive()
@@ -1175,6 +1181,134 @@ func agentHookConfigFindingsAs(ctx context.Context, request trustedActionRequest
 		}
 	}
 	return out
+}
+
+// sandboxAgentHookConfigFindings is the agent hook config guard of a sandbox
+// call, by path alone (GAP-0282). The host guard (agentHookConfigFindingsAs)
+// reads hook files, and resolves their links, on this host's file system,
+// which a sandbox's paths never name, so it skips every sandbox request. The
+// sandbox's own agent cannot be switched off through these files: its managed
+// drop-in sets allowManagedHooksOnly. The threat is the pull-back: the
+// project an actor writes is pulled into the person's laptop project, where
+// a .claude/settings.json or another hook file planted in it takes effect in
+// an agent without that lock, and where the laptop never sees an agent write
+// it. Sandbox writes to a hook file of a project folder or of the guest home
+// are judged by their lexical path in the guest's namespace, with no read of
+// this host and no link followed:
+//   - a native file tool call carries the document it leaves, so it keeps the
+//     laptop's content judgment: a document that turns the hooks off is
+//     tamper.agent_hook_config_disable, which blocks as on the laptop; one the
+//     gateway cannot apply without the file (an Edit) whose text may turn them
+//     off is tamper.agent_hook_config_write; any other document adds nothing;
+//   - a shell write, whose content is not known, is
+//     tamper.agent_hook_config_write as an alert only, never a block.
+//
+// The guard only adds findings. A file the laptop would read first (a hook
+// entry removed from an existing document) is judged without that file, so
+// the sandbox verdict is never stricter than the laptop's.
+func sandboxAgentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	ruleID, note, target := sandboxAgentHookConfigChange(request)
+	if target == "" ||
+		slices.ContainsFunc(findings, func(finding RuleFinding) bool { return finding.RuleID == ruleID }) {
+		return findings
+	}
+	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+	if generation == nil {
+		return findings
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+	if !ok {
+		return findings
+	}
+	title := rule.Title
+	enforcement := findingEnforcementAllowed
+	if ruleID == agentHookConfigWriteRuleID && note == "" {
+		enforcement = findingEnforcementAlertOnly
+	}
+	if note != "" {
+		title += " (" + note + ")"
+	}
+	return append(append([]RuleFinding(nil), findings...), RuleFinding{
+		RuleID: rule.ID, Title: title, Severity: rule.Severity, Confidence: rule.Confidence,
+		Evidence: path.Base(target), Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+		enforcement: enforcement,
+		proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
+	})
+}
+
+// sandboxAgentHookConfigChange is the rule, its note and the hook file of the
+// change a sandbox call makes, in the guest's namespace; target is "" when it
+// changes none (sandboxAgentHookConfigFindings). note is set for a native
+// tool call's document.
+func sandboxAgentHookConfigChange(request trustedActionRequest) (ruleID, note, target string) {
+	input := request.Input
+	if request.SandboxGuestCWD != "" {
+		input.CWD = request.SandboxGuestCWD
+	}
+	if changes, native := agentHookConfigFileChanges(input.Tool, input.Args); native {
+		noRead := func(string) ([]byte, bool) { return nil, false }
+		for _, change := range changes {
+			target := change.path
+			if !path.IsAbs(target) && path.IsAbs(input.CWD) {
+				target = path.Join(input.CWD, target)
+			}
+			format := sandboxAgentHookConfigFormat(target, input.ActiveHome)
+			if format == "" {
+				continue
+			}
+			after, afterExists, ok := change.after(noRead)
+			if !ok {
+				if agentHookConfigTextMayDisable(change.text) {
+					return agentHookConfigWriteRuleID, "may turn the hooks off", target
+				}
+				continue
+			}
+			if reason := agentHookConfigTurnsOff(format, nil, false, after, afterExists); reason != "" {
+				return agentHookConfigDisableRuleID, reason, target
+			}
+		}
+		return "", "", ""
+	}
+	facts := actionfacts.Analyze(input)
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		target := strings.TrimSpace(candidate.Resolved)
+		if target == "" {
+			target = strings.TrimSpace(candidate.Value)
+		}
+		if sandboxAgentHookConfigFormat(target, input.ActiveHome) != "" {
+			return agentHookConfigWriteRuleID, "", target
+		}
+	}
+	return "", "", ""
+}
+
+// sandboxAgentHookConfigFormat is the hook-file format of a sandbox path by
+// its spelling alone: a project hook file (agentHookConfigProjectFiles) in
+// any folder, or a per-user one (agentHookConfigHomeFiles) under the guest
+// home. Sandboxes run Linux, so names are matched as spelled.
+func sandboxAgentHookConfigFormat(target, home string) string {
+	if !path.IsAbs(target) {
+		return ""
+	}
+	target = path.Clean(target)
+	for _, file := range agentHookConfigProjectFiles {
+		if strings.HasSuffix(target, file.suffix) {
+			return file.format
+		}
+	}
+	if home = path.Clean(home); path.IsAbs(home) {
+		for _, file := range agentHookConfigHomeFiles {
+			if target == path.Join(append([]string{home}, file.parts...)...) {
+				return file.format
+			}
+		}
+	}
+	return ""
 }
 
 // agentHookConfigReachedPaths lists the registered paths a statement writes,

@@ -191,7 +191,17 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 		{"profile after cd {U}", "Bash", map[string]any{"command": "cd {U} && echo x >> .profile"}},
 		{"rc cp via {U}", "Bash", map[string]any{"command": "cp src/in {U}/.bashrc"}},
 		{"git hook via src/..", "Bash", map[string]any{"command": "echo x > src/../.git/hooks/pre-commit"}},
+		// A project hook file the pull-back carries into the laptop project
+		// (sandboxAgentHookConfigFindings).
 		{"claude settings relative", "Bash", map[string]any{"command": "echo '{}' > .claude/settings.json"}},
+		{"claude settings.local relative", "Bash", map[string]any{"command": "echo '{}' > .claude/settings.local.json"}},
+		{"claude settings via src/..", "Bash", map[string]any{"command": "cp src/in src/../.claude/settings.json"}},
+		{"claude settings absolute", "Bash", map[string]any{"command": "echo '{}' > {P}/.claude/settings.json"}},
+		{"claude settings home via {U}", "Bash", map[string]any{"command": "echo '{}' > {U}/.claude/settings.json"}},
+		{"codex config relative", "Bash", map[string]any{"command": "printf 'x' >> .codex/config.toml"}},
+		{"claude settings rm", "Bash", map[string]any{"command": "rm .claude/settings.json"}},
+		{"claude settings disable Write", "Write", map[string]any{"file_path": "{P}/.claude/settings.json", "content": "{\"disableAllHooks\": true}"}},
+		{"claude folder control", "Bash", map[string]any{"command": "echo ok > .claude/notes.txt"}},
 		{"crontab file relative", "Bash", map[string]any{"command": "printf '* * * * * sh /tmp/x\\n' > c.txt && crontab c.txt"}},
 		{"defenseclaw state via {U}", "Bash", map[string]any{"command": "rm -rf {U}/.defenseclaw/audit.db"}},
 		{"ssh key read via {U}", "Bash", map[string]any{"command": "cat {U}/.ssh/id_ed25519"}},
@@ -218,18 +228,6 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 		probe  gap0264Probe
 		inHome bool // the call runs in the home, else in the project
 	}
-	// sandboxOwnHookConfig names the rows a sandbox does not judge as the
-	// laptop does, by design and not by the working directory:
-	// tamper.agent_hook_config_write is the agent-hook-config guard
-	// (agentHookConfigFindingsAs), which reads and resolves hook files through
-	// links on this host and therefore skips every sandbox request. In a
-	// sandbox the agent's settings cannot switch DefenseClaw off: the image's
-	// managed drop-in sets allowManagedHooksOnly (substrate kit overlay,
-	// openshell hostile-settings check). These rows pin the sandbox verdict.
-	sandboxOwnHookConfig := map[string]bool{
-		"claude settings relative":           true,
-		"claude settings relative from home": true,
-	}
 	var rows []row
 	for _, probe := range append(probes, fromProject...) {
 		rows = append(rows, row{probe: probe})
@@ -251,15 +249,6 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 			mountAction, mountRules := gap0264Verdict(t, api, actor(true), actorCWD, probe, actorInput)
 			t.Logf("PARITY %-38s laptop=%s %v copy=%s %v mount=%s %v", probe.name,
 				laptopAction, laptopRules, copyAction, copyRules, mountAction, mountRules)
-			if sandboxOwnHookConfig[probe.name] {
-				if laptopAction != "alert" || !slices.Equal(laptopRules, []string{agentHookConfigWriteRuleID}) {
-					t.Errorf("laptop verdict %s %v, want alert [%s]", laptopAction, laptopRules, agentHookConfigWriteRuleID)
-				}
-				if copyAction != "allow" || len(copyRules) != 0 || mountAction != "allow" || len(mountRules) != 0 {
-					t.Errorf("sandbox hook-config row: copy %s %v, mount %s %v, want allow []", copyAction, copyRules, mountAction, mountRules)
-				}
-				return
-			}
 			if copyAction != laptopAction || !slices.Equal(copyRules, laptopRules) {
 				t.Errorf("copy-mode actor verdict %s %v, laptop verdict %s %v", copyAction, copyRules, laptopAction, laptopRules)
 			}
