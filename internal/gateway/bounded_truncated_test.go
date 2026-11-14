@@ -107,8 +107,11 @@ func TestFloorBoundedTruncatedVerdict(t *testing.T) {
 			if got < bounded.Unknown(tier) || got < base {
 				t.Errorf("tier %d %q: %q, lowered or below the floor", tier, action, v.Action)
 			}
-			if !known && v.Action != action {
-				t.Errorf("tier %d %q: an unreadable action was rewritten to %q", tier, action, v.Action)
+			if !known && bounded.Unknown(tier) == bounded.Alert && v.Action != action {
+				t.Errorf("tier %d %q: an unreadable action was rewritten to %q where the floor alerts", tier, action, v.Action)
+			}
+			if !known && bounded.Unknown(tier) == bounded.Block && v.Action != "block" {
+				t.Errorf("tier %d %q: an unreadable action is %q where the floor blocks", tier, action, v.Action)
 			}
 			if action == "allow" && got != bounded.Unknown(tier) {
 				t.Errorf("tier %d allow: raised to %s, want %s", tier, v.Action, bounded.Unknown(tier))
@@ -130,6 +133,31 @@ func TestFloorBoundedTruncatedVerdict(t *testing.T) {
 	v.floorBoundedTruncated(bounded.Of(bounded.Locations), bounded.TierDefault)
 	if len(v.DetailedFindings) != 1 || len(v.Findings) != 1 || !strings.Contains(v.Findings[0], "cap=locations") {
 		t.Fatalf("a second limit finding was added: %+v", v)
+	}
+}
+
+// Review P4 edges: an action the floor cannot read becomes the block where
+// the floor blocks and is kept where it alerts; a verdict with a mode but no
+// raw action keeps its block.
+func TestFloorBoundedTruncatedEdges(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		v    ToolInspectVerdict
+		tier bounded.Tier
+		want string
+	}{
+		{"unknown name, strict", ToolInspectVerdict{Action: "deny"}, bounded.TierStrict, "block"},
+		{"unknown name, default", ToolInspectVerdict{Action: "deny"}, bounded.TierDefault, "deny"},
+		{"allow with a newline, strict", ToolInspectVerdict{Action: "allow\n"}, bounded.TierStrict, "block"},
+		{"allow with a newline, default", ToolInspectVerdict{Action: "allow\n"}, bounded.TierDefault, "alert"},
+		{"mode without raw, block", ToolInspectVerdict{Action: "block", Mode: "action"}, bounded.TierDefault, "block"},
+		{"mode without raw, allow", ToolInspectVerdict{Action: "allow", Mode: "action"}, bounded.TierDefault, "alert"},
+	} {
+		v := tc.v
+		v.floorBoundedTruncated(bounded.Of(bounded.Items), tc.tier)
+		if v.Action != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, v.Action, tc.want)
+		}
 	}
 }
 
@@ -181,7 +209,21 @@ func TestBoundedTierOfTheRequest(t *testing.T) {
 // The guardrail proxy maps a limit finding by the pack too: its
 // secure-client argument is the Secure Client posture only (review F7).
 func TestBoundedProxyPathMapsByThePack(t *testing.T) {
-	SetManagedEnterpriseActive(false)
+	prior := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(prior) })
+	// The flag is the Secure Client posture (cfg.ManagedAIDOnly, sidecar.go):
+	// false for a managed standalone install, so the proxy maps by the pack.
+	// A managed_enterprise config with no enterprise.profile resolves to
+	// Secure Client (pre-existing, config.EnterpriseProfile).
+	standalone := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	if standalone.ManagedAIDOnly() {
+		t.Fatal("a managed standalone install reads as Secure Client")
+	}
+	if unset := (&config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}); !unset.ManagedAIDOnly() {
+		t.Fatal("a managed config with no enterprise.profile no longer resolves to Secure Client: update the s7-response note")
+	}
+	SetManagedEnterpriseActive(standalone.ManagedAIDOnly())
 	for posture, want := range map[string]string{"default": guardrailActionAlert, "permissive": guardrailActionAlert, "strict": guardrailActionBlock} {
 		gc := &config.GuardrailConfig{RulePackDir: filepath.Join(guardrailPoliciesRoot(t), posture)}
 		findings := withBoundedTruncation(nil, bounded.Of(bounded.Bytes), trustedActionRequest{EnforcementCapable: true})

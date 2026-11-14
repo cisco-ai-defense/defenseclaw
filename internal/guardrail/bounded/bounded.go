@@ -15,7 +15,11 @@
 // with Floor. Nothing here allocates on the hot path.
 package bounded
 
-import "time"
+import (
+	"math"
+	"sync/atomic"
+	"time"
+)
 
 // Cap is the kind of bound a reader hit.
 type Cap uint8
@@ -164,10 +168,51 @@ func (t *Truncated) Before(now, deadline time.Time) bool {
 func (t *Truncated) Merge(s CapSet) { t.set = t.set.Union(s) }
 
 // Any reports that some cap was hit.
-func (t *Truncated) Any() bool { return t.set.Any() }
+//
+// Any sees this Truncated's hits and those of any unbound Counter (see
+// Counter); a Counter bound to another Truncated is seen only by
+// Set(counters...).
+func (t *Truncated) Any() bool { return t.set.Any() || unboundHits.Load() != 0 }
 
-// Set is the caps hit so far, the value a reader returns.
-func (t *Truncated) Set() CapSet { return t.set }
+// Set is the caps hit so far, the value a reader returns, including the hits
+// of any unbound Counter (see Counter). Pass the reader's Counters: the hits
+// of one bound to another Truncated by mistake are included too. With
+// PanicOnMisuse on (go test binaries), such a Counter panics here instead.
+func (t *Truncated) Set(counters ...*Counter) CapSet {
+	set := t.set.Union(CapSet{uint16(unboundHits.Load())})
+	for _, k := range counters {
+		if k == nil || k.t == t {
+			continue
+		}
+		if misusePanics.Load() {
+			panic("bounded: a Counter passed to Truncated.Set is bound to another Truncated; make it with NewCounter(&thisTruncated, ...)")
+		}
+		if k.t != nil {
+			set = set.Union(k.t.set)
+		}
+	}
+	return set
+}
+
+// unboundHits holds the caps hit by Counters that were never bound to a
+// Truncated (a zero Counter, a struct field one constructor path forgot to
+// set with NewCounter). Every Truncated reports them (Any, Set), process-wide
+// and for good: such a reader cannot say which call it cut short, so every
+// call is judged as truncated (the unknown tier) rather than one input going
+// unread in silence. Go test binaries panic at the first take instead
+// (PanicOnMisuse).
+var unboundHits atomic.Uint32
+
+// misusePanics: see PanicOnMisuse.
+var misusePanics atomic.Bool
+
+// PanicOnMisuse makes a misused Counter panic where the mistake is made (the
+// first take of an unbound Counter, Set with a Counter bound elsewhere)
+// instead of the production fallback (every call floored, hits merged). It is
+// a test hook: a package that adopts the helper calls it from a _test.go file
+// (func init() { bounded.PanicOnMisuse(true) }); production code never does.
+// This package does not import testing, so its binaries do not grow.
+func PanicOnMisuse(on bool) { misusePanics.Store(on) }
 
 // Counter counts one cap kind across a walk and records its hit in the
 // Truncated it was made for. Like Truncated it is used by pointer and never
@@ -179,6 +224,10 @@ func (t *Truncated) Set() CapSet { return t.set }
 // A Time cap counted in work units (one per node, statement or effect the
 // reader visits) trips on the same input on every host; prefer it to a
 // wall-clock deadline.
+//
+// NewCounter is the only way to make a Counter that counts. A zero Counter
+// (never set with NewCounter) refuses its first take and records the hit in
+// every Truncated (see unboundHits); under go test it panics.
 type Counter struct {
 	_      noCopy
 	t      *Truncated
@@ -197,14 +246,29 @@ func NewCounter(t *Truncated, c Cap, max int) Counter {
 func (k *Counter) Take() bool { return k.TakeN(1) }
 
 // TakeN counts n items (the bytes of a string, for example). A negative n is
-// a reader error, never a refund: it records the cap and is false.
+// a reader error, never a refund: it records the cap and is false. The count
+// saturates instead of wrapping.
 func (k *Counter) TakeN(n int) bool {
-	if n < 0 {
-		k.t.Hit(k.cap)
+	if k.t == nil {
+		if misusePanics.Load() {
+			panic("bounded: Take on a Counter that was never bound; make it with NewCounter(&trunc, cap, max)")
+		}
+		unboundHits.Or(uint32(CapSet{}.with(k.cap).bits))
 		return false
 	}
-	k.n += n
-	return k.t.Within(k.cap, k.n, k.max)
+	switch {
+	case n < 0:
+		k.n = math.MaxInt
+	case n > math.MaxInt-k.n:
+		k.n = math.MaxInt
+	default:
+		k.n += n
+	}
+	if k.n <= k.max {
+		return true
+	}
+	k.t.Hit(k.cap)
+	return false
 }
 
 // Action is a guardrail verdict, ordered from the weakest to the strictest.
@@ -228,14 +292,14 @@ func (a Action) String() string {
 }
 
 // ParseAction reads a gateway action name, in any case and with surrounding
-// space. "ask" is Confirm. An empty name is Allow. Any other name is Block
+// ASCII white space. "ask" is Confirm. An empty name is Allow. Any other name is Block
 // and known false: a verdict the floor cannot read is never lowered.
 func ParseAction(s string) (a Action, known bool) {
 	start, end := 0, len(s)
-	for start < end && (s[start] == ' ' || s[start] == '\t') {
+	for start < end && asciiSpace(s[start]) {
 		start++
 	}
-	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+	for end > start && asciiSpace(s[end-1]) {
 		end--
 	}
 	s = s[start:end]
@@ -251,6 +315,10 @@ func ParseAction(s string) (a Action, known bool) {
 		}
 	}
 	return Block, false
+}
+
+func asciiSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 func equalFoldASCII(s, lower string) bool {

@@ -4,6 +4,7 @@
 package bounded
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -45,6 +46,73 @@ func TestCounterRefusesANegativeTake(t *testing.T) {
 	}
 	if size.TakeN(500) {
 		t.Fatal("a negative take refunded 1000 bytes: 500 fit under a 10-byte cap")
+	}
+}
+
+// A Counter bound to another Truncated than the reader returns is a panic
+// with PanicOnMisuse on (go test), and its hits are merged in production
+// (review V7).
+func TestSetCatchesAMisboundCounter(t *testing.T) {
+	var reader, other Truncated
+	items := NewCounter(&other, Items, 1)
+	items.Take()
+	items.Take()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("Set with a Counter bound to another Truncated did not panic with PanicOnMisuse on")
+			}
+		}()
+		_ = reader.Set(&items)
+	}()
+	PanicOnMisuse(false)
+	defer PanicOnMisuse(true)
+	if got := reader.Set(&items); !got.Has(Items) {
+		t.Fatalf("production Set lost the misbound Counter's hit: %+v", got)
+	}
+	bound := NewCounter(&reader, Paths, 0)
+	bound.Take()
+	if got := reader.Set(&bound, nil); got != Of(Paths) {
+		t.Fatalf("Set(bound counter): %+v", got)
+	}
+}
+
+// A zero Counter (a struct literal, no NewCounter) is never a silent unread
+// (review round 3 P3-1): under go test its first take panics; in production
+// it refuses the take and every Truncated reports the hit (Any and Set), so
+// every call floors.
+func TestZeroCounterIsNeverASilentUnread(t *testing.T) {
+	var zero Counter
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("a take on an unbound Counter did not panic with PanicOnMisuse on")
+			}
+		}()
+		zero.Take()
+	}()
+	PanicOnMisuse(false)
+	t.Cleanup(func() { PanicOnMisuse(true); unboundHits.Store(0) })
+	if zero.Take() {
+		t.Fatal("a zero Counter allowed a take")
+	}
+	var anyReader Truncated
+	if !anyReader.Any() || !anyReader.Set().Has(Items) {
+		t.Fatalf("an unbound Counter's hit is not seen by another reader: any=%t set=%+v", anyReader.Any(), anyReader.Set())
+	}
+}
+
+// The count saturates instead of wrapping.
+func TestTakeNSaturates(t *testing.T) {
+	var trunc Truncated
+	size := NewCounter(&trunc, Bytes, 10)
+	for i, n := range []int{math.MaxInt, math.MaxInt, 1} {
+		if size.TakeN(n) {
+			t.Fatalf("take %d of %d: a huge take wrapped the count back under the cap", i+1, n)
+		}
+	}
+	if !trunc.Set().Has(Bytes) {
+		t.Fatal("the saturated count lost its hit")
 	}
 }
 
@@ -144,6 +212,7 @@ func TestParseActionReadsEverySpelling(t *testing.T) {
 	for in, want := range map[string]Action{
 		"allow": Allow, "alert": Alert, "confirm": Confirm, "ask": Confirm, "block": Block,
 		"BLOCK": Block, "Block": Block, " block": Block, "block\t": Block, "ALERT": Alert, "": Allow,
+		"allow\n": Allow, "\r\nblock\v": Block, "\fconfirm": Confirm,
 	} {
 		if got, known := ParseAction(in); got != want || !known {
 			t.Errorf("ParseAction(%q) = %s known=%t, want %s", in, got, known, want)

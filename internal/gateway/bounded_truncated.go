@@ -117,8 +117,9 @@ func withBoundedTruncation(findings []RuleFinding, set bounded.CapSet, request t
 // to the caps in set to bounded.Floor: at least the unknown tier of the pack,
 // never below the verdict. An action name in any case is read (and written
 // back in its canonical spelling); a name the floor cannot read is kept as it
-// is. The verdict carries one evaluation-limit finding whose severity agrees
-// with the floor (MEDIUM and alert-only where the floor alerts, HIGH where it
+// is where the floor alerts and becomes block where the floor blocks. The
+// verdict carries one evaluation-limit finding whose severity agrees with
+// the floor (MEDIUM and alert-only where the floor alerts, HIGH where it
 // blocks). A verdict applyMode already mapped is floored on its raw action
 // and mapped again, so the order of the two calls cannot drop the floor.
 func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier bounded.Tier) {
@@ -127,7 +128,13 @@ func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier boun
 	}
 	mode := v.Mode
 	if mode != "" {
-		v.Action, v.WouldBlock = v.RawAction, false
+		// applyMode ran: floor the raw verdict, then map the mode again. A
+		// verdict with a mode but no raw action (a literal an adopter built)
+		// is its own raw verdict, so a block is never lowered.
+		if v.RawAction != "" {
+			v.Action = v.RawAction
+		}
+		v.WouldBlock = false
 	}
 	floor := bounded.Unknown(tier)
 	bound := boundedTruncatedFinding(set, true)
@@ -138,7 +145,9 @@ func (v *ToolInspectVerdict) floorBoundedTruncated(set bounded.CapSet, tier boun
 	}
 	before, known := bounded.ParseAction(v.Action)
 	after := bounded.Floor(before, set, tier)
-	if known {
+	if known || floor == bounded.Block {
+		// A name the floor cannot read is kept where the floor alerts (it may
+		// name a block); where the floor blocks it becomes the block.
 		v.Action = after.String()
 	}
 	if after > before {
