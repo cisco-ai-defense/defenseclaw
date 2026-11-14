@@ -421,114 +421,13 @@ func secretAssignmentNameShaped(value string) bool {
 // secretAssignmentPathShaped reports a relative path told by the structure of
 // the whole value: four or more components joined by /, none empty, made of
 // names with only a few ids among them. The value is weighed by its letters
-// and digits, not by its pieces (GAP-0665). A piece (split at _ - . and /) is:
-//   - a counter (digits only, short): it weighs nothing;
-//   - a word: letters of one case shape (all lower, all upper or one capital
-//     then lower), three or more of them (three always pass, more hold a vowel
-//     and no run of more than five consonants). It counts as a word, and its
-//     letters are names;
-//   - a short name: one or two letters of that shape. Its letters are names
-//     but it counts as no word, so single-letter padding (a/b/c/d) never
-//     makes six words;
-//   - a short tag (k8s, v2, a999): a lower-case piece of letters and digits
-//     of four characters or fewer that starts with a letter. Its letters are
-//     names and its digits are ids, because a digit is what an id carries;
-//   - an id otherwise, when it is no longer than 16 characters (a git short
-//     hash, a migration revision, a temporary-file suffix, a longer piece of
-//     letters and digits): all its letters and digits are ids. A longer piece
-//     rules the value out.
-//
-// The value is a path when it has at least six words and the ids are at most a
-// quarter of its letters and digits. A short secret hidden among a few short
-// pieces keeps its ids over a quarter of the value, so it is not a path;
-// random base64 that holds slashes is short pieces mixed in case and full of
-// digits and does not get there either.
+// and digits, not by its pieces (GAP-0665), by weighPath (path_shape.go), the
+// helper SEC-PASSWORD-ASSIGN uses too (GAP-0671): it is a path when it has at
+// least six words and the ids are at most a quarter of its letters and
+// digits. The secret rule weighs plain names only (camel off).
 func secretAssignmentPathShaped(value string) bool {
-	components := strings.Split(value, "/")
-	if len(components) < 4 {
-		return false
-	}
-	words, idChars, total := 0, 0, 0
-	for _, component := range components {
-		pieces := strings.FieldsFunc(component, func(r rune) bool { return r == '_' || r == '-' || r == '.' })
-		if len(pieces) == 0 {
-			return false
-		}
-		for _, piece := range pieces {
-			if secretAssignmentCounter(piece) {
-				continue
-			}
-			size := secretAlnumCount(piece)
-			total += size
-			switch {
-			case !secretAssignmentPathWord(piece):
-				if len(piece) > 16 {
-					return false
-				}
-				idChars += size
-			default:
-				letters := countLetters(piece)
-				switch {
-				case letters == size:
-					if letters >= 3 {
-						words++
-					}
-				case size > 4:
-					// A piece of letters and digits longer than a short tag
-					// is as likely a chunk of a secret as a name.
-					idChars += size
-				default:
-					idChars += size - letters
-				}
-			}
-		}
-	}
-	return words >= 6 && idChars*4 <= total
-}
-
-// secretAssignmentPathWord reports a path piece that a person wrote: letters
-// of one case shape (all lower, all upper or one capital then lower) that are
-// three or fewer, or hold a vowel and no run of more than five consonants; or
-// a short lower-case piece of letters and digits that is not token-like.
-func secretAssignmentPathWord(piece string) bool {
-	if piece == "" || len(piece) > 16 {
-		return false
-	}
-	upper, lower, digits := 0, 0, 0
-	for i := 0; i < len(piece); i++ {
-		switch c := piece[i]; {
-		case c >= 'A' && c <= 'Z':
-			upper++
-		case c >= 'a' && c <= 'z':
-			lower++
-		case c >= '0' && c <= '9':
-			digits++
-		default:
-			return false
-		}
-	}
-	if upper != 0 && lower != 0 && (upper != 1 || piece[0] < 'A' || piece[0] > 'Z') {
-		return false
-	}
-	if digits > 0 {
-		return len(piece) <= 8 && upper == 0 && secretAssignmentLetter(piece[0]) && !secretAssignmentTokenLike(piece)
-	}
-	if len(piece) <= 3 {
-		return true
-	}
-	vowel, run := false, 0
-	for i := 0; i < len(piece); i++ {
-		if strings.IndexByte("aeiouyAEIOUY", piece[i]) >= 0 {
-			vowel = true
-			run = 0
-			continue
-		}
-		run++
-		if run > 5 {
-			return false
-		}
-	}
-	return vowel
+	w := weighPath(value, false)
+	return w.components >= 4 && w.words >= 6 && w.namesOnly()
 }
 
 // secretAssignmentVersionToken reports a segment that is a version or a year
@@ -552,53 +451,6 @@ func secretAssignmentVersionToken(segment string) bool {
 		return false
 	}
 	return len(parts[0]) >= 2 && len(parts[1]) <= 2 && len(parts[3]) <= 4 && secretAssignmentWordShaped(parts[2], 3)
-}
-
-// secretAssignmentTokenLike reports a segment of eight characters or more
-// that turns from letters to digits or back three times or more
-// (7f8a9b0c1d2e): a generated token, where a name has its digits in one run
-// (summer2026, v2).
-func secretAssignmentTokenLike(segment string) bool {
-	if len(segment) < 8 {
-		return false
-	}
-	turns, prev := 0, byte(0)
-	for i := 0; i < len(segment); i++ {
-		class := byte('l')
-		if segment[i] >= '0' && segment[i] <= '9' {
-			class = 'd'
-		} else if !secretAssignmentLetter(segment[i]) {
-			continue
-		}
-		if prev != 0 && class != prev {
-			turns++
-		}
-		prev = class
-	}
-	return turns >= 3
-}
-
-// secretAssignmentCounter reports a segment that is only digits and is short
-// or the length of an epoch in milliseconds.
-func secretAssignmentCounter(segment string) bool {
-	if segment == "" || strings.Trim(segment, "0123456789") != "" {
-		return false
-	}
-	return len(segment) <= 10 || len(segment) == 13
-}
-
-func secretAssignmentLetter(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
-}
-
-func countLetters(value string) int {
-	n := 0
-	for i := 0; i < len(value); i++ {
-		if secretAssignmentLetter(value[i]) {
-			n++
-		}
-	}
-	return n
 }
 
 // secretAssignmentWordLetters counts the letters of value that sit in

@@ -1363,18 +1363,6 @@ func obviousCredentialPlaceholder(candidate string) bool {
 	return repeatedShortCredentialUnit(compact)
 }
 
-// secretAlnumCount counts the letters and digits of s; = + / padding carries no secret.
-func secretAlnumCount(s string) int {
-	n := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
-			n++
-		}
-	}
-	return n
-}
-
 // awsDocumentedSecretKey is the example secret access key of the AWS documentation.
 const awsDocumentedSecretKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
