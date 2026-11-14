@@ -70,6 +70,14 @@ var (
 	}
 )
 
+// RefusesEgress reports a chain the callout refuses when its egress
+// action is block: a secret read, or a secret-manager read, followed by
+// external egress. The gateway's hook answers the same set for a verified
+// actor (gateway.SetSubstrateChainEgressAction).
+func RefusesEgress(chainID string) bool {
+	return egressDenyChains[chainID]
+}
+
 // Options configure a Service.
 type Options struct {
 	// Dir is the leader's store volume directory.

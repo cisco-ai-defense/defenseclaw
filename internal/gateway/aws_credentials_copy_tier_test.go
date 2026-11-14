@@ -15,19 +15,24 @@ import (
 // A file that only starts like the AWS credentials file (credentials.bak) is
 // an ordinary file in the default and permissive tiers; the strict tier keeps
 // a copy protected. The credentials file itself is protected in every tier,
-// alone or next to a copy.
+// alone or next to a copy. A template or sample (credentials.sample) is not a
+// copy: it is ordinary in every tier (rel-1-0-6:GAP-1009,
+// substrate-1:GAP-0210).
 func TestAWSCredentialsCopyIsOrdinaryOutsideTheStrictTier(t *testing.T) {
 	type call struct {
 		name, tool, file, command string
 		// block is the verdict in the default and permissive tiers; the
 		// strict tier blocks every call that names the file or a copy.
 		block bool
+		// ordinary: not the file nor a copy, allowed in every tier.
+		ordinary bool
 	}
 	calls := []call{
 		{name: "write exact", tool: "Write", file: "/home/alice/.aws/credentials", block: true},
 		{name: "write copy", tool: "Write", file: "/home/alice/.aws/credentials.bak"},
-		{name: "write copy sample", tool: "Write", file: "/home/alice/.aws/credentials.sample"},
-		{name: "write dashed neighbour", tool: "Write", file: "/home/alice/.aws/credentials-old"},
+		{name: "write template sample", tool: "Write", file: "/home/alice/.aws/credentials.sample", ordinary: true},
+		{name: "write template example", tool: "Write", file: "/home/alice/.aws/credentials.example", ordinary: true},
+		{name: "write dashed neighbour", tool: "Write", file: "/home/alice/.aws/credentials-old", ordinary: true},
 		{name: "redirect to exact", tool: "shell", command: "echo fixture > ~/.aws/credentials", block: true},
 		{name: "redirect to copy", tool: "shell", command: "echo fixture > ~/.aws/credentials.bak"},
 		{name: "copy the file to a copy", tool: "shell", command: "cp ~/.aws/credentials ~/.aws/credentials.bak", block: true},
@@ -53,7 +58,7 @@ func TestAWSCredentialsCopyIsOrdinaryOutsideTheStrictTier(t *testing.T) {
 				})
 				want := tc.block
 				if profile == "strict" {
-					want = tc.name != "write dashed neighbour"
+					want = !tc.ordinary
 				}
 				if got := buildVerdict(findings, "tool_call").Action == "block"; got != want {
 					t.Errorf("block = %v, want %v (%v)", got, want, FindingStrings(findings))

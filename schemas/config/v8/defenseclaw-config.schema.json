@@ -7680,6 +7680,15 @@
         "idle_suspend_after": {
           "$ref": "#/$defs/duration"
         },
+        "chain_egress_action": {
+          "description": "What a request that leaves the cluster after a secret read gets at the egress callout: block (default, every mode) or alert (opt-in). The leader answers the callout's chain check with it (GAP-0250).",
+          "type": "string",
+          "enum": [
+            "block",
+            "alert"
+          ],
+          "default": "block"
+        },
         "workspace_max_bytes": {
           "type": "integer",
           "minimum": 0,
