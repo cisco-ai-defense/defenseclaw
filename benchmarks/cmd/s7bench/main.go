@@ -230,7 +230,11 @@ func main() {
 	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the /llm proxy GuardrailInspector, direction prompt; the connector UserPromptSubmit answer goes to extra) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision)")
 	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
+	printModeled := flag.Bool("print-modeled", false, "print case,idx,tool,modeled for every event of -corpus (-ids, -connector) and exit: whether the gateway's parser models the call's effects (the tool judge's CALL_EFFECTS section); no engine, no judge, no decisions")
 	flag.Parse()
+	if *printModeled {
+		os.Exit(printModeledEvents(*corpus, *ids, *connectorFlag))
+	}
 	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" {
 		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt or tool-result")
 		os.Exit(2)
@@ -626,4 +630,54 @@ func loadAvg() string {
 		return f[0]
 	}
 	return ""
+}
+
+// printModeledEvents writes case<TAB>idx<TAB>tool<TAB>modeled for every event, mapped to the tool call the hook would see
+// (the same mapping as a run), so a benchmark can be split by whether the parser models a call's effects.
+func printModeledEvents(corpusPath, idsPath, connectorFlag string) int {
+	want := map[string]bool{}
+	if idsPath != "" {
+		b, err := os.ReadFile(idsPath)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		for _, l := range strings.Split(string(b), "\n") {
+			if l = strings.TrimSpace(l); l != "" {
+				want[l] = true
+			}
+		}
+	}
+	f, err := os.Open(corpusPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer f.Close()
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 64<<20)
+	for sc.Scan() {
+		var c corpusCase
+		if json.Unmarshal(sc.Bytes(), &c) != nil || (len(want) > 0 && !want[c.ID]) {
+			continue
+		}
+		conn := connectorOf(connectorFlag, c.Strata.Provider)
+		events := c.Payload.Events
+		if len(events) == 0 {
+			events = []event{c.Payload.event}
+		}
+		for i, ev := range events {
+			var tool string
+			var input json.RawMessage
+			if connectorFlag == "claudecode" {
+				tool, input, _ = mapTool(ev)
+			} else {
+				tool, input, _ = buildCall(conn, ev)
+			}
+			fmt.Fprintf(w, "%s\t%d\t%s\t%v\n", c.ID, i, tool, gateway.S7CallEffectsModeled(tool, string(input)))
+		}
+	}
+	return 0
 }
