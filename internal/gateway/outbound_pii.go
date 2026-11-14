@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/paymentcard"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -65,26 +67,21 @@ func outboundPIICardPattern() *regexp.Regexp {
 }
 
 // outboundPIIRulePattern reads the pattern of one rule from rule-file YAML
-// without a YAML parser: the file shape is fixed (id, then pattern, on the
-// following lines of the same list item).
+// (a rules list of items with an id and a pattern). A file that does not parse
+// or does not carry the rule gives "".
 func outboundPIIRulePattern(data []byte, ruleID string) string {
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		if strings.TrimSpace(line) != "- id: "+ruleID {
-			continue
-		}
-		for _, next := range lines[i+1:] {
-			trimmed := strings.TrimSpace(next)
-			if strings.HasPrefix(trimmed, "- id:") {
-				return ""
-			}
-			if strings.HasPrefix(trimmed, "pattern:") {
-				value := strings.TrimSpace(strings.TrimPrefix(trimmed, "pattern:"))
-				if len(value) >= 2 && value[0] == '\'' && value[len(value)-1] == '\'' {
-					return strings.ReplaceAll(value[1:len(value)-1], "''", "'")
-				}
-				return value
-			}
+	var doc struct {
+		Rules []struct {
+			ID      string `yaml:"id"`
+			Pattern string `yaml:"pattern"`
+		} `yaml:"rules"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return ""
+	}
+	for _, rule := range doc.Rules {
+		if rule.ID == ruleID {
+			return rule.Pattern
 		}
 	}
 	return ""
