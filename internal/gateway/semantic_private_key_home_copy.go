@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"path"
-	"path/filepath"
 	"slices"
 	"strings"
 
