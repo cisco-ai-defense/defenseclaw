@@ -272,8 +272,9 @@ type trustedActionRequest struct {
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
 	// windowsDialectReadings is set by the Windows hooks, which choose one shell
-	// dialect per call: a call whose chosen reading is not complete is also judged
-	// as the other shell and as its readable statements (windowsReadingTwinRequests).
+	// dialect per call: a call whose PowerShell reading is partial is also judged
+	// as its readable statements (windowsReadingTwinRequests), never as another
+	// shell.
 	windowsDialectReadings bool
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
