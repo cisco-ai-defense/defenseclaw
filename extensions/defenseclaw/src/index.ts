@@ -73,12 +73,18 @@ import { scanMCPServer } from "./scanners/mcp-scanner.js";
 import type {
   ScanResult,
   Finding,
-  InstallType,
   OutboundSidecarRequestLog,
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
-import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
+import {
+  configureSidecarConnection,
+  getRuntimeSettings,
+  loadOpenClawOutageMode,
+  loadSidecarConfig,
+  separateUserLayout,
+  setRuntimeSettings,
+} from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor, MODEL_OUTAGE_WARNING } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
@@ -333,6 +339,35 @@ export default function (api: DefenseClawPluginHost) {
 
   // ─── Runtime: tool call interception ───
 
+  configureSidecarConnection(api.pluginConfig);
+  // Setup writes hookMode from connectors.openclaw.hooks.mode and the
+  // OpenClaw version: hybrid (native hooks and the guardrail proxy), native
+  // (native hooks only, Windows) or none (the proxy, OpenClaw before
+  // 2026.8.35).
+  const pluginCfg = (api.pluginConfig as Record<string, unknown> | undefined) ?? {};
+  const configuredHookMode = pluginCfg.hookMode;
+  // native (no interceptor, no proxy) is honoured only on Windows, where
+  // DefenseClaw hosts no proxy: elsewhere openclaw.json is writable by the
+  // agent account, and one key must not turn off model-traffic inspection.
+  const hookMode: "proxy" | "hybrid" | "native" =
+    configuredHookMode === "native" && process.platform === "win32"
+      ? "native"
+      : configuredHookMode === "hybrid" || configuredHookMode === "native"
+        ? "hybrid"
+        : "proxy";
+  // The prompt gate: always on in native mode (the only request-side check
+  // there); otherwise what the gateway reports, and until it first answers,
+  // what setup wrote into openclaw.json.
+  const promptGateOn = (): boolean => {
+    if (hookMode === "native") return true;
+    const runtime = getRuntimeSettings();
+    if (runtime.inspectTimeoutMs > 0) return runtime.promptGate;
+    // Not answered yet. In the separate-user layout openclaw.json has no
+    // promptGate key: the gate is on, so the check runs and a gateway that
+    // does not answer gets the outage rule, not a skipped gate
+    // (rel-1-0-10 REVIEW-4 P2-1).
+    return separateUserLayout() || pluginCfg.promptGate === true;
+  };
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
   if (!isLoopbackHost(sidecarConfig.host)) {
@@ -342,9 +377,24 @@ export default function (api: DefenseClawPluginHost) {
       `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks are blocked`,
     );
   }
-  const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
-    ? Math.max(2_000, (sidecarConfig.approvalTimeoutS + 5) * 1_000)
-    : 2_000;
+  // OpenClaw blocks a gate hook (before_tool_call, before_agent_run) that
+  // throws or runs out of its budget, whatever the DefenseClaw policy says.
+  // The plugin gives each gate hook this budget and waits for a verdict at
+  // most 3 s less, so the plugin, not the host, applies the outage mode.
+  // OpenClaw allows a gate budget up to 600 s; the plugin bounds its own
+  // wait (inspectTimeoutMs) well inside it, so the host never times out first.
+  const hostGateBudgetMs = 600_000;
+  const HOST_MARGIN_MS = 10_000;
+  // The verdict wait comes from the gateway (judge budget, approvals), read
+  // per call; before it answers, the config.yaml approval settings apply.
+  const inspectTimeoutMs = (): number => {
+    const runtime = getRuntimeSettings();
+    const live = loadSidecarConfig();
+    const wanted = runtime.inspectTimeoutMs > 0
+      ? runtime.inspectTimeoutMs
+      : live.hiltEnabled ? Math.max(2_000, (live.approvalTimeoutS + 5) * 1_000) : 10_000;
+    return Math.min(wanted, hostGateBudgetMs - HOST_MARGIN_MS);
+  };
 
   let identityCache: BootstrapPluginIdentityResult | undefined;
   let pluginAgentExtras: { name?: string; policyId?: string } = {};
@@ -388,6 +438,41 @@ export default function (api: DefenseClawPluginHost) {
     { daemonUrl: sidecarConfig.baseUrl },
     daemonClient,
   );
+
+  // The verdict budget and the prompt gate come from the gateway (and, in
+  // the separate-user layout, the approval settings), read when the service
+  // starts and every minute until it stops.
+  let runtimeTimer: ReturnType<typeof setInterval> | undefined;
+  let runtimeFailureLogged = false;
+  // One request at a time; a prompt waits at most RUNTIME_PROMPT_WAIT_MS.
+  const RUNTIME_PROMPT_WAIT_MS = 3_000;
+  let runtimeInFlight: Promise<void> | undefined;
+  const refreshRuntime = (timeoutMs?: number): Promise<void> => {
+    if (runtimeInFlight) return runtimeInFlight;
+    runtimeInFlight = Promise.resolve()
+      .then(() => daemonClient.runtime(hookMode, timeoutMs))
+      .then((res) => {
+        if (res.ok && res.data) {
+          setRuntimeSettings(res.data);
+          runtimeFailureLogged = false;
+        } else if (!runtimeFailureLogged) {
+          runtimeFailureLogged = true;
+          const until = separateUserLayout() ? "the prompt gate stays on" : "the prompt gate follows openclaw.json";
+          console.warn(`[defenseclaw] could not read the guardrail settings from the gateway (status ${res.status}); ${until} until it answers`);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        runtimeInFlight = undefined;
+      });
+    return runtimeInFlight;
+  };
+  const startRuntimeRefresh = (): void => {
+    if (runtimeTimer) return;
+    void refreshRuntime();
+    runtimeTimer = setInterval(() => void refreshRuntime(), 60_000);
+    runtimeTimer.unref?.();
+  };
 
   // ─── Health monitor ───
   // Polls the sidecar /status endpoint and warns when protection is down.
@@ -492,7 +577,7 @@ export default function (api: DefenseClawPluginHost) {
   });
   // Start immediately so gateway model prewarm (before plugin services) also
   // routes through the guardrail when Bedrock is the primary model.
-  interceptor.start();
+  if (hookMode !== "native") interceptor.start();
 
   // Stops the interceptor and the health monitor. OpenClaw calls the service
   // `stop` when it replaces or removes the plugin; it ignores what start()
@@ -501,12 +586,20 @@ export default function (api: DefenseClawPluginHost) {
   const stopService = (): void => {
     interceptor.stop();
     healthMonitor.stop();
+    if (runtimeTimer) clearInterval(runtimeTimer);
+    runtimeTimer = undefined;
   };
 
   api.registerService({
     id: "llm-interceptor",
     stop: stopService,
     start: async () => {
+      startRuntimeRefresh();
+      if (hookMode === "native") {
+        // No guardrail proxy: the native hooks guard OpenClaw.
+        healthMonitor.start();
+        return { stop: stopService };
+      }
       interceptor.start();
       const layers = interceptor.describeLayers();
       if (!layers.fetch || !layers.httpsRequest || !layers.httpRequest || !layers.httpGet) {
@@ -544,7 +637,7 @@ export default function (api: DefenseClawPluginHost) {
     // gateway, and its verdict comes back on that connection (GAP-0594). The
     // budget counts from the proven connection, so the proof does not use it.
     const res = await daemonClient.postRaw("/api/v1/inspect/tool", bodyPayload, {
-      timeoutMs: INSPECT_TIMEOUT_MS,
+      timeoutMs: inspectTimeoutMs(),
       correlation: { runId: toolCtx?.runId, sessionId },
     });
     if (res.status === 0) {
@@ -662,24 +755,134 @@ export default function (api: DefenseClawPluginHost) {
     if (verdict.action === "confirm" && verdict.mode === "action") {
       return buildApprovalRequest(event.toolName, verdict);
     }
-  });
+  }, { timeoutMs: hostGateBudgetMs });
+
+  // ─── Native hooks (hookMode hybrid or native, OpenClaw 2026.8.35+) ───
+
+  // A verdict from an inspect route, with the outage rule of before_tool_call:
+  // only a gateway that did not answer follows the saved outage mode; an
+  // unproven listener, a refused request and a malformed answer stay closed.
+  async function postForVerdict(
+    path: string,
+    body: Record<string, unknown>,
+    correlation: { runId?: string; sessionId?: string },
+    onOutage: (reason: string) => InspectVerdict,
+  ): Promise<InspectVerdict> {
+    const res = await daemonClient.postRaw(path, body, { timeoutMs: inspectTimeoutMs(), correlation });
+    if (res.status === 0) {
+      const msg = res.error ?? "no answer";
+      return res.outage ? onOutage(`sidecar unreachable: ${msg}`) : failClosedVerdict(`sidecar request failed: ${msg}`);
+    }
+    if (res.status < 200 || res.status >= 300) return failClosedVerdict(`sidecar returned ${res.status}`);
+    try {
+      const verdict: unknown = JSON.parse(res.body);
+      return isInspectVerdict(verdict) ? verdict : failClosedVerdict("sidecar returned invalid verdict");
+    } catch {
+      return failClosedVerdict("sidecar returned malformed verdict");
+    }
+  }
+
+  // Outage of a prompt check: open tiers let the prompt through with a
+  // warning, strict and managed tiers block it.
+  const promptOutageVerdict = (reason: string): InspectVerdict => {
+    if (loadOpenClawOutageMode() === "open") {
+      const warning = `DefenseClaw warning: ${reason}; the prompt runs without inspection.`;
+      console.warn(warning);
+      return { action: "allow", severity: "NONE", reason: warning, mode: "observe" };
+    }
+    return failClosedVerdict(reason);
+  };
+
+  const MAX_OBSERVED_TEXT = 256 * 1024;
+  const sessionOf = (ctx?: { sessionKey?: string; sessionId?: string }) => ctx?.sessionKey ?? ctx?.sessionId;
+
+  if (hookMode !== "proxy") {
+    // Prompt gate (connectors.openclaw.hooks.prompt_gate, off by default):
+    // the user prompt is inspected before the model reads it. OpenClaw keeps
+    // only the replacement message in the transcript of a blocked run.
+    api.on("before_agent_run", async (event, ctx) => {
+      // Until the gateway first answers, ask it once more: in the
+      // separate-user layout openclaw.json has no promptGate key and the
+      // gate is only in GET /api/v1/openclaw/runtime (rel-1-0-10 GAP-0138).
+      if (hookMode !== "native" && getRuntimeSettings().inspectTimeoutMs <= 0) {
+        // A refresh already in flight may use the long default timeout; the
+        // prompt waits at most RUNTIME_PROMPT_WAIT_MS for it (REVIEW-5 N2).
+        await Promise.race([
+          refreshRuntime(RUNTIME_PROMPT_WAIT_MS),
+          new Promise<void>((resolve) => setTimeout(resolve, RUNTIME_PROMPT_WAIT_MS).unref?.()),
+        ]);
+      }
+      if (!promptGateOn()) return;
+      const prompt = typeof event?.prompt === "string" ? event.prompt : "";
+      if (!prompt) return;
+      const sessionId = sessionOf(ctx);
+      const verdict = await postForVerdict(
+        "/api/v1/inspect/request",
+        {
+          content: prompt.slice(0, MAX_OBSERVED_TEXT),
+          // A cut prompt is reviewed as a bounded prefix, never as complete.
+          ...(prompt.length > MAX_OBSERVED_TEXT ? { bounded_prefix_review: true } : {}),
+          ...(sessionId ? { session_id: sessionId } : {}),
+        },
+        { runId: ctx?.runId, sessionId },
+        promptOutageVerdict,
+      );
+      console.log(`[defenseclaw] prompt verdict:${verdict.action} severity:${verdict.severity}`);
+      if (verdict.action === "block" && verdict.mode === "action") {
+        return {
+          outcome: "block",
+          reason: `defenseclaw: ${verdict.reason}`,
+          message: `DefenseClaw blocked this message: ${verdict.reason}`,
+        };
+      }
+      return undefined;
+    }, { timeoutMs: hostGateBudgetMs });
+  }
+
+  if (hookMode === "native") {
+    // No guardrail proxy sees the traffic, so the observation hooks feed the
+    // response and tool-result scans (audit and findings; they cannot block).
+    api.on("after_tool_call", (event, ctx) => {
+      const output = event?.error !== undefined ? { error: event.error } : event?.result;
+      const sessionId = sessionOf(ctx);
+      void daemonClient.postRaw("/api/v1/inspect/tool-response", {
+        tool: event?.toolName,
+        output: output === undefined ? null : output,
+        ...(sessionId ? { session_id: sessionId } : {}),
+      }, { timeoutMs: inspectTimeoutMs(), correlation: { runId: event?.runId ?? ctx?.runId, sessionId } }).catch(() => {});
+    });
+    api.on("llm_output", (event, ctx) => {
+      const texts = Array.isArray(event?.assistantTexts) ? event.assistantTexts.filter((t: unknown) => typeof t === "string") : [];
+      const content = texts.join("\n").slice(0, MAX_OBSERVED_TEXT);
+      if (!content) return;
+      const sessionId = event?.sessionId ?? sessionOf(ctx);
+      void daemonClient.postRaw("/api/v1/inspect/response", {
+        content,
+        model: event?.model,
+        ...(sessionId ? { session_id: sessionId } : {}),
+      }, { timeoutMs: inspectTimeoutMs(), correlation: { runId: event?.runId, sessionId } }).catch(() => {});
+    });
+  }
 
   // ─── Slash command: /scan ───
 
   api.registerCommand({
     name: "scan",
+    acceptsArgs: true,
+    requireAuth: true,
     description: "Scan a skill, plugin, MCP config, or source code with DefenseClaw",
     args: [
       { name: "target", description: "Path to skill/plugin directory, MCP config, or source code", required: true },
       { name: "type", description: "Scan type: skill (default), plugin, mcp, code", required: false },
     ],
-    handler: async ({ args }) => {
-      const target = args.target as string | undefined;
+    handler: async (cmd) => {
+      const args = scanArgs(cmd.args);
+      const target = args.target;
       if (!target) {
         return { text: "Usage: /scan <path> [skill|plugin|mcp|code]" };
       }
 
-      const scanType = (args.type ?? "skill") as string;
+      const scanType = args.type ?? "skill";
 
       if (scanType === "plugin") {
         return handlePluginScan(target);
@@ -704,57 +907,33 @@ export default function (api: DefenseClawPluginHost) {
     },
   });
 
-  // ─── Slash command: /block ───
-
-  api.registerCommand({
-    name: "block",
-    description: "Block a skill, MCP server, or plugin",
-    args: [
-      { name: "type", description: "Target type: skill, mcp, plugin", required: true },
-      { name: "name", description: "Name of the target to block", required: true },
-      { name: "reason", description: "Reason for blocking", required: false },
-    ],
-    handler: async ({ args }) => {
-      const targetType = args.type as InstallType | undefined;
-      const name = args.name as string | undefined;
-      if (!targetType || !name) {
-        return { text: "Usage: /block <skill|mcp|plugin> <name> [reason]" };
-      }
-
-      const reason = (args.reason as string) || "Blocked via /block command";
-
-      await enforcer.block(targetType, name, reason);
-      return {
-        text: `Blocked ${targetType} **${name}**: ${reason}`,
-      };
-    },
-  });
-
-  // ─── Slash command: /allow ───
-
-  api.registerCommand({
-    name: "allow",
-    description: "Allow-list a skill, MCP server, or plugin",
-    args: [
-      { name: "type", description: "Target type: skill, mcp, plugin", required: true },
-      { name: "name", description: "Name of the target to allow", required: true },
-      { name: "reason", description: "Reason for allowing", required: false },
-    ],
-    handler: async ({ args }) => {
-      const targetType = args.type as InstallType | undefined;
-      const name = args.name as string | undefined;
-      if (!targetType || !name) {
-        return { text: "Usage: /allow <skill|mcp|plugin> <name> [reason]" };
-      }
-
-      const reason = (args.reason as string) || "Allowed via /allow command";
-
-      await enforcer.allow(targetType, name, reason);
-      return {
-        text: `Allow-listed ${targetType} **${name}**: ${reason}`,
-      };
-    },
-  });
+  // ─── Slash commands: /block, /allow ───
+  // Block and allow lists live in config.yaml and change only with the
+  // DefenseClaw CLI in a terminal. A chat command could be sent by anyone who
+  // can message the agent, and the plugin credential cannot write the lists.
+  for (const [name, verb] of [["block", "Block"], ["allow", "Allow-list"]] as const) {
+    api.registerCommand({
+      name,
+      description: `${verb} a skill, MCP server, or plugin (prints the DefenseClaw command to run in a terminal)`,
+      args: [
+        { name: "type", description: "Target type: skill, mcp, plugin", required: true },
+        { name: "name", description: "Name of the target", required: true },
+      ],
+      acceptsArgs: true,
+      handler: async (cmd) => {
+        const args = commandArgs(cmd.args, ["type", "name"]);
+        // Anyone who can message the agent can type these arguments: only a
+        // known type and a plain name are echoed into the command to copy.
+        const rawType = args.type;
+        const rawName = args.name;
+        const targetType = rawType && ["skill", "mcp", "plugin"].includes(rawType) ? rawType : "<skill|mcp|plugin>";
+        const target = rawName && /^[A-Za-z0-9@._/:-]{1,128}$/.test(rawName) ? rawName : "<name>";
+        return {
+          text: `DefenseClaw changes block and allow lists only from a terminal: run \`defenseclaw ${targetType} ${name} ${target}\`.`,
+        };
+      },
+    });
+  }
 }
 
 // ─── Scan handlers ───
@@ -836,4 +1015,51 @@ function formatScanOutput(
   lines.push(...formatFindings(result.findings));
 
   return lines.join("\n");
+}
+
+/**
+ * Named command arguments. OpenClaw passes the raw text after the command
+ * (2026.8.35 and later, with acceptsArgs); older releases passed an object.
+ * Before rel-1-0-10 GAP-0065 the plugin read only the object form and set no
+ * acceptsArgs, so a command with arguments went to the model as chat text.
+ */
+export function commandArgs(raw: unknown, names: string[]): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  if (typeof raw === "string") {
+    // The first arguments are single words; the last takes the rest of the
+    // line, so a path with spaces stays whole (/scan ~/My Skill).
+    let rest = raw.trim();
+    names.forEach((name, i) => {
+      if (!rest) return;
+      if (i === names.length - 1) {
+        out[name] = rest.replace(/^"(.*)"$/, "$1");
+        rest = "";
+        return;
+      }
+      const quoted = rest.match(/^"([^"]*)"\s*(.*)$/);
+      if (quoted) {
+        out[name] = quoted[1];
+        rest = quoted[2];
+        return;
+      }
+      const m = rest.match(/^(\S+)\s*(.*)$/);
+      out[name] = m ? m[1] : rest;
+      rest = m ? m[2] : "";
+    });
+  } else if (raw && typeof raw === "object") {
+    for (const name of names) {
+      const v = (raw as Record<string, unknown>)[name];
+      out[name] = typeof v === "string" ? v : undefined;
+    }
+  }
+  return out;
+}
+
+/** /scan <path> [skill|plugin|mcp|code]: the path may contain spaces. */
+export function scanArgs(raw: unknown): Record<string, string | undefined> {
+  if (typeof raw !== "string") return commandArgs(raw, ["target", "type"]);
+  const text = raw.trim().replace(/^"(.*)"$/, "$1");
+  const m = text.match(/^(.*\S)\s+(skill|plugin|mcp|code)$/);
+  if (m) return { target: m[1].replace(/^"(.*)"$/, "$1"), type: m[2] };
+  return { target: text || undefined, type: undefined };
 }

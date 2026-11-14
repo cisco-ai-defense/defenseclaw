@@ -14,7 +14,9 @@ import (
 // CheckKeyProductFloor refuses to sign a config that sets a key only
 // 1.0.6 and later read (enterprise.identity.trusted_connectors,
 // connectors.agent_gateway, guardrail.chains.root_scope) unless the bundle
-// carries min_product_version 1.0.6 or later. An older device refuses the
+// carries min_product_version 1.0.6 or later. The same holds for the later
+// keys: enterprise.account_join (1.0.7), the routing keys and
+// observability.tokenomics / observability.pricing (1.0.10). An older device refuses the
 // key as unknown anyway; the floor makes the refusal the documented
 // product_too_old, and keeps a rollback to an older build from loading a
 // policy it cannot read.
@@ -25,9 +27,21 @@ func CheckKeyProductFloor(cfg *config.Config, rawConfig []byte, minProductVersio
 		// enterprise.account_join: 1.0.7 and later.
 		keys, floor = append(keys, later...), config.AccountJoinMinProductVersion
 	}
+	if later := cfg.UsesMinProductVersion110Keys(); len(later) > 0 {
+		// connectors.openclaw: 1.0.10 and later.
+		keys, floor = append(keys, later...), config.OpenClawConnectorMinProductVersion
+	}
 	if later := config.RoutingMinVersionKeysInRaw(rawConfig); len(later) > 0 {
 		// semantic routing policy, route-only and profile routing: 1.0.10 and later.
 		keys, floor = append(keys, later...), config.RoutingMinProductVersion
+	}
+	if later := config.TokenomicsMinVersionKeysInRaw(rawConfig); len(later) > 0 {
+		// observability.tokenomics and observability.pricing: 1.0.10 and later.
+		// A 1.0.9 device refuses the whole config for either block.
+		keys = append(keys, later...)
+		if semver.Compare("v"+config.TokenomicsMinProductVersion, "v"+floor) > 0 {
+			floor = config.TokenomicsMinProductVersion
+		}
 	}
 	if len(keys) == 0 {
 		return nil

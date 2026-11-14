@@ -643,20 +643,20 @@ def _wizard_options(fields: Sequence, label: str) -> tuple[str, ...]:
 
 
 def test_connector_choices_are_os_filtered_for_windows() -> None:
-    # B6: Windows is hook-only, so the proxy connectors (openclaw/zeptoclaw)
-    # must not be offered in the connector wizard and the seeded default must
-    # not be one of them.
+    # B6: Windows has no guardrail proxy, so ZeptoClaw must not be offered in
+    # the connector wizard and the seeded default must not be it. OpenClaw
+    # runs native plugin hooks there (1.0.10) and is offered.
     win_fields = connector_setup_wizard_fields({}, os_name="windows")
     win_options = _wizard_options(win_fields, "Connector")
-    assert "openclaw" not in win_options
+    assert "openclaw" in win_options
     assert "zeptoclaw" not in win_options
     assert "codex" in win_options and "claudecode" in win_options
     assert "amp" in win_options
-    assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
+    assert wizard_field_value(win_fields, "Connector") != "zeptoclaw"
 
     # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) leaves
     # the choice empty so no unsupported agent is selected automatically.
-    proxy_cfg = {"claw": {"mode": "openclaw"}}
+    proxy_cfg = {"claw": {"mode": "zeptoclaw"}}
     seeded = wizard_field_value(connector_setup_wizard_fields(proxy_cfg, os_name="windows"), "Connector")
     assert seeded == ""
 
@@ -666,7 +666,7 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
 
     # The config-editor "Mode" choice is filtered the same way.
     win_mode = _field_by_key(build_setup_sections({}, os_name="windows"), "claw.mode")
-    assert "openclaw" not in win_mode.options and "zeptoclaw" not in win_mode.options
+    assert "openclaw" in win_mode.options and "zeptoclaw" not in win_mode.options
     assert "codex" in win_mode.options
     linux_mode = _field_by_key(build_setup_sections({}, os_name="linux"), "claw.mode")
     assert set(linux_mode.options) == set(CONNECTORS)

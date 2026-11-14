@@ -193,6 +193,33 @@ jobs:
               throw "$shippedTest did not complete with PASS on the native Windows runner"
             }
           }
+          # The versioned hook image (GAP-0751 review 1): the folder rename that
+          # prune relies on is refused while an image runs, the launch folder
+          # DACL, and the start check (timeout, no inherited handles, filtered
+          # token, the self test of the built hook, the real config scan of a
+          # claudecode target, an account file behind a junction is skipped,
+          # the handle-relative open refuses a swapped junction and a folder,
+          # the vendor folders are listed from the ProgramData handle).
+          # Every test must PASS here, none may SKIP.
+          $hookImage = Invoke-WindowsNativeProcess $go @(
+            'test', '-vet=off', '-v', '-count=1', '-run', '^TestWindowsHookImageNative', './internal/cli'
+          ) -TimeoutSeconds 1800 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-hook-image-native-test.log')
+          foreach ($hookImageTest in @(
+            'TestWindowsHookImageNativeRenameRefusedWhileAnImageRuns',
+            'TestWindowsHookImageNativeFolderDACL',
+            'TestWindowsHookImageNativeStarterTimesOut',
+            'TestWindowsHookImageNativeStarterInheritsNoHandles',
+            'TestWindowsHookImageNativeStarterUsesTheFilteredToken',
+            'TestWindowsHookImageNativeSelfTestRunsTheBuiltHook',
+            'TestWindowsHookImageNativeScanWithAClaudeTarget',
+            'TestWindowsHookImageNativeAccountFileBehindAJunction',
+            'TestWindowsHookImageNativeOpenBelowRefusesASwappedJunction',
+            'TestWindowsHookImageNativeVendorFolders'
+          )) {
+            if ([string]$hookImage.StdOut -notmatch "(?m)^--- PASS: $([regex]::Escape($hookImageTest)) ") {
+              throw "$hookImageTest did not complete with PASS on the native Windows runner"
+            }
+          }
       - name: Run native Windows enterprise Setup recovery and mutex tests
         if: ${{ matrix.kind == 'checks' }}
         run: |

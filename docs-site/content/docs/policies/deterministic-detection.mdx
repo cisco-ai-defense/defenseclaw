@@ -373,6 +373,7 @@ fact and use closed CEL/ActionFacts proofs instead of resource-name guesses.
 | `database-destruction-protection` | Selectable | Literal SQL `DELETE` without `WHERE`, schema/table-wide destructive statements, and same-table sensitive SQLite read/delete proof |
 | `infrastructure-destruction-protection` | Selectable | Device format/wipe, protected access-control weakening, kernel-control bind override, and unscoped Terraform/OpenTofu/Pulumi destruction |
 | `kubernetes-production-protection` | Selectable | Exact named Secret content reads, named namespace deletion, and closed `delete --all` workload forms for protected clusters |
+| `active-directory-protection` | Selectable | Kerberos service-ticket and AS-REP requests, NTDS database export, NetExec/CrackMapExec credential use and password spraying against domain services, and bulk LDAP collection for attack-path mapping. Without the pack, the built-in default already alerts on credentialed NetExec (`credential.directory_ticket_request`, HIGH) and strict blocks it |
 | `ssh-authorized-keys-protection` | Staged contract; not activatable yet | Exact active-home `authorized_keys` write, OpenSSH fingerprint derivation, and comparison with trusted approved fingerprints |
 
 The SSH contract intentionally abstains today because the public CEL activation

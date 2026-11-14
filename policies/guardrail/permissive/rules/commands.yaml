@@ -304,13 +304,23 @@ rules:
     # would remove a shipped result-backed detection instead of adding one. Keeping
     # it at HIGH is also exactly the pre-existing behaviour for these programs, so
     # this rule is a no-op against main for the request class.
+    #
+    # The same owner also claims a complete, statically credentialed NetExec /
+    # CrackMapExec call against a domain service (password, hash, key, ticket or
+    # empty credential; POSIX, PowerShell and cmd; rel-1-0-10:GAP-0014). That is
+    # the same non-dump directory credential use at the same HIGH, so default
+    # alerts and strict blocks it. Folding it here keeps the default catalog
+    # within its semantic-rule headroom. The opt-in active-directory-protection
+    # pack adds credential.directory_service_credential_use at CRITICAL to block
+    # it in every profile; the NTDS dump form stays with
+    # credential.directory_credential_acquisition above.
     expression: >-
       f.commands.exists(c, c.argv_complete &&
       c.program in ['impacket-getuserspns', 'getuserspns.py',
-      'impacket-getnpusers', 'getnpusers.py'] &&
+      'impacket-getnpusers', 'getnpusers.py', 'nxc', 'netexec', 'crackmapexec'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: '(?i)\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\.py)\b'
-    title: "Exact Kerberos ticket request"
+    title: "Exact Kerberos ticket request or domain-service credential use (NetExec)"
     severity: HIGH
     confidence: 0.99
     tags: [credential, active-directory, kerberos, bounded-grammar]

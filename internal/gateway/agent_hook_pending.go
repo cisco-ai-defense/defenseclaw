@@ -1125,7 +1125,9 @@ func (p *pendingHookOccurrence) responseFor(stored audit.StoredHookVerdict, deci
 		if decision {
 			reason, _ = hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes).Get()
 		}
-		if strings.EqualFold(resp.Action, stored.Action) && reason == stored.Reason {
+		// A reason a redaction profile transformed is not text and proves
+		// nothing: the action decides alone.
+		if strings.EqualFold(resp.Action, stored.Action) && (stored.ReasonRedacted || reason == stored.Reason) {
 			return resp, true
 		}
 	}

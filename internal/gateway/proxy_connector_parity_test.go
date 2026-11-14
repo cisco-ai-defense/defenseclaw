@@ -213,7 +213,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 			// of fighting the rollback path.
 			if target == "openclaw" {
 				probe, _ := reg.Get("openclaw")
-				probe.SetCredentials("tok", "mk")
+				probe.SetCredentials("tok")
 				probeOpts := connector.SetupOpts{
 					DataDir:   t.TempDir(),
 					ProxyAddr: "127.0.0.1:4000",
@@ -236,7 +236,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 			// target != codex; same connector when target == codex
 			// — the no-op path is also a valid parity case).
 			start, _ := reg.Get("codex")
-			start.SetCredentials("tok", "mk")
+			start.SetCredentials("tok")
 
 			setupOpts := connector.SetupOpts{
 				DataDir:      dir,
@@ -251,7 +251,6 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 				connector:    start,
 				registry:     reg,
 				gatewayToken: "tok",
-				masterKey:    "mk",
 				setupOpts:    setupOpts,
 				health:       NewSidecarHealth(),
 			}
@@ -317,7 +316,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 			// with only the placeholder.
 			if target == "openclaw" {
 				probe, _ := reg.Get("openclaw")
-				probe.SetCredentials("tok", "mk")
+				probe.SetCredentials("tok")
 				probeOpts := connector.SetupOpts{
 					DataDir:   t.TempDir(),
 					ProxyAddr: "127.0.0.1:4000",
@@ -334,7 +333,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 			}
 
 			start, _ := reg.Get("codex")
-			start.SetCredentials("tok", "mk")
+			start.SetCredentials("tok")
 
 			setupOpts := connector.SetupOpts{
 				DataDir:      dir,
@@ -349,7 +348,6 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 				connector:    start,
 				registry:     reg,
 				gatewayToken: "tok",
-				masterKey:    "mk",
 				setupOpts:    setupOpts,
 				health:       NewSidecarHealth(),
 				inspector:    NewGuardrailInspector("local", nil, nil),

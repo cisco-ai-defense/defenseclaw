@@ -159,6 +159,7 @@ type ModelRouterInput struct {
 	// APIs that the proxy already reduced to human text).
 	Text      string
 	HasImages bool
+	ToolTurn  bool
 	Caller    engine.Caller
 	Profiles  []string
 }

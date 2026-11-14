@@ -1815,6 +1815,28 @@
       "additionalProperties": false,
       "description": "Organization routing floor; profiles only tighten it.",
       "properties": {
+        "budget_store": {
+          "$ref": "#/$defs/routingBudgetStore"
+        },
+        "rules": {
+          "type": "array",
+          "maxItems": 256,
+          "description": "Per-subject routing rules. Every matching rule applies: a deny wins, allow lists intersect, the first matching default that survives is used.",
+          "items": {
+            "$ref": "#/$defs/routingAdminRule"
+          }
+        },
+        "budgets": {
+          "type": "array",
+          "maxItems": 64,
+          "description": "Spend limits per user, group or connector, counted on this device from the computed cost of agent calls.",
+          "items": {
+            "$ref": "#/$defs/routingBudget"
+          }
+        },
+        "visibility": {
+          "$ref": "#/$defs/routingVisibility"
+        },
         "allowed_aliases": {
           "type": "array",
           "minItems": 1,
@@ -5109,6 +5131,349 @@
         "CRITICAL"
       ]
     },
+    "routingAdminRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "match"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "match": {
+          "$ref": "#/$defs/routingAdminMatch"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "constrain",
+            "deny"
+          ],
+          "description": "constrain (default) narrows the models; deny refuses the request on a managed device."
+        },
+        "allow": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "description": "routing.models aliases the matched requests may use; a request that is not routed must use one of them too."
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Alias used when nothing else the caller may use was chosen; must be in allow when allow is set."
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^[^\\x00-\\x1f\\x7f]*$",
+          "description": "Refusal text of a deny rule: one line, at most 512 characters."
+        }
+      },
+      "if": {
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "const": "deny"
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "allow"
+              ]
+            },
+            {
+              "required": [
+                "default"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "anyOf": [
+          {
+            "required": [
+              "allow"
+            ]
+          },
+          {
+            "required": [
+              "default"
+            ]
+          }
+        ],
+        "not": {
+          "required": [
+            "message"
+          ]
+        }
+      }
+    },
+    "routingAdminMatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Requests a rule selects. Keys combine with AND, the values of one key with OR. groups, users and agents compare against a verified caller only.",
+      "properties": {
+        "groups": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
+          }
+        },
+        "users": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": "\\S"
+          }
+        },
+        "connectors": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "$ref": "#/$defs/connectorName"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "pattern": "^agt-[0-9a-f]{16}$"
+          }
+        },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$"
+          }
+        },
+        "severity_at_least": {
+          "type": "string",
+          "pattern": "^([Cc][Rr][Ii][Tt][Ii][Cc][Aa][Ll]|[Hh][Ii][Gg][Hh]|[Mm][Ee][Dd][Ii][Uu][Mm]|[Ll][Oo][Ww])$",
+          "description": "LOW, MEDIUM, HIGH or CRITICAL, in any case."
+        }
+      }
+    },
+    "routingBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "scope",
+        "subject",
+        "period",
+        "limit_usd",
+        "on_exceed"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "user",
+            "group",
+            "connector"
+          ]
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^\\S(.*\\S)?$",
+          "description": "user: a users entry or * (each user its own limit); group: one groups entry (pooled); connector: a connector name or *."
+        },
+        "period": {
+          "type": "string",
+          "enum": [
+            "day",
+            "week",
+            "month"
+          ],
+          "description": "UTC calendar window; a week starts Monday."
+        },
+        "limit_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 10000000
+        },
+        "on_exceed": {
+          "type": "string",
+          "pattern": "^(warn|deny|downgrade:[^,\\s]+(,[^,\\s]+)*)$",
+          "description": "warn, deny (managed devices only; OSS reports it) or downgrade:<alias>[,<alias>...]."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "group"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject": {
+                "not": {
+                  "const": "*"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "scope": {
+                "const": "connector"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "subject": {
+                "pattern": "^(\\*|[A-Za-z0-9][A-Za-z0-9._-]{0,127})$"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "routingVisibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "users_see": {
+          "type": "string",
+          "enum": [
+            "own",
+            "none"
+          ],
+          "description": "own (default): a user reads only their own usage; none: only administrators read usage."
+        }
+      }
+    },
+    "routingBudgetStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Opt-in fleet budget store (defenseclaw-gateway budget-store serve). Absent: budgets count on each device. Each device uses its own credential (budget-store device issue, installed by MDM) and sends only the pseudonymous charge keys it was issued, UTC days and dollar amounts, over HTTPS.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^https://[^/?#@\\s]+/?$",
+          "description": "https://host[:port] of the store."
+        },
+        "credential": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Protected credential with this device's own credential; default routing-budget-store-device."
+        },
+        "ca_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])",
+          "description": "PEM file of the only CA trusted for the store; empty: the system roots."
+        },
+        "sync_interval": {
+          "type": "string",
+          "pattern": "^[0-9]+(ms|s|m)$",
+          "description": "How often a device sends its spend and reads the fleet's: 10s to 10m (default 30s)."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        },
+        "server": {
+          "$ref": "#/$defs/routingBudgetStoreServer"
+        }
+      }
+    },
+    "routingBudgetStoreServer": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Read only by budget-store serve on the store host; refused in a device config.",
+      "required": [
+        "listen",
+        "tls_cert_file",
+        "tls_key_file",
+        "db_path"
+      ],
+      "properties": {
+        "listen": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 256
+        },
+        "tls_cert_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "tls_key_file": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "db_path": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 4096,
+          "pattern": "^(/|[A-Za-z]:[\\\\/])"
+        },
+        "rate_limit_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100000,
+          "description": "Requests per device per minute (default 600)."
+        },
+        "device_daily_cap_usd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000000,
+          "description": "Spend one device may add per UTC day (default 500)."
+        }
+      }
+    },
     "routing": {
       "type": "object",
       "additionalProperties": false,
@@ -6848,6 +7213,29 @@
               "pattern": "^[a-z][a-z0-9_-]{0,31}$",
               "description": "Label of the calling gateway in audit on a per-user install."
             }
+          }
+        },
+        "openclaw": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "OpenClaw connector trust settings (1.0.10). Absent keeps the 1.0.9 behaviour. Requires min_product_version 1.0.10 in a bundle.",
+          "properties": {
+            "plugin_install": {"type": "string", "enum": ["managed", "external"], "default": "managed", "description": "managed: DefenseClaw writes its plugin into <claw.home_dir>/extensions/defenseclaw. external: an administrator installed it at plugin_dir; DefenseClaw checks its files equal this build and never writes or deletes them."},
+            "plugin_dir": {"$ref": "#/$defs/pathString", "description": "Absolute path of the administrator-installed plugin (plugin_install: external only)."},
+            "operator_admin": {"type": "boolean", "default": true, "description": "Request the OpenClaw operator.admin scope (used only to turn off a skill, plugin or MCP server through OpenClaw). false keeps read, write and approvals."},
+            "plugin_account": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", "description": "OS account of the OpenClaw gateway when it is not the sidecar account (separate-user layout)."},
+            "plugin_token_file": {"$ref": "#/$defs/pathString", "description": "Separate-user layout: where the sidecar publishes the plugin credential for plugin_account."},
+            "plugin_token_group": {"type": "string", "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$", "description": "Separate-user layout (Linux, macOS): group allowed to read plugin_token_file."},
+            "hooks": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "OpenClaw native plugin hooks.",
+              "properties": {
+                "mode": {"type": "string", "enum": ["auto", "proxy"], "default": "auto", "description": "auto: native plugin hooks on OpenClaw 2026.8.35 and later (with the guardrail proxy on Linux and macOS, alone on Windows), the guardrail proxy below that release. proxy: the 1.0.9 behaviour (not on Windows)."},
+                "prompt_gate": {"type": "boolean", "default": false, "description": "Inspect every user prompt in before_agent_run before the model reads it; blocks it in action mode."}
+              }
+            },
+            "install_policy": {"type": "string", "enum": ["auto", "on", "off"], "default": "auto", "description": "Register DefenseClaw as OpenClaw security.installPolicy (OpenClaw 2026.8.35 and later), so OpenClaw asks DefenseClaw admission before a skill or plugin install or update. auto: on in the strict tier and on managed installs, off in the default and permissive tiers."}
           }
         }
       }
