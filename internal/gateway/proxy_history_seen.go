@@ -143,10 +143,9 @@ func (s *historySeen) warn(op string, err error) {
 	fmt.Fprintf(os.Stderr, "[guardrail] warning: the inspect-once record could not be %s (%v); the request history is inspected in full\n", op, err)
 }
 
-// historyRefusal is a history segment whose request was refused, and the
-// rule that refused it.
+// historyRefusal is what the record holds of a history segment whose request
+// was refused: the rule that refused it (the segment is keyed by its hash).
 type historyRefusal struct {
-	text string
 	rule string
 }
 
@@ -188,7 +187,7 @@ func (s *historySeen) fresh(ctx context.Context, scope string, segs []string) (f
 			if refused == nil {
 				refused = map[historyHash]historyRefusal{}
 			}
-			refused[hashes[i]] = historyRefusal{text: seg, rule: ent.Rule}
+			refused[hashes[i]] = historyRefusal{rule: ent.Rule}
 		}
 	}
 	return fresh, refused
@@ -324,63 +323,6 @@ func historyAllKept(refused map[historyHash]historyRefusal, keep map[historyHash
 		}
 	}
 	return true
-}
-
-// redactHistoryMessages is msgs with the text of every message that holds a
-// refused segment the request does not also send in its current scope (keep)
-// replaced by historyRedactedText, for the inspectors that read the messages
-// (AI Defense): they see the request the upstream gets. A message is matched
-// by the strings the walker reads from it, exactly (GAP-0265): matching the
-// refused text against the raw JSON missed a tool result whose text JSON
-// escapes (a line break, a quote), so AI Defense was still sent it and refused
-// every later turn, and took any message that merely contained a short
-// refused text, a current turn sending it again included. A message the proxy
-// built itself (no raw content: Gemini parts) is matched by its text.
-func redactHistoryMessages(msgs []ChatMessage, refused map[historyHash]historyRefusal, keep map[historyHash]bool, max int) []ChatMessage {
-	var out []ChatMessage
-	for i, m := range msgs {
-		if !messageHoldsRefused(m, refused, keep, max) {
-			continue
-		}
-		if out == nil {
-			out = append([]ChatMessage(nil), msgs...)
-		}
-		out[i].Content, out[i].RawContent = historyRedactedText, nil
-	}
-	if out == nil {
-		return msgs
-	}
-	return out
-}
-
-// messageHoldsRefused reports a message one of whose strings, as the walker
-// reads them, is a refused segment not in keep.
-func messageHoldsRefused(m ChatMessage, refused map[historyHash]historyRefusal, keep map[historyHash]bool, max int) bool {
-	if len(m.RawContent) > 0 {
-		if root, err := parseJSONTree(m.RawContent, max); err == nil {
-			w := &textWalker{turn: -1}
-			if strings.EqualFold(m.Role, "user") {
-				w.user = 1
-			}
-			w.walk(root, "content", 1)
-			for _, s := range w.segs {
-				h := historyHashOf(s)
-				if _, ok := refused[h]; ok && !keep[h] {
-					return true
-				}
-			}
-			return false
-		}
-	}
-	if m.Content == "" || keep[historyHashOf(m.Content)] {
-		return false
-	}
-	for h, rf := range refused {
-		if !keep[h] && strings.Contains(m.Content, rf.text) {
-			return true
-		}
-	}
-	return false
 }
 
 // auditHistoryRedactions writes one audit row per refused history turn the

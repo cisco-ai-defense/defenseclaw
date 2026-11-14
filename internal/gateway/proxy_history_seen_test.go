@@ -159,7 +159,7 @@ func TestGAP0244RecordUnit(t *testing.T) {
 // The redaction rewrites only the refused strings of the turn lists; the
 // turns, roles, ids and every other field stay, repeated keys included.
 func TestGAP0254RedactRefusedHistoryUnit(t *testing.T) {
-	refused := map[historyHash]historyRefusal{historyHashOf("bad text"): {text: "bad text", rule: "R1"}}
+	refused := map[historyHash]historyRefusal{historyHashOf("bad text"): {rule: "R1"}}
 	body := []byte(`{"model":"m","instructions":"bad text","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"bad text"}]},` +
 		`{"type":"function_call","call_id":"c1","name":"read","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"bad text"},` +
 		`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]},{"type":"message","role":"user","content":"next"}]}`)
