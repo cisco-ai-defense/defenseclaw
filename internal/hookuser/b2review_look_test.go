@@ -97,14 +97,14 @@ func TestB2ReviewWatchdogExitStopsTheLook(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		held := make(chan net.Conn, 64)
 		go func() {
-			var held []net.Conn
 			for {
 				c, err := ln.Accept()
 				if err != nil {
 					return
 				}
-				held = append(held, c) // taken, never answered
+				held <- c // taken, never answered
 			}
 		}()
 		payload := `{"hook_event_name":"PreToolUse","session_id":"s","cwd":` + strconv.Quote(account) +
