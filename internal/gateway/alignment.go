@@ -209,12 +209,14 @@ func (v *ToolInspectVerdict) withAlignmentFinding(mode, reason string) *ToolInsp
 	return &out
 }
 
-// alignmentSideEffecting reports a call that sends, changes or runs
-// something: a network action, a write, delete or run outside the working
-// folder, a read of a home dot-folder (credential stores), a shell call the
-// parser cannot prove, or a non-shell tool whose name is an action verb
-// (send, transfer, delete, update, ...). Reads, lists and searches skip the
-// lane.
+// alignmentSideEffecting reports a call that sends or changes something
+// outside the task's folder: a network action (a download that is run
+// included), a write or delete outside the working folder and the temporary
+// folders, a read of a home dot-folder (credential stores), a shell command
+// the parser cannot fully read that runs a network or transfer program, or a
+// non-shell tool whose name is an action verb (send, transfer, delete,
+// update, ...). Running a program is not a side effect by itself; reads,
+// lists and searches skip the lane.
 func alignmentSideEffecting(ctx context.Context, connectorName, toolName, args, cwd string) bool {
 	trimmed := strings.TrimSpace(args)
 	in := actionfacts.Input{Tool: toolName, CWD: cwd, ActiveHome: hookActiveHome(ctx)}
@@ -225,8 +227,15 @@ func alignmentSideEffecting(ctx context.Context, connectorName, toolName, args, 
 	// (MCP and function tools) by the verbs of its name.
 	if actionfacts.PathTool(toolName) || connector.IsShellTool(connectorName, toolName) {
 		facts := actionfacts.Analyze(in)
-		if len(facts.Network) > 0 || !facts.Authoritative() {
+		if len(facts.Network) > 0 {
 			return true
+		}
+		if !facts.Authoritative() {
+			for _, command := range facts.Commands {
+				if alignmentNetworkPrograms[strings.ToLower(filepath.Base(command.Program))] {
+					return true
+				}
+			}
 		}
 		for _, p := range facts.Paths {
 			path := p.Resolved
@@ -234,8 +243,8 @@ func alignmentSideEffecting(ctx context.Context, connectorName, toolName, args, 
 				path = p.Normalized
 			}
 			switch p.Access {
-			case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete, actionfacts.PathAccessExecute, actionfacts.PathAccessConnect:
-				if !alignmentUnder(path, cwd) {
+			case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete, actionfacts.PathAccessConnect:
+				if !alignmentUnder(path, cwd) && !alignmentTempPath(path) {
 					return true
 				}
 			case actionfacts.PathAccessRead:
@@ -247,6 +256,25 @@ func alignmentSideEffecting(ctx context.Context, connectorName, toolName, args, 
 		return false
 	}
 	return alignmentActionVerb(toolName)
+}
+
+// alignmentNetworkPrograms are programs that send or fetch over the network:
+// a shell command the parser cannot fully read that runs one is asked about.
+var alignmentNetworkPrograms = map[string]bool{
+	"curl": true, "wget": true, "scp": true, "sftp": true, "rsync": true, "ssh": true, "nc": true, "ncat": true,
+	"netcat": true, "ftp": true, "telnet": true, "socat": true, "http": true, "https": true, "aws": true,
+	"gsutil": true, "gcloud": true, "az": true, "invoke-webrequest": true, "invoke-restmethod": true, "iwr": true, "irm": true,
+}
+
+// alignmentTempPath reports a path under a temporary folder.
+func alignmentTempPath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	for _, root := range []string{"/tmp", "/var/tmp", "/private/tmp", "/dev/shm", "/dev/null"} {
+		if clean == root || strings.HasPrefix(clean, root+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func alignmentUnder(path, dir string) bool {
