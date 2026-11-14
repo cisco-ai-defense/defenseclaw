@@ -22,10 +22,10 @@ import (
 // whole text; the final check is enforced. A mid-stream scan reads the text
 // since the last scan plus streamScanOverlap bytes before it, not the whole
 // text again (rel-1-0-10:GAP-0515: rel rescanned the whole text every 500
-// bytes, quadratic in the reply length). The overlap is longer than any
-// match the content rules make within a stream window (detection equality
-// on the response corpora and long-stream variants of them, and the random
-// chunking property test); the whole-text checks at the end catch the rest. A final
+// bytes, quadratic in the reply length); a window that blocks is confirmed
+// over the whole text (streamMidScan), so the stream is cut where rel cuts
+// it (detection equality on the response corpora, long-stream variants of
+// them in the three packs, and the random chunking property test). A final
 // check that blocks withholds the tail and ends the stream as a mid-stream
 // block does. Observe mode holds nothing and only records the would-block.
 //
@@ -61,6 +61,26 @@ func streamScanWindow(text string, from int) string {
 		start++
 	}
 	return text[start:]
+}
+
+// streamMidScan is the mid-stream check of a streamed reply whose text so
+// far is text and whose last scan read it up to scanned: with window, the
+// text since then plus streamScanOverlap before it, else the whole text. A
+// window that blocks is checked again over the whole text and that verdict
+// decides, so a stream is cut where the whole-text scan of rel cuts it: the
+// window never misses a block of the whole text (detection equality), but
+// it can block where the whole text does not, because a rule may read
+// context outside the window (strict pack).
+func (p *GuardrailProxy) streamMidScan(ctx context.Context, text string, scanned int, window bool, model, mode string) *ScanVerdict {
+	part := text
+	if window {
+		part = streamScanWindow(text, scanned)
+	}
+	v := p.inspector.InspectMidStream(ctx, "completion", part, []ChatMessage{{Role: "assistant", Content: part}}, model, mode)
+	if len(part) < len(text) && v != nil && v.Severity != "NONE" && v.Action == "block" {
+		v = p.inspector.InspectMidStream(ctx, "completion", text, []ChatMessage{{Role: "assistant", Content: text}}, model, mode)
+	}
+	return v
 }
 
 // streamHold is the bytes of one streamed reply waiting for a check, in

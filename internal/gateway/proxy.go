@@ -1860,12 +1860,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// stream). False: it blocked.
 		scanText := func(window bool) bool {
 			if accumulated.Len() > lastScanLen {
-				text := accumulated.String()
-				if window {
-					text = streamScanWindow(text, lastScanLen)
-				}
-				midVerdict := p.inspector.InspectMidStream(r.Context(), "completion", text,
-					[]ChatMessage{{Role: "assistant", Content: text}}, label, mode)
+				midVerdict := p.streamMidScan(r.Context(), accumulated.String(), lastScanLen, window, label, mode)
 				p.resolveConfirm(r.Context(), r, midVerdict, "completion", label, mode)
 				if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 					fmt.Fprintf(os.Stderr, "[guardrail] PASSTHROUGH-STREAM-BLOCK severity=%s %s (WARNING: %d bytes already forwarded to client, %d held back)\n",
@@ -3932,12 +3927,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	// text (the initial buffer, the end of the stream). False: it blocked;
 	// the stream is cut.
 	scanMid := func(window bool) bool {
-		text := accumulated.String()
-		if window {
-			text = streamScanWindow(text, lastScanLen)
-		}
-		midVerdict := p.inspector.InspectMidStream(llmCtx, "completion", text,
-			[]ChatMessage{{Role: "assistant", Content: text}}, aliasModel, mode)
+		midVerdict := p.streamMidScan(llmCtx, accumulated.String(), lastScanLen, window, aliasModel, mode)
 		p.resolveConfirm(r.Context(), r, midVerdict, "completion", aliasModel, mode)
 		if midVerdict.Severity != "NONE" && midVerdict.Action == "block" {
 			fmt.Fprintf(os.Stderr, "[guardrail] STREAM-BLOCK severity=%s %s (%d bytes held back)\n",

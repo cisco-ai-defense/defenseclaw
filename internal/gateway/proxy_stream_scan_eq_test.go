@@ -21,9 +21,12 @@ import (
 // 6 KiB (past the 4 KiB overlap, so windows leave text out), cut into random
 // chunks, and replayed through the guard's checkpoints (a scan
 // once 500 more bytes of text arrived). At every checkpoint up to the first
-// block, the class the guard acts on (block, confirm, other) of the window
-// scan (streamScanWindow) equals that of the whole-text scan, so the stream
-// is cut at the same byte. The whole-text checks at the end of the stream
+// block, the class the guard acts on (block, confirm, other) of the
+// incremental scan (streamMidScan with a window: the new text plus the
+// overlap, a window block confirmed over the whole text) equals that of the
+// whole-text scan, so the stream is cut at the same byte. (The strict pack,
+// where a window can block on its own, is covered by the s7bench
+// response-stream-eq surface over long-stream variants of response-owner.) The whole-text checks at the end of the stream
 // are unchanged.
 func TestStreamScanIncrementalMatchesWholeText(t *testing.T) {
 	f, err := os.Open("testdata/security_suite/regex/corpus.jsonl")
@@ -55,8 +58,9 @@ func TestStreamScanIncrementalMatchesWholeText(t *testing.T) {
 	}
 	insp := NewGuardrailInspector("local", nil, nil)
 	ctx := context.Background()
-	class := func(s string) string {
-		v := insp.InspectMidStream(ctx, "completion", s, []ChatMessage{{Role: "assistant", Content: s}}, "m", "action")
+	proxy := newTestProxy(t, &mockProvider{}, insp, "action")
+	class := func(s string, window bool, scanned int) string {
+		v := proxy.streamMidScan(ctx, s, scanned, window, "m", "action")
 		switch {
 		case v != nil && v.Severity != "NONE" && v.Action == "block":
 			return "block"
@@ -88,7 +92,7 @@ func TestStreamScanIncrementalMatchesWholeText(t *testing.T) {
 		}
 		prev := 0
 		for _, p := range points {
-			whole, inc := class(text[:p]), class(streamScanWindow(text[:p], prev))
+			whole, inc := class(text[:p], false, 0), class(text[:p], true, prev)
 			prev = p
 			checks++
 			if whole != inc {
