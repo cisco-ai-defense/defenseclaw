@@ -811,7 +811,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// degraded. Durable cross-call joins require correlation, but the
 		// experimental final-artifact execution gate is a same-request
 		// decision and can still protect the exact pre-execution boundary.
-		req.toolChain = &toolChainHookCapture{}
+		req.toolChain = &toolChainHookCapture{reportedCWD: req.ReportedCWD}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
 		ctx = withAgentHost(ctx, r.Header)

@@ -91,6 +91,11 @@ type toolChainHookCapture struct {
 	artifactProjections []guardrail.ToolChainProjection
 	successfulSQLResult *toolValueLineageSQLSuccessfulProjection
 	recorded            bool
+	// reportedCWD is the directory the agent reported for the call, as sent
+	// and before the gateway checked it. It is agent text: it is only joined
+	// to relative operands of a credentials-file read or an external upload
+	// (placeSecretReadPaths), and nothing is read there.
+	reportedCWD string
 }
 
 func (capture *toolChainHookCapture) recordArtifactTrustedAction(
@@ -152,7 +157,7 @@ func (capture *toolChainHookCapture) recordTrustedAction(
 	if capture == nil {
 		return
 	}
-	capture.facts = facts
+	capture.facts = placeSecretReadPaths(facts, capture.reportedCWD)
 	capture.findings = append([]RuleFinding(nil), findings...)
 	capture.recorded = true
 }
@@ -186,6 +191,57 @@ func toolChainPlacedFacts(facts actionfacts.Facts, request trustedActionRequest)
 	placed := request.Input
 	placed.CWD = filepath.Clean(client)
 	return actionfacts.Analyze(placed)
+}
+
+// placeSecretReadPaths places a relative operand of a credentials-file read or
+// an external upload that the gateway could not resolve (the call's directory
+// does not exist on this host, so the call has none) in the directory the
+// agent reported, lexically: the read of ".env" and the upload of
+// "/work/p/.env" then name one file (substrate-1:GAP-0388). Only absolute,
+// clean reported directories are used, and only operands without expansion or
+// glob characters; the facts are copied, never changed in place.
+func placeSecretReadPaths(facts actionfacts.Facts, reported string) actionfacts.Facts {
+	if facts.CWD != "" || toolChainDriveMounts || !strings.HasPrefix(reported, "/") ||
+		hasParentElement(reported) || strings.ContainsRune(reported, 0) ||
+		!hasUnplacedRelativePath(facts) {
+		return facts
+	}
+	reported = path.Clean(reported)
+	uploads := make(map[int64]struct{})
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectExecute &&
+			hasOperation(command, actionfacts.OperationUpload) &&
+			hasExternalUpload(facts, command.ID) {
+			uploads[command.ID] = struct{}{}
+		}
+	}
+	var placed []actionfacts.PathFact
+	for i, candidate := range facts.Paths {
+		value := candidate.Value
+		if candidate.Absolute || candidate.Resolved != "" || candidate.Access != actionfacts.PathAccessRead ||
+			candidate.Flavor == actionfacts.PathFlavorWindows || value == "" ||
+			strings.HasPrefix(value, "/") || strings.HasPrefix(value, "~") ||
+			strings.ContainsAny(value, "\\$*?[]{}`\x00") {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Dialect != actionfacts.DialectPOSIX && command.Dialect != actionfacts.DialectArgv {
+			continue
+		}
+		_, upload := uploads[candidate.CommandID]
+		if _, read := credentialFileContentReadCommand(facts, candidate); !read && !upload {
+			continue
+		}
+		if placed == nil {
+			placed = slices.Clone(facts.Paths)
+		}
+		placed[i].Resolved = path.Join(reported, value)
+	}
+	if placed == nil {
+		return facts
+	}
+	facts.Paths = placed
+	return facts
 }
 
 func hasUnplacedRelativePath(facts actionfacts.Facts) bool {
@@ -1155,10 +1211,16 @@ func projectTrustedActionChainSteps(
 		secretReadExact,
 	)
 	if secretReadExact {
+		joinDigest := secretReadDigest
+		if credentialFileReadByCopy(facts) {
+			// The copy holds the secret too: the file that is uploaded later
+			// may be the source or the copy (substrate-1:GAP-0388).
+			joinDigest = guardrail.ToolChainFileUnknownDigest
+		}
 		setToolChainEnforcementJoinDigest(
 			projection,
 			guardrail.ToolChainSecretReadThenEgress,
-			secretReadDigest,
+			joinDigest,
 		)
 	} else if facts.Parse.Status == actionfacts.StatusPartial {
 		// A pipeline or a command list the classifier cannot finish (an
@@ -1300,6 +1362,16 @@ func projectTrustedActionChainSteps(
 		)
 		if chainEnforcement && chainID == guardrail.ToolChainSecretReadThenEgress {
 			setToolChainEnforcementJoinDigest(projection, chainID, uploadDigest)
+		} else if chainID == guardrail.ToolChainSecretReadThenEgress &&
+			egressDetection && facts.Parse.Status == actionfacts.StatusPartial {
+			// An upload inside a command list or a pipeline whose other parts
+			// the classifier cannot finish: when every external upload command
+			// is argv-complete, the upload is proven and the chain may end
+			// here, detection only (guardrail Step2IdentityOwnsParseProof,
+			// substrate-1:GAP-0389).
+			if digest, ok := externalUploadProofDigest(facts); ok {
+				setToolChainEnforcementJoinDigest(projection, chainID, digest)
+			}
 		}
 	}
 
@@ -2043,12 +2115,73 @@ func credentialFileContentReadCommand(
 	return command, true
 }
 
-// credentialFileReadProofIdentity is the identity a partly parsed call
-// carries when its credentials-file read cannot name one exact file: a
-// relative path the hook does not resolve, or several files. Path identities
-// start with their flavor ("posix", "windows"), so it never equals one and
-// never joins an upload as the same file.
-const credentialFileReadProofIdentity = "credential-read-proof\x00unresolved"
+// credentialFileReadByCopy reports a credentials-file read that is a copy or
+// a move: the destination holds the same bytes.
+func credentialFileReadByCopy(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		command, ok := credentialFileContentReadCommand(facts, candidate)
+		if ok && hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+			return true
+		}
+	}
+	return false
+}
+
+// secretReadPathIdentity is exactPathIdentity, except that a relative
+// operand in a call that changes directory (cd, pushd, popd) is no exact file:
+// the path fact keeps the call's starting directory, not the one the command
+// ran in.
+func secretReadPathIdentity(facts actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
+	if !candidate.Absolute {
+		for _, command := range facts.Commands {
+			switch command.Program {
+			case "cd", "pushd", "popd", "chdir":
+				return "", false
+			}
+		}
+	}
+	return exactPathIdentity(candidate)
+}
+
+// externalUploadProofDigest proves an external upload in a call whose
+// overall parse is partial: every command that uploads to an external
+// destination has its argv complete. The digest is the uploaded file's
+// identity when the uploads read one exact file, else the
+// guardrail.ToolChainFileUnknownDigest marker (a stdin upload, several
+// files).
+func externalUploadProofDigest(facts actionfacts.Facts) (string, bool) {
+	uploads := make(map[int64]struct{})
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!hasOperation(command, actionfacts.OperationUpload) ||
+			!hasExternalUpload(facts, command.ID) {
+			continue
+		}
+		if !command.ArgvComplete {
+			return "", false
+		}
+		uploads[command.ID] = struct{}{}
+	}
+	if len(uploads) == 0 {
+		return "", false
+	}
+	selected, exact := "", true
+	for _, candidate := range facts.Paths {
+		if _, ok := uploads[candidate.CommandID]; !ok || candidate.Access != actionfacts.PathAccessRead {
+			continue
+		}
+		identity, ok := secretReadPathIdentity(facts, candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+			continue
+		}
+		selected = identity
+	}
+	if exact && selected != "" {
+		return pathIdentityDigest(selected), true
+	}
+	return guardrail.ToolChainFileUnknownDigest, true
+}
 
 // credentialFileReadProofDigest proves a credentials-file read in a call
 // whose overall parse is partial: every command that reads a
@@ -2056,8 +2189,10 @@ const credentialFileReadProofIdentity = "credential-read-proof\x00unresolved"
 // complete, whatever the other stages of the pipeline or members of the list
 // are. A member of an && or || list runs conditionally; the step is
 // detection-only, so that is enough. The digest is the read file's exact
-// identity when there is one file and its path resolves, else the
-// credentialFileReadProofIdentity marker.
+// identity when there is one file (a relative path joined to the call's
+// directory when the hook cannot resolve it) and it is not copied or moved,
+// else the guardrail.ToolChainFileUnknownDigest marker, which joins any upload
+// (substrate-1:GAP-0388).
 func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	selected, found, exact := "", false, true
 	for _, candidate := range facts.Paths {
@@ -2069,7 +2204,11 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 			return "", false
 		}
 		found = true
-		identity, ok := exactPathIdentity(candidate)
+		if hasAnyOperation(command, actionfacts.OperationCopy, actionfacts.OperationMove) {
+			exact = false
+			continue
+		}
+		identity, ok := secretReadPathIdentity(facts, candidate)
 		if !ok || selected != "" && selected != identity {
 			exact = false
 			continue
@@ -2082,7 +2221,7 @@ func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
 	case exact && selected != "":
 		return pathIdentityDigest(selected), true
 	default:
-		return pathIdentityDigest(credentialFileReadProofIdentity), true
+		return guardrail.ToolChainFileUnknownDigest, true
 	}
 }
 
