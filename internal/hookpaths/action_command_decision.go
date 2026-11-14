@@ -433,19 +433,28 @@ func ActionCommandAuditReasonWithDialect(command, cwd, home string, dialect acti
 	return actionCommandDecision(command, cwd, home, 0)
 }
 
-// ShellParseBound reports whether the hook client reading of a tool call of
-// connector ends at the recovered-parse proof bound: the reason
-// "shell-parse-bound" the client sends a managed gateway under
-// UnprovenReasonKey (ActionCommandAuditReasonWithDialect in the client
-// dialect). A per-user gateway, which gets no client evidence, derives the
-// same fact with it (rel-1-0-6:GAP-0534).
-func ShellParseBound(connector, tool, command, cwd, home string) bool {
+// ShellParseReason is the hook client reading of a tool call of connector at
+// the recovered parse: "shell-parse-bound" (the proof bound), the reason the
+// client sends a managed gateway under UnprovenReasonKey
+// (ActionCommandAuditReasonWithDialect in the client dialect);
+// UnprovenParserFault (the parser failed on the text, which every pack
+// blocks); or "" for any other reading. A per-user gateway, which gets no
+// client evidence, derives the same fact with it (rel-1-0-6:GAP-0534).
+func ShellParseReason(connector, tool, command, cwd, home string) string {
 	dialect := hookShellDialect(connector, tool)
+	var reason string
 	if !actionWindowsHome(home) || dialect == actionfacts.DialectPOSIX && runtime.GOOS == "windows" {
 		// The POSIX reading returns the unproven-write reason first.
-		return len(command) <= MaxPayloadBytes && UnprovenProtectedWrite(command, cwd, home) == "shell-parse-bound"
+		if len(command) <= MaxPayloadBytes {
+			reason = UnprovenProtectedWrite(command, cwd, home)
+		}
+	} else {
+		reason = ActionCommandAuditReasonWithDialect(command, cwd, home, dialect)
 	}
-	return ActionCommandAuditReasonWithDialect(command, cwd, home, dialect) == "shell-parse-bound"
+	if reason == "shell-parse-bound" || reason == UnprovenParserFault {
+		return reason
+	}
+	return ""
 }
 
 // ActionPrivateKeyRead recognizes a command that reads an active SSH private
