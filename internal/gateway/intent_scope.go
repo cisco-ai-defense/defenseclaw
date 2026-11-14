@@ -672,19 +672,11 @@ func (j *LLMJudge) SnapshotSessionGitRemotes(ctx context.Context, cwd string) {
 	if sessionID == "" {
 		return
 	}
-	j.toolContextMu.Lock()
-	entry, ok := j.toolContext[sessionID]
-	j.toolContextMu.Unlock()
-	if !ok || entry.gitRead {
+	table := j.scopeSessions()
+	if entry, ok := table.get(sessionID); !ok || entry.gitRead {
 		return
 	}
-	hosts := scopeGitRemoteHostsWithin(cwd, scopeGitReadTimeout)
-	j.toolContextMu.Lock()
-	defer j.toolContextMu.Unlock()
-	if entry, ok := j.toolContext[sessionID]; ok && !entry.gitRead {
-		entry.gitHosts, entry.gitRead = hosts, true
-		j.toolContext[sessionID] = entry
-	}
+	table.setGitHosts(sessionID, scopeGitRemoteHostsWithin(cwd, scopeGitReadTimeout))
 }
 
 // scopeGitRemoteHosts returns the hosts of the git remotes of the repository
@@ -811,20 +803,17 @@ func (j *LLMJudge) scopeFloorReason(ctx context.Context, toolName, args, cwd str
 	if sessionID == "" {
 		return ""
 	}
-	j.toolContextMu.Lock()
-	entry, ok := j.toolContext[sessionID]
-	j.toolContextMu.Unlock()
-	if !ok || entry.userIntent == "" {
+	table := j.scopeSessions()
+	entry, ok := table.get(sessionID)
+	if !ok || entry.task == "" {
 		return ""
 	}
 	if !entry.gitRead && cwd != "" {
 		// A session whose first event was this call: the read happens now, once.
 		j.SnapshotSessionGitRemotes(ctx, cwd)
-		j.toolContextMu.Lock()
-		entry = j.toolContext[sessionID]
-		j.toolContextMu.Unlock()
+		entry, _ = table.get(sessionID)
 	}
-	return intentScopeExceeded(entry.userIntent, entry.scopeTargets, toolName, args, entry.gitHosts...)
+	return intentScopeExceeded(entry.task, entry.targets, toolName, args, entry.gitHosts...)
 }
 
 // applyHookScopeFloor folds the scope finding into the hook verdict: in shadow

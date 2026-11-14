@@ -169,7 +169,7 @@ func TestSessionScopeCarriesEarlierPromptTargets(t *testing.T) {
 	if v := judgeWithScopeFloor(judge, ctx, "http.post", `{"url":"https://other.example/in"}`); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a destination no prompt named must still be flagged: %+v", v)
 	}
-	judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, "scope-session"))
+	judge.ResetToolJudgeSession(ctx, judgeSessionKey(ctx))
 	judge.ObserveSessionPrompt(ctx, "continue")
 	if v := judgeWithScopeFloor(judge, ctx, "http.post", post); v == nil || !strings.Contains(strings.Join(v.Findings, ","), intentScopeFinding) {
 		t.Fatalf("a new session must not inherit the old session's scope: %+v", v)

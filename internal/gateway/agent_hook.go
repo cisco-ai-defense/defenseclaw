@@ -830,7 +830,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
-				judge.ResetToolJudgeSession(judgeSessionKeyFor(ctx, req.SessionID))
+				judge.ResetToolJudgeSession(ctx, judgeSessionKeyFor(ctx, req.SessionID))
 			}
 			a.resetUserDownloadRequests(sessionKey)
 		}

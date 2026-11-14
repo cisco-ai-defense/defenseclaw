@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"sort"
@@ -38,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
@@ -129,12 +131,29 @@ type LLMJudge struct {
 	// guardrail.judge.max_parallel is set (nil: no limit).
 	calls *judgeScheduler
 
-	toolContextMu sync.Mutex
-	toolContext   map[string]toolJudgeSessionContext
+	// intents holds each session's user intent and recent tool calls
+	// (intentStore): the process-local store unless SetIntentStore put a
+	// shared one in its place.
+	intentsMu sync.Mutex
+	intents   intentstore.Store
+	// intentWarn* rate-limit the warning a failing intent store writes
+	// (warnIntentStore): at most one line per intentStoreWarnEvery, with
+	// the count of failures it held back. intentWarnOut and intentWarnNow
+	// replace stderr and the clock in tests.
+	intentWarnMu         sync.Mutex
+	intentWarnLast       time.Time
+	intentWarnSuppressed int
+	intentWarnOut        io.Writer
+	intentWarnNow        func() time.Time
 	// history is the decision model's session history (survives a new
 	// prompt; decision_model_history.go).
 	historyMu sync.Mutex
 	history   map[string]*decisionHistorySession
+	// scope is the task-scope floor's per-session table (scopeSessions,
+	// intent_scope_session.go): the turn's task, the targets the session's
+	// prompts named and its git remote hosts, which the intent store does not
+	// keep.
+	scope atomic.Pointer[intentScopeSessions]
 
 	telemetryMu sync.RWMutex
 	traceV8     judgeTraceV8Runtime
@@ -142,26 +161,6 @@ type LLMJudge struct {
 	// runtime during shutdown/reload means "do not start a new span", not
 	// permission to resurrect the legacy v7 path.
 	traceV8Authoritative bool
-}
-
-type toolJudgeSessionContext struct {
-	userIntent string
-	// scopeTargets are the hosts, addresses and paths every user prompt of the
-	// session has named (intent_scope.go); the latest prompt alone does not
-	// carry them when it says "continue".
-	scopeTargets []string
-	// gitHosts are the hosts of the git remotes of the session's working folder,
-	// read once at its first event (SnapshotSessionGitRemotes): a remote the agent
-	// adds later does not clear its own send. gitRead marks the read as done.
-	gitHosts []string
-	gitRead  bool
-	events   []toolJudgeContextEvent
-	lastSeen time.Time
-}
-
-type toolJudgeContextEvent struct {
-	toolName string
-	args     string
 }
 
 // NewLLMJudge creates a judge from config. Returns nil if judge is
@@ -2265,180 +2264,136 @@ func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args st
 		return strings.TrimSuffix(only.String(), "\n")
 	}
 
-	now := time.Now()
-	j.toolContextMu.Lock()
-	if j.toolContext == nil {
-		j.toolContext = make(map[string]toolJudgeSessionContext)
-	}
-	if len(j.toolContext) >= maxToolJudgeContextSessions {
-		j.pruneToolJudgeContextLocked(now)
-	}
-	entry := j.toolContext[sessionID]
-	prior := append([]toolJudgeContextEvent(nil), entry.events...)
-	entry.events = append(entry.events, toolJudgeContextEvent{
-		toolName: strings.Clone(sanitizeToolName(toolName)),
-		args:     strings.Clone(toolJudgeArgumentExcerpt(args, maxToolJudgePriorArgumentBytes)),
+	entry, err := j.intentStore().AppendToolCall(ctx, sessionID, intentstore.ToolCall{
+		Tool: strings.Clone(sanitizeToolName(toolName)),
+		Args: strings.Clone(toolJudgeArgumentExcerpt(args, maxToolJudgePriorArgumentBytes)),
 	})
-	if len(entry.events) > maxToolJudgePriorEvents {
-		entry.events = append([]toolJudgeContextEvent(nil), entry.events[len(entry.events)-maxToolJudgePriorEvents:]...)
+	if err != nil {
+		// A shared store that did not answer leaves the call judged on its
+		// own, like the first call of a session. The operator is told: the
+		// judge then sees neither the user's intent nor the earlier calls.
+		j.warnIntentStore("AppendToolCall", "the tool call is judged without its session intent and recent calls", err)
+		entry = intentstore.Snapshot{}
 	}
-	entry.lastSeen = now
-	j.toolContext[sessionID] = entry
-	j.toolContextMu.Unlock()
+	if j.sessionTaskCleared(sessionID) {
+		// The turn's prompt turned out not to be a task (ClearSessionTask);
+		// its calls stay.
+		entry.UserIntent = ""
+	}
+	prior := entry.Prior
 
 	var sample strings.Builder
-	if entry.userIntent != "" {
+	if entry.UserIntent != "" {
 		// named_targets is the scope of the task as Go read it: the hosts,
 		// addresses and paths the task names, or none. The task is a scope to
 		// check a call against, not a permission.
 		targets := "none"
-		if named := mergeScopeTargets(entry.scopeTargets, entry.userIntent); len(named) > 0 {
+		if named := mergeScopeTargets(j.sessionScopeTargets(sessionID), entry.UserIntent); len(named) > 0 {
 			targets = strings.Join(named, ", ")
 		}
-		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets), entry.userIntent)
+		writeToolJudgeSection(&sample, nonce, "SESSION_USER_INTENT", fmt.Sprintf("untrusted=\"true\" named_targets=%q", targets), entry.UserIntent)
 	}
 	if len(prior) > 0 {
 		sample.WriteString("RECENT TOOL CALLS FROM THE SAME SESSION (oldest first):\n")
 		for index, event := range prior {
-			writeToolJudgeSection(&sample, nonce, "RECENT_TOOL_CALL", fmt.Sprintf("index=%d tool=%q", index+1, event.toolName), event.args)
+			writeToolJudgeSection(&sample, nonce, "RECENT_TOOL_CALL", fmt.Sprintf("index=%d tool=%q", index+1, event.Tool), event.Args)
 		}
 	}
 	writeToolJudgeSection(&sample, nonce, "CURRENT_TOOL_CALL", fmt.Sprintf("tool=%q", sanitizeToolName(toolName)), current)
 	sampleText := strings.TrimSuffix(sample.String(), "\n")
 	if j.decision != nil {
 		state := decisionModelState{
-			SessionUserIntent: entry.userIntent,
+			SessionUserIntent: entry.UserIntent,
 			CurrentToolCall:   decisionModelToolCall{Tool: sanitizeToolName(toolName), Arguments: current},
 			SessionHistory:    j.renderDecisionHistory(ctx),
 		}
 		j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'c', tool: sanitizeToolName(toolName), text: args})
 		for _, event := range prior {
-			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.toolName, Arguments: event.args})
+			state.RecentToolCalls = append(state.RecentToolCalls, decisionModelToolCall{Tool: event.Tool, Arguments: event.Args})
 		}
 		j.keepDecisionState(sampleText, state)
 	}
 	return sampleText
 }
 
-func (j *LLMJudge) pruneToolJudgeContextLocked(now time.Time) {
-	for sessionID, entry := range j.toolContext {
-		if now.Sub(entry.lastSeen) >= toolJudgeContextTTL {
-			delete(j.toolContext, sessionID)
-		}
+// intentStore is the judge's session context store: the one SetIntentStore
+// gave it, else a process-local store made on first use (a judge built as a
+// struct literal works too).
+func (j *LLMJudge) intentStore() intentstore.Store {
+	j.intentsMu.Lock()
+	defer j.intentsMu.Unlock()
+	if j.intents == nil {
+		j.intents = intentstore.NewProcess(intentstore.Limits{
+			MaxSessions: maxToolJudgeContextSessions,
+			MaxPrior:    maxToolJudgePriorEvents,
+			TTL:         toolJudgeContextTTL,
+		})
 	}
-	for len(j.toolContext) >= maxToolJudgeContextSessions {
-		oldestSession := ""
-		var oldest time.Time
-		for sessionID, entry := range j.toolContext {
-			if oldestSession == "" || entry.lastSeen.Before(oldest) {
-				oldestSession = sessionID
-				oldest = entry.lastSeen
-			}
-		}
-		if oldestSession == "" {
-			break
-		}
-		delete(j.toolContext, oldestSession)
+	return j.intents
+}
+
+// SetIntentStore puts store in place of the process-local session context
+// store, before the judge sees its first call: a gateway with several
+// replicas shares one session's intent this way. Nil keeps the default.
+func (j *LLMJudge) SetIntentStore(store intentstore.Store) {
+	if j == nil || store == nil {
+		return
 	}
+	j.intentsMu.Lock()
+	j.intents = store
+	j.intentsMu.Unlock()
+}
+
+// intentStoreWarnEvery is the shortest time between two intent-store
+// warnings of one judge.
+const intentStoreWarnEvery = time.Minute
+
+// warnIntentStore writes a rate-limited warning that the intent store
+// failed op. It names the operation, its consequence and a bounded error
+// text, never the session key or any recorded intent.
+func (j *LLMJudge) warnIntentStore(op, consequence string, err error) {
+	if j == nil || err == nil {
+		return
+	}
+	now := time.Now
+	if j.intentWarnNow != nil {
+		now = j.intentWarnNow
+	}
+	at := now()
+	j.intentWarnMu.Lock()
+	if !j.intentWarnLast.IsZero() && at.Sub(j.intentWarnLast) < intentStoreWarnEvery {
+		j.intentWarnSuppressed++
+		j.intentWarnMu.Unlock()
+		return
+	}
+	held := j.intentWarnSuppressed
+	j.intentWarnLast, j.intentWarnSuppressed = at, 0
+	out := j.intentWarnOut
+	j.intentWarnMu.Unlock()
+	if out == nil {
+		out = defaultLogWriter
+	}
+	msg := err.Error()
+	if len(msg) > 200 {
+		msg = msg[:200] + "..."
+	}
+	more := ""
+	if held > 0 {
+		more = fmt.Sprintf(" (%d more failures since the last warning)", held)
+	}
+	fmt.Fprintf(out, "[judge] warning: intent store %s failed%s: %s; %s\n",
+		op, more, strings.ToValidUTF8(msg, "?"), consequence)
 }
 
 // ObserveSessionPrompt records the latest bounded user task for an
 // authenticated connector session. A new user prompt starts a new tool chain,
 // so prior tool calls are cleared instead of contaminating the next turn. An
-// empty prompt starts a turn with no task. The value is kept in memory only
-// and remains untrusted data in the judge sample.
+// empty prompt starts a turn with no task. The value is kept in the judge's
+// intent store (in memory unless a shared store was set) and remains
+// untrusted data in the judge sample. The prompt also names the session's
+// scope targets (ObserveSessionPromptScope).
 func (j *LLMJudge) ObserveSessionPrompt(ctx context.Context, content string) {
 	j.ObserveSessionPromptScope(ctx, content, content)
-}
-
-// ObserveSessionPromptScope is ObserveSessionPrompt with the text that may name
-// scope targets (hosts, addresses, paths) for the session apart from the task
-// text: scopeText is "" for text that is not known to be what the owner typed
-// (a tool result read by the generic prompt fallback, a remote chat party).
-func (j *LLMJudge) ObserveSessionPromptScope(ctx context.Context, content, scopeText string) {
-	if j == nil {
-		return
-	}
-	sessionID := judgeSessionKey(ctx)
-	content = strings.TrimSpace(content)
-	if sessionID == "" {
-		return
-	}
-	now := time.Now()
-	j.toolContextMu.Lock()
-	defer j.toolContextMu.Unlock()
-	if j.toolContext == nil {
-		j.toolContext = make(map[string]toolJudgeSessionContext)
-	}
-	if len(j.toolContext) >= maxToolJudgeContextSessions {
-		j.pruneToolJudgeContextLocked(now)
-	}
-	entry := toolJudgeSessionContext{lastSeen: now}
-	prior := j.toolContext[sessionID]
-	entry.scopeTargets = prior.scopeTargets
-	entry.gitHosts, entry.gitRead = prior.gitHosts, prior.gitRead
-	if content != "" {
-		entry.userIntent = strings.Clone(toolJudgeUserIntentExcerpt(content))
-		entry.scopeTargets = mergeScopeTargets(prior.scopeTargets, scopeText)
-	}
-	j.toolContext[sessionID] = entry
-	// The decision model's history keeps the prompt as a turn and is not
-	// cleared by it. A blocked prompt comes here as "" (observeUserTurn), so
-	// it never enters the history.
-	if content != "" {
-		j.recordDecisionHistory(ctx, decisionHistoryEvent{kind: 'u', text: content})
-	}
-}
-
-// ClearSessionTask drops the session's task and keeps its recent calls and
-// scope targets: a prompt turned out not to be a task after calls had begun.
-func (j *LLMJudge) ClearSessionTask(ctx context.Context) {
-	if j == nil {
-		return
-	}
-	sessionID := judgeSessionKey(ctx)
-	if sessionID == "" {
-		return
-	}
-	j.toolContextMu.Lock()
-	defer j.toolContextMu.Unlock()
-	if entry, ok := j.toolContext[sessionID]; ok {
-		entry.userIntent = ""
-		j.toolContext[sessionID] = entry
-	}
-}
-
-// inheritToolJudgeContext copies the per-session intent and recent calls of
-// the judge a config or rule-pack change replaces, so live sessions keep
-// their task across the rebuild instead of being judged with none until
-// their next prompt. Sessions the new judge already holds are kept.
-func (j *LLMJudge) inheritToolJudgeContext(from *LLMJudge) {
-	if j == nil || from == nil || j == from {
-		return
-	}
-	from.toolContextMu.Lock()
-	carried := make(map[string]toolJudgeSessionContext, len(from.toolContext))
-	for sessionID, entry := range from.toolContext {
-		entry.events = append([]toolJudgeContextEvent(nil), entry.events...)
-		carried[sessionID] = entry
-	}
-	from.toolContextMu.Unlock()
-	if len(carried) == 0 {
-		return
-	}
-	j.toolContextMu.Lock()
-	defer j.toolContextMu.Unlock()
-	if j.toolContext == nil {
-		j.toolContext = make(map[string]toolJudgeSessionContext, len(carried))
-	}
-	for sessionID, entry := range carried {
-		if _, held := j.toolContext[sessionID]; !held {
-			j.toolContext[sessionID] = entry
-		}
-	}
-	if len(j.toolContext) > maxToolJudgeContextSessions {
-		j.pruneToolJudgeContextLocked(time.Now())
-	}
 }
 
 // judgeSessionKey is the key of the judge's per-session state (the 7-call
@@ -2462,16 +2417,23 @@ func judgeSessionKeyFor(ctx context.Context, sessionID string) string {
 	return key
 }
 
-// ResetToolJudgeSession drops bounded in-memory context when a connector
-// announces a new or ended session. No tool arguments are persisted.
-// sessionID is the state key (sandboxSessionStateKey), not the raw ID.
-func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
+// ResetToolJudgeSession drops the session's bounded context when a connector
+// announces a new or ended session: its intent and calls in the intent store,
+// its scope table entry and its decision-model history. The process-local
+// store persists no tool arguments.
+// sessionID is the judge key (judgeSessionKeyFor), not the raw ID; ctx is the
+// hook call's (a shared store finds the caller in it).
+func (j *LLMJudge) ResetToolJudgeSession(ctx context.Context, sessionID string) {
 	if j == nil || strings.TrimSpace(sessionID) == "" {
 		return
 	}
-	j.toolContextMu.Lock()
-	delete(j.toolContext, sessionID)
-	j.toolContextMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := j.intentStore().Reset(ctx, sessionID); err != nil {
+		j.warnIntentStore("Reset", "the session's earlier intent and calls may still be shown to the judge", err)
+	}
+	j.scopeSessions().reset(sessionID)
 	if j.decision != nil {
 		j.historyMu.Lock()
 		delete(j.history, sessionID)

@@ -82,20 +82,27 @@ func TestInheritToolJudgeContextAcrossRebuild(t *testing.T) {
 	old.ObserveSessionPrompt(ctx, "bump the go toolchain")
 	_ = old.toolJudgeContextSample(ctx, "Bash", `{"command":"go version"}`)
 	next := newIntentTestJudge()
-	other := ContextWithSessionID(context.Background(), "sess-new")
-	next.ObserveSessionPrompt(other, "newer task")
 	next.inheritToolJudgeContext(old)
 	s := next.toolJudgeContextSample(ctx, "Bash", `{"command":"go mod tidy"}`)
 	if !strings.Contains(s, "bump the go toolchain") || !strings.Contains(s, "go version") {
 		t.Fatalf("rebuilt judge lost the session's task or calls:\n%s", s)
 	}
-	if s := next.toolJudgeContextSample(other, "Bash", `{"command":"ls -la"}`); !strings.Contains(s, "newer task") {
-		t.Fatalf("inherit replaced a session the new judge already held:\n%s", s)
+	if entry, ok := next.scopeSessions().get(judgeSessionKey(ctx)); !ok || entry.task == "" {
+		t.Fatal("the scope table did not come along")
 	}
-	// the copy is independent of the old judge
-	_ = old.toolJudgeContextSample(ctx, "Bash", `{"command":"echo old-only"}`)
-	if s := next.toolJudgeContextSample(ctx, "Bash", `{"command":"go build ./..."}`); strings.Contains(s, "old-only") {
-		t.Fatal("inherited history aliases the old judge's")
+	// The successor uses the same intent store: a call the replaced judge was
+	// still answering is one of the session's calls.
+	_ = old.toolJudgeContextSample(ctx, "Bash", `{"command":"echo in-flight"}`)
+	if s := next.toolJudgeContextSample(ctx, "Bash", `{"command":"go build ./..."}`); !strings.Contains(s, "in-flight") {
+		t.Fatalf("the successor does not share the replaced judge's store:\n%s", s)
+	}
+	// A store the successor already has (SetIntentStore, a shared store) is kept.
+	kept := newIntentTestJudge()
+	other := ContextWithSessionID(context.Background(), "sess-new")
+	kept.ObserveSessionPrompt(other, "newer task")
+	kept.inheritToolJudgeContext(old)
+	if s := kept.toolJudgeContextSample(other, "Bash", `{"command":"ls -la"}`); !strings.Contains(s, "newer task") {
+		t.Fatalf("inherit replaced the store the new judge already held:\n%s", s)
 	}
 	var nilJudge *LLMJudge
 	nilJudge.inheritToolJudgeContext(old)
