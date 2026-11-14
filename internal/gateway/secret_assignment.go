@@ -419,41 +419,71 @@ func secretAssignmentNameShaped(value string) bool {
 }
 
 // secretAssignmentPathShaped reports a relative path told by the structure of
-// the whole value: four or more components joined by /, none empty, where the
-// pieces (split at _ - . and /) are mostly names and the few that are ids are
-// short. A piece is a name when it is letters of one case shape (a word, a
-// file name, a short piece such as a or go), a counter, or a short piece of
-// letters and digits that is not token-like (k8s, md5sum). A piece is an id
-// when it is none of those and no longer than 16 characters (a git short
-// hash, a migration revision, a temporary-file suffix); a longer piece rules
-// the value out. The value is a path when it has at least six word pieces and
-// at most one id piece for every four word pieces. Random base64 that holds
-// slashes does not get there: its pieces are short, mixed in case and full of
-// digits, so it has neither six word pieces nor few ids.
+// the whole value: four or more components joined by /, none empty, made of
+// names with only a few ids among them. The value is weighed by its letters
+// and digits, not by its pieces (GAP-0665). A piece (split at _ - . and /) is:
+//   - a counter (digits only, short): it weighs nothing;
+//   - a word: letters of one case shape (all lower, all upper or one capital
+//     then lower), three or more of them (three always pass, more hold a vowel
+//     and no run of more than five consonants). It counts as a word, and its
+//     letters are names;
+//   - a short name: one or two letters of that shape. Its letters are names
+//     but it counts as no word, so single-letter padding (a/b/c/d) never
+//     makes six words;
+//   - a short tag (k8s, v2, a999): a lower-case piece of letters and digits
+//     of four characters or fewer that starts with a letter. Its letters are
+//     names and its digits are ids, because a digit is what an id carries;
+//   - an id otherwise, when it is no longer than 16 characters (a git short
+//     hash, a migration revision, a temporary-file suffix, a longer piece of
+//     letters and digits): all its letters and digits are ids. A longer piece
+//     rules the value out.
+//
+// The value is a path when it has at least six words and the ids are at most a
+// quarter of its letters and digits. A short secret hidden among a few short
+// pieces keeps its ids over a quarter of the value, so it is not a path;
+// random base64 that holds slashes is short pieces mixed in case and full of
+// digits and does not get there either.
 func secretAssignmentPathShaped(value string) bool {
 	components := strings.Split(value, "/")
 	if len(components) < 4 {
 		return false
 	}
-	words, ids := 0, 0
+	words, idChars, total := 0, 0, 0
 	for _, component := range components {
 		pieces := strings.FieldsFunc(component, func(r rune) bool { return r == '_' || r == '-' || r == '.' })
 		if len(pieces) == 0 {
 			return false
 		}
 		for _, piece := range pieces {
+			if secretAssignmentCounter(piece) {
+				continue
+			}
+			size := secretAlnumCount(piece)
+			total += size
 			switch {
-			case secretAssignmentCounter(piece):
-			case secretAssignmentPathWord(piece):
-				words++
-			case len(piece) <= 16:
-				ids++
+			case !secretAssignmentPathWord(piece):
+				if len(piece) > 16 {
+					return false
+				}
+				idChars += size
 			default:
-				return false
+				letters := countLetters(piece)
+				switch {
+				case letters == size:
+					if letters >= 3 {
+						words++
+					}
+				case size > 4:
+					// A piece of letters and digits longer than a short tag
+					// is as likely a chunk of a secret as a name.
+					idChars += size
+				default:
+					idChars += size - letters
+				}
 			}
 		}
 	}
-	return words >= 6 && ids*4 <= words
+	return words >= 6 && idChars*4 <= total
 }
 
 // secretAssignmentPathWord reports a path piece that a person wrote: letters
