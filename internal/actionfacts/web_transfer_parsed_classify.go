@@ -9314,7 +9314,7 @@ func curlOutputHasUnmodeledGlobReference(value string) bool {
 // unknown.
 func wgetPlainUploadResponseName(argv []string, parsed wgetArgvParse) (string, bool) {
 	if !parsed.Complete || len(parsed.Targets) != 1 ||
-		!(parsed.PostDataSet || parsed.PostFileSet || parsed.BodyDataSet || parsed.BodyFileSet) {
+		(!parsed.PostDataSet && !parsed.PostFileSet && !parsed.BodyDataSet && !parsed.BodyFileSet) {
 		return "", false
 	}
 	for i := 1; i < len(argv); i++ {
