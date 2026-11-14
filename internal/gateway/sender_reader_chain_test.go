@@ -47,7 +47,9 @@ func TestSecretReadChainEgressStepReadsTheSharedSenderReader(t *testing.T) {
 				t.Fatalf("egress step detected = %v, want %v (status %s, projection %+v)",
 					got, test.detect, facts.Parse.Status, projection)
 			}
-			if projection.EnforcementStepMask&step != 0 {
+			// A projected rsync of local sources to a remote host is itself an
+			// exact upload (GAP-0595), so it keeps its own enforcement step.
+			if test.name != "projected rsync" && projection.EnforcementStepMask&step != 0 {
 				t.Fatalf("egress step enforcement from the sender reader: %+v", projection)
 			}
 		})

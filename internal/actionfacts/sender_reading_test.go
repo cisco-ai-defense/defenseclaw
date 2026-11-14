@@ -95,8 +95,9 @@ func TestReadSendersUnprojectedRemoteCopyGAP0597(t *testing.T) {
 			want: SenderUnprojected, unknown: true, host: "unnamed.example", unread: true},
 		{name: "function sftp built host", command: "f(){ sftp \"$H\"; }; f",
 			want: SenderUnprojected, unknown: true, unread: true},
+		// An rsync to a remote host is a projected upload (GAP-0595).
 		{name: "projected rsync", command: "rsync -a build/ unnamed.example:/srv/x",
-			want: SenderRemoteCopy, host: "unnamed.example"},
+			want: SenderProjected, host: "unnamed.example"},
 		{name: "projected sftp", command: "sftp u@unnamed.example",
 			want: SenderRemoteCopy, host: "unnamed.example", unread: true},
 		{name: "projected scp", command: "scp report.txt u@unnamed.example:/x",
