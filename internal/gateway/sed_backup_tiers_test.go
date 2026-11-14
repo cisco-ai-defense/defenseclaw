@@ -24,6 +24,13 @@ func sedBackupTierFixture(t *testing.T) boundedEnv {
 	if err := os.WriteFile(filepath.Join(keys, "authorized_keys"), []byte("# decoy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-0496 rel half: an operand typed WITH a directory part.
+	if err := os.MkdirAll(filepath.Join(env.cwd, "ssh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env.cwd, "ssh", "authorized_keys"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return env
 }
 
@@ -44,10 +51,20 @@ func TestSedInPlaceBackupBlocksInEveryTier(t *testing.T) {
 		{"HLR3-SFX-c", "sed -i../.ssh/* s/x/y/ authorized_keys", true},
 		{"SFX-bsd-next-word", "sed -i keys s/x/y/ {keys}/authorized_", true},
 		{"SFX-gnu-plain-suffix", "sed -ikeys s/x/y/ {keys}/authorized_", true},
+		// GAP-0496 rel half (cases HLR4-SFX-pfx-*): GNU sed builds the backup
+		// name from the operand as typed, directory part included, so a
+		// suffix that ends in a star followed by an operand typed with a
+		// directory part names the keys file. {pfx} is the home folder plus
+		// the first byte of the keys folder name, {typed} the rest of it
+		// plus the file name.
+		{"HLR4-SFX-ctl", "sed -i s/x/y/ {typed}", false},
+		{"HLR4-SFX-pfx-attached", "sed -i{pfx}* s/x/y/ {typed}", true},
+		{"HLR4-SFX-pfx-long", "sed --in-place={pfx}* s/x/y/ {typed}", true},
+		{"HLR4-SFX-pfx-cluster", "sed -ni{pfx}* s/x/y/ {typed}", true},
 		{"SFX-ord-bak", "sed -i.bak s/x/y/ f", false},
 		{"SFX-ord-bsd-empty", "sed -i '' s/x/y/ f", false},
 	} {
-		command := strings.ReplaceAll(tc.command, "{keys}", keys)
+		command := strings.NewReplacer("{keys}", keys, "{pfx}", env.home+"/.", "{typed}", "ssh/authorized_keys").Replace(tc.command)
 		for _, tier := range boundedTestTiers {
 			api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
 			action, _ := boundedDecideClaudeCode(t, api, env, boundedShellCommand(command))
