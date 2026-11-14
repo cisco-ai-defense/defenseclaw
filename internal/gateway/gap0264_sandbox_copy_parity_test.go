@@ -22,7 +22,9 @@ import (
 )
 
 // gap0264Probe is one tool call, spelled with {P} for the project the agent
-// works in and {H} for its home.
+// works in, {H} for its home and {U} for the relative path from the project
+// up to the home: ".." on the laptop, whose project is in the home, and
+// "../sandbox" in an actor, whose /work is beside its /sandbox home.
 type gap0264Probe struct {
 	name, tool string
 	input      map[string]any
@@ -31,7 +33,11 @@ type gap0264Probe struct {
 func gap0264Expand(value any, project, home string) any {
 	switch v := value.(type) {
 	case string:
-		return strings.NewReplacer("{P}", project, "{H}", home).Replace(v)
+		up, err := filepath.Rel(project, home)
+		if err != nil {
+			panic(err)
+		}
+		return strings.NewReplacer("{P}", project, "{H}", home, "{U}", up).Replace(v)
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for key, inner := range v {
@@ -180,17 +186,17 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 	// Relative operands from the project, reaching the home with "..", and
 	// from the home itself (GAP-0282, R8's probes and more).
 	fromProject := []gap0264Probe{
-		{"rc via .. from project", "Bash", map[string]any{"command": "echo x >> ../.bashrc"}},
-		{"rc via ./.. from project", "Bash", map[string]any{"command": "echo x >> ./../.zshrc"}},
-		{"profile after cd ..", "Bash", map[string]any{"command": "cd .. && echo x >> .profile"}},
-		{"rc cp via ..", "Bash", map[string]any{"command": "cp src/in ../.bashrc"}},
+		{"rc via {U} from project", "Bash", map[string]any{"command": "echo x >> {U}/.bashrc"}},
+		{"rc via ./{U} from project", "Bash", map[string]any{"command": "echo x >> ./{U}/.zshrc"}},
+		{"profile after cd {U}", "Bash", map[string]any{"command": "cd {U} && echo x >> .profile"}},
+		{"rc cp via {U}", "Bash", map[string]any{"command": "cp src/in {U}/.bashrc"}},
 		{"git hook via src/..", "Bash", map[string]any{"command": "echo x > src/../.git/hooks/pre-commit"}},
 		{"claude settings relative", "Bash", map[string]any{"command": "echo '{}' > .claude/settings.json"}},
 		{"crontab file relative", "Bash", map[string]any{"command": "printf '* * * * * sh /tmp/x\\n' > c.txt && crontab c.txt"}},
-		{"defenseclaw state via ..", "Bash", map[string]any{"command": "rm -rf ../.defenseclaw/audit.db"}},
-		{"ssh key read via ..", "Bash", map[string]any{"command": "cat ../.ssh/id_ed25519"}},
-		{"aws credentials read via ..", "Bash", map[string]any{"command": "cat ../.aws/credentials"}},
-		{"authorized_keys via ..", "Bash", map[string]any{"command": "echo ssh-ed25519 AAAAC3Nza x >> ../.ssh/authorized_keys"}},
+		{"defenseclaw state via {U}", "Bash", map[string]any{"command": "rm -rf {U}/.defenseclaw/audit.db"}},
+		{"ssh key read via {U}", "Bash", map[string]any{"command": "cat {U}/.ssh/id_ed25519"}},
+		{"aws credentials read via {U}", "Bash", map[string]any{"command": "cat {U}/.aws/credentials"}},
+		{"authorized_keys via {U}", "Bash", map[string]any{"command": "echo ssh-ed25519 AAAAC3Nza x >> {U}/.ssh/authorized_keys"}},
 		{"relative project control", "Bash", map[string]any{"command": "echo ok > src/out.txt"}},
 	}
 	fromHome := []gap0264Probe{
@@ -211,6 +217,18 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 	type row struct {
 		probe  gap0264Probe
 		inHome bool // the call runs in the home, else in the project
+	}
+	// sandboxOwnHookConfig names the rows a sandbox does not judge as the
+	// laptop does, by design and not by the working directory:
+	// tamper.agent_hook_config_write is the agent-hook-config guard
+	// (agentHookConfigFindingsAs), which reads and resolves hook files through
+	// links on this host and therefore skips every sandbox request. In a
+	// sandbox the agent's settings cannot switch DefenseClaw off: the image's
+	// managed drop-in sets allowManagedHooksOnly (substrate kit overlay,
+	// openshell hostile-settings check). These rows pin the sandbox verdict.
+	sandboxOwnHookConfig := map[string]bool{
+		"claude settings relative":           true,
+		"claude settings relative from home": true,
 	}
 	var rows []row
 	for _, probe := range append(probes, fromProject...) {
@@ -233,6 +251,15 @@ func TestGAP0264SandboxCopyModeParityWithLaptop(t *testing.T) {
 			mountAction, mountRules := gap0264Verdict(t, api, actor(true), actorCWD, probe, actorInput)
 			t.Logf("PARITY %-38s laptop=%s %v copy=%s %v mount=%s %v", probe.name,
 				laptopAction, laptopRules, copyAction, copyRules, mountAction, mountRules)
+			if sandboxOwnHookConfig[probe.name] {
+				if laptopAction != "alert" || !slices.Equal(laptopRules, []string{agentHookConfigWriteRuleID}) {
+					t.Errorf("laptop verdict %s %v, want alert [%s]", laptopAction, laptopRules, agentHookConfigWriteRuleID)
+				}
+				if copyAction != "allow" || len(copyRules) != 0 || mountAction != "allow" || len(mountRules) != 0 {
+					t.Errorf("sandbox hook-config row: copy %s %v, mount %s %v, want allow []", copyAction, copyRules, mountAction, mountRules)
+				}
+				return
+			}
 			if copyAction != laptopAction || !slices.Equal(copyRules, laptopRules) {
 				t.Errorf("copy-mode actor verdict %s %v, laptop verdict %s %v", copyAction, copyRules, laptopAction, laptopRules)
 			}
