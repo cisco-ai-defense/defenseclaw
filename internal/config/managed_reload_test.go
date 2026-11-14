@@ -31,7 +31,7 @@ func TestManagedReloadRefusal(t *testing.T) {
 	}{
 		{"oss to oss", m(""), m(""), "", ""},
 		{"managed to managed", m("managed_enterprise"), m("managed_enterprise"), "", ""},
-		{"managed spelling", m("managed_enterprise"), m("managed-enterprise"), "", ""},
+		{"managed case", m("managed_enterprise"), m(" Managed_Enterprise "), "", ""},
 		{"downgrade", m("managed_enterprise"), m(""), "managed_downgrade", "managed_downgrade"},
 		{"upgrade", m(""), m("managed_enterprise"), "", "deployment_mode_change"},
 		{"nil old", nil, m(""), "", ""},

@@ -33,7 +33,10 @@ import (
 func TestGAP0307SubstrateFileReloadRefusesADeploymentModeEditWhole(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
-	writeConfigForManagerTest(t, path, dir, "observe")
+	boot := "config_version: 9\ndata_dir: " + dir + "\nguardrail:\n  mode: observe\nobservability: {}\n"
+	if err := os.WriteFile(path, []byte(boot), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	initial, err := config.LoadRuntimeV8File(path)
 	if err != nil {
 		t.Fatalf("initial load: %v", err)
@@ -46,7 +49,7 @@ func TestGAP0307SubstrateFileReloadRefusesADeploymentModeEditWhole(t *testing.T)
 	})
 	runtime, _ := newProxyGeneratedTraceRuntime(t)
 	mgr.bindObservabilityV8(runtime)
-	raw := "config_version: 8\n" +
+	raw := "config_version: 9\n" +
 		"data_dir: " + dir + "\n" +
 		"deployment_mode: managed_enterprise\n" +
 		"guardrail:\n" +
