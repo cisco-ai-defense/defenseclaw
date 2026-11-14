@@ -788,7 +788,7 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 			words = append(words, inlineWordValue(word, values, cwd, home))
 		}
 		if body, ok := shellCommandBodyIndex(words); ok && words[body] != "$" {
-			if _, dynamic := InlineHandedPaths(words[body], cwd, home); dynamic {
+			if handed, _ := InlineHandedPaths(words[body], cwd, home); InlineHandsDynamic(handed) {
 				for _, word := range words[body+1:] {
 					if actionfacts.InlineHandedWordIsPath(word) {
 						targets = append(targets, word)
@@ -842,7 +842,24 @@ func registrationFindActionTargets(args []*syntax.Word, values actionValues, cwd
 				if action == "-execdir" || action == "-okdir" {
 					dir = filepath.Dir(file)
 				}
-				run(registrationFindFileWords(operands, file, home), dir)
+				words := registrationFindFileWords(operands, file, home)
+				run(words, dir)
+				// A child that is no proven reader of the file it is handed (an
+				// option that writes a file or runs a program, a program that
+				// changes it) may change it: the same screens the state reader
+				// applies (actionfacts.FindEmbeddedCommandMayChange,
+				// rel-1-0-10:GAP-0501, GAP-0660).
+				argv := []string{"find", action}
+				for _, word := range words {
+					text, fixed := StaticWord(word, home)
+					if !fixed {
+						text = "$"
+					}
+					argv = append(argv, text)
+				}
+				if actionfacts.FindEmbeddedCommandMayChange(append(argv, ";")) {
+					targets = append(targets, file)
+				}
 			}
 		default:
 			if len(operands) > 0 {
@@ -1550,8 +1567,10 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 			for _, member := range members {
 				target := archiveMemberPath(folder, member)
 				for _, name := range names {
-					if name == target || strings.HasPrefix(name, target+string(filepath.Separator)) ||
-						strings.HasPrefix(target, name+string(filepath.Separator)) {
+					// A member below a registered folder is no reach: the folder is
+					// not replaced by it, only a registered file or a member that
+					// holds one is (rel-1-0-10:GAP-0659).
+					if name == target || strings.HasPrefix(name, target+string(filepath.Separator)) {
 						found = target
 						return false
 					}

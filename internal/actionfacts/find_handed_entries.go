@@ -139,6 +139,11 @@ func handedEntriesOf(words []string, inEntryDir bool) HandedEntries {
 	case "awk", "gawk", "mawk", "nawk":
 		only = awkOnlyPrints(args)
 	case "python", "python3":
+		// Inline code a read grammar proves read-only changes no entry it is
+		// handed (rel-1-0-10:GAP-0657).
+		if InlineCodeHandoff(words).ProvenReads {
+			return HandedEntries{}
+		}
 		return jsonToolHandedEntries(args, inEntryDir)
 	case "cp", "rsync":
 		return copyHandedEntries(program, args, inEntryDir)

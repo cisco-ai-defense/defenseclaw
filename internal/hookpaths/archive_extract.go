@@ -10,6 +10,9 @@ import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // ArchiveExtractionDestinations returns the folders an archive extraction
@@ -101,13 +104,18 @@ func tarDestinations(words []string) []string {
 			}
 		}
 		switch {
-		case word == "--extract" || word == "--get":
-			extract = true
-		case word == "--directory":
-			next()
-		case strings.HasPrefix(word, "--directory="):
-			destinations = append(destinations, strings.TrimPrefix(word, "--directory="))
-		case strings.HasPrefix(word, "--"):
+		case strings.HasPrefix(word, "--") && len(word) > 2:
+			name, value, attached := strings.Cut(word, "=")
+			switch tarLongName(name) {
+			case "--extract", "--get":
+				extract = true
+			case "--directory":
+				if attached {
+					destinations = append(destinations, value)
+				} else {
+					next()
+				}
+			}
 		case strings.HasPrefix(word, "-") && len(word) > 1:
 			cluster := word[1:]
 			if strings.ContainsRune(cluster, 'x') {
@@ -186,11 +194,28 @@ func cpioDestinations(words []string) []string {
 // sudo, env, nice, nohup, time, command, exec or timeout is looked through. It
 // is nil when the command does not parse.
 func ArchiveExtractionPaths(command, cwd, home string) []string {
+	paths, _ := ArchiveExtractionReading(command, cwd, home)
+	return paths
+}
+
+// ArchiveExtractionReading is ArchiveExtractionPaths with the caps the
+// reading hit. A shell -c body (and su -c, script -c, ssh) is read as a
+// command of its own down to InlineMaxShellDepth levels; a body nested deeper,
+// or a wrapper chain longer than actionfacts.InlineChainRounds, is TRUNCATED
+// (bound rule, cap depth): what it extracts is unknown
+// (rel-1-0-10:GAP-0663).
+func ArchiveExtractionReading(command, cwd, home string) ([]string, bounded.CapSet) {
 	file, parsed := parseShell(command)
 	if !parsed || !filepath.IsAbs(cwd) {
-		return nil
+		return nil, bounded.CapSet{}
 	}
 	var out []string
+	var trunc bounded.Truncated
+	archiveWalk(file, cwd, home, 0, &out, &trunc)
+	return out, trunc.Set()
+}
+
+func archiveWalk(file *syntax.File, cwd, home string, depth int, out *[]string, trunc *bounded.Truncated) {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -199,6 +224,17 @@ func ArchiveExtractionPaths(command, cwd, home string) []string {
 		words := make([]string, len(call.Args))
 		for index, arg := range call.Args {
 			words[index], _ = StaticWord(arg, home)
+		}
+		if child, _, caps := actionfacts.InlineChild(words); len(child) > 0 {
+			trunc.Merge(caps)
+			if body, shell := launcherBody(child); shell {
+				if trunc.Within(bounded.Depth, depth+1, InlineMaxShellDepth) {
+					if inner, parsed := parseShell(body); parsed {
+						archiveWalk(inner, cwd, home, depth+1, out, trunc)
+					}
+				}
+				return true
+			}
 		}
 		words = archiveProgramWords(words)
 		if len(words) == 0 {
@@ -212,14 +248,13 @@ func ArchiveExtractionPaths(command, cwd, home string) []string {
 			if !filepath.IsAbs(folder) {
 				folder = filepath.Join(cwd, folder)
 			}
-			out = append(out, filepath.Clean(folder))
+			*out = append(*out, filepath.Clean(folder))
 			for _, member := range members {
-				out = append(out, archiveMemberPath(folder, member))
+				*out = append(*out, archiveMemberPath(folder, member))
 			}
 		}
 		return true
 	})
-	return out
 }
 
 // archiveProgramWords drops the launchers before the program word.
@@ -307,6 +342,7 @@ func tarMembers(words []string) []string {
 			i = len(words)
 		case strings.HasPrefix(word, "--"):
 			name, value, attached := strings.Cut(word, "=")
+			name = tarLongName(name)
 			switch name {
 			case "--extract", "--get":
 				extract = true
@@ -409,4 +445,18 @@ func unzipMembers(words []string) []string {
 		members = append(members, name)
 	}
 	return members
+}
+
+// tarLongName is the long option a --word spells: exactly, else as the only
+// option it is a prefix of (getopt_long: --ext is --extract, --dir is
+// --directory); the word itself for one the shared table does not list.
+func tarLongName(word string) string {
+	switch option := ExpandLongOption(strings.TrimPrefix(word, "--"), tarLongOptions); option {
+	case "":
+		return word
+	case "dir", "cd":
+		return "--directory"
+	default:
+		return "--" + option
+	}
 }

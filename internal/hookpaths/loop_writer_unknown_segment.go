@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"maps"
 	"path"
 	"slices"
@@ -381,7 +382,13 @@ func loopWriterOperands(call *syntax.CallExpr, home string) []*syntax.Word {
 	default:
 		// An inline interpreter child is handed its words as possible
 		// writes (rel-1-0-10:GAP-0365).
-		handed, _, _ := inlineHandedWords(words, home)
+		// Only code that names a write call is a proven write of what it is
+		// handed; code that may write gets the unknown tier from the
+		// hand-off reading of the whole call (InlineHandedPaths).
+		handed, _, access, _ := inlineHandedWordsAs(words, home)
+		if access != actionfacts.InlineWrites {
+			return nil
+		}
 		return handed
 	}
 	inPlace := false

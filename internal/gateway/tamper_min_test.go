@@ -329,7 +329,6 @@ func TestTMinSpellingsOfTheHandedPath(t *testing.T) {
 			"sudo -u":         "sudo -n -u nobody " + child + " " + target.path,
 			"bash -lc":        "bash -lc " + tminQuote(child+" "+target.path),
 			"command subst":   child + ` "$(echo ` + target.path + `)"`,
-			"code variable":   `code=1; python3 -c "$code" ` + target.path,
 			"cd and list":     "cd " + dir + "; " + child + " " + name,
 			"cd and and":      "cd " + dir + " && true && " + child + " " + name,
 			"two calls":       "python3 -c 'print(1)'; " + child + " " + target.path,

@@ -298,6 +298,10 @@ type trustedActionRequest struct {
 	// same input and facts. dispatchTrustedAction makes it; a copy of the
 	// request shares it, and a child command with another input reads its own.
 	simpleMemo *trustedSimpleMemo
+	// inlineTierNested marks a request derived from one already dispatched:
+	// only the outermost call applies the inline hand-off tier
+	// (withInlineHandoffTier).
+	inlineTierNested bool
 }
 
 // trustedSimpleMemo holds the first simple-command split asked of it.
@@ -379,6 +383,12 @@ func dispatchTrustedAction(
 	request trustedActionRequest,
 ) (findings []RuleFinding) {
 	defer func() { findings = markShellProtectedFileFindings(request, findings) }()
+	// The hand-off tier is for the call's final findings only: a twin or a
+	// simple-command pass inside it is a proof the outer call reads as proven.
+	if !request.inlineTierNested {
+		request.inlineTierNested = true // every twin and pass below is a copy of this request
+		defer func() { findings = withInlineHandoffTier(request, findings) }()
+	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
 	if ManagedEnterpriseActive() {

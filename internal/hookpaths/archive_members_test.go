@@ -102,11 +102,11 @@ func TestInlineHandedPaths(t *testing.T) {
 		{"relative word", "python3 -c " + code + " notes.txt", []string{"/home/u/proj/notes.txt"}, false},
 		{"sudo env", "sudo env A=1 python3 -I -c " + code + " ~/.claude/settings.json", []string{"/home/u/.claude/settings.json"}, false},
 		{"variable", "p=~/.defenseclaw/config.yaml; python3 -c " + code + ` "$p"`, []string{"/home/u/.defenseclaw/config.yaml"}, false},
-		{"sh -c", `sh -c "python3 -c 'import sys' ~/.codex/config.toml"`, []string{"/home/u/.codex/config.toml"}, false},
-		{"bash -c single quotes", `bash -c 'python3 -c "import sys" ~/.codex/config.toml'`, []string{"/home/u/.codex/config.toml"}, false},
+		{"sh -c", `sh -c "python3 -c 'import os' ~/.codex/config.toml"`, []string{"/home/u/.codex/config.toml"}, false},
+		{"bash -c single quotes", `bash -c 'python3 -c "import os" ~/.codex/config.toml'`, []string{"/home/u/.codex/config.toml"}, false},
 		{"xargs", "echo ~/.defenseclaw/config.yaml | xargs python3 -c " + code, nil, true},
 		{"while read", "while read f; do python3 -c " + code + ` "$f"; done < list`, nil, true},
-		{"xargs sh -c", "xargs -I{} sh -c 'python3 -c \"import sys\" \"$0\"' {}", nil, true},
+		{"xargs sh -c", "xargs -I{} sh -c 'python3 -c \"import os\" \"$0\"' {}", nil, true},
 		{"parallel", "parallel python3 -c " + code + " ::: ~/.defenseclaw/config.yaml", []string{"/home/u/proj/:::", "/home/u/.defenseclaw/config.yaml"}, true},
 		{"text after the code", `python3 -c ` + code + ` "two words" 'a;b'`, nil, false},
 		{"no handed word", "python3 -c " + code, nil, false},
@@ -114,7 +114,14 @@ func TestInlineHandedPaths(t *testing.T) {
 		{"plain command", "cat ~/.defenseclaw/config.yaml", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			paths, dynamic := InlineHandedPaths(tc.command, cwd, home)
+			handed, _ := InlineHandedPaths(tc.command, cwd, home)
+			var paths []string
+			for _, word := range handed {
+				if !word.Dynamic {
+					paths = append(paths, word.Path)
+				}
+			}
+			dynamic := InlineHandsDynamic(handed)
 			if !slices.Equal(paths, tc.paths) || dynamic != tc.dynamic {
 				t.Fatalf("InlineHandedPaths(%q) = %q, %t; want %q, %t", tc.command, paths, dynamic, tc.paths, tc.dynamic)
 			}

@@ -73,31 +73,3 @@ func archiveExtractsIntoState(facts actionfacts.Facts, request trustedActionRequ
 	}
 	return false
 }
-
-// inlineHandoffStateWrite reports an inline-code interpreter child (python -c
-// CODE ARG...) handed a path in the active state: no reader proves the code
-// read-only, so every fixed path a runner hands it (direct argv, sudo, env,
-// sh -c, a variable) is a possible write of it, and so is a word whose value
-// only a runner knows ("$f" of a while read loop) in a command that names
-// the state at all (rel-1-0-10:GAP-0365). The runners that rewrite their call
-// first (xargs fed by echo or printf, a find, a for loop) reach this as the
-// plain call.
-func inlineHandoffStateWrite(facts actionfacts.Facts, request trustedActionRequest) bool {
-	reaches, ok := stateReachFunc(facts, request)
-	if !ok {
-		return false
-	}
-	command, known := trustedBashCommandInput(request.Input)
-	if !known {
-		return false
-	}
-	home := strings.TrimRight(facts.ActiveHome, "/")
-	paths, dynamic := hookpaths.InlineHandedPaths(command, facts.CWD, home)
-	for _, full := range paths {
-		if reaches(full) {
-			return true
-		}
-	}
-	return dynamic && (request.targetMemo.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) ||
-		hookpaths.CommandMentionsPath(command, home, home+"/.defenseclaw"))
-}
