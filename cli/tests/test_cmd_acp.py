@@ -281,6 +281,7 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
 
 
 def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
     """GAP-1534: doctor lists each binding and FAILs with the fix on drift."""
     from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
 
@@ -312,6 +313,15 @@ def test_doctor_reports_acp_bindings_and_fails_on_drift(tmp_path, monkeypatch):
         [row] = drifted.checks
         assert row["status"] == "fail"
         assert "agent executable digest has drifted" in row["detail"]
+        # An agent the user updated, which only this account can change, is
+        # re-pinned by doctor --fix or acp refresh --agent (rel-1-0-10:GAP-0250).
+        assert "defenseclaw acp refresh --agent kiro" in row["remediation"]
+        # One another account could have changed is bound again by setup.
+        monkeypatch.setattr(cmd_acp_module, "_agent_custody_problem", lambda _path: "other accounts can change it")
+        drifted = _DoctorResult()
+        _check_acp_bindings(app.cfg, drifted)
+        [row] = drifted.checks
+        assert row["status"] == "fail" and "other accounts can change it" in row["detail"]
         repair = _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro", "--profile", "default")
         assert row["remediation"].startswith(f"in PowerShell, run {repair}" if os.name == "nt" else repair)
         assert "--activate" not in row["remediation"]
@@ -1000,9 +1010,11 @@ def test_refresh_repins_only_the_upgraded_defenseclaw_guard(tmp_path, monkeypatc
 
 
 def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
     # make all re-pins the entries that start the guard it just published;
-    # doctor --fix plans the same refresh, applies it once, and never
-    # re-pins a changed agent binary.
+    # doctor --fix plans the same refresh and applies it once. An agent the
+    # user updated at its pinned path, which only this account can change, is
+    # re-pinned too (rel-1-0-10:GAP-0250).
     from defenseclaw.commands.cmd_doctor import _fix_acp_guard_pins
 
     _isolate_client_config(monkeypatch, tmp_path)
@@ -1025,15 +1037,19 @@ def test_source_install_and_doctor_fix_repin_only_defenseclaws_guard(tmp_path, m
 
         guard_path.write_bytes(b"upgraded-guard")
         agent_path.write_bytes(b"updated-agent")
+        # Unattended (--yes): the guard is re-pinned, the changed agent only named.
         tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
-        repair = _repair_command("acp", "setup", "--client", "zed", "--agent", "kiro")
-        assert tag == "plan" and "zed/kiro" in plan and repair in plan
-        assert _fix_acp_guard_pins(app.cfg, assume_yes=True)[0] == "pass"
-        tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=True, plan_only=True)
+        assert tag == "plan" and "guard for zed/kiro" in plan and "updated agent" not in plan
+        assert "defenseclaw acp refresh --agent kiro" in plan
+        tag, plan = _fix_acp_guard_pins(app.cfg, assume_yes=False, plan_only=True)
+        assert tag == "plan" and "guard for zed/kiro" in plan and "updated agent for zed/kiro (" in plan
+        with patch("click.confirm", return_value=True):
+            tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=False)
+        assert tag == "pass" and "updated agent for zed/kiro" in detail
+        tag, detail = _fix_acp_guard_pins(app.cfg, assume_yes=False, plan_only=True)
         assert tag == "skip" and "pins are current" in detail
         result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
-        assert "agent executable digest has drifted" in result.output
-        assert "guard executable digest has drifted" not in result.output
+        assert result.exit_code == 0, result.output
     finally:
         cleanup_app(app, db_path, data_dir)
 
@@ -1236,6 +1252,9 @@ def test_doctor_repair_command_keeps_action_mode(tmp_path, monkeypatch):
         )
         assert result.exit_code == 0, result.output
         agent_path.write_bytes(b"drifted-binary")
+        # An agent another account could have changed is bound again only by
+        # setup, whose command keeps the action mode.
+        monkeypatch.setattr(cmd_acp_module, "_agent_custody_problem", lambda _path: "other accounts can change it")
         drifted = _DoctorResult()
         _check_acp_bindings(app.cfg, drifted)
         [row] = drifted.checks
@@ -2521,3 +2540,169 @@ def test_windows_repair_command_is_pinned_by_a_literal(monkeypatch, deployment_m
     # A standalone host: on a Windows test host the probe can find a Secure Client install.
     monkeypatch.setattr(cmd_acp_module, "is_secure_client", lambda _cfg: False)
     assert cmd_acp_module.setup_repair_command(cfg, "zed", "kiro", data_dir) == expected
+
+
+def _require_private_temp_folders(tmp_path: Path) -> None:
+    """Skip when a folder above tmp_path is one other accounts can change.
+
+    The re-pin custody check (rel-1-0-10:GAP-0250) refuses such a chain, as it
+    should; some lab hosts grant another account Modify on the profile Temp
+    folder. CI and a normal profile pass and run the test.
+    """
+    probe = tmp_path / "custody-probe"
+    probe.mkdir(mode=0o700)
+    target = probe / "agent"
+    target.write_bytes(b"probe")
+    problem = cmd_acp_module._agent_custody_problem(str(target))
+    target.unlink()
+    probe.rmdir()
+    if problem and str(probe) not in problem and str(target) not in problem:
+        pytest.skip(f"the temp folders of this host are not private: {problem}")
+
+def _setup_zed_kiro(tmp_path: Path, monkeypatch, app) -> tuple[str, Path]:
+    """Set up zed/kiro with an agent in a private bin folder; returns (guard, agent path)."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(mode=0o700)
+    guard = _binary(tmp_path / "guard")
+    agent_path = bin_dir / "kiro-cli"
+    agent = _binary(agent_path)
+    result = CliRunner().invoke(
+        acp_cmd,
+        ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+        obj=app,
+    )
+    assert result.exit_code == 0, result.output
+    return guard, agent_path
+
+
+def _lock(data_dir: str) -> dict:
+    return json.loads((Path(data_dir) / "acp" / "zed-kiro.contract-lock.json").read_text())
+
+
+# An agent upgrade (kiro-cli 2.35.1 -> 3.3.0 replaced the pinned file) left the
+# Zed + defenseclaw-acp pair failing closed until acp setup was re-run, and
+# nothing said how to recover (rel-1-0-10:GAP-0250). `acp refresh --agent`
+# re-pins the updated agent at the same path once only this account or an
+# administrator can change it, records the change, and verify passes again.
+def test_refresh_agent_repins_an_updated_agent_and_records_it(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    try:
+        guard, agent_path = _setup_zed_kiro(tmp_path, monkeypatch, app)
+        before = _lock(data_dir)
+        agent_path.write_bytes(b"kiro-cli 3.3.0 upgraded bytes")
+        new_sha = hashlib.sha256(agent_path.read_bytes()).hexdigest()
+
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code != 0
+        assert "agent executable digest has drifted" in result.output
+        assert "defenseclaw acp refresh --agent kiro" in result.output
+
+        # The guard-only refresh the installers run does not re-pin an agent.
+        result = CliRunner().invoke(acp_cmd, ["refresh"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert _lock(data_dir) == before
+
+        with patch.object(cmd_acp_module, "_log_acp_change") as logged:
+            result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        assert "Re-pinned the updated kiro agent for zed/kiro" in result.output
+        after = _lock(data_dir)
+        assert after["agent"]["sha256"] == new_sha
+        assert after["agent"]["path"] == before["agent"]["path"]
+        assert after["guard"] == before["guard"] and after["client"] == before["client"]
+        operation, details = logged.call_args.args[1:]
+        assert operation == "acp-agent-repin"
+        assert "scope=zed/kiro" in details and f"sha256={new_sha}" in details
+        previous = before["agent"]["sha256"]
+        assert f"previous_sha256={previous}" in details
+
+        result = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0, result.output
+        # Nothing left to re-pin.
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+        assert result.exit_code == 0 and "Re-pinned" not in result.output
+        assert "nothing to re-pin" in result.output
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_refresh_agent_refuses_when_a_folder_above_can_be_replaced(tmp_path, monkeypatch):
+    # Another account that can rename a folder above the agent could swap its
+    # own folder in around the re-pin (review of rel-1-0-10:GAP-0250).
+    app, data_dir, db_path = _app(tmp_path)
+    try:
+        _setup_zed_kiro(tmp_path, monkeypatch, app)
+        before = _lock(data_dir)
+        agent_path = tmp_path / "bin" / "kiro-cli"
+        agent_path.write_bytes(b"updated")
+        original = tmp_path.stat().st_mode & 0o7777
+        try:
+            tmp_path.chmod(0o777)
+            result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+            assert result.exit_code != 0
+            assert "other accounts can replace" in result.output
+            assert _lock(data_dir) == before
+            tmp_path.chmod(0o1777)  # sticky: other accounts cannot rename this folder
+            result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+            assert result.exit_code == 0, result.output
+        finally:
+            tmp_path.chmod(original)
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_refresh_agent_refuses_an_agent_other_accounts_can_change(tmp_path, monkeypatch):
+    app, data_dir, db_path = _app(tmp_path)
+    try:
+        _guard, agent_path = _setup_zed_kiro(tmp_path, monkeypatch, app)
+        before = _lock(data_dir)
+        agent_path.write_bytes(b"replaced by someone else")
+        for target, mode in ((agent_path.parent, 0o777), (agent_path, 0o722)):
+            original = target.stat().st_mode & 0o777
+            target.chmod(mode)
+            try:
+                result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+            finally:
+                target.chmod(original)
+            assert result.exit_code != 0
+            assert "zed/kiro" in result.output and "other accounts can change" in result.output
+            assert "defenseclaw acp setup" in result.output
+            assert _lock(data_dir) == before
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_refresh_agent_refuses_a_link_and_a_managed_enrollment(tmp_path, monkeypatch):
+    _require_private_temp_folders(tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    try:
+        _guard, agent_path = _setup_zed_kiro(tmp_path, monkeypatch, app)
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock = _lock(data_dir)
+        agent_path.write_bytes(b"updated")
+        managed = copy.deepcopy(lock)
+        managed["guard"]["managed_custody"] = True
+        lock_path.write_text(json.dumps(managed))
+        os.chmod(lock_path, 0o600)
+        result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+        assert result.exit_code != 0
+        assert "administrator" in result.output
+        assert json.loads(lock_path.read_text()) == managed
+
+        lock_path.write_text(json.dumps(lock))
+        os.chmod(lock_path, 0o600)
+        if os.name != "nt":
+            target = tmp_path / "bin" / "kiro-cli-3.3.0"
+            target.write_bytes(b"updated")
+            agent_path.unlink()
+            agent_path.symlink_to(target)
+            result = CliRunner().invoke(acp_cmd, ["refresh", "--agent", "kiro"], obj=app)
+            assert result.exit_code != 0
+            assert "link" in result.output
+            assert json.loads(lock_path.read_text()) == lock
+    finally:
+        cleanup_app(app, db_path, data_dir)
