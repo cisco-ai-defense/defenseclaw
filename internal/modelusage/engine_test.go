@@ -3,6 +3,7 @@ package modelusage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"runtime"
 	"sync"
@@ -268,5 +269,23 @@ func TestBedrockInvokeHeadersFallback(t *testing.T) {
 	rec := c.End(nil)
 	if rec.Usage.Input != 40 || rec.Usage.Output != 9 || rec.Usage.Source != SourceHeader {
 		t.Fatalf("%+v", rec.Usage)
+	}
+}
+
+// GAP-0631: a caller that closed the connection is a cancelled call, also
+// when the error is not context.Canceled (a failed write to the client).
+func TestClientGoneIsCancelledNotFailed(t *testing.T) {
+	e := NewEngine(newCapture())
+	e.Apply(enabled(), testPricing())
+	defer e.Apply(config.TokenomicsConfig{}, config.PricingConfig{})
+	c := e.Begin(context.Background(), facts())
+	rec := c.End(fmt.Errorf("%w: write tcp: broken pipe", ErrClientGone))
+	if rec.Outcome != "cancelled" || rec.ErrorType != "cancelled" {
+		t.Fatalf("%+v", rec)
+	}
+	// An upstream failure stays failed.
+	c = e.Begin(context.Background(), facts())
+	if rec = c.End(errors.New("connection reset by peer")); rec.Outcome != "failed" || rec.ErrorType != "upstream_error" {
+		t.Fatalf("%+v", rec)
 	}
 }

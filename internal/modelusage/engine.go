@@ -413,7 +413,7 @@ func (c *call) build(err error) Record {
 	end := time.Now()
 	rec := Record{Facts: c.f, Status: c.status, Outcome: "completed", TTFB: c.ttfb, Total: end.Sub(c.start), EndedAt: end}
 	switch {
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled), errors.Is(err, ErrClientGone):
 		rec.Outcome, rec.ErrorType = "cancelled", "cancelled"
 	case err != nil:
 		rec.Outcome, rec.ErrorType = "failed", "upstream_error"

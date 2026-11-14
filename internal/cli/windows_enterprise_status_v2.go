@@ -243,6 +243,7 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 		result.Identity = enterprisestatus.ParseIdentityHealth(health)
 	}
 	result.Cowork = windowsEnterpriseCoworkBlock(result, in.cfg, in.auditStore, block, health)
+	result.Routing = enterprisestatus.BuildRouting(enterprisestatus.RoutingInputs{Config: in.cfg, Connectors: block, Health: health})
 	if in.accountJoin != nil {
 		if report := in.accountJoin(); report != nil {
 			summary := report.Summary()
