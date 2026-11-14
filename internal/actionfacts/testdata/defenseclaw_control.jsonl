@@ -1,0 +1,82 @@
+{"id": "g596-r01", "dialect": "", "command": "defenseclaw guardrail disable", "want": "disable"}
+{"id": "g596-r02", "dialect": "", "command": "defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596-v01", "dialect": "", "command": "defenseclaw guardrail enable", "want": ""}
+{"id": "g596-v02", "dialect": "", "command": "defenseclaw guardrail status", "want": ""}
+{"id": "g596-v03", "dialect": "", "command": "defenseclaw-gateway restart", "want": ""}
+{"id": "g596-v04", "dialect": "", "command": "defenseclaw-gateway status", "want": ""}
+{"id": "g596-v05", "dialect": "", "command": "systemctl --user stop defenseclaw-gateway", "want": "stop"}
+{"id": "g596-v06", "dialect": "", "command": "sudo systemctl stop defenseclaw-gateway", "want": "stop"}
+{"id": "g596-v07", "dialect": "", "command": "defenseclaw uninstall", "want": "uninstall"}
+{"id": "g596-v08", "dialect": "", "command": "defenseclaw setup guardrail --disable", "want": "disable"}
+{"id": "g596-v09", "dialect": "", "command": "defenseclaw guardrail mode observe", "want": "disable"}
+{"id": "g596-v10", "dialect": "", "command": "defenseclaw config set guardrail.enabled false", "want": "config"}
+{"id": "g596-v11", "dialect": "", "command": "defenseclaw connector disable claudecode", "want": "disable"}
+{"id": "g596-v12", "dialect": "", "command": "defenseclaw-gateway stop --force", "want": "stop"}
+{"id": "g596-v13", "dialect": "", "command": "env FOO=1 defenseclaw guardrail disable", "want": "disable"}
+{"id": "g596-v14", "dialect": "", "command": "bash -c 'defenseclaw guardrail disable'", "want": "disable"}
+{"id": "g596-v15", "dialect": "", "command": "/usr/local/bin/defenseclaw guardrail disable", "want": "disable"}
+{"id": "g596-v16", "dialect": "", "command": "pkill -f defenseclaw-gateway", "want": "stop"}
+{"id": "g596-v17", "dialect": "", "command": "kill $(pidof defenseclaw-gateway)", "want": "stop"}
+{"id": "g596-v18", "dialect": "", "command": "sudo systemctl disable --now defenseclaw-gateway", "want": "stop"}
+{"id": "g596-c01", "dialect": "", "command": "defenseclaw --version", "want": ""}
+{"id": "g596-c02", "dialect": "", "command": "defenseclaw doctor", "want": ""}
+{"id": "g596-x01", "dialect": "", "command": "launchctl bootout system/com.cisco.defenseclaw.gateway", "want": "stop"}
+{"id": "g596-x02", "dialect": "", "command": "sudo launchctl unload /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist", "want": "stop"}
+{"id": "g596-x03", "dialect": "cmd", "command": "sc.exe stop DefenseClawGateway", "want": "stop"}
+{"id": "g596-x04", "dialect": "powershell", "command": "Stop-Service DefenseClawGateway", "want": "stop"}
+{"id": "g596-x05", "dialect": "cmd", "command": "taskkill /F /IM defenseclaw-gateway.exe", "want": "stop"}
+{"id": "g596-x06", "dialect": "powershell", "command": "Stop-Process -Name defenseclaw-gateway -Force", "want": "stop"}
+{"id": "g596-x07", "dialect": "powershell", "command": "Get-Process defenseclaw* | Stop-Process", "want": "stop"}
+{"id": "g596-x08", "dialect": "cmd", "command": "schtasks /End /TN DefenseClawHookGuardian", "want": "stop"}
+{"id": "g596-x09", "dialect": "cmd", "command": "net stop DefenseClawGateway", "want": "stop"}
+{"id": "g596-x10", "dialect": "powershell", "command": "Set-Service DefenseClawGateway -StartupType Disabled", "want": "stop"}
+{"id": "g596-x11", "dialect": "powershell", "command": "defenseclaw.exe guardrail disable", "want": "disable"}
+{"id": "g596-x12", "dialect": "", "command": "nohup defenseclaw-gateway stop &", "want": "stop"}
+{"id": "g596-x13", "dialect": "", "command": "timeout 5 defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596-x14", "dialect": "", "command": "python3 -m defenseclaw guardrail disable", "want": "disable"}
+{"id": "g596-x15", "dialect": "", "command": "defenseclaw guardrail fail-mode open", "want": "disable"}
+{"id": "g596-x16", "dialect": "", "command": "defenseclaw reset", "want": "uninstall"}
+{"id": "g596-x17", "dialect": "", "command": "defenseclaw sandbox teardown", "want": "uninstall"}
+{"id": "g596-x18", "dialect": "", "command": "defenseclaw-gateway watchdog stop", "want": "stop"}
+{"id": "g596-x19", "dialect": "", "command": "systemctl stop defenseclaw-hook-guardian.timer", "want": "stop"}
+{"id": "g596-x20", "dialect": "", "command": "systemctl mask defenseclaw-gateway.service", "want": "stop"}
+{"id": "g596-x21", "dialect": "", "command": "killall defenseclaw-gateway", "want": "stop"}
+{"id": "g596-x22", "dialect": "", "command": "defenseclaw guardrail rule disable CMD-RM-RF", "want": "disable"}
+{"id": "g596-x23", "dialect": "", "command": "ls && defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596-x24", "dialect": "", "command": "defenseclaw --profile x guardrail disable", "want": "disable"}
+{"id": "g596-x25", "dialect": "", "command": "sudo -u root env A=1 defenseclaw-gateway stop", "want": "stop"}
+{"id": "g596-x26", "dialect": "", "command": "defenseclaw guardrail protection disable secrets", "want": "disable"}
+{"id": "g596-x27", "dialect": "", "command": "sc stop DefenseClawGateway", "want": "stop"}
+{"id": "g596-x28", "dialect": "", "command": "cat ~/.defenseclaw/gateway.pid | xargs kill", "want": "stop"}
+{"id": "g596-x29", "dialect": "", "command": "kill $(cat ~/.defenseclaw/gateway.pid)", "want": "unproven"}
+{"id": "g596-u01", "dialect": "", "command": "defenseclaw skill install foo", "want": "unproven"}
+{"id": "g596-u02", "dialect": "", "command": "defenseclaw setup llm", "want": "unproven"}
+{"id": "g596-u03", "dialect": "", "command": "defenseclaw guardrail use-pack permissive", "want": "unproven"}
+{"id": "g596-u04", "dialect": "", "command": "defenseclaw config migrate", "want": "unproven"}
+{"id": "g596-u05", "dialect": "", "command": "defenseclaw $VERB", "want": "unproven"}
+{"id": "g596-n01", "dialect": "", "command": "systemctl restart defenseclaw-gateway", "want": ""}
+{"id": "g596-n02", "dialect": "", "command": "systemctl status defenseclaw-gateway", "want": ""}
+{"id": "g596-n03", "dialect": "", "command": "systemctl enable defenseclaw-gateway", "want": ""}
+{"id": "g596-n04", "dialect": "", "command": "systemctl stop nginx", "want": ""}
+{"id": "g596-n05", "dialect": "", "command": "systemctl --user stop myapp", "want": ""}
+{"id": "g596-n06", "dialect": "", "command": "launchctl list | grep defenseclaw", "want": ""}
+{"id": "g596-n07", "dialect": "", "command": "pkill -f node", "want": ""}
+{"id": "g596-n08", "dialect": "", "command": "kill 4242", "want": ""}
+{"id": "g596-n09", "dialect": "", "command": "kill $(pidof nginx)", "want": ""}
+{"id": "g596-n10", "dialect": "", "command": "echo defenseclaw guardrail disable", "want": ""}
+{"id": "g596-n11", "dialect": "", "command": "grep -r 'defenseclaw-gateway stop' docs", "want": ""}
+{"id": "g596-n12", "dialect": "", "command": "defenseclaw skill scan ./pkg", "want": ""}
+{"id": "g596-n13", "dialect": "", "command": "defenseclaw config get guardrail.mode", "want": ""}
+{"id": "g596-n14", "dialect": "", "command": "defenseclaw alerts", "want": ""}
+{"id": "g596-n15", "dialect": "", "command": "defenseclaw audit export", "want": ""}
+{"id": "g596-n16", "dialect": "", "command": "man defenseclaw", "want": ""}
+{"id": "g596-n17", "dialect": "", "command": "docker stop defenseclaw-test", "want": ""}
+{"id": "g596-n18", "dialect": "cmd", "command": "sc.exe query DefenseClawGateway", "want": ""}
+{"id": "g596-n19", "dialect": "powershell", "command": "Get-Service DefenseClawGateway", "want": ""}
+{"id": "g596-n20", "dialect": "powershell", "command": "Restart-Service DefenseClawGateway", "want": ""}
+{"id": "g596-n21", "dialect": "", "command": "cat ~/.defenseclaw/gateway.log", "want": ""}
+{"id": "g596-n22", "dialect": "", "command": "defenseclaw-gateway status --json", "want": ""}
+{"id": "g596-n23", "dialect": "", "command": "defenseclaw guardrail explain", "want": ""}
+{"id": "g596-n24", "dialect": "", "command": "defenseclaw mcp scan ./srv", "want": ""}
+{"id": "g596-n25", "dialect": "", "command": "defenseclaw", "want": ""}
+{"id": "g596-n26", "dialect": "", "command": "git commit -m 'stop defenseclaw-gateway'", "want": ""}
