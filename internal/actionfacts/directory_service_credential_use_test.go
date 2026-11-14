@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,32 @@ func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 		{"cmd upper-case exe", "NXC.EXE smb 198.51.100.10 -u svc -p S3cretP4ss", DialectCMD, true},
 		{"powershell cmd launcher", "nxc.cmd smb 198.51.100.10 -u svc -p S3cretP4ss", DialectPowerShell, true},
 	}
+	// The PowerShell invocation forms and the cme alias of rel-1-0-10:GAP-0406,
+	// each the first row with its program word replaced.
+	rest, ok := strings.CutPrefix(cases[0].command, "nxc ")
+	if !ok || cases[0].dialect != DialectPowerShell || !cases[0].want {
+		t.Fatalf("the first row is no longer a recognized PowerShell nxc call")
+	}
+	for _, form := range []struct {
+		name, program string
+		want          bool
+	}{
+		{"powershell unquoted call operator", "& nxc", true},
+		{"powershell call operator without a space", "&nxc.exe", true},
+		{"powershell unquoted call operator path", `& C:\Tools\nxc.exe`, true},
+		{"powershell dot-sourced path", `. C:\Tools\nxc.exe`, true},
+		{"powershell cme alias", "cme.exe", true},
+		{"powershell bare cme alias", "cme", true},
+		{"powershell call operator on another program", "& whoami", false},
+		{"powershell call operator on a variable", "& $nxc", false},
+	} {
+		cases = append(cases, struct {
+			name    string
+			command string
+			dialect Dialect
+			want    bool
+		}{form.name, form.program + " " + rest, DialectPowerShell, form.want})
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "shell", Command: tc.command, DialectHint: tc.dialect, CWD: `C:\repo`})
@@ -161,6 +188,7 @@ func TestNetExecProgramFamily(t *testing.T) {
 		"nxc.ps1": "nxc", "netexec": "netexec", "NetExec.exe": "netexec", "crackmapexec": "crackmapexec",
 		`C:\Tools\nxc.exe`: "nxc", `c:/tools/NXC.EXE`: "nxc", "/home/u/.local/bin/nxc": "nxc",
 		"./nxc": "nxc", `..\bin\netexec.cmd`: "netexec",
+		"cme": "crackmapexec", "CME.EXE": "crackmapexec", `C:\Tools\cme.cmd`: "crackmapexec",
 	} {
 		if got, ok := netExecProgramFamily(word); !ok || got != want {
 			t.Errorf("netExecProgramFamily(%q) = %q, %v; want %q", word, got, ok, want)
