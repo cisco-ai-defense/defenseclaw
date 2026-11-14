@@ -86,7 +86,7 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 // BASHOPTS or SHELLOPTS, eval and source (they run text the scan does not
 // read), a nested bash with -O or -o. Read as text on purpose: every later
 // glob word of such a call is uncertain.
-var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+]|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
+var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+][a-zA-Z]*[fB]|set\s+[-+]o\s+(noglob|braceexpand|posix)|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
 
 // globOptionsMayChange reports a command whose glob options the scan cannot
 // know at a later word.
