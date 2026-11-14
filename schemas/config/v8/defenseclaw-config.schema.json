@@ -2211,8 +2211,8 @@
               "properties": {
                 "nonshell": {
                   "type": "string",
-                  "enum": ["shadow", "on"],
-                  "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow computes nothing and adds nothing, so the verdicts are those of a build without the lane."
+                  "pattern": "^\\s*([Oo][Nn]|[Ss][Hh][Aa][Dd][Oo][Ww]|[Oo][Ff][Ff])\\s*$",
+                  "description": "The MCP and app tool lane (tool-call effects and the table rules on shell and native file-tool calls). on (default) judges them; shadow and off compute nothing and add nothing, so the verdicts are those of a build without the lane. Any case; any other value is refused at load. Interim type: s7/cascade-config owns guardrail.cascade and takes over the key and these values."
                 }
               }
             }

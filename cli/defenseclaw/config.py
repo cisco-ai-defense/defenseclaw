@@ -3140,7 +3140,9 @@ class GuardrailConfig:
     # Mirrors ``GuardrailConfig.InternalDomains`` in internal/config/config.go.
     internal_domains: list[str] = field(default_factory=list)
     # guardrail.cascade, kept as written: today only ``lanes`` (``nonshell``:
-    # ``shadow`` | ``on``, default on). The gateway validates it. Mirrors
+    # ``on`` | ``shadow`` | ``off``, any case, default on). The gateway
+    # validates it and refuses any other value. Interim type: s7/cascade-config
+    # owns guardrail.cascade and takes it over. Mirrors
     # ``GuardrailConfig.Cascade`` in internal/config/config.go.
     cascade: dict[str, Any] = field(default_factory=dict)
     # Lowest severity a tool call is blocked / alerted at (``CRITICAL``

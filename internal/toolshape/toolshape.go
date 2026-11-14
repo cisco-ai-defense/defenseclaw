@@ -164,6 +164,7 @@ type table struct {
 		Families       []string `yaml:"families"`
 		Tokens         []string `yaml:"tokens"`
 		ExceptFamilies []string `yaml:"except_families"`
+		DataKeys       []string `yaml:"data_keys"`
 	} `yaml:"text_tools"`
 
 	verbOf        map[string]Kind
@@ -189,6 +190,7 @@ type table struct {
 	textFamily    map[string]bool
 	textToken     map[string]bool
 	textExcept    map[string]bool
+	textData      map[string]bool
 }
 
 type compiledSetting struct {
@@ -240,6 +242,7 @@ func load() (*table, error) {
 		t.proxyArgKey = set(t.ProxyArgKeys)
 		t.textFamily, t.textToken = set(t.TextTools.Families), set(t.TextTools.Tokens)
 		t.textExcept = set(t.TextTools.ExceptFamilies)
+		t.textData = set(t.TextTools.DataKeys)
 		for _, suf := range t.PathKeySuffix {
 			t.pathSuffix = append(t.pathSuffix, "_"+suf)
 		}
@@ -481,11 +484,18 @@ func (t *table) placeKey(key string) bool {
 
 // locationKey reports an argument name that names a place or a party: a path,
 // an input or attachment, a URL, a recipient or redirect, a callback, an SQL
-// statement or code, or the arguments of a proxy tool. The text of a text
-// tool (textToolOf) under any other key is data.
+// statement or code, or the arguments of a proxy tool.
 func (t *table) locationKey(key string) bool {
 	return t.placeKey(key) || t.redirectKey[key] || t.recipientKey[key] || t.callbackKey[key] ||
 		t.sqlKey[key] || t.sqlGenericKey[key] || t.codeKey[key] || t.proxyArgKey[key]
+}
+
+// textDataKey reports an argument name that holds the free text of a text
+// tool (the table's text_tools.data_keys: message, html_body, description,
+// comment, ...). Only these keys are data in a text tool; a key that also names
+// a place or a party (locationKey) is never one.
+func (t *table) textDataKey(key string) bool {
+	return t.textData[key] && !t.locationKey(key)
 }
 
 // walker reads one call. It is used by pointer (the counters are bound to
@@ -594,10 +604,12 @@ func (w *walker) str(key, val string) {
 		}
 	}
 	// The free text of a tool that sends, posts or writes text (message,
-	// html_body, description, a comment's body, whatever the key is called) is
-	// data: it is not read as a JSON document, a file URI or a location. The
-	// keys that name a place or a party are read as everywhere (locationKey).
-	if w.textTool && !t.locationKey(key) {
+	// html_body, description, a comment's body: the table's text_tools
+	// data_keys) is data: it is not read as a JSON document, a file URI or a
+	// location. Every other key of such a tool is read as in any tool, down to
+	// the catch-all read of a value that is exactly an absolute path or a file
+	// URI (a Telegram document, a mail attach, a note's name or save_as).
+	if w.textTool && t.textDataKey(key) {
 		if len(val) <= 256 {
 			w.setting(key, strings.ReplaceAll(val, "-", "_"))
 		}

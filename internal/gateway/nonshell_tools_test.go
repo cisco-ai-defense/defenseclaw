@@ -443,6 +443,39 @@ func TestNonShellLaneShadowSwitch(t *testing.T) {
 	}
 }
 
+// GAP-0472: the lane is live only for on, in any case; shadow and off add
+// nothing; a value the loader would refuse never turns it on.
+func TestNonShellLaneSpellings(t *testing.T) {
+	req := nonShellReq("mcp__acme__read_file", `{"path":"/home/u/.ssh/id_rsa"}`, true)
+	shell, _ := json.Marshal(map[string]string{"command": "vault token lookup"})
+	shellReq := nonShellReq("Bash", string(shell), true)
+	prior := []RuleFinding{{RuleID: "X", Severity: "LOW"}}
+	for _, c := range []struct {
+		value string
+		live  bool
+	}{
+		{"on", true}, {"On", true}, {"ON", true}, {" on ", true},
+		{"shadow", false}, {"Shadow", false}, {"SHADOW", false},
+		{"off", false}, {"Off", false}, {"OFF", false}, {" off\t", false},
+		{"disabled", false}, {"true", false}, {"", false},
+	} {
+		ctx := nonShellLaneCtx(c.value)
+		if c.value == "" {
+			cfg := &config.Config{}
+			cfg.Guardrail.Cascade.Lanes = map[string]string{config.NonShellLane: ""}
+			ctx = withPinnedGeneration(context.Background(), &Generation{Config: cfg, N: 1})
+		}
+		got := nonShellToolFindings(ctx, req, prior, "")
+		sh := shellToolFindings(ctx, shellReq, prior)
+		if c.live && (len(got) <= 1 || len(sh) <= 1) {
+			t.Errorf("%q: the lane must be live: mcp %+v shell %+v", c.value, got, sh)
+		}
+		if !c.live && (len(got) != 1 || len(sh) != 1) {
+			t.Errorf("%q: the lane must add nothing: mcp %+v shell %+v", c.value, got, sh)
+		}
+	}
+}
+
 // GAP-0450: a native tool's text argument opens no MCP walk, even when it is
 // exactly a file URI; the place it names (path, url) still does.
 func TestNonShellNativeTextArgumentsOpenNoWalk(t *testing.T) {

@@ -39,13 +39,13 @@ const (
 
 // nonShellLaneShadow is the one switch of the whole non-shell lane (the MCP
 // effects and the table rules on shell and native file-tool calls):
-// guardrail.cascade.lanes.nonshell, shadow or on (default on). In shadow the
-// lane computes nothing and adds nothing: the verdicts are those of
-// rel/1.0.10. The configuration is the request's (its pinned generation, or
+// guardrail.cascade.lanes.nonshell, on, shadow or off (default on). Only on is
+// live: in shadow and in off the lane computes nothing and adds nothing, so
+// the verdicts are those of rel/1.0.10. The configuration is the request's (its pinned generation, or
 // its profile's); with none the lane is on.
 func nonShellLaneShadow(ctx context.Context) bool {
 	cfg := requestPolicyConfig(ctx)
-	return cfg != nil && cfg.Guardrail.NonShellLaneMode() == "shadow"
+	return cfg != nil && cfg.Guardrail.NonShellLaneMode() != "on"
 }
 
 // nonShellToolFindings reads a non-shell tool call (an MCP or app tool) as
