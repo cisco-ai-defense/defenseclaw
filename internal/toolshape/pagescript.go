@@ -1181,7 +1181,7 @@ func (r *jsReader) boundOnce(name string) (lo, hi int, ok bool) {
 			if !r.isAssignOp(i) {
 				continue
 			}
-			if n, isName := r.ident(i - 1); isName && !(i >= 2 && r.isDot(i-2)) {
+			if n, isName := r.ident(i - 1); isName && (i < 2 || !r.isDot(i-2)) {
 				if len(r.assigns[n]) < 2 {
 					r.assigns[n] = append(r.assigns[n], i)
 				}
