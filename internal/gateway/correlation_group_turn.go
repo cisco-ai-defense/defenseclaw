@@ -31,10 +31,11 @@ var hookCorrelationGroupLimits = audit.CorrelationGroupLimits{Occurrences: 1, Ho
 // store's correlation turn (S8 design section 13). It waits for the turn
 // with the caller's context, so a caller that leaves while queued takes
 // nothing. The attempt runs on audit.CorrelationTurnContext: the caller's
-// context, except that while the attempt holds the store write turn it has
-// no cancellation or deadline, because its statements then share a
-// transaction with the occurrences of other hooks and an interrupted
-// statement would make SQLite roll back all of them. The context the attempt
+// context. Only when transactions are shared (Occurrences above 1) does the
+// attempt lose cancellation and deadline while it holds the store write
+// turn, because an interrupted statement would make SQLite roll back the
+// occurrences of other hooks too; at groups of one (production) it keeps
+// both, as on the serial path. The context the attempt
 // returns is put back on the caller's context.
 //
 // The turn replaces the per-session turn of rel-1-0-6 GAP-0490: the hooks of

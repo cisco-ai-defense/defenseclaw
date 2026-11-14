@@ -1636,7 +1636,7 @@ func putCorrelationRelationshipEvidence(
 
 // putCorrelationRelationshipEvidenceOf is putCorrelationRelationshipEvidence;
 // with firstSource the occurrence is recorded only as the first source of an
-// edge that has none (audit PutRelationshipFirstSourceEvidence).
+// edge that has no source evidence (audit PutRelationshipFirstSourceEvidence).
 func putCorrelationRelationshipEvidenceOf(
 	ctx context.Context,
 	tx *audit.CorrelationTx,

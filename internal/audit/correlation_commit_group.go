@@ -90,6 +90,10 @@ type correlationSessionWaiter struct {
 	queuedAt time.Time
 	ready    chan struct{}
 	handed   bool
+	// solo is set for an occurrence whose transactions hold it alone
+	// (correlationBatchMember.solo): it keeps its deadline in the write
+	// turn, so it never continues a shared transaction.
+	solo bool
 	// batch is the write turn handed on with the session turn
 	// (correlationBatchMember.leave), or nil.
 	batch *correlationBatch
@@ -231,7 +235,7 @@ func (group *correlationGroup) joinSession(ctx context.Context, member *correlat
 		group.mu.Unlock()
 		return nil
 	}
-	waiter := &correlationSessionWaiter{queuedAt: time.Now(), ready: make(chan struct{}, 1)}
+	waiter := &correlationSessionWaiter{queuedAt: time.Now(), ready: make(chan struct{}, 1), solo: member.solo()}
 	turn.waiters = append(turn.waiters, waiter)
 	group.sessionWaiting++
 	group.oldestSession[waiter] = waiter.queuedAt
@@ -343,7 +347,10 @@ func (group *correlationGroup) joinWrite(ctx context.Context, s *Store, limits C
 // otherwise the batch commits and the next one starts a new batch.
 func (group *correlationGroup) passWrite(s *Store, batch *correlationBatch) {
 	group.mu.Lock()
-	if len(group.waiters) > 0 && group.members < batch.limits.Occurrences && batch.takesMore() {
+	// A waiter that keeps its deadline in the write turn (groups of one)
+	// never continues another occurrence transaction, whatever its limits.
+	if len(group.waiters) > 0 && group.waiters[0].limits.Occurrences > 1 &&
+		group.members < batch.limits.Occurrences && batch.takesMore() {
 		next := group.popWriteLocked()
 		group.members++
 		group.mu.Unlock()
@@ -503,7 +510,7 @@ func (group *correlationGroup) handOnSession(member *correlationBatchMember) boo
 	group.mu.Lock()
 	defer group.mu.Unlock()
 	turn := group.sessions[member.key]
-	if len(turn.waiters) == 0 || group.members >= batch.limits.Occurrences || !batch.takesMore() {
+	if len(turn.waiters) == 0 || turn.waiters[0].solo || group.members >= batch.limits.Occurrences || !batch.takesMore() {
 		return false
 	}
 	member.writeLeft, member.sessionOut = true, true

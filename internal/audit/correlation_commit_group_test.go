@@ -602,3 +602,28 @@ func TestCorrelationGroupOfOneKeepsTheCallerDeadline(t *testing.T) {
 		})
 	}
 }
+
+// TestCorrelationGroupOfOneNeverJoinsASharedTransaction: an occurrence that
+// keeps its deadline in the write turn (groups of one) queued behind a
+// transaction whose limits take more starts its own transaction: a shared one
+// would be rolled back with it if its deadline ended a statement.
+func TestCorrelationGroupOfOneNeverJoinsASharedTransaction(t *testing.T) {
+	store, repo := newCorrelationTestStore(t)
+	instance := mustCorrelationInstance(t, repo, "group", ConnectorCustodyHookOnly)
+	groups := observeCorrelationGroups(t)
+	commit := holdCorrelationWriteTurn(t, store, instance, groupTestLimits)
+	out := make(chan queuedOccurrence, 1)
+	go runGroupOccurrence(t, store, instance, "solo", CorrelationGroupLimits{Occurrences: 1}, false, out)
+	waitForCorrelationQueue(t, store, 1)
+	holder := commit()
+	if got := <-out; got.err != nil {
+		t.Fatal(got.err)
+	}
+	if err := <-holder; err != nil {
+		t.Fatal(err)
+	}
+	if sizes := groups(); len(sizes) != 2 || sizes[0] != 1 || sizes[1] != 1 {
+		t.Fatalf("transactions %v, want two of one savepoint each", sizes)
+	}
+	groupIdle(t, store)
+}
