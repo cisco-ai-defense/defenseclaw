@@ -38,35 +38,38 @@ var slimHookForbidden = []string{
 	"github.com/defenseclaw/defenseclaw/internal/gateway/",
 	"github.com/defenseclaw/defenseclaw/internal/openshell",
 	"github.com/defenseclaw/defenseclaw/internal/openshell/",
-	"github.com/defenseclaw/defenseclaw/internal/guardrail",
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/",
 	"github.com/defenseclaw/defenseclaw/internal/telemetry",
 	"github.com/defenseclaw/defenseclaw/internal/telemetry/",
-	"github.com/google/cel-go/",
 	"go.opentelemetry.io/otel/sdk",
-	"google.golang.org/protobuf/",
 	"github.com/aws/aws-sdk-go-v2/",
 	"github.com/maximhq/bifrost/",
 	"github.com/open-policy-agent/opa/v1/rego",
 	"github.com/open-policy-agent/opa/v1/topdown",
 }
 
-// slimHookAllowed are the light packages under a forbidden prefix the hook
-// needs: the connector hook runtime and the bounded readers of the guardrail.
+// slimHookAllowed are the packages under a forbidden prefix the hook needs:
+// the connector hook runtime, and the sandbox profile pack check its config
+// load runs (openshell/packs and its egress rules, rel-1-0-10:GAP-0603), not
+// the sandbox runtime.
 var slimHookAllowed = []string{
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector",
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded",
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs",
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress",
 }
 
-// slimHookKnownHeavy are the heavy packages the hook still links in 1.0.10
-// (between the probe-A and probe-B classes of DESIGN 16.2): the outage mode,
-// the asset facts and the foreign-hook guard read config.yaml and the
-// machine policy through internal/config, which links the observability
-// schema, the OPA AST and SQLite. A change that drops one of them shrinks
-// the hook further: remove it from this list.
+// slimHookKnownHeavy are the heavy packages the hook links in 1.0.10 (the
+// probe-A class of DESIGN 16.2): the outage mode, the asset facts and the
+// foreign-hook guard read config.yaml and the machine policy through
+// internal/config (the observability schema, the OPA AST, SQLite), and that
+// load runs the checks the gateway runs, the rule loader verdict on a custom
+// pack among them (internal/guardrail and its CEL compiler, GAP-0603). A
+// change that drops one shrinks the hook: remove it from this list, and keep
+// TestOutageModeGoldenMatchesTheFullCLIHook passing.
 var slimHookKnownHeavy = []string{
 	"github.com/defenseclaw/defenseclaw/internal/config",
 	"github.com/defenseclaw/defenseclaw/internal/observability",
+	"github.com/defenseclaw/defenseclaw/internal/guardrail",
+	"github.com/google/cel-go/cel",
 	"github.com/open-policy-agent/opa/v1/ast",
 	"modernc.org/sqlite",
 }

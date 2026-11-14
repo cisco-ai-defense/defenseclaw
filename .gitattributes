@@ -129,3 +129,4 @@ internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace
 # their detached signature over the exact bytes; a Windows CRLF checkout
 # broke the signature (TestClaudeReleaseManifestSignatureAndPlatformChecksum).
 internal/sensor/testdata/** -text
+cmd/defenseclaw-hook/testdata/outage-packs/** -text
