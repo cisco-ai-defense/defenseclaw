@@ -38,7 +38,7 @@ func shellScopeRead(t *testing.T, command string) (out []string, unreadable bool
 		t.Fatal(err)
 	}
 	var trunc bounded.Truncated
-	dests, unreadable := callSendDestinations("Bash", string(args), &trunc)
+	dests, unreadable, _ := callSendDestinations("Bash", string(args), &trunc)
 	for _, d := range dests {
 		if d.mailbox != "" {
 			out = append(out, "mbx:"+d.mailbox)

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
 	"path"
 	"strings"
 
@@ -36,8 +37,11 @@ import (
 // here-document name no destination. Where actionfacts has no network fact for
 // a sending program (mail, rsync, httpie, aws s3, gsutil, az, a curl -X POST),
 // the program's parsed argv is read. A command that may send and cannot be read
-// (a host the shell builds, a syntax error) is reported as unreadable: the floor
-// then applies the unknown tier to the send, never a text scan. A command past
+// (a host the shell builds) is reported as unreadable: the floor then applies the
+// unknown tier to the send, never a text scan. Whatever actionfacts could not
+// project in full (any status but complete) is also read from the syntax tree,
+// and a call that reading cannot finish either is incomplete, the unknown tier
+// with its own reason (GAP-0491). A command past
 // shellparse's reading bounds is not parsed at all; it is a cap hit, recorded in
 // the reading's bounded.Truncated (the unknown tier, named by its cap).
 
@@ -61,28 +65,37 @@ type shellSendReader struct {
 	add        func(scopeDest)
 	sends      bool
 	unreadable bool
+	incomplete bool
 }
 
 const maxScopeWrapperDepth = 3
 
 // shellSendDestinations analyzes a call that has shell command values and adds
-// the places its commands send to. It reports whether a command sends and
-// whether a command that may send could not be read.
-func shellSendDestinations(toolName, rawArgs string, commands []string, trunc *bounded.Truncated, add func(scopeDest)) (sends, unreadable bool) {
+// the places its commands send to. It reports whether a command sends, whether a
+// command that may send could not be read, and whether a shell value could not be
+// read in full.
+func shellSendDestinations(toolName, rawArgs string, commands []string, trunc *bounded.Truncated, add func(scopeDest)) (sends, unreadable, incomplete bool) {
 	r := &shellSendReader{trunc: trunc, add: add}
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: toolName, Args: json.RawMessage(rawArgs)})
 	if facts.Parse.Status != actionfacts.StatusNotApplicable {
 		r.readFacts(facts, commands, 0)
-		return r.sends, r.unreadable
+		return r.sends, r.unreadable, r.incomplete
 	}
 	// A tool name actionfacts does not know as a shell: read each command value as bash.
 	for _, command := range commands {
 		r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: command}), []string{command}, 0)
 	}
-	return r.sends, r.unreadable
+	return r.sends, r.unreadable, r.incomplete
 }
 
-func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, depth int) {
+// readFacts reads what actionfacts projected of the shell values of a call and,
+// when its status is anything but complete, the syntax tree of every one of them
+// too: a value or a body the projection dropped (a second shell value, a
+// function that is called, a trap string) is then read, and a sender the
+// projection did not account for is an unreadable send, never "no sender"
+// (GAP-0491). It returns the sender programs the projection covered, by name and
+// count, so a caller reading a wrapped command adds them to its own.
+func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, depth int) map[string]int {
 	// A value past shellparse's reading bounds is read by no reader: actionfacts
 	// projects none of its commands (its status is then partial or
 	// limit_exceeded) and the parser refuses it. That is a cap hit (the unknown
@@ -98,27 +111,28 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, 
 		}
 		readable = append(readable, command)
 	}
-	status := facts.Parse.Status
-	if status == actionfacts.StatusPartial && len(facts.Commands) == 0 {
-		// partial with nothing projected (an operand grammar actionfacts does
-		// not know, e.g. curl -d @file) is a projection that failed, not a
-		// command with no sender
-		status = actionfacts.StatusUnsupported
+	covered := r.readProjected(facts, depth)
+	if facts.Parse.Status == actionfacts.StatusComplete {
+		return covered
 	}
-	switch status {
-	case actionfacts.StatusInvalid, actionfacts.StatusLimitExceeded, actionfacts.StatusUnsupported:
-		// actionfacts could not project the command. A send is still a command
-		// whose name is a sending program, read from the syntax tree (not the
-		// text); a command that does not parse is not one the shell runs.
-		// Every shell value of the call is read, not the first alone.
-		for _, command := range readable {
-			if scopeSyntaxHasSender(command) {
+	// actionfacts did not read everything: the syntax reader reads every shell
+	// value, and a sender it finds that the projection does not account for is an
+	// unreadable send. If it cannot finish either, the call is incomplete.
+	for _, command := range readable {
+		res := scopeSyntaxRead(command, 0)
+		r.incomplete = r.incomplete || res.unknown
+		for prog, n := range res.senders {
+			if n > covered[prog] {
 				r.sends, r.unreadable = true, true
-				break
 			}
 		}
-		return
 	}
+	return covered
+}
+
+// readProjected reads the commands and the network facts actionfacts projected.
+func (r *shellSendReader) readProjected(facts actionfacts.Facts, depth int) map[string]int {
+	progs := map[string]int{}
 	byID := make(map[int64]actionfacts.CommandFact, len(facts.Commands))
 	for _, c := range facts.Commands {
 		byID[c.ID] = c
@@ -156,6 +170,9 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, 
 		args := c.Argv
 		if len(args) > 0 && scopeProgram(args[0]) == prog {
 			args = args[1:]
+		}
+		if scopeSenderPrograms[prog] {
+			progs[prog]++
 		}
 		switch prog {
 		case "http", "https", "xh", "xhs":
@@ -196,9 +213,12 @@ func (r *shellSendReader) readFacts(facts actionfacts.Facts, commands []string, 
 				continue
 			}
 			joined := scopeShellJoin(inner)
-			r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: joined}), []string{joined}, depth+1)
+			for p, n := range r.readFacts(actionfacts.Analyze(actionfacts.Input{Tool: "bash", Command: joined}), []string{joined}, depth+1) {
+				progs[p] += n
+			}
 		}
 	}
+	return progs
 }
 
 // curlGetsQuery reports a curl with -G or --get: its data goes in the query of a GET.
@@ -364,7 +384,7 @@ func (r *shellSendReader) readMail(args []string, here string) {
 	add := func(text string) {
 		// The capped scanner: a repeat is not a destination, and more matches than
 		// the scan allows is a cap hit (GAP-0341).
-		for _, m := range scanScopeStrings(scopeShellEmailWord, text, maxScopeMailMatches, r.trunc) {
+		for _, m := range scanScopeStrings(scopeShellEmailWord, text, r.trunc) {
 			found = true
 			r.add(scopeDest{mailbox: strings.ToLower(m)})
 		}
@@ -539,47 +559,180 @@ func scopeShellBoundCap(command string) bounded.Cap {
 	}
 }
 
-// scopeSyntaxHasSender reports whether the parsed command contains a command
-// whose name is a sending program and whose static arguments may send. It reads
-// the shell syntax tree, not the text. The caller has checked the reading
-// bounds (scopeShellBoundCap): a command that does not parse here is a syntax
-// error, not one the shell runs.
-func scopeSyntaxHasSender(command string) bool {
-	file, ok := shellparse.Parse(command)
-	if !ok || file == nil {
-		return false
+// scopeSyntaxResult is what the syntax reader made of one shell value.
+type scopeSyntaxResult struct {
+	// senders counts, by program name, the commands whose name is a sending
+	// program and whose static arguments may send.
+	senders map[string]int
+	// unknown is set when part of the value cannot be read: a program name the
+	// shell builds, a string it evaluates (eval, trap, a shell's -c body) that is
+	// built or too deep to follow, or text the parser failed on for a reason
+	// other than its syntax.
+	unknown bool
+}
+
+func (r *scopeSyntaxResult) merge(o scopeSyntaxResult) {
+	r.unknown = r.unknown || o.unknown
+	for prog, n := range o.senders {
+		r.senders[prog] += n
 	}
-	found := false
-	syntax.Walk(file, func(n syntax.Node) bool {
-		if found {
-			return false
+}
+
+// scopeSyntaxRead reads the shell syntax tree of one value, not its text. A
+// value that does not parse is read statement by statement up to the error: the
+// shell runs the complete lines before a syntax error (GAP-0492). The caller has
+// checked the reading bounds (scopeShellBoundCap).
+func scopeSyntaxRead(command string, depth int) scopeSyntaxResult {
+	res := scopeSyntaxResult{senders: map[string]int{}}
+	if file, ok := shellparse.Parse(command); ok && file != nil {
+		res.merge(scopeSyntaxNode(file, depth))
+		return res
+	}
+	stmts, unknown := scopeStatementsBeforeError(command)
+	res.unknown = unknown
+	for _, st := range stmts {
+		res.merge(scopeSyntaxNode(st, depth))
+	}
+	return res
+}
+
+// scopeStatementsBeforeError returns the statements of a text that does not
+// parse which the shell runs before its syntax error: the ones that end on an
+// earlier line than the error. Bash reads a line whole before it runs it, so a
+// statement on the error's own line, or one the error cuts short, is not run;
+// a text that fails on its first line gives none. A read that failed for another
+// reason than syntax is unknown.
+func scopeStatementsBeforeError(command string) (stmts []*syntax.Stmt, unknown bool) {
+	var all []*syntax.Stmt
+	var err error
+	for st, e := range syntax.NewParser(syntax.Variant(syntax.LangBash)).StmtsSeq(shellparse.Reader(command)) {
+		if e != nil {
+			err = e
+			break
 		}
+		all = append(all, st)
+	}
+	var perr syntax.ParseError
+	if !errors.As(err, &perr) {
+		return nil, err != nil
+	}
+	for _, st := range all {
+		if st.End().Line() < perr.Pos.Line() {
+			stmts = append(stmts, st)
+		}
+	}
+	return stmts, false
+}
+
+// scopeSyntaxNode walks one syntax tree: functions, coprocesses and command
+// substitutions are visited by the walk itself, and the strings a command hands
+// to the shell (eval, trap, a shell's -c body) are read again as shell text.
+func scopeSyntaxNode(root syntax.Node, depth int) scopeSyntaxResult {
+	res := scopeSyntaxResult{senders: map[string]int{}}
+	syntax.Walk(root, func(n syntax.Node) bool {
 		call, ok := n.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
 		}
 		name, ok := scopeLiteralWord(call.Args[0])
 		if !ok {
+			// the program is a word the shell builds: what runs is unknown
+			res.unknown = true
 			return true
 		}
 		prog := scopeProgram(name)
 		var args []string
-		for _, w := range call.Args[1:] {
+		dynamic := map[int]bool{}
+		for i, w := range call.Args[1:] {
 			if lit, ok := scopeLiteralWord(w); ok {
 				args = append(args, lit)
 			} else {
 				args = append(args, "")
+				dynamic[i] = true
 			}
 		}
-		if inner := scopeWrappedCommand(prog, args); len(inner) > 0 {
+		for unwrapped := 0; ; unwrapped++ {
+			inner := scopeWrappedCommand(prog, args)
+			if len(inner) == 0 {
+				break
+			}
+			if unwrapped >= maxScopeWrapperDepth {
+				res.unknown = true
+				return true
+			}
+			drop := len(args) - len(inner)
 			prog, args = scopeProgram(inner[0]), inner[1:]
+			shifted := map[int]bool{}
+			for i := range dynamic {
+				if i-drop-1 >= 0 {
+					shifted[i-drop-1] = true
+				}
+			}
+			if dynamic[drop] {
+				res.unknown = true
+			}
+			dynamic = shifted
+		}
+		if body, ok, known := scopeEvaluatedString(prog, args, dynamic); !known {
+			res.unknown = true
+		} else if ok {
+			switch {
+			case depth >= maxScopeWrapperDepth || scopeShellBoundCap(body) != 0:
+				res.unknown = true
+			default:
+				res.merge(scopeSyntaxRead(body, depth+1))
+			}
 		}
 		if scopeSenderPrograms[prog] && scopeMaySend(prog, args) && !scopeHasRemoteOperand(prog, args) {
-			found = true
+			res.senders[prog]++
 		}
-		return !found
+		return true
 	})
-	return found
+	return res
+}
+
+// scopeEvaluatedString returns the shell text a command hands to the shell to
+// run: eval's words, a trap's action, the body of a shell's -c. ok reports that
+// there is one; known is false when it is built by the shell and cannot be read.
+func scopeEvaluatedString(prog string, args []string, dynamic map[int]bool) (body string, ok, known bool) {
+	switch prog {
+	case "eval":
+		if len(dynamic) > 0 {
+			return "", false, false
+		}
+		return strings.Join(args, " "), len(args) > 0, true
+	case "trap":
+		i := 0
+		if len(args) > 0 && args[0] == "--" {
+			i = 1
+		}
+		if i >= len(args) || (strings.HasPrefix(args[i], "-") && len(args[i]) > 1) {
+			return "", false, true // trap -l, trap -p: no action
+		}
+		if dynamic[i] {
+			return "", false, false
+		}
+		return args[i], args[i] != "" && args[i] != "-", true
+	case "bash", "sh", "zsh", "dash", "ksh":
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			switch {
+			case a == "-o" || a == "-O" || a == "+o":
+				i++
+			case strings.HasPrefix(a, "--"):
+			case len(a) > 1 && a[0] == '-' && scopeShortFlags(a):
+				if strings.Contains(a, "c") {
+					if i+1 >= len(args) || dynamic[i+1] {
+						return "", false, false
+					}
+					return args[i+1], true, true
+				}
+			default:
+				return "", false, true // a script or another operand: no -c body
+			}
+		}
+	}
+	return "", false, true
 }
 
 // scopeLiteralWord is the text of a word made only of literals and quoted text.

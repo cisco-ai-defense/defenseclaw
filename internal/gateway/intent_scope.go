@@ -55,6 +55,12 @@ import (
 // short at a cap.
 const scopeUnreadableReason = "the call may send data and its destination cannot be read, so it is judged as outside the user's task (unreadable_send)"
 
+// scopeIncompleteReason is the floor's reason for a call whose shell text the
+// reader could not read in full (the call is not a shell the reader fully
+// projects, and the syntax reader found a program or a string the shell builds):
+// an incomplete reading is the unknown tier, never "no sender" (GAP-0491).
+const scopeIncompleteReason = "the call's shell text cannot be read in full, so it is judged as outside the user's task (incomplete_reading)"
+
 const (
 	intentScopeFinding   = "INTENT-SCOPE-SEND"
 	maxNamedScopeTargets = 20
@@ -99,29 +105,62 @@ var scopeReadSegments = map[string]bool{
 	"format": true, "lint": true, "parse": true,
 }
 
-// scopeShellKeys are argument names whose string value is shell text.
-var scopeShellKeys = map[string]bool{"command": true, "cmd": true, "script": true, "code": true}
+// scopeKeyKind is what an argument key of a call holds, for the walk and for
+// the size precheck: both read the one table scopeKeys, so a key one of them
+// reads can never be a key the other skips (GAP-0494).
+type scopeKeyKind uint8
 
-// scopeSinkKeys are argument names whose string value is a place the call
-// sends to, whatever the tool is called.
-var scopeSinkKeys = map[string]bool{
-	"destination": true, "dest": true, "recipient": true, "recipients": true, "to": true, "cc": true, "bcc": true,
-	"bcc_override": true, "webhook": true, "webhook_url": true, "log_destination": true, "upload_url": true,
-	"target_url": true, "sink": true, "recipient_email": true, "send_to": true, "callback": true, "callback_url": true,
-	"forward_to": true, "output_url": true, "output_uri": true, "output_destination": true, "export_url": true,
-	"export_destination": true, "backup_url": true, "backup_destination": true, "backup_location": true,
-	"archive_url": true, "archive_destination": true, "archive_location": true, "snapshot_destination": true,
-	"destination_url": true, "destination_uri": true, "dest_url": true, "dest_bucket": true, "target_bucket": true,
-	"upload_destination": true, "replica_url": true, "mirror_url": true,
-}
+const (
+	// scopeKeyShell: the string value is shell text, an array of strings is one
+	// argv (the word list of one command).
+	scopeKeyShell scopeKeyKind = iota + 1
+	// scopeKeyArgs: an array of strings that follows the program a sibling shell
+	// key holds (cmd or command plus args).
+	scopeKeyArgs
+	// scopeKeySink: the string value is a place the call sends to, whatever the
+	// tool is called.
+	scopeKeySink
+	// scopeKeyAmbiguous: a place that is a source as often as a sink (a fetch
+	// tool's url, an exists tool's email, a database host). It counts only when
+	// the tool's own name says it sends.
+	scopeKeyAmbiguous
+)
 
-// scopeAmbiguousKeys name a place that is a source as often as a sink (a fetch
-// tool's url, an exists tool's email, a database host). They count only when
-// the tool's own name says it sends.
-var scopeAmbiguousKeys = map[string]bool{
-	"url": true, "uri": true, "endpoint": true, "host": true, "bucket": true, "remote": true, "address": true,
-	"email": true, "emails": true,
-}
+// scopeShellKeyNames are the keys whose value actionfacts reads as shell
+// (canonicalInputFieldName: the command spellings, the argv spellings, args and
+// the nested containers input, parameters and request), so the lane reads the
+// shell of every call actionfacts does (GAP-0493); code is the lane's own
+// addition (a code-run tool's script). TestIntentScopeGAP0493 pins the list to
+// actionfacts.
+const scopeShellKeyNames = `command cmd script rawcommand raw_command raw-command shellcommand shell_command
+shell-command commandline command_line command-line argv commandargv command_argv command-argv
+input parameters request code`
+
+const scopeArgsKeyNames = `args`
+
+const scopeSinkKeyNames = `destination dest recipient recipients to cc bcc bcc_override webhook webhook_url log_destination
+upload_url target_url sink recipient_email send_to callback callback_url forward_to output_url output_uri
+output_destination export_url export_destination backup_url backup_destination backup_location archive_url
+archive_destination archive_location snapshot_destination destination_url destination_uri dest_url dest_bucket
+target_bucket upload_destination replica_url mirror_url`
+
+const scopeAmbiguousKeyNames = `url uri endpoint host bucket remote address email emails`
+
+// scopeKeys is the table of every argument key the walk reads, lower case. The
+// empty key is the root of a value that is not a JSON object, and it holds
+// shell text.
+var scopeKeys = func() map[string]scopeKeyKind {
+	m := map[string]scopeKeyKind{"": scopeKeyShell}
+	for kind, names := range map[scopeKeyKind]string{
+		scopeKeyShell: scopeShellKeyNames, scopeKeyArgs: scopeArgsKeyNames,
+		scopeKeySink: scopeSinkKeyNames, scopeKeyAmbiguous: scopeAmbiguousKeyNames,
+	} {
+		for _, k := range strings.Fields(names) {
+			m[k] = kind
+		}
+	}
+	return m
+}()
 
 // namedScopeTargets returns the hosts, e-mail addresses and absolute paths the
 // task names, lower case, sorted and deduplicated.
@@ -194,9 +233,11 @@ type scopeString struct{ key, value string }
 
 // scopeStrings returns every string value of the call's JSON arguments with
 // the name of the key it sits under; arguments that are not JSON come back as
-// one value with no key. A walk that reaches the depth or value cap records it
-// in trunc: the call is then out of scope (the bound rule,
-// internal/guardrail/bounded), never silently clean.
+// one value with no key. An array of strings under a shell key is one argv: it
+// comes back as one shell text of its words, and a command next to an args array
+// as one text of the command and its words (GAP-0493). A walk that reaches the
+// depth or value cap records it in trunc: the call is then out of scope (the
+// bound rule, internal/guardrail/bounded), never silently clean.
 func scopeStrings(args string, trunc *bounded.Truncated) []scopeString {
 	var root any
 	if err := json.Unmarshal([]byte(args), &root); err != nil {
@@ -215,23 +256,87 @@ func scopeStrings(args string, trunc *bounded.Truncated) []scopeString {
 		case string:
 			out = append(out, scopeString{strings.ToLower(key), t})
 		case []any:
+			start := len(out)
 			for _, e := range t {
 				if !nodes.Take() {
 					return
 				}
 				walk(key, e, depth+1)
 			}
+			// a root array holds commands, not the words of one
+			if kind := scopeKeys[strings.ToLower(key)]; key != "" && (kind == scopeKeyShell || kind == scopeKeyArgs) {
+				if words, ok := scopeStringWords(t); ok && len(out)-start == len(words) {
+					out = append(out[:start], scopeString{strings.ToLower(key), scopeShellJoin(words)})
+				}
+			}
 		case map[string]any:
+			prog, argv := scopeProgramAndArgs(t)
 			for k, e := range t {
 				if !nodes.Take() {
 					return
 				}
+				if argv != nil && (k == prog || strings.EqualFold(k, "args")) {
+					continue
+				}
 				walk(k, e, depth+1)
+			}
+			if argv != nil {
+				out = append(out, scopeString{"command", t[prog].(string) + " " + scopeShellJoin(argv)})
 			}
 		}
 	}
 	walk("", root, 0)
 	return out
+}
+
+// scopeStringWords returns the elements of an array of only strings.
+func scopeStringWords(a []any) ([]string, bool) {
+	if len(a) == 0 {
+		return nil, false
+	}
+	words := make([]string, len(a))
+	for i, e := range a {
+		w, ok := e.(string)
+		if !ok {
+			return nil, false
+		}
+		words[i] = w
+	}
+	return words, true
+}
+
+// scopeProgramAndArgs finds, in one object, the program written under a shell
+// key (cmd, command: a string) and its arguments under args (an array of
+// strings): actionfacts reads that pair as ambiguous and drops the arguments, so
+// the lane reads the two as one command. It returns the program's key and the
+// words, or a nil argv when the object does not hold exactly that pair.
+func scopeProgramAndArgs(obj map[string]any) (progKey string, argv []string) {
+	var args []string
+	for k, v := range obj {
+		switch scopeKeys[strings.ToLower(k)] {
+		case scopeKeyShell:
+			if _, ok := v.(string); ok {
+				if progKey != "" {
+					return "", nil
+				}
+				progKey = k
+			}
+		case scopeKeyArgs:
+			a, ok := v.([]any)
+			if !ok {
+				return "", nil
+			}
+			if words, ok := scopeStringWords(a); ok && args == nil {
+				args = words
+			} else {
+				return "", nil
+			}
+		}
+	}
+	if progKey == "" {
+		return "", nil
+	}
+	return progKey, args
 }
 
 // scopeLoopback reports a destination that never leaves the host.
@@ -323,35 +428,55 @@ func scanScopeMatches(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated)
 const scopeKeyPrecheckBytes = 32 << 10
 
 // scopeMayHaveDestination reports whether a JSON object argument text names, as an
-// object key, one of the keys callSendDestinations reads (a shell key, a sink key
-// or an ambiguous key); arguments that are not an object are always read. The
-// search is over the raw text, so a text where a key could be written another
-// way is always read too: one with a JSON escape ("to" decodes to "to",
-// GAP-0484), and one that is not valid JSON (scopeStrings reads it as one shell
-// value, whatever keys it seems to have).
+// object key, one of the keys of scopeKeys (the keys the walk reads, the empty
+// key included); arguments that are not an object are always read. The search is
+// over the raw text, so a text where a key could be written another way is
+// always read too: one with a JSON escape ("to" decodes to "to", GAP-0484), and
+// one that is not valid JSON (scopeStrings reads it as one shell value, whatever
+// keys it seems to have). The empty key is looked for as two quotes and a colon
+// (GAP-0494).
 func scopeMayHaveDestination(args string) bool {
 	trimmed := strings.TrimLeft(args, " \t\r\n")
 	if !strings.HasPrefix(trimmed, "{") || strings.Contains(args, `\u`) || !json.Valid([]byte(args)) {
 		return true
 	}
 	lower := strings.ToLower(args)
-	for _, set := range []map[string]bool{scopeShellKeys, scopeSinkKeys, scopeAmbiguousKeys} {
-		for k := range set {
-			if strings.Contains(lower, `"`+k+`"`) {
+	for k := range scopeKeys {
+		if k == "" {
+			if scopeHasEmptyKey(lower) {
 				return true
 			}
+		} else if strings.Contains(lower, `"`+k+`"`) {
+			return true
 		}
 	}
 	return false
 }
 
-// scanScopeStrings returns the whole-match texts of re in t, at most limit of
-// them; more is a cap hit (the bound rule), and the scan stops there.
-func scanScopeStrings(re *lazyregexp.Regexp, t string, limit int, trunc *bounded.Truncated) []string {
-	ms := re.FindAllString(t, limit+1)
-	if len(ms) > limit {
+// scopeHasEmptyKey reports whether valid JSON text holds an empty string followed
+// by a colon: an object key. An empty string value is never followed by one.
+func scopeHasEmptyKey(text string) bool {
+	for i := 0; ; {
+		j := strings.Index(text[i:], `""`)
+		if j < 0 {
+			return false
+		}
+		i += j + 2
+		rest := strings.TrimLeft(text[i:], " \t\r\n")
+		if strings.HasPrefix(rest, ":") {
+			return true
+		}
+	}
+}
+
+// scanScopeStrings returns the whole-match texts of re in t, at most
+// maxScopeMailMatches of them (the one caller reads the recipients of a mail
+// word); more is a cap hit (the bound rule), and the scan stops there.
+func scanScopeStrings(re *lazyregexp.Regexp, t string, trunc *bounded.Truncated) []string {
+	ms := re.FindAllString(t, maxScopeMailMatches+1)
+	if len(ms) > maxScopeMailMatches {
 		trunc.Hit(bounded.Items)
-		ms = ms[:limit]
+		ms = ms[:maxScopeMailMatches]
 	}
 	return ms
 }
@@ -361,22 +486,22 @@ func scanScopeStrings(re *lazyregexp.Regexp, t string, limit int, trunc *bounded
 // destination already read costs nothing; the seventeenth distinct one is a cap
 // hit. unreadable reports a command that may send and could not be read (the
 // unknown tier applies to the send; there is no text scan).
-func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dests []scopeDest, unreadable bool) {
+func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dests []scopeDest, unreadable, incomplete bool) {
 	toolSends, toolReads := scopeToolVerb(toolName)
 	if len(args) > scopeKeyPrecheckBytes && !scopeMayHaveDestination(args) {
-		return nil, false
+		return nil, false, false
 	}
 	values := scopeStrings(args, trunc)
 	var texts, shellTexts []string
 	for _, v := range values {
-		switch {
-		case scopeShellKeys[v.key] || v.key == "":
+		switch scopeKeys[v.key] {
+		case scopeKeyShell, scopeKeyArgs:
 			shellTexts = append(shellTexts, v.value)
-		case scopeSinkKeys[v.key]:
+		case scopeKeySink:
 			if !toolReads || toolSends {
 				texts = append(texts, v.value)
 			}
-		case scopeAmbiguousKeys[v.key]:
+		case scopeKeyAmbiguous:
 			if toolSends {
 				texts = append(texts, v.value)
 			}
@@ -398,13 +523,13 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dest
 	// A shell command is read by its parsed effects: a send is a command that sends.
 	shell := false
 	if len(shellTexts) > 0 {
-		shell, unreadable = shellSendDestinations(toolName, args, shellTexts, trunc, add)
+		shell, unreadable, incomplete = shellSendDestinations(toolName, args, shellTexts, trunc, add)
 	}
-	if !shell && !toolSends && len(texts) == 0 {
-		return nil, false
+	if !shell && !incomplete && !toolSends && len(texts) == 0 {
+		return nil, false, false
 	}
-	if !shell && toolReads && !toolSends {
-		return nil, false
+	if !shell && !incomplete && toolReads && !toolSends {
+		return nil, false, false
 	}
 	for _, t := range texts {
 		for _, m := range scanScopeMatches(scopeURLHostRe, t, trunc) {
@@ -420,7 +545,7 @@ func callSendDestinations(toolName, args string, trunc *bounded.Truncated) (dest
 			}
 		}
 	}
-	return out, unreadable
+	return out, unreadable, incomplete
 }
 
 const maxSessionScopeTargets = 64
@@ -456,7 +581,7 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 		return ""
 	}
 	var trunc bounded.Truncated
-	dests, unreadable := callSendDestinations(toolName, args, &trunc)
+	dests, unreadable, incomplete := callSendDestinations(toolName, args, &trunc)
 	named := append(append(namedScopeTargets(intent), sessionTargets...), gitHosts...)
 	// What was read before a cap is still judged, and a call cut short at a cap
 	// is judged as unknown at least: the stricter of the two stands.
@@ -474,6 +599,9 @@ func intentScopeExceeded(intent string, sessionTargets []string, toolName, args 
 	}
 	if unreadable {
 		return scopeUnreadableReason
+	}
+	if incomplete && !trunc.Any() {
+		return scopeIncompleteReason
 	}
 	if trunc.Any() {
 		reason := "the call is too large to read in full, so it is judged as outside the user's task (" + trunc.Set().Reason() + ")"
@@ -734,7 +862,7 @@ func applyIntentScopeFloor(judged *ScanVerdict, reason string) *ScanVerdict {
 		Findings: []string{intentScopeFinding},
 		Scanner:  "intent-scope",
 	}
-	if reason == scopeUnreadableReason {
+	if reason == scopeUnreadableReason || reason == scopeIncompleteReason {
 		floor.Severity = "HIGH"
 	}
 	if i := strings.Index(reason, bounded.ReasonCode); i >= 0 {

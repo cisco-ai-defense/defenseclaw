@@ -56,7 +56,7 @@ func TestIntentScopeMailRepeatsDoNotHideAnUnnamedRecipient(t *testing.T) {
 	}
 	// the scanner itself: more matches than the scan allows is a cap hit
 	var trunc bounded.Truncated
-	if got := scanScopeStrings(scopeShellEmailWord, strings.Repeat("a@b.example ", maxScopeMailMatches+5), maxScopeMailMatches, &trunc); len(got) != maxScopeMailMatches || !trunc.Any() {
+	if got := scanScopeStrings(scopeShellEmailWord, strings.Repeat("a@b.example ", maxScopeMailMatches+5), &trunc); len(got) != maxScopeMailMatches || !trunc.Any() {
 		t.Errorf("scan past the cap: %d matches, cap hit %v", len(got), trunc.Any())
 	}
 }
