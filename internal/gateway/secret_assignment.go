@@ -229,6 +229,11 @@ func secretAssignmentRejection(raw string) string {
 	if strings.ContainsAny(value, "_-./") && secretAssignmentNameShaped(value) {
 		return "name"
 	}
+	// A long relative path (a file in a source tree, a migration, a temporary
+	// directory) is a path even when one or two of its pieces are ids.
+	if strings.Contains(value, "/") && secretAssignmentPathShaped(value) {
+		return "path"
+	}
 	// A value built from short underscore- or dash-separated pieces
 	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
 	// with separators still carries one long random piece.
@@ -398,6 +403,89 @@ func secretAssignmentNameShaped(value string) bool {
 		digits += secretAlnumCount(segment) - countLetters(segment)
 	}
 	return letters > 0 && wordLetters*10 >= (letters+digits)*7
+}
+
+// secretAssignmentPathShaped reports a relative path told by the structure of
+// the whole value: four or more components joined by /, none empty, where the
+// pieces (split at _ - . and /) are mostly names and the few that are ids are
+// short. A piece is a name when it is letters of one case shape (a word, a
+// file name, a short piece such as a or go), a counter, or a short piece of
+// letters and digits that is not token-like (k8s, md5sum). A piece is an id
+// when it is none of those and no longer than 16 characters (a git short
+// hash, a migration revision, a temporary-file suffix); a longer piece rules
+// the value out. The value is a path when it has at least six word pieces and
+// at most one id piece for every four word pieces. Random base64 that holds
+// slashes does not get there: its pieces are short, mixed in case and full of
+// digits, so it has neither six word pieces nor few ids.
+func secretAssignmentPathShaped(value string) bool {
+	components := strings.Split(value, "/")
+	if len(components) < 4 {
+		return false
+	}
+	words, ids := 0, 0
+	for _, component := range components {
+		pieces := strings.FieldsFunc(component, func(r rune) bool { return r == '_' || r == '-' || r == '.' })
+		if len(pieces) == 0 {
+			return false
+		}
+		for _, piece := range pieces {
+			switch {
+			case secretAssignmentCounter(piece):
+			case secretAssignmentPathWord(piece):
+				words++
+			case len(piece) <= 16:
+				ids++
+			default:
+				return false
+			}
+		}
+	}
+	return words >= 6 && ids*4 <= words
+}
+
+// secretAssignmentPathWord reports a path piece that a person wrote: letters
+// of one case shape (all lower, all upper or one capital then lower) that are
+// three or fewer, or hold a vowel and no run of more than five consonants; or
+// a short lower-case piece of letters and digits that is not token-like.
+func secretAssignmentPathWord(piece string) bool {
+	if piece == "" || len(piece) > 16 {
+		return false
+	}
+	upper, lower, digits := 0, 0, 0
+	for i := 0; i < len(piece); i++ {
+		switch c := piece[i]; {
+		case c >= 'A' && c <= 'Z':
+			upper++
+		case c >= 'a' && c <= 'z':
+			lower++
+		case c >= '0' && c <= '9':
+			digits++
+		default:
+			return false
+		}
+	}
+	if upper != 0 && lower != 0 && (upper != 1 || piece[0] < 'A' || piece[0] > 'Z') {
+		return false
+	}
+	if digits > 0 {
+		return len(piece) <= 8 && upper == 0 && secretAssignmentLetter(piece[0]) && !secretAssignmentTokenLike(piece)
+	}
+	if len(piece) <= 3 {
+		return true
+	}
+	vowel, run := false, 0
+	for i := 0; i < len(piece); i++ {
+		if strings.IndexByte("aeiouyAEIOUY", piece[i]) >= 0 {
+			vowel = true
+			run = 0
+			continue
+		}
+		run++
+		if run > 5 {
+			return false
+		}
+	}
+	return vowel
 }
 
 // secretAssignmentVersionToken reports a segment that is a version or a year
