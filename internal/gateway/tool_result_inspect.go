@@ -250,3 +250,17 @@ func decodeUnicodeEscape(s string) (rune, int) {
 	}
 	return r, 6
 }
+
+// verdictHasPromptInjection reports a prompt-injection finding (the
+// trust-exploit rules, the structural tool-result checks) in a verdict.
+func verdictHasPromptInjection(verdict *ToolInspectVerdict) bool {
+	if verdict == nil {
+		return false
+	}
+	for _, f := range verdict.DetailedFindings {
+		if hasTag(f.Tags, "prompt-injection") {
+			return true
+		}
+	}
+	return false
+}

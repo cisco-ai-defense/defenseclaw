@@ -1,6 +1,6 @@
 ---
 title: Tool results
-description: A tool's output is untrusted data. DefenseClaw checks every tool result for instructions aimed at the agent, alerts on them in the default posture, and in strict withholds the output where the agent lets it.
+description: A tool's output is untrusted data. DefenseClaw checks every tool result for instructions aimed at the agent, alerts on them in the default posture, blocks in strict, and always tells the agent not to follow them and shows you a line.
 keywords:
   - indirect prompt injection
   - tool output
@@ -70,27 +70,49 @@ never run on output text; they judge tool calls.
 
 ## What happens
 
-The tool has already run, so a verdict on its output cannot undo it. Every
-tool-result finding (rules, structural checks, judge) is HIGH at most, so the
-default pack never blocks a tool result:
+The tool has already run when its output comes back, and on most agents the
+output has already reached the model when the hook answers. A verdict on a
+tool result cannot undo the call, and a result cannot be unread. So
+enforcement on this surface means telling the agent and the user:
+
+- the agent is told that the result is untrusted and that it must not follow
+  the instructions in it, and
+- you see a DefenseClaw line in the agent's own window, on every alert and on
+  every block, in every posture.
+
+Every tool-result finding (rules, structural checks, judge) is HIGH at most,
+so the default pack never blocks a tool result:
 
 | posture | what you get |
 |---|---|
-| default, permissive | an alert. The tool output reaches the model. |
-| strict | a block answer: the output is withheld where the agent allows it, below; elsewhere an alert. |
+| default, permissive, managed (default pack) | an alert. The agent gets a context note that the result contains instructions it must not follow; you see the DefenseClaw line. Never a block. |
+| strict, managed strict | a block answer: the agent's tool-result block form, with a reason that says the result contains instructions the agent must not follow; you see the DefenseClaw line. Where the agent can withhold the output (below), it does. |
+
+In observe mode nothing is blocked; a finding that would block says so in the
+same context note and line.
 
 Secrets in a tool's output are an alert today; redacting them where the agent
 can replace the output is planned.
 
-What a block on a tool result does, per agent:
+What each agent does with a tool-result alert and block:
 
-| agent | a block answer on a tool result |
-|---|---|
-| `/llm` proxy (OpenClaw and every proxy-routed agent) | The model call that would carry the output is refused with a DefenseClaw message, so the model never reads it. |
-| Codex | The PostToolUse answer is `decision: block`. In interactive use Codex feeds the reason to the model in place of the tool result; in code mode the tool promise rejects. |
-| Claude Code | PostToolUse and PostToolBatch answers are advisory in Claude Code: the finding is an alert with `would_block`, and the output reaches the model. |
-| Amp | `tool.result` is enforced: the plugin replaces the output with a withheld notice before Amp sends it to the model. |
-| Copilot CLI, Cursor, Devin, Hermes, OpenCode, Antigravity, Kiro | Their post-tool events cannot block: the finding is an alert with `would_block`. |
+| agent | the agent is told | you see | a block in strict |
+|---|---|---|---|
+| Claude Code (PostToolUse) | alert: `hookSpecificOutput.additionalContext`; block: the `reason` of `decision: block` | `systemMessage` | `decision: block` with the reason. The output has already reached the model; Claude Code gives the model the reason with it. |
+| Codex (PostToolUse) | alert: `hookSpecificOutput.additionalContext`; block: the `reason` of `decision: block` | `systemMessage` | `decision: block`. In interactive use Codex feeds the reason to the model in place of the tool result; in code mode the tool promise rejects. |
+| `/llm` proxy (OpenClaw and every proxy-routed agent) | block: the refusal message | the refusal message | The model call that would carry the output is refused, so the model never reads it. |
+| Amp (`tool.result`) | block: the withheld notice in place of the output; alert: nothing | block: the withheld notice; alert: nothing in Amp | Enforced: the plugin replaces the output with a withheld notice before Amp sends it to the model. |
+| Cursor (`postToolUse`) | `additional_context` | nothing in Cursor: the post-tool event has no user field | Cannot block: an alert with `would_block`. |
+| Copilot CLI, Devin (`postToolUse`, `PostToolUse`) | `additionalContext` | nothing in the agent: the post-tool event has no user field | Cannot block: an alert with `would_block`. |
+| Antigravity, Hermes, OpenCode, Kiro | nothing: their post-tool events take no context field DefenseClaw can use | nothing in the agent | Cannot block: an alert with `would_block`. |
+
+Where the agent shows you nothing, the finding is in `defenseclaw alerts`,
+the TUI Alerts panel and the audit log. Desktop notifications cover blocks
+and pending approvals, not alerts.
+
+Before 1.0.10 a Claude Code PostToolUse finding reached only the model:
+`additionalContext` is not shown in the Claude Code window, so the injection
+alert looked silent, and a strict block was answered as an allow.
 
 Managed enterprise (AI Defense only) is unchanged: AI Defense receives the
 conversation, tool messages included.
