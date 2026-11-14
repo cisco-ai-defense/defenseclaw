@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-// The 1.0.9 review of GAP-0534 (r11 S1) read ShellParseBound as skipping the
+// The 1.0.9 review of GAP-0534 (r11 S1) read ShellParseBound (now ShellParseReason) as skipping the
 // relative-cwd and empty-home guard that actionPosixCommandDecision applies
 // first, so that a per-user gateway would grade a recovered-parse call the
 // hook client sends no reason for. UnprovenProtectedWrite applies the same
-// guard, so the two readings agree: this pins that ShellParseBound is the
+// guard, so the two readings agree: this pins that ShellParseReason is the
 // client reading (ActionCommandAuditReasonWithDialect is "shell-parse-bound")
 // for every cwd and home, and is false for a relative or empty cwd and for an
 // empty home.
@@ -37,10 +37,10 @@ func TestShellParseBoundIsTheClientReadingForEveryCwdAndHome(t *testing.T) {
 			for _, h := range homes {
 				for _, cwd := range cwds[h] {
 					for _, command := range []string{ordinary, form, benign} {
-						got := ShellParseBound(connector, tool, command, cwd, h)
+						got := (ShellParseReason(connector, tool, command, cwd, h) == "shell-parse-bound")
 						want := ActionCommandAuditReasonWithDialect(command, cwd, h, dialect) == "shell-parse-bound"
 						if got != want {
-							t.Errorf("%s/%s home=%q cwd=%q %q: ShellParseBound=%v, client reading bound=%v",
+							t.Errorf("%s/%s home=%q cwd=%q %q: ShellParseReason bound=%v, client reading bound=%v",
 								connector, tool, h, cwd, command, got, want)
 						}
 						if got && (h == "" || !filepath.IsAbs(cwd)) {

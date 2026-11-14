@@ -1227,26 +1227,26 @@ func TestToolCallTrackerFoldsToolCallsAsTheEditorMergesThem(t *testing.T) {
 	if before := tracker.Peek(first); before != nil {
 		t.Fatalf("state before the first report: %s", before)
 	}
-	tracker.Commit(first)
+	tracker.Commit(first, false)
 	status := update("tool_call_update", `,"status":"in_progress"`)
 	var got toolCallFields
 	if err := json.Unmarshal(tracker.Peek(status), &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"ls"}` {
 		t.Fatalf("state before the update: %s (%v)", tracker.Peek(status), err)
 	}
-	tracker.Commit(status)
+	tracker.Commit(status, false)
 	permission := Message{JSONRPC: "2.0", ID: json.RawMessage("5"), Method: "session/request_permission",
 		Params: json.RawMessage(`{"sessionId":"s","toolCall":{"toolCallId":"t1","title":"Run ls"},"options":[]}`)}
 	if err := json.Unmarshal(tracker.Peek(permission), &got); err != nil || string(got.Kind) != `"execute"` {
 		t.Fatalf("a permission without a kind does not get the kind of its call: %s", tracker.Peek(permission))
 	}
 	// A later field replaces the kept one; a null does not.
-	tracker.Commit(update("tool_call_update", `,"rawInput":{"command":"pwd"},"kind":null`))
+	tracker.Commit(update("tool_call_update", `,"rawInput":{"command":"pwd"},"kind":null`), false)
 	got = toolCallFields{}
 	if err := json.Unmarshal(tracker.Peek(status), &got); err != nil || string(got.Kind) != `"execute"` || string(got.RawInput) != `{"command":"pwd"}` {
 		t.Fatalf("merged state: %s", tracker.Peek(status))
 	}
 	// The first report of a call is the call: it replaces what was kept, as the editor does.
-	tracker.Commit(update("tool_call", `,"title":"Read it"`))
+	tracker.Commit(update("tool_call", `,"title":"Read it"`), false)
 	got = toolCallFields{}
 	if err := json.Unmarshal(tracker.Peek(status), &got); err != nil || len(got.Kind) != 0 || len(got.RawInput) != 0 || string(got.Title) != `"Read it"` {
 		t.Fatalf("a repeated tool_call merged onto the old state: %s", tracker.Peek(status))
@@ -1275,7 +1275,7 @@ func TestToolCallTrackerBoundsAreMarked(t *testing.T) {
 			`{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"` + id + `"}}`)}
 	}
 	big := strings.Repeat("a", MaxToolCallStateBytes)
-	tracker.Commit(report("big", `,"kind":"execute","rawInput":{"command":"echo `+big+`","description":"x"}`))
+	tracker.Commit(report("big", `,"kind":"execute","rawInput":{"command":"echo `+big+`","description":"x"}`), false)
 	var got toolCallFields
 	if err := json.Unmarshal(tracker.Peek(later("big")), &got); err != nil || !got.Truncated || string(got.Kind) != `"execute"` {
 		t.Fatalf("oversize state: %s (%v)", tracker.Peek(later("big")), err)
@@ -1285,12 +1285,12 @@ func TestToolCallTrackerBoundsAreMarked(t *testing.T) {
 		t.Fatalf("the command was not kept as a prefix: %d bytes (%v)", len(input.Command), err)
 	}
 	// An input of nothing that can be cut is left out.
-	tracker.Commit(report("blob", `,"kind":"execute","rawInput":{"items":[`+strings.Repeat(`"`+strings.Repeat("b", 100)+`",`, 1000)+`"x"]}`))
+	tracker.Commit(report("blob", `,"kind":"execute","rawInput":{"items":[`+strings.Repeat(`"`+strings.Repeat("b", 100)+`",`, 1000)+`"x"]}`), false)
 	if err := json.Unmarshal(tracker.Peek(later("blob")), &got); err != nil || !got.Truncated || len(got.RawInput) > 2 {
 		t.Fatalf("oversize list input: %s", tracker.Peek(later("blob")))
 	}
 	for i := 0; i < MaxTrackedToolCalls+5; i++ {
-		tracker.Commit(report(fmt.Sprintf("c%d", i), `,"kind":"read"`))
+		tracker.Commit(report(fmt.Sprintf("c%d", i), `,"kind":"read"`), false)
 	}
 	if tracker.calls.len() != MaxTrackedToolCalls {
 		t.Fatalf("%d tool calls kept, want %d", tracker.calls.len(), MaxTrackedToolCalls)
@@ -1302,7 +1302,7 @@ func TestToolCallTrackerBoundsAreMarked(t *testing.T) {
 		t.Fatalf("a call never reported has state: %s", tracker.Peek(later("never-reported")))
 	}
 	// A dropped call reported again is kept again.
-	tracker.Commit(report("big", `,"kind":"read"`))
+	tracker.Commit(report("big", `,"kind":"read"`), false)
 	got = toolCallFields{}
 	if err := json.Unmarshal(tracker.Peek(later("big")), &got); err != nil || got.Dropped || string(got.Kind) != `"read"` {
 		t.Fatalf("a call reported again: %s", tracker.Peek(later("big")))

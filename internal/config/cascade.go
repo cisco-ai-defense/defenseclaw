@@ -180,7 +180,7 @@ type CascadeScope struct {
 	Judge     CascadeJudgeConfig     `mapstructure:"judge" yaml:"judge,omitempty" json:"judge,omitempty"`
 	SystemOne CascadeSystemOneConfig `mapstructure:"system_one" yaml:"system_one,omitempty" json:"system_one,omitempty"`
 	// Lanes maps a registered lane (RegisterCascadeLane) to off, shadow or on.
-	Lanes map[string]string `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
+	Lanes CascadeLaneValues `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
 }
 
 // IsZero reports an unset scope.
@@ -225,7 +225,7 @@ type CascadeConfig struct {
 	Unknown   string                 `mapstructure:"unknown" yaml:"unknown,omitempty" json:"unknown,omitempty"`
 	Judge     CascadeJudgeConfig     `mapstructure:"judge" yaml:"judge,omitempty" json:"judge,omitempty"`
 	SystemOne CascadeSystemOneConfig `mapstructure:"system_one" yaml:"system_one,omitempty" json:"system_one,omitempty"`
-	Lanes     map[string]string      `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
+	Lanes     CascadeLaneValues      `mapstructure:"lanes" yaml:"lanes,omitempty" json:"lanes,omitempty"`
 	Policy    CascadePolicyConfig    `mapstructure:"policy" yaml:"policy,omitempty" json:"policy,omitempty"`
 	Admin     CascadeAdminConfig     `mapstructure:"admin" yaml:"admin,omitempty" json:"admin,omitempty"`
 
@@ -339,6 +339,9 @@ type CascadeLane struct {
 	ShadowOnly string
 	// Description is shown by explain.
 	Description string
+	// Global, when set, makes the lane a process-wide switch: only the top
+	// level (guardrail.cascade.lanes) may set it.
+	Global bool
 }
 
 var (
@@ -870,15 +873,18 @@ func validateCascadeScope(path string, s CascadeScope) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		value := strings.ToLower(strings.TrimSpace(s.Lanes[name]))
+		// Exact values: a typo (Shadow, " on") never silently switches a lane.
+		value := s.Lanes[name]
 		lane, ok := cascadeLane(name)
 		switch {
 		case !ok:
 			errs = append(errs, fmt.Errorf("%s.lanes.%s: no such lane in this release (lanes: %s)", path, name, cascadeLaneNames()))
+		case lane.Global && path != "guardrail.cascade":
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: the %s lane is process-wide; set it at guardrail.cascade.lanes.%s only", path, name, name, name))
 		case !cascadeLaneValue(value):
-			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of off, shadow, on", path, name, s.Lanes[name]))
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: %q is not one of %s", path, name, value, strings.Join(CascadeLaneAllowed(name), ", ")))
 		case value == CascadeLaneOn && lane.ShadowOnly != "":
-			errs = append(errs, fmt.Errorf("%s.lanes.%s: on is not available in this release: the lane ships shadow-only (%s); use shadow (record its verdict without changing the answer) or off", path, name, lane.ShadowOnly))
+			errs = append(errs, fmt.Errorf("%s.lanes.%s: on is not available in 1.0.10: the lane ships shadow-only (%s); allowed: off, shadow (shadow records its verdict without changing the answer)", path, name, lane.ShadowOnly))
 		}
 	}
 	return errors.Join(errs...)
