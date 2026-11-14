@@ -410,9 +410,12 @@ func TestGAP0535QuotedShellOptionSweepNeverAllowsABlockedBody(t *testing.T) {
 		t.Skip("the fixtures are POSIX shell text")
 	}
 	bodies := map[string]string{"B1": gap0486Blocked["B1"], "EB1": "eval " + gap0526Quote(gap0486Blocked["B1"]), "B3": gap0486Blocked["B3"]}
+	// The full sweep runs in the plain build (about seven minutes); the race
+	// build and -short read the first spellings of -c with every wrapper,
+	// shell and body (about 4 minutes under -race on a loaded box).
 	options := gap0535OptionWords()
 	if testing.Short() || hookAnswerRaceBuild {
-		options = options[:10]
+		options = options[:3]
 	}
 	for _, name := range []string{"default", "permissive", "strict"} {
 		p := gap0437Pack{name: name, pack: name}
