@@ -34,12 +34,12 @@ import (
 // Bounds on one page script (bounded.Truncated: the caller judges a call with a
 // bound hit as unknown at least, and what was read before the bound is judged).
 const (
-	maxPageScript = 64 << 10 // bytes of one page script read (bounded.Bytes)
-	maxPageTokens = 1 << 14  // tokens read from it (bounded.Nodes)
-	maxPageSends  = 64       // sends reported (bounded.Items)
-	maxPageDefs   = 1 << 10  // definitions tracked for the taint pass (bounded.Items)
-	maxPageRefs   = 1 << 17  // names recorded across all definitions (bounded.Nodes)
-	maxTaintDepth = 16       // levels of one value handed on from name to name (bounded.Depth)
+	maxPageScript = 256 << 10 // bytes of one page script read (bounded.Bytes)
+	maxPageTokens = 1 << 16   // tokens read from it (bounded.Nodes)
+	maxPageSends  = 64        // sends reported (bounded.Items)
+	maxPageDefs   = 1 << 10   // definitions tracked for the taint pass (bounded.Items)
+	maxPageRefs   = 1 << 17   // names recorded across all definitions (bounded.Nodes)
+	maxTaintDepth = 16        // levels of one value handed on from name to name (bounded.Depth)
 )
 
 // SinkKind is the kind of network send a page script makes.
@@ -548,7 +548,7 @@ func (r *jsReader) exprEnd(lo int) int {
 			prev := r.t[j-1]
 			prevOpen := prev.kind == jsPunct && (binaryOp(prev.s) || prev.s == "!" || prev.s == "~")
 			next := t.kind == jsPunct && binaryOp(t.s)
-			if !prevOpen && !next && !(t.kind == jsStr && t.tmpl) {
+			if !prevOpen && !next && (t.kind != jsStr || !t.tmpl) {
 				return j
 			}
 		}
@@ -627,7 +627,7 @@ func AnalyzePageScript(code string) PageFlow {
 			if reads[i] {
 				direct[d] = true
 			}
-			if name, ok := r.ident(i); ok && !(i > 0 && r.isDot(i-1)) {
+			if name, ok := r.ident(i); ok && (i == 0 || !r.isDot(i-1)) {
 				if budget <= 0 {
 					trunc.Hit(bounded.Nodes)
 					break

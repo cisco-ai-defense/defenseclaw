@@ -205,7 +205,7 @@ func TestPageScriptOriginFromTheScript(t *testing.T) {
 // unknown tier, and a flow read before the cap still decides.
 func TestPageScriptTruncated(t *testing.T) {
 	flow := pgScript("document.cookie", pgOtherHost)
-	big := flow + "\n//" + strings.Repeat("x", 1<<17)
+	big := flow + "\n//" + strings.Repeat("x", 1<<19)
 	pgNavigate(t, "t-1", pgOwnHost)
 	got := pgCall(t, "t-1", pgPlaywright+"browser_evaluate", pgArgs(t, map[string]any{"function": big}), false)
 	if _, ok := findingByID(got, pageScriptSessionEgressRuleID); !ok {
@@ -215,7 +215,7 @@ func TestPageScriptTruncated(t *testing.T) {
 		t.Fatalf("no limit finding for a truncated script: %+v", got)
 	}
 	// nothing but padding: no flow, but the call is not clean
-	pad := pgArgs(t, map[string]any{"function": "() => 1\n//" + strings.Repeat("x", 1<<17)})
+	pad := pgArgs(t, map[string]any{"function": "() => 1\n//" + strings.Repeat("x", 1<<19)})
 	got = pgCall(t, "t-2", pgPlaywright+"browser_evaluate", pad, false)
 	if boundedLimitIndex(got) < 0 {
 		t.Fatalf("a truncated script is never clean: %+v", got)
@@ -239,9 +239,9 @@ func TestPageOriginStoreIsBounded(t *testing.T) {
 
 func init() {
 	registerBoundedLane(
-		boundedLaneCap{lane: "s7/browserjs page-script-bytes", cap: bounded.Bytes, limit: 64 << 10,
+		boundedLaneCap{lane: "s7/browserjs page-script-bytes", cap: bounded.Bytes, limit: 256 << 10,
 			gen: pageScriptBytesCall, seen: pageScriptSeenCall},
-		boundedLaneCap{lane: "s7/browserjs page-script-tokens", cap: bounded.Nodes, limit: 1 << 14,
+		boundedLaneCap{lane: "s7/browserjs page-script-tokens", cap: bounded.Nodes, limit: 1 << 16,
 			gen: pageScriptTokensCall, seen: pageScriptSeenCall},
 	)
 }
