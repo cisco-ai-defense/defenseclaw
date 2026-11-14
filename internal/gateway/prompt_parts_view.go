@@ -216,31 +216,49 @@ func jsonContentPartsJoinedText(content string) string {
 	return partsJoinedText(jsonContentTextParts(content))
 }
 
-// unionRuleFindings is base with each finding of view whose rule base lacks
-// for the same profile member.
+// unionRuleFindings merges two rule scans of one message (its text and its
+// parts view, or its text and its folded trust view) into one finding per
+// rule ID and profile member. A key only view has is appended; a key both
+// have keeps the stronger finding in base's place (strongerRuleFinding, the
+// rule the profile-meet merge uses: enforceable, then severity, then confidence).
+// Trust-literal context can demote a rule to LOW detection-only from its
+// surroundings, so one scan can hold a demoted match where the other found
+// the same rule enforceable; a first-wins merge let the weaker one decide
+// (rel-1-0-10:GAP-0527). base is not modified.
 func unionRuleFindings(base, view []RuleFinding) []RuleFinding {
 	if len(view) == 0 {
 		return base
 	}
 	type ruleKey struct{ profile, rule string }
-	seen := make(map[ruleKey]bool, len(base)+len(view))
-	for _, finding := range base {
-		seen[ruleKey{finding.profile, finding.RuleID}] = true
+	out := make([]RuleFinding, len(base), len(base)+len(view))
+	copy(out, base)
+	at := make(map[ruleKey]int, len(base)+len(view))
+	for i, finding := range out {
+		key := ruleKey{finding.profile, finding.RuleID}
+		if _, ok := at[key]; !ok {
+			at[key] = i
+		}
 	}
 	for _, finding := range view {
 		key := ruleKey{finding.profile, finding.RuleID}
-		if seen[key] {
+		if i, ok := at[key]; ok {
+			if strongerRuleFinding(finding, out[i]) {
+				out[i] = finding
+			}
 			continue
 		}
-		seen[key] = true
-		base = append(base, finding)
+		at[key] = len(out)
+		out = append(out, finding)
 	}
-	return base
+	return out
 }
 
 // unionLocalPatternVerdicts is the local-pattern verdict of a text and its
 // parts view (scanLocalPatternsWithActivation of both): every finding of
-// either once, at the higher severity and action of the two.
+// either once, at the higher severity of the two and that severity's action.
+// A view that adds no finding name still raises the severity: its finding
+// string is the rule's, whatever strength trust-literal context left it
+// (rel-1-0-10:GAP-0527). base is not modified.
 func unionLocalPatternVerdicts(base, view *ScanVerdict) *ScanVerdict {
 	if view == nil || len(view.Findings) == 0 {
 		return base
@@ -262,10 +280,11 @@ func unionLocalPatternVerdicts(base, view *ScanVerdict) *ScanVerdict {
 			added = true
 		}
 	}
-	if !added {
+	raised := severityRank[view.Severity] > severityRank[out.Severity]
+	if !added && !raised {
 		return base
 	}
-	if severityRank[view.Severity] > severityRank[out.Severity] {
+	if raised {
 		out.Severity = view.Severity
 	}
 	out.Action = guardrailFallbackActionForSeverity(out.Severity)

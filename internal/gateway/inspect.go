@@ -2789,7 +2789,8 @@ func (a *APIServer) emitCodeGuardTelemetry(
 // generation: every rule on content (scanRaw; scope as for
 // scanContentRuleCategoryWithGeneration), then the trust rules on folded
 // ("" for none), the same content with invisible separators and look-alike
-// letters folded, for a rule the first pass did not find. A strictest
+// letters folded, merged per rule ID keeping the stronger finding
+// (unionRuleFindings, rel-1-0-10:GAP-0527). A strictest
 // combination of profiles runs it with each member's own rules and keeps
 // every member's finding, so even distinct definitions of one rule ID keep
 // their separate audit provenance.
@@ -2818,17 +2819,7 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 	if folded == "" {
 		return findings
 	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "message", ruleScanOptions{
 		contentScope: scope, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
+	}))
 }
