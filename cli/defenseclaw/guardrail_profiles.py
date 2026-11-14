@@ -109,6 +109,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "bae849da47c25cb44132971419ea52e8c7a87b0bd994fece05d1f98bccda2392",
             # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
             "a86801cc5e8efd1c6c8c4b88164c9bcd608fad5200371e7cc0632e297309bd7a",
+            # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
+            "69e71164e4798439ed96acd8070ff36eb03bfe2ce260b3c46221824497610275",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "657b41873648522db2f5f1d2237a822f94712b4775267cd7e129b62c2bfbbc16",
         }
     ),
     "permissive": frozenset(
@@ -174,6 +178,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "e37c3a00b671321ae3e047606610d2fe08083a6282e8ed8778f2b1aac82959a4",
             # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
             "6632604f57eb9a3d0618857cadeaa1ffa53b031115492e82799e917b7d21cc50",
+            # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
+            "1e424c14053a75a0eb15df080839833433717195bd0bd7736ec35cddd4564524",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "d0744d25ec528674c66da161034c6bfe2478a54cde9167647fe80c3e86454d8b",
         }
     ),
     "strict": frozenset(
@@ -238,6 +246,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "d7e4600212678a341448694e23e271de3dce897e0897dde4d7eaf9f4a12f8e23",
             # 1.0.10 (rel/1.0.10 INT batch 10): shellrecall effect rules plus nonshell toolshape rules.
             "b70be45b7d2384a6b05eeb85893ad80926d19207e7a6896390e16aadb06a551b",
+            # 1.0.10 (s7/response-fields): SEC-BEARER-BARE and SEC-PASSWORD-ASSIGN (GAP-0371).
+            "23259c8008f836ee1e60f5dd9ebe86050736da685dc76e8bf4fdcbd56ab53f0f",
+            # 1.0.10 (s7/response-fields merged with rel/1.0.10 a75abaec78): plus the s7/shellrecall effect rules.
+            "b956db73b9de22f9b3d9b107754c458bf4c042d7d109ae4baeb32803f9f378d7",
         }
     ),
 }
