@@ -96,6 +96,10 @@ def apply_settings(
     if protocol is not None:
         name = protocol.strip().lower()
         updated.protocol = "" if name == "system-one" else name  # the default; keep the file minimal
+    elif base_url is not None and not current.protocol and infer_protocol(updated.base_url):
+        # A Google Decisions API URL with no protocol given (init, or setup
+        # with --base-url only) would send System One requests and get 400.
+        updated.protocol = infer_protocol(updated.base_url)
     if api_key_env is not None:
         name = api_key_env.strip()
         if name == DECISION_MODEL_KEY_ENV:
@@ -108,7 +112,9 @@ def apply_settings(
     if block_threshold is not None:
         updated.block_threshold = float(block_threshold)
     if on_confident_block is not None:
-        updated.on_confident_block = on_confident_block.strip().lower()
+        # decide is retired (it acts as escalate): never write it, and drop
+        # an old one, so the file holds only what the gateway does.
+        updated.on_confident_block = ""
     if hook_connectors is not None:
         updated.hook_connectors = parse_connectors(hook_connectors)
     problem = updated.validation_error()
@@ -116,6 +122,17 @@ def apply_settings(
         raise DecisionModelError(f"decision_model: {problem}")
     cfg.decision_model = updated
     return updated
+
+
+def infer_protocol(base_url: str) -> str:
+    """gemini-decisions for a Google Decisions API URL, else ""."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit((base_url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+    return DECISION_MODEL_PROTOCOL_GEMINI if host == "generativelanguage.googleapis.com" else ""
 
 
 def parse_connectors(value: str | list[str] | tuple[str, ...]) -> list[str]:
@@ -364,7 +381,12 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.timeout", f"{dm.effective_timeout():g}s"),
         ("decision_model.allow_threshold", f"{dm.effective_allow_threshold():.2f}"),
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
-        ("decision_model.on_confident_block", dm.effective_on_confident_block()),
+        ("decision_model.block_risk_score", f"{dm.effective_block_risk_score():.2f}"),
+        ("decision_model.escalate_rule_flagged", "true" if dm.effective_escalate_rule_flagged() else "false"),
+        (
+            "decision_model.on_confident_block",
+            "escalate" if dm.effective_on_confident_block() == "escalate" else "decide (retired: acts as escalate)",
+        ),
         ("decision_model.hook_connectors", ", ".join(dm.hook_connectors) or "(none: only in front of the LLM judge)"),
     ]
     return rows

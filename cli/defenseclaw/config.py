@@ -1766,7 +1766,9 @@ DECISION_MODEL_KEY_ENV = "DEFENSECLAW_DECISION_MODEL_KEY"
 DECISION_MODEL_DEFAULT_ALLOW_THRESHOLD = 0.30
 DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD = 0.75
 DECISION_MODEL_DEFAULT_TIMEOUT = 1.0
+# "decide" is retired (owner 2026-11-13: a decision-model block is never final); it still loads and acts as escalate.
 DECISION_MODEL_ON_CONFIDENT_BLOCK = ("escalate", "decide")
+DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE = 1.5
 # Wire protocols: System One ({model, state, questions}, Bearer token) and
 # Google's Decisions API ({model, input, questions}, x-goog-api-key).
 DECISION_MODEL_PROTOCOL_SYSTEM_ONE = "system-one"
@@ -1802,6 +1804,10 @@ class DecisionModelConfig:
     allow_threshold: float = 0.0
     block_threshold: float = 0.0
     on_confident_block: str = ""
+    # A confident block also needs the risk score answer (0..2) at or above this; 0 = 1.5.
+    block_risk_score: float = 0.0
+    # A call the rules flagged never gets a confident block (it escalates); None = true.
+    escalate_rule_flagged: bool | None = None
     # Connectors whose hook-lane tool calls the model answers on its own
     # where the LLM judge does not run ("*" = all). Empty = only in front
     # of the judge. Omitted from YAML when empty.
@@ -1814,7 +1820,8 @@ class DecisionModelConfig:
         return self.api_key_env.strip() or DECISION_MODEL_KEY_ENV
 
     def effective_protocol(self) -> str:
-        return (self.protocol or "").strip().lower() or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
+        # Exact values only (validation_error refuses anything else), as in Go and the schema.
+        return self.protocol or DECISION_MODEL_PROTOCOL_SYSTEM_ONE
 
     def effective_timeout(self) -> float:
         return self.timeout if self.timeout > 0 else DECISION_MODEL_DEFAULT_TIMEOUT
@@ -1824,6 +1831,12 @@ class DecisionModelConfig:
 
     def effective_block_threshold(self) -> float:
         return self.block_threshold if self.block_threshold > 0 else DECISION_MODEL_DEFAULT_BLOCK_THRESHOLD
+
+    def effective_block_risk_score(self) -> float:
+        return self.block_risk_score if self.block_risk_score > 0 else DECISION_MODEL_DEFAULT_BLOCK_RISK_SCORE
+
+    def effective_escalate_rule_flagged(self) -> bool:
+        return self.escalate_rule_flagged is not False
 
     def effective_on_confident_block(self) -> str:
         return (self.on_confident_block or "").strip().lower() or "escalate"
@@ -1846,11 +1859,15 @@ class DecisionModelConfig:
                 f"allow_threshold ({self.effective_allow_threshold()}) must be lower than "
                 f"block_threshold ({self.effective_block_threshold()})"
             )
+        if self.escalate_rule_flagged is not None and not isinstance(self.escalate_rule_flagged, bool):
+            return f"escalate_rule_flagged must be true or false, got {self.escalate_rule_flagged!r}"
+        if not 0 <= self.block_risk_score <= 2:
+            return f"block_risk_score must be between 0 and 2, got {self.block_risk_score}"
         if not 0 <= self.timeout <= 30:
             return f"timeout must be between 0 and 30 seconds, got {self.timeout}"
         if self.effective_on_confident_block() not in DECISION_MODEL_ON_CONFIDENT_BLOCK:
             return f"on_confident_block must be escalate or decide, got {self.on_confident_block!r}"
-        if self.effective_protocol() not in DECISION_MODEL_PROTOCOLS:
+        if self.protocol not in ("", *DECISION_MODEL_PROTOCOLS):
             return f"protocol must be system-one or gemini-decisions, got {self.protocol!r}"
         if self.base_url.strip():
             err = decision_model_url_error(self.base_url)
@@ -1862,6 +1879,13 @@ class DecisionModelConfig:
             if not self.model.strip():
                 return "enabled needs model (the model name the endpoint serves)"
         return ""
+
+
+# Query parameters that carry a key or token. Mirrors decisionModelKeyQueryParams in Go.
+_DECISION_MODEL_KEY_QUERY_PARAMS = frozenset({
+    "key", "api_key", "apikey", "api-key", "x-goog-api-key", "access_token", "token",
+    "auth_token", "auth", "secret", "client_secret", "password",
+})
 
 
 def decision_model_url_error(raw: str) -> str:
@@ -1878,6 +1902,14 @@ def decision_model_url_error(raw: str) -> str:
         return "base_url must be an absolute http(s) URL"
     if parsed.username or parsed.password:
         return f"base_url must not carry credentials; put the token in {DECISION_MODEL_KEY_ENV}"
+    from urllib.parse import parse_qsl
+
+    for name, _value in parse_qsl(parsed.query, keep_blank_values=True):
+        if name.lower() in _DECISION_MODEL_KEY_QUERY_PARAMS:
+            return (
+                f"base_url must not carry a key in its query string ({name}=); put the key in "
+                f"{DECISION_MODEL_KEY_ENV} (decision_model.api_key_env)"
+            )
     scheme = parsed.scheme.lower()
     if scheme == "https":
         return ""
@@ -1914,6 +1946,10 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         allow_threshold=_num("allow_threshold"),
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        block_risk_score=_num("block_risk_score"),
+        # Strict: a YAML bool or nothing; anything else is kept as given so
+        # validation_error reports it (Go refuses it at load too).
+        escalate_rule_flagged=raw.get("escalate_rule_flagged"),
         hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
 

@@ -2038,8 +2038,8 @@ def build_setup_sections(
                 _field(cfg, "Allow At", "decision_model.allow_threshold", hint="Risk at or below skips the judge. Blank = 0.30."),
                 _field(cfg, "Block At", "decision_model.block_threshold", hint="Risk at or above is a confident block. Blank = 0.75."),
                 _field(
-                    cfg, "Confident Block", "decision_model.on_confident_block", "choice", ("escalate", "decide"),
-                    "escalate: the judge still checks it (default). decide: it stands.",
+                    cfg, "Block Risk Score", "decision_model.block_risk_score",
+                    hint="A confident block also needs risk score >= this (0-2). Blank = 1.5.",
                 ),
                 _field(
                     cfg, "Answers Alone For", "decision_model.hook_connectors",

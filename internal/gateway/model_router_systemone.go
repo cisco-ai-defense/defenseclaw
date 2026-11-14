@@ -150,6 +150,15 @@ func (c *systemOneClassifier) Classify(ctx context.Context, in engine.ClassifyIn
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxDecisionModelResponseBytes+1))
+	if err == nil && resp.StatusCode != http.StatusOK {
+		var refusal decisionRefusalError
+		if herr := decisionHTTPError(c.protocol, resp.StatusCode, raw); errors.As(herr, &refusal) {
+			// A safety refusal is a healthy answer the content chose
+			// (GAP-0343): no category, but no breaker failure either.
+			c.record(false)
+			return none, classifierErr(engine.FailureUpstreamStatus, herr)
+		}
+	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		c.record(true)
 		return none, classifierErr(engine.FailureUpstreamStatus, fmt.Errorf("systemone returned HTTP %d", resp.StatusCode))

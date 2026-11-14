@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -53,6 +54,7 @@ type dmCache struct {
 	log                          *os.File
 	flight                       sync.Map // sha -> *dmFlight
 	bg                           chan struct{}
+	legacyHits                   atomic.Int64
 	background                   atomic.Int64
 	// tpm paces upstream calls to this many input tokens per minute (0:
 	// none); the key's quota is shared with other lanes.
@@ -147,6 +149,17 @@ func (c *dmCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sum := sha256.Sum256(body)
 	sha := hex.EncodeToString(sum[:])
 	e := c.load(sha)
+	if e == nil {
+		// A body without the retired context_sufficient question (1.0.10
+		// question set) replays the answer recorded for the same body with
+		// it: the other answers do not depend on it (S7 S1SWEEP, 45 of 45
+		// identical). Bench only.
+		if lk := dmLegacyKey(body); lk != "" {
+			if e = c.load(lk); e != nil {
+				c.legacyHits.Add(1)
+			}
+		}
+	}
 	if e != nil {
 		c.hits.Add(1)
 	} else if c.only {
@@ -344,6 +357,43 @@ func (c *dmCache) summary() string {
 	for i := 0; i < 600 && len(c.bg) > 0; i++ {
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Sprintf("dm-cache hits=%d misses=%d upstream_calls=%d rate_limited=%d gave_up=%d offline_misses=%d stored=%d background=%d",
-		c.hits.Load(), c.misses.Load(), c.upstreamCalls.Load(), c.rateLimited.Load(), c.failed.Load(), c.offlineMisses.Load(), c.stored.Load(), c.background.Load())
+	return fmt.Sprintf("dm-cache hits=%d legacy_hits=%d misses=%d upstream_calls=%d rate_limited=%d gave_up=%d offline_misses=%d stored=%d background=%d",
+		c.hits.Load(), c.legacyHits.Load(), c.misses.Load(), c.upstreamCalls.Load(), c.rateLimited.Load(), c.failed.Load(), c.offlineMisses.Load(), c.stored.Load(), c.background.Load())
+}
+
+// dmLegacyKey is the cache key of body with the pre-1.0.10
+// context_sufficient question added back (its policy prefix taken from the
+// disposition question), or "" when body already has it or is not a
+// decision-model request.
+func dmLegacyKey(body []byte) string {
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return ""
+	}
+	qs, ok := req["questions"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if _, has := qs["context_sufficient"]; has {
+		return ""
+	}
+	disp, ok := qs["disposition"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	instr, _ := disp["instructions"].(string)
+	i := strings.Index(instr, "\n\nChoose allow")
+	if i < 0 {
+		return ""
+	}
+	qs["context_sufficient"] = map[string]any{
+		"type":         "noul",
+		"instructions": instr[:i] + "\n\nDoes the state contain enough trustworthy context to make the intervention decision?",
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }

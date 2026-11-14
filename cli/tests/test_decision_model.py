@@ -130,8 +130,7 @@ def test_enabled_block_round_trips(home):
         "base_url": "https://dm.example/v1/systemone",
         "api_key_env": "DM_TOKEN",
         "allow_threshold": 0.2,
-        "on_confident_block": "decide",
-    }
+    }  # on_confident_block decide is retired: setup never writes it
     again = config_module.load().decision_model
     assert again.active() and again.effective_block_threshold() == 0.75
     # Turning it off keeps the staged settings, minus the switch.
@@ -661,9 +660,36 @@ def gemini():
 
 def test_protocol_validation_and_default():
     assert DecisionModelConfig().effective_protocol() == "system-one"
-    assert DecisionModelConfig(protocol="Gemini-Decisions").effective_protocol() == "gemini-decisions"
     assert DecisionModelConfig(protocol="gemini-decisions").validation_error() == ""
     assert "system-one or gemini-decisions" in DecisionModelConfig(protocol="openai").validation_error()
+    # Exact values only, as in Go and the schema.
+    assert "system-one or gemini-decisions" in DecisionModelConfig(protocol="Gemini-Decisions").validation_error()
+
+
+def test_base_url_refuses_a_key_in_the_query_string():
+    for bad in (
+        "https://generativelanguage.googleapis.com/v1beta/decisions?key=placeholder",
+        "https://dm.example/x?alt=json&API_KEY=placeholder",
+        "https://dm.example/x?access_token=placeholder",
+    ):
+        problem = decision_model_url_error(bad)
+        assert "query string" in problem and "DEFENSECLAW_DECISION_MODEL_KEY" in problem, bad
+        assert "placeholder" not in problem
+    assert decision_model_url_error("https://dm.example/x?alt=json") == ""
+
+
+def test_google_url_infers_the_protocol(home):
+    cfg = config_module.load()
+    dmod.apply_settings(cfg, enabled=True, model="gemini-decision-1", base_url=dmod.GEMINI_BASE_URL)
+    assert cfg.decision_model.protocol == "gemini-decisions"
+    other = config_module.load()
+    dmod.apply_settings(other, enabled=True, model="m", base_url="https://dm.example/v1/systemone")
+    assert other.decision_model.protocol == ""
+    # An explicit protocol wins.
+    explicit = config_module.load()
+    dmod.apply_settings(explicit, enabled=True, model="m", base_url=dmod.GEMINI_BASE_URL, protocol="system-one")
+    assert explicit.decision_model.protocol == ""
+
 
 
 def test_gemini_request_body_matches_the_gateway():
@@ -713,3 +739,48 @@ def test_system_one_protocol_against_the_decisions_api_fails(gemini, tmp_path):
     dm = DecisionModelConfig(enabled=True, model="gemini-decision-1", base_url=gemini)
     result = dmod.ping(dm, str(tmp_path))
     assert not result.ok and result.detail == "HTTP 400"
+
+
+def test_safer_routing_defaults_round_trip_and_validation(home):
+    dm = DecisionModelConfig()
+    assert dm.effective_block_risk_score() == 1.5 and dm.effective_escalate_rule_flagged() is True
+    assert "block_risk_score must be between 0 and 2" in DecisionModelConfig(block_risk_score=2.5).validation_error()
+    (home / "config.yaml").write_text(
+        "config_version: 9\ndecision_model:\n  block_risk_score: 1.2\n  escalate_rule_flagged: false\n  on_confident_block: decide\n"
+    )
+    cfg = config_module.load()
+    assert cfg.decision_model.effective_block_risk_score() == 1.2
+    assert cfg.decision_model.effective_escalate_rule_flagged() is False
+    rows = dict(dmod.summary_rows(cfg))
+    assert rows["decision_model.on_confident_block"].startswith("decide (retired")
+    assert rows["decision_model.block_risk_score"] == "1.20" and rows["decision_model.escalate_rule_flagged"] == "false"
+
+
+def test_retired_decide_is_not_written_and_doctor_warns(home):
+    (home / "config.yaml").write_text(
+        "config_version: 9\ndecision_model:\n  enabled: true\n  model: m\n  base_url: http://127.0.0.1:1/x\n  on_confident_block: decide\n"
+    )
+    cfg = config_module.load()
+    dmod.apply_settings(cfg, on_confident_block="decide")
+    assert cfg.decision_model.on_confident_block == ""
+    from defenseclaw.commands import cmd_doctor
+
+    class _R:
+        def __init__(self):
+            self.rows = []
+
+    seen = []
+    orig = cmd_doctor._emit
+    cmd_doctor._emit = lambda status, name, detail, **kw: seen.append((status, name, detail))
+    try:
+        cmd_doctor._check_decision_model(config_module.load(), _R())
+    finally:
+        cmd_doctor._emit = orig
+    assert any(s == "warn" and "retired" in d for s, _n, d in seen), seen
+
+
+def test_escalate_rule_flagged_is_strict(home):
+    (home / "config.yaml").write_text("config_version: 9\ndecision_model:\n  escalate_rule_flagged: \"yes\"\n")
+    dm = config_module.load().decision_model
+    assert "escalate_rule_flagged must be true or false" in dm.validation_error()
+    assert DecisionModelConfig(escalate_rule_flagged=False).validation_error() == ""

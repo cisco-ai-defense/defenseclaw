@@ -239,6 +239,11 @@ func main() {
 	dmCacheRPM := flag.Int("dm-cache-rpm", 0, "with -dm-cache-dir: upstream requests per minute this process may send (0: no pacing)")
 	dmCacheBudgetFile := flag.String("dm-cache-budget-file", "", "with -dm-cache-dir: file that counts upstream requests across processes")
 	dmCacheBudget := flag.Int64("dm-cache-budget", 0, "with -dm-cache-budget-file: upstream requests allowed in all (0: no cap)")
+	dmBlockRiskScore := flag.Float64("dm-block-risk-score", 0, "decision_model.block_risk_score (0: product default 1.5; 0.0001 turns the gate off for the R0 replay)")
+	dmMediumAlerts := flag.Bool("dm-medium-alerts", false, "bench variant b: a judge lone MEDIUM on a call the decision model escalated is not audit-only")
+	dmAllowRiskVeto := flag.Bool("dm-allow-risk-veto", false, "bench variant: a risk score >= block_risk_score turns a confident allow into an escalation")
+	judgeHookConnectors := flag.String("judge-hook-connectors", "claudecode", "guardrail.judge.hook_connectors (names separated by , or +; all = every connector)")
+	dmRuleFlagged := flag.String("dm-escalate-rule-flagged", "", "decision_model.escalate_rule_flagged: true, false or empty (product default true)")
 	dmCallEffects := flag.Bool("dm-call-effects", false, "decision_model.call_effects: add state.call_effects v1 (S1-c)")
 	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
@@ -366,7 +371,10 @@ func main() {
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
-		cfg.Guardrail.Judge.HookConnectors = []string{"claudecode"}
+		cfg.Guardrail.Judge.HookConnectors = strings.FieldsFunc(*judgeHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
+		if len(cfg.Guardrail.Judge.HookConnectors) == 1 && cfg.Guardrail.Judge.HookConnectors[0] == "all" {
+			cfg.Guardrail.Judge.HookConnectors = []string{"*"}
+		}
 		if *judgeTimeout > 0 {
 			cfg.Guardrail.Judge.HookTimeout = *judgeTimeout
 			cfg.Guardrail.Judge.Timeout = *judgeTimeout
@@ -392,7 +400,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v inflight=%d tpm=%d rpm=%d budget=%d\n", *dmCacheDir, *dmCacheOnly, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudget)
 		}
 		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
-			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock, CallEffects: *dmCallEffects}
+			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock, BlockRiskScore: *dmBlockRiskScore, CallEffects: *dmCallEffects}
+		if v := strings.TrimSpace(*dmRuleFlagged); v != "" {
+			b := v == "true"
+			cfg.DecisionModel.EscalateRuleFlagged = &b
+		}
 		if *dmHook {
 			cfg.DecisionModel.HookConnectors = strings.FieldsFunc(*dmHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
 			if len(cfg.DecisionModel.HookConnectors) == 1 && cfg.DecisionModel.HookConnectors[0] == "all" {
@@ -401,6 +413,7 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
 	}
+	gateway.S7SetDecisionRouting(*dmCacheDir != "" && *dmCacheOnly, *dmMediumAlerts, *dmAllowRiskVeto)
 	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
 	var err2 error
 	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)

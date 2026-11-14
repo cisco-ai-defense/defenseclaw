@@ -74,19 +74,21 @@ Each tool call the model answers is one network call to the URL you configure. P
 Gemini Decision 1 (`gemini-decision-1`) is Google's hosted decision model, served by the Decisions API with a Google AI Studio key. It answers the same three questions; the request carries the call as text in `input` instead of a `state` object, and the key goes in an `x-goog-api-key` header. `decision_model.protocol: gemini-decisions` makes DefenseClaw send that request.
 
 ```bash
+defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY   # paste the AI Studio key (never in base_url)
 defenseclaw setup decision-model --protocol gemini-decisions \
   --base-url https://generativelanguage.googleapis.com/v1beta/decisions \
   --model gemini-decision-1 --connectors claudecode,codex --ping
-defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY   # paste the AI Studio key
 defenseclaw-gateway restart
 ```
 
+A `generativelanguage.googleapis.com` URL given without `--protocol` (in `setup` or in `init --decision-model-url`) gets `gemini-decisions` automatically. A key in the URL (`?key=...`) is refused: it would sit in `config.yaml` and travel in every request URL.
+
 What to know before you turn it on:
 
-- **Privacy.** Every tool call the model answers sends Google the call (tool name and arguments, up to 3,072 bytes), up to seven earlier calls of the session and the user's request (12,288 bytes in all). Read Google's Gemini API terms for your tier before you send real sessions: they say content sent on the free tier may be used to improve Google's products, and content sent on a paid tier is not. Use a paid-tier key for real work.
+- **Privacy.** Every tool call the model answers sends Google the call (tool name and arguments, up to 3,072 bytes), up to seven earlier calls of the session and the user's request (12,288 bytes in all). If model routing uses the System One classifier ([`routing.systemone`](/docs/reference/configuration)) (`routing.classifier: systemone`, which reuses `decision_model` unless `routing.systemone.use_decision_model` is `false`), every routed prompt also goes to Google: the user's request text, the connector, the API family and whether tools are attached. Read Google's Gemini API terms for your tier before you send real sessions: they say content sent on the free tier may be used to improve Google's products, and content sent on a paid tier is not. Use a paid-tier key for real work.
 - **Cost.** A call is about 490 input tokens (the three questions and the policy are most of it) and produces no output tokens. At USD 0.10 per million input tokens that is about USD 0.05 per 1,000 tool calls. The free tier costs nothing but allows only 50,000 input tokens a minute (about 100 calls) and a fixed number of requests a day, shared by every user of the key. Paid tier 1 allows 1,500 requests and 1,000,000 input tokens a minute.
-- **Latency.** 200 calls from a cloud host in November 2026: median 0.25 s, p95 0.45 s, none over the 1 s default `timeout`. The endpoint had one slow spell of a few seconds during that probe; those calls hit the timeout, and after three in a row DefenseClaw paused the model for 30 s as designed (see [When it is down](#when-it-is-down)).
-- **Refusals.** When Google's own safety filters decline a request, the API answers HTTP 400 with a code such as `safety` or `prohibited_content`. DefenseClaw treats that as no answer, never as a block or an allow: cascade 2 keeps the rule verdict and cascade 3 runs the judge. The judge event records failure class `empty_response`.
+- **Latency.** 200 calls from a cloud host in November 2026: median 0.25 s, p95 0.45 s, none over the 1 s default `timeout`. In 25,000 benchmark calls the median was 0.18 s, p95 about 0.33 s, p99 about 0.6 s, with rare answers of 4 to 7 s. For model routing, raise `routing.systemone.timeout_ms` from its 300 ms default to `1000` (the maximum) for this endpoint, or many classifications time out and fall back. The endpoint had one slow spell of a few seconds during that probe; those calls hit the timeout, and after three in a row DefenseClaw paused the model for 30 s as designed (see [When it is down](#when-it-is-down)).
+- **Refusals.** When Google's own safety filters decline a request, the API answers HTTP 400 with a code such as `safety` or `prohibited_content`. The content chose that answer, so DefenseClaw treats it as the unsure answer, never as an outage, a block or an allow: cascade 2 asks for confirmation (a HIGH `JUDGE-DECISION-MODEL` finding: the agent asks the user, or a HIGH alert where it cannot ask) and cascade 3 runs the judge. A refusal does not count toward the 30-second pause after three failures. The judge event records the class as rule id `refusal_<code>`.
 - **Skill scans.** The skill scanner's System One tier does not speak this protocol, so `skill scan` does not use a Gemini Decision 1 endpoint.
 
 ### During `defenseclaw init`
@@ -109,7 +111,7 @@ Risk is `1 - P(allow)` from the model's answer.
 | The model says | Cascade 2 (no judge) | Cascade 3 (with the judge) |
 | --- | --- | --- |
 | allow, risk at or below `allow_threshold` (0.30) | Allow. | Allow; the judge does not run. |
-| block, risk at or above `block_threshold` (0.75) | A CRITICAL `JUDGE-DECISION-MODEL` finding: blocked at every built-in `block_at`. | A HIGH `JUDGE-DECISION-MODEL` finding, and the judge runs and can raise it (`on_confident_block: escalate`, the default). With `decide` the finding stands and the judge does not run. |
+| block, risk at or above `block_threshold` (0.75), and the risk score answer at or above `block_risk_score` (1.5 of 2), on a call the rules did not flag | A CRITICAL `JUDGE-DECISION-MODEL` finding: blocked at every built-in `block_at`. | A HIGH `JUDGE-DECISION-MODEL` finding, and the judge always runs and can raise it: a decision-model block is never final. |
 | anything else (confirm, or a weaker allow or block) | A HIGH `JUDGE-DECISION-MODEL` finding that asks for confirmation (below). | The judge decides. |
 
 A cascade-2 confirmation:
@@ -118,7 +120,7 @@ A cascade-2 confirmation:
 - Otherwise the agent asks the user where its hook can ask before a tool runs: Claude Code (in its default Manual permission mode), Antigravity, Amp and GitHub Copilot in VS Code.
 - Where the agent cannot ask (Codex, or Claude Code outside Manual mode) it is a HIGH alert under the default and permissive policies, as an LLM judge HIGH finding is.
 
-The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
+The rules always come first. A rule block is never revisited, and the decision model never lowers a rule finding: on a call the rules flagged, an allow keeps the rule verdict (cascade 2) or still runs the judge (cascade 3), and a block answer is not confident (`escalate_rule_flagged`): it asks (cascade 2) or goes to the judge (cascade 3). Why both gates: on real work (owner sessions) and the public benchmarks, a block answer alone was wrong often enough to block ordinary commands; requiring the risk score as well cut those false blocks by about two thirds, at a cost in block recall (the calls it no longer blocks still ask or alert). Every finding goes through `block_at` and `alert_at` like a judge finding. In observe mode nothing is blocked or asked.
 
 ## When it is down
 
@@ -157,7 +159,9 @@ On a managed device the administrator sets `decision_model:` in the admin `confi
 | `decision_model.timeout` | `1` | Seconds per call (up to 30). In cascade 3 the gateway also caps each call at a quarter of the time left for the judge. |
 | `decision_model.allow_threshold` | `0.30` | Risk at or below which an allow is confident. `0` uses the default. |
 | `decision_model.block_threshold` | `0.75` | Risk at or above which a block answer is confident. `0` uses the default. |
-| `decision_model.on_confident_block` | `escalate` | Cascade 3 only: `escalate` or `decide`. |
+| `decision_model.block_risk_score` | `1.5` | A block answer is confident only when the model's risk score (0 ordinary work, 1 dual use, 2 clear serious harm) is at or above this too; otherwise the call escalates. `0` uses the default. |
+| `decision_model.escalate_rule_flagged` | `true` | A call the rules already flagged never gets a decision-model confident block: it goes to the judge (cascade 3) or asks (cascade 2). |
+| `decision_model.on_confident_block` | `escalate` | Retired in 1.0.10: a confident block always goes to the judge in cascade 3. `decide` still loads (configs from 1.0.9) and acts as `escalate`. |
 
 In the TUI, open **0 Setup**, press `c` for the config editor and pick the **Decision Model** section.
 
