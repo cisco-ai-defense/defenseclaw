@@ -1180,7 +1180,7 @@ func TestHookIdempotencyBounds(t *testing.T) {
 func mainAPIRoutePaths(t *testing.T) []string {
 	t.Helper()
 	known := []string{
-		"/health", "/status", "/api/v1/admin/shutdown", "/skill/disable", "/skill/enable",
+		"/health", "/status", "/usage", "/api/v1/admin/shutdown", "/skill/disable", "/skill/enable",
 		"/plugin/disable", "/plugin/enable", "/config/patch", "/scan/result", "/enforce/block",
 		"/enforce/allow", "/enforce/blocked", "/enforce/allowed", "/alerts", "/audit/event",
 		"/policy/evaluate", "/policy/reload", "/skills", "/mcps", "/tools/catalog",

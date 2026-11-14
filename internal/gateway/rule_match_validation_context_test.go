@@ -86,3 +86,40 @@ func TestCredibleSSNContextAlignsWideDelimitedHeader(t *testing.T) {
 		t.Fatal("non-record ssn_hash column was treated as an SSN label")
 	}
 }
+
+// Bare identifier shapes need their label (rel-1-0-10 GAP-0171): a run of
+// nine digits beside another one, or a letter and seven digits, is an id.
+func TestBareIdentifierShapesNeedTheirLabel(t *testing.T) {
+	t.Parallel()
+	noHyphen := ruleMatchValidator("ENT-BULK-SSN-NOHYPHEN")
+	dl := ruleMatchValidator("ENT-DL-CA")
+	accept := func(v func(string, string, int, int) bool, text, match string) bool {
+		start := strings.Index(text, match)
+		if start < 0 {
+			t.Fatalf("fixture %q has no %q", text, match)
+		}
+		return v(text, match, start, start+len(match))
+	}
+	table := "<tr><td>order</td><td>731428065</td></tr><tr><td>order</td><td>624519873</td></tr>"
+	if accept(noHyphen, table, "731428065") {
+		t.Fatal("two unlabelled nine-digit table cells were read as SSNs")
+	}
+	stamp := "2026-03-26 00:00:24.731428065 and 2026-03-26 00:00:25.624519873"
+	if accept(noHyphen, stamp, "731428065") {
+		t.Fatal("timestamp fractions were read as SSNs")
+	}
+	if !accept(noHyphen, "employee ssn: 731428065", "731428065") {
+		t.Fatal("a labelled bare SSN was not accepted")
+	}
+	if !accept(ruleMatchValidator("ENT-BULK-SSN"), "ids 731-42-8065 624-51-9873", "731-42-8065") {
+		t.Fatal("a hyphenated SSN list lost its list evidence")
+	}
+	if accept(dl, `{"status": "A1234567", "next": "B7654321"}`, "A1234567") {
+		t.Fatal("an unlabelled id was read as a driver's licence")
+	}
+	for _, text := range []string{"Driver licence: A1234567", `{"dl_number": "A1234567"}`, "CA DL A1234567"} {
+		if !accept(dl, text, "A1234567") {
+			t.Fatalf("labelled licence %q was not accepted", text)
+		}
+	}
+}

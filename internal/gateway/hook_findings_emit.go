@@ -81,9 +81,11 @@ func (a *APIServer) emitHookRuleFindings(
 // audit details + response payloads.
 //
 // Best-effort: emission errors are recorded via the generated scan-error
-// metric (errorReason as the bounded error label) and the function
-// returns an empty hookEvaluationContext so the upstream code
-// path is never aborted by a telemetry hiccup.
+// metric (errorReason as the bounded error label) and the upstream code
+// path is never aborted by a telemetry hiccup. The rule ids come from the
+// verdict itself, so the answer names its rules whether or not the audit
+// write happened (no logger, or a failed write under load): before, every
+// such answer carried findings but no rule_ids (rel-1-0-10 GAP-0353).
 func (a *APIServer) emitInspectVerdictFindings(
 	ctx context.Context,
 	scannerEnum, target, targetType string,
@@ -113,8 +115,9 @@ func (a *APIServer) emitInspectVerdictFindings(
 		Findings:   inspectFindings,
 	}
 
+	ruleIDs := scanner.TopRuleIDs(inspectFindings, 8)
 	if a.logger == nil {
-		return hookEvaluationContext{}
+		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
 	// Recording the scan waits on the audit store; a hook gives its caller's
 	// run slot up for that wait (GAP-1790).
@@ -124,12 +127,12 @@ func (a *APIServer) emitInspectVerdictFindings(
 	if err != nil {
 		metricRuntime, _ := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
-		return hookEvaluationContext{}
+		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
 		ScanID:       scanID,
-		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
+		RuleIDs:      ruleIDs,
 	}
 }
 
@@ -186,8 +189,9 @@ func (p *GuardrailProxy) emitGuardrailScanVerdictFindings(
 		EvaluationID: verdict.EvaluationID,
 		Findings:     inspectFindings,
 	}
+	ruleIDs := scanner.TopRuleIDs(inspectFindings, 8)
 	if p.logger == nil {
-		return hookEvaluationContext{}
+		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
 	corr := ScanCorrelationFromContext(ctx)
 	if corr.Connector == "" && p.connector != nil {
@@ -199,12 +203,12 @@ func (p *GuardrailProxy) emitGuardrailScanVerdictFindings(
 	if err != nil {
 		metricRuntime, _ := p.observabilityV8TraceRuntime().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, errorReason)
-		return hookEvaluationContext{}
+		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
 		ScanID:       scanID,
-		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
+		RuleIDs:      ruleIDs,
 	}
 }
 
@@ -393,8 +397,8 @@ func assetPolicyDecisionTags(decision config.AssetPolicyDecision) []string {
 // Returns the resulting evaluation_id + top rule_ids so the
 // caller can stamp them on its audit row + ScanVerdict. Errors are
 // recorded via the generated scan-error metric under
-// "emit_tool_call_inspect" and result in an empty
-// hookEvaluationContext so the upstream code path is unaffected.
+// "emit_tool_call_inspect"; the rule ids still come back (from the findings)
+// so the upstream code path is unaffected.
 func (p *GuardrailProxy) emitToolCallInspectFindings(
 	ctx context.Context,
 	allFindings []RuleFinding,
@@ -412,19 +416,20 @@ func (p *GuardrailProxy) emitToolCallInspectFindings(
 		Verdict:    action,
 		Findings:   inspectFindings,
 	}
+	ruleIDs := scanner.TopRuleIDs(inspectFindings, 8)
 	if p.logger == nil {
-		return hookEvaluationContext{}
+		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
 	evalID, scanID, err := p.logger.LogInspectFindingsWithCorrelation(ctx, src, ScanCorrelationFromContext(ctx))
 	if err != nil {
 		metricRuntime, _ := p.observabilityV8TraceRuntime().(hookLifecycleMetricV8Runtime)
 		recordScanErrorV8(ctx, metricRuntime, "gateway.runtime.findings", src.Scanner, src.TargetType, "emit_tool_call_inspect")
-		return hookEvaluationContext{}
+		return hookEvaluationContext{RuleIDs: ruleIDs}
 	}
 	return hookEvaluationContext{
 		EvaluationID: evalID,
 		ScanID:       scanID,
-		RuleIDs:      scanner.TopRuleIDs(inspectFindings, 8),
+		RuleIDs:      ruleIDs,
 	}
 }
 

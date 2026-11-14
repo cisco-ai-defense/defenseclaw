@@ -602,9 +602,10 @@ func TestEvaluateCodexHook_ActionGitDiffRemainsStrict(t *testing.T) {
 		ToolResponse: diff,
 		CWD:          repoRoot,
 	})
-	if resp.RawAction != "block" || resp.Severity != "CRITICAL" ||
-		resp.AdditionalContext == "" || resp.CodexOutput == nil {
-		t.Fatalf("response = %+v, want Action mode unchanged for git diff", resp)
+	// Action mode still scans this output untrusted (the finding is kept),
+	// but a tool result never blocks in the default pack: HIGH alert.
+	if resp.RawAction != "alert" || resp.Severity != "HIGH" || resp.AdditionalContext == "" {
+		t.Fatalf("response = %+v, want the untrusted Action-mode finding as a HIGH alert for git diff", resp)
 	}
 }
 
@@ -625,9 +626,10 @@ func TestEvaluateCodexHook_ActionWorkspaceSourceReviewRemainsStrict(t *testing.T
 		ToolResponse: trustExploitKeyword(),
 		CWD:          repoRoot,
 	})
-	if resp.RawAction != "block" || resp.Severity != "CRITICAL" ||
-		resp.AdditionalContext == "" || resp.CodexOutput == nil {
-		t.Fatalf("response = %+v, want Action mode unchanged for ordinary source", resp)
+	// Action mode still scans this output untrusted (the finding is kept),
+	// but a tool result never blocks in the default pack: HIGH alert.
+	if resp.RawAction != "alert" || resp.Severity != "HIGH" || resp.AdditionalContext == "" {
+		t.Fatalf("response = %+v, want the untrusted Action-mode finding as a HIGH alert for ordinary source", resp)
 	}
 
 	mixedResp := api.evaluateCodexHook(t.Context(), codexHookRequest{
@@ -640,9 +642,8 @@ func TestEvaluateCodexHook_ActionWorkspaceSourceReviewRemainsStrict(t *testing.T
 		ToolResponse: trustExploitKeyword(),
 		CWD:          repoRoot,
 	})
-	if mixedResp.RawAction != "block" || mixedResp.Severity != "CRITICAL" ||
-		mixedResp.AdditionalContext == "" || mixedResp.CodexOutput == nil {
-		t.Fatalf("response = %+v, want Action mode strict for mixed fixture and ordinary source", mixedResp)
+	if mixedResp.RawAction != "alert" || mixedResp.Severity != "HIGH" || mixedResp.AdditionalContext == "" {
+		t.Fatalf("response = %+v, want the untrusted Action-mode finding as a HIGH alert for mixed fixture and ordinary source", mixedResp)
 	}
 }
 

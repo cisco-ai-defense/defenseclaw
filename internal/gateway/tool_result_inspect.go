@@ -21,29 +21,37 @@ import (
 // the same content checks, here:
 //
 //   - the content rules a tool's output can carry an attack in: trust-exploit
-//     (prompt injection) and secrets. enterprise-data (cards, IBANs, phone
-//     numbers, email addresses) is left out: those rules are about data the
-//     user or agent sends out; in a tool's output they describe the data the
-//     user asked the tool for (an inbox, a statement, a contact list), so they
-//     alerted on ordinary output (strict: 67% of benign tool outputs). PII in
-//     the output of named tools stays covered by the sensitive-tools result
-//     inspection (sensitive-tools.yaml) and the opt-in PII judge.
-//     Action categories (command, path, C2, cognitive-file) never run on
-//     content, for every connector (Claude Code and Codex already did this).
+//     (prompt injection) and secrets;
+//   - of enterprise-data, only the identifiers tagged regulated or hipaa
+//     (national ids, passports, licences, medical records, dates of birth):
+//     contact and payment data (email addresses, phone numbers, cards, IBANs)
+//     is what an inbox, a contact list or a statement returns by design, and
+//     those rules alerted on ordinary output (strict: 67% of benign AgentDojo
+//     tool outputs). PII in the output of named tools stays covered by the
+//     sensitive-tools result inspection (sensitive-tools.yaml) and the opt-in
+//     PII judge;
+//   - the C2 rules (known exfil and tunnel hosts: webhook.site, ngrok, cloud
+//     metadata, ...) as LOW telemetry: an output that names one is recorded,
+//     but the host in a document or a test fixture is not an action (on the
+//     owner's real tool outputs C2 on output alerted or blocked 98 times, all
+//     docs and fixtures, run s7tr-atA); the call to the host is judged at
+//     PreToolUse. The other action categories (command, path, cognitive-file)
+//     judge tool calls and never run on content;
 //   - the trust-exploit rules again on the tool-result view: string escapes
 //     decoded (tool output is often JSON or YAML in which the text the model
 //     reads is a quoted string) and confusables folded;
 //   - the structural injection checks (tool_result_injection.go);
 //   - the opt-in judge, with the tool-result injection prompt (llm_judge.go).
 //
-// Disposition: the call has already run, so an injection in its output is a
-// warning about what the agent reads next, not an action to stop. Injection
-// findings on this surface are HIGH at most: the default and permissive packs
-// (block at CRITICAL) alert and never block; strict (block at MEDIUM) answers
-// block, which a connector that can act on a finished call uses to withhold
-// the output from the model (docs/guardrails/tool-result-injection.md lists
-// what each connector does with it), and the /llm proxy enforces by refusing
-// the model call that would carry the output.
+// Disposition (S7 lead decision 2026-11-13, option B in plans TOOLRESULT.md):
+// no result-side block in the default pack. The call has already run; a block
+// cannot undo it and on the connectors that can act on it only withholds the
+// output. Every finding on this surface is HIGH at most (rules here, the judge
+// in capToolResultJudgeVerdict, the structural checks): the default and
+// permissive packs (block at CRITICAL) alert, strict (block at MEDIUM) blocks,
+// which withholds the output where the connector can (Codex PostToolUse, Amp
+// tool.result, the /llm proxy refusing the model call) and is an alert with
+// would_block elsewhere (docs-site guardrail/tool-results.mdx).
 
 const directionToolResult = "tool_result"
 
@@ -68,8 +76,23 @@ func toolResultRuleFindings(generation *compiledRulePackCategories, content stri
 	if scanRaw {
 		findings = scanContentRulesWithOptions(generation, content, "message", scope,
 			ruleScanOptions{excludeTrustExploit: true, excludeEnterpriseData: true})
+		for _, f := range scanContentRulesWithOptions(generation, content, "message", scope,
+			ruleScanOptions{onlyCategory: "enterprise-data"}) {
+			if hasTag(f.Tags, "regulated") || hasTag(f.Tags, "hipaa") {
+				findings = append(findings, f)
+			}
+		}
 		injection = scanContentRulesWithOptions(generation, content, "message", scope,
 			ruleScanOptions{onlyCategory: "trust-exploit"})
+		if scope != ruleContentScopeSource {
+			// C2 is an action category, which a content scope leaves out; on a
+			// tool's output it runs on its own, as telemetry (surface comment).
+			for _, f := range scanContentRulesWithOptions(generation, content, "message", ruleContentScopeAll,
+				ruleScanOptions{onlyCategory: "c2"}) {
+				f.Severity = "LOW"
+				findings = append(findings, f)
+			}
+		}
 	}
 	seen := make(map[string]bool, len(injection))
 	for _, f := range injection {
@@ -98,12 +121,13 @@ func toolResultRuleFindings(generation *compiledRulePackCategories, content stri
 		}
 		injection = append(injection, f)
 	}
-	for i := range injection {
-		if strings.EqualFold(injection[i].Severity, "CRITICAL") {
-			injection[i].Severity = "HIGH"
+	out := append(findings, injection...)
+	for i := range out {
+		if strings.EqualFold(out[i].Severity, "CRITICAL") {
+			out[i].Severity = "HIGH"
 		}
 	}
-	return append(findings, injection...)
+	return out
 }
 
 // capToolResultJudgeVerdict applies the tool-result disposition to a judge

@@ -44,6 +44,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
     "default": frozenset(
         {
             "0678175caa680c77ffd723c5ffd7d581e5d6747c884e71b61aa3bfedba92e1b6",
+            "0dcc0d9a1cd54d73c8267c8950bb759806cd8e5a36b50b90d979ac39cc9eae18",
             "19f3cf6086023cfc419756c4b30fe395820b008ba831653949b0c33f2daf76a4",
             "20a9adcda34d02c061e6f1c0073546fcc540f97ee604b55401ba0f9946ef4a70",
             "3020dab533ece09ef7c07c1a877b3004f919e876677403fed18da6ef65a9bb25",
@@ -57,6 +58,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "5b9ca53ad605b53d1d1618b51e52c658140d42190e6f903abaaca604ae145c93",
             "60eca49dfa2a1f7578e40a288d93a0849755204602fe68044726b14db30d5d4d",
             "681d8e7f28cb4030cdd68aae6cc494517f034e355aa4b964fccd391d8b1dd0a4",
+            "773acfa22fae0426028dccd23023aa1276991d13bbc2bfcd65af7a9f30895676",
             "8c28e4d946d9c9fe01d3fb4a7254db347e6183c1b659fbfb37a1aeaebc08f63c",
             "9dc9a1aa028a8b2232babe38e8519f864a1f6d3a6b3990150c2ec3f907d71b8a",
             "9fba3bb1b2c4eec5b675643b6a08f823dc6f61502a4bbacf0f2b60157df737bf",
@@ -68,6 +70,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "aee0a2044e72b0ae9b028b7d40105bb275e60387e2f561e52d729074b7bf1198",
             "b4cfd6a7301e6ca9ca77cef547e5461da54602bae979343fb69ec576877f69c4",
             "b5966ccf711d96c4d4797cc722fa6a23794c3516a2bbb204adce313ed86ca045",
+            "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
             "b974b0cef8f33b0ae11db340911a2a5a12510e4f030c8be35cf23b5701f7d245",
             "baa78282c632122c9a883a4cb329c1bfdee589e28efc7a2064b8673c1d6144f4",
             "c152251f48fe5e3c217202b60d1ca8dfd46d245900c758dce45ebdde31f707b8",
@@ -80,7 +83,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ef527c66677705936f1ee319b24a76f3401286a1362265251ae2a69dc4f6dd22",
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
+            # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
+            # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
         }
     ),
@@ -91,6 +96,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "0c01c692b0fb79d1ace852d4840d5866b61ddc4928604e8c2e3479215620b029",
             "10191910ef94b2f3bb78ec9c70092c4c2ad5fd96077ab9b251fdea1178132f9f",
             "25a73df95116e71d06b8043f82df3e79e4bf943cb2e2e72529448e5ef91c009b",
+            "2754bc2c60934527f86796a740d3d79c23ff8d2e62f010a1bc50ac5921039ea4",
             "29ce292e52f2fac289d6567ec7994b1f17af98e3fd1c4a5e2084f8c8a97b5371",
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
             "3ecdef60681cc5922962c48882de64b97f56605e22c6952bd49bb156ea445328",
@@ -103,6 +109,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "7be65bc5f810de910c07ed0cc955606d0c49fecc9644b438f043ec0eddba3883",
             "8487451e43767a1f0136da3a8b346e143ad9e33ec864f74c49381eff64155aec",
             "9006dc19c958f8b2fa5fe7aba6d54e2fb8454f634b3fc6b6abf777c15a9e6604",
+            "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
+            "976c0343636d8163f496e37746aa26c57f5495c906a5cd7142fda001d78bdeb0",
             "a1291dd16dbd6350daa6b94425bcfa19e734d99e1962e38e64915573d64f27c2",
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
             "a8c864dc71a7201897b4bfe5770187dedaae939ed51d8923ca6b2367b3501d79",
@@ -118,7 +126,9 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f1e4fd9a0be9cfac47f5eb47f3086378cd6f9d8f82bfd462ea75296c99d0d913",
             "f8addded6944af03eaad33d26f34f700a7ceda919697ac3f76528331aa4d4a77",
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
+            # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
+            # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
         }
     ),
@@ -129,6 +139,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "33dce19de265de675a35948a75a652922b4e77d1c8023f4da46831995dfa490b",
             "3bff549d5860011cd63f0654455b6cc0d49e9493bd607284c12be6c764e10893",
             "409ec41d6070542d67370ab9fe469291263a097e69a44ff1b7fce4cea2edcc94",
+            "437f688e218aef5d3c5b47eb1591330401fecc157964c742f7570781f885a9b3",
             "4f9b68412f1cb102b54dad54a08c6e45d254e79984dccd84451cfdca62470e7f",
             "5b9b0f79c491c27b3feed63b90765091d37345621a95792ebcd34195abb097fd",
             "5ef5ff7ce9ff577fcf3a557b61b25b971be62d6ff1e45b8fd3b1771fac6a290b",
@@ -140,6 +151,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "9239bfef0d18ad54bbe55f955885d7a4391556f3d272223d347669f77f54b32b",
             "9308580254480e56c1b865592186226f3c83e72e01c65e6c6b4c8e414e4980ba",
             "9a718f87b06f75cfb1f4fa223fc6f3692ced3ecc17c10b5c8b96fff617d5da67",
+            "9e370259ccfaa9739488dacbd90c266c08bcbf9af9aadd1412f1c1150a814e90",
             "9e8416be13a3a62f9e5a486570b6fce4673b86e2d834aa4d8891732bbaecea9c",
             "9f54aa385dffab92b7c08180ea2e37142d4fcf6ce3a53a29d9c0fc63374e0ff9",
             "a30346773809eb3571e1e44508e343cfc72ac70ed605b9837d0dcd663f2375e0",
@@ -155,7 +167,10 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "e9e7bde2dccb00dd7207ee1cf372ecd901bdac84bb0fea5098770af10de04206",
             "eabc629d3b25da4515c280ea0bb947686a891029dbf186328a947d7a6d91f7d0",
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
+            "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
+            # 1.0.10 (rel/1.0.10 INT batch 4): s7/pii-email email rules plus s7/ad-pack NetExec fold.
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
+            # 1.0.10 (s7/ad-pack): credentialed NetExec folded into credential.directory_ticket_request.
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
         }
     ),
