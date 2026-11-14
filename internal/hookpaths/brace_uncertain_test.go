@@ -1,6 +1,11 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
+//go:build !windows
+
+// The reader is POSIX only: on a Windows home uncertainWriteReason reports
+// nothing, and newShellWordFixture lives in a !windows file.
+
 package hookpaths
 
 import "testing"

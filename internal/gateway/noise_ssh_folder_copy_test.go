@@ -22,6 +22,7 @@ func TestOwnSSHFolderCopyAlertsInsideTheHomeOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell rows")
 	}
+	keepTempDirOffDevice(t)
 	root := t.TempDir()
 	home := filepath.Join(root, "home", "alice")
 	outside := filepath.Join(root, "outside")
