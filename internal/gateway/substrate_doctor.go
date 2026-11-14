@@ -219,7 +219,9 @@ const signInCheckEvery = time.Minute
 // timeout or server error does not say nobody can sign in (GAP-0279). A
 // real outage is reported by the first check that runs after it starts:
 // within signInCheckEvery plus this pause plus two fetch timeouts (about
-// 1 min 12 s), and at once by the administrators' doctor.
+// 1 min 12 s). The administrators' doctor runs the same check with the same
+// retry: it hides a one-off failure too, and shows an outage within about
+// 12 s (the pause plus two fetches).
 var signInRetryAfter = 2 * time.Second
 
 // signInHealth is the last check of the sign-in server.
