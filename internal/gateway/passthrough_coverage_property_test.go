@@ -685,7 +685,7 @@ func TestPassthroughCoverageDuplicateKeysProperty(t *testing.T) {
 func TestPassthroughCoverageHeartbeatSkipsOnlyItself(t *testing.T) {
 	covAllowPrivate(t)
 	const hb = "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. If nothing needs attention, reply HEARTBEAT_OK."
-	if !isHeartbeatMessage(hb, nil) {
+	if rest, ok := stripCanonicalProbes(hb); !ok || rest != "" {
 		t.Skip("the heartbeat text of this tree changed")
 	}
 	up := newCovUpstream(t)

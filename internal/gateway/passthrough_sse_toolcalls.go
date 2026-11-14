@@ -28,6 +28,31 @@ import (
 // streamed reply; past it the stream cannot be held for inspection.
 const sseToolCallMax = 1 << 20
 
+// serverCallType reports a call item the provider runs itself (web search,
+// file search, code interpreter, image generation, an MCP server it calls, an
+// Anthropic server or MCP tool). The agent does not execute such a call, so
+// the stream is not held for it: its progress events and keep-alives go
+// through at once. Its finished call is still read by the tool-call rules, and
+// every text it returns is inspected like any other reply text (GAP-0249).
+func serverCallType(t string) bool {
+	switch t {
+	case "web_search_call", "file_search_call", "code_interpreter_call", "image_generation_call", "mcp_call",
+		"server_tool_use", "mcp_tool_use":
+		return true
+	}
+	return false
+}
+
+// callTypeOfEvent is the call item type a Responses event names:
+// response.code_interpreter_call_code.delta is a code_interpreter_call.
+func callTypeOfEvent(typ string) string {
+	rest := strings.TrimPrefix(typ, "response.")
+	if i := strings.Index(rest, "_call"); i >= 0 {
+		return rest[:i+len("_call")]
+	}
+	return ""
+}
+
 // sseToolCalls collects the tool calls of an SSE reply, so each finished
 // call goes through the tool-call rules before its bytes reach the agent (as
 // GAP-0098 does for the Bedrock eventstream). A call that spans events is
@@ -50,12 +75,15 @@ type sseToolCalls struct {
 	chat      map[int]*sseChatCall
 	chatOrder []int
 	blocks    map[int]*sseChatCall // Anthropic content blocks in progress
-	done      []sseToolCall
-	seen      map[string]bool // finished calls, by name and arguments
-	held      int             // argument bytes of open calls
-	broken    bool
-	responses bool // a Responses event was seen
-	nextIndex int  // next free Responses output_index
+	// serverBlocks are the Anthropic server and MCP tool blocks in progress:
+	// read when they end, never held.
+	serverBlocks map[int]*sseChatCall
+	done         []sseToolCall
+	seen         map[string]bool // finished calls, by name and arguments
+	held         int             // argument bytes of open calls
+	broken       bool
+	responses    bool // a Responses event was seen
+	nextIndex    int  // next free Responses output_index
 	// maxValues is the value cap of an event (guardrail.max_body_values).
 	maxValues int
 }
@@ -75,7 +103,7 @@ type sseChatCall struct {
 }
 
 func newSSEToolCalls(maxValues int) *sseToolCalls {
-	return &sseToolCalls{maxValues: maxValues, open: map[string]bool{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
+	return &sseToolCalls{maxValues: maxValues, open: map[string]bool{}, chat: map[int]*sseChatCall{}, blocks: map[int]*sseChatCall{}, serverBlocks: map[int]*sseChatCall{}, seen: map[string]bool{}}
 }
 
 func (s *sseToolCalls) finished(c sseToolCall) {
@@ -132,7 +160,9 @@ func (s *sseToolCalls) Feed(data string) {
 		}
 		key := itemKey(item.str("id"))
 		if typ == "response.output_item.added" {
-			s.open[key] = true
+			if !serverCallType(item.str("type")) {
+				s.open[key] = true
+			}
 			break
 		}
 		delete(s.open, key)
@@ -148,6 +178,9 @@ func (s *sseToolCalls) Feed(data string) {
 		// function_call_arguments, custom_tool_call_input, mcp_call_arguments,
 		// code_interpreter_call_code ...: the item is open even if its
 		// output_item.added was not seen.
+		if serverCallType(callTypeOfEvent(typ)) {
+			break
+		}
 		s.open[itemKey(root.str("item_id"))] = true
 		if d := root.get("delta"); d != nil && d.kind == 's' {
 			s.grow(len(d.s))
@@ -162,11 +195,19 @@ func (s *sseToolCalls) Feed(data string) {
 			if in := cb.get("input"); in != nil && in.kind == 'o' && len(in.kids) > 0 {
 				c.args.WriteString(in.json())
 			}
-			s.blocks[idx] = c
+			if serverCallType(cb.str("type")) {
+				s.serverBlocks[idx] = c
+			} else {
+				s.blocks[idx] = c
+			}
 		}
 	case typ == "content_block_delta":
 		idx, _ := jnodeInt(root.get("index"))
 		if d := root.get("delta"); d != nil && d.str("type") == "input_json_delta" {
+			if c := s.serverBlocks[idx]; c != nil {
+				c.args.WriteString(d.str("partial_json"))
+				break
+			}
 			c := s.blocks[idx]
 			if c == nil {
 				c = &sseChatCall{}
@@ -177,6 +218,15 @@ func (s *sseToolCalls) Feed(data string) {
 		}
 	case typ == "content_block_stop":
 		idx, _ := jnodeInt(root.get("index"))
+		if c := s.serverBlocks[idx]; c != nil {
+			delete(s.serverBlocks, idx)
+			tc := sseToolCall{ID: c.id, Type: "function"}
+			tc.Function.Name, tc.Function.Arguments = c.name, c.args.String()
+			if tc.Function.Arguments == "" {
+				tc.Function.Arguments = "{}"
+			}
+			s.finished(tc)
+		}
 		if c := s.blocks[idx]; c != nil {
 			delete(s.blocks, idx)
 			tc := sseToolCall{ID: c.id, Type: "function"}

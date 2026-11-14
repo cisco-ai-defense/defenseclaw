@@ -71,6 +71,10 @@ type bedrockEventStreamText struct {
 type bedrockStreamTool struct {
 	Name string
 	Args strings.Builder
+	// Server is a call the provider runs itself (server_tool_use,
+	// mcp_tool_use): it is read by the tool-call rules when it ends and the
+	// stream is not held for it (GAP-0249).
+	Server bool
 }
 
 // bedrockStreamToolMax bounds one tool call's assembled input; a larger one
@@ -79,7 +83,19 @@ const bedrockStreamToolMax = 1 << 20
 
 // Holding reports a tool call that is still open or not yet inspected: its
 // bytes must not reach the agent before the tool-call rules decide.
-func (s *bedrockEventStreamText) Holding() bool { return len(s.tools) > 0 || len(s.done) > 0 }
+func (s *bedrockEventStreamText) Holding() bool {
+	for _, t := range s.tools {
+		if !t.Server {
+			return true
+		}
+	}
+	for i := range s.done {
+		if !s.done[i].Server {
+			return true
+		}
+	}
+	return false
+}
 
 // TakeToolCalls returns the finished tool calls in the shape
 // inspectToolCalls reads (nil for none) and forgets them.
@@ -108,7 +124,7 @@ func (s *bedrockEventStreamText) TakeToolCalls() json.RawMessage {
 	return raw
 }
 
-func (s *bedrockEventStreamText) toolStart(index int, name, initial string) {
+func (s *bedrockEventStreamText) toolStart(index int, name, initial string, server bool) {
 	if index > s.maxIndex {
 		s.maxIndex = index
 	}
@@ -118,7 +134,7 @@ func (s *bedrockEventStreamText) toolStart(index int, name, initial string) {
 	if s.tools == nil {
 		s.tools = map[int]*bedrockStreamTool{}
 	}
-	t := &bedrockStreamTool{Name: name}
+	t := &bedrockStreamTool{Name: name, Server: server}
 	if initial = strings.TrimSpace(initial); initial != "" && initial != "{}" {
 		t.Args.WriteString(initial)
 	}
@@ -139,7 +155,7 @@ func (s *bedrockEventStreamText) toolDelta(index int, part string) {
 
 func (s *bedrockEventStreamText) toolStop(index int) {
 	if t, ok := s.tools[index]; ok {
-		s.done = append(s.done, bedrockStreamTool{Name: t.Name})
+		s.done = append(s.done, bedrockStreamTool{Name: t.Name, Server: t.Server})
 		s.done[len(s.done)-1].Args.WriteString(t.Args.String())
 		delete(s.tools, index)
 	}
@@ -166,8 +182,8 @@ func (s *bedrockEventStreamText) anthropicStreamToolEvent(inner []byte) {
 	}
 	switch ev.Type {
 	case "content_block_start":
-		if ev.ContentBlock.Type == "tool_use" || ev.ContentBlock.Type == "server_tool_use" {
-			s.toolStart(ev.Index, ev.ContentBlock.Name, string(ev.ContentBlock.Input))
+		if ev.ContentBlock.Type == "tool_use" || serverCallType(ev.ContentBlock.Type) {
+			s.toolStart(ev.Index, ev.ContentBlock.Name, string(ev.ContentBlock.Input), serverCallType(ev.ContentBlock.Type))
 		} else if ev.Index > s.maxIndex {
 			s.maxIndex = ev.Index
 		}
@@ -321,7 +337,7 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 			} `json:"start"`
 		}
 		if json.Unmarshal(msg.Payload, &st) == nil {
-			s.toolStart(st.Index, st.Start.ToolUse.Name, "")
+			s.toolStart(st.Index, st.Start.ToolUse.Name, "", false)
 		}
 	case "contentBlockDelta":
 		// ConverseStream: the event type names the frame, the payload is
