@@ -22,7 +22,9 @@ import (
 // render (tests/golden, kept current by TestChartGoldens): both Deployments
 // mount the one defenseclaw-config ConfigMap at the path DEFENSECLAW_CONFIG
 // names, neither passes the removed --chain-egress-action flag (GAP-0253), and the
-// shared resolver gives both roles the same action from that config.yaml.
+// role's own wiring (gatewayRoleChainEgressAction, leaderChainEgressAction,
+// the functions the serve paths call) gives the same action, equal to the
+// value written in that config.yaml.
 func TestSubstrateChainEgressActionGatewayAndLeaderAgree(t *testing.T) {
 	goldens, err := filepath.Glob(filepath.Join("..", "..", "deploy", "helm", "defenseclaw-substrate", "tests", "golden", "*.yaml"))
 	if err != nil || len(goldens) == 0 {
@@ -74,13 +76,22 @@ func TestSubstrateChainEgressActionGatewayAndLeaderAgree(t *testing.T) {
 			} else if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
 				t.Fatalf("load the rendered config.yaml: %v", err)
 			}
-			gwAction, gwSource := substrateChainEgressAction(cfg)
-			leaderAction, leaderSource := substrateChainEgressAction(cfg)
+			// Each role's own wiring (the functions the serve paths call), not
+			// the shared resolver: a role that hard-codes or reads another
+			// source fails here.
+			gwAction, gwSource := gatewayRoleChainEgressAction(cfg)
+			leaderAction, leaderSource := leaderChainEgressAction(cfg)
 			if gwAction != leaderAction || gwSource != leaderSource {
-				t.Fatalf("gateway %s (%s), leader %s (%s): the roles disagree", gwAction, gwSource, leaderAction, leaderSource)
+				t.Fatalf("gateway role %s (%s), leader %s (%s): the roles disagree", gwAction, gwSource, leaderAction, leaderSource)
 			}
-			if want := cfg.Substrate.EffectiveChainEgressAction(); gwAction != want {
-				t.Fatalf("both roles resolve %s, config says %s", gwAction, want)
+			// The expected value comes from the rendered text itself, not from
+			// the resolver: block when the key is absent or empty.
+			want := strings.ToLower(strings.TrimSpace(doc.Substrate.ChainEgressAction))
+			if want == "" {
+				want = config.SubstrateChainEgressBlock
+			}
+			if gwAction != want || leaderAction != want {
+				t.Fatalf("the rendered config says %s; the gateway role resolves %s, the leader %s", want, gwAction, leaderAction)
 			}
 			if err := gateway.SetSubstrateChainEgressAction(gwAction); err != nil {
 				t.Fatalf("the gateway role refuses the action the leader runs with: %v", err)

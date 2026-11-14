@@ -226,7 +226,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// same setting as the callout: config substrate.chain_egress_action,
 		// which the gateway and the leader read from the same ConfigMap
 		// (owner decision 2026-11-13; GAP-0250).
-		chainAction, chainSource := substrateChainEgressAction(cfg)
+		chainAction, chainSource := gatewayRoleChainEgressAction(cfg)
 		if err := gateway.SetSubstrateChainEgressAction(chainAction); err != nil {
 			return fmt.Errorf("serve: chain egress action (%s): %w", chainSource, err)
 		}
@@ -685,7 +685,7 @@ func runSubstrateLeader(parent context.Context, ready *atomic.Bool) error {
 	asks.Serve(srv, askStore)
 	activity.Serve(srv, &activity.Store{Pending: askStore.Pending})
 	chainOpts := substrateChainRegistrations(store)
-	action, source := substrateChainEgressAction(cfg)
+	action, source := leaderChainEgressAction(cfg)
 	fmt.Fprintf(os.Stderr, "[substrate] leader: chain egress action %s (%s): a request after a secret read is %s at the egress callout\n",
 		action, source, map[string]string{chainstate.EgressBlock: "refused", chainstate.EgressAlert: "allowed with an alert"}[action])
 	chainOpts.Dir, chainOpts.EgressAction, chainOpts.Retention = serveFlags.storeDir, action, serveFlags.chainRetention
@@ -983,4 +983,21 @@ func substrateChainEgressAction(c *config.Config) (action, source string) {
 		return chainstate.EgressBlock, "default"
 	}
 	return c.Substrate.EffectiveChainEgressAction(), "config substrate.chain_egress_action"
+}
+
+// gatewayRoleChainEgressAction is the chain egress action the gateway role
+// hands to gateway.SetSubstrateChainEgressAction: the verified actor's hook
+// disposition after a secret read. leaderChainEgressAction is the one the
+// leader puts in chainstate.Options.EgressAction: the egress callout's
+// verdict. Each role's serve path calls its own function, and both read
+// config substrate.chain_egress_action through substrateChainEgressAction, so
+// the hook and the callout cannot disagree on one rendered ConfigMap
+// (GAP-0252; TestSubstrateChainEgressActionGatewayAndLeaderAgree calls both).
+func gatewayRoleChainEgressAction(c *config.Config) (action, source string) {
+	return substrateChainEgressAction(c)
+}
+
+// leaderChainEgressAction: see gatewayRoleChainEgressAction.
+func leaderChainEgressAction(c *config.Config) (action, source string) {
+	return substrateChainEgressAction(c)
 }
