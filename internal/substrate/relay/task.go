@@ -10,12 +10,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/substrate/kit"
@@ -25,6 +28,37 @@ import (
 // connector's headless command with the task text, unattended, so every
 // hook fails closed (D8). It runs on its own: a launcher that disconnects
 // (--detach) leaves it running and follows it again later.
+//
+// Nobody watches an unattended run, so the relay bounds it (GAP-0273): a
+// task that makes no progress for relay.task_stall_ms (DefaultTaskStall) is
+// ended with ExitStalled and a line that says why, and every task end is
+// reported to the gateway (TaskReportPath), which audits it and lets the
+// controller free the actor's worker (GAP-0274).
+
+// ExitStalled is the exit code of a task the relay ended because it made no
+// progress for the stall bound (the timeout(1) convention).
+const ExitStalled = 124
+
+// TaskReportPath is the actor listener route a relay reports a task end to.
+const TaskReportPath = "/api/v1/substrate/relay/task"
+
+const (
+	// stallTick is how often the watchdog samples the agent.
+	stallTick = 30 * time.Second
+	// stallIO is the process group's I/O per tick that counts as progress,
+	// and 1% of a core over the tick the CPU time. An agent stuck on a model
+	// request that never answers uses about 0.2% of a core and a few hundred
+	// bytes a minute (Claude Code 2.1.322, measured for GAP-0273); a live
+	// model stream reads far more than stallIO.
+	stallIO = 16 << 10
+	// stopGrace is how long a stalled agent gets between TERM and KILL.
+	stopGrace = 10 * time.Second
+	// drainBudget is how long the output pipes may stay open after the
+	// agent exited (a background child of the agent holding them).
+	drainBudget = 5 * time.Second
+	// reportBudget bounds the task-end report and its retries.
+	reportBudget = 2 * time.Minute
+)
 
 // TaskRequest starts a task. The headless command is the template's; a
 // request carries only the task text, which must be the text the launcher
@@ -51,6 +85,35 @@ type TaskEvent struct {
 	TS   string `json:"ts"`
 }
 
+// TaskEnd is how a task ended: the exit code, whether the relay ended it
+// for making no progress, and the reason it gave. It is the body of the
+// report to the gateway.
+type TaskEnd struct {
+	ExitCode   int    `json:"exit_code"`
+	Stalled    bool   `json:"stalled,omitempty"`
+	Cause      string `json:"cause,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// Usage is an agent process group's CPU time and I/O bytes so far.
+type Usage struct {
+	CPU time.Duration
+	IO  uint64
+}
+
+// HeadlessOptions are RunHeadless's connections to the outside.
+type HeadlessOptions struct {
+	// Warm pre-connects before the agent starts and probes the gateway
+	// when the task stalls; nil skips both.
+	Warm func(context.Context, string) error
+	// Stall overrides the configuration's no-progress bound, Tick the
+	// watchdog's sample period (tests).
+	Stall, Tick time.Duration
+	// Usage reads the process group's usage; default processGroupUsage
+	// (Linux /proc; elsewhere only output counts).
+	Usage func(pgid int) (Usage, bool)
+}
+
 type task struct {
 	id      string
 	person  string
@@ -72,19 +135,33 @@ func (t *task) emit(e TaskEvent) {
 	t.log.Append(append(b, '\n'))
 }
 
+// retryNotice is an agent line that only says the agent is retrying a model
+// call (Claude Code's stream-json api_retry): it is not progress, or an
+// agent whose every attempt hangs would never stall (GAP-0273).
+func retryNotice(line string) bool {
+	return strings.Contains(line, `"subtype":"api_retry"`)
+}
+
 // RunHeadless runs the connector's headless command for prompt, writes each
-// TaskEvent to emit and returns the exit code. The agent and its hooks run
-// unattended (fail closed, D8); the gateway path is warmed first.
-func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest,
-	warm func(context.Context, string) error, emit func(TaskEvent)) int {
+// TaskEvent to emit and returns how the task ended. The agent and its hooks
+// run unattended (fail closed, D8); the gateway path is warmed first. A task
+// that makes no progress for the stall bound is ended (ExitStalled).
+func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest, o HeadlessOptions, emit func(TaskEvent)) TaskEnd {
+	start := time.Now()
+	end := func(code int) TaskEnd {
+		return TaskEnd{ExitCode: code, DurationMS: time.Since(start).Milliseconds()}
+	}
 	argv, err := expandHeadless(cfg.Relay.Headless, req.Prompt)
 	if err != nil {
 		emit(TaskEvent{Type: "error", Data: err.Error()})
-		return 2
+		e := end(2)
+		e.Cause = err.Error()
+		return e
 	}
-	if c := cfg.Relay.Connector; c != "" && warm != nil {
+	connector := cfg.Relay.Connector
+	if connector != "" && o.Warm != nil {
 		wctx, cancel := context.WithTimeout(ctx, warmBudget)
-		if err := warm(wctx, c); err != nil {
+		if err := o.Warm(wctx, connector); err != nil {
 			emit(TaskEvent{Type: "stderr", Data: "defenseclaw: the gateway did not answer the pre-connect: " + err.Error()})
 		}
 		cancel()
@@ -99,36 +176,197 @@ func RunHeadless(ctx context.Context, cfg kit.Config, req TaskRequest,
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.Stdin = nil
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
-	if err := cmd.Start(); err != nil {
+	// The agent and everything it starts are one process group: the
+	// watchdog measures it and a stalled task ends all of it.
+	setProcessGroup(cmd)
+	cmd.Cancel = func() error { return killProcessGroup(cmd) }
+	// Own pipes, not StdoutPipe: the relay must not wait forever on a pipe
+	// that a child of the agent keeps open after the agent exited.
+	outR, outW, err := os.Pipe()
+	if err != nil {
 		emit(TaskEvent{Type: "error", Data: err.Error()})
-		return 127
+		return end(127)
 	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		outR.Close()
+		outW.Close()
+		emit(TaskEvent{Type: "error", Data: err.Error()})
+		return end(127)
+	}
+	cmd.Stdout, cmd.Stderr = outW, errW
+	if err := cmd.Start(); err != nil {
+		for _, f := range []*os.File{outR, outW, errR, errW} {
+			f.Close()
+		}
+		emit(TaskEvent{Type: "error", Data: err.Error()})
+		return end(127)
+	}
+	outW.Close()
+	errW.Close()
+	var progress atomic.Int64
 	var wg sync.WaitGroup
 	pump := func(kind string, r io.Reader) {
 		defer wg.Done()
 		sc := bufio.NewScanner(r)
 		sc.Buffer(make([]byte, 64<<10), 4<<20)
 		for sc.Scan() {
-			emit(TaskEvent{Type: kind, Data: sc.Text()})
+			line := sc.Text()
+			if !retryNotice(line) {
+				progress.Add(1)
+			}
+			emit(TaskEvent{Type: kind, Data: line})
 		}
 	}
 	wg.Add(2)
-	go pump("stdout", stdout)
-	go pump("stderr", stderr)
-	wg.Wait()
-	err = cmd.Wait()
+	go pump("stdout", outR)
+	go pump("stderr", errR)
+
+	exited := make(chan struct{})
+	var stalled atomic.Pointer[string]
+	go watch(cmd, connector, cfg.Relay.TaskStall(), o, &progress, exited, func(cause string) {
+		stalled.Store(&cause)
+		emit(TaskEvent{Type: "error", Data: "defenseclaw: " + cause})
+	})
+	waitErr := cmd.Wait()
+	close(exited)
+	drained := make(chan struct{})
+	go func() { wg.Wait(); close(drained) }()
+	select {
+	case <-drained:
+	case <-time.After(drainBudget):
+		outR.Close()
+		errR.Close()
+		<-drained
+	}
+	outR.Close()
+	errR.Close()
 	code := 0
-	if err != nil {
+	if waitErr != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
+		if errors.As(waitErr, &ee) {
+			code = exitCodeOf(ee.ProcessState)
 		} else {
 			code = 1
 		}
 	}
-	return code
+	if c := stalled.Load(); c != nil {
+		e := end(ExitStalled)
+		e.Stalled, e.Cause = true, *c
+		return e
+	}
+	return end(code)
+}
+
+// watch ends the agent when it makes no progress for stall: no output line
+// (retry notices aside) and less than stallCPU and stallIO of use in its
+// process group in every tick. A tick much later than planned is a suspend
+// and resume of the actor, not a stall.
+func watch(cmd *exec.Cmd, connector string, stall time.Duration, o HeadlessOptions, progress *atomic.Int64, exited <-chan struct{}, stalled func(string)) {
+	tick := o.Tick
+	if tick <= 0 {
+		tick = stallTick
+	}
+	if o.Stall > 0 {
+		stall = o.Stall
+	}
+	usage := o.Usage
+	if usage == nil {
+		usage = processGroupUsage
+	}
+	cpuMin := tick / 100
+	pid := cmd.Process.Pid
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	prev, havePrev := usage(pid)
+	lastTick, last := time.Now(), time.Now()
+	for {
+		select {
+		case <-exited:
+			return
+		case now := <-t.C:
+			if now.Sub(lastTick) > 3*tick {
+				last = now // the actor was suspended
+			}
+			lastTick = now
+			if progress.Swap(0) > 0 {
+				last = now
+			}
+			if u, ok := usage(pid); ok {
+				// A child that exited takes its counts with it: only growth
+				// counts.
+				if havePrev && (u.CPU-prev.CPU >= cpuMin || (u.IO > prev.IO && u.IO-prev.IO >= stallIO)) {
+					last = now
+				}
+				prev, havePrev = u, true
+			}
+			if now.Sub(last) < stall {
+				continue
+			}
+			probe := "the gateway was not checked"
+			if o.Warm != nil && connector != "" {
+				wctx, cancel := context.WithTimeout(context.Background(), warmBudget)
+				probe = "the cluster gateway answers, so the agent is stuck on a connection of its own"
+				if err := o.Warm(wctx, connector); err != nil {
+					probe = "the cluster gateway does not answer (" + err.Error() + ")"
+				}
+				cancel()
+			}
+			stalled(fmt.Sprintf("the task made no progress for %s (no output, CPU or I/O); %s. The task is ended with exit code %d.",
+				stall.Round(time.Second), probe, ExitStalled))
+			_ = termProcessGroup(cmd)
+			select {
+			case <-exited:
+			case <-time.After(stopGrace):
+				_ = killProcessGroup(cmd)
+			}
+			return
+		}
+	}
+}
+
+// ReportTaskEnd sends end to the gateway with report, retrying an attempt
+// without an answer or with a 5xx for up to reportBudget. A refusal (any
+// other non-2xx, such as an older gateway without the route) is final.
+func ReportTaskEnd(ctx context.Context, report func(context.Context, TaskEnd) error, end TaskEnd) error {
+	ctx, cancel := context.WithTimeout(ctx, reportBudget)
+	defer cancel()
+	delay := 2 * time.Second
+	for {
+		err := report(ctx, end)
+		if err == nil || errors.Is(err, errReportRefused) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		if delay < 30*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+// errReportRefused is a task-end report the gateway answered with a status
+// that a retry does not change.
+var errReportRefused = errors.New("the gateway refused the task-end report")
+
+// GatewayReport posts a task end to the actor listener over t.
+func GatewayReport(t *kit.Transport) func(context.Context, TaskEnd) error {
+	return func(ctx context.Context, end TaskEnd) error {
+		body, _ := json.Marshal(end)
+		resp, err := t.Post(ctx, kit.Request{Path: TaskReportPath, Body: body})
+		switch {
+		case err != nil:
+			return err
+		case resp.Status >= 200 && resp.Status < 300:
+			return nil
+		case resp.Status >= 500:
+			return fmt.Errorf("task-end report: status %d", resp.Status)
+		}
+		return fmt.Errorf("%w (status %d)", errReportRefused, resp.Status)
+	}
 }
 
 func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
@@ -172,12 +410,26 @@ func (s *Server) taskStart(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	t.emit(TaskEvent{Type: "start", ID: t.id})
 	go func() {
-		code := RunHeadless(context.Background(), s.opts.Config, req, s.opts.Warm, t.emit)
+		o := s.opts.Headless
+		o.Warm = s.opts.Warm
+		end := RunHeadless(context.Background(), s.opts.Config, req, o, t.emit)
+		code := end.ExitCode
 		t.mu.Lock()
 		t.code = &code
 		t.mu.Unlock()
 		t.emit(TaskEvent{Type: "exit", Code: &code})
 		t.log.Close()
+		if end.Stalled {
+			s.log.Warn("relay.task_stalled", "task", t.id, "exit_code", code, "cause", end.Cause)
+		}
+		if s.opts.Report == nil {
+			return
+		}
+		if err := ReportTaskEnd(context.Background(), s.opts.Report, end); err != nil {
+			s.log.Warn("relay.task_report", "task", t.id, "exit_code", code, "error", err.Error())
+		} else {
+			s.log.Info("relay.task_report", "task", t.id, "exit_code", code)
+		}
 	}()
 	s.follow(w, r, t, 0)
 }

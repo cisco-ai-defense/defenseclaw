@@ -268,7 +268,8 @@ func testServer(t *testing.T, argv []string) (*Server, *recorder, signer) {
 	cfg.Relay.Headless = []string{"sh", "-c", `echo "out:$0 mode:$DEFENSECLAW_ACTOR_MODE"; echo err >&2; exit 3`, "{prompt}"}
 	rec := &recorder{}
 	s := NewServer(Options{Config: cfg, Verifier: v,
-		Warm: func(context.Context, string) error { rec.add("warm"); return nil },
+		Warm:   func(context.Context, string) error { rec.add("warm"); return nil },
+		Report: func(_ context.Context, e TaskEnd) error { rec.add(fmt.Sprintf("report %d", e.ExitCode)); return nil },
 	})
 	t.Cleanup(func() {
 		if s.agent != nil {
@@ -562,6 +563,19 @@ func TestHeadlessTaskIsUnattendedAndReportsExit(t *testing.T) {
 	}
 	if ev := rec.list(); len(ev) < 1 || ev[0] != "warm" {
 		t.Fatalf("calls %v: the gateway path is warmed before the task runs", ev)
+	}
+	// The end goes to the gateway after the exit event (GAP-0273, GAP-0274).
+	reported := false
+	for i := 0; i < 100 && !reported; i++ {
+		for _, c := range rec.list() {
+			reported = reported || c == "report 3"
+		}
+		if !reported {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	if !reported {
+		t.Fatalf("calls %v: the task end is not reported to the gateway", rec.list())
 	}
 	if _, err := expandHeadless([]string{"x"}, "p"); err == nil {
 		t.Fatal("a headless command without {prompt} accepted")

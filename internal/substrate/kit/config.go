@@ -127,6 +127,25 @@ type RelayConfig struct {
 	IdentityDir string `json:"identity_dir"`
 	// Env is extra environment for the agent the relay starts.
 	Env map[string]string `json:"env"`
+	// TaskStallMS bounds how long a --task run may make no progress (no
+	// agent output other than retry notices, no CPU or I/O in its process
+	// group) before the relay ends it with exit 124 (GAP-0273); 0 is
+	// DefaultTaskStall.
+	TaskStallMS int `json:"task_stall_ms,omitempty"`
+}
+
+// DefaultTaskStall is the relay's no-progress bound of a --task run: longer
+// than one agent model attempt that never answers (Claude Code gives up on
+// one after about 6 minutes), short enough that a run whose gateway path is
+// stuck ends with a reason instead of hanging (GAP-0273).
+const DefaultTaskStall = 10 * time.Minute
+
+// TaskStall is the relay's no-progress bound of a --task run.
+func (r RelayConfig) TaskStall() time.Duration {
+	if r.TaskStallMS > 0 {
+		return time.Duration(r.TaskStallMS) * time.Millisecond
+	}
+	return DefaultTaskStall
 }
 
 // DefaultConfig is the configuration a kit image gets when the template build
@@ -213,6 +232,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxTimeMS+c.RetryMaxTimeMS > 28000 {
 		return errors.New("actor kit config: max_time_ms + retry_max_time_ms must fit the agent's 30 s hook envelope")
+	}
+	if c.Relay.TaskStallMS < 0 || (c.Relay.TaskStallMS > 0 && c.Relay.TaskStallMS < 60000) {
+		return errors.New("actor kit config: relay.task_stall_ms must be 0 (the default) or at least 60000")
 	}
 	if c.MaxAttachBytes < 0 || c.MaxAttachBytes > MaxAttachBytes {
 		return fmt.Errorf("actor kit config: max_attach_bytes must be 0..%d", MaxAttachBytes)
