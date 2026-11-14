@@ -139,7 +139,7 @@ func slotClose(open byte) byte {
 // lower case and digits: a generated string, not a name (GAP-0671). A slot
 // that wraps one ([Wq7mz2LpK9xt]) wraps a password, not a variable.
 func generatedPiece(s string) bool {
-	for _, piece := range strings.FieldsFunc(s, func(r rune) bool { return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') }) {
+	for _, piece := range strings.FieldsFunc(s, func(r rune) bool { return (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') }) {
 		upper, lower, digit := false, false, false
 		for i := 0; i < len(piece); i++ {
 			switch c := piece[i]; {
@@ -162,7 +162,7 @@ func generatedPiece(s string) bool {
 // letter or _ and holds only name and index characters (db_password,
 // ENV[DB_PASS], vault.db-password).
 func nameExpression(s string) bool {
-	if s == "" || !(s[0] == '_' || unicode.IsLetter(rune(s[0]))) {
+	if s == "" || s[0] != '_' && !unicode.IsLetter(rune(s[0])) {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -284,18 +284,18 @@ func schemeReferenceValue(v string) bool {
 		return false
 	}
 	for i := 0; i < len(scheme); i++ {
-		if !(scheme[i] >= 'a' && scheme[i] <= 'z' || scheme[i] == '-') {
+		if (scheme[i] < 'a' || scheme[i] > 'z') && scheme[i] != '-' {
 			return false
 		}
 	}
 	if strings.Contains(rest, "/") {
 		return true
 	}
-	if !(rest[0] == '_' || rest[0] >= 'A' && rest[0] <= 'Z') {
+	if rest[0] != '_' && (rest[0] < 'A' || rest[0] > 'Z') {
 		return false
 	}
 	for i := 0; i < len(rest); i++ {
-		if !(rest[i] == '_' || rest[i] >= 'A' && rest[i] <= 'Z' || rest[i] >= '0' && rest[i] <= '9') {
+		if rest[i] != '_' && (rest[i] < 'A' || rest[i] > 'Z') && (rest[i] < '0' || rest[i] > '9') {
 			return false
 		}
 	}
@@ -480,7 +480,7 @@ func constantNameValue(v string) bool {
 			upper = upper && w[j] >= 'A' && w[j] <= 'Z'
 			digits = digits && w[j] >= '0' && w[j] <= '9'
 		}
-		if !upper && !(digits && i == len(words)-1) {
+		if !upper && (!digits || i != len(words)-1) {
 			return false
 		}
 	}
