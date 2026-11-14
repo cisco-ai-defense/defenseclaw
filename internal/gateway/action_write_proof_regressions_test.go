@@ -51,6 +51,7 @@ func r104ReviewProtectedWrite(t *testing.T, command, cwd, home string) []bool {
 
 func r104ReviewHome(t *testing.T) (home, cwd string) {
 	t.Helper()
+	keepTempDirOffDevice(t)
 	home = t.TempDir()
 	cwd = filepath.Join(home, "project")
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {

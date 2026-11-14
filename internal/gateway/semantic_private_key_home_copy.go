@@ -8,7 +8,10 @@ import (
 	"slices"
 	"strings"
 
+	"mvdan.cc/sh/v3/syntax"
+
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // A user who copies their own SSH key to another place in their own home (a
@@ -208,4 +211,221 @@ func appendTrustedPrivateKeyHomeCopyAlert(
 	}))
 	finding.enforcement = findingEnforcementAlertOnly
 	return append(findings, finding)
+}
+
+// ownSSHFolderCopyTitle is the title of the alert for a copy of the user's own
+// SSH folder content to another place of the same home.
+const ownSSHFolderCopyTitle = "A copy of your own SSH folder content to another place in your home"
+
+// trustedActionOwnSSHFolderCopy reports a command that only copies content of
+// the active user's own SSH folder (a key file, a glob of the folder, the
+// folder) to a private place of the same home outside the SSH folder, with at
+// most harmless helpers beside it. Such a copy exposes nothing the user did not
+// already hold: the copy keeps the mode of its source, and nothing leaves the
+// home. The key rules have no write to the user's authorized keys to judge there,
+// so they alert (the copy widens where the keys live) and do not block
+// (rel-1-0-10:GAP-0018). Where the destination is not provably inside the home
+// (a link that leaves it, a shared folder, another account, /tmp), a wrapper
+// runs the copy, anything else is written, or the home is hidden from this
+// gateway, the block stays. The destination's mode bits are not read: a managed
+// gateway cannot see the home, and a copy keeps the modes of its sources.
+func trustedActionOwnSSHFolderCopy(request trustedActionRequest, input actionfacts.Input) bool {
+	home := strings.TrimRight(input.ActiveHome, "/")
+	if request.ProtectedHomeHook || home == "" || !trustedShellCommandInput(input) {
+		return false
+	}
+	// A hook call carries the command in its arguments, not in Command.
+	command := input.Command
+	if command == "" {
+		command, _ = trustedBashCommandInput(input)
+	}
+	if command == "" {
+		return false
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) == 0 {
+		return false
+	}
+	copied := false
+	var visit func(stmt *syntax.Stmt) bool
+	visit = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || len(stmt.Redirs) != 0 || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return false
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.BinaryCmd:
+			if cmd.Op != syntax.AndStmt {
+				return false
+			}
+			return visit(cmd.X) && visit(cmd.Y)
+		case *syntax.CallExpr:
+			if len(cmd.Assigns) != 0 || len(cmd.Args) == 0 {
+				return false
+			}
+			words := make([]string, len(cmd.Args))
+			for i, arg := range cmd.Args {
+				text, known := hookpaths.StaticWord(arg, home)
+				if !known {
+					// A glob of literal parts (/home/u/.ssh/*) is one literal here:
+					// only the path before the glob is judged.
+					text, known = ownSSHFolderLiteralGlob(arg)
+				}
+				if !known {
+					return false
+				}
+				words[i] = text
+			}
+			switch strings.ToLower(path.Base(words[0])) {
+			case "cp", "gcp":
+				if !ownSSHFolderCopyCall(words[1:], input.CWD, home) {
+					return false
+				}
+				copied = true
+				return true
+			case "mkdir":
+				return ownSSHFolderMkdirCall(words[1:], input.CWD, home)
+			case "echo", "printf", "true", ":", "pwd":
+				return true
+			}
+		}
+		return false
+	}
+	for _, stmt := range file.Stmts {
+		if !visit(stmt) {
+			return false
+		}
+	}
+	return copied
+}
+
+// ownSSHFolderCopyCall judges the operands of one cp: safe options, sources
+// inside the SSH folder of home, one destination in a private place of home.
+func ownSSHFolderCopyCall(args []string, cwd, home string) bool {
+	var operands []string
+	target := ""
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			operands = append(operands, args[i+1:]...)
+			i = len(args)
+		case arg == "-t" || arg == "--target-directory":
+			if i+1 >= len(args) || target != "" {
+				return false
+			}
+			i++
+			target = args[i]
+		case strings.HasPrefix(arg, "--target-directory="):
+			if target != "" {
+				return false
+			}
+			target = strings.TrimPrefix(arg, "--target-directory=")
+		case strings.HasPrefix(arg, "--"):
+			if !slices.Contains(strings.Fields("--recursive --archive --preserve --verbose --force --no-clobber --interactive --update --no-dereference"), arg) {
+				return false
+			}
+		case strings.HasPrefix(arg, "-") && len(arg) > 1:
+			if strings.Trim(arg[1:], "rRapvfniuPHLTd") != "" {
+				return false
+			}
+		default:
+			operands = append(operands, arg)
+		}
+	}
+	sources, destination := operands, target
+	if target == "" {
+		if len(operands) < 2 {
+			return false
+		}
+		sources, destination = operands[:len(operands)-1], operands[len(operands)-1]
+	}
+	if len(sources) == 0 || destination == "" {
+		return false
+	}
+	sshDir := home + "/.ssh"
+	holdsKey := false
+	for _, source := range sources {
+		if clean := path.Clean(hookpaths.OperandPath(strings.TrimRight(source, "*"), cwd)); clean == sshDir ||
+			strings.ContainsAny(source, "*?[") || matchesSSHPrivateKey(clean) {
+			holdsKey = true
+		}
+		base := strings.ToLower(path.Base(strings.TrimRight(source, "/")))
+		if strings.HasPrefix(base, "authorized_keys") || strings.HasPrefix(base, "authorized-keys") {
+			// A named copy of the authorized keys file keeps its own rule (owner
+			// ruling GAP-2590, dd and cp alike).
+			return false
+		}
+		if !pathWithin(path.Clean(hookpaths.OperandPath(strings.TrimRight(source, "*"), cwd)), sshDir) {
+			return false
+		}
+	}
+	// A copy of a file that holds no private key (config, known_hosts, a .pub)
+	// is a plain read the older rules already allow; only a copy that can carry
+	// a private key is an own-key copy.
+	return holdsKey && ownSSHFolderPrivateDestination(destination, cwd, home)
+}
+
+// ownSSHFolderMkdirCall judges a mkdir that prepares a private place of home.
+func ownSSHFolderMkdirCall(args []string, cwd, home string) bool {
+	made := false
+	for _, arg := range args {
+		if arg == "-p" || arg == "--parents" {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") || !ownSSHFolderPrivateDestination(arg, cwd, home) {
+			return false
+		}
+		made = true
+	}
+	return made
+}
+
+// ownSSHFolderPrivateDestination reports a destination inside home, outside the
+// SSH folder and the shared folders, whose existing part, links followed, stays
+// there too; a part that does not exist yet is only a name.
+func ownSSHFolderPrivateDestination(destination, cwd, home string) bool {
+	value := path.Clean(hookpaths.OperandPath(destination, cwd))
+	if !pathWithin(value, home) || pathWithin(value, home+"/.ssh") {
+		return false
+	}
+	relative := strings.TrimPrefix(strings.TrimPrefix(value, home), "/")
+	first, _, _ := strings.Cut(relative, "/")
+	if slices.Contains(trustedActionHomeSharedFolders, strings.ToLower(first)) {
+		return false
+	}
+	// Nothing of the destination below the home exists on this host (the home
+	// itself may be absent): there is no link to follow, the name is all there is.
+	existing := value
+	for existing != home && pathWithin(existing, home) {
+		if _, err := hookpaths.Lstat(existing); err == nil {
+			break
+		}
+		existing = path.Dir(existing)
+	}
+	if _, err := hookpaths.Lstat(existing); err != nil {
+		return true
+	}
+	realHome, err := hookpaths.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	resolved, err := hookpaths.EvalSymlinks(existing)
+	if err != nil {
+		return false
+	}
+	return pathWithin(resolved, realHome) && !pathWithin(resolved, realHome+"/.ssh")
+}
+
+// ownSSHFolderLiteralGlob is the text of a word that is literal text and glob
+// characters only (no quote, expansion or substitution), such as /home/u/.ssh/*.
+func ownSSHFolderLiteralGlob(word *syntax.Word) (string, bool) {
+	var text strings.Builder
+	for _, part := range word.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		text.WriteString(literal.Value)
+	}
+	return text.String(), text.Len() > 0 && !strings.ContainsAny(text.String(), "$`")
 }
