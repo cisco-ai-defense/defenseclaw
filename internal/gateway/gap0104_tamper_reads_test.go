@@ -354,3 +354,23 @@ func TestGAP0365RunnersHandThePathToPythonCode(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0365: words after inline python code are paths only when
+// they can be one. An owner-trace call (agent-transcripts-sample case
+// 9cd416548576ab6e/126) carried a second command line, code with a state
+// path in a string included, as words after the first python call's code and
+// redirects; none of them is a path that code was handed, and the call stays
+// as it was before the hand-off model (allow in default, the sudo alert in
+// strict). The paths are placeholders.
+func TestGAP0365TextWordsAfterCodeAreNotHandedPaths(t *testing.T) {
+	h := newGAP0104Home(t)
+	command := `sudo -iu u audit export | python3 -c "import sys,json; print(sorted(json.loads(sys.stdin.readline()).keys()))" > /tmp/o1.raw 2>&1 ssh -n h sudo -iu u python3 -c "import sqlite3; c=sqlite3.connect(\"` +
+		h.home + `/.defenseclaw/audit.db\"); print(c.execute(\"select 1\").fetchall())" > /tmp/o2.raw 2>&1 cat /tmp/o1.raw`
+	for profile, want := range map[string]string{"default": "allow", "strict": "alert"} {
+		judge := newHookConfigJudge(t, "claudecode", profile)
+		got := judge(h.project, false, "Bash", map[string]any{"command": command})
+		if action := hookConfigAction(got); action != want || strings.Contains(got, "tamper.detector_state_write") {
+			t.Errorf("%s: action %q, want %q: %.500s", profile, action, want, got)
+		}
+	}
+}

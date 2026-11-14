@@ -31,11 +31,20 @@ func PythonCodeHandedOperands(argv []string) []string {
 	}
 	var operands []string
 	for _, operand := range argv[1+at+1:] {
-		if operand != "" && !strings.HasPrefix(operand, "-") {
+		if pythonOperandIsPath(operand) {
 			operands = append(operands, operand)
 		}
 	}
 	return operands
+}
+
+// pythonOperandIsPath reports an operand that can be one path: a word with
+// no option dash, no space, no quote and no shell syntax. A word that holds
+// text (more code, a sentence, a command line carried as an argument) is
+// not a path the code was handed.
+func pythonOperandIsPath(operand string) bool {
+	return operand != "" && !strings.HasPrefix(operand, "-") &&
+		!strings.ContainsAny(operand, " \t\n\"'`$;|&<>(){}")
 }
 
 // PythonInlineCode finds the -c code in the arguments of a python call (the
@@ -99,7 +108,7 @@ func PythonCodeHandedOperandsOf(command CommandFact) []string {
 	}
 	var operands []string
 	for _, operand := range PythonCodeHandedOperands(words) {
-		if operand != "" && !strings.ContainsAny(operand, "$*?[`") {
+		if !strings.ContainsAny(operand, "$*?[`") {
 			operands = append(operands, operand)
 		}
 	}
