@@ -281,20 +281,33 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	}
 	var verdict *ToolInspectVerdict
 	reportOnly := false
-	if isAction {
-		verdict, reportOnly = a.inspectACPFrameAction(ctx, req, agent.ConnectorID, frameAction, inspectContent)
-	} else {
-		// Scan the frame's strings, not the marshalled envelope. Content
-		// rules anchor on prose boundaries, and inside raw JSON every value
-		// is preceded by a quote, so envelope scanning makes detection
-		// depend on whether a rule's boundary alternation happens to admit
-		// `"`. See InspectableText.
-		content := acp.InspectableText(req.Payload)
-		if content == "" {
-			content = string(req.Payload)
+	func() {
+		// A check that fails internally (rel-1-0-10:GAP-0437) answers the
+		// evaluation-fault block as a normal verdict, as the hook and
+		// /inspect/tool routes do (GAP-0486): recorded, then mapped by the
+		// profile's mode below (observe reports would_block). Answered
+		// "unavailable", an observe guard delivered the frame unchecked and
+		// nothing was recorded. The recover covers the frame-action path as
+		// well as the message scan.
+		defer recoverGatewayGoroutine("acp evaluate", func() { verdict, reportOnly = toolCheckFaultVerdict(), false })
+		if acpEvaluateFaultHook != nil {
+			acpEvaluateFaultHook()
 		}
-		verdict = inspectContent(content)
-	}
+		if isAction {
+			verdict, reportOnly = a.inspectACPFrameAction(ctx, req, agent.ConnectorID, frameAction, inspectContent)
+		} else {
+			// Scan the frame's strings, not the marshalled envelope. Content
+			// rules anchor on prose boundaries, and inside raw JSON every value
+			// is preceded by a quote, so envelope scanning makes detection
+			// depend on whether a rule's boundary alternation happens to admit
+			// `"`. See InspectableText.
+			content := acp.InspectableText(req.Payload)
+			if content == "" {
+				content = string(req.Payload)
+			}
+			verdict = inspectContent(content)
+		}
+	}()
 	if verdict == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP inspection unavailable"})
 		return
