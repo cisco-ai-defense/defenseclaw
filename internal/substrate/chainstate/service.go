@@ -78,6 +78,20 @@ func RefusesEgress(chainID string) bool {
 	return egressDenyChains[chainID]
 }
 
+// RefusesEgressJoin reports whether a detected chain is refused when the
+// egress action is block: a chain RefusesEgress names whose result bit is
+// clear in fileUnknownJoinMask (guardrail.ToolChainMatches.FileUnknownJoinMask).
+// A chain that joined only through the file-unknown marker (the read named
+// no one file) alerts instead. The callout (egressMemo.verdict) and the
+// gateway's hook (substrateChainEgressIntent) both decide with it.
+func RefusesEgressJoin(chainID string, fileUnknownJoinMask uint32) bool {
+	if !egressDenyChains[chainID] {
+		return false
+	}
+	bit, ok := guardrail.ToolChainResultMask(chainID)
+	return ok && fileUnknownJoinMask&bit == 0
+}
+
 // Options configure a Service.
 type Options struct {
 	// Dir is the leader's store volume directory.

@@ -47,8 +47,13 @@ type ToolChainObserveInput struct {
 }
 
 type ToolChainObserveResult struct {
-	Status                  ToolChainObserveStatus
-	DetectedMask            uint32
+	Status       ToolChainObserveStatus
+	DetectedMask uint32
+	// FileUnknownJoinMask is guardrail.ToolChainMatches.FileUnknownJoinMask
+	// of this event, stored with it (file_unknown_chain_mask): the detected
+	// chains that joined only through the file-unknown marker. Clear means
+	// resolved, also for a record or a leader answer from before the field.
+	FileUnknownJoinMask     uint32
 	EnforcementSafeMask     uint32
 	DeniedMask              uint32
 	DetectedChainIDs        []string
@@ -360,8 +365,9 @@ func (repo *ToolChainRepository) observeTx(
 			received_time_unix_nano, input_fingerprint, projection_fingerprint,
 			ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
 			enforcement_join_digests, enforcement_output_join_digests, value_join_digests,
-			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id,
+			file_unknown_chain_mask
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		string(input.SemanticEventID), string(input.ConnectorInstanceID), sessionDigest,
 		sequence, received, input.InputFingerprint, projectionFP, input.RulesetFingerprint,
 		string(input.Projection.ParseStatus), input.Projection.DetectionStepMask,
@@ -370,7 +376,7 @@ func (repo *ToolChainRepository) observeTx(
 		encodeToolChainJoinDigests(input.Projection.EnforcementOutputJoinDigests),
 		encodeToolChainValueJoinDigests(input.Projection.ValueJoinDigests),
 		matches.DetectedMask, matches.EnforcementSafeMask,
-		denied, nullStr(stableActionID))
+		denied, nullStr(stableActionID), matches.FileUnknownJoinMask)
 	if err != nil {
 		return ToolChainObserveResult{}, err
 	}
@@ -384,7 +390,8 @@ func (repo *ToolChainRepository) observeTx(
 		return ToolChainObserveResult{}, err
 	}
 	return makeToolChainResult(ToolChainObserveFresh, matches.DetectedMask,
-		matches.EnforcementSafeMask, denied, stableActionID, receiptIDs, false)
+		matches.FileUnknownJoinMask, matches.EnforcementSafeMask, denied, stableActionID,
+		receiptIDs, false)
 }
 
 // toolChainSessionDigestSQL reads the session identifier of one event. The
@@ -433,7 +440,7 @@ type persistedToolChainEvent struct {
 	enforcementJoinDigests                                                        [guardrail.ToolChainCount]string
 	enforcementOutputJoinDigests                                                  [guardrail.ToolChainCount]string
 	valueJoinDigests                                                              [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
-	detected, enforcementSafe, denied                                             uint32
+	detected, enforcementSafe, denied, fileUnknown                                uint32
 }
 
 func (repo *ToolChainRepository) loadExistingEvent(
@@ -472,7 +479,7 @@ func (repo *ToolChainRepository) loadExistingEvent(
 			)
 		}
 		result, err := makeToolChainResult(ToolChainObserveReplay, event.detected,
-			event.enforcementSafe, 0, "", nil, true)
+			event.fileUnknown, event.enforcementSafe, 0, "", nil, true)
 		return result, true, err
 	}
 	replay, found, err := repo.loadReceiptReplay(ctx, tx, input, session, now)
@@ -483,7 +490,7 @@ func (repo *ToolChainRepository) loadExistingEvent(
 		return ToolChainObserveResult{}, true, ErrToolChainIntegrity
 	}
 	result, err := makeToolChainResult(ToolChainObserveReplay, event.detected,
-		event.enforcementSafe, 0, "", nil, true)
+		event.fileUnknown, event.enforcementSafe, 0, "", nil, true)
 	return result, true, err
 }
 
@@ -558,6 +565,7 @@ func (repo *ToolChainRepository) upgradeExistingEventDeny(
 	result, err := makeToolChainResult(
 		ToolChainObserveFresh,
 		event.detected,
+		event.fileUnknown,
 		event.enforcementSafe,
 		denied,
 		stableAction,
@@ -579,13 +587,14 @@ func (repo *ToolChainRepository) scanPersistedToolChainEvent(
 		sequence, received_time_unix_nano, input_fingerprint, projection_fingerprint,
 		ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
 		enforcement_join_digests, enforcement_output_join_digests, value_join_digests,
-		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
+		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id,
+		file_unknown_chain_mask
 		FROM guardrail_chain_events WHERE semantic_event_id=?`), string(eventID)).Scan(
 		&event.connector, &event.session, &event.sequence, &event.received, &event.inputFP,
 		&event.projectionFP, &event.ruleset, &event.parseStatus, &event.detectionSteps,
 		&event.enforcementSteps, &enforcementJoinDigests,
 		&enforcementOutputJoinDigests, &valueJoinDigests, &event.detected,
-		&event.enforcementSafe, &event.denied, &stable)
+		&event.enforcementSafe, &event.denied, &stable, &event.fileUnknown)
 	if errors.Is(err, sql.ErrNoRows) {
 		return event, false, nil
 	}
@@ -628,6 +637,7 @@ func validatePersistedToolChainEvent(event persistedToolChainEvent) error {
 		validateSHA256("ruleset fingerprint", event.ruleset, true) != nil ||
 		event.detected&^guardrail.ToolChainKnownResultMask != 0 ||
 		event.enforcementSafe&^event.detected != 0 || event.denied&^event.enforcementSafe != 0 ||
+		event.fileUnknown&^event.detected != 0 ||
 		event.sequence < 1 || event.received < 1 {
 		return ErrToolChainIntegrity
 	}
@@ -832,8 +842,12 @@ func (repo *ToolChainRepository) loadReceiptReplay(
 			return ToolChainObserveResult{}, true, err
 		}
 	}
+	fileUnknown, err := repo.loadToolChainFileUnknownMask(ctx, tx, input.SemanticEventID)
+	if err != nil {
+		return ToolChainObserveResult{}, true, err
+	}
 	result, err := makeToolChainResult(ToolChainObserveReplay, first.detected,
-		first.enforcementSafe, first.denied, first.stableAction, ids, true)
+		fileUnknown&first.detected, first.enforcementSafe, first.denied, first.stableAction, ids, true)
 	return result, true, err
 }
 
@@ -972,9 +986,26 @@ func toolChainReceiptID(stableAction, chainID, predecessor string) string {
 	return "gcr_" + hex.EncodeToString(sum[:])
 }
 
+// loadToolChainFileUnknownMask reads the stored file-unknown mask of an
+// event for a receipt replay; an event row already pruned reads as 0
+// (resolved), the fail-safe answer.
+func (repo *ToolChainRepository) loadToolChainFileUnknownMask(
+	ctx context.Context,
+	tx *sql.Tx,
+	eventID SemanticEventID,
+) (uint32, error) {
+	var mask uint32
+	err := tx.QueryRowContext(ctx, repo.sql(`SELECT file_unknown_chain_mask
+		FROM guardrail_chain_events WHERE semantic_event_id=?`), string(eventID)).Scan(&mask)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return mask, err
+}
+
 func makeToolChainResult(
 	status ToolChainObserveStatus,
-	detected, enforcementSafe, denied uint32,
+	detected, fileUnknown, enforcementSafe, denied uint32,
 	stableAction string,
 	receiptIDs []string,
 	suppress bool,
@@ -993,7 +1024,7 @@ func makeToolChainResult(
 	}
 	return ToolChainObserveResult{
 		Status: status, DetectedMask: detected, EnforcementSafeMask: enforcementSafe,
-		DeniedMask: denied, DetectedChainIDs: detectedIDs,
+		DeniedMask: denied, FileUnknownJoinMask: fileUnknown & detected, DetectedChainIDs: detectedIDs,
 		EnforcementSafeChainIDs: enforcementIDs, DeniedChainIDs: deniedIDs,
 		StableActionID: stableAction, ReceiptIDs: append([]string(nil), receiptIDs...),
 		SuppressTelemetry: suppress,

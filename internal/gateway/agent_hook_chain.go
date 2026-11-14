@@ -1320,6 +1320,19 @@ func projectTrustedActionChainSteps(
 				digest,
 			)
 		}
+	} else if secretRead && !secretReadIdentityExact &&
+		facts.Parse.Status == actionfacts.StatusComplete && secretReadNamesNoOneFile(facts) {
+		// A complete call that reads several credentials or secret files, or
+		// one whose path it cannot name (a relative path in a call not proven
+		// to keep its directory): the read names no one file. The marker joins
+		// any upload, as the missing identity did, and marks the chain
+		// unresolved, which the Agent Substrate egress disposition only alerts
+		// on (guardrail.ToolChainMatches.FileUnknownJoinMask).
+		setToolChainEnforcementJoinDigest(
+			projection,
+			guardrail.ToolChainSecretReadThenEgress,
+			guardrail.ToolChainFileUnknownDigest,
+		)
 	}
 	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); supported {
 		addToolChainStep(
@@ -2169,6 +2182,22 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 func credentialFileContentRead(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
 		if _, ok := credentialFileContentReadCommand(facts, candidate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// secretReadNamesNoOneFile reports a call with a read of a credentials file
+// or of a file a secret-read rule names: with exactSecretReadChainDigest
+// false, that read names no one file.
+func secretReadNamesNoOneFile(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if _, ok := credentialFileContentReadCommand(facts, candidate); ok {
+			return true
+		}
+		if candidate.Access == actionfacts.PathAccessRead &&
+			matchesAnySensitivePathCandidate(semanticPathValue(candidate)) {
 			return true
 		}
 	}

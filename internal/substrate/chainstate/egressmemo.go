@@ -212,7 +212,7 @@ func (m *egressMemo) verdict(now time.Time, action string) (EgressVerdict, bool)
 	if !warm {
 		return EgressVerdict{}, false
 	}
-	detected, ok := detectEgress(w, now)
+	detected, fileUnknown, ok := detectEgress(w, now)
 	if !ok {
 		return EgressVerdict{}, false
 	}
@@ -222,10 +222,17 @@ func (m *egressMemo) verdict(now time.Time, action string) (EgressVerdict, bool)
 			continue
 		}
 		v.Detected = append(v.Detected, d.ID)
-		if egressDenyChains[d.ID] && v.Rule == "" {
+		if !egressDenyChains[d.ID] {
+			continue
+		}
+		// A chain that joined only through the file-unknown marker only
+		// alerts; a resolved one refuses while the action is block. The
+		// verdict names a refusing chain before an alerting one.
+		refuse := action == EgressBlock && RefusesEgressJoin(d.ID, fileUnknown)
+		if v.Rule == "" || refuse && !v.Deny {
 			v.Rule = d.ID
 			v.Reason = "Earlier in this actor's work it read a secret; DefenseClaw blocks sending data off the cluster after that."
-			v.Deny = action == EgressBlock
+			v.Deny = refuse
 		}
 	}
 	return v, true
@@ -233,17 +240,20 @@ func (m *egressMemo) verdict(now time.Time, action string) (EgressVerdict, bool)
 
 // detectEgress matches an egress step at now against the window, as the
 // store's Observe of that step would, and against each prepared first
-// step on its own, as if it had just resolved.
-func detectEgress(w memoWindow, now time.Time) (uint32, bool) {
+// step on its own, as if it had just resolved. fileUnknown holds the
+// detected chains that no match resolved: every match that detects them
+// joined only through the file-unknown marker.
+func detectEgress(w memoWindow, now time.Time) (detected, fileUnknown uint32, ok bool) {
 	next := max(w.Next, 1)
 	final := guardrail.ToolChainWindowEvent{SemanticEventID: "substrate.egress", Sequence: next, ReceivedAt: now, Projection: egressStep}
-	var mask uint32
+	var resolved uint32
 	if len(w.Events) > 0 {
 		m, err := guardrail.MatchToolChains(w.Events, final)
 		if err != nil {
-			return 0, false
+			return 0, 0, false
 		}
-		mask |= m.DetectedMask
+		detected |= m.DetectedMask
+		resolved |= m.DetectedMask &^ m.FileUnknownJoinMask
 	}
 	for _, p := range w.Pending {
 		if !now.Before(p.ExpiresAt) {
@@ -253,11 +263,12 @@ func detectEgress(w memoWindow, now time.Time) (uint32, bool) {
 		m, err := guardrail.MatchToolChains(prior, guardrail.ToolChainWindowEvent{
 			SemanticEventID: final.SemanticEventID, Sequence: 2, ReceivedAt: now, Projection: egressStep})
 		if err != nil {
-			return 0, false
+			return 0, 0, false
 		}
-		mask |= m.DetectedMask
+		detected |= m.DetectedMask
+		resolved |= m.DetectedMask &^ m.FileUnknownJoinMask
 	}
-	return mask, true
+	return detected, detected &^ resolved, true
 }
 
 // egressRecord is one job for the worker: an egress step to record, or
