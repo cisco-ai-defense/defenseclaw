@@ -134,3 +134,26 @@ func TestHookCapacityCountsEachReportedLineOnceAcrossReportRuns(t *testing.T) {
 		t.Fatalf("window = %+v, want 2 late allows and 1 deadline deny", got)
 	}
 }
+
+func TestHookCapacityExportsOnlyDeadlineOutcomes(t *testing.T) {
+	withHookCapacity(t, time.Date(2026, 11, 14, 14, 30, 0, 0, time.UTC))
+	exported := map[string]uint64{}
+	hookCapacity.setSink(func(outcome string, n uint64) { exported[outcome] += n })
+	hookCapacity.note(hookCapacityAnswered, time.Time{}, 50)
+	hookCapacity.note(hookCapacityDeadlineDeny, time.Time{}, 2)
+	hookCapacity.note(hookCapacityLateAllow, time.Time{}, 3)
+	hookCapacity.note(hookCapacityShed, time.Time{}, 1)
+	// Outside the window: neither counted nor exported.
+	hookCapacity.note(hookCapacityDeadlineDeny, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC), 9)
+	want := map[string]uint64{hookCapacityDeadlineDeny: 2, hookCapacityLateAllow: 3, hookCapacityShed: 1}
+	if len(exported) != len(want) {
+		t.Fatalf("exported %v, want %v", exported, want)
+	}
+	for k, v := range want {
+		if exported[k] != v {
+			t.Fatalf("exported %v, want %v", exported, want)
+		}
+	}
+	// An API server without a bound runtime exports nothing and does not panic.
+	(&APIServer{}).recordHookDeadlineOutcomeMetric(hookCapacityDeadlineDeny, 1)
+}

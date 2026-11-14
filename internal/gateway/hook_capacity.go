@@ -4,10 +4,13 @@
 package gateway
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 )
 
 // The hook capacity counter is the overload signal of the hook path (S8
@@ -78,6 +81,20 @@ type hookCapacityCounter struct {
 	now     func() time.Time
 	since   time.Time
 	buckets [hookCapacityWindow]hookCapacityBucket
+	// sink exports each deadline outcome as the telemetry counter
+	// defenseclaw.hook.deadline_outcomes; nil until the API server binds its
+	// observability runtime. Called outside mu.
+	sink func(outcome string, n uint64)
+}
+
+// setSink binds the telemetry export of the deadline outcomes.
+func (c *hookCapacityCounter) setSink(sink func(outcome string, n uint64)) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.sink = sink
+	c.mu.Unlock()
 }
 
 func newHookCapacityCounter(now func() time.Time) *hookCapacityCounter {
@@ -97,6 +114,13 @@ func (c *hookCapacityCounter) note(outcome string, at time.Time, n uint64) {
 	if c == nil || n == 0 {
 		return
 	}
+	if sink := c.noteLocked(outcome, at, n); sink != nil && outcome != hookCapacityAnswered {
+		sink(outcome, n)
+	}
+}
+
+// noteLocked counts under mu and returns the sink of a counted outcome.
+func (c *hookCapacityCounter) noteLocked(outcome string, at time.Time, n uint64) func(string, uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.now().Unix() / 60
@@ -105,7 +129,7 @@ func (c *hookCapacityCounter) note(outcome string, at time.Time, n uint64) {
 		minute = now
 	}
 	if minute > now || minute <= now-hookCapacityWindow {
-		return
+		return nil
 	}
 	b := &c.buckets[minute%hookCapacityWindow]
 	if b.minute != minute {
@@ -121,6 +145,7 @@ func (c *hookCapacityCounter) note(outcome string, at time.Time, n uint64) {
 	case hookCapacityShed:
 		b.shed += n
 	}
+	return c.sink
 }
 
 func (b hookCapacityBucket) counts() HookCapacityCounts {
@@ -210,4 +235,43 @@ func (a *APIServer) noteHookCallerGoneCapacity(connector string, shed bool) {
 		return
 	}
 	hookCapacity.note(hookCapacityDeadlineDeny, time.Time{}, 1)
+}
+
+// hookDeadlineOutcomeV8Producer is the producer of the deadline outcome
+// counter.
+const hookDeadlineOutcomeV8Producer = "gateway.hook_capacity"
+
+// recordHookDeadlineOutcomeMetric exports n deadline outcomes as the
+// telemetry counter defenseclaw.hook.deadline_outcomes. Best effort: an
+// unbound runtime or a failed export never changes a hook answer.
+func (a *APIServer) recordHookDeadlineOutcomeMetric(outcome string, n uint64) {
+	if a == nil || n == 0 {
+		return
+	}
+	switch outcome {
+	case hookCapacityDeadlineDeny, hookCapacityLateAllow, hookCapacityShed:
+	default:
+		return
+	}
+	metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	if metricRuntime == nil {
+		return
+	}
+	ctx := context.Background()
+	item := newGatewayGeneratedMetricItem(
+		ctx,
+		time.Now().UTC(),
+		observability.SourceGateway,
+		"",
+		hookDeadlineOutcomeV8Producer,
+		observability.EventName(observability.TelemetryInstrumentDefenseClawHookDeadlineOutcomes),
+		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawHookDeadlineOutcomes(observability.MetricDefenseClawHookDeadlineOutcomesInput{
+				Envelope:                envelope,
+				Value:                   int64(min(n, uint64(1<<62))),
+				DefenseClawMetricReason: outcome,
+			})
+		},
+	)
+	_, _ = metricRuntime.RecordGeneratedMetricBatch(ctx, []observabilityruntime.GeneratedMetricBatchItem{item})
 }
