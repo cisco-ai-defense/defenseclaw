@@ -674,7 +674,7 @@ func AnalyzePageScript(code string) PageFlow {
 			if reads[i] {
 				return true
 			}
-			if name, ok := r.ident(i); ok && tainted[name] && !(i > 0 && r.isDot(i-1)) {
+			if name, ok := r.ident(i); ok && tainted[name] && (i == 0 || !r.isDot(i-1)) {
 				// An object key ({ cookie: 1 }) is not a use of the name.
 				if r.is(i+1, ":") && (r.is(i-1, "{") || r.is(i-1, ",")) {
 					continue
@@ -945,7 +945,7 @@ func (r *jsReader) sends(flow *PageFlow, trunc *bounded.Truncated, hasTaint func
 					return
 				}
 			}
-		case name == "navigator" && !(i > 0 && r.isDot(i-1)):
+		case name == "navigator" && (i == 0 || !r.isDot(i-1)):
 			if m, next, ok := r.member(i + 1); ok && m == "sendBeacon" && r.is(next, "(") {
 				as := r.args(next)
 				if len(as) > 0 && hasTaint(as[0][0], r.closeOf(next)) {
@@ -977,7 +977,7 @@ func (r *jsReader) sends(flow *PageFlow, trunc *bounded.Truncated, hasTaint func
 			}
 		case r.is(i+1, ".") || r.is(i+1, "?."):
 			// x.open(method, url), x.setRequestHeader(k, v), x.send(body)
-			if m, next, ok := r.member(i + 1); ok && r.is(next, "(") && !(i > 0 && r.isDot(i-1)) {
+			if m, next, ok := r.member(i + 1); ok && r.is(next, "(") && (i == 0 || !r.isDot(i-1)) {
 				switch {
 				case xhrVar[name] != nil:
 					st := xhrVar[name]
@@ -1034,7 +1034,7 @@ func (r *jsReader) sends(flow *PageFlow, trunc *bounded.Truncated, hasTaint func
 			continue
 		}
 		prop, ok := r.ident(i - 1)
-		if !ok || !(prop == "src" || prop == "action") || i < 2 || !r.isDot(i-2) {
+		if !ok || (prop != "src" && prop != "action") || i < 2 || !r.isDot(i-2) {
 			continue
 		}
 		hi := r.exprEnd(i + 1)
@@ -1118,7 +1118,7 @@ func (r *jsReader) destinationAt(lo, hi, depth int) (DestKind, string) {
 			return DestSameOrigin, ""
 		}
 		// A name bound once: const u = "https://host/path" + x.
-		if blo, bhi, ok := r.boundOnce(first.s); ok && !(blo <= lo && lo < bhi) {
+		if blo, bhi, ok := r.boundOnce(first.s); ok && (lo < blo || lo >= bhi) {
 			return r.destinationAt(blo, bhi, depth+1)
 		}
 	}
@@ -1197,7 +1197,7 @@ func classifyLiteral(s string, whole, ended bool) (DestKind, string) {
 	// only when the literal text itself ends it.
 	end := strings.IndexAny(rest, "/?#\\")
 	if end < 0 {
-		if !(whole && ended) {
+		if !whole || !ended {
 			return DestUnknown, ""
 		}
 		end = len(rest)
