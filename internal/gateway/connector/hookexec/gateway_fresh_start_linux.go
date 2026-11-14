@@ -111,7 +111,7 @@ func perUserFreshGatewayProof(dataDir string, check *perUserPeerCheck) restartPr
 		// The accepted socket must have exactly one holder, as on the
 		// shell helper's connection proof. A capture taken earlier also
 		// preserves this fact if the socket closed at the deadline.
-		holder, unique := perUserConnectedPeerPID(client, server)
+		holder, unique := perUserGatewayPeerPID(context.Background(), []string{dataDir}, client, server)
 		if !unique || holder != current.pid {
 			return restartProofResult{reason: "no_holder"}
 		}
@@ -138,8 +138,9 @@ func perUserFreshGatewayProof(dataDir string, check *perUserPeerCheck) restartPr
 // perUserCaptureFreshGatewayOwner records the sole holder while the call's
 // verified connection is open. A canceled request can close that socket at
 // the answer deadline before the proof runs. Capture runs only for a recent
-// gateway record and never delays the request.
-func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
+// gateway record and never delays the request. The record in dataDir names the
+// process asked first (perUserGatewayPeerPID).
+func perUserCaptureFreshGatewayOwner(dataDir string, check *perUserPeerCheck) {
 	if check == nil {
 		return
 	}
@@ -152,7 +153,10 @@ func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
 	if !okc || !oks {
 		return
 	}
-	go captureFreshGatewayOwner(check, client, server, perUserConnectedPeerPIDWithin)
+	homes := []string{dataDir}
+	go captureFreshGatewayOwner(check, client, server, func(ctx context.Context, client, server *net.TCPAddr) (int, bool) {
+		return perUserGatewayPeerPID(ctx, homes, client, server)
+	})
 }
 
 // captureFreshGatewayOwner reads the sole holder of the connection with scan

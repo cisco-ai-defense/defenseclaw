@@ -72,7 +72,17 @@ func TestPerUserLinuxProvisionalUIDIsNeverProof(t *testing.T) {
 		{name: "user caller, provisional root then foreign listener", self: 1001,
 			rows: [][2]int{{0, 0}, {foreign, 77}}, wantErr: "another account", wantReads: 2},
 		{name: "user caller, accepted root listener", self: 1001,
-			rows: [][2]int{{0, 77}}, wantErr: "another account", wantReads: 1},
+			rows: [][2]int{{0, 77}}, wantErr: "another account", wantReads: settledRootReads},
+		// rel-1-0-10 GAP-0395: the kernel reads the owner (sock_i_uid: root
+		// while the socket has no file) and the inode (sock_i_ino) apart, so
+		// a row read while accept() gives the socket its file can show the
+		// root UID beside the real inode. The next read names the owner.
+		{name: "user caller, root read while accept attaches the file", self: 1001,
+			rows: [][2]int{{0, 77}, {1001, 77}}, wantReads: 2},
+		{name: "user caller, provisional, then a torn root read, then own", self: 1001,
+			rows: [][2]int{{0, 0}, {0, 77}, {1001, 77}}, wantReads: 3},
+		{name: "user caller, a torn root read, then foreign", self: 1001,
+			rows: [][2]int{{0, 77}, {foreign, 77}}, wantErr: "another account", wantReads: 2},
 		{name: "user caller, never accepted", self: 1001,
 			rows: [][2]int{{0, 0}}, wantErr: "not accepted"},
 	} {

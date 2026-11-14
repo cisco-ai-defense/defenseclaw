@@ -151,7 +151,7 @@ func TestGAP0295ManagedAndSecureClientNeverTakeTheRestartWindow(t *testing.T) {
 			// The fresh-record render, when armed, runs in the background.
 			time.Sleep(50 * time.Millisecond)
 			w.mu.Lock()
-			armed := w.restart != nil || w.restartProof != nil
+			armed := w.restart != nil || w.restartChoice != nil || w.restartProof != nil
 			w.mu.Unlock()
 			if armed {
 				t.Fatal("the restart-window answer was armed for a managed or Secure Client call")
