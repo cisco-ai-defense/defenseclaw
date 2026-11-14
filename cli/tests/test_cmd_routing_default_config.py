@@ -290,3 +290,19 @@ def test_doctor_checks_the_systemone_endpoint_for_real(monkeypatch) -> None:
     assert row["status"] == "fail" and "not reachable" in row["detail"] and "setup decision-model --ping" in row["remediation"]
     none = _doctor_systemone(monkeypatch, 405, systemone={"use_decision_model": False})
     assert none["System One classifier"]["status"] == "warn" and "no endpoint" in none["System One classifier"]["detail"]
+
+
+def test_usage_rows_with_null_numbers_print(home: Path, monkeypatch) -> None:
+    (home / "config.yaml").write_text(CONFIGS["routing_off"])
+    answer = {"enabled": True, "scope": "own", "rows": [{"key": "fast", "calls": None, "input_tokens": None, "output_tokens": None}]}
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (answer, ""))
+    result = invoke(["usage"])
+    assert result.exit_code == 0 and "fast" in result.output and "Traceback" not in result.output, result.output
+
+
+def test_provider_names_follow_the_gateway_registry(home: Path, monkeypatch) -> None:
+    (home / "config.yaml").write_text(CONFIGS["empty"])
+    monkeypatch.setattr(cmd_routing, "_ask_gateway", lambda app, method, path, **kw: (None, "the gateway is not running"))
+    for provider in ("openai-compatible", "OpenAI", "amazon-bedrock", "vertex"):
+        result = invoke(["models", "add", provider.replace("-", "").lower()[:10], "--provider", provider, "--model", "m"])
+        assert result.exit_code == 0, (provider, result.output)

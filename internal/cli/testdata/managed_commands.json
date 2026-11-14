@@ -29,7 +29,7 @@
       "managed_windows": "Offered",
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "routing status",
-      "note": "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; every other routing command is set in the administrator's config."
+      "note": "`routing status`, `routing budgets list` and `routing explain <id>` show your own model routing decisions and budgets, read from the managed gateway; `routing rules list` shows the routing rules (all of them to an administrator, none to a standard account). Every other routing command, including `routing test`, is set in the administrator config and answers with the key that owns it (exit 3); an administrator dry-runs a rule with `routing test --as-user` on a workstation that has the per-user install."
     },
     {
       "command": "defenseclaw sandbox ...",

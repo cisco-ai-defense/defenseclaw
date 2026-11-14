@@ -292,8 +292,8 @@ func (a *APIServer) handleRoutingTest(w http.ResponseWriter, r *http.Request) {
 	d := eng.Decide(r.Context(), engineRequest(in))
 	body := map[string]any{
 		"category": d.Category, "confidence": d.Confidence, "candidate_alias": d.Candidate,
-		"filtered_by": d.FilteredBy, "rule_ids": d.RuleIDs, "outcome": d.Outcome, "source": d.Source,
-		"warnings": d.Warnings, "failure": d.FailureCode, "simulated": simulated,
+		"filtered_by": d.FilteredBy, "rule_ids": nonNilSlice(d.RuleIDs), "outcome": d.Outcome, "source": d.Source,
+		"warnings": nonNilSlice(d.Warnings), "failure": d.FailureCode, "simulated": nonNilSlice(simulated),
 	}
 	if d.Backend != nil {
 		body["selected_alias"], body["selected_model"] = d.Backend.Alias, d.Backend.Model

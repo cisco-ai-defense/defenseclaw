@@ -403,7 +403,7 @@ func executeLauncher(ctx context.Context, root *cobra.Command, args []string) in
 		if command, ok := launcherAuditedWriter(args); ok && !launcherAsksHelp(args) {
 			reportManagedCommandRefusal(command, "")
 		}
-		if len(args) > 0 && args[0] == "routing" && !launcherAsksHelp(args) {
+		if managedRoutingNamedRefusal(args) && !launcherAsksHelp(args) {
 			// A routing command the launcher does not run is the managed
 			// routing answer: the key the administrator config owns, exit 3
 			// (GAP-0573), not the generic refusal.

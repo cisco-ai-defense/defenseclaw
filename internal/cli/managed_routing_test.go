@@ -167,7 +167,7 @@ func TestLauncherRunsTheRoutingReads(t *testing.T) {
 	}
 }
 
-// The launcher (Linux, macOS) runs the three reads and nothing else of routing.
+// The launcher (Linux, macOS) runs the four reads and nothing else of routing.
 func TestLauncherOffersOnlyTheRoutingReads(t *testing.T) {
 	for _, args := range [][]string{{"routing", "status"}, {"routing", "budgets", "list"}, {"routing", "explain", "x"}, {"routing", "rules", "list"}} {
 		if !launcherOffers(args) {
@@ -214,6 +214,23 @@ func TestManagedRoutingRulesListAndNamedRefusals(t *testing.T) {
 	} {
 		if got := managedRoutingRefusal(strings.Fields(words)); !strings.Contains(got, key+" is set by your administrator") || !strings.Contains(got, "Nothing was changed.") {
 			t.Fatalf("%s: %q", words, got)
+		}
+	}
+}
+
+// The tree (managed Windows defenseclaw.exe) names the key too, not only the launcher.
+func TestManagedRoutingTreeRefusalNamesTheKey(t *testing.T) {
+	for args, key := range map[string]string{
+		"enable": "routing.enabled", "rules add": "routing.admin.rules", "budgets add": "routing.admin.budgets", "pricing set": "observability.pricing",
+	} {
+		root := &cobra.Command{Use: "defenseclaw"}
+		root.SetErr(io.Discard)
+		root.SetOut(io.Discard)
+		root.AddCommand(newManagedRoutingCmd())
+		root.SetArgs(append([]string{"routing"}, strings.Fields(args)...))
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), key+" is set by your administrator") {
+			t.Fatalf("%s: %v", args, err)
 		}
 	}
 }

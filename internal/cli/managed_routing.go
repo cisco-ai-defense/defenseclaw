@@ -42,7 +42,7 @@ func managedRoutingRefusal(words []string) string {
 			key = k
 		}
 	}
-	return "this computer DefenseClaw is managed by your organization: " + key + " is set by your administrator in the " +
+	return "this computer's DefenseClaw is managed by your organization: " + key + " is set by your administrator in the " +
 		"administrator config (model routing, its rules and budgets). You can read your own routing with " + managedRoutingReads +
 		". Nothing was changed."
 }
@@ -65,7 +65,7 @@ func newManagedRoutingCmd() *cobra.Command {
 		if command, ok := launcherAuditedWriter(words); ok {
 			reportManagedCommandRefusal(command, "")
 		}
-		return withExitCode(managedDeviceAnswer(managedRoutingRefusal(words)), 3)
+		return withExitCode(managedDeviceAnswer(managedRoutingRefusal(words[1:])), 3)
 	}
 	read := func(path string) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, _ []string) error { return runManagedRoutingRead(cmd, path) }
@@ -159,6 +159,21 @@ func managedRoutingWriter(words []string) (string, bool) {
 // the caller: an administrator reads routing.admin.rules, a standard account
 // none (the rules are administrator policy; a user reads the outcome with
 // routing status and routing explain).
+// managedRoutingNamedRefusal reports whether args are a routing writer or the
+// dry run: the commands whose refusal names the config key that owns them.
+// Any other routing command the launcher does not offer keeps the generic
+// launcher refusal (exit 2).
+func managedRoutingNamedRefusal(args []string) bool {
+	if len(args) < 2 || args[0] != "routing" {
+		return false
+	}
+	if args[1] == "test" {
+		return true
+	}
+	_, ok := managedRoutingWriter(args[1:])
+	return ok
+}
+
 func runManagedRoutingRules(cmd *cobra.Command) error {
 	status, body, err := managedRoutingRead(cmd.Context(), "/api/v1/routing/effective")
 	if err != nil {

@@ -36,6 +36,16 @@ SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 # The gateway serves usage at GET /usage (docs: gateway-api, tokenomics); it is
 # not under /api/v1 (GAP-0569).
 USAGE_PATH = "/usage"
+# Provider names the gateway routes (mapProviderKey in internal/gateway/provider_bifrost.go,
+# matched case-insensitively there): the recognized LLM providers plus the aliases it accepts.
+ROUTING_PROVIDERS = frozenset(
+    {
+        "openai", "openai-compatible", "custom-openai", "anthropic", "bedrock", "amazon-bedrock", "azure",
+        "gemini", "gemini-openai", "vertex", "vertex_ai", "vertexai", "openrouter", "groq", "mistral", "ollama",
+        "vllm", "cohere", "perplexity", "cerebras", "fireworks", "fireworks_ai", "fireworksai", "xai", "deepseek",
+        "together", "together_ai", "togetherai", "lm_studio", "lmstudio", "huggingface", "replicate", "local",
+    }
+)
 USAGE_BY = ("model", "connector", "route", "user", "group", "profile")
 # Starting keyword rules that routing setup --route writes (GAP-0565). The
 # rules classifier matches each list as case-insensitive substrings on the
@@ -44,12 +54,12 @@ ROUTE_CATEGORIES: dict[str, tuple[int, list[str]]] = {
     "coding": (
         80,
         ["debug", "implement", "refactor", "function", "compile", "bug", "traceback", "stack trace",
-         "unit test", "regex", "sql", "python", "golang", "javascript", "typescript", "rust", "bash", "dockerfile",
-         "terraform", "diff"],
+         "unit test", "regex", "sql", "python", "golang", "javascript", "typescript", "in rust", "bash", "dockerfile",
+         "terraform", "git diff"],
     ),
     "reasoning": (
         70,
-        ["prove", "proof", "theorem", "puzzle", "probability", "derive", "complexity", "big-o", "optimal",
+        ["prove", "theorem", "puzzle", "probability", "derive", "complexity", "big-o", "optimal",
          "trade-off", "tradeoff", "step by step", "design a system", "constraints", "riddle"],
     ),
     "summarize": (
@@ -189,12 +199,10 @@ def _check_provider(provider: str, *, option: str = "--provider") -> str:
     """The provider name, if the gateway knows it (the provider registry the
     judge and the decision model use). An unknown name was written and failed
     on the first call (GAP-0600)."""
-    from defenseclaw.config import _RECOGNIZED_LLM_PROVIDERS
-
     name = provider.strip()
-    if name not in _RECOGNIZED_LLM_PROVIDERS:
+    if name.lower() not in ROUTING_PROVIDERS:
         raise click.UsageError(
-            f"{option}: unknown provider {provider!r}. Use one of: " + ", ".join(sorted(_RECOGNIZED_LLM_PROVIDERS))
+            f"{option}: unknown provider {provider!r}. Use one of: " + ", ".join(sorted(ROUTING_PROVIDERS))
         )
     return name
 
@@ -1244,8 +1252,8 @@ def routing_usage(app: AppContext, group_by: str, since: str, as_json: bool) -> 
         cost_text = f"{cost:.4f} USD" if isinstance(cost, (int, float)) else "cost unknown"
         basis = f" ({r['cost_basis']})" if r.get("cost_basis") else ""
         click.echo(
-            f"  {str(r.get('key', '-')):<28} {r.get('calls', 0):>6} calls  in {r.get('input_tokens', 0):>9}  "
-            f"out {r.get('output_tokens', 0):>8}  {cost_text}{basis}"
+            f"  {str(r.get('key', '-')):<28} {r.get('calls') or 0:>6} calls  in {r.get('input_tokens') or 0:>9}  "
+            f"out {r.get('output_tokens') or 0:>8}  {cost_text}{basis}"
         )
 
 

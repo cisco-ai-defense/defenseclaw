@@ -207,3 +207,13 @@ func TestRoutingListsAreNeverNull(t *testing.T) {
 		}
 	}
 }
+
+func TestNonNilSlice(t *testing.T) {
+	var none []string
+	if raw, _ := json.Marshal(nonNilSlice(none)); string(raw) != "[]" {
+		t.Fatalf("nil slice marshals as %s", raw)
+	}
+	if raw, _ := json.Marshal(nonNilSlice([]string{"a"})); string(raw) != `["a"]` {
+		t.Fatalf("slice marshals as %s", raw)
+	}
+}
