@@ -194,6 +194,11 @@ async def test_empty_config_and_usage_rows_render_at_80x24(tmp_path, monkeypatch
         model = app.routing_model
         assert model.usage_rows() and model.data_table_rows(compact=True) == [("fast", "3", "0.5000")]
         text = screen_text(app)
+        for _ in range(40):  # the table repaints a frame after the summary line
+            if "0.5000" in text:
+                break
+            await pilot.pause(0.05)
+            text = screen_text(app)
         assert "Usage for the last week (yours)" in text and "0.5000" in text, text
 
 

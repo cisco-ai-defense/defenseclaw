@@ -195,7 +195,7 @@ def test_setup_route_refuses_unknown_category_or_alias(home: Path, spec: str) ->
     assert (home / "config.yaml").read_bytes() == before
 
 
-def _doctor_routing(**routing) -> dict:
+def _doctor_routing(expect: int = 1, **routing) -> dict:
     from types import SimpleNamespace
 
     from defenseclaw.commands import cmd_doctor
@@ -203,7 +203,7 @@ def _doctor_routing(**routing) -> dict:
     result = cmd_doctor._DoctorResult()
     cfg = SimpleNamespace(routing=SimpleNamespace(enabled=True, remote={}, port=8799, models=[{"name": "fast"}], **routing))
     cmd_doctor._check_semantic_routing(cfg, result, live_health=None)
-    assert len(result.checks) == 1
+    assert len(result.checks) == expect  # systemone adds its reachability row
     return result.checks[0]
 
 
@@ -216,7 +216,8 @@ def test_doctor_rules_classifier_is_in_process_and_flags_missing_rules(monkeypat
     assert "no route rules" in flagged["detail"] and "every request goes to fast" in flagged["detail"]
     ok = _doctor_routing(classifier="rules", default_alias="fast", decisions=[{"name": "coding"}])
     assert ok["status"] == "pass" and "rules classifier, in process" in ok["detail"] and "default fast" in ok["detail"]
-    one = _doctor_routing(classifier="systemone", default_alias="fast", decisions=[])
+    monkeypatch.setattr(cmd_doctor, "_http_probe", lambda url, **kw: (405, ""))
+    one = _doctor_routing(classifier="systemone", default_alias="fast", decisions=[], expect=2)
     assert one["status"] == "pass" and "systemone classifier" in one["detail"]
 
 
