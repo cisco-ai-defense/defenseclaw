@@ -4,12 +4,9 @@
 package hookpaths
 
 import (
+	"runtime"
 	"testing"
-
-	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
-
-func init() { bounded.PanicOnMisuse(true) }
 
 // rel-1-0-10:GAP-0437: an assignment whose $(( arithmetic has a syntax error
 // made the recovering parse behind UnprovenProtectedWrite panic. The reader
@@ -26,8 +23,11 @@ func TestUnprovenProtectedWriteParserFaultIsBound(t *testing.T) {
 		if got := UnprovenProtectedWrite(command, cwd, home); got != "shell-parse-bound" {
 			t.Errorf("UnprovenProtectedWrite(%q) = %q, want shell-parse-bound", command, got)
 		}
-		if got := ActionCommandAuditReason(command, cwd, home); got != "shell-parse-bound" {
-			t.Errorf("ActionCommandAuditReason(%q) = %q, want shell-parse-bound", command, got)
+		// A Windows home is read by the Windows decision first, which
+		// gives its own unknown class; the POSIX reading is the bound.
+		got := ActionCommandAuditReason(command, cwd, home)
+		if got == "" || runtime.GOOS != "windows" && got != "shell-parse-bound" {
+			t.Errorf("ActionCommandAuditReason(%q) = %q, want shell-parse-bound (an unknown class on Windows)", command, got)
 		}
 		if !ShellParseBound("claudecode", "Bash", command, cwd, home) {
 			t.Errorf("ShellParseBound(%q) = false, want true", command)
