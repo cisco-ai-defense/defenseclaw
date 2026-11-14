@@ -89,3 +89,31 @@ func TestSecretRecallSR8SecretsWithSlashesAreNotPaths(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0563: digit groups of nine digits or fewer weigh nothing only up to 13
+// digits in all; several random groups carry the value and are not a name.
+func TestSecretRecallSR8ManyDigitGroupsAreNotAName(t *testing.T) {
+	for _, name := range []string{"dr_secret_key_1700000000", "build_20261113_1530_v2", "build_2026_nightly_1700000000", "summer-holiday-1700000000123"} {
+		if got := secretAssignmentRejection(name); got == "" {
+			t.Errorf("a composed name was accepted as a secret: %q", name)
+		}
+	}
+	r := rand.New(rand.NewSource(563))
+	const digits = "0123456789"
+	const n = 2000
+	for label, sep := range map[string]string{"underscore": "_", "slash": "/"} {
+		accepted := 0
+		for i := 0; i < n; i++ {
+			parts := []string{"prod"}
+			for g := 0; g < 4; g++ {
+				parts = append(parts, randomString(r, digits, 9))
+			}
+			if secretAssignmentRejection(strings.Join(parts, sep)) == "" {
+				accepted++
+			}
+		}
+		if accepted != n {
+			t.Errorf("word and 4 x 9 digits joined by %s (%s): accepted %d of %d, want all", sep, label, accepted, n)
+		}
+	}
+}

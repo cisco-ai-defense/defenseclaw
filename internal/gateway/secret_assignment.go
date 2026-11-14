@@ -238,11 +238,16 @@ func secretAssignmentRejection(raw string) string {
 	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
 	// with separators still carries one long random piece.
 	if segments := strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' }); len(segments) > 1 {
-		longest := 0
+		longest, counterDigits := 0, 0
 		for _, segment := range segments {
 			longest = max(longest, len(segment))
+			if strings.Trim(segment, "0123456789") == "" {
+				counterDigits += len(segment)
+			}
 		}
-		if longest < 10 {
+		// Short pieces are a phrase; several digit groups that run past a
+		// date and a time are a number a program drew (GAP-0563).
+		if longest < 10 && counterDigits <= maxSecretAssignmentCounterDigits {
 			return "pieces"
 		}
 	}
@@ -366,11 +371,17 @@ func secretAssignmentCodeChar(c byte) bool {
 	return secretAssignmentIdentStart(c) || c >= '0' && c <= '9' || strings.IndexByte(".+-*/=&!", c) >= 0
 }
 
+// maxSecretAssignmentCounterDigits is the digits of short counters in one value
+// that weigh nothing: a date (8) and a time (4) with a digit to spare.
+const maxSecretAssignmentCounterDigits = 13
+
 // secretAssignmentNameShaped reports a value a person composed: words and
 // numbers joined by _, -, . or / (a relative path), where the letters and digits of the value that
 // do not sit in a word-shaped run of three letters or more are under three
-// tenths. A separator-delimited number of nine digits or fewer is a counter or
-// a year and weighs nothing; so does ONE number of ten or thirteen digits,
+// tenths. Separator-delimited numbers of nine digits or fewer are counters or
+// years and weigh nothing up to 13 digits in all (a date and a time, build_20261113_1530,
+// fit); further ones count as digits, so several random groups do not pass as
+// a name (GAP-0563). ONE number of ten or thirteen digits weighs nothing too,
 // which is a timestamp in seconds or milliseconds (dr_secret_key_1700000000),
 // and ONE version token (python3dot11, md5sum2024). Any other digit counts
 // against the name, so a random token that holds digits, or words followed by
@@ -378,12 +389,14 @@ func secretAssignmentCodeChar(c byte) bool {
 func secretAssignmentNameShaped(value string) bool {
 	letters, digits, wordLetters := 0, 0, 0
 	sawTimestamp, sawVersion := false, false
+	shortCounterDigits := 0
 	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == '/' }) {
 		if secretAssignmentCounter(segment) {
 			if len(segment) < 10 {
-				continue
-			}
-			if !sawTimestamp {
+				if shortCounterDigits += len(segment); shortCounterDigits <= maxSecretAssignmentCounterDigits {
+					continue
+				}
+			} else if !sawTimestamp {
 				sawTimestamp = true
 				continue
 			}
