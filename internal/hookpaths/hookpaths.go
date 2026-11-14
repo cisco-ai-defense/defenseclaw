@@ -2001,6 +2001,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
+				if !isApplyPatchToolName(tool) && unprovenReason == "" && WriteOperandCaps(command, cwd, home).Any() {
+					unprovenReason = UnprovenBoundedPaths
+				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
@@ -2009,11 +2012,15 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					if !protectedDecision && !noDereferenceTouchSafe {
 						// A per-user gateway reads the user's links itself; a
 						// managed gateway cannot. The client carries its own
-						// decision for EVERY call, not for a list of verbs or a
-						// syntax (rel-1-0-10 GAP-0415, GAP-0326, GAP-0327), minus
+						// decision for EVERY call with a word the shell expands,
+						// not for a list of verbs or a syntax (rel-1-0-10 GAP-0415,
+						// GAP-0326, GAP-0327): a call of fixed text is judged by
+						// the walk of its operands above, which names what each
+						// verb reads and writes. The carry is minus
 						// a value the call proves dead and a call whose writers
 						// the one resolver proves safe (writersAllProvenSafe).
-						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
+						protectedDecision = commandMayExpand(command) &&
+							ActionCommandDecision(command, cwd, home) != "" &&
 							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 							!actionClientProvedOverwrittenRedirect(command, cwd, home) &&
 							!writersAllProvenSafe(command, cwd, home, nil)

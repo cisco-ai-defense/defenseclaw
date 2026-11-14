@@ -161,7 +161,7 @@ func TestResolveShellWordUncertainClasses(t *testing.T) {
 		if err := os.Mkdir(many, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		for i := 0; i <= maxResolvedCandidates; i++ {
+		for i := 0; i <= MaxResolvedCandidates; i++ {
 			if err := os.WriteFile(filepath.Join(many, "f"+string(rune('a'+i%26))+string(rune('a'+i/26%26))+string(rune('a'+i/676))), nil, 0o600); err != nil {
 				t.Fatal(err)
 			}

@@ -6,8 +6,10 @@ package hookpaths
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -237,4 +239,40 @@ func writersAllProvenSafe(command, cwd, home string, memo *TargetMemo) bool {
 		}
 	}
 	return true
+}
+
+// commandMayExpand reports a command with a character the shell expands or
+// reads as code: a parameter or command substitution, a glob or brace
+// pattern, a backslash or backtick, a subshell or process substitution. A
+// command without one is fixed text: every word names exactly what it reads
+// as, and the walk of its operands judges them by what each verb does with
+// them (a read operand of a writer is not a write). The managed carry
+// (hookpaths.go) is for the other commands, whose word a managed gateway
+// behind ProtectHome cannot place (rel-1-0-10 GAP-0415).
+func commandMayExpand(command string) bool {
+	return strings.ContainsAny(command, "$*?[{\\`(")
+}
+
+// UnprovenBoundedPaths is the UnprovenReasonKey class of a call whose write
+// operand expanded to more paths than the resolver reads (MaxResolvedCandidates):
+// the hook client tells a managed gateway, which cannot read the home, that
+// the call is truncated at the bounded.Paths cap (rel-1-0-10 GAP-0438).
+const UnprovenBoundedPaths = "bounded-paths"
+
+// WriteOperandCaps are the caps the one resolver hit reading the write
+// operands of command (bounded.Paths: a word expanded to more than
+// MaxResolvedCandidates paths). A call that hit one is truncated: the caller
+// judges what was read as before and the bound rule floors it to the unknown
+// tier of the pack (internal/guardrail/bounded). A command without a
+// character the shell expands cannot hit one and is not read.
+func WriteOperandCaps(command, cwd, home string) bounded.CapSet {
+	var set bounded.CapSet
+	if !commandMayExpand(command) {
+		return set
+	}
+	forEachWriteOperand(command, cwd, home, CurrentShellStartup(), func(resolved resolvedWord) bool {
+		set = set.Union(resolved.caps)
+		return false
+	})
+	return set
 }

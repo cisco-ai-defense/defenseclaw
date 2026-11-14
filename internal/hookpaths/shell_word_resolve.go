@@ -27,11 +27,11 @@ const (
 	wordUncertainTruncated = "shell-parse-bound"
 )
 
-// maxResolvedCandidates bounds the paths one word may expand to, counted by
+// MaxResolvedCandidates bounds the paths one word may expand to, counted by
 // a bounded.Counter on bounded.Paths (the one bound rule, rel-1-0-10
 // GAP-0301): a word past it is truncated, so uncertain, never cut short and
 // never judged below the unknown tier.
-const maxResolvedCandidates = 256
+const MaxResolvedCandidates = 256
 
 // shellGlobOptions are the bash options that change pathname expansion. The
 // first group the resolver models exactly (dotGlob, noCaseGlob, nullGlob,
@@ -174,7 +174,7 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
 	matches, complete, unseen := actionExpandGlobFold(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob)
 	var truncated bounded.Truncated
-	candidates := bounded.NewCounter(&truncated, bounded.Paths, maxResolvedCandidates)
+	candidates := bounded.NewCounter(&truncated, bounded.Paths, MaxResolvedCandidates)
 	switch {
 	case unseen || !complete:
 		return resolvedWord{uncertain: wordUncertainUnread}

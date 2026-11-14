@@ -105,6 +105,8 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	ReplaceVerbShape(command, cwd, home)
 	replaceVerbSafe(command, cwd, home)
 	writersAllProvenSafe(command, cwd, home, nil)
+	commandMayExpand(command)
+	WriteOperandCaps(command, cwd, home)
 	actionGlobFacts(command, cwd, home)
 	LinkWalkFacts(command, cwd, home)
 }
@@ -124,7 +126,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionfacts.Analyze", "actionfacts.CommandTextOverLimit", "actionfacts.DynamicOperandTwins", "actionfacts.OverLimitCommandBoundedTwin",
 	"actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
 	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
-	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "ReplaceVerbShape", "replaceVerbSafe", "writersAllProvenSafe", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
+	"plainMoveDestinationsWithStatements", "powerShellQuotedPathOperands", "ReplaceVerbShape", "replaceVerbSafe", "writersAllProvenSafe", "commandMayExpand", "WriteOperandCaps", "shellWriteOperands", "shellparse.PastReadingBounds", "straightLineReadings",
 }
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep

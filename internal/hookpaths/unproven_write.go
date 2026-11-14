@@ -31,6 +31,7 @@ var unprovenReasonTitles = map[string]string{
 	"interpreter-argument":   "An interpreter has a dynamic argument after writable code",
 	"shell-parse":            "A shell parse error leaves a protected write unproved",
 	"shell-parse-bound":      "A shell parse exceeded the protected write proof bound",
+	UnprovenBoundedPaths:     "A write operand expanded past the path bound and may name a protected file",
 	"copy-directory":         "A copy into a directory can select a protected file",
 	"cdpath":                 "CDPATH can select a directory containing a protected file link",
 	"nested-shell":           "A nested shell or shell script can write a protected file",

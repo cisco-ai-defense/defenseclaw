@@ -449,6 +449,12 @@ func dispatchTrustedAction(
 	if request.EnforcementCapable && trustedCallShellParseBound(request) {
 		return trustedActionLimitFindings(true)
 	}
+	// A write operand the resolver read past its path bound is truncated
+	// (bounded.Paths): what was read is judged below, and the bound rule
+	// floors the call to the unknown tier of the pack (rel-1-0-10 GAP-0438).
+	if caps := trustedResolverCaps(request); caps.Any() {
+		defer func() { findings = withBoundedTruncation(findings, caps, request) }()
+	}
 	if bound == shellReadingNestedProof {
 		// The readers below read it, but past this weight they do not prove
 		// its protected targets: a call whose text may name one also gets
