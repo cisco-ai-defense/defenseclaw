@@ -95,6 +95,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "b82abc998f4b917dbbc856bda3bb4f9211ce829b3ab86a6464a031b6953b680a",
             # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
             "bada955b0ca029db29465c2ab0d5b4ffde02406eed0e16c36e70c7bc1de27ec6",
+            # 1.0.10 (s7/response round 2, GAP-0371): SEC-BEARER-BARE and 8-character password assignments, with rel, s7/secret-recall and s7/bounded merged.
+            "bcb5f38ece1c9cace7a1c96cf1a19f68f2697924c069ef92affac57970d1aae5",
         }
     ),
     "permissive": frozenset(
@@ -146,6 +148,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "969de899d5a8544152cd09ad05b1e67ac841a4da53c4bb1e992a3b55c796f7a1",
             # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
             "a35b1f3babbf06082de85953c1b6f7743233cff459a7ec19dbbf6c64181c5177",
+            # 1.0.10 (s7/response round 2, GAP-0371): SEC-BEARER-BARE and 8-character password assignments, with rel, s7/secret-recall and s7/bounded merged.
+            "4138d4940c69bc5347e0bdca0d20aef30dba5049ca881fe831f38a4cfce817c5",
         }
     ),
     "strict": frozenset(
@@ -196,6 +200,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f6ba060634b55b87887932700fbd73cd7d658f175f2bc83a75b057e45e8355aa",
             # 1.0.10 (s7/secret-recall): SEC-SECRET-ASSIGN, a generic credential-assignment rule.
             "18bef68d5e6cf60390d9f3925667fa2afa39d9d74b70ee5114c02de8b714c3ec",
+            # 1.0.10 (s7/response round 2, GAP-0371): SEC-BEARER-BARE and 8-character password assignments, with rel, s7/secret-recall and s7/bounded merged.
+            "b94289f634d6e17826a8510c82ee0e80536a19db9fda8cd2c6e065b38a75d473",
         }
     ),
 }

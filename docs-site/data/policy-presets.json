@@ -2852,6 +2852,16 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -2903,7 +2913,7 @@
                 },
                 {
                   "id": "SEC-SECRET-ASSIGN",
-                  "pattern": "(?i)\\b[a-z0-9_-]{0,48}?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?[a-z0-9_-]{0,48}\\\\*[\"']?\\s*(?:[:=,(]|\\s+is\\s+|=>)\\s*\\\\*[\"']?[A-Za-z0-9_\\-+/=.!@#$%^&*~]{12,128}",
+                  "pattern": "(?i)\\b[a-z0-9_-]{0,48}?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?[a-z0-9_-]{0,48}\\\\*[\"']?\\s*(?:[:=,(]|\\s+is\\s+|=>)\\s*\\\\*[\"']?[A-Za-z0-9_\\-+/=.!@#$%^&*~]{8,128}",
                   "title": "Credential-named assignment with a random-looking value",
                   "severity": "MEDIUM",
                   "confidence": 0.6,
@@ -6963,6 +6973,16 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -7014,7 +7034,7 @@
                 },
                 {
                   "id": "SEC-SECRET-ASSIGN",
-                  "pattern": "(?i)\\b[a-z0-9_-]{0,48}?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?[a-z0-9_-]{0,48}\\\\*[\"']?\\s*(?:[:=,(]|\\s+is\\s+|=>)\\s*\\\\*[\"']?[A-Za-z0-9_\\-+/=.!@#$%^&*~]{12,128}",
+                  "pattern": "(?i)\\b[a-z0-9_-]{0,48}?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?[a-z0-9_-]{0,48}\\\\*[\"']?\\s*(?:[:=,(]|\\s+is\\s+|=>)\\s*\\\\*[\"']?[A-Za-z0-9_\\-+/=.!@#$%^&*~]{8,128}",
                   "title": "Credential-named assignment with a random-looking value",
                   "severity": "MEDIUM",
                   "confidence": 0.6,
@@ -10800,6 +10820,16 @@
                   ]
                 },
                 {
+                  "id": "SEC-BEARER-BARE",
+                  "pattern": "(?i)\\bbearer\\s+[A-Za-z0-9\\-_.~+/]{20,}=*",
+                  "title": "Bearer credential",
+                  "severity": "MEDIUM",
+                  "confidence": 0.6,
+                  "tags": [
+                    "credential"
+                  ]
+                },
+                {
                   "id": "SEC-SENDGRID",
                   "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
                   "title": "SendGrid API key",
@@ -10851,7 +10881,7 @@
                 },
                 {
                   "id": "SEC-SECRET-ASSIGN",
-                  "pattern": "(?i)\\b[a-z0-9_-]{0,48}?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?[a-z0-9_-]{0,48}\\\\*[\"']?\\s*(?:[:=,(]|\\s+is\\s+|=>)\\s*\\\\*[\"']?[A-Za-z0-9_\\-+/=.!@#$%^&*~]{12,128}",
+                  "pattern": "(?i)\\b[a-z0-9_-]{0,48}?(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|credential)s?[a-z0-9_-]{0,48}\\\\*[\"']?\\s*(?:[:=,(]|\\s+is\\s+|=>)\\s*\\\\*[\"']?[A-Za-z0-9_\\-+/=.!@#$%^&*~]{8,128}",
                   "title": "Credential-named assignment with a random-looking value",
                   "severity": "MEDIUM",
                   "confidence": 0.6,
