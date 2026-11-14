@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -825,24 +827,39 @@ func TestBufferedToolCallChunksCapped(t *testing.T) {
 		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: &fin}},
 	})
 
-	prov := &mockProvider{streamChunks: chunks}
-	insp := newMockInspector()
-	proxy := newTestProxy(t, prov, insp, "action")
-
 	reqBody := mustJSON(t, map[string]interface{}{
 		"model":    "gpt-4",
 		"messages": []map[string]interface{}{{"role": "user", "content": "big payload"}},
 		"stream":   true,
 	})
-
-	rec := postChat(t, proxy, reqBody)
-	body := rec.Body.String()
-
-	if !strings.Contains(body, "blocked") {
-		t.Error("expected block message when buffered tool-call data exceeds cap")
-	}
-	if !strings.Contains(body, "[DONE]") {
-		t.Error("stream should end with [DONE]")
+	// The cap is the one bound rule (rel-1-0-10 review P3-5): past it the
+	// calls are judged as read. The strict pack's unknown tier blocks; the
+	// default pack alerts and the stream goes on whole.
+	for _, pack := range []string{"default", "strict"} {
+		prov := &mockProvider{streamChunks: chunks}
+		proxy := newTestProxy(t, prov, newMockInspector(), "action")
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(reqBody))
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("Content-Type", "application/json")
+		cfg := &config.Config{}
+		cfg.Guardrail.RulePack = pack
+		req = req.WithContext(withPinnedGeneration(req.Context(), &Generation{N: 1, Config: cfg}))
+		rec := httptest.NewRecorder()
+		proxy.handleChatCompletion(rec, req)
+		body := rec.Body.String()
+		if !strings.Contains(body, "[DONE]") {
+			t.Errorf("%s: stream should end with [DONE]", pack)
+		}
+		delivered := strings.Count(body, `"name":"big"`)
+		if pack == "strict" {
+			if !strings.Contains(body, "blocked") || delivered != 0 {
+				t.Errorf("strict: want the block notice and no tool-call chunk, got %d chunks", delivered)
+			}
+			continue
+		}
+		if strings.Contains(body, "blocked") || delivered != 30 {
+			t.Errorf("default: want all 30 tool-call chunks and no block, got %d chunks", delivered)
+		}
 	}
 }
 
