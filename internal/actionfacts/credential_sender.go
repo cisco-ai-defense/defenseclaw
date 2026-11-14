@@ -73,8 +73,14 @@ func credentialFileLiteral(literal, cwd, home string) bool {
 	case strings.HasPrefix(value, "~/") && strings.HasPrefix(home, "/"):
 		value = path.Join(home, value[2:])
 	case strings.HasPrefix(value, "/"):
-	case strings.HasPrefix(cwd, "/") && !strings.Contains(value, "://") && !strings.ContainsAny(value, " \t"):
-		value = path.Join(cwd, value)
+	case !strings.Contains(value, "://") && !strings.ContainsAny(value, " \t"):
+		// A relative name: the hook path often has no working directory, so
+		// the name is judged by its shape alone, rooted at /.
+		root := "/"
+		if strings.HasPrefix(cwd, "/") {
+			root = cwd
+		}
+		value = path.Join(root, value)
 	default:
 		return false
 	}
