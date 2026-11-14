@@ -46,9 +46,12 @@ const (
 	hookLoneTrigger = "trg_audit_hook_lone_delete"
 )
 
+// hookLonePairSQL removes the listed fail-mode decisions of a semantic event.
+const hookLonePairSQL = `DELETE FROM ` + hookLoneTable + ` WHERE semantic_event_id = ?`
+
 var hookLoneDDL = []string{
-	// semantic_event_id is set only for a fail-mode decision that waits for
-	// the failure report's connector-hook row (the partial index holds just
+	// semantic_event_id is set only for a fail-mode decision, which any
+	// connector-hook row of that event pairs (the partial index holds just
 	// those); a row of record stores its key alone, about 57 B.
 	`CREATE TABLE IF NOT EXISTS ` + hookLoneTable + ` (
 		audit_event_id TEXT PRIMARY KEY,
@@ -190,8 +193,9 @@ func (s *Store) trackHookRowTx(ctx context.Context, tx *sql.Tx, action, recordID
 			return err
 		}
 	case string(ActionConnectorHook), string(ActionConnectorHookSynthetic):
-		_, err := txExecContextObserved(ctx, tx, "audit_hook_lone_pair", s.sqliteBusyObservabilityV8(),
-			`DELETE FROM `+hookLoneTable+` WHERE semantic_event_id = ?`, semanticEventID)
+		// Every managed connector-hook row runs it: prepared, like the row's
+		// own insert (prepared_statements.go).
+		_, err := s.txExecPrepared(ctx, tx, "audit_hook_lone_pair", hookLonePairSQL, semanticEventID)
 		return err
 	}
 	return nil

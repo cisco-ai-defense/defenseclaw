@@ -20,7 +20,9 @@ import (
 // transaction.
 // The field class set insert runs once per row too (field_class_sets.go); on
 // a Secure Client store it has no table, does not prepare and is never run.
-var preparedStatementQueries = []string{eventHistoryInsertSQL, correlationObservationInsertSQL, fieldClassSetInsertSQL}
+// hookLonePairSQL runs once per connector-hook row; on a Secure Client store
+// (no audit_hook_lone) it does not prepare and is never run.
+var preparedStatementQueries = []string{eventHistoryInsertSQL, correlationObservationInsertSQL, fieldClassSetInsertSQL, hookLonePairSQL}
 
 // prepareStatements prepares the repeated inserts on the store's connection.
 // A statement that does not prepare runs as text, as before.
