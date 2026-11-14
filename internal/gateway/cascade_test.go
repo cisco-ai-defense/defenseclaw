@@ -78,7 +78,7 @@ func TestCascadeFinalActionTable(t *testing.T) {
 			if tt.floor != "" {
 				eff.CriticalFloor = tt.floor
 			}
-			out := cascadeFinalAction(tt.before, tt.flagged, tt.critical, false, tt.decisions, tt.err, "alert", eff)
+			out := cascadeFinalAction(tt.before, tt.flagged, tt.critical, false, false, tt.decisions, tt.err, "alert", eff)
 			if out.Final != tt.want || out.DecidedBy != tt.decidedBy || out.PolicyRule != tt.policyRule {
 				t.Fatalf("got final=%s decided_by=%q rule=%q, want %s %q %q", out.Final, out.DecidedBy, out.PolicyRule, tt.want, tt.decidedBy, tt.policyRule)
 			}
@@ -123,7 +123,7 @@ func TestCascadeFinalInvariantGrid(t *testing.T) {
 										default:
 											decisions = []policy.CascadeDecision{{Action: answer, ID: "x"}}
 										}
-										out := cascadeFinalAction(before, flagged, critical, uninspected, decisions, err, unknown, e)
+										out := cascadeFinalAction(before, flagged, critical, uninspected, false, decisions, err, unknown, e)
 										got := rank(out.Final)
 										n++
 										if critical && got < rank(floor) {

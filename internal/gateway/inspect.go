@@ -191,6 +191,11 @@ type ToolInspectVerdict struct {
 	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
 	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
 	decisionConfirm bool
+	// uninspectedRaised marks an action the uninspected marker raised
+	// (markOversizeUninspected, markContentCut), not one the content that was
+	// read proved: the cascade policy may lower it, but never below the
+	// unknown tier. A proven block on uninspected content stays a block.
+	uninspectedRaised bool
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -210,15 +215,54 @@ type ToolInspectVerdict struct {
 // (bounded_prefix_review, from the per-user shell inspect hooks) like the
 // native hook route: never a silent allow of a call the gateway read only in
 // part. It runs before applyMode, so observe mode warns and audits the call
-// and action mode blocks it; a block found in the review stands.
+// and action mode blocks it; a block found in the review stands. The marker
+// is set whatever the verdict: the cascade's floors read it, so a block the
+// prefix proved stays a block and the policy cannot lower it (GAP-0579).
 func (v *ToolInspectVerdict) markOversizeUninspected() {
+	v.addUninspectedMarker()
 	if v.Action == "block" {
 		return
 	}
 	v.Action = "block"
 	v.Severity = "HIGH"
 	v.Reason = oversizeUninspectedReason
-	v.Findings = append([]string{hookOversizeUninspectedRuleID}, v.Findings...)
+	v.uninspectedRaised = true
+}
+
+// markContentCut answers content the gateway cut at maxInspectContentLen:
+// the rest was never read, so the verdict is at least the unknown tier
+// (unknownAction; these routes cannot ask, so confirm is alert) and carries
+// the uninspected marker for the cascade's floors (the ONE BOUND RULE,
+// GAP-0579). What the prefix proved still decides.
+func (v *ToolInspectVerdict) markContentCut(unknownAction string) {
+	v.addUninspectedMarker()
+	if unknownAction != guardrailActionBlock {
+		unknownAction = guardrailActionAlert
+	}
+	if cascadeRank(v.Action) >= cascadeRank(unknownAction) {
+		return
+	}
+	v.Action = unknownAction
+	sev := "MEDIUM"
+	if unknownAction == guardrailActionBlock {
+		sev = "HIGH"
+	}
+	if guardrailSeverityRank(v.Severity) < guardrailSeverityRank(sev) {
+		v.Severity = sev
+	}
+	if v.Reason == "" {
+		v.Reason = contentCutReason
+	} else {
+		v.Reason = contentCutReason + "; " + v.Reason
+	}
+	v.uninspectedRaised = true
+}
+
+// addUninspectedMarker adds the oversize-uninspected finding once.
+func (v *ToolInspectVerdict) addUninspectedMarker() {
+	if !slices.Contains(v.Findings, hookOversizeUninspectedRuleID) {
+		v.Findings = append([]string{hookOversizeUninspectedRuleID}, v.Findings...)
+	}
 }
 
 func (v *ToolInspectVerdict) applyMode(mode string) {

@@ -1652,16 +1652,38 @@
         }
       }
     },
+    "cascadeLane": {
+      "type": "string",
+      "description": "A cascade lane switch: off, or shadow (compute and record beside today's rules, never change the answer). The lane ships shadow-only in 1.0.10, so on is refused (internal/config/cascade_lanes.go lists the open gaps).",
+      "enum": [
+        "off",
+        "shadow"
+      ]
+    },
     "cascadeLanes": {
       "type": "object",
       "maxProperties": 64,
-      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only accepts off and shadow.",
+      "description": "Live/shadow switch per registered lane: off, shadow or on. A lane that ships shadow-only (effects, secret_flow) accepts off and shadow.",
       "propertyNames": {
         "pattern": "^[a-z][a-z0-9_]{0,63}$"
       },
+      "properties": {
+        "effects": {
+          "$ref": "#/$defs/cascadeLane",
+          "default": "shadow"
+        },
+        "secret_flow": {
+          "$ref": "#/$defs/cascadeLane",
+          "default": "shadow"
+        }
+      },
       "additionalProperties": {
         "type": "string",
-        "maxLength": 16
+        "enum": [
+          "off",
+          "shadow",
+          "on"
+        ]
       }
     },
     "cascadeScope": {

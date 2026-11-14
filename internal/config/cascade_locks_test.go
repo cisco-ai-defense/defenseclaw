@@ -17,6 +17,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -223,6 +224,99 @@ func TestCascadeWeakerNamesEveryScope(t *testing.T) {
 	} {
 		if !strings.Contains(weaker, want) {
 			t.Errorf("WEAKER misses %q:\n%s", want, weaker)
+		}
+	}
+}
+
+// GAP-0580: admin.locked [mode] decides for a connector under
+// application_protection (automatic protection of a connector nobody set
+// up by hand) too. The overlay sets observe, sets action, or sets no mode:
+// the locked top-level mode applies in each, never the observe default of
+// an overlay without a mode. The same for a profile and for the identity
+// profiles derived from it.
+func TestCascadeLockedModeUnderApplicationProtection(t *testing.T) {
+	for _, top := range []string{"action", "observe"} {
+		head := strings.Replace(lockedAdminTop, "mode: action", "mode: "+top, 1)
+		for name, ap := range map[string]string{
+			"ap-global-observe":    "application_protection:\n  enabled: true\n  guardrail:\n    mode: observe\n",
+			"ap-global-action":     "application_protection:\n  enabled: true\n  guardrail:\n    mode: action\n",
+			"ap-connector-observe": "application_protection:\n  enabled: true\n  connectors:\n    cursor:\n      guardrail:\n        mode: observe\n",
+			"ap-connector-action":  "application_protection:\n  enabled: true\n  connectors:\n    cursor:\n      guardrail:\n        mode: action\n",
+			"ap-no-mode":           "application_protection:\n  enabled: true\n",
+		} {
+			cfg := loadCascadeDoc(t, head+ap)
+			for _, c := range []string{"cursor", "codex", "claudecode"} {
+				if got := cfg.HookModeForConnector(c); got != top {
+					t.Errorf("top %s, %s/%s: hook mode %s, want the locked top-level %s", top, name, c, got, top)
+				}
+				if got := cfg.EffectiveGuardrailModeForConnector(c); got != top {
+					t.Errorf("top %s, %s/%s: effective mode %s, want %s", top, name, c, got, top)
+				}
+			}
+			profile := head + "  profiles:\n    contractors:\n      mode: observe\n      connectors:\n        codex:\n          mode: observe\n" + ap
+			pcfg := loadCascadeDoc(t, profile)
+			d, err := pcfg.DerivedForProfile("contractors")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range []string{"cursor", "codex", "claudecode"} {
+				if got := d.HookModeForConnector(c); got != top {
+					t.Errorf("top %s, %s, profile contractors/%s: hook mode %s, want %s", top, name, c, got, top)
+				}
+			}
+		}
+	}
+	// Without the lock the overlay decides as before (observe when it sets
+	// no mode).
+	unlocked := strings.Replace(lockedAdminTop, "locked: [mode, ", "locked: [", 1)
+	cfg := loadCascadeDoc(t, unlocked+"application_protection:\n  enabled: true\n")
+	if got := cfg.HookModeForConnector("cursor"); got != "observe" {
+		t.Errorf("unlocked, overlay with no mode: hook mode %s, want observe", got)
+	}
+	cfg = loadCascadeDoc(t, unlocked+"application_protection:\n  enabled: true\n  guardrail:\n    mode: action\n")
+	if got := cfg.HookModeForConnector("cursor"); got != "action" {
+		t.Errorf("unlocked, overlay action: hook mode %s, want action", got)
+	}
+}
+
+// GAP-0686: the v8 schema refuses on for a lane that ships shadow-only, as
+// rel's lane enum did, and every shipped shadow-only lane has that enum.
+func TestCascadeSchemaRefusesOnForShadowOnlyLanes(t *testing.T) {
+	raw, err := os.ReadFile("../../schemas/config/v8/defenseclaw-config.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Defs map[string]struct {
+			Properties map[string]struct {
+				Ref string `json:"$ref"`
+			} `json:"properties"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	props := doc.Defs["cascadeLanes"].Properties
+	for _, lane := range CascadeLanes() {
+		if lane.ShadowOnly == "" || strings.HasPrefix(lane.Name, "test_") {
+			continue
+		}
+		if props[lane.Name].Ref != "#/$defs/cascadeLane" {
+			t.Errorf("shadow-only lane %s has no off|shadow enum in the schema", lane.Name)
+		}
+	}
+	dataDir := t.TempDir()
+	for _, tc := range []struct {
+		lanes string
+		ok    bool
+	}{
+		{"effects: \"on\"", false}, {"secret_flow: \"on\"", false}, {"effects: live", false},
+		{"effects: \"off\"", true}, {"secret_flow: shadow", true},
+	} {
+		body := []byte("config_version: 9\ndata_dir: " + dataDir + "\nguardrail:\n  cascade:\n    lanes:\n      " + tc.lanes + "\n")
+		_, err := ParseCompileObservabilityV8("config.yaml", body, ObservabilityV8CompileOptions{DefaultDataDir: dataDir})
+		if (err == nil) != tc.ok {
+			t.Errorf("lanes %s: schema err=%v, want ok=%v", tc.lanes, err, tc.ok)
 		}
 	}
 }

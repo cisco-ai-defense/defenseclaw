@@ -3831,6 +3831,9 @@ const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
 const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap, " +
 	"so the gateway could read only part of the call."
 
+// contentCutReason is the reason of content cut at maxInspectContentLen.
+const contentCutReason = "content over the 256 KiB inspect cap: only the first 256 KiB were inspected"
+
 // oversizeUninspectedPayload reports a bounded review of an oversized call.
 // Every bounded review lacks part of the call (hookexec.OversizeUninspectedField),
 // so bounded_prefix_review alone marks it too: a sender that drops the
