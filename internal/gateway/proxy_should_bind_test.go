@@ -25,9 +25,10 @@ import (
 
 // TestProxyShouldBindForConnector_MatchesProxyClassification is the
 // regression net for the multi-connector boot guard. proxyShouldBindForConnector
-// MUST agree with connector.IsProxyConnector for every registered connector:
+// MUST agree with connector.UsesGuardrailProxy for every registered connector:
 // proxy connectors (openclaw/zeptoclaw) bind a port and cannot share a
 // multi-connector process; every hook connector must return false so it can.
+// Native OpenClaw on Windows binds no port (DESIGN-REVIEW-1 P2-12).
 //
 // opencode regressed here: it was a hook-only connector missing from the
 // allowlist, so it fell to the `default: return true` arm and the gateway
@@ -43,9 +44,9 @@ func TestProxyShouldBindForConnector_MatchesProxyClassification(t *testing.T) {
 			t.Fatalf("registry.Get(%q) returned !ok", name)
 		}
 		got := proxyShouldBindForConnector(conn, gc)
-		want := connector.IsProxyConnector(name)
+		want := connector.UsesGuardrailProxy(name)
 		if got != want {
-			t.Errorf("proxyShouldBindForConnector(%q)=%v, want %v (IsProxyConnector). "+
+			t.Errorf("proxyShouldBindForConnector(%q)=%v, want %v (UsesGuardrailProxy). "+
 				"Hook connectors must return false so they can share a multi-connector process.",
 				name, got, want)
 		}

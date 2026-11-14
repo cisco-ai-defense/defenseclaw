@@ -113,6 +113,7 @@ _HISTORY_SELECT_RE = re.compile(
     r"\bFROM\s+[\"`\[]?audit_events(?:[\"`\]]|\b)",
     re.IGNORECASE,
 )
+_HISTORY_PROJECTION_RE = re.compile(r"length\(\s*COALESCE\(\s*projected_record_json\b", re.IGNORECASE)
 _RAW_SQLITE_CONNECT = sqlite3.connect
 
 
@@ -132,7 +133,10 @@ class SQLTrace:
             for statement in self.statements
             if statement.lstrip().upper().startswith("SELECT")
             and _HISTORY_SELECT_RE.search(statement)
-            and "projected_record_json" in statement.lower()
+            # The event-history read projects the record's length; hook
+            # readers name projected_record_json and payload_json too, to
+            # pair a decision's rows and read a record body (S8 R4, #1384).
+            and _HISTORY_PROJECTION_RE.search(statement)
             and "payload_json" in statement.lower()
         )
 

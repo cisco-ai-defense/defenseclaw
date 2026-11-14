@@ -80,10 +80,10 @@ func NestedBodyWeight(command string) int {
 				return true
 			}
 		}
-		if depth >= nestedBodyMaxDepth || TooDeep(text) {
+		if depth >= nestedBodyMaxDepth || nestingBound(text) != "" {
 			return false
 		}
-		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(Reader(text), "")
+		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(text), "")
 		if err != nil || file == nil {
 			return false
 		}

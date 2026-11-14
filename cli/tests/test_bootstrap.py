@@ -1261,7 +1261,9 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
             with open(env_path, encoding="utf-8") as fh:
                 self.assertNotIn("stray-proxy-secret", fh.read())
 
-    def test_openclaw_install_still_pins_openclaw_token(self):
+    def test_openclaw_install_saves_the_openclaw_token_apart_from_the_master(self):
+        # R-TOK: the OpenClaw token is only the OpenClaw credential; the
+        # gateway gets a DefenseClaw token of its own.
         from defenseclaw.bootstrap import _apply_gateway_defaults
         from defenseclaw.file_permissions import make_private_directory
 
@@ -1271,9 +1273,18 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
         cfg.guardrail.connector = "openclaw"
         cfg.claw.config_file = self._stray_openclaw_json("legit-openclaw-secret")
 
-        _apply_gateway_defaults(cfg, is_new_config=True)
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_GATEWAY_TOKEN", None)
+            os.environ.pop("OPENCLAW_GATEWAY_TOKEN", None)
+            _apply_gateway_defaults(cfg, is_new_config=True)
+            master = cfg.gateway.resolved_token()
 
-        self.assertEqual(cfg.gateway.token_env, "OPENCLAW_GATEWAY_TOKEN")
+        self.assertEqual(cfg.gateway.token_env, "DEFENSECLAW_GATEWAY_TOKEN")
+        with open(os.path.join(cfg.data_dir, ".env"), encoding="utf-8") as fh:
+            body = fh.read()
+        self.assertIn("OPENCLAW_GATEWAY_TOKEN=legit-openclaw-secret", body)
+        self.assertNotIn(master, ("", "legit-openclaw-secret"))
+        self.assertIn(f"DEFENSECLAW_GATEWAY_TOKEN={master}", body)
 
 
 def test_devin_readiness_uses_pinned_workspace_hook_not_ambient_home(

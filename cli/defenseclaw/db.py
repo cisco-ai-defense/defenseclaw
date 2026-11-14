@@ -44,9 +44,18 @@ from defenseclaw.alert_semantics import (
     ALERT_NON_ALLOW_OUTCOMES,
 )
 from defenseclaw.hook_metrics import (
+    CONNECTOR_HOOK_ACTION,
+    CONNECTOR_HOOK_SYNTHETIC_ACTION,
+    HOOK_DECISION_ACTION,
+    HOOK_DECISION_VERDICT_KEYS,
     aggregate_connector_hook_decision,
+    aggregate_hook_row_decision,
     connector_hook_connector,
+    count_once_hook_rows,
+    hook_decision_body_sql,
     hook_decision_may_block_sql,
+    hook_semantic_event_id_sql,
+    lone_hook_decision_sql,
 )
 from defenseclaw.models import (
     ActionEntry,
@@ -327,6 +336,7 @@ class Store:
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.create_function("dc_hook_connector", 3, connector_hook_connector)
             self.db.create_function("dc_hook_decision", 3, aggregate_connector_hook_decision)
+            self.db.create_function("dc_hook_row_decision", 4, aggregate_hook_row_decision)
             if read_only:
                 # ``mode=ro`` prevents file writes while ``query_only`` also
                 # rejects accidental mutations through writable attached DBs.
@@ -703,6 +713,12 @@ class Store:
         "defenseclaw.guardrail.decision",
         "defenseclaw.guardrail.mode",
         "defenseclaw.guardrail.would_block",
+        # A hook_decision row is the only local row of a benign per-user
+        # allow (S8 R4, #1384): its verdict keys classify it as the
+        # connector-hook row did (hook_metrics.hook_row_decision).
+        "defenseclaw.guardrail.raw_action",
+        "defenseclaw.guardrail.enforced",
+        "defenseclaw.security.severity",
         "defenseclaw.guardrail.rule_ids",
         "defenseclaw.finding.rule_id",
         "defenseclaw.judge.action",
@@ -719,9 +735,11 @@ class Store:
         columns, _tables = self._audit_projection_schema()
         if "structured_json" not in columns:
             return "NULL"
-        source = (
-            "COALESCE(NULLIF(structured_json, ''), payload_json)" if "payload_json" in columns else "structured_json"
-        )
+        source = "structured_json"
+        if {"payload_json", "projected_record_json"}.issubset(columns):
+            source = f"COALESCE(NULLIF(structured_json, ''), {hook_decision_body_sql()})"
+        elif "payload_json" in columns:
+            source = "COALESCE(NULLIF(structured_json, ''), payload_json)"
         paths = ", ".join(f"'$.\"{key}\"'" for key in self._SUMMARY_STRUCTURED_KEYS)
         # With several paths json_extract returns one JSON array of the values.
         return f"CASE WHEN json_valid(COALESCE({source}, '')) THEN json_extract({source}, {paths}) END"
@@ -741,13 +759,30 @@ class Store:
         )
         return cls._row_to_event((*row[:8], json.dumps(structured) if structured else None, *row[9:]))
 
+    def _hook_semantic_id_sql(self, alias: str = "") -> str:
+        """The semantic event id of a hook row (both kinds), else NULL.
+
+        It pairs a decision's connector-hook and hook_decision rows, so a
+        reader shows and counts the decision once (S8 R4, #1384).
+        """
+        columns, _ = self._audit_projection_schema()
+        if "projected_record_json" not in columns:
+            return "NULL"
+        prefix = f"{alias}." if alias else ""
+        return (
+            f"CASE WHEN {prefix}action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}',"
+            f" '{CONNECTOR_HOOK_SYNTHETIC_ACTION}')"
+            f" THEN {hook_semantic_event_id_sql(prefix + 'projected_record_json')} END"
+        )
+
     def list_event_summaries(self, limit: int = 100) -> list[Event]:
         """List recent audit rows without loading large structured payloads."""
 
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
+                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced,
+                      {self._hook_semantic_id_sql()} AS semantic_event_id
                FROM audit_events ORDER BY {self._audit_event_order()} LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -776,7 +811,8 @@ class Store:
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
+                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced,
+                      {self._hook_semantic_id_sql()} AS semantic_event_id
                FROM {table}
                WHERE {scope}(COALESCE(enforced, 0) = 1
                   OR (action = 'connector-hook'
@@ -794,7 +830,8 @@ class Store:
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced
+                      severity, run_id, {self._summary_structured_sql()} AS structured_json, connector, enforced,
+                      {self._hook_semantic_id_sql()} AS semantic_event_id
                FROM audit_events
                WHERE {_ACTIONABLE_EVENT_WHERE}
                ORDER BY {self._audit_event_order()} LIMIT ?""",
@@ -814,23 +851,72 @@ class Store:
         if connector:
             # Match the name literally: % and _ would otherwise be wildcards.
             name = connector.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            sql += " AND lower(COALESCE(details, '')) LIKE ? ESCAPE '\\'"
-            params = (f"%connector={name}%",)
+            # A row is the connector's when its connector column says so, as
+            # the panel attributes it (event_connector), or, on rows older
+            # than the column, when its details do. A hook_decision row
+            # names its connector only in the column (S8 R4, #1384).
+            sql += (
+                " AND (lower(TRIM(COALESCE(connector, ''))) = ?"
+                " OR (TRIM(COALESCE(connector, '')) = '' AND lower(COALESCE(details, '')) LIKE ? ESCAPE '\\'))"
+            )
+            params = (connector.strip().lower(), f"%connector={name}%")
         return int(self.db.execute(sql, params).fetchone()[0])
 
     def list_connector_hook_event_summaries(self, limit: int = 500) -> list[Event]:
-        """List recent connector-hook rows without the actionable filter."""
+        """List recent hook decisions, one row each, without the actionable filter.
 
+        A decision is its connector-hook row, or its hook_decision row when
+        that is its only local row (a benign per-user allow since 1.0.10, S8
+        R4, #1384). Both rows of a decision are written in the same call, so
+        pairing them inside a window twice the limit is exact for every row
+        returned.
+        """
+
+        limit = max(limit, 1)
+        columns, _ = self._audit_projection_schema()
+        if not {"payload_json", "projected_record_json"}.issubset(columns):
+            cur = self.db.execute(
+                f"""SELECT id, timestamp, action, target, actor,
+                          substr(COALESCE(details, ''), 1, ?) AS details,
+                          severity, run_id, NULL AS structured_json, connector, enforced
+                   FROM audit_events
+                   WHERE action = '{CONNECTOR_HOOK_ACTION}'
+                   ORDER BY {self._audit_event_order()} LIMIT ?""",
+                (_SUMMARY_DETAILS_BYTES, limit),
+            )
+            return [self._row_to_event(r) for r in cur.fetchall()]
+        body = hook_decision_body_sql()
+        verdict_keys = ", ".join(f"'{key}', json_extract(body, '$.\"{key}\"')" for key in HOOK_DECISION_VERDICT_KEYS)
         cur = self.db.execute(
-            f"""SELECT id, timestamp, action, target, actor,
-                      substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
-               FROM audit_events
-               WHERE action = 'connector-hook'
-               ORDER BY {self._audit_event_order()} LIMIT ?""",
-            (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
+            f"""SELECT id, timestamp, action,
+                      CASE WHEN action = '{HOOK_DECISION_ACTION}' AND TRIM(COALESCE(target, '')) = ''
+                           THEN json_extract(body, '$.\"defenseclaw.hook.event\"') ELSE target END,
+                      actor, details, severity, run_id,
+                      CASE WHEN action = '{HOOK_DECISION_ACTION}' AND json_valid(COALESCE(body, ''))
+                           THEN json_object({verdict_keys}) END,
+                      connector, enforced, semantic_event_id
+               FROM (
+                   SELECT id, timestamp, action, target, actor,
+                          substr(COALESCE(details, ''), 1, ?) AS details,
+                          severity, run_id, connector, enforced, rowid AS row_order,
+                          {self._audit_event_order().split(" ", 1)[0]} AS instant,
+                          CASE WHEN action = '{HOOK_DECISION_ACTION}' THEN {body} END AS body,
+                          {self._hook_semantic_id_sql()} AS semantic_event_id
+                   FROM audit_events
+                   WHERE action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}',
+                                    '{CONNECTOR_HOOK_SYNTHETIC_ACTION}')
+                   ORDER BY {self._audit_event_order()} LIMIT ?
+               )
+               ORDER BY instant DESC, row_order DESC""",
+            (_SUMMARY_DETAILS_BYTES, limit * 2 + 50),
         )
-        return [self._row_to_event(r) for r in cur.fetchall()]
+        # A synthetic Stop pairs its hook_decision row (same semantic event)
+        # but is not itself a listed decision, as before.
+        return [
+            event
+            for event in count_once_hook_rows(self._row_to_event(r) for r in cur.fetchall())
+            if event.action != CONNECTOR_HOOK_SYNTHETIC_ACTION
+        ][:limit]
 
     def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
         """Return exact all-time hook counters grouped by connector.
@@ -839,8 +925,21 @@ class Store:
         classify legacy rows whose identity or decision only exists in the
         structured envelope or exact ``key=value`` detail tokens.
         """
+        columns, _ = self._audit_projection_schema()
+        lone_hook_decisions = ""
+        if {"payload_json", "projected_record_json"}.issubset(columns):
+            # A decision whose only local row is its hook_decision row (a
+            # benign per-user allow since 1.0.10) counts once, from that row;
+            # a decision with a connector-hook row counts from it alone, as
+            # before (S8 R4, #1384).
+            lone_hook_decisions = f"""UNION ALL
+                   SELECT COALESCE(NULLIF(LOWER(TRIM(COALESCE(connector, ''))), ''), '__unattributed__'),
+                          dc_hook_row_decision(action, '', {hook_decision_body_sql()}, enforced),
+                          timestamp
+                     FROM audit_events
+                    WHERE action = '{HOOK_DECISION_ACTION}' AND {lone_hook_decision_sql()}"""
         cur = self.db.execute(
-            """WITH source AS (
+            f"""WITH source AS (
                    SELECT CASE
                               WHEN TRIM(COALESCE(connector, '')) <> ''
                                   THEN LOWER(TRIM(connector))
@@ -863,6 +962,7 @@ class Store:
                           dc_hook_decision(details, structured_json, enforced) AS decision,
                           timestamp
                      FROM source
+                   {lone_hook_decisions}
                )
                SELECT connector_name,
                       COUNT(*) AS calls,
@@ -989,9 +1089,14 @@ class Store:
             return "NULL"
         if not {"payload_json", "event_name"}.issubset(columns):
             return f"{prefix}structured_json"
+        native = f"{prefix}payload_json"
+        if "projected_record_json" in columns:
+            # payload_json, else the projected record's body: a native row
+            # may keep its body only there (S8 R4, #1384).
+            native = hook_decision_body_sql(f"{prefix}payload_json", f"{prefix}projected_record_json")
         return (
             f"COALESCE(NULLIF({prefix}structured_json, ''), CASE WHEN {prefix}event_name IS NOT NULL"
-            f" AND {prefix}event_name NOT LIKE 'legacy.audit.%' THEN {prefix}payload_json END)"
+            f" AND {prefix}event_name NOT LIKE 'legacy.audit.%' THEN {native} END)"
         )
 
     def _audit_event_order(self, alias: str = "", *, newest: bool = True) -> str:
@@ -1340,6 +1445,8 @@ class Store:
         structured = (
             "COALESCE(NULLIF(structured_json, ''), payload_json)" if "payload_json" in columns else "structured_json"
         )
+        if {"payload_json", "projected_record_json"}.issubset(columns):
+            structured = f"COALESCE(NULLIF(structured_json, ''), {hook_decision_body_sql()})"
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor, details, severity, run_id, {structured}, connector,
                       enforced
@@ -2340,6 +2447,7 @@ class Store:
             structured=structured,
             connector=(row[9] or "") if len(row) > 9 else "",
             enforced=(bool(row[10]) if row[10] is not None else None) if len(row) > 10 else None,
+            semantic_event_id=str(row[11] or "") if len(row) > 11 else "",
         )
 
     def get_target_snapshot(self, target_type: str, target_path: str) -> TargetSnapshot | None:

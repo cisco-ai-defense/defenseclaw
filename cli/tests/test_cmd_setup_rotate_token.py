@@ -176,7 +176,9 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64 + b"\r\n",
             )
 
-    def test_renderer_removes_exact_legacy_key_but_preserves_prefixed_keys(self) -> None:
+    def test_renderer_replaces_the_master_and_keeps_the_openclaw_credential(self) -> None:
+        # R-TOK: OPENCLAW_GATEWAY_TOKEN is the OpenClaw credential, not the
+        # master, so rotation keeps it byte-for-byte.
         secret = "replacement-token-that-must-stay-redacted"
         snapshot = cmd_setup._RotateTokenDotenvSnapshot(
             existed=True,
@@ -193,7 +195,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
 
         body = cmd_setup._rotate_token_render(snapshot, secret)
 
-        self.assertNotIn(b"OPENCLAW_GATEWAY_TOKEN=exposed-a", body)
+        self.assertTrue(body.startswith(b"OPENCLAW_GATEWAY_TOKEN=exposed-a\r\n"))
         self.assertNotIn(b"DEFENSECLAW_GATEWAY_TOKEN=exposed-b", body)
         self.assertIn(
             b"OPENCLAW_GATEWAY_TOKEN_SUFFIX=keep-legacy-prefix\r\n",
@@ -1699,6 +1701,30 @@ with locked_file_update(lock_base):
             self.assertNotEqual(result.exit_code, 0)
             lifecycle.assert_not_called()
             self.assertIn("externally managed", result.output)
+
+    def test_openclaw_token_env_rotates_the_master_and_keeps_the_openclaw_credential(self) -> None:
+        # R-TOK: a token_env naming OPENCLAW_GATEWAY_TOKEN is ignored by every
+        # resolver, so rotation proceeds on DEFENSECLAW_GATEWAY_TOKEN and leaves
+        # the OpenClaw credential as it is.
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            app.cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+            dotenv = os.path.join(td, ".env")
+            with open(dotenv, "w", encoding="utf-8") as fh:
+                fh.write("DEFENSECLAW_GATEWAY_TOKEN=old-master\nOPENCLAW_GATEWAY_TOKEN=openclaw-side\n")
+            os.chmod(dotenv, 0o600)
+            with mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle") as lifecycle:
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            with open(dotenv, encoding="utf-8") as fh:
+                body = fh.read()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        lifecycle.assert_called()
+        self.assertIn("OPENCLAW_GATEWAY_TOKEN=openclaw-side", body)
+        self.assertNotIn("old-master", body)
+        self.assertEqual(body.count("DEFENSECLAW_GATEWAY_TOKEN="), 1)
 
     def test_inactive_openclaw_hint_is_ignored_for_codex_only_roster(self) -> None:
         from tempfile import TemporaryDirectory

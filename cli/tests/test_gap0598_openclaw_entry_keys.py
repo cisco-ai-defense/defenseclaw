@@ -106,7 +106,7 @@ class TestRestoreLeavesNoEnabledResidue(unittest.TestCase):
 
 class TestPatchMergesEntry(unittest.TestCase):
     def _patch(self, path: str) -> None:
-        patch_openclaw_config(path, "m", 4000, "k", "")
+        patch_openclaw_config(path, "m", 4000, "")
 
     def test_keeps_operator_keys_and_sets_enabled(self):
         with tempfile.TemporaryDirectory() as d:

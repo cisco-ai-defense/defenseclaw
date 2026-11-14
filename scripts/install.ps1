@@ -158,7 +158,7 @@ $NotData = @(".venv", ".venv.busy", ".uv", "previous", "previous.new", ".repair"
     ".lifecycle-txn.json", ".lifecycle-txn.json.new", ".lifecycle-closer", "*.dc-removed-*")
 # Connectors supported on Windows (cli/defenseclaw/platform_support.py).
 $ConnectorChoices = @("codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity",
-    "opencode", "amp", "kiro", "none")
+    "opencode", "amp", "kiro", "openclaw", "none")
 # -File runs return exit codes; `irm | iex` and script blocks must never exit
 # (that would close the user's window), so they throw instead.
 $RunAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
@@ -5990,7 +5990,9 @@ function Invoke-Install {
     # 3) already said which one. Anything else restores the previous install.
     $provenGateway = $startNew -and -not $sealOnly
     # Only connectors this release supports on Windows are required again: a
-    # retired one (or the default openclaw entry) has no hooks to put back.
+    # retired one has no hooks to put back. OpenClaw (native plugin hooks on
+    # Windows since 1.0.10) is held like the others: Get-HeldConnectors drops
+    # one the previous gateway reported unhealthy, as 1.0.9 refused it here.
     $guardedBefore = @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" })
     $problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
     if ($problems.Count) {

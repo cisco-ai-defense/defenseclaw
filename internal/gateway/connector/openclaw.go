@@ -30,7 +30,6 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
@@ -95,15 +94,9 @@ func OpenClawExtensionAvailable() bool {
 }
 
 // OpenClawHomeOverride lets tests redirect the OpenClaw home directory so
-// Setup/Teardown write into a scratch path instead of ~/.openclaw.
+// Setup/Teardown write into a scratch path instead of ~/.openclaw. It wins
+// over the paths config.yaml names (openclaw_paths.go).
 var OpenClawHomeOverride string
-
-func openClawHome() string {
-	if OpenClawHomeOverride != "" {
-		return OpenClawHomeOverride
-	}
-	return filepath.Join(userHomeDir(), ".openclaw")
-}
 
 // OpenClawConnector handles LLM traffic routing and tool inspection for OpenClaw.
 // LLM traffic: fetch interceptor plugin patches globalThis.fetch to route
@@ -111,8 +104,9 @@ func openClawHome() string {
 // Tool inspection: same plugin hooks api.on("before_tool_call") and calls
 // /api/v1/inspect/tool.
 type OpenClawConnector struct {
+	state        openClawPathState
+	plugin       openClawPluginCredential
 	gatewayToken string
-	masterKey    string
 }
 
 // NewOpenClawConnector creates a new OpenClaw connector.
@@ -124,6 +118,11 @@ func (c *OpenClawConnector) Name() string                           { return "op
 func (c *OpenClawConnector) Description() string                    { return "fetch interceptor plugin" }
 func (c *OpenClawConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *OpenClawConnector) SubprocessPolicy() SubprocessPolicy {
+	if openClawNativeOnly() {
+		// The PATH shims are bash scripts for a proxy-era OpenClaw; native
+		// Windows has no bash on its PATH and runs no shims.
+		return SubprocessNone
+	}
 	return ResolveSubprocessPolicy(SubprocessShims)
 }
 
@@ -261,11 +260,15 @@ func OpenClawPluginApprovalsRefusal(rawVersion string) string {
 }
 
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	// Proxy connectors require the local guardrail proxy, which DefenseClaw
-	// does not host on Windows (hook-only there). Fail clearly instead of
-	// planting a half-configured proxy connector.
-	if !ConnectorSupportedOnHostOS(c.Name()) {
-		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	// The platform row decides (native Windows runs OpenClaw in native hook
+	// mode, without the guardrail proxy).
+	if err := validateConnectorSupportedOnOS(c.Name(), openClawHooksGOOS); err != nil {
+		return err
+	}
+	// Managed Windows stays refused: the Windows enterprise profile does not
+	// deliver the per-user plugin credential or repair openclaw.json yet.
+	if openClawHooksGOOS == "windows" && opts.ManagedEnterprise {
+		return errors.New("openclaw: " + OpenClawManagedWindowsRefusal)
 	}
 
 	// The Makefile keeps the gateway buildable on machines without the
@@ -280,9 +283,18 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("%s", OpenClawPluginApprovalsRefusal(opts.AgentVersion))
 	}
 
+	// Windows has no guardrail proxy: OpenClaw is guarded by its native
+	// plugin hooks only, which need OpenClaw 2026.8.35 or later.
+	if openClawHooksGOOS == "windows" && openClawLacksNativeHooks(openClawObservedVersion(opts)) {
+		return fmt.Errorf("openclaw: on Windows DefenseClaw guards OpenClaw through its native plugin hooks, which need OpenClaw %s or later, and this host has %s; "+
+			"upgrade OpenClaw (npm install -g openclaw@latest)", OpenClawNativeHooksSince, NormalizeAgentVersion("openclaw", openClawObservedVersion(opts)))
+	}
+
 	if !openClawExtensionAvailable() {
 		return fmt.Errorf("openclaw extension is not bundled in this gateway build — run 'make extensions' (or 'make plugin') and rebuild the gateway, or pick a different connector with 'defenseclaw setup connector'")
 	}
+
+	c.recordPluginCredential(opts)
 
 	// Surface 1: Install the embedded plugin into OpenClaw and register it
 	// in openclaw.json. Enabling the connector is the *only* step an
@@ -291,13 +303,14 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return err
 	}
 
-	// Surface 2: Plugin subprocess enforcement
-	policy := ResolveSubprocessPolicy(SubprocessShims)
-	if err := SetupSubprocessEnforcement(policy, opts, c.Name()); err != nil {
+	// Surface 2: Plugin subprocess enforcement (bash PATH shims). Native
+	// Windows has none (SubprocessPolicy is none there).
+	if err := SetupSubprocessEnforcement(c.SubprocessPolicy(), opts, c.Name()); err != nil {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}
 
-	// Surface 3: Hook script for tool inspection
+	// Surface 3: the hook folder with the connector-scoped plugin credential
+	// (hooks/.hook-openclaw.token) the plugin authenticates with, on every OS.
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("openclaw hook script: %w", err)
@@ -310,7 +323,16 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 // keeps the pre-setup record of the file in step. The record is read, written
 // and updated under one hold of the file lock (see openClawConfigLocked).
 func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
-	configPath := filepath.Join(openClawHome(), "openclaw.json")
+	paths := c.pathsFor(opts)
+	configPath := paths.config
+	if openClawSeparateUser(opts) {
+		return c.registerSeparateUser(opts, paths)
+	}
+	externalDir := paths.external
+	// Check every file setup is about to change before changing any.
+	if err := openClawPreflight(paths, externalDir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("openclaw extension install: %w", err)
 	}
@@ -326,9 +348,12 @@ func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
 		}
 		observedVersion := openClawObservedVersion(opts)
 		dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
-		if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled, dropRejectedApprovals,
-			openClawConversationHooksSupported(observedVersion)); err != nil {
+		if err := installOpenClawExtension(paths, externalDir, opts.HILTEnabled, dropRejectedApprovals,
+			openClawConversationHooksSupported(observedVersion), openClawPluginKeysWithAllow(opts, observedVersion)); err != nil {
 			return fmt.Errorf("openclaw extension install: %w", err)
+		}
+		if err := applyOpenClawInstallPolicy(configPath, opts); err != nil {
+			return fmt.Errorf("openclaw install policy: %w", err)
 		}
 		if keepSnapshot {
 			if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
@@ -355,7 +380,7 @@ func (c *OpenClawConnector) IsBundledPlugin(dir string) bool {
 
 // BundledPluginDir is where Setup installs DefenseClaw's own OpenClaw plugin.
 func (c *OpenClawConnector) BundledPluginDir() string {
-	return filepath.Join(openClawHome(), "extensions", "defenseclaw")
+	return c.currentPaths().pluginDir()
 }
 
 var errNotBundledFile = errors.New("not a bundled file")
@@ -455,17 +480,24 @@ func openClawConfigRegistersDefenseClaw(configPath string) bool {
 func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	var errs []string
 
-	configPath := filepath.Join(openClawHome(), "openclaw.json")
+	paths := c.pathsFor(opts)
+	configPath := paths.config
 	dropRejectedApprovals := OpenClawLacksPluginApprovals(openClawObservedVersion(opts))
-	// One hold covers the restore-or-cleanup decision and its write, so a setup
-	// that starts meanwhile (a gateway start) cannot interleave with it.
-	if err := openClawConfigLocked(configPath, func() error {
+	// In the separate-user layout DefenseClaw never wrote openclaw.json.
+	// Otherwise one hold covers the restore-or-cleanup decision and its
+	// write, so a setup that starts meanwhile (a gateway start) cannot
+	// interleave with it.
+	if openClawSeparateUser(opts) {
+		if err := c.teardownSeparateUser(opts, paths); err != nil {
+			errs = append(errs, err.Error())
+		}
+	} else if err := openClawConfigLocked(configPath, func() error {
 		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
 			errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
 		} else if restored {
-			extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
-			parentDir := filepath.Join(openClawHome(), "extensions")
-			if err := safeRemoveAll(extDir, parentDir); err != nil {
+			// The restored bytes predate setup and so its install policy.
+			discardOpenClawInstallPolicyRecord(opts.DataDir)
+			if err := safeRemoveAll(paths.managedPluginDir(), paths.extensionsDir()); err != nil {
 				errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
 			}
 			// The snapshot predates this setup and can hold the block an
@@ -480,7 +512,10 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 				fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: %s changed after DefenseClaw set it up (OpenClaw or you saved it); "+
 					"removed only the DefenseClaw settings and kept everything else, so the file is not byte for byte the copy from before setup\n", configPath)
 			}
-			if err := uninstallOpenClawExtension(openClawHome(), dropRejectedApprovals, openClawSetupGrantFor(opts.DataDir, c.Name())); err != nil {
+			if err := removeOpenClawInstallPolicy(configPath, opts.DataDir); err != nil {
+				errs = append(errs, fmt.Sprintf("remove security.installPolicy: %v", err))
+			}
+			if err := uninstallOpenClawExtension(paths, dropRejectedApprovals, openClawSetupGrantFor(opts.DataDir, c.Name())); err != nil {
 				errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
 			} else {
 				discardManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json")
@@ -514,25 +549,69 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 }
 
 // installOpenClawExtension writes the embedded plugin files to
-// <ocHome>/extensions/defenseclaw and registers the plugin in
-// <ocHome>/openclaw.json. Idempotent: re-running leaves the config in the
+// <home>/extensions/defenseclaw and registers the plugin in the openclaw.json
+// of paths (claw.config_file, else <home>/openclaw.json). Idempotent: re-running leaves the config in the
 // same shape (single allow entry, single load path, enabled=true).
-func installOpenClawExtension(ocHome string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
-	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
-	parentDir := filepath.Join(ocHome, "extensions")
+func installOpenClawExtension(paths openClawPaths, externalDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool, pluginKeys openClawPluginKeys) error {
+	extDir := paths.managedPluginDir()
+	parentDir := paths.extensionsDir()
 
-	if err := safeRemoveAll(extDir, parentDir); err != nil {
-		return fmt.Errorf("remove prior extension: %w", err)
+	if externalDir == "" {
+		if err := safeRemoveAll(extDir, parentDir); err != nil {
+			return fmt.Errorf("remove prior extension: %w", err)
+		}
+		if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
+			return fmt.Errorf("write plugin files: %w", err)
+		}
+	} else {
+		// An administrator installed the plugin (verified by the preflight);
+		// DefenseClaw only registers it.
+		extDir = externalDir
 	}
-	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
-		return fmt.Errorf("write plugin files: %w", err)
-	}
-
-	configPath := filepath.Join(ocHome, "openclaw.json")
-	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks); err != nil {
+	configPath := paths.config
+	if err := patchOpenClawConfig(configPath, extDir, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks, pluginKeys); err != nil {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
+	if externalDir != "" {
+		removeManagedCopyAfterSwitch(paths, externalDir)
+	}
 	return nil
+}
+
+// removeManagedCopyAfterSwitch removes, once openclaw.json loads the
+// administrator copy, the DefenseClaw plugin an earlier managed setup left
+// under <home>/extensions/defenseclaw, so OpenClaw does not find two plugins
+// with one id. Only a DefenseClaw plugin (manifest id defenseclaw) that this
+// account owns throughout goes; anything else stays, with a notice.
+func removeManagedCopyAfterSwitch(paths openClawPaths, externalDir string) {
+	extDir := paths.managedPluginDir()
+	if _, err := os.Lstat(extDir); err != nil {
+		return
+	}
+	if !openClawDirIsDefenseClawPlugin(extDir) {
+		fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: left %s in place (not a DefenseClaw plugin); OpenClaw may load it next to %s\n", extDir, externalDir)
+		return
+	}
+	if err := openClawTreeOwnedForWrite(extDir); err != nil {
+		fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: left %s in place (%v); remove it so OpenClaw loads only %s\n", extDir, err, externalDir)
+		return
+	}
+	if err := safeRemoveAll(extDir, paths.extensionsDir()); err != nil {
+		fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: could not remove the managed copy %s: %v\n", extDir, err)
+	}
+}
+
+// openClawDirIsDefenseClawPlugin reports whether dir holds an OpenClaw
+// plugin manifest with id defenseclaw.
+func openClawDirIsDefenseClawPlugin(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "openclaw.plugin.json"))
+	if err != nil {
+		return false
+	}
+	var manifest struct {
+		ID string `json:"id"`
+	}
+	return json.Unmarshal(data, &manifest) == nil && manifest.ID == "defenseclaw"
 }
 
 // safeRemoveAll removes target only if it resolves to a path under parent.
@@ -607,7 +686,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
 // in plugins.load.paths. Other sections are left untouched. The caller holds
 // the openclaw.json lock (see openClawConfigLocked).
-func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
+func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool, pluginKeys openClawPluginKeys) error {
 	cfg := map[string]interface{}{}
 	var before map[string]interface{}
 	original, readErr := readConnectorStateFile(configPath)
@@ -627,7 +706,20 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 		plugins = map[string]interface{}{}
 	}
 
-	plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+	// plugins.allow is an exclusive allowlist in OpenClaw: creating one with
+	// only defenseclaw turned off every other plugin (a model provider, the
+	// browser, channels; rel-1-0-10 GAP-0069). DefenseClaw joins an
+	// allowlist the operator has and creates none; an enabled entry with a
+	// load path loads the plugin without one. A list that holds only
+	// defenseclaw and that an earlier setup created (pluginKeys.allowCreated)
+	// is taken out again.
+	if list, ok := plugins["allow"].([]interface{}); ok && len(list) > 0 {
+		if pluginKeys.allowCreated && len(list) == 1 && list[0] == "defenseclaw" {
+			delete(plugins, "allow")
+		} else {
+			plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
+		}
+	}
 
 	entries, _ := plugins["entries"].(map[string]interface{})
 	if entries == nil {
@@ -645,6 +737,7 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 		return err
 	}
 	entry["enabled"] = true
+	setOpenClawPluginKeys(entry, pluginKeys)
 	if allowConversationHooks {
 		hooks, _ := entry["hooks"].(map[string]interface{})
 		if hooks == nil {
@@ -702,16 +795,14 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 // the DefenseClaw entries from openclaw.json, leaving unrelated plugins
 // untouched. Returns an error if cleanup fails so the caller can log or
 // retry.
-func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool, grant openClawSetupGrant) error {
+func uninstallOpenClawExtension(paths openClawPaths, dropRejectedApprovals bool, grant openClawSetupGrant) error {
 	var errs []string
 
-	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
-	parentDir := filepath.Join(ocHome, "extensions")
-	if err := safeRemoveAll(extDir, parentDir); err != nil {
+	if err := safeRemoveAll(paths.managedPluginDir(), paths.extensionsDir()); err != nil {
 		errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
 	}
 
-	configPath := filepath.Join(ocHome, "openclaw.json")
+	configPath := paths.config
 	data, err := readConnectorStateFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -795,6 +886,7 @@ func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRe
 		return
 	}
 	delete(entry, "enabled")
+	removeDefenseClawPluginKeys(entry)
 	if scope.conversationGrant {
 		removeDefenseClawConversationGrant(entry, scope.keepEmptyHooks)
 	}
@@ -803,6 +895,68 @@ func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRe
 		return
 	}
 	entries["defenseclaw"] = entry
+}
+
+// openClawHookModeKey is the plugin config key setup writes with the
+// resolved hook mode (ResolveOpenClawHookMode).
+const openClawHookModeKey = "hookMode"
+
+// openClawPromptGateKey is the plugin config key setup writes when
+// connectors.openclaw.hooks.prompt_gate is on, so the plugin has it before
+// the gateway answers its runtime settings.
+const openClawPromptGateKey = "promptGate"
+
+// openClawSetupConfigKeys are the plugin config keys setup derives from
+// config.yaml; teardown takes them out again.
+var openClawSetupConfigKeys = []string{openClawHookModeKey, openClawPromptGateKey}
+
+// openClawPluginKeys are the derived plugin config values.
+type openClawPluginKeys struct {
+	hookMode   string
+	promptGate bool
+	// allowCreated: the openclaw.json before the first setup had no
+	// plugins.allow, so a ["defenseclaw"] list there is one an earlier
+	// setup created.
+	allowCreated bool
+}
+
+// setOpenClawPluginKeys writes config.hookMode for a native or hybrid mode
+// and config.promptGate when it is on, and removes them otherwise: the proxy
+// mode is what a plugin without the keys runs, so a 1.0.9 openclaw.json does
+// not change for it.
+func setOpenClawPluginKeys(entry map[string]interface{}, keys openClawPluginKeys) {
+	removeDefenseClawPluginKeys(entry)
+	if keys.hookMode == "" || keys.hookMode == OpenClawHookModeProxy {
+		return
+	}
+	cfg, _ := entry["config"].(map[string]interface{})
+	if cfg == nil {
+		cfg = map[string]interface{}{}
+	}
+	cfg[openClawHookModeKey] = keys.hookMode
+	if keys.promptGate {
+		cfg[openClawPromptGateKey] = true
+	}
+	entry["config"] = cfg
+}
+
+// removeDefenseClawPluginKeys deletes the derived plugin config keys, and
+// the config object when that leaves it empty.
+func removeDefenseClawPluginKeys(entry map[string]interface{}) {
+	cfg, ok := entry["config"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	removed := false
+	for _, key := range openClawSetupConfigKeys {
+		if _, ok := cfg[key]; ok {
+			delete(cfg, key)
+			removed = true
+		}
+	}
+	if removed && len(cfg) == 0 {
+		delete(entry, "config")
+	}
 }
 
 // removeDefenseClawConversationGrant deletes hooks.allowConversationAccess
@@ -891,15 +1045,25 @@ func isDefenseClawPathString(value string) bool {
 func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 	var residual []string
 
-	// Check extension directory
-	extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
-	if _, err := os.Stat(extDir); err == nil {
+	paths := c.pathsFor(opts)
+	if openClawSeparateUser(opts) {
+		// openclaw.json belongs to the OpenClaw account; only the published
+		// credential is DefenseClaw state.
+		if tokenFile := strings.TrimSpace(opts.OpenClawPluginTokenFile); tokenFile != "" {
+			if _, err := os.Lstat(tokenFile); err == nil {
+				residual = append(residual, tokenFile+" still exists")
+			}
+		}
+		paths.config = ""
+	}
+	// Check extension directory (never created in the separate-user layout)
+	if _, err := os.Stat(paths.managedPluginDir()); err == nil && !openClawSeparateUser(opts) {
 		residual = append(residual, "extensions/defenseclaw still exists")
 	}
 
 	// Check openclaw.json for defenseclaw entries
-	configPath := filepath.Join(openClawHome(), "openclaw.json")
-	if data, err := readConnectorStateFile(configPath); err == nil {
+	configPath := paths.config
+	if data, err := readConnectorStateFile(configPath); configPath != "" && err == nil {
 		if cfg, err := parseOpenClawConfig(configPath, data); err == nil {
 			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
 				if entries, ok := plugins["entries"].(map[string]interface{}); ok {
@@ -931,6 +1095,9 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 }
 
 func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
+	if c.pluginCredentialMatches(r) {
+		return true
+	}
 	isLoopback := IsLoopback(r)
 
 	// Check X-DC-Auth token (set by the fetch interceptor).
@@ -941,18 +1108,8 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
-	// Check Authorization with the proxy master key.
-	if c.masterKey != "" {
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") && SecureTokenMatch(strings.TrimPrefix(auth, "Bearer "), c.masterKey) {
-			return true
-		}
-	}
-
-	// No gateway token configured: trust loopback callers. The masterKey is
-	// an alternative credential for programmatic/remote access — its presence
-	// alone should not revoke loopback trust. The operator opts into requiring
-	// auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
+	// No gateway token configured: trust loopback callers. The operator opts
+	// into requiring auth on all connections by setting DEFENSECLAW_GATEWAY_TOKEN.
 	if c.gatewayToken == "" {
 		return isLoopback
 	}
@@ -960,23 +1117,22 @@ func (c *OpenClawConnector) Authenticate(r *http.Request) bool {
 	return false
 }
 
-// SetCredentials injects the gateway token and master key at sidecar boot.
-func (c *OpenClawConnector) SetCredentials(gatewayToken, masterKey string) {
+// SetCredentials injects the gateway token at sidecar boot.
+func (c *OpenClawConnector) SetCredentials(gatewayToken string) {
 	c.gatewayToken = gatewayToken
-	c.masterKey = masterKey
 }
 
 // HasUsableProviders implements ProviderProbe (plan A4). OpenClaw does
 // not maintain a provider snapshot: the fetch interceptor plugin
 // supplies the upstream URL + key on every call via X-DC-Target-URL /
 // X-AI-Auth. As long as openclaw.json has been patched (the plugin is
-// installed) and either a gateway token or master key is configured,
+// installed) and a gateway token is configured,
 // the gateway has at least one usable upstream. We treat the absence
 // of credentials as "no upstream" so the boot probe fails fast on
 // half-installed deployments.
 func (c *OpenClawConnector) HasUsableProviders() (int, error) {
-	if c.gatewayToken == "" && c.masterKey == "" {
-		return 0, errors.New("openclaw: no gateway token or master key configured; fetch interceptor cannot authenticate to proxy")
+	if c.gatewayToken == "" {
+		return 0, errors.New("openclaw: no gateway token configured; fetch interceptor cannot authenticate to proxy")
 	}
 	return 1, nil
 }
@@ -1020,17 +1176,19 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 // <DataDir>/connector_backups backs the config restore path. Hook scripts
 // under <DataDir>/hooks/ are written for proxy-side tool inspection.
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	ocHome := openClawHome()
-	return AgentPaths{
-		PatchedFiles:         []string{filepath.Join(ocHome, "openclaw.json")},
-		BackupFiles:          []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
-		HookScripts:          hookScriptPathsForConnector(opts, c),
-		GeneratedFiles:       subprocessGeneratedFiles(opts),
-		GeneratedExecutables: subprocessGeneratedExecutables(opts),
-		CreatedDirs: append([]string{
-			filepath.Join(ocHome, "extensions", "defenseclaw"),
-		}, subprocessCreatedDirs(opts)...),
+	paths := c.pathsFor(opts)
+	out := AgentPaths{
+		PatchedFiles: []string{paths.config},
+		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
+		HookScripts:  hookScriptPathsForConnector(opts, c),
+		CreatedDirs:  []string{paths.managedPluginDir()},
 	}
+	if c.SubprocessPolicy() == SubprocessShims {
+		out.GeneratedFiles = subprocessGeneratedFiles(opts)
+		out.GeneratedExecutables = subprocessGeneratedExecutables(opts)
+		out.CreatedDirs = append(out.CreatedDirs, subprocessCreatedDirs(opts)...)
+	}
+	return out
 }
 
 func (c *OpenClawConnector) HookScripts(opts SetupOpts) []string {
@@ -1058,15 +1216,50 @@ func (c *OpenClawConnector) RequiredEnv() []EnvRequirement {
 func (c *OpenClawConnector) SupportsComponentScanning() bool { return true }
 
 func (c *OpenClawConnector) ComponentTargets(cwd string) map[string][]string {
-	home := userHomeDir()
-	openclawHome := filepath.Join(home, ".openclaw")
-	workspace := filepath.Join(openclawHome, "workspace")
+	paths := c.currentPaths()
+	workspace := filepath.Join(paths.home, "workspace")
 
 	targets := map[string][]string{
-		"skill":  {filepath.Join(workspace, "skills"), filepath.Join(openclawHome, "skills")},
-		"plugin": {filepath.Join(openclawHome, "extensions")},
-		"mcp":    {filepath.Join(openclawHome, "openclaw.json")},
-		"config": {filepath.Join(openclawHome, "openclaw.json")},
+		"skill":  {filepath.Join(workspace, "skills"), filepath.Join(paths.home, "skills")},
+		"plugin": {paths.extensionsDir()},
+		"mcp":    {paths.config},
+		"config": {paths.config},
 	}
 	return targets
+}
+
+// openClawPluginKeysFor derives the plugin config values from opts.
+func openClawPluginKeysFor(opts SetupOpts, observedVersion string) openClawPluginKeys {
+	return openClawPluginKeys{
+		hookMode:   ResolveOpenClawHookMode(opts.OpenClawHooksMode, observedVersion),
+		promptGate: opts.OpenClawPromptGate,
+	}
+}
+
+// openClawPluginKeysWithAllow is openClawPluginKeysFor plus whether the
+// copy of openclaw.json from before the first setup had no plugins.allow.
+func openClawPluginKeysWithAllow(opts SetupOpts, observedVersion string) openClawPluginKeys {
+	keys := openClawPluginKeysFor(opts, observedVersion)
+	keys.allowCreated = openClawPristineLacksAllow(opts.DataDir)
+	return keys
+}
+
+// openClawPristineLacksAllow reports a pre-setup copy of openclaw.json that
+// exists and has no plugins.allow, or no file at all before setup. With no
+// copy, or one that cannot be read, nothing is claimed.
+func openClawPristineLacksAllow(dataDir string) bool {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "openclaw", "openclaw.json"))
+	if err != nil {
+		return false
+	}
+	if !b.Existed {
+		return true
+	}
+	pristine, err := parseOpenClawConfig(b.Path, b.PristineBytes)
+	if err != nil {
+		return false
+	}
+	plugins, _ := pristine["plugins"].(map[string]interface{})
+	_, had := plugins["allow"]
+	return !had
 }
