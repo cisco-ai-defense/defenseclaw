@@ -58,9 +58,9 @@ func gap0270Fill(t *testing.T, dir string, n int) {
 
 // rel-1-0-10:GAP-0270: the corpus shapes over a temp folder get the same
 // answer whether the folder holds a few names or more than the pattern walk
-// reads (4096). On dc-build-1 (/tmp 17,212 entries) the for-loop and
+// reads (4096). On lab-host (/tmp 17,212 entries) the for-loop and
 // redirect shapes were CRITICAL persistence.ssh_authorized_keys_command
-// blocks, on dc-s7-bench (/tmp 468 entries) allows.
+// blocks, on lab-host (/tmp 468 entries) allows.
 func TestGAP0270GatewayBusyTempFolderSameAnswer(t *testing.T) {
 	root := t.TempDir()
 	home, busy := filepath.Join(root, "home"), filepath.Join(root, "tmp")
