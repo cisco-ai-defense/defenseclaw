@@ -87,6 +87,8 @@ proxy_arg_keys: [arguments, args, params, parameters, input]
 callback_keys: [callback_url, callback, notify_url, webhook_callback]
 # Argument names that hold the name of the tool a proxy tool calls.
 name_keys: [name, tool, tool_name, method]
+# Argument names that hold a resource identifier (a file: URI among them).
+uri_keys: [uri, uris, resource, resources, ref, refs, link, links, document, documents, source_uri, target_uri, resource_uri, file_uri, location, locations]
 # Argument names that carry a URL or host.
 url_keys: [url, urls, uri, endpoint, href, link, webhook, webhook_url, api_endpoint, base_url, host, hostname, server, address]
 # Argument names that redirect output to another party (a copy, a forward, an

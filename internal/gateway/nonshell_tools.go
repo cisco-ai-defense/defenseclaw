@@ -173,7 +173,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				// caller's claim, so it never excuses a copy; it only makes the
 				// finding certain (the call says whose mail it is and copies it
 				// elsewhere).
-				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, len(mapping.Senders) == 0)
+				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, !senderNamedAnotherHost(mapping.Senders, e.Host))
 			}
 			if e.Host != "" && nonShellCollectorHost(e.Host) {
 				add(mcpSendCollectorRuleID, "reaches a paste, file-drop or webhook-catcher host", false)
@@ -207,8 +207,7 @@ func nonShellToolApplies(request trustedActionRequest, mcpServer string) bool {
 	if tool == "" || request.Input.Command != "" || len(request.Input.Argv) != 0 || trustedShimArgvTool(tool) {
 		return false
 	}
-	if mcpServer == "" && actionfacts.KnownTool(tool) &&
-		!strings.Contains(strings.ToLower(string(request.Input.Args)), "file:") {
+	if mcpServer == "" && actionfacts.KnownTool(tool) && !toolshape.HasFileURIArg(request.Input.Args) {
 		return false
 	}
 	if _, ok := connector.ShellCommandArgs(request.Connector, tool, request.Input.Args); ok {
@@ -355,4 +354,21 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		}
 	}
 	return out
+}
+
+// senderNamedAnotherHost reports a call that names its own account on a host
+// other than host: a copy to a third host is then certain. A copy to the
+// named account's own host stays uncertain (an alert, never a block): the
+// account is the caller's claim and never excuses a copy, but a copy to
+// oneself is the common shape of a hidden copy that is meant.
+func senderNamedAnotherHost(senders []string, host string) bool {
+	if len(senders) == 0 {
+		return false
+	}
+	for _, s := range senders {
+		if s == host {
+			return false
+		}
+	}
+	return true
 }

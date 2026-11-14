@@ -163,6 +163,7 @@ type table struct {
 	NameKeys      []string            `yaml:"name_keys"`
 	ProxyArgKeys  []string            `yaml:"proxy_arg_keys"`
 	CallbackKeys  []string            `yaml:"callback_keys"`
+	URIKeys       []string            `yaml:"uri_keys"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
@@ -183,6 +184,7 @@ type table struct {
 	senderKey     map[string]bool
 	searchToken   map[string]bool
 	callbackKey   map[string]bool
+	uriKey        map[string]bool
 }
 
 type compiledSetting struct {
@@ -230,6 +232,7 @@ func load() (*table, error) {
 		t.codeKey, t.codeToken, t.localHost = set(t.CodeKeys), set(t.CodeToolTokens), set(t.LocalHosts)
 		t.contentKey, t.senderKey, t.searchToken = set(t.ContentKeys), set(t.SenderKeys), set(t.SearchTokens)
 		t.callbackKey = set(t.CallbackKeys)
+		t.uriKey = set(t.URIKeys)
 		for _, suf := range t.PathKeySuffix {
 			t.pathSuffix = append(t.pathSuffix, "_"+suf)
 		}
@@ -548,10 +551,11 @@ func (w *walker) str(key, val string) {
 		w.textPaths(key, val)
 		return
 	}
-	if t.locationKey(key) {
+	fromURI := false
+	if t.locationKey(key) || (t.contentKey[key] && !w.bodyIsData(val)) {
 		switch p, kind := fileURIPath(val); kind {
 		case fileURIPlaced:
-			val = p
+			val, fromURI = p, true
 		case fileURIUnplaced:
 			w.trunc.Hit(bounded.Nodes)
 			return
@@ -612,6 +616,8 @@ func (w *walker) str(key, val string) {
 		w.path(KindRead, key, val)
 	case (t.pathRead[key] || t.pathKeySuffix(key)) && looksPath(val):
 		w.path(w.pathKind(), key, val)
+	case fromURI && looksPath(val):
+		w.path(w.pathKind(), key, val)
 	case !t.urlKey[key] && !t.redirectKey[key] && !t.recipientKey[key] && absolutePath(val):
 		w.path(w.pathKind(), key, val)
 	}
@@ -661,14 +667,14 @@ func pythonLiteralToJSON(v string) string {
 	})
 }
 
-// bodyIsData reports that a value under a content-style key is the text of a
-// plain write: the tool writes, is neither a send nor a proxy tool, and the
-// value is not a JSON document.
-func (w *walker) bodyIsData(val string) bool {
-	if w.m.Verb != KindWrite || w.proxy || w.m.Family == FamilyMail || w.m.Family == FamilyChat {
-		return false
-	}
-	return !jsonDocument(val)
+// bodyIsData reports that a value under a content-style key is what the
+// call writes or sends: the verb of the tool (or of the tool a proxy names) is
+// a write or a send, or the tool is a mail or chat tool. What a call writes or
+// sends is data, whatever its spelling (a JSON file body, a bug report, a
+// path in a message). A tool that neither writes nor sends reads the value
+// like any argument.
+func (w *walker) bodyIsData(string) bool {
+	return w.m.Verb == KindWrite || w.m.Verb == KindNetSend || w.m.Family == FamilyMail || w.m.Family == FamilyChat
 }
 
 var rePathToken = regexp.MustCompile("(?:[A-Za-z]:[\\\\/]|~[\\\\/]|/)[^\\s\"'`,;|&<>(){}\\[\\]]{2,}")
@@ -724,7 +730,7 @@ var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "inp
 // locationKey reports a key that can hold a location (a path, a file URI, a
 // URL); a value under any other key is not a location by its spelling alone.
 func (t *table) locationKey(key string) bool {
-	return t.pathRead[key] || t.pathWrite[key] || inputKeys[key] || t.pathKeySuffix(key) || t.urlKey[key]
+	return t.pathRead[key] || t.pathWrite[key] || inputKeys[key] || t.pathKeySuffix(key) || t.urlKey[key] || t.uriKey[key]
 }
 
 // pathKeySuffix reports a key that ends in one of the table's path words
@@ -1075,4 +1081,52 @@ func DecodeExec(code string) bool {
 		}
 	}
 	return false
+}
+
+// HasFileURIArg reports that a call carries a file: URI as the value of a key
+// that can hold a location (or of a content key a reading tool receives). The
+// gateway reads the arguments of an agent's own tool with the MCP walk only
+// then; a file: substring anywhere else is text.
+func HasFileURIArg(args json.RawMessage) bool {
+	t, err := load()
+	if err != nil || len(args) == 0 {
+		return false
+	}
+	root, ok := decodeLenient(args)
+	if !ok {
+		return false
+	}
+	nodes := 0
+	var walk func(key string, v any, depth int) bool
+	walk = func(key string, v any, depth int) bool {
+		nodes++
+		if nodes > maxNodes || depth > maxDepth {
+			return false
+		}
+		switch x := v.(type) {
+		case map[string]any:
+			for k, item := range x {
+				if walk(normKey(k), item, depth+1) {
+					return true
+				}
+			}
+		case []any:
+			for i, item := range x {
+				if i >= maxItems {
+					return false
+				}
+				if walk(key, item, depth+1) {
+					return true
+				}
+			}
+		case string:
+			if t.locationKey(key) || t.contentKey[key] {
+				if _, kind := fileURIPath(strings.TrimSpace(x)); kind != fileURINone {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk("", root, 0)
 }

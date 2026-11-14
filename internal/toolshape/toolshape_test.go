@@ -642,8 +642,8 @@ func TestRound3Mapping(t *testing.T) {
 	if m := mapOf(t, "mcp__x__read_file", `{"data":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`); !has(m, "/home/u/.ssh/id_rsa") {
 		t.Errorf("JSON under data for a read tool: %+v", m.Effects)
 	}
-	if m := mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/a.json","content":"{\"path\":\"/etc/shadow\"}"}`); !has(m, "/etc/shadow") {
-		t.Errorf("a JSON body is read as arguments: %+v", m.Effects)
+	if m := mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/a.json","content":"{\"path\":\"/etc/shadow\"}"}`); has(m, "/etc/shadow") {
+		t.Errorf("a JSON body is data for a write: %+v", m.Effects)
 	}
 	// A recipient field of more than 64 addresses is recorded.
 	var list []string
@@ -691,8 +691,8 @@ func TestRound4(t *testing.T) {
 		t.Errorf("a pattern is text: %+v %v", m.Effects, m.Truncated)
 	}
 	// Content keys: read for a send, a proxy, a JSON value; data for a prose write.
-	if m := mapOf(t, "mcp__mail__send", `{"to":"a@x.com","body":"/home/u/.ssh/id_rsa"}`); !has(m, "/home/u/.ssh/id_rsa") {
-		t.Errorf("a send body: %+v", m.Effects)
+	if m := mapOf(t, "mcp__mail__send", `{"to":"a@x.com","body":"/home/u/.ssh/id_rsa"}`); has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("a send body is data: %+v", m.Effects)
 	}
 	if m := mapOf(t, "mcp__proxy__call_tool", `{"name":"x","arguments":{"text":"/home/u/.ssh/id_rsa"}}`); !has(m, "/home/u/.ssh/id_rsa") {
 		t.Errorf("a proxy text: %+v", m.Effects)
@@ -744,5 +744,48 @@ func TestRound4(t *testing.T) {
 	}
 	if cb != 1 {
 		t.Errorf("callback effects: %+v", m.Effects)
+	}
+}
+
+func TestRound5(t *testing.T) {
+	has := func(m Mapping, path string) bool {
+		for _, e := range m.Effects {
+			if e.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+	// What a call writes or sends is data, whatever its spelling.
+	for _, c := range []struct{ tool, args string }{
+		{"mcp__filesystem__write_file", `{"path":"/repo/c.json","content":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`},
+		{"mcp__filesystem__edit_file", `{"path":"/repo/c.json","edits":[{"oldText":"a","newText":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}]}`},
+		{"mcp__github__create_issue", `{"title":"t","body":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`},
+		{"mcp__mail__send", `{"to":"a@x.com","body":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`},
+		{"mcp__slack__post_message", `{"channel":"c","text":"/home/u/.ssh/id_rsa"}`},
+	} {
+		if m := mapOf(t, c.tool, c.args); has(m, "/home/u/.ssh/id_rsa") {
+			t.Errorf("%s: a body read as arguments: %+v", c.tool, m.Effects)
+		}
+	}
+	// A tool that neither writes nor sends reads the value; a file URI under a content key too.
+	if m := mapOf(t, "mcp__x__read_file", `{"data":"file:///home/u/.ssh/id_rsa"}`); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("file URI under data for a read tool: %+v", m.Effects)
+	}
+	for _, key := range []string{"resource", "ref", "uris", "link", "document"} {
+		b, _ := json.Marshal(map[string]string{key: "file:///home/u/.ssh/id_rsa"})
+		if m := mapOf(t, "mcp__x__open", string(b)); !has(m, "/home/u/.ssh/id_rsa") {
+			t.Errorf("file URI under %s: %+v", key, m.Effects)
+		}
+	}
+	// A native tool's arguments open the MCP walk only for a real file URI under a location key.
+	if HasFileURIArg(json.RawMessage(`{"file_path":"/repo/package.json","content":"{\"dependencies\":{\"a\":\"file:../a\"}}"}`)) {
+		t.Error("a file: dependency in a package.json body is text")
+	}
+	if HasFileURIArg(json.RawMessage(`{"pattern":"file:/etc/passwd"}`)) {
+		t.Error("a search pattern is text")
+	}
+	if !HasFileURIArg(json.RawMessage(`{"uri":"file:///etc/passwd"}`)) || !HasFileURIArg(json.RawMessage(`{"path":"file:/etc/passwd"}`)) {
+		t.Error("a file URI under a location key")
 	}
 }

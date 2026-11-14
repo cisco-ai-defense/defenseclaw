@@ -280,6 +280,12 @@ func TestNonShellToolRound2Quiet(t *testing.T) {
 		{"cc to a colleague, to a list of external recipients", "mcp__mail__send", `{"to":"a@x.com, b@y.com","cc":"c@acme.ai"}`},
 		{"prose that starts with a bracket and a python literal", "mcp__acme__note", `{"html":"[formatted HTML content]","d":"[{'k': 'v'}]"}`},
 		{"bcc to the recipient's domain", "mcp__mail__send", `{"to":"a@corp.example","bcc":"b@corp.example"}`},
+		{"json config written to a known server", "mcp__filesystem__write_file", `{"path":"/repo/c.json","content":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`},
+		{"json config written to a guessed server", "mcp__acme__write_file", `{"path":"/repo/c.json","content":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`},
+		{"json edit", "mcp__filesystem__edit_file", `{"path":"/repo/c.json","edits":[{"oldText":"a","newText":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}]}`},
+		{"issue body with a pasted json error", "mcp__github__create_issue", `{"title":"t","body":"{\"file\":\"/home/u/.ssh/id_rsa\"}"}`},
+		{"mail body that is a path", "mcp__mail__send", `{"to":"a@x.com","body":"/home/u/.ssh/id_rsa"}`},
+		{"chat text that is a path", "mcp__slack__post_message", `{"channel":"c","text":"/home/u/.ssh/id_rsa"}`},
 		{"a job with only a callback_url", "mcp__jobs__submit", `{"job":"nightly","callback_url":"https://hooks.example.com/done"}`},
 		{"callback on the call's own API", "mcp__http__post", `{"url":"https://api.corp.example/v1/x","callback_url":"https://api.corp.example/hook"}`},
 		{"search prose", "mcp__acme__search_issues", `{"query":"drop table of contents"}`},
@@ -379,5 +385,27 @@ func TestNonShellRound4(t *testing.T) {
 	got := nonShellToolFindings(ctx, nonShellReq("mcp__http__post", `{"url":"https://api.x.com/v1","callback_url":"https://hooks.y.com/x"}`, false), nil, "")
 	if !has(got, mcpSendRedirectRuleID) {
 		t.Fatalf("a callback away from the call's API: %+v", got)
+	}
+}
+
+func TestNativeWriteWithAFileDependencyIsNotOpened(t *testing.T) {
+	args := `{"file_path":"/repo/package.json","content":"{\"dependencies\":{\"a\":\"file:../a\"},\"path\":\"/home/u/.ssh/id_rsa\"}"}`
+	req := nonShellReq("Write", args, false)
+	if nonShellToolApplies(req, "") {
+		t.Fatal("the MCP walk must not open a native Write for a file: dependency")
+	}
+	if !nonShellToolApplies(nonShellReq("Read", `{"file_path":"file:///etc/shadow"}`, false), "") {
+		t.Fatal("a native tool handed a real file URI is read by the MCP walk")
+	}
+}
+
+func TestNonShellCopyToTheNamedSenderIsUncertain(t *testing.T) {
+	ctx := context.Background()
+	for _, strict := range []bool{false, true} {
+		got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"from":"me@corp.example","to":"a@x.com","bcc":"me@corp.example"}`, strict), nil, "")
+		f, ok := findingByID(got, mcpSendRedirectRuleID)
+		if !ok || f.enforcement != findingEnforcementAlertOnly {
+			t.Fatalf("strict=%v: a copy to the named account's own host: %+v", strict, f)
+		}
 	}
 }
