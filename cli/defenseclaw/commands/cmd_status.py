@@ -519,6 +519,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
         _print_policy(health)
+        _print_hook_capacity(health)
         _print_watch_root_coverage(health)
         _print_audit_log_health(cfg, health)
         _print_retention_cap_warning(health)
@@ -1356,6 +1357,48 @@ def _policy_status(health: dict | None) -> dict | None:
         "last_reload_error": policy_reload_rejection(policy),
         "opa_unavailable": policy.get("opa_unavailable") or "",
     }
+
+
+def _hook_capacity_status(health: dict | None) -> dict | None:
+    """The hook capacity window from /health (S8 DESIGN 18), or None.
+
+    Counts of the last hour: tool calls answered in time, and the ones that
+    ran out of their answer budget (deadline denies, late allows) or were
+    refused by the admission limits (shed). Absent on older gateways, on
+    Secure Client and for an ordinary account of a managed host.
+    """
+    capacity = (health or {}).get("hook_capacity")
+    if not isinstance(capacity, dict):
+        return None
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+
+    def count(key: str) -> int:
+        value = window.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    minutes = capacity.get("window_minutes")
+    return {
+        "window_minutes": minutes if isinstance(minutes, int) and not isinstance(minutes, bool) else 60,
+        "answered": count("answered"),
+        "deadline_denies": count("deadline_denies"),
+        "late_allows": count("late_allows"),
+        "shed": count("shed"),
+        "sizing_doc": str(capacity.get("sizing_doc") or "")[:200],
+    }
+
+
+def _print_hook_capacity(health: dict | None) -> None:
+    """One row only when a tool call ran out of its answer budget in the window."""
+    capacity = _hook_capacity_status(health)
+    if capacity is None or capacity["deadline_denies"] + capacity["late_allows"] == 0:
+        return
+    denies, late = capacity["deadline_denies"], capacity["late_allows"]
+    minutes, answered = capacity["window_minutes"], capacity["answered"]
+    value = (
+        f"over capacity: {denies} denied and {late} unchecked tool call(s) in the last {minutes} min "
+        f"ran out of their answer budget ({answered} answered in time); not a policy result, see defenseclaw doctor"
+    )
+    _status_row("Hook capacity", ux._style(value, fg="yellow"))
 
 
 def _print_policy(health: dict | None) -> None:
@@ -2647,6 +2690,8 @@ def _status_payload(app) -> dict:
             payload["audit_store_cap_warning"] = warning
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
+    if (capacity := _hook_capacity_status(health)) is not None:
+        payload["hook_capacity"] = capacity
     payload["connectors"] = _connector_roster(cfg, health=health)
     if any(row.get("name") == "openclaw" and row.get("enabled") for row in payload["connectors"]):
         from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue

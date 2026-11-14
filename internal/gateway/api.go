@@ -1934,6 +1934,12 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if policy, ok := CurrentPolicyHealth(); ok && administrator {
 		body["policy"] = a.policyHealthBody(policy)
 	}
+	if administrator && (cfg == nil || !cfg.SecureClientIntegration()) {
+		// The machine-wide hook load: an ordinary account of a managed host
+		// does not read how many calls the other accounts made. Secure
+		// Client keeps its health body (issue #1092).
+		body["hook_capacity"] = hookCapacity.snapshot()
+	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
 	}

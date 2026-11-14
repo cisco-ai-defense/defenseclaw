@@ -7639,6 +7639,7 @@ def _check_windows_gateway_diagnostics(
 
     runtime: dict = {}
     peer_broker = None
+    hook_capacity = None
     if status_code == 200:
         try:
             payload = json.loads(status_body)
@@ -7647,6 +7648,7 @@ def _check_windows_gateway_diagnostics(
                 runtime = candidate
             if isinstance(payload, dict):
                 peer_broker = payload.get("route_peer_broker")
+                hook_capacity = payload.get("hook_capacity")
         except (json.JSONDecodeError, TypeError):
             runtime = {}
 
@@ -7730,7 +7732,54 @@ def _check_windows_gateway_diagnostics(
     else:
         _emit("pass", "Gateway home", "running gateway uses this canonical data home", r=r)
     _emit_route_peer_broker_row(peer_broker, r)
+    _emit_hook_capacity_row(hook_capacity, r)
     return True
+
+
+def _capacity_count(counts, key: str) -> int:
+    value = counts.get(key) if isinstance(counts, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _emit_hook_capacity_row(capacity, r: _DoctorResult) -> None:
+    """Hook capacity: tool calls that ended at their answer budget (S8 DESIGN 18).
+
+    The gateway counts, per minute over its last hour, the hook calls it
+    answered in time and the ones that ran out of their answer budget: a
+    deadline deny (the hook blocked the call, the managed and strict
+    answer) or a late allow (the call ran without a check, the default
+    per-user answer). Any of them means the host got more tool calls than it
+    can check in time; the sizing page gives the measured rate per host.
+    """
+    if not isinstance(capacity, dict):
+        return
+    window = capacity.get("window") if isinstance(capacity.get("window"), dict) else {}
+    peak = capacity.get("peak_minute") if isinstance(capacity.get("peak_minute"), dict) else {}
+    minutes = _capacity_count(capacity, "window_minutes") or 60
+    doc = str(capacity.get("sizing_doc") or "")[:200]
+    carried = _capacity_count(capacity, "answered_per_minute_peak")
+    denies, late = _capacity_count(window, "deadline_denies"), _capacity_count(window, "late_allows")
+    shed = _capacity_count(window, "shed")
+    if denies + late == 0:
+        detail = f"no tool call ran out of its answer budget in the last {minutes} min (peak {carried} calls answered in one minute)"
+        if shed:
+            detail += f"; {shed} refused by the admission limits and retried"
+        _emit("pass", "Hook capacity", detail, r=r)
+        return
+    start = str(capacity.get("peak_minute_start") or "")[:40]
+    peak_denies = _capacity_count(peak, "deadline_denies")
+    peak_late = _capacity_count(peak, "late_allows")
+    peak_answered = _capacity_count(peak, "answered")
+    detail = (
+        f"in the last {minutes} min {denies} tool call(s) were denied and {late} ran unchecked because "
+        f"DefenseClaw could not check them in time (busiest minute {start}: "
+        f"{peak_denies} denied, {peak_late} unchecked, "
+        f"{peak_answered} answered). This host is over its hook capacity, not a policy result; "
+        f"run fewer agents at once or use a larger host"
+    )
+    if doc:
+        detail += f" (sizing: {doc})"
+    _emit("warn", "Hook capacity", detail, r=r)
 
 
 def _emit_route_peer_broker_row(broker, r: _DoctorResult) -> None:
