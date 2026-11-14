@@ -6,7 +6,12 @@ package hookpaths
 import (
 	"runtime"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
+
+// The bound rule's misuse check panics in this package's tests (TestAdopters).
+func init() { bounded.PanicOnMisuse(true) }
 
 // rel-1-0-10:GAP-0437: an assignment whose $(( arithmetic has a syntax error
 // made the recovering parse behind UnprovenProtectedWrite panic. The reader
