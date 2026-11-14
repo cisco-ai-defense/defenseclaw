@@ -47,16 +47,74 @@ func (s budgetShape) command(n int) string {
 
 func shape(name string, n int) string { return budgetShapes[name].command(n) }
 
-// measure returns the bytes allocated and the time the call took.
-func measure(call func()) (alloc uint64, took time.Duration) {
+// cost is what a call spent: the bytes and the heap objects it allocated
+// (both counted by the runtime, so they do not depend on the host) and the
+// wall time it took (which does).
+type cost struct {
+	alloc, mallocs uint64
+	took           time.Duration
+}
+
+func measureCost(call func()) cost {
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
 	start := time.Now()
 	call()
-	took = time.Since(start)
+	took := time.Since(start)
 	runtime.ReadMemStats(&after)
-	return after.TotalAlloc - before.TotalAlloc, took
+	return cost{after.TotalAlloc - before.TotalAlloc, after.Mallocs - before.Mallocs, took}
+}
+
+// measure returns the bytes allocated and the time the call took.
+func measure(call func()) (alloc uint64, took time.Duration) {
+	c := measureCost(call)
+	return c.alloc, c.took
+}
+
+// The bounds of these tests are counts first: the bytes and the heap objects
+// a call allocates, which the runtime counts and no host changes. A refused
+// text allocates a handful of objects and a parse of the same text allocates
+// one or more per node, so a count bound says whether the reader parsed.
+// The time is a guard against a stall or a runaway loop, and it is read
+// against the host that runs the test: the same calls on a reference command,
+// a fixed in-budget text of a few KB, give the cost of one byte of a full
+// parse on this host in this process (-race, coverage and a loaded or small
+// runner included), and a bound is timeFactor times that cost per byte of the
+// command. A refusal or a parse of a flat text is a fraction of the
+// reference per byte on every host, so the factor leaves a wide margin
+// where a shared runner is 50 times slower than the dev host (a fixed
+// second does not, and failed on one: PR 1457, shard 9).
+const (
+	timeFactor     = 10
+	timeFloor      = 100 * time.Millisecond
+	referenceUnits = 2000 // 4 KB of "words"
+	referenceRuns  = 3
+	refusalObjects = 256  // objects of a refusal: a handful
+	probeObjects   = 2048 // objects of a probe: a refusal, or the parse of one long word
+)
+
+// timeBound is the most a call over bytes of text may take on this host.
+func timeBound(bytes int, call func(command string)) time.Duration {
+	best := time.Duration(-1)
+	var size int
+	for run := range referenceRuns {
+		// Each run is a text of its own: a repeated text is a parse-cache hit.
+		command := shape("words", referenceUnits+run)
+		size = len(command)
+		c := measureCost(func() { call(command) })
+		if best < 0 || c.took < best {
+			best = c.took
+		}
+	}
+	return timeFloor + time.Duration(float64(best)/float64(size)*float64(bytes)*timeFactor)
+}
+
+// readAll is the work of the probes: the budget, then both parses.
+func readAll(command string) {
+	BudgetExceeded(command)
+	Parse(command)
+	ParseWithComments(command)
 }
 
 // TestChainBudgetIsExact pins the chain bound on its tree: a chain of
@@ -161,7 +219,8 @@ func TestTreeBudgetCoversEveryTreeKind(t *testing.T) {
 
 // TestHardBoundsRefuseWithoutAParse pins the bounds of the first stage: a
 // text past MaxCommandBytes, MaxChainBytes or MaxWords is refused whatever
-// it holds, and the check costs a linear pass.
+// it holds, and the check costs a linear pass: no parse (a handful of
+// objects) and a time within a multiple of the reference parse.
 func TestHardBoundsRefuseWithoutAParse(t *testing.T) {
 	for _, row := range []struct {
 		name, command, reason string
@@ -172,13 +231,15 @@ func TestHardBoundsRefuseWithoutAParse(t *testing.T) {
 		{"heredoc raw bound", shape("heredoc-q", rawChainBytes+1), BudgetChain},
 		{"nesting", strings.Repeat("(", MaxNestingDepth+1) + "a", BudgetNesting},
 	} {
-		alloc, took := measure(func() {
+		bound := timeBound(len(row.command), readAll)
+		spent := measureCost(func() {
 			if got := BudgetExceeded(row.command); got != row.reason {
 				t.Errorf("%s: BudgetExceeded=%q, want %q", row.name, got, row.reason)
 			}
 		})
-		if alloc > 4<<20 || took > time.Second {
-			t.Errorf("%s: %d KiB allocated in %s", row.name, alloc>>10, took)
+		t.Logf("%s: %d bytes, %d KiB in %d objects, %s (bound %s)", row.name, len(row.command), spent.alloc>>10, spent.mallocs, spent.took, bound)
+		if spent.alloc > 4<<20 || spent.mallocs > refusalObjects || spent.took > bound {
+			t.Errorf("%s: %d KiB in %d objects allocated in %s (bound %s)", row.name, spent.alloc>>10, spent.mallocs, spent.took, bound)
 		}
 	}
 }
@@ -186,10 +247,11 @@ func TestHardBoundsRefuseWithoutAParse(t *testing.T) {
 // TestProbeShapesAreBoundedInTimeAndMemory runs the probes of the gateway
 // (a pipeline of 33,577 stages, a left-deep list of 166,443 ||) and every
 // family at sizes far past the budget through the budget and the parser:
-// each is decided within a few MiB and well under a second, and none
-// crashes. Before the budget the list killed the process with a stack
-// overflow in the copy of the parse cache. The bounds are loose on purpose:
-// they hold under -race on a loaded box.
+// each is decided within a few MiB and a few objects (counts, which no host
+// changes) and within a multiple of the cost of a reference parse on this
+// host, and none crashes. Before the budget the list killed the process with
+// a stack overflow in the copy of the parse cache. The bounds hold under
+// -race on a loaded or small runner.
 func TestProbeShapesAreBoundedInTimeAndMemory(t *testing.T) {
 	for name, n := range map[string]int{
 		"pipe": 33577, "or": 166443, "and": 166443, "mixed": 100000, "subst": 50000, "group": 50000,
@@ -197,13 +259,11 @@ func TestProbeShapesAreBoundedInTimeAndMemory(t *testing.T) {
 		"background": 200000, "heredoc": 100000,
 	} {
 		command := shape(name, n)
-		alloc, took := measure(func() {
-			BudgetExceeded(command)
-			Parse(command)
-			ParseWithComments(command)
-		})
-		if alloc > 24<<20 || took > 2*time.Second {
-			t.Errorf("%s n=%d (%d bytes): %d MiB allocated in %s", name, n, len(command), alloc>>20, took)
+		bound := timeBound(len(command), readAll)
+		spent := measureCost(func() { readAll(command) })
+		t.Logf("%s n=%d (%d bytes): %d KiB in %d objects, %s (bound %s)", name, n, len(command), spent.alloc>>10, spent.mallocs, spent.took, bound)
+		if spent.alloc > 24<<20 || spent.mallocs > probeObjects || spent.took > bound {
+			t.Errorf("%s n=%d (%d bytes): %d MiB in %d objects allocated in %s (bound %s)", name, n, len(command), spent.alloc>>20, spent.mallocs, spent.took, bound)
 		}
 	}
 }

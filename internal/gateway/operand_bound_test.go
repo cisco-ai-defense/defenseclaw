@@ -55,15 +55,16 @@ func redirectTargets(n int) string {
 // protected file or link the call names directly, or through a value it
 // knows, or within the bound, is blocked in every tier, whatever stands
 // before it, and so is a later name that is a link; the other plain names
-// past the bound are not resolved further, so the default tier allows with an
-// alert that names the bound and the strict tier keeps the evaluation-limit
-// block. A call within the bound is judged as before and raises neither.
+// past the bound are not resolved further, so the call carries the
+// evaluation-limit finding with the reason bounded_truncated cap=items
+// (rel-1-0-10:GAP-0313): an alert in the default tier, a block in the strict
+// tier. A call within the bound is judged as before and carries none.
 func TestCallOverOperandBoundIsJudgedByTheTier(t *testing.T) {
 	bound := actionfacts.MaxOperandsPerCall
 	rows := []struct {
 		name, command string
 		def, strict   string
-		over          bool // the default tier alerts and the strict tier adds the limit rule
+		over          bool // past the bound: the bounded evaluation-limit finding
 	}{
 		{"ordinary below the bound", "touch " + operandWords(bound-24), "allow", "allow", false},
 		{"ordinary at the bound", "echo " + operandWords(bound), "allow", "allow", false},
@@ -106,23 +107,15 @@ func TestCallOverOperandBoundIsJudgedByTheTier(t *testing.T) {
 					}
 					ctx := withShareBodyStrict(t.Context(), func() bool { return strict })
 					findings := dispatchTrustedAction(ctx, request)
-					got, want := buildVerdict(findings, "tool_call").Action, row.def
+					got, want := operandBoundTierAction(findings, strict), row.def
 					if strict {
 						want = row.strict
 					}
 					if got != want {
 						t.Errorf("strict=%v: %s, want %s (findings %v)", strict, got, want, findings)
 					}
-					alert := slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == operandBoundRuleID })
-					limit := slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "ACTION-COMPOUND-LIMIT" })
-					if !strict && alert != row.over {
-						t.Errorf("default tier alert: %v, want %v", alert, row.over)
-					}
-					if strict && limit != row.over {
-						t.Errorf("strict tier ACTION-COMPOUND-LIMIT: %v, want %v", limit, row.over)
-					}
-					if strict && alert || !strict && limit {
-						t.Errorf("the other tier verdict is present: %v", findings)
+					if bound := slices.ContainsFunc(findings, operandBoundTruncated); bound != row.over {
+						t.Errorf("strict=%v: %s finding: %v, want %v (findings %v)", strict, operandBoundReason, bound, row.over, findings)
 					}
 				}()
 			}
