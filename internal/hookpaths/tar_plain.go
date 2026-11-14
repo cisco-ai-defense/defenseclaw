@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"compress/bzip2"
 	"compress/gzip"
@@ -72,19 +73,255 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 		strings.Count(command, filepath.Base(archive)) != 1 {
 		return false
 	}
-	path := OperandPath(archive, cwd)
+	return archivePlainWithFacts(OperandPath(archive, cwd), tarArchivePlain, facts, record)
+}
+
+// archivePlainWithFacts reads the archive at path with plain and keeps the
+// hook client's TarPlainFactPrefix evidence for it.
+func archivePlainWithFacts(path string, plain func(string) bool, facts map[string]string, record bool) bool {
 	key := TarPlainFactPrefix + path
 	if !record && facts != nil {
 		// A client claim alone does not clear the scope: the gateway reads
 		// the archive itself and needs the fact as well. One that cannot
 		// read it (ProtectHome) keeps the opaque reading (review 8).
-		return facts[key] == "1" && tarArchivePlain(path)
+		return facts[key] == "1" && plain(path)
 	}
-	plain := tarArchivePlain(path)
-	if record && facts != nil && plain {
+	ok := plain(path)
+	if record && facts != nil && ok {
 		facts[key] = "1"
 	}
-	return plain
+	return ok
+}
+
+// archiveExtractionHoldsNoLink reports an extraction call that makes no
+// link in its destination: a tar or unzip of one archive file whose every
+// member is a plain file or folder with a relative name and no ..
+// (tarArchivePlain, zipArchivePlain), read where the call opens it.
+//
+// The archive is read at its own name when nothing before the call can
+// write a file (onlyDirectoryStatementsBefore, rel-1-0-6:GAP-0339). It is
+// also read when the one statement before it that writes is a plain mv or
+// cp of an existing regular file onto the archive name (stagedArchiveSource:
+// mv ~/Downloads/app.tar.gz ~/projects/ && tar xzf ~/projects/app.tar.gz -C
+// ~/projects): the archive tar opens is that file's content, so that file is
+// read (rel-1-0-10:GAP-0593). Before this, a staged archive was never read,
+// the extraction folder in the home was an opaque link scope, and the call
+// blocked as an SSH key write in every pack.
+func archiveExtractionHoldsNoLink(file *syntax.File, call *syntax.CallExpr, program string, args []string, static []bool, cwd, command, home string, facts map[string]string, record bool) bool {
+	if onlyDirectoryStatementsBefore(file, call, home) {
+		if tarArchiveHoldsNoLink(program, args, static, cwd, command, facts, record) {
+			return true
+		}
+		if archive, ok := extractionArchive(program, args, static, cwd); ok && program == "unzip" &&
+			strings.Count(command, filepath.Base(archive)) == 1 {
+			return archivePlainWithFacts(archive, zipArchivePlain, facts, record)
+		}
+		return false
+	}
+	archive, ok := extractionArchive(program, args, static, cwd)
+	if !ok {
+		return false
+	}
+	source, staging, ok := stagedArchiveSource(file, call, command, home, cwd, archive)
+	if !ok {
+		return false
+	}
+	// No other statement names the archive or its source, so nothing else
+	// in the command can rewrite either (as tarArchiveHoldsNoLink asks of
+	// the archive word).
+	callText := command[call.Pos().Offset():call.End().Offset()]
+	for _, name := range []string{filepath.Base(archive), filepath.Base(source)} {
+		if strings.Count(command, name) != strings.Count(staging, name)+strings.Count(callText, name) {
+			return false
+		}
+	}
+	plain := tarArchivePlain
+	if program == "unzip" {
+		plain = zipArchivePlain
+	}
+	return archivePlainWithFacts(source, plain, facts, record)
+}
+
+// extractionArchive is the absolute path of the one archive file a static
+// tar extraction (tarScan, tarArchiveWord) or unzip call (unzipArchiveWord)
+// reads.
+func extractionArchive(program string, args []string, static []bool, cwd string) (string, bool) {
+	if !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	var archive string
+	switch {
+	case strings.HasSuffix(program, "tar"):
+		if _, _, extract, ok := tarScan(args, static, cwd); !ok || !extract {
+			return "", false
+		}
+		word, ok := tarArchiveWord(args, static)
+		if !ok {
+			return "", false
+		}
+		archive = word
+	case program == "unzip":
+		word, ok := unzipArchiveWord(args, static)
+		if !ok {
+			return "", false
+		}
+		archive = word
+	default:
+		return "", false
+	}
+	if archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") {
+		return "", false
+	}
+	return filepath.Clean(OperandPath(archive, cwd)), true
+}
+
+// unzipArchiveWord returns the archive operand of a static unzip call: the
+// first word that is not an option or the value of -d, -P, -I or -O. A
+// pattern or an option this reading does not know keeps it unread.
+func unzipArchiveWord(args []string, static []bool) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		if !staticAt(static, i) {
+			return "", false
+		}
+		arg := args[i]
+		if arg == "" || arg == "-" {
+			return "", false
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return arg, true
+		}
+		cluster := arg[1:]
+		for j := 0; j < len(cluster); j++ {
+			switch cluster[j] {
+			case 'd', 'P', 'I', 'O':
+				if j+1 == len(cluster) {
+					i++
+				}
+				j = len(cluster)
+			case 'q', 'o', 'n', 'j', 'u', 'f', 'a', 'C', 'L', 'D', 'T':
+			default:
+				return "", false
+			}
+		}
+	}
+	return "", false
+}
+
+// stagedArchiveSource reports the file a plain mv or cp before call puts at
+// archive, and the text of that statement. Every other top-level statement
+// before call is a static cd or mkdir (onlyDirectoryStatementsBefore); after
+// a cd both operands of the mv or cp must be absolute. The mv or cp has no
+// option but -f or -v, no redirection and exactly two static operands; its
+// source is an existing regular file (not a link) and its destination is
+// archive, or an existing folder where the source keeps its name as archive.
+func stagedArchiveSource(file *syntax.File, call *syntax.CallExpr, command, home, cwd, archive string) (source, text string, ok bool) {
+	if file == nil || call == nil || !filepath.IsAbs(cwd) {
+		return "", "", false
+	}
+	statements, linear := linearShellStatements(file)
+	if !linear {
+		return "", "", false
+	}
+	changed := false
+	for _, stmt := range statements {
+		if stmt.Cmd == syntax.Command(call) {
+			if len(stmt.Redirs) != 0 || source == "" {
+				return "", "", false
+			}
+			return source, text, true
+		}
+		if len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated {
+			return "", "", false
+		}
+		earlier, isCall := stmt.Cmd.(*syntax.CallExpr)
+		if !isCall || len(earlier.Args) == 0 || len(earlier.Assigns) != 0 {
+			return "", "", false
+		}
+		words := make([]string, len(earlier.Args))
+		for i, arg := range earlier.Args {
+			word, fixed := StaticWord(arg, home)
+			if !fixed {
+				return "", "", false
+			}
+			words[i] = word
+		}
+		switch words[0] {
+		case "cd":
+			changed = true
+			continue
+		case "mkdir":
+			continue
+		case "mv", "cp":
+		default:
+			return "", "", false
+		}
+		if source != "" {
+			return "", "", false
+		}
+		var operands []string
+		for _, word := range words[1:] {
+			switch {
+			case word == "-f" || word == "-v":
+			case strings.HasPrefix(word, "-"):
+				return "", "", false
+			default:
+				operands = append(operands, word)
+			}
+		}
+		if len(operands) != 2 || changed && (!filepath.IsAbs(operands[0]) || !filepath.IsAbs(operands[1])) {
+			return "", "", false
+		}
+		from := filepath.Clean(OperandPath(operands[0], cwd))
+		if info, err := Lstat(from); err != nil || !info.Mode().IsRegular() {
+			return "", "", false
+		}
+		to := filepath.Clean(OperandPath(operands[1], cwd))
+		if info, err := pathStat(to); err == nil && info.IsDir() {
+			to = filepath.Join(to, filepath.Base(from))
+		} else if strings.HasSuffix(operands[1], "/") {
+			return "", "", false
+		}
+		if to != archive {
+			return "", "", false
+		}
+		source, text = from, command[stmt.Pos().Offset():stmt.End().Offset()]
+	}
+	return "", "", false
+}
+
+// zipArchivePlain reads the zip archive at path and reports that every
+// member is a regular file or a folder with a relative name and no ..
+// component, within the tar bounds.
+func zipArchivePlain(path string) bool {
+	info, err := pathStat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTarPlainBytes {
+		return false
+	}
+	file, err := pathOpen(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	reader, err := zip.NewReader(file, info.Size())
+	if err != nil || len(reader.File) == 0 || len(reader.File) > maxTarPlainMembers {
+		return false
+	}
+	for _, member := range reader.File {
+		mode := member.Mode()
+		if !mode.IsRegular() && !mode.IsDir() {
+			return false
+		}
+		name := member.Name
+		if name == "" || strings.HasPrefix(name, "/") || filepath.IsAbs(name) || strings.Contains(name, "\\") {
+			return false
+		}
+		for _, part := range strings.Split(strings.TrimSuffix(name, "/"), "/") {
+			if part == ".." {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // tarArchiveWord returns the one archive operand of a tar call: -f FILE,

@@ -4,6 +4,9 @@
 package gateway
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -97,5 +100,84 @@ func TestGAP0570SSHFolderReadsLinksAndCheckoutAreNotKeyOrHookWrites(t *testing.T
 				}
 			})
 		}
+	}
+}
+
+// rel-1-0-10:GAP-0593 (TD hook API): a download moved or copied into a
+// project folder and unpacked there blocked as an SSH key write in every
+// pack. The archive tar or unzip opens is the moved file, and that file
+// is read: plain members make no link, so the call writes no key file. A
+// staged archive with a link member, or a staged source that is itself a
+// link, keeps the rel reading.
+func TestGAP0593StagedPlainArchiveIsNotAKeyWrite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell rows")
+	}
+	home, cwd := shellProtectedFileHome(t)
+	downloads, projects := filepath.Join(home, "Downloads"), filepath.Join(home, "projects")
+	for _, dir := range []string{downloads, projects} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r107WriteTar(t, filepath.Join(downloads, "app.tar.gz"), true, tar.Header{Name: "app/main.go", Typeflag: tar.TypeReg, Mode: 0o600, Size: 2})
+	r107WriteTar(t, filepath.Join(downloads, "app2.tar.gz"), true, tar.Header{Name: "app2/main.go", Typeflag: tar.TypeReg, Mode: 0o600, Size: 2})
+	r107WriteTar(t, filepath.Join(downloads, "linked.tar.gz"), true, tar.Header{Name: "p", Typeflag: tar.TypeSymlink, Linkname: "../.ssh/authorized_keys"})
+	gap0593WriteZip(t, filepath.Join(downloads, "app.zip"))
+	if err := os.Symlink(filepath.Join(downloads, "app.tar.gz"), filepath.Join(downloads, "alias.tar.gz")); err != nil {
+		t.Fatal(err)
+	}
+	const keys = "persistence.ssh_authorized_keys_command"
+	allow := map[string]string{"default": "allow", "permissive": "allow", "strict": "allow", "managed": "allow"}
+	block := map[string]string{"default": "block", "permissive": "block", "strict": "block", "managed": "block"}
+	rows := []struct {
+		name, command, rule string
+		want                map[string]string
+	}{
+		{"R01 mv then tar -C", "mv ~/Downloads/app.tar.gz ~/projects/ && tar xzf ~/projects/app.tar.gz -C ~/projects", "", allow},
+		{"R02 cp then tar -C", "cp ~/Downloads/app2.tar.gz ~/projects/ && tar xzf ~/projects/app2.tar.gz -C ~/projects", "", allow},
+		{"R03 mv then unzip -d", "mv ~/Downloads/app.zip ~/projects/ && unzip -q ~/projects/app.zip -d ~/projects", "", allow},
+		{"staged link member then a write through it", "mv ~/Downloads/linked.tar.gz ~/projects/ && tar xzf ~/projects/linked.tar.gz -C ~/projects && echo marker >> ~/projects/p", keys, block},
+		{"staged source is a link, then a write in the folder", "mv ~/Downloads/alias.tar.gz ~/projects/ && tar xzf ~/projects/alias.tar.gz -C ~/projects && echo marker >> ~/projects/p", keys, block},
+	}
+	for _, row := range rows {
+		for _, cell := range []string{"default", "permissive", "strict", "managed"} {
+			posture, managed := cell, false
+			if cell == "managed" {
+				posture, managed = "default", true
+			}
+			t.Run(fmt.Sprintf("%s %s", cell, row.name), func(t *testing.T) {
+				action, rules := shellProtectedFileRoute(t, home, cwd, "claudecode", posture, managed, row.command)
+				if want := row.want[cell]; action != want {
+					t.Fatalf("action = %q (rules %v), want %q", action, rules, want)
+				}
+				if row.rule != "" && !slices.Contains(rules, row.rule) {
+					t.Fatalf("rules = %v, want %s", rules, row.rule)
+				}
+				if row.rule == "" && len(rules) != 0 {
+					t.Fatalf("rules = %v, want none", rules)
+				}
+			})
+		}
+	}
+}
+
+// gap0593WriteZip writes a zip archive of one plain file under a folder.
+func gap0593WriteZip(t *testing.T, path string) {
+	t.Helper()
+	var body bytes.Buffer
+	archive := zip.NewWriter(&body)
+	member, err := archive.Create("app/main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := member.Write([]byte("x\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

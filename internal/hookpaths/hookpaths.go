@@ -4593,8 +4593,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveMayLink(program, words[1:], static[1:]) &&
-					(!onlyDirectoryStatementsBefore(file, call, home) ||
-						!tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)) {
+					!archiveExtractionHoldsNoLink(file, call, program, words[1:], static[1:], dir, command, home, facts, record) {
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
 				if archiveCopiesLinks(program, words[1:], static[1:]) {
