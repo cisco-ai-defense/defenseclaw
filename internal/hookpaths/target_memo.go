@@ -6,6 +6,8 @@ package hookpaths
 import (
 	"slices"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
 
 // TargetMemo keeps the file system answers of one hook evaluation: the
@@ -57,34 +59,33 @@ type TargetMemo struct {
 	// Windows candidate checks among them (WorkParts).
 	work       int
 	candidates int
-	// globUnproven is the literal directory of the first pathname pattern
-	// whose expansion could not finish (actionProtectedFileGlobReachAs).
-	globUnproven string
+	// globCaps are the bounds the pattern walks of the evaluation hit
+	// (actionProtectedFileGlobReachAs).
+	globCaps bounded.CapSet
 }
 
-// noteGlobUnproven keeps dir as the first unfinished pattern expansion of
-// the evaluation. A nil memo keeps nothing.
-func (m *TargetMemo) noteGlobUnproven(dir string) {
+// noteGlobTruncated adds the caps a pattern walk hit. A nil memo keeps
+// nothing.
+func (m *TargetMemo) noteGlobTruncated(caps bounded.CapSet) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
-	if m.globUnproven == "" {
-		m.globUnproven = dir
-	}
+	m.globCaps = m.globCaps.Union(caps)
 	m.mu.Unlock()
 }
 
-// GlobUnproven returns the literal directory of the first pathname pattern
-// whose expansion stopped at a bound or at a directory it could not read:
-// an unknown target of the evaluation, "" when there was none.
-func (m *TargetMemo) GlobUnproven() string {
+// GlobTruncated is the set of bounds the pathname pattern walks of the
+// evaluation hit before they could prove a pattern selects no protected
+// file (internal/guardrail/bounded): the caller floors the call at the
+// unknown tier. The zero set: none.
+func (m *TargetMemo) GlobTruncated() bounded.CapSet {
 	if m == nil {
-		return ""
+		return bounded.CapSet{}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.globUnproven
+	return m.globCaps
 }
 
 // maxTargetMemoEntries bounds a memo: past it, answers are computed and not

@@ -26,6 +26,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
@@ -1534,7 +1535,7 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 	}
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
-	candidates, complete, unseen := actionExpandGlob(pattern, literal, hidden, userView, dots)
+	candidates, complete, unseen, caps := actionExpandGlobBounded(pattern, literal, hidden, userView, dots, false)
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			globs.note(pattern, "1")
@@ -1582,16 +1583,19 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			return false
 		}
 	}
-	// The walk (this one, or the client's that sent no answer) stopped at
-	// a bound or at a directory it could not read, so an alias of any name
-	// may be among the names it did not see: the pattern is unproved,
-	// never an allow (GAP-1481). Unproved is an unknown target, not a
-	// protected one: the memo keeps it, and the authorized-keys proof
-	// holds the call as an unproven write (UnprovenGlobIncomplete), which
-	// blocks wherever an unknown target can reach the home and is named
-	// for what it is (rel-1-0-10:GAP-0270).
-	globs.targetMemo().noteGlobUnproven(actionGlobLiteralDir(pattern))
-	return false
+	// The walk stopped at a bound (internal/guardrail/bounded) and found no
+	// alias in what it read: the call is TRUNCATED, not a protected target.
+	// The memo keeps the caps, and the gateway floors the call at the
+	// unknown tier of the pack (default and permissive alert, strict
+	// blocks) and never below what was read (rel-1-0-10:GAP-0401).
+	if caps.Any() && !unseen {
+		globs.targetMemo().noteGlobTruncated(caps)
+		return false
+	}
+	// A directory it could not read, this walk's or the client's that sent
+	// no answer: an alias of any name may be there, so the pattern is
+	// unproved, never an allow (GAP-1481).
+	return true
 }
 
 // actionGlobDotComponentsMatch reports, for a pattern that filepath.Match
@@ -1790,13 +1794,32 @@ func actionGlobFacts(command, cwd, home string) map[string]string {
 	return globs.record
 }
 
-// Bounds of actionExpandGlob: directories read and names kept per step.
-const (
-	actionGlobMaxReads = 64
-	actionGlobMaxNames = 4096
-	// actionGlobMaxEntries bounds the names one expansion reads in all.
-	actionGlobMaxEntries = 1 << 18
+// actionGlobMaxNames bounds the names one step of actionExpandGlob keeps,
+// and is the chunk it reads a folder in.
+const actionGlobMaxNames = 4096
+
+// The bounds of one expansion (the bound rule, internal/guardrail/bounded):
+// the directories it reads (cap paths) and the names it reads in all (cap
+// items). A walk past one is TRUNCATED (actionExpandGlobBounded); tests lower
+// them with UseGlobWalkBoundsForTests.
+var (
+	actionGlobMaxReads   atomic.Int64
+	actionGlobMaxEntries atomic.Int64
 )
+
+func init() {
+	actionGlobMaxReads.Store(64)
+	actionGlobMaxEntries.Store(1 << 18)
+}
+
+// UseGlobWalkBoundsForTests sets the directory-read and name bounds of one
+// pattern expansion and returns the restore. It is a test hook.
+func UseGlobWalkBoundsForTests(reads, entries int) (restore func()) {
+	oldReads, oldEntries := actionGlobMaxReads.Load(), actionGlobMaxEntries.Load()
+	actionGlobMaxReads.Store(int64(reads))
+	actionGlobMaxEntries.Store(int64(entries))
+	return func() { actionGlobMaxReads.Store(oldReads); actionGlobMaxEntries.Store(oldEntries) }
+}
 
 // actionExpandGlob lists the existing names an absolute pattern selects. A
 // literal component is joined without a lookup, so a final file that does
@@ -1823,6 +1846,27 @@ func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func(
 // actionExpandGlobFold is actionExpandGlob; fold matches names without case
 // (the nocaseglob option).
 func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots func() bool, fold bool) (candidates []string, complete, unseen bool) {
+	candidates, complete, unseen, _ = actionExpandGlobBounded(pattern, literal, hidden, userView, dots, fold)
+	return candidates, complete, unseen
+}
+
+// actionExpandGlobBounded is actionExpandGlobFold; caps is the set of bounds
+// the walk hit (internal/guardrail/bounded): more directories than
+// actionGlobMaxReads (cap paths), more names than actionGlobMaxEntries in all
+// or than actionGlobMaxNames in one step (cap items). Every name read before
+// a cap is still matched and returned. complete is false whenever caps hit
+// one, and when a directory could not be read.
+func actionExpandGlobBounded(pattern, literal string, hidden, userView bool, dots func() bool, fold bool) (candidates []string, complete, unseen bool, caps bounded.CapSet) {
+	var trunc bounded.Truncated
+	reads := bounded.NewCounter(&trunc, bounded.Paths, int(actionGlobMaxReads.Load()))
+	names := bounded.NewCounter(&trunc, bounded.Items, int(actionGlobMaxEntries.Load()))
+	candidates, complete, unseen = actionExpandGlobWalk(pattern, literal, hidden, userView, dots, fold, &trunc, &reads, &names)
+	return candidates, complete, unseen, trunc.Set(&reads, &names)
+}
+
+func actionExpandGlobWalk(pattern, literal string, hidden, userView bool, dots func() bool, fold bool,
+	trunc *bounded.Truncated, reads, names *bounded.Counter,
+) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -1830,9 +1874,6 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 		start, rest = literal, pattern[len(literal)+1:]
 	}
 	paths := []string{start}
-	reads := 0
-	// entries counts the names read from every folder of this expansion.
-	entries := 0
 	complete = true
 	for _, component := range strings.Split(rest, separator) {
 		if component == "" {
@@ -1846,7 +1887,12 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 		}
 		var next []string
 		for _, dir := range paths {
-			if reads++; reads > actionGlobMaxReads || len(next) >= actionGlobMaxNames {
+			if len(next) >= actionGlobMaxNames {
+				trunc.Hit(bounded.Items)
+				complete = false
+				break
+			}
+			if !reads.Take() {
 				complete = false
 				break
 			}
@@ -1882,9 +1928,10 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 			// a folder of more than 4096 names an authorized-keys block
 			// (rel-1-0-10:GAP-0018).
 			var matched []string
+			over := false
 			for {
 				chunk, chunkErr := directory.Readdirnames(actionGlobMaxNames)
-				entries += len(chunk)
+				over = !names.TakeN(len(chunk))
 				for _, name := range chunk {
 					if (actionGlobNameMatch(component, name) || fold && actionGlobNameMatch(strings.ToLower(component), strings.ToLower(name))) &&
 						!actionGlobSkipsDotName(component, name, dots) {
@@ -1895,7 +1942,7 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 					err = chunkErr
 					break
 				}
-				if len(chunk) == 0 || entries > actionGlobMaxEntries {
+				if len(chunk) == 0 || over {
 					break
 				}
 			}
@@ -1905,7 +1952,7 @@ func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots f
 				// the shell skips it (*/* in a project with files).
 				continue
 			}
-			if err != nil && err != io.EOF || entries > actionGlobMaxEntries {
+			if err != nil && err != io.EOF || over {
 				complete = false
 			}
 			for _, name := range matched {

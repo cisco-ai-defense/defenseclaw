@@ -1538,17 +1538,6 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.resolvedTarget = &resolvedTarget
 	evidence.unprovenTarget = &unprovenTarget
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
-	// A pathname pattern under the home whose expansion could not finish is
-	// an unknown target, held like an unresolved one: the unknown handling
-	// below warns or blocks it, named for what it is, never as a proved key
-	// write (rel-1-0-10:GAP-0270).
-	heldGlob := false
-	if !symlinkWrite {
-		if dir := request.targetMemo.GlobUnproven(); dir != "" {
-			symlinkWrite, heldGlob = true, true
-			unprovenTarget = unprovenWrite{class: hookpaths.UnprovenGlobIncomplete, operand: dir}
-		}
-	}
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
 		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
@@ -1633,13 +1622,6 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			} else if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if unprovenOnly && !unresolved {
-				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
-			} else if heldGlob && named.ID == rule.ID &&
-				!trustedAuthorizedKeysSymlinkWrite(input) &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
-				!trustedSandboxGuestAuthorizedKeysWrite(request) {
-				// Still enforced (strict, managed, or the pattern can reach
-				// the home), as the unknown target it is.
 				title = hookpaths.UnprovenWriteTitle(unprovenTarget.class) + unprovenWriteGuidance
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&

@@ -45,8 +45,8 @@ func fillDir(t *testing.T, dir string, n int) {
 }
 
 type gap0270Verdict struct {
-	decision, unproven, glob string
-	keyRead                  bool
+	decision, unproven string
+	truncated, keyRead bool
 }
 
 // gap0270Dialect reads the rows as a POSIX shell runs them; on Windows that
@@ -61,10 +61,10 @@ func gap0270Dialect() actionfacts.Dialect {
 func gap0270Read(command, cwd, home string) gap0270Verdict {
 	memo := NewTargetMemo()
 	return gap0270Verdict{
-		decision: memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, gap0270Dialect(), nil),
-		unproven: UnprovenProtectedWrite(command, cwd, home),
-		glob:     memo.GlobUnproven(),
-		keyRead:  posixShellPrivateKeyRead(command, cwd, home),
+		decision:  memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, gap0270Dialect(), nil),
+		unproven:  UnprovenProtectedWrite(command, cwd, home),
+		truncated: memo.GlobTruncated().Any(),
+		keyRead:   posixShellPrivateKeyRead(command, cwd, home),
 	}
 }
 
@@ -88,7 +88,7 @@ func TestGAP0270GlobOutsideHomeSameOnEveryBox(t *testing.T) {
 			if got != small[i] {
 				t.Fatalf("busy folder verdict %+v, small folder %+v", got, small[i])
 			}
-			if got.decision != "" || got.unproven != "" || got.glob != "" || got.keyRead {
+			if got.decision != "" || got.unproven != "" || got.truncated || got.keyRead {
 				t.Fatalf("verdict %+v, want no protected, unproven or unknown target", got)
 			}
 		})
@@ -107,13 +107,16 @@ func TestGAP0270GlobOutsideHomeSameOnEveryBox(t *testing.T) {
 	}
 }
 
-// rel-1-0-10:GAP-0270 (b): under the home the pattern is still expanded,
-// through links. A walk past its bound keeps every match it read, so an
-// alias it found is still a protected target; a walk that found none is an
-// unknown target (TargetMemo.GlobUnproven), not a protected one.
+// rel-1-0-10:GAP-0270 (b), GAP-0401: under the home the pattern is still
+// expanded, through links. A walk past its bound (lowered here; the shared
+// bound of internal/guardrail/bounded) keeps every match it read, so an
+// alias it found is still a protected target; a walk that found none is
+// TRUNCATED (TargetMemo.GlobTruncated), not a protected target and never a
+// plain allow.
 func TestGAP0270GlobInHomeBoundIsUnknown(t *testing.T) {
+	defer UseGlobWalkBoundsForTests(64, 64)()
 	home, cwd := globAliasFixture(t)
-	fillDir(t, cwd, actionGlobMaxNames+1)
+	fillDir(t, cwd, 200)
 	for _, command := range globAliasProtectedCommands(cwd) {
 		t.Run(command, func(t *testing.T) {
 			if got := gap0270Read(command, cwd, home); got.decision != "protected-target" {
@@ -124,8 +127,8 @@ func TestGAP0270GlobInHomeBoundIsUnknown(t *testing.T) {
 	for _, command := range []string{`cp payload b*/`, `cp payload buil*/notes.txt`, `cp payload s*/notes.txt`} {
 		t.Run("unknown/"+command, func(t *testing.T) {
 			got := gap0270Read(command, cwd, home)
-			if got.decision != "" || got.glob != cwd {
-				t.Fatalf("verdict %+v, want no decision and the unknown folder %s", got, cwd)
+			if got.decision != "" || !got.truncated {
+				t.Fatalf("verdict %+v, want no decision and a truncated walk", got)
 			}
 		})
 	}
@@ -162,23 +165,23 @@ func TestGAP0270GlobLiteralDir(t *testing.T) {
 		{"/home/u", true}, {"/home/u/proj", true}, {"/home", true}, {"/", true},
 		{"/tmp", false}, {"/home/u2", false}, {"/var/tmp/home/u", false},
 	} {
-		if got := NearProtected(filepath.FromSlash(row.path), home); got != row.near {
-			t.Errorf("NearProtected(%s) = %t, want %t", row.path, got, row.near)
+		if got := pathNear(filepath.FromSlash(row.path), home); got != row.near {
+			t.Errorf("pathNear(%s) = %t, want %t", row.path, got, row.near)
 		}
 	}
 }
 
-// globHeld is globHeldDecision's answer for a pattern held as an unknown
-// target (TargetMemo.GlobUnproven) with no protected target proved.
+// globHeld is globHeldDecision's answer for a pattern whose walk was
+// TRUNCATED (TargetMemo.GlobTruncated) with no protected target proved.
 const globHeld = "held-unknown"
 
 // globHeldDecision is the action decision of command with facts, or
-// globHeld when the decision found no protected target but held an
-// unfinished pattern expansion.
+// globHeld when the decision found no protected target and a pattern walk
+// hit its bound.
 func globHeldDecision(command, cwd, home string, facts map[string]string) string {
 	memo := NewTargetMemo()
 	decision := memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, gap0270Dialect(), facts)
-	if decision == "" && memo.GlobUnproven() != "" {
+	if decision == "" && memo.GlobTruncated().Any() {
 		return globHeld
 	}
 	return decision

@@ -96,21 +96,24 @@ func TestR104RoundNUnreadableSiblingKeepsGlobMatch(t *testing.T) {
 
 // GAP-1481, the bound form of the same class: a match past the directory
 // read bound was dropped and the name fallback (keyl* names no key)
-// allowed the write.
+// allowed the write. Past the bound the walk is now TRUNCATED (the bound
+// rule, internal/guardrail/bounded; lead decision 2026-11-14 for
+// rel-1-0-10:GAP-0270): never an allow, the gateway floors it at the
+// unknown tier of the pack (TestGAP0270GatewayInHomeBoundNamedUnknown).
 func TestR104RoundNGlobPastReadBoundIsUnproved(t *testing.T) {
 	_, home, cwd := globFactsFixture(t, false)
 	key := filepath.Join(home, ".ssh", "authorized_keys")
-	for i := 0; i <= actionGlobMaxReads+4; i++ {
+	for i := 0; i <= int(actionGlobMaxReads.Load())+4; i++ {
 		if err := os.MkdirAll(filepath.Join(cwd, "many", fmt.Sprintf("d%03d", i)), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Symlink(key, filepath.Join(cwd, "many", fmt.Sprintf("d%03d", actionGlobMaxReads+4), "keylink")); err != nil {
+	if err := os.Symlink(key, filepath.Join(cwd, "many", fmt.Sprintf("d%03d", actionGlobMaxReads.Load()+4), "keylink")); err != nil {
 		t.Fatal(err)
 	}
 	for _, command := range []string{`cp payload many/*/keyl*`, `cd many && cp payload */keyl*`} {
-		if got := posixShellDecision(command, cwd, home); got != "protected-target" {
-			t.Errorf("%s: ActionCommandDecision = %q, want protected-target", command, got)
+		if got := globHeldDecision(command, cwd, home, nil); got != globHeld {
+			t.Errorf("%s: ActionCommandDecision = %q, want a truncated walk (%s)", command, got, globHeld)
 		}
 	}
 	// Within the bound an ordinary pattern stays allowed.

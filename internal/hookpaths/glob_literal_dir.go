@@ -176,17 +176,3 @@ func pathNear(a, b string) bool {
 	}
 	return within(a, b) || within(b, a)
 }
-
-// NearProtected reports a path that is the active home, or one of the
-// directories of its protected key files, or inside or above one of them.
-func NearProtected(path, home string) bool {
-	if pathNear(path, home) {
-		return true
-	}
-	for _, key := range ProtectedAuthorizedKeysPaths(home) {
-		if pathNear(path, filepath.Dir(key)) {
-			return true
-		}
-	}
-	return false
-}

@@ -35,7 +35,6 @@ var unprovenReasonTitles = map[string]string{
 	"nested-shell":           "A nested shell or shell script can write a protected file",
 	UnprovenLinkUnread:       "A link the command makes or changes could not be read and may lead to a protected file",
 	UnprovenTargetUnresolved: "A write target could not be resolved and may be a protected file",
-	UnprovenGlobIncomplete:   "A pathname pattern could not be expanded in full and may select a protected file",
 }
 
 // linkCallText is link-making code this package does not evaluate:
@@ -48,10 +47,6 @@ var linkCallText = lazyregexp.New(`(?i)symlink|hardlink|junction|\bos\.link\b|\b
 const (
 	UnprovenLinkUnread       = "link-unread"
 	UnprovenTargetUnresolved = "target-unresolved"
-	// UnprovenGlobIncomplete: a pattern under the home whose expansion
-	// passed its bound or met a directory it could not read
-	// (TargetMemo.GlobUnproven, rel-1-0-10:GAP-0270).
-	UnprovenGlobIncomplete = "glob-incomplete"
 )
 
 // UnprovenWriteTitle gives the operator the class that prevented a proof.

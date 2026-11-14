@@ -71,7 +71,7 @@ func TestGAP0398NameGateKeepsOutsideAliasRows(t *testing.T) {
 	// The GAP-0270 read shapes in the same folder are still decided from
 	// their text: no component can match a protected name.
 	for i, command := range gap0270ReadShapes(outside) {
-		if got := gap0270Read(command, outside, home); got.decision != "" || got.unproven != "" || got.glob != "" || got.keyRead {
+		if got := gap0270Read(command, outside, home); got.decision != "" || got.unproven != "" || got.truncated || got.keyRead {
 			t.Errorf("read shape S%d beside the link: verdict %+v, want none", i, got)
 		}
 	}

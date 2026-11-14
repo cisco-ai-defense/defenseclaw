@@ -412,6 +412,11 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	// A pathname pattern whose walk hit its bound before it could prove the
+	// pattern selects no protected file is TRUNCATED (the bound rule,
+	// internal/guardrail/bounded): the call takes at least the unknown tier
+	// of the pack, and what the walk read still decides (rel-1-0-10:GAP-0401).
+	defer func() { findings = withBoundedTruncation(findings, request.targetMemo.GlobTruncated(), request) }()
 	if request.ShellStartup != nil {
 		request.targetMemo.WithShellStartup(request.ShellStartup)
 	}
@@ -805,7 +810,7 @@ func dispatchTrustedActionWith(
 						wholeWriteSafe = wholeCommandKnown &&
 							request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
 								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == "" &&
-							request.targetMemo.GlobUnproven() == ""
+							!request.targetMemo.GlobTruncated().Any()
 						if !wholeWriteSafe && wholeCommandKnown && !request.ProtectedHomeHook &&
 							(request.Connector == "claudecode" || request.Connector == "codex") &&
 							trustedPOSIXShellCall(request.Input, facts) {

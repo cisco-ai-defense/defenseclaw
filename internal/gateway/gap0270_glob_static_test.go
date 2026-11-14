@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -90,10 +91,11 @@ func TestGAP0270GatewayBusyTempFolderSameAnswer(t *testing.T) {
 	}
 }
 
-// rel-1-0-10:GAP-0270 (b): a pattern under the home whose walk passes its
-// bound and finds no alias is an unknown target. It is held, as the shipped
-// unknown handling holds an unknown target that can reach the home, and is
-// named as an incomplete pattern, never as a proved authorized-keys write.
+// rel-1-0-10:GAP-0270 (b), GAP-0401: a pattern under the home whose walk
+// passes its bound (lowered here) and finds no alias is TRUNCATED through
+// internal/guardrail/bounded: the evaluation-limit finding names the cap,
+// the default pack alerts and the strict pack blocks, never a proved
+// authorized-keys write.
 func TestGAP0270GatewayInHomeBoundNamedUnknown(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
@@ -104,16 +106,24 @@ func TestGAP0270GatewayInHomeBoundNamedUnknown(t *testing.T) {
 		}
 	}
 	t.Setenv("HOME", home)
+	defer hookpaths.UseGlobWalkBoundsForTests(64, 64)()
 	const command = "cp payload b*/"
 	if got := gap0270Hook(t, "claudecode", project, command, false); !strings.HasPrefix(got, `{"action":"allow"`) {
 		t.Fatalf("small folder answer = %.500s, want allow", got)
 	}
-	gap0270Fill(t, project, 4097)
+	gap0270Fill(t, project, 200)
+	reason := bounded.Of(bounded.Items).Reason()
 	for _, strict := range []bool{false, true} {
 		got := gap0270Hook(t, "claudecode", project, command, strict)
 		t.Logf("strict=%t busy: %.900s", strict, got)
-		if !strings.Contains(got, hookpaths.UnprovenWriteTitle(hookpaths.UnprovenGlobIncomplete)) {
-			t.Fatalf("strict=%t busy folder answer = %.700s, want the incomplete-pattern title", strict, got)
+		if !strings.Contains(got, reason) {
+			t.Fatalf("strict=%t busy folder answer = %.700s, want the truncation reason %q", strict, got, reason)
+		}
+		if blocked := strings.HasPrefix(got, `{"action":"block"`); blocked != strict {
+			t.Fatalf("strict=%t busy folder answer = %.700s, want block only in strict", strict, got)
+		}
+		if strings.Contains(got, "persistence.ssh_authorized_keys_command") && !strict {
+			t.Fatalf("default busy folder answer = %.700s, names a key write", got)
 		}
 	}
 }
