@@ -6,6 +6,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -185,6 +186,10 @@ func launcherInner(argv []string) []string {
 // or a nested shell: whether the call would run it is not a question a
 // guardrail answers in the agent's favour.
 func DefenseClawControl(facts Facts, text string) []DefenseClawControlFact {
+	return defenseClawControl(facts, text, 0)
+}
+
+func defenseClawControl(facts Facts, text string, depth int) []DefenseClawControlFact {
 	textNames := strings.Contains(strings.ToLower(text), defenseClawNamespace)
 	var out []DefenseClawControlFact
 	seen := map[DefenseClawControlFact]bool{}
@@ -202,8 +207,7 @@ func DefenseClawControl(facts Facts, text string) []DefenseClawControlFact {
 		if len(argv) == 0 && command.Executable != "" {
 			argv = []string{command.Executable}
 		}
-		dynamic := !command.ArgvComplete || !staticArguments(command.Arguments)
-		for depth := 0; depth < 6 && len(argv) > 0; depth++ {
+		for unwrap := 0; unwrap < 6 && len(argv) > 0; unwrap++ {
 			inner := launcherInner(argv)
 			if inner == nil {
 				break
@@ -213,20 +217,23 @@ func DefenseClawControl(facts Facts, text string) []DefenseClawControlFact {
 		if len(argv) == 0 {
 			continue
 		}
-		if fact, ok := judgeDefenseClawArgv(argv, dynamic, textNames, facts, command); ok {
+		if fact, ok := judgeDefenseClawArgv(argv, textNames, depth, facts, command); ok {
 			add(fact)
 		}
 	}
 	return out
 }
 
-func judgeDefenseClawArgv(argv []string, dynamic, textNames bool, facts Facts, command CommandFact) (DefenseClawControlFact, bool) {
+func judgeDefenseClawArgv(argv []string, textNames bool, depth int, facts Facts, command CommandFact) (DefenseClawControlFact, bool) {
 	proven := func(kind DefenseClawControlKind) (DefenseClawControlFact, bool) {
 		return DefenseClawControlFact{Kind: kind, Proven: true}, true
 	}
 	unproven := DefenseClawControlFact{Kind: DefenseClawControlUnproven}
+	// A word the parse could not resolve (a substitution, a variable, a
+	// tilde) has no value in argv.
+	dynamic := slices.Contains(argv[1:], "")
 	if program := defenseClawProgramName(argv); program != "" {
-		kind, decided := judgeDefenseClawCLI(argv[1:], program)
+		kind, decided := judgeDefenseClawCLI(argv[1:], program, dynamic)
 		if decided {
 			if kind == "" {
 				return DefenseClawControlFact{}, false
@@ -251,6 +258,10 @@ func judgeDefenseClawArgv(argv []string, dynamic, textNames bool, facts Facts, c
 			return unproven, true
 		}
 	case "kill", "killall", "pkill", "taskkill", "stop-process":
+		if slices.Contains(flags, "-0") || slices.Contains(flags, "-l") {
+			// kill -0 probes whether a process exists; kill -l lists signals.
+			break
+		}
 		if killTargetsDefenseClaw(words) {
 			return proven(DefenseClawControlStop)
 		}
@@ -259,14 +270,28 @@ func judgeDefenseClawArgv(argv []string, dynamic, textNames bool, facts Facts, c
 		}
 		// A dynamic target (a pid read from a file, a substitution) of a
 		// call that names DefenseClaw elsewhere: the target is unproven.
-		if (dynamic || len(words) == 0) && textNames {
+		if (dynamic || len(words) == 0) && textNames &&
+			(hasChildCommands(facts, command) || command.PipelineID != 0) {
 			return unproven, true
 		}
-	case "powershell", "pwsh", "cmd", "bash", "sh", "zsh", "dash", "ksh", "fish":
-		// An inline script the parse did not open: a DefenseClaw word and a
-		// stopping word in it is a reading the rules cannot prove.
-		if !hasChildCommands(facts, command) && inlineScriptTouchesDefenseClaw(argv[1:]) {
-			return unproven, true
+	case "powershell", "pwsh", "cmd":
+		// An inline script the parse did not open is read again in its own
+		// dialect; whatever it stops or disables is judged like a command of
+		// the call.
+		if script, dialect := inlineScript(name, argv[1:]); script != "" && depth < 3 {
+			tool := "Bash"
+			if dialect == DialectPowerShell {
+				tool = "PowerShell"
+			}
+			inner := defenseClawControl(Analyze(Input{Tool: tool, Command: script, DialectHint: dialect}), script, depth+1)
+			for _, fact := range inner {
+				if fact.Proven {
+					return fact, true
+				}
+			}
+			if len(inner) > 0 {
+				return inner[0], true
+			}
 		}
 	}
 	return DefenseClawControlFact{}, false
@@ -446,8 +471,14 @@ var (
 		"list": true, "show": true, "get": true, "scan": true, "validate": true, "check": true,
 		"info": true, "inspect": true, "search": true, "reference": true, "path": true, "help": true,
 		"tui": true, "alerts": true, "audit": true, "aibom": true, "codeguard": true, "evaluate": true,
-		"digest": true, "verify": true, "test": true, "export": true, "report": true, "diff": true,
+		"digest": true, "verify": true, "profile-explain": true, "readiness": true, "enumerate": true, "test": true, "export": true, "report": true, "diff": true,
 		"enable": true, "start": true, "restart": true, "reload": true, "up": true, "completion": true,
+	}
+	// defenseClawRelaxVerbs relax what the guardrail enforces without a stop
+	// or a disable; they are judged at the unknown tier.
+	defenseClawRelaxVerbs = map[string]bool{
+		"use-pack": true, "suppress": true, "severity": true, "trusted-paths": true,
+		"allow-private-upstream": true, "migrate": true,
 	}
 	defenseClawReadFlags = map[string]bool{
 		"--version": true, "-v": true, "-version": true, "--help": true, "-h": true, "-help": true,
@@ -457,7 +488,7 @@ var (
 // judgeDefenseClawCLI classifies one defenseclaw or defenseclaw-gateway
 // invocation. decided is false when the command is a changing verb the rules
 // cannot name, or has an operand the parse left open before any verb.
-func judgeDefenseClawCLI(args []string, program string) (kind DefenseClawControlKind, decided bool) {
+func judgeDefenseClawCLI(args []string, program string, dynamic bool) (kind DefenseClawControlKind, decided bool) {
 	words, flags := splitOperands(args)
 	for _, flag := range flags {
 		if flag == "--disable" || flag == "--uninstall" {
@@ -512,5 +543,37 @@ func judgeDefenseClawCLI(args []string, program string) (kind DefenseClawControl
 			return "", true
 		}
 	}
-	return "", false
+	// A verb that relaxes the policy without naming a stop (a pack switch, a
+	// suppression, a severity change, a trusted path) is a reading the rules
+	// cannot prove either way; so is a call whose verb the parse left open.
+	for _, word := range lower {
+		if defenseClawRelaxVerbs[word] {
+			return "", false
+		}
+	}
+	if dynamic {
+		return "", false
+	}
+	// Any other command (enterprise ensure, repair, skill install, setup)
+	// changes nothing the guardrail rests on by itself.
+	return "", true
+}
+
+// inlineScript returns the script text a PowerShell or cmd invocation runs
+// from its command line and the dialect to read it in.
+func inlineScript(program string, args []string) (string, Dialect) {
+	for index, arg := range args {
+		flag := strings.ToLower(arg)
+		switch program {
+		case "powershell", "pwsh":
+			if flag == "-command" || flag == "-c" || flag == "-com" || flag == "-comm" {
+				return strings.Join(args[index+1:], " "), DialectPowerShell
+			}
+		case "cmd":
+			if flag == "/c" || flag == "/k" || flag == "/r" {
+				return strings.Join(args[index+1:], " "), DialectCMD
+			}
+		}
+	}
+	return "", ""
 }

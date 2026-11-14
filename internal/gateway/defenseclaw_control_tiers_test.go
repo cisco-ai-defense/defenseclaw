@@ -70,3 +70,39 @@ func TestDefenseClawControlFiveTiers(t *testing.T) {
 		}
 	}
 }
+
+// TestDefenseClawControlOnTheClaudeHookPath sends the headline rows through
+// the Claude Code PreToolUse route in the five packs: the proven stop or
+// disable is a block, a read-only command is allowed.
+func TestDefenseClawControlOnTheClaudeHookPath(t *testing.T) {
+	file, err := os.Open("../actionfacts/testdata/defenseclaw_control.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	want := map[string]string{
+		"g596-r01": "block", "g596-r02": "block", "g596-v14": "block", "g596-v17": "block",
+		"g596-v06": "block", "g596-c01": "allow", "g596-c02": "allow", "g596-v02": "allow",
+	}
+	rows := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		var r struct{ ID, Command string }
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := want[r.ID]; ok {
+			rows[r.ID] = r.Command
+		}
+	}
+	for _, p := range gap0437Packs {
+		a := gap0437Server(t, p, "claudecode", "action")
+		for id, action := range want {
+			out := gap0437Hook(t, a, t.TempDir(), p.name+id, rows[id])
+			if got, _ := out["action"].(string); got != action {
+				raw, _ := json.Marshal(out)
+				t.Errorf("%s %s: action %q, want %s: %s", p.name, id, got, action, raw)
+			}
+		}
+	}
+}

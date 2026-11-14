@@ -49,10 +49,21 @@
 {"id": "g596-x27", "dialect": "", "command": "sc stop DefenseClawGateway", "want": "stop"}
 {"id": "g596-x28", "dialect": "", "command": "cat ~/.defenseclaw/gateway.pid | xargs kill", "want": "stop"}
 {"id": "g596-x29", "dialect": "", "command": "kill $(cat ~/.defenseclaw/gateway.pid)", "want": "unproven"}
-{"id": "g596-u01", "dialect": "", "command": "defenseclaw skill install foo", "want": "unproven"}
-{"id": "g596-u02", "dialect": "", "command": "defenseclaw setup llm", "want": "unproven"}
+{"id": "g596-u01", "dialect": "", "command": "defenseclaw skill install foo", "want": ""}
+{"id": "g596-u02", "dialect": "", "command": "defenseclaw setup llm", "want": ""}
 {"id": "g596-u03", "dialect": "", "command": "defenseclaw guardrail use-pack permissive", "want": "unproven"}
 {"id": "g596-u04", "dialect": "", "command": "defenseclaw config migrate", "want": "unproven"}
+{"id": "g596-u06", "dialect": "", "command": "defenseclaw guardrail suppress add CMD-X", "want": "unproven"}
+{"id": "g596-u07", "dialect": "", "command": "defenseclaw guardrail rule severity CMD-X low", "want": "unproven"}
+{"id": "g596-u08", "dialect": "", "command": "defenseclaw-gateway enterprise linux ensure --json", "want": ""}
+{"id": "g596-u09", "dialect": "", "command": "defenseclaw-gateway enterprise linux profile-explain --user u", "want": ""}
+{"id": "g596-u10", "dialect": "", "command": "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge", "want": "uninstall"}
+{"id": "g596-u11", "dialect": "", "command": "defenseclaw guardrail suppress list", "want": ""}
+{"id": "g596-y01", "dialect": "", "command": "powershell -NoProfile -Command \"Stop-Service DefenseClawGateway\"", "want": "stop"}
+{"id": "g596-y02", "dialect": "cmd", "command": "cmd /c sc stop DefenseClawGateway", "want": "stop"}
+{"id": "g596-y03", "dialect": "", "command": "powershell -NoProfile -Command \"Get-Service DefenseClawGateway | Select-Object Name,Status\"", "want": ""}
+{"id": "g596-y04", "dialect": "", "command": "bash capture.sh defenseclaw-gateway status", "want": ""}
+{"id": "g596-y05", "dialect": "", "command": "bash ./run.sh defenseclaw-gateway stop", "want": ""}
 {"id": "g596-u05", "dialect": "", "command": "defenseclaw $VERB", "want": "unproven"}
 {"id": "g596-n01", "dialect": "", "command": "systemctl restart defenseclaw-gateway", "want": ""}
 {"id": "g596-n02", "dialect": "", "command": "systemctl status defenseclaw-gateway", "want": ""}
@@ -79,4 +90,7 @@
 {"id": "g596-n23", "dialect": "", "command": "defenseclaw guardrail explain", "want": ""}
 {"id": "g596-n24", "dialect": "", "command": "defenseclaw mcp scan ./srv", "want": ""}
 {"id": "g596-n25", "dialect": "", "command": "defenseclaw", "want": ""}
+{"id": "g596-n27", "dialect": "", "command": "kill -0 4242", "want": ""}
+{"id": "g596-n28", "dialect": "", "command": "DEFENSECLAW_X=$(pwd) uv run defenseclaw agent-control sync --once | jq .", "want": ""}
+{"id": "g596-n29", "dialect": "", "command": "kill $(cat /tmp/app.pid)", "want": ""}
 {"id": "g596-n26", "dialect": "", "command": "git commit -m 'stop defenseclaw-gateway'", "want": ""}

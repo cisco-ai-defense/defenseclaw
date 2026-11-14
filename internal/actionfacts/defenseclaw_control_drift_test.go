@@ -107,10 +107,10 @@ func TestDefenseClawStopVerbsFollowTheCLI(t *testing.T) {
 	for verb := range seen {
 		args := []string{"guardrail", verb}
 		if verb == "disable" || verb == "stop" || verb == "uninstall" || verb == "teardown" || verb == "remove-all" || verb == "kill" || verb == "shutdown" {
-			if _, decided := judgeDefenseClawCLI(args, "defenseclaw"); !decided {
+			if _, decided := judgeDefenseClawCLI(args, "defenseclaw", false); !decided {
 				t.Errorf("registered subcommand %q is not decided by the control rules", verb)
 			}
-			kind, _ := judgeDefenseClawCLI(args, "defenseclaw")
+			kind, _ := judgeDefenseClawCLI(args, "defenseclaw", false)
 			if kind == "" {
 				t.Errorf("registered subcommand %q is treated as read-only", verb)
 			}
