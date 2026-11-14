@@ -346,13 +346,26 @@ regex_only`), and nothing calls a model until you turn the judge on. When you
 do, use Gemma 4 31B (`google.gemma-4-31b`) on Amazon Bedrock. DefenseClaw
 benchmarks the judge and tunes its prompt against this model.
 
-On the S7 judge benchmark (default pack, `regex_judge`, the hook answer
-window, three fresh rounds), rules plus Gemma 4 31B blocked no benign call on
-two public agent-trace corpora (1,200 benign calls) and alerted on 6 or 7 of
-694 benign calls of one of them. On a Windows shell corpus, 6 to 9 of 2,459
-benign calls were blocked (about 0.3%; one of them by the rules alone). It answered in about 0.85 seconds at the median and 1.7 seconds at
-the 95th percentile, and cost about USD 0.3 per 1,000 tool calls. The
+On the S7 judge benchmark (default pack, `regex_judge`, two fresh rounds),
+rules plus Gemma 4 31B blocked no benign call on two public agent-trace
+corpora (1,200 benign calls) and alerted on 8 and 11 of the 694 benign calls
+of one of them (the rules alone: 15 and 16). On a Windows shell corpus, 7 and
+9 of 2,459 benign calls were blocked (about 0.3%). Alert recall on the other
+public corpus rose from 0.29 to 0.64. The
 [LLM judge benchmark](/docs/guardrail/llm-judge-benchmark) has more numbers.
+
+The judge's own stages are cascade lanes (`guardrail.cascade.lanes`, see
+[Configure the cascade](/docs/guardrail/configure-cascade)). They act only
+while the judge is on for the connector, and each ships `on`:
+
+| Lane | `on` (shipped) | `off` |
+|---|---|---|
+| `judge_read_skip` | With `regex_judge`, a call no rule flagged that the parser proves only reads is not sent to the judge. | Every call the rules leave open goes to the judge. |
+| `judge_unmodeled_alert` | In the default pack, a lone `needs_review` finding on a call the parser does not model (MCP and other tools) alerts. | It is recorded without an alert, like a modeled call. |
+| `judge_tool_result_context` | The judge that reads a tool's output also gets the tool, what its call did (arguments redacted) and your request for the turn. | It judges the output alone. |
+
+`shadow` acts as `off` for these lanes: they change which question the judge
+is asked and have no verdict of their own to record.
 
 Gemma 4 runs on the `bedrock-mantle` endpoint and only under the `/openai/v1`
 path. The `/v1` path refuses it with "isn't supported on this route", and

@@ -53,7 +53,10 @@ coverage, but it adds model latency to every eligible call.
 
 `weak_signal` findings are ignored. `needs_review` can alert but cannot block
 by itself. In the default pack a lone `needs_review` finding on a call no rule
-flagged is recorded without an alert. A block requires actionable corroboration
+flagged is recorded without an alert, except on a call DefenseClaw's parser
+does not model (MCP and other tools, where the judge sees only the call text):
+there it still alerts, and never blocks (cascade lane `judge_unmodeled_alert`).
+A block requires actionable corroboration
 or strong structural evidence of exfiltration or destruction. This keeps
 ambiguous activity visible without turning ordinary coding commands into
 routine interruptions.
@@ -64,6 +67,11 @@ earlier calls of the session did to the same paths, and the rules that sent the
 call to the judge. It judges those effects rather than the call's vocabulary: a
 call the parser proves sends nothing over the network is not judged as data
 exfiltration.
+
+When the judge reads a tool's output, it also gets the tool's name and what
+its call did (the paths it read, or its arguments with credentials removed)
+in its instructions, and your request for the turn next to the output, marked
+as untrusted text. The output cannot change either.
 
 ## Frozen public validation
 
