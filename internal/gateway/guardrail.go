@@ -734,9 +734,11 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 			}
 		}()
 	}
-	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
+	// The content rules of a prompt also read it as the model reads its text
+	// parts (withPromptPartsView, GAP-0465).
+	verdict := g.inspectStrategy(withPromptPartsView(ctx, direction, content, messages), strategy, direction, content, messages, model, mode)
 	if raw != "" {
-		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
+		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(withPromptPartsView(ctx, direction, raw, messages), strategy, direction, raw, messages, model, mode))
 	}
 
 	elapsed := time.Since(start)
@@ -1162,13 +1164,16 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	ciscoClient := g.currentCiscoInspector()
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	signals := triagePatterns(direction, content)
+	signals := triagePatternsFor(ctx, direction, content)
 	judge := g.requestJudge(ctx)
 	if judge != nil && direction == "prompt" {
 		// Opt-in only: a prompt with one half of an injection shape goes to the
 		// injection adjudicator. With no judge these signals do not exist, so
 		// the default posture never alerts on a near miss.
 		signals = append(signals, promptInjectionReviewSignals(content)...)
+		if view := promptPartsViewOf(ctx, content); view != "" {
+			signals = append(signals, promptInjectionReviewSignals(view)...)
+		}
 	}
 	high, review, _ := partitionSignals(signals)
 
@@ -1358,7 +1363,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
-		sigs := triagePatterns(direction, content)
+		sigs := triagePatternsFor(ctx, direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
 		endRegex("", "", time.Since(regexStart))
@@ -1842,23 +1847,38 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // scanLocalPatternsFor is scanLocalPatterns for a guardrail proxy request:
 // its content rules come from the rule pack of the request's profile
 // (proxyRuleGeneration).
+//
+// A prompt with a parts view (withPromptPartsView) is also scanned as the
+// model reads it, and the two verdicts are unioned (GAP-0465).
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
-	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)))
+	rules, patterns := proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx))
+	verdict := scanLocalPatternsWithActivation(direction, content, rules, patterns)
+	if view := promptPartsViewOf(ctx, content); view != "" {
+		verdict = unionLocalPatternVerdicts(verdict, scanLocalPatternsWithActivation(direction, view, rules, patterns))
+	}
+	return verdict
 }
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
-// request, with the rule pack of its profile (proxyRuleGeneration).
+// request, with the rule pack of its profile (proxyRuleGeneration), on
+// content and on its parts view (withPromptPartsView, GAP-0465).
 func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	return scanUntrustedContentRules(proxyRuleGeneration(ctx), content)
+	generation := proxyRuleGeneration(ctx)
+	findings := scanUntrustedContentRules(generation, content)
+	if view := promptPartsViewOf(ctx, content); view != "" {
+		findings = unionRuleFindings(findings, scanUntrustedContentRules(generation, view))
+	}
+	return findings
 }
 
 // scanUntrustedContentRules is the content rule scan of untrusted text with
 // generation: every content rule on the text as written, then the trust rules
-// on the same text with invisible separators and look-alike letters folded, for
-// a rule the first pass did not find. A directive with a zero-width character
+// on the same text with invisible separators and look-alike letters folded,
+// merged per rule ID keeping the stronger finding (unionRuleFindings,
+// rel-1-0-10:GAP-0527). A directive with a zero-width character
 // spliced into a word, or a Latin letter swapped for a Cyrillic one, reads the
 // same to a model and must not read differently to the rules. The hook path
 // does the same (messageRuleFindings); the Secure Client generation keeps its
@@ -1872,19 +1892,9 @@ func scanUntrustedContentRules(generation *compiledRulePackCategories, content s
 	if folded == content {
 		return findings
 	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "", ruleScanOptions{
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "", ruleScanOptions{
 		contentScope: ruleContentScopeUntrusted, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
+	}))
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {

@@ -101,6 +101,9 @@ func (geminiAdapter) WriteBlockResponse(p *GuardrailProxy, w http.ResponseWriter
 type geminiTurn struct {
 	Role string
 	Text string
+	// Parts are the text parts Text joins with a line feed, for the prompt
+	// rules' parts view (promptPartsJoinedText).
+	Parts []string
 }
 
 // extractGeminiContentsText flattens a Gemini-shaped `contents[]` JSON
@@ -130,60 +133,59 @@ func extractGeminiContentsText(raw json.RawMessage) []geminiTurn {
 		if err := json.Unmarshal(r, &turn); err != nil {
 			continue
 		}
-		var sb strings.Builder
-		for _, p := range turn.Parts {
-			var part struct {
-				Text string `json:"text"`
-			}
-			if err := json.Unmarshal(p, &part); err == nil && part.Text != "" {
-				if sb.Len() > 0 {
-					sb.WriteByte('\n')
-				}
-				sb.WriteString(part.Text)
-			}
-		}
-		if sb.Len() > 0 {
-			out = append(out, geminiTurn{Role: turn.Role, Text: sb.String()})
+		if parts := geminiTextParts(turn.Parts); len(parts) > 0 {
+			out = append(out, geminiTurn{Role: turn.Role, Text: strings.Join(parts, "\n"), Parts: parts})
 		}
 	}
 	return out
 }
 
+// geminiTextParts is the non-empty text of each Gemini part; other parts
+// (inlineData, fileData, functionCall, functionResponse) are skipped.
+func geminiTextParts(rawParts []json.RawMessage) []string {
+	var parts []string
+	for _, p := range rawParts {
+		var part struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(p, &part); err == nil && part.Text != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	return parts
+}
+
 // extractGeminiSystemInstructionText pulls the text out of a Gemini
 // `systemInstruction` field, which accepts either a plain string
-// shorthand OR a {role,parts[]} object. Returns "" on unknown shapes.
+// shorthand OR a {role,parts[]} object: the text parts joined with a line
+// feed. Returns "" on unknown shapes.
 func extractGeminiSystemInstructionText(raw json.RawMessage) string {
+	return strings.Join(extractGeminiSystemInstructionParts(raw), "\n")
+}
+
+// extractGeminiSystemInstructionParts is the text parts of a Gemini
+// `systemInstruction` field: the string shorthand as one part, or the text of
+// each part of the object form. Returns nil on unknown shapes.
+func extractGeminiSystemInstructionParts(raw json.RawMessage) []string {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return ""
+		return nil
 	}
 	switch trimmed[0] {
 	case '"':
 		var s string
-		if err := json.Unmarshal(raw, &s); err == nil {
-			return s
+		if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+			return []string{s}
 		}
 	case '{':
 		var obj struct {
 			Parts []json.RawMessage `json:"parts"`
 		}
 		if err := json.Unmarshal(raw, &obj); err == nil {
-			var sb strings.Builder
-			for _, p := range obj.Parts {
-				var part struct {
-					Text string `json:"text"`
-				}
-				if err := json.Unmarshal(p, &part); err == nil && part.Text != "" {
-					if sb.Len() > 0 {
-						sb.WriteByte('\n')
-					}
-					sb.WriteString(part.Text)
-				}
-			}
-			return sb.String()
+			return geminiTextParts(obj.Parts)
 		}
 	}
-	return ""
+	return nil
 }
 
 // injectSystemInstructionGemini merges the notification content into

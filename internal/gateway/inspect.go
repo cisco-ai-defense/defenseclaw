@@ -1591,13 +1591,30 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
+	cfg := a.decisionConfig(ctx)
+	foldTrust := cfg == nil || !cfg.SecureClientIntegration()
 	folded := ""
-	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+	if foldTrust {
 		if view := trustPatternText(content); view != content {
 			folded = view
 		}
 	}
-	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
+	generation := snapshotRulePackGenerationFor(ctx, req.Connector)
+	ruleFindings := messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
+	// A prompt whose content is a JSON block array is also read as the model
+	// reads its text parts, with no separator (GAP-0465).
+	if isPromptDirection(req.Direction) {
+		if joined := jsonContentPartsJoinedText(content); joined != "" {
+			joinedFolded := ""
+			if foldTrust {
+				if view := trustPatternText(joined); view != joined {
+					joinedFolded = view
+				}
+			}
+			ruleFindings = unionRuleFindings(ruleFindings,
+				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
+		}
+	}
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -2777,7 +2794,8 @@ func (a *APIServer) emitCodeGuardTelemetry(
 // generation: every rule on content (scanRaw; scope as for
 // scanContentRuleCategoryWithGeneration), then the trust rules on folded
 // ("" for none), the same content with invisible separators and look-alike
-// letters folded, for a rule the first pass did not find. A strictest
+// letters folded, merged per rule ID keeping the stronger finding
+// (unionRuleFindings, rel-1-0-10:GAP-0527). A strictest
 // combination of profiles runs it with each member's own rules and keeps
 // every member's finding, so even distinct definitions of one rule ID keep
 // their separate audit provenance.
@@ -2806,17 +2824,7 @@ func messageRuleFindings(generation *compiledRulePackCategories, content, folded
 	if folded == "" {
 		return findings
 	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+	return unionRuleFindings(findings, scanRuleGeneration(generation, folded, "message", ruleScanOptions{
 		contentScope: scope, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
+	}))
 }

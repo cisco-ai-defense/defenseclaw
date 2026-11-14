@@ -1352,7 +1352,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				if role == "" {
 					role = "user"
 				}
-				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
+				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text, textParts: t.Parts})
 			}
 			userText = lastUserText(geminiMsgs)
 			turnText = promptTurnText(geminiMsgs)
@@ -1362,7 +1362,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if userText == "" && len(partial.SystemInstruction) > 0 {
-		userText = extractGeminiSystemInstructionText(partial.SystemInstruction)
+		parts := extractGeminiSystemInstructionParts(partial.SystemInstruction)
+		userText = strings.Join(parts, "\n")
+		// No message holds these parts: the prompt rules' parts view reads
+		// them from the request context (withPromptPartsView, GAP-0465).
+		r = r.WithContext(withPromptTextParts(r.Context(), parts))
 	}
 
 	// Ollama /api/generate + legacy completion endpoints: top-level
