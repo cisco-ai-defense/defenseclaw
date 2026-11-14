@@ -1616,7 +1616,7 @@ func RegistrationWriteCandidate(command string) bool {
 	if strings.ContainsAny(command, ">") {
 		return true
 	}
-	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node", "bun", "ruby", "php", "bash", "zsh", "dash", "ksh", "sh"} {
+	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "7z", "dd", "tee", "sponge", "python", "node", "bun", "ruby", "php", "bash", "zsh", "dash", "ksh", "sh"} {
 		if strings.Contains(command, word) {
 			return true
 		}
