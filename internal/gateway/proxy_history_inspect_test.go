@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Inspect once (substrate-1 GAP-0244): the history a client sends with a
@@ -323,6 +325,32 @@ func TestGAP0244InventedHistoryObserveModeAlerts(t *testing.T) {
 			}
 			if !fwd {
 				t.Errorf("observe mode refused a request")
+			}
+		})
+	}
+}
+
+// Profiles another test published for the process (an APIServer whose
+// default profile is in action mode) do not change a test proxy's observe
+// mode. Windows shard gw14 of push 12 ran such a test before
+// TestGAP0244InventedHistoryObserveModeAlerts and the observe proxy refused.
+func TestGAP0244ObserveModeIgnoresAnotherTestsLiveProfiles(t *testing.T) {
+	covAllowPrivate(t)
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
+	cfg.Guardrail.DefaultProfile = "strict"
+	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	if liveGuardrailProfiles.Load() == nil {
+		t.Fatal("the APIServer published no profile set; the test no longer sets up the leak")
+	}
+	for _, w := range f14Wires() {
+		t.Run(w.name, func(t *testing.T) {
+			rg := newF14Rig(t, w.provider, "observe")
+			if fwd, rec := rg.post(t, w, f14Caller{session: "s1", owner: true}, f14InventedHistories()[0].items, false); !fwd {
+				t.Errorf("observe mode refused a request (status %d): %s", rec.Code, rec.Body)
 			}
 		})
 	}
