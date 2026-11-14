@@ -114,7 +114,9 @@ func TestGAP0104ShellReadsOfProtectedFilesStayAllowed(t *testing.T) {
 		{name: "tar extract a named state member into the home", command: `tar -xf /tmp/gap0104.tar -C ~ .defenseclaw/config.yaml`, defaults: "block", strict: "block", rule: state, posix: true},
 		{name: "old-style tar extract a named hooks member", command: `tar xf /tmp/gap0104.tar -C ~ .defenseclaw/hooks/codex-hook.sh`, defaults: "block", strict: "block", rule: state, posix: true},
 		{name: "unzip a named state member into the home", command: `unzip -o /tmp/gap0104.zip .defenseclaw/config.yaml -d ~`, defaults: "block", strict: "block", rule: state, posix: true},
-		{name: "find exec python writes state", command: `find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`, defaults: "alert", strict: "block", rule: state},
+		// rel-1-0-10:GAP-0468: the find reader judges code it cannot prove
+		// read-only, as rel did: a block in every pack.
+		{name: "find exec python writes state", command: `find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`, defaults: "block", strict: "block", rule: state},
 		// rel-1-0-10:GAP-0269: the same existing row aimed at an agent hook config.
 		{name: "find exec python writes hook config", command: strings.NewReplacer("~/.defenseclaw -name config.yaml", "~/.claude -name settings.json").Replace(`find ~/.defenseclaw -name config.yaml -exec python3 -c 'import sys; open(sys.argv[1], "w").write("")' {} \;`), defaults: "alert", strict: "block", rule: hookWrite},
 	}
@@ -334,7 +336,10 @@ func TestGAP0365RunnersHandThePathToPythonCode(t *testing.T) {
 						}
 						// A pipeline into xargs and a nested shell body keep the
 						// strong state finding (a proven write): a block in every pack.
-						if target.rule == "tamper.detector_state_write" && (strings.HasPrefix(name, "xargs") || name == "sh -c") {
+						// So does code a find -exec child runs: the find reader judges
+						// it as before the read proof (rel-1-0-10:GAP-0468).
+						if target.rule == "tamper.detector_state_write" &&
+							(strings.HasPrefix(name, "xargs") || name == "sh -c" || strings.HasPrefix(name, "find")) {
 							want = "block"
 						}
 					}
@@ -371,6 +376,40 @@ func TestGAP0365TextWordsAfterCodeAreNotHandedPaths(t *testing.T) {
 		got := judge(h.project, false, "Bash", map[string]any{"command": command})
 		if action := hookConfigAction(got); action != want || strings.Contains(got, "tamper.detector_state_write") {
 			t.Errorf("%s: action %q, want %q: %.500s", profile, action, want, got)
+		}
+	}
+}
+
+// rel-1-0-10:GAP-0468: python code a find -exec, -exec env or -execdir child
+// runs on the DefenseClaw state it finds is judged by the find reader, as
+// before the read proof: code the grammar does not prove read-only may change
+// every entry it is handed, a block in every pack (rel db6d83c82f blocked
+// these three rows; round 4 had moved them to the default pack's alert).
+// Code the grammar proves read-only stays allowed (GAP-0104).
+func TestGAP0468FindExecPythonOnStateKeepsTheBlock(t *testing.T) {
+	h := newGAP0104Home(t)
+	const (
+		writes = `import sys; open(sys.argv[1], "w").write("")`
+		reads  = `import sys; print(open(sys.argv[1]).read())`
+	)
+	rows := map[string]string{
+		"find exec":     `find ~/.defenseclaw -name config.yaml -exec python3 -c 'BODY' {} \;`,
+		"find exec env": `find ~/.defenseclaw -name config.yaml -exec env python3 -c 'BODY' {} \;`,
+		"find execdir":  `find ~/.defenseclaw -name config.yaml -execdir python3 -I -c 'BODY' {} \;`,
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		judge := newHookConfigJudge(t, "claudecode", profile)
+		for id, template := range rows {
+			for body, want := range map[string]string{writes: "block", reads: "allow"} {
+				command := strings.ReplaceAll(template, "BODY", body)
+				got := judge(h.project, false, "Bash", map[string]any{"command": command})
+				if action := hookConfigAction(got); action != want {
+					t.Errorf("%s/%s/%s: action %q, want %q: %.500s", profile, id, want, action, want, got)
+				}
+				if want == "block" && !strings.Contains(got, "tamper.detector_state_write") {
+					t.Errorf("%s/%s: want rule tamper.detector_state_write: %.500s", profile, id, got)
+				}
+			}
 		}
 	}
 }

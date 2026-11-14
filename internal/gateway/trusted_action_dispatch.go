@@ -11481,33 +11481,63 @@ func trustedSimpleCommandEvidenceCWDs(request trustedActionRequest, simples []ac
 	return cwds
 }
 
-// uncertainPythonCodes lists the inline python code strings of a call that
-// the read grammar does not prove read-only, wherever a runner carries them
-// (the words of any command, find -exec children included).
-func uncertainPythonCodes(facts actionfacts.Facts) []string {
+// uncertainPythonCodesOf lists the inline python code strings in the words
+// of one command that the read grammar does not prove read-only, wherever a
+// runner carries them (find -exec children included).
+func uncertainPythonCodesOf(command actionfacts.CommandFact) []string {
 	var codes []string
-	for _, command := range facts.Commands {
-		for i, word := range command.Argv {
-			base := strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/")))
-			if base != "python" && !strings.HasPrefix(base, "python3") && base != "python2" {
-				continue
-			}
-			if code, _, ok := actionfacts.PythonInlineCode(command.Argv[i+1:]); ok && !actionfacts.PythonCodeOnlyReads(code) &&
-				!slices.Contains(codes, code) {
-				codes = append(codes, code)
-			}
+	for i, word := range command.Argv {
+		base := strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/")))
+		if base != "python" && !strings.HasPrefix(base, "python3") && base != "python2" {
+			continue
+		}
+		if code, _, ok := actionfacts.PythonInlineCode(command.Argv[i+1:]); ok && !actionfacts.PythonCodeOnlyReads(code) &&
+			!slices.Contains(codes, code) {
+			codes = append(codes, code)
 		}
 	}
 	return codes
 }
 
+// uncertainPythonCodeRoutes splits the inline python code strings of a call
+// that the read grammar does not prove read-only by who judges them. handed:
+// every command that carries the code is the python call itself
+// (actionfacts.PythonCallInlineCode); the code reaches a file through the
+// words it is handed, the reach the hand-off model added
+// (rel-1-0-10:GAP-0365). judged: the code is also words of another program
+// whose reader judges it (the find reader reads a find -exec, -execdir or -ok
+// child it cannot prove read-only as one that may change every entry it
+// finds), as before the hand-off model (rel-1-0-10:GAP-0468).
+func uncertainPythonCodeRoutes(facts actionfacts.Facts) (handed, judged []string) {
+	for _, command := range facts.Commands {
+		call, isCall := actionfacts.PythonCallInlineCode(command)
+		for _, code := range uncertainPythonCodesOf(command) {
+			switch {
+			case isCall && code == call:
+				if !slices.Contains(handed, code) {
+					handed = append(handed, code)
+				}
+			case !slices.Contains(judged, code):
+				judged = append(judged, code)
+			}
+		}
+	}
+	handed = slices.DeleteFunc(handed, func(code string) bool { return slices.Contains(judged, code) })
+	return handed, judged
+}
+
 // withPythonUnknownStateTier gives inline python code that is not proven
-// read-only the pack's unknown tier on DefenseClaw state (rel-1-0-10:GAP-0244,
-// GAP-0365). When that code is the only thing that reaches active state (the
-// same call with the code swapped for a read-only print produces no state
-// finding), the state finding is HIGH: an alert in the default and
-// permissive packs, a block in strict. Any other mutation of state keeps the
-// CRITICAL finding in every pack.
+// read-only the pack's unknown tier on DefenseClaw state, for the reach the
+// hand-off model added only: code that a python call runs on the words it is
+// handed (rel-1-0-10:GAP-0244, GAP-0365). When that code is the only thing
+// that reaches active state (the same call with the code swapped for a
+// read-only print produces no state finding), the state finding is HIGH: an
+// alert in the default and permissive packs, a block in strict. The read grammar
+// proves reads only, so it cannot tell a plain write from an unfamiliar read:
+// code that another program's reader judges (a find -exec child the find
+// reader reads as may change what it finds) keeps that reader's CRITICAL
+// finding in every pack, as before the read proof (rel-1-0-10:GAP-0468). Any
+// other mutation of state keeps the CRITICAL finding in every pack too.
 func withPythonUnknownStateTier(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
 	enforcing := func(list []RuleFinding) bool {
@@ -11523,9 +11553,9 @@ func withPythonUnknownStateTier(parent context.Context, request trustedActionReq
 		return findings
 	}
 	facts := actionfacts.Analyze(request.Input)
-	codes := uncertainPythonCodes(facts)
+	codes, judged := uncertainPythonCodeRoutes(facts)
 	if len(codes) == 0 {
-		return findings
+		return findings // every such code is judged by another program's reader
 	}
 	// A pipeline into xargs is judged through its twins, whose proven state
 	// findings the call merges as proven: it keeps the strong finding.
@@ -11536,6 +11566,9 @@ func withPythonUnknownStateTier(parent context.Context, request trustedActionReq
 	}
 	sanitized := command
 	for _, code := range codes {
+		if slices.ContainsFunc(judged, func(other string) bool { return strings.Contains(other, code) }) {
+			return findings // the swap would change code a reader judges
+		}
 		// The code as written in the text: plain, or with its double quotes
 		// escaped inside a double-quoted shell body (sh -c "python3 -c '...'").
 		replaced := false

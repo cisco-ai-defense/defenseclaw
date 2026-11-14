@@ -20,9 +20,7 @@ func PythonCodeHandedOperands(argv []string) []string {
 	if len(argv) < 3 {
 		return nil
 	}
-	program := strings.ToLower(path.Base(strings.ReplaceAll(argv[0], `\`, "/")))
-	program = strings.TrimSuffix(program, ".exe")
-	if program != "python" && !posixVersionedPythonProgram(program) {
+	if !pythonProgramWord(argv[0]) {
 		return nil
 	}
 	code, at, ok := PythonInlineCode(argv[1:])
@@ -73,8 +71,48 @@ func PythonInlineCode(args []string) (code string, at int, ok bool) {
 // parallel runner hands the child the words after its own options (and after
 // ::: for parallel).
 func PythonCodeHandedOperandsOf(command CommandFact) []string {
-	if command.Dialect != "" && command.Dialect != DialectPOSIX || len(command.Argv) < 3 {
+	words, ok := pythonCallWords(command)
+	if !ok {
 		return nil
+	}
+	var operands []string
+	for _, operand := range PythonCodeHandedOperands(words) {
+		if !strings.ContainsAny(operand, "$*?[`") {
+			operands = append(operands, operand)
+		}
+	}
+	return operands
+}
+
+// PythonCallInlineCode returns the inline code of a parsed command that is
+// itself the python -c call once the wrappers and runners
+// PythonCodeHandedOperandsOf looks through are stripped: the call that hands
+// its operands to the code. A python call that is only words of another
+// program (a find -exec child, a shell body) is not one; that program's
+// reader judges the code (rel-1-0-10:GAP-0468).
+func PythonCallInlineCode(command CommandFact) (string, bool) {
+	words, ok := pythonCallWords(command)
+	if !ok || len(words) < 3 || !pythonProgramWord(words[0]) {
+		return "", false
+	}
+	code, _, inline := PythonInlineCode(words[1:])
+	return code, inline
+}
+
+// pythonProgramWord reports a program word that names a python interpreter
+// (python, python3, python3.12, a path to one, python.exe).
+func pythonProgramWord(word string) bool {
+	program := strings.ToLower(path.Base(strings.ReplaceAll(word, `\`, "/")))
+	program = strings.TrimSuffix(program, ".exe")
+	return program == "python" || posixVersionedPythonProgram(program)
+}
+
+// pythonCallWords returns the words of a POSIX command with the wrappers
+// that pass argv on and an xargs or parallel runner stripped (see
+// PythonCodeHandedOperandsOf).
+func pythonCallWords(command CommandFact) ([]string, bool) {
+	if command.Dialect != "" && command.Dialect != DialectPOSIX || len(command.Argv) < 3 {
+		return nil, false
 	}
 	words := command.Argv
 	static := make([]bool, len(words))
@@ -106,13 +144,7 @@ func PythonCodeHandedOperandsOf(command CommandFact) []string {
 		}
 		break
 	}
-	var operands []string
-	for _, operand := range PythonCodeHandedOperands(words) {
-		if !strings.ContainsAny(operand, "$*?[`") {
-			operands = append(operands, operand)
-		}
-	}
-	return operands
+	return words, true
 }
 
 // runnerChildWords returns the child command of an xargs or parallel call,
