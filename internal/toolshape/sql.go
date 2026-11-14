@@ -54,11 +54,8 @@ var (
 // to the characters it holds (a backslash that escapes a quote in MySQL, "#"
 // that starts a comment in MySQL and is an operator in PostgreSQL, "$$" that
 // quotes in PostgreSQL), and the classes of any reading count: the stronger
-// one wins. over reports a text past the bound (it was read in part).
-func ClassifySQL(sql string) (classes []SQLClass, over bool) {
-	if len(sql) > maxSQL {
-		sql, over = sql[:maxSQL], true
-	}
+// one wins. The caller bounds the text (the string bound).
+func ClassifySQL(sql string) (classes []SQLClass) {
 	variants := []sqlDialect{{}}
 	expand := func(has bool, set func(*sqlDialect)) {
 		if !has {
@@ -85,7 +82,7 @@ func ClassifySQL(sql string) (classes []SQLClass, over bool) {
 			}
 		}
 	}
-	return classes, over
+	return classes
 }
 
 // sqlDialect is one reading of the characters whose meaning differs by dialect.

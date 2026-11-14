@@ -39,15 +39,14 @@ var shapesYAML []byte
 // the walk records it (bounded.Truncated) and the caller judges the call as
 // unknown at least (internal/guardrail/bounded, the S7 bound rule).
 const (
-	maxDepth   = 16        // object and array nesting (bounded.Depth)
-	maxItems   = 512       // elements of one array (bounded.Items)
-	maxEffects = 256       // effects of one call (bounded.Effects)
-	maxNodes   = 1 << 16   // values of one walk (bounded.Nodes)
-	maxNested  = 4         // JSON documents nested in string arguments (bounded.Depth)
-	maxString  = 1 << 20   // bytes of one string argument read (bounded.Bytes)
-	maxPath    = 32 << 10  // bytes of a path value (bounded.Bytes); a longer one is still judged
-	maxContent = 1 << 20   // bytes of write content collected (bounded.Bytes)
-	maxSQL     = maxString // SQL is read whole, up to the string bound
+	maxDepth   = 16       // object and array nesting (bounded.Depth)
+	maxItems   = 512      // elements of one array (bounded.Items)
+	maxEffects = 256      // effects of one call (bounded.Effects)
+	maxNodes   = 1 << 16  // values of one walk (bounded.Nodes)
+	maxNested  = 4        // JSON documents nested in string arguments (bounded.Depth)
+	maxString  = 1 << 20  // bytes of one string argument read (bounded.Bytes)
+	maxPath    = 32 << 10 // bytes of a path value (bounded.Bytes); a longer one is still judged
+	maxContent = 1 << 20  // bytes of write content collected (bounded.Bytes)
 )
 
 // Family is the kind of server or tool a call belongs to.
@@ -101,7 +100,6 @@ type Effect struct {
 	Path    string // read, write, delete, list
 	URL     string // net_fetch, net_send
 	Host    string // net_fetch, net_send (lower-case, no port)
-	Addr    string // a recipient address or channel
 	Role    Role
 	SQL     []SQLClass // sql
 	Setting string     // setting: what the change does
@@ -126,9 +124,6 @@ type Mapping struct {
 	// Content is the text the call writes (values under content-style keys,
 	// nested ones included), for the rules that read what is written.
 	Content string
-	// Senders are the hosts of the call's own account fields (from, sender,
-	// account), when it names them.
-	Senders []string
 }
 
 type table struct {
@@ -158,12 +153,12 @@ type table struct {
 	PathKeySuffix []string            `yaml:"path_key_suffixes"`
 	TextRules     []TextRule          `yaml:"text_rules"`
 	ContentKeys   []string            `yaml:"content_keys"`
-	SenderKeys    []string            `yaml:"sender_keys"`
 	SearchTokens  []string            `yaml:"search_tokens"`
 	NameKeys      []string            `yaml:"name_keys"`
+	InputKeys     []string            `yaml:"input_keys"`
+	OperationKeys []string            `yaml:"operation_keys"`
 	ProxyArgKeys  []string            `yaml:"proxy_arg_keys"`
 	CallbackKeys  []string            `yaml:"callback_keys"`
-	URIKeys       []string            `yaml:"uri_keys"`
 
 	verbOf        map[string]Kind
 	pathRead      map[string]bool
@@ -181,10 +176,9 @@ type table struct {
 	localHost     map[string]bool
 	pathSuffix    []string
 	contentKey    map[string]bool
-	senderKey     map[string]bool
 	searchToken   map[string]bool
 	callbackKey   map[string]bool
-	uriKey        map[string]bool
+	inputKey      map[string]bool
 }
 
 type compiledSetting struct {
@@ -230,9 +224,9 @@ func load() (*table, error) {
 		t.urlKey, t.redirectKey, t.recipientKey = set(t.URLKeys), set(t.RedirectKeys), set(t.RecipientKeys)
 		t.sqlKey, t.sqlGenericKey = set(t.SQLKeys), set(t.SQLGenericKeys)
 		t.codeKey, t.codeToken, t.localHost = set(t.CodeKeys), set(t.CodeToolTokens), set(t.LocalHosts)
-		t.contentKey, t.senderKey, t.searchToken = set(t.ContentKeys), set(t.SenderKeys), set(t.SearchTokens)
+		t.contentKey, t.searchToken = set(t.ContentKeys), set(t.SearchTokens)
 		t.callbackKey = set(t.CallbackKeys)
-		t.uriKey = set(t.URIKeys)
+		t.inputKey = set(t.InputKeys)
 		for _, suf := range t.PathKeySuffix {
 			t.pathSuffix = append(t.pathSuffix, "_"+suf)
 		}
@@ -486,7 +480,7 @@ func (w *walker) value(key string, v any, depth int) {
 
 // operationObject reads {"op": "disable_mfa"} entries of an operations list.
 func (w *walker) operationObject(it map[string]any) {
-	for _, k := range []string{"op", "operation", "action", "type"} {
+	for _, k := range w.t.OperationKeys {
 		if s, ok := it[k].(string); ok && w.t.settingOps.MatchString(strings.ToLower(strings.TrimSpace(s))) {
 			w.add(Effect{Kind: KindSetting, Arg: k, Setting: "turns a security control off (" + s + ")"})
 		}
@@ -552,7 +546,7 @@ func (w *walker) str(key, val string) {
 		return
 	}
 	fromURI := false
-	if t.locationKey(key) || (t.contentKey[key] && !w.bodyIsData(val)) {
+	if !t.contentKey[key] || !w.bodyIsData(val) {
 		switch p, kind := fileURIPath(val); kind {
 		case fileURIPlaced:
 			val, fromURI = p, true
@@ -567,11 +561,6 @@ func (w *walker) str(key, val string) {
 	}
 
 	switch {
-	case t.senderKey[key] && (looksAddress(val) || looksURL(val)):
-		if h := hostFromAddrOrURL(val); h != "" {
-			w.m.Senders = append(w.m.Senders, h)
-		}
-		return
 	case t.callbackKey[key] && looksURL(val):
 		w.destination(key, val, RoleCallback)
 	case t.redirectKey[key] || t.recipientKey[key]:
@@ -596,11 +585,7 @@ func (w *walker) str(key, val string) {
 
 	switch {
 	case t.sqlKey[key] || (t.sqlGenericKey[key] && w.genericSQL(val)):
-		classes, over := ClassifySQL(val)
-		if over {
-			w.trunc.Hit(bounded.Bytes)
-		}
-		if len(classes) > 0 {
+		if classes := ClassifySQL(val); len(classes) > 0 {
 			w.add(Effect{Kind: KindSQL, Arg: key, SQL: classes})
 		}
 		return
@@ -612,7 +597,7 @@ func (w *walker) str(key, val string) {
 	switch {
 	case t.pathWrite[key] && looksPath(val):
 		w.path(KindWrite, key, val)
-	case inputKeys[key] && looksPath(val):
+	case t.inputKey[key] && looksPath(val):
 		w.path(KindRead, key, val)
 	case (t.pathRead[key] || t.pathKeySuffix(key)) && looksPath(val):
 		w.path(w.pathKind(), key, val)
@@ -724,15 +709,6 @@ func (w *walker) pathKind() Kind {
 	return KindRead
 }
 
-// inputKeys always name a file that is read, whatever the verb of the tool name.
-var inputKeys = map[string]bool{"src": true, "source": true, "input": true, "input_path": true, "input_file": true, "from": true}
-
-// locationKey reports a key that can hold a location (a path, a file URI, a
-// URL); a value under any other key is not a location by its spelling alone.
-func (t *table) locationKey(key string) bool {
-	return t.pathRead[key] || t.pathWrite[key] || inputKeys[key] || t.pathKeySuffix(key) || t.urlKey[key] || t.uriKey[key]
-}
-
 // pathKeySuffix reports a key that ends in one of the table's path words
 // (relative_path, config_file_name).
 func (t *table) pathKeySuffix(key string) bool {
@@ -754,14 +730,11 @@ func (w *walker) destination(key, val string, role Role) {
 		e.URL = val
 		e.Host = hostOf(val)
 	case looksAddress(val):
-		e.Addr = strings.ToLower(val)
-		e.Host = e.Addr[strings.LastIndex(e.Addr, "@")+1:]
-	default:
-		e.Addr = val
+		e.Host = strings.ToLower(val[strings.LastIndex(val, "@")+1:])
 	}
 	// Only the host matters to the rules: a list of addresses at one host is one
 	// effect, so a long mailing list does not exhaust the effect bound.
-	id := string(e.Role) + "\x00" + string(e.Kind) + "\x00" + e.Host + "\x00" + e.Addr
+	id := string(e.Role) + "\x00" + string(e.Kind) + "\x00" + e.Host + "\x00" + e.URL
 	if e.Host != "" {
 		id = string(e.Role) + "\x00" + string(e.Kind) + "\x00" + e.Host
 	}
@@ -773,16 +746,6 @@ func (w *walker) destination(key, val string, role Role) {
 	}
 	w.dests[id] = true
 	w.add(e)
-}
-
-func hostFromAddrOrURL(v string) string {
-	switch {
-	case looksURL(v):
-		return hostOf(v)
-	case looksAddress(v):
-		return strings.ToLower(v[strings.LastIndex(v, "@")+1:])
-	}
-	return ""
 }
 
 // decodeLenient decodes a JSON document the way the servers that receive it
@@ -1083,10 +1046,10 @@ func DecodeExec(code string) bool {
 	return false
 }
 
-// HasFileURIArg reports that a call carries a file: URI as the value of a key
-// that can hold a location (or of a content key a reading tool receives). The
-// gateway reads the arguments of an agent's own tool with the MCP walk only
-// then; a file: substring anywhere else is text.
+// HasFileURIArg reports that a call carries a file: URI as the value of an
+// argument that is not a body (a content key). The gateway reads the
+// arguments of an agent's own tool with the MCP walk only then; a file:
+// substring in a body, or anywhere that is not a file URI, is text.
 func HasFileURIArg(args json.RawMessage) bool {
 	t, err := load()
 	if err != nil || len(args) == 0 {
@@ -1120,7 +1083,7 @@ func HasFileURIArg(args json.RawMessage) bool {
 				}
 			}
 		case string:
-			if t.locationKey(key) || t.contentKey[key] {
+			if !t.contentKey[key] {
 				if _, kind := fileURIPath(strings.TrimSpace(x)); kind != fileURINone {
 					return true
 				}

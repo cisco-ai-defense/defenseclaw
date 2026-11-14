@@ -190,7 +190,7 @@ func TestSQLClasses(t *testing.T) {
 	}
 	for _, c := range cases {
 		var got []string
-		classes, _ := ClassifySQL(c.sql)
+		classes := ClassifySQL(c.sql)
 		for _, k := range classes {
 			got = append(got, k.Class)
 		}
@@ -548,13 +548,6 @@ func TestContentIsCollectedFromNestedKeys(t *testing.T) {
 	}
 }
 
-func TestSendersAndRedirectKeys(t *testing.T) {
-	m := mapOf(t, "mcp__mail__send", `{"from":"me@corp.example","to":"a@corp.example","cc":"b@corp.example"}`)
-	if len(m.Senders) != 1 || m.Senders[0] != "corp.example" {
-		t.Errorf("senders = %v", m.Senders)
-	}
-}
-
 func TestDatabaseServersByShape(t *testing.T) {
 	for _, c := range []struct {
 		tool, args string
@@ -585,13 +578,10 @@ func TestSQLDialectReadings(t *testing.T) {
 		{"SELECT '$$'; SELECT '$$'", false},
 		{"SELECT price FROM t WHERE cost = $1 AND id = $2", false},
 	} {
-		classes, _ := ClassifySQL(c.sql)
+		classes := ClassifySQL(c.sql)
 		if got := len(classes) > 0; got != c.want {
 			t.Errorf("ClassifySQL(%q) = %v, want drop=%v", c.sql, classes, c.want)
 		}
-	}
-	if _, over := ClassifySQL(strings.Repeat("SELECT 1; ", maxSQL/8)); !over {
-		t.Error("a text past the SQL bound is recorded")
 	}
 }
 
@@ -686,9 +676,20 @@ func TestRound4(t *testing.T) {
 			t.Errorf("%q truncated", v)
 		}
 	}
-	b, _ = json.Marshal(map[string]string{"pattern": "file:/etc/shadow", "subject": "file://server/x"})
-	if m := mapOf(t, "mcp__x__grep", string(b)); m.Truncated.Any() || has(m, "/etc/shadow") {
-		t.Errorf("a pattern is text: %+v %v", m.Effects, m.Truncated)
+	// A real file URI is read from any argument value, decoded; a write's body stays data.
+	for _, key := range []string{"pattern", "label", "ref", "anything"} {
+		b, _ = json.Marshal(map[string]string{key: "file:///home/u/.ssh/id_rsa"})
+		if m := mapOf(t, "mcp__x__do", string(b)); !has(m, "/home/u/.ssh/id_rsa") {
+			t.Errorf("file URI under %s: %+v", key, m.Effects)
+		}
+	}
+	b, _ = json.Marshal(map[string]string{"data": "file:///home/u%2F.ssh%2Fid_rsa"})
+	if m := mapOf(t, "mcp__x__read_file", string(b)); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("encoded slashes: %+v", m.Effects)
+	}
+	b, _ = json.Marshal(map[string]string{"path": "/repo/a.md", "content": "file:///home/u/.ssh/id_rsa"})
+	if m := mapOf(t, "mcp__filesystem__write_file", string(b)); has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("a write body is data: %+v", m.Effects)
 	}
 	// Content keys: read for a send, a proxy, a JSON value; data for a prose write.
 	if m := mapOf(t, "mcp__mail__send", `{"to":"a@x.com","body":"/home/u/.ssh/id_rsa"}`); has(m, "/home/u/.ssh/id_rsa") {
@@ -772,7 +773,7 @@ func TestRound5(t *testing.T) {
 	if m := mapOf(t, "mcp__x__read_file", `{"data":"file:///home/u/.ssh/id_rsa"}`); !has(m, "/home/u/.ssh/id_rsa") {
 		t.Errorf("file URI under data for a read tool: %+v", m.Effects)
 	}
-	for _, key := range []string{"resource", "ref", "uris", "link", "document"} {
+	for _, key := range []string{"resource", "ref", "uris", "link", "document", "whatever"} {
 		b, _ := json.Marshal(map[string]string{key: "file:///home/u/.ssh/id_rsa"})
 		if m := mapOf(t, "mcp__x__open", string(b)); !has(m, "/home/u/.ssh/id_rsa") {
 			t.Errorf("file URI under %s: %+v", key, m.Effects)
@@ -782,8 +783,8 @@ func TestRound5(t *testing.T) {
 	if HasFileURIArg(json.RawMessage(`{"file_path":"/repo/package.json","content":"{\"dependencies\":{\"a\":\"file:../a\"}}"}`)) {
 		t.Error("a file: dependency in a package.json body is text")
 	}
-	if HasFileURIArg(json.RawMessage(`{"pattern":"file:/etc/passwd"}`)) {
-		t.Error("a search pattern is text")
+	if HasFileURIArg(json.RawMessage(`{"pattern":"file: notes","ref":"file:../lib"}`)) {
+		t.Error("text that starts with file: is not a file URI")
 	}
 	if !HasFileURIArg(json.RawMessage(`{"uri":"file:///etc/passwd"}`)) || !HasFileURIArg(json.RawMessage(`{"path":"file:/etc/passwd"}`)) {
 		t.Error("a file URI under a location key")

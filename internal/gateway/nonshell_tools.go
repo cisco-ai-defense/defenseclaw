@@ -37,6 +37,13 @@ const (
 	maxNonShellPathTwins = 64 // twin dispatches of one call (bounded.Paths); the table's path rules read every path
 )
 
+// nonShellShadow is the one switch of the whole non-shell lane (the MCP effects
+// and the table rules on shell and native file-tool calls). When it is true
+// the lane computes nothing and adds nothing: the live verdicts are those of
+// rel/1.0.10. It ships false (live); the S7 lead flips it to ship the lane
+// shadow-only.
+var nonShellShadow = false
+
 // nonShellToolFindings reads a non-shell tool call (an MCP or app tool) as
 // effects with internal/toolshape and judges them: a path the call names is
 // judged as the native file tool on that path would be, so the protected
@@ -48,7 +55,7 @@ const (
 // table cannot place adds nothing: unknown is not clean, but it alerts only
 // where a sensitive target is plausible, and that is the path rules above.
 func nonShellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding, mcpServer string) []RuleFinding {
-	if !request.EnforcementCapable || ManagedEnterpriseActive() || !nonShellToolApplies(request, mcpServer) {
+	if nonShellShadow || !request.EnforcementCapable || ManagedEnterpriseActive() || !nonShellToolApplies(request, mcpServer) {
 		return findings
 	}
 	mapping, err := toolshape.Map(request.Input.Tool, request.Input.Args, mcpServer)
@@ -173,7 +180,7 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 				// caller's claim, so it never excuses a copy; it only makes the
 				// finding certain (the call says whose mail it is and copies it
 				// elsewhere).
-				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, !senderNamedAnotherHost(mapping.Senders, e.Host))
+				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, true)
 			}
 			if e.Host != "" && nonShellCollectorHost(e.Host) {
 				add(mcpSendCollectorRuleID, "reaches a paste, file-drop or webhook-catcher host", false)
@@ -300,7 +307,7 @@ func nonShellContentOf(raw json.RawMessage) string {
 // managed installs a finding is an alert. A call without a word any rule
 // needs is not parsed again.
 func shellToolFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !request.EnforcementCapable || ManagedEnterpriseActive() {
+	if nonShellShadow || !request.EnforcementCapable || ManagedEnterpriseActive() {
 		return findings
 	}
 	// A shell call is read by its command; a native file tool (Read, Write,
@@ -354,21 +361,4 @@ func shellToolFindings(ctx context.Context, request trustedActionRequest, findin
 		}
 	}
 	return out
-}
-
-// senderNamedAnotherHost reports a call that names its own account on a host
-// other than host: a copy to a third host is then certain. A copy to the
-// named account's own host stays uncertain (an alert, never a block): the
-// account is the caller's claim and never excuses a copy, but a copy to
-// oneself is the common shape of a hidden copy that is meant.
-func senderNamedAnotherHost(senders []string, host string) bool {
-	if len(senders) == 0 {
-		return false
-	}
-	for _, s := range senders {
-		if s == host {
-			return false
-		}
-	}
-	return true
 }

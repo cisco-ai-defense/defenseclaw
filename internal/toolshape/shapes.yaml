@@ -77,18 +77,18 @@ known_roles:
   fs: [read, write, delete, list]
 # Argument names whose value is text the call writes.
 content_keys: [content, contents, text, data, body, file_text, new_text, new_string, new_str, replacement, insert_text, new_content, file_content]
-# Argument names that name the caller's own account (a mail sender, an API caller).
-sender_keys: [from, sender, from_address, from_email, sender_email, account, user_email, reply_to]
 # Name tokens of a search or lookup tool: its query key is a free-text search, not a statement.
 search_tokens: [search, find, lookup, grep, browse, suggest, autocomplete, ask]
 # A call with one of these keys beside a tool name has the shape of a proxy tool.
 proxy_arg_keys: [arguments, args, params, parameters, input]
 # Argument names that hold a URL the call asks to be told at.
 callback_keys: [callback_url, callback, notify_url, webhook_callback]
+# Argument names that always name a file that is read, whatever the verb of the tool name.
+input_keys: [src, source, input, input_path, input_file, from]
+# Keys of an operations-list entry that name the operation.
+operation_keys: [op, operation, action, type]
 # Argument names that hold the name of the tool a proxy tool calls.
 name_keys: [name, tool, tool_name, method]
-# Argument names that hold a resource identifier (a file: URI among them).
-uri_keys: [uri, uris, resource, resources, ref, refs, link, links, document, documents, source_uri, target_uri, resource_uri, file_uri, location, locations]
 # Argument names that carry a URL or host.
 url_keys: [url, urls, uri, endpoint, href, link, webhook, webhook_url, api_endpoint, base_url, host, hostname, server, address]
 # Argument names that redirect output to another party (a copy, a forward, an
