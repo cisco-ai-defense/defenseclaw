@@ -55,3 +55,30 @@ func dmCorpusAllowed(endpoint, corpus, allow string) error {
 
 // dmKeyFromEnv checks the secret the gateway client reads (DEFENSECLAW_DECISION_MODEL_KEY); the value is never printed.
 func dmKeyPresent() bool { return os.Getenv("DEFENSECLAW_DECISION_MODEL_KEY") != "" }
+
+// dmFillJudgeRefused is the -dm-fill guard (rel-1-0-10:GAP-0617). A fill run answers every cache miss with a fixed unsure answer so the
+// real answers can be fetched later; the product escalates an unsure System One answer to the hook judge, so a fill run that has a judge
+// configured would send every miss to the paid judge for decisions that are void. A fill run therefore takes no judge: -judge-model,
+// -judge-url and -layers judge are refused, before anything boots. Exit status 2, like the other flag errors.
+func dmFillJudgeRefused(fill bool, judgeModel, judgeURL, layers string) error {
+	if !fill {
+		return nil
+	}
+	var set []string
+	if strings.TrimSpace(judgeModel) != "" {
+		set = append(set, "-judge-model")
+	}
+	if strings.TrimSpace(judgeURL) != "" {
+		set = append(set, "-judge-url")
+	}
+	for _, l := range strings.FieldsFunc(layers, func(r rune) bool { return r == ',' || r == '+' || r == ' ' }) {
+		if l == "judge" {
+			set = append(set, "-layers judge")
+			break
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return fmt.Errorf("-dm-fill cannot run with a judge configuration (%s): the fill run's unsure answers would escalate to the judge and spend on decisions that are void. Fill the System One cache first with no judge, then run the judge on cache-only replays", strings.Join(set, ", "))
+}

@@ -6,7 +6,10 @@
 
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDMCorpusAllowed(t *testing.T) {
 	ext := "https://dm.example.com/v1/systemone"
@@ -31,6 +34,35 @@ func TestDMCorpusAllowed(t *testing.T) {
 		err := dmCorpusAllowed(c.endpoint, c.corpus, c.allow)
 		if (err == nil) != c.ok {
 			t.Errorf("%s: err=%v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
+// A fill run takes no judge configuration (rel-1-0-10:GAP-0617): the unsure fill answers would escalate to the paid judge.
+func TestDMFillRefusesAJudgeConfiguration(t *testing.T) {
+	cases := []struct {
+		name                    string
+		fill                    bool
+		judgeModel, judgeURL, l string
+		refused                 bool
+	}{
+		{"fill, no judge", true, "", "", "", false},
+		{"fill, dm layer only", true, "", "", "dm", false},
+		{"fill, judge model", true, "gemma-4-31b", "", "", true},
+		{"fill, judge url only", true, "", "http://127.0.0.1:9000/v1", "", true},
+		{"fill, judge layer", true, "", "", "judge", true},
+		{"fill, dm and judge layers", true, "", "", "dm,judge", true},
+		{"fill, dm+judge layers", true, "", "", "dm+judge", true},
+		{"fill, blank judge model", true, "  ", "", "", false},
+		{"no fill, judge model", false, "gemma-4-31b", "http://127.0.0.1:9000/v1", "dm,judge", false},
+	}
+	for _, c := range cases {
+		err := dmFillJudgeRefused(c.fill, c.judgeModel, c.judgeURL, c.l)
+		if (err != nil) != c.refused {
+			t.Errorf("%s: refused=%v, want %v (%v)", c.name, err != nil, c.refused, err)
+		}
+		if err != nil && !strings.Contains(err.Error(), "-dm-fill cannot run with a judge configuration") {
+			t.Errorf("%s: error does not name the cause: %v", c.name, err)
 		}
 	}
 }

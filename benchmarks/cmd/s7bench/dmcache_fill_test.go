@@ -177,7 +177,7 @@ func TestDMFillStubIsAValidAnswer(t *testing.T) {
 func TestPromptRecordScoresTheHookAnswer(t *testing.T) {
 	hook := []byte(`{"action":"block","raw_action":"block","severity":"HIGH","reason":"detection-only x","findings":["TRUST-X:a"],"would_block":true,"rule_ids":["TRUST-X"]}`)
 	insp := &gateway.ScanVerdict{Action: "allow", Severity: "NONE"}
-	r := promptRecord("c1", "claudecode", 200, hook, insp, "")
+	r := promptRecord("c1", "claudecode", 200, hook, insp, "", 0, nil)
 	if r.Action != "block" || r.RawAction != "block" || r.Severity != "HIGH" || !r.WouldBlock || len(r.RuleIDs) != 1 || !r.DetOnly || r.Err != "" {
 		t.Fatalf("scored fields are not the hook answer: %+v", r)
 	}
@@ -188,15 +188,41 @@ func TestPromptRecordScoresTheHookAnswer(t *testing.T) {
 		t.Fatalf("record shape changed: %+v", r)
 	}
 	// A hook that answers no JSON, or not 200, is an error row, never an allow.
-	bad := promptRecord("c2", "cursor", 404, []byte(`not json`), insp, "cursor:404")
+	bad := promptRecord("c2", "cursor", 404, []byte(`not json`), insp, "cursor:404", 0, nil)
 	if bad.Err == "" || bad.Action != "" || bad.Extra["connector_fallback"] != "cursor:404" {
 		t.Fatalf("a refused hook must be an error row: %+v", bad)
 	}
-	if st := promptRecord("c3", "claudecode", 500, []byte(`{"action":"allow"}`), insp, ""); st.Err != "http 500" {
+	if st := promptRecord("c3", "claudecode", 500, []byte(`{"action":"allow"}`), insp, "", 0, nil); st.Err != "http 500" {
 		t.Fatalf("status 500 must be an error row: %+v", st)
 	}
 	var raw bytes.Buffer
 	if err := json.NewEncoder(&raw).Encode(r); err != nil || !strings.Contains(raw.String(), `"inspect_action"`) {
 		t.Fatalf("record does not serialize the diagnostic column: %v %s", err, raw.String())
+	}
+}
+
+// A prompt row carries the hook call's own latency and the judge requests it made, in the fields a tool-call row has (rel-1-0-10:GAP-0613).
+func TestPromptRecordCarriesHookLatencyAndJudgeCalls(t *testing.T) {
+	hook := []byte(`{"action":"alert","raw_action":"alert","severity":"HIGH","findings":["JUDGE:x"]}`)
+	calls := []gateway.S7JudgeCall{{LatencyMs: 1153, Parsed: true, Action: "alert", Severity: "HIGH", InTokens: 812, OutTokens: 61}, {LatencyMs: 40, Err: "context canceled", Cancelled: true}}
+	r := promptRecord("c4", "claudecode", 200, hook, nil, "", 1520*time.Millisecond, calls)
+	if r.LatencyUs != 1_520_000 || len(r.JudgeCalls) != 2 || r.JudgeCalls[0].InTokens != 812 {
+		t.Fatalf("latency or judge calls missing: %+v", r)
+	}
+	var back map[string]any
+	b, _ := json.Marshal(r)
+	if err := json.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back["lat_us"].(float64) != 1_520_000 {
+		t.Fatalf("lat_us not serialized: %s", b)
+	}
+	jc, _ := back["judge_calls"].([]any)
+	if len(jc) != 2 || jc[0].(map[string]any)["in_tok"].(float64) != 812 || jc[0].(map[string]any)["latency_ms"].(float64) != 1153 {
+		t.Fatalf("judge_calls not serialized as a tool-call row's: %s", b)
+	}
+	// No judge request (rules only): the field is absent, like a tool-call row.
+	if b2, _ := json.Marshal(promptRecord("c5", "claudecode", 200, hook, nil, "", time.Millisecond, nil)); strings.Contains(string(b2), "judge_calls") {
+		t.Fatalf("empty judge_calls serialized: %s", b2)
 	}
 }

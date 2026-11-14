@@ -389,6 +389,10 @@ func main() {
 		cfg.Guardrail.Judge.MaxParallelExplicit = true
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
+	if err := dmFillJudgeRefused(*dmFill, *judgeModel, *judgeURL, *layers); err != nil {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
+		os.Exit(2)
+	}
 	if *dmFill && (*dmCacheDir == "" || *dmURL == "") {
 		fmt.Fprintln(os.Stderr, "[s7bench] FATAL: -dm-fill needs -dm-url and -dm-cache-dir")
 		os.Exit(2)
@@ -589,6 +593,10 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 		// inspection (InspectText) runs first, as before, and is kept only as the diagnostic columns extra.inspect_*.
 		v := e.InspectText(ctx, "prompt", text)
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": text, "transcript_path": ""})
+		// The hook call is timed on its own (InspectText is a diagnostic beside it) and the judge or System One requests it made are taken
+		// for this session, the same two fields a tool-call row carries (lat_us, judge_calls; rel-1-0-10:GAP-0613). A fallback call is part
+		// of the one answer the case gets, so it is inside the timed span, as on the tool-call path.
+		t0 := time.Now()
 		st, hb := e.HookFor(ctx, conn, body)
 		fallback := ""
 		if st >= 400 && conn != "claudecode" {
@@ -597,8 +605,9 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 			fallback = fmt.Sprintf("%s:%d", conn, st)
 			st, hb = e.HookFor(ctx, "claudecode", body)
 		}
+		lat := time.Since(t0)
 		decisions.Add(1)
-		emit(promptRecord(c.ID, conn, st, hb, v, fallback))
+		emit(promptRecord(c.ID, conn, st, hb, v, fallback, lat, e.TakeJudgeCalls(sid)))
 		return
 	}
 	if surface == "response" || surface == "response-stream" {
@@ -736,10 +745,12 @@ func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, p
 
 // promptRecord is the prompt-surface decision of one case: the UserPromptSubmit hook answer (hb, HTTP status st) is the scored action,
 // severity and findings; the proxy text inspection v rides along in extra.inspect_* for comparison only (rel-1-0-10:GAP-0554). A hook that
-// answered no JSON, or not HTTP 200, is an error row and never an allow.
-func promptRecord(id, conn string, st int, hb []byte, v *gateway.ScanVerdict, fallback string) record {
+// answered no JSON, or not HTTP 200, is an error row and never an allow. lat is the time of the hook call alone (InspectText is not in it)
+// and calls are the judge requests that call made, in the same fields a tool-call row has (lat_us, judge_calls; rel-1-0-10:GAP-0613).
+func promptRecord(id, conn string, st int, hb []byte, v *gateway.ScanVerdict, fallback string, lat time.Duration, calls []gateway.S7JudgeCall) record {
 	var hr hookResp
-	r := record{Case: id, Connector: conn, N: 1, SrcTool: "__prompt__", Tool: "UserPromptSubmit", Mapped: "prompt", Status: st}
+	r := record{Case: id, Connector: conn, N: 1, SrcTool: "__prompt__", Tool: "UserPromptSubmit", Mapped: "prompt", Status: st,
+		LatencyUs: lat.Microseconds(), JudgeCalls: calls}
 	if err := json.Unmarshal(hb, &hr); err != nil {
 		r.Err = "decode: " + err.Error()
 	} else if st != 200 {
