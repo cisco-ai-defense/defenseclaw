@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -609,5 +610,48 @@ func TestAddressListsAndVisibleCopies(t *testing.T) {
 	slices.Sort(red)
 	if !slices.Equal(prim, []string{"x.com", "x.com", "y.com", "z.com"}) || !slices.Equal(red, []string{"v.com", "w.com"}) {
 		t.Errorf("primary %v redirect %v", prim, red)
+	}
+}
+
+func TestRound3Mapping(t *testing.T) {
+	has := func(m Mapping, path string) bool {
+		for _, e := range m.Effects {
+			if e.Path == path {
+				return true
+			}
+		}
+		return false
+	}
+	// A value that starts with "file:" and is not a file URI is text.
+	for _, v := range []string{"file: report.txt", "file:name", "FILE:notes", "file:"} {
+		b, _ := json.Marshal(map[string]string{"pattern": v})
+		if m := mapOf(t, "mcp__acme__grep", string(b)); m.Truncated.Any() || len(m.Effects) != 0 {
+			t.Errorf("%q: %+v truncated=%v", v, m.Effects, m.Truncated)
+		}
+	}
+	for _, v := range []string{"file:/etc/shadow", "file:///etc/shadow", "file://localhost/etc/shadow", "FILE:/etc/shadow"} {
+		b, _ := json.Marshal(map[string]string{"uri": v})
+		if m := mapOf(t, "mcp__x__read_resource", string(b)); !has(m, "/etc/shadow") {
+			t.Errorf("%q not read: %+v", v, m.Effects)
+		}
+	}
+	// A path a read tool receives under a content-style key is read; a write's body is data.
+	if m := mapOf(t, "mcp__x__read_file", `{"text":"/home/u/.ssh/id_rsa"}`); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("path under text for a read tool: %+v", m.Effects)
+	}
+	if m := mapOf(t, "mcp__x__read_file", `{"data":"{\"path\":\"/home/u/.ssh/id_rsa\"}"}`); !has(m, "/home/u/.ssh/id_rsa") {
+		t.Errorf("JSON under data for a read tool: %+v", m.Effects)
+	}
+	if m := mapOf(t, "mcp__filesystem__write_file", `{"path":"/repo/a.json","content":"{\"path\":\"/etc/shadow\"}"}`); has(m, "/etc/shadow") {
+		t.Errorf("a write's body read as arguments: %+v", m.Effects)
+	}
+	// A recipient field of more than 64 addresses is recorded.
+	var list []string
+	for i := 0; i < 70; i++ {
+		list = append(list, "u"+strconv.Itoa(i)+"@x.com")
+	}
+	b, _ := json.Marshal(map[string]string{"bcc": strings.Join(list, ", ")})
+	if m := mapOf(t, "mcp__mail__send", string(b)); !m.Truncated.Has(bounded.Items) {
+		t.Errorf("a 70-address field: %v", m.Truncated)
 	}
 }

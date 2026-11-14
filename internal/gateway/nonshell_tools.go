@@ -81,10 +81,6 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			own[e.Host] = true
 		}
 	}
-	senders := map[string]bool{}
-	for _, h := range mapping.Senders {
-		senders[h] = true
-	}
 
 	// One reading of the call's text, shared by every path effect: the path
 	// rules that read what is written, and the first write twin.
@@ -166,8 +162,12 @@ func nonShellToolFindings(ctx context.Context, request trustedActionRequest, fin
 			// fetch as for a send.
 			if e.Role == toolshape.RoleRedirect && e.Host != "" &&
 				!toolshape.LocalHost(e.Host) && !toolshape.PrivateHost(e.Host) &&
-				!own[e.Host] && !senders[e.Host] {
-				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, len(senders) == 0)
+				!own[e.Host] {
+				// The account a call names for itself (from, sender) is the
+				// caller's claim, so it never excuses a copy; it only makes the
+				// finding certain (the call says whose mail it is and copies it
+				// elsewhere).
+				add(mcpSendRedirectRuleID, "copy or output goes to "+e.Arg, len(mapping.Senders) == 0)
 			}
 			if e.Host != "" && nonShellCollectorHost(e.Host) {
 				add(mcpSendCollectorRuleID, "reaches a paste, file-drop or webhook-catcher host", false)

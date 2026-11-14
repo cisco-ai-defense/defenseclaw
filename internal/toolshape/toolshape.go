@@ -39,15 +39,16 @@ var shapesYAML []byte
 // the walk records it (bounded.Truncated) and the caller judges the call as
 // unknown at least (internal/guardrail/bounded, the S7 bound rule).
 const (
-	maxDepth   = 16       // object and array nesting (bounded.Depth)
-	maxItems   = 512      // elements of one array (bounded.Items)
-	maxEffects = 256      // effects of one call (bounded.Effects)
-	maxNodes   = 1 << 16  // values of one walk (bounded.Nodes)
-	maxNested  = 4        // JSON documents nested in string arguments (bounded.Depth)
-	maxString  = 1 << 20  // bytes of one string argument read (bounded.Bytes)
-	maxPath    = 32 << 10 // bytes of a path value (bounded.Bytes); a longer one is still judged
-	maxContent = 1 << 20  // bytes of write content collected (bounded.Bytes)
-	maxSQL     = 256 << 10
+	maxDepth     = 16       // object and array nesting (bounded.Depth)
+	maxItems     = 512      // elements of one array (bounded.Items)
+	maxEffects   = 256      // effects of one call (bounded.Effects)
+	maxNodes     = 1 << 16  // values of one walk (bounded.Nodes)
+	maxNested    = 4        // JSON documents nested in string arguments (bounded.Depth)
+	maxString    = 1 << 20  // bytes of one string argument read (bounded.Bytes)
+	maxPath      = 32 << 10 // bytes of a path value (bounded.Bytes); a longer one is still judged
+	maxContent   = 1 << 20  // bytes of write content collected (bounded.Bytes)
+	maxSQL       = 256 << 10
+	maxAddresses = 64 // addresses of one recipient field (bounded.Items)
 )
 
 // Family is the kind of server or tool a call belongs to.
@@ -503,7 +504,12 @@ func (w *walker) str(key, val string) {
 			w.content.WriteString(val)
 			w.content.WriteByte('\n')
 		}
-		return
+		if w.bodyIsData() {
+			// A write's body is data: it is not read as arguments. A value a
+			// tool that does not write receives under such a key (a path
+			// handed to a read tool as "text") is read like any string.
+			return
+		}
 	}
 	// A string that holds a JSON document ("arguments": "{...}") is read as
 	// that document, to a bounded nesting. A document the reader cannot parse
@@ -552,7 +558,12 @@ func (w *walker) str(key, val string) {
 			role = RoleRedirect
 		}
 		// "a@x.com, b@y.com": a list of addresses in one string.
-		for _, part := range addressList(val) {
+		var over bool
+		parts := addressList(val, &over)
+		if over {
+			w.trunc.Hit(bounded.Items)
+		}
+		for _, part := range parts {
 			if looksAddress(part) || looksURL(part) {
 				w.destination(key, part, role)
 			}
@@ -590,7 +601,7 @@ func (w *walker) str(key, val string) {
 
 // addressList splits an address field on commas and semicolons (at most 64
 // parts) and drops a display name ("Ann <ann@x.com>").
-func addressList(v string) []string {
+func addressList(v string, over *bool) []string {
 	if !strings.ContainsAny(v, ",; <") {
 		return []string{v}
 	}
@@ -603,7 +614,8 @@ func addressList(v string) []string {
 		if part != "" {
 			out = append(out, part)
 		}
-		if len(out) >= 64 {
+		if len(out) >= maxAddresses {
+			*over = true
 			break
 		}
 	}
@@ -628,6 +640,13 @@ func pythonLiteralToJSON(v string) string {
 		}
 		return "null"
 	})
+}
+
+// bodyIsData reports that a content-style key holds the text the call writes:
+// the verb of the tool (or of the tool a proxy names) is a write, or the call
+// has a content collected beside a path (a write of a body).
+func (w *walker) bodyIsData() bool {
+	return w.m.Verb == KindWrite || w.m.Verb == KindNetSend || w.m.Verb == KindExec
 }
 
 // path adds a path effect. A path past maxPath is still judged (the native
@@ -824,10 +843,17 @@ const (
 // host (a network share) or one with no path is unplaced: the caller must not
 // treat it as clean.
 func fileURIPath(s string) (string, int) {
-	if len(s) < 5 || !strings.EqualFold(s[:5], "file:") {
+	if len(s) < 6 || !strings.EqualFold(s[:5], "file:") {
 		return "", fileURINone
 	}
 	rest := s[5:]
+	// Only the spellings of a file URI: file:/x, file://host/x, file:C:/x. A
+	// value that merely starts with "file:" (a search pattern, "file: notes")
+	// is text.
+	if !(rest[0] == '/' || len(rest) >= 3 && rest[1] == ':' && (rest[2] == '/' || rest[2] == '\\') &&
+		(rest[0] >= 'a' && rest[0] <= 'z' || rest[0] >= 'A' && rest[0] <= 'Z')) {
+		return "", fileURINone
+	}
 	host := ""
 	if strings.HasPrefix(rest, "//") {
 		rest = rest[2:]
