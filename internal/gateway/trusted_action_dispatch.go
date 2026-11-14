@@ -581,10 +581,14 @@ func dispatchTrustedAction(
 	facts = fileToolLinkTargetFacts(facts, request)
 	// A Windows call the tokenizer stopped reading at its input bound (one word
 	// over the word limit) is truncated: judged as unknown at the pack's
-	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345).
+	// unknown tier at least, never a clean allow (rel-1-0-10:GAP-0345). So is
+	// a Windows host call past the command size (no dialect read) or under a
+	// POSIX tool label, and a shell command too large to read at all
+	// (actionfacts.TruncatedHostCall).
 	if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
 		slices.Contains(facts.Parse.Issues, actionfacts.IssueInputLimit) &&
-		(facts.Parse.Dialect == actionfacts.DialectPowerShell || facts.Parse.Dialect == actionfacts.DialectCMD) {
+		(facts.Parse.Dialect == actionfacts.DialectPowerShell || facts.Parse.Dialect == actionfacts.DialectCMD ||
+			actionfacts.TruncatedHostCall(request.Input)) {
 		defer func() {
 			findings = withBoundedTruncation(findings, bounded.Of(bounded.Bytes), request)
 		}()

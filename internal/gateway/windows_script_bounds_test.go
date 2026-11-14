@@ -219,3 +219,49 @@ func TestWindowsCallBlocksPastTheParserDepthAreTruncated(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowsEncodedLauncherUnderAPOSIXToolIsReadAsUnderPowerShell
+// (rel-1-0-10:GAP-0345): an -EncodedCommand launcher a POSIX tool runs gets the
+// reading and the bounds the PowerShell-tool spelling gets. Its payload is
+// read when the encoded word is past the tokenizer's word limit, and a launcher
+// past the word limit, the wrapper depth or the command size is truncated,
+// never a clean allow.
+func TestWindowsEncodedLauncherUnderAPOSIXToolIsReadAsUnderPowerShell(t *testing.T) {
+	command, rule := windowsFixtureCommand(t, "windows-disable-multiple-defender-registry-controls")
+	padded := command + "; Write-Output '" + strings.Repeat("a", 3000) + "'"
+	for _, pack := range []string{"default", "strict"} {
+		strict := pack == "strict"
+		for _, tool := range []string{"Bash", "PowerShell"} {
+			for _, shape := range []struct {
+				name, command string
+				read          bool // the payload's own rule is found
+			}{
+				{"one layer", windowsEncodedLayers(command, 1), true},
+				{"payload past the word limit", windowsEncodedLayers(padded, 1), true},
+				{"past the wrapper depth", windowsEncodedLayers(command, actionfacts.MaxWrapperDepth+1), false},
+				{"past the command size", windowsEncodedLayers(command, 7), false},
+			} {
+				t.Run(pack+"/"+tool+"/"+shape.name, func(t *testing.T) {
+					findings := windowsBoundsFindings(t, pack, tool, shape.command, `C:\Users\alice`, strict)
+					if windowsBoundsAllowed(findings) {
+						t.Fatalf("a clean allow: %v", FindingStrings(findings))
+					}
+					if shape.read && !slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == rule }) {
+						t.Fatalf("the payload is not read (%s): %v", rule, FindingStrings(findings))
+					}
+				})
+			}
+		}
+		// A benign payload past the word limit is truncated under both tools
+		// alike; a short one stays clean.
+		benign := "Get-Date; Write-Output '" + strings.Repeat("a", 3000) + "'"
+		for _, tool := range []string{"Bash", "PowerShell"} {
+			if findings := windowsBoundsFindings(t, pack, tool, windowsEncodedLayers(benign, 1), `C:\Users\alice`, strict); !windowsBoundsHasLimit(findings) {
+				t.Fatalf("%s %s: a benign launcher past the word limit is not truncated: %v", pack, tool, FindingStrings(findings))
+			}
+			if findings := windowsBoundsFindings(t, pack, tool, windowsEncodedLayers("Get-Date", 1), `C:\Users\alice`, strict); !windowsBoundsAllowed(findings) {
+				t.Fatalf("%s %s: a short benign launcher is not allowed: %v", pack, tool, FindingStrings(findings))
+			}
+		}
+	}
+}

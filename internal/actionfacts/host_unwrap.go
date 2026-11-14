@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 
@@ -663,6 +664,69 @@ func powerShellOnlyGrammar(source string) bool {
 	return powerShellOnlyAliases[first] || powerShellVariableAssignment.MatchString(trimmed)
 }
 
+// plainHostLauncherLine reports a text that is one powershell or pwsh
+// launcher call of plain words only (letters, digits, blanks and - + / = . _ :):
+// a POSIX shell, cmd.exe and PowerShell split it into the same words, so the
+// text read as PowerShell is the call whatever tool label it came under. It is
+// how an -EncodedCommand launcher a POSIX tool runs gets the reading the
+// PowerShell-tool spelling gets when the POSIX reading stops at its word limit
+// (rel-1-0-10:GAP-0345). One pass over the text, no parse.
+func plainHostLauncherLine(source string) bool {
+	text := strings.TrimSpace(source)
+	end := strings.IndexAny(text, " \t")
+	if end <= 0 {
+		return false
+	}
+	if first := text[:end]; !hostLauncherIdentity(first, "powershell") && !hostLauncherIdentity(first, "pwsh") {
+		return false
+	}
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case c == ' ' || c == '\t' || c == '-' || c == '+' || c == '/' || c == '=' || c == '.' || c == '_' || c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// TruncatedHostCall reports a call the tokenizer stopped reading at its input
+// bound that is a Windows host call whatever its tool label, or one whose
+// command was not read at all: a PowerShell or cmd tool label, a command text
+// that is one plain powershell or pwsh launcher line (plainHostLauncherLine,
+// read from the arguments as given up to their size limit), or a shell
+// command whose arguments are past that limit. Such a call is judged as
+// truncated, never a clean allow (rel-1-0-10:GAP-0345). The caller asks only
+// for a call past the input bound.
+func TruncatedHostCall(input Input) bool {
+	if len(input.Argv) != 0 {
+		return false
+	}
+	switch strings.ToLower(input.Tool) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
+		return true
+	}
+	text := input.Command
+	if text == "" {
+		if len(input.Args) == 0 || !argsExecutionTool(input.Tool) {
+			return false
+		}
+		if len(input.Args) > maxArgsJSONBytes {
+			return true
+		}
+		var args struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(input.Args, &args) != nil {
+			return false
+		}
+		text = args.Command
+	}
+	return plainHostLauncherLine(text)
+}
+
 // powerShellVariableAssignment is a statement that starts with $name = ...:
 // no POSIX shell has that, and cmd.exe does not expand it.
 var powerShellVariableAssignment = lazyMustCompile(`^\$[A-Za-z_][A-Za-z0-9_:]*\s*[-+*/]?=`)
@@ -904,7 +968,7 @@ func HostScriptReadings(input Input, facts Facts, depth int, listed bool) HostSc
 			if !ok {
 				body, bodyDialect, ok = posixLauncherRequotedBody(source)
 			}
-			if !ok && powerShellOnlyGrammar(source) {
+			if !ok && (powerShellOnlyGrammar(source) || plainHostLauncherLine(source)) {
 				body, bodyDialect, ok = source, DialectPowerShell, true
 			}
 			if !ok {
