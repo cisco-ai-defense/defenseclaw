@@ -197,7 +197,7 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool, 
 				if actionWindowsHome(home) && shellWordNeedsResolver(word) {
 					return nil, false
 				}
-				resolved := resolveShellWord(word, values, cwd, shellGlobOptionsForCall(command, startup))
+				resolved := resolveShellWord(word, values, cwd, shellGlobOptionsForCall(command, startup), nil)
 				if resolved.uncertain != "" {
 					return nil, false
 				}

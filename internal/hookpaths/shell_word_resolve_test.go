@@ -68,7 +68,7 @@ func TestResolveShellWordEveryQuotingNamesTheEntry(t *testing.T) {
 		want := filepath.Join(f.project, name)
 		for _, q := range hlinkmatrix.Quotings() {
 			t.Run(q.ID+"/"+name, func(t *testing.T) {
-				got := resolveShellWord(shellWordOf(t, "touch "+q.Spell(name), 1), f.values, f.project, shellGlobOptions{})
+				got := resolveShellWord(shellWordOf(t, "touch "+q.Spell(name), 1), f.values, f.project, shellGlobOptions{}, nil)
 				if got.uncertain != "" {
 					t.Fatalf("uncertain %q", got.uncertain)
 				}
@@ -106,7 +106,7 @@ func TestResolveShellWordGlobRules(t *testing.T) {
 		{"noglob-literal", "alias[[]1]", shellGlobOptions{noGlob: true}, []string{"alias[[]1]"}, nil},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
-			got := resolveShellWord(shellWordOf(t, "touch "+tc.word, 1), f.values, f.project, tc.opts)
+			got := resolveShellWord(shellWordOf(t, "touch "+tc.word, 1), f.values, f.project, tc.opts, nil)
 			if got.uncertain != "" {
 				t.Fatalf("uncertain %q", got.uncertain)
 			}
@@ -132,7 +132,7 @@ func TestResolveShellWordUncertainClasses(t *testing.T) {
 			continue
 		}
 		t.Run(row.ID, func(t *testing.T) {
-			got := resolveShellWord(shellWordOf(t, row.Command, 1), f.values, f.project, shellGlobOptions{})
+			got := resolveShellWord(shellWordOf(t, row.Command, 1), f.values, f.project, shellGlobOptions{}, nil)
 			if got.uncertain == "" {
 				t.Errorf("settled to %q", got.candidates)
 			}
@@ -150,7 +150,7 @@ func TestResolveShellWordUncertainClasses(t *testing.T) {
 		// The user's own shell cannot list it either: it expands nothing and
 		// passes the word as written. A gateway that cannot see the home
 		// (hidden view) is uncertain instead; TestResolveShellWordHiddenHome.
-		got := resolveShellWord(shellWordOf(t, "touch closed/*", 1), f.values, f.project, shellGlobOptions{})
+		got := resolveShellWord(shellWordOf(t, "touch closed/*", 1), f.values, f.project, shellGlobOptions{}, nil)
 		if got.uncertain != "" || len(got.candidates) != 1 {
 			t.Errorf("uncertain %q, candidates %q", got.uncertain, got.candidates)
 		}
@@ -165,7 +165,7 @@ func TestResolveShellWordUncertainClasses(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		got := resolveShellWord(shellWordOf(t, "touch many/*", 1), f.values, f.project, shellGlobOptions{})
+		got := resolveShellWord(shellWordOf(t, "touch many/*", 1), f.values, f.project, shellGlobOptions{}, nil)
 		if got.uncertain != wordUncertainTruncated {
 			t.Errorf("uncertain %q, candidates %d", got.uncertain, len(got.candidates))
 		}

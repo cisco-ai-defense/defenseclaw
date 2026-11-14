@@ -1841,7 +1841,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the pack tier decides it (default and permissive alert, strict blocks;
 	// rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380).
 	if input.Command != "" && trustedShellCommandInput(request.Input) {
-		if reason := hookpaths.UncertainWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason != "" {
+		if reason := request.targetMemo.UncertainWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason != "" {
 			return unproven(reason, "")
 		}
 	}

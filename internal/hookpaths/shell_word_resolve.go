@@ -127,7 +127,15 @@ type resolvedWord struct {
 // substitution, an unknown parameter, a brace part, a directory the walk
 // cannot read and a result past the bound. The caller judges every
 // candidate by identity.
-func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
+//
+// memo is the evaluation memo of the caller (nil: none). A walk that hits the
+// bound of the one glob walk (internal/guardrail/bounded) is TRUNCATED: with a
+// memo the caps go to it (TargetMemo.GlobTruncated, which the gateway floors
+// at the unknown tier) and the names read are the candidates, judged by
+// identity; past the bound a pattern whose text proves it (actionGlobTextDecides)
+// keeps the names read and is not truncated. Without a memo the word stays
+// uncertain (rel-1-0-10:GAP-0401).
+func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions, memo *TargetMemo) resolvedWord {
 	if word == nil || !filepath.IsAbs(cwd) || !resolverWordKnown(word, values) {
 		return resolvedWord{uncertain: wordUncertainDynamic}
 	}
@@ -162,7 +170,16 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	hidden := actionGlobViewHidden(cwd, home)
 	userView := !hidden && actionProcessOwnsHome(home)
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
-	matches, complete, unseen := actionExpandGlobFold(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob)
+	matches, complete, unseen, caps := actionExpandGlobBounded(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob)
+	if caps.Any() && !unseen && memo != nil {
+		if len(matches) > maxResolvedCandidates {
+			return resolvedWord{uncertain: wordUncertainTruncated}
+		}
+		if !actionGlobTextDecides(OperandPath(pattern, cwd), home, memo) {
+			memo.noteGlobTruncated(caps)
+		}
+		return resolvedWord{candidates: matches}
+	}
 	switch {
 	case unseen || !complete:
 		return resolvedWord{uncertain: wordUncertainUnread}
@@ -187,14 +204,14 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 // working directory, the program receives that name and writes its value.
 // Any other match is uncertain. Without a glob character the value after the
 // equals sign is the operand too.
-func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions) resolvedWord {
-	whole := resolveShellWord(word, values, cwd, opts)
+func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions, memo *TargetMemo) resolvedWord {
+	whole := resolveShellWord(word, values, cwd, opts, memo)
 	tail, name, attached := resolverAttachedValue(word)
 	if !attached {
 		return whole
 	}
 	if _, active := resolverWordPattern(word, values, cwd); !active {
-		value := resolveShellWord(tail, values, cwd, opts)
+		value := resolveShellWord(tail, values, cwd, opts, memo)
 		whole.candidates = append(whole.candidates, value.candidates...)
 		if whole.uncertain == "" {
 			whole.uncertain = value.uncertain

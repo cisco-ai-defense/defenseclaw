@@ -282,7 +282,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			// through the one resolver, and every candidate it names is
 			// judged by identity (GAP-0293, GAP-0324, GAP-0325).
 			if resolverWord {
-				resolved := resolveWriteWord(word, values, effectiveCWD, globOptions)
+				resolved := resolveWriteWord(word, values, effectiveCWD, globOptions, globs.targetMemo())
 				for _, candidate := range resolved.candidates {
 					if checkAs(candidate, false, effectiveCWD, true) {
 						return true

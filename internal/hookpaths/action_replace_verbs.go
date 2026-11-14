@@ -53,7 +53,7 @@ func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 		if !noDereferenceTouchLiteralWord(word) && (len(word.Parts) != 1 || actionSoleParameter(word) == "") {
 			return false
 		}
-		resolved := resolveShellWord(word, values, cwd, options)
+		resolved := resolveShellWord(word, values, cwd, options, nil)
 		if resolved.uncertain != "" {
 			return false
 		}

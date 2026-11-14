@@ -27,7 +27,10 @@ var uncertainWriteVerbs = map[string]bool{
 // GAP-0293 round 3): such an operand is not proven to leave the protected
 // files alone, so the pack tier decides it (GAP-0350), never a plain allow.
 // startup is the agent's shell startup (nil: this process's own).
-func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
+//
+// m is the evaluation memo: a word whose glob walk hit the shared bound is
+// not an uncertain class here, it is TRUNCATED in m (resolveShellWord).
+func (m *TargetMemo) UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
 	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return ""
 	}
@@ -46,7 +49,7 @@ func UncertainWriteReason(command, cwd, home string, startup *ShellStartup) stri
 		if reason != "" || word == nil {
 			return
 		}
-		reason = resolveWriteWord(word, values, cwd, options).uncertain
+		reason = resolveWriteWord(word, values, cwd, options, m).uncertain
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if reason != "" {

@@ -161,7 +161,7 @@ func TestResolverMatchesRealBashOnTheModeledSubset(t *testing.T) {
 		for _, pattern := range modeled {
 			t.Run(option.id+"/"+pattern, func(t *testing.T) {
 				word := shellWordOf(t, "touch "+pattern, 1)
-				got := resolveShellWord(word, f.values, f.project, option.opts)
+				got := resolveShellWord(word, f.values, f.project, option.opts, nil)
 				if !resolverPatternModeled(pattern) {
 					if got.uncertain == "" {
 						t.Fatalf("a form outside the subset is settled: %q", got.candidates)
@@ -231,7 +231,7 @@ func TestResolverUncertainOutsideTheModeledSubset(t *testing.T) {
 			for name, value := range v.Env {
 				t.Setenv(name, value)
 			}
-			if got := UncertainWriteReason(v.Command, f.project, f.home, nil); (got != "") != wantUncertain {
+			if got := NewTargetMemo().UncertainWriteReason(v.Command, f.project, f.home, nil); (got != "") != wantUncertain {
 				t.Errorf("UncertainWriteReason = %q, uncertain wanted %t", got, wantUncertain)
 			}
 		})
@@ -243,12 +243,12 @@ func TestResolverUncertainOutsideTheModeledSubset(t *testing.T) {
 func TestUncertainWriteReasonOnTheCorpus(t *testing.T) {
 	f := newShellWordFixture(t)
 	for _, row := range hlinkmatrix.UncertainRows() {
-		if reason := UncertainWriteReason(row.Command, f.project, f.home, nil); reason == "" {
+		if reason := NewTargetMemo().UncertainWriteReason(row.Command, f.project, f.home, nil); reason == "" {
 			t.Errorf("%s: uncertain operand has no reason", row.ID)
 		}
 	}
 	for _, row := range hlinkmatrix.Rows(f.names) {
-		if reason := UncertainWriteReason(row.Command, f.project, f.home, nil); reason != "" {
+		if reason := NewTargetMemo().UncertainWriteReason(row.Command, f.project, f.home, nil); reason != "" {
 			t.Errorf("%s: proven row reports %q", row.ID, reason)
 		}
 	}
@@ -311,7 +311,7 @@ func TestHLinkRealBashOracle(t *testing.T) {
 			}
 			startup := CurrentShellStartup()
 			decision := ActionCommandDecision(v.Command, project, home) != ""
-			uncertain := UncertainWriteReason(v.Command, project, home, &startup) != ""
+			uncertain := NewTargetMemo().UncertainWriteReason(v.Command, project, home, &startup) != ""
 			if !decision && !uncertain {
 				missed[v.Layout+"/"+v.Transform] = append(missed[v.Layout+"/"+v.Transform], v.Base.ID)
 			}
