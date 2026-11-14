@@ -815,7 +815,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	}
 	start := time.Now()
 
-	verdict := scanLocalPatternsWithActivation("prompt", content, ruleGenerationOf(g, ""), localPatternsOf(g))
+	verdict := sessionPromptLocalVerdict(content, ruleGenerationOf(g, ""), localPatternsOf(g))
 
 	runJudge := judge != nil && verdict != nil && verdict.Severity == "HIGH"
 	if runJudge {

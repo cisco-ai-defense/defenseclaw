@@ -734,9 +734,11 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 			}
 		}()
 	}
-	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
+	// The content rules of a prompt also read it as the model reads its text
+	// parts (withPromptPartsView, GAP-0465).
+	verdict := g.inspectStrategy(withPromptPartsView(ctx, direction, content, messages), strategy, direction, content, messages, model, mode)
 	if raw != "" {
-		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
+		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(withPromptPartsView(ctx, direction, raw, messages), strategy, direction, raw, messages, model, mode))
 	}
 
 	elapsed := time.Since(start)
@@ -1162,7 +1164,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	ciscoClient := g.currentCiscoInspector()
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
-	signals := triagePatterns(direction, content)
+	signals := triagePatternsFor(ctx, direction, content)
 	high, review, _ := partitionSignals(signals)
 
 	// Keep trust, credential, and PII detection on untrusted content. Concrete
@@ -1346,7 +1348,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		}()
 		regexStart := time.Now()
 		_, endRegex := g.startPhaseSpan(ctx, "regex")
-		sigs := triagePatterns(direction, content)
+		sigs := triagePatternsFor(ctx, direction, content)
 		// Regex phase without a verdict still records latency — timing
 		// alone is a useful signal when comparing judge_first budgets.
 		endRegex("", "", time.Since(regexStart))
@@ -1830,17 +1832,31 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // scanLocalPatternsFor is scanLocalPatterns for a guardrail proxy request:
 // its content rules come from the rule pack of the request's profile
 // (proxyRuleGeneration).
+//
+// A prompt with a parts view (withPromptPartsView) is also scanned as the
+// model reads it, and the two verdicts are unioned (GAP-0465).
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
-	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)))
+	rules, patterns := proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx))
+	verdict := scanLocalPatternsWithActivation(direction, content, rules, patterns)
+	if view := promptPartsViewOf(ctx, content); view != "" {
+		verdict = unionLocalPatternVerdicts(verdict, scanLocalPatternsWithActivation(direction, view, rules, patterns))
+	}
+	return verdict
 }
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
-// request, with the rule pack of its profile (proxyRuleGeneration).
+// request, with the rule pack of its profile (proxyRuleGeneration), on
+// content and on its parts view (withPromptPartsView, GAP-0465).
 func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	return scanContentRuleCategoryWithGeneration(proxyRuleGeneration(ctx), content, "", ruleContentScopeUntrusted, "")
+	generation := proxyRuleGeneration(ctx)
+	findings := scanContentRuleCategoryWithGeneration(generation, content, "", ruleContentScopeUntrusted, "")
+	if view := promptPartsViewOf(ctx, content); view != "" {
+		findings = unionRuleFindings(findings, scanContentRuleCategoryWithGeneration(generation, view, "", ruleContentScopeUntrusted, ""))
+	}
+	return findings
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {

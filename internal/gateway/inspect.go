@@ -1586,13 +1586,30 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// its own rule pack (empty ⇒ process-global default set).
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
+	cfg := a.decisionConfig(ctx)
+	foldTrust := cfg == nil || !cfg.SecureClientIntegration()
 	folded := ""
-	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+	if foldTrust {
 		if view := trustPatternText(content); view != content {
 			folded = view
 		}
 	}
-	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
+	generation := snapshotRulePackGenerationFor(ctx, req.Connector)
+	ruleFindings := messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
+	// A prompt whose content is a JSON block array is also read as the model
+	// reads its text parts, with no separator (GAP-0465).
+	if isPromptDirection(req.Direction) {
+		if joined := jsonContentPartsJoinedText(content); joined != "" {
+			joinedFolded := ""
+			if foldTrust {
+				if view := trustPatternText(joined); view != joined {
+					joinedFolded = view
+				}
+			}
+			ruleFindings = unionRuleFindings(ruleFindings,
+				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
+		}
+	}
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
