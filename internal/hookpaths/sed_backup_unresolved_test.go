@@ -77,6 +77,10 @@ func TestSedInPlaceBackupReading(t *testing.T) {
 		{"SFXREV-sh-c-dollar0", `sh -c 'sed -i"$0" s/x/y/ authorized_keys' '{keys}/*'`, sedUnresolved},
 		{"SFXREV-func", `f(){ sed -i"$1" s/x/y/ authorized_keys; }; f '{keys}/*'`, sedUnresolved},
 		{"SFXREV-perl-dyn", `perl -pi"$X" -e 1 f`, sedUnresolved},
+		{"SFXREV-bash-c-outer-var", `bash -c "sed -i$X s/x/y/ authorized_keys"`, sedUnresolved},
+		{"SFXREV-eval-outer-var", `eval "sed -i$X s/x/y/ authorized_keys"`, sedUnresolved},
+		{"SFXREV-bash-c-outer-var-plain", `bash -c "sed -i.bak s/$X/y/ f"`, sedNone},
+		{"SFXREV-find-exec-sh-c", `find . -name f -exec sh -c 'sed -i{keys}/* s/x/y/ "$0"' {} \;`, sedUnresolved},
 		// Wrappers with a directory.
 		{"SFXREV-env-C", "env -C {home} sed -i.ssh/* s/x/y/ authorized_keys", sedBlock},
 		{"SFXREV-env-chdir", "env --chdir={home} sed -i.ssh/* s/x/y/ authorized_keys", sedBlock},
