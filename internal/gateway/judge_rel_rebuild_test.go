@@ -165,3 +165,24 @@ func TestToolResultContextLaneOff(t *testing.T) {
 		}
 	}
 }
+
+// An empty judge answer (rel-1-0-10:GAP-0610 class: Gemma 4 sometimes returns no
+// content) is a judge failure: the hook keeps the rule verdict, and the
+// cascade's judge.no_verdict decides whether that is the unknown tier. It is
+// never read as an allow.
+func TestToolJudgeEmptyAnswerFallsBackToTheRules(t *testing.T) {
+	for _, content := range []string{"", "   ", "not json"} {
+		mock := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{Message: &ChatMessage{Role: "assistant", Content: content}}}}}
+		j := newMockJudge(t, mock)
+		j.cfg.ToolInjection = true
+		v := j.RunToolJudge(context.Background(), "Bash", `{"command":"make build"}`)
+		if v == nil || !v.JudgeFailed {
+			t.Fatalf("answer %q: verdict %+v, want a judge failure", content, v)
+		}
+		cfg := config.DefaultConfig()
+		cfg.DataDir = t.TempDir()
+		if lane := hookJudgeLaneVerdict(cfg, "claudecode", "tool_call", v); lane != nil {
+			t.Fatalf("answer %q: the hook lane took %+v, want the rule verdict kept", content, lane)
+		}
+	}
+}
