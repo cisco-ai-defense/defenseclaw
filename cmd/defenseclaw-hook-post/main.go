@@ -12,12 +12,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -269,7 +267,10 @@ func observeGatewayStartDuringCall(dataDir string, peer *hookexec.PerUserPeerRec
 }
 
 func main() {
-	os.Exit(runMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	code := runMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	// No outage-mode look of the native hook outlives the call (GAP-0268).
+	stopNativeHookLooks()
+	os.Exit(code)
 }
 
 // runMain is main with its streams: the exit status of the request.
@@ -436,18 +437,23 @@ func runUserHookGuardAt(self string, args []string, input io.Reader, output, err
 		fmt.Fprintln(errOutput, "DefenseClaw hook registration is invalid")
 		return 2
 	}
-	command := exec.Command(args[1], args[2:]...)
-	command.Stdin, command.Stdout, command.Stderr = input, output, errOutput
-	err := command.Run()
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+	// The native hook runs in this process (S8 B2): the same hook body as
+	// defenseclaw-hook-user (internal/hookuser), with the registered home and
+	// address, so the guard leg is one process and decides even when the
+	// hook-user binary is missing or broken.
+	home, addr, ok := registeredNativeArgs(args[2:])
+	if !ok {
+		fmt.Fprintln(errOutput, "DefenseClaw hook registration is invalid")
 		return 2
 	}
-	fmt.Fprintln(errOutput, "DefenseClaw hook could not start")
-	return 2
+	code := runNativeUserHook(self, home, addr, input, output, errOutput)
+	if code != 0 && code != 2 {
+		// As the 1.0.9 guard read hook-user's exit: Claude Code takes any
+		// other status as a non-blocking error and runs the tool.
+		fmt.Fprintln(errOutput, "DefenseClaw hook could not start")
+		return 2
+	}
+	return code
 }
 
 func userGuardExecutableMatches(self, registered string) bool {

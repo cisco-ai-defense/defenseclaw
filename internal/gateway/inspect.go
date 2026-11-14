@@ -1098,6 +1098,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			observation.ParserUncertaintyCount,
 		)
 	}
+	// The live shadow run of the effect lane records through the audit log
+	// (guardrail.cascade.lanes.effects=shadow, GAP-0256); it never changes the verdict.
+	action.recordEffectShadow = func(res EffectShadowResult) {
+		a.recordEffectShadow(ctx, firstNonEmpty(req.Connector, action.Connector), res)
+	}
 	// CodeGuard: scan file content for any file-write tool.
 	//
 	// the legacy gate matched only the canonical
@@ -1120,6 +1125,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
 		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
 	}
+	// An MCP or app tool is read as effects (internal/toolshape): the path it
+	// names, its SQL, code, settings and send destinations (rel-1-0-10:GAP-0016).
+	ruleFindings = nonShellToolFindings(ctx, action, ruleFindings, req.MCPServerName)
+	ruleFindings = shellToolFindings(ctx, action, ruleFindings)
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()

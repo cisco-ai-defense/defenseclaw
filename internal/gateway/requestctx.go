@@ -26,7 +26,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"github.com/google/uuid"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // Phase 5: request_id threading.
@@ -242,12 +242,12 @@ func needsRequestIDClean(id string) bool {
 	return false
 }
 
-// mintRequestID returns a fresh v4 UUID. Kept as a function so tests
-// can shadow it via a package-level variable if deterministic IDs
-// are needed (no plans to do this today; UUID collisions in tests
-// are vanishingly unlikely).
+// mintRequestID returns a fresh time-ordered UUIDv7. audit_events indexes
+// request_id: a random v4 put each insert on a random leaf of that index,
+// a cold page read and a dirty page per row once the store outgrew the page
+// cache (GAP-0286).
 func mintRequestID() string {
-	return uuid.NewString()
+	return observability.NewTimeOrderedID()
 }
 
 // requestIDMiddleware wraps next with a middleware that ensures every
@@ -255,7 +255,7 @@ func mintRequestID() string {
 //
 //  1. If the client sent one via RequestIDHeader / X-Request-Id /
 //     X-Correlation-Id, we honour it verbatim.
-//  2. Otherwise we mint a fresh v4 UUID.
+//  2. Otherwise we mint a fresh time-ordered UUIDv7.
 //
 // The final ID is exposed back to the client via the response header
 // of the same name so they can cross-reference support tickets with

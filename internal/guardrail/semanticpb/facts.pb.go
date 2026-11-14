@@ -1009,8 +1009,12 @@ type Facts struct {
 	DataFlows       []*DataFlowFact           `protobuf:"bytes,8,rep,name=data_flows,json=dataFlows,proto3" json:"data_flows,omitempty"`
 	Artifacts       []*ArtifactFact           `protobuf:"bytes,9,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
 	ArchiveLineages []*ArchiveArtifactLineage `protobuf:"bytes,10,rep,name=archive_lineages,json=archiveLineages,proto3" json:"archive_lineages,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// effects is the effect-model projection of the call (internal/effects,
+	// internal/effectrules). It is filled only for the effect rules; the
+	// ActionFacts rules never see it populated.
+	Effects       []*EffectFact `protobuf:"bytes,11,rep,name=effects,proto3" json:"effects,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Facts) Reset() {
@@ -1113,6 +1117,515 @@ func (x *Facts) GetArchiveLineages() []*ArchiveArtifactLineage {
 	return nil
 }
 
+func (x *Facts) GetEffects() []*EffectFact {
+	if x != nil {
+		return x.Effects
+	}
+	return nil
+}
+
+// EffectFact is one effect of the call: what it reads, writes, deletes,
+// links, runs, sends or fetches, on which target, and how sure the model is.
+// Every enum-like field is a closed lower-case string (effects.Kind and
+// friends) so the projection is JSON-stable across releases.
+type EffectFact struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// index is the 1-based position of the effect in the call.
+	Index int64 `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	// kind: read write append delete link exec network_send network_fetch
+	// permission_change opaque.
+	Kind   string        `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Target *EffectTarget `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
+	// target_state: known unknown. role_state: known guessed unknown.
+	TargetState string `protobuf:"bytes,4,opt,name=target_state,json=targetState,proto3" json:"target_state,omitempty"`
+	RoleState   string `protobuf:"bytes,5,opt,name=role_state,json=roleState,proto3" json:"role_state,omitempty"`
+	// reasons are the closed reason codes, highest precedence first, each as
+	// "<scope>:<code>" (scope target, role or structure). reason is the first
+	// code alone, "" when the effect is fully known.
+	Reasons []string `protobuf:"bytes,6,rep,name=reasons,proto3" json:"reasons,omitempty"`
+	Reason  string   `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	// data_kind: none literal heredoc here_string patch_text file stdin pipe
+	// argument code command_output ("" when the effect carries no data).
+	DataKind string          `protobuf:"bytes,8,opt,name=data_kind,json=dataKind,proto3" json:"data_kind,omitempty"`
+	Sources  []*EffectSource `protobuf:"bytes,9,rep,name=sources,proto3" json:"sources,omitempty"`
+	Origin   *EffectOrigin   `protobuf:"bytes,10,opt,name=origin,proto3" json:"origin,omitempty"`
+	// cond is true when the effect runs only on some paths.
+	Cond          bool `protobuf:"varint,11,opt,name=cond,proto3" json:"cond,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectFact) Reset() {
+	*x = EffectFact{}
+	mi := &file_facts_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectFact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectFact) ProtoMessage() {}
+
+func (x *EffectFact) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectFact.ProtoReflect.Descriptor instead.
+func (*EffectFact) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *EffectFact) GetIndex() int64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *EffectFact) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *EffectFact) GetTarget() *EffectTarget {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *EffectFact) GetTargetState() string {
+	if x != nil {
+		return x.TargetState
+	}
+	return ""
+}
+
+func (x *EffectFact) GetRoleState() string {
+	if x != nil {
+		return x.RoleState
+	}
+	return ""
+}
+
+func (x *EffectFact) GetReasons() []string {
+	if x != nil {
+		return x.Reasons
+	}
+	return nil
+}
+
+func (x *EffectFact) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *EffectFact) GetDataKind() string {
+	if x != nil {
+		return x.DataKind
+	}
+	return ""
+}
+
+func (x *EffectFact) GetSources() []*EffectSource {
+	if x != nil {
+		return x.Sources
+	}
+	return nil
+}
+
+func (x *EffectFact) GetOrigin() *EffectOrigin {
+	if x != nil {
+		return x.Origin
+	}
+	return nil
+}
+
+func (x *EffectFact) GetCond() bool {
+	if x != nil {
+		return x.Cond
+	}
+	return false
+}
+
+type EffectTarget struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// type: none path url host process remote.
+	Type   string `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
+	Path   string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	Glob   string `protobuf:"bytes,3,opt,name=glob,proto3" json:"glob,omitempty"`
+	Url    string `protobuf:"bytes,4,opt,name=url,proto3" json:"url,omitempty"`
+	Scheme string `protobuf:"bytes,5,opt,name=scheme,proto3" json:"scheme,omitempty"`
+	Host   string `protobuf:"bytes,6,opt,name=host,proto3" json:"host,omitempty"`
+	Port   int64  `protobuf:"varint,7,opt,name=port,proto3" json:"port,omitempty"`
+	Scope  string `protobuf:"bytes,8,opt,name=scope,proto3" json:"scope,omitempty"`
+	// link: not_checked none followed unresolved.
+	Link string `protobuf:"bytes,9,opt,name=link,proto3" json:"link,omitempty"`
+	// key is effects.Target.Key(): the canonical join key.
+	Key    string `protobuf:"bytes,10,opt,name=key,proto3" json:"key,omitempty"`
+	Flavor string `protobuf:"bytes,11,opt,name=flavor,proto3" json:"flavor,omitempty"`
+	// protected lists the protected sets this target matches or may match.
+	// Read it through protected(target) and protected(target, set).
+	Protected []*ProtectedMatch `protobuf:"bytes,12,rep,name=protected,proto3" json:"protected,omitempty"`
+	// agent_created is true when an earlier call of the same session wrote
+	// this target (the agent made the file).
+	AgentCreated  bool `protobuf:"varint,13,opt,name=agent_created,json=agentCreated,proto3" json:"agent_created,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectTarget) Reset() {
+	*x = EffectTarget{}
+	mi := &file_facts_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectTarget) ProtoMessage() {}
+
+func (x *EffectTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectTarget.ProtoReflect.Descriptor instead.
+func (*EffectTarget) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *EffectTarget) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetGlob() string {
+	if x != nil {
+		return x.Glob
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetScheme() string {
+	if x != nil {
+		return x.Scheme
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetPort() int64 {
+	if x != nil {
+		return x.Port
+	}
+	return 0
+}
+
+func (x *EffectTarget) GetScope() string {
+	if x != nil {
+		return x.Scope
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetLink() string {
+	if x != nil {
+		return x.Link
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetFlavor() string {
+	if x != nil {
+		return x.Flavor
+	}
+	return ""
+}
+
+func (x *EffectTarget) GetProtected() []*ProtectedMatch {
+	if x != nil {
+		return x.Protected
+	}
+	return nil
+}
+
+func (x *EffectTarget) GetAgentCreated() bool {
+	if x != nil {
+		return x.AgentCreated
+	}
+	return false
+}
+
+// ProtectedMatch is one protected set the target touches. state is known (the
+// target is a member) or unknown (it may be one: a glob, a dynamic part, or a
+// link that was never checked). A set the target cannot touch is absent.
+type ProtectedMatch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Set           string                 `protobuf:"bytes,1,opt,name=set,proto3" json:"set,omitempty"`
+	State         string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProtectedMatch) Reset() {
+	*x = ProtectedMatch{}
+	mi := &file_facts_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProtectedMatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProtectedMatch) ProtoMessage() {}
+
+func (x *ProtectedMatch) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProtectedMatch.ProtoReflect.Descriptor instead.
+func (*ProtectedMatch) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *ProtectedMatch) GetSet() string {
+	if x != nil {
+		return x.Set
+	}
+	return ""
+}
+
+func (x *ProtectedMatch) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+func (x *ProtectedMatch) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type EffectSource struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// kind: effect path variable stdin.
+	Kind          string `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
+	Effect        int64  `protobuf:"varint,2,opt,name=effect,proto3" json:"effect,omitempty"`
+	Path          string `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
+	Variable      string `protobuf:"bytes,4,opt,name=variable,proto3" json:"variable,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectSource) Reset() {
+	*x = EffectSource{}
+	mi := &file_facts_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectSource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectSource) ProtoMessage() {}
+
+func (x *EffectSource) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectSource.ProtoReflect.Descriptor instead.
+func (*EffectSource) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *EffectSource) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *EffectSource) GetEffect() int64 {
+	if x != nil {
+		return x.Effect
+	}
+	return 0
+}
+
+func (x *EffectSource) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *EffectSource) GetVariable() string {
+	if x != nil {
+		return x.Variable
+	}
+	return ""
+}
+
+type EffectOrigin struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// surface: shell file_tool patch mcp argv. dialect: posix powershell cmd none.
+	Surface       string   `protobuf:"bytes,1,opt,name=surface,proto3" json:"surface,omitempty"`
+	Dialect       string   `protobuf:"bytes,2,opt,name=dialect,proto3" json:"dialect,omitempty"`
+	Command       int64    `protobuf:"varint,3,opt,name=command,proto3" json:"command,omitempty"`
+	Program       string   `protobuf:"bytes,4,opt,name=program,proto3" json:"program,omitempty"`
+	Wrappers      []string `protobuf:"bytes,5,rep,name=wrappers,proto3" json:"wrappers,omitempty"`
+	Depth         int64    `protobuf:"varint,6,opt,name=depth,proto3" json:"depth,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EffectOrigin) Reset() {
+	*x = EffectOrigin{}
+	mi := &file_facts_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EffectOrigin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EffectOrigin) ProtoMessage() {}
+
+func (x *EffectOrigin) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EffectOrigin.ProtoReflect.Descriptor instead.
+func (*EffectOrigin) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *EffectOrigin) GetSurface() string {
+	if x != nil {
+		return x.Surface
+	}
+	return ""
+}
+
+func (x *EffectOrigin) GetDialect() string {
+	if x != nil {
+		return x.Dialect
+	}
+	return ""
+}
+
+func (x *EffectOrigin) GetCommand() int64 {
+	if x != nil {
+		return x.Command
+	}
+	return 0
+}
+
+func (x *EffectOrigin) GetProgram() string {
+	if x != nil {
+		return x.Program
+	}
+	return ""
+}
+
+func (x *EffectOrigin) GetWrappers() []string {
+	if x != nil {
+		return x.Wrappers
+	}
+	return nil
+}
+
+func (x *EffectOrigin) GetDepth() int64 {
+	if x != nil {
+		return x.Depth
+	}
+	return 0
+}
+
 type ParseResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Status        ParseStatus            `protobuf:"varint,1,opt,name=status,proto3,enum=defenseclaw.guardrail.semantic.v1.ParseStatus" json:"status,omitempty"`
@@ -1124,7 +1637,7 @@ type ParseResult struct {
 
 func (x *ParseResult) Reset() {
 	*x = ParseResult{}
-	mi := &file_facts_proto_msgTypes[1]
+	mi := &file_facts_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1136,7 +1649,7 @@ func (x *ParseResult) String() string {
 func (*ParseResult) ProtoMessage() {}
 
 func (x *ParseResult) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[1]
+	mi := &file_facts_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1149,7 +1662,7 @@ func (x *ParseResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ParseResult.ProtoReflect.Descriptor instead.
 func (*ParseResult) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{1}
+	return file_facts_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *ParseResult) GetStatus() ParseStatus {
@@ -1195,7 +1708,7 @@ type CommandFact struct {
 
 func (x *CommandFact) Reset() {
 	*x = CommandFact{}
-	mi := &file_facts_proto_msgTypes[2]
+	mi := &file_facts_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1207,7 +1720,7 @@ func (x *CommandFact) String() string {
 func (*CommandFact) ProtoMessage() {}
 
 func (x *CommandFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[2]
+	mi := &file_facts_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1220,7 +1733,7 @@ func (x *CommandFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommandFact.ProtoReflect.Descriptor instead.
 func (*CommandFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{2}
+	return file_facts_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *CommandFact) GetId() int64 {
@@ -1332,7 +1845,7 @@ type ArgumentFact struct {
 
 func (x *ArgumentFact) Reset() {
 	*x = ArgumentFact{}
-	mi := &file_facts_proto_msgTypes[3]
+	mi := &file_facts_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1344,7 +1857,7 @@ func (x *ArgumentFact) String() string {
 func (*ArgumentFact) ProtoMessage() {}
 
 func (x *ArgumentFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[3]
+	mi := &file_facts_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1357,7 +1870,7 @@ func (x *ArgumentFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArgumentFact.ProtoReflect.Descriptor instead.
 func (*ArgumentFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{3}
+	return file_facts_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ArgumentFact) GetValue() string {
@@ -1393,7 +1906,7 @@ type RedirectFact struct {
 
 func (x *RedirectFact) Reset() {
 	*x = RedirectFact{}
-	mi := &file_facts_proto_msgTypes[4]
+	mi := &file_facts_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1405,7 +1918,7 @@ func (x *RedirectFact) String() string {
 func (*RedirectFact) ProtoMessage() {}
 
 func (x *RedirectFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[4]
+	mi := &file_facts_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1418,7 +1931,7 @@ func (x *RedirectFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RedirectFact.ProtoReflect.Descriptor instead.
 func (*RedirectFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{4}
+	return file_facts_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *RedirectFact) GetFd() int64 {
@@ -1459,7 +1972,7 @@ type WrapperFact struct {
 
 func (x *WrapperFact) Reset() {
 	*x = WrapperFact{}
-	mi := &file_facts_proto_msgTypes[5]
+	mi := &file_facts_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1471,7 +1984,7 @@ func (x *WrapperFact) String() string {
 func (*WrapperFact) ProtoMessage() {}
 
 func (x *WrapperFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[5]
+	mi := &file_facts_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1484,7 +1997,7 @@ func (x *WrapperFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WrapperFact.ProtoReflect.Descriptor instead.
 func (*WrapperFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{5}
+	return file_facts_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *WrapperFact) GetExecutable() string {
@@ -1516,7 +2029,7 @@ type PathFact struct {
 
 func (x *PathFact) Reset() {
 	*x = PathFact{}
-	mi := &file_facts_proto_msgTypes[6]
+	mi := &file_facts_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1528,7 +2041,7 @@ func (x *PathFact) String() string {
 func (*PathFact) ProtoMessage() {}
 
 func (x *PathFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[6]
+	mi := &file_facts_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1541,7 +2054,7 @@ func (x *PathFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PathFact.ProtoReflect.Descriptor instead.
 func (*PathFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{6}
+	return file_facts_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PathFact) GetCommandId() int64 {
@@ -1610,7 +2123,7 @@ type NetworkFact struct {
 
 func (x *NetworkFact) Reset() {
 	*x = NetworkFact{}
-	mi := &file_facts_proto_msgTypes[7]
+	mi := &file_facts_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1622,7 +2135,7 @@ func (x *NetworkFact) String() string {
 func (*NetworkFact) ProtoMessage() {}
 
 func (x *NetworkFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[7]
+	mi := &file_facts_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1635,7 +2148,7 @@ func (x *NetworkFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkFact.ProtoReflect.Descriptor instead.
 func (*NetworkFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{7}
+	return file_facts_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *NetworkFact) GetCommandId() int64 {
@@ -1713,7 +2226,7 @@ type DataFlowFact struct {
 
 func (x *DataFlowFact) Reset() {
 	*x = DataFlowFact{}
-	mi := &file_facts_proto_msgTypes[8]
+	mi := &file_facts_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1725,7 +2238,7 @@ func (x *DataFlowFact) String() string {
 func (*DataFlowFact) ProtoMessage() {}
 
 func (x *DataFlowFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[8]
+	mi := &file_facts_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1738,7 +2251,7 @@ func (x *DataFlowFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DataFlowFact.ProtoReflect.Descriptor instead.
 func (*DataFlowFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{8}
+	return file_facts_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DataFlowFact) GetFromCommandId() int64 {
@@ -1785,7 +2298,7 @@ type ArtifactFact struct {
 
 func (x *ArtifactFact) Reset() {
 	*x = ArtifactFact{}
-	mi := &file_facts_proto_msgTypes[9]
+	mi := &file_facts_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1797,7 +2310,7 @@ func (x *ArtifactFact) String() string {
 func (*ArtifactFact) ProtoMessage() {}
 
 func (x *ArtifactFact) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[9]
+	mi := &file_facts_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1810,7 +2323,7 @@ func (x *ArtifactFact) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArtifactFact.ProtoReflect.Descriptor instead.
 func (*ArtifactFact) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{9}
+	return file_facts_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ArtifactFact) GetCommandId() int64 {
@@ -1882,7 +2395,7 @@ type ArchiveArtifactLineage struct {
 
 func (x *ArchiveArtifactLineage) Reset() {
 	*x = ArchiveArtifactLineage{}
-	mi := &file_facts_proto_msgTypes[10]
+	mi := &file_facts_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1894,7 +2407,7 @@ func (x *ArchiveArtifactLineage) String() string {
 func (*ArchiveArtifactLineage) ProtoMessage() {}
 
 func (x *ArchiveArtifactLineage) ProtoReflect() protoreflect.Message {
-	mi := &file_facts_proto_msgTypes[10]
+	mi := &file_facts_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1907,7 +2420,7 @@ func (x *ArchiveArtifactLineage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArchiveArtifactLineage.ProtoReflect.Descriptor instead.
 func (*ArchiveArtifactLineage) Descriptor() ([]byte, []int) {
-	return file_facts_proto_rawDescGZIP(), []int{10}
+	return file_facts_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ArchiveArtifactLineage) GetIdentity() string {
@@ -1949,7 +2462,7 @@ var File_facts_proto protoreflect.FileDescriptor
 
 const file_facts_proto_rawDesc = "" +
 	"\n" +
-	"\vfacts.proto\x12!defenseclaw.guardrail.semantic.v1\"\xf2\x04\n" +
+	"\vfacts.proto\x12!defenseclaw.guardrail.semantic.v1\"\xbb\x05\n" +
 	"\x05Facts\x12\x12\n" +
 	"\x04tool\x18\x01 \x01(\tR\x04tool\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12\x1f\n" +
@@ -1963,7 +2476,54 @@ const file_facts_proto_rawDesc = "" +
 	"data_flows\x18\b \x03(\v2/.defenseclaw.guardrail.semantic.v1.DataFlowFactR\tdataFlows\x12M\n" +
 	"\tartifacts\x18\t \x03(\v2/.defenseclaw.guardrail.semantic.v1.ArtifactFactR\tartifacts\x12d\n" +
 	"\x10archive_lineages\x18\n" +
-	" \x03(\v29.defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineageR\x0farchiveLineages\"\xe1\x01\n" +
+	" \x03(\v29.defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineageR\x0farchiveLineages\x12G\n" +
+	"\aeffects\x18\v \x03(\v2-.defenseclaw.guardrail.semantic.v1.EffectFactR\aeffects\"\xb8\x03\n" +
+	"\n" +
+	"EffectFact\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12G\n" +
+	"\x06target\x18\x03 \x01(\v2/.defenseclaw.guardrail.semantic.v1.EffectTargetR\x06target\x12!\n" +
+	"\ftarget_state\x18\x04 \x01(\tR\vtargetState\x12\x1d\n" +
+	"\n" +
+	"role_state\x18\x05 \x01(\tR\troleState\x12\x18\n" +
+	"\areasons\x18\x06 \x03(\tR\areasons\x12\x16\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12\x1b\n" +
+	"\tdata_kind\x18\b \x01(\tR\bdataKind\x12I\n" +
+	"\asources\x18\t \x03(\v2/.defenseclaw.guardrail.semantic.v1.EffectSourceR\asources\x12G\n" +
+	"\x06origin\x18\n" +
+	" \x01(\v2/.defenseclaw.guardrail.semantic.v1.EffectOriginR\x06origin\x12\x12\n" +
+	"\x04cond\x18\v \x01(\bR\x04cond\"\xe6\x02\n" +
+	"\fEffectTarget\x12\x12\n" +
+	"\x04type\x18\x01 \x01(\tR\x04type\x12\x12\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x12\n" +
+	"\x04glob\x18\x03 \x01(\tR\x04glob\x12\x10\n" +
+	"\x03url\x18\x04 \x01(\tR\x03url\x12\x16\n" +
+	"\x06scheme\x18\x05 \x01(\tR\x06scheme\x12\x12\n" +
+	"\x04host\x18\x06 \x01(\tR\x04host\x12\x12\n" +
+	"\x04port\x18\a \x01(\x03R\x04port\x12\x14\n" +
+	"\x05scope\x18\b \x01(\tR\x05scope\x12\x12\n" +
+	"\x04link\x18\t \x01(\tR\x04link\x12\x10\n" +
+	"\x03key\x18\n" +
+	" \x01(\tR\x03key\x12\x16\n" +
+	"\x06flavor\x18\v \x01(\tR\x06flavor\x12O\n" +
+	"\tprotected\x18\f \x03(\v21.defenseclaw.guardrail.semantic.v1.ProtectedMatchR\tprotected\x12#\n" +
+	"\ragent_created\x18\r \x01(\bR\fagentCreated\"P\n" +
+	"\x0eProtectedMatch\x12\x10\n" +
+	"\x03set\x18\x01 \x01(\tR\x03set\x12\x14\n" +
+	"\x05state\x18\x02 \x01(\tR\x05state\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"j\n" +
+	"\fEffectSource\x12\x12\n" +
+	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x16\n" +
+	"\x06effect\x18\x02 \x01(\x03R\x06effect\x12\x12\n" +
+	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1a\n" +
+	"\bvariable\x18\x04 \x01(\tR\bvariable\"\xa8\x01\n" +
+	"\fEffectOrigin\x12\x18\n" +
+	"\asurface\x18\x01 \x01(\tR\asurface\x12\x18\n" +
+	"\adialect\x18\x02 \x01(\tR\adialect\x12\x18\n" +
+	"\acommand\x18\x03 \x01(\x03R\acommand\x12\x18\n" +
+	"\aprogram\x18\x04 \x01(\tR\aprogram\x12\x1a\n" +
+	"\bwrappers\x18\x05 \x03(\tR\bwrappers\x12\x14\n" +
+	"\x05depth\x18\x06 \x01(\x03R\x05depth\"\xe1\x01\n" +
 	"\vParseResult\x12F\n" +
 	"\x06status\x18\x01 \x01(\x0e2..defenseclaw.guardrail.semantic.v1.ParseStatusR\x06status\x12D\n" +
 	"\adialect\x18\x02 \x01(\x0e2*.defenseclaw.guardrail.semantic.v1.DialectR\adialect\x12D\n" +
@@ -2207,7 +2767,7 @@ func file_facts_proto_rawDescGZIP() []byte {
 }
 
 var file_facts_proto_enumTypes = make([]protoimpl.EnumInfo, 15)
-var file_facts_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_facts_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_facts_proto_goTypes = []any{
 	(ParseStatus)(0),               // 0: defenseclaw.guardrail.semantic.v1.ParseStatus
 	(Dialect)(0),                   // 1: defenseclaw.guardrail.semantic.v1.Dialect
@@ -2225,51 +2785,61 @@ var file_facts_proto_goTypes = []any{
 	(ArtifactRole)(0),              // 13: defenseclaw.guardrail.semantic.v1.ArtifactRole
 	(ArtifactKind)(0),              // 14: defenseclaw.guardrail.semantic.v1.ArtifactKind
 	(*Facts)(nil),                  // 15: defenseclaw.guardrail.semantic.v1.Facts
-	(*ParseResult)(nil),            // 16: defenseclaw.guardrail.semantic.v1.ParseResult
-	(*CommandFact)(nil),            // 17: defenseclaw.guardrail.semantic.v1.CommandFact
-	(*ArgumentFact)(nil),           // 18: defenseclaw.guardrail.semantic.v1.ArgumentFact
-	(*RedirectFact)(nil),           // 19: defenseclaw.guardrail.semantic.v1.RedirectFact
-	(*WrapperFact)(nil),            // 20: defenseclaw.guardrail.semantic.v1.WrapperFact
-	(*PathFact)(nil),               // 21: defenseclaw.guardrail.semantic.v1.PathFact
-	(*NetworkFact)(nil),            // 22: defenseclaw.guardrail.semantic.v1.NetworkFact
-	(*DataFlowFact)(nil),           // 23: defenseclaw.guardrail.semantic.v1.DataFlowFact
-	(*ArtifactFact)(nil),           // 24: defenseclaw.guardrail.semantic.v1.ArtifactFact
-	(*ArchiveArtifactLineage)(nil), // 25: defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineage
+	(*EffectFact)(nil),             // 16: defenseclaw.guardrail.semantic.v1.EffectFact
+	(*EffectTarget)(nil),           // 17: defenseclaw.guardrail.semantic.v1.EffectTarget
+	(*ProtectedMatch)(nil),         // 18: defenseclaw.guardrail.semantic.v1.ProtectedMatch
+	(*EffectSource)(nil),           // 19: defenseclaw.guardrail.semantic.v1.EffectSource
+	(*EffectOrigin)(nil),           // 20: defenseclaw.guardrail.semantic.v1.EffectOrigin
+	(*ParseResult)(nil),            // 21: defenseclaw.guardrail.semantic.v1.ParseResult
+	(*CommandFact)(nil),            // 22: defenseclaw.guardrail.semantic.v1.CommandFact
+	(*ArgumentFact)(nil),           // 23: defenseclaw.guardrail.semantic.v1.ArgumentFact
+	(*RedirectFact)(nil),           // 24: defenseclaw.guardrail.semantic.v1.RedirectFact
+	(*WrapperFact)(nil),            // 25: defenseclaw.guardrail.semantic.v1.WrapperFact
+	(*PathFact)(nil),               // 26: defenseclaw.guardrail.semantic.v1.PathFact
+	(*NetworkFact)(nil),            // 27: defenseclaw.guardrail.semantic.v1.NetworkFact
+	(*DataFlowFact)(nil),           // 28: defenseclaw.guardrail.semantic.v1.DataFlowFact
+	(*ArtifactFact)(nil),           // 29: defenseclaw.guardrail.semantic.v1.ArtifactFact
+	(*ArchiveArtifactLineage)(nil), // 30: defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineage
 }
 var file_facts_proto_depIdxs = []int32{
-	16, // 0: defenseclaw.guardrail.semantic.v1.Facts.parse:type_name -> defenseclaw.guardrail.semantic.v1.ParseResult
-	17, // 1: defenseclaw.guardrail.semantic.v1.Facts.commands:type_name -> defenseclaw.guardrail.semantic.v1.CommandFact
-	21, // 2: defenseclaw.guardrail.semantic.v1.Facts.paths:type_name -> defenseclaw.guardrail.semantic.v1.PathFact
-	22, // 3: defenseclaw.guardrail.semantic.v1.Facts.network:type_name -> defenseclaw.guardrail.semantic.v1.NetworkFact
-	23, // 4: defenseclaw.guardrail.semantic.v1.Facts.data_flows:type_name -> defenseclaw.guardrail.semantic.v1.DataFlowFact
-	24, // 5: defenseclaw.guardrail.semantic.v1.Facts.artifacts:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactFact
-	25, // 6: defenseclaw.guardrail.semantic.v1.Facts.archive_lineages:type_name -> defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineage
-	0,  // 7: defenseclaw.guardrail.semantic.v1.ParseResult.status:type_name -> defenseclaw.guardrail.semantic.v1.ParseStatus
-	1,  // 8: defenseclaw.guardrail.semantic.v1.ParseResult.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
-	2,  // 9: defenseclaw.guardrail.semantic.v1.ParseResult.issues:type_name -> defenseclaw.guardrail.semantic.v1.IssueCode
-	3,  // 10: defenseclaw.guardrail.semantic.v1.CommandFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.CommandKind
-	1,  // 11: defenseclaw.guardrail.semantic.v1.CommandFact.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
-	4,  // 12: defenseclaw.guardrail.semantic.v1.CommandFact.effect:type_name -> defenseclaw.guardrail.semantic.v1.CommandEffect
-	18, // 13: defenseclaw.guardrail.semantic.v1.CommandFact.arguments:type_name -> defenseclaw.guardrail.semantic.v1.ArgumentFact
-	6,  // 14: defenseclaw.guardrail.semantic.v1.CommandFact.operations:type_name -> defenseclaw.guardrail.semantic.v1.OperationKind
-	19, // 15: defenseclaw.guardrail.semantic.v1.CommandFact.redirects:type_name -> defenseclaw.guardrail.semantic.v1.RedirectFact
-	20, // 16: defenseclaw.guardrail.semantic.v1.CommandFact.wrappers:type_name -> defenseclaw.guardrail.semantic.v1.WrapperFact
-	5,  // 17: defenseclaw.guardrail.semantic.v1.ArgumentFact.quote:type_name -> defenseclaw.guardrail.semantic.v1.QuoteKind
-	7,  // 18: defenseclaw.guardrail.semantic.v1.RedirectFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
-	7,  // 19: defenseclaw.guardrail.semantic.v1.PathFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
-	8,  // 20: defenseclaw.guardrail.semantic.v1.PathFact.flavor:type_name -> defenseclaw.guardrail.semantic.v1.PathFlavor
-	11, // 21: defenseclaw.guardrail.semantic.v1.NetworkFact.action:type_name -> defenseclaw.guardrail.semantic.v1.NetworkAction
-	9,  // 22: defenseclaw.guardrail.semantic.v1.NetworkFact.scope:type_name -> defenseclaw.guardrail.semantic.v1.NetworkScope
-	10, // 23: defenseclaw.guardrail.semantic.v1.NetworkFact.target_kind:type_name -> defenseclaw.guardrail.semantic.v1.NetworkTargetKind
-	12, // 24: defenseclaw.guardrail.semantic.v1.DataFlowFact.from:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
-	12, // 25: defenseclaw.guardrail.semantic.v1.DataFlowFact.to:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
-	13, // 26: defenseclaw.guardrail.semantic.v1.ArtifactFact.role:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactRole
-	14, // 27: defenseclaw.guardrail.semantic.v1.ArtifactFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactKind
-	28, // [28:28] is the sub-list for method output_type
-	28, // [28:28] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	21, // 0: defenseclaw.guardrail.semantic.v1.Facts.parse:type_name -> defenseclaw.guardrail.semantic.v1.ParseResult
+	22, // 1: defenseclaw.guardrail.semantic.v1.Facts.commands:type_name -> defenseclaw.guardrail.semantic.v1.CommandFact
+	26, // 2: defenseclaw.guardrail.semantic.v1.Facts.paths:type_name -> defenseclaw.guardrail.semantic.v1.PathFact
+	27, // 3: defenseclaw.guardrail.semantic.v1.Facts.network:type_name -> defenseclaw.guardrail.semantic.v1.NetworkFact
+	28, // 4: defenseclaw.guardrail.semantic.v1.Facts.data_flows:type_name -> defenseclaw.guardrail.semantic.v1.DataFlowFact
+	29, // 5: defenseclaw.guardrail.semantic.v1.Facts.artifacts:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactFact
+	30, // 6: defenseclaw.guardrail.semantic.v1.Facts.archive_lineages:type_name -> defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineage
+	16, // 7: defenseclaw.guardrail.semantic.v1.Facts.effects:type_name -> defenseclaw.guardrail.semantic.v1.EffectFact
+	17, // 8: defenseclaw.guardrail.semantic.v1.EffectFact.target:type_name -> defenseclaw.guardrail.semantic.v1.EffectTarget
+	19, // 9: defenseclaw.guardrail.semantic.v1.EffectFact.sources:type_name -> defenseclaw.guardrail.semantic.v1.EffectSource
+	20, // 10: defenseclaw.guardrail.semantic.v1.EffectFact.origin:type_name -> defenseclaw.guardrail.semantic.v1.EffectOrigin
+	18, // 11: defenseclaw.guardrail.semantic.v1.EffectTarget.protected:type_name -> defenseclaw.guardrail.semantic.v1.ProtectedMatch
+	0,  // 12: defenseclaw.guardrail.semantic.v1.ParseResult.status:type_name -> defenseclaw.guardrail.semantic.v1.ParseStatus
+	1,  // 13: defenseclaw.guardrail.semantic.v1.ParseResult.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
+	2,  // 14: defenseclaw.guardrail.semantic.v1.ParseResult.issues:type_name -> defenseclaw.guardrail.semantic.v1.IssueCode
+	3,  // 15: defenseclaw.guardrail.semantic.v1.CommandFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.CommandKind
+	1,  // 16: defenseclaw.guardrail.semantic.v1.CommandFact.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
+	4,  // 17: defenseclaw.guardrail.semantic.v1.CommandFact.effect:type_name -> defenseclaw.guardrail.semantic.v1.CommandEffect
+	23, // 18: defenseclaw.guardrail.semantic.v1.CommandFact.arguments:type_name -> defenseclaw.guardrail.semantic.v1.ArgumentFact
+	6,  // 19: defenseclaw.guardrail.semantic.v1.CommandFact.operations:type_name -> defenseclaw.guardrail.semantic.v1.OperationKind
+	24, // 20: defenseclaw.guardrail.semantic.v1.CommandFact.redirects:type_name -> defenseclaw.guardrail.semantic.v1.RedirectFact
+	25, // 21: defenseclaw.guardrail.semantic.v1.CommandFact.wrappers:type_name -> defenseclaw.guardrail.semantic.v1.WrapperFact
+	5,  // 22: defenseclaw.guardrail.semantic.v1.ArgumentFact.quote:type_name -> defenseclaw.guardrail.semantic.v1.QuoteKind
+	7,  // 23: defenseclaw.guardrail.semantic.v1.RedirectFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
+	7,  // 24: defenseclaw.guardrail.semantic.v1.PathFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
+	8,  // 25: defenseclaw.guardrail.semantic.v1.PathFact.flavor:type_name -> defenseclaw.guardrail.semantic.v1.PathFlavor
+	11, // 26: defenseclaw.guardrail.semantic.v1.NetworkFact.action:type_name -> defenseclaw.guardrail.semantic.v1.NetworkAction
+	9,  // 27: defenseclaw.guardrail.semantic.v1.NetworkFact.scope:type_name -> defenseclaw.guardrail.semantic.v1.NetworkScope
+	10, // 28: defenseclaw.guardrail.semantic.v1.NetworkFact.target_kind:type_name -> defenseclaw.guardrail.semantic.v1.NetworkTargetKind
+	12, // 29: defenseclaw.guardrail.semantic.v1.DataFlowFact.from:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
+	12, // 30: defenseclaw.guardrail.semantic.v1.DataFlowFact.to:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
+	13, // 31: defenseclaw.guardrail.semantic.v1.ArtifactFact.role:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactRole
+	14, // 32: defenseclaw.guardrail.semantic.v1.ArtifactFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactKind
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_facts_proto_init() }
@@ -2283,7 +2853,7 @@ func file_facts_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_facts_proto_rawDesc), len(file_facts_proto_rawDesc)),
 			NumEnums:      15,
-			NumMessages:   11,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

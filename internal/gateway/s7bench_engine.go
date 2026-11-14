@@ -89,6 +89,15 @@ func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (
 	if g := currentGeneration(); g != nil {
 		api.SetHookDecisionJudge(g.decisionJudge)
 	}
+	// The harness has no real user home to follow links through, so the
+	// effect lane uses a lexical resolver: a path resolves to itself. Member
+	// names are still matched lexically (writing ~/.ssh/authorized_keys is
+	// known regardless). Real symlink-through-link attacks are not exercised
+	// here; that is a documented harness limit.
+	effectResolverOverride = func(path string) (string, bool) { return path, true }
+	// The harness reads the effect verdict per case from Deterministic (the
+	// same effectShadowRun core); the hook's async live run is not needed.
+	effectShadowLiveOff = true
 	hooks := map[string]http.HandlerFunc{connectorName: api.handleUnifiedConnectorHook(connectorName)}
 	for _, name := range more {
 		if _, ok := hooks[name]; !ok {
@@ -108,7 +117,12 @@ func S7NewEngineMulti(cfg *config.Config, connectorName string, more []string) (
 
 // Hook answers one hook payload through the connector's handler. headers
 // (name, value pairs) are set on the request, e.g. the hook's answer wait.
-func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (int, []byte) {
+func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (code int, out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
+		}
+	}()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+e.connector, bytes.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	for i := 0; i+1 < len(headers); i += 2 {
@@ -120,7 +134,12 @@ func (e *S7Engine) Hook(ctx context.Context, body []byte, headers ...string) (in
 }
 
 // HookFor answers one hook payload through the named connector's handler.
-func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (int, []byte) {
+func (e *S7Engine) HookFor(ctx context.Context, connectorName string, body []byte, headers ...string) (code int, out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			code, out = 500, []byte(`{"action":"allow","reason":"panic"}`)
+		}
+	}()
 	h, ok := e.hooks[connectorName]
 	if !ok {
 		h, connectorName = e.hook, e.connector
@@ -173,6 +192,11 @@ type S7Det struct {
 	Eligible   bool        `json:"eligible"`
 	Findings   []S7Finding `json:"findings,omitempty"`
 	IssueCodes []string    `json:"issues,omitempty"`
+	// Effect is the effect-model rule lane verdict (guardrail.cascade.lanes.effects
+	// shadow or on), computed beside today's answer for the disagreement
+	// measurement. Nil when the lane is off.
+	Effect     *EffectShadowResult `json:"effect,omitempty"`
+	EffectFull *EffectShadowResult `json:"effect_full,omitempty"`
 }
 
 // Deterministic evaluates the call the way evaluateAgentHook projects it.
@@ -180,20 +204,28 @@ func (e *S7Engine) Deterministic(ctx context.Context, toolName string, args json
 	return e.DeterministicFor(ctx, e.connector, toolName, args, cwd)
 }
 
-// DeterministicFor is Deterministic for the named connector.
-func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName string, args json.RawMessage, cwd string) S7Det {
+// DeterministicFor is Deterministic for the named connector. It recovers per
+// case so one parser panic cannot abort a run.
+func (e *S7Engine) DeterministicFor(ctx context.Context, connectorName, toolName string, args json.RawMessage, cwd string) (det S7Det) {
+	defer func() {
+		if r := recover(); r != nil {
+			det = S7Det{Tool: toolName, Parse: "panic"}
+		}
+	}()
 	actionTool := agentHookTrustedActionTool(connectorName, toolName, runtime.GOOS)
 	trusted, toolCWD := agentHookTrustedActionArgs(connectorName, toolName, args)
 	if toolCWD == "" {
 		toolCWD = cwd
 	}
-	in := actionfacts.Input{Tool: actionTool, Args: trusted, CWD: toolCWD}
+	in := actionfacts.Input{Tool: actionTool, Args: trusted, CWD: toolCWD, ActiveHome: benchActiveHome(toolCWD)}
 	r := EvaluateDeterministicAction(ctx, in, string(args), connectorName, e.profile)
 	out := S7Det{Tool: actionTool, Parse: r.ParseStatus, Dialect: r.Dialect, Severity: r.Severity,
 		EnforceSev: r.EnforceableSeverity, Action: r.Action, Eligible: r.EnforcementEligible, IssueCodes: r.IssueCodes}
 	for _, f := range r.Findings {
 		out.Findings = append(out.Findings, S7Finding{RuleID: f.RuleID, Severity: f.Severity, Confidence: f.Confidence, Disposition: f.Disposition, Route: f.Route})
 	}
+	out.Effect = r.EffectShadow
+	out.EffectFull = r.EffectShadowFull
 	return out
 }
 
@@ -359,4 +391,18 @@ func (e *S7Engine) InspectText(ctx context.Context, direction, text string) *Sca
 		v = &ScanVerdict{Action: "allow", Severity: "NONE"}
 	}
 	return v
+}
+
+// benchActiveHome derives the session home from a tool working directory so
+// the effect lane roots its protected sets correctly in the harness. It is
+// the first two path components (/home/<user>), else the cwd, else a default.
+func benchActiveHome(cwd string) string {
+	if cwd == "" {
+		return "/home/bench"
+	}
+	parts := strings.Split(strings.TrimPrefix(cwd, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "home" {
+		return "/home/" + parts[1]
+	}
+	return cwd
 }

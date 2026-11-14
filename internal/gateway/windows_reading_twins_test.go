@@ -7,62 +7,114 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 )
+
+// windowsUnreadableStatement is a PowerShell statement the reader does not
+// model (a subexpression), so a call that holds it is a partial PowerShell
+// reading.
+const windowsUnreadableStatement = "Write-Output $(Get-Date)"
+
+// selectWindowsShellDialect is the dialect of selectWindowsShellDialectReading,
+// as the tests of the Windows hook selection read it.
+func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
+	dialect, _ := selectWindowsShellDialectReading(tool, command, input)
+	return dialect
+}
+
+// windowsHookShellCall is command as a Windows hook places it: a generic shell
+// tool call whose dialect is chosen by the hook's own selection
+// (selectWindowsShellDialect), never forced by the test.
+func windowsHookShellCall(command, cwd string) actionfacts.Input {
+	input := actionfacts.Input{Tool: "shell", Command: command, CWD: cwd}
+	input.DialectHint = selectWindowsShellDialect(input.Tool, command, input)
+	return input
+}
 
 // TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall keeps the
 // finding of statements the PowerShell reading can read when another statement
-// of the call cannot be read (rel-1-0-10:GAP-0367). The attack is the atomic
-// case named below (two statements that hijack a UAC auto-elevation handler
-// together, from windowsAtomicParityPositives); the unreadable statement is a
-// subexpression the reader does not model, placed before and after it. Without
-// the Windows hook's readings the parse is partial and the multi-statement
-// finding is lost, which this test pins as the reason for the twin.
+// of the call cannot be read (rel-1-0-10:GAP-0367), with the dialect the
+// Windows hook selects for the call (rel-1-0-10:GAP-0405). The attacks are two
+// existing fixtures, loaded by id: the UAC auto-elevation handler chain of the
+// tool-call security corpus (two statements that make the finding together)
+// and the full NTDS IFM export of the Active Directory conformance pack. The
+// unreadable statement is placed before the first and after the second, joined
+// by a newline. The hook's selection places both calls in no dialect, and the
+// readable-statements reading used to run only for a call placed in
+// PowerShell, so strict went from block to allow.
 func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testing.T) {
-	const caseName, rule = "UAC event viewer handler chain", "privilege.windows_uac_autoelevation_hijack"
-	var positive *windowsAtomicParityCase
-	for i := range windowsAtomicParityPositives {
-		if windowsAtomicParityPositives[i].name == caseName {
-			positive = &windowsAtomicParityPositives[i]
+	type pinned struct {
+		id, rule, command, cwd, layout string
+	}
+	var cases []pinned
+	for _, test := range readJSONL[toolCallCorpusCase](t, "toolcall", "corpus.jsonl") {
+		if test.ID == "windows-uac-eventvwr-autoelevation-hijack" {
+			cases = append(cases, pinned{"toolcall/" + test.ID, test.RuleID, test.Command, test.CWD, "before"})
 		}
 	}
-	if positive == nil {
-		t.Fatalf("atomic case %q not found", caseName)
+	raw, err := os.ReadFile(filepath.Join("..", "..", "benchmarks", "fixtures", "active-directory-conformance-v1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	unreadable := "Write-Output $(Get-Date)"
-	layouts := map[string]string{
-		"before": unreadable + "\n" + positive.command,
-		"after":  positive.command + "\n" + unreadable,
+	for _, line := range strings.Split(string(raw), "\n") {
+		var fixture struct {
+			ID      string `json:"id"`
+			Payload struct {
+				Command string `json:"command"`
+				CWD     string `json:"cwd"`
+			} `json:"payload"`
+			Truth struct {
+				RuleIDs []string `json:"rule_ids"`
+			} `json:"truth"`
+		}
+		if strings.TrimSpace(line) == "" || json.Unmarshal([]byte(line), &fixture) != nil {
+			continue
+		}
+		if fixture.ID == "ad-v1/ntds-ifm-full" && len(fixture.Truth.RuleIDs) == 1 {
+			cases = append(cases, pinned{"ad/" + fixture.ID, fixture.Truth.RuleIDs[0], fixture.Payload.Command, fixture.Payload.CWD, "after"})
+		}
 	}
-	for name, command := range layouts {
-		for _, pack := range []string{"default", "strict"} {
-			input := actionfacts.Input{
-				Tool: positive.tool, Command: command, CWD: `C:\repo`, DialectHint: actionfacts.DialectPowerShell,
+	if len(cases) != 2 {
+		t.Fatalf("found %d of the 2 pinned fixtures", len(cases))
+	}
+	for _, test := range cases {
+		command := windowsUnreadableStatement + "\n" + test.command
+		if test.layout == "after" {
+			command = test.command + "\n" + windowsUnreadableStatement
+		}
+		input := windowsHookShellCall(command, test.cwd)
+		t.Run(test.id+"/"+test.layout, func(t *testing.T) {
+			if input.DialectHint != "" {
+				t.Fatalf("the hook placed the call in %q: the test no longer pins an unplaced call (rel-1-0-10:GAP-0405)", input.DialectHint)
 			}
-			t.Run(name+"/"+pack, func(t *testing.T) {
-				alone := input
-				alone.Command = positive.command
-				whole := evaluateDeterministicAction(context.Background(), alone, positive.command, "benchmark-"+pack, pack, false)
-				if !slices.Contains(whole.RuleIDs, rule) {
-					t.Fatalf("the atomic case alone has no %s: %v", rule, whole.RuleIDs)
-				}
-				plain := evaluateDeterministicAction(context.Background(), input, command, "benchmark-"+pack, pack, false)
-				if plain.Authoritative {
-					t.Fatalf("the unreadable statement left the parse %q: the test no longer pins the partial reading", plain.ParseStatus)
-				}
-				if slices.Contains(plain.RuleIDs, rule) {
-					t.Fatalf("without the readings the partial call already has %s: %v", rule, plain.RuleIDs)
+			dialect, reading := selectWindowsShellDialectReading(input.Tool, command, input)
+			if dialect != "" || reading == nil || reading.facts.Parse.Status != actionfacts.StatusPartial ||
+				reading.facts.Parse.Dialect != actionfacts.DialectPowerShell {
+				t.Fatalf("the selection's PowerShell reading is not a partial one: %q %+v", dialect, reading)
+			}
+			for _, pack := range []string{"default", "strict"} {
+				alone := windowsHookShellCall(test.command, test.cwd)
+				whole := evaluateDeterministicAction(context.Background(), alone, test.command, "benchmark-"+pack, pack, true)
+				if !slices.Contains(whole.RuleIDs, test.rule) {
+					t.Fatalf("%s: the fixture alone has no %s: %v", pack, test.rule, whole.RuleIDs)
 				}
 				got := evaluateDeterministicAction(context.Background(), input, command, "benchmark-"+pack, pack, true)
-				if !slices.Contains(got.RuleIDs, rule) || got.Action != whole.Action {
-					t.Fatalf("action=%q rules=%v, want %s with %s", got.Action, got.RuleIDs, whole.Action, rule)
+				if !slices.Contains(got.RuleIDs, test.rule) || got.Action != whole.Action {
+					t.Fatalf("%s: action=%q rules=%v, want %s with %s", pack, got.Action, got.RuleIDs, whole.Action, test.rule)
 				}
-			})
-		}
+			}
+			if facts := actionfacts.Analyze(input); facts.Parse.Status != actionfacts.StatusAmbiguous || facts.Parse.Dialect != actionfacts.DialectPowerShell {
+				t.Fatalf("the hook's reading is %s/%s, want ambiguous/powershell", facts.Parse.Status, facts.Parse.Dialect)
+			}
+		})
 	}
 }
 
@@ -71,7 +123,7 @@ func TestWindowsHookJudgesTheReadableStatementsOfAPartialPowerShellCall(t *testi
 // a reading itself, and never the other shell (a Git Bash call read as
 // PowerShell blocked benign copies, TestR105GAP2304WindowsGitBashHomeDrivePaths).
 func TestWindowsReadingTwinRequests(t *testing.T) {
-	const unreadable = "Write-Output $(Get-Date)"
+	const unreadable = windowsUnreadableStatement
 	input := actionfacts.Input{
 		Tool: "shell", CWD: `C:\repo`, DialectHint: actionfacts.DialectPowerShell,
 		Command: "Get-Location\n" + unreadable + "\nGet-Date",
@@ -81,8 +133,8 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 		t.Fatalf("fixture is not a partial PowerShell reading: %+v", partial.Parse)
 	}
 	hook := trustedActionRequest{Input: input, windowsDialectReadings: true}
-	twins := windowsReadingTwinRequests(hook, partial)
-	if len(twins) != 1 {
+	twins, cut := windowsReadingTwinRequests(hook, partial)
+	if len(twins) != 1 || cut.Any() {
 		t.Fatalf("got %d twins, want the readable-statements one", len(twins))
 	}
 	twin := twins[0]
@@ -96,20 +148,74 @@ func TestWindowsReadingTwinRequests(t *testing.T) {
 		"already a reading":       {Input: input, windowsDialectReadings: true, readingTwin: true},
 		"a simple-command pass":   {Input: input, windowsDialectReadings: true, simpleCommandPass: true},
 	} {
-		if got := windowsReadingTwinRequests(request, partial); len(got) != 0 {
+		if got, _ := windowsReadingTwinRequests(request, partial); len(got) != 0 {
 			t.Fatalf("%s got %d twins", name, len(got))
 		}
+	}
+	// The hook placed the call in no dialect: its own reading is an ambiguous
+	// PowerShell reading, and the readable statements come from the PowerShell
+	// reading of the same call (rel-1-0-10:GAP-0405).
+	unplaced := hook
+	unplaced.Input.DialectHint = ""
+	ambiguous := partial
+	ambiguous.Parse.Status = actionfacts.StatusAmbiguous
+	if got, _ := windowsReadingTwinRequests(unplaced, ambiguous); len(got) != 1 ||
+		got[0].Input.Command != twin.Input.Command || got[0].Input.DialectHint != actionfacts.DialectPowerShell {
+		t.Fatalf("an unplaced call with an ambiguous PowerShell reading got %d twins, want the readable-statements one", len(got))
+	}
+	ambiguousPOSIX := ambiguous
+	ambiguousPOSIX.Parse.Dialect = actionfacts.DialectPOSIX
+	if got, _ := windowsReadingTwinRequests(unplaced, ambiguousPOSIX); len(got) != 0 {
+		t.Fatalf("an ambiguous POSIX reading got %d twins: the other shell is never read", len(got))
 	}
 	posix := hook
 	posix.Input.DialectHint = actionfacts.DialectPOSIX
 	posixPartial := partial
 	posixPartial.Parse.Dialect = actionfacts.DialectPOSIX
-	if got := windowsReadingTwinRequests(posix, posixPartial); len(got) != 0 {
+	if got, _ := windowsReadingTwinRequests(posix, posixPartial); len(got) != 0 {
 		t.Fatalf("a POSIX reading got %d twins: the other shell is never read", len(got))
 	}
 	complete := partial
 	complete.Parse.Status = actionfacts.StatusComplete
-	if got := windowsReadingTwinRequests(hook, complete); len(got) != 0 {
+	if got, _ := windowsReadingTwinRequests(hook, complete); len(got) != 0 {
 		t.Fatalf("a complete reading got %d twins", len(got))
+	}
+	// The selection's own PowerShell reading is reused when it was made of the
+	// same input, and the call is read again otherwise.
+	hinted := unplaced.Input
+	hinted.DialectHint = actionfacts.DialectPowerShell
+	stale := &windowsHintedReading{input: hinted, facts: complete}
+	if got := stale.factsFor(hinted); got.Parse.Status != actionfacts.StatusComplete {
+		t.Fatalf("the selection's reading of the same input was not reused")
+	}
+	other := hinted
+	other.Command += "\nGet-Date"
+	if got := stale.factsFor(other); got.Parse.Status == actionfacts.StatusComplete {
+		t.Fatalf("the selection's reading of another input was reused")
+	}
+	// No statement of an unplaced call is readable alone: the PowerShell
+	// reading of the whole call is the one extra reading (rel-1-0-10:GAP-0425).
+	none := unplaced
+	none.Input.Command = unreadable + "\n" + unreadable
+	noneHinted := none.Input
+	noneHinted.DialectHint = actionfacts.DialectPowerShell
+	if facts := actionfacts.Analyze(noneHinted); facts.Parse.Status != actionfacts.StatusPartial {
+		t.Fatalf("fixture is not a partial PowerShell reading: %+v", facts.Parse)
+	}
+	if got, cut := windowsReadingTwinRequests(none, ambiguous); len(got) != 1 || cut.Any() ||
+		got[0].Input.Command != none.Input.Command || got[0].Input.DialectHint != actionfacts.DialectPowerShell || !got[0].readingTwin {
+		t.Fatalf("an unplaced call with no readable statement got %d twins, want its whole PowerShell reading", len(got))
+	}
+	// The readable-statements reading counts its statements against the
+	// reading's bound (internal/guardrail/bounded): past it there is no twin
+	// and the cap is returned for the call's findings.
+	many := make([]string, 0, 130)
+	for range 129 {
+		many = append(many, "Get-Location")
+	}
+	long := hook
+	long.Input.Command = strings.Join(append(many, unreadable), "\n")
+	if got, cut := windowsReadingTwinRequests(long, partial); len(got) != 0 || !cut.Has(bounded.Items) {
+		t.Fatalf("a call past the statement bound got %d twins and cut %v, want none and the items cap", len(got), cut.Reason())
 	}
 }

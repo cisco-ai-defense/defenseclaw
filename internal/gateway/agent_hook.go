@@ -1103,6 +1103,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resp,
 				time.Since(t0),
 			)
+			// Secret flow tracking: on a successful credential-read tool
+			// result, index its secret values into the session so a later
+			// outbound call that sends them (even re-encoded) is caught. It
+			// self-gates on guardrail.cascade.lanes.secret_flow and records only keyed
+			// digests, never the raw value.
+			addSecretFlowResultValues(ctx, req)
 			// Last, once the verdict is final: a sandbox verdict carries
 			// a plain reason (rule, title, what to do instead) to the
 			// agent, the activity feed and last_blocked.
@@ -1686,6 +1692,14 @@ func (a *APIServer) finalizeAgentHookAnswer(
 	// and was written in the audit section with the connector-hook record
 	// export only (#1384); AuditPersisted is then its commit.
 	decisionInAudit := false
+	// connectorRowMissing: the audit section ran and did not commit the
+	// call's connector-hook row (its write failed, it panicked, or the row
+	// of record was abandoned), so the fail-mode decision written below may
+	// be the decision's only local hook row (rel-1-0-10:GAP-0316). The store
+	// lists it only while no connector-hook row of its event is stored: a
+	// row that is already there, or one a queued write, the failure report
+	// or pending recovery commits later, pairs it.
+	connectorRowMissing := false
 	if !replay {
 		var auditErr error
 		safeSection("audit", func() {
@@ -1753,6 +1767,7 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		// verdict the agent never saw. An unjournaled occurrence keeps its
 		// record IDs but nothing recovers it.
 		recoverable := req.pendingJournaled
+		connectorRowMissing = !result.AuditPersisted && !errors.Is(auditErr, errHookAuditNotConfigured)
 		if !result.AuditPersisted && !panicked && !errors.Is(auditErr, errHookAuditNotConfigured) {
 			if auditErr == nil {
 				auditErr = errors.New("the audit section panicked")
@@ -1857,6 +1872,9 @@ func (a *APIServer) finalizeAgentHookAnswer(
 					decisionBaseCtx = renewed
 					defer cancel()
 				}
+			}
+			if connectorRowMissing {
+				decisionBaseCtx = audit.WithLoneHookDecisionAwaitingReport(decisionBaseCtx)
 			}
 			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
 			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
@@ -3681,105 +3699,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		if req.ToolArgsProjectionUncertain {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
 		}
-		fallbackTool := agentHookTrustedActionTool(
-			req.ConnectorName, req.ToolName, runtime.GOOS,
-		)
-		if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
-			copilotargs.LocalTool(req.ToolName)) {
-			fallbackTool = copilotargs.LocalActionTool(req.ToolName)
-		}
-		actionTool, resourceIdentity := trustedToolActionFromContext(
-			ctx, req.ConnectorName, req.ToolName, fallbackTool,
-		)
-		toolRequest := &ToolInspectRequest{
-			Tool:                    req.ToolName,
-			Args:                    req.ToolArgs,
-			Direction:               "tool_call",
-			Connector:               req.ConnectorName,
-			MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
-			callerCWD:               req.CWD,
-			toolUseID:               reportedToolInvocationID(req),
-			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
-			aidToolCallDeclared:     connector.HookProfileCarriesAIDToolCall(profile),
-			toolNameIsLabel:         req.ToolNameIsLabel,
-			hookEvent:               req.HookEventName,
-		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
-		trustedArgs, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
-		shellProjectedArgs := trustedArgs
-		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "cursor") {
-			// beforeShellExecution names no tool: its payload is the shell
-			// command (see connector.CursorTrustedShellArgs).
-			if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
-				actionTool, trustedArgs, toolCWD = "shell", args, dir
-			}
-		}
-		var hermesWriteViews []connector.HermesWriteView
-		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "hermes") && actionTool == fallbackTool {
-			// Hermes' native file writes (patch in both modes, write_file)
-			// are judged as one reviewed single-target write per file they
-			// change: the first here, the others with it
-			// (inspectHermesWriteToolPolicyCtx, GAP-0667).
-			if views, ok := connector.HermesTrustedWriteViews(req.ToolName, req.ToolArgs); ok {
-				actionTool, trustedArgs, hermesWriteViews = views[0].Tool, views[0].Args, views
-			}
-		}
-		hermesV4APatch := false
-		if strings.EqualFold(req.ConnectorName, "hermes") && req.ToolName == "patch" && len(hermesWriteViews) > 0 {
-			var mode struct {
-				Mode string `json:"mode"`
-			}
-			hermesV4APatch = json.Unmarshal(req.ToolArgs, &mode) == nil && mode.Mode == "patch"
-		}
-		if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "kiro") && actionTool == fallbackTool {
-			// Kiro native file writes (fs_write in the kiro-cli and IDE
-			// shapes, fs_append, str_replace) are judged as the reviewed
-			// write_file and edit contracts (GAP-0688).
-			if tool, args, ok := connector.KiroTrustedWriteArgs(req.ToolName, req.ToolArgs); ok {
-				actionTool, trustedArgs = tool, args
-			}
-		}
-		// A sandbox shell call is also judged on its command alone when its
-		// other arguments leave the parse partial.
-		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
-		actionInput := actionfacts.Input{
-			Tool:                     actionTool,
-			Args:                     trustedArgs,
-			CWD:                      agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD),
-			ActiveHome:               hookActiveHome(ctx),
-			CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
-			ToolResourceIdentity:     resourceIdentity,
-			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
-		}
-		dialectHint := a.agentHookWindowsDialectHint(ctx)
-		if dialectHint {
-			actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
-		}
-		var conflictSource *conflictingToolArgumentSource
-		if bytes.Equal(trustedArgs, shellProjectedArgs) {
-			// The conflicting-keys check reads the arguments as the call
-			// carried them and projects each candidate as above (GAP-0678).
-			conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
-		}
-		verdict = a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                   actionInput,
-			LegacyText:              string(req.ToolArgs),
-			conflictSource:          conflictSource,
-			Connector:               req.ConnectorName,
-			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
-			EnforcementCapable:      enforcementCapable,
-			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
-			ManagedInstall:          a.managedInstallForHook(ctx),
-			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
-			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
-			patchTarget:             hermesV4APatch,
-			strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-			windowsShellDialect:     dialectHint,
-			windowsDialectReadings:  dialectHint,
-			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
-		}, command, commandTool, hermesWriteViews)
+		verdict = a.inspectAgentHookToolCall(ctx, req, profile, enforcementCapable)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
@@ -4034,7 +3956,7 @@ func trustedUnparsedToolCallReason(reason string) bool {
 	return ok && unparsedToolCallReasonConnector.MatchString(name)
 }
 
-// selectWindowsShellDialect selects a complete grammar for a native Windows
+// selectWindowsShellDialectReading selects a complete grammar for a native Windows
 // shell call. Codex names its shell tool Bash everywhere, but on Windows it
 // runs the command in PowerShell, so a command such as
 // `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
@@ -4049,44 +3971,170 @@ func trustedUnparsedToolCallReason(reason string) bool {
 // PowerShell statement, pipeline, redirect or expansion is PowerShell code,
 // and reading the whole line as CMD would hide its write. An exact
 // cmd /d /c wrapper that PowerShell cannot read may still use CMD grammar.
-func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
+//
+// For a call it places in no dialect it also returns the PowerShell reading it
+// made of the call, which the Windows hook readings reuse instead of parsing
+// the call again (windowsReadingTwinRequests).
+func selectWindowsShellDialectReading(tool, command string, input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {
 	case "bash", "exec_command", "shell_command", "shell", "powershell", "execute_command", "run_command", "terminal",
 		"exec", "execute", "run_shell", "run_shell_command", "runshellcommand", "shell_exec", "run_terminal_cmd", "async_shell_command":
 	default:
-		return ""
+		return "", nil
 	}
 	if command == "" {
-		return ""
+		return "", nil
 	}
 	if soleCMDInvocation(command) {
-		return actionfacts.DialectCMD
+		return actionfacts.DialectCMD, nil
 	}
 	input.DialectHint = actionfacts.DialectPowerShell
-	if actionfacts.Analyze(input).Authoritative() ||
+	powerShell := actionfacts.Analyze(input)
+	powerShellInput := input
+	if powerShell.Authoritative() ||
 		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
-		return actionfacts.DialectPowerShell
+		return actionfacts.DialectPowerShell, nil
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "cmd /d /c ") {
 		input.DialectHint = actionfacts.DialectCMD
 		if actionfacts.Analyze(input).Authoritative() {
-			return actionfacts.DialectCMD
+			return actionfacts.DialectCMD, nil
 		}
 	}
-	return ""
+	return "", &windowsHintedReading{input: powerShellInput, facts: powerShell}
 }
 
 // agentHookWindowsShellDialect reads only the server-projected shell arguments.
 // A payload-supplied dialect field cannot choose the parser grammar.
 func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+	dialect, _ := agentHookWindowsShellDialectReading(input)
+	return dialect
+}
+
+// agentHookWindowsShellDialectReading is agentHookWindowsShellDialect with the
+// PowerShell reading the selection made of a call it placed in no dialect
+// (selectWindowsShellDialectReading).
+func agentHookWindowsShellDialectReading(input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
 	var args struct {
 		Command string `json:"command"`
 	}
 	if json.Unmarshal(input.Args, &args) != nil {
-		return ""
+		return "", nil
 	}
-	return selectWindowsShellDialect(input.Tool, args.Command, input)
+	return selectWindowsShellDialectReading(input.Tool, args.Command, input)
+}
+
+// inspectAgentHookToolCall judges one structured tool call as the trusted
+// action it performs: the connector's tool and argument projections, the
+// working directory, the Windows shell dialect, the strict and managed tiers,
+// and the rule packs, protected targets and effects behind
+// inspectTrustedToolPolicyCtx. enforcementCapable says whether the surface
+// that carried the call can refuse it. The ACP route judges the tool calls
+// an ACP frame performs through it as well (acpFrameToolCall), so one action
+// gets one verdict whichever surface carries it (rel-1-0-10:GAP-0176).
+func (a *APIServer) inspectAgentHookToolCall(
+	ctx context.Context, req agentHookRequest, profile connector.HookProfile, enforcementCapable bool,
+) *ToolInspectVerdict {
+	fallbackTool := agentHookTrustedActionTool(
+		req.ConnectorName, req.ToolName, runtime.GOOS,
+	)
+	if req.ConnectorName == "copilot" && (req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal ||
+		copilotargs.LocalTool(req.ToolName)) {
+		fallbackTool = copilotargs.LocalActionTool(req.ToolName)
+	}
+	actionTool, resourceIdentity := trustedToolActionFromContext(
+		ctx, req.ConnectorName, req.ToolName, fallbackTool,
+	)
+	toolRequest := &ToolInspectRequest{
+		Tool:                    req.ToolName,
+		Args:                    req.ToolArgs,
+		Direction:               "tool_call",
+		Connector:               req.ConnectorName,
+		MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
+		callerCWD:               req.CWD,
+		toolUseID:               reportedToolInvocationID(req),
+		toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
+		aidToolCallDeclared:     connector.HookProfileCarriesAIDToolCall(profile),
+		toolNameIsLabel:         req.ToolNameIsLabel,
+		hookEvent:               req.HookEventName,
+	}
+	trustedArgs, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, req.ToolArgs)
+	shellProjectedArgs := trustedArgs
+	if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "cursor") {
+		// beforeShellExecution names no tool: its payload is the shell
+		// command (see connector.CursorTrustedShellArgs).
+		if args, dir, ok := connector.CursorTrustedShellArgs(req.HookEventName, req.ToolArgs); ok {
+			actionTool, trustedArgs, toolCWD = "shell", args, dir
+		}
+	}
+	var hermesWriteViews []connector.HermesWriteView
+	if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "hermes") && actionTool == fallbackTool {
+		// Hermes' native file writes (patch in both modes, write_file)
+		// are judged as one reviewed single-target write per file they
+		// change: the first here, the others with it
+		// (inspectHermesWriteToolPolicyCtx, GAP-0667).
+		if views, ok := connector.HermesTrustedWriteViews(req.ToolName, req.ToolArgs); ok {
+			actionTool, trustedArgs, hermesWriteViews = views[0].Tool, views[0].Args, views
+		}
+	}
+	hermesV4APatch := false
+	if strings.EqualFold(req.ConnectorName, "hermes") && req.ToolName == "patch" && len(hermesWriteViews) > 0 {
+		var mode struct {
+			Mode string `json:"mode"`
+		}
+		hermesV4APatch = json.Unmarshal(req.ToolArgs, &mode) == nil && mode.Mode == "patch"
+	}
+	if strings.EqualFold(strings.TrimSpace(req.ConnectorName), "kiro") && actionTool == fallbackTool {
+		// Kiro native file writes (fs_write in the kiro-cli and IDE
+		// shapes, fs_append, str_replace) are judged as the reviewed
+		// write_file and edit contracts (GAP-0688).
+		if tool, args, ok := connector.KiroTrustedWriteArgs(req.ToolName, req.ToolArgs); ok {
+			actionTool, trustedArgs = tool, args
+		}
+	}
+	// A sandbox shell call is also judged on its command alone when its
+	// other arguments leave the parse partial.
+	command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
+	actionInput := actionfacts.Input{
+		Tool:                     actionTool,
+		Args:                     trustedArgs,
+		CWD:                      agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD),
+		ActiveHome:               hookActiveHome(ctx),
+		CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
+		ToolResourceIdentity:     resourceIdentity,
+		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
+	}
+	dialectHint := a.agentHookWindowsDialectHint(ctx)
+	var windowsPowerShellReading *windowsHintedReading
+	if dialectHint {
+		actionInput.DialectHint, windowsPowerShellReading = agentHookWindowsShellDialectReading(actionInput)
+	}
+	var conflictSource *conflictingToolArgumentSource
+	if bytes.Equal(trustedArgs, shellProjectedArgs) {
+		// The conflicting-keys check reads the arguments as the call
+		// carried them and projects each candidate as above (GAP-0678).
+		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
+	}
+	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+		Input:                    actionInput,
+		LegacyText:               string(req.ToolArgs),
+		conflictSource:           conflictSource,
+		Connector:                req.ConnectorName,
+		CopilotSharedLocalFile:   copilotSharedLocalFileCall(ctx, req),
+		EnforcementCapable:       enforcementCapable,
+		StrictPolicy:             a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		ManagedInstall:           a.managedInstallForHook(ctx),
+		ManagedHookOverflowHold:  managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+		ResolvedWriteTargets:     resolvedWritesFromContext(ctx),
+		patchTarget:              hermesV4APatch,
+		strictPatchLinks:         hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		SandboxGuestCWD:          sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		windowsShellDialect:      dialectHint,
+		windowsDialectReadings:   dialectHint,
+		windowsPowerShellReading: windowsPowerShellReading,
+		record:                   toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+	}, command, commandTool, hermesWriteViews)
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for

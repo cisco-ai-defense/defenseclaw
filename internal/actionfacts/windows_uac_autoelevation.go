@@ -31,13 +31,41 @@ type windowsUACRegistryWrite struct {
 // conditional execution, and unresolved trigger paths. It is enforcement-grade
 // only because every accepted command belongs to an authoritative,
 // enforcement-eligible Facts projection.
+//
+// A call may run the chain more than once. Each trigger ends one chain, and
+// the handler state starts over after it: the call is proven when every chain
+// in it is a complete chain of its own, with no command before, between or
+// after them. The state used to run across the whole call, so a second chain
+// (a second trigger, more than four commands) undid the proof of the first
+// and the same hijack run twice was allowed (rel-1-0-10:GAP-0427).
 func ProvesWindowsUACAutoElevationHijack(facts Facts) bool {
 	if !facts.Authoritative() || !facts.EnforcementEligible() ||
-		facts.Parse.Dialect != DialectPowerShell ||
-		len(facts.Commands) < 2 || len(facts.Commands) > 4 {
+		facts.Parse.Dialect != DialectPowerShell || len(facts.Commands) < 2 {
 		return false
 	}
+	start := 0
+	for index, command := range facts.Commands {
+		if !exactWindowsUACTopLevelCommand(command) {
+			return false
+		}
+		if _, trigger := exactWindowsUACTrigger(command); !trigger {
+			continue
+		}
+		if !windowsUACChain(facts.Commands[start : index+1]) {
+			return false
+		}
+		start = index + 1
+	}
+	return start == len(facts.Commands)
+}
 
+// windowsUACChain is one complete hijack chain of
+// ProvesWindowsUACAutoElevationHijack: two to four exact top-level commands
+// that replace one per-user class handler and end with the matching trigger.
+func windowsUACChain(commands []CommandFact) bool {
+	if len(commands) < 2 || len(commands) > 4 {
+		return false
+	}
 	var (
 		handlerPath  string
 		triggerName  string
@@ -45,13 +73,13 @@ func ProvesWindowsUACAutoElevationHijack(facts Facts) bool {
 		delegateSeen bool
 		setupSeen    bool
 	)
-	for index, command := range facts.Commands {
+	for index, command := range commands {
 		if !exactWindowsUACTopLevelCommand(command) {
 			return false
 		}
 
 		if trigger, ok := exactWindowsUACTrigger(command); ok {
-			if triggerName != "" || index != len(facts.Commands)-1 {
+			if triggerName != "" || index != len(commands)-1 {
 				return false
 			}
 			triggerName = trigger

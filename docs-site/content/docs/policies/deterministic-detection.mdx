@@ -21,7 +21,7 @@ This page inventories the detectors currently shipped in the repository and
 explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/guardrail/benchmarks).
 
-The balanced/default enabled rule catalog contains 254 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
+The balanced/default enabled rule catalog contains 276 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
 
 ## Decision architecture
 
@@ -56,9 +56,9 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 258 | 254 | 137 | 127 | 69 |
-| Permissive | 258 | 250 | 137 | 127 | 71 |
-| Strict | 270 | 270 | 150 | 145 | 71 |
+| Balanced/default | 280 | 276 | 137 | 149 | 86 |
+| Permissive | 280 | 272 | 137 | 149 | 88 |
+| Strict | 292 | 292 | 150 | 167 | 88 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
@@ -70,13 +70,13 @@ the permissive ones. In every profile,
 `CMD-WRAPPED-DOWNLOAD-EXEC` and `CMD-SUBST-DOWNLOAD-EXEC` keep a `false`
 declaration because only their exact action proof can match them.
 
-The 254 enabled balanced/default rules are generated from
+The 276 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 131 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
-| `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
+| `command` | 150 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `sensitive-path` | 29 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
 | `trust-exploit` | 30 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, role and chat-template spoofing, hidden text, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
@@ -144,6 +144,18 @@ commands, so there is no finding for them.
 To turn these alerts off, use the `permissive` pack (`defenseclaw guardrail use-pack permissive`)
 or add a suppression. The shipped default is `guardrail.rule_pack: default`;
 connector-specific choices take precedence.
+
+### Staged files, literal credentials and inline code
+
+Five alert-only rules report effects a coding agent has little reason to produce. The rules carry no CEL expression (the semantic rule count is capped to keep headroom for partner rules) and an inert regex; the result comes from a code-owned proof over the parsed commands, so a harmless mention never matches. None of them can block, in any profile: the evidence shows a staging step, not that the file runs or that the call succeeded.
+
+| Rule | Effect it reports |
+| --- | --- |
+| `exec.escaped_binary_write` | `echo` or `printf` operands that decode, through hex or octal byte escapes, to bytes that are not text (not valid UTF-8, or holding a NUL or a control byte other than tab, newline, carriage return and escape) and are written to a file (redirect or `tee`), when the write also looks like staging a program: it begins with an ELF, PE, Mach-O or `#!` magic, it appends (`>>`, `tee -a`; droppers write a binary chunk by chunk, so the test is per call), or the same action then makes the file executable or runs it. A key or digest of any size written once into a fixture file is binary but none of those, so it does not match. Color codes and a byte order mark are text. |
+| `account.literal_password_change_via_stdin` | `passwd` fed by `echo` or `printf`, or `passwd` or `chpasswd` piped on into a shell. A `chpasswd` run on its own is account automation and does not match. |
+| `exec.download_then_run_fetched_file` | `wget`, `curl`, `tftp` or `ftpget` takes a file from a bare public IPv4 address and a later command of the same action runs that file name, after a copy, or after the fetched archive was unpacked. Hostnames are not covered. |
+| `source_control.clone_then_run_or_adhoc_push` | `git clone` followed by running a file of the clone (a path inside it, or a program or script run by path after a `cd` into it; `npm install`, `make` or `go test` in the clone are ordinary work and do not match), and `git push` to an inline ssh remote (`[user@]host:path` or `ssh://host/path`) on a host that is an address or a dotted name and not a well-known code forge, which includes a self-hosted server, or to an https or git URL on a bare public IP address. A bare host name with no dot (an alias from the user's ssh configuration) does not match, in either ssh form. The remote is the repository operand once options and their values (`-o`, `--push-option`, `--repo`) are skipped, and a remote that the same action defines with `git remote add`, `set-url`, `git config remote.NAME.url` or `-c remote.NAME.url=` is resolved to its address. `env`, `nohup`, `time`, `nice`, `ionice`, `stdbuf` and `timeout` in front of the command are read through. A push to a fork URL on a forge is ordinary and does not match. |
+| `exec.inline_code_network_and_exec` | An interpreter one-liner (`python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r`, `lua -e`, `bun -e`, `deno eval`) that asks for a network capability and a process spawn or exec capability, and a runner (`bun run`, `deno run`, `npx`, `npm exec`, `pnpm dlx`, `yarn dlx`, `uv run`, `uvx`, `pipx run`) told to run a URL (running a remote script is the class this rule reports, `deno run` included). Capabilities are read from a table of documented library and builtin names in `internal/actionfacts/inline_capabilities.go`, looked for in the whole code operand as text, comments and string bodies included, and not from what the code is for. A one-liner that only names a network library and a process library in a sentence therefore alerts, which is the price of never reading code as prose; the rule only alerts. A destination counts as local only when every host in the code is `localhost`, a name under `.localhost` or a loopback address, and no value is read from the environment, arguments or stdin; a private-range address is a network destination. |
 
 ## ActionFacts
 
@@ -435,6 +447,28 @@ actually protected. See [Opt-in protection packs](/docs/reference/cli),
 DefenseClaw also protects its saved installer (`~/.defenseclaw/installer/` and `~/.defenseclaw/previous/installer/`): an agent that writes, truncates or deletes it is blocked in every mode and with every rule pack, like `config.yaml`. The permissive pack rates this rule HIGH, and DefenseClaw still blocks a change to its own files there. Reading or running the saved installer stays allowed.
 
 With the balanced (default) rule pack, action mode blocks CRITICAL findings; instruction-file writes are HIGH, so they are reported, not blocked, unless the session loaded the file or found it at its start ([Instruction files](#instruction-files)), `guardrail.block_at` is `HIGH` or the strict pack is used.
+
+## MCP and app tool calls
+
+An MCP or app tool reaches the gateway as a tool name and a JSON object. `internal/toolshape` reads that call as effects, the same kind of facts the shell and file-tool paths produce, and the rules decide on the effects. The table it reads is `internal/toolshape/shapes.yaml`; it holds names and argument shapes only.
+
+| Effect | Read from | Judged by |
+| --- | --- | --- |
+| File read, write, delete or list on a path | path-valued arguments: the keys in `path_keys`, any key that ends in a word of `path_key_suffixes` (`relative_path`, `fileName`, `pathname`), and any absolute or home path under another key (spaces allowed); `file:` URIs in any argument value (not in the body a call writes or sends) are read as their path (`file:/x`, `file://localhost/x`, a loopback host, percent escapes; a value such as `file:../lib` or a search pattern is text); a leading `//` is read as `/`; a relative path is resolved against the session directory; the verb of the tool name, or of the tool a proxy names in `name`, sets the kind | the call is judged as the native file tool on that path is: the path facts go through the same rules (`PATH-SSH-KEY`, `PATH-AWS-CREDS`, `PATH-KUBE`, and the rest), and the table's own path rules (`PATH-K8S-CLUSTER-CRED`, `PATH-CRED-STORE`, `PATH-CRED-STORE-USER`) run on the native file tools as well |
+| SQL statement | `sql`, `statement` and similar keys; `query` or `q` for a database tool (the server or the tool name has a token of the table's `db` family) and, for any other tool, a value of statement shape when the tool is not a search or lookup. A text is read under every quoting and comment rule its characters allow (MySQL backslash and `#`, PostgreSQL dollar quotes) and the stronger reading counts | `MCP-SQL-DESTRUCTIVE` (DROP, TRUNCATE, DELETE with no WHERE or an always-true one), `MCP-SQL-PRIVILEGE`, `MCP-SQL-AUDIT-OFF`, `MCP-SQL-CREDENTIAL` |
+| Send to a recipient, copy or URL | `to`, `recipients`, `url`, and the copy and redirect keys (`bcc`, `cc`, `bcc_override`, `forward_to`, `output_url`, `callback_url`) | `MCP-SEND-REDIRECT`: a hidden copy (`bcc`, `forward_to`) or output field (`output_url`) names a host that is none of the call's own parties (its recipients and its request URLs), or a `callback_url` names a host other than the call's own API (a call with no request URL of its own has nothing to compare and adds nothing). A visible `to` or `cc` is a recipient, not a copy. The caller's own domain has no trusted source in 1.0.10 (a `from` or `sender` field is the caller's claim), so this finding is an alert in every pack and never a block. `MCP-SEND-COLLECTOR`: a paste, file-drop or webhook-catcher host from the sandbox egress blocklist, for a fetch as for a send |
+| Security setting | argument names and values such as `skip_2fa: true`, `verify_ssl: false`, `include_sensitive_data: true`, `acl: public-read`, and `{"op": "disable_mfa"}` entries | `MCP-SETTING-DOWNGRADE` |
+| Code | the code argument of a code-execution tool | `MCP-CODE-DECODE-EXEC` (decoded text is passed to an evaluator) |
+
+A string argument that holds a JSON document (a proxy tool's `arguments`, or the whole argument object sent as a string) is read as that document, with the numbers, `NaN` literals, comments, trailing commas and Python-literal spellings the receiving server accepts; a document in the shape of JSON that no reading parses (a server cannot parse it either) is read as text for the locations it names, so a protected path in it is still judged. Text under content keys (`content`, `text`, `newText`, ...) is collected for the rules that read what a call writes. What a call writes or sends is data, whatever its spelling (a JSON file body, a bug report, a path in a message): it is not read as arguments when the verb of the tool, or of the tool a proxy names, is a write or a send, or the tool is a mail or chat tool. A tool that neither writes nor sends reads such a value like any argument. The verb a proxy's `name` argument gives applies to calls shaped like a proxy (a tool name beside `arguments`).
+
+**Known and guessed roles.** For a server and verb the table lists in `known_roles` (the filesystem server's `read_file`, `read_multiple_files`, `write_file`, `delete`), the role of a path effect is known, so the verdict is the native file tool's, including a block in the default tier. For every other tool the role is a guess from names (the effect reason is `mcp_semantics`): outside the strict tier a finding is an alert and never a block, and strict keeps the enforceable finding. A finding the native tool leaves detection-only stays detection-only for an MCP call.
+
+**Unknown and bounded calls.** A tool the table cannot place has no effects and adds nothing, except for a path value that is a protected target. Every bound goes through the shared bound rule (`internal/guardrail/bounded`): 512 items per array and per address field, 16 levels (arrays included), 256 effects, 65,536 values, 4 nested JSON strings, 1 MiB per string (SQL is read whole up to it), 1 MiB of collected content, 32 KiB per path, 64 path-twin dispatches per call. A call that reaches a bound is never clean: what was read before the bound is judged as always, and the call carries the evaluation-limit finding with the reason `bounded_truncated cap=...`, at least the unknown tier of the pack (an alert in the default and permissive packs, a managed install with the default pack included; a block in the strict pack). A file URI of another host and a JSON document the reader cannot parse count as unread, too. A tool the connector reports under an MCP server is read here whatever its bare name.
+
+Shell calls use the same table for rules that need no CEL: `CMD-SECRET-REVEAL` (`--reveal`, `--show-secrets`), `CMD-SECRET-LOOKUP`, `CMD-GIT-SHOW-SECRET`, `CMD-PRIV-SETUID`, `CMD-PRIV-PATH-HIJACK`, `CMD-PERSIST-SYSTEM-SCHEDULE` and writes of a uid-0 line to `/etc/passwd`. They run in Go on the parsed ActionFacts, because the rule catalog's CEL cost budget is spent, and the pack keeps the rule's title, severity and tags.
+
+The whole lane (these effects and the table rules on shell and native file-tool calls) has one switch, `nonShellShadow` in `internal/gateway/nonshell_tools.go`. When it is set the lane adds nothing and the verdicts are those of rel/1.0.10.
 
 ## Action-mode rule details
 
