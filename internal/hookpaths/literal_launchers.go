@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // boundedProgramAssignment recognizes one literal assignment immediately
@@ -252,6 +254,11 @@ func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home st
 				}
 			}
 			operands := directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
+			// An interpreter child whose code no reader proves read-only is handed
+			// its argument paths as possible writes (rel-1-0-10:GAP-0365).
+			for _, name := range actionfacts.InlineCodeHandedWords(words) {
+				operands = append(operands, OperandPath(name, cwd))
+			}
 			if include != nil {
 				operands = append(operands, knownEntryChangeOperands(words, cwd)...)
 			}

@@ -385,6 +385,9 @@ func registrationCallWrites(call *syntax.CallExpr, home string) bool {
 	if !fixed {
 		return true
 	}
+	if handed, fed, hands := inlineHandedWords(words, home); hands && (len(handed) != 0 || fed) {
+		return true // inline code handed words: no reader proves it read-only
+	}
 	base := programBase(program)
 	if base == "find" {
 		return registrationFindWrites(words[1:], home)

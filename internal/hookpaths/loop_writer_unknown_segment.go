@@ -379,7 +379,10 @@ func loopWriterOperands(call *syntax.CallExpr, home string) []*syntax.Word {
 	switch programBase(program) {
 	case "sed", "gsed", "perl":
 	default:
-		return nil
+		// An inline interpreter child is handed its words as possible
+		// writes (rel-1-0-10:GAP-0365).
+		handed, _, _ := inlineHandedWords(words, home)
+		return handed
 	}
 	inPlace := false
 	var operands []*syntax.Word

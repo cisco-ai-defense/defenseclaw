@@ -139,16 +139,23 @@ func inlineProgramRow(command CommandFact) (inlineCapabilityRow, []string, bool)
 	if len(argv) < 2 || command.Kind != CommandKindProcess {
 		return inlineCapabilityRow{}, nil, false
 	}
-	base := path.Base(argv[0])
+	_, row, ok := inlineInterpreterRow(argv[0])
+	return row, argv, ok
+}
+
+// inlineInterpreterRow names the table row of an interpreter program word
+// (a path, a version suffix such as python3.12 dropped).
+func inlineInterpreterRow(program string) (string, inlineCapabilityRow, bool) {
+	base := path.Base(program)
 	for len(base) > 0 && (base[len(base)-1] == '.' || (base[len(base)-1] >= '0' && base[len(base)-1] <= '9')) &&
 		inlineProgramAliases[base] == "" {
 		base = base[:len(base)-1]
 	}
 	key, ok := inlineProgramAliases[base]
 	if !ok {
-		return inlineCapabilityRow{}, nil, false
+		return "", inlineCapabilityRow{}, false
 	}
-	return inlineCapabilityTable[key], argv, true
+	return key, inlineCapabilityTable[key], true
 }
 
 func inlineCodeOperands(row inlineCapabilityRow, args []string) string {

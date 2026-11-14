@@ -1291,7 +1291,8 @@ func withActiveStateTargetMention(
 	if !hereStringMutates && !xargsMutates && !globbedStateMutation(facts) &&
 		(!placed || !globbedStateMutation(linkFacts)) && !throughLink(globbedStateMutationThroughLink) &&
 		!findGlobTwinStateMutation(facts, request) &&
-		!archiveExtractsIntoState(facts, request) && !provenLinkedStateWrite(facts, request) &&
+		!archiveExtractsIntoState(facts, request) && !inlineHandoffStateWrite(facts, request) &&
+		!provenLinkedStateWrite(facts, request) &&
 		!provenFollowedInPlaceStateWrite(facts, request) && !fileToolWriteThroughLinkToState(facts, request) {
 		command, known := trustedBashCommandInput(request.Input)
 		if !known {

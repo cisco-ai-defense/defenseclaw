@@ -4,7 +4,9 @@
 package hookpaths
 
 import (
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -174,14 +176,16 @@ func cpioDestinations(words []string) []string {
 	return nil
 }
 
-// ArchiveExtractionFolders returns the absolute folders the archive
-// extractions of a shell command write in (ArchiveExtractionDestinations),
-// with each word expanded as the shell would from the home alone (quotes,
-// ~/, $HOME; a word with any other expansion is skipped) and a relative
-// folder placed in cwd. A leading sudo, env, nice, nohup, time, command,
-// exec or timeout is looked through. It is nil when the command does not
-// parse.
-func ArchiveExtractionFolders(command, cwd, home string) []string {
+// ArchiveExtractionPaths returns the absolute paths the archive extractions
+// of a shell command write: each folder (ArchiveExtractionDestinations) and
+// each member the extraction names, joined below it and normalized
+// (ArchiveExtractionMembers), so `tar -xf a.tar -C ~ .defenseclaw/config.yaml`
+// is a write of that file (rel-1-0-10:GAP-0142). Each word is expanded as the
+// shell would from the home alone (quotes, ~/, $HOME; a word with any other
+// expansion is skipped) and a relative folder is placed in cwd. A leading
+// sudo, env, nice, nohup, time, command, exec or timeout is looked through. It
+// is nil when the command does not parse.
+func ArchiveExtractionPaths(command, cwd, home string) []string {
 	file, parsed := parseShell(command)
 	if !parsed || !filepath.IsAbs(cwd) {
 		return nil
@@ -200,6 +204,7 @@ func ArchiveExtractionFolders(command, cwd, home string) []string {
 		if len(words) == 0 {
 			return true
 		}
+		members := ArchiveExtractionMembers(words[0], words[1:])
 		for _, folder := range ArchiveExtractionDestinations(words[0], words[1:]) {
 			if folder == "" || strings.HasPrefix(folder, "~") {
 				continue
@@ -208,6 +213,9 @@ func ArchiveExtractionFolders(command, cwd, home string) []string {
 				folder = filepath.Join(cwd, folder)
 			}
 			out = append(out, filepath.Clean(folder))
+			for _, member := range members {
+				out = append(out, archiveMemberPath(folder, member))
+			}
 		}
 		return true
 	})
@@ -241,4 +249,164 @@ func archiveProgramWords(words []string) []string {
 		}
 	}
 	return words
+}
+
+// archiveMemberPath is where a member lands: below the folder, or at its own
+// absolute name when tar keeps it (-P).
+func archiveMemberPath(folder, member string) string {
+	if archiveAbsolute(member) {
+		return filepath.Clean(member)
+	}
+	return filepath.Join(folder, filepath.FromSlash(member))
+}
+
+// archiveAbsolute reports an absolute member name, spelled with a slash or as
+// a drive path.
+func archiveAbsolute(name string) bool {
+	return strings.HasPrefix(name, "/") || filepath.IsAbs(name)
+}
+
+// ArchiveExtractionMembers lists the members a tar or unzip extraction names
+// after its archive, each as the relative name it lands at below the
+// destination: a leading / is dropped, tar --strip-components is applied and
+// unzip -j keeps only the base name. A member extracted to stdout (tar -O)
+// or only listed (tar -t, unzip -l -p -t -Z) writes nothing and is not
+// listed; neither is a member an exclusion names. tar -P keeps an absolute
+// member as it is (it lands there, whatever the destination). An extraction
+// that names no member lists none: it extracts the whole archive.
+func ArchiveExtractionMembers(program string, words []string) []string {
+	switch strings.ToLower(filepath.Base(program)) {
+	case "unzip":
+		return unzipMembers(words)
+	case "tar", "gtar", "bsdtar":
+		return tarMembers(words)
+	}
+	return nil
+}
+
+// tarValueLetters are the tar short options whose value is the rest of the
+// cluster or the next word; tarValueOptions the long ones whose value is
+// the next word when it is not attached.
+const tarValueLetters = "fCTXbHIKLNVg"
+
+var tarValueOptions = map[string]bool{
+	"--file": true, "--directory": true, "--exclude": true, "--files-from": true, "--exclude-from": true,
+	"--transform": true, "--xform": true, "--owner": true, "--group": true, "--mode": true, "--mtime": true,
+	"--format": true, "--use-compress-program": true, "--newer": true, "--after-date": true, "--label": true,
+	"--blocking-factor": true, "--record-size": true, "--strip-components": true,
+}
+
+func tarMembers(words []string) []string {
+	var operands []string
+	extract, stdout, absolute, strip := false, false, false, 0
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			operands = append(operands, words[i+1:]...)
+			i = len(words)
+		case strings.HasPrefix(word, "--"):
+			name, value, attached := strings.Cut(word, "=")
+			switch name {
+			case "--extract", "--get":
+				extract = true
+			case "--to-stdout", "--list", "--to-command":
+				stdout = true
+			case "--absolute-names":
+				absolute = true
+			}
+			if !attached && tarValueOptions[name] {
+				if i++; i < len(words) {
+					value = words[i]
+				}
+			}
+			if name == "--strip-components" {
+				strip, _ = strconv.Atoi(value)
+			}
+		case strings.HasPrefix(word, "-") && len(word) > 1 || i == 0:
+			cluster, dashed := strings.TrimPrefix(word, "-"), strings.HasPrefix(word, "-")
+			values := 0
+			for at := 0; at < len(cluster); at++ {
+				switch cluster[at] {
+				case 'x':
+					extract = true
+				case 'O', 't':
+					stdout = true
+				case 'P':
+					absolute = true
+				}
+				if strings.IndexByte(tarValueLetters, cluster[at]) < 0 {
+					continue
+				}
+				if dashed {
+					// The rest of the cluster is the value; at its end the
+					// next word is.
+					if at+1 == len(cluster) {
+						values++
+					}
+					break
+				}
+				values++
+			}
+			i += values
+		default:
+			operands = append(operands, word)
+		}
+	}
+	if !extract || stdout {
+		return nil
+	}
+	var members []string
+	for _, operand := range operands {
+		if absolute && archiveAbsolute(operand) {
+			members = append(members, operand)
+		}
+		parts := strings.Split(path.Clean(strings.TrimLeft(filepath.ToSlash(operand), "/")), "/")
+		if strip > 0 {
+			if len(parts) <= strip {
+				continue
+			}
+			parts = parts[strip:]
+		}
+		members = append(members, strings.Join(parts, "/"))
+	}
+	return members
+}
+
+func unzipMembers(words []string) []string {
+	archive, excluding, junk := "", false, false
+	var named []string
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "-x":
+			excluding = true
+		case strings.HasPrefix(word, "-") && len(word) > 1:
+			// The letters up to a d are options; what follows it is its value.
+			cluster, last := word[1:], false
+			if at := strings.IndexByte(cluster, 'd'); at >= 0 {
+				cluster, last = cluster[:at+1], at+2 == len(word)
+			}
+			if strings.ContainsAny(cluster, "lptvzZc") {
+				return nil
+			}
+			junk = junk || strings.Contains(cluster, "j")
+			if last || word == "-P" {
+				i++
+			}
+		case archive == "":
+			archive = word
+		case !excluding:
+			named = append(named, word)
+		}
+	}
+	var members []string
+	for _, name := range named {
+		name = path.Clean(strings.TrimLeft(filepath.ToSlash(name), "/"))
+		if junk {
+			name = path.Base(name)
+		}
+		members = append(members, name)
+	}
+	return members
 }

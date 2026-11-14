@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // registrationWriteReachedAs is RegistrationWriteReached in one reading of
@@ -777,6 +779,32 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 				}
 			}
 		}
+	case "sh", "bash", "dash", "ash", "zsh", "ksh":
+		// A shell body that hands a word of its own to inline code (python -c
+		// CODE "$1") is handed the words the shell was given
+		// (rel-1-0-10:GAP-0365).
+		words := []string{program}
+		for _, word := range operands {
+			words = append(words, inlineWordValue(word, values, cwd, home))
+		}
+		if body, ok := shellCommandBodyIndex(words); ok && words[body] != "$" {
+			if _, dynamic := InlineHandedPaths(words[body], cwd, home); dynamic {
+				for _, word := range words[body+1:] {
+					if actionfacts.InlineHandedWordIsPath(word) {
+						targets = append(targets, word)
+					}
+				}
+			}
+		}
+	default:
+		// An inline interpreter child is handed its argument paths as
+		// possible writes (rel-1-0-10:GAP-0365); a word with no fixed
+		// value is no path.
+		words := []string{program}
+		for _, word := range operands {
+			words = append(words, inlineWordValue(word, values, cwd, home))
+		}
+		targets = append(targets, actionfacts.InlineCodeHandedWords(words)...)
 	}
 	return targets
 }
@@ -1510,8 +1538,25 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 			}
 			args = append(args, value)
 		}
+		if words := archiveProgramWords(append([]string{program}, args...)); len(words) > 0 {
+			program, args = words[0], words[1:]
+		}
+		members := ArchiveExtractionMembers(program, args)
 		for _, dest := range ArchiveExtractionDestinations(program, args) {
 			folder := OperandPath(dest, cwd)
+			// A member lands below the folder by its own name: one that is a
+			// registered file, or holds registered files, is a write of them
+			// (rel-1-0-10:GAP-0142).
+			for _, member := range members {
+				target := archiveMemberPath(folder, member)
+				for _, name := range names {
+					if name == target || strings.HasPrefix(name, target+string(filepath.Separator)) ||
+						strings.HasPrefix(target, name+string(filepath.Separator)) {
+						found = target
+						return false
+					}
+				}
+			}
 			// A generic ancestor such as /tmp is not a registered hook
 			// folder merely because a test home happens to live below it.
 			if !slices.Contains(names, folder) {
@@ -1534,7 +1579,7 @@ func RegistrationWriteCandidate(command string) bool {
 	if strings.ContainsAny(command, ">") {
 		return true
 	}
-	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node", "ruby", "bash", "zsh", "dash", "ksh", "sh"} {
+	for _, word := range []string{"rm", "mv", "cp", "ln", "sed", "perl", "patch", "chmod", "chown", "chgrp", "setfacl", "chattr", "find", "truncate", "touch", "install", "rsync", "tar", "unzip", "dd", "tee", "sponge", "python", "node", "bun", "ruby", "php", "bash", "zsh", "dash", "ksh", "sh"} {
 		if strings.Contains(command, word) {
 			return true
 		}
