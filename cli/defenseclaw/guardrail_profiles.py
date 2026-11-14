@@ -98,9 +98,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
             "09f044aa6791dab5e73c031c65d7217098cef576c5f8d16a02ce059d4da5a7a2",
-            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
-            "9e5cf4bf0de1a18894339fc034783a15c7b5f915f6318c8d0d894b3ec8598d2f",
-            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and command rule ids.
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell and
+            # psfloor packs.
+            "3aedf8b8713f67ffade62680bbc19815ace3e5daefc76402ec3a32ad78d61a89",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
+            # command rule ids.
             "b10430a9f09cf9341d1810047bdc4db50be2987e2f27584af20e579e13e20b09",
             # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
             # ids.
@@ -161,9 +163,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
             "d86064891b13281853484ff4f038b6e2c7c88c6aa049437ad631675b6e77f828",
-            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
-            "7c603db086fabe815139fa17af5660ed9747071cef721d0978de39126e36fb9e",
-            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and command rule ids.
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell and
+            # psfloor packs.
+            "2783a2ca24978a9e652681a5a0875172cd4cdf3bb0a703cac4eb612f0a2f2e60",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
+            # command rule ids.
             "2fc01f00e12d004a400b70939788dda568c097ba4ef895f5392735f698238142",
             # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
             # ids.
@@ -223,9 +227,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             # 1.0.10 (s7/toolresult, rel-1-0-10 GAP-0171): contact tag on the email/phone rules; ENT-DL-CA and
             # ENT-BULK-SSN-NOHYPHEN carry their label in the pattern.
             "d907a3f35099a86d92ebbf062e92fdb3ee4eee38a7ff9b3b75be6f05a70fc12b",
-            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall and toolresult packs.
-            "21f1a85da146fc1998dd013f9e06f7a734217a62933de9895900a5b70723cbfb",
-            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and command rule ids.
+            # 1.0.10 (rel/1.0.10 INT batch 11): sysone, openclaw-msg, secret-recall, toolresult, nonshell and
+            # psfloor packs.
+            "78d4dc6a848e5868f2c8b064c299b686ab6234e108cff50529cbb105e36646f5",
+            # 1.0.10 (s7/nonshell merged with rel/1.0.10 7f32dbb3a0): MCP and app tool rules, credential-store and
+            # command rule ids.
             "80a72f2d44b59278db1dec7d86ec2c26709638f4f56de6948de7f4040b5802d6",
             # 1.0.10 (rel/1.0.10, s7/nonshell): MCP and app tool rules (toolshape), credential-store and command rule
             # ids.
