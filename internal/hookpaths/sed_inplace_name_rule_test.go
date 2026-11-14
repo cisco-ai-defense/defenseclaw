@@ -51,6 +51,16 @@ func TestSedInPlaceNameRule(t *testing.T) {
 		{"h17", "sed -i/tmp/x_* s/x/y/ /abs/f", []string{"/abs/f", "/tmp/x_/abs/f"}, []string{"/abs/f", "/abs/f/tmp/x_*"}},
 		{"h13", "sed --in-place=x/y/* s/x/y/ f", []string{"f", "x/y/f"}, nil},
 
+		// GAP-0496 (cases HLR4-SFX-pfx-attached, -cluster, -long of the s7-hlrev4
+		// review; real GNU sed 4.9 changed the keys file in each): the operand
+		// is typed with a directory part, so "*" becomes "ssh/authorized_keys"
+		// and the suffix "/home/u/.*" names /home/u/.ssh/authorized_keys. BSD
+		// keeps "*" literal.
+		{"HLR4-SFX-pfx-attached", "sed -i/home/u/.* s/x/y/ ssh/authorized_keys", []string{"ssh/authorized_keys", "/home/u/.ssh/authorized_keys"}, []string{"ssh/authorized_keys", "ssh/authorized_keys/home/u/.*"}},
+		{"HLR4-SFX-pfx-cluster", "sed -ni/home/u/.* s/x/y/ ssh/authorized_keys", []string{"ssh/authorized_keys", "/home/u/.ssh/authorized_keys"}, []string{"ssh/authorized_keys", "ssh/authorized_keys/home/u/.*"}},
+		{"HLR4-SFX-pfx-long", "sed --in-place=/home/u/.* s/x/y/ ssh/authorized_keys", []string{"ssh/authorized_keys", "/home/u/.ssh/authorized_keys"}, nil},
+		{"HLR4-SFX-ctl", "sed -i s/x/y/ ssh/authorized_keys", []string{"ssh/authorized_keys"}, nil},
+
 		// GNU: no suffix, no backup.
 		{"g17", "sed -i s/x/y/ f", []string{"f"}, nil},
 		{"h3", "sed --in-place s/x/y/ f", []string{"f"}, nil},
