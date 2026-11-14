@@ -109,6 +109,11 @@ type ScanVerdict struct {
 	// needs_review category (MEDIUM, nothing actionable): audit-only in the
 	// default pack when the rules did not flag the call (judgeReviewOnlyAudit).
 	reviewOnly bool
+	// decisionFloorOnly marks a verdict that is only the decision model's
+	// confident-block floor because the LLM judge gave no verdict (failed,
+	// late, busy, no budget). It is not a judge answer: a closed-mode
+	// refusal of an escalated CRITICAL call still applies. In-process only.
+	decisionFloorOnly bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

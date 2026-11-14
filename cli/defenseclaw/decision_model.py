@@ -6,7 +6,9 @@ TUI and the skill scanner.
 
 The decision model is a small, fast model that speaks the System One
 protocol (``POST {model, state, questions}``; answers carry calibrated
-probabilities). The gateway runs it on hook-lane tool calls
+probabilities), or with ``protocol: gemini-decisions`` Google's Decisions
+API (Gemini Decision 1: ``POST {model, input, questions}``, the state as a
+labeled string, the key in ``x-goog-api-key``). The gateway runs it on hook-lane tool calls
 (internal/gateway/decision_model.go), per connector, in one of three
 cascades: rules only, rules -> decision model, or rules -> decision model ->
 LLM judge. ``skill scan`` passes it to the skill scanner's advisory System
@@ -24,6 +26,7 @@ from typing import Any
 from defenseclaw import connector_paths
 from defenseclaw.config import (
     DECISION_MODEL_KEY_ENV,
+    DECISION_MODEL_PROTOCOL_GEMINI,
     Config,
     DecisionModelConfig,
     decision_model_url_error,
@@ -31,6 +34,12 @@ from defenseclaw.config import (
 
 INIT_QUESTION = "Do you want to use a decision model?"
 DEFAULT_BASE_URL = "http://127.0.0.1:8791/v1/systemone"
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/decisions"
+GEMINI_MODEL = "gemini-decision-1"
+# Mirrors decisionModelInputLabel in internal/gateway/decision_model.go.
+GEMINI_INPUT_LABEL = "STATE (untrusted JSON):\n"
+# HTTP 400 error codes the Decisions API uses when its safety filters decline the input.
+GEMINI_REFUSAL_CODES = frozenset({"safety", "prohibited_content", "blocklist", "image_safety", "content_blocked"})
 BENCHMARK_URL = "https://huggingface.co/spaces/Vineethsain/defenseclaw-system-one"
 DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/decision-model/"
 
@@ -65,6 +74,7 @@ def apply_settings(
     enabled: bool | None = None,
     model: str | None = None,
     base_url: str | None = None,
+    protocol: str | None = None,
     api_key_env: str | None = None,
     timeout: float | None = None,
     allow_threshold: float | None = None,
@@ -83,6 +93,13 @@ def apply_settings(
         updated.model = model.strip()
     if base_url is not None:
         updated.base_url = base_url.strip()
+    if protocol is not None:
+        name = protocol.strip().lower()
+        updated.protocol = "" if name == "system-one" else name  # the default; keep the file minimal
+    elif base_url is not None and not current.protocol and infer_protocol(updated.base_url):
+        # A Google Decisions API URL with no protocol given (init, or setup
+        # with --base-url only) would send System One requests and get 400.
+        updated.protocol = infer_protocol(updated.base_url)
     if api_key_env is not None:
         name = api_key_env.strip()
         if name == DECISION_MODEL_KEY_ENV:
@@ -94,8 +111,11 @@ def apply_settings(
         updated.allow_threshold = float(allow_threshold)
     if block_threshold is not None:
         updated.block_threshold = float(block_threshold)
-    if on_confident_block is not None:
-        updated.on_confident_block = on_confident_block.strip().lower()
+    if on_confident_block is not None or (updated.on_confident_block or "").strip().lower() == "decide":
+        # decide is retired (it acts as escalate): never write it, and drop
+        # an old one on any setup write, so the file holds only what the
+        # gateway does.
+        updated.on_confident_block = ""
     if hook_connectors is not None:
         updated.hook_connectors = parse_connectors(hook_connectors)
     problem = updated.validation_error()
@@ -103,6 +123,17 @@ def apply_settings(
         raise DecisionModelError(f"decision_model: {problem}")
     cfg.decision_model = updated
     return updated
+
+
+def infer_protocol(base_url: str) -> str:
+    """gemini-decisions for a Google Decisions API URL, else ""."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit((base_url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+    return DECISION_MODEL_PROTOCOL_GEMINI if host == "generativelanguage.googleapis.com" else ""
 
 
 def parse_connectors(value: str | list[str] | tuple[str, ...]) -> list[str]:
@@ -237,10 +268,14 @@ def ping(
     if problem:
         return PingResult(False, problem)
     headers = {"Content-Type": "application/json"}
-    bearer = dm.resolved_api_key(data_dir) if send_token else ""
-    if bearer:
-        headers["Authorization"] = f"Bearer {bearer}"
-    body = json.dumps({"model": dm.model, "state": _PING_STATE, "questions": _PING_QUESTIONS})
+    gemini = dm.effective_protocol() == DECISION_MODEL_PROTOCOL_GEMINI
+    token_value = dm.resolved_api_key(data_dir) if send_token else ""
+    if token_value:
+        if gemini:
+            headers["x-goog-api-key"] = token_value
+        else:
+            headers["Authorization"] = f"Bearer {token_value}"
+    body = json.dumps(request_body(dm, _PING_STATE, _PING_QUESTIONS))
     started = time.monotonic()
     try:
         resp = requests.post(
@@ -255,6 +290,10 @@ def ping(
     except requests.RequestException:
         return PingResult(False, "connection failed")
     latency = int((time.monotonic() - started) * 1000)
+    if gemini and resp.status_code == 400:
+        code = _error_code(resp.content)
+        if code in GEMINI_REFUSAL_CODES:
+            return PingResult(False, f"the model declined the probe ({code})", latency)
     if resp.status_code != 200:
         return PingResult(False, f"HTTP {resp.status_code}", latency)
     answer = _disposition(resp.content)
@@ -262,6 +301,29 @@ def ping(
         return PingResult(False, "answer is not a System One disposition choice", latency)
     choice, p_allow = answer
     return PingResult(True, f"answered {choice} (risk {1 - p_allow:.2f}) in {latency} ms", latency)
+
+
+def request_body(dm: DecisionModelConfig, state: dict, questions: dict) -> dict:
+    """The request body in the endpoint's protocol. gemini-decisions has no
+    state field: the state goes in ``input`` as labeled, 1-space indented
+    JSON, as the gateway sends it."""
+    if dm.effective_protocol() == DECISION_MODEL_PROTOCOL_GEMINI:
+        return {
+            "model": dm.model,
+            "input": GEMINI_INPUT_LABEL + json.dumps(state, indent=1, ensure_ascii=False),
+            "questions": questions,
+        }
+    return {"model": dm.model, "state": state, "questions": questions}
+
+
+def _error_code(raw: bytes) -> str:
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code.strip().lower() if isinstance(code, str) else ""
 
 
 def _disposition(raw: bytes) -> tuple[str, float] | None:
@@ -315,11 +377,17 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.enabled", "true" if dm.enabled else "false"),
         ("decision_model.model", dm.model or "(unset)"),
         ("decision_model.base_url", dm.base_url or "(unset)"),
+        ("decision_model.protocol", dm.effective_protocol()),
         key_row,
         ("decision_model.timeout", f"{dm.effective_timeout():g}s"),
         ("decision_model.allow_threshold", f"{dm.effective_allow_threshold():.2f}"),
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
-        ("decision_model.on_confident_block", dm.effective_on_confident_block()),
+        ("decision_model.block_risk_score", f"{dm.effective_block_risk_score():.2f}"),
+        ("decision_model.escalate_rule_flagged", "true" if dm.effective_escalate_rule_flagged() else "false"),
+        (
+            "decision_model.on_confident_block",
+            "escalate" if dm.effective_on_confident_block() == "escalate" else "decide (retired: acts as escalate)",
+        ),
         ("decision_model.hook_connectors", ", ".join(dm.hook_connectors) or "(none: only in front of the LLM judge)"),
     ]
     return rows
@@ -348,6 +416,9 @@ def skill_scanner_options(cfg: Config) -> tuple[dict[str, Any], dict[str, str]]:
     dm = cfg.decision_model
     if not dm.active() or managed_host(cfg):
         # On a managed host the decision model is the gateway's alone.
+        return {}, {}
+    if dm.effective_protocol() == DECISION_MODEL_PROTOCOL_GEMINI:
+        # The skill scanner's advisory tier speaks System One only.
         return {}, {}
     kwargs = {"system_one_endpoint": dm.base_url.strip(), "system_one_model": dm.model.strip()}
     env: dict[str, str] = {}
