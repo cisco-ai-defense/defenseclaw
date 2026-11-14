@@ -236,7 +236,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		var pendingReads []pendingRead
 		direct := actionDirectStatements(file)
 		var plainReads map[*syntax.Stmt]bool
-		if !stateOnly {
+		if !stateOnly && depth == 0 {
+			// A nested shell body keeps the whole-body reading
+			// (TestR104StructuralProtectedNamedPOSIX: sh -c 'cat KEYS').
 			plainReads = actionPlainReadStatements(file, home)
 		}
 		// Quoting makes *, ? and [ literal only in a POSIX reading of a
@@ -492,20 +494,45 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 // statements, so a protected path it names is not a write target of the
 // call, whatever the others run (ssh -V, make). A statement that changes
 // folder (cd, pushd, popd) is not one: the folder decides what later
-// relative names reach. A call that reads $_ (the last word of the
-// statement before) can pass a name on, so it has none.
+// relative names reach. A call has none when it reads $_ (the last word of
+// the statement before, which can pass a name on), assigns a variable or
+// declares a function (PATH=/tmp/x can change what a later reader runs, as
+// actionKnownReadOnlyShell reads it), or prints an expansion with echo or
+// printf (the rel-1-0-6:GAP-0225 ruling keeps the mention there: only a
+// fixed-text echo is verdict-neutral, actionFixedTextEchoes).
 func actionPlainReadStatements(file *syntax.File, home string) map[*syntax.Stmt]bool {
 	if file == nil {
 		return nil
 	}
-	lastWord := false
+	neutral := actionFixedTextEchoes(file)
+	// An agent's exit-status wrapper (status=$?; printf '%s' "$status";
+	// exit "$status", GAP-2168) prints the status only and stays neutral.
+	status := map[string]bool{"?": true}
+	kept := false
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if parameter, ok := node.(*syntax.ParamExp); ok && parameter.Param != nil && parameter.Param.Value == "_" {
-			lastWord = true
+		switch node := node.(type) {
+		case *syntax.ParamExp:
+			kept = node.Param != nil && node.Param.Value == "_"
+		case *syntax.Assign, *syntax.FuncDecl, *syntax.DeclClause:
+			kept = true
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 && actionExitStatusAssignment(node) {
+				for _, assign := range node.Assigns {
+					status[assign.Name.Value] = true
+				}
+				return false
+			}
+			if len(node.Args) > 0 && !neutral[node] {
+				program, known := staticProgramWord(node.Args[0], home)
+				base := programBase(program)
+				if !known || (base == "echo" || base == "printf") && !actionStatusReport(node.Args[1:], status) {
+					kept = true
+				}
+			}
 		}
-		return !lastWord
+		return !kept
 	})
-	if lastWord {
+	if kept {
 		return nil
 	}
 	reads := map[*syntax.Stmt]bool{}
