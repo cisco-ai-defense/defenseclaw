@@ -186,7 +186,12 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
-    assert workflow.count(race) == 2
+    assert workflow.count(race) == 1
+    # A gateway shard's -timeout follows its planned seconds
+    # (go_test_shards.py --timeout, test_linux_gateway_shard_timeouts_fit_the_job).
+    gateway = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" '
+    assert workflow.count(gateway) == 1
+    assert 'test_timeout="$("${plan[@]}" --timeout)"' in workflow
     # The remaining-package shards run several go test runs in one step: they
     # share one deadline inside the step budget, and each run is stopped at
     # most 11 minutes in or when the deadline is up, whichever comes first.
@@ -334,6 +339,15 @@ def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
         text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
         for minutes in re.findall(r"-timeout[ =](\d+)m", text):
             assert int(minutes) <= 14, f"{name}: go test -timeout {minutes}m leaves no room in a 20-minute job"
+    # The Linux gateway shards take their -timeout from the plan, at most
+    # TIMEOUT_CAP_SECONDS; with the slowest set-up measured on 11-13 (377 s:
+    # checkout, Go cache, plugin build, race compile) and a minute for the
+    # artifact uploads, the job ends inside its timeout-minutes.
+    spec = importlib.util.spec_from_file_location("go_test_shards", ROOT / "scripts/go_test_shards.py")
+    shards = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shards)
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]["go-test-gateway"]
+    assert shards.TIMEOUT_CAP_SECONDS + 377 + 60 <= job["timeout-minutes"] * 60
 
 
 def test_pull_request_workflows_use_no_actions_setup_go_cache() -> None:

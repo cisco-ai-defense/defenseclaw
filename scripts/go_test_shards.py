@@ -35,7 +35,8 @@ shard as several -run regexes of at most MAX_RUN_PATTERN_CHARS, one per
 line, for a caller that runs one go test per line: a Windows command line
 holds 32,767 characters, and a gateway shard of 733 names took 34,028
 (Windows Native CI 43331326436, gw6: "The filename or extension is too
-long").
+long"). --timeout (test mode, --shard-index, recorded times) prints the
+go test -timeout of the shard instead of its regex: see shard_timeout_seconds.
 """
 
 from __future__ import annotations
@@ -58,6 +59,19 @@ TEST_FUNCTION_RE = re.compile(r"^func\s+((?:Test|Fuzz|Example)[A-Za-z0-9_]*)\s*\
 # internal/cli parts of about 57,000 characters ("The filename or extension
 # is too long"), so a longer part runs as several patterns of at most this size.
 MAX_RUN_PATTERN_CHARS = 16_000
+# The go test -timeout of a timed test-mode shard: its planned seconds (each
+# test at the slowest recorded run) times the headroom, plus the pad, within
+# the floor and the cap. Held out of the refresh, each of the 7 runs of
+# 11-13 (rel/1.0.10 and Substrate #1456) ran every Linux gateway shard
+# within 1.00x of its plan; under the flat 11m before, a shard of 186 s of
+# unrecorded tests ran 1.58x. 1.5x covers a runner that slow, or about
+# 250 s of new tests in one shard. The pad covers the race binary's start.
+# The cap keeps a shard and the slowest measured job set-up (377 s: checkout,
+# Go cache, plugin build, race compile) inside the 20-minute job.
+TIMEOUT_HEADROOM = 1.5
+TIMEOUT_PAD_SECONDS = 60
+TIMEOUT_FLOOR_SECONDS = 240
+TIMEOUT_CAP_SECONDS = 720
 
 
 def discover_test_files(package_dir: Path) -> list[tuple[Path, tuple[str, ...]]]:
@@ -116,6 +130,21 @@ def balance(items: list[tuple[str, float]], shard_count: int) -> list[list[str]]
     return shards
 
 
+def test_weigher(test_seconds: dict[str, float]):
+    """The seconds a test weighs: its recorded time, else "*" (the mean of
+    the package's tests under two seconds), else the median recorded time."""
+    default = float(test_seconds.get("*", _median(v for k, v in test_seconds.items() if k != "*")))
+    return lambda name: float(test_seconds.get(name, default))
+
+
+def shard_timeout_seconds(names: list[str], test_seconds: dict[str, float]) -> int:
+    """The go test -timeout of a shard of names, in seconds."""
+    weigh = test_weigher(test_seconds)
+    planned = sum(weigh(name) for name in names)
+    wanted = math.ceil(planned * TIMEOUT_HEADROOM + TIMEOUT_PAD_SECONDS)
+    return min(TIMEOUT_CAP_SECONDS, max(TIMEOUT_FLOOR_SECONDS, wanted))
+
+
 def weighted_test_groups(
     files: list[tuple[Path, tuple[str, ...]]],
     shard_count: int,
@@ -126,8 +155,7 @@ def weighted_test_groups(
     if split_tests and not test_seconds:
         raise ValueError("split_tests requires per-test timings")
     if test_seconds:
-        default = float(test_seconds.get("*", _median(v for k, v in test_seconds.items() if k != "*")))
-        weigh = lambda name: float(test_seconds.get(name, default))  # noqa: E731
+        weigh = test_weigher(test_seconds)
         file_weights = [(path, names, sum(weigh(name) for name in names)) for path, names in files]
         limit = sum(weight for _, _, weight in file_weights) / shard_count / 2
         groups: list[tuple[tuple[str, ...], float]] = []
@@ -330,9 +358,15 @@ def main() -> int:
         action="store_true",
         help="test mode, --shard-index: print the shard as -run regexes of at most MAX_RUN_PATTERN_CHARS, one per line",
     )
+    parser.add_argument(
+        "--timeout",
+        action="store_true",
+        help="test mode, --shard-index: print the shard's go test -timeout (needs recorded times)",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    test_seconds: dict[str, float] | None = None
 
     try:
         timings = [load_timings(path) for path in args.timings]
@@ -345,6 +379,8 @@ def main() -> int:
                 parser.error("--match is for test mode")
             if args.split_tests:
                 parser.error("--split-tests is for test mode")
+            if args.timeout:
+                parser.error("--timeout is for test mode")
             shards, expected, problems = _package_mode(args, timings[0] if timings else {})
         else:
             files = discover_test_files(args.package_dir)
@@ -352,7 +388,10 @@ def main() -> int:
                 files = match_test_files(files, args.match)
             package_dir = args.package_dir.resolve()
             key = package_dir.relative_to(ROOT).as_posix() if package_dir.is_relative_to(ROOT) else ""
-            shards = partition_test_files(files, args.shard_count, package_test_seconds(timings, key), args.split_tests)
+            test_seconds = package_test_seconds(timings, key)
+            if args.timeout and not test_seconds:
+                parser.error("--timeout needs --timings that record the package")
+            shards = partition_test_files(files, args.shard_count, test_seconds, args.split_tests)
             expected = sorted({name for _, names in files for name in names})
             problems = check_exact_cover(shards, expected)
     except ValueError as exc:
@@ -371,6 +410,8 @@ def main() -> int:
         return 1
     if (args.shard_index is None) == (not command):
         parser.error("pass either --shard-index, --check, or a command after --")
+    if args.timeout and (command or args.bounded):
+        parser.error("--timeout prints one shard's timeout: pass --shard-index without --bounded or a command")
     if command:
         return run_shards(shards, command)
     if not 0 <= args.shard_index < args.shard_count:
@@ -378,7 +419,16 @@ def main() -> int:
     selected = shards[args.shard_index]
     if not selected:
         parser.error("selected shard contains no tests")
-    if args.packages_file is not None:
+    if args.timeout:
+        seconds = shard_timeout_seconds(selected, test_seconds)
+        if seconds == TIMEOUT_CAP_SECONDS:
+            print(
+                f"::warning::shard {args.shard_index} plans more than the {TIMEOUT_CAP_SECONDS}s timeout cap allows;"
+                " add shards or refresh the timings",
+                file=sys.stderr,
+            )
+        print(f"{seconds}s")
+    elif args.packages_file is not None:
         print("\n".join(selected))
     elif args.bounded:
         print("\n".join(bounded_regexes(selected)))

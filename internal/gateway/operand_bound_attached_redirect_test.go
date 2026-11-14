@@ -24,9 +24,9 @@ func TestRedirectsWrittenAgainstAWordCountTowardTheOperandBound(t *testing.T) {
 	findings := dispatchTrustedAction(withShareBodyStrict(t.Context(), func() bool { return false }), request)
 	alert := false
 	for _, finding := range findings {
-		alert = alert || finding.RuleID == "ACTION-OPERAND-BOUND"
+		alert = alert || operandBoundTruncated(finding)
 	}
-	if action := buildVerdict(findings, "tool_call").Action; !alert || action != "alert" {
+	if action := operandBoundTierAction(findings, false); !alert || action != "alert" {
 		t.Errorf("1500 adjacent file redirects: action %s, bound alert %v, findings %v", action, alert, findings)
 	}
 }
@@ -44,8 +44,8 @@ func TestFileRedirectsOfADescriptorOperatorCountTowardTheOperandBound(t *testing
 		{"both streams", "echo x" + strings.Repeat(" >&f", 1500), false, "alert", true},
 		{"stdout", "echo x" + strings.Repeat(" 1>&f", 1500), false, "alert", true},
 		{"attached", "echo x" + strings.Repeat(">&f", 1500), false, "alert", true},
-		{"both streams, strict", "echo x" + strings.Repeat(" >&f", 1500), true, "block", false},
-		{"stdout, strict", "echo x" + strings.Repeat(" 1>&f", 1500), true, "block", false},
+		{"both streams, strict", "echo x" + strings.Repeat(" >&f", 1500), true, "block", true},
+		{"stdout, strict", "echo x" + strings.Repeat(" 1>&f", 1500), true, "block", true},
 		{"descriptor copies", "echo x" + strings.Repeat(" 2>&1", 1500), false, "allow", false},
 		{"descriptor copies, strict", "echo x" + strings.Repeat(" >&2", 1500), true, "allow", false},
 	} {
@@ -57,9 +57,9 @@ func TestFileRedirectsOfADescriptorOperatorCountTowardTheOperandBound(t *testing
 			findings := dispatchTrustedAction(withShareBodyStrict(t.Context(), func() bool { return tc.strict }), request)
 			alert := false
 			for _, finding := range findings {
-				alert = alert || finding.RuleID == "ACTION-OPERAND-BOUND"
+				alert = alert || operandBoundTruncated(finding)
 			}
-			if action := buildVerdict(findings, "tool_call").Action; action != tc.action || alert != tc.alert {
+			if action := operandBoundTierAction(findings, tc.strict); action != tc.action || alert != tc.alert {
 				t.Errorf("action %s, bound alert %v, findings %v; want %s, alert %v", action, alert, findings, tc.action, tc.alert)
 			}
 		})

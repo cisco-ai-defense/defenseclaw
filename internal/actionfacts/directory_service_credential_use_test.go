@@ -78,7 +78,8 @@ func TestExactNetExecDomainServiceAuth(t *testing.T) {
 // from the PowerShell and cmd parsers (rel-1-0-10:GAP-0051 N2): bare nxc,
 // nxc.exe and a path-qualified binary are recognized and keep the parse
 // complete; a dynamic credential, a help call and a non-credentialed call stay
-// partial.
+// partial. A literal double quote in an argument changes nothing: the proof
+// reads the call as written, whatever Windows PowerShell 5.1 does to the argv.
 func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -98,6 +99,10 @@ func TestExactNetExecDomainServiceAuthWindows(t *testing.T) {
 		{"cmd help", "nxc.exe smb 198.51.100.10 -h", DialectCMD, false},
 		{"powershell no credential", "nxc smb 198.51.100.10 --shares", DialectPowerShell, false},
 		{"cmd path-qualified no credential", `C:\Tools\nxc.exe smb 198.51.100.10 --shares`, DialectCMD, false},
+		{"powershell literal double quote in -x", `nxc smb 198.51.100.10 -u svc -p S3cretP4ss -x 'whoami "/all"'`, DialectPowerShell, true},
+		{"powershell literal double quote in password", `nxc smb 198.51.100.10 -u svc -p 'S3cret"P4ss'`, DialectPowerShell, true},
+		{"cmd upper-case exe", "NXC.EXE smb 198.51.100.10 -u svc -p S3cretP4ss", DialectCMD, true},
+		{"powershell cmd launcher", "nxc.cmd smb 198.51.100.10 -u svc -p S3cretP4ss", DialectPowerShell, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -143,6 +148,29 @@ func TestNetExecNTDSDumpAfterGlobalOptions(t *testing.T) {
 		facts := Analyze(in)
 		if !ExactDirectoryCredentialCompromise(facts) {
 			t.Fatalf("input=%+v is not a proven NTDS dump (status=%s)", in, facts.Parse.Status)
+		}
+	}
+}
+
+// TestNetExecProgramFamily is the one identity of a NetExec executable word in
+// every dialect (rel-1-0-10:GAP-0366): base name, either slash, any case, one
+// launcher extension. Near misses stay outside the family.
+func TestNetExecProgramFamily(t *testing.T) {
+	for word, want := range map[string]string{
+		"nxc": "nxc", "NXC": "nxc", "nxc.exe": "nxc", "Nxc.EXE": "nxc", "nxc.cmd": "nxc", "nxc.bat": "nxc",
+		"nxc.ps1": "nxc", "netexec": "netexec", "NetExec.exe": "netexec", "crackmapexec": "crackmapexec",
+		`C:\Tools\nxc.exe`: "nxc", `c:/tools/NXC.EXE`: "nxc", "/home/u/.local/bin/nxc": "nxc",
+		"./nxc": "nxc", `..\bin\netexec.cmd`: "netexec",
+	} {
+		if got, ok := netExecProgramFamily(word); !ok || got != want {
+			t.Errorf("netExecProgramFamily(%q) = %q, %v; want %q", word, got, ok, want)
+		}
+	}
+	for _, word := range []string{
+		"", " nxc", "nxc ", "nxc.exe.exe", "nxc.txt", "nxcc", "xnxc", "nxc.exe/", "john", "cmd.exe", `C:\Tools\nxc.exe\`, ".",
+	} {
+		if got, ok := netExecProgramFamily(word); ok {
+			t.Errorf("netExecProgramFamily(%q) = %q; want no family", word, got)
 		}
 	}
 }

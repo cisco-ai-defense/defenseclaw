@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -300,6 +301,13 @@ func TestHookImageDigestMemoRehashesANewObject(t *testing.T) {
 // A replace of the image between the handle's read and the path's last look
 // is reported and not cached (review P3-4).
 func TestHookImageDigestMemoRefusesAReplaceDuringTheRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Open shares a file for reading and writing, not for delete, so
+		// Windows refuses the replace the test makes while the handle is
+		// open: no replace can land during a read there (native proof,
+		// GAP-0751). The unix runs hold the check.
+		t.Skip("Windows refuses to replace a file another handle holds open without delete sharing")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "defenseclaw-hook.exe")
 	if err := os.WriteFile(path, []byte("one"), 0o600); err != nil {
