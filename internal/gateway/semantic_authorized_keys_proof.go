@@ -1051,14 +1051,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// protected file: class (hookpaths.UnprovenWriteTitle) names why. The
 	// first true answer decides the call, so the class is that answer's
 	// (rel-1-0-10:GAP-0013).
-	// evidenceGap: a managed gateway holds no complete reading from its hook
-	// client (no header, an undecodable or rejected one, a map past its bound).
-	evidenceGap := request.ProtectedHomeHook &&
-		(len(request.ResolvedWriteTargets) == 0 || request.ResolvedWriteTargets[hookpaths.TruncatedKey] != "" ||
-			(request.Input.CWD != "" && startDirectoryUnread(request)))
 	unproven := func(class, operand string) bool {
 		if request.unprovenTarget != nil && request.unprovenTarget.class == "" {
-			*request.unprovenTarget = unprovenWrite{class: class, operand: operand, evidenceGap: evidenceGap}
+			*request.unprovenTarget = unprovenWrite{class: class, operand: operand}
 		}
 		return true
 	}
@@ -2335,12 +2330,4 @@ func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts
 // left to the shell reading.
 func placedByCodexClient(connector, resolved string) bool {
 	return connector == "codex" && resolved != ""
-}
-
-// startDirectoryUnread reports a managed call whose hook client gave no
-// reading of the starting directory (no fact, or the unreadable mark): the
-// gateway cannot place a relative name, so the call keeps failing closed.
-func startDirectoryUnread(request trustedActionRequest) bool {
-	physical, ok := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+request.Input.CWD]
-	return !ok || physical == "?"
 }
