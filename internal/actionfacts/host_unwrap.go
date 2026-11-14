@@ -708,7 +708,7 @@ func TruncatedHostCall(input Input) bool {
 				return true
 			}
 		}
-		return false
+		return hostLauncherArgv(input.Argv, 0)
 	}
 	windows := input.DialectHint == DialectPowerShell || input.DialectHint == DialectCMD
 	switch strings.ToLower(input.Tool) {
@@ -743,6 +743,9 @@ func TruncatedHostCall(input Input) bool {
 					parts = append(parts, text)
 				}
 			}
+			if hostLauncherArgv(parts, 0) {
+				return true
+			}
 			text = strings.Join(parts, " ")
 		}
 	}
@@ -760,16 +763,28 @@ func hostLauncherWord(word string) bool {
 	return false
 }
 
-// hostLauncherMention reports a text with a powershell, pwsh or cmd launcher
-// at a command position: at the start, after a statement separator (; & |
-// && || ( ) { } or a line break), behind sudo, env, exec, nohup, command,
-// time or start, by name or by a path, quoted or bare (which covers a launcher
-// behind cmd /c and Git Bash's cmd //c). A launcher word inside an open quoted
-// string is a word of another command (an ssh remote command, a script
-// argument, a message) and is not one. Past maxLauncherMentionMatches
-// candidates the text counts as naming one, so the screen is bounded. One
-// pass of a regular expression; no parse (rel-1-0-10:GAP-0608).
+// hostLauncherMention reports a text that runs a powershell, pwsh or cmd
+// launcher: by the shell's own reading of the text (hostLauncherStatements:
+// a launcher as the command of a statement, behind a wrapper and its options,
+// in a local shell -c, eval or backtick script, quoted or by a path), or by
+// the pattern screen, which also sees the text the reading steps over (a
+// here-document body) and the text it cannot follow (an unterminated quote).
+// The launcher word of another command's quoted argument (an ssh remote
+// command, a message) is data and names nothing (rel-1-0-10:GAP-0608,
+// GAP-0740).
 func hostLauncherMention(text string) bool {
+	return hostLauncherStatements(text, 0) || hostLauncherPatternMention(text)
+}
+
+// hostLauncherPatternMention reports a text with a powershell, pwsh or cmd
+// launcher at a command position: at the start, after a statement separator
+// (; & | && || ( ) { } or a line break), behind sudo, env, exec, nohup,
+// command, time or start, by name or by a path, quoted or bare. A launcher
+// word inside an open quoted string (an odd count of quote characters before
+// it) is a word of another command. Past maxLauncherMentionMatches
+// candidates the text counts as naming one, so the screen is bounded. One
+// pass of a regular expression; no parse.
+func hostLauncherPatternMention(text string) bool {
 	matches := hostLauncherAtCommand.FindAllStringIndex(text, maxLauncherMentionMatches+1)
 	if len(matches) > maxLauncherMentionMatches {
 		return true
@@ -783,11 +798,11 @@ func hostLauncherMention(text string) bool {
 	return false
 }
 
-// maxLauncherMentionMatches bounds the candidates hostLauncherMention checks.
+// maxLauncherMentionMatches bounds the candidates hostLauncherPatternMention checks.
 const maxLauncherMentionMatches = 64
 
 // hostLauncherAtCommand is a launcher word at a command position
-// (hostLauncherMention).
+// (hostLauncherPatternMention).
 var hostLauncherAtCommand = lazyMustCompile(`(?i)(?:^|[;&|(){}\n]|&&|\|\|)[ \t]*(?:(?:sudo|env|exec|nohup|command|time|start)[ \t]+)*["'\x60]?(?:[a-z]:)?(?:[^\s;&|"'\x60()]*[/\\])?(?:powershell|pwsh|cmd)(?:\.exe)?["'\x60]?(?:[ \t]|$)`)
 
 // maxTruncatedHostCallArgsBytes bounds the arguments TruncatedHostCall
