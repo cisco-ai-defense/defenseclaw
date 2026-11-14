@@ -1836,12 +1836,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	// No operand is proven protected. An operand the one shell word resolver
 	// cannot settle (a glob form it does not model, a glob option the call may
-	// have changed, a variable or substitution, a directory it cannot read) is
-	// not proven to leave the protected files alone either: it is UNCERTAIN, and
-	// the pack tier decides it (default and permissive alert, strict blocks;
+	// have changed, a directory it cannot read) is not proven to leave the
+	// protected files alone either: it is UNCERTAIN, and the pack tier
+	// decides it (default and permissive alert, strict blocks;
 	// rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380).
-	if input.Command != "" && trustedShellCommandInput(request.Input) {
-		if reason := request.targetMemo.UncertainWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason != "" {
+	// A managed gateway cannot read the user's folders, so its resolver would call
+	// every glob unread; the hook client's reading decides there (GAP-0415).
+	if input.Command != "" && !request.ProtectedHomeHook && trustedShellCommandInput(request.Input) {
+		// Only a glob form or option the resolver does not model (the dynamic-argument
+		// class) is read here; a folder it cannot read is the older tier and stays
+		// as it was.
+		if reason := request.targetMemo.UncertainGlobWriteReason(input.Command, input.CWD, facts.ActiveHome, nil); reason == "dynamic-argument" {
 			return unproven(reason, "")
 		}
 	}

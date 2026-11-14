@@ -68,9 +68,9 @@ func gap0270Read(command, cwd, home string) gap0270Verdict {
 	}
 }
 
-// rel-1-0-10:GAP-0270 (a, c): a pattern whose literal folder is away from
-// the home is decided from its text, so a busy folder (more names than the
-// walk reads) gives the verdict a small one gives. Before the fix the
+// rel-1-0-10:GAP-0270 (a, c): the walk reads a busy folder in chunks to the
+// end (up to the bound of one walk, 262,144 names), so a busy folder (more
+// names than one read step, 4096) gives the verdict a small one gives. Before the fix the
 // for-loop and redirect shapes were protected-target and the listings an
 // unproven dynamic-argument once the folder passed actionGlobMaxNames.
 func TestGAP0270GlobOutsideHomeSameOnEveryBox(t *testing.T) {
@@ -131,43 +131,6 @@ func TestGAP0270GlobInHomeBoundIsUnknown(t *testing.T) {
 				t.Fatalf("verdict %+v, want no decision and a truncated walk", got)
 			}
 		})
-	}
-}
-
-func TestGAP0270GlobLiteralDir(t *testing.T) {
-	for _, row := range []struct{ pattern, dir string }{
-		{"/tmp/x-*.log", "/tmp"},
-		{"/var/tmp/run/x-*/out.json", "/var/tmp/run"},
-		{"/*/x", "/"},
-		{"/home/u/proj/[ab]/c", "/home/u/proj"},
-		{"/home/u/proj/a?", "/home/u/proj"},
-		// A shell may still rewrite these components (bash brace lists,
-		// extglob groups, escapes): the literal folder stops before them.
-		{"/{tmp,home}/u/.ssh/x*", "/"},
-		{"/@(home)/u/.ssh/a*", "/"},
-		{"/tmp/+(x)/y*", "/tmp"},
-		{"/tmp/!(x)/y*", "/tmp"},
-		// ".." stays as written (rel-1-0-10:GAP-0400); a relative pattern
-		// has no literal folder (it is never away).
-		{"/tmp/l/../x/y*", "/tmp/l/../x"},
-		{"rel/x*", ""},
-	} {
-		pattern, dir := filepath.FromSlash(row.pattern), filepath.FromSlash(row.dir)
-		if got := actionGlobLiteralDir(pattern); got != filepath.VolumeName(pattern)+dir && got != dir {
-			t.Errorf("actionGlobLiteralDir(%s) = %s, want %s", pattern, got, dir)
-		}
-	}
-	home := filepath.FromSlash("/home/u")
-	for _, row := range []struct {
-		path string
-		near bool
-	}{
-		{"/home/u", true}, {"/home/u/proj", true}, {"/home", true}, {"/", true},
-		{"/tmp", false}, {"/home/u2", false}, {"/var/tmp/home/u", false},
-	} {
-		if got := pathNear(filepath.FromSlash(row.path), home); got != row.near {
-			t.Errorf("pathNear(%s) = %t, want %t", row.path, got, row.near)
-		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -1351,15 +1352,12 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 	if err != nil {
 		return false
 	}
-	names, err := directory.Readdirnames(4097)
+	// Every name is read, in chunks, up to the bound of one glob walk; a
+	// folder past it is not proved, as an unread name may be a link of any
+	// name (rel-1-0-10:GAP-0270, GAP-0441).
+	names, complete := actionReadDirNamesBounded(directory)
 	_ = directory.Close()
-	if err != nil && err != io.EOF {
-		return false
-	}
-	// Past the bound, the names not read are decided from the text when it
-	// proves them: an away folder and a name that can match no protected
-	// one (rel-1-0-10:GAP-0270, GAP-0398). The names read are judged below.
-	if len(names) > 4096 && !actionGlobTextDecides(strings.TrimSuffix(parent, string(filepath.Separator))+string(filepath.Separator)+pattern, home, nil) {
+	if !complete {
 		return false
 	}
 	protected := newProtectedFiles(home)
@@ -1378,6 +1376,31 @@ func actionGeneratedPathSafe(value, cwd, home string) bool {
 		}
 	}
 	return true
+}
+
+// actionReadDirNamesBounded reads the names of an open folder in chunks of
+// actionGlobMaxNames, up to actionGlobMaxEntries names in all (the bound of
+// one glob walk, internal/guardrail/bounded cap items). complete is false
+// on a read error and past the bound; the names read are returned either
+// way.
+func actionReadDirNamesBounded(directory interface {
+	Readdirnames(int) ([]string, error)
+}) (names []string, complete bool) {
+	var trunc bounded.Truncated
+	budget := bounded.NewCounter(&trunc, bounded.Items, int(actionGlobMaxEntries.Load()))
+	for {
+		chunk, err := directory.Readdirnames(actionGlobMaxNames)
+		if !budget.TakeN(len(chunk)) {
+			return append(names, chunk...), false
+		}
+		names = append(names, chunk...)
+		if err == io.EOF || err == nil && len(chunk) == 0 {
+			return names, true
+		}
+		if err != nil {
+			return names, false
+		}
+	}
 }
 
 func actionPathArgument(program string, index, count int) bool {

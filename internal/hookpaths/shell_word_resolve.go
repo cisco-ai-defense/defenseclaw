@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -26,8 +27,10 @@ const (
 	wordUncertainTruncated = "shell-parse-bound"
 )
 
-// maxResolvedCandidates bounds the paths one word may expand to. A word past
-// it is uncertain, not cut short.
+// maxResolvedCandidates bounds the paths one word may expand to, counted by
+// a bounded.Counter on bounded.Paths (the one bound rule, rel-1-0-10
+// GAP-0301): a word past it is truncated, so uncertain, never cut short and
+// never judged below the unknown tier.
 const maxResolvedCandidates = 256
 
 // shellGlobOptions are the bash options that change pathname expansion. The
@@ -83,7 +86,7 @@ func shellGlobOptionsFromEnv(getenv func(string) string) shellGlobOptions {
 // BASHOPTS or SHELLOPTS, eval and source (they run text the scan does not
 // read), a nested bash with -O or -o. Read as text on purpose: every later
 // glob word of such a call is uncertain.
-var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+]|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
+var globOptionsChangeText = regexp.MustCompile(`shopt|GLOBIGNORE|BASHOPTS|SHELLOPTS|(^|[;&|(\s])(set\s+[-+][a-zA-Z]*[fB]|set\s+[-+]o\s+(noglob|braceexpand|posix)|eval\b|source\b|\.\s)|\bbash\s+[^|;&]*-[Oo]`)
 
 // globOptionsMayChange reports a command whose glob options the scan cannot
 // know at a later word.
@@ -105,6 +108,9 @@ func shellGlobOptionsForCall(command string, startup ShellStartup) shellGlobOpti
 type resolvedWord struct {
 	candidates []string
 	uncertain  string
+	// caps are the caps the word hit (bounded.Paths past the candidate
+	// bound); a hit also sets uncertain to wordUncertainTruncated.
+	caps bounded.CapSet
 }
 
 // resolveShellWord is the one reading of a write operand:
@@ -132,9 +138,8 @@ type resolvedWord struct {
 // bound of the one glob walk (internal/guardrail/bounded) is TRUNCATED: with a
 // memo the caps go to it (TargetMemo.GlobTruncated, which the gateway floors
 // at the unknown tier) and the names read are the candidates, judged by
-// identity; past the bound a pattern whose text proves it (actionGlobTextDecides)
-// keeps the names read and is not truncated. Without a memo the word stays
-// uncertain (rel-1-0-10:GAP-0401).
+// identity, whatever the pattern text says (rel-1-0-10:GAP-0441). Without a
+// memo the word stays uncertain (rel-1-0-10:GAP-0401).
 func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts shellGlobOptions, memo *TargetMemo) resolvedWord {
 	if word == nil || !filepath.IsAbs(cwd) || !resolverWordKnown(word, values) {
 		return resolvedWord{uncertain: wordUncertainDynamic}
@@ -171,20 +176,23 @@ func resolveShellWord(word *syntax.Word, values actionValues, cwd string, opts s
 	userView := !hidden && actionProcessOwnsHome(home)
 	dots := func() bool { return opts.dotGlob || actionShellProfileMayDotglob(home) }
 	matches, complete, unseen, caps := actionExpandGlobBounded(OperandPath(pattern, cwd), base, hidden, userView, dots, opts.noCaseGlob)
+	var truncated bounded.Truncated
+	candidates := bounded.NewCounter(&truncated, bounded.Paths, maxResolvedCandidates)
 	if caps.Any() && !unseen && memo != nil {
-		if len(matches) > maxResolvedCandidates {
-			return resolvedWord{uncertain: wordUncertainTruncated}
+		if !candidates.TakeN(len(matches)) {
+			return resolvedWord{uncertain: wordUncertainTruncated, caps: truncated.Set(&candidates)}
 		}
-		if !actionGlobTextDecides(OperandPath(pattern, cwd), home, memo) {
-			memo.noteGlobTruncated(caps)
-		}
+		// The names the walk did not read are never decided from the
+		// pattern text: a link of any name may be among them
+		// (rel-1-0-10:GAP-0441).
+		memo.noteGlobTruncated(caps)
 		return resolvedWord{candidates: matches}
 	}
 	switch {
 	case unseen || !complete:
 		return resolvedWord{uncertain: wordUncertainUnread}
-	case len(matches) > maxResolvedCandidates:
-		return resolvedWord{uncertain: wordUncertainTruncated}
+	case !candidates.TakeN(len(matches)):
+		return resolvedWord{uncertain: wordUncertainTruncated, caps: truncated.Set(&candidates)}
 	case len(matches) > 0:
 		return resolvedWord{candidates: matches}
 	case opts.nullGlob || opts.failGlob:
@@ -213,6 +221,7 @@ func resolveWriteWord(word *syntax.Word, values actionValues, cwd string, opts s
 	if _, active := resolverWordPattern(word, values, cwd); !active {
 		value := resolveShellWord(tail, values, cwd, opts, memo)
 		whole.candidates = append(whole.candidates, value.candidates...)
+		whole.caps = whole.caps.Union(value.caps)
 		if whole.uncertain == "" {
 			whole.uncertain = value.uncertain
 		}

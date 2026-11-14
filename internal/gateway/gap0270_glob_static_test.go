@@ -127,3 +127,67 @@ func TestGAP0270GatewayInHomeBoundNamedUnknown(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0441 (review round 2 probe G6): at the gateway, a write
+// through the GAP-0270 shape S7's x-*/*.txt over an away folder of
+// subfolders, one of which holds a link of an ordinary name to
+// authorized_keys. The link takes every position. With the read bound
+// lowered, a link the walk read is a CRITICAL authorized-keys block in
+// default and strict; one it did not read is TRUNCATED (the evaluation-limit
+// finding names cap paths): the default pack alerts and the strict pack
+// blocks. No position is a plain allow.
+func TestGAP0441GatewayUnreadLinkIsTruncated(t *testing.T) {
+	const subfolders, reads = 8, 4
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(home, "project")
+	away := filepath.Join(root, "tmp")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project, away} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(project, "payload")} {
+		if err := os.WriteFile(file, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	for k := range subfolders {
+		if err := os.Mkdir(filepath.Join(away, fmt.Sprintf("x-%02d", k)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer hookpaths.UseGlobWalkBoundsForTests(reads, 1<<18)()
+	pattern := away + "/x-*/*.txt"
+	rows := []string{"cp payload " + pattern, "tee " + pattern + " < payload"}
+	reason := bounded.Of(bounded.Paths).Reason()
+	held := 0
+	for k := range subfolders {
+		link := filepath.Join(away, fmt.Sprintf("x-%02d", k), "n.txt")
+		if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), link); err != nil {
+			t.Fatal(err)
+		}
+		for i, command := range rows {
+			for _, strict := range []bool{false, true} {
+				got := gap0270Hook(t, "claudecode", project, command, strict)
+				blocked := strings.HasPrefix(got, `{"action":"block"`)
+				keyWrite := strings.Contains(got, "persistence.ssh_authorized_keys_command")
+				truncated := strings.Contains(got, reason)
+				switch {
+				case blocked && keyWrite && strings.Contains(got, "CRITICAL"):
+				case truncated && blocked == strict:
+					held++
+				default:
+					t.Errorf("row %d, link in subfolder %d, strict=%t: answer %.700s, want a CRITICAL key-write block or TRUNCATED", i, k, strict, got)
+				}
+			}
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if held == 0 {
+		t.Fatal("no position was past the lowered read bound")
+	}
+}

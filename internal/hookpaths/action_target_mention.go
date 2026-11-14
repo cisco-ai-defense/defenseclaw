@@ -1547,20 +1547,15 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 		return false
 	}
 	// What the walk read is judged above, by identity: a link of any name
-	// is followed (rel-1-0-10:GAP-0398). The names it could not read are
-	// decided from the text when that proves them: the literal folder is
-	// away from every protected target and no component can match a
-	// protected name. The verdict then does not depend on how full the
-	// folder is (rel-1-0-10:GAP-0270). The client answer "0" still means a
-	// finished walk.
-	if actionGlobTextDecides(pattern, home, globs.targetMemo()) {
-		return false
-	}
+	// is followed (rel-1-0-10:GAP-0398). The names it did not read are never
+	// decided from the pattern text, which cannot prove anything about a
+	// link of any name among them (rel-1-0-10:GAP-0441).
 	if hidden {
 		if answer := globs.answer(pattern); answer != "" {
 			// A walk this process could not see, or could not finish,
 			// defers to the client, which expanded the pattern as the
-			// user or decided it from its text.
+			// user: its "1" is a match proved by identity and always
+			// holds (rel-1-0-10:GAP-0442).
 			return answer == "1"
 		}
 	}
@@ -1583,11 +1578,12 @@ func actionProtectedFileGlobReachAs(pattern, cwd string, protected protectedFile
 			return false
 		}
 	}
-	// The walk stopped at a bound (internal/guardrail/bounded) and found no
-	// alias in what it read: the call is TRUNCATED, not a protected target.
-	// The memo keeps the caps, and the gateway floors the call at the
-	// unknown tier of the pack (default and permissive alert, strict
-	// blocks) and never below what was read (rel-1-0-10:GAP-0401).
+	// The truncated reach: the walk stopped at a bound
+	// (internal/guardrail/bounded) and found no alias in what it read. The
+	// call is TRUNCATED, not a protected target: the memo keeps the caps,
+	// and the gateway floors the call at the unknown tier of the pack
+	// (default and permissive alert, strict blocks) and never below what was
+	// read (rel-1-0-10:GAP-0401, GAP-0441).
 	if caps.Any() && !unseen {
 		globs.targetMemo().noteGlobTruncated(caps)
 		return false
@@ -1840,17 +1836,12 @@ func UseGlobWalkBoundsForTests(reads, entries int) (restore func()) {
 // A component that starts with * or ? does not match a name with a leading
 // dot, as in the shell, unless dots reports a setting that changes that.
 func actionExpandGlob(pattern, literal string, hidden, userView bool, dots func() bool) (candidates []string, complete, unseen bool) {
-	return actionExpandGlobFold(pattern, literal, hidden, userView, dots, false)
-}
-
-// actionExpandGlobFold is actionExpandGlob; fold matches names without case
-// (the nocaseglob option).
-func actionExpandGlobFold(pattern, literal string, hidden, userView bool, dots func() bool, fold bool) (candidates []string, complete, unseen bool) {
-	candidates, complete, unseen, _ = actionExpandGlobBounded(pattern, literal, hidden, userView, dots, fold)
+	candidates, complete, unseen, _ = actionExpandGlobBounded(pattern, literal, hidden, userView, dots, false)
 	return candidates, complete, unseen
 }
 
-// actionExpandGlobBounded is actionExpandGlobFold; caps is the set of bounds
+// actionExpandGlobBounded is actionExpandGlob; fold matches names without
+// case (the nocaseglob option), and caps is the set of bounds
 // the walk hit (internal/guardrail/bounded): more directories than
 // actionGlobMaxReads (cap paths), more names than actionGlobMaxEntries in all
 // or than actionGlobMaxNames in one step (cap items). Every name read before

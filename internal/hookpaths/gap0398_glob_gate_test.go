@@ -37,9 +37,9 @@ func gap0398POSIX(t *testing.T) {
 
 // rel-1-0-10:GAP-0398 (review P1-1, probes R4 and G3): a link to ~/.ssh in a
 // folder away from the home is selected by a pattern whose later
-// components can match a protected name. The name gate keeps those
-// patterns expanded, so every alias row is a protected target in a small
-// and in a busy folder, without the shell word resolver.
+// components select the link. The walk follows a link of any name, so
+// every alias row is a protected target in a small and in a busy folder,
+// without the shell word resolver.
 func TestGAP0398NameGateKeepsOutsideAliasRows(t *testing.T) {
 	gap0398POSIX(t)
 	home, _ := globAliasFixture(t)
@@ -68,8 +68,8 @@ func TestGAP0398NameGateKeepsOutsideAliasRows(t *testing.T) {
 			t.Errorf("literal row %d: decision = %q, want protected-target", i, got)
 		}
 	}
-	// The GAP-0270 read shapes in the same folder are still decided from
-	// their text: no component can match a protected name.
+	// The GAP-0270 read shapes in the same folder select no link: no
+	// verdict.
 	for i, command := range gap0270ReadShapes(outside) {
 		if got := gap0270Read(command, outside, home); got.decision != "" || got.unproven != "" || got.truncated || got.keyRead {
 			t.Errorf("read shape S%d beside the link: verdict %+v, want none", i, got)
@@ -84,42 +84,6 @@ func gap0398Index(rows []string, command string) int {
 		}
 	}
 	return -1
-}
-
-// The name gate itself: a component from the first expanding one that can
-// match .ssh, a protected key file or folder name, or a private key name
-// keeps the pattern expanded; a component the shell may rewrite can match
-// any name; the literal leading folder is not gated.
-func TestGAP0398NameGate(t *testing.T) {
-	gap0398POSIX(t)
-	home := t.TempDir()
-	memo := NewTargetMemo()
-	gated := func(rel string) bool {
-		return actionGlobMayNameProtected(filepath.Join("/var/tmp/run", rel), home, memo)
-	}
-	for _, name := range actionGlobProtectedNames(home, memo) {
-		if !gated("x*/" + name) {
-			t.Errorf("a literal protected name %s after a wildcard is not gated", name)
-		}
-		if !gated(name[:1] + "*") {
-			t.Errorf("a wildcard that can match %s is not gated", name)
-		}
-	}
-	for _, rel := range []string{"*", "x-*/*", "*/x-*", "{a,b}*", "@(x)*", "\\x*"} {
-		if !gated(rel) {
-			t.Errorf("%s: not gated", rel)
-		}
-	}
-	for _, shape := range gap0270ReadShapes("/var/tmp/run") {
-		for _, word := range strings.Fields(shape) {
-			if strings.HasPrefix(word, "/var/tmp/run/") && actionGlobMayNameProtected(word, home, memo) {
-				t.Errorf("a GAP-0270 read shape operand is gated: %s", word)
-			}
-		}
-	}
-	if actionGlobMayNameProtected(filepath.Join(home, ".ssh", "authorized_keys"), home, memo) {
-		t.Error("a pattern with no expanding component is gated")
-	}
 }
 
 // rel-1-0-10:GAP-0399 (review P2-1, probe K1): a key read through a link to
@@ -204,12 +168,5 @@ func TestGAP0400DotDotAfterLink(t *testing.T) {
 		if !appendRow {
 			t.Fatalf("%s: no append-redirect row", s.name)
 		}
-	}
-	// The literal folder keeps ".." as written for the resolver.
-	if got, want := actionGlobLiteralDir(plink+"/../keyd*/x"), plink+"/.."; got != want {
-		t.Errorf("actionGlobLiteralDir kept %s, want %s", got, want)
-	}
-	if actionGlobDirAway(actionGlobLiteralDir(plink+"/../keyd*/x"), home, nil) {
-		t.Error("a folder that resolves into the home through .. after a link is away")
 	}
 }

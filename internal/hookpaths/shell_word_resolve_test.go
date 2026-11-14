@@ -11,6 +11,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/testenv/hlinkmatrix"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -166,8 +167,8 @@ func TestResolveShellWordUncertainClasses(t *testing.T) {
 			}
 		}
 		got := resolveShellWord(shellWordOf(t, "touch many/*", 1), f.values, f.project, shellGlobOptions{}, nil)
-		if got.uncertain != wordUncertainTruncated {
-			t.Errorf("uncertain %q, candidates %d", got.uncertain, len(got.candidates))
+		if got.uncertain != wordUncertainTruncated || !got.caps.Has(bounded.Paths) {
+			t.Errorf("uncertain %q, caps %q, candidates %d", got.uncertain, got.caps.Reason(), len(got.candidates))
 		}
 	})
 }

@@ -1800,39 +1800,26 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 	if _, err := filepath.Match(base, ""); err != nil {
 		return false // An incomplete URL bracket is not a shell glob.
 	}
-	// A pattern this listing cannot finish (a pattern folder, a folder past
-	// the bound) is decided from its text when the text proves it: the
-	// literal folder is away from every protected target and no component
-	// can match a protected name (rel-1-0-10:GAP-0270, GAP-0398).
-	unfinished := func() bool { return !actionGlobTextDecides(OperandPath(pattern, cwd), filepath.Dir(ssh), nil) }
+	// A pattern folder, a folder this listing cannot read in full and a
+	// folder past the bound of one glob walk are not proved: an unread name
+	// may be a link of any name, so the pattern text decides nothing
+	// (rel-1-0-10:GAP-0441). Every name read is judged.
 	if strings.ContainsAny(parent, "*?[") {
-		return unfinished()
+		return true
 	}
 	directory, err := pathOpen(OperandPath(parent, cwd))
 	if err != nil {
 		return false
 	}
-	names, err := directory.Readdirnames(4097)
+	names, complete := actionReadDirNamesBounded(directory)
 	_ = directory.Close()
-	if err != nil && err != io.EOF {
-		return true
-	}
-	if len(names) > 4096 {
-		for _, name := range names {
-			if matched, _ := filepath.Match(base, name); matched &&
-				protectedReachPath(OperandPath(name, OperandPath(parent, cwd)), protected, ssh) {
-				return true
-			}
-		}
-		return unfinished()
-	}
 	for _, name := range names {
 		if matched, _ := filepath.Match(base, name); matched &&
 			protectedReachPath(OperandPath(name, OperandPath(parent, cwd)), protected, ssh) {
 			return true
 		}
 	}
-	return false
+	return !complete
 }
 
 func protectedReachPath(path string, protected protectedFiles, ssh string) bool {

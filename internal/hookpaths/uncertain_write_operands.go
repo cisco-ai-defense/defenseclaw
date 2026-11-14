@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"path/filepath"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -31,6 +32,21 @@ var uncertainWriteVerbs = map[string]bool{
 // m is the evaluation memo: a word whose glob walk hit the shared bound is
 // not an uncertain class here, it is TRUNCATED in m (resolveShellWord).
 func (m *TargetMemo) UncertainWriteReason(command, cwd, home string, startup *ShellStartup) string {
+	return m.uncertainWriteReason(command, cwd, home, startup, false)
+}
+
+// UncertainGlobWriteReason is UncertainWriteReason for the operands whose
+// pieces are all known and whose glob reading is what the resolver cannot
+// settle: a glob form it does not model, a glob option the call may have
+// changed, a directory it cannot read, a result past its bound. An operand
+// that holds an unknown variable or a command substitution is left to the
+// dynamic-operand proofs of the gateway, which judge it with the whole
+// command in view (rel-1-0-10:GAP-0350, GAP-0378, GAP-0379, GAP-0380).
+func (m *TargetMemo) UncertainGlobWriteReason(command, cwd, home string, startup *ShellStartup) string {
+	return m.uncertainWriteReason(command, cwd, home, startup, true)
+}
+
+func (m *TargetMemo) uncertainWriteReason(command, cwd, home string, startup *ShellStartup, globOnly bool) string {
 	if home == "" || !filepath.IsAbs(cwd) || actionWindowsHome(home) {
 		return ""
 	}
@@ -49,7 +65,29 @@ func (m *TargetMemo) UncertainWriteReason(command, cwd, home string, startup *Sh
 		if reason != "" || word == nil {
 			return
 		}
-		reason = resolveWriteWord(word, values, cwd, options, m).uncertain
+		if !globOnly {
+			reason = resolveWriteWord(word, values, cwd, options, m).uncertain
+			return
+		}
+		// Bash expands a brace list into its words first; each is then a plain
+		// word or a glob. A list of known alternatives is read word by word, as the
+		// shell passes them; a list that is too long is not read.
+		split := *word
+		split.Parts = append([]syntax.WordPart(nil), word.Parts...)
+		syntax.SplitBraces(&split)
+		alternatives := expand.Braces(&split)
+		if len(alternatives) > 64 {
+			reason = wordUncertainDynamic
+			return
+		}
+		for _, alternative := range alternatives {
+			if !resolverWordKnown(alternative, values) {
+				continue
+			}
+			if reason = resolveWriteWord(alternative, values, cwd, options, m).uncertain; reason != "" {
+				return
+			}
+		}
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if reason != "" {
