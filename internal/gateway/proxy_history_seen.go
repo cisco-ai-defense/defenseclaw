@@ -369,6 +369,62 @@ func (p *GuardrailProxy) auditHistoryRedactions(r *http.Request, reds []historyR
 	}
 }
 
+// historyBlameMax is the most current-turn segments a refusal is attributed
+// among, one inspection each; with more, every segment is recorded refused.
+const historyBlameMax = 8
+
+// refusedSegments is what a refused request records as refused (GAP-0257):
+// only the segments the refusal is attributed to, so the text sent next to
+// a refused one (a benign co-turn, a tool result) is not removed when the
+// client sends it back.
+//
+//   - A refusal that is not a guardrail block (an audit that failed closed)
+//     is attributed to nothing: the guardrail allowed the text.
+//   - One current-turn segment (the walker's Turn: not system or developer
+//     text, instructions or tool definitions): that one, with no further
+//     inspection. It is the only text of the request the client can send
+//     back as history, and a refusal keeps managed AI Defense at one call.
+//   - Two to historyBlameMax: each is inspected alone, once, and the ones
+//     the guardrail blocks alone are blamed. This runs only on a refusal
+//     with several current turns (one more AI Defense call each, managed).
+//   - None blamed, no current turn, or too many: the refusal cannot be
+//     attributed and every current-scope segment is recorded refused, as
+//     before (fail safe).
+func (p *GuardrailProxy) refusedSegments(ctx context.Context, v *ScanVerdict, current, turn []string, label, mode string) []string {
+	if v == nil || v.Action != "block" {
+		return nil
+	}
+	cands := uniqueSegments(turn)
+	if len(cands) == 1 {
+		return cands
+	}
+	if len(cands) == 0 || len(cands) > historyBlameMax || p.inspector == nil {
+		return current
+	}
+	var blamed []string
+	for _, s := range cands {
+		if alone := p.inspector.Inspect(ctx, "prompt", promptInspectionText(s), nil, label, mode); alone != nil && alone.Action == "block" {
+			blamed = append(blamed, s)
+		}
+	}
+	if len(blamed) == 0 {
+		return current
+	}
+	return blamed
+}
+
+func uniqueSegments(segs []string) []string {
+	seen := make(map[string]bool, len(segs))
+	out := make([]string, 0, len(segs))
+	for _, s := range segs {
+		if !seen[s] && strings.TrimSpace(s) != "" {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // refusedHistoryVerdict is the verdict of a request that carries a refused
 // turn the proxy cannot remove (a signed body): refused, fail closed.
 func refusedHistoryVerdict() *ScanVerdict {
