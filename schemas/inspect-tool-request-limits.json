@@ -1,8 +1,9 @@
 {
-  "$comment": "The request body limit of the local API (POST /api/v1/inspect/tool among its routes) and the fields of an OpenClaw message call that carry an attachment. One source: the gateway reads body_max_bytes (internal/gateway apiRequestBodyMaxBytes) and message_attachment_keys (messageAttachmentField) from this embedded file, and the plugin build copies it next to its sources (make plugin). The plugin sends a message call whole up to body_max_bytes. Over it, only a base64 value under a message_attachment_keys field becomes a descriptor (its size, type, hash and the text in it); message text is never cut, and a call that still does not fit is blocked in every pack (rel-1-0-10:GAP-0356, GAP-0402, GAP-0436).",
+  "$comment": "The request body limit of the local API (POST /api/v1/inspect/tool among its routes) and what an OpenClaw message call carries as an attachment. One source: the gateway reads body_max_bytes (internal/gateway apiRequestBodyMaxBytes), message_attachment_keys (messageAttachmentField) and message_data_url_header_max_bytes (messageWalk.attachment) from this embedded file, and the plugin build copies it next to its sources (make plugin), so both sides call the same values attachments. message_data_url_header_max_bytes: a data URL is an attachment only when its \";base64,\" marker ends within this many bytes (UTF-8 bytes, not characters) of its start. The plugin sends a message call whole up to body_max_bytes. Over it, only a base64 value under a message_attachment_keys field becomes a descriptor (its size, type, hash and the text in it, or a not-read descriptor past the plugin's read budget); message text is never cut, and a call that still does not fit is blocked in every pack (rel-1-0-10:GAP-0356, GAP-0402, GAP-0436, GAP-0511, GAP-0512).",
   "body_max_bytes": 1048576,
   "message_attachment_keys": [
     "buffer",
     "media"
-  ]
+  ],
+  "message_data_url_header_max_bytes": 256
 }

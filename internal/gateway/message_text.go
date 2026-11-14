@@ -343,22 +343,25 @@ func messageAttachmentField(key string) bool {
 	return messageAttachmentKeys[asciiLowerPreservingBytes(key)]
 }
 
-// messageAttachmentKeys is message_attachment_keys of the embedded limits file.
-// The OpenClaw plugin reads the same list: over the body limit it replaces only
-// the values of these fields (by their size, type, hash and text), so the
-// plugin and the gateway agree on what an attachment is.
-var messageAttachmentKeys = func() map[string]bool {
+// messageAttachmentKeys and messageDataURLHeaderMaxBytes are
+// message_attachment_keys and message_data_url_header_max_bytes of the embedded
+// limits file. The OpenClaw plugin reads the same file: over the body limit it
+// replaces only the values of these fields that are attachments by the same
+// test (by their size, type, hash and text), so the plugin and the gateway
+// agree on what an attachment is (rel-1-0-10:GAP-0511).
+var messageAttachmentKeys, messageDataURLHeaderMaxBytes = func() (map[string]bool, int) {
 	var limits struct {
-		Keys []string `json:"message_attachment_keys"`
+		Keys      []string `json:"message_attachment_keys"`
+		HeaderMax int      `json:"message_data_url_header_max_bytes"`
 	}
-	if err := json.Unmarshal(publicschemas.InspectToolRequestLimits, &limits); err != nil || len(limits.Keys) == 0 {
-		panic("gateway: schemas/inspect-tool-request-limits.json has no message_attachment_keys")
+	if err := json.Unmarshal(publicschemas.InspectToolRequestLimits, &limits); err != nil || len(limits.Keys) == 0 || limits.HeaderMax <= 0 {
+		panic("gateway: schemas/inspect-tool-request-limits.json has no message_attachment_keys or message_data_url_header_max_bytes")
 	}
 	keys := make(map[string]bool, len(limits.Keys))
 	for _, k := range limits.Keys {
 		keys[asciiLowerPreservingBytes(k)] = true
 	}
-	return keys
+	return keys, limits.HeaderMax
 }()
 
 // attachment reads a long value of an attachment field that is base64 all
@@ -370,14 +373,22 @@ var messageAttachmentKeys = func() map[string]bool {
 // declared media type decides nothing; the bytes do. What is past the budget is
 // unread: the call is truncated, never skipped and never decoded for seconds on
 // the 200 ms path. A value with anything but base64 in it is not a payload and
-// is read as text by the caller.
+// is read as text by the caller. A data URL is a payload only when its
+// ";base64," ends within the first messageDataURLHeaderMaxBytes bytes (bytes,
+// not characters: the plugin counts the same way, GAP-0511).
+//
+// Known limit (no gap, the GAP-0356 class): what an attachment value carries
+// outside its decoded bytes is not read as text. That is a raw base64-alphabet
+// value (key lines in buffer are decoded, never read as words), the parameters
+// of an ASCII data URL header (data:...;name=...;base64,), and an attachment
+// nested past messageTextMaxDepth (that one is TRUNCATED, the unknown tier).
 func (w *messageWalk) attachment(s string) bool {
 	if len(s) < messagePayloadMinBytes {
 		return false
 	}
 	payload := s
 	if strings.HasPrefix(s, "data:") {
-		head := s[:min(len(s), 256)]
+		head := s[:min(len(s), messageDataURLHeaderMaxBytes)]
 		i := strings.Index(head, ";base64,")
 		if i < 0 {
 			return false

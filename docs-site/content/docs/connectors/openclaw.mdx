@@ -428,6 +428,17 @@ OpenClaw blocks a gate hook that throws or runs out of time, whatever the Defens
 
 The plugin waits for a verdict as long as the gateway says: the hook judge budget (`guardrail.judge.hook_timeout`) plus 2 seconds, or the approval timeout plus 5 seconds when human approval is on. Before 1.0.10 the plugin waited 2 seconds without approval, so a judge verdict could arrive after the plugin had applied its outage mode. The budget that OpenClaw gives the hook is the approval timeout plus 15 seconds, at least 30 seconds and at most 600 seconds, and the plugin stops waiting 3 seconds before it ends.
 
+### Large message calls
+
+The plugin sends a `message` tool call to the gateway whole, up to the gateway's 1 MiB request limit. Over the limit, the plugin never cuts the message text:
+
+- Each attachment (a long base64 `buffer` or `media` value, or a base64 data URL whose `;base64,` ends within its first 256 bytes) is replaced by a descriptor: its size, media type, SHA-256 hash and the text the gateway would read in its bytes. A key in a file sent as an attachment still reaches the rules.
+- Attachments past 32 MiB of base64 in one call are not read. Each one gets a descriptor that says so (size, type, hash and "not read").
+- A call with descriptors is judged at least at the unknown tier of its policy: an alert in the default and permissive policies, a block in the strict policy. A finding in the text still blocks.
+- A call whose text alone is over the limit is blocked in every policy, before any check is sent. So is a call with an attachment that was not read and a `content` or `body` field: earlier releases refused those calls for their size.
+
+The gateway reads an attachment only for the text of its decoded bytes. Text in a raw base64-alphabet `buffer` value, in the parameters of a plain ASCII data URL header, or in an attachment nested more than 8 levels deep is not read. The nested case is judged at the unknown tier.
+
 ### Limits of the hook modes
 
 - The `before_agent_run` hook is not an input gate for Codex harness runs, GitHub Copilot harness runs, or OpenClaw node worker turns on older OpenClaw lines. The prompt gate does not see those prompts.

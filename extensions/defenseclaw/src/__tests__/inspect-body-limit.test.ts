@@ -22,7 +22,15 @@ import { GATEWAY_BODY_LIMIT_BYTES, MESSAGE_TEXT_OVER_LIMIT, fitInspectBody } fro
 
 const limits = JSON.parse(
   readFileSync(new URL("../../../../schemas/inspect-tool-request-limits.json", import.meta.url), "utf8"),
-) as { body_max_bytes: number; message_attachment_keys: string[] };
+) as { body_max_bytes: number; message_attachment_keys: string[]; message_data_url_header_max_bytes: number };
+/** The gateway's attachment test rows (GAP-0511): which data URL values are attachments, by bytes. */
+const windowRows = JSON.parse(
+  readFileSync(new URL("../../../../internal/gateway/testdata/message_attachment_window.json", import.meta.url), "utf8"),
+) as {
+  payload_unit: string;
+  payload_repeat: number;
+  cases: Array<{ name: string; fill: string; count: number; marker_end_bytes: number; attachment: boolean }>;
+};
 const LIMIT = limits.body_max_bytes;
 const bodyBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 const KEY = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2";
@@ -52,6 +60,7 @@ describe("fitInspectBody", () => {
   it("has one source for the limit and the attachment fields: the file the gateway embeds", () => {
     expect(GATEWAY_BODY_LIMIT_BYTES).toBe(LIMIT);
     expect(limits.message_attachment_keys).toEqual(["buffer", "media"]);
+    expect(limits.message_data_url_header_max_bytes).toBe(256);
   });
 
   it("sends a call of exactly the limit whole and refuses one byte more of text", () => {
@@ -228,9 +237,92 @@ describe("fitInspectBody", () => {
     expect(list[1].MEDIA).toMatch(/^\[attachment bytes not sent/);
   });
 
-  it("refuses attachments past what one call reads", () => {
-    const got = fitInspectBody(wrap({ message: "a video", buffer: "AAEC".repeat((33 << 20) / 4) }));
+  // GAP-0512: an attachment past what one call reads is sent as a not-read
+  // descriptor (size, type, hash, "not read"), so the gateway judges the call
+  // at the unknown tier of its pack; the text still fits and is sent whole.
+  const NOT_READ = /^\[attachment bytes not sent: \d+ characters, [^,]+, sha256 [0-9a-f]{64}, not read: past the plugin's read budget\]$/;
+  it.each([
+    ["ben-photo-30m-caption", 30_000_000],
+    ["ben-photo-40m-caption", 40 << 20],
+  ])("sends %s with a not-read descriptor, never refused", (_name, n) => {
+    const params = { to: "+1", caption: "our trip", buffer: `data:image/jpeg;base64,${b64(noise(n))}` };
+    const got = fitInspectBody(wrap(params));
+    expect(got.refused).toBeUndefined();
+    expect(got.partial).toBe(true);
+    expect(got.payload.args_partial).toBe(true);
+    const args = got.payload.args as Record<string, string>;
+    expect(args.caption).toBe("our trip");
+    expect(args.buffer).toMatch(NOT_READ);
+    expect(args.buffer).toContain("image/jpeg");
+    expect(bodyBytes(got.payload)).toBeLessThan(4096);
+  });
+
+  it("reads attachments while the budget lasts and sends the rest not read", () => {
+    const first = b64(Buffer.concat([noise(20 << 20), Buffer.from(`\nkey: ${KEY}\n`)]));
+    const got = fitInspectBody(wrap({ message: "two files", attachments: [{ buffer: first }, { buffer: b64(noise(20 << 20)) }] }));
+    expect(got.partial).toBe(true);
+    const list = (got.payload.args as { attachments: Array<Record<string, string>> }).attachments;
+    expect(list[0].buffer).toContain(`key: ${KEY}`);
+    expect(list[0].buffer).not.toContain("not read");
+    expect(list[1].buffer).toMatch(NOT_READ);
+  });
+
+  // rel sent a message with content or body, and its gateway refused one over
+  // the limit (400): with an attachment nobody read, that call stays refused.
+  it.each(["content", "body"])("refuses a not-read attachment next to a %s, as rel did", (field) => {
+    const got = fitInspectBody(wrap({ to: "+1", [field]: "a video", buffer: "AAEC".repeat((33 << 20) / 4) }));
     expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+    const two = fitInspectBody(wrap({ [field]: "two photos", attachments: [{ buffer: b64(noise(13_000_000)) }, { buffer: b64(noise(13_000_000)) }] }));
+    expect(two.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+  });
+
+  it("still refuses text over the limit next to a not-read attachment", () => {
+    const got = fitInspectBody(wrap({ to: "+1", caption: `${prose(1_100_000)} ${KEY}`, buffer: "AAEC".repeat((33 << 20) / 4) }));
+    expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+  });
+
+  // GAP-0511: a data URL is an attachment only when ";base64," ends within the
+  // header window in BYTES, as the gateway reads it. The rows are the
+  // gateway's own (message_attachment_window.json).
+  it("calls the same data URL values attachments as the gateway does", () => {
+    const payload = windowRows.payload_unit.repeat(windowRows.payload_repeat);
+    for (const row of windowRows.cases) {
+      const value = `data:text/plain;name=${row.fill.repeat(row.count)};base64,${payload}`;
+      expect(Buffer.byteLength(value.slice(0, value.indexOf(";base64,") + 8)), row.name).toBe(row.marker_end_bytes);
+      const got = fitInspectBody(wrap({ buffer: value }), 4096);
+      if (row.attachment) {
+        expect(got.partial, row.name).toBe(true);
+        expect((got.payload.args as Record<string, string>).buffer, row.name).toMatch(/^\[attachment bytes not sent: /);
+      } else {
+        expect(got.refused, row.name).toBe(MESSAGE_TEXT_OVER_LIMIT);
+      }
+    }
+  });
+
+  // The review's round-7 shapes (GAP-0511): a non-ASCII header puts the marker
+  // past 256 bytes but within 256 characters. The gateway reads such a value
+  // as text, so over the limit the plugin refuses it (block, as rel), and
+  // under the limit it is sent whole.
+  const nonAsciiHdr = `data:text/plain;name=${"é".repeat(150)}`;
+  const rawKeyLines = (n: number) => `${KEY}\n${"Q".repeat(60)}\n`.repeat(Math.ceil(n / 75)).slice(0, n);
+  const shapes: Array<[string, (n: number) => Record<string, unknown>]> = [
+    ["dataurl-nonascii-hdrkey-bin", (n) => ({ to: "+15550001111", body: "see the attached file", buffer: `${nonAsciiHdr};note=${KEY};base64,${b64(noise(n))}` })],
+    ["dataurl-nonascii-hdr-rawpayload", (n) => ({ to: "+15550001111", body: "see the attached file", buffer: `${nonAsciiHdr};base64,${rawKeyLines(Math.round(n * 1.34))}` })],
+  ];
+  it.each(shapes)("refuses %s-over and sends %s-under whole", (_name, mk) => {
+    const over = wrap(mk(1_200_000));
+    const got = fitInspectBody(over);
+    expect(got.refused).toBe(MESSAGE_TEXT_OVER_LIMIT);
+    expect(got.payload).toBe(over);
+    const under = wrap(mk(600_000));
+    expect(bodyBytes(under)).toBeLessThanOrEqual(LIMIT);
+    expect(fitInspectBody(under).payload).toBe(under);
+  });
+
+  it("still describes an ASCII data URL photo over the limit (dataurl-ascii-photo-over)", () => {
+    const got = fitInspectBody(wrap({ to: "+15550001111", caption: "our trip", buffer: `data:image/jpeg;base64,${b64(noise(1_200_000))}` }));
+    expect(got.partial).toBe(true);
+    expect((got.payload.args as Record<string, string>).buffer).toMatch(/^\[attachment bytes not sent: \d+ characters, image\/jpeg, sha256 [0-9a-f]{64}\]$/);
   });
 
   it("changes only a message, whatever the case of its name: any other tool is sent whole", () => {

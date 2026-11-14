@@ -721,14 +721,18 @@ func TestInspectToolRequestLimitsFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var limits struct {
-		BodyMax int64    `json:"body_max_bytes"`
-		Keys    []string `json:"message_attachment_keys"`
+		BodyMax   int64    `json:"body_max_bytes"`
+		Keys      []string `json:"message_attachment_keys"`
+		HeaderMax int      `json:"message_data_url_header_max_bytes"`
 	}
 	if err := json.Unmarshal(raw, &limits); err != nil {
 		t.Fatal(err)
 	}
 	if limits.BodyMax != apiRequestBodyMaxBytes {
 		t.Errorf("limits file %+v, gateway limit %d: want the same body limit", limits, apiRequestBodyMaxBytes)
+	}
+	if limits.HeaderMax <= 0 || limits.HeaderMax != messageDataURLHeaderMaxBytes {
+		t.Errorf("limits file data URL header window %d, gateway %d: want the same window", limits.HeaderMax, messageDataURLHeaderMaxBytes)
 	}
 	if len(limits.Keys) != len(messageAttachmentKeys) {
 		t.Errorf("attachment fields %v, gateway %v", limits.Keys, messageAttachmentKeys)
@@ -771,6 +775,76 @@ func TestInspectToolArgsPartialDescriptorKeepsTheAttachmentText(t *testing.T) {
 		_, photo := postInspectForConnector(t, api, "openclaw", body("Apple\niPhone 15 Pro Max\n<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"></x:xmpmeta>"))
 		if want := bounded.Unknown(tier.tier).String(); photo.Action != want {
 			t.Errorf("%s: a photo's descriptor: action = %q findings = %v, want %s (the unknown tier), not a block for its size", tier.name, photo.Action, photo.Findings, want)
+		}
+	}
+}
+
+// A data URL is an attachment only when its ";base64," ends within the
+// window's bytes, not characters (GAP-0511). The plugin's test reads the same
+// rows, so the two sides call the same values attachments: a header of
+// non-ASCII characters whose marker is past the window is text, header and
+// payload alike.
+func TestMessageAttachmentDataURLWindow(t *testing.T) {
+	raw, err := os.ReadFile("testdata/message_attachment_window.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Unit   string `json:"payload_unit"`
+		Repeat int    `json:"payload_repeat"`
+		Cases  []struct {
+			Name       string `json:"name"`
+			Fill       string `json:"fill"`
+			Count      int    `json:"count"`
+			EndBytes   int    `json:"marker_end_bytes"`
+			Attachment bool   `json:"attachment"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Cases) == 0 {
+		t.Fatalf("fixture: %v", err)
+	}
+	const prefix = "data:text/plain;name="
+	payload := strings.Repeat(doc.Unit, doc.Repeat)
+	for _, c := range doc.Cases {
+		header := prefix + strings.Repeat(c.Fill, c.Count) + ";base64,"
+		if len(header) != c.EndBytes || (c.EndBytes <= messageDataURLHeaderMaxBytes) != c.Attachment {
+			t.Fatalf("%s: marker ends at byte %d (row %d), window %d: the row is wrong", c.Name, len(header), c.EndBytes, messageDataURLHeaderMaxBytes)
+		}
+		args, _ := json.Marshal(map[string]string{"buffer": header + payload})
+		got := extractMessageArgs(args)
+		if read := strings.Contains(got.Text, prefix); read == c.Attachment {
+			t.Errorf("%s: attachment = %v, want %v (text %.40q)", c.Name, !read, c.Attachment, got.Text)
+		}
+	}
+}
+
+// An attachment the plugin could not read (past its read budget) comes as a
+// not-read descriptor with args_partial: the call is at the unknown tier of
+// the pack in every tier, never an allow and never a block for its size alone
+// (GAP-0512, the GAP-0356 tier), and a key in the caption next to it still
+// blocks.
+func TestInspectToolArgsPartialUnreadAttachmentIsTheUnknownTier(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	env := boundedLaneEnv(t)
+	t.Setenv("HOME", env.home)
+	body := func(caption string) string {
+		b, _ := json.Marshal(map[string]any{"tool": "message", "direction": "outbound", "args_partial": true,
+			"args": map[string]any{"to": "+15550001111", "caption": caption,
+				"buffer": "[attachment bytes not sent: 53333359 characters, image/jpeg, sha256 " + strings.Repeat("cd", 32) + ", not read: past the plugin's read budget]"}})
+		return string(b)
+	}
+	for _, tier := range boundedTestTiers {
+		api := boundedTierAPI(t, tier.posture, tier.managed, tier.tier)
+		api.inspectToolScanTimeout = 5 * time.Second
+		_, photo := postInspectForConnector(t, api, "openclaw", body("our trip"))
+		if want := bounded.Unknown(tier.tier).String(); photo.Action != want {
+			t.Errorf("%s: a not-read photo: action = %q findings = %v, want %s (the unknown tier)", tier.name, photo.Action, photo.Findings, want)
+		}
+		_, keyed := postInspectForConnector(t, api, "openclaw", body("key: "+messageTestSecret))
+		if keyed.Action != "block" || keyed.Severity != "CRITICAL" {
+			t.Errorf("%s: a key in the caption next to a not-read photo: action = %q severity = %q, want block CRITICAL", tier.name, keyed.Action, keyed.Severity)
 		}
 	}
 }

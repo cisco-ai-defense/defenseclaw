@@ -18,8 +18,8 @@
 
 import { createHash } from "node:crypto";
 // Copied from schemas/inspect-tool-request-limits.json by `make plugin`: the
-// gateway reads its request body limit and its attachment fields from the same
-// file.
+// gateway reads its request body limit, its attachment fields and its data URL
+// header window from the same file.
 import limits from "./inspect-tool-request-limits.json" with { type: "json" };
 
 /**
@@ -36,13 +36,25 @@ import limits from "./inspect-tool-request-limits.json" with { type: "json" };
  * media type and SHA-256 and the text the gateway would have read in it (the
  * runs of text of its bytes, as messageAttachmentText reads them): a photo
  * becomes a few bytes, and a key in a file sent as an attachment still reaches
- * the rules. A call that then fits is sent with `args_partial: true` (the bytes
- * were not sent, so the gateway judges it at least at the unknown tier of its
- * pack). A call that still does not fit, because its text alone (or the text
- * in its attachments) is over the limit, is refused here and blocked in every
- * pack, as rel's gateway refused it (400, a failed check). Any other tool is
- * never changed here: the gateway refuses it as it always has and the check
- * fails closed.
+ * the rules. An attachment past what one call reads (ATTACHMENT_READ_MAX_CHARS)
+ * is replaced by a not-read descriptor, its size and type only: the text of
+ * the call fits, only that attachment cannot be read (GAP-0512). A call that
+ * then fits is sent with `args_partial: true` (the bytes were not sent, so the
+ * gateway judges it at least at the unknown tier of its pack: alert in the
+ * default and permissive packs, block in strict, never allow). A call that
+ * still does not fit, because its text alone (or the text in its attachments)
+ * is over the limit, is refused here and blocked in every pack, as rel's
+ * gateway refused it (400, a failed check). So is a call with a not-read
+ * attachment and a `content` or `body`: rel sent those calls, and its gateway
+ * refused them for their size, so the part nobody read stays blocked. Any
+ * other tool is never changed here: the gateway refuses it as it always has
+ * and the check fails closed.
+ *
+ * Known limit (no gap, the GAP-0356 class): the gateway reads an attachment
+ * only for the text of its decoded bytes, so the descriptor carries only that.
+ * Text in a raw base64-alphabet value (key lines in `buffer`), in the
+ * parameters of an ASCII data URL header, or in an attachment nested past the
+ * gateway's depth 8 (TRUNCATED, the unknown tier) is not read on either side.
  */
 
 /**
@@ -54,14 +66,29 @@ export const GATEWAY_BODY_LIMIT_BYTES = limits.body_max_bytes;
 /** The reason a message call over the limit is blocked. */
 export const MESSAGE_TEXT_OVER_LIMIT = "message text exceeds the inspection limit";
 
+/** ASCII-only lower case, as the gateway's asciiLowerPreservingBytes folds a field name. */
+const asciiLower = (s: string) => s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
 /** The fields that carry an attachment, at any depth (the gateway's messageAttachmentField). */
-const ATTACHMENT_KEYS = new Set(limits.message_attachment_keys.map((k) => k.toLowerCase()));
-/** An attachment field's value this long is replaced by its descriptor. */
+const ATTACHMENT_KEYS = new Set(limits.message_attachment_keys.map(asciiLower));
+/**
+ * The bytes from the start of a data URL within which its ";base64," must end
+ * (the gateway's messageDataURLHeaderMaxBytes, from the same file). UTF-8
+ * bytes, not UTF-16 units: a header with non-ASCII characters in it is text to
+ * the gateway once the marker is past this many bytes (GAP-0511).
+ */
+const DATA_URL_HEADER_MAX_BYTES = limits.message_data_url_header_max_bytes;
+const BASE64_MARKER = ";base64,";
+/**
+ * An attachment field's value this long is replaced by its descriptor. It is
+ * deliberately larger than the gateway's messagePayloadMinBytes (1024): a value
+ * between the two is kept as it is (or the call refused), never described, so
+ * the plugin describes only what the gateway also reads as an attachment.
+ */
 const ATTACHMENT_MIN_CHARS = 4096;
 /**
  * The base64 characters of attachments one call decodes for their text (24 MiB
  * of bytes, a few phone photos, well under a second). An attachment past it is
- * not read, so the call is refused rather than sent without what it might hold.
+ * not read: it gets a not-read descriptor (GAP-0512).
  */
 const ATTACHMENT_READ_MAX_CHARS = 32 << 20;
 /** The shortest run of text bytes read out of an attachment (messageRunMinBytes). */
@@ -231,52 +258,85 @@ function attachmentText(payload: string): string {
   return text;
 }
 
-/** The base64 part of a long attachment value (bare, or behind a base64 data URL header), or undefined. */
+/**
+ * The base64 part of a long attachment value (bare, or behind a base64 data URL
+ * header whose marker ends within DATA_URL_HEADER_MAX_BYTES bytes, as the
+ * gateway's messageWalk.attachment reads it), or undefined.
+ */
 function base64Payload(value: string): string | undefined {
   let payload = value;
   if (value.startsWith("data:")) {
-    const i = value.slice(0, 256).indexOf(";base64,");
-    if (i < 0) return undefined;
-    payload = value.slice(i + ";base64,".length);
+    // A marker past the window in characters is past it in bytes too, so the
+    // character slice only bounds the search; the byte count decides.
+    const i = value.slice(0, DATA_URL_HEADER_MAX_BYTES).indexOf(BASE64_MARKER);
+    const end = i + BASE64_MARKER.length;
+    if (i < 0 || Buffer.byteLength(value.slice(0, end)) > DATA_URL_HEADER_MAX_BYTES) return undefined;
+    payload = value.slice(end);
   }
   return BASE64_ALL.test(payload) ? payload : undefined;
 }
 
 /**
  * The descriptor of an attachment value: what the gateway can judge without
- * its bytes, and the text it would have read in them.
+ * its bytes, and the text it would have read in them. An attachment past the
+ * read budget (read false) says so and carries no text: the gateway judges it
+ * at the unknown tier, as it judges any part of a call it did not read.
  */
-function describeAttachment(value: string, payload: string): string {
-  const mime = /^data:([^;,]*)[;,]/.exec(value.slice(0, 256))?.[1] || "unknown type";
+function describeAttachment(value: string, payload: string, read: boolean): string {
+  const mime = /^data:([^;,]*)[;,]/.exec(value.slice(0, DATA_URL_HEADER_MAX_BYTES))?.[1] || "unknown type";
   const hash = createHash("sha256").update(value).digest("hex");
+  const facts = `${value.length} characters, ${mime}, sha256 ${hash}`;
+  if (!read) return `[attachment bytes not sent: ${facts}, not read: past the plugin's read budget]`;
   const text = attachmentText(payload);
-  const head = `[attachment bytes not sent: ${value.length} characters, ${mime}, sha256 ${hash}]`;
+  const head = `[attachment bytes not sent: ${facts}]`;
   return text === "" ? head : `${head}\n${text}`;
+}
+
+interface DescribeBudget {
+  /** The base64 characters left to read. */
+  chars: number;
+  /** Attachments replaced by a descriptor with their text. */
+  described: number;
+  /** Attachments replaced by a not-read descriptor. */
+  unread: number;
 }
 
 /**
  * Replaces each long base64 attachment value under value (in place) by its
- * descriptor. Returns false when the attachments are past what one call reads.
+ * descriptor: with its text while the read budget lasts, a not-read descriptor
+ * past it.
  */
-function describeAttachments(value: unknown, budget: { chars: number; described: number }, depth: number): boolean {
-  if (value === null || typeof value !== "object" || depth > 64) return true;
+function describeAttachments(value: unknown, budget: DescribeBudget, depth: number): void {
+  if (value === null || typeof value !== "object" || depth > 64) return;
   const container = value as Record<string, unknown>;
   for (const key of Object.keys(container)) {
     const item = container[key];
     if (typeof item === "string") {
-      if (!Array.isArray(container) && ATTACHMENT_KEYS.has(key.toLowerCase()) && item.length >= ATTACHMENT_MIN_CHARS) {
+      if (!Array.isArray(container) && ATTACHMENT_KEYS.has(asciiLower(key)) && item.length >= ATTACHMENT_MIN_CHARS) {
         const payload = base64Payload(item);
         if (payload === undefined) continue;
-        budget.chars -= payload.length;
-        if (budget.chars < 0) return false;
-        container[key] = describeAttachment(item, payload);
-        budget.described++;
+        const read = payload.length <= budget.chars;
+        if (read) {
+          budget.chars -= payload.length;
+          budget.described++;
+        } else {
+          budget.unread++;
+        }
+        container[key] = describeAttachment(item, payload, read);
       }
-    } else if (!describeAttachments(item, budget, depth + 1)) {
-      return false;
+    } else {
+      describeAttachments(item, budget, depth + 1);
     }
   }
-  return true;
+}
+
+/**
+ * True when rel's plugin sent this call to the gateway: it sent a message only
+ * when `content` or `body` held something, and the gateway refused one over
+ * the limit (400, a block).
+ */
+function relSent(args: Record<string, unknown>): boolean {
+  return Boolean(args.content || args.body);
 }
 
 /**
@@ -288,9 +348,12 @@ export function fitInspectBody(payload: Record<string, unknown>, limit = GATEWAY
   if (String(payload.tool).toLowerCase() !== "message" || size(payload) <= limit) return { payload, partial: false };
   const refused = { payload, partial: false, refused: MESSAGE_TEXT_OVER_LIMIT };
   if (payload.args === null || typeof payload.args !== "object") return refused;
-  const args = structuredClone(payload.args);
-  const budget = { chars: ATTACHMENT_READ_MAX_CHARS, described: 0 };
-  if (!describeAttachments(args, budget, 0) || budget.described === 0) return refused;
+  const args = structuredClone(payload.args) as Record<string, unknown>;
+  const budget: DescribeBudget = { chars: ATTACHMENT_READ_MAX_CHARS, described: 0, unread: 0 };
+  describeAttachments(args, budget, 0);
+  if (budget.described + budget.unread === 0) return refused;
+  // An attachment nobody can read next to the text rel sent: blocked, as rel blocked it.
+  if (budget.unread > 0 && relSent(args)) return refused;
   const out = { ...payload, args, args_partial: true };
   return size(out) <= limit ? { payload: out, partial: true } : refused;
 }
