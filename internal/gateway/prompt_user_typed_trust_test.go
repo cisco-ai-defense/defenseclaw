@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,6 +38,13 @@ import (
 // through a transport, a mode or a profile use it.
 func userTypedBlockingPrompt() string {
 	return "AWS_ACCESS_KEY_ID=" + codexHighEntropyAWSKey()
+}
+
+// userTypedBlockingPromptHook is the JSON body of a hook event whose prompt is
+// userTypedBlockingPrompt.
+func userTypedBlockingPromptHook(event, sessionID string) string {
+	body, _ := json.Marshal(map[string]string{"hook_event_name": event, "session_id": sessionID, "prompt": userTypedBlockingPrompt()})
+	return string(body)
 }
 
 func userTypedTrustGeneration(t *testing.T, profile string) *compiledRulePackCategories {
@@ -105,20 +113,22 @@ func TestTypedPromptTrustCeilingByCategoryAndOrigin(t *testing.T) {
 	}
 }
 
-// The /llm proxy: the prompt direction is the user turn and alerts; the
-// completion direction is the model and still blocks.
+// The /llm proxy: the user turn the proxy call site attributes as typed alerts;
+// the same text with no attribution (the prompt direction alone is not typed,
+// rel-1-0-10:GAP-0408) and the completion direction still block.
 func TestTypedPromptTrustCeilingOnTheProxyPromptPath(t *testing.T) {
 	for _, strategy := range []string{"regex_only", "regex_judge"} {
 		t.Run(strategy, func(t *testing.T) {
-			previous := liveGeneration.Load()
-			liveGeneration.Store(nil)
-			t.Cleanup(func() { liveGeneration.Store(previous) })
-			inspector := NewGuardrailInspector("local", nil, nil)
-			inspector.SetDetectionStrategy(strategy, "", "", "", false)
-			prompt := inspector.Inspect(context.Background(), "prompt", floorOverridePrompt, nil, "model", "action")
+			inspector := newLLMOriginInspector(t, strategy)
+			messages := []ChatMessage{{Role: "user", Content: floorOverridePrompt}}
+			prompt := inspectLLMMessages(inspector, messages)
 			if prompt == nil || prompt.Action != "alert" || prompt.Severity != "HIGH" ||
 				!strings.Contains(strings.Join(prompt.Findings, ","), "TRUST-IGNORE-PREVIOUS") {
 				t.Fatalf("prompt verdict = %+v, want a HIGH alert naming TRUST-IGNORE-PREVIOUS", prompt)
+			}
+			unattributed := inspector.Inspect(context.Background(), "prompt", floorOverridePrompt, messages, "model", "action")
+			if unattributed == nil || unattributed.Action != "block" || unattributed.Severity != "CRITICAL" {
+				t.Fatalf("prompt verdict with no typed attribution = %+v, want the CRITICAL block", unattributed)
 			}
 			completion := inspector.Inspect(context.Background(), "completion", floorOverridePrompt, nil, "model", "action")
 			if completion == nil || completion.Action != "block" || completion.Severity != "CRITICAL" {
