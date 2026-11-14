@@ -1596,9 +1596,13 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	}
 	generation := snapshotRulePackGenerationFor(ctx, req.Connector)
 	ruleFindings := messageRuleFindings(generation, content, folded, req.contentScope, !ManagedEnterpriseActive())
-	// A prompt whose content is a JSON block array, and a tool result with
-	// content block arrays in it, are also read as the model reads their text
-	// parts, with no separator (GAP-0465, GAP-0528).
+	// A prompt whose content is a JSON block array is also read as the model
+	// reads its text parts, with no separator (GAP-0465). So are the text
+	// blocks of a tool result, for the trust rules only (GAP-0528): the joined
+	// text exists to find an instruction split across blocks, and a secret or
+	// PII rule on it would read the digits and keys the blocks end and begin
+	// with as one token, and the unescaped text of a JSON item as a new
+	// plain-text string, which is not what the tool returned.
 	if joined := messagePartsJoinedText(req.Direction, content); joined != "" {
 		joinedFolded := ""
 		if foldTrust {
@@ -1606,8 +1610,17 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 				joinedFolded = view
 			}
 		}
-		ruleFindings = unionRuleFindings(ruleFindings,
-			messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
+		if isToolResultDirection(req.Direction) {
+			ruleFindings = unionRuleFindings(ruleFindings,
+				messageRuleFindings(generation, "", joined, req.contentScope, false))
+			if joinedFolded != "" {
+				ruleFindings = unionRuleFindings(ruleFindings,
+					messageRuleFindings(generation, "", joinedFolded, req.contentScope, false))
+			}
+		} else {
+			ruleFindings = unionRuleFindings(ruleFindings,
+				messageRuleFindings(generation, joined, joinedFolded, req.contentScope, !ManagedEnterpriseActive()))
+		}
 	}
 
 	var verdict *ToolInspectVerdict

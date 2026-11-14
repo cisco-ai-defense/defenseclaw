@@ -274,3 +274,32 @@ func TestTrustRulesMatchAcrossALineFeed(t *testing.T) {
 	}
 	t.Logf("%d rows, %d single-space swaps", rows, cuts)
 }
+
+// The joined view of a tool result is for the trust rules: the end of one block
+// and the start of the next are not one key or number for the secret and PII
+// rules, and the unescaped text of a JSON item is not a new plain string (the
+// owner trace cases that raised ENT-BULK-SSN-NOHYPHEN in the strict pack when
+// the view read every rule).
+func TestToolResultPartsViewIsTrustRulesOnly(t *testing.T) {
+	api := newPartJoinAPI(t)
+	parts := []string{"token AKIAQ3XK7PD", "2MZ5WJ8HR end"}
+	generation := snapshotRulePackGeneration("")
+	whole := scanContentRuleCategoryWithGeneration(generation, strings.Join(parts, ""), "message", ruleContentScopeUntrusted, "")
+	if len(whole) == 0 || whole[0].RuleID != "SEC-AWS-KEY" {
+		t.Fatalf("the joined text no longer holds an AWS key: %+v", whole)
+	}
+	if got := partJoinToolResultRules(api, structuredHookContentString(partJoinBlocks("text", parts))); slices.Contains(got, "SEC-AWS-KEY") {
+		t.Errorf("a tool result's joined blocks are read by a secret rule: %v", got)
+	}
+	// The same parts as a prompt are still read joined by every rule.
+	messages := partJoinChatMessages(t, string(mustJSON(t, []map[string]any{{"role": "user", "content": partJoinBlocks("text", parts)}})))
+	if got := promptPartsJoinedText(promptInspectText(messages), messages, nil); got != strings.Join(parts, "") {
+		t.Errorf("prompt view %q", got)
+	}
+	verdict := api.inspectMessageContent(context.Background(), &ToolInspectRequest{
+		Tool: "message", Content: string(mustJSON(t, partJoinBlocks("text", parts))), Direction: "prompt", Connector: "hermes",
+	})
+	if verdict == nil || !slices.Contains(verdict.Findings, "SEC-AWS-KEY:"+whole[0].Title) {
+		t.Errorf("hook prompt of two blocks: %+v", verdict)
+	}
+}

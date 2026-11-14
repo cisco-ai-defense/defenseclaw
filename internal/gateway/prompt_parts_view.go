@@ -43,7 +43,10 @@ import (
 // MCP content array, Anthropic tool_result content) are read as one text; the
 // hook scans the leaves of a structured result one per line
 // (rel-1-0-10:GAP-0529, GAP-0528). Both get the same no-separator view and the
-// same stronger-finding merge.
+// same stronger-finding merge. The tool-result view is read by the trust rules
+// only (inspectMessageContent): it exists to find an instruction split across
+// blocks, and a PII or secret rule would read the digits and keys two blocks
+// end and begin with as one token.
 
 // isContentTextBlockType reports whether a content block of type blockType is
 // text the model reads: "text" (Chat Completions, Anthropic), "input_text" and
