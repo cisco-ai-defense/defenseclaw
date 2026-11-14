@@ -158,10 +158,16 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "GO_TEST_SHARDS: 40" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
-    # The three Linux jobs, and the four darwin gateway parts, which weigh the
-    # unix and darwin tests by their Linux times (go-darwin.json holds none).
+    # The three Linux jobs, and the six darwin gateway parts, which weigh the
+    # unix and darwin tests by their macOS times once go-darwin.json records
+    # internal/gateway and by their Linux times until then.
     assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
-    assert workflow.count("label: macos-latest darwin gateway ") == 4
+    assert workflow.count("label: macos-latest darwin gateway ") == 6
+    assert workflow.count("            shards: 6\n") == 6
+    assert (
+        "--timings scripts/test-timings/go-darwin.json \\\n            --timings scripts/test-timings/go-linux.json \\"
+        in workflow
+    )
     # One coverage profile per gateway, audit and remaining-package shard: the
     # count Combine Go coverage requires follows the shard counts (it stayed 52
     # when the remaining packages went from 12 to 16 shards and would have
@@ -180,7 +186,12 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
-    assert workflow.count(race) == 2
+    assert workflow.count(race) == 1
+    # A gateway shard's -timeout follows its planned seconds
+    # (go_test_shards.py --timeout, test_linux_gateway_shard_timeouts_fit_the_job).
+    gateway = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$test_timeout" '
+    assert workflow.count(gateway) == 1
+    assert 'test_timeout="$("${plan[@]}" --timeout)"' in workflow
     # The remaining-package shards run several go test runs in one step: they
     # share one deadline inside the step budget, and each run is stopped at
     # most 11 minutes in or when the deadline is up, whichever comes first.
@@ -188,11 +199,15 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert workflow.count(shared) == 1
     assert "deadline=$((SECONDS + 960))" in workflow
     assert 'echo "$((left < 660 ? left : 660))s"' in workflow
-    # The three Linux race jobs and the darwin connector parts.
-    assert workflow.count("python3 scripts/go_test_report.py --timings") == 4
+    # The three Linux race jobs, the darwin connector parts and the darwin
+    # gateway parts.
+    assert workflow.count("python3 scripts/go_test_report.py --timings") == 5
     assert workflow.count("label: macos-latest darwin connector ") == 4
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
+    assert "name: go-test-timings-darwin-gateway-${{ matrix.shard }}" in workflow
+    # Part 1 runs go test's vet checks for the whole package; the others skip them.
+    assert '[ "$GO_TEST_SHARD" -ne 0 ] || vet=' in workflow
     assert "DC_TEST_NATIVE_GATEWAY" in workflow
     needs = "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]"
     assert needs in workflow
@@ -324,6 +339,35 @@ def test_go_test_timeouts_stay_inside_the_job_budget() -> None:
         text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
         for minutes in re.findall(r"-timeout[ =](\d+)m", text):
             assert int(minutes) <= 14, f"{name}: go test -timeout {minutes}m leaves no room in a 20-minute job"
+    # The Linux gateway shards take their -timeout from the plan, at most
+    # TIMEOUT_CAP_SECONDS; with the slowest set-up measured on 11-13 (377 s:
+    # checkout, Go cache, plugin build, race compile) and a minute for the
+    # artifact uploads, the job ends inside its timeout-minutes.
+    spec = importlib.util.spec_from_file_location("go_test_shards", ROOT / "scripts/go_test_shards.py")
+    shards = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(shards)
+    job = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))["jobs"]["go-test-gateway"]
+    assert shards.TIMEOUT_CAP_SECONDS + 377 + 60 <= job["timeout-minutes"] * 60
+
+
+def test_pull_request_workflows_use_no_actions_setup_go_cache() -> None:
+    # actions/setup-go's own cache saves an entry per branch (520-700 MB
+    # each, the repository's cache quota). In a pull request's scope a small
+    # one was restored before main's shared Go cache (PR #1456: every macOS
+    # job compiled cold). Pull request jobs use ./.github/actions/setup-go or
+    # set cache: false.
+    for name, job_id, job in _pull_request_jobs():
+        for step in job.get("steps") or []:
+            if str(step.get("uses", "")).startswith("actions/setup-go@"):
+                assert (step.get("with") or {}).get("cache") is False, (
+                    f"{name}:{job_id} uses the actions/setup-go cache"
+                )
+
+
+def test_the_shared_go_cache_restores_only_its_own_entries() -> None:
+    action = yaml.safe_load((ROOT / ".github/actions/setup-go/action.yml").read_text(encoding="utf-8"))
+    restore = next(step for step in action["runs"]["steps"] if step.get("id") == "restore")
+    assert restore["with"]["restore-keys"].strip().splitlines() == ["${{ steps.paths.outputs.prefix }}"]
 
 
 def test_every_go_cache_save_writes_the_entry_its_job_restores() -> None:

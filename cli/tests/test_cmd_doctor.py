@@ -3931,10 +3931,29 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        self.assertEqual(
-            _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
-            "",
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            self.assertEqual(
+                _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
+                "",
+            )
+
+    def test_native_windows_openclaw_reports_no_proxy(self):
+        # Native Windows OpenClaw runs only its plugin hooks: no guardrail
+        # proxy listens, so a closed port is expected, alone or with a hook
+        # connector; ZeptoClaw still needs the probe.
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
         )
+
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+            alone = _guardrail_proxy_intentionally_closed(self._cfg(["openclaw"], mode="action"))
+            mixed = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "openclaw"]))
+            zepto = _guardrail_proxy_intentionally_closed(self._cfg(["openclaw", "zeptoclaw"]))
+        self.assertIn("openclaw (mode=action via native plugin hooks)", alone)
+        self.assertIn("no guardrail proxy in native hook mode", alone)
+        self.assertIn("codex (mode=observe)", mixed)
+        self.assertIn("openclaw (mode=observe via native plugin hooks)", mixed)
+        self.assertEqual(zepto, "")
 
     def test_zeptoclaw_peer_forces_real_probe(self):
         from defenseclaw.commands.cmd_doctor import (

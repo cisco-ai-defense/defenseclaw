@@ -13,51 +13,13 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// MaxNestingDepth bounds how deep a command may nest (, { and [ before a
-// parser reads it. The mvdan parser recurses once or more per level of (,
-// $(, $((, { and [, and a 180 KiB command of ( overflowed the 1 GB
-// goroutine stack of the Windows gateway: a fatal error no recover catches,
-// so the whole gateway exited (GAP-2537). No real command nests this deep.
-const MaxNestingDepth = 512
-
-// TooDeep reports whether command is past the reading bounds: it nests (, {
-// or [ deeper than MaxNestingDepth (counted in one linear pass over every
-// byte, quotes and escapes too, so the bound holds whatever the grammar), or
-// its brace expansions would produce more than MaxBraceFields words or
-// MaxBraceBytes bytes (BraceExpansionTooLarge, GAP-0187). Callers take
-// their over-limit path and never hand such a command to a recursive parser
-// or an expander.
-func TooDeep(command string) bool {
-	if len(command) >= largeCommandMin && len(command) <= largeCommandMax {
-		return tooDeepLarge(command)
-	}
-	return tooDeepScan(command)
-}
-
-func tooDeepScan(command string) bool {
-	depth, braces := 0, false
-	for i := 0; i < len(command); i++ {
-		switch command[i] {
-		case '(', '{', '[':
-			if depth++; depth > MaxNestingDepth {
-				return true
-			}
-			braces = braces || command[i] == '{'
-		case ')', '}', ']':
-			if depth > 0 {
-				depth--
-			}
-		}
-	}
-	return braces && BraceExpansionTooLarge(command)
-}
-
 // Reader is the reader to hand a recursive shell parser
-// (syntax.Parser.Parse) for command: a command past MaxNestingDepth reads
-// as an error, so the parser returns that error instead of recursing into
-// it. Every hook-path and gateway reader parses through it, so no caller
-// has to remember the bound (GAP-2556: the hook client tilde twin parsed
-// the raw command before any bound and overflowed the 1 GB stack).
+// (syntax.Parser.Parse) for command: a command past the reading budget
+// (BudgetExceeded) reads as an error, so the parser returns that error
+// instead of recursing into it. Every hook-path and gateway reader parses
+// through it, so no caller has to remember the bound (GAP-2556: the hook
+// client tilde twin parsed the raw command before any bound and overflowed
+// the 1 GB stack).
 func Reader(command string) io.Reader {
 	if TooDeep(command) {
 		return tooDeepReader{}
@@ -65,16 +27,16 @@ func Reader(command string) io.Reader {
 	return strings.NewReader(command)
 }
 
-// ErrTooDeep is the read error of a command past MaxNestingDepth.
-var ErrTooDeep = errors.New("shellparse: command nests past the reading bound")
+// ErrTooDeep is the read error of a command past the reading budget.
+var ErrTooDeep = errors.New("shellparse: command is past the reading budget")
 
 type tooDeepReader struct{}
 
 func (tooDeepReader) Read([]byte) (int, error) { return 0, ErrTooDeep }
 
 // Parse reads a command with the same Bash-then-POSIX grammar used for hook
-// command proofs. Callers bound their inputs before parsing; a command past
-// MaxNestingDepth is not parsed.
+// command proofs. A command past the reading budget (BudgetExceeded) is not
+// parsed.
 func Parse(command string) (*syntax.File, bool) {
 	return parse(command, false)
 }
@@ -86,7 +48,7 @@ func ParseWithComments(command string) (*syntax.File, bool) {
 }
 
 func parse(command string, comments bool) (*syntax.File, bool) {
-	if len(command) < largeCommandMin || len(command) > largeCommandMax {
+	if len(command) < largeCommandMin || len(command) > MaxCommandBytes {
 		return parseCommand(command, comments)
 	}
 	key := parseCacheKey{command, comments}

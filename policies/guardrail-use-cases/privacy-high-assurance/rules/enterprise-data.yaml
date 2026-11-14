@@ -51,11 +51,18 @@ rules:
     tags: [pii, financial, privacy-high-assurance]
 
   - id: ENT-EMAIL-BULK
-    pattern: '(?i)\b(?:e-?mail)(?:[\s_-]+address)?[\s*_:#=-]{1,12}[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
+    pattern: '(?i)(?:\b|_)e-?mails?(?:[\s_-]*address(?:es)?)?["''\s*_:#=\[-]{1,12}[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
     title: "Email address in a labeled field"
     severity: CRITICAL
     confidence: 0.80
     tags: [pii, structured, privacy-high-assurance]
+
+  - id: PII-EMAIL-LIST
+    pattern: '(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b'
+    title: "Five or more email addresses together"
+    severity: CRITICAL
+    confidence: 0.75
+    tags: [pii, bulk, privacy-high-assurance]
 
   - id: ENT-US-PHONE
     pattern: '(?i)\b(?:phone|telephone|mobile|contact)(?:[\s_-]+(?:number|no\.?))?[\s*_:#=-]{1,12}(?:\+\d{1,3}(?:[\s.-]?\d){7,14}|(?:\+1[\s.-]?)?\d{3}[\s.-]\d{3}[\s.-]\d{4}|\(\d{3}\)[\s.-]?\d{3}[\s.-]\d{4})\b'

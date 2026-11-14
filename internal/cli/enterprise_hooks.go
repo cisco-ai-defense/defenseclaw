@@ -664,6 +664,7 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		// re-rendered on the next pass.
 		ForeignHookGuardBinary: standaloneForeignHookGuardBinary(enterpriseHookConnector),
 		ManagedHookBinary:      standaloneManagedHookBinary(),
+		RouteOnly:              enterpriseHookWindowsRouteOnly(enterpriseHookConnector, enterpriseHookUser, target.sid, apiAddr),
 	}
 	// A single-target install renders the shared machine policy from the
 	// same deployment contract the guardian uses, so the next reconcile does
@@ -2760,6 +2761,7 @@ func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bo
 				// Standalone Amp and OpenCode only; empty on Secure Client.
 				ForeignHookGuardBinary: standaloneForeignHookGuardBinary(target.Connector),
 				ManagedHookBinary:      standaloneManagedHookBinary(),
+				RouteOnly:              enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr),
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
@@ -3378,6 +3380,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				MachinePolicyContractID:     enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 				OpenCodeServicePort:         openCodePorts[strings.ToUpper(resolved.sid)],
 				OpenCodeServicePortRequired: runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && strings.EqualFold(target.Connector, "opencode"),
+				RouteOnly:                   enterpriseHookWindowsRouteOnly(target.Connector, target.User, resolved.sid, apiAddr),
 			}
 			// Repair the user's objects as root before anything validates them.
 			err = repairEnterpriseHookUserTargetPlatform(target, opts)
@@ -3675,6 +3678,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	defer enterpriseHookGuardianWatching.Store(false)
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
 	startEnterpriseHookQuarantineRemovals(cmd.Context(), cmd.ErrOrStderr())
+	startEnterpriseHookPeerBroker(cmd.Context(), cmd.ErrOrStderr())
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks watch: create fsnotify watcher: %w", err)
@@ -6326,20 +6330,12 @@ func loadEnterpriseHookUserScopedTokens(dataDir, connectorName, identity string)
 	return enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity, false)
 }
 
-func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
-	connectorName = strings.TrimSpace(connectorName)
-	if connectorName == "" {
-		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
-	}
-	dataDir = strings.TrimSpace(dataDir)
-	if dataDir == "" {
-		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
-	}
-	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
-		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
-	}
+// enterpriseHookUserScopedKey is the per-user credential key targets are
+// rendered from: the staged key while a rotation runs, else the committed
+// one (minted on first use when mint is set).
+func enterpriseHookUserScopedKey(dataDir string, mint bool) (string, error) {
 	if err := validateEnterpriseHookUserTokenKeyLocation(dataDir); err != nil {
-		return "", "", err
+		return "", err
 	}
 	// While a credential rotation has staged the next key, every target is
 	// rendered (and verified) with credentials derived from it; the gateway
@@ -6359,7 +6355,26 @@ func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, 
 		}
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("enterprise hooks: %w", err)
+		return "", fmt.Errorf("enterprise hooks: %w", err)
+	}
+	return key, nil
+}
+
+func enterpriseHookUserScopedTokensFor(dataDir, connectorName, identity string, mint bool) (string, string, error) {
+	connectorName = strings.TrimSpace(connectorName)
+	if connectorName == "" {
+		return "", "", fmt.Errorf("enterprise hooks: connector is required before deriving per-user credentials")
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", "", fmt.Errorf("enterprise hooks: config data_dir is required before deriving per-user credentials")
+	}
+	if _, ok := connector.CanonicalUserScopedIdentity(identity); !ok {
+		return "", "", fmt.Errorf("enterprise hooks: per-user credentials need the target's uid or SID")
+	}
+	key, err := enterpriseHookUserScopedKey(dataDir, mint)
+	if err != nil {
+		return "", "", err
 	}
 	hookToken, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
 	if err != nil {

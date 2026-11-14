@@ -1,0 +1,35 @@
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime   # must be exactly this path
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe                            # observe | action
+  connectors:
+    codex: {}
+    claudecode: {}
+# Added by the S1 upgrade fixture: semantic routing as a 1.0.8 managed admin
+# config wrote it (vLLM Semantic Router remote classifier, keys named by
+# api_key_env). 1.0.10 must accept it unchanged and keep the keys working.
+routing:
+  enabled: true
+  version: 0.3.0
+  remote:
+    endpoint: https://router.example.internal
+  models:
+    - name: fast
+      provider: openai
+      model: gpt-4.1-mini
+      api_key_env: OPENAI_API_KEY
+    - name: local
+      provider: ollama
+      model: llama3.1
+      base_url: http://127.0.0.1:11434
+  decisions:
+    - name: default
+      model_refs: [local]

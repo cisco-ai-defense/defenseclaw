@@ -55,6 +55,12 @@ const (
 	// overflowed, or otherwise non-authoritative scans to local SQLite only.
 	// It can never be projected as a managed inventory snapshot.
 	ObservabilityV8LocalInventoryDiagnosticAction observability.ProducerKey = "local_inventory_diagnostic"
+	// ObservabilityV8ManagedEndpointHealthAction is the release-owned routing
+	// identity for the periodic platform.health endpoint health report. The
+	// report carries the user.id of failing hook targets, so like the
+	// inventory it stays in local SQLite and is exported only through the
+	// CMID-authenticated AI Defense destination.
+	ObservabilityV8ManagedEndpointHealthAction observability.ProducerKey = "endpoint_health"
 )
 
 // ObservabilityV8ManagedAIDOptions are release-owned inputs, not source
@@ -86,9 +92,15 @@ func WithObservabilityV8ManagedAIDDestination(
 	plan *ObservabilityV8Plan,
 	options ObservabilityV8ManagedAIDOptions,
 ) (*ObservabilityV8Plan, error) {
-	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) || options.Endpoint == "" ||
+	if plan == nil || !managed.IsManagedEnterprise(options.DeploymentMode) ||
 		managed.IsStandaloneProfile(options.Profile) {
 		return plan, nil
+	}
+	if options.Endpoint == "" {
+		// No managed destination yet, but the endpoint health report must
+		// still never reach an operator destination: a report built while a
+		// reload clears the endpoint can be emitted on this plan.
+		return withObservabilityV8ManagedEndpointHealthReserved(plan)
 	}
 	origin, ok := observabilityV8ManagedAIDOrigin(options.Endpoint)
 	if !ok {
@@ -250,9 +262,10 @@ func ObservabilityV8ManagedAIDDeploymentAliases(destination ObservabilityV8Effec
 	return !destination.managedAIDDeploymentAliasesOff
 }
 
-// reserveObservabilityV8ManagedInventory prepends a release-owned drop route
-// to every operator-configured log destination. The required local SQLite
-// destination is deliberately excluded so inventory remains durable; the
+// reserveObservabilityV8ManagedInventory prepends release-owned drop routes
+// for the endpoint inventory and the endpoint health report to every
+// operator-configured log destination. The required local SQLite
+// destination is deliberately excluded so both remain durable; the
 // managed destination is appended only after this pass and is therefore the
 // sole optional exporter allowed to receive these actions.
 func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectivePlan) {
@@ -268,7 +281,7 @@ func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectiveP
 			continue
 		}
 		for routeIndex := range destination.Routes {
-			destination.Routes[routeIndex].Index = routeIndex + 1
+			destination.Routes[routeIndex].Index = routeIndex + 2
 		}
 		destination.Routes = append([]ObservabilityV8EffectiveRoute{{
 			Index: 0, Name: "drop-managed-endpoint-inventory", Generated: true,
@@ -289,8 +302,94 @@ func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectiveP
 				},
 			},
 			Action: ObservabilityV8RouteDrop,
-		}}, destination.Routes...)
+		}, observabilityV8ManagedEndpointHealthDropRoute(1)}, destination.Routes...)
 	}
+}
+
+const observabilityV8ManagedEndpointHealthDropRouteName = "drop-managed-endpoint-health"
+
+// observabilityV8ManagedEndpointHealthDropRoute drops the endpoint health
+// report. It lists the users whose hook targets are failing, so it is
+// reserved to the managed destination.
+func observabilityV8ManagedEndpointHealthDropRoute(index int) ObservabilityV8EffectiveRoute {
+	return ObservabilityV8EffectiveRoute{
+		Index: index, Name: observabilityV8ManagedEndpointHealthDropRouteName, Generated: true,
+		Signals: []observability.Signal{observability.SignalLogs},
+		Selector: ObservabilityV8EffectiveSelector{
+			Buckets: []observability.Bucket{observability.BucketPlatformHealth},
+			Actions: []observability.ProducerKey{ObservabilityV8ManagedEndpointHealthAction},
+		},
+		Action: ObservabilityV8RouteDrop,
+	}
+}
+
+// ObservabilityV8PlanReservesEndpointHealth reports whether every operator
+// log destination of plan drops the endpoint health report, so emitting it
+// on plan can reach only local SQLite and the managed destination. The
+// reporter checks the plan that routes each report, which closes the window
+// where a reload swaps the plan after the reporter's config check.
+func ObservabilityV8PlanReservesEndpointHealth(plan *ObservabilityV8Plan) bool {
+	if plan == nil {
+		return false
+	}
+	for _, destination := range plan.effective.Destinations {
+		if destination.Kind == ObservabilityV8DestinationLocalSQLite ||
+			destination.Name == ObservabilityV8ManagedAIDDestinationName ||
+			!destination.Capabilities.Supports(observability.SignalLogs) ||
+			!observabilityV8SignalsContain(destination.SelectedSignals, observability.SignalLogs) {
+			continue
+		}
+		reserved := false
+		for _, route := range destination.Routes {
+			if route.Generated && route.Name == observabilityV8ManagedEndpointHealthDropRouteName {
+				reserved = true
+				break
+			}
+		}
+		if !reserved {
+			return false
+		}
+	}
+	return true
+}
+
+// withObservabilityV8ManagedEndpointHealthReserved returns plan with the
+// endpoint health drop route first on every operator log destination that
+// lacks it, for a managed Secure Client plan compiled without the managed
+// destination. It is idempotent.
+func withObservabilityV8ManagedEndpointHealthReserved(plan *ObservabilityV8Plan) (*ObservabilityV8Plan, error) {
+	effective := cloneObservabilityV8EffectivePlan(plan.effective)
+	changed := false
+	for destinationIndex := range effective.Destinations {
+		destination := &effective.Destinations[destinationIndex]
+		if destination.Kind == ObservabilityV8DestinationLocalSQLite ||
+			destination.Name == ObservabilityV8ManagedAIDDestinationName ||
+			!destination.Capabilities.Supports(observability.SignalLogs) ||
+			!observabilityV8SignalsContain(destination.SelectedSignals, observability.SignalLogs) {
+			continue
+		}
+		reserved := false
+		for _, route := range destination.Routes {
+			if route.Generated && route.Name == observabilityV8ManagedEndpointHealthDropRouteName {
+				reserved = true
+				break
+			}
+		}
+		if reserved {
+			continue
+		}
+		for routeIndex := range destination.Routes {
+			destination.Routes[routeIndex].Index = routeIndex + 1
+		}
+		destination.Routes = append([]ObservabilityV8EffectiveRoute{
+			observabilityV8ManagedEndpointHealthDropRoute(0),
+		}, destination.Routes...)
+		changed = true
+	}
+	if !changed {
+		return plan, nil
+	}
+	return newObservabilityV8Plan(effective)
 }
 
 // observabilityV8ManagedAIDOrigin accepts only the release-owned base origin.

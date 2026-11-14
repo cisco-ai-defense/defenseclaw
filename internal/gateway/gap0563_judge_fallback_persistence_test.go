@@ -106,11 +106,9 @@ func TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("judge call did not finish")
 			}
-			row := newestHookDecision(t, fixture.api.store, session)
-			extra, _ := row.Structured["extra"].(map[string]any)
-			if got, _ := extra[hookJudgeFallbackExtraKey].(string); got != tc.reason {
-				t.Errorf("audit fallback = %q, want %q", got, tc.reason)
-			}
+			// A benign per-user allow keeps one local row, its hook_decision
+			// row, which names the fallback (#1384); the connector-hook
+			// record with extra.judge_fallback is exported only.
 			if got := gap0563ProjectedFallback(t, fixture.path); got != tc.reason {
 				t.Errorf("projected fallback = %q, want %q", got, tc.reason)
 			}
