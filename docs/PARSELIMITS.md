@@ -70,6 +70,13 @@ before the budget refused to read the call (GAP-0281). The hook client sends
 the incomplete-evidence header for such a call; the gateway does not depend on
 it.
 
+A call the shell parser fails on (a contained parser fault, such as a
+recovered panic) is not an over-budget call: it blocks in every pack with the
+reason "The command could not be parsed safely", never the parse-bound alert,
+and in observe mode a hook route still blocks it, as the hook routes did
+before the fault was contained, while `/api/v1/inspect/tool` and ACP report
+it as `would_block` (rel-1-0-10:GAP-0486).
+
 ## A block proven beside a cap (the cap floor)
 
 The unknown tier is a floor, not the verdict. A call past any reading cap of

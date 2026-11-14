@@ -48,6 +48,7 @@ from defenseclaw.hook_metrics import (
     CONNECTOR_HOOK_SYNTHETIC_ACTION,
     HOOK_DECISION_ACTION,
     HOOK_DECISION_VERDICT_KEYS,
+    HOOK_ROWS_TABLE,
     aggregate_connector_hook_decision,
     aggregate_hook_row_decision,
     connector_hook_connector,
@@ -55,6 +56,7 @@ from defenseclaw.hook_metrics import (
     hook_decision_body_sql,
     hook_decision_may_block_sql,
     hook_semantic_event_id_sql,
+    lone_hook_decision_rows_sql,
     lone_hook_decision_sql,
 )
 from defenseclaw.models import (
@@ -885,8 +887,46 @@ class Store:
                 (_SUMMARY_DETAILS_BYTES, limit),
             )
             return [self._row_to_event(r) for r in cur.fetchall()]
-        body = hook_decision_body_sql()
         verdict_keys = ", ".join(f"'{key}', json_extract(body, '$.\"{key}\"')" for key in HOOK_DECISION_VERDICT_KEYS)
+        if "retention_timestamp_unix_nano" in columns:
+            # The window is taken newest first through the time index
+            # (idx_retention_audit_events_timestamp, which the gateway keeps):
+            # +action keeps the planner off idx_audit_action, which sorted
+            # every hook row by a column stored after its JSON records, a
+            # cold read of each row's overflow pages (239 s on a grown 6.4 GB
+            # store, rel-1-0-10:GAP-0316). Only the window's rows are read
+            # and parsed.
+            body = hook_decision_body_sql("a.payload_json", "a.projected_record_json")
+            cur = self.db.execute(
+                f"""SELECT id, timestamp, action,
+                          CASE WHEN action = '{HOOK_DECISION_ACTION}' AND TRIM(COALESCE(target, '')) = ''
+                               THEN json_extract(body, '$.\"defenseclaw.hook.event\"') ELSE target END,
+                          actor, details, severity, run_id,
+                          CASE WHEN action = '{HOOK_DECISION_ACTION}' AND json_valid(COALESCE(body, ''))
+                               THEN json_object({verdict_keys}) END,
+                          connector, enforced, semantic_event_id
+                   FROM (
+                       SELECT a.id, a.timestamp, a.action, a.target, a.actor,
+                              substr(COALESCE(a.details, ''), 1, ?) AS details,
+                              a.severity, a.run_id, a.connector, a.enforced, a.rowid AS row_order,
+                              a.retention_timestamp_unix_nano AS instant,
+                              CASE WHEN a.action = '{HOOK_DECISION_ACTION}' THEN {body} END AS body,
+                              {self._hook_semantic_id_sql("a")} AS semantic_event_id
+                       FROM (SELECT rowid AS window_row FROM audit_events
+                             WHERE +action IN ('{CONNECTOR_HOOK_ACTION}', '{HOOK_DECISION_ACTION}',
+                                               '{CONNECTOR_HOOK_SYNTHETIC_ACTION}')
+                             ORDER BY retention_timestamp_unix_nano DESC LIMIT ?) AS window
+                       CROSS JOIN audit_events AS a ON a.rowid = window.window_row
+                   )
+                   ORDER BY instant DESC, row_order DESC""",
+                (_SUMMARY_DETAILS_BYTES, limit * 2 + 50),
+            )
+            return [
+                event
+                for event in count_once_hook_rows(self._row_to_event(r) for r in cur.fetchall())
+                if event.action != CONNECTOR_HOOK_SYNTHETIC_ACTION
+            ][:limit]
+        body = hook_decision_body_sql()
         cur = self.db.execute(
             f"""SELECT id, timestamp, action,
                       CASE WHEN action = '{HOOK_DECISION_ACTION}' AND TRIM(COALESCE(target, '')) = ''
@@ -918,6 +958,13 @@ class Store:
             if event.action != CONNECTOR_HOOK_SYNTHETIC_ACTION
         ][:limit]
 
+    def _hook_rows_tracked(self) -> bool:
+        """Whether the store has audit_hook_lone (a 1.0.10 gateway opened it)."""
+
+        return self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (HOOK_ROWS_TABLE,)
+        ).fetchone() is not None
+
     def connector_hook_event_stats(self) -> dict[str, dict[str, Any]]:
         """Return exact all-time hook counters grouped by connector.
 
@@ -927,7 +974,16 @@ class Store:
         """
         columns, _ = self._audit_projection_schema()
         lone_hook_decisions = ""
-        if {"payload_json", "projected_record_json"}.issubset(columns):
+        if {"payload_json", "projected_record_json"}.issubset(columns) and self._hook_rows_tracked():
+            # The lone rows come from audit_hook_lone, so only their own
+            # records are read (rel-1-0-10:GAP-0316).
+            body = hook_decision_body_sql("lone.payload_json", "lone.projected_record_json")
+            lone_hook_decisions = f"""UNION ALL
+                   SELECT COALESCE(NULLIF(LOWER(TRIM(COALESCE(lone.connector, ''))), ''), '__unattributed__'),
+                          dc_hook_row_decision(lone.action, '', {body}, lone.enforced),
+                          lone.timestamp
+                     {lone_hook_decision_rows_sql("lone")}"""
+        elif {"payload_json", "projected_record_json"}.issubset(columns):
             # A decision whose only local row is its hook_decision row (a
             # benign per-user allow since 1.0.10) counts once, from that row;
             # a decision with a connector-hook row counts from it alone, as
