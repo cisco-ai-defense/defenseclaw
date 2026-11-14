@@ -19,6 +19,8 @@ from defenseclaw.commands import cmd_guardrail
 from tests.test_fail_mode_runtime import _runtime_cfg
 from tests.test_fcux_cli_messages_b11 import _app, _fail_mode
 
+pytestmark = pytest.mark.usefixtures("openclaw_proxy_topology")
+
 _CONTINUES = "continue with a warning while the gateway is down"
 _BLOCKED = "blocked while the gateway is down"
 
