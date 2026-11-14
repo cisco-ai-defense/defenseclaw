@@ -122,39 +122,33 @@ func TestConfigMapWinsAndFileIsTheFallback(t *testing.T) {
 	w, path, clk := newFileWatcher(t, "a,b")
 	var cm []byte
 	var found bool
-	var ferr error
+	ferr := errors.New("forbidden")
 	w.Fetch = func(context.Context) ([]byte, bool, error) { return cm, found, ferr }
-	// The ConfigMap is edited; the mounted file (kubelet) is not yet.
-	cm, found = []byte("a"), true
-	clk.t = clk.t.Add(DefaultInterval)
-	if ch := w.Refresh(context.Background()); !ch.Changed || allow(ch.Config) != "a" || ch.FetchWarning != "" {
-		t.Fatalf("ConfigMap edit: %+v", ch)
-	}
-	// The API read fails: the file is read, with one warning.
-	ferr = errors.New("forbidden")
+	// The API has never answered (no RBAC yet): the mounted file is the
+	// source, with one warning.
 	if err := os.WriteFile(path, []byte("a,c"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	clk.t = clk.t.Add(DefaultInterval)
 	ch := w.Refresh(context.Background())
 	if !ch.Changed || allow(ch.Config) != "a,c" || !strings.Contains(ch.FetchWarning, "forbidden") {
-		t.Fatalf("fallback: %+v", ch)
+		t.Fatalf("fallback before the API answered: %+v", ch)
 	}
 	clk.t = clk.t.Add(DefaultInterval)
 	if ch := w.Refresh(context.Background()); ch.FetchWarning != "" {
 		t.Fatal("the same API failure warned twice")
 	}
-	// A missing key also falls back to the file.
-	ferr, found = nil, false
+	// The API answers: its source wins over the file.
+	ferr, cm, found = nil, []byte("a"), true
 	clk.t = clk.t.Add(DefaultInterval)
-	if ch := w.Refresh(context.Background()); !strings.Contains(ch.FetchWarning, "missing") || allow(ch.Config) != "a,c" {
-		t.Fatalf("missing key: %+v", ch)
+	if ch := w.Refresh(context.Background()); !ch.Changed || allow(ch.Config) != "a" || ch.FetchWarning != "" {
+		t.Fatalf("ConfigMap edit: %+v", ch)
 	}
-	// The API answers again: no warning, its source wins.
-	cm, found = []byte("z"), true
+	// From now on a failed read keeps the config in force (GAP-0293).
+	ferr = errors.New("forbidden")
 	clk.t = clk.t.Add(DefaultInterval)
-	if ch := w.Refresh(context.Background()); ch.FetchWarning != "" || allow(ch.Config) != "z" {
-		t.Fatalf("API back: %+v", ch)
+	if ch := w.Refresh(context.Background()); ch.Changed || allow(ch.Config) != "a" || !strings.Contains(ch.FetchWarning, "stays") {
+		t.Fatalf("API failure after it answered: %+v", ch)
 	}
 }
 

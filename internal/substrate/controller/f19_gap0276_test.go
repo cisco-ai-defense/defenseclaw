@@ -255,7 +255,7 @@ func TestGAP0276BadEditKeepsConfigInForce(t *testing.T) {
 		t.Fatalf("a source that does not load changed the policy (%d writes, was %d)", n, before)
 	}
 	ev := r.sink.Events(controller.EventConfigRefused)
-	if len(ev) != 1 || ev[0].Severity != controller.SeverityAlert || !strings.Contains(ev[0].Message, "does not load") {
+	if len(ev) != 1 || ev[0].Severity != controller.SeverityAlert || !strings.Contains(ev[0].Message, "not applied") {
 		t.Fatalf("refused events = %+v", ev)
 	}
 	r.cm.set("v2", j9Config(func(c *config.Config) { c.Substrate.Egress.Allow = without(c.Substrate.Egress.Allow, j9Host) }))

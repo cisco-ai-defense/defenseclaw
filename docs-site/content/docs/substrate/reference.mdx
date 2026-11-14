@@ -156,7 +156,7 @@ Keys of the `sandbox` section (and of `substrate.admin`) for the runtime:
 
 Change the config with `helm upgrade` or GitOps. `helm upgrade` also restarts every DefenseClaw pod (each pod carries a checksum of the config), so every setting below applies within one rollout.
 
-A direct edit of the `defenseclaw-config` ConfigMap, for example with `kubectl edit`, needs no restart for most settings. The controller, the gateway and the leader read the ConfigMap through the Kubernetes API every 2 seconds. An edit that does not load is refused with an alert (`sandbox.config.refused`), and the config in force stays.
+A direct edit of the `defenseclaw-config` ConfigMap, for example with `kubectl edit`, needs no restart for most settings. The controller, the gateway and the leader read the ConfigMap through the Kubernetes API every 2 seconds. An edit that does not load is refused with an alert (`sandbox.config.refused`), and the config in force stays. So does a failed read of the ConfigMap: once the API has answered, a component never falls back to its mounted file, which on a managed install keeps the config it started with.
 
 | Setting | When running and new agents get it |
 |---|---|
@@ -166,8 +166,10 @@ A direct edit of the `defenseclaw-config` ConfigMap, for example with `kubectl e
 | `substrate.secrets` | The egress bindings within about 5 seconds. The gateway's injection list at its next restart |
 | `substrate.templates`, `substrate.require_attested_templates` | Templates are attested again on the next pass |
 | `substrate.chain_egress_action` | Within about 2 seconds, on the gateway's hook answers and the leader's callout verdicts |
+| `substrate.unattended.asks` (and the profile `unattended_asks`) | On the gateway's next ask. The callout's copy only through `helm upgrade` |
 | `guardrail` mode and rules (hooks and model calls) | When the gateway reloads its mounted config file. The kubelet updates the file about a minute after the edit. Managed installs mount the file in a way the kubelet never updates, so they apply it at the next gateway restart |
-| `substrate.identity`, `substrate.rate_limits`, `substrate.llm`, `llm_providers`, `substrate.workspace_max_bytes`, `substrate.unattended.ask_timeout`, `deployment_mode` | At the next restart of the gateway or the leader. Each logs the keys that wait for it |
+| `substrate.identity`, `substrate.services`, `substrate.api`, `substrate.bundles`, `substrate.rate_limits`, `substrate.llm`, `llm_providers`, `substrate.workspace_max_bytes`, `substrate.unattended.ask_timeout` | At the next restart of the pods. The controller keeps the identity, services and API it started with too, so it stays in step with the gateway. Each component logs the keys that wait for a restart |
+| `deployment_mode` and the enterprise profile | Never live. An edit that changes them, for example one that drops `managed_enterprise`, is refused whole with a `sandbox.config.refused` alert. It applies only when the pods restart with it, through `helm upgrade` |
 | `substrate.extproc`, and the callout's copy of `url_rules`, `ask_hosts`, `actor_secrets` and unattended asks | Only through `helm upgrade`, which renders the callout's own ConfigMap |
 
 After a direct edit of a setting that waits for a restart, run `kubectl -n defenseclaw-system rollout restart deploy/defenseclaw-gateway` (or `deploy/defenseclaw-gateway-leader`). With `substrate.bundles` on, the stage bundles are layered over the profiles that config.yaml had when the controller started, so a profile change in config.yaml applies when the controller restarts.

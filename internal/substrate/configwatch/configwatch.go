@@ -63,12 +63,20 @@ type Watcher struct {
 	Load func(path string, raw []byte) (*config.Config, error)
 	Now  func() time.Time
 
+	// mu guards the fields below and is never held across a read of the
+	// source, so Current never waits on the API server (GAP-0296).
 	mu       sync.Mutex
 	cur      *config.Config
 	digest   string
 	readAt   time.Time
+	reading  bool
 	badHash  string
 	fetchErr string
+	// apiOK: the ConfigMap read has answered at least once. From then on
+	// a failed or empty read keeps the config in force and never falls
+	// back to the mounted file, which a managed subPath mount never
+	// updates: a tightening must not revert on an API blip (GAP-0293).
+	apiOK bool
 }
 
 // New returns a watcher whose current config is boot, the config the
@@ -118,10 +126,9 @@ type Change struct {
 }
 
 // Refresh reads the source if Interval has passed since the last read and
-// loads it if its digest changed.
+// loads it if its digest changed. A Refresh while another one reads the
+// source returns the config in force at once.
 func (w *Watcher) Refresh(ctx context.Context) Change {
-	w.mu.Lock()
-	defer w.mu.Unlock()
 	now := time.Now
 	if w.Now != nil {
 		now = w.Now
@@ -130,18 +137,51 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
+	w.mu.Lock()
 	out := Change{Config: w.cur, Digest: w.digest}
 	t := now()
-	if !w.readAt.IsZero() && t.Sub(w.readAt) < interval {
+	if w.reading || (!w.readAt.IsZero() && t.Sub(w.readAt) < interval) {
+		w.mu.Unlock()
 		return out
 	}
-	w.readAt = t
-	raw, warn, err := w.read(ctx)
+	w.readAt, w.reading = t, true
+	apiOK := w.apiOK
+	w.mu.Unlock()
+
+	raw, answered, warn, err := w.read(ctx, apiOK)
+	var cfg *config.Config
+	var loadErr error
+	d := ""
+	if err == nil && raw != nil {
+		d = Digest(raw)
+		w.mu.Lock()
+		same := d == w.digest || d == w.badHash
+		w.mu.Unlock()
+		if !same {
+			load := w.Load
+			if load == nil {
+				load = config.LoadRuntimeV8CandidateFromBytes
+			}
+			cfg, loadErr = load(w.Path, raw)
+			if loadErr == nil && cfg != nil && !cfg.Substrate.Enabled {
+				loadErr = errors.New("substrate.enabled is false")
+			}
+		}
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.reading = false
+	if answered {
+		w.apiOK = true
+	}
+	out = Change{Config: w.cur, Digest: w.digest}
 	if warn != w.fetchErr {
 		w.fetchErr = warn
 		out.FetchWarning = warn
 	}
-	if err != nil {
+	switch {
+	case err != nil:
 		// Nothing readable: keep the config in force (the next read tries
 		// again). Reported like a source that does not load, once.
 		if w.badHash != "read:"+err.Error() {
@@ -149,26 +189,26 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 			out.Refused = err
 		}
 		return out
-	}
-	d := Digest(raw)
-	if d == w.digest {
+	case raw == nil:
+		// The API answered before and failed now: keep the config in force.
+		return out
+	case d == w.digest:
 		w.badHash = ""
 		return out
-	}
-	if d == w.badHash {
+	case d == w.badHash:
+		return out
+	case cfg == nil && loadErr == nil:
+		// Another Refresh applied a change while this one loaded.
 		return out
 	}
-	load := w.Load
-	if load == nil {
-		load = config.LoadRuntimeV8CandidateFromBytes
+	if loadErr == nil {
+		if reason, rerr := config.LiveReloadRefusal(w.cur, cfg); rerr != nil {
+			loadErr = fmt.Errorf("%s: %w; it applies only when the pods restart with it (helm upgrade)", reason, rerr)
+		}
 	}
-	cfg, err := load(w.Path, raw)
-	if err == nil && cfg != nil && !cfg.Substrate.Enabled {
-		err = errors.New("substrate.enabled is false")
-	}
-	if err != nil {
+	if loadErr != nil {
 		w.badHash = d
-		out.Refused = fmt.Errorf("config.yaml %s does not load, %s stays in force: %w", d, w.digest, err)
+		out.Refused = fmt.Errorf("config.yaml %s is refused, %s stays in force: %w", d, w.digest, loadErr)
 		return out
 	}
 	w.badHash = ""
@@ -178,23 +218,30 @@ func (w *Watcher) Refresh(ctx context.Context) Change {
 	return out
 }
 
-// read returns the source: the ConfigMap, else the file. warn names why
-// the ConfigMap was not used ("" when it was, or when there is none).
-func (w *Watcher) read(ctx context.Context) (raw []byte, warn string, err error) {
+// read returns the source: the ConfigMap, else the mounted file. answered
+// is set when the ConfigMap read answered. Once it has (apiOK), a failed or
+// empty read returns no source, so the config in force stays (GAP-0293);
+// before that, and with no ConfigMap read configured, the mounted file is
+// the source. warn names why the ConfigMap was not used.
+func (w *Watcher) read(ctx context.Context, apiOK bool) (raw []byte, answered bool, warn string, err error) {
 	if w.Fetch != nil {
 		b, found, ferr := w.Fetch(ctx)
 		switch {
 		case ferr == nil && found:
-			return b, "", nil
+			return b, true, "", nil
+		case ferr == nil && apiOK:
+			return nil, false, "the defenseclaw-config ConfigMap or its config.yaml key is missing: the config in force stays", nil
 		case ferr == nil:
 			warn = "the defenseclaw-config ConfigMap or its config.yaml key is missing: reading the mounted file"
+		case apiOK:
+			return nil, false, "cannot read the defenseclaw-config ConfigMap (" + ferr.Error() + "): the config in force stays until it answers again", nil
 		default:
 			warn = "cannot read the defenseclaw-config ConfigMap (" + ferr.Error() + "): reading the mounted file, which the kubelet updates on its own schedule"
 		}
 	}
 	b, err := os.ReadFile(w.Path)
 	if err != nil {
-		return nil, warn, fmt.Errorf("read %s: %w", w.Path, err)
+		return nil, false, warn, fmt.Errorf("read %s: %w", w.Path, err)
 	}
-	return b, warn, nil
+	return b, false, warn, nil
 }

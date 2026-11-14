@@ -156,6 +156,10 @@ type Controller struct {
 	lifeRetry []*actorState
 	// uidByKey is the last UID seen per atespace/name (GAP-0133).
 	uidByKey map[string]string
+	// retired are atespaces a config change stopped managing, listed once
+	// more by a scoped controller; listed is what the last scoped pass
+	// listed (GAP-0295).
+	retired, listed map[string]bool
 }
 
 type recreatedActor struct {
@@ -259,7 +263,7 @@ func New(o Options) (*Controller, error) {
 		return nil, errors.New("controller: Config needs Live")
 	}
 	c := &Controller{o: o, actors: map[string]*actorState{}, templates: map[string]cachedTemplate{},
-		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}}
+		unlisted: map[string]bool{}, warnedList: map[string]bool{}, uidByKey: map[string]string{}, retired: map[string]bool{}}
 	lv := &Live{Settings: o.Settings, Secrets: o.Secrets, LauncherAtespaces: o.LauncherAtespaces, RequireAttestation: o.RequireAttestation,
 		Templates: o.Templates, Attestor: o.Attestor, Resolver: o.Resolver, IdleSuspendAfter: o.IdleSuspendAfter}
 	if o.Config != nil {
@@ -333,6 +337,12 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		if !seen[uid] && c.unlisted[ns] {
 			continue // not listed this pass, not known to be deleted
 		}
+		if !seen[uid] && c.scoped && !c.listed[ns] {
+			// Its atespace is no longer managed and was not listed: the
+			// actor is not deleted, it left DefenseClaw's view (GAP-0295).
+			delete(c.actors, uid)
+			continue
+		}
 		if !seen[uid] {
 			gone = append(gone, st)
 			delete(c.actors, uid)
@@ -400,16 +410,13 @@ func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 		c.emit(Event{Type: EventWarning, Severity: SeverityWarn,
 			Message: "no global viewer role on ate-api-server: listing only the managed atespaces; inventory and shadow AI cover only those"})
 	}
-	set := map[string]bool{}
-	lv := c.live()
-	for ns := range lv.LauncherAtespaces {
+	set := managedSet(c.live())
+	c.mu.Lock()
+	for ns := range c.retired {
 		set[ns] = true
 	}
-	if l, ok := lv.Resolver.(AtespaceLister); ok {
-		for _, ns := range l.ManagedAtespaces() {
-			set[ns] = true
-		}
-	}
+	c.listed = set
+	c.mu.Unlock()
 	names := make([]string, 0, len(set))
 	for ns := range set {
 		names = append(names, ns)
@@ -421,6 +428,9 @@ func (c *Controller) listActors(ctx context.Context) ([]*ateapi.Actor, error) {
 		actors, err := ateapi.AllActors(ctx, c.o.Client, ns, c.o.PageSize)
 		if err == nil {
 			c.listOK(ns)
+			c.mu.Lock()
+			delete(c.retired, ns)
+			c.mu.Unlock()
 			out = append(out, actors...)
 			continue
 		}

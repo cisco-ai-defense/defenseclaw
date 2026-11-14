@@ -76,9 +76,11 @@ func (c *Controller) reloadConfig(ctx context.Context) {
 	if c.o.Config == nil || c.o.Live == nil {
 		return
 	}
+	// The source is read without reloadMu: a create path waiting on a slow
+	// API server read must not hold the others (GAP-0296).
+	ch := c.o.Config.Refresh(ctx)
 	c.reloadMu.Lock()
 	defer c.reloadMu.Unlock()
-	ch := c.o.Config.Refresh(ctx)
 	if ch.FetchWarning != "" {
 		c.emit(Event{Type: EventWarning, Severity: SeverityWarn, Message: ch.FetchWarning})
 	}
@@ -91,14 +93,25 @@ func (c *Controller) reloadConfig(ctx context.Context) {
 	if ch.Config == nil || ch.Digest == prev {
 		return
 	}
+	old := c.live()
 	lv := c.o.Live(ch.Config)
 	lv.Digest = ch.Digest
 	c.cur.Store(&lv)
+	// Atespaces the old config managed and the new one does not: a scoped
+	// controller (no global viewer) lists them once more, so their actors
+	// lose DefenseClaw's policy instead of dropping out of the listing with
+	// it in force (GAP-0295).
+	now := managedSet(&lv)
+	c.mu.Lock()
+	for ns := range managedSet(old) {
+		if !now[ns] {
+			c.retired[ns] = true
+		}
+	}
 	// Template verdicts were reached with the old attestor, registries and
 	// image lists: re-attest on the next use. Entries are expired, not
 	// dropped, so a registry outage still rides out on the last good
 	// verdict (GAP-0127).
-	c.mu.Lock()
 	for k, ct := range c.templates {
 		ct.at = time.Time{}
 		c.templates[k] = ct
@@ -107,4 +120,19 @@ func (c *Controller) reloadConfig(ctx context.Context) {
 	c.emit(Event{Type: EventConfigReloaded, Severity: SeverityInfo,
 		Message: "config.yaml changed: every actor's egress policy is rendered again from it on this pass",
 		Detail:  map[string]any{"config_digest": lv.Digest, "previous_digest": prev}})
+}
+
+// managedSet is the atespaces a config manages by name: the launcher ones
+// and those its resolver lists.
+func managedSet(lv *Live) map[string]bool {
+	set := map[string]bool{}
+	for ns := range lv.LauncherAtespaces {
+		set[ns] = true
+	}
+	if l, ok := lv.Resolver.(AtespaceLister); ok {
+		for _, ns := range l.ManagedAtespaces() {
+			set[ns] = true
+		}
+	}
+	return set
 }

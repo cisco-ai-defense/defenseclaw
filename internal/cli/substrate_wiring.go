@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -43,14 +44,7 @@ func newSubstrateController(cfg *config.Config, client ateapi.Client, reg contro
 	}
 	// No CPU source: never suspend on silence alone (E4).
 	idle := idleAfter && cpu != nil
-	live := func(c *config.Config) controller.Live {
-		if resolver != nil && c != cfg {
-			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
-				Message: "substrate.bundles: the stage bundles are layered over the profiles config.yaml had when the controller started; " +
-					"a profile change in config.yaml applies when the controller restarts (the egress allow list, secrets, launcher atespaces and template rules apply now)"})
-		}
-		return substrateControllerLive(c, idle, resolver, sink)
-	}
+	live := substrateControllerLiveFunc(cfg, idle, resolver, sink)
 	lv := live(cfg)
 	o := controller.Options{
 		Client: client, Attestor: lv.Attestor, Activity: act, CPU: cpu,
@@ -180,4 +174,48 @@ func substrateTemplateSkills(ctl *controller.Controller) func(ctx context.Contex
 		}
 		return digests, nil
 	}
+}
+
+// substrateControllerLiveFunc builds controller.Live for each config.yaml in
+// force. The restart-only render inputs (substrate.identity: audience and
+// token lifetime; substrate.services) keep their boot values, as the
+// gateway keeps them, or actor calls are refused until a restart
+// (GAP-0297). In bundle mode the stage bundles keep the boot profiles.
+func substrateControllerLiveFunc(boot *config.Config, idle bool, resolver controller.ProfileResolver, sink controller.Sink) func(*config.Config) controller.Live {
+	bootSettings := controller.SettingsFromConfig(boot)
+	return func(c *config.Config) controller.Live {
+		if c != boot && resolver != nil {
+			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "substrate.bundles: the stage bundles are layered over the profiles config.yaml had when the controller started; " +
+					"a profile change in config.yaml applies when the controller restarts (the egress allow list, secrets, launcher atespaces and template rules apply now)"})
+		}
+		lv := substrateControllerLive(c, idle, resolver, sink)
+		if c == boot {
+			return lv
+		}
+		if keys := substrateControllerRestartOnly(boot, c); len(keys) > 0 {
+			sink.Emit(controller.Event{Type: controller.EventWarning, Severity: controller.SeverityWarn,
+				Message: "config.yaml changed " + strings.Join(keys, ", ") + ": applies when the pods restart (helm upgrade, or kubectl rollout restart " +
+					"deploy/defenseclaw-gateway deploy/defenseclaw-gateway-leader deploy/defenseclaw-controller); until then the values the pods started with stay"})
+		}
+		lv.Settings.ActorService, lv.Settings.AdminService = bootSettings.ActorService, bootSettings.AdminService
+		lv.Settings.Audience, lv.Settings.TokenLifetimeSeconds = bootSettings.Audience, bootSettings.TokenLifetimeSeconds
+		return lv
+	}
+}
+
+// substrateControllerRestartOnly names the render inputs that changed from
+// boot to cur and that the controller keeps at their boot values.
+func substrateControllerRestartOnly(boot, cur *config.Config) []string {
+	var out []string
+	if !reflect.DeepEqual(boot.Substrate.Identity, cur.Substrate.Identity) {
+		out = append(out, "substrate.identity")
+	}
+	if !reflect.DeepEqual(boot.Substrate.Services, cur.Substrate.Services) {
+		out = append(out, "substrate.services")
+	}
+	if !reflect.DeepEqual(boot.Substrate.API, cur.Substrate.API) {
+		out = append(out, "substrate.api")
+	}
+	return out
 }
