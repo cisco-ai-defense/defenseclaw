@@ -392,15 +392,6 @@ func killTargetsDefenseClaw(words []string) bool {
 	return false
 }
 
-func hasChildCommands(facts Facts, command CommandFact) bool {
-	for _, other := range facts.Commands {
-		if other.ParentCommandID == command.ID && command.ID != 0 {
-			return true
-		}
-	}
-	return false
-}
-
 // childNamesDefenseClaw reports a command nested in command (a substitution
 // such as the pid lookup of a kill) that names the DefenseClaw namespace.
 func childNamesDefenseClaw(facts Facts, command CommandFact) bool {
