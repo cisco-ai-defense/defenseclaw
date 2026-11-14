@@ -323,8 +323,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 		windowsReadings := windowsHookHost() && !isSandboxHookRequest(ctx) &&
 			(cfg == nil || !cfg.SecureClientIntegration())
+		var windowsPowerShellReading *windowsHintedReading
 		if windowsReadings {
-			actionInput.DialectHint = selectWindowsShellDialect(
+			actionInput.DialectHint, windowsPowerShellReading = selectWindowsShellDialectReading(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
 		}
@@ -339,6 +340,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			SandboxGuestCWD:               req.guestCWD,
 			windowsDialectReadings:        windowsReadings,
+			windowsPowerShellReading:      windowsPowerShellReading,
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
