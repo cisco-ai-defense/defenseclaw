@@ -19,11 +19,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -37,22 +40,50 @@ type event struct {
 	CWD      string          `json:"cwd"`
 	Dialect  string          `json:"dialect"`
 	Outcome  string          `json:"outcome"`
+	// Result is the tool output (tool-result surface corpora); sent as the PostToolUse tool_response with -surface tool-result.
+	Result string `json:"result"`
+	// ToolResult is case-v1 events[].tool_result (optional): the tool output of the source trace. The hook surface replays it as the PostToolUse
+	// tool_response (shell tools: stdout), so the response-side rules see the text the agent saw.
+	ToolResult *struct {
+		Text string `json:"text"`
+	} `json:"tool_result"`
+}
+
+// resultText is the tool output an event carries: the tool-result surface field, else the optional case-v1 tool_result.
+func (e event) resultText() string {
+	if e.Result != "" {
+		return e.Result
+	}
+	if e.ToolResult != nil {
+		return e.ToolResult.Text
+	}
+	return ""
 }
 
 type payload struct {
 	event
 	Events []event `json:"events"`
 	Intent string  `json:"user_intent"`
-	Prompt string  `json:"user_prompt"`
+	// EventResult is the tool_result of a single-call case (payload.event_result; a window carries it on events[]).
+	EventResult *struct {
+		Text string `json:"text"`
+	} `json:"event_result"`
+	Prompt string `json:"user_prompt"`
+	// Content is case-v1 payload.content: the user's request (AgentDojo, MCPTox, InjecAgent, agent-trace) or, for prompt corpora, the user turn.
+	Content string `json:"content"`
 }
 
 type corpusCase struct {
 	ID      string  `json:"id"`
 	Payload payload `json:"payload"`
+	Strata  struct {
+		Provider string `json:"provider"`
+	} `json:"strata"`
 }
 
 type record struct {
 	Case       string                `json:"case"`
+	Connector  string                `json:"connector,omitempty"`
 	Idx        int                   `json:"idx"`
 	N          int                   `json:"n"`
 	SrcTool    string                `json:"src_tool"`
@@ -200,25 +231,119 @@ func main() {
 	judgeURL := flag.String("judge-url", "", "judge base URL")
 	dmURL := flag.String("dm-url", "", "decision model System One URL; empty: off")
 	dmModel := flag.String("dm-model", "", "decision model name")
+	dmProtocol := flag.String("dm-protocol", "", "decision_model.protocol: system-one or gemini-decisions (empty: product default)")
+	dmCacheDir := flag.String("dm-cache-dir", "", "bench-only answer cache: a loopback relay in front of -dm-url stores every answer under sha256(request body) in this dir and replays hits")
+	dmCacheOnly := flag.Bool("dm-cache-only", false, "with -dm-cache-dir: replay only, a miss fails the call (offline, no key needed)")
+	dmFill := flag.Bool("dm-fill", false, "with -dm-cache-dir: cache fill mode (rel-1-0-10:GAP-0555). The relay answers a miss at once with a fixed unsure answer that is never stored, so the product's decision-model client never times out and its breaker never trips; the real answers are fetched upstream by the relay's own paced workers (-dm-cache-inflight, -dm-cache-rpm, -dm-cache-tpm) after the cases, with long retries, and stored. The run's own decisions are void. Exit 4 when a request is still unanswered")
+	dmCacheInflight := flag.Int("dm-cache-inflight", 8, "with -dm-cache-dir: upstream requests in flight per harness process")
+	dmCacheTPM := flag.Int("dm-cache-tpm", 0, "with -dm-cache-dir: input tokens per minute this process may send upstream (0: no pacing)")
+	dmCacheRPM := flag.Int("dm-cache-rpm", 0, "with -dm-cache-dir: upstream requests per minute this process may send (0: no pacing)")
+	dmCacheBudgetFile := flag.String("dm-cache-budget-file", "", "with -dm-cache-dir: file that counts upstream requests across processes")
+	dmCacheBudget := flag.Int64("dm-cache-budget", 0, "with -dm-cache-budget-file: upstream requests allowed in all (0: no cap)")
+	dmBlockRiskScore := flag.Float64("dm-block-risk-score", 0, "decision_model.block_risk_score (0: product default 1.5; 0.0001 turns the gate off for the R0 replay)")
+	dmMediumAlerts := flag.Bool("dm-medium-alerts", false, "bench variant b: a judge lone MEDIUM on a call the decision model escalated is not audit-only")
+	dmAllowRiskVeto := flag.Bool("dm-allow-risk-veto", false, "bench variant: a risk score >= block_risk_score turns a confident allow into an escalation")
+	judgeHookConnectors := flag.String("judge-hook-connectors", "claudecode", "guardrail.judge.hook_connectors (names separated by , or +; all = every connector)")
+	dmRuleFlagged := flag.String("dm-escalate-rule-flagged", "", "decision_model.escalate_rule_flagged: true, false or empty (product default true)")
+	dmHistoryTurns := flag.Int("dm-history-turns", -1, "decision_model.history_turns (-1: product default 25; 0: off)")
+	dmFlowGuard := flag.String("dm-flow-guard", "", "decision_model.flow_guard: true, false or empty (product default true)")
+	dmCacheLog := flag.String("dm-cache-log", "", "with -dm-cache-dir: JSONL of every upstream call (sha, status, latency, tokens, retries); default <cache-dir>/../log/<time>-<pid>.jsonl")
 	dmTimeout := flag.Float64("dm-timeout", 0, "decision model timeout seconds (0: product default)")
 	judgeTimeout := flag.Float64("judge-timeout", 0, "hook judge timeout seconds (0: product default)")
 	judgeParallel := flag.Int("judge-max-parallel", 16, "guardrail.judge.max_parallel; the local proxy stands in for a remote endpoint, which the product does not serialize (a loopback judge URL defaults to 1)")
 	dmHook := flag.Bool("dm-hook", false, "decision model answers alone for the connector (cascade 2)")
+	dmHookConnectors := flag.String("dm-hook-connectors", "claudecode", "connectors the decision model answers for with -dm-hook (decision_model.hook_connectors; names separated by , or +)")
+	dmAllowAt := flag.Float64("dm-allow-threshold", 0, "decision_model.allow_threshold (0: product default 0.30)")
+	dmBlockAt := flag.Float64("dm-block-threshold", 0, "decision_model.block_threshold (0: product default 0.75)")
+	dmOnBlock := flag.String("dm-on-confident-block", "", "decision_model.on_confident_block: escalate or decide (empty: product default)")
+	dmAllowCorpus := flag.String("dm-allow-corpus", "", "corpora that may be sent to an EXTERNAL decision model endpoint (names separated by , or +); a loopback endpoint (the stub) needs none; the run is refused when -corpus-name is not listed")
+	corpusName := flag.String("corpus-name", "", "name of the corpus in the gate registry (s7-gate passes it); used by -dm-allow-corpus")
 	layers := flag.String("layers", "", "probe layers per call: dm,judge")
+	connectorFlag := flag.String("connector", "claudecode", "claudecode (legacy: every case as a Claude Code call) | auto (each case to the hook handler of its strata.provider connector, with that connector's payload shape) | a connector name")
+	scratch := flag.String("scratch-dir", "", "parent directory of the run's scratch dir (default: the system temp dir)")
+	scratchCapMB := flag.Int("scratch-cap-mb", 2048, "fail the run loudly when its scratch dir (audit.db + WAL) passes this many MiB")
+	walGuard := flag.Bool("wal-guard", true, "run the product audit WAL guard pass every 500 ms (false reproduces the unbounded WAL growth; measurement only, keep -scratch-cap-mb low)")
+	startArrivalMS := flag.Int("session-start-arrival-ms", 0, "how long the first call of a session waits for its SessionStart to arrive before judging the start in its place (product default 1000). The corpora hold no SessionStart event, so any wait is a constant added to every case: 0 measures the hook work (rel-1-0-10:GAP-0261)")
 	post := flag.Bool("post", true, "send PostToolUse for events whose outcome is succeeded")
 	det := flag.Bool("det", true, "record the trusted-action deterministic evaluation")
+	surface := flag.String("surface", "hook", "hook (tool calls through the connector hook) | prompt (payload.content through the connector UserPromptSubmit hook; the scored decision is the hook answer, the /llm proxy GuardrailInspector text inspection goes to extra.inspect_* for comparison) | tool-result (each event's result as the PostToolUse tool_response; the PostToolUse answer is the decision) | response (payload.content as a model completion through the /llm proxy GuardrailInspector, direction completion, the whole text at once) | response-stream (the same text replayed as a stream: mid-stream scans every 500 bytes decide, the final check beside them is recorded in extra but not enforced, as in the proxy)")
+	promptFromContent := flag.Bool("prompt-from-content", false, "send case-v1 payload.content as the session's UserPromptSubmit before the tool calls (the user's task for intent-aware layers)")
 	effectsRules := flag.String("cascade-effects", "", "guardrail.cascade.lanes.effects: off|shadow|on (empty keeps the config default; on bypasses validation, harness only)")
 	answerWithin := flag.Int("answer-within-ms", 0, "send the hook's answer wait (X-DefenseClaw-Hook-Answer-Within-Ms) on PreToolUse, bounding the judge as a live Claude Code hook does; 0: unbounded")
 	flag.Parse()
+	if *surface != "hook" && *surface != "prompt" && *surface != "tool-result" && *surface != "response" && *surface != "response-stream" {
+		fmt.Fprintln(os.Stderr, "-surface must be hook, prompt, tool-result, response or response-stream")
+		os.Exit(2)
+	}
+	if err := dmCorpusAllowed(*dmURL, *corpusName, *dmAllowCorpus); err != nil {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
+		os.Exit(2)
+	}
+	if *dmURL != "" && !dmLoopback(*dmURL) && !dmKeyPresent() && !(*dmCacheDir != "" && *dmCacheOnly) {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL: an external decision model endpoint needs DEFENSECLAW_DECISION_MODEL_KEY in the environment (s7gate --dm-key-file)")
+		os.Exit(2)
+	}
 	if *corpus == "" || *out == "" || *policyDir == "" {
 		fmt.Fprintln(os.Stderr, "need -corpus -out -policy-dir")
 		os.Exit(2)
 	}
-	dataDir, err := os.MkdirTemp("", "s7bench-")
+	dataDir, err := os.MkdirTemp(*scratch, "s7bench-")
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dataDir)
+	var engine *gateway.S7Engine
+	var scratchPeak atomic.Int64
+	var decisionsTotal, casesTotal atomic.Int64
+	startRun := time.Now()
+	// The scratch dir is removed on every way out: normal end, panic, SIGINT/SIGTERM/SIGHUP, boot failure, cap exceeded.
+	cleaned := atomic.Bool{}
+	cleanup := func() {
+		if cleaned.Swap(true) {
+			return
+		}
+		if engine != nil {
+			engine.Close()
+		}
+		_ = os.RemoveAll(dataDir)
+	}
+	defer cleanup()
+	defer func() {
+		if r := recover(); r != nil {
+			cleanup()
+			panic(r)
+		}
+	}()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		sig := <-sigs
+		fmt.Fprintf(os.Stderr, "[s7bench] %v: removing scratch dir %s and exiting\n", sig, dataDir)
+		cleanup()
+		os.Exit(130)
+	}()
+	dirSize := func() int64 {
+		var n int64
+		_ = filepath.Walk(dataDir, func(_ string, info os.FileInfo, err error) error {
+			if err == nil && info.Mode().IsRegular() {
+				n += info.Size()
+			}
+			return nil
+		})
+		return n
+	}
+	go func() {
+		for range time.Tick(time.Second) {
+			n := dirSize()
+			if n > scratchPeak.Load() {
+				scratchPeak.Store(n)
+			}
+			if n > int64(*scratchCapMB)<<20 {
+				fmt.Fprintf(os.Stderr, "[s7bench] FATAL: scratch dir %s is %d MiB, over the %d MiB cap (audit.db + WAL growth); removing it and exiting 3\n", dataDir, n>>20, *scratchCapMB)
+				cleanup()
+				os.Exit(3)
+			}
+		}
+	}()
 
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ConfigVersionV9
@@ -230,6 +355,20 @@ func main() {
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.ClaudeCode.Enabled = true
 	cfg.ClaudeCode.Mode = *mode
+	cfg.Codex.Enabled = true
+	cfg.Codex.Mode = *mode
+	extra := []string{}
+	if *connectorFlag != "claudecode" {
+		cfg.ConnectorHooks = map[string]config.AgentHookConfig{}
+		names := []string{"codex"}
+		for name := range knownConnectors {
+			if name != "claudecode" && name != "codex" {
+				cfg.ConnectorHooks[name] = config.AgentHookConfig{Enabled: true, Mode: *mode}
+			}
+			names = append(names, name)
+		}
+		extra = names
+	}
 	cfg.Guardrail.DetectionStrategy = *strategy
 	cfg.Guardrail.DetectionStrategyToolCall = *strategy
 	if *effectsRules != "" {
@@ -238,7 +377,10 @@ func main() {
 	if *judgeModel != "" {
 		cfg.Guardrail.Judge.Enabled = true
 		cfg.Guardrail.Judge.ToolInjection = true
-		cfg.Guardrail.Judge.HookConnectors = []string{"claudecode"}
+		cfg.Guardrail.Judge.HookConnectors = strings.FieldsFunc(*judgeHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
+		if len(cfg.Guardrail.Judge.HookConnectors) == 1 && cfg.Guardrail.Judge.HookConnectors[0] == "all" {
+			cfg.Guardrail.Judge.HookConnectors = []string{"*"}
+		}
 		if *judgeTimeout > 0 {
 			cfg.Guardrail.Judge.HookTimeout = *judgeTimeout
 			cfg.Guardrail.Judge.Timeout = *judgeTimeout
@@ -247,16 +389,65 @@ func main() {
 		cfg.Guardrail.Judge.MaxParallelExplicit = true
 		cfg.Guardrail.Judge.LLM = config.LLMConfig{Model: "openai/" + *judgeModel, Provider: "openai", BaseURL: *judgeURL, APIKey: "s7-local-proxy"}
 	}
-	if *dmURL != "" {
-		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: *dmURL, Timeout: *dmTimeout}
-		if *dmHook {
-			cfg.DecisionModel.HookConnectors = []string{"claudecode"}
-		}
+	if err := dmFillJudgeRefused(*dmFill, *judgeModel, *judgeURL, *layers); err != nil {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL:", err)
+		os.Exit(2)
 	}
-	engine, err := gateway.S7NewEngine(cfg, "claudecode")
+	if *dmFill && (*dmCacheDir == "" || *dmURL == "") {
+		fmt.Fprintln(os.Stderr, "[s7bench] FATAL: -dm-fill needs -dm-url and -dm-cache-dir")
+		os.Exit(2)
+	}
+	var dmc *dmCache
+	if *dmURL != "" {
+		baseURL := *dmURL
+		if *dmCacheDir != "" {
+			logPath := *dmCacheLog
+			if logPath == "" {
+				logPath = filepath.Join(filepath.Dir(filepath.Clean(*dmCacheDir)), "log", fmt.Sprintf("%s-%d.jsonl", time.Now().UTC().Format("20060102T150405"), os.Getpid()))
+			}
+			u, c, err := startDMCache(*dmURL, (config.DecisionModelConfig{Protocol: *dmProtocol}).EffectiveProtocol(), *dmCacheDir, *dmCacheOnly, *dmFill, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudgetFile, *dmCacheBudget, logPath)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "[s7bench] FATAL: dm cache:", err)
+				os.Exit(2)
+			}
+			baseURL, dmc = u, c
+			fmt.Fprintf(os.Stderr, "[s7bench] dm cache dir=%s only=%v fill=%v inflight=%d tpm=%d rpm=%d budget=%d\n", *dmCacheDir, *dmCacheOnly, *dmFill, *dmCacheInflight, *dmCacheTPM, *dmCacheRPM, *dmCacheBudget)
+		}
+		cfg.DecisionModel = config.DecisionModelConfig{Enabled: true, Model: *dmModel, BaseURL: baseURL, Protocol: *dmProtocol, Timeout: *dmTimeout,
+			AllowThreshold: *dmAllowAt, BlockThreshold: *dmBlockAt, OnConfidentBlock: *dmOnBlock, BlockRiskScore: *dmBlockRiskScore}
+		if *dmHistoryTurns >= 0 {
+			n := *dmHistoryTurns
+			cfg.DecisionModel.HistoryTurns = &n
+		}
+		if v := strings.TrimSpace(*dmFlowGuard); v != "" {
+			b := v == "true"
+			cfg.DecisionModel.FlowGuard = &b
+		}
+		if v := strings.TrimSpace(*dmRuleFlagged); v != "" {
+			b := v == "true"
+			cfg.DecisionModel.EscalateRuleFlagged = &b
+		}
+		if *dmHook {
+			cfg.DecisionModel.HookConnectors = strings.FieldsFunc(*dmHookConnectors, func(r rune) bool { return r == ',' || r == '+' })
+			if len(cfg.DecisionModel.HookConnectors) == 1 && cfg.DecisionModel.HookConnectors[0] == "all" {
+				cfg.DecisionModel.HookConnectors = []string{"*"}
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[s7bench] decision model: %s external=%v corpus=%s hook_connectors=%v key=%v\n", *dmModel, !dmLoopback(*dmURL), *corpusName, cfg.DecisionModel.HookConnectors, dmKeyPresent())
+	}
+	gateway.S7SetDecisionHistoryNonce(*dmCacheDir != "")
+	gateway.S7SetDecisionRouting(*dmCacheDir != "" && *dmCacheOnly, *dmMediumAlerts, *dmAllowRiskVeto)
+	gateway.S7SetSessionStartArrival(time.Duration(*startArrivalMS) * time.Millisecond)
+	var err2 error
+	engine, err2 = gateway.S7NewEngineMulti(cfg, "claudecode", extra)
+	err = err2
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "boot:", err)
+		cleanup()
 		os.Exit(1)
+	}
+	if !*walGuard {
+		engine.Close()
 	}
 	hasJudge, hasDM := engine.HasJudge()
 	recording := hasJudge && engine.RecordJudgeCalls()
@@ -314,7 +505,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for c := range jobs {
-				runCase(engine, c, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
+				runCase(engine, c, *connectorFlag, *surface, *promptFromContent, *post, *det, wantDM, wantJudge, preHeaders, emit, &decisions)
 				if n := done.Add(1); n%1000 == 0 {
 					fmt.Fprintf(os.Stderr, "[s7bench] %d cases %d decisions %.0fs\n", n, decisions.Load(), time.Since(start).Seconds())
 				}
@@ -342,6 +533,33 @@ func main() {
 	close(jobs)
 	wg.Wait()
 	fmt.Fprintf(os.Stderr, "[s7bench] done cases=%d decisions=%d in %.1fs\n", done.Load(), decisions.Load(), time.Since(start).Seconds())
+	var fillUnanswered int64
+	if dmc != nil && *dmFill {
+		// The cases are done; the real answers are still being fetched. Wait for every one before the run ends.
+		fmt.Fprintf(os.Stderr, "[s7bench] dm fill: cases done, %d requests queued upstream, waiting for them\n", dmc.fillQueued.Load())
+		fillUnanswered = dmc.fillWait(os.Stderr)
+	}
+	if dmc != nil {
+		fmt.Fprintf(os.Stderr, "[s7bench] %s\n", dmc.summary())
+	}
+	casesTotal.Store(done.Load())
+	decisionsTotal.Store(decisions.Load())
+	stats := engine.Stats(context.Background())
+	wall := time.Since(startRun).Seconds()
+	rs := map[string]any{"cases": casesTotal.Load(), "decisions": decisionsTotal.Load(), "wall_s": wall, "decisions_per_s": float64(decisionsTotal.Load()) / wall,
+		"scratch_peak_bytes": scratchPeak.Load(), "scratch_cap_mb": *scratchCapMB, "load1_at_end": loadAvg(), "audit": stats, "pack": *pack, "connector_flag": *connectorFlag, "gomaxprocs": runtime.GOMAXPROCS(0), "dm_fill": *dmFill, "dm_fill_unanswered": fillUnanswered}
+	if b, err := json.MarshalIndent(rs, "", " "); err == nil {
+		_ = os.WriteFile(*out+".runstats.json", b, 0o644)
+	}
+	if fillUnanswered > 0 {
+		fmt.Fprintf(os.Stderr, "[s7bench] dm fill INCOMPLETE: %d requests unanswered; run the fill again (answered requests are cached and not sent again)\n", fillUnanswered)
+		w.Flush()
+		cleanup()
+		os.Exit(4)
+	}
+	if *dmFill {
+		fmt.Fprintln(os.Stderr, "[s7bench] dm fill COMPLETE: every request answered and stored; this run's own decisions are void (made with the fill stub); replay with -dm-cache-only")
+	}
 }
 
 type hookResp struct {
@@ -354,21 +572,79 @@ type hookResp struct {
 	RuleIDs    []string `json:"rule_ids"`
 }
 
-func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
+func runCase(e *gateway.S7Engine, c corpusCase, connectorFlag, surface string, promptFromContent, post, det, wantDM, wantJudge bool, preHeaders []string, emit func(record), decisions *atomic.Int64) {
+	conn := connectorOf(connectorFlag, c.Strata.Provider)
+	legacy := connectorFlag == "claudecode"
 	h := sha256.Sum256([]byte(c.ID))
 	sid := "s7-" + hex.EncodeToString(h[:12])
 	ctx := context.Background()
 	events := c.Payload.Events
 	if len(events) == 0 {
-		events = []event{c.Payload.event}
+		one := c.Payload.event
+		if one.ToolResult == nil {
+			one.ToolResult = c.Payload.EventResult
+		}
+		events = []event{one}
 	}
 	cwd := "/home/bench/work"
-	if intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt); intent != "" {
+	if surface == "prompt" {
+		text := firstNonEmpty(c.Payload.Content, c.Payload.Prompt, c.Payload.Intent, c.Payload.Command)
+		// The scored answer is the UserPromptSubmit hook's answer, the one a coding agent gets (rel-1-0-10:GAP-0554). The proxy's text
+		// inspection (InspectText) runs first, as before, and is kept only as the diagnostic columns extra.inspect_*.
+		v := e.InspectText(ctx, "prompt", text)
+		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": text, "transcript_path": ""})
+		// The hook call is timed on its own (InspectText is a diagnostic beside it) and the judge or System One requests it made are taken
+		// for this session, the same two fields a tool-call row carries (lat_us, judge_calls; rel-1-0-10:GAP-0613). A fallback call is part
+		// of the one answer the case gets, so it is inside the timed span, as on the tool-call path.
+		t0 := time.Now()
+		st, hb := e.HookFor(ctx, conn, body)
+		fallback := ""
+		if st >= 400 && conn != "claudecode" {
+			// The connector's handler refused the claudecode-shaped body: ask the Claude Code handler instead and say so in the record, so a
+			// refused shape is never scored as an allow (same rule as the tool-call path).
+			fallback = fmt.Sprintf("%s:%d", conn, st)
+			st, hb = e.HookFor(ctx, "claudecode", body)
+		}
+		lat := time.Since(t0)
+		decisions.Add(1)
+		emit(promptRecord(c.ID, conn, st, hb, v, fallback, lat, e.TakeJudgeCalls(sid)))
+		return
+	}
+	if surface == "response" || surface == "response-stream" {
+		text := firstNonEmpty(c.Payload.Content, c.Payload.Command)
+		t0 := time.Now()
+		r := record{Case: c.ID, Connector: conn, N: 1, SrcTool: "__response__", Tool: "assistant_response", Mapped: "response", Status: 200}
+		if surface == "response" {
+			v := e.InspectText(ctx, "completion", text)
+			r.Action, r.RawAction, r.Severity, r.Findings = v.Action, v.Action, v.Severity, v.Findings
+		} else {
+			sr := e.InspectStream(ctx, text)
+			r.Action, r.RawAction, r.Severity, r.Findings = sr.Action, sr.Action, sr.Severity, sr.Findings
+			r.Extra = map[string]string{"blocked_at": fmt.Sprint(sr.BlockedAt), "scans": fmt.Sprint(sr.Scans), "unchecked_tail": fmt.Sprint(sr.UncheckedTail), "bytes": fmt.Sprint(len(text)),
+				"final_action": sr.FinalAction, "final_sev": sr.FinalSeverity, "final_findings": strings.Join(sr.FinalFindings, ",")}
+		}
+		r.LatencyUs = time.Since(t0).Microseconds()
+		decisions.Add(1)
+		emit(r)
+		return
+	}
+	intent := firstNonEmpty(c.Payload.Intent, c.Payload.Prompt)
+	if intent == "" && promptFromContent {
+		intent = c.Payload.Content
+	}
+	if intent != "" {
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": sid, "cwd": cwd, "prompt": intent, "transcript_path": ""})
-		e.Hook(ctx, body)
+		e.HookFor(ctx, conn, body)
 	}
 	for i, ev := range events {
-		tool, input, mapped := mapTool(ev)
+		var tool string
+		var input json.RawMessage
+		var mapped string
+		if legacy {
+			tool, input, mapped = mapTool(ev)
+		} else {
+			tool, input, mapped = buildCall(conn, ev)
+		}
 		ecwd := cwd
 		if ev.CWD != "" {
 			ecwd = ev.CWD
@@ -376,9 +652,35 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		body, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": sid, "cwd": ecwd,
 			"tool_name": tool, "tool_input": input, "permission_mode": "default", "transcript_path": "",
 			"tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
+		if conn == "codex" {
+			var bm map[string]any
+			_ = json.Unmarshal(body, &bm)
+			bm["turn_id"] = sid
+			bm["model"] = "bench"
+			body, _ = json.Marshal(bm)
+		}
+		if conn == "cursor" && mapped == "shell" {
+			// Cursor's shell hook is beforeShellExecution: it names no tool, its payload is the command.
+			var in struct {
+				Command string `json:"command"`
+			}
+			_ = json.Unmarshal(input, &in)
+			body, _ = json.Marshal(map[string]any{"hook_event_name": "beforeShellExecution", "conversation_id": sid, "generation_id": sid, "cwd": ecwd, "command": in.Command, "workspace_roots": []string{ecwd}})
+		}
 		t0 := time.Now()
-		status, resp := e.Hook(ctx, body, preHeaders...)
-		r := record{Case: c.ID, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
+		status, resp := e.HookFor(ctx, conn, body, preHeaders...)
+		fallback := ""
+		if status >= 400 && conn != "claudecode" && !legacy {
+			// The connector's handler refused the payload shape (a binding this harness cannot supply): judge the call through the
+			// Claude Code handler instead, and say so in the record, so a refused shape is never scored as an allow.
+			cc := ev
+			ftool, finput, _ := mapTool(cc)
+			fbody, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": sid, "cwd": ecwd, "tool_name": ftool, "tool_input": finput,
+				"permission_mode": "default", "transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
+			fallback = fmt.Sprintf("%s:%d", conn, status)
+			status, resp = e.HookFor(ctx, "claudecode", fbody, preHeaders...)
+		}
+		r := record{Case: c.ID, Connector: conn, Idx: i, N: len(events), SrcTool: ev.ToolName, Tool: tool, Mapped: mapped, Status: status,
 			LatencyUs: time.Since(t0).Microseconds()}
 		r.JudgeCalls = e.TakeJudgeCalls(sid)
 		var hr hookResp
@@ -392,25 +694,82 @@ func runCase(e *gateway.S7Engine, c corpusCase, post, det, wantDM, wantJudge boo
 		}
 		r.Reason = hr.Reason
 		if status != 200 {
+			if os.Getenv("S7_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "[s7bench-debug] %s status=%d body=%s resp=%s\n", conn, status, string(body), string(resp))
+			}
 			r.Err = fmt.Sprintf("http %d", status)
 		}
+		if fallback != "" {
+			r.Extra = map[string]string{"connector_fallback": fallback}
+		}
 		if det {
-			d := e.Deterministic(ctx, tool, input, ecwd)
+			d := e.DeterministicFor(ctx, conn, tool, input, ecwd)
 			r.Det = &d
 		}
 		if wantDM || wantJudge {
 			dm, jv := e.Layers(ctx, sid, tool, string(input), wantDM, wantJudge)
 			r.DM, r.Judge = &dm, &jv
 		}
-		if post && ev.Outcome == "succeeded" {
+		if (post && (ev.Outcome == "succeeded" || ev.resultText() != "")) || surface == "tool-result" {
+			var resp any = map[string]any{"stdout": "", "stderr": "", "interrupted": false}
+			if surface == "tool-result" {
+				resp = ev.resultText()
+			} else if t := ev.resultText(); t != "" {
+				if mapped == "shell" {
+					resp = map[string]any{"stdout": t, "stderr": "", "interrupted": false}
+				} else {
+					resp = t
+				}
+			}
 			pb, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "session_id": sid, "cwd": ecwd,
-				"tool_name": tool, "tool_input": input, "tool_response": map[string]any{"stdout": "", "stderr": "", "interrupted": false},
+				"tool_name": tool, "tool_input": input, "tool_response": resp,
 				"transcript_path": "", "tool_use_id": fmt.Sprintf("toolu_%s_%d", sid[3:15], i)})
-			r.PostStatus, _ = e.Hook(ctx, pb)
+			var pbody []byte
+			r.PostStatus, pbody = e.HookFor(ctx, conn, pb)
+			if surface == "tool-result" {
+				// The decision on this surface is the PostToolUse answer; the PreToolUse answer moves to extra.
+				var pr hookResp
+				_ = json.Unmarshal(pbody, &pr)
+				if r.Extra == nil {
+					r.Extra = map[string]string{}
+				}
+				r.Extra["pre_action"], r.Extra["pre_raw_action"] = r.Action, r.RawAction
+				r.Action, r.RawAction, r.Severity, r.Findings, r.RuleIDs = pr.Action, pr.RawAction, pr.Severity, pr.Findings, pr.RuleIDs
+				r.Mapped = "tool-result"
+			}
 		}
 		decisions.Add(1)
 		emit(r)
 	}
+}
+
+// promptRecord is the prompt-surface decision of one case: the UserPromptSubmit hook answer (hb, HTTP status st) is the scored action,
+// severity and findings; the proxy text inspection v rides along in extra.inspect_* for comparison only (rel-1-0-10:GAP-0554). A hook that
+// answered no JSON, or not HTTP 200, is an error row and never an allow. lat is the time of the hook call alone (InspectText is not in it)
+// and calls are the judge requests that call made, in the same fields a tool-call row has (lat_us, judge_calls; rel-1-0-10:GAP-0613).
+func promptRecord(id, conn string, st int, hb []byte, v *gateway.ScanVerdict, fallback string, lat time.Duration, calls []gateway.S7JudgeCall) record {
+	var hr hookResp
+	r := record{Case: id, Connector: conn, N: 1, SrcTool: "__prompt__", Tool: "UserPromptSubmit", Mapped: "prompt", Status: st,
+		LatencyUs: lat.Microseconds(), JudgeCalls: calls}
+	if err := json.Unmarshal(hb, &hr); err != nil {
+		r.Err = "decode: " + err.Error()
+	} else if st != 200 {
+		r.Err = fmt.Sprintf("http %d", st)
+	}
+	r.Action, r.RawAction, r.Severity, r.WouldBlock, r.RuleIDs, r.Findings = hr.Action, hr.RawAction, hr.Severity, hr.WouldBlock, hr.RuleIDs, hr.Findings
+	r.DetOnly = strings.HasPrefix(hr.Reason, "detection-only")
+	if len(hr.Reason) > 240 {
+		hr.Reason = hr.Reason[:240]
+	}
+	r.Reason = hr.Reason
+	r.Extra = map[string]string{"scored_via": "hook"}
+	if v != nil {
+		r.Extra["inspect_action"], r.Extra["inspect_sev"], r.Extra["inspect_findings"] = v.Action, v.Severity, strings.Join(v.Findings, ",")
+	}
+	if fallback != "" {
+		r.Extra["connector_fallback"] = fallback
+	}
+	return r
 }
 
 func firstNonEmpty(v ...string) string {
@@ -418,6 +777,18 @@ func firstNonEmpty(v ...string) string {
 		if s != "" {
 			return s
 		}
+	}
+	return ""
+}
+
+func loadAvg() string {
+	b, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return ""
+	}
+	f := strings.Fields(string(b))
+	if len(f) > 0 {
+		return f[0]
 	}
 	return ""
 }

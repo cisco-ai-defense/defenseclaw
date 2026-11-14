@@ -40,6 +40,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/fixturefs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -282,6 +283,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
 		})
+		a.forgetBlockedPrompt(ctx, req.Prompt, verdict)
 		if decision, matched := a.codexPromptSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{
 				targetType: "skill",
@@ -1012,6 +1014,9 @@ func (a *APIServer) inspectCodexToolResult(
 ) *ToolInspectVerdict {
 	req = req.withTrustedActiveHome(ctx)
 	content := codexToolResponseString(req.ToolResponse)
+	for _, j := range a.hookSessionJudges(ctx) {
+		j.ObserveToolResult(ctx, content) // decision_model.history_tool_results only
+	}
 	if sandboxToolResultUntrusted(ctx) {
 		return a.inspectMessageContent(ctx, codexToolResultInspectRequest(content, ruleContentScopeUntrusted))
 	}
@@ -3801,11 +3806,12 @@ func sanitizeHookCWD(cwd string) string {
 // resolveHookCWD resolves a hook working directory to the real directory
 // it names; tests stand in for a service account that may not stat it.
 var resolveHookCWD = func(cwd string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(cwd)
+	resolved, err := filepath.EvalSymlinks(fixturefs.Map(cwd))
 	if err != nil {
 		return "", err
 	}
-	info, err := os.Stat(resolved)
+	resolved = fixturefs.Unmap(resolved)
+	info, err := os.Stat(fixturefs.Map(resolved))
 	if err != nil {
 		return "", err
 	}
