@@ -40,6 +40,7 @@ const (
 	maxPageDefs   = 1 << 10   // definitions tracked for the taint pass (bounded.Items)
 	maxPageRefs   = 1 << 17   // names recorded across all definitions (bounded.Nodes)
 	maxTaintDepth = 16        // levels of one value handed on from name to name (bounded.Depth)
+	maxPageWork   = 1 << 22   // steps of every pass together: a bracket or expression scan counts one per token (bounded.Time)
 )
 
 // SinkKind is the kind of network send a page script makes.
@@ -334,7 +335,7 @@ func decodeEscape(src string, i int) (string, int) {
 		}
 	case 'u':
 		if i+2 < len(src) && src[i+2] == '{' {
-			if end := strings.IndexByte(src[i:], '}'); end > 0 && end < 12 {
+			if end := strings.IndexByte(src[i:min(len(src), i+12)], '}'); end > 0 {
 				if v, err := strconv.ParseUint(src[i+3:i+end], 16, 32); err == nil {
 					return string(rune(v)), i + end + 1
 				}
@@ -358,6 +359,13 @@ type jsReader struct {
 	t     []jsTok
 	match []int // index of the bracket that closes (or opens) the one at i, -1 when none
 	trunc *bounded.Truncated
+	// work is the budget of every scan that can cross many tokens (an
+	// expression's end, a call's arguments, a taint search): a script built to
+	// make each of them cross the rest of the script would otherwise cost
+	// tokens squared. Spent, the scans stop and the reading is truncated.
+	work    *bounded.Counter
+	ends    map[int]int      // exprEnd by start token
+	assigns map[string][]int // assignment operators by the name they assign (built once)
 }
 
 func (r *jsReader) tok(i int) *jsTok {
@@ -520,8 +528,14 @@ func binaryOp(s string) bool {
 // ; or , outside brackets, a closing bracket of an outer group, or a line
 // break the expression cannot continue across.
 func (r *jsReader) exprEnd(lo int) int {
+	if e, ok := r.ends[lo]; ok {
+		return e
+	}
 	depth := 0
 	for j := lo; j < len(r.t); j++ {
+		if !r.work.Take() {
+			return j
+		}
 		t := r.t[j]
 		if t.kind == jsPunct {
 			switch t.s {
@@ -530,16 +544,14 @@ func (r *jsReader) exprEnd(lo int) int {
 				continue
 			case ")", "]", "}":
 				if depth == 0 {
+					r.ends[lo] = j
 					return j
 				}
 				depth--
 				continue
-			case ";":
+			case ";", ",":
 				if depth == 0 {
-					return j
-				}
-			case ",":
-				if depth == 0 {
+					r.ends[lo] = j
 					return j
 				}
 			}
@@ -549,10 +561,12 @@ func (r *jsReader) exprEnd(lo int) int {
 			prevOpen := prev.kind == jsPunct && (binaryOp(prev.s) || prev.s == "!" || prev.s == "~")
 			next := t.kind == jsPunct && binaryOp(t.s)
 			if !prevOpen && !next && (t.kind != jsStr || !t.tmpl) {
+				r.ends[lo] = j
 				return j
 			}
 		}
 	}
+	r.ends[lo] = len(r.t)
 	return len(r.t)
 }
 
@@ -563,6 +577,9 @@ func (r *jsReader) args(open int) [][2]int {
 	var out [][2]int
 	lo, depth := open+1, 0
 	for j := open + 1; j < end; j++ {
+		if !r.work.Take() {
+			return out
+		}
 		t := r.t[j]
 		if t.kind != jsPunct {
 			continue
@@ -599,7 +616,8 @@ func AnalyzePageScript(code string) PageFlow {
 		code = code[:maxPageScript]
 		trunc.Hit(bounded.Bytes)
 	}
-	r := &jsReader{trunc: &trunc}
+	work := bounded.NewCounter(&trunc, bounded.Time, maxPageWork)
+	r := &jsReader{trunc: &trunc, work: &work, ends: map[int]int{}}
 	r.t = lexJS(code, &trunc)
 	r.buildMatch()
 
@@ -612,7 +630,7 @@ func AnalyzePageScript(code string) PageFlow {
 		}
 	}
 	if !flow.ReadsState {
-		flow.Truncated = trunc.Set()
+		flow.Truncated = trunc.Set(&work)
 		return flow
 	}
 
@@ -624,6 +642,9 @@ func AnalyzePageScript(code string) PageFlow {
 	budget := maxPageRefs
 	for d, df := range defs {
 		for i := df.lo; i < df.hi && i < len(r.t); i++ {
+			if !r.work.Take() {
+				break
+			}
 			if reads[i] {
 				direct[d] = true
 			}
@@ -671,6 +692,9 @@ func AnalyzePageScript(code string) PageFlow {
 
 	hasTaint := func(lo, hi int) bool {
 		for i := lo; i < hi && i < len(r.t); i++ {
+			if !r.work.Take() {
+				return false
+			}
 			if reads[i] {
 				return true
 			}
@@ -688,7 +712,7 @@ func AnalyzePageScript(code string) PageFlow {
 	if len(flow.Sends) > 0 {
 		flow.Gotos = r.gotos(&trunc)
 	}
-	flow.Truncated = trunc.Set()
+	flow.Truncated = trunc.Set(&work)
 	return flow
 }
 
@@ -841,6 +865,9 @@ func (r *jsReader) paramNames(lo, hi int) []string {
 // token j.
 func (r *jsReader) chainStart(j int) int {
 	for {
+		if !r.work.Take() {
+			return j + 1
+		}
 		for j >= 0 && (r.is(j, ")") || r.is(j, "]")) {
 			if r.match[j] < 0 {
 				return j + 1
@@ -896,7 +923,7 @@ func (r *jsReader) targets(i int) []string {
 
 // root is the root name of the member or index chain that ends at token j.
 func (r *jsReader) root(j int) []string {
-	for j >= 0 {
+	for j >= 0 && r.work.Take() {
 		switch {
 		case r.is(j, "]") && r.match[j] >= 0:
 			j = r.match[j] - 1
@@ -1145,18 +1172,28 @@ func (r *jsReader) isLocation(i int) bool {
 // boundOnce is the range of the expression a name is bound to when the script
 // assigns the name exactly once.
 func (r *jsReader) boundOnce(name string) (lo, hi int, ok bool) {
-	count := 0
-	for i := range r.t {
-		if !r.isAssignOp(i) {
-			continue
+	if r.assigns == nil {
+		// One pass for every name; the right side is read only for a name
+		// assigned once.
+		r.assigns = map[string][]int{}
+		r.work.TakeN(len(r.t))
+		for i := range r.t {
+			if !r.isAssignOp(i) {
+				continue
+			}
+			if n, isName := r.ident(i - 1); isName && !(i >= 2 && r.isDot(i-2)) {
+				if len(r.assigns[n]) < 2 {
+					r.assigns[n] = append(r.assigns[n], i)
+				}
+			}
 		}
-		if n, isName := r.ident(i - 1); !isName || n != name || (i >= 2 && r.isDot(i-2)) {
-			continue
-		}
-		count++
-		lo, hi = i+1, r.exprEnd(i+1)
 	}
-	return lo, hi, count == 1 && lo < hi
+	at := r.assigns[name]
+	if len(at) != 1 {
+		return 0, 0, false
+	}
+	lo, hi = at[0]+1, r.exprEnd(at[0]+1)
+	return lo, hi, lo < hi
 }
 
 // classifyLiteral reads the literal text a destination starts with. whole is
