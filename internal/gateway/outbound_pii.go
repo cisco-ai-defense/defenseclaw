@@ -179,14 +179,14 @@ func outboundPIIFindings(request trustedActionRequest, findings []RuleFinding) [
 	for _, text := range strs {
 		text = outboundPIIQuotes.Replace(text)
 		if card != nil {
-			for _, loc := range card.FindAllStringIndex(text, 8) {
+			for _, loc := range card.FindAllStringIndex(text, -1) {
 				if paymentcard.LabeledRunAt(text, loc[0], loc[1]) {
 					add(outboundPIICardRuleID, "Labelled payment card number in a message the tool sends")
 					break
 				}
 			}
 		}
-		for _, m := range outboundPIIPassport.FindAllStringSubmatchIndex(text, 8) {
+		for _, m := range outboundPIIPassport.FindAllStringSubmatchIndex(text, -1) {
 			value := text[m[2]:m[3]]
 			digits := 0
 			for _, r := range value {

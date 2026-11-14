@@ -123,7 +123,11 @@ func secretAssignmentMostlyPlaceholderWord(token string) bool {
 }
 
 var (
-	secretAssignmentVarRef  = regexp.MustCompile(`^\$\{|^\$\(|^\$[A-Z_][A-Z0-9_]*$|^%[A-Za-z_]+%$|^\{\{|^<|^@[A-Za-z_]+`)
+	// A value is one reference when it is a variable ($NAME, %NAME%), a
+	// command substitution ($(cmd ...)) or a mention (@name) and nothing
+	// else. The rule pattern never lets a value start with { or <, so a
+	// ${NAME}, {{ name }} or <name> slot never reaches this check.
+	secretAssignmentVarRef  = regexp.MustCompile(`^\$\(|^\$[A-Z_][A-Z0-9_]*$|^%[A-Za-z_]+%$|^@[A-Za-z_]+$`)
 	secretAssignmentCodeRef = regexp.MustCompile(`(?i)^(?:process\.env|os\.environ|os\.getenv|system\.getenv|env\[|getenv|config\.|settings\.|self\.|this\.|secrets?\.|vault:|ref\+|aws:|arn:|kms:|op://)`)
 	secretAssignmentDotted  = regexp.MustCompile(`^[a-z0-9_-]+(?:\.[a-z0-9_-]+)+$`)
 	// snake_case and kebab-case identifiers are names, not generated secrets.
@@ -180,18 +184,26 @@ func secretAssignmentValueLooksSecret(raw string) bool {
 // returns "" for a value that looks like a generated secret.
 func secretAssignmentRejection(raw string) string {
 	value := strings.TrimSpace(raw)
-	// The value runs to the first character a secret does not use.
+	// The value runs to the first character a secret does not use. = ( and )
+	// are secret characters (a Django key holds all three); a closing
+	// parenthesis with no opening one in the value closes the code around it.
 	if end := strings.IndexFunc(value, func(r rune) bool {
 		letterOrDigit := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
-		return !letterOrDigit && !strings.ContainsRune("_-+/.!@#$%^&*~", r)
+		return !letterOrDigit && !strings.ContainsRune("_-+/.!@#$%^&*~=()", r)
 	}); end >= 0 {
-		// A name followed by "(" is a call, not a value.
-		if value[end] == '(' {
-			return "call"
-		}
 		value = value[:end]
 	}
 	value = strings.TrimRight(value, ".,;!=")
+	for strings.HasSuffix(value, ")") && strings.Count(value, ")") > strings.Count(value, "(") {
+		value = strings.TrimRight(strings.TrimSuffix(value, ")"), ".,;!=")
+	}
+	// A name followed by "(" is a call (get_token(x), os.getenv(NAME)), not a
+	// value: what stands before the first "(" is an identifier of word-shaped
+	// letters. A random key that happens to hold a "(" has random runs there.
+	if open := strings.IndexByte(value, '('); open > 0 && secretAssignmentCallee.MatchString(value[:open]) &&
+		secretAssignmentWordLettersMin(value[:open], 3)*10 >= secretAlnumCount(value[:open])*7 {
+		return "call"
+	}
 	if len(value) < 12 || len(value) > 128 {
 		return "length"
 	}
@@ -211,20 +223,12 @@ func secretAssignmentRejection(raw string) string {
 	}
 	// A value made of words joined by separators and a number
 	// (dr_secret_key_1700000000, summer-holiday-2026) is a name a person or a
-	// script composed, not a random secret: most of its letters sit in
+	// script composed, not a random secret: most of what it holds sits in
 	// word-shaped runs of three letters or more. A generated token with
-	// separators (dd_api_7f8a9b0c1d2e) has random letter runs of one or two.
-	if strings.ContainsAny(value, "_-.") {
-		letters, wordLetters := 0, 0
-		for _, run := range strings.FieldsFunc(value, func(r rune) bool {
-			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
-		}) {
-			letters += len(run)
-			wordLetters += secretAssignmentWordLettersMin(run, 3)
-		}
-		if letters > 0 && wordLetters*10 >= letters*7 {
-			return "name"
-		}
+	// separators (dd_api_7f8a9b0c1d2e) has random letter runs of one or two
+	// and digits among its letters.
+	if strings.ContainsAny(value, "_-.") && secretAssignmentNameShaped(value) {
+		return "name"
 	}
 	// A value built from short underscore- or dash-separated pieces
 	// (0nscience_count, max-retry-3) is a name or a phrase. A generated token
@@ -279,6 +283,81 @@ func secretAssignmentRejection(raw string) string {
 		return "entropy"
 	}
 	return ""
+}
+
+// secretAssignmentCallee is the text before the "(" of a call: an identifier
+// path (get_token, os.getenv, client.fetchSecret).
+var secretAssignmentCallee = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
+
+// secretAssignmentNameShaped reports a value a person composed: words and
+// numbers joined by _, - or ., where the letters and digits of the value that
+// do not sit in a word-shaped run of three letters or more are under three
+// tenths. A separator-delimited number of ten digits or fewer, or the
+// thirteen digits of an epoch in milliseconds, is a counter, a year or a
+// timestamp and weighs nothing either way (dr_secret_key_1700000000); any
+// other digit counts against the name, so a random token that holds digits, or
+// words followed by a long random number, is not one.
+func secretAssignmentNameShaped(value string) bool {
+	letters, digits, wordLetters := 0, 0, 0
+	for _, segment := range strings.FieldsFunc(value, func(r rune) bool { return r == '_' || r == '-' || r == '.' }) {
+		if secretAssignmentCounter(segment) {
+			continue
+		}
+		if secretAssignmentTokenLike(segment) {
+			return false
+		}
+		for _, run := range strings.FieldsFunc(segment, func(r rune) bool {
+			return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z')
+		}) {
+			letters += len(run)
+			wordLetters += secretAssignmentWordLettersMin(run, 3)
+		}
+		digits += secretAlnumCount(segment) - countLetters(segment)
+	}
+	return letters > 0 && wordLetters*10 >= (letters+digits)*7
+}
+
+// secretAssignmentTokenLike reports a segment of eight characters or more
+// that turns from letters to digits or back three times or more
+// (7f8a9b0c1d2e): a generated token, where a name has its digits in one run
+// (summer2026, v2).
+func secretAssignmentTokenLike(segment string) bool {
+	if len(segment) < 8 {
+		return false
+	}
+	turns, prev := 0, byte(0)
+	for i := 0; i < len(segment); i++ {
+		class := byte('l')
+		if segment[i] >= '0' && segment[i] <= '9' {
+			class = 'd'
+		} else if !(segment[i] >= 'a' && segment[i] <= 'z' || segment[i] >= 'A' && segment[i] <= 'Z') {
+			continue
+		}
+		if prev != 0 && class != prev {
+			turns++
+		}
+		prev = class
+	}
+	return turns >= 3
+}
+
+// secretAssignmentCounter reports a segment that is only digits and is short
+// or the length of an epoch in milliseconds.
+func secretAssignmentCounter(segment string) bool {
+	if segment == "" || strings.Trim(segment, "0123456789") != "" {
+		return false
+	}
+	return len(segment) <= 10 || len(segment) == 13
+}
+
+func countLetters(value string) int {
+	n := 0
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'a' && value[i] <= 'z' || value[i] >= 'A' && value[i] <= 'Z' {
+			n++
+		}
+	}
+	return n
 }
 
 // secretAssignmentWordLetters counts the letters of value that sit in
