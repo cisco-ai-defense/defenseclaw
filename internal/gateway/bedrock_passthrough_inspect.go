@@ -74,7 +74,8 @@ func bedrockInvokeText(body []byte) string {
 const bedrockStreamMaxFrame = 16 << 20
 
 // bedrockEventStreamText decodes an AWS eventstream as it arrives and
-// returns the assistant text of each whole message. It keeps only the
+// returns the model text of each whole message (answer, reasoning and tool
+// input, GAP-0370). It keeps only the
 // bytes of the message not yet complete. A malformed stream stops the
 // decoding (the bytes still reach the caller); Broken reports it.
 type bedrockEventStreamText struct {
@@ -96,12 +97,12 @@ func (s *bedrockEventStreamText) Model() string { return s.model }
 
 // Feed takes the next bytes of the stream and returns the text of the
 // messages they complete.
-func (s *bedrockEventStreamText) Feed(p []byte) string {
+func (s *bedrockEventStreamText) Feed(p []byte) []responsePiece {
 	if s.broken {
-		return ""
+		return nil
 	}
 	s.buf = append(s.buf, p...)
-	var sb strings.Builder
+	var out []responsePiece
 	for len(s.buf) >= 12 {
 		total := int(binary.BigEndian.Uint32(s.buf[:4]))
 		if total < 16 || total > bedrockStreamMaxFrame {
@@ -117,15 +118,15 @@ func (s *bedrockEventStreamText) Feed(p []byte) string {
 			s.broken, s.buf = true, nil
 			break
 		}
-		sb.WriteString(s.messageText(msg))
+		out = append(out, s.messagePieces(msg)...)
 	}
 	if len(s.buf) == 0 {
 		s.buf = nil
 	}
-	return sb.String()
+	return out
 }
 
-func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
+func (s *bedrockEventStreamText) messagePieces(msg eventstream.Message) []responsePiece {
 	var mtype, etype string
 	for _, h := range msg.Headers {
 		switch h.Name {
@@ -136,7 +137,7 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 		}
 	}
 	if mtype != "event" {
-		return ""
+		return nil
 	}
 	switch etype {
 	case "chunk":
@@ -146,11 +147,11 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 			Bytes string `json:"bytes"`
 		}
 		if json.Unmarshal(msg.Payload, &c) != nil || c.Bytes == "" {
-			return ""
+			return nil
 		}
 		inner, err := base64.StdEncoding.DecodeString(c.Bytes)
 		if err != nil {
-			return ""
+			return nil
 		}
 		if s.model == "" {
 			var start struct {
@@ -162,8 +163,8 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 				s.model = start.Message.Model
 			}
 		}
-		if t := extractSSEChunkText(string(inner), "anthropic"); t != "" {
-			return t
+		if pieces := anthropicStreamPieces(inner); len(pieces) > 0 {
+			return pieces
 		}
 		var other struct {
 			Generation string `json:"generation"`
@@ -171,19 +172,16 @@ func (s *bedrockEventStreamText) messageText(msg eventstream.Message) string {
 			Completion string `json:"completion"`
 		}
 		if json.Unmarshal(inner, &other) == nil {
-			return other.Generation + other.OutputText + other.Completion
+			return []responsePiece{answerPiece(0, other.Generation+other.OutputText+other.Completion)}
 		}
 	case "contentBlockDelta":
 		// ConverseStream: the event type names the frame, the payload is
-		// {"contentBlockIndex":0,"delta":{"text":"..."}}.
-		var d struct {
-			Delta struct {
-				Text string `json:"text"`
-			} `json:"delta"`
-		}
+		// {"contentBlockIndex":0,"delta":{"text" | "reasoningContent":{"text"}
+		// | "toolUse":{"input"}}}.
+		var d bedrockStreamDelta
 		if json.Unmarshal(msg.Payload, &d) == nil {
-			return d.Delta.Text
+			return d.pieces()
 		}
 	}
-	return ""
+	return nil
 }
