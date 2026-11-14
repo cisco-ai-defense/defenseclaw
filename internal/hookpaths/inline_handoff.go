@@ -384,3 +384,52 @@ func findExecChildren(argv []string) [][]string {
 	}
 	return children
 }
+
+// FindExecChildCommands lists the programs the find calls of a command run
+// with -exec, -execdir, -ok and -okdir, each as a shell command of its own:
+// the words of the child, a word that holds the handed entry ({}) put as a
+// plain file name of the working folder, shell-quoted. A child with a word
+// only a runner knows is left out. Judged as a call of its own, the child
+// reaches what it names itself exactly as it would run directly
+// (rel-1-0-10:GAP-0501, GAP-0660).
+func FindExecChildCommands(command, cwd, home string) []string {
+	if !filepath.IsAbs(cwd) || !strings.Contains(command, "find") {
+		return nil
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var out []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 4 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		for i, arg := range call.Args {
+			value, fixed := StaticWord(arg, home)
+			if !fixed {
+				value = "$"
+			}
+			words[i] = value
+		}
+		child, _, _ := actionfacts.InlineChild(words)
+		if len(child) < 4 || programBase(child[0]) != "find" {
+			return true
+		}
+		for _, exec := range findExecChildren(child) {
+			if slices.Contains(exec, "$") {
+				continue
+			}
+			quoted := make([]string, len(exec))
+			for i, word := range exec {
+				word = strings.ReplaceAll(word, "{}", "tmin-entry")
+				quoted[i] = "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
+			}
+			out = append(out, strings.Join(quoted, " "))
+		}
+		return true
+	})
+	return out
+}

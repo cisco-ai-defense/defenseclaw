@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"context"
+	"path"
 	"slices"
 	"strings"
 
@@ -92,10 +94,11 @@ const inlineUnknownStateTitle = "Inline code that may write DefenseClaw security
 // The finding is alert-only outside strict, so the self-protection floor of
 // profileClassFloor (which blocks an enforcing tamper.detector_state_write in
 // every profile) does not apply to a possible write.
-func withInlineHandoffTier(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func withInlineHandoffTier(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	if !trustedShellCommandInput(request.Input) {
 		return findings
 	}
+	findings = withFindChildTwins(ctx, request, findings)
 	command, known := trustedBashCommandInput(request.Input)
 	if !known || !containsInlineInterpreterName(command) && !mentionsArchiveExtractor(command) {
 		return findings
@@ -103,8 +106,17 @@ func withInlineHandoffTier(request trustedActionRequest, findings []RuleFinding)
 	facts := actionfacts.Analyze(request.Input)
 	reading := readInlineState(facts, request)
 	if mentionsArchiveExtractor(command) {
-		_, caps := hookpaths.ArchiveExtractionReading(command, facts.CWD, strings.TrimRight(facts.ActiveHome, "/"))
+		_, unknown, caps := hookpaths.ArchiveExtractionUnknown(command, facts.CWD, strings.TrimRight(facts.ActiveHome, "/"))
 		reading.caps = reading.caps.Union(caps)
+		// Members the words do not tell may be a file of the state below the
+		// extraction folder: the unknown tier.
+		if reaches, ok := stateReachFunc(facts, request); ok && !reading.hands {
+			for _, folder := range unknown {
+				if reaches(path.Join(folder, ".defenseclaw")) {
+					reading.hands, reading.access = true, actionfacts.InlineUnknown
+				}
+			}
+		}
 	}
 	if reading.caps.Any() {
 		findings = withBoundedTruncation(findings, reading.caps, request)
@@ -150,4 +162,38 @@ func mentionsArchiveExtractor(command string) bool {
 		}
 	}
 	return false
+}
+
+// withFindChildTwins judges each program a find runs (-exec, -execdir, -ok,
+// -okdir) as a call of its own, with the handed entry put as a plain file of
+// the working folder: what the child names itself (sort -o STATE, an install
+// destination, a redirect in an sh -c body) is reached as it would be run
+// directly. A proven state or hook config finding of the twin is added to the
+// call's findings (rel-1-0-10:GAP-0501, GAP-0660).
+func withFindChildTwins(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	command, known := trustedBashCommandInput(request.Input)
+	if !known || !strings.Contains(command, "find") || !strings.Contains(command, "-exec") &&
+		!strings.Contains(command, "-ok") {
+		return findings
+	}
+	children := hookpaths.FindExecChildCommands(command, request.Input.CWD, strings.TrimRight(request.Input.ActiveHome, "/"))
+	for _, child := range children[:min(len(children), 4)] {
+		twin := operandBoundReading(request, child)
+		twin.targetMemo, twin.simpleMemo = nil, nil
+		got := dispatchTrustedAction(ctx, twin)
+		got = agentHookConfigFindings(ctx, twin, got)
+		for _, found := range got {
+			if !found.contributesToEnforcement() ||
+				found.RuleID != "tamper.detector_state_write" && found.RuleID != agentHookConfigWriteRuleID &&
+					found.RuleID != agentHookConfigDisableRuleID {
+				continue
+			}
+			if !slices.ContainsFunc(findings, func(f RuleFinding) bool {
+				return f.RuleID == found.RuleID && f.contributesToEnforcement()
+			}) {
+				findings = append(slices.Clip(findings), found)
+			}
+		}
+	}
+	return findings
 }

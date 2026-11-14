@@ -367,3 +367,92 @@ func TestTMin2HandOffSpellings(t *testing.T) {
 	}
 	tmin2Run(t, h, rows)
 }
+
+// rel-1-0-10:GAP-0501 residual (GAP-0660): a find child that names a protected
+// file in its own option or operand (sort -o FILE {}, install {} FILE, an
+// sh -c body that redirects to it) reaches it as it would run directly.
+func TestTMin2FindChildNamesTheFile(t *testing.T) {
+	h := tminHome(t)
+	var rows []tmin2Row
+	for _, target := range tmin2Targets {
+		find := func(child string) string { return `find /tmp -name p -exec ` + child + ` \;` }
+		for name, child := range map[string]string{
+			"sort -o":        "sort -o " + target.path + " {}",
+			"sort --output=": "sort --output=" + target.path + " {}",
+			"sort timeout":   "timeout 5 sort -o " + target.path + " {}",
+			"install":        "install {} " + target.path,
+			"cp":             "cp {} " + target.path,
+			"tee":            "tee " + target.path,
+		} {
+			if target.tag == "hookcfg" && strings.HasPrefix(name, "sort") {
+				continue // GAP-0506: no registered-file reader names sort a writer, direct or under find
+			}
+			rows = append(rows, tmin2Row{target.tag + "-names", name, find(child), target.block})
+		}
+		for name, child := range map[string]string{
+			"sort -o project": "sort -o out.txt {}",
+			"cp project":      "cp {} ./backup/",
+			"sh -c project":   "sh -c " + tminQuote("cat {} > ./all.txt"),
+			"grep":            "grep token {}",
+		} {
+			rows = append(rows, tmin2Row{"benign-" + target.tag, name, find(child), tmin2Allow})
+		}
+	}
+	tmin2Run(t, h, rows)
+}
+
+// rel-1-0-10:GAP-0142 residual (GAP-0661): an extraction whose members the
+// words do not tell (a glob, a list file, a rename) may write any file below
+// its folder; so may a 7z or busybox spelling and find -exec tar.
+func TestTMin2ArchiveMembersTheWordsDoNotTell(t *testing.T) {
+	h := tminHome(t)
+	var rows []tmin2Row
+	for _, target := range []struct {
+		tag, member, glob string
+		want              tmin2Want
+	}{
+		{"state", ".defenseclaw/config.yaml", ".defense*/config.yaml", tmin2Block},
+		{"hookcfg", ".claude/settings.json", ".claud*/settings.json", tmin2Tier},
+	} {
+		known := tmin2Block
+		if target.tag == "hookcfg" {
+			known = tmin2Tier
+		}
+		for name, template := range map[string]string{
+			"tar glob member":      `tar -xf /tmp/tmin.tar -C ~ --wildcards 'G'`,
+			"tar glob member bare": `tar -xf /tmp/tmin.tar -C ~ 'G'`,
+			"unzip glob member":    `unzip -o -d ~ /tmp/tmin.zip 'G'`,
+			"tar -T list":          `tar -xf /tmp/tmin.tar -C ~ -T /tmp/list.txt`,
+			"tar --files-from":     `tar -xf /tmp/tmin.tar -C ~ --files-from=/tmp/list.txt`,
+			"tar --transform":      `tar -xf /tmp/tmin.tar -C ~ --transform 's,^,x/,' proj/a.txt`,
+			"bsdtar -s":            `bsdtar -xf /tmp/tmin.tar -C ~ -s ',^,x/,' proj/a.txt`,
+			"tar in sh -c":         `sh -c "tar -xf /tmp/tmin.tar -C ~ -T /tmp/list.txt"`,
+		} {
+			// An unknown member list is the unknown tier, not a proven write.
+			want := tmin2Tier
+			rows = append(rows, tmin2Row{target.tag + "-unknown", name, strings.ReplaceAll(template, "G", target.glob), want})
+		}
+		for name, template := range map[string]string{
+			"7z x member":      `7z x /tmp/tmin.7z -o` + h.home + ` @M@`,
+			"busybox tar":      `busybox tar -xf /tmp/tmin.tar -C ~ @M@`,
+			"busybox unzip":    `busybox unzip /tmp/tmin.zip @M@ -d ~`,
+			"find -exec tar":   `find /tmp -name tmin.tar -exec tar -xf {} -C ~ @M@ \;`,
+			"find -exec unzip": `find /tmp -name tmin.zip -exec unzip -o {} @M@ -d ~ \;`,
+		} {
+			rows = append(rows, tmin2Row{target.tag + "-known", name, strings.ReplaceAll(template, "@M@", target.member), known})
+		}
+	}
+	// Folders the state is not below, and plain project members.
+	for name, command := range map[string]string{
+		"glob in a scratch folder":   `tar -xf /tmp/tmin.tar -C /var/tmp/tmin --wildcards '*.md'`,
+		"list into a scratch folder": `tar -xf /tmp/tmin.tar -C /var/tmp/tmin -T /tmp/list.txt`,
+		"transform in /var/tmp":      `tar -xf /tmp/tmin.tar -C /var/tmp/tmin --transform 's,^,x/,' a.txt`,
+		"unzip glob in /var/tmp":     `unzip -o -d /var/tmp/tmin /tmp/tmin.zip '*.py'`,
+		"7z project member":          `7z x /tmp/tmin.7z -o` + h.home + `/proj proj/a.txt`,
+		"busybox tar project":        `busybox tar -xf /tmp/tmin.tar -C ~/proj a.txt`,
+		"find -exec tar project":     `find /tmp -name tmin.tar -exec tar -xf {} -C ~/proj a.txt \;`,
+	} {
+		rows = append(rows, tmin2Row{"benign", name, command, tmin2Allow})
+	}
+	tmin2Run(t, h, rows)
+}

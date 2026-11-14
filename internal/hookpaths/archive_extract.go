@@ -205,17 +205,53 @@ func ArchiveExtractionPaths(command, cwd, home string) []string {
 // (bound rule, cap depth): what it extracts is unknown
 // (rel-1-0-10:GAP-0663).
 func ArchiveExtractionReading(command, cwd, home string) ([]string, bounded.CapSet) {
-	file, parsed := parseShell(command)
-	if !parsed || !filepath.IsAbs(cwd) {
-		return nil, bounded.CapSet{}
-	}
-	var out []string
-	var trunc bounded.Truncated
-	archiveWalk(file, cwd, home, 0, &out, &trunc)
-	return out, trunc.Set()
+	paths, _, caps := ArchiveExtractionUnknown(command, cwd, home)
+	return paths, caps
 }
 
-func archiveWalk(file *syntax.File, cwd, home string, depth int, out *[]string, trunc *bounded.Truncated) {
+// ArchiveExtractionUnknown is ArchiveExtractionReading with the folders of
+// the extractions whose members the words do not tell: a member glob, a list
+// read from a file (tar -T), a rename of the members (tar --transform, bsdtar
+// -s). Whatever such an extraction writes below its folder is unknown
+// (rel-1-0-10:GAP-0142).
+func ArchiveExtractionUnknown(command, cwd, home string) (paths, unknown []string, caps bounded.CapSet) {
+	file, parsed := parseShell(command)
+	if !parsed || !filepath.IsAbs(cwd) {
+		return nil, nil, bounded.CapSet{}
+	}
+	var trunc bounded.Truncated
+	archiveWalk(file, cwd, home, 0, &paths, &unknown, &trunc)
+	return paths, unknown, trunc.Set()
+}
+
+// archiveMembersUnknown reports an extraction whose members cannot be read
+// from its words.
+func archiveMembersUnknown(program string, words []string) bool {
+	switch strings.ToLower(filepath.Base(program)) {
+	case "tar", "gtar", "bsdtar":
+		for _, word := range words {
+			if strings.HasPrefix(word, "--") {
+				switch tarLongName(strings.SplitN(word, "=", 2)[0]) {
+				case "--files-from", "--transform", "--xform":
+					return true
+				}
+				continue
+			}
+			if strings.HasPrefix(word, "-") && len(word) > 1 && (strings.Contains(word[1:], "T") && !strings.Contains(word[1:], "f") ||
+				word == "-T" || strings.HasPrefix(word, "-s") && strings.Contains(filepath.Base(program), "bsdtar")) {
+				return true
+			}
+		}
+	}
+	for _, member := range ArchiveExtractionMembers(program, words) {
+		if strings.ContainsAny(member, "*?[") {
+			return true
+		}
+	}
+	return false
+}
+
+func archiveWalk(file *syntax.File, cwd, home string, depth int, out, unknown *[]string, trunc *bounded.Truncated) {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -230,7 +266,7 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out *[]string, 
 			if body, shell := launcherBody(child); shell {
 				if trunc.Within(bounded.Depth, depth+1, InlineMaxShellDepth) {
 					if inner, parsed := parseShell(body); parsed {
-						archiveWalk(inner, cwd, home, depth+1, out, trunc)
+						archiveWalk(inner, cwd, home, depth+1, out, unknown, trunc)
 					}
 				}
 				return true
@@ -249,6 +285,9 @@ func archiveWalk(file *syntax.File, cwd, home string, depth int, out *[]string, 
 				folder = filepath.Join(cwd, folder)
 			}
 			*out = append(*out, filepath.Clean(folder))
+			if archiveMembersUnknown(words[0], words[1:]) {
+				*unknown = append(*unknown, filepath.Clean(folder))
+			}
 			for _, member := range members {
 				*out = append(*out, archiveMemberPath(folder, member))
 			}
@@ -266,6 +305,8 @@ func archiveProgramWords(words []string) []string {
 			for len(words) > 0 && strings.HasPrefix(words[0], "-") {
 				words = words[1:]
 			}
+		case "busybox", "toybox":
+			words = words[1:]
 		case "env":
 			words = words[1:]
 			for len(words) > 0 && (strings.HasPrefix(words[0], "-") || strings.Contains(words[0], "=")) {
@@ -315,8 +356,28 @@ func ArchiveExtractionMembers(program string, words []string) []string {
 		return unzipMembers(words)
 	case "tar", "gtar", "bsdtar":
 		return tarMembers(words)
+	case "7z", "7za", "7zr":
+		return sevenZipMembers(words)
 	}
 	return nil
+}
+
+// sevenZipMembers lists the members 7z x names after its archive.
+func sevenZipMembers(words []string) []string {
+	if len(words) < 2 || words[0] != "x" && words[0] != "e" {
+		return nil
+	}
+	var operands []string
+	for _, word := range words[1:] {
+		if !strings.HasPrefix(word, "-") {
+			operands = append(operands, word)
+		}
+	}
+	var members []string
+	for _, operand := range operands[min(1, len(operands)):] {
+		members = append(members, path.Clean(strings.TrimLeft(filepath.ToSlash(operand), "/")))
+	}
+	return members
 }
 
 // tarValueLetters are the tar short options whose value is the rest of the

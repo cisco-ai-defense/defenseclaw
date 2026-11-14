@@ -1530,7 +1530,7 @@ func registrationCopyReach(file *syntax.File, cwd, home string, protected protec
 // registrationArchivePossibleReachAs is RegistrationArchivePossibleReach in
 // one reading of the command.
 func registrationArchivePossibleReachAs(command, cwd, home string, names []string) string {
-	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") {
+	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") && !strings.Contains(command, "7z") {
 		return ""
 	}
 	file, ok := parseShell(command)
@@ -1559,8 +1559,19 @@ func registrationArchivePossibleReachAs(command, cwd, home string, names []strin
 			program, args = words[0], words[1:]
 		}
 		members := ArchiveExtractionMembers(program, args)
+		unknown := archiveMembersUnknown(program, args)
 		for _, dest := range ArchiveExtractionDestinations(program, args) {
 			folder := OperandPath(dest, cwd)
+			// Members the words do not tell may be any file below the folder: a
+			// registered file there is a possible write (rel-1-0-10:GAP-0142).
+			if unknown {
+				for _, name := range names {
+					if strings.HasPrefix(name, folder+string(filepath.Separator)) {
+						found = folder
+						return false
+					}
+				}
+			}
 			// A member lands below the folder by its own name: one that is a
 			// registered file, or holds registered files, is a write of them
 			// (rel-1-0-10:GAP-0142).

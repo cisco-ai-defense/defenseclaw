@@ -387,7 +387,7 @@ func dispatchTrustedAction(
 	// simple-command pass inside it is a proof the outer call reads as proven.
 	if !request.inlineTierNested {
 		request.inlineTierNested = true // every twin and pass below is a copy of this request
-		defer func() { findings = withInlineHandoffTier(request, findings) }()
+		defer func() { findings = withInlineHandoffTier(parent, request, findings) }()
 	}
 	parent, endOpenedPaths := withOpenedPathScope(parent)
 	defer endOpenedPaths()
