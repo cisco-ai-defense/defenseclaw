@@ -595,7 +595,7 @@ func patchProgramWordCount(line string) int {
 				length++
 			}
 			// A Windows program suffix is still the program.
-			if length > 0 && !(line[end] == '.' && slices.Contains(patchProgramSuffixes, strings.ToLower(rest[:length]))) {
+			if length > 0 && (line[end] != '.' || !slices.Contains(patchProgramSuffixes, strings.ToLower(rest[:length]))) {
 				continue
 			}
 		}
