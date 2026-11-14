@@ -442,6 +442,13 @@ func TestToolChainRootScopeUpgradeFromReleasedStores(t *testing.T) {
 				}
 			}
 			// The released binary serves this store: a live session chain.
+			// This build stands in for it, and its chain writes name the
+			// event column added after 1.0.5 (file_unknown_chain_mask), so
+			// the stand-in store gets that column first; an event row written
+			// without it is TestToolChainStateOldFormatEventReadsAsResolved.
+			if err := migrateToolChainFileUnknownState(old.db); err != nil {
+				t.Fatal(err)
+			}
 			old.ready.Store(true)
 			fixture := toolChainFixtureOn(t, old, time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC))
 			chainID := guardrail.ToolChainStagedReverseShellPersistence

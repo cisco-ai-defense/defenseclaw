@@ -175,13 +175,17 @@ func (a *APIServer) applyToolChainRootResult(
 }
 
 // toolChainRootOnlyResult keeps the chains of root the session result does
-// not already give at the same strength.
+// not already give at the same strength. A chain the root window resolved
+// while the session window joined it only through the file-unknown marker
+// is stronger in root.
 func toolChainRootOnlyResult(root, session audit.ToolChainObserveResult) (audit.ToolChainObserveResult, error) {
 	keep := (root.DetectedMask &^ session.DetectedMask) |
 		(root.EnforcementSafeMask &^ session.EnforcementSafeMask) |
-		(root.DeniedMask &^ session.DeniedMask)
+		(root.DeniedMask &^ session.DeniedMask) |
+		((root.DetectedMask &^ root.FileUnknownJoinMask) & session.FileUnknownJoinMask)
 	out := root
 	out.DetectedMask &= keep
+	out.FileUnknownJoinMask &= keep
 	out.EnforcementSafeMask &= keep
 	out.DeniedMask &= keep
 	if out.DeniedMask == 0 {

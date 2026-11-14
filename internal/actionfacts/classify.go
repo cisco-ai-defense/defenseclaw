@@ -794,6 +794,16 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
 	default:
+		if spec, ok := posixFileReaderSpecs[program]; ok && !spec.startsProgram {
+			// A standard program that reads the files named in its
+			// arguments, like cat and head (the table is the whole list). A
+			// Windows or PowerShell program of the same name (sort.exe,
+			// Sort-Object) has another grammar.
+			if requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+				classifyPOSIXFileReader(out, command, spec)
+			}
+			break
+		}
 		classifyUnknownOutputOperand(out, command)
 		if posixVersionedPythonProgram(program) {
 			classifyPOSIXStdinScriptInterpreter(out, command)
@@ -816,6 +826,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
 
+	if spec, ok := posixFileReaderSpecs[program]; ok && spec.startsProgram &&
+		(command.Dialect == DialectPOSIX || command.Dialect == DialectArgv) {
+		// xargs -a FILE reads its input items from FILE. The program it runs
+		// is read on its own words (classifyEmbeddedPrograms), so the parse
+		// stays as partial as it was.
+		classifyPOSIXFileReader(out, command, spec)
+	}
 	classifyRedirects(out, command)
 }
 

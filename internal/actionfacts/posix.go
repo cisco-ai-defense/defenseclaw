@@ -1380,7 +1380,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		program := commandProgram(command.Executable)
 		var child parseOutput
-		switch program {
+		switch posixStaticWrapperSwitchKey(program) {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 			if structuralPOSIXPipelineStdinInterpreter(out, &command) ||
 				exactPOSIXShellPreviewInvocation(&command) {
@@ -1438,7 +1438,7 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parseCommandAs(nested, dialect, out.nextID, wrapperDepth+1)
-		case "sudo", "exec", "env", "command", "builtin", "nsenter", "chroot":
+		case posixStaticWrapperKey:
 			nestedArgv, ok, uncertain := staticPOSIXWrapperArgv(command.Argv, program)
 			if uncertain {
 				out.markPartial(IssueUnsupportedConstruct)
@@ -1516,6 +1516,28 @@ var (
 	}
 )
 
+// staticPOSIXWrapperPrograms are the programs staticPOSIXWrapperArgv unwraps:
+// the one list of the pass-through wrappers, read by both places that
+// expand them (expandStaticPOSIXWrappers and analyzeStructuredArgv) through
+// posixStaticWrapperSwitchKey.
+var staticPOSIXWrapperPrograms = map[string]struct{}{
+	"env": {}, "sudo": {}, "command": {}, "builtin": {}, "exec": {},
+	"nsenter": {}, "chroot": {}, "nice": {}, "time": {}, "timeout": {}, "nohup": {},
+}
+
+// posixStaticWrapperKey is the switch key of a program in
+// staticPOSIXWrapperPrograms.
+const posixStaticWrapperKey = "\x00static-posix-wrapper"
+
+// posixStaticWrapperSwitchKey maps a pass-through wrapper to
+// posixStaticWrapperKey and any other program to itself.
+func posixStaticWrapperSwitchKey(program string) string {
+	if _, ok := staticPOSIXWrapperPrograms[program]; ok {
+		return posixStaticWrapperKey
+	}
+	return program
+}
+
 func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool) {
 	if len(argv) < 2 {
 		return nil, false, false
@@ -1581,6 +1603,117 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 				return nil, false, true
 			}
 			return cloneSlice(argv[i:]), true, false
+		}
+
+	case "nice":
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--":
+				if i+1 < len(argv) {
+					return cloneSlice(argv[i+1:]), true, false
+				}
+				return nil, false, false
+			case arg == "--help" || arg == "--version":
+				return nil, false, false
+			case arg == "-n" || arg == "--adjustment":
+				i++
+				if i >= len(argv) {
+					return nil, false, true
+				}
+			case strings.HasPrefix(arg, "--adjustment="):
+			case strings.HasPrefix(arg, "-n") && posixSignedDecimal(arg[2:]):
+			case strings.HasPrefix(arg, "-") && posixSignedDecimal(strings.TrimLeft(arg, "-")):
+				// The historical -N and --N spellings of -n N.
+			case strings.HasPrefix(arg, "-"):
+				return nil, false, true
+			default:
+				return cloneSlice(argv[i:]), true, false
+			}
+		}
+
+	case "time":
+		// The external time program (the shell keyword is parsed as syntax).
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--":
+				if i+1 < len(argv) {
+					return cloneSlice(argv[i+1:]), true, false
+				}
+				return nil, false, false
+			case arg == "-p" || arg == "-v" || arg == "-a" || arg == "-q" ||
+				arg == "--portability" || arg == "--verbose" || arg == "--append" ||
+				arg == "--quiet":
+			case arg == "-f" || arg == "--format":
+				i++
+				if i >= len(argv) {
+					return nil, false, true
+				}
+			case strings.HasPrefix(arg, "--format="):
+			case strings.HasPrefix(arg, "-f") && len(arg) > 2:
+			case strings.HasPrefix(arg, "-"):
+				// -o FILE writes a report file; --help, --version and the
+				// rest are not a plain pass-through.
+				return nil, false, true
+			default:
+				return cloneSlice(argv[i:]), true, false
+			}
+		}
+
+	case "timeout":
+		i := 1
+	timeoutOptions:
+		for ; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--":
+				i++
+				break timeoutOptions
+			case arg == "--preserve-status" || arg == "--foreground" ||
+				arg == "-v" || arg == "--verbose":
+			case arg == "-s" || arg == "--signal" || arg == "-k" || arg == "--kill-after":
+				i++
+				if i >= len(argv) {
+					return nil, false, true
+				}
+			case strings.HasPrefix(arg, "--signal=") || strings.HasPrefix(arg, "--kill-after="):
+			case (strings.HasPrefix(arg, "-s") || strings.HasPrefix(arg, "-k")) && len(arg) > 2:
+			case strings.HasPrefix(arg, "-"):
+				return nil, false, true
+			default:
+				break timeoutOptions
+			}
+		}
+		if i >= len(argv) {
+			return nil, false, false
+		}
+		if !posixTimeoutDuration(argv[i]) {
+			return nil, false, true
+		}
+		if i+1 < len(argv) {
+			return cloneSlice(argv[i+1:]), true, false
+		}
+		return nil, false, false
+
+	case "nohup":
+		// nohup takes no options but --help, --version and the -- end
+		// marker: its first word decides (staticcheck SA4008, the loop
+		// this replaces never passed its first word).
+		if len(argv) > 1 {
+			switch arg := argv[1]; {
+			case arg == "--":
+				if len(argv) > 2 {
+					return cloneSlice(argv[2:]), true, false
+				}
+				return nil, false, false
+			case arg == "--help" || arg == "--version":
+				return nil, false, false
+			case strings.HasPrefix(arg, "-"):
+				return nil, false, true
+			default:
+				return cloneSlice(argv[1:]), true, false
+			}
 		}
 
 	case "sudo":
@@ -1790,4 +1923,39 @@ func posixShellProgram(program string) bool {
 func isStaticEnvironmentAssignment(value string) bool {
 	name, _, ok := strings.Cut(value, "=")
 	return ok && name != ""
+}
+
+// posixSignedDecimal reports an optionally signed decimal number.
+func posixSignedDecimal(value string) bool {
+	value = strings.TrimPrefix(strings.TrimPrefix(value, "+"), "-")
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// posixTimeoutDuration reports a timeout(1) DURATION: a number with an
+// optional s, m, h or d suffix.
+func posixTimeoutDuration(value string) bool {
+	if value != "" && strings.ContainsRune("smhd", rune(value[len(value)-1])) {
+		value = value[:len(value)-1]
+	}
+	digits := 0
+	dots := 0
+	for _, character := range value {
+		switch {
+		case character >= '0' && character <= '9':
+			digits++
+		case character == '.':
+			dots++
+		default:
+			return false
+		}
+	}
+	return digits > 0 && dots <= 1
 }

@@ -2102,6 +2102,10 @@ var migrations = []migration{
 		description: rejectedRecordsMigrationDescription,
 		apply:       migrateRejectedRecords,
 	},
+	{
+		description: "guardrails: store which detected chains joined only through the file-unknown marker",
+		apply:       migrateToolChainFileUnknownState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

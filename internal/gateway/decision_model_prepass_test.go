@@ -14,7 +14,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
-	"github.com/defenseclaw/defenseclaw/internal/intentstore"
 )
 
 const prepassArgs = `{"command":"go test ./internal/... -run TestSomething -count=1 -v"}`
@@ -87,16 +86,17 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 // uses the prepass answer and sample: one model request, one session entry.
 func TestDecisionPrepassAsksOnceAndRecordsOnce(t *testing.T) {
 	a, hits := prepassServer(t, 0, "allow", 0.55)
+	// The session context is counted through the judge's public intent-store
+	// setter (feat/substrate moved it behind intentstore.Store).
+	store := &sharedIntentStore{}
+	a.hookJudge.Load().SetIntentStore(store)
 	ctx := ContextWithSessionID(context.Background(), "prepass-session")
 	a.runHookJudge(ctx, "tool_call", "tool_call", "codex", prepassArgs, "Bash", nil)
 	if hits.Load() != 1 {
 		t.Fatalf("decision model asked %d times, want 1", hits.Load())
 	}
-	// The judge's session context lives behind intentstore.Store on
-	// feat/substrate (ae7fbecaf4); count every session's entries there.
-	n := a.hookJudge.Load().intentStore().(*intentstore.Process).CallCount()
-	if n != 1 {
-		t.Fatalf("session context holds %d entries for one call, want 1", n)
+	if n := len(store.appends); n != 1 {
+		t.Fatalf("session context recorded %d entries for one call, want 1", n)
 	}
 }
 
