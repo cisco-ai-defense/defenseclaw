@@ -343,7 +343,12 @@ func TestG235bKnownValueStateTargetsInPlaceAndThroughLink(t *testing.T) {
 				!cell.blind && !strings.Contains(got, "tamper.detector_state_write") {
 				t.Errorf("%s = %.200s, want block tamper.detector_state_write", row.command, got)
 			}
-		} else if !strings.HasPrefix(got, `{"action":"allow"`) {
+		} else if !strings.HasPrefix(got, `{"action":"allow"`) &&
+			// A bash -c body the walk cannot resolve (the spelling holds a
+			// login variable) is the unknown tier as an alert
+			// (rel-1-0-10:GAP-0535, lead decision 2026-11-14).
+			!(strings.HasPrefix(row.command, "bash -c ") && strings.HasPrefix(got, `{"action":"alert"`) &&
+				strings.Contains(got, parseFailureRuleID)) {
 			t.Errorf("%s = %.200s, want allow", row.command, got)
 		}
 	})

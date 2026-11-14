@@ -613,10 +613,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
 				if nested {
 					if !static {
-						if simplePotentialShellScript(call.Args, effective) {
+						if simplePotentialShellScript(call.Args, effective) && simpleRuntimeWords(call.Args) {
 							// A shell -c body, or a word that may be the -c
-							// option, the walk cannot resolve: what runs is
-							// not known (rel-1-0-10:GAP-0535).
+							// option, whose text is made at run time: what runs
+							// is not known (rel-1-0-10:GAP-0535). Static text the
+							// walk does not model (a quoted pattern, an option
+							// it does not read) stays a parse gap, as on rel.
 							return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
 						}
 						// A wrapper option the walk does not model, a trap
@@ -2325,6 +2327,31 @@ func simpleQuotedArgv(argv []string) (string, bool) {
 		words = append(words, quoted)
 	}
 	return strings.Join(words, " "), true
+}
+
+// simpleRuntimeWords reports a word of args whose text the shell makes at run
+// time: a parameter, command, arithmetic or process substitution, or a
+// pattern outside quotes.
+func simpleRuntimeWords(args []*syntax.Word) bool {
+	runtime := false
+	for _, arg := range args {
+		for _, part := range arg.Parts {
+			if lit, ok := part.(*syntax.Lit); ok && strings.ContainsAny(lit.Value, "*?[") {
+				runtime = true
+			}
+		}
+		syntax.Walk(arg, func(node syntax.Node) bool {
+			switch node.(type) {
+			case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
+				runtime = true
+			}
+			return !runtime
+		})
+		if runtime {
+			return true
+		}
+	}
+	return false
 }
 
 // simplePotentialShellScript reports an argument that is a shell's -c
