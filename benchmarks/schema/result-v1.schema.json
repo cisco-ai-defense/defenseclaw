@@ -18,7 +18,8 @@
           "opt-in/database-destruction-protection",
           "opt-in/infrastructure-destruction-protection",
           "opt-in/kubernetes-production-protection",
-          "opt-in/privacy-high-assurance"
+          "opt-in/privacy-high-assurance",
+          "opt-in/active-directory-protection"
         ]}
       ]
     },

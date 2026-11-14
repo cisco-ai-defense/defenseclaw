@@ -1484,12 +1484,15 @@ func sshDirectoryPrerequisite(facts actionfacts.Facts) bool {
 }
 
 // sshPrivateKeyMutationPrerequisite reports a write, append or delete of the
-// active user's SSH private key by anything but ssh-keygen.
+// active user's SSH private key by anything but ssh-keygen. It names the
+// standard key files only (id_rsa, id_ed25519, ...): removing a scratch pair
+// such as ~/.ssh/id_test is routine (rel HP4 review row r4-rm-test-keypair),
+// while a read of any id_* key in ~/.ssh is still a key read.
 func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if ok && !strings.EqualFold(command.Program, "ssh-keygen") &&
-			matchesActiveSSHPrivateKey(facts, candidate) &&
+			matchesActiveStandardSSHPrivateKey(facts, candidate) &&
 			integrityCommandMutatesPath(command, candidate) {
 			return true
 		}
@@ -4155,7 +4158,8 @@ func integrityPathHasFixtureSegment(value string) bool {
 	) {
 		switch component {
 		case "testdata", "test-data", "fixture", "fixtures",
-			"example", "examples", "docs":
+			"example", "examples", "docs",
+			"__tests__", "__fixtures__", "__mocks__":
 			return true
 		}
 	}

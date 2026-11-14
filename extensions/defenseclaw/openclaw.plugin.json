@@ -31,20 +31,45 @@
       },
       "sidecarPort": {
         "type": "integer",
-        "default": 18970,
-        "description": "Port for the DefenseClaw Go sidecar REST API"
-      },
-      "mode": {
-        "type": "string",
-        "enum": ["observe", "action"],
-        "default": "observe",
-        "description": "Guardrail mode: observe (log only) or action (block threats)"
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "Separate-user layout: port of the DefenseClaw gateway API (gateway.api_port). Written by an administrator from the block defenseclaw setup prints."
       },
       "awsHttp1Shim": {
         "type": "string",
-        "enum": ["auto", "on", "off"],
+        "enum": [
+          "auto",
+          "on",
+          "off"
+        ],
         "default": "auto",
         "description": "Amazon Bedrock: pi-ai uses HTTP/2 by default, which bypasses the guardrail proxy. When enabled, sets AWS_BEDROCK_FORCE_HTTP1=1 (pi-ai) and applies a Smithy fallback patch. auto = on only if OpenClaw model config references Bedrock; on = always; off = never."
+      },
+      "sidecarHost": {
+        "type": "string",
+        "description": "Separate-user layout: loopback host of the DefenseClaw gateway (gateway.host)."
+      },
+      "guardrailPort": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535,
+        "description": "Separate-user layout: port of the DefenseClaw guardrail proxy (guardrail.port)."
+      },
+      "tokenFile": {
+        "type": "string",
+        "description": "Separate-user layout: absolute path of the plugin credential the DefenseClaw gateway publishes (connectors.openclaw.plugin_token_file). Without it the plugin reads its credential and settings from the DefenseClaw data folder of its own account."
+      },
+      "hookMode": {
+        "type": "string",
+        "enum": [
+          "hybrid",
+          "native"
+        ],
+        "description": "Written by defenseclaw setup from connectors.openclaw.hooks.mode and the OpenClaw version: hybrid = native plugin hooks plus the guardrail proxy, native = native plugin hooks only (Windows). Absent = the guardrail proxy with before_tool_call (OpenClaw before 2026.8.35)."
+      },
+      "promptGate": {
+        "type": "boolean",
+        "description": "Written by defenseclaw setup from connectors.openclaw.hooks.prompt_gate: check every user prompt in before_agent_run. Always on in native mode."
       }
     }
   }

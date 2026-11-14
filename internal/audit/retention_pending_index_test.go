@@ -22,7 +22,6 @@ func TestRetentionPendingOperationBatchSearchesTheEndedOperationsIndex(t *testin
 		`INSERT INTO sqlite_stat1(tbl, idx, stat) VALUES
 			('correlation_pending_operations', 'sqlite_autoindex_correlation_pending_operations_1', '70000 1001 1001 1001 1 1 1 1'),
 			('correlation_pending_operations', 'idx_correlation_pending_status', '70000 1001 1001 1001 1001 1 1 1 1'),
-			('correlation_pending_operations', 'idx_correlation_pending_exact', '70000 1001 1001 1001 1 1 1 1 1'),
 			('correlation_pending_operations', 'idx_correlation_pending_start_event', '70000 1'),
 			('correlation_pending_operations', 'idx_correlation_pending_terminal_event', '70000 1001')`,
 		`ANALYZE sqlite_schema`,

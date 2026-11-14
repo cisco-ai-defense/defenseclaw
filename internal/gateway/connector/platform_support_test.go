@@ -23,7 +23,7 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
-	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "openclaw", "opencode",
 }
 
 var windowsPreviewConnectorNames = []string{}
@@ -31,7 +31,6 @@ var windowsPreviewConnectorNames = []string{}
 var windowsNotCertifiedConnectorNames = []string{}
 
 var windowsUnsupportedConnectorNames = []string{
-	"openclaw",
 	"zeptoclaw",
 }
 
@@ -192,11 +191,11 @@ func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 		}
 	}
 
-	warning, err = CheckPlatformSupport("openclaw", "windows")
+	warning, err = CheckPlatformSupport("zeptoclaw", "windows")
 	if warning != "" {
 		t.Fatalf("unsupported warning = %q, want empty", warning)
 	}
-	wantError := "connector \"openclaw\" is not supported on windows: " + windowsConnectorSupport["openclaw"].Reason
+	wantError := "connector \"zeptoclaw\" is not supported on windows: " + windowsConnectorSupport["zeptoclaw"].Reason
 	if err == nil || err.Error() != wantError {
 		t.Fatalf("unsupported error = %v, want %q", err, wantError)
 	}
@@ -208,8 +207,64 @@ func TestValidateConnectorSupportedOnOS(t *testing.T) {
 			t.Fatalf("supported connector %s should remain available: %v", name, err)
 		}
 	}
-	err := validateConnectorSupportedOnOS("openclaw", "windows")
+	if err := validateConnectorSupportedOnOS("openclaw", "windows"); err != nil {
+		t.Fatalf("OpenClaw runs native hooks on Windows and must be available: %v", err)
+	}
+	err := validateConnectorSupportedOnOS("zeptoclaw", "windows")
 	if err == nil || !strings.Contains(err.Error(), "requires the guardrail proxy") {
-		t.Fatalf("expected clear OpenClaw Windows rejection, got %v", err)
+		t.Fatalf("expected clear ZeptoClaw Windows rejection, got %v", err)
+	}
+}
+
+// The OpenClaw Windows row says what native mode leaves out, so an operator
+// does not expect the proxy-only protections there.
+func TestOpenClawWindowsRowNamesNativeModeLimits(t *testing.T) {
+	reason := ConnectorSupportOnOS("openclaw", "windows").Reason
+	for _, want := range []string{OpenClawNativeHooksSince, "native plugin hooks", "no guardrail proxy", "managed Windows"} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("OpenClaw Windows reason %q does not say %q", reason, want)
+		}
+	}
+}
+
+// UsesGuardrailProxy follows the resolved hook mode: OpenClaw uses the proxy
+// on Linux and macOS (proxy or hybrid) and not on Windows (native), while
+// IsProxyConnector stays the fixed connector family on every OS.
+func TestUsesGuardrailProxyFollowsTheOpenClawHookMode(t *testing.T) {
+	cases := []struct {
+		name, goos string
+		want       bool
+	}{
+		{"openclaw", "linux", true},
+		{"openclaw", "darwin", true},
+		{"openclaw", "windows", false},
+		{"zeptoclaw", "linux", true},
+		{"zeptoclaw", "windows", true},
+		{"codex", "linux", false},
+		{"codex", "windows", false},
+	}
+	for _, tc := range cases {
+		if got := UsesGuardrailProxyOnOS(tc.name, tc.goos); got != tc.want {
+			t.Errorf("UsesGuardrailProxyOnOS(%q, %q) = %v, want %v", tc.name, tc.goos, got, tc.want)
+		}
+	}
+	prev := openClawHooksGOOS
+	t.Cleanup(func() { openClawHooksGOOS = prev })
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		openClawHooksGOOS = goos
+		if !IsProxyConnector("openclaw") {
+			t.Errorf("IsProxyConnector(openclaw) on %s = false; the family does not change with the OS", goos)
+		}
+		want := goos != "windows"
+		if got := UsesGuardrailProxy("openclaw"); got != want {
+			t.Errorf("UsesGuardrailProxy(openclaw) on %s = %v, want %v", goos, got, want)
+		}
+		wantMode := LLMTrafficModeProxy
+		if goos == "windows" {
+			wantMode = LLMTrafficModeHooksOnly
+		}
+		if got := LLMTrafficModeForConnector("openclaw"); got != wantMode {
+			t.Errorf("LLMTrafficModeForConnector(openclaw) on %s = %q, want %q", goos, got, wantMode)
+		}
 	}
 }

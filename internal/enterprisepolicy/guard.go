@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // The foreign-hook guard exists because several agents run every
@@ -563,6 +565,12 @@ func connectorSources(req GuardRequest, home string, addUser func(home string, o
 // guardian never repairs them, so a user could put any content behind the
 // path (and an unmanaged install's leftover registration would run twice).
 func (r GuardRequest) ownedCommand(command string) bool {
+	return r.ownedCommandFor(command, r.HookBinary)
+}
+
+// ownedCommandFor is ownedCommand for one administrator hook binary of the
+// request's family (ownedHookBinaries).
+func (r GuardRequest) ownedCommandFor(command, hookBinary string) bool {
 	command = strings.TrimSpace(command)
 	if r.Policy.Route == RoutePerUser {
 		for _, owned := range r.OwnedCommands {
@@ -571,10 +579,32 @@ func (r GuardRequest) ownedCommand(command string) bool {
 			}
 		}
 	}
-	if copilotVSCodeLocalCommandOwned(r.goos(), r.HookBinary, command) {
+	if copilotVSCodeLocalCommandOwned(r.goos(), hookBinary, command) {
 		return true
 	}
-	return ownedCommand(command, r.HookBinary)
+	return ownedCommand(command, hookBinary)
+}
+
+// ownedHookBinaries is the administrator hook binary and, on Windows, each
+// other hook image of the same install bin that texts name (GAP-0751): the
+// transition image bin\defenseclaw-hook.exe or another launch folder
+// bin\hooks\<16 hex>. A user's registration an earlier release wrote names
+// one of those until the guardian rewrites it, and it is still DefenseClaw's
+// own, never a foreign hook. Each candidate still has to match a command
+// DefenseClaw renders for it exactly.
+func (r GuardRequest) ownedHookBinaries(texts ...string) []string {
+	binaries := []string{r.HookBinary}
+	if r.goos() != "windows" || strings.TrimSpace(r.HookBinary) == "" {
+		return binaries
+	}
+	for _, text := range texts {
+		for _, path := range winpath.EnterpriseHookImagePathsIn(text) {
+			if !slices.Contains(binaries, path) && winpath.SameEnterpriseHookImageFamily(path, r.HookBinary) {
+				binaries = append(binaries, path)
+			}
+		}
+	}
+	return binaries
 }
 
 // ownedHandlerKeys are the shared keys DefenseClaw's own handlers carry
@@ -609,12 +639,28 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 	default:
 		return false
 	}
+	var texts []string
+	for key, value := range fields {
+		if command, ok := value.(string); ok && handlerCommandKeys[key] {
+			texts = append(texts, command)
+		}
+	}
+	for _, hookBinary := range r.ownedHookBinaries(texts...) {
+		if r.ownedHandlerFor(handler, fields, hookBinary) {
+			return true
+		}
+	}
+	return false
+}
+
+// ownedHandlerFor is ownedHandler for one administrator hook binary.
+func (r GuardRequest) ownedHandlerFor(handler any, fields map[string]any, hookBinary string) bool {
 	commands := 0
 	for key, value := range fields {
 		switch {
 		case handlerCommandKeys[key]:
 			command, ok := value.(string)
-			if !ok || !r.ownedCommand(command) {
+			if !ok || !r.ownedCommandFor(command, hookBinary) {
 				return false
 			}
 			commands++
@@ -625,9 +671,9 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 		case key == "args":
 			// Exec form carries the admin binary and its arguments separately.
 			command := stringField(handler, "command")
-			matchesBinary := command == r.HookBinary
+			matchesBinary := command == hookBinary
 			if r.goos() == "windows" {
-				matchesBinary = strings.EqualFold(command, r.HookBinary)
+				matchesBinary = strings.EqualFold(command, hookBinary)
 			}
 			if !ownedExecArgs(value) || !matchesBinary {
 				return false
@@ -646,7 +692,7 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 	if r.Connector == ConnectorClaudeCode {
 		// Claude renders one command. Recognize its current exec form and
 		// the exact earlier shell form when reading user settings.
-		opts := Options{GOOS: r.goos(), HookBinary: r.HookBinary}
+		opts := Options{GOOS: r.goos(), HookBinary: hookBinary}
 		return commands == 1 && (claudeHandlerIsOwned(opts, handler) || claudeHandlerIsLegacyOwned(opts, handler))
 	}
 	return commands > 0

@@ -75,7 +75,7 @@ func TestHookContractAdmissionRefreshesDefenseClawReleaseContractChange(t *testi
 			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 			transaction, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{conn},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if err != nil {
 				t.Fatalf("setup: %v", err)
@@ -111,7 +111,7 @@ func TestHookContractAdmissionRefreshesCompatibleAgentUpdate(t *testing.T) {
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 	transaction, err := s.setupConnectorsIsolatedTransaction(
 		context.Background(), []connector.Connector{conn},
-		"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+		"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 	)
 	if err != nil {
 		t.Fatalf("setup: %v", err)
@@ -149,7 +149,7 @@ func TestHookContractAdmissionStillRefusesUpstreamAgentDrift(t *testing.T) {
 			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 			transaction, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{conn},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if err != nil {
 				t.Fatalf("setup: %v", err)
@@ -360,7 +360,7 @@ func TestRefreshOfAnAgentThatDidNotRunNamesTheCauseNotAnOpenAgent(t *testing.T) 
 			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
 			_, err = s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{conn},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if err == nil || !errors.Is(err, ErrHookContractAdmission) || conn.setupCalls != 0 {
 				t.Fatalf("refresh error = %v, setupCalls = %d; want the unversioned agent refused before setup", err, conn.setupCalls)
@@ -435,7 +435,7 @@ func TestRefreshOfASlowOrUntrustedAgentDoesNotSayCloseIt(t *testing.T) {
 			conn := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}, setupErr: tc.setupErr}
 			_, err := s.setupConnectorsIsolatedTransaction(
 				context.Background(), []connector.Connector{conn},
-				"tok", "127.0.0.1:0", "127.0.0.1:0", "master", guardrail.NewRulePackCache(),
+				"tok", "127.0.0.1:0", "127.0.0.1:0", guardrail.NewRulePackCache(),
 			)
 			if err == nil {
 				t.Fatal("refresh succeeded, want the refresh of the active connector refused")

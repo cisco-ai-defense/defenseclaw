@@ -167,8 +167,15 @@ type EmitContext struct {
 }
 
 func (snapshot EmitContext) Plan() *config.ObservabilityV8Plan { return snapshot.plan }
-func (snapshot EmitContext) Digest() string                    { return snapshot.digest }
-func (snapshot EmitContext) Generation() uint64                { return snapshot.generation }
+
+// NewEmitContextForTest is an EmitContext bound to plan, for a test emitter
+// that routes a builder's record on a chosen plan. Production emit contexts
+// come only from the runtime.
+func NewEmitContextForTest(plan *config.ObservabilityV8Plan) EmitContext {
+	return EmitContext{plan: plan}
+}
+func (snapshot EmitContext) Digest() string     { return snapshot.digest }
+func (snapshot EmitContext) Generation() uint64 { return snapshot.generation }
 
 // InboundLocalTraceResource returns the sealed local resource prepared from the
 // same provider generation that admitted an imported trace target. Ordinary
@@ -324,6 +331,17 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	}, nil
 }
 
+// LogsCollected reports whether the active plan collects the logs of
+// bucket; false without an active plan or for a bucket it does not name.
+func (runtime *Runtime) LogsCollected(bucket observability.Bucket) bool {
+	graph := runtime.Active()
+	if graph == nil {
+		return false
+	}
+	effective, ok := graph.Plan().Bucket(bucket)
+	return ok && effective.Collect.Logs
+}
+
 // Active returns the exact currently published graph pointer.
 func (runtime *Runtime) Active() *runtimegraph.Graph {
 	if runtime == nil || runtime.manager == nil {
@@ -476,6 +494,13 @@ func (runtime *Runtime) emitWithLeaseControls(
 	if !inbound {
 		export = observability.RemoteExportFrom(ctx)
 	}
+	if !localOnly && !inbound && originDestination == "" && !suppressAll &&
+		observability.ExportOnlyInCall(ctx) && !observability.SkipLocalWrite(ctx) &&
+		audit.CallWritesOpen(ctx, local.store) {
+		// The hook call stores this occurrence in its row of record: no local
+		// row, export after the call commits (dispatchAfterLocalCommit).
+		ctx = observability.WithSkipLocalWrite(ctx)
+	}
 	var outcome pipeline.LocalLogOutcome
 	var processErr error
 	switch {
@@ -498,7 +523,7 @@ func (runtime *Runtime) emitWithLeaseControls(
 			if inbound {
 				return pipeline.LocalLogOutcome{}, processErr
 			}
-			if export == observability.RemoteExportDefault {
+			if export == observability.RemoteExportDefault && !observability.ExportAfterCallCommit(ctx) {
 				runtime.dispatchOptional(ctx, lease, graph, outcome)
 			}
 		}
@@ -546,6 +571,11 @@ func (runtime *Runtime) dispatchAfterLocalCommit(
 			dispatchCtx := context.WithoutCancel(ctx)
 			if audit.DeferAfterCallWrites(ctx, store, func() {
 				defer fork.Release()
+				if observability.ExportAfterCallCommit(dispatchCtx) && !audit.CallWritesCommitted(dispatchCtx) {
+					// The row of record did not commit: the call exports the
+					// decision with its fail-mode verdict instead.
+					return
+				}
 				runtime.dispatchOptional(dispatchCtx, fork, graph, outcome)
 			}) {
 				return

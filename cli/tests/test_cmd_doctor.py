@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tests.environment import isolated_home_env
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -354,6 +356,7 @@ class DoctorHermesPathTests(unittest.TestCase):
             self.assertIn(config_path, result.checks[0]["detail"])
             self.assertIn("live=false", result.checks[0]["detail"])
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class DoctorGuardrailTests(unittest.TestCase):
     def setUp(self):
         from defenseclaw.commands import cmd_doctor
@@ -1783,6 +1786,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.passed, 1)
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     """Regression: provider routing must be prefix-based, not substring-based.
 
@@ -2299,6 +2303,7 @@ class VerifyBedrockTests(unittest.TestCase):
             self.assertEqual(_bedrock_region(), "us-east-1")
 
 
+@pytest.mark.usefixtures("openclaw_proxy_topology")
 class BedrockRoutingTests(unittest.TestCase):
     """Check ``_check_llm_api_key`` routes Bedrock configs to
     :func:`_verify_bedrock` (M3 hook)."""
@@ -3931,10 +3936,29 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        self.assertEqual(
-            _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
-            "",
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            self.assertEqual(
+                _guardrail_proxy_intentionally_closed(self._cfg(["hermes", "openclaw"])),
+                "",
+            )
+
+    def test_native_windows_openclaw_reports_no_proxy(self):
+        # Native Windows OpenClaw runs only its plugin hooks: no guardrail
+        # proxy listens, so a closed port is expected, alone or with a hook
+        # connector; ZeptoClaw still needs the probe.
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
         )
+
+        with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+            alone = _guardrail_proxy_intentionally_closed(self._cfg(["openclaw"], mode="action"))
+            mixed = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "openclaw"]))
+            zepto = _guardrail_proxy_intentionally_closed(self._cfg(["openclaw", "zeptoclaw"]))
+        self.assertIn("openclaw (mode=action via native plugin hooks)", alone)
+        self.assertIn("no guardrail proxy in native hook mode", alone)
+        self.assertIn("codex (mode=observe)", mixed)
+        self.assertIn("openclaw (mode=observe via native plugin hooks)", mixed)
+        self.assertEqual(zepto, "")
 
     def test_zeptoclaw_peer_forces_real_probe(self):
         from defenseclaw.commands.cmd_doctor import (

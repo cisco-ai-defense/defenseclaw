@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -65,7 +66,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 // calls of its function only is the assignment name=word, the reading of the
 // calls that bind, and the command is reported as mixed.
 func hereStringPipeTwin(command, home string, split, straight bool) (string, bool, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(shellparse.Reader(command), "")
 	if err != nil {
 		return "", false, false
 	}

@@ -52,7 +52,7 @@ describe('command generator shell safety', () => {
       matrix.connectors.map((connector) => [connector.id, connector.windowsSupport]),
     );
     assert.equal(statuses.size, matrix.connectors.length);
-    assert.equal(statuses.get('openclaw'), 'unsupported');
+    assert.equal(statuses.get('openclaw'), 'supported'); // native hook mode on OpenClaw 2026.8.35+ (oc/integ, Go Windows roster)
     assert.equal(statuses.get('zeptoclaw'), 'unsupported');
     assert.equal(statuses.get('opencode'), 'supported');
     for (const status of statuses.values()) {

@@ -1138,7 +1138,12 @@ func projectTrustedActionChainSteps(
 		"secrets.browser_session_store_read",
 		"secrets.workload_identity_token_read",
 	}
-	secretRead := hasAnyFinding(secretReadIDs...)
+	// A read of a credentials file starts the chain wherever the file is
+	// (the home, a project, a work directory) and whether or not the active
+	// pack alerts on the read itself: PATH-ENV-FILE is quiet in default and
+	// the home-path rules name only the account's own copy
+	// (substrate-1:GAP-0210).
+	secretRead := hasAnyFinding(secretReadIDs...) || credentialFileContentRead(facts)
 	secretReadDigest, secretReadIdentityExact := exactSingleReadPathDigest(facts)
 	secretReadExact := secretRead && secretReadIdentityExact &&
 		facts.Authoritative() && facts.EnforcementEligible()
@@ -1155,6 +1160,19 @@ func projectTrustedActionChainSteps(
 			guardrail.ToolChainSecretReadThenEgress,
 			secretReadDigest,
 		)
+	} else if facts.Parse.Status == actionfacts.StatusPartial {
+		// A pipeline or a command list the classifier cannot finish (an
+		// unknown operand grammar in another stage) still proves a
+		// credentials-file read when the reading command is complete: carry
+		// the read's identity so the chain may start here, detection only
+		// (guardrail Step1IdentityOwnsParseProof, substrate-1:GAP-0226).
+		if digest, ok := credentialFileReadProofDigest(facts); ok {
+			setToolChainEnforcementJoinDigest(
+				projection,
+				guardrail.ToolChainSecretReadThenEgress,
+				digest,
+			)
+		}
 	}
 	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); supported {
 		addToolChainStep(
@@ -1985,6 +2003,106 @@ func gitBashDriveLetterIdentity(candidate actionfacts.PathFact) (string, bool) {
 	return strings.ToLower(value[:2] + path.Clean(strings.ReplaceAll(value[2:], `\`, "/"))), true
 }
 
+// credentialFileContentRead reports an executed command that reads,
+// searches (grep) or copies the contents of a file of a credentials-file shape
+// (actionfacts.MatchCredentialFileShape, the one table) anywhere the agent
+// can reach. Not counted: a repository fixture (credentialFileFixturePath)
+// and an SSH client that only presents a key (ssh -i, scp -i), which
+// PATH-SSH-KEY does not count either.
+func credentialFileContentRead(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if _, ok := credentialFileContentReadCommand(facts, candidate); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialFileContentReadCommand returns the command that reads the
+// contents of candidate when candidate is a credentials-file read that
+// credentialFileContentRead counts.
+func credentialFileContentReadCommand(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) (actionfacts.CommandFact, bool) {
+	if candidate.Access != actionfacts.PathAccessRead {
+		return actionfacts.CommandFact{}, false
+	}
+	value := semanticPathValue(candidate)
+	if _, ok := actionfacts.MatchCredentialFileShape(value); !ok ||
+		credentialFileFixturePath(value) {
+		return actionfacts.CommandFact{}, false
+	}
+	command, ok := integrityCommandByID(facts, candidate.CommandID)
+	if !ok || command.Effect != actionfacts.EffectExecute ||
+		sshIdentityConsumer(command) ||
+		!hasAnyOperation(command, actionfacts.OperationRead,
+			actionfacts.OperationSearch, actionfacts.OperationCopy) {
+		return actionfacts.CommandFact{}, false
+	}
+	return command, true
+}
+
+// credentialFileReadProofIdentity is the identity a partly parsed call
+// carries when its credentials-file read cannot name one exact file: a
+// relative path the hook does not resolve, or several files. Path identities
+// start with their flavor ("posix", "windows"), so it never equals one and
+// never joins an upload as the same file.
+const credentialFileReadProofIdentity = "credential-read-proof\x00unresolved"
+
+// credentialFileReadProofDigest proves a credentials-file read in a call
+// whose overall parse is partial: every command that reads a
+// credentials-shaped file (credentialFileContentReadCommand) has its argv
+// complete, whatever the other stages of the pipeline or members of the list
+// are. A member of an && or || list runs conditionally; the step is
+// detection-only, so that is enough. The digest is the read file's exact
+// identity when there is one file and its path resolves, else the
+// credentialFileReadProofIdentity marker.
+func credentialFileReadProofDigest(facts actionfacts.Facts) (string, bool) {
+	selected, found, exact := "", false, true
+	for _, candidate := range facts.Paths {
+		command, ok := credentialFileContentReadCommand(facts, candidate)
+		if !ok {
+			continue
+		}
+		if !command.ArgvComplete {
+			return "", false
+		}
+		found = true
+		identity, ok := exactPathIdentity(candidate)
+		if !ok || selected != "" && selected != identity {
+			exact = false
+			continue
+		}
+		selected = identity
+	}
+	switch {
+	case !found:
+		return "", false
+	case exact && selected != "":
+		return pathIdentityDigest(selected), true
+	default:
+		return pathIdentityDigest(credentialFileReadProofIdentity), true
+	}
+}
+
+// credentialFileFixturePath reports a credentials-shaped file inside a
+// repository's test or documentation tree, or inside an installed
+// third-party package, which ship sample keys and .env files (owner traces,
+// substrate-1:GAP-0210).
+func credentialFileFixturePath(value string) bool {
+	if integrityPathHasFixtureSegment(value) {
+		return true
+	}
+	for _, component := range strings.Split(strings.Trim(canonicalSemanticPath(value), "/"), "/") {
+		switch component {
+		case "node_modules", "site-packages", "dist-packages":
+			return true
+		}
+	}
+	return false
+}
+
 func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {
 	return exactSinglePathDigest(facts, func(candidate actionfacts.PathFact) bool {
 		return candidate.Access == actionfacts.PathAccessRead &&
@@ -2345,6 +2463,11 @@ func toolValueLineageSourceKindForSensitiveRead(
 		return 0, false
 	}
 	value := strings.ToLower(strings.ReplaceAll(selected, `\`, "/"))
+	// An identity is "<flavor>\x00<path>"; the credentials-file table reads
+	// the path (it refuses a value with a NUL byte).
+	if index := strings.LastIndexByte(value, 0); index >= 0 {
+		value = value[index+1:]
+	}
 	switch {
 	case matchesEnvironmentFile(value) || matchesProcEnvironCandidate(value):
 		return toolValueLineageSourceEnv, true

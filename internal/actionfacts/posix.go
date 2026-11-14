@@ -447,7 +447,7 @@ func projectPOSIXStatement(
 		command.Argv = append(command.Argv, argument.Value)
 		if index == 0 {
 			command.Executable = argument.Value
-			command.Program = commandProgram(argument.Value)
+			command.Program = commandProgramForDialect(argument.Value, DialectPOSIX)
 		}
 	}
 	if len(call.Args) == 0 {
