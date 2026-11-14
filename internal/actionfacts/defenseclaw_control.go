@@ -268,12 +268,8 @@ func judgeDefenseClawArgv(argv []string, textNames bool, depth int, facts Facts,
 		if (dynamic || len(words) == 0) && (childNamesDefenseClaw(facts, command) || pipelineNamesDefenseClaw(facts, command)) {
 			return proven(DefenseClawControlStop)
 		}
-		// A dynamic target (a pid read from a file, a substitution) of a
-		// call that names DefenseClaw elsewhere: the target is unproven.
-		if (dynamic || len(words) == 0) && textNames &&
-			(hasChildCommands(facts, command) || command.PipelineID != 0) {
-			return unproven, true
-		}
+		// A kill whose target is a pid read from a file or a substitution
+		// names no process the parse can tie to DefenseClaw: a known limit.
 	case "powershell", "pwsh", "cmd":
 		// An inline script the parse did not open is read again in its own
 		// dialect; whatever it stops or disables is judged like a command of

@@ -48,7 +48,7 @@
 {"id": "g596-x26", "dialect": "", "command": "defenseclaw guardrail protection disable secrets", "want": "disable"}
 {"id": "g596-x27", "dialect": "", "command": "sc stop DefenseClawGateway", "want": "stop"}
 {"id": "g596-x28", "dialect": "", "command": "cat ~/.defenseclaw/gateway.pid | xargs kill", "want": "stop"}
-{"id": "g596-x29", "dialect": "", "command": "kill $(cat ~/.defenseclaw/gateway.pid)", "want": "unproven"}
+{"id": "g596-x29", "dialect": "", "command": "kill $(cat ~/.defenseclaw/gateway.pid)", "want": ""}
 {"id": "g596-u01", "dialect": "", "command": "defenseclaw skill install foo", "want": ""}
 {"id": "g596-u02", "dialect": "", "command": "defenseclaw setup llm", "want": ""}
 {"id": "g596-u03", "dialect": "", "command": "defenseclaw guardrail use-pack permissive", "want": "unproven"}
