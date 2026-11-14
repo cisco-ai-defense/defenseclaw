@@ -259,3 +259,42 @@ func TestGAP0605UserNoticeWording(t *testing.T) {
 		t.Fatalf("non-injection alert notice = %q", got)
 	}
 }
+
+// A connector with no tool-result block form says so in its note in every
+// posture, strict included: tool-result injection is alert only there
+// (GAP-0605). Payload shapes follow flow_results_test.go r2Results; Cursor and
+// Devin stand for the generic hook path (Copilot needs its registration
+// header, covered by the same code).
+func TestGAP0605AlertOnlyConnectorsSayTheLimit(t *testing.T) {
+	out := gap0605Text(gap0605Row{id: "g605-cat-inj"})
+	cases := []struct {
+		connector, event, tool string
+		payload                map[string]any
+	}{
+		{"cursor", "postToolUse", "Shell", map[string]any{"tool_output": out}},
+		{"devin", "PostToolUse", "shell", map[string]any{"tool_response": map[string]any{"output": out}}},
+	}
+	for _, p := range []gap0437Pack{gap0437Packs[0], gap0437Packs[1]} {
+		for _, tc := range cases {
+			t.Run(p.name+"/"+tc.connector, func(t *testing.T) {
+				a := gap0437Server(t, p, tc.connector, "action")
+				body := map[string]any{
+					"hook_event_name": tc.event, "session_id": "gap0605-" + tc.connector, "cwd": t.TempDir(),
+					"tool_name": tc.tool, "tool_input": map[string]any{"command": "cat ../decoy/notes.txt"},
+				}
+				for k, v := range tc.payload {
+					body[k] = v
+				}
+				resp := gap0437Serve(t, a.handleAgentHook(tc.connector), "/api/v1/hook/"+tc.connector, body)
+				if resp["action"] == "block" {
+					t.Fatalf("an alert-only connector answered block: %v", resp)
+				}
+				note, _ := resp["additional_context"].(string)
+				want := "Tool-result injection is alert only on " + tc.connector
+				if !strings.Contains(note, want) || !strings.Contains(note, connector.ToolResultInjectionGuidance) {
+					t.Fatalf("note %q lacks the limit or the guidance (raw=%v)", note, resp["raw_action"])
+				}
+			})
+		}
+	}
+}

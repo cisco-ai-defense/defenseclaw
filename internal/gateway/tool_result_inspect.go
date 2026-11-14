@@ -264,3 +264,18 @@ func verdictHasPromptInjection(verdict *ToolInspectVerdict) bool {
 	}
 	return false
 }
+
+// toolResultAlertOnlyNotice ends a tool-result note on a connector with no
+// tool-result block form with the documented limit (docs guardrail/
+// tool-results; doctor and status print the same line).
+func toolResultAlertOnlyNotice(additional, connectorName string) string {
+	limit := "Tool-result injection is alert only on " + connectorName + ": DefenseClaw cannot block a tool result there, and the output reached the agent."
+	additional = strings.TrimSpace(additional)
+	if strings.Contains(additional, limit) {
+		return additional
+	}
+	if additional == "" {
+		return limit
+	}
+	return additional + " " + limit
+}

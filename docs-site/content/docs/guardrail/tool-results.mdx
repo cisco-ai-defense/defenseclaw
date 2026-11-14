@@ -101,14 +101,28 @@ What each agent does with a tool-result alert and block:
 | Claude Code (PostToolUse) | alert: `hookSpecificOutput.additionalContext`; block: the `reason` of `decision: block` | `systemMessage` | `decision: block` with the reason. The output has already reached the model; Claude Code gives the model the reason with it. |
 | Codex (PostToolUse) | alert: `hookSpecificOutput.additionalContext`; block: the `reason` of `decision: block` | `systemMessage` | `decision: block`. In interactive use Codex feeds the reason to the model in place of the tool result; in code mode the tool promise rejects. |
 | `/llm` proxy (OpenClaw and every proxy-routed agent) | block: the refusal message | the refusal message | The model call that would carry the output is refused, so the model never reads it. |
-| Amp (`tool.result`) | block: the withheld notice in place of the output; alert: nothing | block: the withheld notice; alert: nothing in Amp | Enforced: the plugin replaces the output with a withheld notice before Amp sends it to the model. |
-| Cursor (`postToolUse`) | `additional_context` | nothing in Cursor: the post-tool event has no user field | Cannot block: an alert with `would_block`. |
-| Copilot CLI, Devin (`postToolUse`, `PostToolUse`) | `additionalContext` | nothing in the agent: the post-tool event has no user field | Cannot block: an alert with `would_block`. |
-| Antigravity, Hermes, OpenCode, Kiro | nothing: their post-tool events take no context field DefenseClaw can use | nothing in the agent | Cannot block: an alert with `would_block`. |
+| Amp (`tool.result`) | block: the withheld notice in place of the output | an Amp notification (alert); the withheld notice (block) | Enforced: the plugin replaces the output with a withheld notice before Amp sends it to the model. |
+| Cursor (`postToolUse`) | `additional_context`, ending with the limit line below | nothing in Cursor: the post-tool event has no user field | Alert only. |
+| Copilot CLI, Devin (`postToolUse`, `PostToolUse`) | `additionalContext`, ending with the limit line below | nothing in the agent: the post-tool event has no user field | Alert only. |
+| Antigravity, Hermes, OpenCode, Kiro | nothing: their post-tool events take no context field DefenseClaw can use | nothing in the agent | Alert only. |
 
-Where the agent shows you nothing, the finding is in `defenseclaw alerts`,
-the TUI Alerts panel and the audit log. Desktop notifications cover blocks
-and pending approvals, not alerts.
+**Alert only.** Cursor, Copilot CLI, Devin, Antigravity, Hermes, OpenCode
+and Kiro have no hook that can block a tool result, so on them a tool-result
+injection is an alert in every posture, strict included, and the output
+reaches the model. DefenseClaw says so in three places:
+
+- the agent's note (where the agent takes one) ends with "Tool-result
+  injection is alert only on `<connector>`: DefenseClaw cannot block a tool
+  result there, and the output reached the agent.";
+- `defenseclaw doctor` prints a "Tool-result injection" row per connector:
+  "tool-result injection: alert only on `<connector>`" for these, and the
+  alert-and-block summary for the others;
+- `defenseclaw status` prints the same "alert only" line under the connector
+  list for each enabled connector it applies to.
+
+The finding itself is in `defenseclaw alerts`, the TUI Alerts panel and the
+audit log on every agent. Desktop notifications cover blocks and pending
+approvals, not alerts.
 
 Before 1.0.10 a Claude Code PostToolUse finding reached only the model:
 `additionalContext` is not shown in the Claude Code window, so the injection
