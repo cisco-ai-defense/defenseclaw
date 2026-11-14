@@ -86,20 +86,17 @@ func TestDecisionPrepassUnderJudgeLoad(t *testing.T) {
 // uses the prepass answer and sample: one model request, one session entry.
 func TestDecisionPrepassAsksOnceAndRecordsOnce(t *testing.T) {
 	a, hits := prepassServer(t, 0, "allow", 0.55)
+	// The session context is counted through the judge's public intent-store
+	// setter (feat/substrate moved it behind intentstore.Store).
+	store := &sharedIntentStore{}
+	a.hookJudge.Load().SetIntentStore(store)
 	ctx := ContextWithSessionID(context.Background(), "prepass-session")
 	a.runHookJudge(ctx, "tool_call", "tool_call", "codex", prepassArgs, "Bash", nil)
 	if hits.Load() != 1 {
 		t.Fatalf("decision model asked %d times, want 1", hits.Load())
 	}
-	j := a.hookJudge.Load()
-	j.toolContextMu.Lock()
-	n := 0
-	for _, e := range j.toolContext {
-		n += len(e.events)
-	}
-	j.toolContextMu.Unlock()
-	if n != 1 {
-		t.Fatalf("session context holds %d entries for one call, want 1", n)
+	if n := len(store.appends); n != 1 {
+		t.Fatalf("session context recorded %d entries for one call, want 1", n)
 	}
 }
 
