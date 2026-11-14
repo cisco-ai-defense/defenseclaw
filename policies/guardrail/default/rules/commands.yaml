@@ -1685,3 +1685,10 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [execution, obfuscation, mcp]
+  - id: PAGE-SCRIPT-SESSION-EGRESS
+    tool_call_only: true
+    pattern: 'a^'
+    title: "Browser page script sends session state to another host"
+    severity: HIGH
+    confidence: 0.8
+    tags: [exfiltration, browser, session, mcp]

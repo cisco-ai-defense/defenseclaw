@@ -877,6 +877,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
 		EnforcementCapable: true,
+		sessionID:          req.SessionID,
 	}
 	if args, dir, ok := connector.TrustedShellArgs(req.Connector, req.Tool, req.Args); ok {
 		// OpenClaw's exec tool sends execution controls (yieldMs, timeout,
