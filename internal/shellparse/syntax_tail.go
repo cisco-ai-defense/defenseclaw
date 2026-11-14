@@ -123,7 +123,7 @@ func readSyntaxTail(command string) (tail SyntaxTail, ok bool) {
 		return SyntaxTail{}, false
 	}
 	var trunc bounded.Truncated
-	budget := bounded.NewCounter(&trunc, bounded.Bytes, 2*len(command)+(16<<10))
+	budget := bounded.NewCounter(&trunc, bounded.Bytes, 4*len(command)+(64<<10))
 	statements := bounded.NewCounter(&trunc, bounded.Items, MaxSyntaxTailStatements)
 	add := func(statement string) {
 		if statements.Take() {
