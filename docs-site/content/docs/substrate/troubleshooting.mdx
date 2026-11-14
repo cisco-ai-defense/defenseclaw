@@ -117,11 +117,12 @@ Ask your administrator to run `defenseclaw substrate verify` and look at `actor_
 
 ### Nobody can sign in, and `verify` says `sign_in_server` fails
 
-The gateway checks the OIDC sign-in server (`substrate.identity.oidc.issuer`) from its own network every minute, and `verify`, `status --cluster` and `doctor --install-file` show the result as `sign_in_server`. A sign-in the gateway cannot check is refused with the same cause, so the launcher says which one. The causes:
+The gateway checks the OIDC sign-in server (`substrate.identity.oidc.issuer`) from its own network every minute, and a failed check is made once more two seconds later: only a failure that repeats is reported, so one timeout or server error is not. A real outage shows within about 1 min 12 s (the next check, the pause and two 5 s fetches), and at once in the gateway's own doctor. `verify`, `status --cluster` and `doctor --install-file` show the result as `sign_in_server`. A sign-in the gateway cannot check is refused with the same cause, so the launcher says which one. The causes:
 
 - `issuer_unreachable`: no answer (DNS, connection or timeout). The issuer's address may have changed, for example after the host restarted with a new public name; set `substrate.identity.oidc.issuer` to the address it answers on now, or see the network policy below.
 - `issuer_tls_name`: the certificate does not name the issuer host. Issue a certificate whose names include it.
 - `issuer_tls_untrusted`: the certificate does not verify against the gateway's trust bundle. Set `gateway.oidcCA` to the CA that signed it, or renew an expired certificate.
+- `issuer_unavailable`: the sign-in server answers with server errors (5xx or 429). The address is right; check the server's health and logs (for Keycloak, the realm and its database).
 - `issuer_http`: the address does not serve a discovery document. Use the address that ends before `/.well-known` (for Keycloak, `.../realms/REALM`).
 - `issuer_mismatch`: the discovery document names another issuer. Set the issuer to exactly that value.
 - `issuer_keys`: the key set (`jwks_uri`) does not load.

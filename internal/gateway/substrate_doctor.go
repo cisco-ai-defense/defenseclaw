@@ -214,6 +214,14 @@ type SubstrateSignInServer interface {
 // signInCheckEvery is how often the gateway checks its sign-in server.
 const signInCheckEvery = time.Minute
 
+// signInRetryAfter is the pause before a check that failed is made once
+// more: a failure is reported only when it repeats, so one discovery
+// timeout or server error does not say nobody can sign in (GAP-0279). A
+// real outage is reported by the first check that runs after it starts:
+// within signInCheckEvery plus this pause plus two fetch timeouts (about
+// 1 min 12 s), and at once by the administrators' doctor.
+var signInRetryAfter = 2 * time.Second
+
 // signInHealth is the last check of the sign-in server.
 type signInHealth struct {
 	mu    sync.Mutex
@@ -286,6 +294,17 @@ func (st *substrateState) watchSignIn(ctx context.Context) {
 // returns the doctor row (GET /api/v1/substrate/doctor, administrators).
 func (st *substrateState) checkSignIn(ctx context.Context) SubstrateCheck {
 	d := st.cfg.SignInServer.DiagnoseIssuer(ctx)
+	if d.Cause != "" {
+		// Once more before it counts (GAP-0279).
+		t := time.NewTimer(signInRetryAfter)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return SignInServerCheck(d)
+		case <-t.C:
+		}
+		d = st.cfg.SignInServer.DiagnoseIssuer(ctx)
+	}
 	st.signIn.record(d, time.Now())
 	return SignInServerCheck(d)
 }
@@ -311,6 +330,9 @@ func SignInServerCheck(d identity.IssuerDiagnosis) SubstrateCheck {
 	case identity.IssuerHTTP:
 		c.Detail = "the sign-in server does not serve its discovery document (" + d.Detail + "): nobody can sign in"
 		c.Fix = "check substrate.identity.oidc.issuer: it is the address that ends before /.well-known (for Keycloak, .../realms/REALM)"
+	case identity.IssuerUnavailable:
+		c.Detail = "the sign-in server " + d.Issuer + " answers with server errors (" + d.Detail + "), twice in a row: sign-ins may fail"
+		c.Fix = "the address is right but the sign-in server is failing: check its health and logs (for Keycloak, the realm and its database), then run doctor again"
 	case identity.IssuerMismatch:
 		c.Detail = d.Detail + ": every sign-in is refused"
 		c.Fix = "set substrate.identity.oidc.issuer to exactly the issuer the discovery document names (scheme, host, port and path)"

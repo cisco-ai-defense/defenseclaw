@@ -333,6 +333,8 @@ func signInServerWords(reason string) string {
 		return "the sign-in server's certificate is not trusted by the gateway"
 	case identity.IssuerHTTP:
 		return "the sign-in server does not answer at its configured address"
+	case identity.IssuerUnavailable:
+		return "the sign-in server is answering with errors"
 	case identity.IssuerMismatch:
 		return "the sign-in server names another issuer than the gateway is configured with"
 	case identity.IssuerKeys:

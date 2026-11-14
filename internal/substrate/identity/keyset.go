@@ -372,7 +372,7 @@ func (ks *KeySet) getJSON(ctx context.Context, rawURL string, v any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d", resp.StatusCode)
+		return &statusError{code: resp.StatusCode}
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxDocumentBytes+1))
 	if err != nil {
@@ -435,3 +435,8 @@ func (ks *KeySet) verify(ctx context.Context, t parsedJWS) error {
 	}
 	return verifySignature(t.header.Alg, k.key, t.signed, t.signature)
 }
+
+// statusError is a fetch answered with a status other than 200.
+type statusError struct{ code int }
+
+func (e *statusError) Error() string { return fmt.Sprintf("status %d", e.code) }

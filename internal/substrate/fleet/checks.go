@@ -532,6 +532,7 @@ func CheckSignInServerReach(o Observed) Check {
 		"issuer_tls_name":      "its certificate does not name the issuer host",
 		"issuer_tls_untrusted": "its certificate does not verify against the gateway's trust bundle",
 		"issuer_http":          "it does not serve its discovery document at the configured address",
+		"issuer_unavailable":   "it answers with server errors (it is up, but failing)",
 		"issuer_mismatch":      "its discovery document names another issuer than substrate.identity.oidc.issuer",
 		"issuer_keys":          "its key set does not load",
 	}[o.SignInCause]

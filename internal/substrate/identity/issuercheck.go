@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 )
 
@@ -20,6 +21,7 @@ const (
 	IssuerTLSName      = "issuer_tls_name"      // the certificate does not name the issuer host
 	IssuerTLSUntrusted = "issuer_tls_untrusted" // the certificate does not verify against the configured CA
 	IssuerHTTP         = "issuer_http"          // the discovery address answered, but not with a discovery document
+	IssuerUnavailable  = "issuer_unavailable"   // the server answered with an error of its own (5xx, 429): it is up but failing
 	IssuerMismatch     = "issuer_mismatch"      // the discovery document names another issuer
 	IssuerKeys         = "issuer_keys"          // the key set (jwks_uri) does not load
 )
@@ -68,6 +70,7 @@ func (ks *KeySet) DiagnoseIssuer(ctx context.Context) IssuerDiagnosis {
 		if cause == IssuerHTTP {
 			cause = IssuerKeys
 		}
+		// A server-side error on the key set stays issuer_unavailable.
 		d.Cause, d.Detail = cause, fmt.Sprintf("key set %s: %v", doc.JWKSURI, err)
 		return d
 	}
@@ -89,7 +92,10 @@ func issuerCause(err error) string {
 	var dnsErr *net.DNSError
 	var op *net.OpError
 	var uerr *url.Error
+	var serr *statusError
 	switch {
+	case errors.As(err, &serr) && (serr.code >= 500 || serr.code == http.StatusTooManyRequests):
+		return IssuerUnavailable
 	case errors.As(err, &host), errors.As(err, &hostp):
 		return IssuerTLSName
 	case errors.As(err, &unknown), errors.As(err, &invalid), errors.As(err, &verr):
