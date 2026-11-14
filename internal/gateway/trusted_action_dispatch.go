@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -281,6 +282,10 @@ type trustedActionRequest struct {
 	// as its readable statements (windowsReadingTwinRequests), never as another
 	// shell.
 	windowsDialectReadings bool
+	// windowsPowerShellReading is the PowerShell reading the hook's dialect
+	// selection made of a call it placed in no dialect; the readings above
+	// reuse it instead of parsing the call again. nil: none.
+	windowsPowerShellReading *windowsHintedReading
 	// readingTwin marks a request that is itself one of those readings.
 	readingTwin bool
 	// generation is the rule generation the call is judged with; nil: the
@@ -534,6 +539,18 @@ func dispatchTrustedAction(
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
 		}()
+		if facts.Parse.Status == actionfacts.StatusLimitExceeded &&
+			(facts.Parse.Dialect == actionfacts.DialectCMD || facts.Parse.Dialect == actionfacts.DialectPowerShell) {
+			// A CMD or PowerShell reading stopped at a cap of its own
+			// (commands, tokens, nesting) under the statement budget: what
+			// it read still decides, and the call is never judged below the
+			// unknown tier of its pack (the one bound rule). A CMD reading
+			// capped at 127 to 257 statements had no limit finding at all
+			// and was allowed in strict (rel-1-0-10:GAP-0426). A POSIX
+			// reading keeps its statement budget (ShellStatementsOverBudget),
+			// under which an ordinary long script stays allowed.
+			defer func() { findings = withBoundedTruncation(findings, bounded.Of(bounded.Items), request) }()
+		}
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
@@ -600,10 +617,14 @@ func dispatchTrustedAction(
 		analyzed = true
 	}
 	facts = fileToolLinkTargetFacts(facts, request)
-	for _, twin := range windowsReadingTwinRequests(request, facts) {
+	windowsTwins, windowsTwinCut := windowsReadingTwinRequests(request, facts)
+	for _, twin := range windowsTwins {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
 		}()
+	}
+	if windowsTwinCut.Any() {
+		defer func() { findings = withBoundedTruncation(findings, windowsTwinCut, request) }()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;

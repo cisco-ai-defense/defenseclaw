@@ -3956,7 +3956,7 @@ func trustedUnparsedToolCallReason(reason string) bool {
 	return ok && unparsedToolCallReasonConnector.MatchString(name)
 }
 
-// selectWindowsShellDialect selects a complete grammar for a native Windows
+// selectWindowsShellDialectReading selects a complete grammar for a native Windows
 // shell call. Codex names its shell tool Bash everywhere, but on Windows it
 // runs the command in PowerShell, so a command such as
 // `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
@@ -3971,44 +3971,58 @@ func trustedUnparsedToolCallReason(reason string) bool {
 // PowerShell statement, pipeline, redirect or expansion is PowerShell code,
 // and reading the whole line as CMD would hide its write. An exact
 // cmd /d /c wrapper that PowerShell cannot read may still use CMD grammar.
-func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
+//
+// For a call it places in no dialect it also returns the PowerShell reading it
+// made of the call, which the Windows hook readings reuse instead of parsing
+// the call again (windowsReadingTwinRequests).
+func selectWindowsShellDialectReading(tool, command string, input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
 	tool = strings.ToLower(strings.TrimSpace(tool))
 	switch tool {
 	case "bash", "exec_command", "shell_command", "shell", "powershell", "execute_command", "run_command", "terminal",
 		"exec", "execute", "run_shell", "run_shell_command", "runshellcommand", "shell_exec", "run_terminal_cmd", "async_shell_command":
 	default:
-		return ""
+		return "", nil
 	}
 	if command == "" {
-		return ""
+		return "", nil
 	}
 	if soleCMDInvocation(command) {
-		return actionfacts.DialectCMD
+		return actionfacts.DialectCMD, nil
 	}
 	input.DialectHint = actionfacts.DialectPowerShell
-	if actionfacts.Analyze(input).Authoritative() ||
+	powerShell := actionfacts.Analyze(input)
+	powerShellInput := input
+	if powerShell.Authoritative() ||
 		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
-		return actionfacts.DialectPowerShell
+		return actionfacts.DialectPowerShell, nil
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "cmd /d /c ") {
 		input.DialectHint = actionfacts.DialectCMD
 		if actionfacts.Analyze(input).Authoritative() {
-			return actionfacts.DialectCMD
+			return actionfacts.DialectCMD, nil
 		}
 	}
-	return ""
+	return "", &windowsHintedReading{input: powerShellInput, facts: powerShell}
 }
 
 // agentHookWindowsShellDialect reads only the server-projected shell arguments.
 // A payload-supplied dialect field cannot choose the parser grammar.
 func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+	dialect, _ := agentHookWindowsShellDialectReading(input)
+	return dialect
+}
+
+// agentHookWindowsShellDialectReading is agentHookWindowsShellDialect with the
+// PowerShell reading the selection made of a call it placed in no dialect
+// (selectWindowsShellDialectReading).
+func agentHookWindowsShellDialectReading(input actionfacts.Input) (actionfacts.Dialect, *windowsHintedReading) {
 	var args struct {
 		Command string `json:"command"`
 	}
 	if json.Unmarshal(input.Args, &args) != nil {
-		return ""
+		return "", nil
 	}
-	return selectWindowsShellDialect(input.Tool, args.Command, input)
+	return selectWindowsShellDialectReading(input.Tool, args.Command, input)
 }
 
 // inspectAgentHookToolCall judges one structured tool call as the trusted
@@ -4092,8 +4106,9 @@ func (a *APIServer) inspectAgentHookToolCall(
 		CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 	}
 	dialectHint := a.agentHookWindowsDialectHint(ctx)
+	var windowsPowerShellReading *windowsHintedReading
 	if dialectHint {
-		actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
+		actionInput.DialectHint, windowsPowerShellReading = agentHookWindowsShellDialectReading(actionInput)
 	}
 	var conflictSource *conflictingToolArgumentSource
 	if bytes.Equal(trustedArgs, shellProjectedArgs) {
@@ -4102,22 +4117,23 @@ func (a *APIServer) inspectAgentHookToolCall(
 		conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 	}
 	return a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-		Input:                   actionInput,
-		LegacyText:              string(req.ToolArgs),
-		conflictSource:          conflictSource,
-		Connector:               req.ConnectorName,
-		CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
-		EnforcementCapable:      enforcementCapable,
-		StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		ManagedInstall:          a.managedInstallForHook(ctx),
-		ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
-		ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
-		patchTarget:             hermesV4APatch,
-		strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
-		SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-		windowsShellDialect:     dialectHint,
-		windowsDialectReadings:  dialectHint,
-		record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+		Input:                    actionInput,
+		LegacyText:               string(req.ToolArgs),
+		conflictSource:           conflictSource,
+		Connector:                req.ConnectorName,
+		CopilotSharedLocalFile:   copilotSharedLocalFileCall(ctx, req),
+		EnforcementCapable:       enforcementCapable,
+		StrictPolicy:             a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		ManagedInstall:           a.managedInstallForHook(ctx),
+		ManagedHookOverflowHold:  managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+		ResolvedWriteTargets:     resolvedWritesFromContext(ctx),
+		patchTarget:              hermesV4APatch,
+		strictPatchLinks:         hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
+		SandboxGuestCWD:          sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+		windowsShellDialect:      dialectHint,
+		windowsDialectReadings:   dialectHint,
+		windowsPowerShellReading: windowsPowerShellReading,
+		record:                   toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 	}, command, commandTool, hermesWriteViews)
 }
 
