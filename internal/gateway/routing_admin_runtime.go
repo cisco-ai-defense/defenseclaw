@@ -30,8 +30,8 @@ var activeEngineRouter atomic.Pointer[engineRouter]
 
 // recordRoutingDecision keeps one routed call in the recent-decisions ring:
 // no prompt text, headers or credentials, and the verified caller key only.
-// recordRoutingDecision records d in the decision ring and returns the
-// caller key of the entry.
+// It returns the caller key of the entry (amendRoutingDecision amends only
+// that caller's).
 func recordRoutingDecision(ctx context.Context, in *ModelRouterInput, d *engine.Decision, managed bool) string {
 	if in == nil || d == nil {
 		return ""
@@ -269,9 +269,24 @@ func routingAdminIdentitySelectors(cfg *config.Config) ([]string, bool) {
 // the original request (a stored response id of the original provider, a
 // backend with no known origin): on a managed device an allow list or a
 // budget downgrade binds that exit too.
-func (p *GuardrailProxy) gateOriginal(ctx context.Context, o SemanticRouteOutcome, provider, model string) SemanticRouteOutcome {
+// cause says why the routed backend cannot be used: a sensitive decision is
+// refused with it (GAP-0576), any other gets a route_fallback warning.
+func (p *GuardrailProxy) gateOriginal(ctx context.Context, o SemanticRouteOutcome, provider, model, cause string) SemanticRouteOutcome {
 	if o.Result == SemanticRouteDenied {
 		return o
+	}
+	if o.Route != nil && o.Route.SensitiveNarrowed() {
+		alias := ""
+		if o.Route.Backend != nil {
+			alias = o.Route.Backend.Alias
+		}
+		o.Result, o.Decision, o.FailureCode = SemanticRouteDenied, nil, SemanticRouteFailureFiltered
+		o.Deny = engine.SensitiveLocalDeny(o.Route.Sensitive.Source, "DefenseClaw cannot send it to model "+alias+": "+cause)
+		amendRoutingDecision(ctx, o)
+		return o
+	}
+	if o.Route != nil {
+		o.Route.Warnings = append(o.Route.Warnings, "route_fallback:"+boundedRouterLabel(cause, 96))
 	}
 	o.Result, o.Decision = SemanticRouteFallback, nil
 	p.applyRouteGate(ctx, &o, provider, model)
@@ -284,8 +299,10 @@ func (p *GuardrailProxy) gateOriginal(ctx context.Context, o SemanticRouteOutcom
 // rewrite, a signed Bedrock body): the request goes to its own model, which a
 // managed allow list or budget downgrade may refuse, and its cost is charged
 // to the budgets. Only the admin evaluator runs (no classifier, no alias
-// eligibility): category rules apply to routed calls only. Nothing runs
-// unless routing is on and routing.admin has rules or budgets.
+// eligibility): category rules apply to routed calls only. A request
+// routing.sensitive marks is refused (it cannot be re-routed, GAP-0576).
+// Nothing runs unless routing is on and routing.sensitive or routing.admin
+// is set.
 func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput) SemanticRouteOutcome {
 	if p == nil {
 		return SemanticRouteOutcome{}
@@ -308,7 +325,7 @@ func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput)
 	routerIn := &ModelRouterInput{
 		Model: model, RequestModel: model, APIFamily: in.APIFamily, Connector: p.connectorName(),
 		Listener: engine.ListenerGuardrail, Severity: in.Severity, RequestedProvider: in.Provider,
-		ConversationID: r.Header.Get("X-DC-Session-Id"), Text: in.Text, Caller: caller, Profiles: profiles,
+		ConversationID: routeConversationID(r), Text: in.Text, Caller: caller, Profiles: profiles,
 	}
 	req := engineRequest(routerIn)
 	if src := eng.SensitiveFloor(req); src != "" {
@@ -317,8 +334,8 @@ func (p *GuardrailProxy) gateUnrouted(r *http.Request, in passthroughRouteInput)
 		deny := engine.SensitiveLocalDeny(src, "DefenseClaw cannot re-route this request (a signed Bedrock body or an API it does not rewrite)")
 		d := engine.Decision{Outcome: engine.OutcomeDenied, Deny: deny, FailureCode: engine.FailureFiltered, Source: engine.SourceSensitive,
 			FilteredBy: "sensitive", Sensitive: engine.SensitiveOutcome{Source: src, Reason: "positive"}}
-		recordRoutingDecision(ctx, routerIn, &d, cfg.StandaloneEnterprise())
-		return SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: deny, Route: &d}
+		caller := recordRoutingDecision(ctx, routerIn, &d, cfg.StandaloneEnterprise())
+		return SemanticRouteOutcome{Result: SemanticRouteDenied, Deny: deny, Route: &d, recordCaller: caller}
 	}
 	if admin == nil {
 		return SemanticRouteOutcome{}

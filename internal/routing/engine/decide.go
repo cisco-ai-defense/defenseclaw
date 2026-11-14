@@ -79,9 +79,10 @@ func (e *Engine) Decide(ctx context.Context, req Request) (d Decision) {
 		if src := e.sensitiveFloor(req, signals); src != "" || e.sensitiveSticky(req) {
 			if src == "" {
 				src = SensitiveSourceSticky
-			} else {
-				e.markSensitiveSticky(req)
 			}
+			// Every narrowed turn renews the mark: the history the next turn
+			// carries still holds the sensitive turn.
+			e.markSensitiveSticky(req)
 			pol.AllowedAliases = intersectAliases(pol.AllowedAliases, s.Aliases)
 			d.FilteredBy = "sensitive"
 			d.Sensitive = SensitiveOutcome{Source: src, Reason: "positive"}

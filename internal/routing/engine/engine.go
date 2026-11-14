@@ -25,6 +25,9 @@ type Options struct {
 	// Sticky is the conversation cache shared across generations (nil = a
 	// private one). It is used only with classifier systemone.
 	Sticky *StickyCache
+	// SensitiveMarks keeps the sensitive mark of each conversation across
+	// generations (nil = a private one); used only with routing.sensitive.
+	SensitiveMarks *StickyCache
 }
 
 // Engine is built once per config generation and is safe for concurrent
@@ -46,6 +49,7 @@ type Engine struct {
 	managed       bool
 	credentialOK  func(Backend, Request) bool
 	sticky        *StickyCache
+	marks         *StickyCache
 	// capabilityFilter is off for vllm_sr, whose 1.0.9 configs used
 	// free-form capabilities.
 	capabilityFilter bool
@@ -78,9 +82,15 @@ func New(cfg *config.Config, opts Options) (*Engine, error) {
 		managed:       opts.Managed,
 		credentialOK:  opts.CredentialOK,
 	}
-	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne || (r.Sensitive != nil && len(r.Sensitive.Aliases) > 0) {
-		// The sensitive narrowing of a conversation is sticky too: its
-		// later turns carry the earlier sensitive turn (GAP-0576).
+	if r.Sensitive != nil && len(r.Sensitive.Aliases) > 0 {
+		// The sensitive mark of a conversation (GAP-0576): its own cache, so
+		// classifier answers stay cached only for systemone.
+		e.marks = opts.SensitiveMarks
+		if e.marks == nil {
+			e.marks = NewStickyCache()
+		}
+	}
+	if r.EffectiveClassifier() == config.RoutingClassifierSystemOne {
 		e.sticky = opts.Sticky
 		if e.sticky == nil {
 			e.sticky = NewStickyCache()

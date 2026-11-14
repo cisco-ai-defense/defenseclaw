@@ -33,6 +33,7 @@ type engineRouter struct {
 	classifier engine.Classifier // vllm_sr client, nil unless started
 	dotenv     string
 	sticky     *engine.StickyCache
+	marks      *engine.StickyCache // routing.sensitive conversation marks
 	// admin, when set (tests), is used for every generation instead of
 	// the routing.admin evaluator compiled per generation (adminFor).
 	admin engine.AdminEvaluator
@@ -52,7 +53,7 @@ type engineCacheEntry struct {
 }
 
 func newEngineRouter(boot *config.Config, classifier engine.Classifier, dotenv string) *engineRouter {
-	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache()}
+	return &engineRouter{boot: boot, classifier: classifier, dotenv: dotenv, sticky: engine.NewStickyCache(), marks: engine.NewStickyCache()}
 }
 
 // SetAdminEvaluator installs the routing.admin rules and budgets evaluator
@@ -95,11 +96,12 @@ func (r *engineRouter) engineFor(ctx context.Context) (*engine.Engine, *config.C
 	} else {
 		var err error
 		eng, err = engine.New(cfg, engine.Options{
-			Classifier:   classifier,
-			Admin:        r.adminFor(cfg),
-			Managed:      cfg != nil && cfg.StandaloneEnterprise(),
-			Sticky:       r.sticky,
-			CredentialOK: func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
+			Classifier:     classifier,
+			Admin:          r.adminFor(cfg),
+			Managed:        cfg != nil && cfg.StandaloneEnterprise(),
+			Sticky:         r.sticky,
+			SensitiveMarks: r.marks,
+			CredentialOK:   func(b engine.Backend, req engine.Request) bool { return r.backendCredentialOK(cfg, b, req) },
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[routing] policy build failed, routing off for this generation: %v\n", err)

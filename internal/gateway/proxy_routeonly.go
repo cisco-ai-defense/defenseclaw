@@ -502,8 +502,16 @@ func routeOnlyCredentialClass(h http.Header, family string) string {
 	return engine.CredentialNone
 }
 
-// conversationID is the agent session header, scoped to the caller by the
-// engine sticky key.
+// routeConversationID is the conversation of a guardrail-listener request:
+// the session the correlation middleware resolved (the DefenseClaw session
+// header the extension sends), else the agent session header (Claude Code,
+// Codex). The sensitive mark of a conversation keys on it (GAP-0576).
+func routeConversationID(r *http.Request) string {
+	return truncateUTF8(firstNonEmpty(SessionIDFromContext(r.Context()), routeOnlyConversationID(r.Header)), 128)
+}
+
+// routeOnlyConversationID is the agent session header, scoped to the
+// caller by the engine sticky key.
 func routeOnlyConversationID(h http.Header) string {
 	for _, k := range []string{"X-Claude-Code-Session-Id", "Session_id", "Session-Id", "Conversation_id"} {
 		if v := strings.TrimSpace(h.Get(k)); v != "" {

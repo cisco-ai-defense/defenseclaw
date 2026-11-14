@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -265,5 +266,63 @@ func TestUnroutedSensitivePassthroughIsRefused(t *testing.T) {
 	}
 	if o := p.gateUnrouted(r, passthroughRouteInput{APIFamily: config.RoutingAPIInvoke, Signed: true, Provider: "bedrock", Text: "hello"}); o.Result == SemanticRouteDenied {
 		t.Fatalf("a plain signed request is refused: %+v", o)
+	}
+}
+
+func TestPassthroughSensitiveConversationStaysNarrowed(t *testing.T) {
+	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg.Routing = config.RoutingConfig{
+		Enabled: true, Classifier: config.RoutingClassifierRules,
+		Models: []config.RoutingModelBackend{
+			{Name: "local", Provider: "ollama", Model: "qwen2.5", BaseURL: "http://127.0.0.1:11434", APIs: []string{"messages"}},
+			{Name: "haiku", Provider: "anthropic", Model: "claude-haiku-4-5", APIs: []string{"messages"}},
+		},
+		Signals:   config.RoutingSignalConfig{Keywords: []config.RoutingKeywordSignal{{Name: "secret", Keywords: []string{"password"}}}},
+		Decisions: []config.RoutingDecisionRule{{Name: "default", ModelRefs: []string{"haiku"}}},
+		Sensitive: &config.RoutingSensitiveConfig{Signals: []string{"secret"}, Aliases: []string{"local"}},
+	}
+	if err := cfg.Routing.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p := &GuardrailProxy{modelRouter: newEngineRouter(cfg, nil, "")}
+	call := func(text string) (passthroughRoute, bool, SemanticRouteOutcome) {
+		r := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		r.Header.Set("X-Claude-Code-Session-Id", "pt-session-1")
+		body, _ := json.Marshal(messagesBody(text))
+		return p.routePassthrough(r, passthroughRouteInput{APIFamily: config.RoutingAPIMessages, Body: body, Text: text, Model: "claude-sonnet-4-5",
+			InboundOrigin: "https://api.anthropic.com", Provider: "anthropic"})
+	}
+	if route, ok, o := call("my password is hunter2"); !ok || route.Provider != "ollama" {
+		t.Fatalf("sensitive turn: ok=%v %+v %+v", ok, route, o)
+	}
+	if route, ok, o := call("now refactor foo"); !ok || route.Provider != "ollama" || o.Route == nil || o.Route.Sensitive.Source != engine.SensitiveSourceSticky {
+		t.Fatalf("next turn of the conversation: ok=%v %+v %+v", ok, route, o.Route)
+	}
+}
+
+func TestRouteOnlySensitiveUnreachableLocalIsRefusedAndAudited(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "http://" + ln.Addr().String()
+	_ = ln.Close()
+	f := sensitiveRouteOnlyFixture(t, config.RoutingModelBackend{Provider: "ollama", Model: "qwen2.5", APIs: []string{"messages"}, BaseURL: closed})
+	store, logger := testStoreAndLogger(t)
+	f.srv.router.SetAuditLogger(logger)
+	rec := f.post(t, "/r/claudecode/v1/messages", messagesBody("my password is hunter2"), func(r *http.Request) {
+		loginInbound(r)
+		r.Header.Set("X-Request-Id", "req-s1c-unreachable-1")
+	})
+	if rec.Code != http.StatusBadGateway || atomic.LoadInt32(&f.origHits) != 0 || !strings.Contains(rec.Body.String(), "sensitive") {
+		t.Fatalf("unreachable local: %d cloud=%d %s", rec.Code, f.origHits, rec.Body.String())
+	}
+	events, _ := store.ListEvents(20)
+	found := false
+	for _, e := range events {
+		found = found || (e.Target == "routing.sensitive" && strings.Contains(e.Details, engine.DenyCodeSensitiveLocal))
+	}
+	if !found {
+		t.Fatalf("no audit row: %+v", events)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -116,5 +117,30 @@ func TestSensitiveConversationStaysNarrowed(t *testing.T) {
 	noID := chat("please refactor this")
 	if d := e.Decide(context.Background(), noID); d.SensitiveNarrowed() {
 		t.Fatalf("a request without a session id is narrowed: %+v", d.Sensitive)
+	}
+}
+
+func TestSensitiveConversationMarkSlidesAndExpires(t *testing.T) {
+	e := mustEngine(t, sensitiveSignalConfig(), Options{})
+	now := time.Unix(1_800_000_000, 0)
+	e.marks.now = func() time.Time { return now }
+	turn := func(text string) Decision {
+		r := chat(text)
+		r.ConversationID = "conv-slide"
+		return e.Decide(context.Background(), r)
+	}
+	turn("key AKIA1234")
+	for i := 0; i < 3; i++ {
+		now = now.Add(20 * time.Minute)
+		if d := turn("keep refactoring"); d.Sensitive.Source != SensitiveSourceSticky {
+			t.Fatalf("turn %d, 20 minutes after the last narrowed turn: %+v", i, d.Sensitive)
+		}
+	}
+	now = now.Add(31 * time.Minute)
+	if d := turn("keep refactoring"); d.SensitiveNarrowed() {
+		t.Fatalf("31 minutes after the last narrowed turn: %+v", d.Sensitive)
+	}
+	if e.sticky != nil {
+		t.Fatal("routing.sensitive alone must not cache classifier answers")
 	}
 }
