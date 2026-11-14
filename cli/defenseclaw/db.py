@@ -286,6 +286,13 @@ def _validate(field: str, value: str) -> None:
         raise ValueError(f"audit: invalid {field} action value {value!r}")
 
 
+# The audit rows of tool calls the gateway read only in part: the hook and
+# inspect verdicts that carry the ACTION-PARSE-FAILURE record (a shell syntax
+# error or a shell body it could not resolve; rel-1-0-10:GAP-0526). They are
+# allowed by default, so status and doctor count them for the admin.
+UNREAD_CALLS_SQL = "SELECT COUNT(*) FROM audit_events WHERE details LIKE '%ACTION-PARSE-FAILURE%'"
+
+
 class Store:
     def __init__(
         self,
@@ -2357,6 +2364,7 @@ class Store:
                 ),
                 total_scans=_count("SELECT COUNT(*) FROM scan_results"),
                 blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
+                unread_calls=self._count_within(UNREAD_CALLS_SQL, alert_count_seconds),
             ),
             cfg,
         )

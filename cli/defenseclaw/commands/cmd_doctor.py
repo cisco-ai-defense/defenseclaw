@@ -3206,6 +3206,45 @@ def _human_size(num_bytes: int) -> str:
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     _check_audit_db_store(cfg, r)
     _check_moved_aside_audit_stores(str(getattr(cfg, "audit_db", "") or ""), r)
+    _check_unread_calls(cfg, r)
+
+
+def _check_unread_calls(cfg, r: _DoctorResult) -> None:
+    """Count the tool calls the gateway read only in part (ACTION-PARSE-FAILURE
+    records, rel-1-0-10:GAP-0526): a shell syntax error or a shell body it could
+    not resolve. Their readable statements were judged; the rest is allowed in
+    the default and permissive packs, so the admin sees how many there are.
+    A warning when there are any; nothing when the audit store is unreadable
+    (its own check reports that)."""
+    import sqlite3
+
+    from defenseclaw.db import UNREAD_CALLS_SQL
+
+    db_path = str(getattr(cfg, "audit_db", "") or "")
+    if not db_path or not os.path.isfile(db_path):
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            count = int(conn.execute(UNREAD_CALLS_SQL).fetchone()[0] or 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return
+    if count == 0:
+        _emit("pass", "Unread tool calls", "none recorded", r=r, check_id="doctor.guardrail.unread-calls")
+        return
+    _emit(
+        "warn",
+        "Unread tool calls",
+        f"{count} tool call(s) were read only in part (ACTION-PARSE-FAILURE): a shell syntax error or a shell "
+        "body that could not be resolved. Their readable statements were checked; the rest was allowed outside "
+        "the strict pack",
+        r=r,
+        check_id="doctor.guardrail.unread-calls",
+        reason_code="unread-tool-calls",
+        remediation="list them: defenseclaw alerts, or search the audit log for ACTION-PARSE-FAILURE",
+    )
 
 
 _CARRY_OVER_NOTE_SUFFIX = ".carryover.json"
