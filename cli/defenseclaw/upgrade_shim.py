@@ -501,8 +501,9 @@ def _release_route_only(target: str, *, yes: bool) -> tuple[bool, bool]:
         error = ShimError if left == rendered and restarted else _RouteOnlyPartlyRestoredError
         raise error(
             f"the {', '.join(left)} settings still point at the DefenseClaw route-only listener, which DefenseClaw "
-            f"{target} does not have, so the agent would get 401 on every call. Run: {disable}, then run this "
-            "command again" + ("" if restarted else ". The gateway is stopped: defenseclaw-gateway start")
+            f"{target} does not have, so the agent would get 401 on every call. Run: {disable} (or remove the "
+            "DefenseClaw base URL and route header from those settings by hand), then run this command again"
+            + ("" if restarted else ". The gateway is stopped: defenseclaw-gateway start")
         )
     print(f"  → Put back the {names} model settings that route-only changed (DefenseClaw {target} has no route-only).")
     print("    Restart the agent. Installing 1.0.10 or later again routes it again from config.yaml.")

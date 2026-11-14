@@ -1522,8 +1522,12 @@ if [[ "${ROLLBACK}" == true ]]; then
     # rel-1-0-10 GAP-0602: a release before 1.0.10 has no route-only
     # listener; an agent left pointing at it gets 401 on every call.
     if [[ -n "${back_to}" ]] && version_lt "${back_to}" 1.0.10 && route_only_left; then
-        [[ "${was_running}" == true ]] && { start_gateway || true; }
-        die "The Claude Code or Codex settings still point at the DefenseClaw route-only listener, which ${back_to} does not have; run 'defenseclaw routing disable --connector claudecode' (and codex), then roll back again. Nothing was changed"
+        # This install stays; its gateway start writes back any hook entries
+        # the conversion above changed.
+        if [[ "${was_running}" == true || -n "${LEGACY_TORN_DOWN:-}" ]]; then
+            start_gateway || true
+        fi
+        die "The Claude Code or Codex settings still point at the DefenseClaw route-only listener, which ${back_to} does not have; run 'defenseclaw routing disable --connector claudecode' (and codex), or remove the DefenseClaw base URL and route header from those settings by hand, then roll back again. DefenseClaw ${current:-} stays installed"
     fi
     swapped=0
     swap_with_previous || swapped=$?
