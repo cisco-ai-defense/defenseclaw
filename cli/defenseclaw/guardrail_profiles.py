@@ -79,7 +79,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "eff50a0531271623e510832a1cb3d7044940cbc8096ecf2a6bc8da190f4504da",
-            # 1.0.10 (s7/shellrecall): five alert-only effect rules (staged file, stdin password, download-run, git, inline code).
+            # 1.0.10 (s7/shellrecall): five alert-only effect rules
+            # (staged file, stdin password, download-run, git, inline code).
             "fbb392bb8ac84607447cefa5a889cfe95ad396026c46159501d634c52bdd25ef",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "55665ae8a227130bb6d1ee97a3610e43b58256f7763b495cb684631ca0d56cda",
@@ -122,7 +123,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "a23660e6371f3b640001b0437a039fdbbf78a2f07998c17dd7a49d1c60621030",
-            # 1.0.10 (s7/shellrecall): five alert-only effect rules (staged file, stdin password, download-run, git, inline code).
+            # 1.0.10 (s7/shellrecall): five alert-only effect rules
+            # (staged file, stdin password, download-run, git, inline code).
             "9a79a431a425ee9a61e856af9bccfe840d0dbc1cd14757d7ba352eee704c671a",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "2bac0a30348b309bc44a85d9c05c5917a0c8738d43d0efb9ce027bbed653b1f5",
@@ -164,7 +166,8 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "f5d6d19b78fe7d3897acb6a28a9fae08049fcda9745f944d5cdb45e573669bc5",
             # 1.0.10 (rel/1.0.10, e681992abf): tool-injection judge answer template shows "none".
             "6a5ac830ea0c6f7b2a7e5addefaf418711d5fc77a62bbd49d54700242197fbb2",
-            # 1.0.10 (s7/shellrecall): five alert-only effect rules (staged file, stdin password, download-run, git, inline code).
+            # 1.0.10 (s7/shellrecall): five alert-only effect rules
+            # (staged file, stdin password, download-run, git, inline code).
             "bdd27d5347627c74b8b90da944b7dca7de20d5488c6e36c50b28d5a9d73763fc",
             # 1.0.10 (s7/pii-email merged with rel/1.0.10 and s7/cascade): adds the two email PII rules.
             "7b2c63557d7a67123a73900b744524991200ec33cc3ef0090a13c75c8448fd44",
