@@ -287,10 +287,30 @@ func ruleMatchValidator(ruleID string) func(text, match string, start, end int) 
 			return acceptedSecretAssignment(match)
 		}
 	}
+	if ruleID == "SEC-BEARER-BARE" {
+		return func(text, match string, start, _ int) bool {
+			return !bearerHeaderBefore(text, start) && acceptedCredentialMatch(ruleID, match)
+		}
+	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }
 	}
 	return nil
+}
+
+// bearerHeaderBefore reports a Bearer credential written as an
+// Authorization (or bearer) header value, which SEC-BEARER reports: the
+// bare rule only adds the forms without the header name.
+func bearerHeaderBefore(text string, start int) bool {
+	if start <= 0 || start > len(text) {
+		return false
+	}
+	before := strings.TrimRight(strings.ToLower(text[max(0, start-48):start]), " \t\"'")
+	if !strings.HasSuffix(before, ":") && !strings.HasSuffix(before, "=") {
+		return false
+	}
+	before = strings.TrimRight(strings.TrimRight(before, ":="), " \t\"'")
+	return strings.HasSuffix(before, "authorization") || strings.HasSuffix(before, "bearer")
 }
 
 // acceptedPublicIPv4Download keeps the parser-fallback rule aligned with its
@@ -1204,7 +1224,8 @@ func acceptedCredentialMatch(ruleID, match string) bool {
 	// detected, while an AKIA key with a zero-filler tail looks the same to any
 	// entropy or repetition measure. Where the two cannot be separated, the
 	// product's choice is to report.
-	return ruleID != "SEC-BEARER" || credentialEntropy(compactCredential(candidate)) >= 2.5
+	return (ruleID != "SEC-BEARER" && ruleID != "SEC-BEARER-BARE") ||
+		credentialEntropy(compactCredential(candidate)) >= 2.5
 }
 
 func credentialCandidate(ruleID, match string) string {
@@ -1259,7 +1280,7 @@ func credentialCandidate(ruleID, match string) string {
 				return authority[colon+1:]
 			}
 		}
-	case "SEC-BEARER":
+	case "SEC-BEARER", "SEC-BEARER-BARE":
 		if bearer := strings.LastIndex(lower, "bearer"); bearer >= 0 {
 			return strings.TrimSpace(trimmed[bearer+len("bearer"):])
 		}

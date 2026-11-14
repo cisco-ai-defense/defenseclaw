@@ -159,8 +159,13 @@ func TestSecretAssignmentRejectsPhrasesAndWords(t *testing.T) {
 		"BlueRiverStationTwo9", "summerholidayplans1", "HTTPServerConfig42", "correcthorsebattery2",
 		"SalesDemo2026!", "WelcomeToTheTeam1", "my-favourite-band-1999",
 	} {
-		if acceptedSecretAssignment("password: " + value) {
-			t.Errorf("a phrase was accepted as a secret: %q", value)
+		if acceptedSecretAssignment("api_token: " + value) {
+			t.Errorf("a phrase was accepted as a generated secret: %q", value)
+		}
+		// A password word is different: the value a person set is the
+		// password, phrase or not (rel-1-0-10:GAP-0371).
+		if !acceptedSecretAssignment("password: " + value) {
+			t.Errorf("a password assignment was not reported: %q", value)
 		}
 	}
 }

@@ -23,7 +23,7 @@ const secretAssignmentRuleID = "SEC-SECRET-ASSIGN"
 // credential keyword anywhere in it; the words of the identifier decide
 // (secretAssignmentKeyIsCredential).
 var secretAssignmentParts = regexp.MustCompile(
-	`^\W?([A-Za-z0-9_-]+)\\*["']?\s*(?:[:=,(]|\s+is\s+|=>)\s*\\*["']?(.+)$`)
+	`^\W?([A-Za-z0-9_-]+)\\*["']?\s*([:=,(]|\s+is\s+|=>)\s*\\*["']?(.+)$`)
 
 // secretAssignmentKeywords are the words, joined, that name a credential.
 var secretAssignmentKeywords = map[string]bool{
@@ -138,7 +138,85 @@ func acceptedSecretAssignment(match string) bool {
 	if m == nil {
 		return false
 	}
-	return secretAssignmentKeyIsCredential(m[1]) && secretAssignmentValueLooksSecret(m[2])
+	if !secretAssignmentKeyIsCredential(m[1]) {
+		return false
+	}
+	if passwordAssignmentKey(m[1]) && passwordAssignmentSeparator(m[2]) {
+		return passwordAssignmentRejection(m[3]) == ""
+	}
+	return secretAssignmentValueLooksSecret(m[3])
+}
+
+// passwordAssignmentWords are the credential words of a password a person
+// sets. A value assigned to one of them is the password itself, whatever it
+// looks like: a short or word-like password is the one most worth reporting.
+var passwordAssignmentWords = map[string]bool{"password": true, "passwd": true, "pwd": true, "passphrase": true}
+
+// passwordAssignmentKey reports an identifier whose credential word is a
+// password word (db_password, PASSWORD, userPwd).
+func passwordAssignmentKey(key string) bool {
+	for _, word := range identifierWords(key) {
+		if passwordAssignmentWords[strings.TrimSuffix(word, "s")] {
+			return true
+		}
+	}
+	return false
+}
+
+// passwordAssignmentSeparator is the assignment of a value (password=x,
+// password: x, "password" => x), not prose ("the password is required") or a
+// call or list (password(x), password, x).
+func passwordAssignmentSeparator(sep string) bool {
+	switch strings.TrimSpace(sep) {
+	case ":", "=", "=>":
+		return true
+	}
+	return false
+}
+
+// passwordAssignmentRejection is secretAssignmentRejection for a password
+// word: 8 to 128 characters, still not a reference, placeholder, path or
+// name, and with a letter and a digit or symbol (a bare word or type name
+// such as Optional is code, not a password). The generated-secret checks
+// (word shape, character classes, entropy) do not apply (rel-1-0-10:GAP-0371;
+// the proxy-only detector removed for GAP-0210 had the same bar).
+func passwordAssignmentRejection(raw string) string {
+	value := strings.TrimSpace(raw)
+	if end := strings.IndexFunc(value, func(r rune) bool {
+		letterOrDigit := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		return !letterOrDigit && !strings.ContainsRune("_-+/.!@#$%^&*~", r)
+	}); end >= 0 {
+		if value[end] == '(' {
+			return "call"
+		}
+		value = value[:end]
+	}
+	value = strings.TrimRight(value, ".,;!=")
+	if len(value) < 8 || len(value) > 128 {
+		return "length"
+	}
+	if secretAssignmentVarRef.MatchString(value) || secretAssignmentCodeRef.MatchString(value) {
+		return "reference"
+	}
+	if secretAssignmentPlaceholderValue(value) || obviousCredentialPlaceholder(value) {
+		return "placeholder"
+	}
+	if strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "~") ||
+		strings.Contains(value, "//") || secretAssignmentDotted.MatchString(value) || secretAssignmentIdentifier(value) {
+		return "path-or-name"
+	}
+	letter, other := false, false
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			letter = true
+		} else {
+			other = true
+		}
+	}
+	if !letter || !other {
+		return "no-digit"
+	}
+	return ""
 }
 
 // secretAssignmentKeyIsCredential reports an identifier that holds a credential

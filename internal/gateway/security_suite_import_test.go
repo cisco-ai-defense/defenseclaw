@@ -116,6 +116,15 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 				}
 				imported = append(imported, c)
 				keptAttack++
+			case it.IsAttack && inspectorSeverity == "LOW":
+				// The rules see it and score it below the alert line (one email
+				// address is LOW, rel-1-0-10:GAP-0172): lock that, so a change
+				// to the severity shows here instead of the row leaving the tier.
+				c.Surfaces = []string{"inspector"}
+				c.ExpectedSeverityAtLeast = "LOW"
+				c.ForbiddenSeverityAtLeast = "MEDIUM"
+				imported = append(imported, c)
+				keptAttack++
 			case it.IsAttack:
 				skipAttack++ // judge-only; lives in the live tier
 			case severityRank[inspectorSeverity] < severityRank["HIGH"]:

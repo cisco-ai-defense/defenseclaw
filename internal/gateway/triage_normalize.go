@@ -84,33 +84,45 @@ var backSlashRunRegex = lazyregexp.New(`\\{2,}`)
 // chars (Unicode classifies them as `Cf` format, not `Z` separator).
 func stripZeroWidth(s string) string {
 	return strings.Map(func(r rune) rune {
-		switch {
-		case r == '\u00AD',
-			r == '\u034F',
-			r == '\u061C',
-			r == '\u115F',
-			r == '\u1160',
-			r == '\u17B4',
-			r == '\u17B5',
-			r == '\u180E',
-			r == '\u200B',
-			r == '\u200C',
-			r == '\u200D',
-			r == '\u200E',
-			r == '\u200F',
-			r >= '\u202A' && r <= '\u202E',
-			r == '\u2060',
-			r >= '\u2061' && r <= '\u2064',
-			r >= '\u2066' && r <= '\u2069',
-			r >= '\u206A' && r <= '\u206F',
-			r == '\u3164',
-			r == '\uFEFF',
-			r == '\uFFA0',
-			r >= '\uFFF9' && r <= '\uFFFB':
+		if invisibleFormatRune(r) {
 			return -1
 		}
 		return r
 	}, s)
+}
+
+// invisibleFormatRune reports a character that renders as nothing: the
+// set stripZeroWidth removes and the trust fold (trustPatternText) drops
+// with the rest of Unicode Cf, so the trust rules and the secret pass see
+// through the same characters (rel-1-0-10:GAP-0210 review P3-1: the
+// Hangul fillers and Khmer inherent vowels are not Cf).
+func invisibleFormatRune(r rune) bool {
+	switch {
+	case r == '\u00AD',
+		r == '\u034F',
+		r == '\u061C',
+		r == '\u115F',
+		r == '\u1160',
+		r == '\u17B4',
+		r == '\u17B5',
+		r == '\u180E',
+		r == '\u200B',
+		r == '\u200C',
+		r == '\u200D',
+		r == '\u200E',
+		r == '\u200F',
+		r >= '\u202A' && r <= '\u202E',
+		r == '\u2060',
+		r >= '\u2061' && r <= '\u2064',
+		r >= '\u2066' && r <= '\u2069',
+		r >= '\u206A' && r <= '\u206F',
+		r == '\u3164',
+		r == '\uFEFF',
+		r == '\uFFA0',
+		r >= '\uFFF9' && r <= '\uFFFB':
+		return true
+	}
+	return false
 }
 
 // normalizeForTriage returns a canonicalized form of content suitable

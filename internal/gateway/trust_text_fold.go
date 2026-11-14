@@ -18,7 +18,7 @@ func trustPatternText(value string) string {
 		return value
 	}
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) || r == '\u00ad' || r == '\u034f' ||
+		if unicode.Is(unicode.Cf, r) || invisibleFormatRune(r) ||
 			r >= '\ufe00' && r <= '\ufe0f' {
 			return -1
 		}
