@@ -95,8 +95,12 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		body = io.NopCloser(bytes.NewReader(plaintext))
 	}
 	r.Body = http.MaxBytesReader(w, body, acp.MaxTurnEvaluationBytes+(64<<10))
+	// A field this gateway does not know is ignored, never a refusal: a guard
+	// that is newer than the gateway it talks to (session_cwd and
+	// tool_call_state were added to the evaluation after 1.0.9, and a gateway
+	// that has not restarted since an upgrade does not know them) must not have
+	// every frame refused; it only loses what the field tells.
 	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
 	var req acp.Evaluation
 	if err := decoder.Decode(&req); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ACP evaluation body"})
@@ -216,9 +220,17 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// ACP frames are judged by inspectMessageContent, so profile selection
-	// must use that same path when an identity assignment is uncertain.
-	ctx := withProfilePath(acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration()), profilePathInspect)
+	// A frame that performs an action (a command, a file read or write, a
+	// tool call) is judged as the hook path judges that tool call, so its
+	// profile is selected on the hook path; any other frame is prose, judged
+	// by inspectMessageContent on the inspect path, which is the path that
+	// decides an uncertain identity assignment (rel-1-0-10:GAP-0176).
+	frameAction, isAction := acpFrameToolCalls(req, runtime.GOOS)
+	path := profilePathInspect
+	if isAction {
+		path = profilePathHook
+	}
+	ctx := withProfilePath(acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration()), path)
 	// Resolve the identity-based guardrail profile once, with the ACP
 	// agent's connector, as the hook, proxy and inspect paths do: resolved
 	// lazily, the request had no connector, so a connectors assignment never
@@ -259,29 +271,51 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if req.Surface == acp.SurfacePrompt {
 		direction = "prompt"
 	}
-	scanCtx, cancel := context.WithTimeout(ctx, inspectScanTimeout)
-	defer cancel()
-	// Scan the frame's strings, not the marshalled envelope. Content rules
-	// anchor on prose boundaries, and inside raw JSON every value is preceded
-	// by a quote, so envelope scanning makes detection depend on whether a
-	// rule's boundary alternation happens to admit `"`. See InspectableText.
-	content := acp.InspectableText(req.Payload)
-	if content == "" {
-		content = string(req.Payload)
+	inspectContent := func(content string) *ToolInspectVerdict {
+		scanCtx, cancel := context.WithTimeout(ctx, inspectScanTimeout)
+		defer cancel()
+		return a.inspectMessageContent(scanCtx, &ToolInspectRequest{
+			Tool: "message", Content: content, Direction: direction,
+			Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
+		})
 	}
-	verdict := a.inspectMessageContent(scanCtx, &ToolInspectRequest{
-		Tool: "message", Content: content, Direction: direction,
-		Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
-	})
+	var verdict *ToolInspectVerdict
+	reportOnly := false
+	if isAction {
+		verdict, reportOnly = a.inspectACPFrameAction(ctx, req, agent.ConnectorID, frameAction, inspectContent)
+	} else {
+		// Scan the frame's strings, not the marshalled envelope. Content
+		// rules anchor on prose boundaries, and inside raw JSON every value
+		// is preceded by a quote, so envelope scanning makes detection
+		// depend on whether a rule's boundary alternation happens to admit
+		// `"`. See InspectableText.
+		content := acp.InspectableText(req.Payload)
+		if content == "" {
+			content = string(req.Payload)
+		}
+		verdict = inspectContent(content)
+	}
 	if verdict == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP inspection unavailable"})
 		return
 	}
-	verdict = a.applyCascadeFinal(scanCtx, agent.ConnectorID, "acp", direction, "", verdict)
-	verdict.applyMode(mode)
+	verdict = a.applyCascadeFinal(ctx, agent.ConnectorID, "acp", direction, "", verdict)
+	// As on the hook path, an action finding the code proves (a change to
+	// DefenseClaw's own state, or one a possible account assignment would
+	// enforce) is enforced in observe mode too, and the observe guard is
+	// told to refuse it (provenHookActionMustEnforce, GAP-2103).
+	effectiveMode, enforced := mode, false
+	if isAction && frameAction.enforceable && mode != string(acp.ModeAction) && a.provenHookActionMustEnforce(ctx, verdict) {
+		effectiveMode, enforced = string(acp.ModeAction), true
+	}
+	verdict.applyMode(effectiveMode)
+	if reportOnly {
+		verdict.RawAction, verdict.WouldBlock = "block", true
+	}
 	result := acp.Verdict{
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock, FailMode: acpProfileFailMode(profile, mode),
+		Enforced: enforced && verdict.Action == "block",
 	}
 	record := func(recordCtx context.Context) hookEvaluationContext {
 		var evaluation hookEvaluationContext
