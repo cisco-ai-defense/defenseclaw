@@ -15,7 +15,7 @@ import (
 // credential) drops it.
 const codexAuthCommandConfig = "model = \"openai.gpt-oss-120b\"\nmodel_provider = \"bedrock-runtime\"\n\n" +
 	"[model_providers.bedrock-runtime]\nname = \"Bedrock\"\nbase_url = \"https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1\"\nwire_api = \"responses\"\n\n" +
-	"[model_providers.bedrock-runtime.auth]\ncommand = \"/opt/dc-bedrock/bedrock-token.py\"\nargs = [\"--region\", \"us-east-1\"]\ntimeout_ms = 5000\n"
+	"experimental_bearer_token = \"fixed-bearer-test\"\n\n[model_providers.bedrock-runtime.auth]\ncommand = \"/opt/dc-bedrock/bedrock-token.py\"\nargs = [\"--region\", \"us-east-1\"]\ntimeout_ms = 5000\n"
 
 func TestCodexRouteOnlyKeepsTheAuthCommand(t *testing.T) {
 	path, opts := codexRouteFixture(t, codexAuthCommandConfig)
@@ -31,7 +31,7 @@ func TestCodexRouteOnlyKeepsTheAuthCommand(t *testing.T) {
 	}
 	prov := doc["model_providers"].(map[string]interface{})["defenseclaw_route"].(map[string]interface{})
 	auth, ok := prov["auth"].(map[string]interface{})
-	if !ok || auth["command"] != "/opt/dc-bedrock/bedrock-token.py" || len(auth["args"].([]interface{})) != 2 {
+	if !ok || auth["command"] != "/opt/dc-bedrock/bedrock-token.py" || len(auth["args"].([]interface{})) != 2 || prov["experimental_bearer_token"] != "fixed-bearer-test" {
 		t.Fatalf("the route provider lost the auth command: %v\n%s", prov, raw)
 	}
 	if err := RouteOnlyDrift(c, opts, route); err != nil {
@@ -53,7 +53,7 @@ func TestCodexRouteOnlyCustodyDropsTheAuthCommand(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(path)
 	table := string(raw)[strings.Index(string(raw), "[model_providers.defenseclaw_route]"):]
-	if strings.Contains(table, "bedrock-token.py") || !strings.Contains(table, RouteOnlyPlaceholderCredential) {
+	if strings.Contains(table, "bedrock-token.py") || strings.Contains(table, "fixed-bearer-test") || !strings.Contains(table, RouteOnlyPlaceholderCredential) {
 		t.Fatalf("custody render keeps the agent credential command:\n%s", table)
 	}
 }

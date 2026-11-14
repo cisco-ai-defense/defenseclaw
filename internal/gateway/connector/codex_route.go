@@ -15,8 +15,9 @@ import (
 // Codex route-only rendering (DESIGN 7.2, 15.8, 18.1): one owned table
 // [model_providers.defenseclaw_route] at the end of config.toml and the
 // top-level model_provider pointing at it. The wrapped provider settings
-// (wire_api, env_key, requires_openai_auth) are copied so the agent keeps
-// its own login or key; the gateway forwards to routing.route_only
+// (codexWrappedFields: wire_api, env_key, requires_openai_auth, the auth
+// command table, a fixed bearer and the headers) are copied so the agent
+// keeps its own login or key; the gateway forwards to routing.route_only
 // .upstreams.codex. A custody render (managed macOS and Windows) drops the
 // credential settings and sends a placeholder bearer instead. Restore puts the original model_provider line back byte
 // for byte and deletes the owned table.
