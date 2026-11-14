@@ -122,7 +122,7 @@ func TestGAP0564RealProviderProxyBenignAnswer(t *testing.T) {
 		cfg: &config.JudgeConfig{Enabled: true, Injection: true}, model: "test-model",
 		provider: provider, rp: &guardrail.RulePack{},
 	}
-	verdict := judge.runInjectionJudge(t.Context(), "please list the files in this folder")
+	verdict := judge.runInjectionJudge(t.Context(), "please list the files in this folder", false)
 	if verdict == nil || verdict.Action != "allow" {
 		t.Fatalf("benign proxy judge answer = %+v, want allow", verdict)
 	}

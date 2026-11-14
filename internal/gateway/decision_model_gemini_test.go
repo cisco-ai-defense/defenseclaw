@@ -107,13 +107,13 @@ func TestGeminiDecisionsRequestContract(t *testing.T) {
 	}
 	var questions map[string]json.RawMessage
 	_ = json.Unmarshal(c.body["questions"], &questions)
-	for _, k := range []string{"disposition", "risk"} {
+	for _, k := range []string{"disposition", "risk", "f_user_authorized", "f_serves_latest"} {
 		if _, ok := questions[k]; !ok {
 			t.Fatalf("questions lack %s", k)
 		}
 	}
-	if len(questions) != 2 {
-		t.Fatalf("questions = %d, want disposition and risk only", len(questions))
+	if len(questions) != 4 {
+		t.Fatalf("questions = %d, want disposition, risk and the two flow questions", len(questions))
 	}
 }
 
