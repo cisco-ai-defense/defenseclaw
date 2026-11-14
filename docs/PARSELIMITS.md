@@ -206,3 +206,19 @@ gap.
   allocation and time. Inputs come from the generators of `budget_gen_test.go`.
 - `internal/actionfacts/pipeline_scope_test.go`: the statement split of a
   pipeline is linear.
+
+## The byte bounds of the analysis are caps of the bound rule
+
+The analysis of a call (`actionfacts.Analyze`) has its own byte bounds, below
+the reading budget's 1 MiB: one literal word over 4 KiB, the command text over
+64 KiB, the arguments over 256 KiB. Past one of them the analysis ends with
+`limit_exceeded` / `input_limit` and no command, so the readers have nothing to
+judge. Such a POSIX shell call is TRUNCATED in the sense of the bound rule
+(`internal/guardrail/bounded`, cap `bytes`, `gateway/posix_parse_limit.go`): an
+alert in the default and permissive packs (a managed install's included), a
+block in the strict pack, never below what the text read before the bound
+proves (rel-1-0-10:GAP-0382; before it the call was allowed with no finding in
+every pack). A count bound (a statement of more argv words than the analysis
+keeps) stays with the operand bound, and a Windows host call keeps its own rule
+(GAP-0345, GAP-0318). The property test of the bound rule pins the cap
+(`shell-parse input bytes`).

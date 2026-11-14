@@ -496,7 +496,11 @@ func dispatchTrustedAction(
 			// observe mode allows the budget finding but hard-blocks a
 			// proven write to the active state, and that proof is formed
 			// only there (withOverBudgetStateMutation).
-			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
+			// A call whose analysis also stopped at a byte bound names that cap
+			// (GAP-0382); the finding is the same one.
+			return withOverBudgetStateMutation(parent, request, facts,
+				withBoundedTruncation(trustedActionLimitFindings(request.EnforcementCapable),
+					posixParseTruncation(request.Input, facts), request))
 		}
 		defer func() {
 			findings = withStaticFunctionStateMutation(parent, request, findings)
@@ -570,6 +574,14 @@ func dispatchTrustedAction(
 	for _, twin := range windowsReadingTwinRequests(request, facts) {
 		defer func() {
 			findings = withTwinProvenBlocks(findings, dispatchTrustedAction(parent, twin))
+		}()
+	}
+	// A POSIX shell call the analysis stopped reading at a byte bound (one word
+	// past the string bound ends it with no command) is truncated: judged at
+	// the unknown tier of the pack, never a clean allow (rel-1-0-10:GAP-0382).
+	if set := posixParseTruncation(request.Input, facts); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
 		}()
 	}
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
