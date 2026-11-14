@@ -86,11 +86,11 @@ func replaceVerbSafeIn(command, cwd, home string, startup ShellStartup) bool {
 				return false
 			}
 		case info.Mode()&os.ModeSymlink != 0:
-			// mv replaces a symlink and GNU sed -i refuses one, but what
-			// install does with a symlink destination differs between
-			// implementations (GAP-0389 pins it blocked): only a hard-link
-			// name is proved for install.
-			if name == "install" || name == "ginstall" {
+			// mv replaces a symlink everywhere, but what install and sed -i
+			// do with a symlink destination differs between implementations
+			// (GAP-0389 and the command-link tests pin them blocked): only a
+			// hard-link name is proved for them.
+			if name != "mv" && name != "gmv" {
 				return false
 			}
 			if target, serr := pathStat(entry); serr == nil && target.IsDir() {
