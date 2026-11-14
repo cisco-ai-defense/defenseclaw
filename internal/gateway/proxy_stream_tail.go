@@ -16,12 +16,16 @@ import (
 // The tail of a streamed completion (rel-1-0-10:GAP-0212). In action mode
 // the passthrough and /llm streaming paths keep the bytes no check has
 // covered yet in a streamHold and send them only after a check has read
-// their text: the mid-stream scan of the whole text (every 500 bytes of
-// text, as before), the same scan over the text since the last check plus
-// streamScanOverlap bytes before it once the oldest held byte has waited
-// streamHoldMaxAge (so a slow stream does not rescan its whole text ten
-// times a second), and at the end of the stream the final post-stream check
-// over the whole text, which is enforced. A final
+// their text: the mid-stream scan (every 500 bytes of text, as before, or
+// once the oldest held byte has waited streamHoldMaxAge), and at the end of
+// the stream the mid-stream scan and the final post-stream check over the
+// whole text; the final check is enforced. A mid-stream scan reads the text
+// since the last scan plus streamScanOverlap bytes before it, not the whole
+// text again (rel-1-0-10:GAP-0515: rel rescanned the whole text every 500
+// bytes, quadratic in the reply length). The overlap is longer than any
+// match the content rules make within a stream window (detection equality
+// on the response corpora and long-stream variants of them, and the random
+// chunking property test); the whole-text checks at the end catch the rest. A final
 // check that blocks withholds the tail and ends the stream as a mid-stream
 // block does. Observe mode holds nothing and only records the would-block.
 //
@@ -44,10 +48,9 @@ const (
 	streamHoldMaxPartialAge = 5 * time.Second
 )
 
-// streamScanOverlap is the text before the last check that a check the
-// hold bound asks for reads again with the new text (a finding split across
-// the two is read whole). The every-500-bytes check reads the whole text, as
-// before.
+// streamScanOverlap is the text before the last scan that a mid-stream
+// scan reads again with the new text, so a finding split across the two is
+// read whole.
 const streamScanOverlap = 4 << 10
 
 // streamScanWindow is text from streamScanOverlap bytes before from, on a

@@ -1811,7 +1811,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		var accumulated strings.Builder
 		streamResponseModel := ""
 		lastScanLen := 0
-		lastFullScanLen := 0
 		const scanInterval = 500
 		var lineBuf strings.Builder
 		bedrockStreamReported := false
@@ -1856,9 +1855,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			return lineBuf.Len()
 		}
 		// scanText runs the mid-stream check when text arrived since the last
-		// one: over the whole text (every 500 bytes, as before) or, for a
-		// release the hold bound asks for, over the text since the last check
-		// with streamScanOverlap bytes before it. False: it blocked.
+		// one: over the text since the last check with streamScanOverlap bytes
+		// before it (window), or over the whole text (at the end of the
+		// stream). False: it blocked.
 		scanText := func(window bool) bool {
 			if accumulated.Len() > lastScanLen {
 				text := accumulated.String()
@@ -1875,9 +1874,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					return false
 				}
 				lastScanLen = accumulated.Len()
-				if !window {
-					lastFullScanLen = lastScanLen
-				}
 			}
 			return true
 		}
@@ -1909,7 +1905,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			lastScanLen = accumulated.Len()
-			lastFullScanLen = lastScanLen
 			keep := len(initialBuf)
 			if !atEnd {
 				keep = min(unread(), len(initialBuf))
@@ -2075,9 +2070,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					now := time.Now()
 					hold.add(chunk, now)
 					// At the end of the stream the final check reads the tail.
-					full := accumulated.Len()-lastFullScanLen >= scanInterval
-					if readErr == nil && (full || len(hold.buf)-unread() >= streamHoldMaxBytes || hold.due(now)) {
-						if !checkHeld(!full) {
+					if readErr == nil && (accumulated.Len()-lastScanLen >= scanInterval ||
+						len(hold.buf)-unread() >= streamHoldMaxBytes || hold.due(now)) {
+						if !checkHeld(true) {
 							midBlocked = true
 							break
 						}
@@ -3932,11 +3927,10 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	var holdTimer streamHoldTimer
 	defer holdTimer.stop()
 	const midStreamScanInterval = 500
-	lastFullScanLen := 0
-	// scanMid runs the mid-stream check over the whole text so far (every
-	// 500 bytes, as before) or, for a release the hold bound asks for, over
-	// the text since the last check with streamScanOverlap bytes before it.
-	// False: it blocked; the stream is cut.
+	// scanMid runs the mid-stream check over the text since the last check
+	// with streamScanOverlap bytes before it (window), or over the whole
+	// text (the initial buffer, the end of the stream). False: it blocked;
+	// the stream is cut.
 	scanMid := func(window bool) bool {
 		text := accumulated.String()
 		if window {
@@ -3956,9 +3950,6 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			return false
 		}
 		lastScanLen = accumulated.Len()
-		if !window {
-			lastFullScanLen = lastScanLen
-		}
 		return true
 	}
 	// releaseHeld sends the held chunks after a check has read their text.
@@ -3999,8 +3990,8 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 			}
 		}
 
-		if accumulated.Len()-lastFullScanLen >= midStreamScanInterval && mode == "action" {
-			if !scanMid(false) {
+		if accumulated.Len()-lastScanLen >= midStreamScanInterval && mode == "action" {
+			if !scanMid(true) {
 				return
 			}
 		}
