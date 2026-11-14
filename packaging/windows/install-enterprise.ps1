@@ -4959,6 +4959,13 @@ try {
         if ($Action -eq 'Verify' -and $collectRequest -ceq '1') {
             $arguments['CollectRuntimeGenerations'] = $true
         }
+        # The Verify an ensure runs to decide whether to repair accepts
+        # failures confined to user targets the guardian reported (GAP-0601).
+        $degradedRequest = [Environment]::GetEnvironmentVariable('DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED', 'Process')
+        [Environment]::SetEnvironmentVariable('DEFENSECLAW_STANDALONE_ENSURE_VERIFY_DEGRADED', $null, 'Process')
+        if ($Action -eq 'Verify' -and $degradedRequest -ceq '1') {
+            $arguments['AcceptDegradedTargets'] = $true
+        }
     }
     $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
     # A kit rotation journal the uninstall kept or left is named in the
