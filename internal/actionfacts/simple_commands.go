@@ -81,6 +81,13 @@ type SimpleCommand struct {
 // (rel-1-0-10:GAP-0526).
 const EvaluationFailureSyntax = "syntax"
 
+// EvaluationFailureUnresolvedBody is the EvaluationFailure of a call that
+// starts a nested shell body the walk cannot resolve statically (a shell
+// option word that may be -c, a dynamic -c body, trap handler or su
+// command): what runs is not known, so the call is judged at the unknown tier
+// of the pack, never allowed for that part (rel-1-0-10:GAP-0535).
+const EvaluationFailureUnresolvedBody = "unresolved-body"
+
 func isSyntaxTailUnread(simple SimpleCommand) bool {
 	return simple.EvaluationFailure == EvaluationFailureSyntax
 }
@@ -590,7 +597,13 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				var innerInterpreter string
 				script, shared, nested, static := simpleNestedScript(call, effective, &innerCWDUnknown, &innerInterpreter)
 				if nested {
-					if !static || len(script) > maxCommandBytes {
+					if !static {
+						// A shell body, an option word that may be -c, a trap
+						// handler or su command the walk cannot resolve: what
+						// runs is not known (rel-1-0-10:GAP-0535).
+						return []SimpleCommand{{EvaluationFailure: EvaluationFailureUnresolvedBody}}
+					}
+					if len(script) > maxCommandBytes {
 						return []SimpleCommand{{EvaluationFailure: "parse"}}
 					}
 					innerInput := input
@@ -2008,7 +2021,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		value, known := simpleStaticScriptWord(args[index], vars)
 		return value, true, true, known
 	}
-	if program == "su" && simplePotentialShellScript(args) {
+	if program == "su" && simplePotentialShellScript(args, vars) {
 		// The target account can change both startup files and directory.
 		return "", false, true, false
 	}
@@ -2018,7 +2031,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		for index, arg := range args {
 			value, known := simpleStaticScriptWord(arg, vars)
 			if !known {
-				if simplePotentialShellScript(args) {
+				if simplePotentialShellScript(args, vars) {
 					return "", false, true, false
 				}
 				return "", false, false, false
@@ -2034,6 +2047,8 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			}
 		case "timeout":
 			childIndex = simpleTimeoutChildIndex(argv)
+		case "nice":
+			childIndex = simpleNiceChildIndex(argv)
 		case "env":
 			if split, ok := simpleEnvSplitString(argv); ok {
 				return split, false, true, true
@@ -2042,7 +2057,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		default:
 			child, found, uncertain := staticPOSIXWrapperArgv(argv, wrapper)
 			if uncertain {
-				if simplePotentialShellScript(args) {
+				if simplePotentialShellScript(args, vars) {
 					return "", false, true, false
 				}
 				return "", false, false, false
@@ -2072,7 +2087,18 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 		return "", false, false, false
 	}
 	for index := 1; index < len(args); index++ {
-		option := args[index].Lit()
+		// The option is the word the shell sees, after quote removal and
+		// escapes ('-c', "-c", $'-c', -'c', \-c read as -c), not its
+		// spelling (rel-1-0-10:GAP-0535).
+		option, known := simpleStaticWord(args[index], vars)
+		if !known {
+			if index+1 < len(args) {
+				// A word the walk cannot resolve may be -c, with a body
+				// after it: the call is not known.
+				return "", false, true, false
+			}
+			return "", false, false, false
+		}
 		if option == "--" {
 			continue
 		}
@@ -2088,7 +2114,7 @@ func simpleNestedScriptArgs(args []*syntax.Word, vars map[string]string, depth i
 			continue
 		}
 		if !simpleShellSafeOption(option) {
-			if simplePotentialShellScript(args) {
+			if simplePotentialShellScript(args, vars) {
 				return "", false, true, false
 			}
 			return "", false, false, false
@@ -2126,7 +2152,7 @@ func simpleShellNoExec(args []*syntax.Word, vars map[string]string, program stri
 
 func simpleNestedWrapper(program string) bool {
 	switch program {
-	case "env", "sudo", "exec", "command", "nohup", "timeout", "nsenter", "chroot":
+	case "env", "sudo", "exec", "command", "nohup", "timeout", "nice", "nsenter", "chroot":
 		return true
 	default:
 		return false
@@ -2281,15 +2307,43 @@ func simpleQuotedArgv(argv []string) (string, bool) {
 	return strings.Join(words, " "), true
 }
 
-func simplePotentialShellScript(args []*syntax.Word) bool {
+// simplePotentialShellScript reports an argument that is a shell's -c
+// option, alone or among combined short options, as the shell sees the word
+// (quotes and escapes removed, rel-1-0-10:GAP-0535). A word the walk cannot
+// resolve is judged where the shell itself reads its options
+// (simpleNestedScriptArgs).
+func simplePotentialShellScript(args []*syntax.Word, vars map[string]string) bool {
 	for _, arg := range args {
-		option := arg.Lit()
+		option, _ := simpleStaticWord(arg, vars)
 		if option == "-c" || len(option) > 2 && strings.HasPrefix(option, "-") && option[1] != '-' &&
 			strings.ContainsRune(option[1:], 'c') {
 			return true
 		}
 	}
 	return false
+}
+
+// simpleNiceChildIndex is the index of the command nice runs: after -n N,
+// -N, --adjustment=N or --adjustment N, and an optional --; -1 for any other
+// option.
+func simpleNiceChildIndex(argv []string) int {
+	index := 1
+	for index < len(argv) && strings.HasPrefix(argv[index], "-") {
+		arg := argv[index]
+		switch {
+		case arg == "--":
+			return index + 1
+		case arg == "-n" || arg == "--adjustment":
+			index += 2
+		case strings.HasPrefix(arg, "--adjustment=") ||
+			strings.HasPrefix(arg, "-n") && strings.Trim(arg[2:], "0123456789") == "" ||
+			len(arg) > 1 && strings.Trim(arg[1:], "0123456789") == "":
+			index++
+		default:
+			return -1
+		}
+	}
+	return index
 }
 
 func simpleTimeoutChildIndex(argv []string) int {

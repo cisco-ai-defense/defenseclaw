@@ -55,3 +55,39 @@ func TestSimpleCommandsWithoutASyntaxErrorHaveNoMarker(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-10:GAP-0535: the -c option of a shell is the word the shell sees.
+// Each spelling reads the body as the plain -c does; an option word the walk
+// cannot resolve, with a body after it, is EvaluationFailureUnresolvedBody.
+func TestSimpleCommandsReadTheShellOptionAsTheShellSeesIt(t *testing.T) {
+	for _, command := range []string{
+		"bash -c 'echo a; echo b'", "bash '-c' 'echo a; echo b'", `bash "-c" 'echo a; echo b'`,
+		"bash $'-c' 'echo a; echo b'", "bash -'c' 'echo a; echo b'", `bash \-c 'echo a; echo b'`,
+		"bash -lc 'echo a; echo b'", "sh '-ec' 'echo a; echo b'", "env bash '-c' 'echo a; echo b'",
+		"nice -n 5 bash '-c' 'echo a; echo b'", "timeout 5 dash \"-c\" 'echo a; echo b'",
+	} {
+		input := Input{Tool: "Bash", Command: command, CWD: "/w"}
+		simples := SimpleCommands(input, Analyze(input))
+		for _, want := range []string{"echo a", "echo b"} {
+			if !slices.ContainsFunc(simples, func(simple SimpleCommand) bool { return simple.Text == want }) {
+				t.Errorf("%q: no reading %q: %+v", command, want, simples)
+			}
+		}
+	}
+	for _, command := range []string{`bash "$o" 'echo a'`, `bash -c "$(cat f)"`} {
+		input := Input{Tool: "Bash", Command: command, CWD: "/w"}
+		simples := SimpleCommands(input, Analyze(input))
+		if !slices.ContainsFunc(simples, func(simple SimpleCommand) bool {
+			return simple.EvaluationFailure == EvaluationFailureUnresolvedBody
+		}) {
+			t.Errorf("%q: %+v, want %q", command, simples, EvaluationFailureUnresolvedBody)
+		}
+	}
+	// A script run with a dynamic path has no -c body.
+	input := Input{Tool: "Bash", Command: `bash "$f"`, CWD: "/w"}
+	if simples := SimpleCommands(input, Analyze(input)); slices.ContainsFunc(simples, func(simple SimpleCommand) bool {
+		return simple.EvaluationFailure == EvaluationFailureUnresolvedBody
+	}) {
+		t.Errorf("a dynamic script path: %+v", simples)
+	}
+}

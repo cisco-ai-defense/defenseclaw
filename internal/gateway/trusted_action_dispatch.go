@@ -719,6 +719,12 @@ func dispatchTrustedActionWith(
 						findings = withSimpleCommandFindings(findings, trustedActionParseFailureFindings(request.EnforcementCapable))
 						continue
 					}
+					if simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody {
+						// A nested shell body the walk cannot resolve: what it
+						// runs is unknown (rel-1-0-10:GAP-0535).
+						findings = withSimpleCommandFindings(findings, trustedActionUnresolvedBodyFindings(request.EnforcementCapable))
+						continue
+					}
 					if simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax {
 						// A text with a syntax error: its readable statements
 						// are judged as the simple commands around this one,
@@ -9676,7 +9682,8 @@ func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfac
 	}
 	if facts.Parse.Dialect == actionfacts.DialectPOSIX && facts.Parse.Status != actionfacts.StatusLimitExceeded &&
 		!slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
-			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax
+			return simple.EvaluationFailure == "parse" || simple.EvaluationFailure == actionfacts.EvaluationFailureSyntax ||
+				simple.EvaluationFailure == actionfacts.EvaluationFailureUnresolvedBody
 		}) {
 		// A complete POSIX split already enforced the limit. The extra
 		// count is needed only when the analyzer reached its own bound or
@@ -9806,6 +9813,22 @@ func trustedActionSyntaxUnreadFindings(enforcementCapable bool) []RuleFinding {
 	findings := trustedActionParseFailureFindings(enforcementCapable)
 	for index := range findings {
 		findings[index].Title = syntaxUnreadTitle
+	}
+	return findings
+}
+
+// unresolvedBodyTitle is the reason of a command that starts a shell body
+// whose text, or whose -c option word, is not known before it runs.
+const unresolvedBodyTitle = "This command runs a shell body that could not be read before it runs, so the body was not checked"
+
+// trustedActionUnresolvedBodyFindings is the unknown-tier finding of a
+// command with a nested shell body the walk cannot resolve
+// (actionfacts.EvaluationFailureUnresolvedBody): parseFailureRuleID, an
+// alert outside the strict tier and a block in it (rel-1-0-10:GAP-0535).
+func trustedActionUnresolvedBodyFindings(enforcementCapable bool) []RuleFinding {
+	findings := trustedActionParseFailureFindings(enforcementCapable)
+	for index := range findings {
+		findings[index].Title = unresolvedBodyTitle
 	}
 	return findings
 }

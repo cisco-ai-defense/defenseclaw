@@ -359,3 +359,110 @@ func gap0526SyntaxSuffixes(n int) []string {
 	}
 	return out
 }
+
+// rel-1-0-10:GAP-0535. A shell's -c option is the word the shell sees, not
+// its spelling: quoted, ANSI-C quoted, concatenated, escaped or combined
+// with other short options, the body after it runs. gap0535OptionWords
+// spells the option in each of those ways (built in code from "-c" and the
+// short options the -c readers accept).
+func gap0535OptionWords() []string {
+	var out []string
+	for _, option := range []string{"-c", "-lc", "-ic", "-xc", "-ec", "-ce"} {
+		flags := option[1:]
+		out = append(out,
+			option,
+			"'"+option+"'",
+			`"`+option+`"`,
+			"$'"+option+"'",
+			"-'"+flags+"'",
+			`"-"`+flags,
+			`\`+option,
+			"-"+`\`+flags,
+			"$'\\x2d"+flags+"'",
+			"'-'\""+flags+"\"",
+		)
+	}
+	return out
+}
+
+// gap0535Wrappers runs a shell directly or behind a wrapper.
+var gap0535Wrappers = map[string]string{
+	"direct": "", "env": "env ", "env-assign": "env A=1 ", "sudo": "sudo ", "nice": "nice ",
+	"nice-n": "nice -n 5 ", "timeout": "timeout 5 ", "command": "command ",
+}
+
+var gap0535Shells = []string{"bash", "sh", "zsh", "dash"}
+
+// The GAP-0535 sweep: every spelling of the -c option x {bash, sh, zsh,
+// dash} x {direct, env, sudo, nice, timeout, command} x the B1 and EB1
+// (eval) bodies, in the default, permissive and strict packs. The body
+// blocks alone; none of the calls may be allowed or only alerted.
+func TestGAP0535QuotedShellOptionSweepNeverAllowsABlockedBody(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	bodies := map[string]string{"B1": gap0486Blocked["B1"], "EB1": "eval " + gap0526Quote(gap0486Blocked["B1"]), "B3": gap0486Blocked["B3"]}
+	options := gap0535OptionWords()
+	if testing.Short() || hookAnswerRaceBuild {
+		options = options[:10]
+	}
+	for _, name := range []string{"default", "permissive", "strict"} {
+		p := gap0437Pack{name: name, pack: name}
+		t.Run(name, func(t *testing.T) {
+			hook := gap0437Server(t, p, "claudecode", "action")
+			cwd := t.TempDir()
+			total, notBlocked := 0, 0
+			for _, bodyID := range gap0526SortedIDs(bodies) {
+				body := bodies[bodyID]
+				if out := gap0437Hook(t, hook, cwd, name+bodyID, body); out["action"] != "block" {
+					t.Fatalf("%s %s: the body must block alone: %v", name, bodyID, out)
+				}
+				for _, wrapperID := range gap0526SortedIDs(gap0535Wrappers) {
+					for _, shell := range gap0535Shells {
+						for i, option := range options {
+							command := gap0535Wrappers[wrapperID] + shell + " " + option + " " + gap0526Quote(body)
+							total++
+							out := gap0437Hook(t, hook, cwd, name+bodyID+wrapperID+shell+string(rune('a'+i%26)), command)
+							if out["action"] != "block" {
+								notBlocked++
+								if notBlocked <= 40 {
+									t.Errorf("%s %s %s %s option %q: action %v, want block (rules %v)", name, bodyID, wrapperID, shell, option, out["action"], out["rule_ids"])
+								}
+							}
+						}
+					}
+				}
+			}
+			t.Logf("GAP0535SWEEP pack=%s combinations=%d not_blocked=%d", name, total, notBlocked)
+		})
+	}
+}
+
+// A shell call whose option word or -c body the walk cannot resolve is
+// judged at the unknown tier of the pack (alert, strict blocks), never
+// allowed.
+func TestGAP0535UnresolvedShellBodyTakesTheUnknownTier(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixtures are POSIX shell text")
+	}
+	for _, p := range gap0437Packs {
+		t.Run(p.name, func(t *testing.T) {
+			hook := gap0437Server(t, p, "claudecode", "action")
+			cwd := t.TempDir()
+			want := "alert"
+			if p.pack == "strict" {
+				want = "block"
+			}
+			for _, command := range []string{`bash "$o" 'ls'`, `bash -c "$(cat f)"`, `env bash "$o" 'ls'`} {
+				out := gap0437Hook(t, hook, cwd, p.name+command, command)
+				if out["action"] != want && out["action"] != "block" {
+					t.Errorf("%s %q: action %v, want %s: %v", p.name, command, out["action"], want, out)
+				}
+			}
+			// A shell running a script whose path is dynamic has no -c body.
+			if out := gap0437Hook(t, hook, cwd, p.name+"script", `bash "$f"`); out["action"] == "block" && p.pack != "strict" {
+				t.Errorf("%s: a script run is %v", p.name, out["action"])
+			}
+		})
+	}
+}
