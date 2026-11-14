@@ -38,6 +38,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/bounded"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -618,6 +619,16 @@ func dispatchTrustedAction(
 	// upload) is the unknown tier of the one bound rule: the profile decides,
 	// an alert in the default and permissive packs, a block in strict
 	// (GAP-0595).
+	// A cap the sender reader hit (its nesting depth, its reading bounds) is
+	// TRUNCATED, whatever it read before the cap still judged: at least the
+	// unknown tier of the pack (the one bound rule, GAP-0721).
+	var senderCaps bounded.Truncated
+	actionfacts.ReadSenders(facts).Bound(&senderCaps)
+	if set := senderCaps.Set(); set.Any() {
+		defer func() {
+			findings = withBoundedTruncation(findings, set, request)
+		}()
+	}
 	if reason := actionfacts.CredentialSenderUnreadDestination(facts); reason != actionfacts.CredentialSenderNone {
 		defer func() {
 			findings = withCredentialSenderFinding(findings, reason, request.EnforcementCapable)

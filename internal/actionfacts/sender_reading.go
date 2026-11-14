@@ -61,6 +61,8 @@ const (
 	// whose code asks for a network capability: the code is opaque to the
 	// projection, so where it sends is not read (GAP-0595).
 	SenderInlineCode SenderOrigin = "inline_code"
+	// SenderNetworkRole and SenderUnprovenRole are read from the network
+	// facts and the operand shape (sender_network_role.go).
 )
 
 // SenderFact is one command of a call that sends data to a network sink.
@@ -77,6 +79,9 @@ type SenderFact struct {
 	// DestinationUnknown is set when where it sends could not be read in
 	// full: a word the shell builds, stdin, an unprojected part.
 	DestinationUnknown bool
+	// Operands are the static operand words of the sender's command (what a
+	// credential-file check reads); empty for an embedded program.
+	Operands []string
 }
 
 // SendReading is the shared sender reader's answer for one call.
@@ -107,7 +112,9 @@ func (r SendReading) Bound(t *bounded.Truncated) {
 // UnknownTier reports a reading whose answer is the unknown tier of the one
 // bound rule (bounded.Unknown: alert in default and permissive, block in
 // strict): a sender whose destination is not read in full, or a cap hit.
-func (r SendReading) UnknownTier() bool { return r.Capped || r.UnknownDestination() }
+func (r SendReading) UnknownTier() bool {
+	return r.Capped || r.Unreadable || r.UnknownDestination()
+}
 
 // Sends reports a sender of any origin.
 func (r SendReading) Sends() bool { return len(r.Senders) > 0 }
@@ -140,19 +147,24 @@ func (r SendReading) UnprojectedSends() bool {
 type sendSource struct {
 	text string
 	argv []string
+	// dialect is the dialect of text: POSIX (or none), PowerShell or cmd.
+	dialect Dialect
 }
 
-// networkSenderPrograms can send data to a network sink.
-var networkSenderPrograms = map[string]bool{
-	"curl": true, "wget": true, "http": true, "https": true, "xh": true, "xhs": true,
-	"scp": true, "rsync": true, "sftp": true, "nc": true, "ncat": true, "netcat": true,
-	"mail": true, "mailx": true, "sendmail": true, "swaks": true, "msmtp": true, "mutt": true,
-}
-
-// NetworkSenderProgram reports a program name (any directory, any case, an
-// .exe suffix) that can send data to a network sink.
-func NetworkSenderProgram(word string) bool {
-	return networkSenderPrograms[senderProgramName(word)]
+// NetworkRoleProgram reports a program name (any directory, any case, an
+// .exe suffix) that the egress classifiers or the mail list know as a network
+// program: the classifier publishes a network fact for it when it is given a
+// remote operand.
+func NetworkRoleProgram(word string) bool {
+	name := senderProgramName(word)
+	if name == "" || strings.ContainsAny(name, " \t\r\n\x00") {
+		return false
+	}
+	if mailSenderPrograms[name] {
+		return true
+	}
+	probe := Analyze(Input{Tool: "bash", Argv: []string{name, "user@probe.invalid:/x", "https://probe.invalid/x"}})
+	return len(probe.Network) > 0
 }
 
 func senderProgramName(word string) string {
@@ -166,6 +178,7 @@ const maxSenderDepth = 3
 func ReadSenders(facts Facts) SendReading {
 	var reading SendReading
 	readProjectedSenders(facts, &reading, 0)
+	readNetworkRoleSenders(facts, &reading, false)
 	readInlineCodeSenders(facts, &reading)
 	if facts.Parse.Status != StatusComplete && facts.Parse.Status != StatusNotApplicable {
 		reading.Unread = true
@@ -201,9 +214,10 @@ func readProjectedSenders(facts Facts, reading *SendReading, depth int) {
 			continue
 		}
 		prog := senderProgramName(command.Program)
-		args := commandArgs(command)
+		args := commandWords(command)
 		if network := uploads[command.ID]; len(network) > 0 {
-			sender := SenderFact{CommandID: command.ID, Program: prog, Origin: SenderProjected, Network: network}
+			sender := SenderFact{CommandID: command.ID, Program: prog, Origin: SenderProjected, Network: network,
+				Operands: staticOperands(args)}
 			for _, n := range network {
 				host := n.NormalizedHost
 				if host == "" {
@@ -224,6 +238,7 @@ func readProjectedSenders(facts Facts, reading *SendReading, depth int) {
 				reading.Senders = append(reading.Senders, SenderFact{
 					CommandID: command.ID, Program: prog, Origin: SenderRemoteCopy,
 					Hosts: hosts, DestinationUnknown: unknown || !command.ArgvComplete,
+					Operands: staticOperands(args),
 				})
 			}
 		}
@@ -250,6 +265,7 @@ func commandArgs(command CommandFact) []string {
 func readEmbeddedSenders(facts Facts, parentID int64, prog string, argv []string, reading *SendReading, depth int) {
 	if depth >= maxSenderDepth {
 		reading.Unreadable = true
+		reading.Capped, reading.Cap = true, bounded.Depth
 		return
 	}
 	var programs []embeddedProgram
@@ -289,6 +305,9 @@ func readEmbeddedSenders(facts Facts, parentID int64, prog string, argv []string
 			reading.Senders = append(reading.Senders, sender)
 		}
 		reading.Unreadable = reading.Unreadable || inner.Unreadable
+		if inner.Capped && !reading.Capped {
+			reading.Capped, reading.Cap = true, inner.Cap
+		}
 		if found {
 			continue
 		}
@@ -311,7 +330,7 @@ func readEmbeddedSenders(facts Facts, parentID int64, prog string, argv []string
 			reading.Unreadable = true
 			continue
 		}
-		if sends, hosts, unknown := readSenderArgs(name, args, shiftDynamic(handed, len(program.whole)-len(args))); sends {
+		if sends, hosts, unknown := readWordSender(name, args, shiftDynamic(handed, len(program.whole)-len(args)), true, depth+1); sends {
 			reading.Senders = append(reading.Senders, SenderFact{
 				CommandID: parentID, Program: name, Origin: SenderEmbedded,
 				Hosts: hosts, DestinationUnknown: unknown || stdinDestination || len(hosts) == 0,
@@ -355,6 +374,16 @@ func readUnprojectedSenders(facts Facts, reading *SendReading) {
 	var occurrences []senderOccurrence
 	for _, source := range facts.sendSources {
 		switch {
+		case source.text != "" && source.dialect == DialectCMD:
+			// no cmd reader reads the part the projection did not: unknown
+			reading.Unreadable = true
+		case source.text != "" && source.dialect == DialectPowerShell:
+			res := readPowerShellSender(source.text)
+			reading.Unreadable = reading.Unreadable || res.unknown
+			if res.cap != 0 && !reading.Capped {
+				reading.Capped, reading.Cap = true, res.cap
+			}
+			occurrences = append(occurrences, res.calls...)
 		case source.text != "":
 			if c := shellBoundCap(source.text); c != 0 {
 				reading.Capped, reading.Cap = true, c
@@ -362,6 +391,9 @@ func readUnprojectedSenders(facts Facts, reading *SendReading) {
 			}
 			res := syntaxSenderRead(source.text, 0)
 			reading.Unreadable = reading.Unreadable || res.unknown
+			if res.cap != 0 && !reading.Capped {
+				reading.Capped, reading.Cap = true, res.cap
+			}
 			occurrences = append(occurrences, res.calls...)
 		case len(source.argv) > 0:
 			name, args := unwrapSenderWords(source.argv, nil)
@@ -404,6 +436,9 @@ func readOccurrence(occurrence senderOccurrence, reading *SendReading, depth int
 		var inner SendReading
 		readEmbeddedSenders(Facts{}, 0, occurrence.name, append([]string{occurrence.name}, occurrence.args...), &inner, depth)
 		reading.Unreadable = reading.Unreadable || inner.Unreadable
+		if inner.Capped && !reading.Capped {
+			reading.Capped, reading.Cap = true, inner.Cap
+		}
 		for _, sender := range inner.Senders {
 			sender.Origin = SenderUnprojected
 			sender.DestinationUnknown = true
@@ -411,12 +446,10 @@ func readOccurrence(occurrence senderOccurrence, reading *SendReading, depth int
 		}
 		return
 	}
-	if !networkSenderPrograms[occurrence.name] {
-		return
-	}
-	if sends, hosts, _ := readSenderArgs(occurrence.name, occurrence.args, occurrence.dynamic); sends {
+	if sends, hosts, _ := readWordSender(occurrence.name, occurrence.args, occurrence.dynamic, occurrence.fed, depth); sends {
 		reading.Senders = append(reading.Senders, SenderFact{
 			Program: occurrence.name, Origin: SenderUnprojected, Hosts: hosts,
+			Operands: staticOperands(occurrence.args),
 			// a part the projection did not read: where it sends is not proven
 			DestinationUnknown: true,
 		})
@@ -426,7 +459,7 @@ func readOccurrence(occurrence senderOccurrence, reading *SendReading, depth int
 // embeddedMaySend reports a find or xargs whose words name a sender program.
 func embeddedMaySend(args []string) bool {
 	for _, word := range args {
-		if NetworkSenderProgram(word) {
+		if NetworkRoleProgram(word) {
 			return true
 		}
 	}
@@ -440,12 +473,23 @@ type senderOccurrence struct {
 	name    string
 	args    []string
 	dynamic map[int]bool
+	// fed is set when the call's standard input is fed: a pipe into it, a
+	// file redirect or a here-document.
+	fed bool
 }
 
 type syntaxSenderResult struct {
 	calls   []senderOccurrence
 	unknown bool
+	// cap is the first reading cap the value hit (bounded.Cap), 0 for none.
+	cap bounded.Cap
 }
+
+// maxSenderOccurrences bounds the calls of one value the unprojected reader
+// classifies.
+const maxSenderOccurrences = 256
+
+const boundedItems = bounded.Items
 
 // syntaxSenderRead reads the shell syntax tree of one value. A value that
 // does not parse is read statement by statement up to the error: the shell
@@ -490,7 +534,28 @@ func statementsBeforeSyntaxError(command string) (stmts []*syntax.Stmt, unknown 
 // substitutions are visited by the walk, and the strings a command hands to
 // the shell (eval, trap, a shell's -c body) are read again as shell text.
 func syntaxSenderNode(root syntax.Node, depth int, res *syntaxSenderResult) {
+	fed := map[*syntax.CallExpr]bool{}
 	syntax.Walk(root, func(n syntax.Node) bool {
+		switch t := n.(type) {
+		case *syntax.Stmt:
+			// a call whose standard input is read from a file, a here-document
+			// or a here-string
+			if call, ok := t.Cmd.(*syntax.CallExpr); ok {
+				for _, redirect := range t.Redirs {
+					switch redirect.Op {
+					case syntax.RdrIn, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc, syntax.RdrInOut:
+						fed[call] = true
+					}
+				}
+			}
+		case *syntax.BinaryCmd:
+			// the call on the right of a pipe reads its left side
+			if t.Op == syntax.Pipe || t.Op == syntax.PipeAll {
+				if call, ok := t.Y.Cmd.(*syntax.CallExpr); ok {
+					fed[call] = true
+				}
+			}
+		}
 		call, ok := n.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
 			return true
@@ -515,21 +580,29 @@ func syntaxSenderNode(root syntax.Node, depth int, res *syntaxSenderResult) {
 		if body, ok, known := evaluatedShellString(name, args, argDynamic); !known {
 			res.unknown = true
 		} else if ok {
-			if depth >= maxSenderDepth || shellBoundCap(body) != 0 {
+			if depth >= maxSenderDepth {
 				res.unknown = true
+				res.hitCap(bounded.Depth)
+			} else if c := shellBoundCap(body); c != 0 {
+				res.unknown = true
+				res.hitCap(c)
 			} else {
 				inner := syntaxSenderRead(body, depth+1)
 				res.unknown = res.unknown || inner.unknown
+				res.hitCap(inner.cap)
 				res.calls = append(res.calls, inner.calls...)
 			}
 		}
-		if networkSenderPrograms[name] || name == "find" || name == "xargs" {
-			occurrence := senderOccurrence{name: name, args: args}
-			if len(argDynamic) > 0 {
-				occurrence.dynamic = argDynamic
-			}
-			res.calls = append(res.calls, occurrence)
+		if len(res.calls) >= maxSenderOccurrences {
+			res.unknown = true
+			res.hitCap(bounded.Items)
+			return true
 		}
+		occurrence := senderOccurrence{name: name, args: args, fed: fed[call]}
+		if len(argDynamic) > 0 {
+			occurrence.dynamic = argDynamic
+		}
+		res.calls = append(res.calls, occurrence)
 		return true
 	})
 }
@@ -692,16 +765,22 @@ func shortFlagLetters(a string) bool {
 // text.
 func literalShellWord(w *syntax.Word) (string, bool) {
 	var b strings.Builder
-	var part func(p syntax.WordPart) bool
-	part = func(p syntax.WordPart) bool {
+	var part func(p syntax.WordPart, quoted bool) bool
+	part = func(p syntax.WordPart, quoted bool) bool {
 		switch t := p.(type) {
 		case *syntax.Lit:
-			b.WriteString(t.Value)
+			b.WriteString(unescapeShellLiteral(t.Value, quoted))
 		case *syntax.SglQuoted:
+			if t.Dollar {
+				return false // $'...' has escapes of its own
+			}
 			b.WriteString(t.Value)
 		case *syntax.DblQuoted:
+			if t.Dollar {
+				return false
+			}
 			for _, q := range t.Parts {
-				if !part(q) {
+				if !part(q, true) {
 					return false
 				}
 			}
@@ -711,11 +790,39 @@ func literalShellWord(w *syntax.Word) (string, bool) {
 		return true
 	}
 	for _, p := range w.Parts {
-		if !part(p) {
+		if !part(p, false) {
 			return "", false
 		}
 	}
 	return b.String(), true
+}
+
+// unescapeShellLiteral removes the backslash escapes of a literal: outside
+// quotes a backslash quotes the next byte (a backslash and a line break
+// vanish); in double quotes it does so only before $ ` " \ and a line break.
+func unescapeShellLiteral(value string, quoted bool) string {
+	if !strings.Contains(value, `\`) {
+		return value
+	}
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c != '\\' || i+1 >= len(value) {
+			b.WriteByte(c)
+			continue
+		}
+		next := value[i+1]
+		switch {
+		case next == '\n':
+			i++
+		case !quoted || next == '$' || next == '`' || next == '"' || next == '\\':
+			b.WriteByte(next)
+			i++
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 var (
@@ -727,102 +834,43 @@ func remoteCopyProgram(name string) bool {
 	return name == "scp" || name == "rsync" || name == "sftp"
 }
 
-// readSenderArgs reads the words of a sender program: whether it sends,
-// the hosts its static words name, and whether its destination is unknown
-// (a word the shell builds, no destination word).
-func readSenderArgs(name string, args []string, dynamic map[int]bool) (sends bool, hosts []string, unknown bool) {
+// readWordSender reads one program and its words that the projection holds
+// no command for (a program an unprojected part, a find or an xargs runs):
+// the words are classified as a call of their own and read by the same rules
+// as a projected command (upload facts, the network role, the operand shape).
+// fed is set when the program's standard input is (or may be) fed: an xargs
+// program reads what it was handed. A word the shell builds is any word, so a
+// program the classifiers know as a network program with such a word may
+// send.
+func readWordSender(name string, words []string, dynamic map[int]bool, fed bool, depth int) (sends bool, hosts []string, unknown bool) {
 	if remoteCopyProgram(name) {
-		return readRemoteCopyArgs(name, args, dynamic)
+		return readRemoteCopyArgs(name, words, dynamic)
 	}
-	if !programMaySend(name, args, dynamic) {
-		return false, nil, false
+	child := Analyze(Input{Tool: "bash", Argv: append([]string{name}, words...)})
+	var inner SendReading
+	readProjectedSenders(child, &inner, depth)
+	readNetworkRoleSenders(child, &inner, fed)
+	for _, sender := range inner.Senders {
+		hosts = append(hosts, sender.Hosts...)
+		unknown = unknown || sender.DestinationUnknown
 	}
-	for i, word := range args {
-		if dynamic[i] {
-			unknown = true
-			continue
-		}
-		if host, ok := urlOperandHost(word); ok {
-			hosts = appendHost(hosts, host)
+	if len(inner.Senders) > 0 {
+		return true, hosts, unknown || len(hosts) == 0
+	}
+	if len(dynamic) > 0 && NetworkRoleProgram(name) {
+		return true, nil, true
+	}
+	if fed {
+		// What an xargs hands the program may be its destination: the words
+		// with a destination of their own show whether it would send.
+		probe := Analyze(Input{Tool: "bash", Argv: append(append([]string{name}, words...), "https://probe.invalid/x")})
+		var more SendReading
+		readProjectedSenders(probe, &more, depth)
+		if len(more.Senders) > 0 {
+			return true, nil, true
 		}
 	}
-	return true, hosts, unknown || len(hosts) == 0
-}
-
-// programMaySend reports whether the words leave open that the program
-// sends: curl and wget only with a body, upload, form or sending method;
-// nc without -l or -z; the programs that exist to send always. A word the
-// shell builds may be any option.
-func programMaySend(name string, args []string, dynamic map[int]bool) bool {
-	if len(dynamic) > 0 {
-		return true
-	}
-	switch name {
-	case "curl":
-		for i, a := range args {
-			switch {
-			case a == "--json" || a == "--upload-file" || strings.HasPrefix(a, "--data") ||
-				strings.HasPrefix(a, "--form") || strings.HasPrefix(a, "--json=") || strings.HasPrefix(a, "--upload-file="):
-				return true
-			case a == "-X" || a == "--request":
-				if i+1 < len(args) && sendingMethod(args[i+1]) {
-					return true
-				}
-			case strings.HasPrefix(a, "--request="):
-				if sendingMethod(a[len("--request="):]) {
-					return true
-				}
-			case strings.HasPrefix(a, "-X") && len(a) > 2:
-				if sendingMethod(a[2:]) {
-					return true
-				}
-			case strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && shortFlagLetters(a) && strings.ContainsAny(a, "dFT"):
-				return true
-			}
-		}
-		return false
-	case "wget":
-		for _, a := range args {
-			if strings.HasPrefix(a, "--post-") || strings.HasPrefix(a, "--body-") ||
-				strings.HasPrefix(a, "--method=") && sendingMethod(a[len("--method="):]) {
-				return true
-			}
-		}
-		return false
-	case "nc", "ncat", "netcat":
-		for _, a := range args {
-			if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && shortFlagLetters(a) && strings.ContainsAny(a, "lz") {
-				return false
-			}
-			if a == "--listen" {
-				return false
-			}
-		}
-		return true
-	case "http", "https", "xh", "xhs":
-		for _, a := range args {
-			switch {
-			case a == "POST" || a == "PUT" || a == "PATCH":
-				return true
-			case a == "--form" || a == "-f" || a == "--json" || a == "-j" || a == "--multipart":
-				return true
-			case strings.HasPrefix(a, "-"):
-			case strings.Contains(a, ":=") || strings.Contains(a, "=@") || strings.Contains(a, "@") ||
-				strings.Contains(a, "=") && !strings.Contains(a, "=="):
-				return true
-			}
-		}
-		return false
-	}
-	return networkSenderPrograms[name]
-}
-
-func sendingMethod(method string) bool {
-	switch strings.ToUpper(method) {
-	case "POST", "PUT", "PATCH":
-		return true
-	}
-	return false
+	return false, nil, false
 }
 
 // readRemoteCopyArgs reads an scp, rsync or sftp: only a remote destination
@@ -955,5 +1003,12 @@ func readInlineCodeSenders(facts Facts, reading *SendReading) {
 			Origin:             SenderInlineCode,
 			DestinationUnknown: true,
 		})
+	}
+}
+
+// hitCap records the first cap hit.
+func (r *syntaxSenderResult) hitCap(c bounded.Cap) {
+	if c != 0 && r.cap == 0 {
+		r.cap = c
 	}
 }
