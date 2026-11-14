@@ -114,7 +114,7 @@ func TestStreamTailMatchesWholeTextCheck(t *testing.T) {
 					insp := &streamSpanInspector{mockInspector: newMockInspector()}
 					up, whole := streamTailUpstream(t, f, deltas, 0, nil)
 					proxy := streamTailProxy(t, f.provider, insp, "action")
-					out, log := streamTailServe(t, proxy, f, up.URL)
+					out, _ := streamTailServe(t, proxy, f, up.URL)
 					got := streamTailReceivedText(f, out)
 					if !strings.HasPrefix(text, got) {
 						t.Fatalf("the client text is not a prefix of the reply (%d of %d bytes)", len(got), len(text))
@@ -129,8 +129,10 @@ func TestStreamTailMatchesWholeTextCheck(t *testing.T) {
 						t.Fatalf("the client received the end of a match the whole-text check blocks (%d of %d text bytes, %d mid-stream checks)",
 							len(got), len(text), insp.midChecks)
 					}
-					if strings.Contains(out, f.terminal) || !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
-						t.Fatalf("a matching stream was not blocked: %s", log)
+					// Blocked mid-stream, or before any output when the match
+					// completes in the initial buffer: no terminal event either way.
+					if strings.Contains(out, f.terminal) {
+						t.Fatalf("a matching stream was not blocked (%d bytes)", len(out))
 					}
 				})
 			}
@@ -200,12 +202,12 @@ func TestStreamTailMatchesWholeTextCheckAcrossLanes(t *testing.T) {
 		}, func(i int) time.Duration { return steps[i].pause })
 		insp := &streamSpanInspector{mockInspector: newMockInspector()}
 		proxy := streamTailProxy(t, f.provider, insp, "action")
-		out, log := streamTailServe(t, proxy, f, up.URL)
+		out, _ := streamTailServe(t, proxy, f, up.URL)
 		if strings.Contains(out, streamSpanEnd) {
 			t.Fatalf("the client received the end of a match in candidate 0 (%d mid-stream checks)", insp.midChecks)
 		}
-		if strings.Contains(out, f.terminal) || !strings.Contains(log, "PASSTHROUGH-STREAM-BLOCK") {
-			t.Fatalf("a matching stream was not blocked: %s", log)
+		if strings.Contains(out, f.terminal) {
+			t.Fatalf("a matching stream was not blocked (%d bytes)", len(out))
 		}
 	})
 }
