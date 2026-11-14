@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
@@ -27,43 +28,36 @@ import (
 // message is never skipped as a whole, whatever its length or shape, and a
 // sentence that differs from the canonical wording is not a probe.
 
-// The canonical sentences, each a regexp that matches it verbatim with any
-// whitespace between words (canonicalProbeSentence in the tests builds them
-// and proves they are its output). They are constants so the module-wide
-// pattern check compiles them (internal/lazyregexp).
-const (
-	probeFollowStrictly  = `Follow\s+it\s+strictly\.`
-	probeNoOldTasks      = `Do\s+not\s+infer\s+or\s+repeat\s+old\s+tasks\s+from\s+prior\s+chats\.`
-	probeReplyOK         = `If\s+nothing\s+needs\s+attention,\s+reply\s+HEARTBEAT_OK`
-	probeStartupSequence = `Execute\s+your\s+Session\s+Startup\s+sequence\s+now\s+-\s+read\s+the\s+required\s+files\s+before\s+responding\s+to\s+the\s+user\.`
-	probeBootstrapFirst  = `If\s+BOOTSTRAP\.md\s+exists\s+in\s+the\s+provided\s+Project\s+Context,\s+read\s+it\s+and\s+follow\s+its\s+instructions\s+first\.`
-	probeGreet           = `Then\s+greet\s+the\s+user\s+in\s+your\s+configured\s+persona,\s+if\s+one\s+is\s+provided\.`
-	probeBeYourself      = `Be\s+yourself\s+-\s+use\s+your\s+defined\s+voice,\s+mannerisms,\s+and\s+mood\.`
-	probeKeepShort       = `Keep\s+it\s+to\s+1-3\s+sentences\s+and\s+ask\s+what\s+they\s+want\s+to\s+do\.`
-	probeDefaultModel    = `If\s+the\s+runtime\s+model\s+differs\s+from\s+default_model\s+in\s+the\s+system\s+prompt,\s+mention\s+the\s+default\s+model\.`
-	probeNoInternals     = `Do\s+not\s+mention\s+internal\s+steps,\s+files,\s+tools,\s+or\s+reasoning\.`
-)
+// canonicalProbeRe builds a regexp from canonical sentences: the sentences
+// match verbatim, with any whitespace between words, in any case.
+func canonicalProbeSentence(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		words[i] = regexp.QuoteMeta(w)
+	}
+	return strings.Join(words, `\s+`)
+}
 
-// heartbeatProbeRe is OpenClaw's heartbeat prompt, in any case. Each optional
-// sentence is one of its canonical sentences, in its canonical place.
+// heartbeatProbeRe is OpenClaw's heartbeat prompt. Each optional sentence is
+// one of its canonical sentences, in its canonical place.
 var heartbeatProbeRe = lazyregexp.New(`(?i)\bRead\s+HEARTBEAT\.md` +
 	`(?:\s+if\s+it\s+exists)?(?:\s*\(workspace\s+context\))?\s*\.` +
-	`(?:\s+` + probeFollowStrictly + `)?` +
-	`(?:\s+` + probeNoOldTasks + `)?` +
-	`\s+` + probeReplyOK + `\b\.?`)
+	`(?:\s+` + canonicalProbeSentence("Follow it strictly.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("Do not infer or repeat old tasks from prior chats.") + `)?` +
+	`\s+` + canonicalProbeSentence("If nothing needs attention, reply HEARTBEAT_OK") + `\b\.?`)
 
 // sessionStartupProbeRe is OpenClaw's /new and /reset prompt
-// (BARE_SESSION_RESET_PROMPT_BASE), in any case: its anchor sentence, in
-// either variant, and then any of its canonical sentences in order.
+// (BARE_SESSION_RESET_PROMPT_BASE): its anchor sentence, in either variant,
+// and then any of its canonical sentences in order.
 var sessionStartupProbeRe = lazyregexp.New(`(?i)\bA\s+new\s+session\s+was\s+started\s+via\s+/new\s+or\s+/reset` +
 	`(?:\.|\s+while\s+bootstrap\s+is\s+still\s+pending\s+for\s+this\s+workspace\.)` +
-	`(?:\s+` + probeStartupSequence + `)?` +
-	`(?:\s+` + probeBootstrapFirst + `)?` +
-	`(?:\s+` + probeGreet + `)?` +
-	`(?:\s+` + probeBeYourself + `)?` +
-	`(?:\s+` + probeKeepShort + `)?` +
-	`(?:\s+` + probeDefaultModel + `)?` +
-	`(?:\s+` + probeNoInternals + `)?`)
+	`(?:\s+` + canonicalProbeSentence("Execute your Session Startup sequence now - read the required files before responding to the user.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("If BOOTSTRAP.md exists in the provided Project Context, read it and follow its instructions first.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("Then greet the user in your configured persona, if one is provided.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("Be yourself - use your defined voice, mannerisms, and mood.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("Keep it to 1-3 sentences and ask what they want to do.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("If the runtime model differs from default_model in the system prompt, mention the default model.") + `)?` +
+	`(?:\s+` + canonicalProbeSentence("Do not mention internal steps, files, tools, or reasoning.") + `)?`)
 
 // stripCanonicalProbes returns text without the canonical heartbeat and
 // session-startup sentences, and whether it held any. What is left is
