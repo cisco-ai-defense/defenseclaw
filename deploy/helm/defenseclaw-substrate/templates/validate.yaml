@@ -7,10 +7,11 @@
 {{- fail "config.substrate.extproc.failure_mode open is not allowed with deployment_mode managed_enterprise: the callout always fails closed there" -}}
 {{- end -}}
 {{- /* The chain egress action is one config key the gateway and the leader
-read; a flag on the gateway alone never reached the leader (GAP-0250). */ -}}
+read. A pre-release build had a gateway flag for it, which never reached the
+leader; the flag is gone, and setting it here is a clear error (GAP-0250). */ -}}
 {{- range (concat (.Values.gateway.extraArgs | default list) (.Values.gateway.args | default list)) -}}
 {{- if hasPrefix "--chain-egress-action" (toString .) -}}
-{{- fail "gateway.extraArgs and gateway.args must not set --chain-egress-action: set config.substrate.chain_egress_action (block or alert), which the gateway and the leader both read (GAP-0250)" -}}
+{{- fail "--chain-egress-action is not a DefenseClaw flag: set config.substrate.chain_egress_action (block or alert) instead; the gateway and the leader both read it (GAP-0250)" -}}
 {{- end -}}
 {{- end -}}
 {{- $chainAction := lower (toString (dig "chain_egress_action" "block" $sub)) -}}
